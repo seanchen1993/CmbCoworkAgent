@@ -1,3 +1,4 @@
+import { splitTruncatedText } from "./bounds"
 import type {
   AgentTrace,
   TraceChatMessage,
@@ -67,6 +68,19 @@ function truncateString(
 
   if (effective.tail <= 0) {
     return `${value.slice(0, effective.head)}\n...[trace truncated: binary-like value, omitted ${value.length - effective.head} chars]...`
+  }
+
+  // Collection may already have cut this to a head and a tail. Narrow the two
+  // halves separately and carry its omitted count forward: slicing across the
+  // marker would take the "tail" from the middle of the original and present it
+  // as the end, and would report an omitted count for the wrong string.
+  const existing = splitTruncatedText(value)
+  if (existing) {
+    const head = existing.head.slice(0, effective.head)
+    const tail = existing.tail.slice(-effective.tail)
+    const omitted =
+      existing.omitted + (existing.head.length - head.length) + (existing.tail.length - tail.length)
+    return `${head}\n...[trace truncated: omitted ${omitted} chars]...\n${tail}`
   }
 
   const omitted = Math.max(0, value.length - effective.head - effective.tail)

@@ -2,6 +2,78 @@ const DEFAULT_MAX_DEPTH = 6
 const DEFAULT_MAX_ENTRIES = 64
 const DEFAULT_MAX_STRING_CHARS = 16 * 1024
 
+/**
+ * Marker left in the middle of a value that was cut down to a head and a tail.
+ *
+ * Collection and upload both truncate, and they used to do it independently:
+ * collection kept only the head, then the uploader took a "head and tail" of
+ * that — so the tail a reader saw in the cloud was the middle of the original,
+ * presented as its end, and the omitted count described the wrong string. The
+ * two sides now share this format, and the uploader narrows the two halves
+ * separately instead of slicing across them.
+ */
+export const TRACE_TRUNCATION_MARKER_PREFIX = "\n...[trace truncated: omitted "
+export const TRACE_TRUNCATION_MARKER_SUFFIX = " chars]...\n"
+
+const TRACE_TRUNCATION_MARKER_PATTERN = /\n\.\.\.\[trace truncated: omitted (\d+) chars\]\.\.\.\n/
+
+export interface SplitTruncatedText {
+  head: string
+  tail: string
+  omitted: number
+}
+
+/** Split a value this module truncated back into its head, tail and omitted count. */
+export function splitTruncatedText(value: string): SplitTruncatedText | undefined {
+  const match = TRACE_TRUNCATION_MARKER_PATTERN.exec(value)
+  if (!match || match.index < 0) return undefined
+  return {
+    head: value.slice(0, match.index),
+    tail: value.slice(match.index + match[0].length),
+    omitted: Number.parseInt(match[1], 10) || 0
+  }
+}
+
+function joinTruncatedText(head: string, tail: string, omitted: number): string {
+  return `${head}${TRACE_TRUNCATION_MARKER_PREFIX}${omitted}${TRACE_TRUNCATION_MARKER_SUFFIX}${tail}`
+}
+
+/**
+ * The marker itself has to fit inside maxChars, or the caller's own head-only
+ * cut lands past the marker and takes the tail off again — which is the exact
+ * failure this function exists to prevent. 12 digits covers any omitted count.
+ */
+const TRACE_TRUNCATION_MARKER_OVERHEAD =
+  TRACE_TRUNCATION_MARKER_PREFIX.length + TRACE_TRUNCATION_MARKER_SUFFIX.length + 12
+
+/**
+ * Cut `value` to `maxChars` keeping both ends. The tail is a quarter of the
+ * budget: enough that an error or a result's last lines survive, small enough
+ * that the head still carries the shape of the content.
+ */
+export function truncateKeepingEnds(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value
+  const budget = Math.max(2, maxChars - TRACE_TRUNCATION_MARKER_OVERHEAD)
+  const headChars = Math.max(1, Math.floor(budget * 0.75))
+  const tailChars = Math.max(1, budget - headChars)
+
+  const existing = splitTruncatedText(value)
+  if (existing) {
+    // Already split once. Narrow each half on its own so the tail stays the
+    // real tail, and carry the original omitted count forward.
+    const head = existing.head.slice(0, headChars)
+    const tail = existing.tail.slice(-tailChars)
+    const omitted =
+      existing.omitted + (existing.head.length - head.length) + (existing.tail.length - tail.length)
+    return joinTruncatedText(head, tail, omitted)
+  }
+  return joinTruncatedText(
+    value.slice(0, headChars),
+    value.slice(-tailChars),
+    value.length - headChars - tailChars
+  )
+}
+
 export const TRACE_COLLECTION_MAX_BYTES = 512 * 1024
 export const TRACE_PERSISTED_MAX_BYTES = 1024 * 1024
 
@@ -189,14 +261,19 @@ export class TraceCollectionBudget {
     return this.remainingBytes >= minimumBytes
   }
 
-  takeText(value: string, maxChars: number): string {
+  /**
+   * @param keepEnds for content fields (message text, tool results, assistant
+   * text). Identifiers and timestamps must stay head-only — a marker spliced
+   * into an id would corrupt it, and they never approach their limits anyway.
+   */
+  takeText(value: string, maxChars: number, keepEnds = false): string {
     // A drained budget must never turn a scalar into the "[trace budget
     // exhausted]" placeholder. boundTelemetryValue emits that marker for a
     // string input only when the budget is already at zero, and for a scalar
     // field the marker is indistinguishable from real content downstream — an
     // empty string is the only honest representation of "dropped".
     if (this.remainingBytes <= 0) return ""
-    const result = boundTelemetryValue(value, {
+    const result = boundTelemetryValue(keepEnds ? truncateKeepingEnds(value, maxChars) : value, {
       maxBytes: this.remainingBytes,
       maxStringChars: maxChars,
       maxDepth: 1,

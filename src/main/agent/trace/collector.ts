@@ -492,7 +492,9 @@ function boundTraceToolCall(call: TraceToolCall, budget: TraceCollectionBudget):
       args && typeof args === "object" && !Array.isArray(args)
         ? (args as Record<string, unknown>)
         : {},
-    ...(typeof call.result === "string" ? { result: budget.takeText(call.result, 16 * 1024) } : {}),
+    ...(typeof call.result === "string"
+      ? { result: budget.takeText(call.result, 16 * 1024, true) }
+      : {}),
     ...(typeof call.durationMs === "number" && Number.isFinite(call.durationMs)
       ? { durationMs: Math.max(0, Math.min(call.durationMs, 24 * 60 * 60 * 1000)) }
       : {})
@@ -561,9 +563,9 @@ function boundTraceChatMessage(
     role,
     ...(typeof message.mid === "string" ? { mid: message.mid } : {}),
     ...(typeof message.ref === "string" ? { ref: message.ref } : {}),
-    content: budget.takeText(String(message.content ?? ""), 16 * 1024),
+    content: budget.takeText(String(message.content ?? ""), 16 * 1024, true),
     ...(typeof message.reasoning === "string"
-      ? { reasoning: budget.takeText(message.reasoning, 8 * 1024) }
+      ? { reasoning: budget.takeText(message.reasoning, 8 * 1024, true) }
       : {}),
     ...(typeof message.name === "string" ? { name: budget.takeText(message.name, 512) } : {}),
     ...(typeof message.toolCallId === "string"
@@ -1316,7 +1318,7 @@ export class TraceCollector {
       this.currentToolCalls = []
       return
     }
-    const boundedText = this.collectionBudget.takeText(assistantText, 32 * 1024)
+    const boundedText = this.collectionBudget.takeText(assistantText, 32 * 1024, true)
     const textClaim = this.internValue(boundedText)
     const step: TraceStep = {
       index: this.currentStepIndex++,
