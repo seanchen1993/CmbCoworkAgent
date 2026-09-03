@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { VirtualList } from "@/components/ui/virtual-list"
+import { shouldSoftWrapCodePreview } from "@/lib/code-preview-layout"
 import { requestCodeHighlight } from "./code-highlight-client"
 
 interface CodeViewerProps {
@@ -64,6 +65,7 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
   const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : undefined
   const language = useMemo(() => getLanguage(ext), [ext])
   const lines = useMemo(() => content.split("\n"), [content])
+  const shouldSoftWrap = useMemo(() => shouldSoftWrapCodePreview(lines), [lines])
   const shouldVirtualize = lines.length > VIRTUAL_SCROLL_LINE_THRESHOLD
   const lineCount = lines.length
   const highlightKey =
@@ -117,7 +119,7 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
           <div className="shiki-wrapper">
             {highlightedHtml ? (
               <div
-                className="shiki-content"
+                className={`shiki-content ${shouldSoftWrap ? "shiki-content-soft-wrap" : ""}`}
                 dangerouslySetInnerHTML={{ __html: highlightedHtml }}
               />
             ) : (

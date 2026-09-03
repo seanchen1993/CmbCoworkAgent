@@ -965,6 +965,21 @@
   background: transparent !important;
 }
 
+.shiki-content-soft-wrap pre {
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.shiki-content-soft-wrap code {
+  white-space: inherit;
+}
+
+.shiki-content.shiki-content-soft-wrap .line {
+  display: block;
+  width: auto;
+}
+
 .shiki-content .line {
   display: inline-block;
   width: 100%;

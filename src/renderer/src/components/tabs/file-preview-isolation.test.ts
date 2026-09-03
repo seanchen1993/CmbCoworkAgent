@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 const fileViewer = readFileSync(new URL("./FileViewer.tsx", import.meta.url), "utf8")
 const tabbedPanel = readFileSync(new URL("./TabbedPanel.tsx", import.meta.url), "utf8")
 const codeViewer = readFileSync(new URL("./CodeViewer.tsx", import.meta.url), "utf8")
+const rendererStyles = readFileSync(new URL("../../index.css", import.meta.url), "utf8")
 const highlightWorker = readFileSync(new URL("./code-highlight-worker.ts", import.meta.url), "utf8")
 const previewIpc = readFileSync(
   new URL("../../../../main/ipc/file-preview.ts", import.meta.url),
@@ -80,6 +81,16 @@ describe("persisted active file preview isolation", () => {
     expect(highlightWorker).toContain("MAX_HIGHLIGHT_HTML_CHARS")
   })
 
+  it("assembles bounded web-source pages and soft-wraps compact minified source", () => {
+    expect(fileViewer).toContain("assembleBoundedTextPreview")
+    expect(fileViewer).toContain("WEB_SOURCE_PREVIEW_MAX_BYTES")
+    expect(fileViewer).toContain("htmlLike && !textPage?.truncated")
+    expect(codeViewer).toContain("shouldSoftWrapCodePreview")
+    expect(codeViewer).toContain("shiki-content-soft-wrap")
+    expect(rendererStyles).toContain(".shiki-content-soft-wrap pre")
+    expect(rendererStyles).toContain(".shiki-content.shiki-content-soft-wrap .line")
+  })
+
   it("requires a trusted-source grant instead of exposing renderer path-to-token minting", () => {
     expect(previewIpc).toContain('"externalGrant" in source')
     expect(previewIpc).toContain("resolveExternalFileReadGrant")
@@ -93,9 +104,7 @@ describe("persisted active file preview isolation", () => {
     expect(externalGrants).toContain("realpath(candidate)")
     expect(previewIpc).toContain('"workspace:authorizeToolFilePreview"')
     expect(previewIpc).toContain("authorizeTrustedToolFilePreview(")
-    expect(trustedToolPreview).toContain(
-      "AsyncLocalStorage<ActiveTrustedToolFilePreviewContext>"
-    )
+    expect(trustedToolPreview).toContain("AsyncLocalStorage<ActiveTrustedToolFilePreviewContext>")
     expect(trustedToolPreview).toContain("recordTrustedToolFilePreviewSource")
     expect(trustedToolPreview).toContain("threadGeneration !== currentThreadGeneration")
     expect(trustedToolPreview).toContain("external: false")
