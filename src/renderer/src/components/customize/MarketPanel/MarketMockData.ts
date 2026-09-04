@@ -14,7 +14,10 @@ function buildMockUpdatedAt(createdAt: string): string {
   return new Date(timestamp + MOCK_UPDATED_AT_OFFSET_MS).toISOString()
 }
 
-function appendUpdatedAtToExtraJson(extraJson: string | undefined, updatedAt: string): string | undefined {
+function appendUpdatedAtToExtraJson(
+  extraJson: string | undefined,
+  updatedAt: string
+): string | undefined {
   if (!extraJson?.trim()) return extraJson
 
   try {
