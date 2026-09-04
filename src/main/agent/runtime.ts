@@ -32,6 +32,7 @@ import {
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
+import { patchLocalExecutionPrompt } from "./local-execution-prompt"
 import { getProjectThreadDataDirectory } from "./context-history-path"
 import { withRawApiCallCapture } from "../services/llm-api-request-capture"
 import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
@@ -247,7 +248,8 @@ import {
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
   InterleavedThinkingChatOpenAICompletions,
-  ReasoningDisplayChatOpenAICompletions
+  ReasoningDisplayChatOpenAICompletions,
+  ToolCallAwareChatOpenAICompletions
 } from "./interleaved-thinking-completions"
 import {
   createMalformedToolCallGuardMiddleware,
@@ -2301,6 +2303,12 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
+    // DeepAgents uses "sandbox" to mean any backend that supports execute.
+    // LocalSandbox can execute directly on the host, so correct both the tool
+    // description and the execution docs appended to each model request.
+    if (filesystemBackend instanceof LocalSandbox) {
+      patchLocalExecutionPrompt(mw, filesystemBackend.getSandboxMode())
+    }
     markFilesystemWriteToolAsUserInitiated(mw)
     patchRuntimeReadFileTool({
       middleware: mw,
@@ -4271,7 +4279,10 @@ export function getModelInstance(
       completions: new ChatOpenAICompletions(baseFields)
     } as never)
   } else {
-    model = new ChatOpenAI(baseFields)
+    model = new ChatOpenAI({
+      ...baseFields,
+      completions: new ToolCallAwareChatOpenAICompletions(baseFields)
+    } as never)
   }
 
   return purpose === "context-compaction" ? configureLocalCompactionTokenEstimation(model) : model

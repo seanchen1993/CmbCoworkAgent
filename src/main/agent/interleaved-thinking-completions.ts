@@ -133,7 +133,24 @@ function mergeReasoningIntoContent(content: unknown, reasoning: unknown): string
   return contentText ? `${reasoningBlock}\n${contentText}` : reasoningBlock
 }
 
-export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompletions {
+export class ToolCallAwareChatOpenAICompletions extends ChatOpenAICompletions {
+  override _convertCompletionsDeltaToBaseMessageChunk(
+    ...args: Parameters<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]>
+  ): ReturnType<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]> {
+    const [delta, rawResponse, defaultRole] = args
+    // Some compatible providers omit role for the entire completion stream.
+    // A generic leading text/empty chunk also loses later tools during concat,
+    // so every role-less chunk must use the assistant completion default.
+    // The upstream converter still prefers delta.role over this fallback.
+    return super._convertCompletionsDeltaToBaseMessageChunk(
+      delta,
+      rawResponse,
+      defaultRole ?? "assistant"
+    )
+  }
+}
+
+export class InterleavedThinkingChatOpenAICompletions extends ToolCallAwareChatOpenAICompletions {
   private thinkingOpen = false
   private readonly exposeReasoning: boolean
   private readonly requestFields: unknown
@@ -267,7 +284,7 @@ export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompleti
   }
 }
 
-export class ReasoningDisplayChatOpenAICompletions extends ChatOpenAICompletions {
+export class ReasoningDisplayChatOpenAICompletions extends ToolCallAwareChatOpenAICompletions {
   override _convertCompletionsMessageToBaseMessage(
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]> {
