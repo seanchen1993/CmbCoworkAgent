@@ -32,9 +32,7 @@ export function renderUploaderProfile(
     return (
       <span
         className={
-          multiline
-            ? "min-w-0 whitespace-normal break-all leading-relaxed"
-            : "min-w-0 truncate"
+          multiline ? "min-w-0 whitespace-normal break-all leading-relaxed" : "min-w-0 truncate"
         }
       >
         {fallbackUserId || "—"}
@@ -57,10 +55,10 @@ export function renderUploaderProfile(
   }
 
   return (
-    <span className="flex min-w-0 max-w-full items-center gap-1">
-      <span className="truncate">{userName}</span>
-      <span className="shrink-0 text-muted-foreground">（{sapId}）</span>
-      <span className="min-w-0 truncate text-muted-foreground">{orgName}</span>
+    <span className="flex w-0 min-w-0 max-w-full flex-1 items-center gap-1 overflow-hidden">
+      <span className="min-w-0 truncate">{userName}</span>
+      <span className="min-w-0 shrink truncate text-muted-foreground">（{sapId}）</span>
+      <span className="min-w-0 flex-1 truncate text-muted-foreground">{orgName}</span>
     </span>
   )
 }
