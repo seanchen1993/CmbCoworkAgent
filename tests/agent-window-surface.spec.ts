@@ -1,7 +1,7 @@
 /**
- * Contract for the headless AgentRunDelivery.
+ * Contract for the managed transport AgentRunDelivery.
  *
- * src/main/agent/headless-delivery.ts hands agent.ts an object that satisfies
+ * src/main/agent/managed-transport-delivery.ts hands agent.ts an object that satisfies
  * only part of BrowserWindow, cast through `as unknown as BrowserWindow`. That
  * cast silences the compiler, so a new `window.<member>` in agent.ts compiles
  * fine and then throws at runtime — on the IM path only, possibly in a rarely
@@ -28,7 +28,7 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message)
 }
 
-/** Every BrowserWindow member the headless window in headless-delivery.ts provides. */
+/** Every BrowserWindow member managed-transport-delivery.ts's window shim provides. */
 const SUPPORTED_WINDOW_MEMBERS = new Set([
   "id",
   "isDestroyed",
@@ -36,12 +36,12 @@ const SUPPORTED_WINDOW_MEMBERS = new Set([
   "webContents.isDestroyed"
 ])
 
-function testAgentWindowSurfaceStaysHeadlessSafe(): void {
+function testAgentWindowSurfaceStaysShimSafe(): void {
   const agent = read("src/main/ipc/agent.ts")
 
   // `window` is the only BrowserWindow-typed identifier the run body threads
   // through; `win` appears solely inside BrowserWindow.getAllWindows() loops,
-  // which iterate real windows and never see the headless one.
+  // which iterate real windows and never see the shim.
   const used = new Set<string>()
   for (const match of agent.matchAll(/\bwindow\.([A-Za-z]+(?:\.[A-Za-z]+)?)/g)) {
     const member = match[1]
@@ -55,32 +55,32 @@ function testAgentWindowSurfaceStaysHeadlessSafe(): void {
   const unsupported = [...used].filter((member) => !SUPPORTED_WINDOW_MEMBERS.has(member))
   assert(
     unsupported.length === 0,
-    `agent.ts uses BrowserWindow members the headless delivery cannot provide: ` +
+    `agent.ts uses BrowserWindow members the managed transport delivery cannot provide: ` +
       `${unsupported.join(", ")}\n` +
-      `  → either add them to headlessWindow in src/main/agent/headless-delivery.ts,\n` +
+      `  → either add them to managedWindow in src/main/agent/managed-transport-delivery.ts,\n` +
       `    or route the call through delivery.send() / AgentRunExecutionContext instead.`
   )
   assert(used.size > 0, "window member scan matched nothing — the regex or agent.ts moved")
 }
 
-function testHeadlessDeliveryDeclaresExactlyThatSurface(): void {
-  const headless = read("src/main/agent/headless-delivery.ts")
+function testManagedDeliveryDeclaresExactlyThatSurface(): void {
+  const managed = read("src/main/agent/managed-transport-delivery.ts")
   for (const member of ["id:", "isDestroyed:", "send:", "webContents:"]) {
     assert(
-      headless.includes(member),
-      `headless delivery must define ${member} to satisfy agent.ts's window usage`
+      managed.includes(member),
+      `managed transport delivery must define ${member} to satisfy agent.ts's window usage`
     )
   }
   assert(
-    headless.includes("isAvailable: () => true"),
-    "a headless run must never be gated on a desktop window being available"
+    managed.includes("isAvailable: () => true"),
+    "a managed run must never be gated on a desktop window being available"
   )
 }
 
 function testOnlyDesktopRunsCanOpenAModal(): void {
   const agent = read("src/main/ipc/agent.ts")
   // dialog.showMessageBox needs a real BrowserWindow to parent to. Every path
-  // reaching it must be gated, or a headless run crashes inside auto-commit.
+  // reaching it must be gated, or a managed run crashes inside auto-commit.
   const dialogCalls = [...agent.matchAll(/dialog\.[A-Za-z]+\(/g)].map((match) => match[0])
   assert(
     dialogCalls.length === 1 && dialogCalls[0] === "dialog.showMessageBox(",
@@ -102,8 +102,8 @@ function testManagedTransportsNeverFallBackToNoDelivery(): void {
   // Returning null here is what made an IM Goal turn fail outright whenever the
   // desktop happened to be closed ("主窗口尚未就绪" out of requireDelivery).
   assert(
-    main.includes("createHeadlessAgentRunDelivery()"),
-    "the IM delivery resolver must fall back to a headless delivery, not null"
+    main.includes("createManagedTransportAgentRunDelivery()"),
+    "the IM delivery resolver must fall back to a managed transport delivery, not null"
   )
   assert(
     !/setAgentRunDeliveryResolver\(\(\) =>[\s\S]{0,200}?:\s*null\s*\)/.test(main),
@@ -112,8 +112,8 @@ function testManagedTransportsNeverFallBackToNoDelivery(): void {
 }
 
 const tests = [
-  testAgentWindowSurfaceStaysHeadlessSafe,
-  testHeadlessDeliveryDeclaresExactlyThatSurface,
+  testAgentWindowSurfaceStaysShimSafe,
+  testManagedDeliveryDeclaresExactlyThatSurface,
   testOnlyDesktopRunsCanOpenAModal,
   testManagedTransportsNeverFallBackToNoDelivery
 ]

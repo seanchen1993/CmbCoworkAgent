@@ -5,7 +5,7 @@ import {
   type AgentRunGoalNotice,
   type AgentRunTerminal
 } from "../../agent/agent-run-service"
-import { createHeadlessAgentRunDelivery } from "../../agent/headless-delivery"
+import { createManagedTransportAgentRunDelivery } from "../../agent/managed-transport-delivery"
 import type { RemoteTurnPolicy } from "../../agent/standard-thread-turn"
 import type { PreparedRemoteStandardTurnInput } from "./remote-runner"
 
@@ -53,7 +53,7 @@ export interface DesktopRunBridgeDependencies {
 
 const defaultDependencies: DesktopRunBridgeDependencies = {
   startRun: startAgentRun,
-  getDelivery: createHeadlessAgentRunDelivery
+  getDelivery: createManagedTransportAgentRunDelivery
 }
 
 /**
