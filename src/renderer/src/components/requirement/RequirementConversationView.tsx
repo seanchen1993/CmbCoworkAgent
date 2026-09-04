@@ -118,7 +118,10 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
 }
 
 function isRequirementSpacePublished(manifest: RequirementPrdManifest | null): boolean {
-  return manifest?.prd.status.toLowerCase() === "published"
+  return (
+    manifest?.prd.status.toLowerCase() === "published" ||
+    Boolean(manifest?.prd.prDetailUrl?.trim())
+  )
 }
 
 function isRequirementPrdGenerationCompleted(

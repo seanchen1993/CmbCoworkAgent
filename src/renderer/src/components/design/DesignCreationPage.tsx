@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Archive,
   ArrowLeft,
@@ -13,6 +13,7 @@ import {
   X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import type { DesignCreationRequest, DesignSessionKind, DesignSystemInfo } from "./types"
 import { getDetailCode } from "@/api/leanstar-requirements"
@@ -184,6 +185,9 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
   const [templatesLoading, setTemplatesLoading] = useState(true)
   const [templatesError, setTemplatesError] = useState<string | null>(null)
   const [selectedTemplateId, setSelectedTemplateId] = useState("")
+  const [hoveredTemplateId, setHoveredTemplateId] = useState<string | null>(null)
+  const [templatePreviewHeights, setTemplatePreviewHeights] = useState<Record<string, number>>({})
+  const templateHoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [templatePage, setTemplatePage] = useState(0)
   const [uploadedTemplate, setUploadedTemplate] = useState<UploadedFile | null>(null)
   const [templateUploading, setTemplateUploading] = useState(false)
@@ -413,6 +417,24 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
     templatePage * TEMPLATE_PAGE_SIZE,
     (templatePage + 1) * TEMPLATE_PAGE_SIZE
   )
+  const openTemplatePreview = (templateId: string): void => {
+    if (templateHoverCloseTimer.current) clearTimeout(templateHoverCloseTimer.current)
+    setHoveredTemplateId(templateId)
+  }
+  const closeTemplatePreview = (): void => {
+    if (templateHoverCloseTimer.current) clearTimeout(templateHoverCloseTimer.current)
+    templateHoverCloseTimer.current = setTimeout(() => setHoveredTemplateId(null), 120)
+  }
+  const handleTemplatePreviewLoad = (templateId: string, frame: HTMLIFrameElement): void => {
+    const documentHeight = Math.max(
+      frame.contentDocument?.documentElement.scrollHeight ?? 0,
+      frame.contentDocument?.body?.scrollHeight ?? 0,
+      900
+    )
+    setTemplatePreviewHeights((heights) =>
+      heights[templateId] === documentHeight ? heights : { ...heights, [templateId]: documentHeight }
+    )
+  }
   const orderedDesignSystems = [...designSystems].sort(compareDesignSystemsForDisplay)
   const designSystemGroups = Array.from(
     orderedDesignSystems.reduce((groups, system) => {
@@ -699,18 +721,21 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
                         {visibleTemplates.map((template) => {
                           const active = template.id === selectedTemplateId
                           return (
-                            <button
-                              key={template.id}
-                              type="button"
-                              aria-pressed={active}
-                              onClick={() => setSelectedTemplateId(template.id)}
-                              className={cn(
-                                "cursor-pointer overflow-hidden rounded-lg border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                active
-                                  ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
-                                  : "border-border bg-background hover:border-border-emphasis"
-                              )}
-                            >
+                            <Popover key={template.id} open={hoveredTemplateId === template.id}>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  aria-pressed={active}
+                                  onClick={() => setSelectedTemplateId(template.id)}
+                                  onMouseEnter={() => openTemplatePreview(template.id)}
+                                  onMouseLeave={closeTemplatePreview}
+                                  className={cn(
+                                    "cursor-pointer overflow-hidden rounded-lg border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                    active
+                                      ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
+                                      : "border-border bg-background hover:border-border-emphasis"
+                                  )}
+                                >
                                   <span className="block h-50 overflow-hidden bg-white">
                                 <iframe
                                   title={`${template.name}模板预览`}
@@ -731,7 +756,43 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
                                   </span>
                                 </span>
                               </span>
-                            </button>
+                                </button>
+                              </PopoverTrigger>
+                              <PopoverContent
+                                side="right"
+                                align="start"
+                                sideOffset={12}
+                                onMouseEnter={openTemplatePreview.bind(null, template.id)}
+                                onMouseLeave={closeTemplatePreview}
+                                className="mb-6 w-[min(70vw,42rem)] p-2"
+                              >
+                                <div className="mb-2 flex items-center justify-between gap-2 px-1">
+                                  <span className="truncate text-xs font-semibold text-foreground">
+                                    {template.name}
+                                  </span>
+                                  <span className="text-[10px] text-muted-foreground">HTML 预览</span>
+                                </div>
+                                <div className="h-[min(72vh,36rem)] overflow-y-auto overflow-x-hidden rounded border border-border bg-white">
+                                  <div
+                                    className="relative w-full"
+                                    style={{
+                                      height: `${(templatePreviewHeights[template.id] ?? 900) * 0.64}px`
+                                    }}
+                                  >
+                                    <iframe
+                                      title={`${template.name}大图预览`}
+                                      srcDoc={template.html}
+                                      sandbox="allow-same-origin"
+                                      onLoad={(event) =>
+                                        handleTemplatePreviewLoad(template.id, event.currentTarget)
+                                      }
+                                      style={{ height: `${templatePreviewHeights[template.id] ?? 900}px` }}
+                                      className="pointer-events-none absolute left-0 top-0 block w-[156.25%] origin-top-left scale-[0.64] border-0 bg-white"
+                                    />
+                                  </div>
+                                </div>
+                              </PopoverContent>
+                            </Popover>
                           )
                         })}
                       </div>

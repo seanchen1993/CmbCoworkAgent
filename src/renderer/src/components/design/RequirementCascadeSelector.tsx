@@ -522,7 +522,7 @@ export function NamespaceTreeSelector({
               该需求特性暂无实施详情。
             </p>
           )}
-          {selectedDetailCode && (
+          {selectedDetailCode && (requirementDetailLoading || requirementDetail) && (
             <div className="mt-4 rounded-md border border-border bg-muted/20 p-3">
               <div className="text-xs font-semibold text-foreground">需求详情</div>
               {requirementDetailLoading ? (

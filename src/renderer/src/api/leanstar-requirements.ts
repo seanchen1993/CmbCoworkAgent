@@ -77,6 +77,12 @@ type ApiPageResponse<T> = PageResponse<T> & {
   body?: PageResponse<T>
 }
 
+type ApiDetailResponse = {
+  returnCode?: string
+  errorMsg?: string
+  body?: RequirementDetail | null
+}
+
 type NamespaceTreeResponse = {
   namespaceTreeList?: NamespaceTreeNode[]
 }
@@ -384,12 +390,17 @@ export const leanstarRequirementsApi = {
   },
 
   // 第三步：需求整体详情
-  getRequirementDetail(code: string): Promise<RequirementDetail> {
-    if (USE_MOCK) return Promise.resolve(MOCK_REQUIREMENT_DETAIL[code] ?? {})
-    return request<RequirementDetail>(
+  getRequirementDetail(code: string): Promise<RequirementDetail | null> {
+    if (USE_MOCK) return Promise.resolve(MOCK_REQUIREMENT_DETAIL[code] ?? null)
+    return request<RequirementDetail | ApiDetailResponse>(
       `/api/requirement/product-requirements/${encodeURIComponent(code)}/detail`,
       { method: "GET" }
-    )
+    ).then((result) => {
+      if (result && typeof result === "object" && "returnCode" in result) {
+        return (result as ApiDetailResponse).body ?? null
+      }
+      return result as RequirementDetail
+    })
   },
 
   getNamespaceTree(): Promise<NamespaceTreeResponse> {
