@@ -8,6 +8,19 @@ import type { LocalThreadRunOwner } from "./thread-run-lease"
 export type AgentRunRequest = AgentInvokeParams
 
 export interface AgentRunDelivery {
+  /**
+   * NOT always a real BrowserWindow.
+   *
+   * A managed transport (IM, and any future scheduled or cloud caller) has no
+   * window and supplies a shim that implements exactly four members: `id`,
+   * `isDestroyed()`, `webContents.send()` and `webContents.isDestroyed()` — see
+   * createManagedTransportAgentRunDelivery. The shim is cast to BrowserWindow,
+   * so reaching for a fifth member compiles cleanly and then throws at runtime,
+   * on the managed path only, possibly in a branch nobody exercises for weeks.
+   * tests/agent-window-surface.spec.ts fails the build before that can ship.
+   *
+   * Prefer `send` / `isAvailable` over reaching through this field at all.
+   */
   window: BrowserWindow
   send(channel: string, payload: unknown): void
   isAvailable(): boolean

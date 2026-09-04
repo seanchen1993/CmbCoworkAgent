@@ -1470,6 +1470,7 @@ async function executeAgentGoalControl(
   const { threadId, message } = request
   return agentRunExecutionContextStorage.run(context, () =>
     withThreadRunMutationLock(threadId, async () => {
+      // Possibly a managed transport's shim; see AgentRunDelivery.window.
       const window = delivery.window
       const activeController = activeRuns.get(threadId)
       const channel = activeController
@@ -2348,6 +2349,16 @@ function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
   return segments.join("；")
 }
 
+/**
+ * Every renderer send in this file funnels through here. That is why a managed
+ * transport can get away with a four-member window shim (see
+ * AgentRunDelivery.window): `webContents.send` is the only sending member this
+ * file ever touches.
+ *
+ * If you need a new renderer message, route it through here or through
+ * AgentRunDelivery.send. Reaching for another BrowserWindow member instead
+ * compiles fine and then throws on the IM path.
+ */
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
   if (window.isDestroyed() || window.webContents.isDestroyed()) return
   try {
@@ -3276,6 +3287,15 @@ function sendAutoCommitResult(
   })
 }
 
+/**
+ * The one place in this file that needs a REAL BrowserWindow: Electron
+ * validates the parent window of a modal and rejects a managed transport's
+ * shim. Callers must gate this on a desktop-owned run (canPromptModal); a
+ * managed run declines auto-commit instead of prompting nobody.
+ *
+ * Any new Electron dialog here needs the same gate —
+ * tests/agent-window-surface.spec.ts fails on an ungated one.
+ */
 async function confirmAutoCommit(
   window: BrowserWindow,
   result: AgentAutoCommitResult
@@ -5871,6 +5891,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       )
       const initialInvokeWorkspacePath = initialInvokeParsedMetadata.workspacePath
       const baseChannel = `agent:stream:${threadId}`
+      // May be a managed transport's shim rather than a real window — only
+      // id / isDestroyed / webContents.send / webContents.isDestroyed exist on
+      // it. See AgentRunDelivery.window before using anything else.
       const window = delivery.window
 
       console.log("[Agent] Received invoke request:", {

@@ -138,6 +138,33 @@ function testSyntheticIdCannotCollideWithARealWindow(): void {
   assert.equal(shim.id, MANAGED_TRANSPORT_WINDOW_ID)
 }
 
+function testAnUnsupportedWindowMemberExplainsItself(): void {
+  // The source guard reads agent.ts for `window.<member>`, so an aliased access
+  // slips past it. This is what the run would hit instead of a bare
+  // "x is not a function" with nothing pointing at why this window differs.
+  const shim = createManagedTransportAgentRunDelivery(recorder().deps).window as unknown as Record<
+    string,
+    unknown
+  >
+  assert.throws(
+    () => shim.focus,
+    /BrowserWindow\.focus.*does not implement.*managed-transport-delivery\.ts/s,
+    "an unsupported member must name itself and say where to fix it"
+  )
+  assert.throws(() => (shim.webContents as Record<string, unknown>).executeJavaScript, /executeJavaScript/)
+}
+
+function testProbingTheShimStaysSafe(): void {
+  // Node inspects objects while logging and awaiting; throwing on those probes
+  // would break diagnostics instead of revealing a real mistake.
+  const delivery = createManagedTransportAgentRunDelivery(recorder().deps)
+  const shim = delivery.window as unknown as Record<string | symbol, unknown>
+  assert.doesNotThrow(() => shim.then, "a thenable probe must not throw when awaited")
+  assert.doesNotThrow(() => shim[Symbol.toPrimitive])
+  assert.doesNotThrow(() => JSON.stringify({ id: (shim as { id: number }).id }))
+  assert.doesNotThrow(() => String(delivery.isAvailable()))
+}
+
 async function testGoalRunSurvivesWithNoDesktopWindow(): Promise<void> {
   // The regression this delivery fixes: ImGoalRunBridge.requireDelivery() threw
   // "主窗口尚未就绪" whenever mainWindow was null, so an IM Goal turn failed
@@ -179,7 +206,9 @@ async function main(): Promise<void> {
     testLifecycleAndCustomEventsSurviveTranslation,
     testOnlyTheThreadWideChannelIsTranslated,
     testWindowShimRoutesThroughTheSameTranslation,
-    testSyntheticIdCannotCollideWithARealWindow
+    testSyntheticIdCannotCollideWithARealWindow,
+    testAnUnsupportedWindowMemberExplainsItself,
+    testProbingTheShimStaysSafe
   ]) {
     test()
     console.log(`PASS ${test.name}`)

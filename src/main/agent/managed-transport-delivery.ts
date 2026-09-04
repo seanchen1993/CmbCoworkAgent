@@ -74,6 +74,34 @@ function toRendererEvents(
   return []
 }
 
+/**
+ * Last line of defence behind tests/agent-window-surface.spec.ts.
+ *
+ * That guard reads agent.ts for `window.<member>`, so an aliased access
+ * (`const w = delivery.window; w.focus()`) slips past it. Without this the
+ * failure would surface in production as "w.focus is not a function", on the
+ * managed path only, with nothing pointing at why this window is different.
+ *
+ * Symbols and inherited object keys are left alone: Node probes objects with
+ * `Symbol.toPrimitive`, `util.inspect.custom` and `then`, and throwing on those
+ * would break logging and awaiting rather than reveal a real mistake.
+ */
+function explainUnsupportedWindowMembers<T extends object>(shim: T): T {
+  return new Proxy(shim, {
+    get(target, property, receiver) {
+      if (typeof property !== "string" || property in target || property === "then") {
+        return Reflect.get(target, property, receiver)
+      }
+      throw new Error(
+        `A managed transport run reached BrowserWindow.${property}, which its window shim does ` +
+          `not implement (it has ${Object.keys(target).join(", ")}). Route the call through ` +
+          `AgentRunDelivery.send / AgentRunExecutionContext, or add the member in ` +
+          `src/main/agent/managed-transport-delivery.ts if a managed run can genuinely serve it.`
+      )
+    }
+  })
+}
+
 export interface ManagedTransportDeliveryDependencies {
   mirror: typeof mirrorStandardTurnStreamToRenderer
   broadcast: typeof broadcastToRenderers
@@ -113,14 +141,14 @@ export function createManagedTransportAgentRunDelivery(
     for (const event of toRendererEvents(converter, payload)) mirror(threadId, event)
   }
 
-  const managedWindow = {
+  const managedWindow = explainUnsupportedWindowMembers({
     id: MANAGED_TRANSPORT_WINDOW_ID,
     isDestroyed: (): boolean => false,
-    webContents: {
+    webContents: explainUnsupportedWindowMembers({
       send: (channel: string, payload: unknown): void => forward(channel, payload),
       isDestroyed: (): boolean => false
-    }
-  }
+    })
+  })
 
   return {
     window: managedWindow as BrowserWindow,
