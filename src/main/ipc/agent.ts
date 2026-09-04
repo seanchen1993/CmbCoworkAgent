@@ -1,4 +1,5 @@
 import { IpcMain, BrowserWindow, dialog } from "electron"
+import { normalizeWorkspacePathKey } from "../../shared/workspace-path"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { nowIsoLocal } from "../util/local-time"
 import { AsyncKeyedLock } from "./async-keyed-lock"
@@ -6869,9 +6870,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const markAutoModeTerminal = (
           outcome: AgentTurnEndEvent["outcome"],
           code: AutoModeTerminalCode,
-          terminalMessage?: string
+          terminalMessage?: string,
+          terminalError?: unknown
         ): void => {
           autoModeTerminal = createAutoModeTerminal(outcome, code, terminalMessage)
+          // Failures are reported to the renderer and then swallowed, so this
+          // run resolves normally either way. A managed transport has no stream
+          // to read: without this it can only infer failure from "no final
+          // text", collapsing a retryable provider blip and a hook halt into
+          // one generic error. The original error travels along so the caller
+          // keeps its own retry policy.
+          runExecutionContext.onRunTerminated?.({
+            outcome,
+            code,
+            ...(terminalMessage ? { message: terminalMessage } : {}),
+            ...(terminalError !== undefined ? { error: terminalError } : {})
+          })
         }
         // Actual model used after failover — hoisted for catch/finally routing feedback
         let usedModelId: string | undefined
@@ -6954,6 +6968,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.log("[Agent] Thread metadata:", metadata)
 
           const workspacePath = parsedThreadMetadata.workspacePath
+          // A managed transport authorized this run against a specific
+          // workspace, then did async work before it started. If the thread has
+          // been repointed since (a desktop workspace switch, a first run on an
+          // empty thread), executing here would run under an authorization that
+          // was never granted for this workspace.
+          const authorizedWorkspacePath = runExecutionContext.expectedWorkspacePath
+          if (
+            authorizedWorkspacePath &&
+            normalizeWorkspacePathKey(workspacePath ?? "") !==
+              normalizeWorkspacePathKey(authorizedWorkspacePath)
+          ) {
+            throw new Error(
+              `Run was authorized for workspace ${authorizedWorkspacePath} but the thread now points at ${workspacePath ?? "(none)"}`
+            )
+          }
           sessionWorkspacePath = workspacePath ?? undefined
           const harnessAgentContext = await getHarnessAgentContext(metadata, {
             workspacePath,
@@ -7843,7 +7872,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
-            recursionLimit: 1000
+            // Centralized product budget (agent-runtime-limits). Hardcoding it
+            // here made one logical turn's budget depend on which entry point
+            // resumed it, and left the IM path below the limit it used to get.
+            recursionLimit: getAgentGraphRecursionLimit()
           }
 
           // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
@@ -9543,7 +9575,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "hook_halt", error.reason)
+            markAutoModeTerminal("error", "hook_halt", error.reason, error)
             return
           }
           const actionStationarityHalt = getActionStationarityHaltError(error)
@@ -9573,7 +9605,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "failure_fuse", actionStationarityHalt.decision.reason)
+            markAutoModeTerminal("error", "failure_fuse", actionStationarityHalt.decision.reason, error)
             return
           }
           const failureFuseHalt = getFailureFuseHaltError(error)
@@ -9595,7 +9627,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "failure_fuse", failureFuseHalt.decision.reason)
+            markAutoModeTerminal("error", "failure_fuse", failureFuseHalt.decision.reason, error)
             return
           }
           // Ignore abort-related errors (expected when stream is cancelled)
@@ -9694,7 +9726,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
               })
             }
-            markAutoModeTerminal("error", "provider_error", errMsg)
+            markAutoModeTerminal("error", "provider_error", errMsg, error)
             turnStateShouldDispose = true
           } else {
             notifyManagedAgentRunCancelled(runExecutionContext)
@@ -10631,7 +10663,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
-            recursionLimit: 1000
+            // Centralized product budget (agent-runtime-limits). Hardcoding it
+            // here made one logical turn's budget depend on which entry point
+            // resumed it, and left the IM path below the limit it used to get.
+            recursionLimit: getAgentGraphRecursionLimit()
           }
 
           // Resume from checkpoint by streaming with Command containing the decision

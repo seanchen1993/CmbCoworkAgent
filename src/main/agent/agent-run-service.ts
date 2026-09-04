@@ -37,6 +37,23 @@ export interface AgentRunDetachedResultSignal {
   runId?: string
 }
 
+/**
+ * How a run ended, for callers with no stream to read.
+ *
+ * The desktop run body reports failures by sending them to the renderer and
+ * then returning normally, so its completion promise resolves either way. A
+ * managed transport that only sees "no final text" cannot tell a provider
+ * blip from a hook halt, and would report every failure as equally final.
+ * `error` carries the original so the caller keeps its own retry policy.
+ */
+export interface AgentRunTerminal {
+  outcome: "success" | "error" | "unknown"
+  /** Terminal classification: hook_halt, failure_fuse, provider_error, … */
+  code: string
+  message?: string
+  error?: unknown
+}
+
 export interface AgentGoalControlRequest {
   threadId: string
   message: string
@@ -62,6 +79,14 @@ export interface AgentRunExecutionContext {
     managedExternally?: boolean
   }
   signal?: AbortSignal
+  /**
+   * Workspace this run was authorized against. A managed transport validates
+   * the target workspace, then does async work (title reads, event bookkeeping,
+   * skill preparation) before the run starts, while the run body reads the
+   * thread's *current* workspace. Setting this makes that drift fail the run
+   * instead of silently executing somewhere the caller never authorized.
+   */
+  expectedWorkspacePath?: string
   allowForeignOwnerGoalControl?: boolean
   trustedExplicitSkill?: SkillUseBlockMetadata
   allowTrustedTransportSkillMarker?: boolean
@@ -71,6 +96,8 @@ export interface AgentRunExecutionContext {
   onGoalNotice?: (notice: AgentRunGoalNotice) => void
   onFinalAssistant?: (result: AgentRunFinalAssistant) => void | Promise<void>
   onRunCancelled?: () => void
+  /** Fires once per run with its terminal classification. See AgentRunTerminal. */
+  onRunTerminated?: (terminal: AgentRunTerminal) => void
   onDetachedResultAvailable?: (signal: AgentRunDetachedResultSignal) => void
 }
 

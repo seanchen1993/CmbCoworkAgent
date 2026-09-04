@@ -134,6 +134,25 @@ function testTheBridgeLeavesTranscriptPersistenceToTheRunBody(): void {
   )
 }
 
+function testTheRunBodyStillHonoursWhatTheBridgeDependsOn(): void {
+  const agent = readFileSync(join(PROJECT_ROOT, "src/main/ipc/agent.ts"), "utf8")
+  assert(
+    agent.includes("runExecutionContext.onRunTerminated?.({"),
+    "the run body must report its terminal state; a managed caller has no stream to read it from"
+  )
+  assert(
+    agent.includes("runExecutionContext.expectedWorkspacePath"),
+    "the run body must honour the workspace its caller authorized"
+  )
+  // Every error branch has to carry the original error, or retryability is lost.
+  for (const code of ["hook_halt", "failure_fuse", "provider_error"]) {
+    assert(
+      new RegExp(`markAutoModeTerminal\\("error", "${code}"[^)]*, error\\)`).test(agent),
+      `the ${code} branch must pass the original error to the terminal report`
+    )
+  }
+}
+
 async function testTurnInputMapsOntoTheRunContext(): Promise<void> {
   const captured: Captured = { request: null, context: null }
   const hooks = { onWaitStart: () => undefined, onWaitEnd: () => undefined }
@@ -235,10 +254,66 @@ async function testARunThatSaysNothingIsAnError(): Promise<void> {
   )
 }
 
+async function testAFailedRunRethrowsTheOriginalError(): Promise<void> {
+  // IM classifies retryability off the error itself (isRetryableApiError). The
+  // run body reports failures to the renderer and returns, so without the
+  // terminal callback every failure would reach IM as one generic "no reply"
+  // and a retryable provider blip would be marked permanently failed.
+  const captured: Captured = { request: null, context: null }
+  const providerError = new Error("upstream 503")
+  await assert.rejects(
+    run(baseInput(), captured, async (context) => {
+      context.onRunTerminated?.({
+        outcome: "error",
+        code: "provider_error",
+        message: "upstream 503",
+        error: providerError
+      })
+    }),
+    (thrown: unknown) => thrown === providerError,
+    "the original error must survive, not be replaced by a generic one"
+  )
+}
+
+async function testAFailureWithoutAnErrorObjectStillFails(): Promise<void> {
+  const captured: Captured = { request: null, context: null }
+  await assert.rejects(
+    run(baseInput(), captured, async (context) => {
+      context.onRunTerminated?.({ outcome: "error", code: "hook_halt", message: "Hook 拦截" })
+    }),
+    /Hook 拦截/,
+    "a halt without an Error object must still surface its reason"
+  )
+}
+
+async function testASuccessfulTerminalDoesNotMaskTheReply(): Promise<void> {
+  const captured: Captured = { request: null, context: null }
+  const text = await run(baseInput(), captured, async (context) => {
+    context.onRunTerminated?.({ outcome: "success", code: "normal" })
+    await context.onFinalAssistant?.({ messageId: "m1", finalText: "完成" })
+  })
+  assert.equal(text, "完成")
+}
+
+async function testTheAuthorizedWorkspaceIsPinned(): Promise<void> {
+  // IM's capability guard validates a workspace, then does async work before the
+  // run starts, while the run body reads the thread's current workspace.
+  const captured: Captured = { request: null, context: null }
+  await run(baseInput({ workspacePath: "/tmp/authorized" }), captured, async (context) => {
+    await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
+  })
+  assert.equal(
+    captured.context?.expectedWorkspacePath,
+    "/tmp/authorized",
+    "the run must be pinned to the workspace IM authorized it against"
+  )
+}
+
 async function main(): Promise<void> {
   for (const test of [
     testInboxOnlyRuntimeOptionsTravelOnThePolicy,
-    testTheBridgeLeavesTranscriptPersistenceToTheRunBody
+    testTheBridgeLeavesTranscriptPersistenceToTheRunBody,
+    testTheRunBodyStillHonoursWhatTheBridgeDependsOn
   ]) {
     test()
     console.log(`PASS ${test.name}`)
@@ -250,7 +325,11 @@ async function main(): Promise<void> {
     testTheImRunnerKeepsOwningItsLease,
     testCancellationSurfacesAsAnAbort,
     testAGoalNoticeStandsInForAMissingReply,
-    testARunThatSaysNothingIsAnError
+    testARunThatSaysNothingIsAnError,
+    testAFailedRunRethrowsTheOriginalError,
+    testAFailureWithoutAnErrorObjectStillFails,
+    testASuccessfulTerminalDoesNotMaskTheReply,
+    testTheAuthorizedWorkspaceIsPinned
   ]) {
     await test()
     console.log(`PASS ${test.name}`)

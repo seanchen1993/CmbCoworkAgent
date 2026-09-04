@@ -2,7 +2,8 @@ import {
   startAgentRun,
   type AgentRunDelivery,
   type AgentRunExecutionContext,
-  type AgentRunGoalNotice
+  type AgentRunGoalNotice,
+  type AgentRunTerminal
 } from "../../agent/agent-run-service"
 import { createHeadlessAgentRunDelivery } from "../../agent/headless-delivery"
 import type { RemoteTurnPolicy } from "../../agent/standard-thread-turn"
@@ -73,6 +74,7 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
   const notices: AgentRunGoalNotice[] = []
   let finalText: string | null = null
   let cancelled = false
+  let terminal: AgentRunTerminal | null = null
 
   const context: AgentRunExecutionContext = {
     source: input.source,
@@ -80,6 +82,9 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
     // it sends after the run settles, so the run body must not release it.
     localRunLease: { owner: input.runOwner, runId: input.runId, managedExternally: true },
     signal: input.signal,
+    // IM's capability guard validated this workspace before the turn was
+    // prepared; the run body must refuse to execute anywhere else.
+    expectedWorkspacePath: input.workspacePath,
     allowTrustedTransportSkillMarker: true,
     extraSystemPrompt: IM_UNTRUSTED_INPUT_SYSTEM_PROMPT,
     ...(input.explicitSkill ? { trustedExplicitSkill: input.explicitSkill } : {}),
@@ -94,6 +99,9 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
     },
     onRunCancelled: () => {
       cancelled = true
+    },
+    onRunTerminated: (result) => {
+      terminal = result
     }
   }
 
@@ -111,6 +119,16 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
   await handle.completion
 
   if (cancelled) throw new DOMException("IM run was cancelled", "AbortError")
+
+  // A failed run still resolves its completion promise (the run body reports
+  // errors to the renderer and returns). Rethrowing the original here keeps the
+  // caller's retry classification working: isRetryableApiError still sees the
+  // provider error it was written for, instead of a generic "no reply".
+  const outcome = terminal as AgentRunTerminal | null
+  if (outcome && outcome.outcome !== "success") {
+    if (outcome.error instanceof Error) throw outcome.error
+    throw new Error(outcome.message?.trim() || `本轮运行以 ${outcome.code} 结束。`)
+  }
 
   const resolved = finalText as string | null
   if (resolved && resolved.trim()) return resolved.trim()
