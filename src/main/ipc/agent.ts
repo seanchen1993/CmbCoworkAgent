@@ -3298,7 +3298,8 @@ async function finalizeAutoCommit({
   userPrompt,
   snapshot,
   window,
-  channel
+  channel,
+  canPromptModal
 }: {
   threadId: string
   workspacePath: string | undefined
@@ -3306,6 +3307,13 @@ async function finalizeAutoCommit({
   snapshot: AgentGitSnapshot | null
   window: BrowserWindow
   channel: string
+  /**
+   * Only a real desktop window can host `dialog.showMessageBox`. A headless
+   * delivery (IM and other managed transports) has no window to parent a modal
+   * to, so "ask" mode declines instead of prompting — the run must not block on
+   * a dialog nobody can see.
+   */
+  canPromptModal: boolean
 }): Promise<void> {
   // Skip auto-commit while a background workflow is ACTIVE on this WORKSPACE: it
   // writes to the tree asynchronously, so a dirty-diff commit here could sweep its
@@ -3386,7 +3394,7 @@ async function finalizeAutoCommit({
       workspacePath,
       userPrompt,
       snapshot,
-      confirm: (preview) => confirmAutoCommit(window, preview)
+      ...(canPromptModal ? { confirm: (preview) => confirmAutoCommit(window, preview) } : {})
     })
     // Telemetry: the existing `git.commit.created` (triggeredBy=agent-auto) only
     // fires on success. Emit an attempt event so skip / user-cancel / fail are also
@@ -9145,7 +9153,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   : rootUserPrompt,
                 snapshot: autoCommit.snapshot,
                 window,
-                channel
+                channel,
+                canPromptModal: runExecutionContext.source === "desktop"
               })
               await markLatestForkBoundaryBestEffort({
                 threadId,
@@ -11016,7 +11025,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
               snapshot: autoCommit.snapshot,
               window,
-              channel
+              channel,
+              // resume / interrupt are desktop-only IPC entries: the window here
+              // always comes from BrowserWindow.fromWebContents(event.sender).
+              canPromptModal: true
             })
             await markLatestForkBoundaryBestEffort({
               threadId,
@@ -12132,7 +12144,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
               snapshot: autoCommit.snapshot,
               window,
-              channel
+              channel,
+              // resume / interrupt are desktop-only IPC entries: the window here
+              // always comes from BrowserWindow.fromWebContents(event.sender).
+              canPromptModal: true
             })
             await markLatestForkBoundaryBestEffort({
               threadId,

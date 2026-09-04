@@ -460,6 +460,7 @@ import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
 import { builtinRobotManager } from "./services/im/manager"
 import { createBrowserWindowAgentRunDelivery } from "./agent/agent-run-service"
+import { createHeadlessAgentRunDelivery } from "./agent/headless-delivery"
 import {
   configurePetWindow,
   createPetWindow,
@@ -1436,8 +1437,11 @@ if (browserNativeMessagingHostLaunch) {
 
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
+    // An IM turn must not depend on someone having the desktop open. With a
+    // window we keep targeting it (unchanged desktop behaviour); without one the
+    // run still executes and its stream is broadcast to whoever opens later.
     builtinRobotManager.setAgentRunDeliveryResolver(() =>
-      mainWindow ? createBrowserWindowAgentRunDelivery(mainWindow) : null
+      mainWindow ? createBrowserWindowAgentRunDelivery(mainWindow) : createHeadlessAgentRunDelivery()
     )
     setAppAttentionHandler(requestAppAttention)
     await initializeAppTray({
