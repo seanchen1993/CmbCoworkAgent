@@ -85,6 +85,11 @@ import {
   neutralizeImSkillUseMarkers
 } from "./skill-command"
 import { ImGoalRunBridge } from "./goal-runner"
+import {
+  executeRemoteStandardTurnOnDesktopRunBody,
+  isDesktopRunBodyEnabledForIm,
+  withImInboxRuntimePolicy
+} from "./desktop-run-bridge"
 
 const IM_INBOX_BLOCKED_TOOLS = [
   "execute",
@@ -671,7 +676,7 @@ async function executePreparedImStandardTurn(
       onDetachedResultAvailable
     })
   }
-  return executePreparedRemoteStandardTurn({
+  const turn: PreparedRemoteStandardTurnInput = {
     rawMessage: preparedMessage.visibleText,
     userMessageId: `im:${event.eventId}:user`,
     threadId: target.threadId,
@@ -688,6 +693,20 @@ async function executePreparedImStandardTurn(
     remotePolicy,
     interactionWaitHooks,
     onDetachedResultAvailable
+  }
+  if (!isDesktopRunBodyEnabledForIm()) return executePreparedRemoteStandardTurn(turn)
+  // The run body derives its own runtime options and knows nothing about
+  // targetKind, so the two inbox-only ones move onto the policy it does read.
+  return executeRemoteStandardTurnOnDesktopRunBody({
+    ...turn,
+    remotePolicy: withImInboxRuntimePolicy(remotePolicy, {
+      targetKind: target.kind,
+      imDeliveryContext: resolveImInboxDeliveryContextForRuntime({
+        threadId: target.threadId,
+        targetKind: target.kind,
+        metadata
+      })
+    })
   })
 }
 

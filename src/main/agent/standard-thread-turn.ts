@@ -684,6 +684,15 @@ export interface RemoteTurnPolicy {
   disableMcpTools?: boolean
   blockedToolNames?: string[]
   filesystemAccess?: CreateAgentRuntimeOptions["filesystemAccess"]
+  /**
+   * An inbox turn has no human in front of it to approve an edit, and its tool
+   * surface is already narrowed by blockedToolNames + filesystemAccess. Carried
+   * on the policy rather than derived inside a run body, so every entry point
+   * that accepts a policy grants the same thing.
+   */
+  autoApproveFileEdits?: boolean
+  /** Binds an inbox turn's scheduler tool to the delivery that triggered it. */
+  imDeliveryContext?: CreateAgentRuntimeOptions["imDeliveryContext"]
 }
 
 export interface StandardThreadRuntimeFactoryInput {
@@ -726,7 +735,9 @@ function applyRemoteTurnPolicy(
     ...(policy.disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
     ...(policy.disableMcpTools ? { disableMcpTools: true } : {}),
     ...(policy.blockedToolNames ? { blockedToolNames: policy.blockedToolNames } : {}),
-    ...(policy.filesystemAccess ? { filesystemAccess: policy.filesystemAccess } : {})
+    ...(policy.filesystemAccess ? { filesystemAccess: policy.filesystemAccess } : {}),
+    ...(policy.autoApproveFileEdits ? { autoApproveFileEdits: true } : {}),
+    ...(policy.imDeliveryContext ? { imDeliveryContext: policy.imDeliveryContext } : {})
   }
 }
 
