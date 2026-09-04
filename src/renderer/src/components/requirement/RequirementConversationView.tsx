@@ -342,9 +342,10 @@ function RequirementConversationSession({
       },
       onCreateConversation: async (item) => {
         await window.api.expertAgents.setEnabled("analyst", true)
+        const conversationNumber = String(item.threadIds.length + 1).padStart(3, "0")
         const thread = await createThread(
           {
-            title: `PRD 沟通 · ${item.title}`,
+            title: `${conversationNumber}-PRD-${item.title}`,
             requirementId: item.id,
             requirementTitle: item.title,
             requirementSystem: item.system,
@@ -723,7 +724,7 @@ function RequirementConversationSession({
         threadState.setWorkspaceFiles(workspaceResult.files)
       }
       if (isRequirementPrdGenerationCompleted(manifest)) {
-        setPreviewTab("prd")
+        setPreviewTab("requirement-space")
       }
       // Reset publish queue when the conversation ended without a successful publish
       if (!isRequirementSpacePublished(manifest)) {

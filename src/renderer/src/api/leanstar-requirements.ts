@@ -12,7 +12,7 @@ export type ProductRequirement = {
   title: string
   status?: string
   priority?: string
-  owner?: string
+  owner?: string | { id?: string; name?: string }
   functionList?: ProductRequirementFunction[]
 }
 

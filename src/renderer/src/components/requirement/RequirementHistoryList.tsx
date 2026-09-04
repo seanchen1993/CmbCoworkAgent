@@ -69,6 +69,9 @@ function getStatusLabel(status: string): string {
 function getStatusClass(status: string): string {
   if (status.includes("异常")) return "bg-status-critical/10 text-status-critical"
   if (status.includes("沟通")) return "bg-[#fff0e9] text-[#a65a3e]"
+  if (status.includes("生成") && !status.includes("已发布")) {
+    return "bg-status-info/10 text-status-info"
+  }
   if (status.includes("发布")) return "bg-status-warning/10 text-status-warning"
   if (status.includes("交付")) return "bg-[#e9f2ec] text-[#44715a]"
   return "bg-[#a4e6a27a] text-[#1b7e30]"

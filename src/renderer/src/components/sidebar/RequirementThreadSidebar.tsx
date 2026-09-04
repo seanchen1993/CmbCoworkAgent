@@ -104,6 +104,13 @@ function getStatusPresentation(status: string): {
   dotClass: string
   showDot: boolean
 } {
+  if (status.includes("生成") && !status.includes("已发布")) {
+    return {
+      tagClass: "border-status-info/20 bg-status-info/5 text-status-info/85",
+      dotClass: "bg-status-info",
+      showDot: true
+    }
+  }
   if (status.includes("异常")) {
     return {
       tagClass: "border-status-critical/20 bg-status-critical/5 text-status-critical/85",

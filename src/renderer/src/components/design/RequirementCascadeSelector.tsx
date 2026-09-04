@@ -20,7 +20,8 @@ import {
   getDetailCode,
   type ImplementationDetail,
   type NamespaceTreeNode,
-  type ProductRequirement
+  type ProductRequirement,
+  type RequirementDetail
 } from "@/api/leanstar-requirements"
 
 export type NamespaceTreeSelection = {
@@ -88,6 +89,37 @@ function inaccessibleLabel(reason?: string): string | null {
   if (reason === "UNAUTHORIZED") return "无权限"
   if (reason === "UNSUPPORTED") return "不支持"
   return reason
+}
+
+function NamespacePathLabel({
+  pathName,
+  className
+}: {
+  pathName: string
+  className?: string
+}): React.JSX.Element {
+  const segments = pathName
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+  const lastSegment = segments.at(-1) ?? pathName
+  return (
+    <span className={cn("flex min-w-0 items-center justify-start text-left", className)} title={pathName}>
+      <span className="min-w-0 truncate">{lastSegment}</span>
+      {pathName && pathName !== lastSegment && (
+        <span className="ml-1 min-w-0 truncate text-muted-foreground">({pathName})</span>
+      )}
+    </span>
+  )
+}
+
+function getOwnerLabel(owner: ProductRequirement["owner"]): string {
+  if (!owner) return ""
+  if (typeof owner === "string") return owner
+  const name = owner.name?.trim()
+  const id = owner.id?.trim()
+  if (!name && !id) return ""
+  return `(${id ?? ""}/${name ?? ""})`
 }
 
 function SelectField<T extends { code?: string; title?: string }>({
@@ -177,6 +209,8 @@ export function NamespaceTreeSelector({
   )
   const [loading, setLoading] = useState<"requirements" | "details" | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [requirementDetail, setRequirementDetail] = useState<RequirementDetail | null>(null)
+  const [requirementDetailLoading, setRequirementDetailLoading] = useState(false)
 
   const leafNodes = useMemo(() => collectLeafNodes(tree), [tree])
 
@@ -222,6 +256,7 @@ export function NamespaceTreeSelector({
     setRequirements([])
     setDetails([])
     setSelectedDetailCode(null)
+    setRequirementDetail(null)
     onChange(null)
     setLoading("requirements")
     setError(null)
@@ -238,6 +273,7 @@ export function NamespaceTreeSelector({
     setRequirementCode(nextCode)
     setDetails([])
     setSelectedDetailCode(null)
+    setRequirementDetail(null)
     onChange(null)
     if (!nextCode || !selectedNamespace) return
     const requirement = requirements.find((item) => item.code === nextCode)
@@ -250,7 +286,7 @@ export function NamespaceTreeSelector({
       requirement,
       implementationDetails: []
     })
-    // The page response already includes the functions for this requirement.
+    // The page response may include functions for this requirement.
     setDetails(
       (requirement.functionList ?? []).map((item) => ({
         id: item.id,
@@ -272,6 +308,33 @@ export function NamespaceTreeSelector({
       )
       .finally(() => setLoading(null))
   }
+
+  useEffect(() => {
+    if (!selectedDetailCode || !value?.requirement.code) {
+      setRequirementDetail(null)
+      setRequirementDetailLoading(false)
+      return
+    }
+    let cancelled = false
+    setRequirementDetailLoading(true)
+    void leanstarRequirementsApi
+      .getRequirementDetail(value.requirement.code)
+      .then((result) => {
+        if (!cancelled) setRequirementDetail(result)
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) {
+          setRequirementDetail(null)
+          setError(reason instanceof Error ? reason.message : "加载需求详情失败")
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRequirementDetailLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDetailCode, value?.requirement.code])
 
   const toggleDetail = (detail: ImplementationDetail): void => {
     if (!value) return
@@ -345,8 +408,17 @@ export function NamespaceTreeSelector({
               value={selectedNamespace ? getNodeKey(selectedNamespace) : ""}
               onValueChange={handleNamespaceChange}
             >
-              <SelectTrigger className="h-10 w-full min-w-0 overflow-hidden rounded-md border-input bg-background px-3 text-xs font-medium shadow-none transition-colors hover:border-border-emphasis focus:border-primary focus:ring-2 focus:ring-ring [&>svg]:size-3.5 [&>svg]:text-muted-foreground">
-                <SelectValue className="min-w-0 truncate" placeholder="请选择命名空间" />
+              <SelectTrigger className="h-10 w-full min-w-0 justify-start overflow-hidden rounded-md border-input bg-background px-3 text-left text-xs font-medium shadow-none transition-colors hover:border-border-emphasis focus:border-primary focus:ring-2 focus:ring-ring [&>svg]:size-3.5 [&>svg]:text-muted-foreground">
+                {selectedNamespace ? (
+                  <NamespacePathLabel
+                    pathName={selectedNamespace.pathName}
+                    className="min-w-0 flex-1"
+                  />
+                ) : (
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                    请选择命名空间
+                  </span>
+                )}
               </SelectTrigger>
               <SelectContent>
                 {leafNodes.map((option) => {
@@ -354,16 +426,19 @@ export function NamespaceTreeSelector({
                   const disabled = option.accessible === false
                   const reasonLabel = inaccessibleLabel(option.inaccessibleReason)
                   return (
-                    <SelectItem key={key} value={key} disabled={disabled} className="text-xs">
-                      <span
+                    <SelectItem
+                      key={key}
+                      value={key}
+                      disabled={disabled}
+                      className="group text-xs data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground"
+                    >
+                      <NamespacePathLabel
+                        pathName={option.pathName}
                         className={cn(
-                          "block max-w-[min(70vw,28rem)] truncate",
+                          "max-w-[min(70vw,28rem)]",
                           disabled && "text-muted-foreground/60"
                         )}
-                        title={option.pathName}
-                      >
-                        {option.pathName}
-                      </span>
+                      />
                       {reasonLabel && (
                         <span className="ml-2 text-[10px] text-muted-foreground">
                           {reasonLabel}
@@ -389,7 +464,10 @@ export function NamespaceTreeSelector({
           placeholder={selectedNamespace ? "请选择需求特性" : "请先选择命名空间"}
           onChange={handleRequirementChange}
           getValue={(option) => option.code}
-          getLabel={(option) => `${option.title}（${option.code}）`}
+          getLabel={(option) => {
+            const owner = getOwnerLabel(option.owner)
+            return `${option.title}（${option.code}）${owner}`
+          }}
         />
       </div>
 
@@ -443,6 +521,20 @@ export function NamespaceTreeSelector({
             <p className="mt-4 rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
               该需求特性暂无实施详情。
             </p>
+          )}
+          {selectedDetailCode && (
+            <div className="mt-4 rounded-md border border-border bg-muted/20 p-3">
+              <div className="text-xs font-semibold text-foreground">需求详情</div>
+              {requirementDetailLoading ? (
+                <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                  <LoaderCircle className="size-3.5 animate-spin" /> 加载需求详情中...
+                </div>
+              ) : requirementDetail ? (
+                <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-muted-foreground">
+                  {JSON.stringify(requirementDetail, null, 2)}
+                </pre>
+              ) : null}
+            </div>
           )}
         </div>
       )}
