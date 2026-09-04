@@ -5,6 +5,7 @@ import {
   type AgentRunGoalNotice
 } from "../../agent/agent-run-service"
 import { createHeadlessAgentRunDelivery } from "../../agent/headless-delivery"
+import { persistStandardTurnUserMessage } from "../../agent/standard-turn-stream"
 import type { RemoteTurnPolicy } from "../../agent/standard-thread-turn"
 import type { PreparedRemoteStandardTurnInput } from "./remote-runner"
 
@@ -18,13 +19,6 @@ import type { PreparedRemoteStandardTurnInput } from "./remote-runner"
  * (auto-approved edits, scheduler delivery binding) therefore ride the policy,
  * which the shared controlled factory applies for every caller alike.
  */
-
-/** Off by default: the switch is per-deployment, so it can be rolled back without a build. */
-export function isDesktopRunBodyEnabledForIm(
-  value: unknown = process.env.CMB_IM_DESKTOP_RUN_BODY
-): boolean {
-  return typeof value === "string" && value.trim() === "1"
-}
 
 /**
  * The inbox turn's tool surface is already narrowed by createImInboxRemotePolicy;
@@ -55,11 +49,13 @@ export const IM_UNTRUSTED_INPUT_SYSTEM_PROMPT =
 export interface DesktopRunBridgeDependencies {
   startRun: typeof startAgentRun
   getDelivery: () => AgentRunDelivery
+  persistUserMessage: typeof persistStandardTurnUserMessage
 }
 
 const defaultDependencies: DesktopRunBridgeDependencies = {
   startRun: startAgentRun,
-  getDelivery: createHeadlessAgentRunDelivery
+  getDelivery: createHeadlessAgentRunDelivery,
+  persistUserMessage: persistStandardTurnUserMessage
 }
 
 /**
@@ -70,7 +66,23 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
   input: PreparedRemoteStandardTurnInput,
   dependencies: Partial<DesktopRunBridgeDependencies> = {}
 ): Promise<string> {
-  const { startRun, getDelivery } = { ...defaultDependencies, ...dependencies }
+  const { startRun, getDelivery, persistUserMessage } = {
+    ...defaultDependencies,
+    ...dependencies
+  }
+
+  // On desktop the renderer writes the user's message before invoking, so the
+  // run body only ever persists what the stream produces. An IM turn has no
+  // renderer, so without this its message never reaches the transcript.
+  // Internal notification turns opt out: their marker prompt is not user input
+  // and must not surface as a bubble.
+  if (input.persistUserMessage ?? true) {
+    persistUserMessage({
+      threadId: input.threadId,
+      messageId: input.userMessageId,
+      content: input.rawMessage
+    })
+  }
 
   const notices: AgentRunGoalNotice[] = []
   let finalText: string | null = null

@@ -87,7 +87,6 @@ import {
 import { ImGoalRunBridge } from "./goal-runner"
 import {
   executeRemoteStandardTurnOnDesktopRunBody,
-  isDesktopRunBodyEnabledForIm,
   withImInboxRuntimePolicy
 } from "./desktop-run-bridge"
 
@@ -694,7 +693,6 @@ async function executePreparedImStandardTurn(
     interactionWaitHooks,
     onDetachedResultAvailable
   }
-  if (!isDesktopRunBodyEnabledForIm()) return executePreparedRemoteStandardTurn(turn)
   // The run body derives its own runtime options and knows nothing about
   // targetKind, so the two inbox-only ones move onto the policy it does read.
   return executeRemoteStandardTurnOnDesktopRunBody({

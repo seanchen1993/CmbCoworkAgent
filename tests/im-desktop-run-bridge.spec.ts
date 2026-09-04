@@ -20,7 +20,6 @@ import type {
 import {
   executeRemoteStandardTurnOnDesktopRunBody,
   IM_UNTRUSTED_INPUT_SYSTEM_PROMPT,
-  isDesktopRunBodyEnabledForIm,
   withImInboxRuntimePolicy
 } from "../src/main/services/im/desktop-run-bridge"
 import type { PreparedRemoteStandardTurnInput } from "../src/main/services/im/remote-runner"
@@ -66,17 +65,6 @@ function stubRun(
   }
 }
 
-function testTheSwitchIsOffUnlessExplicitlyTurnedOn(): void {
-  // Every existing deployment must keep the parallel IM implementation until
-  // someone opts in; an unset or malformed value is not an opt-in.
-  assert.equal(isDesktopRunBodyEnabledForIm(undefined), false)
-  assert.equal(isDesktopRunBodyEnabledForIm(""), false)
-  assert.equal(isDesktopRunBodyEnabledForIm("0"), false)
-  assert.equal(isDesktopRunBodyEnabledForIm("true"), false)
-  assert.equal(isDesktopRunBodyEnabledForIm("1"), true)
-  assert.equal(isDesktopRunBodyEnabledForIm(" 1 "), true)
-}
-
 function testInboxOnlyRuntimeOptionsTravelOnThePolicy(): void {
   const deliveryContext = { taskId: "task-1" } as NonNullable<
     ReturnType<typeof withImInboxRuntimePolicy>
@@ -120,6 +108,7 @@ async function testTurnInputMapsOntoTheRunContext(): Promise<void> {
     }),
     {
       getDelivery: () => delivery,
+      persistUserMessage: () => undefined,
       startRun: stubRun(captured, async (context) => {
         await context.onFinalAssistant?.({ messageId: "m1", finalText: "  构建成功  " })
       })
@@ -151,6 +140,7 @@ async function testTheImRunnerKeepsOwningItsLease(): Promise<void> {
   const captured: Captured = { request: null, context: null }
   await executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
     getDelivery: () => delivery,
+    persistUserMessage: () => undefined,
     startRun: stubRun(captured, async (context) => {
       await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
     })
@@ -170,6 +160,7 @@ async function testCancellationSurfacesAsAnAbort(): Promise<void> {
   await assert.rejects(
     executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
       getDelivery: () => delivery,
+      persistUserMessage: () => undefined,
       startRun: stubRun(captured, async (context) => {
         context.onRunCancelled?.()
       })
@@ -183,6 +174,7 @@ async function testAGoalNoticeStandsInForAMissingReply(): Promise<void> {
   const captured: Captured = { request: null, context: null }
   const text = await executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
     getDelivery: () => delivery,
+    persistUserMessage: () => undefined,
     startRun: stubRun(captured, async (context) => {
       context.onGoalNotice?.({
         message: "Goal 已暂停",
@@ -201,6 +193,7 @@ async function testARunThatSaysNothingIsAnError(): Promise<void> {
   await assert.rejects(
     executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
       getDelivery: () => delivery,
+      persistUserMessage: () => undefined,
       startRun: stubRun(captured, async () => undefined)
     }),
     /未产生可回传结果/,
@@ -208,13 +201,49 @@ async function testARunThatSaysNothingIsAnError(): Promise<void> {
   )
 }
 
+async function testTheUserMessageReachesTheTranscript(): Promise<void> {
+  // On desktop the renderer persists the user's message before invoking, so the
+  // run body only persists what the stream produces. An IM turn has no
+  // renderer: without the bridge writing it, the message never appears.
+  const persisted: Array<{ threadId: string; messageId: string; content: string }> = []
+  const captured: Captured = { request: null, context: null }
+  await executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
+    getDelivery: () => delivery,
+    persistUserMessage: (entry) => persisted.push(entry),
+    startRun: stubRun(captured, async (context) => {
+      await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
+    })
+  })
+  assert.deepEqual(persisted, [
+    { threadId: "t1", messageId: "im:42:user", content: "查一下今天的构建" }
+  ])
+}
+
+async function testANotificationTurnLeavesNoUserBubble(): Promise<void> {
+  // A notification turn's marker prompt is plumbing, not user input.
+  const persisted: unknown[] = []
+  const captured: Captured = { request: null, context: null }
+  await executeRemoteStandardTurnOnDesktopRunBody(
+    baseInput({ internalNotificationTurn: true, persistUserMessage: false }),
+    {
+      getDelivery: () => delivery,
+      persistUserMessage: (entry) => persisted.push(entry),
+      startRun: stubRun(captured, async (context) => {
+        await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
+      })
+    }
+  )
+  assert.deepEqual(persisted, [], "a notification turn must not create a user bubble")
+  assert.equal(captured.request?.coordinatorInternalNotification, true)
+}
+
 async function main(): Promise<void> {
-  testTheSwitchIsOffUnlessExplicitlyTurnedOn()
-  console.log("PASS testTheSwitchIsOffUnlessExplicitlyTurnedOn")
   testInboxOnlyRuntimeOptionsTravelOnThePolicy()
   console.log("PASS testInboxOnlyRuntimeOptionsTravelOnThePolicy")
 
   for (const test of [
+    testTheUserMessageReachesTheTranscript,
+    testANotificationTurnLeavesNoUserBubble,
     testTurnInputMapsOntoTheRunContext,
     testTheImRunnerKeepsOwningItsLease,
     testCancellationSurfacesAsAnAbort,
