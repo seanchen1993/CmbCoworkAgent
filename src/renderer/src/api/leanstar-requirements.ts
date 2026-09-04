@@ -7,14 +7,25 @@ export type DigitalProduct = {
 }
 
 export type ProductRequirement = {
+  id?: string
   code: string
   title: string
   status?: string
   priority?: string
   owner?: string
+  functionList?: ProductRequirementFunction[]
+}
+
+export type ProductRequirementFunction = {
+  id?: string
+  code: string
+  title: string
+  status?: string
+  priority?: string
 }
 
 export type ImplementationDetail = {
+  id?: string
   frCode?: string
   subFrCode?: string
   title: string
@@ -36,7 +47,7 @@ export type RequirementDetail = {
 
 // 实施功能（subFr）的唯一标识，优先 subFrCode，回退 frCode。
 export function getDetailCode(detail?: ImplementationDetail): string {
-  return detail?.subFrCode || detail?.frCode || ""
+  return detail?.subFrCode || detail?.frCode || detail?.id || ""
 }
 
 export type NamespaceTreeNode = {
@@ -60,6 +71,10 @@ export type NamespaceTreeNode = {
 type PageResponse<T> = {
   content?: T[]
   total?: number
+}
+
+type ApiPageResponse<T> = PageResponse<T> & {
+  body?: PageResponse<T>
 }
 
 type NamespaceTreeResponse = {
@@ -350,14 +365,14 @@ export const leanstarRequirementsApi = {
       const content = MOCK_REQUIREMENTS[domainId] ?? []
       return Promise.resolve({ content, total: content.length })
     }
-    return request<PageResponse<ProductRequirement>>("/api/requirement/product-requirements/page", {
+    return request<ApiPageResponse<ProductRequirement>>("/api/requirement/product-requirements/page", {
       method: "POST",
       body: JSON.stringify({
         pageIndex: 1,
         pageSize: 15,
         domain: { id: domainId, type: domainType }
       })
-    })
+    }).then((result) => result.body ?? result)
   },
 
   getImplementationDetail(code: string): Promise<{ subFrs?: ImplementationDetail[] }> {

@@ -62,7 +62,11 @@ function getInitialPreviewTab(requirement: RequirementRecord): PreviewTab {
 
 function normalizePrdFilePath(filePath: string): string {
   const normalized = filePath.trim().replace(/\\/g, "/").replace(/^\/+/, "")
-  return normalized === "prd" || normalized.startsWith("prd/")
+  const prdMarker = normalized.toLowerCase().lastIndexOf("/prd/")
+  if (prdMarker >= 0) return `/${normalized.slice(prdMarker + 1)}`
+  return (
+    normalized.toLowerCase() === "prd" || normalized.toLowerCase().startsWith("prd/")
+  )
     ? `/${normalized}`
     : `/prd/${normalized}`
 }
@@ -171,6 +175,7 @@ function RequirementConversationSession({
   )
   const threadId = selectedThreadId ?? requirement.threadIds[0] ?? null
   const threadState = useThreadState(threadId)
+  const setWorkspaceFiles = threadState?.setWorkspaceFiles
   const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
   const expertProcessRunning = subagents.some((item) => item.status === "running")
   const observedSubagentStatesRef = useRef(new Map<string, string>())
@@ -246,10 +251,7 @@ function RequirementConversationSession({
     [threadState?.workspaceFiles]
   )
   const defaultPrdPath = useMemo(
-    () =>
-      prdFiles.find((file) => !file.is_dir && file.path === "/prd/full-prd.md")?.path ??
-      prdFiles.find((file) => !file.is_dir)?.path ??
-      null,
+    () => prdFiles.find((file) => !file.is_dir)?.path ?? null,
     [prdFiles]
   )
   const effectiveSelectedPrdPath =
@@ -260,9 +262,6 @@ function RequirementConversationSession({
     (file) => !file.is_dir && file.path === effectiveSelectedPrdPath
   )
   const prdFileCount = prdFiles.filter((file) => !file.is_dir).length
-  const manifestPrdPath =
-    requirementSpaceManifest?.prd.file.trim() || requirement.prdManifest.prd.file.trim()
-  const fallbackPrdPath = manifestPrdPath || "/prd/full-prd.md"
   const prdGenerationCompleted =
     isRequirementGenerated(requirement) ||
     isRequirementPublished(requirement) ||
@@ -614,15 +613,33 @@ function RequirementConversationSession({
   const handleFunctionFilePreview = useCallback(
     (filePath: string): void => {
       const targetPath = normalizePrdFilePath(filePath)
-      const matchingFile = prdFiles.find(
-        (file) => !file.is_dir && file.path.replace(/\\/g, "/") === targetPath
-      )
+      const normalizedTarget = targetPath.toLowerCase()
+      const targetSuffix = normalizedTarget.replace(/^\/prd\//, "")
+      const targetName = targetSuffix.split("/").pop() ?? targetSuffix
+      const matchingFile =
+        prdFiles.find(
+          (file) => !file.is_dir && file.path.replace(/\\/g, "/").toLowerCase() === normalizedTarget
+        ) ??
+        prdFiles.find(
+          (file) =>
+            !file.is_dir && file.path.replace(/\\/g, "/").toLowerCase().endsWith(`/${targetSuffix}`)
+        ) ??
+        prdFiles.find(
+          (file) => !file.is_dir && file.path.split(/[\\/]/).pop()?.toLowerCase() === targetName
+        )
 
       setPreviewTab("prd")
-      setSelectedPrdPath(matchingFile?.path ?? targetPath)
+      setSelectedPrdPath(matchingFile?.path ?? null)
     },
     [prdFiles]
   )
+
+  useEffect(() => {
+    if (previewTab !== "prd" || !threadId) return
+    void window.api.workspace.loadFromDisk(threadId).then((result) => {
+      if (result.success) setWorkspaceFiles?.(result.files)
+    })
+  }, [previewTab, setWorkspaceFiles, threadId])
 
   useEffect(() => {
     if (threadId) {
@@ -962,54 +979,39 @@ function RequirementConversationSession({
               </TabsContent>
 
               <TabsContent value="prd" className="m-0 flex min-h-0 flex-1 flex-col">
-                {prdFileCount > 0 ? (
-                  <div className="grid min-h-0 flex-1 grid-cols-[minmax(168px,25%)_minmax(0,1fr)] overflow-hidden">
-                    <aside className="flex min-w-0 flex-col overflow-hidden border-r border-border/80 bg-white">
-                      <div className="min-h-0 flex-1 overflow-y-auto py-1">
-                        <FileTree
-                          files={prdFiles}
+                <div className="grid min-h-0 flex-1 grid-cols-[minmax(168px,25%)_minmax(0,1fr)] overflow-hidden">
+                  <aside className="flex min-w-0 flex-col overflow-hidden border-r border-border/80 bg-white">
+                    <div className="min-h-0 flex-1 overflow-y-auto py-1">
+                      <FileTree
+                        files={prdFiles}
+                        threadId={threadId}
+                        selectedPath={effectiveSelectedPrdPath}
+                        onFileSelect={setSelectedPrdPath}
+                        initialExpandedPaths={prdFiles
+                          .filter((file) => file.is_dir)
+                          .map((file) => file.path)}
+                      />
+                    </div>
+                  </aside>
+                  <section className="flex min-w-0 flex-col overflow-hidden bg-white">
+                    <div className="min-h-0 flex-1 p-2">
+                      {selectedPrdFile && threadId ? (
+                        <ResourcePreview
+                          key={`${selectedPrdFile.path}:${prdPreviewReloadToken}`}
+                          filePath={selectedPrdFile.path.replace(/^\/+/, "")}
+                          workspacePath={threadState?.workspacePath ?? requirement.requirementPath}
                           threadId={threadId}
-                          selectedPath={effectiveSelectedPrdPath}
-                          onFileSelect={setSelectedPrdPath}
-                          initialExpandedPaths={prdFiles
-                            .filter((file) => file.is_dir)
-                            .map((file) => file.path)}
+                          reloadToken={prdPreviewReloadToken}
+                          onReload={() => setPrdPreviewReloadToken((value) => value + 1)}
                         />
-                      </div>
-                    </aside>
-                    <section className="flex min-w-0 flex-col overflow-hidden bg-white">
-                      <div className="min-h-0 flex-1 p-2">
-                        {selectedPrdFile && threadId ? (
-                          <ResourcePreview
-                            key={`${selectedPrdFile.path}:${prdPreviewReloadToken}`}
-                            filePath={selectedPrdFile.path.replace(/^\/+/, "")}
-                            workspacePath={
-                              threadState?.workspacePath ?? requirement.requirementPath
-                            }
-                            threadId={threadId}
-                            reloadToken={prdPreviewReloadToken}
-                            onReload={() => setPrdPreviewReloadToken((value) => value + 1)}
-                          />
-                        ) : (
-                          <div className="flex h-full items-center justify-center px-6 text-center text-sm leading-5 text-muted-foreground">
-                            请选择文件预览
-                          </div>
-                        )}
-                      </div>
-                    </section>
-                  </div>
-                ) : threadId ? (
-                  <section className="min-h-0 flex-1 overflow-hidden bg-white p-2">
-                    <ResourcePreview
-                      key={`${fallbackPrdPath}:${prdPreviewReloadToken}`}
-                      filePath={fallbackPrdPath.replace(/^\/+/, "")}
-                      workspacePath={threadState?.workspacePath ?? requirement.requirementPath}
-                      threadId={threadId}
-                      reloadToken={prdPreviewReloadToken}
-                      onReload={() => setPrdPreviewReloadToken((value) => value + 1)}
-                    />
+                      ) : (
+                        <div className="flex h-full items-center justify-center px-6 text-center text-sm leading-5 text-muted-foreground">
+                          {prdFileCount > 0 ? "请选择文件预览" : "PRD 文件夹中暂无可预览文件"}
+                        </div>
+                      )}
+                    </div>
                   </section>
-                ) : null}
+                </div>
               </TabsContent>
 
               <TabsContent value="requirement-space" className="m-0 min-h-0 flex-1 overflow-y-auto">

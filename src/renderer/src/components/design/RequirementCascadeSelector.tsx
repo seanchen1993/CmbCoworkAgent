@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import {
   Check,
-  CheckCircle2,
-  Circle,
   ClipboardList,
   Layers3,
   LoaderCircle,
@@ -119,24 +117,31 @@ function SelectField<T extends { code?: string; title?: string }>({
 }): React.JSX.Element {
   return (
     <label className="group grid gap-2">
-      <span className="flex items-center gap-2 text-xs font-semibold text-foreground">
-        <span className="flex size-5 items-center justify-center rounded-full bg-muted text-[10px] font-bold text-muted-foreground group-focus-within:bg-primary group-focus-within:text-primary-foreground">
-          {step}
+      {label && (
+        <span className="flex items-center gap-2 text-xs font-semibold text-foreground">
+          <span className="flex size-5 items-center justify-center rounded-full bg-muted text-[10px] font-bold text-muted-foreground group-focus-within:bg-primary group-focus-within:text-primary-foreground">
+            {step}
+          </span>
+          <Icon className="size-3.5 text-muted-foreground" />
+          {label}
         </span>
-        <Icon className="size-3.5 text-muted-foreground" />
-        {label}
-      </span>
+      )}
       <span className="relative">
         <Select value={value} disabled={disabled || loading} onValueChange={onChange}>
-          <SelectTrigger className="h-10 w-full rounded-md border-input bg-background px-3 text-xs font-medium shadow-none transition-colors hover:border-border-emphasis focus:border-primary focus:ring-2 focus:ring-ring disabled:bg-muted/30 disabled:text-muted-foreground disabled:opacity-100 [&>svg]:size-3.5 [&>svg]:text-muted-foreground">
-            <SelectValue placeholder={loading ? "加载中..." : placeholder} />
+          <SelectTrigger className="h-10 w-full min-w-0 overflow-hidden rounded-md border-input bg-background px-3 text-xs font-medium shadow-none transition-colors hover:border-border-emphasis focus:border-primary focus:ring-2 focus:ring-ring disabled:bg-muted/30 disabled:text-muted-foreground disabled:opacity-100 [&>svg]:size-3.5 [&>svg]:text-muted-foreground">
+            <SelectValue
+              className="min-w-0 truncate"
+              placeholder={loading ? "加载中..." : placeholder}
+            />
           </SelectTrigger>
           <SelectContent>
             {options.map((option) => {
               const optionValue = getValue(option)
               return (
                 <SelectItem key={optionValue} value={optionValue} className="text-xs">
-                  {getLabel(option)}
+                  <span className="block max-w-[min(70vw,28rem)] truncate" title={getLabel(option)}>
+                    {getLabel(option)}
+                  </span>
                 </SelectItem>
               )
             })}
@@ -221,7 +226,7 @@ export function NamespaceTreeSelector({
     setLoading("requirements")
     setError(null)
     void leanstarRequirementsApi
-      .listProductRequirements(node.devopsOrgId, node.namespaceType)
+      .listProductRequirements(node.devopsOrgId, node.namespaceType ?? "")
       .then((result) => setRequirements(result.content ?? []))
       .catch((reason: unknown) =>
         setError(reason instanceof Error ? reason.message : "加载需求特性失败")
@@ -245,13 +250,23 @@ export function NamespaceTreeSelector({
       requirement,
       implementationDetails: []
     })
+    // The page response already includes the functions for this requirement.
+    setDetails(
+      (requirement.functionList ?? []).map((item) => ({
+        id: item.id,
+        frCode: item.code,
+        subFrCode: item.code,
+        title: item.title,
+        frStatus: item.status,
+        priority: item.priority
+      }))
+    )
+    if (requirement.functionList !== undefined) return
     setLoading("details")
     setError(null)
     void leanstarRequirementsApi
       .getImplementationDetail(nextCode)
-      .then((result) => {
-        setDetails(result.subFrs ?? [])
-      })
+      .then((result) => setDetails(result.subFrs ?? []))
       .catch((reason: unknown) =>
         setError(reason instanceof Error ? reason.message : "加载实施详情失败")
       )
@@ -330,8 +345,8 @@ export function NamespaceTreeSelector({
               value={selectedNamespace ? getNodeKey(selectedNamespace) : ""}
               onValueChange={handleNamespaceChange}
             >
-              <SelectTrigger className="h-10 w-full rounded-md border-input bg-background px-3 text-xs font-medium shadow-none transition-colors hover:border-border-emphasis focus:border-primary focus:ring-2 focus:ring-ring [&>svg]:size-3.5 [&>svg]:text-muted-foreground">
-                <SelectValue placeholder="请选择命名空间" />
+              <SelectTrigger className="h-10 w-full min-w-0 overflow-hidden rounded-md border-input bg-background px-3 text-xs font-medium shadow-none transition-colors hover:border-border-emphasis focus:border-primary focus:ring-2 focus:ring-ring [&>svg]:size-3.5 [&>svg]:text-muted-foreground">
+                <SelectValue className="min-w-0 truncate" placeholder="请选择命名空间" />
               </SelectTrigger>
               <SelectContent>
                 {leafNodes.map((option) => {
@@ -340,7 +355,13 @@ export function NamespaceTreeSelector({
                   const reasonLabel = inaccessibleLabel(option.inaccessibleReason)
                   return (
                     <SelectItem key={key} value={key} disabled={disabled} className="text-xs">
-                      <span className={cn(disabled && "text-muted-foreground/60")}>
+                      <span
+                        className={cn(
+                          "block max-w-[min(70vw,28rem)] truncate",
+                          disabled && "text-muted-foreground/60"
+                        )}
+                        title={option.pathName}
+                      >
                         {option.pathName}
                       </span>
                       {reasonLabel && (
@@ -398,50 +419,25 @@ export function NamespaceTreeSelector({
             )}
           </div>
           {loading === "details" ? (
-            <div className="mt-4 flex h-20 items-center justify-center gap-2 rounded-lg border border-dashed border-border text-xs text-muted-foreground">
-              <LoaderCircle className="size-3.5 animate-spin" /> 加载实施详情中...
+            <div className="mt-4 flex h-10 items-center justify-center gap-2 rounded-md border border-dashed border-border text-xs text-muted-foreground">
+              <LoaderCircle className="size-3.5 animate-spin" /> 加载实施功能中...
             </div>
           ) : details.length > 0 ? (
-            <div className="mt-3 overflow-hidden rounded-lg border border-border bg-background">
-              {details.map((detail) => {
-                const code = getDetailCode(detail)
-                return (
-                  <button
-                    type="button"
-                    key={code}
-                    aria-pressed={selectedDetailCode === code}
-                    onClick={() => toggleDetail(detail)}
-                    className={cn(
-                      "flex min-h-14 w-full items-center gap-3 border-b border-border px-3.5 py-3 text-left transition-colors last:border-b-0 focus-visible:relative focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      selectedDetailCode === code
-                        ? "bg-primary/5"
-                        : "bg-background hover:bg-muted/30"
-                    )}
-                  >
-                    <span className="shrink-0 text-primary">
-                      {selectedDetailCode === code ? (
-                        <CheckCircle2 className="size-[18px]" />
-                      ) : (
-                        <Circle className="size-[18px] text-muted-foreground/70" />
-                      )}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-xs font-medium text-foreground">
-                        {detail.title}
-                      </span>
-                      {detail.implementDevopsOrgId && (
-                        <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                          实施组：{detail.implementDevopsOrgId}
-                          {detail.priority ? ` · 优先级 ${detail.priority}` : ""}
-                        </span>
-                      )}
-                    </span>
-                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                      {code}
-                    </span>
-                  </button>
-                )
-              })}
+            <div className="mt-3">
+              <SelectField
+                step={3}
+                icon={ClipboardList}
+                label=""
+                value={selectedDetailCode ?? ""}
+                options={details}
+                placeholder="请选择实施功能"
+                onChange={(code) => {
+                  const detail = details.find((item) => getDetailCode(item) === code)
+                  if (detail) toggleDetail(detail)
+                }}
+                getValue={getDetailCode}
+                getLabel={(detail) => `${detail.title}（${getDetailCode(detail)}）`}
+              />
             </div>
           ) : (
             <p className="mt-4 rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
