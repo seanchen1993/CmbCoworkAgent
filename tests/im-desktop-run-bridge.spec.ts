@@ -3,15 +3,18 @@
  *
  * The bridge is a drop-in for executePreparedRemoteStandardTurn, so these tests
  * pin the mapping it performs: what the run body can derive for itself is left
- * alone, and the two things it cannot know about (an inbox turn's auto-approved
- * edits and its scheduler delivery binding) ride the remote policy that the
- * shared controlled factory applies for every caller alike.
+ * alone — including the user's transcript message — and the two things it
+ * cannot know about (an inbox turn's auto-approved edits and its scheduler
+ * delivery binding) ride the remote policy that the shared controlled factory
+ * applies for every caller alike.
  *
  * Run:
  *   npx tsx tests/im-desktop-run-bridge.spec.ts
  */
 
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
+import { join, resolve } from "node:path"
 import type {
   AgentRunDelivery,
   AgentRunExecutionContext,
@@ -23,6 +26,8 @@ import {
   withImInboxRuntimePolicy
 } from "../src/main/services/im/desktop-run-bridge"
 import type { PreparedRemoteStandardTurnInput } from "../src/main/services/im/remote-runner"
+
+const PROJECT_ROOT = resolve(__dirname, "..")
 
 const delivery: AgentRunDelivery = {
   window: {} as AgentRunDelivery["window"],
@@ -65,6 +70,17 @@ function stubRun(
   }
 }
 
+function run(
+  input: PreparedRemoteStandardTurnInput,
+  captured: Captured,
+  behaviour: (context: AgentRunExecutionContext) => Promise<void>
+): Promise<string> {
+  return executeRemoteStandardTurnOnDesktopRunBody(input, {
+    getDelivery: () => delivery,
+    startRun: stubRun(captured, behaviour)
+  })
+}
+
 function testInboxOnlyRuntimeOptionsTravelOnThePolicy(): void {
   const deliveryContext = { taskId: "task-1" } as NonNullable<
     ReturnType<typeof withImInboxRuntimePolicy>
@@ -94,24 +110,48 @@ function testInboxOnlyRuntimeOptionsTravelOnThePolicy(): void {
   )
 }
 
+function testTheBridgeLeavesTranscriptPersistenceToTheRunBody(): void {
+  // persistVisibleUserTranscriptMessage (agent.ts) writes the user's message
+  // under the same userMessageId this bridge passes in, and already skips the
+  // marker prompts of internal notification turns. Persisting here as well
+  // upserts the identical row a second time on every IM message.
+  const source = readFileSync(
+    join(PROJECT_ROOT, "src/main/services/im/desktop-run-bridge.ts"),
+    "utf8"
+  )
+  assert(
+    !source.includes("persistStandardTurnUserMessage"),
+    "the run body owns the user transcript message; the bridge must not write it too"
+  )
+  const agent = readFileSync(join(PROJECT_ROOT, "src/main/ipc/agent.ts"), "utf8")
+  assert(
+    agent.includes("function persistVisibleUserTranscriptMessage("),
+    "the owner this bridge defers to must still exist"
+  )
+  assert(
+    agent.includes("userTranscriptMessagePersisted = persistVisibleUserTranscriptMessage("),
+    "the run body must still persist the user transcript message for the turn it runs"
+  )
+}
+
 async function testTurnInputMapsOntoTheRunContext(): Promise<void> {
   const captured: Captured = { request: null, context: null }
   const hooks = { onWaitStart: () => undefined, onWaitEnd: () => undefined }
-  const skill = { name: "deploy", version: "1.0.0" } as PreparedRemoteStandardTurnInput["explicitSkill"]
+  const skill = {
+    name: "deploy",
+    version: "1.0.0"
+  } as PreparedRemoteStandardTurnInput["explicitSkill"]
 
-  const text = await executeRemoteStandardTurnOnDesktopRunBody(
+  const text = await run(
     baseInput({
       agentMode: "coordinator",
       explicitSkill: skill,
       interactionWaitHooks: hooks,
       remotePolicy: { disableMcpTools: true }
     }),
-    {
-      getDelivery: () => delivery,
-      persistUserMessage: () => undefined,
-      startRun: stubRun(captured, async (context) => {
-        await context.onFinalAssistant?.({ messageId: "m1", finalText: "  构建成功  " })
-      })
+    captured,
+    async (context) => {
+      await context.onFinalAssistant?.({ messageId: "m1", finalText: "  构建成功  " })
     }
   )
 
@@ -136,14 +176,20 @@ async function testTurnInputMapsOntoTheRunContext(): Promise<void> {
   )
 }
 
+async function testANotificationTurnIsMarkedAsInternal(): Promise<void> {
+  const captured: Captured = { request: null, context: null }
+  await run(baseInput({ internalNotificationTurn: true }), captured, async (context) => {
+    await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
+  })
+  // The run body keys its notification-turn handling — skipping prompt
+  // preparation and the user bubble — off this flag plus the marker prompt.
+  assert.equal(captured.request?.coordinatorInternalNotification, true)
+}
+
 async function testTheImRunnerKeepsOwningItsLease(): Promise<void> {
   const captured: Captured = { request: null, context: null }
-  await executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
-    getDelivery: () => delivery,
-    persistUserMessage: () => undefined,
-    startRun: stubRun(captured, async (context) => {
-      await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
-    })
+  await run(baseInput(), captured, async (context) => {
+    await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
   })
 
   // The IM runner still has to send a reply after the run settles, so the run
@@ -158,12 +204,8 @@ async function testTheImRunnerKeepsOwningItsLease(): Promise<void> {
 async function testCancellationSurfacesAsAnAbort(): Promise<void> {
   const captured: Captured = { request: null, context: null }
   await assert.rejects(
-    executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
-      getDelivery: () => delivery,
-      persistUserMessage: () => undefined,
-      startRun: stubRun(captured, async (context) => {
-        context.onRunCancelled?.()
-      })
+    run(baseInput(), captured, async (context) => {
+      context.onRunCancelled?.()
     }),
     (error: unknown) => error instanceof DOMException && error.name === "AbortError",
     "a cancelled run must not be reported to the user as a completed turn"
@@ -172,17 +214,13 @@ async function testCancellationSurfacesAsAnAbort(): Promise<void> {
 
 async function testAGoalNoticeStandsInForAMissingReply(): Promise<void> {
   const captured: Captured = { request: null, context: null }
-  const text = await executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
-    getDelivery: () => delivery,
-    persistUserMessage: () => undefined,
-    startRun: stubRun(captured, async (context) => {
-      context.onGoalNotice?.({
-        message: "Goal 已暂停",
-        goalId: "g1",
-        activeWindowId: null,
-        eventId: 1,
-        createdAt: 1
-      })
+  const text = await run(baseInput(), captured, async (context) => {
+    context.onGoalNotice?.({
+      message: "Goal 已暂停",
+      goalId: "g1",
+      activeWindowId: null,
+      eventId: 1,
+      createdAt: 1
     })
   })
   assert.equal(text, "Goal 已暂停")
@@ -191,60 +229,24 @@ async function testAGoalNoticeStandsInForAMissingReply(): Promise<void> {
 async function testARunThatSaysNothingIsAnError(): Promise<void> {
   const captured: Captured = { request: null, context: null }
   await assert.rejects(
-    executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
-      getDelivery: () => delivery,
-      persistUserMessage: () => undefined,
-      startRun: stubRun(captured, async () => undefined)
-    }),
+    run(baseInput(), captured, async () => undefined),
     /未产生可回传结果/,
     "an empty run must fail loudly rather than reply with nothing"
   )
 }
 
-async function testTheUserMessageReachesTheTranscript(): Promise<void> {
-  // On desktop the renderer persists the user's message before invoking, so the
-  // run body only persists what the stream produces. An IM turn has no
-  // renderer: without the bridge writing it, the message never appears.
-  const persisted: Array<{ threadId: string; messageId: string; content: string }> = []
-  const captured: Captured = { request: null, context: null }
-  await executeRemoteStandardTurnOnDesktopRunBody(baseInput(), {
-    getDelivery: () => delivery,
-    persistUserMessage: (entry) => persisted.push(entry),
-    startRun: stubRun(captured, async (context) => {
-      await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
-    })
-  })
-  assert.deepEqual(persisted, [
-    { threadId: "t1", messageId: "im:42:user", content: "查一下今天的构建" }
-  ])
-}
-
-async function testANotificationTurnLeavesNoUserBubble(): Promise<void> {
-  // A notification turn's marker prompt is plumbing, not user input.
-  const persisted: unknown[] = []
-  const captured: Captured = { request: null, context: null }
-  await executeRemoteStandardTurnOnDesktopRunBody(
-    baseInput({ internalNotificationTurn: true, persistUserMessage: false }),
-    {
-      getDelivery: () => delivery,
-      persistUserMessage: (entry) => persisted.push(entry),
-      startRun: stubRun(captured, async (context) => {
-        await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
-      })
-    }
-  )
-  assert.deepEqual(persisted, [], "a notification turn must not create a user bubble")
-  assert.equal(captured.request?.coordinatorInternalNotification, true)
-}
-
 async function main(): Promise<void> {
-  testInboxOnlyRuntimeOptionsTravelOnThePolicy()
-  console.log("PASS testInboxOnlyRuntimeOptionsTravelOnThePolicy")
+  for (const test of [
+    testInboxOnlyRuntimeOptionsTravelOnThePolicy,
+    testTheBridgeLeavesTranscriptPersistenceToTheRunBody
+  ]) {
+    test()
+    console.log(`PASS ${test.name}`)
+  }
 
   for (const test of [
-    testTheUserMessageReachesTheTranscript,
-    testANotificationTurnLeavesNoUserBubble,
     testTurnInputMapsOntoTheRunContext,
+    testANotificationTurnIsMarkedAsInternal,
     testTheImRunnerKeepsOwningItsLease,
     testCancellationSurfacesAsAnAbort,
     testAGoalNoticeStandsInForAMissingReply,

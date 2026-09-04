@@ -5,7 +5,6 @@ import {
   type AgentRunGoalNotice
 } from "../../agent/agent-run-service"
 import { createHeadlessAgentRunDelivery } from "../../agent/headless-delivery"
-import { persistStandardTurnUserMessage } from "../../agent/standard-turn-stream"
 import type { RemoteTurnPolicy } from "../../agent/standard-thread-turn"
 import type { PreparedRemoteStandardTurnInput } from "./remote-runner"
 
@@ -49,13 +48,11 @@ export const IM_UNTRUSTED_INPUT_SYSTEM_PROMPT =
 export interface DesktopRunBridgeDependencies {
   startRun: typeof startAgentRun
   getDelivery: () => AgentRunDelivery
-  persistUserMessage: typeof persistStandardTurnUserMessage
 }
 
 const defaultDependencies: DesktopRunBridgeDependencies = {
   startRun: startAgentRun,
-  getDelivery: createHeadlessAgentRunDelivery,
-  persistUserMessage: persistStandardTurnUserMessage
+  getDelivery: createHeadlessAgentRunDelivery
 }
 
 /**
@@ -66,23 +63,12 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
   input: PreparedRemoteStandardTurnInput,
   dependencies: Partial<DesktopRunBridgeDependencies> = {}
 ): Promise<string> {
-  const { startRun, getDelivery, persistUserMessage } = {
-    ...defaultDependencies,
-    ...dependencies
-  }
+  const { startRun, getDelivery } = { ...defaultDependencies, ...dependencies }
 
-  // On desktop the renderer writes the user's message before invoking, so the
-  // run body only ever persists what the stream produces. An IM turn has no
-  // renderer, so without this its message never reaches the transcript.
-  // Internal notification turns opt out: their marker prompt is not user input
-  // and must not surface as a bubble.
-  if (input.persistUserMessage ?? true) {
-    persistUserMessage({
-      threadId: input.threadId,
-      messageId: input.userMessageId,
-      content: input.rawMessage
-    })
-  }
+  // The user's transcript message is NOT written here. The run body owns it:
+  // persistVisibleUserTranscriptMessage (agent.ts) writes it under this same
+  // userMessageId, and already skips the marker prompts of internal
+  // notification turns. Writing it here too would upsert the same row twice.
 
   const notices: AgentRunGoalNotice[] = []
   let finalText: string | null = null
