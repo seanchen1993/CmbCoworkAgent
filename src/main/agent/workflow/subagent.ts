@@ -507,8 +507,10 @@ async function runOnce(
           new ToolMessage({
             tool_call_id: id,
             content:
-              "[This tool call did not complete. Call structured_output again, exactly once, " +
-              "by itself, with input matching the required JSON Schema.]"
+              "[No result is available for this tool call; its execution outcome is unknown. " +
+              "Check the current state before deciding whether any work remains. Reuse existing " +
+              "results and do not blindly repeat side effects. Complete only remaining work " +
+              "allowed by your tools and permissions, then call structured_output with your result.]"
           })
       )
       snapshot = await raceWithAbort(
@@ -519,7 +521,13 @@ async function runOnce(
                 messages: [
                   ...repairMessages,
                   new HumanMessage(
-                    "You have not returned a valid structured result yet. Call the structured_output tool now, exactly once, with an input matching the required JSON Schema. Do not reply with plain text."
+                    "You have not returned a valid structured result yet. Reuse the work and tool " +
+                      "results already available. If an operation's outcome is unknown, check the " +
+                      "current state before deciding what remains; do not blindly repeat side " +
+                      "effects. Complete only remaining work allowed by your tools and permissions, " +
+                      "then call structured_output exactly once with an input matching the required " +
+                      "JSON Schema. Base failure reasons on tool results or explicit access " +
+                      "restrictions, not assumptions about paths. Do not reply with plain text."
                   )
                 ]
               },

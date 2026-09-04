@@ -25,6 +25,7 @@ import {
 } from "../src/main/agent/workflow/types.ts"
 import {
   WORKFLOW_MODE_SYSTEM_PROMPT,
+  WORKFLOW_SUBAGENT_BASE_PROMPT,
   buildWorkflowSubagentStructuredPrompt
 } from "../src/main/agent/workflow/prompts.ts"
 
@@ -2731,10 +2732,24 @@ async function testWorkflowSubagentRepairsNormalizedDanglingThenNudges(): Promis
     repaired,
     "nudge stream input must include a synthetic tool result for the normalized dangling id"
   )
+  const repair = streamInputs
+    .flat()
+    .find((message) => (message as { tool_call_id?: unknown })?.tool_call_id === "call-parallel")
+  const repairText = String((repair as { content?: unknown })?.content)
+  assert(
+    repairText.includes("execution outcome is unknown") && repairText.includes("current state"),
+    "a missing result must prompt state verification, not assert the operation did not execute"
+  )
+  assert(
+    repairText.includes("do not blindly repeat side effects") &&
+      repairText.includes("only remaining work allowed by your tools and permissions"),
+    "dangling-call recovery must preserve completed side effects and current permissions"
+  )
 }
 
 async function testWorkflowSubagentNudgesAfterClosedToolCall(): Promise<void> {
   let streamCalls = 0
+  const streamInputs: unknown[][] = []
   const schema = {
     type: "object",
     properties: {
@@ -2750,8 +2765,9 @@ async function testWorkflowSubagentNudgesAfterClosedToolCall(): Promise<void> {
       cleanupThread: async () => undefined,
       isRetryableApiError: () => false,
       createRuntime: async (options) => ({
-        stream: async () => {
+        stream: async (input: unknown) => {
           streamCalls += 1
+          streamInputs.push((input as { messages: unknown[] }).messages)
           return (async function* () {
             if (streamCalls === 1) {
               yield [
@@ -2814,6 +2830,21 @@ async function testWorkflowSubagentNudgesAfterClosedToolCall(): Promise<void> {
 
   assert(JSON.stringify(result.structured) === '{"answer":"ok"}', "captures nudge result")
   assert(streamCalls === 2, `closed tool calls should still allow the nudge, got ${streamCalls}`)
+  assert(
+    streamInputs[1].length === 1,
+    "completed tool calls need only the existing nudge, with no synthetic tool result"
+  )
+  const nudge = String((streamInputs[1][0] as { content: unknown }).content)
+  assert(
+    nudge.includes("Reuse the work and tool results already available") &&
+      nudge.includes("do not blindly repeat side effects"),
+    "the nudge must reuse completed work instead of requesting another execution"
+  )
+  assert(
+    nudge.includes("only remaining work allowed by your tools and permissions") &&
+      nudge.includes("Base failure reasons on tool results or explicit access restrictions"),
+    "the nudge must finish permitted outstanding work before reporting an evidenced result"
+  )
 }
 
 async function testWorkflowSubagentStopsAfterStructuredOutputSuccess(): Promise<void> {
@@ -3125,6 +3156,58 @@ async function testStructuredOutputPatternValidationStaysLocal(): Promise<void> 
       "recorded successfully"
     ),
     'enum values containing a "pattern" business key still validate normally'
+  )
+}
+
+function testWorkflowSubagentExecutionPromptContract(): void {
+  const structuredPrompt = buildWorkflowSubagentStructuredPrompt(
+    JSON.stringify({ type: "object", properties: { success: { type: "boolean" } } }),
+    '{"success":true}'
+  )
+  for (const prompt of [WORKFLOW_SUBAGENT_BASE_PROMPT, structuredPrompt]) {
+    assert(
+      prompt.includes("When the task requires an operation") &&
+        prompt.includes("within your permissions"),
+      "both leaf prompts must condition tool use on the task and existing permissions"
+    )
+    assert(
+      prompt.includes("actual tool results or an explicit tool/access restriction") &&
+        prompt.includes("absolute Windows path or outside the workspace"),
+      "both leaf prompts must ground access failures rather than infer them from path shape"
+    )
+    assert(
+      prompt.includes("do not repeat side effects just to produce the final answer"),
+      "both leaf prompts must preserve completed operations when reporting"
+    )
+  }
+  assert(
+    structuredPrompt.includes("structured_output only records your answer") &&
+      structuredPrompt.includes("input shape, not actual execution results"),
+    "schema examples and structured_output must not be mistaken for completed work"
+  )
+}
+
+async function testStructuredOutputAcceptsBusinessFailure(): Promise<void> {
+  const capture = { value: undefined as unknown, called: false }
+  const tool = createStructuredOutputTool(
+    {
+      type: "object",
+      properties: {
+        success: { type: "boolean" },
+        errors: { type: "array", items: { type: "string" } }
+      },
+      required: ["success", "errors"],
+      additionalProperties: false
+    },
+    capture
+  )
+  const failure = { success: false, errors: ["read_file returned permission denied"] }
+  const response = await tool.invoke(failure)
+  assert(String(response).includes("recorded successfully"), "business failure is schema-valid")
+  assert(capture.called, "business failure records the structured call")
+  assert(
+    JSON.stringify(capture.value) === JSON.stringify(failure),
+    "the result collector must preserve success:false without requiring an execution tool"
   )
 }
 
@@ -3548,6 +3631,8 @@ const tests = [
   testWorkflowSubagentStopsAfterStructuredOutputSuccess,
   testWorkflowSubagentStreamModeRequestsTokenStreaming,
   testStructuredOutputPatternValidationStaysLocal,
+  testWorkflowSubagentExecutionPromptContract,
+  testStructuredOutputAcceptsBusinessFailure,
   testStructuredOutputExamplePromptOmitsInvalidExamples,
   testOversizedScriptRejected,
   testInactivityWindowFlooredAboveAgentTimeout,

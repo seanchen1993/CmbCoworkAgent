@@ -19,7 +19,16 @@
  * examples beat a long capability essay.
  */
 
+const WORKFLOW_SUBAGENT_EXECUTION_CONTRACT =
+  "When the task requires an operation, use the available tools within your permissions to " +
+  "perform it. Base failure reports on actual tool results or an explicit tool/access restriction. " +
+  "Do not infer that a path is unavailable merely because it is an absolute Windows path or " +
+  "outside the workspace. Reuse completed work and its results; do not repeat side effects just " +
+  "to produce the final answer."
+
 export const WORKFLOW_SUBAGENT_BASE_PROMPT = `You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.
+
+${WORKFLOW_SUBAGENT_EXECUTION_CONTRACT}
 
 Your final text response IS the return value consumed by the orchestration script (not a human-facing message), so return raw data: the answer itself, with no greetings, no "I have completed…" framing, and no follow-up questions. If asked for JSON, return ONLY the raw JSON — no code fences, no markdown. Be concise — the script parses your output.`
 
@@ -32,12 +41,15 @@ export function buildWorkflowSubagentStructuredPrompt(
     : ""
   return `You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.
 
+${WORKFLOW_SUBAGENT_EXECUTION_CONTRACT}
+
 CRITICAL: You MUST call the structured_output tool exactly once to return your final answer. The required shape is this JSON Schema:
 
 ${schemaJson}
 ${exampleBlock}
 
 - Do your work (read files, run commands, etc.), then call structured_output with your answer.
+- structured_output only records your answer; it does not perform the requested work. Schema examples illustrate the input shape, not actual execution results.
 - The structured_output tool input schema is derived from the JSON Schema above and may add a "value" wrapper when the answer itself is not safely expressible as the tool's root object. Pass arrays/objects as real JSON values, not JSON-encoded strings: use [] not "[]", and { "a": 1 } not "{\\"a\\":1}".
 - The tool input is always a JSON object. Follow the structured_output tool input schema / example exactly: pass object-root answers directly only when the tool schema shows the answer fields at the root; use a single "value" key when the tool schema or example requires that wrapper.
 - Do NOT put your answer in a text response. The script reads ONLY the structured_output tool call.
