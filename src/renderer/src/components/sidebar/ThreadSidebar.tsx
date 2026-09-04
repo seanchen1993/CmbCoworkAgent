@@ -979,6 +979,7 @@ export function ThreadSidebar(): React.JSX.Element {
   }
 
   const handleNewProjectThread = async (project: ThreadProject): Promise<void> => {
+    if (project.isManagedInbox) return
     expandProject(project.key)
     await createThread({
       title: `Thread ${new Date().toLocaleDateString()}`,
@@ -1398,6 +1399,7 @@ export function ThreadSidebar(): React.JSX.Element {
                 const isCollapsed = collapsedProjectKeys.has(project.key)
                 const canManageProject = Boolean(project.path)
                 const canRenameProject = canManageProject && !project.isManagedInbox
+                const canCreateProjectThread = !project.isManagedInbox
                 const hasSelectedThread = project.key === currentProjectKey
                 const requestedVisibleThreads =
                   visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS
@@ -1510,9 +1512,17 @@ export function ThreadSidebar(): React.JSX.Element {
                                   />
                                   <IconPopoverButton
                                     icon={<Plus className="size-3" />}
-                                    popoverContent="新增任务"
+                                    popoverContent={
+                                      canCreateProjectThread
+                                        ? "新增任务"
+                                        : "远程收件箱不支持新增任务"
+                                    }
+                                    disabled={!canCreateProjectThread}
                                     stopPropagation
-                                    className="size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20"
+                                    className={cn(
+                                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
+                                      !canCreateProjectThread && "cursor-not-allowed !opacity-30"
+                                    )}
                                     onClick={() => void handleNewProjectThread(project)}
                                   />
                                   <IconPopoverButton
@@ -1572,7 +1582,10 @@ export function ThreadSidebar(): React.JSX.Element {
                           <Pencil className="size-4 mr-2" />
                           修改工作区名称
                         </ContextMenuItem>
-                        <ContextMenuItem onClick={() => void handleNewProjectThread(project)}>
+                        <ContextMenuItem
+                          disabled={!canCreateProjectThread}
+                          onClick={() => void handleNewProjectThread(project)}
+                        >
                           <Plus className="size-4 mr-2" />
                           新增任务
                         </ContextMenuItem>
