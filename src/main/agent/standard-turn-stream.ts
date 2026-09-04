@@ -2,6 +2,8 @@ import type { Message } from "../types"
 import { flushStrict, upsertThreadMessages } from "../db"
 import { StreamConverter, type SchedulerEvent } from "./stream-converter"
 import type { TraceCollector } from "./trace/collector"
+import { TurnAttributionRecorder } from "./turn-attribution"
+import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 
 export type StandardTurnStreamSink = (event: SchedulerEvent) => void
 
@@ -42,16 +44,58 @@ export function persistStandardTurnUserMessage(input: {
   if (count !== 1) throw new Error("Failed to persist the remote user transcript message")
 }
 
+export interface StandardTurnStreamOptions {
+  /** Anchors attribution and trace recording to this turn in a whole-thread snapshot. */
+  userMessageId?: string
+  /** Injectable for tests; built from threadId + trace when omitted. */
+  attribution?: TurnAttributionRecorder
+  /** Injectable for tests; built from trace when omitted. */
+  traceRecorder?: TurnTraceRecorder
+}
+
 export class StandardTurnStreamConsumer {
   private readonly converter = new StreamConverter()
   private finalAssistantText = ""
   private readonly toolNames = new Set<string>()
+  /**
+   * Skill attribution runs off the raw stream, not the converted events: the
+   * renderer event shapes drop `skillsMetadata` and carry only partially
+   * streamed tool-call args, so a consumer built on them cannot attribute code
+   * generations to the skills that produced them.
+   */
+  private readonly attribution?: TurnAttributionRecorder
+  /**
+   * Model calls, token usage and the assistant side of the conversation are
+   * recorded here for the same reason: the converted events carry neither
+   * `usage_metadata` nor `response_metadata`, so a turn recorded off them
+   * reports as having used no model at all.
+   */
+  private readonly traceRecorder?: TurnTraceRecorder
 
   constructor(
     private readonly threadId: string,
     private readonly sink?: StandardTurnStreamSink,
-    private readonly trace?: TraceCollector
-  ) {}
+    trace?: TraceCollector,
+    options: StandardTurnStreamOptions = {}
+  ) {
+    this.attribution =
+      options.attribution ??
+      (trace
+        ? new TurnAttributionRecorder({
+            threadId,
+            tracer: trace,
+            ...(options.userMessageId ? { userMessageId: options.userMessageId } : {})
+          })
+        : undefined)
+    this.traceRecorder =
+      options.traceRecorder ??
+      (trace
+        ? new TurnTraceRecorder({
+            tracer: trace,
+            ...(options.userMessageId ? { userMessageId: options.userMessageId } : {})
+          })
+        : undefined)
+  }
 
   getFinalAssistantText(): string {
     return this.finalAssistantText
@@ -61,11 +105,18 @@ export class StandardTurnStreamConsumer {
     return [...this.toolNames]
   }
 
+  /** Files this turn wrote, for callers that drive memory maintenance. */
+  getFileWritePaths(): string[] {
+    return this.attribution?.getFileWritePaths() ?? []
+  }
+
   async consume(stream: AsyncIterable<unknown>, signal?: AbortSignal): Promise<void> {
     for await (const chunk of stream) {
       if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
       const [mode, data] = chunk as [string, unknown]
       const serialized = JSON.parse(JSON.stringify(data)) as unknown
+      this.attribution?.onStreamChunk(mode, serialized)
+      this.traceRecorder?.onStreamChunk(mode, serialized)
       for (const event of this.converter.processChunk(mode, serialized)) {
         this.observe(event)
         this.sink?.(event)
@@ -78,26 +129,17 @@ export class StandardTurnStreamConsumer {
   }
 
   private observe(event: SchedulerEvent): void {
+    // Tool nodes and their results are recorded by traceRecorder off the values
+    // snapshots: a streamed delta can still carry `args: {}`, and the LLM node
+    // a tool call belongs under does not exist yet at delta time. Only the
+    // tool-name summary is collected here.
     if (event.type === "message-delta" && Array.isArray(event.toolCalls)) {
-      for (const call of event.toolCalls as Array<{ id?: string; name?: string; args?: unknown }>) {
-        if (!call.name) continue
-        this.toolNames.add(call.name)
-        this.trace?.addToolNode({
-          name: call.name,
-          input: call.args,
-          llmMessageId: event.id,
-          toolCallId: call.id
-        })
+      for (const call of event.toolCalls as Array<{ name?: string }>) {
+        if (call.name) this.toolNames.add(call.name)
       }
     }
     if (event.type === "tool-message") {
       if (event.name) this.toolNames.add(event.name)
-      this.trace?.addToolResultNode({
-        toolCallId: event.toolCallId,
-        output: event.content,
-        status: event.isError ? "error" : "success",
-        metadata: { messageId: event.id }
-      })
       return
     }
     if (event.type !== "full-messages") return

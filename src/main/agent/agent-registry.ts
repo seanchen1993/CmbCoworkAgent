@@ -1,8 +1,8 @@
 /**
  * Shared agent-type registry.
  *
- * One open registry of agent "profiles" that all three execution modes draw from:
- *  - Solo Agent (normal): each profile becomes a deepagents SubAgent the main
+ * One open registry of agent "profiles" shared by the supported execution paths:
+ *  - Multi and Workflow: each profile becomes a deepagents SubAgent the main
  *    agent's task tool can spawn by name (subagent_type).
  *  - Dynamic Workflows: a script's `agent(prompt, { agentType })` resolves a
  *    profile here, then maps it onto the leaf createAgentRuntime.
@@ -71,7 +71,7 @@ const KNOWN_TOOLS = [
 ] as const
 
 /** Claude Code tool name → this project's tool name. Names absent here (e.g.
- * NotebookEdit, Agent, ExitPlanMode, WebFetch, WebSearch) have no Solo/workflow
+ * NotebookEdit, Agent, ExitPlanMode, WebFetch, WebSearch) have no task/workflow
  * subagent equivalent and are ignored when seen in a user's frontmatter. */
 const CC_TOOL_ALIASES: Record<string, string> = {
   read: "read_file",
@@ -92,10 +92,10 @@ export const WRITE_TOOL_NAMES = ["write_file", "edit_file"] as const
  * Normalize a profile `model:` value to a custom-model lookup key by dropping the
  * internal `custom:` scheme prefix when present. A profile may write either
  * `model: foo` or `model: custom:foo`; both must resolve the SAME config. The
- * Solo task-subagent path and the workflow agentType path must agree here —
+ * Inline task-subagent path and the workflow agentType path must agree here —
  * otherwise `model: custom:foo` works under a workflow but silently inherits the
- * main model for a Solo subagent (the workflow path prepends `custom:` then the
- * runtime slices it; the Solo path looks up directly, so it needs this strip).
+ * main model for a task subagent (the workflow path prepends `custom:` then the
+ * runtime slices it; the task path looks up directly, so it needs this strip).
  */
 export function stripCustomModelPrefix(model: string): string {
   return model.startsWith("custom:") ? model.slice("custom:".length) : model
@@ -445,8 +445,8 @@ End with exactly this line (parsed by caller): \`VERDICT: PASS\` or \`VERDICT: F
 - **PARTIAL**: what was verified, what could not be and why (missing tool/env), what the implementer should know.`
 
 /** Built-in profiles mirroring Claude Code's Explore / Plan / verification.
- * general-purpose is intentionally absent: Solo keeps its own general-purpose
- * subagent, and a no-agentType workflow agent() already runs the default agent.
+ * general-purpose is intentionally absent: the inline task runtime supplies its
+ * own general-purpose subagent, and a no-agentType workflow agent() runs the default agent.
  * Naming follows CC (capital Explore/Plan, lowercase verification). */
 export const BUILT_IN_AGENT_PROFILES: readonly AgentProfile[] = [
   {
@@ -1000,7 +1000,7 @@ export function resolveAgentProfile(name: string, workspacePath?: string): Agent
  * parity.
  *
  * The injected prompt comes in several shapes here: workflow leaves pass a plain
- * string (filesystemSystemPrompt), while the Solo guard's wrapModelCall passes
+ * string (filesystemSystemPrompt), while the task guard's wrapModelCall passes
  * LangChain's `request.systemMessage` — a SystemMessage OBJECT whose `.content`
  * is EITHER a string OR a content-block array (`[{type:"text", text:"…"}, …]`,
  * which LangChain's normalizeSystemPrompt / SystemMessage.concat() produce when
