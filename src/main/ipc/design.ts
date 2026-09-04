@@ -642,6 +642,8 @@ interface DesignTemplateInfo {
   mode: string
   platform: string | null
   scenario: string
+  previewHtml: string
+  previewPath: string
 }
 
 interface DesignArtifactMetadata {
@@ -804,6 +806,41 @@ function getDesignSystemById(id: string | undefined): { info?: DesignSystemInfo;
   }
 }
 
+function findDesignTemplatePreview(dirPath: string): string | null {
+  const preferredFileNames = ["example.html", "template.html", "index.html"]
+  const filesByName = new Map<string, string[]>()
+  const directories = [dirPath]
+
+  while (directories.length > 0) {
+    const current = directories.shift()
+    if (!current) continue
+    try {
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const entryPath = path.join(current, entry.name)
+        if (entry.isDirectory()) {
+          directories.push(entryPath)
+        } else if (entry.isFile() && preferredFileNames.includes(entry.name)) {
+          const matches = filesByName.get(entry.name) ?? []
+          matches.push(entryPath)
+          filesByName.set(entry.name, matches)
+        }
+      }
+    } catch {
+      // Ignore unreadable template subdirectories.
+    }
+  }
+
+  for (const fileName of preferredFileNames) {
+    const preview = filesByName.get(fileName)?.sort((a, b) => {
+      const aDepth = path.relative(dirPath, a).split(path.sep).length
+      const bDepth = path.relative(dirPath, b).split(path.sep).length
+      return aDepth - bDepth || a.localeCompare(b)
+    })[0]
+    if (preview) return preview
+  }
+  return null
+}
+
 function listDesignTemplates(): DesignTemplateInfo[] {
   const root = firstExistingDir(candidateRepoResourceDirs(DESIGN_TEMPLATES_DIRNAME))
   if (!root) return []
@@ -814,6 +851,8 @@ function listDesignTemplates(): DesignTemplateInfo[] {
     const skillPath = path.join(dirPath, "SKILL.md")
     if (!fs.existsSync(skillPath)) continue
     try {
+      const previewPath = findDesignTemplatePreview(dirPath)
+      if (!previewPath) continue
       const content = fs.readFileSync(skillPath, "utf-8")
       const fm = parseFrontmatterBlock(content)
       const name = parseSimpleYamlScalar(fm, "name") || entry.name
@@ -821,7 +860,16 @@ function listDesignTemplates(): DesignTemplateInfo[] {
       const mode = fm.match(/^\s*mode:\s*(.+)$/m)?.[1]?.trim() || "prototype"
       const platform = fm.match(/^\s*platform:\s*(.+)$/m)?.[1]?.trim() || null
       const scenario = fm.match(/^\s*scenario:\s*(.+)$/m)?.[1]?.trim() || "design"
-      templates.push({ name, description, path: skillPath, mode, platform, scenario })
+      templates.push({
+        name,
+        description,
+        path: skillPath,
+        mode,
+        platform,
+        scenario,
+        previewHtml: fs.readFileSync(previewPath, "utf-8"),
+        previewPath
+      })
     } catch {
       // Ignore malformed templates.
     }

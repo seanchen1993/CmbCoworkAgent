@@ -7,11 +7,8 @@ import {
   FileCode2,
   FileText,
   FolderOpen,
-  LayoutPanelTop,
-  List,
   LoaderCircle,
   PencilLine,
-  TableProperties,
   Upload,
   X
 } from "lucide-react"
@@ -33,40 +30,10 @@ type TemplateOption = {
   id: string
   name: string
   description: string
-  icon: typeof LayoutPanelTop
   html: string
 }
 
-const TEMPLATE_OPTIONS: TemplateOption[] = [
-  {
-    id: "detail",
-    name: "详情页",
-    description: "信息概览、操作区与内容详情",
-    icon: LayoutPanelTop,
-    html: `<!doctype html><html><body style="margin:0;padding:14px;font:12px Arial;color:#172033;background:#fff"><div style="height:11px;width:45%;background:#dde3ea;border-radius:3px"></div><div style="margin-top:12px;border:1px solid #e4e7ec;border-radius:5px;padding:10px"><div style="height:32px;background:#f6f8fa;border-radius:3px"></div><div style="display:flex;gap:8px;margin-top:10px"><div style="height:48px;flex:1;background:#edf3f9;border-radius:3px"></div><div style="height:48px;flex:1;background:#f7f1e9;border-radius:3px"></div></div><div style="height:8px;width:82%;background:#e8ebef;border-radius:3px;margin-top:12px"></div><div style="height:8px;width:62%;background:#e8ebef;border-radius:3px;margin-top:7px"></div></div></body></html>`
-  },
-  {
-    id: "list",
-    name: "列表页",
-    description: "筛选、列表项与批量操作",
-    icon: List,
-    html: `<!doctype html><html><body style="margin:0;padding:14px;font:12px Arial;color:#172033;background:#fff"><div style="display:flex;justify-content:space-between"><div style="height:11px;width:34%;background:#dde3ea;border-radius:3px"></div><div style="height:18px;width:30px;background:#bc8158;border-radius:3px"></div></div><div style="margin-top:12px;height:22px;background:#f4f6f8;border:1px solid #e4e7ec;border-radius:3px"></div><div style="margin-top:9px;border:1px solid #e4e7ec;border-radius:5px">${[1, 2, 3, 4].map((row) => `<div style="height:20px;border-bottom:${row === 4 ? "0" : "1px solid #eef0f2"};display:flex;align-items:center;gap:7px;padding:0 8px"><span style="width:7px;height:7px;background:#ccd5df;border-radius:50%"></span><span style="height:6px;width:${45 + row * 7}%;background:#e5e9ee;border-radius:2px"></span></div>`).join("")}</div></body></html>`
-  },
-  {
-    id: "table-form",
-    name: "表格 / 表单",
-    description: "数据表格与编辑表单组合",
-    icon: TableProperties,
-    html: `<!doctype html><html><body style="margin:0;padding:14px;font:12px Arial;color:#172033;background:#fff"><div style="height:11px;width:40%;background:#dde3ea;border-radius:3px"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:12px">${[1, 2, 3, 4].map(() => '<div style="height:17px;border:1px solid #dfe4ea;border-radius:3px;background:#fafbfc"></div>').join("")}</div><div style="margin-top:10px;border:1px solid #e2e6ea;border-radius:4px"><div style="height:14px;background:#f2f4f6"></div>${[1, 2, 3].map(() => '<div style="height:15px;border-top:1px solid #edf0f2"></div>').join("")}</div></body></html>`
-  },
-  {
-    id: "dashboard",
-    name: "数据看板",
-    description: "指标卡、趋势和数据分布",
-    icon: LayoutPanelTop,
-    html: `<!doctype html><html><body style="margin:0;padding:14px;font:12px Arial;color:#172033;background:#fff"><div style="height:11px;width:34%;background:#dde3ea;border-radius:3px"></div><div style="display:flex;gap:6px;margin-top:11px">${[1, 2, 3].map(() => '<div style="height:31px;flex:1;border:1px solid #e4e7ec;border-radius:4px;background:#fafbfc"></div>').join("")}</div><div style="display:flex;gap:8px;margin-top:9px"><div style="height:54px;flex:1;border:1px solid #e4e7ec;border-radius:4px;background:linear-gradient(160deg,#fff 55%,#eaf0f6 56%)"></div><div style="height:54px;width:35%;border:1px solid #e4e7ec;border-radius:4px"></div></div></body></html>`
-  }
-]
+const TEMPLATE_PAGE_SIZE = 4
 
 function getPathName(filePath: string): string {
   return filePath.split(/[\\/]/).pop() || filePath
@@ -213,7 +180,11 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
   const [designSystems, setDesignSystems] = useState<DesignSystemInfo[]>([])
   const [selectedDesignSystemId, setSelectedDesignSystemId] = useState<string | null>(null)
   const [templateMode, setTemplateMode] = useState<SelectionMode>("select")
-  const [selectedTemplateId, setSelectedTemplateId] = useState(TEMPLATE_OPTIONS[0].id)
+  const [templates, setTemplates] = useState<TemplateOption[]>([])
+  const [templatesLoading, setTemplatesLoading] = useState(true)
+  const [templatesError, setTemplatesError] = useState<string | null>(null)
+  const [selectedTemplateId, setSelectedTemplateId] = useState("")
+  const [templatePage, setTemplatePage] = useState(0)
   const [uploadedTemplate, setUploadedTemplate] = useState<UploadedFile | null>(null)
   const [templateUploading, setTemplateUploading] = useState(false)
   const [templateError, setTemplateError] = useState<string | null>(null)
@@ -236,6 +207,35 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
         if (!cancelled) setWorkspacePath(path)
       })
       .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void window.api.design
+      .listTemplates()
+      .then((items) => {
+        if (cancelled) return
+        const nextTemplates = items.map((item) => ({
+          id: item.path,
+          name: item.name,
+          description: item.description,
+          html: item.previewHtml
+        }))
+        setTemplates(nextTemplates)
+        setSelectedTemplateId(nextTemplates[0]?.id ?? "")
+        setTemplatePage(0)
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setTemplatesError(error instanceof Error ? error.message : "加载模板列表失败")
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setTemplatesLoading(false)
+      })
     return () => {
       cancelled = true
     }
@@ -407,7 +407,12 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
       .finally(() => setImportingKind(null))
   }
 
-  const selectedTemplate = TEMPLATE_OPTIONS.find((item) => item.id === selectedTemplateId)
+  const selectedTemplate = templates.find((item) => item.id === selectedTemplateId)
+  const templatePageCount = Math.ceil(templates.length / TEMPLATE_PAGE_SIZE)
+  const visibleTemplates = templates.slice(
+    templatePage * TEMPLATE_PAGE_SIZE,
+    (templatePage + 1) * TEMPLATE_PAGE_SIZE
+  )
   const orderedDesignSystems = [...designSystems].sort(compareDesignSystemsForDisplay)
   const designSystemGroups = Array.from(
     orderedDesignSystems.reduce((groups, system) => {
@@ -676,44 +681,90 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
                 </div>
 
                 {templateMode === "select" && (
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    {TEMPLATE_OPTIONS.map((template) => {
-                      const Icon = template.icon
-                      const active = template.id === selectedTemplateId
-                      return (
+                  <div className="mt-4">
+                    {templatesLoading ? (
+                      <div className="flex h-48 items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-muted/20 text-xs text-muted-foreground">
+                        <LoaderCircle className="size-3.5 animate-spin" /> 正在加载模板...
+                      </div>
+                    ) : templatesError ? (
+                      <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs text-destructive">
+                        {templatesError}
+                      </p>
+                    ) : templates.length === 0 ? (
+                      <p className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
+                        未找到可预览的 HTML 模板。
+                      </p>
+                    ) : (
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        {visibleTemplates.map((template) => {
+                          const active = template.id === selectedTemplateId
+                          return (
+                            <button
+                              key={template.id}
+                              type="button"
+                              aria-pressed={active}
+                              onClick={() => setSelectedTemplateId(template.id)}
+                              className={cn(
+                                "cursor-pointer overflow-hidden rounded-lg border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                active
+                                  ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
+                                  : "border-border bg-background hover:border-border-emphasis"
+                              )}
+                            >
+                                  <span className="block h-50 overflow-hidden bg-white">
+                                <iframe
+                                  title={`${template.name}模板预览`}
+                                  srcDoc={template.html}
+                                  sandbox=""
+                                  tabIndex={-1}
+                                      className="pointer-events-none block h-[62.5rem] w-[500%] origin-top-left scale-[0.2] border-0 bg-white"
+                                />
+                              </span>
+                              <span className="flex gap-2 border-t border-border px-3 py-2.5">
+                                <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                                <span className="min-w-0">
+                                  <span className="block text-xs font-semibold text-foreground">
+                                    {template.name}
+                                  </span>
+                                  <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                                    {template.description}
+                                  </span>
+                                </span>
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                    {templatePageCount > 1 && (
+                      <div className="mt-4 flex items-center justify-end gap-2 text-xs text-muted-foreground">
                         <button
-                          key={template.id}
                           type="button"
-                          aria-pressed={active}
-                          onClick={() => setSelectedTemplateId(template.id)}
-                          className={cn(
-                            "overflow-hidden rounded-lg border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                            active
-                              ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
-                              : "border-border bg-background hover:border-border-emphasis"
-                          )}
+                          aria-label="上一页模板"
+                          title="上一页"
+                          disabled={templatePage === 0}
+                          onClick={() => setTemplatePage((page) => Math.max(0, page - 1))}
+                          className="inline-flex size-8 items-center justify-center rounded-md border border-border transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
-                          <iframe
-                            title={`${template.name}模板预览`}
-                            srcDoc={template.html}
-                            sandbox=""
-                            tabIndex={-1}
-                            className="pointer-events-none block h-32 w-full border-0 bg-white"
-                          />
-                          <span className="flex gap-2 border-t border-border px-3 py-2.5">
-                            <Icon className="mt-0.5 size-3.5 shrink-0 text-primary" />
-                            <span className="min-w-0">
-                              <span className="block text-xs font-semibold text-foreground">
-                                {template.name}
-                              </span>
-                              <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
-                                {template.description}
-                              </span>
-                            </span>
-                          </span>
+                          <ArrowLeft className="size-3.5" />
                         </button>
-                      )
-                    })}
+                        <span className="min-w-16 text-center">
+                          第 {templatePage + 1} / {templatePageCount} 页
+                        </span>
+                        <button
+                          type="button"
+                          aria-label="下一页模板"
+                          title="下一页"
+                          disabled={templatePage >= templatePageCount - 1}
+                          onClick={() =>
+                            setTemplatePage((page) => Math.min(templatePageCount - 1, page + 1))
+                          }
+                          className="inline-flex size-8 items-center justify-center rounded-md border border-border transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <ArrowRight className="size-3.5" />
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 

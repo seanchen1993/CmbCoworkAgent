@@ -1974,6 +1974,8 @@ interface CustomAPI {
         mode: string
         platform: string | null
         scenario: string
+        previewHtml: string
+        previewPath: string
       }>
     >
     agentGenerate: (

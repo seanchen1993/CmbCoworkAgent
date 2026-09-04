@@ -3879,6 +3879,8 @@ const api = {
         mode: string
         platform: string | null
         scenario: string
+        previewHtml: string
+        previewPath: string
       }>
     > => ipcRenderer.invoke("design:list-templates"),
     /**
