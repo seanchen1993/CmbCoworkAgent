@@ -135,6 +135,9 @@ import type {
   HarnessFeatureCreateResult,
   HarnessFeatureDeployUnitBinding,
   HarnessFeatureDeployUnitUpdateInput,
+  HarnessFeatureImManagementUpdateInput,
+  HarnessFeatureThreadGrantInput,
+  HarnessFeatureThreadGrantResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -566,9 +569,7 @@ const MAX_MANAGED_AUTO_SEND_STREAMS = 100
 const MAX_MANAGED_AUTO_SEND_BUFFERED_EVENTS = 10000
 const MANAGED_AUTO_SEND_TERMINAL_RETENTION_MS = 30000
 const managedAutoSendStreams = new Map<string, ManagedAutoSendStreamBuffer>()
-const managedAutoSendStartListeners = new Set<
-  (event: ManagedAutoSendStreamStartEvent) => void
->()
+const managedAutoSendStartListeners = new Set<(event: ManagedAutoSendStreamStartEvent) => void>()
 
 function disposeManagedAutoSendStream(runId: string): void {
   const stream = managedAutoSendStreams.get(runId)
@@ -4340,6 +4341,20 @@ const api = {
         "harnessBoard:updateFeatureDeployUnits",
         input
       ) as Promise<HarnessFeatureDeployUnitBinding>,
+    setFeatureImManagement: (
+      input: HarnessFeatureImManagementUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> =>
+      ipcRenderer.invoke(
+        "harnessBoard:setFeatureImManagement",
+        input
+      ) as Promise<HarnessFeatureDeployUnitBinding>,
+    ensureFeatureThreadImGrant: (
+      input: HarnessFeatureThreadGrantInput
+    ): Promise<HarnessFeatureThreadGrantResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:ensureFeatureThreadImGrant",
+        input
+      ) as Promise<HarnessFeatureThreadGrantResult>,
     validateManagedRunStart: (input: ManagedRunStartValidationInput): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:validateManagedRunStart", input) as Promise<void>,
     startManagedRun: (input: ManagedRunStartInput): Promise<ManagedRunSummary> =>
@@ -4420,7 +4435,10 @@ const api = {
     getManagedRunEvents: (
       input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
     ): Promise<ManagedRunEventsPage> =>
-      ipcRenderer.invoke("harnessBoard:getManagedRunEvents", input) as Promise<ManagedRunEventsPage>,
+      ipcRenderer.invoke(
+        "harnessBoard:getManagedRunEvents",
+        input
+      ) as Promise<ManagedRunEventsPage>,
     cancelDialogTips: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelDialogTips") as Promise<void>,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {

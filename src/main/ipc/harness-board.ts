@@ -25,6 +25,7 @@ import {
   getHarnessLeanTokenConfig,
   saveHarnessDeployUnitMappings,
   saveHarnessLeanTokenConfig,
+  setHarnessFeatureImManagement,
   skipHarnessRunNode,
   syncHarnessProjectConstraints,
   updateHarnessFeatureDeployUnits,
@@ -64,6 +65,8 @@ import {
 import { assertHarnessProjectCanBeDeleted } from "../harness-board/project-deletion-gate"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
+import { materializeHarnessFeatureThreadGrant } from "../services/im/feature-thread-grant"
+import { builtinRobotManager } from "../services/im/manager"
 import {
   HARNESS_ADAPTER_DETAIL_MAX_IPC_BYTES,
   HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
@@ -102,6 +105,9 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessFeatureDeployUnitBinding,
+  HarnessFeatureImManagementUpdateInput,
+  HarnessFeatureThreadGrantInput,
+  HarnessFeatureThreadGrantResult,
   HarnessHumanGateDecisionInput,
   HarnessHumanGateSnapshot,
   HarnessFeatureDeployUnitUpdateInput,
@@ -245,7 +251,9 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:catalog",
-    async (event): Promise<{
+    async (
+      event
+    ): Promise<{
       projects: HarnessProjectListItem[]
       registry: HarnessAdapterRegistryItem[]
     }> => {
@@ -321,13 +329,19 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle("harnessBoard:getDeployUnitMappings", async (): Promise<HarnessDeployUnitMapping[]> => {
-    return listHarnessDeployUnitMappings()
-  })
+  ipcMain.handle(
+    "harnessBoard:getDeployUnitMappings",
+    async (): Promise<HarnessDeployUnitMapping[]> => {
+      return listHarnessDeployUnitMappings()
+    }
+  )
 
-  ipcMain.handle("harnessBoard:getLeanTokenConfig", async (event): Promise<HarnessLeanTokenConfig> => {
-    return getHarnessLeanTokenConfig({ scope: `${event.sender.id}:board-settings` })
-  })
+  ipcMain.handle(
+    "harnessBoard:getLeanTokenConfig",
+    async (event): Promise<HarnessLeanTokenConfig> => {
+      return getHarnessLeanTokenConfig({ scope: `${event.sender.id}:board-settings` })
+    }
+  )
 
   ipcMain.handle(
     "harnessBoard:saveDeployUnitMappings",
@@ -354,14 +368,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:getKnowledgePreview",
     async (event, adapterId: string): Promise<HarnessKnowledgePreviewResult> => {
       ensureEnterpriseSenderCleanup(event)
-      const normalizedAdapterId = typeof adapterId === "string" ? adapterId.trim().slice(0, 512) : ""
+      const normalizedAdapterId =
+        typeof adapterId === "string" ? adapterId.trim().slice(0, 512) : ""
       if (!normalizedAdapterId) throw new Error("Harness adapter id is required")
       const scope = `harness-knowledge:${event.sender.id}:${normalizedAdapterId}`
       const preview = await readHarnessKnowledgePreviewInWorker(normalizedAdapterId, scope)
       if (!preview.exists || !preview.path) return preview
-      const previewablePaths = preview.files
-        .filter((file) => !file.is_dir)
-        .map((file) => file.path)
+      const previewablePaths = preview.files.filter((file) => !file.is_dir).map((file) => file.path)
       if (previewablePaths.length === 0) return preview
 
       // The knowledge root comes from the main-process Harness adapter config.
@@ -410,10 +423,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:searchDeployUnits",
-    async (
-      _event,
-      input: HarnessDeployUnitSearchInput
-    ): Promise<HarnessDeployUnitSearchResult> => {
+    async (_event, input: HarnessDeployUnitSearchInput): Promise<HarnessDeployUnitSearchResult> => {
       return searchDeployUnits(input)
     }
   )
@@ -485,6 +495,25 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     ): Promise<HarnessFeatureDeployUnitBinding> => {
       return updateHarnessFeatureDeployUnits(input)
     }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:setFeatureImManagement",
+    async (
+      _event,
+      input: HarnessFeatureImManagementUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> => {
+      if (input.enabled) builtinRobotManager.assertFeatureImManagementAvailable()
+      return setHarnessFeatureImManagement(input.projectId, input.featureId, input.enabled)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:ensureFeatureThreadImGrant",
+    async (
+      _event,
+      input: HarnessFeatureThreadGrantInput
+    ): Promise<HarnessFeatureThreadGrantResult> => materializeHarnessFeatureThreadGrant(input)
   )
 
   ipcMain.handle(
@@ -684,12 +713,10 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         resolveHarnessRunDetailCurrentStage(detail)
       )
       if (desiredWatchScopesBySender.get(event.sender.id)?.has(watchScopeKey)) {
-        startHarnessWatchRefs(
-          watchScopeKey,
-          detail.project.projectRootPath,
-          detail.run.watchRefs,
-          { projectId: payload.projectId, featureSlug: payload.slug }
-        )
+        startHarnessWatchRefs(watchScopeKey, detail.project.projectRootPath, detail.run.watchRefs, {
+          projectId: payload.projectId,
+          featureSlug: payload.slug
+        })
       }
       const artifactPreviewGrant = issueHarnessRunArtifactPreviewGrant(detail, event.sender.id)
       return artifactPreviewGrant

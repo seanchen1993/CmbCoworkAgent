@@ -2,6 +2,7 @@ import type { HarnessRunDetailViewModel, HarnessWorkflowNextAction, Thread } fro
 import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
 import { HARNESS_SOURCE } from "../../../shared/harness-board-types"
+import { toast } from "sonner"
 
 type CreateHarnessThread = (
   config: {
@@ -44,6 +45,15 @@ export async function createHarnessFeatureThread({
   const resolvedNextAction = nextAction ?? getHarnessRunNextAction(runDetail)
   if (resolvedNextAction) {
     setPendingHarnessNextAction(thread.thread_id, resolvedNextAction)
+  }
+
+  const grant = await window.api.harnessBoard.ensureFeatureThreadImGrant({
+    projectId,
+    featureId: slug,
+    threadId: thread.thread_id
+  })
+  if (grant.required && !grant.granted) {
+    toast.error(grant.error || "会话已创建，但未能接入招乎")
   }
 
   return thread
