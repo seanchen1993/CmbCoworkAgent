@@ -32,6 +32,10 @@ import {
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
+import {
+  createTurnCompletionGateMiddleware,
+  type TurnCompletionRecoveryCallback
+} from "./turn-completion-integrity"
 import { getProjectThreadDataDirectory } from "./context-history-path"
 import { withRawApiCallCapture } from "../services/llm-api-request-capture"
 import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
@@ -2161,6 +2165,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onToolFailureSignal,
     onFinalSystemPrompt,
     onFailureFuseNotice,
+    onTurnCompletionRecovery,
+    turnCompletionTodoGateEnabled = true,
     outputStyle,
     conciseModeEnabled = false
   }: {
@@ -2173,6 +2179,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       signal: ToolFailureSignal
     }) => FailureFuseDecision | void
     onFailureFuseNotice?: FailureFuseNoticeCallback
+    onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
+    turnCompletionTodoGateEnabled?: boolean
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [k: string]: any
   } = params
@@ -2938,6 +2946,18 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
             )
           ]
         : []),
+      // Refuse to END the turn on an invalid final message (empty reply after a
+      // tool result, a length-truncated answer, a tool call the provider never
+      // structured, a stream that EOF'd without a terminal event) or with the
+      // model's own todo list still open. Placed immediately BEFORE the steer
+      // queue: afterModel runs in REVERSE array order, so a message the user
+      // typed into the running turn is injected first and outranks any recovery
+      // prompt this gate would add. See turn-completion-integrity.ts.
+      createTurnCompletionGateMiddleware({
+        ownerRunToken: currentRunMessageQueueOwnerToken,
+        todoGateEnabled: mainTodosEnabled && turnCompletionTodoGateEnabled,
+        onRecovery: onTurnCompletionRecovery
+      }),
       // Inject user messages steered into the running turn. Placed BEFORE
       // summarization (injected turns should participate in context management)
       // and BEFORE humanInTheLoop (a steered message must never race a pending
@@ -4316,8 +4336,13 @@ export interface CreateAgentRuntimeOptions {
   conciseModeEnabled?: boolean
   /** Stable identity exposed to hooks for subagent/worker attribution. */
   agentId?: string
-  /** Physical foreground run token allowed to drain the current-run steer queue. */
+  /** Physical foreground run token allowed to drain the current-run steer queue.
+   * Doubles as the turn-completion gate's run key (same physical run). */
   currentRunMessageQueueOwnerToken?: string
+  /** Notice sink for turn-completion-gate recoveries (empty reply retried, …). */
+  onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
+  /** Ordinary-path todo completion gate. Defaults to enabled. */
+  turnCompletionTodoGateEnabled?: boolean
   /** Optional UI thread ID for approval prompts. Async worker runtimes keep their own checkpoint thread but surface approvals on the parent thread UI. */
   approvalThreadId?: string
   /** Optional model ID from thread/runtime config */
@@ -6675,6 +6700,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     },
     threadId: options.threadId,
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
+    onTurnCompletionRecovery: options.onTurnCompletionRecovery,
+    turnCompletionTodoGateEnabled: options.turnCompletionTodoGateEnabled,
     soloTaskTraceManager,
     actionStationarityTurnId,
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,

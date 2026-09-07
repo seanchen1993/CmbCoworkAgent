@@ -346,6 +346,11 @@ import {
   shouldPauseGoalForEmptyTurn
 } from "../agent/goals/evaluator"
 import {
+  clearTurnCompletionGateState,
+  describeTurnCompletionFailure,
+  readTurnCompletionGateReport
+} from "../agent/turn-completion-integrity"
+import {
   evaluateGoalWithRuntimeRetry,
   formatGoalEvaluatorRuntimeFailureReason
 } from "../agent/goals/evaluator-runtime"
@@ -445,6 +450,31 @@ const MAX_PENDING_MEMORY_FILE_PATHS = 512
 const MAX_MEMORY_BATCH_NOTICE_CHARACTERS = 512
 const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
+/**
+ * 完成门禁对所有物理运行入口一视同仁：invoke / resume / interrupt 跑的是同一张
+ * 图、同一个中间件（三者都传 currentRunMessageQueueOwnerToken），所以恢复回合里
+ * 的空回复、截断回复同样会被拦截并记录。只有 invoke 读报告的话，恢复入口照样
+ * 会把这些回合报成「任务完成」。
+ *
+ * 返回非 null 表示本回合不得按成功收尾。
+ */
+function readTurnCompletionFailure(threadId: string, runToken: string): string | null {
+  const report = readTurnCompletionGateReport(threadId, runToken)
+  return report ? describeTurnCompletionFailure(report) : null
+}
+
+/** 门禁重试的 UI 提示：重试要花掉用户一次模型调用，不能是静默的内部循环。 */
+function formatTurnCompletionRecoveryNotice(input: {
+  kind: "defect" | "todo"
+  detail: string
+  attempt: number
+  maxAttempts: number
+}): string {
+  return input.kind === "todo"
+    ? `任务尚未完成（${input.detail}），已请求模型继续（${input.attempt}/${input.maxAttempts}）。`
+    : `模型未给出有效结果（${input.detail}），已请求模型重新作答（${input.attempt}/${input.maxAttempts}）。`
+}
+
 const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 const SYSTEM_PROMPT_PREVIEW_IDS_ENV = "VITE_SYSTEM_PROMPT_PREVIEW_YST_IDS"
 const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
@@ -6444,6 +6474,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           emitGoalNotice(window, channel, threadId, notice)
         }
 
+        // The completion gate bounced the turn back to the model. Surface it:
+        // the retry costs the user a model call and changes what they see in the
+        // transcript, so it must not be a silent internal loop.
+        const sendTurnCompletionNotice = (input: {
+          kind: "defect" | "todo"
+          detail: string
+          attempt: number
+          maxAttempts: number
+        }): void => {
+          sendHookNotice(formatTurnCompletionRecoveryNotice(input))
+        }
+
         let latestSerializedValuesMessagesForGoalFlush: unknown[] = []
 
         const sendGoalSubturnComplete = (): void => {
@@ -7736,7 +7778,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,
-              onWorkflowLaunched
+              onWorkflowLaunched,
+              onTurnCompletionRecovery: sendTurnCompletionNotice
             }),
             harnessContext: harnessAgentContext
           })
@@ -8914,6 +8957,33 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               if (!continued) break
             }
 
+            // ── Ordinary-path completion gate ──────────────────────────────
+            // Everything above this point can end with the graph simply having
+            // stopped producing events, which is NOT the same as the user's
+            // task being done. The in-graph gate (turn-completion-integrity.ts)
+            // already spent its bounded retries trying to get a valid final
+            // message and, for a plain chat turn, its todo nudges; if it still
+            // has an unresolved defect or open todos, this turn must settle as
+            // incomplete instead of emitting done + task-complete + "✅ 任务完成".
+            //
+            // Read AFTER the goal loop so goal continuation sub-turns — which
+            // run through the same graph and the same gate — are reflected. An
+            // already-degraded outcome (Stop hook halt, goal blocked) keeps its
+            // own, more specific reason.
+            if (invokeFinalOutcome === "success") {
+              const completionFailure = readTurnCompletionFailure(threadId, runToken)
+              if (completionFailure) {
+                // markInvokeIncomplete only — the settlement block below turns
+                // a non-success outcome into markAutoModeTerminal("error",
+                // "unknown", reason), the same terminal shape the Stop-hook and
+                // goal-blocked paths already produce. No new endReason code is
+                // minted here so managed-run policy keeps one incomplete rule.
+                markInvokeIncomplete(completionFailure)
+                sendHookNotice(completionFailure)
+                console.warn(`[Agent] Turn settled as incomplete: ${completionFailure}`)
+              }
+            }
+
             clearCoordinatorNotificationSelectedSkillsOnExit = true
             void settleDrainedCoordinatorNotifications("ack").catch((error) => {
               console.warn("[Agent] Coordinator notification settlement failed:", error)
@@ -9551,6 +9621,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
           }
         } finally {
+          // The gate's per-run state is process-global; every exit of this
+          // physical run (success, throw, abort) must drop it or the map grows
+          // for the process lifetime and a later run reusing the key would read
+          // a stale defect.
+          clearTurnCompletionGateState(threadId, runToken)
           // Safety net for EARLY RETURNS inside the try (Stop hook blocked
           // completion, PostSkillUse max revisions, goal-continuation halts…):
           // success settles on the ack path and thrown errors settle in the
@@ -10487,6 +10562,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             baseOptions: () => ({
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
+              onTurnCompletionRecovery: (input) =>
+                sendHookNotice(formatTurnCompletionRecoveryNotice(input)),
               workspacePath,
               coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
               coordinatorSelectedSkill: resumeCoordinatorSelectedSkill,
@@ -10846,22 +10923,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
 
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-            await finalizeAutoCommit({
-              threadId,
-              workspacePath,
-              userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
-              snapshot: autoCommit.snapshot,
-              window,
-              channel
-            })
-            await markLatestForkBoundaryBestEffort({
-              threadId,
-              turnId: turnState.turnId,
-              source: "agent_run_complete",
-              runToken,
-              controller: abortController
-            })
-            scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            // Check before success-only side effects, including the asynchronous IM delivery.
+            const completionFailure = readTurnCompletionFailure(threadId, runToken)
+            if (completionFailure) sendHookNotice(completionFailure)
+            if (!completionFailure) {
+              await finalizeAutoCommit({
+                threadId,
+                workspacePath,
+                userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+                snapshot: autoCommit.snapshot,
+                window,
+                channel
+              })
+              await markLatestForkBoundaryBestEffort({
+                threadId,
+                turnId: turnState.turnId,
+                source: "agent_run_complete",
+                runToken,
+                controller: abortController
+              })
+              scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            }
             pauseActiveGoalAfterBoundary(
               threadId,
               window,
@@ -10872,9 +10954,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             turnStateShouldDispose = true
-            resumeAutoModeTerminal = createAutoModeTerminal("success", "normal")
+            resumeAutoModeTerminal = completionFailure
+              ? createAutoModeTerminal("error", "unknown", completionFailure)
+              : createAutoModeTerminal("success", "normal")
             safeSendToWindow(window, channel, { type: "done" })
-            if (!boundaryGoalId) {
+            if (!completionFailure && !boundaryGoalId) {
               emitAppAttention({
                 kind: "task-complete",
                 threadId,
@@ -10991,6 +11075,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
           turnStateShouldDispose = true
         } finally {
+          // 门禁状态按 threadId::runToken 挂在进程级 Map 上；每个物理运行的每条
+          // 退出路径都必须清理，否则 Map 只增不减（三个入口都会产生状态）。
+          clearTurnCompletionGateState(threadId, runToken)
           await settlePhysicalAgentRun({
             kind: "resume",
             threadId,
@@ -11617,6 +11704,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
+              onTurnCompletionRecovery: (input) =>
+                sendHookNotice(formatTurnCompletionRecoveryNotice(input)),
               workspacePath,
               coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
               coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
@@ -11962,22 +12051,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
 
             clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
-            await finalizeAutoCommit({
-              threadId,
-              workspacePath,
-              userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
-              snapshot: autoCommit.snapshot,
-              window,
-              channel
-            })
-            await markLatestForkBoundaryBestEffort({
-              threadId,
-              turnId: turnState.turnId,
-              source: "agent_run_complete",
-              runToken,
-              controller: abortController
-            })
-            scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            // Check before success-only side effects, including the asynchronous IM delivery.
+            const completionFailure = readTurnCompletionFailure(threadId, runToken)
+            if (completionFailure) sendHookNotice(completionFailure)
+            if (!completionFailure) {
+              await finalizeAutoCommit({
+                threadId,
+                workspacePath,
+                userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+                snapshot: autoCommit.snapshot,
+                window,
+                channel
+              })
+              await markLatestForkBoundaryBestEffort({
+                threadId,
+                turnId: turnState.turnId,
+                source: "agent_run_complete",
+                runToken,
+                controller: abortController
+              })
+              scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            }
             pauseActiveGoalAfterBoundary(
               threadId,
               window,
@@ -11988,9 +12082,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             turnStateShouldDispose = true
-            interruptAutoModeTerminal = createAutoModeTerminal("success", "normal")
+            interruptAutoModeTerminal = completionFailure
+              ? createAutoModeTerminal("error", "unknown", completionFailure)
+              : createAutoModeTerminal("success", "normal")
             safeSendToWindow(window, channel, { type: "done" })
-            if (!boundaryGoalId) {
+            if (!completionFailure && !boundaryGoalId) {
               emitAppAttention({
                 kind: "task-complete",
                 threadId,
@@ -12122,6 +12218,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
         }
       } finally {
+        // 同 resume：门禁状态必须随物理运行一起释放。
+        clearTurnCompletionGateState(threadId, runToken)
         await settlePhysicalAgentRun({
           kind: "interrupt",
           threadId,
