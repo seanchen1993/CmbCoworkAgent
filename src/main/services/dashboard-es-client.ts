@@ -3,6 +3,7 @@ import {
   DASHBOARD_ES_INPUT_BYTE_LIMIT,
   DASHBOARD_ES_OUTPUT_BYTE_LIMIT,
   DASHBOARD_ES_REQUEST_CANCELLED,
+  DASHBOARD_ES_RESPONSE_TOO_LARGE,
   type DashboardEsProjection,
   type DashboardEsWorkerResponse
 } from "./dashboard-es-protocol"
@@ -56,6 +57,24 @@ export function isDashboardEsWorkerUnavailable(
   error: unknown
 ): error is DashboardEsWorkerUnavailableError {
   return error instanceof DashboardEsWorkerUnavailableError
+}
+
+/**
+ * 响应体积超限。沿 cause 链走，因为它跨了三层包装：worker 侧
+ * DashboardEsRuntimeError → 客户端 Error.code → esQuery 的错误封装。
+ *
+ * 必须和「节点不可达」分开：体积超限重试多少次、换几个节点结果都一样，报成
+ * 「请检查网络连接」只会把排查引到错误方向。
+ */
+export function isDashboardEsResponseTooLarge(error: unknown): boolean {
+  let current: unknown = error
+  for (let depth = 0; current && typeof current === "object" && depth < 5; depth += 1) {
+    const record = current as { code?: unknown; message?: unknown; cause?: unknown }
+    if (record.code === DASHBOARD_ES_RESPONSE_TOO_LARGE) return true
+    if (typeof record.message === "string" && record.message.includes("byte limit")) return true
+    current = record.cause
+  }
+  return false
 }
 
 export function isDashboardEsRequestCancelled(error: unknown): boolean {

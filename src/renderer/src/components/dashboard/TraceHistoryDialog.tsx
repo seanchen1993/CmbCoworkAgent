@@ -1034,11 +1034,19 @@ export function TraceExplorer({
     )
   }
 
+  // thread 列表是摘要预览（不含 _raw），完整对话在选中会话时懒加载。加载还在飞
+  // 的那一小段窗口里 selectedTrace 仍是预览行，此时提示「缺少 raw」是误报——
+  // 加载完成后 threadTraceCache 会用带 _raw 的完整 trace 覆盖它。
+  const rawMissingNotice =
+    selectedTrace && !selectedTrace.rawAvailable && !threadLoading
+      ? selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"
+      : null
+
   const conversationContent = (
     <>
-      {selectedTrace && !selectedTrace.rawAvailable && (
+      {rawMissingNotice && (
         <div className="mb-3 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-          {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"}
+          {rawMissingNotice}
         </div>
       )}
       {selectedTrace ? (
