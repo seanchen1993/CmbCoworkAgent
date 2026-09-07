@@ -7,7 +7,6 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { ChatScrollSettings } from "../shared/chat-scroll"
 import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
 import type {
   Thread,
@@ -272,9 +271,6 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
-const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
-const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
-const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
 const GIT_CHANGE_NOTICE_GET_CHANNEL = "app:get-git-change-notice-enabled"
 const GIT_CHANGE_NOTICE_SET_CHANNEL = "app:set-git-change-notice-enabled"
 const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
@@ -341,22 +337,10 @@ const electronAPI = {
     ipcRenderer.on(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
     return () => ipcRenderer.removeListener(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
   },
-  getChatScrollSettings: (): Promise<ChatScrollSettings> =>
-    ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_GET_CHANNEL) as Promise<ChatScrollSettings>,
-  setChatScrollSettings: (settings: Partial<ChatScrollSettings>): Promise<ChatScrollSettings> =>
-    ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_SET_CHANNEL, settings) as Promise<ChatScrollSettings>,
   getGitChangeNoticeEnabled: (): Promise<boolean> =>
     ipcRenderer.invoke(GIT_CHANGE_NOTICE_GET_CHANNEL) as Promise<boolean>,
   setGitChangeNoticeEnabled: (enabled: boolean): Promise<boolean> =>
     ipcRenderer.invoke(GIT_CHANGE_NOTICE_SET_CHANNEL, enabled) as Promise<boolean>,
-  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => {
-    const handler = (_event: unknown, settings: unknown): void => {
-      if (!settings || typeof settings !== "object" || Array.isArray(settings)) return
-      callback(settings as ChatScrollSettings)
-    }
-    ipcRenderer.on(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
-    return () => ipcRenderer.removeListener(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
-  },
   getAgentRuntimeSettings: (): Promise<AgentRuntimeSettings> =>
     ipcRenderer.invoke(AGENT_RUNTIME_SETTINGS_GET_CHANNEL) as Promise<AgentRuntimeSettings>,
   setAgentRuntimeRecursionLimit: (value: number): Promise<AgentRuntimeSettings> =>
@@ -572,9 +556,7 @@ const MAX_MANAGED_AUTO_SEND_STREAMS = 100
 const MAX_MANAGED_AUTO_SEND_BUFFERED_EVENTS = 10000
 const MANAGED_AUTO_SEND_TERMINAL_RETENTION_MS = 30000
 const managedAutoSendStreams = new Map<string, ManagedAutoSendStreamBuffer>()
-const managedAutoSendStartListeners = new Set<
-  (event: ManagedAutoSendStreamStartEvent) => void
->()
+const managedAutoSendStartListeners = new Set<(event: ManagedAutoSendStreamStartEvent) => void>()
 
 function disposeManagedAutoSendStream(runId: string): void {
   const stream = managedAutoSendStreams.get(runId)
@@ -4426,7 +4408,10 @@ const api = {
     getManagedRunEvents: (
       input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
     ): Promise<ManagedRunEventsPage> =>
-      ipcRenderer.invoke("harnessBoard:getManagedRunEvents", input) as Promise<ManagedRunEventsPage>,
+      ipcRenderer.invoke(
+        "harnessBoard:getManagedRunEvents",
+        input
+      ) as Promise<ManagedRunEventsPage>,
     cancelDialogTips: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelDialogTips") as Promise<void>,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {

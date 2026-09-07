@@ -25,7 +25,6 @@ import {
   normalizeCompleteMessageIds,
   normalizeMessageRoleCollisionIds
 } from "../../../shared/message-role-collision"
-import { normalizeChatScrollSettings, type ChatScrollSettings } from "../../../shared/chat-scroll"
 import { revalidateModelCatalog } from "./model-catalog-cache"
 import type { ThreadDeleteOptions, ThreadMetadataPatch } from "../../../main/types"
 import { chatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
@@ -942,7 +941,6 @@ interface AppState {
   // Settings dialog state
   settingsOpen: boolean
   browserCdpConfig: BrowserCdpConfig
-  chatScrollSettings: ChatScrollSettings
 
   // Sidebar state
   sidebarCollapsed: boolean
@@ -1042,8 +1040,6 @@ interface AppState {
 
   // Settings actions
   setSettingsOpen: (open: boolean) => void
-  setChatScrollSettings: (settings: ChatScrollSettings) => void
-  loadChatScrollSettings: () => Promise<void>
   setBrowserCdpConfig: (config: BrowserCdpConfig) => void
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<void>
   loadGitChangeNoticeEnabled: () => Promise<void>
@@ -1154,7 +1150,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   rightPanelTab: "todos",
   rightModule: "work",
   settingsOpen: false,
-  chatScrollSettings: normalizeChatScrollSettings({}),
   browserCdpConfig: DEFAULT_BROWSER_CDP_CONFIG,
   gitChangeNoticeEnabled: true,
   gitChangeNoticePendingByThread: {},
@@ -1603,32 +1598,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ settingsOpen: open })
   },
 
-  setChatScrollSettings: (settings: ChatScrollSettings) => {
-    set({ chatScrollSettings: normalizeChatScrollSettings(settings) })
-  },
-
-  loadChatScrollSettings: async () => {
-    try {
-      const chatScrollSettings = await window.electron.getChatScrollSettings()
-      get().setChatScrollSettings(chatScrollSettings)
-    } catch (error) {
-      console.warn("[Store] Failed to load chat scroll settings; using defaults:", error)
-    }
-  },
-
   setBrowserCdpConfig: (browserCdpConfig: BrowserCdpConfig) => {
     set({ browserCdpConfig })
   },
 
   setGitChangeNoticeEnabled: async (enabled: boolean) => {
     await window.electron.setGitChangeNoticeEnabled(enabled)
-    set({ gitChangeNoticeEnabled: enabled, ...(enabled ? {} : { gitChangeNoticePendingByThread: {} }) })
+    set({
+      gitChangeNoticeEnabled: enabled,
+      ...(enabled ? {} : { gitChangeNoticePendingByThread: {} })
+    })
   },
 
   loadGitChangeNoticeEnabled: async () => {
     try {
       const enabled = await window.electron.getGitChangeNoticeEnabled()
-      set({ gitChangeNoticeEnabled: enabled, ...(enabled ? {} : { gitChangeNoticePendingByThread: {} }) })
+      set({
+        gitChangeNoticeEnabled: enabled,
+        ...(enabled ? {} : { gitChangeNoticePendingByThread: {} })
+      })
     } catch (error) {
       console.warn("[Store] Failed to load Git change notice setting; using enabled:", error)
     }

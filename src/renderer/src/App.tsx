@@ -228,7 +228,6 @@ function App(): React.JSX.Element {
     currentThreadId,
     loadThreads,
     loadDashboardAllowed,
-    loadChatScrollSettings,
     loadGitChangeNoticeEnabled,
     loadModels,
     dashboardAllowed,
@@ -258,7 +257,6 @@ function App(): React.JSX.Element {
       currentThreadId: state.currentThreadId,
       loadThreads: state.loadThreads,
       loadDashboardAllowed: state.loadDashboardAllowed,
-      loadChatScrollSettings: state.loadChatScrollSettings,
       loadGitChangeNoticeEnabled: state.loadGitChangeNoticeEnabled,
       loadModels: state.loadModels,
       dashboardAllowed: state.dashboardAllowed,
@@ -723,7 +721,9 @@ function App(): React.JSX.Element {
     ? Boolean(gitWorkspaceByThread[activeRightPanelThreadId])
     : false
   const hasPendingGitDiff = activeRightPanelThreadId
-    ? Boolean(gitChangeNoticePendingByThread[activeRightPanelThreadId] && isActiveRightPanelThreadGit)
+    ? Boolean(
+        gitChangeNoticePendingByThread[activeRightPanelThreadId] && isActiveRightPanelThreadGit
+      )
     : false
   const showRightPanelModuleControls =
     mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
@@ -733,10 +733,7 @@ function App(): React.JSX.Element {
       setGitChangeNoticePending(activeRightPanelThreadId, false)
     }
     openResourcePanelOverlay("git")
-  }, [
-    activeRightPanelThreadId,
-    setGitChangeNoticePending
-  ])
+  }, [activeRightPanelThreadId, setGitChangeNoticePending])
 
   const rightModuleRef = useRef(rightModule)
   const previousActiveRightPanelThreadIdRef = useRef<string | null>(activeRightPanelThreadId)
@@ -835,7 +832,7 @@ function App(): React.JSX.Element {
         if (threads.length === 0) {
           await createThread()
         }
-        await Promise.all([loadChatScrollSettings(), loadGitChangeNoticeEnabled()])
+        await loadGitChangeNoticeEnabled()
       } catch (error) {
         console.error("Failed to initialize:", error)
       } finally {
@@ -847,7 +844,6 @@ function App(): React.JSX.Element {
     loadThreads,
     setBrowserCdpConfig,
     loadDashboardAllowed,
-    loadChatScrollSettings,
     loadGitChangeNoticeEnabled,
     createThread
   ])
@@ -1085,7 +1081,9 @@ function App(): React.JSX.Element {
             className="flex flex-1 min-w-0 items-center justify-center gap-1.5"
           >
             <CmbDevClawLogo className="size-7 shrink-0 object-contain" />
-            <span className="app-badge-name">CMBDev<span className="text-red-500">Claw</span></span>
+            <span className="app-badge-name">
+              CMBDev<span className="text-red-500">Claw</span>
+            </span>
           </div>
           {/* Right: right panel toggle */}
           <div className="flex flex-1 h-full items-center justify-end pl-1 gap-1">
@@ -1251,10 +1249,7 @@ function App(): React.JSX.Element {
                         style={{ width: `${workerSplitLeftPercent}%` }}
                       >
                         {renderedThreadId ? (
-                          <TabbedPanel
-                            threadId={renderedThreadId}
-                            showTabBar={false}
-                          />
+                          <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
                         ) : (
                           <div className="flex flex-1 items-center justify-center text-muted-foreground">
                             选择或创建一个任务开始
@@ -1276,10 +1271,7 @@ function App(): React.JSX.Element {
                     !previewFullscreen && (
                       <main className={fullscreenMainClassName} style={fullscreenMainStyle}>
                         {renderedThreadId ? (
-                          <TabbedPanel
-                            threadId={renderedThreadId}
-                            showTabBar={false}
-                          />
+                          <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
                         ) : (
                           <div className="flex flex-1 items-center justify-center text-muted-foreground">
                             选择或创建一个任务开始
