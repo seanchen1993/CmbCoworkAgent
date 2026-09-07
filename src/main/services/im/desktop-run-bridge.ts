@@ -1,12 +1,11 @@
 import {
   startAgentRun,
   type AgentRunDelivery,
-  type AgentRunExecutionContext,
-  type AgentRunGoalNotice,
-  type AgentRunTerminal
+  type AgentRunExecutionContext
 } from "../../agent/agent-run-service"
 import { createManagedTransportAgentRunDelivery } from "../../agent/managed-transport-delivery"
 import type { RemoteTurnPolicy } from "../../agent/standard-thread-turn"
+import { createManagedRunResultCollector } from "./managed-run-result"
 import type { PreparedRemoteStandardTurnInput } from "./remote-runner"
 
 /**
@@ -71,10 +70,7 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
   // userMessageId, and already skips the marker prompts of internal
   // notification turns. Writing it here too would upsert the same row twice.
 
-  const notices: AgentRunGoalNotice[] = []
-  let finalText: string | null = null
-  let cancelled = false
-  let terminal: AgentRunTerminal | null = null
+  const collected = createManagedRunResultCollector({ cancelledMessage: "IM run was cancelled" })
 
   const context: AgentRunExecutionContext = {
     source: input.source,
@@ -82,27 +78,16 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
     // it sends after the run settles, so the run body must not release it.
     localRunLease: { owner: input.runOwner, runId: input.runId, managedExternally: true },
     signal: input.signal,
-    // IM's capability guard validated this workspace before the turn was
-    // prepared; the run body must refuse to execute anywhere else.
-    expectedWorkspacePath: input.workspacePath,
     allowTrustedTransportSkillMarker: true,
     extraSystemPrompt: IM_UNTRUSTED_INPUT_SYSTEM_PROMPT,
     ...(input.explicitSkill ? { trustedExplicitSkill: input.explicitSkill } : {}),
     ...(input.remotePolicy ? { remotePolicy: input.remotePolicy } : {}),
     ...(input.interactionWaitHooks ? { interactionWaitHooks: input.interactionWaitHooks } : {}),
+    ...(input.verifyResolvedThread ? { verifyResolvedThread: input.verifyResolvedThread } : {}),
     ...(input.onDetachedResultAvailable
       ? { onDetachedResultAvailable: input.onDetachedResultAvailable }
       : {}),
-    onGoalNotice: (notice) => notices.push(notice),
-    onFinalAssistant: (result) => {
-      finalText = result.finalText
-    },
-    onRunCancelled: () => {
-      cancelled = true
-    },
-    onRunTerminated: (result) => {
-      terminal = result
-    }
+    ...collected.hooks
   }
 
   const handle = await startRun(
@@ -118,21 +103,7 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
   )
   await handle.completion
 
-  if (cancelled) throw new DOMException("IM run was cancelled", "AbortError")
-
-  // A failed run still resolves its completion promise (the run body reports
-  // errors to the renderer and returns). Rethrowing the original here keeps the
-  // caller's retry classification working: isRetryableApiError still sees the
-  // provider error it was written for, instead of a generic "no reply".
-  const outcome = terminal as AgentRunTerminal | null
-  if (outcome && outcome.outcome !== "success") {
-    if (outcome.error instanceof Error) throw outcome.error
-    throw new Error(outcome.message?.trim() || `本轮运行以 ${outcome.code} 结束。`)
-  }
-
-  const resolved = finalText as string | null
-  if (resolved && resolved.trim()) return resolved.trim()
-  const notice = notices.at(-1)?.message.trim()
-  if (notice) return notice
-  throw new Error("本轮运行未产生可回传结果，请在桌面查看运行状态。")
+  // A tool-only turn legitimately produces no assistant text; the runner this
+  // replaces answered "处理完成。" rather than failing the delivery.
+  return collected.resolve(() => "处理完成。")
 }

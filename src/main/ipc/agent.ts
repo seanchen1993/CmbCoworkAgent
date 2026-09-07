@@ -1,5 +1,4 @@
 import { IpcMain, BrowserWindow, dialog } from "electron"
-import { normalizeWorkspacePathKey } from "../../shared/workspace-path"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { nowIsoLocal } from "../util/local-time"
 import { AsyncKeyedLock } from "./async-keyed-lock"
@@ -418,7 +417,8 @@ import {
   registerAgentRunImplementation,
   startAgentRun,
   type AgentRunDelivery,
-  type AgentRunExecutionContext
+  type AgentRunExecutionContext,
+  type AgentRunTerminal
 } from "../agent/agent-run-service"
 
 function withHarnessStageInvalidation(
@@ -6209,6 +6209,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // Abort any existing stream for this thread before starting a new one
       // This prevents concurrent streams which can cause checkpoint corruption
       let pendingPhysicalStreamRunSetupGuard: PhysicalStreamRunSetupGuard | undefined
+      // Most terminal paths classify themselves, but this body has many early
+      // returns and a managed caller has no stream to fall back on. Declared out
+      // here so the outermost finally can report `unknown` when none of them
+      // ran — onRunTerminated is contracted to fire exactly once per run.
+      let terminalReported = false
+      const reportTerminal = (terminal: AgentRunTerminal): void => {
+        if (terminalReported) return
+        terminalReported = true
+        runExecutionContext.onRunTerminated?.(terminal)
+      }
       try {
         if (!initialInvokeThread) {
           safeSendToWindow(window, channel, { type: "error", error: "Thread not found" })
@@ -6903,7 +6913,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // text", collapsing a retryable provider blip and a hook halt into
           // one generic error. The original error travels along so the caller
           // keeps its own retry policy.
-          runExecutionContext.onRunTerminated?.({
+          reportTerminal({
             outcome,
             code,
             ...(terminalMessage ? { message: terminalMessage } : {}),
@@ -6991,21 +7001,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.log("[Agent] Thread metadata:", metadata)
 
           const workspacePath = parsedThreadMetadata.workspacePath
-          // A managed transport authorized this run against a specific
-          // workspace, then did async work before it started. If the thread has
-          // been repointed since (a desktop workspace switch, a first run on an
-          // empty thread), executing here would run under an authorization that
-          // was never granted for this workspace.
-          const authorizedWorkspacePath = runExecutionContext.expectedWorkspacePath
-          if (
-            authorizedWorkspacePath &&
-            normalizeWorkspacePathKey(workspacePath ?? "") !==
-              normalizeWorkspacePathKey(authorizedWorkspacePath)
-          ) {
-            throw new Error(
-              `Run was authorized for workspace ${authorizedWorkspacePath} but the thread now points at ${workspacePath ?? "(none)"}`
-            )
-          }
+          // A managed transport authorized this run against a target — its
+          // workspace, grant, feature binding and delivery context — and then
+          // did async work before it started. The thread may have been
+          // repointed or rebound since. Only the caller knows what it
+          // authorized, so it re-checks; this file has no concept of a grant.
+          const authorizationRefusal = runExecutionContext.verifyResolvedThread?.({
+            workspacePath,
+            metadata
+          })
+          if (authorizationRefusal) throw new Error(authorizationRefusal)
           sessionWorkspacePath = workspacePath ?? undefined
           const harnessAgentContext = await getHarnessAgentContext(metadata, {
             workspacePath,
@@ -7216,6 +7221,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             throwIfInvokeAborted()
             if (!preparedPrompt.accepted) {
               if (preparedPrompt.blockedBy === "explicit_skill") {
+                markAutoModeTerminal("error", "hook_halt", preparedPrompt.reason)
                 pauseActiveGoalForRuntimeStop(preparedPrompt.reason)
                 safeSendToWindow(window, channel, {
                   type: "error",
@@ -7224,6 +7230,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 finishTraceInBackground(tracer, "error", preparedPrompt.reason, "Agent")
                 turnStateShouldDispose = true
               } else if (preparedPrompt.blockedBy === "user_prompt_submit") {
+                markAutoModeTerminal("error", "hook_halt", "UserPromptSubmit hook stopped the turn")
                 pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped the turn.")
                 sendHookBlocked(
                   "UserPromptSubmit",
@@ -9947,6 +9954,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard = undefined
         setupGuard.fail(error)
       } finally {
+        // Nothing classified this run — an early return, or a throw before the
+        // main body. Report it so a managed caller can tell "ended without a
+        // reply" from "never reported" instead of guessing from empty text.
+        reportTerminal({ outcome: "unknown", code: "unknown" })
         clearStreamFailureDiagnostics(channel)
         pendingPhysicalStreamRunSetupGuard?.abandon()
         pendingPhysicalStreamRunSetupGuard = undefined

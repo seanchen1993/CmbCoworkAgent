@@ -107,7 +107,16 @@ function sameSnapshot(left: ImTargetSnapshot, right: ImTargetSnapshot): boolean 
   )
 }
 
-function metadataMatchesTarget(
+/**
+ * Also used as the run body's authorization fence: the guard validates a target
+ * before a turn is prepared, and the thread's metadata can be repointed or
+ * rebound in the async window before the run actually starts.
+ *
+ * Covers what lives in thread metadata — workspace, delivery context, feature
+ * binding, target kind. A grant revoked mid-flight is a different mechanism
+ * (the execution permit is revoked separately) and is not visible here.
+ */
+export function metadataMatchesTarget(
   metadata: Record<string, unknown>,
   target: ImTargetSnapshot,
   event: Pick<ImEventRecord, "conversationKey" | "principalId">

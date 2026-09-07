@@ -137,12 +137,16 @@ function testTheBridgeLeavesTranscriptPersistenceToTheRunBody(): void {
 function testTheRunBodyStillHonoursWhatTheBridgeDependsOn(): void {
   const agent = readFileSync(join(PROJECT_ROOT, "src/main/ipc/agent.ts"), "utf8")
   assert(
-    agent.includes("runExecutionContext.onRunTerminated?.({"),
+    agent.includes("runExecutionContext.onRunTerminated?.(terminal)"),
     "the run body must report its terminal state; a managed caller has no stream to read it from"
   )
   assert(
-    agent.includes("runExecutionContext.expectedWorkspacePath"),
-    "the run body must honour the workspace its caller authorized"
+    agent.includes("runExecutionContext.verifyResolvedThread?.({"),
+    "the run body must re-check the caller's authorization before running"
+  )
+  assert(
+    agent.includes('reportTerminal({ outcome: "unknown", code: "unknown" })'),
+    "the run body must guarantee a terminal report, or onRunTerminated is a lie"
   )
   // Every error branch has to carry the original error, or retryability is lost.
   for (const code of ["hook_halt", "failure_fuse", "provider_error"]) {
@@ -245,13 +249,15 @@ async function testAGoalNoticeStandsInForAMissingReply(): Promise<void> {
   assert.equal(text, "Goal 已暂停")
 }
 
-async function testARunThatSaysNothingIsAnError(): Promise<void> {
+async function testAToolOnlyTurnStillReplies(): Promise<void> {
+  // A successful turn that produced no assistant text is normal (tool-only
+  // work). The runner this replaces answered "处理完成。"; failing the delivery
+  // instead would surface as an error in the user's IM chat.
   const captured: Captured = { request: null, context: null }
-  await assert.rejects(
-    run(baseInput(), captured, async () => undefined),
-    /未产生可回传结果/,
-    "an empty run must fail loudly rather than reply with nothing"
-  )
+  const text = await run(baseInput(), captured, async (context) => {
+    context.onRunTerminated?.({ outcome: "success", code: "normal" })
+  })
+  assert.equal(text, "处理完成。")
 }
 
 async function testAFailedRunRethrowsTheOriginalError(): Promise<void> {
@@ -295,17 +301,18 @@ async function testASuccessfulTerminalDoesNotMaskTheReply(): Promise<void> {
   assert.equal(text, "完成")
 }
 
-async function testTheAuthorizedWorkspaceIsPinned(): Promise<void> {
-  // IM's capability guard validates a workspace, then does async work before the
-  // run starts, while the run body reads the thread's current workspace.
+async function testTheAuthorizationCheckReachesTheRunBody(): Promise<void> {
+  // IM's capability guard validates a target, then does async work before the
+  // run starts, while the run body reads the thread's current metadata.
   const captured: Captured = { request: null, context: null }
-  await run(baseInput({ workspacePath: "/tmp/authorized" }), captured, async (context) => {
+  const verify = (): string | null => "绑定已变化"
+  await run(baseInput({ verifyResolvedThread: verify }), captured, async (context) => {
     await context.onFinalAssistant?.({ messageId: "m1", finalText: "ok" })
   })
   assert.equal(
-    captured.context?.expectedWorkspacePath,
-    "/tmp/authorized",
-    "the run must be pinned to the workspace IM authorized it against"
+    captured.context?.verifyResolvedThread,
+    verify,
+    "the caller's authorization check must reach the run body"
   )
 }
 
@@ -325,11 +332,11 @@ async function main(): Promise<void> {
     testTheImRunnerKeepsOwningItsLease,
     testCancellationSurfacesAsAnAbort,
     testAGoalNoticeStandsInForAMissingReply,
-    testARunThatSaysNothingIsAnError,
+    testAToolOnlyTurnStillReplies,
     testAFailedRunRethrowsTheOriginalError,
     testAFailureWithoutAnErrorObjectStillFails,
     testASuccessfulTerminalDoesNotMaskTheReply,
-    testTheAuthorizedWorkspaceIsPinned
+    testTheAuthorizationCheckReachesTheRunBody
   ]) {
     await test()
     console.log(`PASS ${test.name}`)

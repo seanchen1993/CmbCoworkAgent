@@ -93,13 +93,23 @@ export interface AgentRunExecutionContext {
   }
   signal?: AbortSignal
   /**
-   * Workspace this run was authorized against. A managed transport validates
-   * the target workspace, then does async work (title reads, event bookkeeping,
-   * skill preparation) before the run starts, while the run body reads the
-   * thread's *current* workspace. Setting this makes that drift fail the run
-   * instead of silently executing somewhere the caller never authorized.
+   * Re-checks the caller's authorization against the thread state the run body
+   * actually resolved. Return a reason to refuse the run, or null to proceed.
+   *
+   * A managed transport validates its target — workspace, grant id and version,
+   * feature binding, delivery context — and then does async work (title reads,
+   * event bookkeeping, skill preparation) before the run starts, while the run
+   * body reads the thread's *current* metadata. Anything that drifts in that
+   * window would otherwise execute under an authorization never granted for it.
+   *
+   * The check is a callback rather than a value because only the caller knows
+   * what it authorized; the run body must stay transport-neutral and has no
+   * concept of a grant. It runs once, before the runtime is created.
    */
-  expectedWorkspacePath?: string
+  verifyResolvedThread?: (resolved: {
+    workspacePath: string | undefined
+    metadata: Record<string, unknown>
+  }) => string | null
   allowForeignOwnerGoalControl?: boolean
   trustedExplicitSkill?: SkillUseBlockMetadata
   allowTrustedTransportSkillMarker?: boolean
@@ -109,7 +119,14 @@ export interface AgentRunExecutionContext {
   onGoalNotice?: (notice: AgentRunGoalNotice) => void
   onFinalAssistant?: (result: AgentRunFinalAssistant) => void | Promise<void>
   onRunCancelled?: () => void
-  /** Fires once per run with its terminal classification. See AgentRunTerminal. */
+  /**
+   * Fires exactly once per run, before its completion promise settles.
+   *
+   * Most terminal paths classify themselves; the run body reports `unknown` for
+   * any that does not, so a caller can always tell "ended without a reply" from
+   * "never reported". Do not assume a specific code is reachable — treat an
+   * unrecognized one as a plain failure.
+   */
   onRunTerminated?: (terminal: AgentRunTerminal) => void
   onDetachedResultAvailable?: (signal: AgentRunDetachedResultSignal) => void
 }

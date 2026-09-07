@@ -60,6 +60,7 @@ import {
 import { DEFAULT_IM_CHANNEL_ID, type RemoteImAckV1 } from "../../../shared/im-gateway-contract"
 import {
   imRemoteCapabilityGuard,
+  metadataMatchesTarget,
   type ImRemoteCapabilityDecision,
   type ImRemoteCapabilityGuard
 } from "./capability-guard"
@@ -165,6 +166,15 @@ export interface PreparedRemoteStandardTurnInput {
   coordinatorNotificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
   onCoordinatorNotificationAction?: (notificationIds: string[]) => void
   onDetachedResultAvailable?: (signal: ImDetachedResultSignal) => void
+  /**
+   * Re-checks this turn's authorization against the thread state the run body
+   * resolves. The capability guard validated a target snapshot before the turn
+   * was prepared; the thread can be repointed or rebound in between.
+   */
+  verifyResolvedThread?: (resolved: {
+    workspacePath: string | undefined
+    metadata: Record<string, unknown>
+  }) => string | null
 }
 
 export interface ImRemoteRunnerDependencies {
@@ -653,6 +663,18 @@ async function executePreparedImStandardTurn(
       : agentMode === "normal" && metadata.subagentsEnabled === false
         ? { disableSubagents: true }
         : undefined
+  // The capability guard validated this target before the turn was prepared;
+  // title reads, event bookkeeping and skill preparation all happen in between,
+  // and the thread can be repointed or rebound in that window. Built once here
+  // so both branches enter the run body under the same authorization.
+  const verifyResolvedThread = (resolved: {
+    workspacePath: string | undefined
+    metadata: Record<string, unknown>
+  }): string | null =>
+    metadataMatchesTarget(resolved.metadata, target, event)
+      ? null
+      : `Run was authorized for ${target.kind} target ${target.targetId} in ${target.workspacePath}, but the thread no longer matches that binding`
+
   if (
     directGoalCommand ||
     goalRuns.shouldUseGoalPipeline(target.threadId, preparedMessage.visibleText, {
@@ -672,7 +694,8 @@ async function executePreparedImStandardTurn(
       agentMode,
       remotePolicy,
       interactionWaitHooks,
-      onDetachedResultAvailable
+      onDetachedResultAvailable,
+      verifyResolvedThread
     })
   }
   const turn: PreparedRemoteStandardTurnInput = {
@@ -691,7 +714,8 @@ async function executePreparedImStandardTurn(
     explicitSkill: preparedMessage.explicitSkill?.use,
     remotePolicy,
     interactionWaitHooks,
-    onDetachedResultAvailable
+    onDetachedResultAvailable,
+    verifyResolvedThread
   }
   // The run body derives its own runtime options and knows nothing about
   // targetKind, so the two inbox-only ones move onto the policy it does read.
