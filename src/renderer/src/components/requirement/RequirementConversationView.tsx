@@ -363,7 +363,9 @@ function RequirementConversationSession({
           setSelectedThreadId(nextThreadId)
           await onSelectRequirement(item, nextThreadId)
         } else {
-          await onSelectRequirement(item)
+          // Preserve the clicked conversation when switching requirements. Without
+          // this, the parent opens the target requirement's default (first) thread.
+          await onSelectRequirement(item, nextThreadId)
         }
       },
       onCreateConversation: async (item) => {
