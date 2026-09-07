@@ -81,6 +81,7 @@ type SkillMarketInfo = Pick<
   | "guidance"
   | "user_id"
   | "version"
+  | "extra_json"
 >
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
@@ -574,7 +575,8 @@ function PublishSkillDialog(props: {
         version: skill.version || marketInfo?.version || undefined,
         guidance: skill.metadata?.guidance || marketInfo?.guidance || "",
         chinese_name: getSkillChineseName(skill, marketInfo),
-        user_id: marketInfo?.user_id
+        user_id: marketInfo?.user_id,
+        extra_json: marketInfo?.extra_json
       }}
       generatedFile={{
         label: "将自动打包当前技能目录为 zip 并上传",
@@ -1605,7 +1607,11 @@ export function SkillsPanel(): React.JSX.Element {
           chinese_name: item.chinese_name,
           category: item.category,
           description: item.description,
-          featured: item.featured
+          featured: item.featured,
+          guidance: item.guidance,
+          user_id: item.user_id,
+          version: item.version,
+          extra_json: item.extra_json
         }
       }
       setMarketSkillMap(next)
@@ -2130,22 +2136,31 @@ export function SkillsPanel(): React.JSX.Element {
                 </span>
                 <span className="relative">上传技能</span>
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-amber-300/55 bg-amber-500/[0.08] px-2 text-xs font-medium text-amber-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-amber-400/70 hover:bg-amber-500/[0.16] hover:shadow-md dark:text-amber-300"
-                onClick={handleOpenRecordSkill}
-                aria-label="录制技能"
-              >
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-amber-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-                />
-                <span className="relative flex size-4 items-center justify-center rounded-full bg-amber-500/15 ring-1 ring-amber-500/25 transition-transform duration-200 group-hover:scale-105">
-                  <Radio className="size-2.5" />
-                </span>
-                <span className="relative">录制技能</span>
-              </Button>
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-amber-300/55 bg-amber-500/[0.08] px-2 text-xs font-medium text-amber-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-amber-400/70 hover:bg-amber-500/[0.16] hover:shadow-md dark:text-amber-300"
+                      onClick={handleOpenRecordSkill}
+                      aria-label="录制技能"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-amber-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                      />
+                      <span className="relative flex size-4 items-center justify-center rounded-full bg-amber-500/15 ring-1 ring-amber-500/25 transition-transform duration-200 group-hover:scale-105">
+                        <Radio className="size-2.5" />
+                      </span>
+                      <span className="relative">录制技能</span>
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-60 text-xs leading-relaxed">
+                    这是合作共建功能，如有问题，请联系王文林
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
             <Button
               variant="outline"
@@ -3168,11 +3183,15 @@ export function SkillDetail(props: {
   const category = getSkillCategory(skill, marketInfo)
   const description = marketInfo?.description || skill.description || "暂无描述"
   const skillFrontmatterVersion = skill.metadata?.version?.trim() || ""
-  const resolvedSkillVersion = skillFrontmatterVersion || skill.version || DEFAULT_SKILL_VERSION
+  // 兼容用户填写 v1.0.1 / V1.0.1 / 1.0.1，统一展示为小写 v 前缀
+  const normalizedFrontmatterVersion = skillFrontmatterVersion.replace(/^[vV]+/, "")
+  const resolvedSkillVersion = skillFrontmatterVersion
+    ? `v${normalizedFrontmatterVersion}`
+    : skill.version || DEFAULT_SKILL_VERSION
   const skillVersionMissingInFrontmatter = !skillFrontmatterVersion
   const skillVersionTooltip = skillVersionMissingInFrontmatter
     ? `当前没有在 SKILL.md frontmatter 里找到 version，所以这里显示的是默认值 ${DEFAULT_SKILL_VERSION}。`
-    : "这个值直接读取自 SKILL.md frontmatter 里的 version 字段。"
+    : "这个值直接读取自 SKILL.md frontmatter 里的 version 字段（已统一为小写 v 前缀）。"
   const isFeatured = isFeaturedSkill(marketInfo)
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const previewContent =
@@ -3468,8 +3487,19 @@ export function SkillDetail(props: {
                   {content}
                 </pre>
               ) : (
-                <div className="streaming-markdown text-sm leading-relaxed">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
+                <div className="streaming-markdown text-sm leading-relaxed overflow-x-auto">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      table: ({ children }) => (
+                        <div className="streaming-markdown-table-wrap my-4 overflow-x-auto">
+                          <table className="w-full border-collapse">{children}</table>
+                        </div>
+                      )
+                    }}
+                  >
+                    {previewContent ?? ""}
+                  </ReactMarkdown>
                 </div>
               )}
             </div>
