@@ -20,6 +20,7 @@ import type {
   ManagedRunEventCursor,
   ManagedRunEventsPage,
   ManagedRunDecisionFacts,
+  ManagedRunPolicyResult,
   ManagedRunIdentity,
   ManagedRunSnapshot,
   ManagedRunStatus,
@@ -47,26 +48,29 @@ export interface ManagedRunRecord extends ManagedRunIdentity {
   modifiedAtMs: number
 }
 
-type ManagedRunEventInput = {
+interface ManagedRunEventInput {
   type: ManagedRunEvent["type"]
+  summary: string
   scope?: ManagedRunEvent["scope"]
-  source?: ManagedRunEvent["source"]
   nodeId?: string
-  featureStatus?: ManagedRunEvent["featureStatus"]
-  nodeStatus?: ManagedRunEvent["nodeStatus"]
-  slashSkill?: string
   threadId?: string
-  workspacePath?: string
   sourceThreadId?: string
   targetThreadId?: string
-  decision?: string
+  sourceEventId?: string
+  sourceEventType?: ManagedRunEvent["sourceEventType"]
+  decisionEventId?: string
+  policyResult?: ManagedRunEvent["policyResult"]
+  decisionActor?: ManagedRunEvent["decisionActor"]
+  decisionChannel?: ManagedRunEvent["decisionChannel"]
+  decisionAction?: ManagedRunEvent["decisionAction"]
+  gateId?: string
   reasonCode?: string
-  decisionFacts?: ManagedRunEvent["decisionFacts"]
-  decisionRule?: string
+  retryNumber?: number
+  retryAt?: string
+  delayMs?: number
+  previousStatus?: "running"
   outcome?: ManagedRunEvent["outcome"]
   endReason?: ManagedRunEvent["endReason"]
-  summary?: string
-  [key: string]: unknown
 }
 
 interface JournalValidationState {
@@ -86,17 +90,17 @@ const EVENT_CURSOR_VERSION = 1
 const MANAGED_RUN_HASH_PATTERN = /^v1:sha256:[a-f0-9]{64}$/u
 const MANAGED_RUN_EVENT_TYPES = new Set<ManagedRunEvent["type"]>([
   "run_started",
-  "feature_inspected",
-  "decision_made",
+  "managed_agent_turn_ended",
+  "provider_retry_timer_elapsed",
+  "human_gate_invoked",
+  "run_stop_requested",
+  "session_run_aborted",
+  "run_interrupted_after_restart",
+  "managed_run_decision",
   "session_created",
   "session_started",
-  "session_completed",
+  "session_continued",
   "provider_retry_scheduled",
-  "provider_retry_sent",
-  "provider_retry_reset",
-  "biz_retry_reuse_thread",
-  "biz_retry_new_thread",
-  "human_gate_requested",
   "human_gate_approved",
   "human_gate_rejected",
   "human_gate_conflict",
@@ -133,12 +137,22 @@ const MANAGED_RUN_CHANGED_FIELDS = new Set([
   "currentNodeStatus",
   "nextAction"
 ])
-const MANAGED_RUN_EVENT_SOURCES = new Set([
-  "feature_status",
-  "agent_end_reason",
-  "controller_policy",
-  "managed_run",
-  "human_gate"
+const MANAGED_RUN_POLICY_TYPES = new Set([
+  "biz_progress",
+  "biz_retry",
+  "provider_retry",
+  "human_gate",
+  "run_termination"
+])
+const MANAGED_RUN_DECISION_ACTIONS = new Set([
+  "start_new_thread",
+  "continue_current_thread",
+  "schedule_provider_retry",
+  "approve_human_gate",
+  "reject_human_gate",
+  "stop_managed_run",
+  "complete_managed_run",
+  "fail_managed_run"
 ])
 const AGENT_END_REASON_CODES = new Set([
   "normal",
@@ -364,16 +378,57 @@ function isManagedRunLastDecision(value: unknown): boolean {
   if (value === undefined) return true
   if (!isPlainRecord(value)) return false
   return (
-    typeof value.decision === "string" &&
-    value.decision.length > 0 &&
-    value.decision.length <= 128 &&
-    isOptionalText(value.reasonCode, 128) &&
-    isOptionalText(value.summary, EVENT_SUMMARY_MAX_LENGTH) &&
-    isOptionalText(value.rule, EVENT_SUMMARY_MAX_LENGTH) &&
-    (value.facts === undefined || isManagedRunDecisionFacts(value.facts)) &&
+    isManagedRunPolicyResult(value.policyResult) &&
+    (value.decisionActor === "controller" ||
+      value.decisionActor === "user" ||
+      value.decisionActor === "system") &&
+    (value.decisionChannel === "system" ||
+      value.decisionChannel === "desktop" ||
+      value.decisionChannel === "im") &&
+    MANAGED_RUN_DECISION_ACTIONS.has(value.decisionAction as string) &&
+    typeof value.summary === "string" &&
+    value.summary.length <= EVENT_SUMMARY_MAX_LENGTH &&
     typeof value.createTime === "string" &&
     MANAGED_RUN_TIME_PATTERN.test(value.createTime)
   )
+}
+
+function isManagedRunPolicyResult(value: unknown): value is ManagedRunPolicyResult {
+  if (!isPlainRecord(value) || !MANAGED_RUN_POLICY_TYPES.has(value.type as string)) return false
+  if (
+    !isOptionalText(value.reasonCode, 128) ||
+    typeof value.reasonCode !== "string" ||
+    !isOptionalText(value.rule, EVENT_SUMMARY_MAX_LENGTH) ||
+    (value.facts !== undefined && !isManagedRunDecisionFacts(value.facts))
+  ) {
+    return false
+  }
+  if (
+    value.proposedAction !== undefined &&
+    !MANAGED_RUN_DECISION_ACTIONS.has(value.proposedAction as string)
+  ) {
+    return false
+  }
+  if (value.type === "biz_progress") return value.proposedAction === "start_new_thread"
+  if (value.type === "biz_retry") {
+    return ["continue_current_thread", "start_new_thread", "fail_managed_run"].includes(
+      value.proposedAction as string
+    )
+  }
+  if (value.type === "provider_retry") {
+    return ["schedule_provider_retry", "continue_current_thread", "fail_managed_run"].includes(
+      value.proposedAction as string
+    )
+  }
+  if (value.type === "human_gate") {
+    return value.proposedAction === undefined || value.proposedAction === "fail_managed_run"
+  }
+  return [
+    "stop_managed_run",
+    "complete_managed_run",
+    "fail_managed_run",
+    "reject_human_gate"
+  ].includes(value.proposedAction as string)
 }
 
 function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
@@ -382,7 +437,7 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
   }
   const snapshot = value as Partial<ManagedRunSnapshot>
   if (
-    snapshot.version !== 2 ||
+    snapshot.version !== 2.5 ||
     typeof snapshot.runId !== "string" ||
     !snapshot.runId.trim() ||
     typeof snapshot.projectId !== "string" ||
@@ -424,30 +479,41 @@ function normalizeEvent(value: unknown, identity: ManagedRunIdentity): ManagedRu
     throw new ManagedRunCorruptError("ManagedRun event must contain an object")
   }
   const event = value as Partial<ManagedRunEvent>
-  const validDecisionFacts =
-    event.decisionFacts === undefined || isManagedRunDecisionFacts(event.decisionFacts)
-  const validFeatureInspection =
-    event.type !== "feature_inspected" ||
-    (event.scope === "stage" &&
-      typeof event.nodeId === "string" &&
-      event.nodeId.length > 0 &&
-      HARNESS_FEATURE_STATUSES.has(event.featureStatus as string) &&
-      HARNESS_NODE_STATUSES.has(event.nodeStatus as string))
   const validDecision =
-    event.type !== "decision_made" ||
-    (typeof event.decision === "string" &&
-      event.decision.length > 0 &&
-      isManagedRunDecisionFacts(event.decisionFacts) &&
-      typeof event.decisionRule === "string" &&
-      event.decisionRule.length > 0)
-  const validSessionCompletion =
-    event.type !== "session_completed" ||
+    event.type !== "managed_run_decision" ||
+    (typeof event.sourceEventId === "string" &&
+      MANAGED_RUN_EVENT_TYPES.has(event.sourceEventType as ManagedRunEvent["type"]) &&
+      isManagedRunPolicyResult(event.policyResult) &&
+      (event.decisionActor === "controller" ||
+        event.decisionActor === "user" ||
+        event.decisionActor === "system") &&
+      (event.decisionChannel === "system" ||
+        event.decisionChannel === "desktop" ||
+        event.decisionChannel === "im") &&
+      MANAGED_RUN_DECISION_ACTIONS.has(event.decisionAction as string))
+  const validManagedTurnEnd =
+    event.type !== "managed_agent_turn_ended" ||
     (typeof event.threadId === "string" &&
       event.threadId.length > 0 &&
       (event.outcome === "success" || event.outcome === "error") &&
       isAgentEndReason(event.endReason))
+  const actionOrTerminal = new Set([
+    "session_created",
+    "session_started",
+    "session_continued",
+    "provider_retry_scheduled",
+    "human_gate_approved",
+    "human_gate_rejected",
+    "human_gate_conflict",
+    "run_cancelled",
+    "run_failed",
+    "run_completed"
+  ])
+  const validDecisionLink =
+    !actionOrTerminal.has(event.type as string) ||
+    (typeof event.decisionEventId === "string" && event.decisionEventId.length > 0)
   if (
-    event.version !== 2 ||
+    event.version !== 2.5 ||
     typeof event.eventId !== "string" ||
     !event.eventId.trim() ||
     typeof event.createTime !== "string" ||
@@ -457,25 +523,20 @@ function normalizeEvent(value: unknown, identity: ManagedRunIdentity): ManagedRu
     typeof event.runId !== "string" ||
     event.runId !== identity.runId ||
     (event.scope !== "global" && event.scope !== "stage") ||
-    (event.source !== undefined && !MANAGED_RUN_EVENT_SOURCES.has(event.source)) ||
-    (event.featureStatus !== undefined &&
-      !HARNESS_FEATURE_STATUSES.has(event.featureStatus as string)) ||
-    (event.nodeStatus !== undefined && !HARNESS_NODE_STATUSES.has(event.nodeStatus as string)) ||
     (event.outcome !== undefined && event.outcome !== "success" && event.outcome !== "error") ||
     !isOptionalText(event.nodeId, 512) ||
     !isOptionalText(event.threadId, 512) ||
-    !isOptionalText(event.workspacePath, 4096) ||
     !isOptionalText(event.sourceThreadId, 512) ||
     !isOptionalText(event.targetThreadId, 512) ||
-    !isOptionalText(event.slashSkill, 256) ||
-    !isOptionalText(event.decision, 128) ||
+    !isOptionalText(event.sourceEventId, 512) ||
+    !isOptionalText(event.decisionEventId, 512) ||
+    !isOptionalText(event.gateId, 512) ||
     !isOptionalText(event.reasonCode, 128) ||
-    !isOptionalText(event.decisionRule, EVENT_SUMMARY_MAX_LENGTH) ||
-    !isOptionalText(event.summary, EVENT_SUMMARY_MAX_LENGTH) ||
-    !validDecisionFacts ||
-    !validFeatureInspection ||
+    typeof event.summary !== "string" ||
+    event.summary.length > EVENT_SUMMARY_MAX_LENGTH ||
     !validDecision ||
-    !validSessionCompletion ||
+    !validManagedTurnEnd ||
+    !validDecisionLink ||
     (event.endReason !== undefined && !isAgentEndReason(event.endReason))
   ) {
     throw new ManagedRunCorruptError("ManagedRun event has an invalid schema")
@@ -496,10 +557,7 @@ function encodeEventCursor(identity: ManagedRunIdentity, offset: number): Manage
   ).toString("base64url")
 }
 
-function decodeEventCursor(
-  cursor: ManagedRunEventCursor,
-  identity: ManagedRunIdentity
-): number {
+function decodeEventCursor(cursor: ManagedRunEventCursor, identity: ManagedRunIdentity): number {
   if (!cursor || cursor.length > 4096) throw new Error("Invalid ManagedRun event cursor")
   try {
     const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown
@@ -642,27 +700,23 @@ export class ManagedRunStore {
     ensureDirectory(runDirectory(rootDir, snapshot))
     this.ensureHealthyJournal(snapshot)
     const summary = boundedText(event.summary, EVENT_SUMMARY_MAX_LENGTH)
-    const slashSkill =
-      typeof event.slashSkill === "string" ? boundedText(event.slashSkill, 256) : undefined
     const endReasonMessage = boundedText(event.endReason?.message, EVENT_SUMMARY_MAX_LENGTH)
     const next: ManagedRunEvent = {
       ...event,
-      version: 2,
+      version: 2.5,
       eventId: randomUUID(),
       createTime,
       type: event.type as ManagedRunEvent["type"],
       runId: snapshot.runId,
       scope: event.scope ?? (event.nodeId ? "stage" : "global"),
       nodeId: boundedText(event.nodeId, 512),
-      featureStatus: event.featureStatus,
-      nodeStatus: event.nodeStatus,
       threadId: boundedText(event.threadId, 512),
       sourceThreadId: boundedText(event.sourceThreadId, 512),
       targetThreadId: boundedText(event.targetThreadId, 512),
-      workspacePath: boundedText(event.workspacePath, 4096),
-      decision: boundedText(event.decision, 128),
+      sourceEventId: boundedText(event.sourceEventId, 512),
+      decisionEventId: boundedText(event.decisionEventId, 512),
+      gateId: boundedText(event.gateId, 512),
       reasonCode: boundedText(event.reasonCode, 128),
-      decisionRule: boundedText(event.decisionRule, EVENT_SUMMARY_MAX_LENGTH),
       outcome: event.outcome,
       endReason: event.endReason
         ? {
@@ -670,8 +724,7 @@ export class ManagedRunStore {
             ...(endReasonMessage ? { message: endReasonMessage } : {})
           }
         : undefined,
-      slashSkill,
-      summary
+      summary: summary ?? ""
     }
     const validated = normalizeEvent(next, snapshot)
     const descriptor = openSync(path, "a", 0o600)
@@ -693,7 +746,7 @@ export class ManagedRunStore {
     const runId = `mr_${randomUUID().replace(/-/gu, "")}`
     const now = formatManagedRunTimestamp()
     const snapshot: ManagedRunSnapshot = {
-      version: 2,
+      version: 2.5,
       runId,
       projectId,
       featureId,
@@ -705,12 +758,6 @@ export class ManagedRunStore {
       updatedAt: now
     }
     this.writeSnapshot(snapshot)
-    this.appendEvent(snapshot, {
-      type: "run_started",
-      scope: "global",
-      source: "managed_run",
-      summary: "托管运行已启动"
-    })
     return snapshot
   }
 
@@ -728,17 +775,19 @@ export class ManagedRunStore {
 
   updateSnapshot(snapshot: ManagedRunSnapshot, event?: ManagedRunEventInput): ManagedRunSnapshot {
     const now = formatManagedRunTimestamp()
-    const reasonCode = boundedText(event?.reasonCode, 128)
     const summary = boundedText(event?.summary, EVENT_SUMMARY_MAX_LENGTH)
-    const rule = boundedText(event?.decisionRule, EVENT_SUMMARY_MAX_LENGTH)
     const lastDecision =
-      event?.type === "decision_made" && typeof event.decision === "string"
+      event?.type === "managed_run_decision" &&
+      event.policyResult &&
+      event.decisionActor &&
+      event.decisionChannel &&
+      event.decisionAction
         ? {
-            decision: event.decision,
-            ...(reasonCode ? { reasonCode } : {}),
-            ...(summary ? { summary } : {}),
-            ...(event.decisionFacts ? { facts: event.decisionFacts } : {}),
-            ...(rule ? { rule } : {}),
+            policyResult: event.policyResult,
+            decisionActor: event.decisionActor,
+            decisionChannel: event.decisionChannel,
+            decisionAction: event.decisionAction,
+            summary: summary ?? "",
             createTime: now
           }
         : snapshot.lastDecision
@@ -760,7 +809,11 @@ export class ManagedRunStore {
       return { ...identity, snapshot: null, corrupt: true, modifiedAtMs }
     }
     try {
-      const snapshot = readSnapshot(path)
+      const raw = JSON.parse(readFileSync(path, "utf8")) as unknown
+      if (isPlainRecord(raw) && raw.version !== 2.5) {
+        return { ...identity, snapshot: null, corrupt: false, modifiedAtMs }
+      }
+      const snapshot = normalizeSnapshot(raw)
       if (
         snapshot.runId !== identity.runId ||
         snapshot.projectId !== identity.projectId ||
@@ -780,7 +833,8 @@ export class ManagedRunStore {
     const records: ManagedRunRecord[] = []
     for (const runSegment of readdirSync(path, { withFileTypes: true })) {
       if (!runSegment.isDirectory() || !/^mr_[A-Za-z0-9_-]+$/u.test(runSegment.name)) continue
-      records.push(this.getRun({ projectId, featureId, runId: runSegment.name }))
+      const record = this.getRun({ projectId, featureId, runId: runSegment.name })
+      if (record.snapshot || record.corrupt) records.push(record)
     }
     return records
   }
@@ -800,7 +854,8 @@ export class ManagedRunStore {
       for (const runSegment of readdirSync(featurePath, { withFileTypes: true })) {
         if (!runSegment.isDirectory() || !/^mr_[A-Za-z0-9_-]+$/u.test(runSegment.name)) continue
         if (projectId) {
-          records.push(this.getRun({ projectId, featureId, runId: runSegment.name }))
+          const record = this.getRun({ projectId, featureId, runId: runSegment.name })
+          if (record.snapshot || record.corrupt) records.push(record)
           continue
         }
         try {
@@ -832,11 +887,7 @@ export class ManagedRunStore {
 
   findRunningRun(projectId: string, featureId: string): ManagedRunRecord | null {
     for (const record of this.listFeatureRuns(projectId, featureId)) {
-      if (
-        record.corrupt ||
-        !record.snapshot ||
-        isManagedRunTerminal(record.snapshot.status)
-      ) {
+      if (record.corrupt || !record.snapshot || isManagedRunTerminal(record.snapshot.status)) {
         continue
       }
       try {
@@ -856,7 +907,7 @@ export class ManagedRunStore {
     if (!record) return null
     if (record.corrupt || !record.snapshot) {
       return {
-        version: 2,
+        version: 2.5,
         runId: record.runId,
         projectId: record.projectId,
         featureId: record.featureId,

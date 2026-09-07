@@ -178,6 +178,7 @@ export interface HarnessFeatureDeployUnitBinding {
   featureId: string
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
+  imManagementEnabled?: boolean
   humanGate?: HarnessHumanGateSnapshot
 }
 
@@ -189,9 +190,7 @@ function isHarnessPlainObject(value: unknown): value is Record<string, unknown> 
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)
 }
 
-export function normalizeHarnessAgentmdLoadStatus(
-  value: unknown
-): HarnessAgentmdLoadStatusItem[] {
+export function normalizeHarnessAgentmdLoadStatus(value: unknown): HarnessAgentmdLoadStatusItem[] {
   if (!Array.isArray(value)) return []
   const status: HarnessAgentmdLoadStatusItem[] = []
   for (const item of value) {
@@ -394,6 +393,24 @@ export interface HarnessFeatureDeployUnitUpdateInput {
   selectedDeployUnits: HarnessDeployUnitMapping[]
 }
 
+export interface HarnessFeatureImManagementUpdateInput {
+  projectId: string
+  featureId: string
+  enabled: boolean
+}
+
+export interface HarnessFeatureThreadGrantInput {
+  projectId: string
+  featureId: string
+  threadId: string
+}
+
+export interface HarnessFeatureThreadGrantResult {
+  required: boolean
+  granted: boolean
+  error?: string
+}
+
 export interface ManagedRunStartInput {
   projectId: string
   featureId: string
@@ -422,9 +439,7 @@ export interface HarnessRunArtifactRevealInput {
   filePath: string
 }
 
-export type HarnessRunArtifactRevealResult =
-  | { success: true }
-  | { success: false; error: string }
+export type HarnessRunArtifactRevealResult = { success: true } | { success: false; error: string }
 
 export interface HarnessRunArtifactGrantRefreshInput {
   projectId: string
@@ -550,7 +565,7 @@ export interface ManagedRunIdentity {
 }
 
 export interface ManagedRunSnapshot {
-  version: 2
+  version: 2.5
   runId: string
   projectId: string
   featureId: string
@@ -576,11 +591,11 @@ export interface ManagedRunSnapshot {
   updatedAt: string
   completedAt?: string
   lastDecision?: {
-    decision: string
-    reasonCode?: string
-    summary?: string
-    facts?: ManagedRunDecisionFacts
-    rule?: string
+    policyResult: ManagedRunPolicyResult
+    decisionActor: ManagedRunDecisionActor
+    decisionChannel: ManagedRunDecisionChannel
+    decisionAction: ManagedRunDecisionAction
+    summary: string
     createTime: string
   }
 }
@@ -612,19 +627,73 @@ export interface ManagedRunDecisionFacts {
   terminalReason?: string
 }
 
+export type ManagedRunPolicyResult =
+  | {
+      type: "biz_progress"
+      proposedAction: "start_new_thread"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+  | {
+      type: "biz_retry"
+      proposedAction: "continue_current_thread" | "start_new_thread" | "fail_managed_run"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+  | {
+      type: "provider_retry"
+      proposedAction: "schedule_provider_retry" | "continue_current_thread" | "fail_managed_run"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+  | {
+      type: "human_gate"
+      proposedAction?: "fail_managed_run"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+  | {
+      type: "run_termination"
+      proposedAction:
+        | "stop_managed_run"
+        | "complete_managed_run"
+        | "fail_managed_run"
+        | "reject_human_gate"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+
+export type ManagedRunDecisionAction =
+  | "start_new_thread"
+  | "continue_current_thread"
+  | "schedule_provider_retry"
+  | "approve_human_gate"
+  | "reject_human_gate"
+  | "stop_managed_run"
+  | "complete_managed_run"
+  | "fail_managed_run"
+
+export type ManagedRunDecisionActor = "controller" | "user" | "system"
+export type ManagedRunDecisionChannel = "system" | "desktop" | "im"
+
 export type ManagedRunEventType =
   | "run_started"
-  | "feature_inspected"
-  | "decision_made"
+  | "managed_agent_turn_ended"
+  | "provider_retry_timer_elapsed"
+  | "human_gate_invoked"
+  | "run_stop_requested"
+  | "session_run_aborted"
+  | "run_interrupted_after_restart"
+  | "managed_run_decision"
   | "session_created"
   | "session_started"
-  | "session_completed"
+  | "session_continued"
   | "provider_retry_scheduled"
-  | "provider_retry_sent"
-  | "provider_retry_reset"
-  | "biz_retry_reuse_thread"
-  | "biz_retry_new_thread"
-  | "human_gate_requested"
   | "human_gate_approved"
   | "human_gate_rejected"
   | "human_gate_conflict"
@@ -633,33 +702,32 @@ export type ManagedRunEventType =
   | "run_completed"
 
 export interface ManagedRunEvent {
-  version: 2
+  version: 2.5
   eventId: string
   createTime: string
   type: ManagedRunEventType
   runId: string
   scope: "global" | "stage"
-  source?:
-    | "feature_status"
-    | "agent_end_reason"
-    | "controller_policy"
-    | "managed_run"
-    | "human_gate"
   nodeId?: string
-  featureStatus?: HarnessFeatureStatus
-  nodeStatus?: HarnessNodeStatus
-  slashSkill?: string
   threadId?: string
-  workspacePath?: string
   sourceThreadId?: string
   targetThreadId?: string
-  decision?: string
+  sourceEventId?: string
+  sourceEventType?: ManagedRunEventType
+  decisionEventId?: string
+  policyResult?: ManagedRunPolicyResult
+  decisionActor?: ManagedRunDecisionActor
+  decisionChannel?: ManagedRunDecisionChannel
+  decisionAction?: ManagedRunDecisionAction
+  gateId?: string
   reasonCode?: string
-  decisionFacts?: ManagedRunDecisionFacts
-  decisionRule?: string
+  retryNumber?: number
+  retryAt?: string
+  delayMs?: number
+  previousStatus?: "running"
   outcome?: AgentTurnEndEvent["outcome"]
   endReason?: AgentTurnEndEvent["endReason"]
-  summary?: string
+  summary: string
   [key: string]: unknown
 }
 
@@ -836,8 +904,7 @@ export interface ManagedRunSessionAction {
   userMessage: string
 }
 
-export const AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL =
-  "harnessBoard:managedAutoSendStreamStarted"
+export const AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL = "harnessBoard:managedAutoSendStreamStarted"
 
 export interface ManagedAutoSendStreamStartEvent {
   runId: string
@@ -984,6 +1051,7 @@ export interface HarnessRunDetailViewModel {
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]
     managedRun?: ManagedRunSummary
+    imManagementEnabled?: boolean
     humanGate?: HarnessHumanGateSnapshot
   }
   sessions: HarnessSessionBinding[]

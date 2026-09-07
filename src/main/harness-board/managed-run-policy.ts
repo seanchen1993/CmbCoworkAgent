@@ -2,22 +2,13 @@ import type {
   AgentTurnEndEvent,
   ManagedBizRetryMode,
   ManagedFeatureStatusSnapshot,
+  ManagedRunPolicyResult,
   ManagedRunSnapshot
 } from "../../shared/harness-board-types"
 
-export type ManagedRunDecisionType =
-  | "advance"
-  | "biz_retry_reuse_thread"
-  | "biz_retry_new_thread"
-  | "provider_retry"
-  | "fail"
-  | "complete"
-
-export interface ManagedRunDecision {
-  decision: ManagedRunDecisionType
-  reasonCode: string
+export interface ManagedRunPolicyEvaluation {
+  policyResult: ManagedRunPolicyResult
   summary: string
-  rule: string
 }
 
 export interface ManagedRunPolicyConfig {
@@ -74,21 +65,27 @@ function hasValidNextAction(feature: ManagedFeatureStatusSnapshot): boolean {
 
 function missingNextActionDecision(
   feature: ManagedFeatureStatusSnapshot
-): ManagedRunDecision | null {
+): ManagedRunPolicyEvaluation | null {
   if (!feature.nextAction?.slashSkill) {
     return {
-      decision: "fail",
-      reasonCode: "next_action_missing_slash_skill",
-      summary: "当前节点的 nextAction 缺少 slashSkill",
-      rule: "创建新会话前必须存在可执行技能；缺少技能时结束托管运行。"
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: "next_action_missing_slash_skill",
+        rule: "创建新会话前必须存在可执行技能；缺少技能时结束托管运行。"
+      },
+      summary: "当前节点的 nextAction 缺少 slashSkill"
     }
   }
   if (!feature.nextAction.userMessage) {
     return {
-      decision: "fail",
-      reasonCode: "next_action_missing_user_message",
-      summary: "当前节点的 nextAction 缺少 userMessage",
-      rule: "创建新会话前必须存在执行消息；缺少消息时结束托管运行。"
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: "next_action_missing_user_message",
+        rule: "创建新会话前必须存在执行消息；缺少消息时结束托管运行。"
+      },
+      summary: "当前节点的 nextAction 缺少 userMessage"
     }
   }
   return null
@@ -146,7 +143,7 @@ export function resolveManagedRunDecision(input: {
   feature: ManagedFeatureStatusSnapshot
   terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">
   config?: ManagedRunPolicyConfig
-}): ManagedRunDecision {
+}): ManagedRunPolicyEvaluation {
   const { run, feature, terminal } = input
   const config = input.config ?? DEFAULT_MANAGED_RUN_POLICY
   if (
@@ -155,34 +152,46 @@ export function resolveManagedRunDecision(input: {
     (feature.currentNodeStatus === "done" || feature.currentNodeStatus === "archived")
   ) {
     return {
-      decision: "complete",
-      reasonCode: "feature_terminal",
-      summary: "特性已进入终态",
-      rule: "当前阶段是工作流最后阶段，且特性状态和阶段状态均为已完成或已归档时，完成托管运行。"
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "complete_managed_run",
+        reasonCode: "feature_terminal",
+        rule: "当前阶段是工作流最后阶段，且特性状态和阶段状态均为已完成或已归档时，完成托管运行。"
+      },
+      summary: "特性已进入终态"
     }
   }
   if (["blocked", "warning", "error", "unknown"].includes(feature.featureStatus)) {
     return {
-      decision: "fail",
-      reasonCode: `feature_status_${feature.featureStatus}`,
-      summary: `特性状态为 ${feature.featureStatus}，托管运行失败，需处理后重新开始`,
-      rule: "特性状态为受阻、警告、错误或未知时，结束托管运行并等待人工处理。"
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: `feature_status_${feature.featureStatus}`,
+        rule: "特性状态为受阻、警告、错误或未知时，结束托管运行并等待人工处理。"
+      },
+      summary: `特性状态为 ${feature.featureStatus}，托管运行失败，需处理后重新开始`
     }
   }
   if (terminal?.endReason.code === "hook_halt") {
     return {
-      decision: "fail",
-      reasonCode: "hook_halt",
-      summary: terminal.endReason.message || "Hook 阻止了本轮完成",
-      rule: "Hook 明确阻止本轮继续时，结束托管运行。"
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: "hook_halt",
+        rule: "Hook 明确阻止本轮继续时，结束托管运行。"
+      },
+      summary: terminal.endReason.message || "Hook 阻止了本轮完成"
     }
   }
   if (terminal?.endReason.code === "failure_fuse") {
     return {
-      decision: "fail",
-      reasonCode: "failure_fuse",
-      summary: terminal.endReason.message || "失败熔断器阻止了继续执行",
-      rule: "失败熔断器触发时，结束托管运行，避免继续自动执行。"
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: "failure_fuse",
+        rule: "失败熔断器触发时，结束托管运行，避免继续自动执行。"
+      },
+      summary: terminal.endReason.message || "失败熔断器阻止了继续执行"
     }
   }
 
@@ -195,18 +204,24 @@ export function resolveManagedRunDecision(input: {
   const nodeCompleted = isCompletedNodeStatus(feature.currentNodeStatus)
   if (terminal?.endReason.code === "provider_error" && !nodeChanged && !nodeCompleted) {
     return {
-      decision: "provider_retry",
-      reasonCode: "provider_error",
-      summary: "模型服务调用失败，计划在原会话重试",
-      rule: "模型服务调用失败且当前阶段尚未结束时，不考虑上下文占用，在原会话中按退避计划重试。"
+      policyResult: {
+        type: "provider_retry",
+        proposedAction: "schedule_provider_retry",
+        reasonCode: "provider_error",
+        rule: "模型服务调用失败且当前阶段尚未结束时，不考虑上下文占用，在原会话中按退避计划重试。"
+      },
+      summary: "模型服务调用失败，计划在原会话重试"
     }
   }
   if (terminal?.outcome === "error" && terminal.endReason.code !== "provider_error") {
     return {
-      decision: "fail",
-      reasonCode: "agent_error",
-      summary: terminal.endReason.message || "Agent 执行失败",
-      rule: "非模型服务错误导致会话失败时，不自动重试并结束托管运行。"
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: "agent_error",
+        rule: "非模型服务错误导致会话失败时，不自动重试并结束托管运行。"
+      },
+      summary: terminal.endReason.message || "Agent 执行失败"
     }
   }
 
@@ -214,10 +229,13 @@ export function resolveManagedRunDecision(input: {
     const invalidAction = missingNextActionDecision(feature)
     if (invalidAction) return invalidAction
     return {
-      decision: "advance",
-      reasonCode: "initial_action_resolved",
-      summary: "首次检查得到合法执行指令，创建第一个工作会话",
-      rule: "当前托管运行尚无工作会话且 nextAction 合法时，创建第一个工作会话。"
+      policyResult: {
+        type: "biz_progress",
+        proposedAction: "start_new_thread",
+        reasonCode: "initial_action_resolved",
+        rule: "当前托管运行尚无工作会话且 nextAction 合法时，创建第一个工作会话。"
+      },
+      summary: "首次检查得到合法执行指令，创建第一个工作会话"
     }
   }
 
@@ -227,23 +245,27 @@ export function resolveManagedRunDecision(input: {
     const invalidAction = missingNextActionDecision(feature)
     if (invalidAction) return invalidAction
     return {
-      decision: "advance",
-      reasonCode: nodeChanged ? "current_node_changed" : "current_node_completed",
-      summary: nodeChanged
-        ? "当前阶段已经变化，创建新会话继续"
-        : "当前阶段已经结束，创建新会话继续",
-      rule: nodeChanged
-        ? "currentNodeId 变化表示进入新的工作阶段，创建新会话并清零 Biz Retry。"
-        : "当前阶段状态变化为已完成、已归档或已跳过时，创建新会话推进并清零 Biz Retry。"
+      policyResult: {
+        type: "biz_progress",
+        proposedAction: "start_new_thread",
+        reasonCode: nodeChanged ? "current_node_changed" : "current_node_completed",
+        rule: nodeChanged
+          ? "currentNodeId 变化表示进入新的工作阶段，创建新会话并清零 Biz Retry。"
+          : "当前阶段状态变化为已完成、已归档或已跳过时，创建新会话推进并清零 Biz Retry。"
+      },
+      summary: nodeChanged ? "当前阶段已经变化，创建新会话继续" : "当前阶段已经结束，创建新会话继续"
     }
   }
 
   if (terminal?.outcome === "success" && run.bizRetryCount >= config.maxBizRetries) {
     return {
-      decision: "fail",
-      reasonCode: "biz_retry_limit_exceeded",
-      summary: "当前任务重试超过限制次数",
-      rule: "完成三次 Biz Retry 后当前阶段仍未结束时，结束托管运行。"
+      policyResult: {
+        type: "biz_retry",
+        proposedAction: "fail_managed_run",
+        reasonCode: "biz_retry_limit_exceeded",
+        rule: "完成三次 Biz Retry 后当前阶段仍未结束时，结束托管运行。"
+      },
+      summary: "当前任务重试超过限制次数"
     }
   }
 
@@ -254,13 +276,16 @@ export function resolveManagedRunDecision(input: {
     config
   })
   if (retry.retryMode === "new_thread" && !hasValidNextAction(feature)) {
-    return missingNextActionDecision(feature) as ManagedRunDecision
+    return missingNextActionDecision(feature) as ManagedRunPolicyEvaluation
   }
   return {
-    decision:
-      retry.retryMode === "reuse_thread" ? "biz_retry_reuse_thread" : "biz_retry_new_thread",
-    reasonCode: retry.reasonCode,
-    summary: retry.summary,
-    rule: retry.rule
+    policyResult: {
+      type: "biz_retry",
+      proposedAction:
+        retry.retryMode === "reuse_thread" ? "continue_current_thread" : "start_new_thread",
+      reasonCode: retry.reasonCode,
+      rule: retry.rule
+    },
+    summary: retry.summary
   }
 }
