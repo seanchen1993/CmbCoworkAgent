@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TraceExplorer } from "./TraceHistoryDialog"
+import { unwrapThreadTracesResponse } from "./thread-traces-response"
 import type { DashboardTraceDetail } from "./use-dashboard"
 
 // ── 类型（与主进程 dashboard.ts / preload d.ts 对齐）──────────────────
@@ -238,8 +239,11 @@ function ThreadDetailDialog({
   const loadThreadTraces = useCallback(
     async (id: string): Promise<DashboardTraceDetail[]> => {
       if (id === threadId) return traces
-      const res = await window.api.dashboard.threadTraces(id, { scope: threadScope })
-      return res.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
+      // 失败必须抛出而不是回落成空列表：TraceExplorer 会把「成功但为空」缓存下来，
+      // 那样一次网络抖动就把该会话永久锁在只有摘要的状态。
+      return unwrapThreadTracesResponse(
+        await window.api.dashboard.threadTraces(id, { scope: threadScope })
+      )
     },
     [threadId, threadScope, traces]
   )

@@ -31,6 +31,12 @@ function section(source: string, start: string, end: string): string {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const dashboardSource = readFileSync(join(__dirname, "../src/main/ipc/dashboard.ts"), "utf8")
+// thread 视图的「按会话分页」查询构造已抽成纯函数模块（两阶段：先定位当页会话，
+// 再只为当页会话回带不含 _raw 的预览 trace）。见 dashboard-trace-thread-list.ts。
+const threadListSource = readFileSync(
+  join(__dirname, "../src/main/ipc/dashboard-trace-thread-list.ts"),
+  "utf8"
+)
 const projectModePanelSource = readFileSync(
   join(__dirname, "../src/renderer/src/components/dashboard/panels/ProjectModePanel.tsx"),
   "utf8"
@@ -38,9 +44,9 @@ const projectModePanelSource = readFileSync(
 
 function testThreadListAggUsesRootThreadId(): void {
   const source = section(
-    dashboardSource,
-    "function threadListAgg",
-    "function parseThreadListContainer"
+    threadListSource,
+    "export function threadListKeysAgg",
+    "export function parseThreadListKeys"
   )
   assertIncludes(
     source,

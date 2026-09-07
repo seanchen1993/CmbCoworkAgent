@@ -14,7 +14,8 @@ import {
   DASHBOARD_ES_WORKER_RESOURCE_LIMITS,
   DashboardEsRequestCancelledError,
   DashboardEsWorkerClient,
-  DashboardEsWorkerUnavailableError
+  DashboardEsWorkerUnavailableError,
+  isDashboardEsResponseTooLarge
 } from "./dashboard-es-client"
 import {
   DASHBOARD_ES_INPUT_BYTE_LIMIT,
@@ -406,5 +407,51 @@ describe("Dashboard ES worker", () => {
     await client.close()
 
     await expect(pending).resolves.toBeInstanceOf(DashboardEsRequestCancelledError)
+  })
+})
+
+/**
+ * 体积超限曾被 makeEsUnavailableError 一律包成「请检查网络连接后重试」，把线上
+ * 排查引到了网络方向。这两类失败的处理方式完全不同：换节点、重试对体积超限
+ * 毫无意义，只能缩小查询。
+ */
+describe("response-too-large classification", () => {
+  it("recognises the code on the error itself", () => {
+    const error = Object.assign(
+      new Error("Dashboard normalized response exceeds the 6291456 byte limit"),
+      {
+        code: DASHBOARD_ES_RESPONSE_TOO_LARGE
+      }
+    )
+    expect(isDashboardEsResponseTooLarge(error)).toBe(true)
+  })
+
+  it("follows the cause chain the worker/client/esQuery wrapping creates", () => {
+    const worker = Object.assign(new Error("too large"), { code: DASHBOARD_ES_RESPONSE_TOO_LARGE })
+    const wrapped = new Error("dashboard query failed", {
+      cause: new Error("node failed", { cause: worker })
+    })
+    expect(isDashboardEsResponseTooLarge(wrapped)).toBe(true)
+  })
+
+  it("recognises the message even when the code was dropped in transit", () => {
+    expect(
+      isDashboardEsResponseTooLarge(new Error("Dashboard response exceeds the 262144 byte limit"))
+    ).toBe(true)
+  })
+
+  it("does not misclassify a genuine transport failure", () => {
+    expect(isDashboardEsResponseTooLarge(new Error("fetch failed"))).toBe(false)
+    expect(isDashboardEsResponseTooLarge(new DashboardEsWorkerUnavailableError("no worker"))).toBe(
+      false
+    )
+    expect(isDashboardEsResponseTooLarge(null)).toBe(false)
+    expect(isDashboardEsResponseTooLarge("too large")).toBe(false)
+  })
+
+  it("terminates on a self-referential cause chain", () => {
+    const looping = new Error("loop") as Error & { cause?: unknown }
+    looping.cause = looping
+    expect(isDashboardEsResponseTooLarge(looping)).toBe(false)
   })
 })
