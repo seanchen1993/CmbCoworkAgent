@@ -19,7 +19,8 @@ import ts from "typescript"
 import { createManagedRunResultCollector } from "../src/main/services/im/managed-run-result"
 import {
   ImCompletionHookRejectedError,
-  ImPreparedPromptRejectedError
+  ImPreparedPromptRejectedError,
+  ImTurnIncompleteError
 } from "../src/main/services/im/turn-failures"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
@@ -237,9 +238,91 @@ function testResumeStatusNoticesSurviveTerminalFallback(): void {
       expected
     )
   }
+  // An exit that classified nothing and wrote nothing is still not a success.
   const unknown = createManagedRunResultCollector()
   unknown.hooks.onRunTerminated?.({ outcome: "unknown", code: "unknown" })
-  assert.throws(() => unknown.resolve(() => "处理完成。"), /unknown/)
+  assert.throws(
+    () => unknown.resolve(() => "处理完成。"),
+    (error: unknown) => error instanceof ImTurnIncompleteError
+  )
+}
+
+function testAnIncompleteTurnKeepsTheAnswerItWrote(): void {
+  // The completion gate bounces a turn for HOW it ended — a truncated final
+  // message, todos left open — not for what it wrote. The desktop transcript
+  // shows that text next to the reason; IM has one message, so it must carry
+  // both. Answering a usable turn with a bare short code throws away work the
+  // user already paid a model call for.
+  const collected = createManagedRunResultCollector()
+  void collected.hooks.onFinalAssistant?.({ messageId: "m1", finalText: "改完了前两处，" })
+  collected.hooks.onRunTerminated?.({
+    outcome: "error",
+    code: "unknown",
+    message: "模型未能给出有效的最终结果：length_truncated（已重试 2 次）。本回合按未完成处理。"
+  })
+  const reply = collected.resolve(() => "处理完成。")
+  assert(reply.startsWith("改完了前两处，"), `answer must survive, got: ${reply}`)
+  assert(reply.includes("length_truncated"), `reason must ride along, got: ${reply}`)
+  assert(
+    reply.includes("本回合按未完成处理"),
+    `the reply must not read as a completed turn, got: ${reply}`
+  )
+}
+
+function testAnIncompleteTurnWithNoAnswerStillExplainsItself(): void {
+  // empty_response is the gate's most common defect and leaves nothing to
+  // preserve. The reason is then the only thing the user has, so it must reach
+  // them under a code of its own — REMOTE_RUNTIME_FAILED replies with a short
+  // code and nothing else.
+  const collected = createManagedRunResultCollector()
+  collected.hooks.onRunTerminated?.({
+    outcome: "error",
+    code: "unknown",
+    message: "模型未能给出有效的最终结果：empty_response（已重试 2 次）。本回合按未完成处理。"
+  })
+  assert.throws(
+    () => collected.resolve(() => "处理完成。"),
+    (error: unknown) =>
+      error instanceof ImTurnIncompleteError &&
+      error.reasonCode === "REMOTE_TURN_INCOMPLETE" &&
+      error.message.includes("empty_response")
+  )
+}
+
+function testAPolicyBlockStillDiscardsItsPartialText(): void {
+  // The contrast that makes the branch above safe to have. "Incomplete" means
+  // the answer is unfinished; "blocked" means it must not be delivered at all.
+  // A Stop hook keeping its text would ship exactly what policy refused.
+  const collected = createManagedRunResultCollector()
+  void collected.hooks.onFinalAssistant?.({ messageId: "m1", finalText: "机密内容" })
+  collected.hooks.onRunTerminated?.({
+    outcome: "error",
+    code: "hook_halt",
+    message: "Stop hook halted the turn"
+  })
+  assert.throws(
+    () => collected.resolve(() => "处理完成。"),
+    (error: unknown) => error instanceof ImCompletionHookRejectedError
+  )
+}
+
+function testTheRunnerSurfacesAnIncompleteReasonInsteadOfAShortCode(): void {
+  // failureReply is not exported and the runner needs the whole IM stack, so
+  // the wiring is pinned at the source. Three separate things must hold, and
+  // dropping any one of them silently restores the generic failure reply.
+  const runner = readFileSync(join(PROJECT_ROOT, "src/main/services/im/remote-runner.ts"), "utf8")
+  assert(
+    runner.includes('if (reasonCode === "REMOTE_TURN_INCOMPLETE")'),
+    "failureReply must have a branch that renders the incomplete reason"
+  )
+  assert(
+    /error instanceof ImTurnIncompleteError \? error\.message : undefined/.test(runner),
+    "the thrown reason must be passed into failureReply, not dropped"
+  )
+  assert(
+    runner.includes("!(error instanceof ImTurnIncompleteError) &&"),
+    "an incomplete turn must never be retried: its retries were already spent in the gate"
+  )
 }
 
 function testBothImEntryPointsUseThisCollector(): void {
@@ -272,6 +355,10 @@ async function main(): Promise<void> {
     testCancellationOutranksEverything,
     testANoticeStandsInForAMissingReply,
     testResumeStatusNoticesSurviveTerminalFallback,
+    testAnIncompleteTurnKeepsTheAnswerItWrote,
+    testAnIncompleteTurnWithNoAnswerStillExplainsItself,
+    testAPolicyBlockStillDiscardsItsPartialText,
+    testTheRunnerSurfacesAnIncompleteReasonInsteadOfAShortCode,
     testBothImEntryPointsUseThisCollector
   ]) {
     test()

@@ -86,7 +86,11 @@ import {
   neutralizeImSkillUseMarkers
 } from "./skill-command"
 import { ImGoalRunBridge } from "./goal-runner"
-import { ImCompletionHookRejectedError, ImPreparedPromptRejectedError } from "./turn-failures"
+import {
+  ImCompletionHookRejectedError,
+  ImPreparedPromptRejectedError,
+  ImTurnIncompleteError
+} from "./turn-failures"
 import {
   executeRemoteStandardTurnOnDesktopRunBody,
   withImInboxRuntimePolicy
@@ -230,11 +234,23 @@ function abortLike(error: unknown, signal: AbortSignal): boolean {
   )
 }
 
-function failureReply(reasonCode: string, retryable: boolean, eventId: string): string {
+function failureReply(
+  reasonCode: string,
+  retryable: boolean,
+  eventId: string,
+  detail?: string
+): string {
   const code = eventShortCode(eventId)
   if (reasonCode === "REMOTE_PROMPT_BLOCKED") return "这条消息被本机 Hook 策略拦截，未执行。"
   if (reasonCode === "REMOTE_COMPLETION_HOOK_BLOCKED") {
     return `本机 Hook 未允许本轮结果完成。事件短码：${code}。请在桌面查看详情。`
+  }
+  // An incomplete turn that wrote nothing gets the reason itself: it is the
+  // only thing the user has to go on, it is already written for them
+  // (describeTurnCompletionFailure), and a bare short code would hide that the
+  // model never produced a valid answer.
+  if (reasonCode === "REMOTE_TURN_INCOMPLETE") {
+    return `${detail ?? "本轮未完成。"}\n事件短码：${code}。请在桌面查看详情。`
   }
   return retryable
     ? `处理失败，可稍后重试。事件短码：${code}。`
@@ -1125,19 +1141,26 @@ export class ImRemoteRunner {
         error instanceof ImSkillCommandError
           ? error.reasonCode
           : error instanceof ImPreparedPromptRejectedError ||
-              error instanceof ImCompletionHookRejectedError
+              error instanceof ImCompletionHookRejectedError ||
+              error instanceof ImTurnIncompleteError
             ? error.reasonCode
             : "REMOTE_RUNTIME_FAILED"
       const retryable =
         !(error instanceof ImSkillCommandError) &&
         !(error instanceof ImPreparedPromptRejectedError) &&
         !(error instanceof ImCompletionHookRejectedError) &&
+        !(error instanceof ImTurnIncompleteError) &&
         isRetryableApiError(error)
       console.error("[IM] Standard turn failed:", error)
       const reply =
         error instanceof ImSkillCommandError
           ? error.publicReply
-          : failureReply(reasonCode, retryable, event.eventId)
+          : failureReply(
+              reasonCode,
+              retryable,
+              event.eventId,
+              error instanceof ImTurnIncompleteError ? error.message : undefined
+            )
       const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
         eventId: event.eventId,
         state: "failed",
