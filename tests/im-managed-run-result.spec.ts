@@ -15,6 +15,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
+import ts from "typescript"
 import { createManagedRunResultCollector } from "../src/main/services/im/managed-run-result"
 import {
   ImCompletionHookRejectedError,
@@ -177,6 +178,70 @@ async function testTheCallersOwnFinalAssistantStillRuns(): Promise<void> {
   assert.deepEqual(seen, ["ok"], "chaining must not be dropped when the collector records")
 }
 
+function testResumeStatusNoticesSurviveTerminalFallback(): void {
+  const agent = readFileSync(join(PROJECT_ROOT, "src/main/ipc/agent.ts"), "utf8")
+  const entry = agent.slice(agent.indexOf("registerAgentRunImplementation(("))
+  const wrapper = entry.slice(
+    entry.indexOf("let terminalReported = false"),
+    entry.indexOf("return agentRunExecutionContextStorage.run(")
+  )
+  const resume = entry.slice(entry.indexOf('if (goalCommand.type === "resume")'))
+  // Execute the actual early-return branches and once-only wrapper. The rest
+  // of the run body requires Electron; these status replies need no runtime.
+  const earlyReturns = resume.slice(0, resume.indexOf("if (!getThreadWorkspacePath(threadId))"))
+  const body = ts.transpileModule(
+    `${wrapper}
+     try { ${earlyReturns} } }
+     finally { runExecutionContext.onRunTerminated?.({ outcome: "unknown", code: "unknown" }) }`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }
+  ).outputText
+  const execute = new Function(
+    "incomingRunExecutionContext",
+    "goalCommand",
+    "goalManager",
+    "activeRuns",
+    "threadId",
+    "window",
+    "channel",
+    "emitGoalNotice",
+    "safeSendToWindow",
+    body
+  )
+  for (const [goal, busy, expected] of [
+    [null, false, "没有可继续的 goal。"],
+    [{ status: "complete" }, false, "Goal 已完成，不能 resume。清除请发送 /goal clear。"],
+    [{ status: "active" }, true, "Goal 正在进行中，无需 resume。"],
+    [{ status: "paused" }, true, "当前线程正在运行，稍后发送 /goal resume。"]
+  ] as const) {
+    const collected = createManagedRunResultCollector()
+    execute(
+      collected.hooks,
+      { type: "resume" },
+      { get: () => goal },
+      { has: () => busy },
+      "t1",
+      {},
+      "channel",
+      (_window: unknown, _channel: string, _thread: string, message: string) =>
+        collected.hooks.onGoalNotice?.({
+          message,
+          goalId: "g1",
+          activeWindowId: null,
+          eventId: 1,
+          createdAt: 1
+        }),
+      () => undefined
+    )
+    assert.equal(
+      collected.resolve(() => "unexpected empty result"),
+      expected
+    )
+  }
+  const unknown = createManagedRunResultCollector()
+  unknown.hooks.onRunTerminated?.({ outcome: "unknown", code: "unknown" })
+  assert.throws(() => unknown.resolve(() => "处理完成。"), /unknown/)
+}
+
 function testBothImEntryPointsUseThisCollector(): void {
   // The whole point: neither path may grow its own outcome reading again.
   for (const file of [
@@ -206,6 +271,7 @@ async function main(): Promise<void> {
     testAnUnreportedTerminalIsNotTreatedAsFailure,
     testCancellationOutranksEverything,
     testANoticeStandsInForAMissingReply,
+    testResumeStatusNoticesSurviveTerminalFallback,
     testBothImEntryPointsUseThisCollector
   ]) {
     test()

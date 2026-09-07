@@ -5980,17 +5980,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               channel,
               sendDone: true
             })
-            if (controlResult.handled) return
+            if (controlResult.handled) {
+              runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
+              return
+            }
 
             if (goalCommand.type === "resume") {
               const currentGoal = goalManager.get(threadId)
               if (currentGoal?.status === "active" && activeRuns.has(threadId)) {
                 emitGoalNotice(window, channel, threadId, "Goal 正在进行中，无需 resume。")
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
               if (!currentGoal) {
                 emitGoalNotice(window, channel, threadId, "没有可继续的 goal。")
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6001,6 +6006,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 已完成，不能 resume。清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6011,6 +6017,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6042,6 +6049,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 状态已变化，请重新发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6061,6 +6069,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 状态已变化，请重新发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6071,6 +6080,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 已完成，不能 resume。清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6081,6 +6091,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6097,6 +6108,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   goal ? `Goal 当前状态：${goal.status}。` : "没有可继续的 goal。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6126,6 +6138,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后再设置新的 goal。暂停请发送 /goal pause，清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6159,6 +6172,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 状态已变化，请重新发送 /goal <目标>。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6169,6 +6183,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后再设置新的 goal。暂停请发送 /goal pause，清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
