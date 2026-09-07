@@ -29,11 +29,14 @@ import type { PreparedRemoteStandardTurnInput } from "./remote-runner"
  * would let untrusted remote input write to the workspace unreviewed while the
  * one human who could object is sitting right there in the chat.
  *
- * This is not a blanket rule for `targetKind === "inbox"`: an unattended inbox
- * turn (a scheduler reminder) has no interactionWaitHooks and no
- * requestUserInput, and approvals never time out — see APPROVAL_TIMEOUT_MS in
- * runtime.ts. Those keep their own posture in executePreparedRemoteStandardTurn
- * rather than inheriting this one.
+ * A scheduled reminder takes the same posture, even though it has no
+ * interactionWaitHooks and no requestUserInput. Approvals do not travel on
+ * those: the runtime registers them with approvalDecisionBroker, which
+ * remote-approval-service subscribes to and routes by threadId alone, and the
+ * scheduler has already proven an active conversation and inbox target for
+ * that thread. So an unattended edit is asked about rather than waved through
+ * — it just waits (APPROVAL_TIMEOUT_MS is null) until the owner answers in IM
+ * or the run is aborted, holding that thread's run lease meanwhile.
  */
 export function withImInboxRuntimePolicy(
   policy: RemoteTurnPolicy | undefined,

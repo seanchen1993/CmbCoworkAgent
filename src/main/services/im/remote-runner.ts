@@ -459,13 +459,6 @@ export async function executePreparedRemoteStandardTurn(
           metadata
         }),
         extraSystemPrompt: IM_UNTRUSTED_INPUT_CONTEXT,
-        // Unattended inbox turns only: a scheduler reminder carries no
-        // interactionWaitHooks and no requestUserInput, and approvals never
-        // time out (APPROVAL_TIMEOUT_MS in runtime.ts), so requiring one here
-        // would hang the run until it is aborted. A user's own inbox message
-        // takes the opposite posture and is approved over IM — see
-        // withImInboxRuntimePolicy. Do not "unify" these two.
-        autoApproveFileEdits: targetKind === "inbox",
         onFileMutation: (filePath) => recordAgentTouchedFile(threadId, workspacePath, filePath),
         onCoordinatorWorkerEvent: (event) => {
           if (event.stream) return

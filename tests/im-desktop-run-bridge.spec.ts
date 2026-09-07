@@ -118,6 +118,29 @@ function testInboxOnlyRuntimeOptionsTravelOnThePolicy(): void {
   )
 }
 
+function testNoImPathWavesThroughAFileEdit(): void {
+  // Every IM turn reaches an inbox thread that remote-approval-service can
+  // route to: it resolves by threadId out of conversation state, not from the
+  // event or from interactionWaitHooks, so even an unattended scheduler
+  // reminder can ask its owner. Re-enabling autoApproveFileEdits anywhere here
+  // would let untrusted remote input write to the workspace unreviewed.
+  for (const file of [
+    "src/main/services/im/desktop-run-bridge.ts",
+    "src/main/services/im/remote-runner.ts",
+    "src/main/services/im/goal-runner.ts",
+    "src/main/services/im/inbox-scheduler.ts"
+  ]) {
+    const source = readFileSync(join(PROJECT_ROOT, file), "utf8")
+    for (const line of source.split("\n")) {
+      if (line.trimStart().startsWith("*") || line.trimStart().startsWith("//")) continue
+      assert(
+        !line.includes("autoApproveFileEdits"),
+        `${file} must not auto-approve file edits for an IM turn: ${line.trim()}`
+      )
+    }
+  }
+}
+
 function testTheBridgeLeavesTranscriptPersistenceToTheRunBody(): void {
   // persistVisibleUserTranscriptMessage (agent.ts) writes the user's message
   // under the same userMessageId this bridge passes in, and already skips the
@@ -341,6 +364,7 @@ async function testTheAuthorizationCheckReachesTheRunBody(): Promise<void> {
 async function main(): Promise<void> {
   for (const test of [
     testInboxOnlyRuntimeOptionsTravelOnThePolicy,
+    testNoImPathWavesThroughAFileEdit,
     testTheBridgeLeavesTranscriptPersistenceToTheRunBody,
     testTheRunBodyStillHonoursWhatTheBridgeDependsOn
   ]) {
