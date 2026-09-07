@@ -5100,20 +5100,12 @@ function FeatureConversationPanel({
   threadId,
   chatSurface = "harness-project",
   readOnlyReason,
-  hasPendingGitDiffNotice,
   onHarnessSessionCreated,
-  onRequestOpenGitPanel,
-  onDismissGitChangeNotice,
-  onThreadGitStatusChange
 }: {
   threadId: string | null
   chatSurface?: "harness-project" | "harness-feature-session"
   readOnlyReason?: string | null
-  hasPendingGitDiffNotice?: boolean
   onHarnessSessionCreated?: (threadId: string) => void
-  onRequestOpenGitPanel?: () => void
-  onDismissGitChangeNotice?: () => void
-  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }): React.JSX.Element {
   return (
     <section className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border/70 bg-background w-full">
@@ -5122,13 +5114,9 @@ function FeatureConversationPanel({
           <TabbedPanel
             threadId={threadId}
             showTabBar={false}
-            hasPendingGitDiffNotice={hasPendingGitDiffNotice}
             chatSurface={chatSurface}
             hideWelcomeSkillTabs
             readOnlyReason={readOnlyReason}
-            onRequestOpenGitPanel={onRequestOpenGitPanel}
-            onDismissGitChangeNotice={onDismissGitChangeNotice}
-            onThreadGitStatusChange={onThreadGitStatusChange}
             onHarnessSessionCreated={onHarnessSessionCreated}
           />
         </div>
@@ -6152,10 +6140,6 @@ function ProjectSessionPage({
   onBackToList,
   onBackToProject,
   onHarnessSessionCreated,
-  hasPendingGitDiffNotice,
-  onRequestOpenGitPanel,
-  onDismissGitChangeNotice,
-  onThreadGitStatusChange
 }: {
   project: ProjectFeatureSidebarProject
   thread: Thread | null
@@ -6163,10 +6147,6 @@ function ProjectSessionPage({
   onBackToList: () => void
   onBackToProject: () => void
   onHarnessSessionCreated?: (threadId: string) => void
-  hasPendingGitDiffNotice?: boolean
-  onRequestOpenGitPanel?: () => void
-  onDismissGitChangeNotice?: () => void
-  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }): React.JSX.Element {
   const title = thread ? getThreadTitle(thread) : "项目会话"
   const readOnlyReason = deleted ? "所属项目已删除，当前会话只读。" : null
@@ -6197,11 +6177,7 @@ function ProjectSessionPage({
           threadId={thread?.thread_id ?? null}
           chatSurface="harness-feature-session"
           readOnlyReason={readOnlyReason}
-          hasPendingGitDiffNotice={hasPendingGitDiffNotice}
           onHarnessSessionCreated={onHarnessSessionCreated}
-          onRequestOpenGitPanel={onRequestOpenGitPanel}
-          onDismissGitChangeNotice={onDismissGitChangeNotice}
-          onThreadGitStatusChange={onThreadGitStatusChange}
         />
       </div>
     </div>
@@ -6364,7 +6340,6 @@ function FeatureDetailPage({
   projectDeleted,
   activeSessionThreadId,
   isViewingSession,
-  hasPendingGitDiffNotice,
   fallbackProjectName,
   fallbackFeatureTitle,
   onBackToList,
@@ -6374,9 +6349,6 @@ function FeatureDetailPage({
   onActiveSessionChange,
   onSessionViewChange,
   onActiveSessionThreadChange,
-  onRequestOpenGitPanel,
-  onDismissGitChangeNotice,
-  onThreadGitStatusChange
 }: {
   detail: HarnessRunDetailViewModel | null
   loading: boolean
@@ -6384,7 +6356,6 @@ function FeatureDetailPage({
   projectDeleted?: boolean
   activeSessionThreadId?: string
   isViewingSession: boolean
-  hasPendingGitDiffNotice?: boolean
   fallbackProjectName?: string
   fallbackFeatureTitle?: string
   onBackToList: () => void
@@ -6394,9 +6365,6 @@ function FeatureDetailPage({
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
   onActiveSessionThreadChange?: (threadId: string | null) => void
-  onRequestOpenGitPanel?: () => void
-  onDismissGitChangeNotice?: () => void
-  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
 }): React.JSX.Element {
   const defaultNodeId = useMemo(() => {
     if (!detail) return null
@@ -7117,11 +7085,7 @@ function FeatureDetailPage({
           <FeatureConversationPanel
             threadId={activeSessionThreadIdForView}
             readOnlyReason={projectDeleted ? "项目已删除，仅可查看历史会话" : null}
-            hasPendingGitDiffNotice={hasPendingGitDiffNotice}
             onHarnessSessionCreated={handleContextReminderSessionCreated}
-            onRequestOpenGitPanel={onRequestOpenGitPanel}
-            onDismissGitChangeNotice={onDismissGitChangeNotice}
-            onThreadGitStatusChange={onThreadGitStatusChange}
           />
         </div>
       ) : projectDeleted ? (
@@ -8107,18 +8071,10 @@ function ProjectFeatureSidebar({
 }
 
 interface HarnessBoardViewProps {
-  hasPendingGitDiffNotice?: boolean
-  onRequestOpenGitPanel?: () => void
-  onDismissGitChangeNotice?: () => void
-  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
   onActiveSessionThreadChange?: (threadId: string | null) => void
 }
 
 export function HarnessBoardView({
-  hasPendingGitDiffNotice,
-  onRequestOpenGitPanel,
-  onDismissGitChangeNotice,
-  onThreadGitStatusChange,
   onActiveSessionThreadChange
 }: HarnessBoardViewProps = {}): React.JSX.Element {
   const [initialCatalogSnapshot] = useState(readHarnessBoardCatalogCache)
@@ -11412,7 +11368,6 @@ export function HarnessBoardView({
           projectDeleted={selectedFeatureDeleted}
           activeSessionThreadId={selectedFeature.activeSessionThreadId}
           isViewingSession={isViewingSession}
-          hasPendingGitDiffNotice={hasPendingGitDiffNotice}
           fallbackProjectName={
             selectedFeatureDeleted
               ? readThreadHarnessProjectName(selectedFeatureThread)
@@ -11426,9 +11381,6 @@ export function HarnessBoardView({
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
           onActiveSessionThreadChange={onActiveSessionThreadChange}
-          onRequestOpenGitPanel={onRequestOpenGitPanel}
-          onDismissGitChangeNotice={onDismissGitChangeNotice}
-          onThreadGitStatusChange={onThreadGitStatusChange}
         />
         <FeatureCreateDialog
           mode={featureDialogMode}
@@ -11472,10 +11424,6 @@ export function HarnessBoardView({
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
           onHarnessSessionCreated={handleActiveProjectSessionChange}
-          hasPendingGitDiffNotice={hasPendingGitDiffNotice}
-          onRequestOpenGitPanel={onRequestOpenGitPanel}
-          onDismissGitChangeNotice={onDismissGitChangeNotice}
-          onThreadGitStatusChange={onThreadGitStatusChange}
         />
         {sidebarDeleteDialog}
         {sidebarPortal}

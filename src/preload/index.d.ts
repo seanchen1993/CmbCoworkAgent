@@ -201,7 +201,6 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { ChatScrollSettings } from "../shared/chat-scroll"
 import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
@@ -220,9 +219,8 @@ interface ElectronAPI {
   getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
-  getChatScrollSettings: () => Promise<ChatScrollSettings>
-  setChatScrollSettings: (settings: Partial<ChatScrollSettings>) => Promise<ChatScrollSettings>
-  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => () => void
+  getGitChangeNoticeEnabled: () => Promise<boolean>
+  setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
   setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
