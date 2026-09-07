@@ -7744,7 +7744,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
-            recursionLimit: 1000
+            recursionLimit: getAgentGraphRecursionLimit()
           }
 
           // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
@@ -10545,7 +10545,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
-            recursionLimit: 1000
+            recursionLimit: getAgentGraphRecursionLimit()
           }
 
           // Resume from checkpoint by streaming with Command containing the decision
