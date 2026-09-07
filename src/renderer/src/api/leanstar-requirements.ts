@@ -45,6 +45,20 @@ export type RequirementDetail = {
   [key: string]: unknown
 }
 
+export type RequirementDocumentContent = {
+  code?: string
+  title?: string
+  type?: string
+  requirementVersion?: string | null
+  digitalProductId?: string
+  digitalProductName?: string
+  documentTextContent?: string
+  zhaohuDocId?: string | null
+  prType?: string
+  frType?: string | null
+  richComponents?: unknown[]
+}
+
 // 实施功能（subFr）的唯一标识，优先 subFrCode，回退 frCode。
 export function getDetailCode(detail?: ImplementationDetail): string {
   return detail?.subFrCode || detail?.frCode || detail?.id || ""
@@ -81,6 +95,12 @@ type ApiDetailResponse = {
   returnCode?: string
   errorMsg?: string
   body?: RequirementDetail | null
+}
+
+type ApiDocumentContentResponse = {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: RequirementDocumentContent | null
 }
 
 type NamespaceTreeResponse = {
@@ -258,7 +278,8 @@ const MOCK_NAMESPACE_TREE: NamespaceTreeNode[] = [
         children: [
           {
             devopsOrgId: "org-wplus",
-            pathName: "Mock 银行/Mock 总行/Mock 技术部/Mock 开发组 A",
+            pathName:
+              "Mock 银行/Mock 总行/Mock 技术部/Mock 开发组 A/Mock 银行/Mock 总行/Mock 技术部/Mock 开发组 A",
             pathId: "cmb/it/wplus",
             orgLevel: "组",
             isOrgLeaf: true,
@@ -371,14 +392,17 @@ export const leanstarRequirementsApi = {
       const content = MOCK_REQUIREMENTS[domainId] ?? []
       return Promise.resolve({ content, total: content.length })
     }
-    return request<ApiPageResponse<ProductRequirement>>("/api/requirement/product-requirements/page", {
-      method: "POST",
-      body: JSON.stringify({
-        pageIndex: 1,
-        pageSize: 15,
-        domain: { id: domainId, type: domainType }
-      })
-    }).then((result) => result.body ?? result)
+    return request<ApiPageResponse<ProductRequirement>>(
+      "/api/requirement/product-requirements/page",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          pageIndex: 1,
+          pageSize: 15,
+          domain: { id: domainId, type: domainType }
+        })
+      }
+    ).then((result) => result.body ?? result)
   },
 
   getImplementationDetail(code: string): Promise<{ subFrs?: ImplementationDetail[] }> {
@@ -401,6 +425,25 @@ export const leanstarRequirementsApi = {
       }
       return result as RequirementDetail
     })
+  },
+
+  getRequirementDocumentContent(code: string): Promise<RequirementDocumentContent | null> {
+    if (USE_MOCK) {
+      const detail = MOCK_REQUIREMENT_DETAIL[code]
+      return Promise.resolve(
+        detail
+          ? {
+              code: detail.code,
+              title: detail.title,
+              documentTextContent: `# ${detail.title ?? code}\n\nMock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容。Mock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容。Mock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容。Mock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容\n\nMock 需求文档内容。`
+            }
+          : null
+      )
+    }
+    return request<ApiDocumentContentResponse>(
+      `/api/requirement/document-content/${encodeURIComponent(code)}`,
+      { method: "GET" }
+    ).then((result) => result.body ?? null)
   },
 
   getNamespaceTree(): Promise<NamespaceTreeResponse> {

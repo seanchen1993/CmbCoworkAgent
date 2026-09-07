@@ -1,12 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import {
-  Check,
-  ClipboardList,
-  Layers3,
-  LoaderCircle,
-  Network,
-  RefreshCw
-} from "lucide-react"
+import { Check, ClipboardList, Eye, Layers3, LoaderCircle, Network, RefreshCw } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
   Select,
@@ -15,6 +8,8 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import {
   leanstarRequirementsApi,
   getDetailCode,
@@ -103,10 +98,13 @@ function NamespacePathLabel({
     .filter(Boolean)
   const lastSegment = segments.at(-1) ?? pathName
   return (
-    <span className={cn("flex min-w-0 items-center justify-start text-left", className)} title={pathName}>
-      <span className="min-w-0 truncate">{lastSegment}</span>
+    <span
+      className={cn("flex min-w-0 items-center justify-start text-left", className)}
+      title={pathName}
+    >
+      <span className="shrink-0 whitespace-nowrap">{lastSegment}</span>
       {pathName && pathName !== lastSegment && (
-        <span className="ml-1 min-w-0 truncate text-muted-foreground">({pathName})</span>
+        <span className="ml-1 min-w-0 flex-1 truncate text-muted-foreground">({pathName})</span>
       )}
     </span>
   )
@@ -203,6 +201,10 @@ export function NamespaceTreeSelector({
   const [requirements, setRequirements] = useState<ProductRequirement[]>([])
   const [requirementCode, setRequirementCode] = useState(value?.requirement.code ?? "")
   const [details, setDetails] = useState<ImplementationDetail[]>([])
+  const [documentContent, setDocumentContent] = useState("")
+  const [documentLoading, setDocumentLoading] = useState(false)
+  const [documentError, setDocumentError] = useState<string | null>(null)
+  const [documentPreviewOpen, setDocumentPreviewOpen] = useState(false)
   const [selectedDetailCode, setSelectedDetailCode] = useState<string | null>(
     getDetailCode(value?.implementationDetails[0]) || null
   )
@@ -253,6 +255,10 @@ export function NamespaceTreeSelector({
     setRequirements([])
     setDetails([])
     setSelectedDetailCode(null)
+    setDocumentContent("")
+    setDocumentLoading(false)
+    setDocumentError(null)
+    setDocumentPreviewOpen(false)
     onChange(null)
     setLoading("requirements")
     setError(null)
@@ -281,6 +287,17 @@ export function NamespaceTreeSelector({
       requirement,
       implementationDetails: []
     })
+    setDocumentLoading(true)
+    setDocumentError(null)
+    setDocumentPreviewOpen(false)
+    void leanstarRequirementsApi
+      .getRequirementDocumentContent(nextCode)
+      .then((result) => setDocumentContent(result?.documentTextContent ?? ""))
+      .catch((reason: unknown) => {
+        setDocumentContent("")
+        setDocumentError(reason instanceof Error ? reason.message : "加载需求文档失败")
+      })
+      .finally(() => setDocumentLoading(false))
     // The page response may include functions for this requirement.
     setDetails(
       (requirement.functionList ?? []).map((item) => ({
@@ -421,22 +438,67 @@ export function NamespaceTreeSelector({
         </label>
 
         {/* 步骤 2：需求特性 */}
-        <SelectField
-          step={2}
-          icon={Layers3}
-          label="需求特性"
-          value={requirementCode}
-          options={requirements}
-          disabled={!selectedNamespace}
-          loading={loading === "requirements"}
-          placeholder={selectedNamespace ? "请选择需求特性" : "请先选择命名空间"}
-          onChange={handleRequirementChange}
-          getValue={(option) => option.code}
-          getLabel={(option) => {
-            const owner = getOwnerLabel(option.owner)
-            return `${option.title}（${option.code}）${owner}`
-          }}
-        />
+        <div className="grid gap-2">
+          <span className="flex items-center gap-2 text-xs font-semibold text-foreground">
+            <span className="flex size-5 items-center justify-center rounded-full bg-muted text-[10px] font-bold text-muted-foreground">
+              2
+            </span>
+            <Layers3 className="size-3.5 text-muted-foreground" />
+            需求特性
+            <Popover open={documentPreviewOpen} onOpenChange={setDocumentPreviewOpen}>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="预览需求特性文档"
+                  title={documentLoading ? "加载需求文档中" : "预览需求文档"}
+                  disabled={!requirementCode || documentLoading}
+                  className="inline-flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {documentLoading ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <Eye className="size-3.5" />
+                  )}
+                </button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="start"
+                side="bottom"
+                className="max-h-[60vh] w-[min(720px,calc(100vw-2rem))] overflow-auto p-0"
+              >
+                {documentError ? (
+                  <p className="p-4 text-xs text-destructive">{documentError}</p>
+                ) : documentContent ? (
+                  <MarkdownPreview
+                    content={documentContent}
+                    showHeader={false}
+                    showModeToggle={false}
+                    whiteBackground
+                    className="text-foreground"
+                  />
+                ) : (
+                  <p className="p-4 text-xs text-muted-foreground">暂无需求文档内容</p>
+                )}
+              </PopoverContent>
+            </Popover>
+          </span>
+          <SelectField
+            step={2}
+            icon={Layers3}
+            label=""
+            value={requirementCode}
+            options={requirements}
+            disabled={!selectedNamespace}
+            loading={loading === "requirements"}
+            placeholder={selectedNamespace ? "请选择需求特性" : "请先选择命名空间"}
+            onChange={handleRequirementChange}
+            getValue={(option) => option.code}
+            getLabel={(option) => {
+              const owner = getOwnerLabel(option.owner)
+              return `${option.title}（${option.code}）${owner}`
+            }}
+          />
+        </div>
       </div>
 
       {error && (
