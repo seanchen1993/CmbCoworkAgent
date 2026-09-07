@@ -20,6 +20,7 @@ import {
   OwnedClaimFence,
   SingleFlightBatchCoalescer,
   TimedOutPredecessorFence,
+  canUseBoundedCheckpointRecovery,
   isPathInsideAnyDirectory,
   runSettlementPhases,
   type RunSettlementPhase
@@ -6155,11 +6156,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             // reclaim the replacement's queue after one of its setup awaits.
             setCurrentRunMessageQueueOwner(threadId, nextInvokeRunToken)
             const existingController = activeRuns.get(threadId)
+            let predecessorSettlement: "settled" | "timed_out" = "settled"
             if (existingController) {
               console.log("[Agent] Aborting existing stream for thread:", threadId)
               existingController.abort()
-              await waitForReplacedRunToSettle(threadId)
             }
+            // The controller is released before the settlement promise during
+            // terminal cleanup. Always consult that promise so the narrow
+            // controller-gone/settlement-pending window cannot authorize an
+            // index repair while predecessor persistence is still running.
+            predecessorSettlement = await waitForReplacedRunToSettle(threadId)
             if (rejectAgentStartDuringShutdown(window, channel)) {
               clearCurrentRunMessageQueue(threadId, nextInvokeRunToken)
               releaseLocalThreadRunLease(threadId, "desktop", nextInvokeRunToken)
@@ -6190,6 +6196,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortController: nextAbortController,
               turnState: nextTurnState,
               runToken: nextRunToken,
+              allowBoundedCheckpointRecovery: canUseBoundedCheckpointRecovery(
+                predecessorSettlement,
+                timedOutPredecessorFence.hasPending(threadId)
+              ),
               activeRunSettledPromise: nextActiveRunSettledPromise,
               resolveActiveRunSettled: nextResolveActiveRunSettled
             }
@@ -6225,6 +6235,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           abortController,
           turnState,
           runToken,
+          allowBoundedCheckpointRecovery,
           activeRunSettledPromise,
           resolveActiveRunSettled
         } = replacement
@@ -6270,7 +6281,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           guard: physicalStreamRunSetupGuard,
           operation: async () => {
             const tail = await getDurableRuntimeTail(threadId, {
-              excludeMessages: userMessageId ? [{ id: userMessageId, role: "user" }] : []
+              excludeMessages: userMessageId ? [{ id: userMessageId, role: "user" }] : [],
+              allowBoundedCheckpointRecovery
             })
             if (tail.persistedMessages.length > 0 && tail.checkpointHasInterrupt) {
               throw new Error(
