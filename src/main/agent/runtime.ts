@@ -246,6 +246,7 @@ import {
   invokeMcpToolWithPlaywrightInAppBrowserSupport
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
+  DeepSeekChatOpenAICompletions,
   InterleavedThinkingChatOpenAICompletions,
   ReasoningDisplayChatOpenAICompletions
 } from "./interleaved-thinking-completions"
@@ -4180,7 +4181,7 @@ export function getModelInstance(
     interleavedThinking?: boolean
     enableThinking?: boolean
     enableThinkingEffort?: boolean
-    thinkingEffort?: "high" | "max"
+    thinkingEffort?: "low" | "high" | "max"
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
@@ -4207,6 +4208,7 @@ export function getModelInstance(
   const topK = customConfig.topK ?? DEFAULT_TOP_K
   const thinkingEffort = customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT
   const thinkingConfigured = customConfig.enableThinking === true
+  const isDeepSeek = /deepseek/i.test(resolvedModel)
   // Compaction needs a final-text handoff, not a reasoning trace. Allowing a
   // thinking model here can spend the entire output budget on reasoning and
   // return empty content, so keep thinking exclusive to normal agent calls.
@@ -4241,7 +4243,14 @@ export function getModelInstance(
         enable_thinking: enableThinking,
         ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})
       },
-      ...(enableThinking ? { thinking: { type: "enabled" } } : {})
+      ...(isDeepSeek
+        ? {
+            thinking: { type: enableThinking ? "enabled" : "disabled" },
+            ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})
+          }
+        : {
+            ...(enableThinking ? { thinking: { type: "enabled" } } : {})
+          })
     },
     configuration: {
       baseURL: customConfig.baseUrl,
@@ -4250,7 +4259,12 @@ export function getModelInstance(
   }
 
   let model: ChatOpenAI
-  if (enableThinking && customConfig.interleavedThinking) {
+  if (enableThinking && isDeepSeek) {
+    model = new ChatOpenAI({
+      ...baseFields,
+      completions: new DeepSeekChatOpenAICompletions(baseFields)
+    } as never)
+  } else if (enableThinking && /minimax/i.test(resolvedModel) && customConfig.interleavedThinking) {
     model = new ChatOpenAI({
       ...baseFields,
       completions: new InterleavedThinkingChatOpenAICompletions(baseFields, {

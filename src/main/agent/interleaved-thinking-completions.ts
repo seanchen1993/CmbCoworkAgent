@@ -1,7 +1,11 @@
 import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager"
 import type { BaseMessage } from "@langchain/core/messages"
-import type { ChatGenerationChunk } from "@langchain/core/outputs"
-import { ChatOpenAICompletions } from "@langchain/openai"
+import type { ChatGenerationChunk, ChatResult } from "@langchain/core/outputs"
+import {
+  ChatOpenAICompletions,
+  convertMessagesToCompletionsMessageParams,
+  type OpenAIClient
+} from "@langchain/openai"
 
 const THINK_OPEN_TAG = "<think>"
 const THINK_CLOSE_TAG = "</think>"
@@ -306,5 +310,87 @@ export class ReasoningDisplayChatOpenAICompletions extends ChatOpenAICompletions
       )
       return super._convertCompletionsDeltaToBaseMessageChunk(...args)
     }
+  }
+}
+
+const DEEPSEEK_MESSAGES = Symbol("deepseekMessages")
+type DeepSeekRequestOptions = OpenAIClient.RequestOptions & {
+  [DEEPSEEK_MESSAGES]?: OpenAIClient.Chat.ChatCompletionMessageParam[]
+}
+
+/** Keep reasoning in durable message metadata, and replay it as a sibling of content. */
+export class DeepSeekChatOpenAICompletions extends ReasoningDisplayChatOpenAICompletions {
+  private reasoningMessages(messages: BaseMessage[]) {
+    return messages.flatMap((message) =>
+      convertMessagesToCompletionsMessageParams({ messages: [message], model: this.model }).map(
+        (param) =>
+          param.role === "assistant"
+            ? {
+                ...param,
+                reasoning_content: extractReasoningFromRecord(
+                  message as unknown as Record<string, unknown>
+                )
+              }
+            : param
+      )
+    )
+  }
+
+  override _generate(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun
+  ): Promise<ChatResult> {
+    // Non-streaming LangChain forwards options.options to completionWithRetry.
+    // Streaming invoke delegates to our _streamResponseChunks instead.
+    return super._generate(
+      messages,
+      this.invocationParams(options).stream
+        ? options
+        : {
+            ...options,
+            options: {
+              ...options.options,
+              [DEEPSEEK_MESSAGES]: this.reasoningMessages(messages)
+            }
+          },
+      runManager
+    )
+  }
+
+  override async *_streamResponseChunks(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun
+  ): AsyncGenerator<ChatGenerationChunk> {
+    yield* super._streamResponseChunks(
+      messages,
+      // Streaming LangChain forwards the call options directly. Keep this
+      // metadata call-local so concurrent requests never share message state.
+      { ...options, [DEEPSEEK_MESSAGES]: this.reasoningMessages(messages) },
+      runManager
+    )
+  }
+
+  override completionWithRetry(
+    request: OpenAIClient.Chat.ChatCompletionCreateParamsStreaming,
+    requestOptions?: OpenAIClient.RequestOptions
+  ): Promise<AsyncIterable<OpenAIClient.Chat.Completions.ChatCompletionChunk>>
+  override completionWithRetry(
+    request: OpenAIClient.Chat.ChatCompletionCreateParamsNonStreaming,
+    requestOptions?: OpenAIClient.RequestOptions
+  ): Promise<OpenAIClient.Chat.Completions.ChatCompletion>
+  override completionWithRetry(
+    request: OpenAIClient.Chat.ChatCompletionCreateParams,
+    requestOptions?: DeepSeekRequestOptions
+  ) {
+    const { [DEEPSEEK_MESSAGES]: messages, ...httpOptions } = requestOptions ?? {}
+    const body = messages ? { ...request, messages } : request
+    return body.stream
+      ? super.completionWithRetry(body, httpOptions)
+      : super.completionWithRetry(
+          body as OpenAIClient.Chat.ChatCompletionCreateParamsNonStreaming,
+          httpOptions
+        )
   }
 }
