@@ -430,8 +430,83 @@ function testAdvancedDesktopModesStayInsideTheExistingHandler(): void {
   }
 }
 
+/**
+ * The turn-completion gate (src/main/agent/turn-completion-integrity.ts) is a
+ * middleware, so it is active on EVERY entry point that passes a run token —
+ * invoke, resume and interrupt all build their Runtime through
+ * prepareStandardThreadRuntimeFactory with currentRunMessageQueueOwnerToken.
+ *
+ * That means all three can end a turn holding an unresolved defect, and all
+ * three create per-run gate state. An entry point that skips the report keeps
+ * emitting task-complete for an empty/truncated reply; one that skips the
+ * cleanup leaks its entry in a process-lifetime Map. Freeze both here: this was
+ * missed on the first pass and is invisible to the unit tests, which only
+ * exercise the middleware.
+ */
+function testTurnCompletionGateCoversEveryEntryPoint(): void {
+  for (const [label, handler] of [
+    ["invoke", invoke],
+    ["resume", resume],
+    ["interrupt", interrupt]
+  ] as const) {
+    assertIncludes(
+      handler,
+      "currentRunMessageQueueOwnerToken: runToken",
+      `${label} runs under a physical run token (the gate keys off it)`
+    )
+    assertIncludes(
+      handler,
+      "readTurnCompletionFailure(threadId, runToken)",
+      `${label} consults the completion gate before settling`
+    )
+    assertIncludes(
+      handler,
+      "clearTurnCompletionGateState(threadId, runToken)",
+      `${label} releases gate state on every exit`
+    )
+    assertIncludes(
+      handler,
+      "onTurnCompletionRecovery",
+      `${label} surfaces gate retries to the user`
+    )
+  }
+  // 门禁判定必须早于终态与 task-complete，否则判定结果影响不到收尾。
+  for (const [label, handler] of [
+    ["resume", resume],
+    ["interrupt", interrupt]
+  ] as const) {
+    assertSourceOrder(
+      handler,
+      [
+        "readTurnCompletionFailure(threadId, runToken)",
+        "if (!completionFailure) {",
+        "await finalizeAutoCommit({",
+        "await markLatestForkBoundaryBestEffort({",
+        "scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)",
+        'createAutoModeTerminal("success", "normal")',
+        'kind: "task-complete"'
+      ],
+      `${label} gates the success settlement`
+    )
+    const successEffects = sliceBetween(
+      handler,
+      "if (!completionFailure) {",
+      "\n            }",
+      `${label} success-only side effects`
+    )
+    for (const effect of [
+      "await finalizeAutoCommit({",
+      "await markLatestForkBoundaryBestEffort({",
+      "scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)"
+    ]) {
+      assertIncludes(successEffects, effect, `${label} skips ${effect} on completion failure`)
+    }
+  }
+}
+
 const tests = [
   testForegroundHandlerInventory,
+  testTurnCompletionGateCoversEveryEntryPoint,
   testInvokeReplacementOwnershipOrder,
   testFreshTurnGoalAndTranscriptSemantics,
   testPromptSkillHookAndHarnessPreparation,

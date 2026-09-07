@@ -7364,12 +7364,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             toolCallStates: upsertToolCallStateFromRequest(state.toolCallStates, approvalRequest)
           }
         })
-        // Auto-switch to this thread so the approval UI is visible
-        const currentId = useAppStore.getState().currentThreadId
-        if (currentId !== threadId) {
-          console.log(`[ThreadProvider] Auto-switching to thread ${threadId} for pending approval`)
-          useAppStore.getState().selectThread(threadId)
-        }
+        // Keep background approvals in their owning thread. The sidebar and project board already
+        // surface pending approval state; changing the active thread here would also close project,
+        // dashboard, and customization views without an explicit user navigation.
       })
       const cleanupResolved = window.api.sandbox.onApprovalResolved(threadId, (data) => {
         console.log(
@@ -7511,13 +7508,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               toolCallStates
             }
           })
-          const currentId = useAppStore.getState().currentThreadId
-          if (currentId !== threadId && isCurrentListenerEpoch()) {
-            console.log(
-              `[ThreadProvider] Auto-switching to thread ${threadId} for restored pending approval`
-            )
-            useAppStore.getState().selectThread(threadId)
-          }
+          // Restoring an approval is hydration, not navigation. Leave the user's active view and
+          // thread untouched; the restored pending state remains discoverable through its badge.
         })
         .catch((error) => {
           console.warn(

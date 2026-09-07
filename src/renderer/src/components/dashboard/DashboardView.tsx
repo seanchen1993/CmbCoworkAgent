@@ -91,6 +91,7 @@ import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
 import { AdvancedFeaturesPanel } from "./panels/AdvancedFeaturesPanel"
 import { TraceExplorer, TraceHistoryDialog, TraceTriggerScopeToggle } from "./TraceHistoryDialog"
+import { unwrapThreadTracesResponse } from "./thread-traces-response"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
 import { UncommittedCodeDialog } from "./UncommittedCodeDialog"
 import { marketApi, type MarketItem } from "../../api/market"
@@ -4221,8 +4222,10 @@ export function DashboardView(): React.JSX.Element {
 
   const loadProjectThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
-      const res = await window.api.dashboard.threadTraces(threadId, { scope: "project" })
-      return res.success && Array.isArray(res.data) ? res.data : []
+      // 同上：失败抛出，交给 TraceExplorer 显示并允许重试，别缓存成空成功。
+      return unwrapThreadTracesResponse(
+        await window.api.dashboard.threadTraces(threadId, { scope: "project" })
+      )
     },
     []
   )

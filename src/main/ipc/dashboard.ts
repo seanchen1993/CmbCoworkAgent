@@ -87,6 +87,7 @@ import {
 } from "../services/dashboard-es-protocol"
 import {
   isDashboardEsRequestCancelled,
+  isDashboardEsResponseTooLarge,
   isDashboardEsWorkerUnavailable,
   queryDashboardEsInWorker
 } from "../services/dashboard-es-client"
@@ -97,6 +98,16 @@ import {
   isDashboardRequestCancelled
 } from "../services/dashboard-request-coordinator"
 import { projectDashboardEsResponse } from "../services/dashboard-view-model-projection"
+import {
+  buildThreadListPreviewBody,
+  MAX_THREAD_LIST_BUCKETS,
+  orderThreadListPreviewHits,
+  collectPagedThreadTraces,
+  parseThreadListKeys,
+  threadListBucketsNeeded,
+  threadListKeysAgg,
+  threadListPreviewSourceIncludes
+} from "./dashboard-trace-thread-list"
 import {
   STAGE_BUCKET_LABELS,
   STAGE_DONE_LABEL,
@@ -173,6 +184,12 @@ function getErrorDetail(error: Error): string {
 
 function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error {
   const detail = lastError ? getErrorDetail(lastError) : "unknown error"
+  // 体积超限和节点不可达是两类问题：前者重试多少次、换几个节点都一样，报成
+  // 「请检查网络连接」只会把排查引到错误方向（本次线上就是这么被误导的）。
+  if (isDashboardEsResponseTooLarge(lastError)) {
+    console.warn("[Dashboard] ES response too large:", detail)
+    return new Error("本次查询返回的数据量过大，请缩小时间范围或减少每页条数后重试")
+  }
   console.warn(`[Dashboard] All ${nodes.length} ES nodes failed. Last error:`, detail)
   return new Error("请检查网络连接后重试")
 }
@@ -2270,6 +2287,22 @@ function normalizeTraceTriggerSource(value: unknown): TraceTriggerSource {
     : "chat"
 }
 
+/**
+ * 会话预览列表用的 _source 白名单：在完整白名单基础上去掉 `_raw`。
+ *
+ * `_raw` 是整条 trace 的序列化原文（含全部模型调用与工具输入输出），单条常在
+ * 十 KB 量级。thread 视图一页要回带「pageSize 个会话 × 每会话最多
+ * THREAD_LIST_TRACES_PER_THREAD 条」，带上 `_raw` 就是几百份原文，直接顶穿
+ * DASHBOARD_ES_OUTPUT_BYTE_LIMIT（6 MiB），整页查询失败。
+ *
+ * 列表本来就只是预览：卡片头部的工具数/Token/成败计数全部来自已索引的摘要
+ * 字段，而完整对话在用户选中某个会话时由 `dashboard:threadTraces` 单独懒加载
+ * （见 TraceHistoryDialog 的 threadTraceCache）。所以预览阶段不取 `_raw`。
+ */
+function dashboardTraceSummarySourceIncludes(): string[] {
+  return threadListPreviewSourceIncludes(dashboardTraceSourceIncludes())
+}
+
 function dashboardTraceSourceIncludes(): string[] {
   return [
     "_raw",
@@ -2470,9 +2503,27 @@ function countUserInputRequests(nodes: TraceNode[] | undefined): number {
   return nodes.filter((node) => node.type === "tool" && node.name === "request_user_input").length
 }
 
-function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
+/** 预览行是「故意没取 _raw」，不是「这条 trace 坏了」。文案要说清楚，否则
+ * 列表里每一行都会挂上一条误导性的「缺少 _raw」告警。 */
+const TRACE_PREVIEW_RAW_OMITTED = "列表仅展示摘要，选中该会话后自动加载完整对话"
+
+interface NormalizeTraceDetailOptions {
+  /** true 表示这批 hit 走的是 dashboardTraceSummarySourceIncludes()（无 _raw）。 */
+  preview?: boolean
+}
+
+function normalizeTraceDetail(
+  hit: EsSearchHit,
+  options?: NormalizeTraceDetailOptions
+): DashboardTraceDetail {
   const source = hit._source ?? {}
-  const parsed = parseRawTrace(source._raw)
+  // 预览批次没请求 _raw，跳过解析：省掉每行一次 JSON.parse + 建树，也避免把
+  // 「没取」误报成「解析失败」。个别文档若仍带 _raw（旧索引/别的调用方），
+  // 照常解析，不因预览标记而丢信息。
+  const parsed =
+    options?.preview && source._raw === undefined
+      ? { error: TRACE_PREVIEW_RAW_OMITTED }
+      : parseRawTrace(source._raw)
 
   if (parsed.trace) {
     const trace = normalizeParsedTrace(parsed.trace, source, hit)
@@ -3940,67 +3991,28 @@ function normalizeTermsBucketList(
 }
 
 // ── 会话（thread）列表分页：用户页 / 技能页 thread 视图共用同一套逻辑 ──
-// 会话按最近活跃时间倒序取桶后切片分页；该上限同时约束 terms 桶数与可翻到的
-// 最深页（page * pageSize ≤ 上限）。单用户 / 单技能的会话量有界，300 足够。
-const MAX_THREAD_LIST_BUCKETS = 300
-// 每个会话在列表里展开渲染的 trace 数上限。会话内 trace 通常很少；超大会话的
-// 完整还原由「Thread 对话还原」抽屉（fetchThreadTraces）负责，列表无需全量。
-const THREAD_LIST_TRACES_PER_THREAD = 50
-
-/** 当前页所需的 terms 桶数（取到第 page 页末尾，封顶 MAX_THREAD_LIST_BUCKETS）。 */
-function threadListBucketsNeeded(page: number, pageSize: number): number {
-  return Math.min(page * pageSize, MAX_THREAD_LIST_BUCKETS)
-}
-
 /**
- * 「按会话分页」的聚合定义：按 rootThreadId 分桶（按最近活跃倒序）、每桶回带该会话
- * 的 trace（升序、最多 THREAD_LIST_TRACES_PER_THREAD 条）。用户页与技能页 thread
- * 视图共用，保证两边口径完全一致。历史数据需要回填 rootThreadId=threadId。
+ * 「按会话分页」的两阶段实现：阶段 1 只定位当页会话，阶段 2 只为当页会话回带
+ * 预览 trace（不含 `_raw`）。查询构造与切片是纯函数，见
+ * ./dashboard-trace-thread-list。这里只负责发起阶段 2 的查询并归一化命中。
  */
-function threadListAgg(bucketsNeeded: number): Record<string, unknown> {
-  return {
-    total_threads: { cardinality: { field: "rootThreadId" } },
-    by_thread: {
-      terms: {
-        field: "rootThreadId",
-        size: bucketsNeeded,
-        order: { latest_started_at: "desc" }
-      },
-      aggs: {
-        latest_started_at: { max: { field: "startedAt" } },
-        traces: {
-          top_hits: {
-            size: THREAD_LIST_TRACES_PER_THREAD,
-            sort: [{ startedAt: { order: "asc" } }],
-            _source: { includes: dashboardTraceSourceIncludes() }
-          }
-        }
-      }
-    }
-  }
-}
-
-/**
- * 解析 threadListAgg 的结果容器（含 total_threads + by_thread），按当前页切片，
- * 并把当页每个会话的全部 trace 摊平返回，交给客户端按 thread 归组（每组完整、不跨页）。
- */
-function parseThreadListContainer(
-  container: Record<string, unknown>,
-  page: number,
-  pageSize: number
-): { traces: DashboardTraceDetail[]; totalThreads: number } {
-  const totalThreads = Math.min(
-    asNumber(asRecord(container.total_threads).value),
-    MAX_THREAD_LIST_BUCKETS
-  )
-  const buckets = asRecord(container.by_thread).buckets
-  const fromBucket = (page - 1) * pageSize
-  const selected = Array.isArray(buckets) ? buckets.slice(fromBucket, fromBucket + pageSize) : []
-  const traces = selected.flatMap((bucket) => {
-    const hits = asRecord(asRecord(asRecord(bucket).traces).hits).hits
-    return Array.isArray(hits) ? hits.map((hit) => normalizeTraceDetail(hit as EsSearchHit)) : []
+async function fetchThreadListPreviewTraces(
+  threadIds: string[],
+  baseFilter: unknown[],
+  accessFilter: Record<string, unknown> | null
+): Promise<DashboardTraceDetail[]> {
+  if (threadIds.length === 0) return []
+  const body = buildThreadListPreviewBody({
+    threadIds,
+    baseFilter,
+    accessFilter,
+    sourceIncludes: dashboardTraceSummarySourceIncludes()
   })
-  return { traces, totalThreads }
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
+  return orderThreadListPreviewHits(aggs, threadIds).map((hit) =>
+    normalizeTraceDetail(hit as EsSearchHit, { preview: true })
+  )
 }
 
 async function fetchUserDetail(
@@ -4064,7 +4076,7 @@ async function fetchUserDetail(
             ...statsAggs,
             thread_list: {
               filter: traceAccessFilter ?? { match_all: {} },
-              aggs: threadListAgg(threadListBucketsNeeded(tracePage, tracePageSize))
+              aggs: threadListKeysAgg(threadListBucketsNeeded(tracePage, tracePageSize))
             }
           }
         }
@@ -4105,12 +4117,13 @@ async function fetchUserDetail(
   let traces: DashboardTraceDetail[]
   let total: number
   if (traceViewMode === "thread") {
-    const parsed = parseThreadListContainer(asRecord(aggs.thread_list), tracePage, tracePageSize)
-    traces = parsed.traces
+    // 阶段 1 的会话 id 与统计聚合同批返回；阶段 2 只为当页会话补预览 trace。
+    const parsed = parseThreadListKeys(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    traces = await fetchThreadListPreviewTraces(parsed.threadIds, baseFilter, traceAccessFilter)
     total = parsed.totalThreads
   } else {
     const hits = raw.hits?.hits ?? []
-    traces = hits.map(normalizeTraceDetail)
+    traces = hits.map((hit) => normalizeTraceDetail(hit))
     total = getTotalHits(raw, hits.length)
   }
 
@@ -6440,11 +6453,13 @@ async function fetchSkillRecentTraces(
       query: {
         bool: { filter: filters }
       },
-      aggs: threadListAgg(threadListBucketsNeeded(currentPage, size))
+      aggs: threadListKeysAgg(threadListBucketsNeeded(currentPage, size))
     }
     const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
     const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
-    const { traces, totalThreads } = parseThreadListContainer(aggs, currentPage, size)
+    // 数据权限过滤已并入 filters，阶段 2 无需再单独传 accessFilter。
+    const { threadIds, totalThreads } = parseThreadListKeys(aggs, currentPage, size)
+    const traces = await fetchThreadListPreviewTraces(threadIds, filters, null)
     return {
       traces,
       total: totalThreads,
@@ -6470,7 +6485,7 @@ async function fetchSkillRecentTraces(
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   return {
-    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
+    traces: (raw.hits?.hits ?? []).map((hit) => normalizeTraceDetail(hit)),
     total: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
     page: currentPage,
     pageSize: size,
@@ -6486,6 +6501,9 @@ async function fetchSkillRecentTraces(
 // - 仍保留组织级数据权限过滤；
 // - 按 startedAt 升序返回（从首条到末条），上限 MAX_THREAD_TRACES 防止单 thread 过大撑爆查询。
 const MAX_THREAD_TRACES = 200
+/** 单批条数。25 条 × 单条几十 KB ≈ 1 MiB 量级，对 6 MiB 上限留足余量；最多 8 次
+ * 串行请求，延迟可接受。 */
+const THREAD_TRACES_FETCH_CHUNK = 25
 
 interface ThreadTracesOptions {
   scope?: "platform" | "project"
@@ -6515,20 +6533,25 @@ async function fetchThreadTraces(
     filters,
     projectScoped ? buildProjectModeAccessFilter(access) : buildTraceAccessFilter(access)
   )
-  const body = {
-    track_total_hits: false,
-    size: MAX_THREAD_TRACES,
-    sort: [{ startedAt: { order: "asc" } }],
-    query: { bool: { filter: filters } },
-    _source: { includes: dashboardTraceSourceIncludes() }
-  }
-  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
-  const seen = new Set<string>()
-  return (raw.hits?.hits ?? []).map(normalizeTraceDetail).filter((trace) => {
-    const key = trace.traceId || `${trace.threadId}:${trace.startedAt}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
+  // 分批拉取：这条通路回带完整 `_raw`，一次 200 条就可能顶穿 6 MiB。分页与去重
+  // 是纯逻辑，见 collectPagedThreadTraces（含 from/size 的取舍与边界说明）。
+  return collectPagedThreadTraces({
+    maxTraces: MAX_THREAD_TRACES,
+    chunkSize: THREAD_TRACES_FETCH_CHUNK,
+    fetchPage: async (from, size) => {
+      const body = {
+        track_total_hits: false,
+        from,
+        size,
+        sort: [{ startedAt: { order: "asc" } }],
+        query: { bool: { filter: filters } },
+        _source: { includes: dashboardTraceSourceIncludes() }
+      }
+      const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+      return raw.hits?.hits ?? []
+    },
+    normalize: (hit) => normalizeTraceDetail(hit),
+    dedupeKey: (trace) => trace.traceId || `${trace.threadId}:${trace.startedAt}`
   })
 }
 
@@ -13982,15 +14005,20 @@ async function fetchProjectModeTraces(
       aggs: {
         thread_list: {
           filter: traceAccessFilter ?? { match_all: {} },
-          aggs: threadListAgg(threadListBucketsNeeded(tracePage, tracePageSize))
+          aggs: threadListKeysAgg(threadListBucketsNeeded(tracePage, tracePageSize))
         }
       }
     }
     const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
     const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
-    const parsed = parseThreadListContainer(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    const parsed = parseThreadListKeys(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    const traces = await fetchThreadListPreviewTraces(
+      parsed.threadIds,
+      baseFilter,
+      traceAccessFilter
+    )
     return {
-      traces: parsed.traces,
+      traces,
       tracePage,
       tracePageSize,
       total: parsed.totalThreads,
@@ -14015,7 +14043,7 @@ async function fetchProjectModeTraces(
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
   return {
-    traces: hits.map(normalizeTraceDetail),
+    traces: hits.map((hit) => normalizeTraceDetail(hit)),
     tracePage,
     tracePageSize,
     // from+size 只能触达前 max_result_window 条，故按相同上限收口 total，

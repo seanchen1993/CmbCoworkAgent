@@ -900,8 +900,13 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     standardThreadTurn,
-    "{ featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }",
-    "Harness feature failures preserve project-mode identity for runtime policy"
+    "featureId: harnessFeature?.slug",
+    "Harness feature failures preserve the feature identity for runtime policy"
+  )
+  assertIncludes(
+    standardThreadTurn,
+    "harnessProjectId: harnessFeature?.projectId",
+    "Harness feature failures preserve the project identity for runtime policy"
   )
   assertOccurrenceCount(
     agentIpc,

@@ -423,21 +423,21 @@ function canCurrentUserViewMarketItem(
   }
   const grayUserIds = getGrayUserIdsFromExtraJson(item.extra_json)
   const grayOrgs = getGrayOrgsFromExtraJson(item.extra_json)
-  
+
   if (grayUserIds.length === 0 && grayOrgs.length === 0) return true
-  
+
   if (grayUserIds.length > 0 && grayUserIds.some((userId) =>
     doesMarketUserIdMatchCurrentUser(userId, currentUserIdCandidates, currentUserSapId)
   )) {
     return true
   }
-  
+
   if (grayOrgs.length > 0 && currentUserPathName && grayOrgs.some((org) =>
     currentUserPathName.includes(org)
   )) {
     return true
   }
-  
+
   return false
 }
 
@@ -594,7 +594,9 @@ function MarketItemCard({
             {item.chinese_name ? (
               <h3 className="text-[15px] font-medium leading-snug text-foreground">
                 {item.chinese_name}
-                <span className="ml-1.5 text-sm font-normal text-muted-foreground">({item.name})</span>
+                <span className="ml-1.5 text-sm font-normal text-muted-foreground">
+                  ({item.name})
+                </span>
               </h3>
             ) : (
               <h3 className="text-[15px] font-medium leading-snug text-foreground">{item.name}</h3>
@@ -680,8 +682,8 @@ function MarketItemCard({
       {/*)}*/}
 
       {/* Footer: metadata + actions */}
-      <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
-        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted-foreground">
+      <div className="mt-auto flex flex-nowrap items-center justify-between gap-2 overflow-hidden border-t border-border pt-3">
+        <div className="min-w-0 flex-[1_1_0%] flex flex-wrap gap-x-3 gap-y-1 overflow-hidden text-[12px] text-muted-foreground">
           {uploadTimeLabel ? (
             <div className="flex items-center gap-1">
               <Calendar className="size-3 shrink-0" />
@@ -700,12 +702,14 @@ function MarketItemCard({
           {/*  </div>*/}
           {/*)}*/}
           {item.user_id ? (
-            <div className="flex min-w-0 max-w-full items-center gap-1">
+            <div className="flex min-w-0 max-w-full flex-[1_1_0%] items-center gap-1 overflow-hidden">
               <User className="size-3 shrink-0" />
               {showResolvedUploader ? (
                 renderUploaderProfile(uploaderProfile, item.user_id)
               ) : (
-                <span className="min-w-0 truncate">用户 {item.user_id}</span>
+                <span className="min-w-0 truncate">
+                  用户 {item.user_id}
+                </span>
               )}
             </div>
           ) : null}
@@ -769,36 +773,34 @@ function MarketItemCard({
                     重装
                   </Button>
                 )
+              ) : installActionDisabled ? (
+                <TooltipProvider delayDuration={180}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="inline-flex cursor-not-allowed">
+                        <Button
+                          size="sm"
+                          className="pointer-events-none h-7 gap-1 rounded-lg border-0 bg-muted px-3 text-xs text-muted-foreground opacity-85"
+                          disabled
+                          aria-disabled="true"
+                        >
+                          <Plus className="size-3" />
+                          无需安装
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    {installDisabledTooltip}
+                  </Tooltip>
+                </TooltipProvider>
               ) : (
-                installActionDisabled ? (
-                  <TooltipProvider delayDuration={180}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="inline-flex cursor-not-allowed">
-                          <Button
-                            size="sm"
-                            className="pointer-events-none h-7 gap-1 rounded-lg border-0 bg-muted px-3 text-xs text-muted-foreground opacity-85"
-                            disabled
-                            aria-disabled="true"
-                          >
-                            <Plus className="size-3" />
-                            无需安装
-                          </Button>
-                        </span>
-                      </TooltipTrigger>
-                      {installDisabledTooltip}
-                    </Tooltip>
-                  </TooltipProvider>
-                ) : (
-                  <Button
-                    size="sm"
-                    className="h-7 cursor-pointer gap-1 rounded-lg border-0 bg-button px-3 text-xs text-button-foreground hover:bg-button/90"
-                    onClick={handleInstallDownload}
-                  >
-                    <Plus className="size-3" />
-                    安装
-                  </Button>
-                )
+                <Button
+                  size="sm"
+                  className="h-7 cursor-pointer gap-1 rounded-lg border-0 bg-button px-3 text-xs text-button-foreground hover:bg-button/90"
+                  onClick={handleInstallDownload}
+                >
+                  <Plus className="size-3" />
+                  安装
+                </Button>
               )}
               {isInstalled && !isFeatured && !installActionDisabled && (
                 <Button

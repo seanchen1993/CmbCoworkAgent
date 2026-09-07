@@ -22,6 +22,7 @@ export default defineConfig({
       "src/renderer/src/lib/agent-git-commit-selection.test.ts",
       "src/renderer/src/components/dashboard/active-user-export.test.ts",
       "src/renderer/src/components/dashboard/project-mode-export.test.ts",
+      "src/renderer/src/components/dashboard/thread-traces-response.test.ts",
       "src/renderer/src/components/update/release-notes.test.ts",
       "src/renderer/src/components/trace/TraceConversation.test.ts",
       "src/renderer/src/components/chat/chat-message-virtual-list-initial-position.test.ts",
