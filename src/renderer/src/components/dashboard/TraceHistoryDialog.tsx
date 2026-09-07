@@ -39,6 +39,7 @@ import type {
   DashboardTraceTriggerScope,
   DashboardTraceViewMode
 } from "./use-dashboard"
+import { unwrapThreadTracesResponse } from "./thread-traces-response"
 
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -819,6 +820,8 @@ export function TraceExplorer({
     {}
   )
   const [threadLoadingId, setThreadLoadingId] = useState<string | null>(null)
+  // 最近一次失败的会话 id。只记一个：横幅只讲当前选中的会话，切走再切回会重试。
+  const [threadLoadErrorId, setThreadLoadErrorId] = useState<string | null>(null)
   const activeViewMode = viewMode ?? localViewMode
   const handleViewModeChange = (mode: DashboardTraceViewMode): void => {
     if (!viewMode) setLocalViewMode(mode)
@@ -829,13 +832,10 @@ export function TraceExplorer({
   const defaultLoadThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
       const api = window.api?.dashboard
-      if (!api || typeof api.threadTraces !== "function") return []
-      try {
-        const res = await api.threadTraces(threadId)
-        return res?.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
-      } catch {
-        return []
+      if (!api || typeof api.threadTraces !== "function") {
+        throw new Error("当前环境不支持加载完整会话")
       }
+      return unwrapThreadTracesResponse(await api.threadTraces(threadId))
     },
     []
   )
@@ -885,6 +885,7 @@ export function TraceExplorer({
     if (threadTraceCache[selectedThreadId]) return
     let cancelled = false
     setThreadLoadingId(selectedThreadId)
+    setThreadLoadErrorId((current) => (current === selectedThreadId ? null : current))
     void effectiveLoadThreadTraces(selectedThreadId)
       .then((full) => {
         if (cancelled) return
@@ -893,6 +894,13 @@ export function TraceExplorer({
             ? prev
             : { ...prev, [selectedThreadId]: Array.isArray(full) ? full : [] }
         )
+      })
+      .catch((error) => {
+        // 关键：失败不写缓存。写进去的话 `if (threadTraceCache[id]) return` 会把这
+        // 个会话永久锁在「只有摘要」的状态；不写则切走再切回就会重试。
+        if (cancelled) return
+        console.warn("[Dashboard] 加载完整会话失败:", error)
+        setThreadLoadErrorId(selectedThreadId)
       })
       .finally(() => {
         if (!cancelled)
@@ -1036,9 +1044,14 @@ export function TraceExplorer({
 
   // thread 列表是摘要预览（不含 _raw），完整对话在选中会话时懒加载。加载还在飞
   // 的那一小段窗口里 selectedTrace 仍是预览行，此时提示「缺少 raw」是误报——
-  // 加载完成后 threadTraceCache 会用带 _raw 的完整 trace 覆盖它。
-  const rawMissingNotice =
-    selectedTrace && !selectedTrace.rawAvailable && !threadLoading
+  // 加载完成后 threadTraceCache 会用带 _raw 的完整 trace 覆盖它。加载失败时预览行
+  // 同样没有 raw，但原因不是「这条 trace 缺内容」，得说清楚，否则用户既不知道
+  // 发生了什么、也不知道还能重试。
+  const threadLoadFailed =
+    activeViewMode === "thread" && !threadLoading && selectedThreadId === threadLoadErrorId
+  const rawMissingNotice = threadLoadFailed
+    ? "完整会话加载失败，当前仅显示摘要。切换到其他会话再切回可重试。"
+    : selectedTrace && !selectedTrace.rawAvailable && !threadLoading
       ? selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"
       : null
 

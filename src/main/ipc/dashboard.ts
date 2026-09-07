@@ -102,6 +102,7 @@ import {
   buildThreadListPreviewBody,
   MAX_THREAD_LIST_BUCKETS,
   orderThreadListPreviewHits,
+  collectPagedThreadTraces,
   parseThreadListKeys,
   threadListBucketsNeeded,
   threadListKeysAgg,
@@ -6500,6 +6501,9 @@ async function fetchSkillRecentTraces(
 // - 仍保留组织级数据权限过滤；
 // - 按 startedAt 升序返回（从首条到末条），上限 MAX_THREAD_TRACES 防止单 thread 过大撑爆查询。
 const MAX_THREAD_TRACES = 200
+/** 单批条数。25 条 × 单条几十 KB ≈ 1 MiB 量级，对 6 MiB 上限留足余量；最多 8 次
+ * 串行请求，延迟可接受。 */
+const THREAD_TRACES_FETCH_CHUNK = 25
 
 interface ThreadTracesOptions {
   scope?: "platform" | "project"
@@ -6529,23 +6533,26 @@ async function fetchThreadTraces(
     filters,
     projectScoped ? buildProjectModeAccessFilter(access) : buildTraceAccessFilter(access)
   )
-  const body = {
-    track_total_hits: false,
-    size: MAX_THREAD_TRACES,
-    sort: [{ startedAt: { order: "asc" } }],
-    query: { bool: { filter: filters } },
-    _source: { includes: dashboardTraceSourceIncludes() }
-  }
-  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
-  const seen = new Set<string>()
-  return (raw.hits?.hits ?? [])
-    .map((hit) => normalizeTraceDetail(hit))
-    .filter((trace) => {
-      const key = trace.traceId || `${trace.threadId}:${trace.startedAt}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
-    })
+  // 分批拉取：这条通路回带完整 `_raw`，一次 200 条就可能顶穿 6 MiB。分页与去重
+  // 是纯逻辑，见 collectPagedThreadTraces（含 from/size 的取舍与边界说明）。
+  return collectPagedThreadTraces({
+    maxTraces: MAX_THREAD_TRACES,
+    chunkSize: THREAD_TRACES_FETCH_CHUNK,
+    fetchPage: async (from, size) => {
+      const body = {
+        track_total_hits: false,
+        from,
+        size,
+        sort: [{ startedAt: { order: "asc" } }],
+        query: { bool: { filter: filters } },
+        _source: { includes: dashboardTraceSourceIncludes() }
+      }
+      const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+      return raw.hits?.hits ?? []
+    },
+    normalize: (hit) => normalizeTraceDetail(hit),
+    dedupeKey: (trace) => trace.traceId || `${trace.threadId}:${trace.startedAt}`
+  })
 }
 
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {

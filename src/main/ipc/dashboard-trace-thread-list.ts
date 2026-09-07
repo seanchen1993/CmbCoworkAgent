@@ -168,3 +168,42 @@ export function orderThreadListPreviewHits(
   }
   return threadIds.flatMap((threadId) => hitsByThread.get(threadId) ?? [])
 }
+
+/**
+ * 「Thread 对话还原」的分批拉取。
+ *
+ * 这条通路回带完整 `_raw`（整条 trace 原文，单条可达几十 KB），一次 200 条就
+ * 可能超过 DASHBOARD_ES_OUTPUT_BYTE_LIMIT（6 MiB）而整个请求失败。会话列表改成
+ * 摘要预览之后，完整对话只剩这一条通路，它一失败用户就什么都看不到，所以必须
+ * 把单次响应压到有余量的水平。
+ *
+ * 分页用 from/size 而非 search_after：范围是单个会话、按 startedAt 升序、总量
+ * 封顶 maxTraces，远在 max_result_window 之内。诚实边界——批与批之间若有新
+ * trace 落库，窗口会平移导致边界处漏/重；会话是历史数据、实际不会发生，且
+ * dedupeKey 去重能吸收重复。
+ *
+ * 取到不足一批即停，不会为了凑满 maxTraces 多发一次空查询。
+ */
+export async function collectPagedThreadTraces<THit, TTrace>(input: {
+  maxTraces: number
+  chunkSize: number
+  fetchPage: (from: number, size: number) => Promise<THit[]>
+  normalize: (hit: THit) => TTrace
+  dedupeKey: (trace: TTrace) => string
+}): Promise<TTrace[]> {
+  const seen = new Set<string>()
+  const traces: TTrace[] = []
+  for (let from = 0; from < input.maxTraces; from += input.chunkSize) {
+    const size = Math.min(input.chunkSize, input.maxTraces - from)
+    const hits = await input.fetchPage(from, size)
+    for (const hit of hits) {
+      const trace = input.normalize(hit)
+      const key = input.dedupeKey(trace)
+      if (seen.has(key)) continue
+      seen.add(key)
+      traces.push(trace)
+    }
+    if (hits.length < size) break
+  }
+  return traces
+}

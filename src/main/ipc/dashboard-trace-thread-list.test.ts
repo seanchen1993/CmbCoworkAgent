@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   buildThreadListPreviewBody,
+  collectPagedThreadTraces,
   MAX_THREAD_LIST_BUCKETS,
   orderThreadListPreviewHits,
   parseThreadListKeys,
@@ -216,5 +217,111 @@ describe("翻页不再放大数据量", () => {
     }) as { aggs: { by_thread: { terms: { size: number } } } }
     // 阶段 2 的规模只跟 pageSize 有关，与页码无关。
     expect(body.aggs.by_thread.terms.size).toBe(pageSize)
+  })
+})
+
+describe("完整会话分批拉取", () => {
+  /** 记录每一批的 from/size，并按需返回命中。 */
+  function pager(total: number): {
+    calls: Array<{ from: number; size: number }>
+    fetchPage: (from: number, size: number) => Promise<Array<{ id: string }>>
+  } {
+    const calls: Array<{ from: number; size: number }> = []
+    return {
+      calls,
+      fetchPage: async (from, size) => {
+        calls.push({ from, size })
+        return Array.from({ length: Math.max(0, Math.min(size, total - from)) }, (_, i) => ({
+          id: `t${from + i}`
+        }))
+      }
+    }
+  }
+
+  const collect = (
+    total: number,
+    maxTraces = 200,
+    chunkSize = 25
+  ): ReturnType<typeof pager> & { run: () => Promise<Array<{ id: string }>> } => {
+    const p = pager(total)
+    return {
+      ...p,
+      run: () =>
+        collectPagedThreadTraces({
+          maxTraces,
+          chunkSize,
+          fetchPage: p.fetchPage,
+          normalize: (hit: { id: string }) => hit,
+          dedupeKey: (trace) => trace.id
+        })
+    }
+  }
+
+  it("把单次响应压到 chunkSize，而不是一次要 200 条完整 raw", async () => {
+    const p = collect(200)
+    const traces = await p.run()
+    expect(traces).toHaveLength(200)
+    expect(p.calls.every((call) => call.size === 25)).toBe(true)
+    expect(p.calls).toHaveLength(8)
+  })
+
+  it("取到不足一批即停，不多发空查询", async () => {
+    const p = collect(30)
+    expect(await p.run()).toHaveLength(30)
+    expect(p.calls).toEqual([
+      { from: 0, size: 25 },
+      { from: 25, size: 25 }
+    ])
+  })
+
+  it("会话为空时只发一次请求", async () => {
+    const p = collect(0)
+    expect(await p.run()).toEqual([])
+    expect(p.calls).toHaveLength(1)
+  })
+
+  it("最后一批不越过 maxTraces", async () => {
+    const p = collect(1000, 60, 25)
+    expect(await p.run()).toHaveLength(60)
+    expect(p.calls).toEqual([
+      { from: 0, size: 25 },
+      { from: 25, size: 25 },
+      { from: 50, size: 10 }
+    ])
+  })
+
+  it("批与批之间窗口平移造成的重复会被去重吸收", async () => {
+    // from/size 分页的已知边界：批间若有新数据落库，边界处会重复。
+    const calls: number[] = []
+    const traces = await collectPagedThreadTraces({
+      maxTraces: 10,
+      chunkSize: 5,
+      fetchPage: async (from) => {
+        calls.push(from)
+        return from === 0
+          ? [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }, { id: "e" }]
+          : [{ id: "e" }, { id: "f" }, { id: "g" }, { id: "h" }, { id: "i" }]
+      },
+      normalize: (hit: { id: string }) => hit,
+      dedupeKey: (trace) => trace.id
+    })
+    expect(traces.map((t) => t.id)).toEqual(["a", "b", "c", "d", "e", "f", "g", "h", "i"])
+    expect(calls).toEqual([0, 5])
+  })
+
+  it("拉取失败向上抛出，不会静默返回半份结果", async () => {
+    // 第一批必须取满，否则 hits.length < size 会提前收工、根本走不到第二批。
+    await expect(
+      collectPagedThreadTraces({
+        maxTraces: 50,
+        chunkSize: 25,
+        fetchPage: async (from) => {
+          if (from > 0) throw new Error("本次查询返回的数据量过大")
+          return Array.from({ length: 25 }, (_, i) => ({ id: `t${i}` }))
+        },
+        normalize: (hit: { id: string }) => hit,
+        dedupeKey: (trace) => trace.id
+      })
+    ).rejects.toThrow("数据量过大")
   })
 })
