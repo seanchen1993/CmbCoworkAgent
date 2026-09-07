@@ -417,8 +417,7 @@ import {
   registerAgentRunImplementation,
   startAgentRun,
   type AgentRunDelivery,
-  type AgentRunExecutionContext,
-  type AgentRunTerminal
+  type AgentRunExecutionContext
 } from "../agent/agent-run-service"
 
 function withHarnessStageInvalidation(
@@ -5864,8 +5863,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   registerActiveAgentRunInspector(hasActiveAgentRun)
   registerAgentGoalControlImplementation(executeAgentGoalControl)
 
-  registerAgentRunImplementation((request, delivery, runExecutionContext) =>
-    agentRunExecutionContextStorage.run(runExecutionContext, async () => {
+  registerAgentRunImplementation((request, delivery, incomingRunExecutionContext) => {
+    // onRunTerminated is contracted to fire exactly once per run, and this body
+    // returns from dozens of places — Goal command handling alone has a dozen
+    // early returns before the main try block. Deduplicating and defaulting
+    // around the whole implementation is the only placement that actually
+    // holds: a managed caller has no stream to fall back on, so an unreported
+    // run reaches it as an unexplained "no reply".
+    let terminalReported = false
+    const runExecutionContext: AgentRunExecutionContext = {
+      ...incomingRunExecutionContext,
+      onRunTerminated: (terminal) => {
+        if (terminalReported) return
+        terminalReported = true
+        incomingRunExecutionContext.onRunTerminated?.(terminal)
+      }
+    }
+    return agentRunExecutionContextStorage.run(runExecutionContext, async () => {
       const {
         threadId,
         message,
@@ -6209,16 +6223,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // Abort any existing stream for this thread before starting a new one
       // This prevents concurrent streams which can cause checkpoint corruption
       let pendingPhysicalStreamRunSetupGuard: PhysicalStreamRunSetupGuard | undefined
-      // Most terminal paths classify themselves, but this body has many early
-      // returns and a managed caller has no stream to fall back on. Declared out
-      // here so the outermost finally can report `unknown` when none of them
-      // ran — onRunTerminated is contracted to fire exactly once per run.
-      let terminalReported = false
-      const reportTerminal = (terminal: AgentRunTerminal): void => {
-        if (terminalReported) return
-        terminalReported = true
-        runExecutionContext.onRunTerminated?.(terminal)
-      }
       try {
         if (!initialInvokeThread) {
           safeSendToWindow(window, channel, { type: "error", error: "Thread not found" })
@@ -6913,7 +6917,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // text", collapsing a retryable provider blip and a hook halt into
           // one generic error. The original error travels along so the caller
           // keeps its own retry policy.
-          reportTerminal({
+          runExecutionContext.onRunTerminated?.({
             outcome,
             code,
             ...(terminalMessage ? { message: terminalMessage } : {}),
@@ -7221,6 +7225,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             throwIfInvokeAborted()
             if (!preparedPrompt.accepted) {
               if (preparedPrompt.blockedBy === "explicit_skill") {
+                // Distinct from a completion (Stop) hook halt: this input never
+                // reached the model, and IM tells the user so.
+                runExecutionContext.onRunTerminated?.({
+                  outcome: "error",
+                  code: "prompt_blocked",
+                  message: preparedPrompt.reason
+                })
                 markAutoModeTerminal("error", "hook_halt", preparedPrompt.reason)
                 pauseActiveGoalForRuntimeStop(preparedPrompt.reason)
                 safeSendToWindow(window, channel, {
@@ -7230,7 +7241,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 finishTraceInBackground(tracer, "error", preparedPrompt.reason, "Agent")
                 turnStateShouldDispose = true
               } else if (preparedPrompt.blockedBy === "user_prompt_submit") {
-                markAutoModeTerminal("error", "hook_halt", "UserPromptSubmit hook stopped the turn")
+                runExecutionContext.onRunTerminated?.({
+                  outcome: "error",
+                  code: "prompt_blocked",
+                  message: "UserPromptSubmit hook stopped the turn"
+                })
+                markAutoModeTerminal(
+                  "error",
+                  "hook_halt",
+                  "UserPromptSubmit hook stopped the turn"
+                )
                 pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped the turn.")
                 sendHookBlocked(
                   "UserPromptSubmit",
@@ -9954,16 +9974,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard = undefined
         setupGuard.fail(error)
       } finally {
-        // Nothing classified this run — an early return, or a throw before the
-        // main body. Report it so a managed caller can tell "ended without a
-        // reply" from "never reported" instead of guessing from empty text.
-        reportTerminal({ outcome: "unknown", code: "unknown" })
         clearStreamFailureDiagnostics(channel)
         pendingPhysicalStreamRunSetupGuard?.abandon()
         pendingPhysicalStreamRunSetupGuard = undefined
       }
+    }).finally(() => {
+      // Nothing classified this run: an early return, or a throw before the
+      // main body ever started. Reporting `unknown` lets a managed caller tell
+      // "ended without a reply" from "never reported".
+      runExecutionContext.onRunTerminated?.({ outcome: "unknown", code: "unknown" })
     })
-  )
+  })
 
   // Transport adapter for renderer-originated agent invocations.
   ipcMain.on("agent:invoke", (event, request: AgentInvokeParams) => {

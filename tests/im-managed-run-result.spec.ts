@@ -16,6 +16,10 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { createManagedRunResultCollector } from "../src/main/services/im/managed-run-result"
+import {
+  ImCompletionHookRejectedError,
+  ImPreparedPromptRejectedError
+} from "../src/main/services/im/turn-failures"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
 
@@ -63,6 +67,53 @@ function testAFailureRethrowsTheOriginalError(): void {
   assert.throws(
     () => collected.resolve(() => "处理完成。"),
     (thrown: unknown) => thrown === providerError
+  )
+}
+
+function testABlockedTurnKeepsItsReasonCode(): void {
+  // The IM runner maps a thrown error to a reason code by instanceof, so a
+  // plain Error becomes REMOTE_RUNTIME_FAILED — the user is told the robot
+  // broke rather than that policy stopped their message. The two blocks are
+  // also distinct: one never reached the model, the other refused to finish.
+  const blockedInput = createManagedRunResultCollector()
+  blockedInput.hooks.onRunTerminated?.({
+    outcome: "error",
+    code: "prompt_blocked",
+    message: "UserPromptSubmit hook stopped the turn"
+  })
+  assert.throws(
+    () => blockedInput.resolve(() => "处理完成。"),
+    (error: unknown) =>
+      error instanceof ImPreparedPromptRejectedError && error.reasonCode === "REMOTE_PROMPT_BLOCKED"
+  )
+
+  const blockedCompletion = createManagedRunResultCollector()
+  blockedCompletion.hooks.onRunTerminated?.({
+    outcome: "error",
+    code: "hook_halt",
+    message: "Stop hook halted the turn"
+  })
+  assert.throws(
+    () => blockedCompletion.resolve(() => "处理完成。"),
+    (error: unknown) =>
+      error instanceof ImCompletionHookRejectedError &&
+      error.reasonCode === "REMOTE_COMPLETION_HOOK_BLOCKED"
+  )
+}
+
+function testAClassifiedBlockOutranksItsRawError(): void {
+  // A hook halt arrives with a HookHaltError attached. Rethrowing that would
+  // lose the reason code, since the runner only recognizes its own classes.
+  const collected = createManagedRunResultCollector()
+  collected.hooks.onRunTerminated?.({
+    outcome: "error",
+    code: "hook_halt",
+    message: "Stop hook halted the turn",
+    error: new Error("raw hook halt")
+  })
+  assert.throws(
+    () => collected.resolve(() => "处理完成。"),
+    (error: unknown) => error instanceof ImCompletionHookRejectedError
   )
 }
 
@@ -149,6 +200,8 @@ async function main(): Promise<void> {
     testAReplyWins,
     testAnEmptySuccessIsTheCallersDecision,
     testAFailureRethrowsTheOriginalError,
+    testABlockedTurnKeepsItsReasonCode,
+    testAClassifiedBlockOutranksItsRawError,
     testAFailureOutranksAReply,
     testAnUnreportedTerminalIsNotTreatedAsFailure,
     testCancellationOutranksEverything,

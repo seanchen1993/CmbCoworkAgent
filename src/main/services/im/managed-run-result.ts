@@ -4,6 +4,7 @@ import type {
   AgentRunGoalNotice,
   AgentRunTerminal
 } from "../../agent/agent-run-service"
+import { ImCompletionHookRejectedError, ImPreparedPromptRejectedError } from "./turn-failures"
 
 /**
  * Collects what a managed run produced and turns it into the one string an IM
@@ -62,7 +63,10 @@ export function createManagedRunResultCollector(
 
     resolve(onEmpty) {
       if (cancelled) {
-        throw new DOMException(options.cancelledMessage ?? "Managed run was cancelled", "AbortError")
+        throw new DOMException(
+          options.cancelledMessage ?? "Managed run was cancelled",
+          "AbortError"
+        )
       }
 
       // A failed run still resolves its completion promise. Rethrowing the
@@ -71,8 +75,17 @@ export function createManagedRunResultCollector(
       // instead of a generic "no reply".
       const outcome = terminal as AgentRunTerminal | null
       if (outcome && outcome.outcome !== "success") {
+        const reason = outcome.message?.trim() || `本轮运行以 ${outcome.code} 结束。`
+        // A blocked turn is not a broken one. The IM runner maps a thrown error
+        // to a reason code by instanceof, so losing the classification here
+        // turns "your message was stopped by policy" into a generic robot
+        // failure — and a retryable-looking one at that.
+        if (outcome.code === "prompt_blocked") throw new ImPreparedPromptRejectedError(reason)
+        if (outcome.code === "hook_halt") throw new ImCompletionHookRejectedError(reason)
+        // Everything else keeps the original error, so isRetryableApiError
+        // still sees the provider error it was written for.
         if (outcome.error instanceof Error) throw outcome.error
-        throw new Error(outcome.message?.trim() || `本轮运行以 ${outcome.code} 结束。`)
+        throw new Error(reason)
       }
 
       const reply = (finalText as string | null)?.trim()

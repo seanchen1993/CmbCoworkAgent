@@ -87,6 +87,10 @@ import {
 } from "./skill-command"
 import { ImGoalRunBridge } from "./goal-runner"
 import {
+  ImCompletionHookRejectedError,
+  ImPreparedPromptRejectedError
+} from "./turn-failures"
+import {
   executeRemoteStandardTurnOnDesktopRunBody,
   withImInboxRuntimePolicy
 } from "./desktop-run-bridge"
@@ -205,13 +209,6 @@ export type ImRemoteThreadLifecycleState =
   | "rejected"
   | "outcome_unknown"
 
-class ImPreparedPromptRejectedError extends Error {
-  readonly reasonCode = "REMOTE_PROMPT_BLOCKED"
-}
-
-class ImCompletionHookRejectedError extends Error {
-  readonly reasonCode = "REMOTE_COMPLETION_HOOK_BLOCKED"
-}
 
 function acknowledgementForTerminal(event: ImEventRecord): RemoteImAckV1 {
   const common = { eventId: event.eventId, leaseId: event.leaseId }

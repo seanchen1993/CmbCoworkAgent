@@ -137,16 +137,30 @@ function testTheBridgeLeavesTranscriptPersistenceToTheRunBody(): void {
 function testTheRunBodyStillHonoursWhatTheBridgeDependsOn(): void {
   const agent = readFileSync(join(PROJECT_ROOT, "src/main/ipc/agent.ts"), "utf8")
   assert(
-    agent.includes("runExecutionContext.onRunTerminated?.(terminal)"),
+    agent.includes("runExecutionContext.onRunTerminated?.({"),
     "the run body must report its terminal state; a managed caller has no stream to read it from"
   )
   assert(
     agent.includes("runExecutionContext.verifyResolvedThread?.({"),
     "the run body must re-check the caller's authorization before running"
   )
+  // The guarantee has to sit around the whole implementation. Goal command
+  // handling alone returns from a dozen places before the main try block, so a
+  // fallback inside it leaves those runs unreported.
+  const entry = agent.slice(agent.indexOf("registerAgentRunImplementation(("))
+  const wrapper = entry.slice(0, entry.indexOf("agentRunExecutionContextStorage.run("))
   assert(
-    agent.includes('reportTerminal({ outcome: "unknown", code: "unknown" })'),
-    "the run body must guarantee a terminal report, or onRunTerminated is a lie"
+    wrapper.includes("let terminalReported = false"),
+    "the once-only guarantee must wrap the implementation, not sit inside its body"
+  )
+  assert(
+    entry.includes(".finally(() => {") &&
+      entry.includes('onRunTerminated?.({ outcome: "unknown", code: "unknown" })'),
+    "an unclassified run must still report a terminal, or onRunTerminated is a lie"
+  )
+  assert(
+    agent.includes('code: "prompt_blocked"'),
+    "a prompt blocked before the model must stay distinct from a completion hook halt"
   )
   // Every error branch has to carry the original error, or retryability is lost.
   for (const code of ["hook_halt", "failure_fuse", "provider_error"]) {
