@@ -86,10 +86,7 @@ import {
   neutralizeImSkillUseMarkers
 } from "./skill-command"
 import { ImGoalRunBridge } from "./goal-runner"
-import {
-  ImCompletionHookRejectedError,
-  ImPreparedPromptRejectedError
-} from "./turn-failures"
+import { ImCompletionHookRejectedError, ImPreparedPromptRejectedError } from "./turn-failures"
 import {
   executeRemoteStandardTurnOnDesktopRunBody,
   withImInboxRuntimePolicy
@@ -208,7 +205,6 @@ export type ImRemoteThreadLifecycleState =
   | "failed"
   | "rejected"
   | "outcome_unknown"
-
 
 function acknowledgementForTerminal(event: ImEventRecord): RemoteImAckV1 {
   const common = { eventId: event.eventId, leaseId: event.leaseId }
@@ -463,6 +459,12 @@ export async function executePreparedRemoteStandardTurn(
           metadata
         }),
         extraSystemPrompt: IM_UNTRUSTED_INPUT_CONTEXT,
+        // Unattended inbox turns only: a scheduler reminder carries no
+        // interactionWaitHooks and no requestUserInput, and approvals never
+        // time out (APPROVAL_TIMEOUT_MS in runtime.ts), so requiring one here
+        // would hang the run until it is aborted. A user's own inbox message
+        // takes the opposite posture and is approved over IM — see
+        // withImInboxRuntimePolicy. Do not "unify" these two.
         autoApproveFileEdits: targetKind === "inbox",
         onFileMutation: (filePath) => recordAgentTouchedFile(threadId, workspacePath, filePath),
         onCoordinatorWorkerEvent: (event) => {

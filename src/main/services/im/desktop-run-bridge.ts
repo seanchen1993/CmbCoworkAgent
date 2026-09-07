@@ -20,8 +20,20 @@ import type { PreparedRemoteStandardTurnInput } from "./remote-runner"
  */
 
 /**
- * The inbox turn's tool surface is already narrowed by createImInboxRemotePolicy;
- * these two carry what the IM runner used to derive from `targetKind` inline.
+ * Binds an inbox turn's scheduler tool to the delivery that triggered it.
+ *
+ * Deliberately does NOT set autoApproveFileEdits. An inbox turn arrives from a
+ * real person in a live conversation, it is given allowRequestUserInput, and
+ * the approval service resolves an inbox route (remote-approval-service), so a
+ * file edit can and should be approved by that person over IM. Auto-approving
+ * would let untrusted remote input write to the workspace unreviewed while the
+ * one human who could object is sitting right there in the chat.
+ *
+ * This is not a blanket rule for `targetKind === "inbox"`: an unattended inbox
+ * turn (a scheduler reminder) has no interactionWaitHooks and no
+ * requestUserInput, and approvals never time out — see APPROVAL_TIMEOUT_MS in
+ * runtime.ts. Those keep their own posture in executePreparedRemoteStandardTurn
+ * rather than inheriting this one.
  */
 export function withImInboxRuntimePolicy(
   policy: RemoteTurnPolicy | undefined,
@@ -32,7 +44,6 @@ export function withImInboxRuntimePolicy(
   if (input.targetKind !== "inbox") return policy
   return {
     ...policy,
-    autoApproveFileEdits: true,
     ...(input.imDeliveryContext ? { imDeliveryContext: input.imDeliveryContext } : {})
   }
 }

@@ -90,9 +90,17 @@ function testInboxOnlyRuntimeOptionsTravelOnThePolicy(): void {
     { disableSubagents: true },
     { targetKind: "inbox", imDeliveryContext: deliveryContext }
   )
-  assert.equal(inbox?.autoApproveFileEdits, true, "an inbox turn has no human to approve an edit")
   assert.equal(inbox?.imDeliveryContext, deliveryContext)
   assert.equal(inbox?.disableSubagents, true, "the caller's policy must survive augmentation")
+  // An inbox turn is a live conversation with a real person who is given
+  // allowRequestUserInput and for whom the approval service resolves a route.
+  // Auto-approving would let untrusted remote input write to the workspace
+  // unreviewed while the one human who could object is in the chat.
+  assert.notEqual(
+    inbox?.autoApproveFileEdits,
+    true,
+    "an inbox file edit must be approved over IM, not waved through"
+  )
 
   const thread = withImInboxRuntimePolicy(
     { disableSubagents: true },
@@ -101,7 +109,7 @@ function testInboxOnlyRuntimeOptionsTravelOnThePolicy(): void {
   assert.deepEqual(
     thread,
     { disableSubagents: true },
-    "a non-inbox turn must not silently gain auto-approved edits"
+    "a non-inbox turn must not silently gain inbox-only runtime options"
   )
   assert.equal(
     withImInboxRuntimePolicy(undefined, { targetKind: "thread" }),
