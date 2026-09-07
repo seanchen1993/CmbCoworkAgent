@@ -478,11 +478,28 @@ function testTurnCompletionGateCoversEveryEntryPoint(): void {
       handler,
       [
         "readTurnCompletionFailure(threadId, runToken)",
+        "if (!completionFailure) {",
+        "await finalizeAutoCommit({",
+        "await markLatestForkBoundaryBestEffort({",
+        "scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)",
         'createAutoModeTerminal("success", "normal")',
         'kind: "task-complete"'
       ],
       `${label} gates the success settlement`
     )
+    const successEffects = sliceBetween(
+      handler,
+      "if (!completionFailure) {",
+      "\n            }",
+      `${label} success-only side effects`
+    )
+    for (const effect of [
+      "await finalizeAutoCommit({",
+      "await markLatestForkBoundaryBestEffort({",
+      "scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)"
+    ]) {
+      assertIncludes(successEffects, effect, `${label} skips ${effect} on completion failure`)
+    }
   }
 }
 

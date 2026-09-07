@@ -169,6 +169,12 @@ describe("final message inspection", () => {
   // 正确回合判成失败——比漏判贵得多，所以下面每一种都必须放行。
   it.each([
     ["行内代码引用标签", "该解析器通过匹配 `<tool_call>` 标签识别工具调用。"],
+    [
+      "引用块中的日志示例",
+      '日志中的错误格式如下：\n> <tool_call>{"name":"read_file"}</tool_call>\n这只是引用的日志。'
+    ],
+    ["嵌套引用中的标签", '  > > <invoke name="read_file">'],
+    ["列表内引用中的标签", '- > <tool_call>{"name":"read_file"}</tool_call>'],
     ["句中裸提及标签", "代码里判断的是 <function=foo> 这种写法，注意不要漏掉闭合。"],
     [
       "围栏代码块里的示例",

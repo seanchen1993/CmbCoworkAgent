@@ -10923,22 +10923,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
 
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-            await finalizeAutoCommit({
-              threadId,
-              workspacePath,
-              userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
-              snapshot: autoCommit.snapshot,
-              window,
-              channel
-            })
-            await markLatestForkBoundaryBestEffort({
-              threadId,
-              turnId: turnState.turnId,
-              source: "agent_run_complete",
-              runToken,
-              controller: abortController
-            })
-            scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            // Check before success-only side effects, including the asynchronous IM delivery.
+            const completionFailure = readTurnCompletionFailure(threadId, runToken)
+            if (completionFailure) sendHookNotice(completionFailure)
+            if (!completionFailure) {
+              await finalizeAutoCommit({
+                threadId,
+                workspacePath,
+                userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+                snapshot: autoCommit.snapshot,
+                window,
+                channel
+              })
+              await markLatestForkBoundaryBestEffort({
+                threadId,
+                turnId: turnState.turnId,
+                source: "agent_run_complete",
+                runToken,
+                controller: abortController
+              })
+              scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            }
             pauseActiveGoalAfterBoundary(
               threadId,
               window,
@@ -10949,10 +10954,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             turnStateShouldDispose = true
-            // 与 invoke 同一套判定：门禁重试耗尽后仍是空回复 / 截断回复 / 未解析
-            // 出的工具调用时，这一回合不得报成任务完成。
-            const completionFailure = readTurnCompletionFailure(threadId, runToken)
-            if (completionFailure) sendHookNotice(completionFailure)
             resumeAutoModeTerminal = completionFailure
               ? createAutoModeTerminal("error", "unknown", completionFailure)
               : createAutoModeTerminal("success", "normal")
@@ -12050,22 +12051,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
 
             clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
-            await finalizeAutoCommit({
-              threadId,
-              workspacePath,
-              userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
-              snapshot: autoCommit.snapshot,
-              window,
-              channel
-            })
-            await markLatestForkBoundaryBestEffort({
-              threadId,
-              turnId: turnState.turnId,
-              source: "agent_run_complete",
-              runToken,
-              controller: abortController
-            })
-            scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            // Check before success-only side effects, including the asynchronous IM delivery.
+            const completionFailure = readTurnCompletionFailure(threadId, runToken)
+            if (completionFailure) sendHookNotice(completionFailure)
+            if (!completionFailure) {
+              await finalizeAutoCommit({
+                threadId,
+                workspacePath,
+                userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
+                snapshot: autoCommit.snapshot,
+                window,
+                channel
+              })
+              await markLatestForkBoundaryBestEffort({
+                threadId,
+                turnId: turnState.turnId,
+                source: "agent_run_complete",
+                runToken,
+                controller: abortController
+              })
+              scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            }
             pauseActiveGoalAfterBoundary(
               threadId,
               window,
@@ -12076,10 +12082,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             turnStateShouldDispose = true
-            // 与 invoke 同一套判定：门禁重试耗尽后仍是空回复 / 截断回复 / 未解析
-            // 出的工具调用时，这一回合不得报成任务完成。
-            const completionFailure = readTurnCompletionFailure(threadId, runToken)
-            if (completionFailure) sendHookNotice(completionFailure)
             interruptAutoModeTerminal = completionFailure
               ? createAutoModeTerminal("error", "unknown", completionFailure)
               : createAutoModeTerminal("success", "normal")

@@ -292,7 +292,7 @@ function stripCodeSpans(text: string): string {
  *
  * Two filters, both aimed at the same failure: never fail a correct answer.
  *   - code spans are stripped first (a quoted or fenced tag is documentation);
- *   - the marker must OPEN a line. A model that emits a call instead of using
+ *   - the marker must OPEN an unquoted line. A model that emits a call instead of using
  *     the tool API puts it on its own line; prose that mentions one has it mid
  *     sentence ("代码里判断的是 <function=foo> 这种写法").
  *
@@ -304,7 +304,7 @@ function stripCodeSpans(text: string): string {
 export function containsTextualToolCall(text: string): boolean {
   const prose = stripCodeSpans(text).toLowerCase()
   return TEXTUAL_TOOL_CALL_MARKERS.some((marker) =>
-    new RegExp(`(^|\n)[ \t>*-]*${escapeRegExp(marker.toLowerCase())}`).test(prose)
+    new RegExp(`(^|\n)[ \t*-]*${escapeRegExp(marker.toLowerCase())}`).test(prose)
   )
 }
 
