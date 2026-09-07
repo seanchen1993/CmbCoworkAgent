@@ -4843,7 +4843,19 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     return (
       <>
         {createModalOpen ? (
-          <DesignCreationPage onBack={() => setCreateModalOpen(false)} />
+          <DesignCreationPage
+            onBack={() => setCreateModalOpen(false)}
+            onEnterDesign={(selection) => {
+              // TODO(design-entry): the design session does NOT yet consume
+              // this payload — wiring up consumption is intentionally
+              // deferred. For now we only log it.
+              console.log("[DesignCreationPage] enter design selection:", selection)
+            }}
+            onSessionCreated={(id) => {
+              setCreateModalOpen(false)
+              openSession(id)
+            }}
+          />
         ) : (
           <DesignGallery
             sessionIndex={sessionIndex}

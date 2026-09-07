@@ -16,7 +16,12 @@ import {
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
-import type { DesignCreationRequest, DesignSessionKind, DesignSystemInfo } from "./types"
+import type {
+  DesignCreationRequest,
+  DesignCreationSelection,
+  DesignSessionKind,
+  DesignSystemInfo
+} from "./types"
 import { getDetailCode } from "@/api/leanstar-requirements"
 import { NamespaceTreeSelector, type NamespaceTreeSelection } from "./RequirementCascadeSelector"
 
@@ -49,7 +54,7 @@ function parsedHostname(rawUrl: string): string {
   }
 }
 
-function completeCreation(request: DesignCreationRequest): void {
+function completeCreation(request: DesignCreationRequest): string {
   const sessionId = `ds_${Math.random().toString(36).slice(2, 10)}`
   const tabId = "design-main"
   const now = Date.now()
@@ -99,7 +104,7 @@ function completeCreation(request: DesignCreationRequest): void {
     ])
   )
   localStorage.setItem("design_last_session", sessionId)
-  window.location.reload()
+  return sessionId
 }
 
 function getDesignSystemGroupLabel(label: string | null | undefined): string {
@@ -175,7 +180,17 @@ const CREATION_METHODS: Array<{
   }
 ]
 
-export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JSX.Element {
+export function DesignCreationPage({
+  onBack,
+  onEnterDesign,
+  onSessionCreated
+}: {
+  onBack: () => void
+  onEnterDesign?: (selection: DesignCreationSelection) => void
+  /** Called with the new session id after persistence so the host can switch
+   * to it via React state (no full-page reload). */
+  onSessionCreated?: (sessionId: string) => void
+}): React.JSX.Element {
   const [method, setMethod] = useState<DesignSessionKind>("prompt")
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
@@ -342,13 +357,14 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
       if (!htmlPath) throw new Error("请选择 .html 或 .htm 文件")
       const result = await window.api.file.readText(htmlPath)
       if (!result.success || !result.content) throw new Error(result.error || "无法读取 HTML 文件")
-      completeCreation({
+      const id = completeCreation({
         kind: "import_html",
         workspacePath,
         title: result.filename || getPathName(htmlPath),
         prompt: result.content,
         designSystemId: selectedDesignSystemId
       })
+      onSessionCreated?.(id)
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "导入 HTML 页面失败")
     } finally {
@@ -367,13 +383,14 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
       if (!zipPath) throw new Error("请选择 .zip 压缩包")
       const result = await window.api.design.importPrototypeZip(zipPath)
       if (!result.success || !result.html) throw new Error(result.error || "解析原型图压缩包失败")
-      completeCreation({
+      const id = completeCreation({
         kind: "prototype_zip",
         workspacePath,
         title: result.title || getPathName(zipPath),
         prompt: result.html,
         designSystemId: selectedDesignSystemId
       })
+      onSessionCreated?.(id)
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "导入原型图压缩包失败")
     } finally {
@@ -396,7 +413,7 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
       .then((result) => {
         if (!result.success || !result.html) throw new Error(result.error || "抓取页面失败")
         setLinkModalOpen(false)
-        completeCreation({
+        const id = completeCreation({
           kind: "import_url",
           workspacePath,
           title: result.title || parsedHostname(url),
@@ -404,6 +421,7 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
           url,
           designSystemId: selectedDesignSystemId
         })
+        onSessionCreated?.(id)
       })
       .catch((error: unknown) => {
         setImportError(error instanceof Error ? error.message : "导入链接页面失败")
@@ -489,7 +507,62 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
             .filter(Boolean)
             .join("\n")
         : ""
-    completeCreation({
+
+    // Emit the structured selection (template content, requirement content, …)
+    // so the design session page can consume it after the navigation below.
+    // TODO(design-entry): the design session does NOT yet consume these emitted
+    // values — wiring up consumption (e.g. seeding the conversation or
+    // prefilling the prompt from the structured payload) is tracked separately
+    // and intentionally deferred. For now we only emit + navigate.
+    if (onEnterDesign) {
+      const templateHtml =
+        templateMode === "select"
+          ? (selectedTemplate?.html ?? null)
+          : templateMode === "upload"
+            ? (uploadedTemplate?.html ?? null)
+            : null
+      const templateName =
+        templateMode === "select"
+          ? (selectedTemplate?.name ?? null)
+          : templateMode === "upload"
+            ? (uploadedTemplate?.name ?? null)
+            : null
+      onEnterDesign({
+        method,
+        workspacePath,
+        template: {
+          mode: templateMode,
+          name: templateName,
+          html: templateHtml,
+          path: templateMode === "upload" ? (uploadedTemplate?.path ?? null) : null
+        },
+        requirement: {
+          mode: requirementMode,
+          namespaceId:
+            requirementMode === "select" ? (requirementSelection?.namespaceId ?? null) : null,
+          pathName:
+            requirementMode === "select" ? (requirementSelection?.pathName ?? null) : null,
+          requirement:
+            requirementMode === "select" && requirementSelection
+              ? {
+                  code: requirementSelection.requirement.code,
+                  title: requirementSelection.requirement.title
+                }
+              : null,
+          implementationDetails:
+            requirementMode === "select" && requirementSelection
+              ? requirementSelection.implementationDetails.map((detail) => ({
+                  title: detail.title,
+                  code: getDetailCode(detail)
+                }))
+              : [],
+          path: requirementMode === "upload" ? (uploadedRequirement?.path ?? null) : null
+        },
+        designSystemId: selectedDesignSystemId
+      })
+    }
+
+    const id = completeCreation({
       kind: method,
       workspacePath,
       title: fallbackTitle,
@@ -512,6 +585,7 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
       prompt: `${basePrompt}${creationContext}`,
       designSystemId: selectedDesignSystemId
     })
+    onSessionCreated?.(id)
   }
 
   const handleCreationMethodClick = (nextMethod: DesignSessionKind): void => {

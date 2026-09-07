@@ -55,6 +55,40 @@ export type DesignSessionKind = "prompt" | "import_url" | "import_html" | "proto
 export type AnswerValue = string | string[]
 
 /**
+ * Structured selection values emitted by {@link DesignCreationPage} when the
+ * user clicks "进入设计". The design session page is expected to consume these
+ * (e.g. seed the conversation or prefill the prompt). Consumption is NOT yet
+ * wired up — see the TODO in `DesignCreationPage.handleStart`.
+ */
+export interface DesignCreationSelection {
+  /** Creation method chosen on the page. */
+  method: DesignSessionKind
+  /** Resolved workspace path, if any. */
+  workspacePath: string | null
+  /** Template content chosen on the page. */
+  template: {
+    mode: "select" | "upload" | "none"
+    name: string | null
+    /** HTML content of the selected/uploaded template, if any. */
+    html: string | null
+    /** Local path of an uploaded template file, if any. */
+    path: string | null
+  }
+  /** Requirement content chosen on the page. */
+  requirement: {
+    mode: "select" | "upload" | "none"
+    namespaceId: string | null
+    pathName: string | null
+    requirement: { code: string; title: string } | null
+    implementationDetails: Array<{ title: string; code: string }>
+    /** Local path of an uploaded requirement file, if any. */
+    path: string | null
+  }
+  /** Selected design system id, if any. */
+  designSystemId: string | null
+}
+
+/**
  * Payload passed from the standalone new-design page to the editor.
  * Keep this transport shape small so the legacy create dialog can be restored
  * without changing the editor's session model.
