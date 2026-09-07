@@ -99,6 +99,13 @@ function formatCompactTime(date: Date | string): string {
   return `${String(value.getFullYear()).slice(2)}/${month}/${day}`
 }
 
+function formatDateTime(date: Date | string): string {
+  const value = typeof date === "string" ? new Date(date) : date
+  if (Number.isNaN(value.getTime())) return ""
+  const pad = (part: number): string => String(part).padStart(2, "0")
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`
+}
+
 function getStatusPresentation(status: string): {
   tagClass: string
   dotClass: string
@@ -628,21 +635,13 @@ export function RequirementThreadSidebar({
                       <dt>更新时间</dt>
                       <dd className="text-foreground">
                         {requirement.updatedAt
-                          ? formatCompactTime(requirement.updatedAt)
+                          ? formatDateTime(requirement.updatedAt)
                           : "未设置"}
                       </dd>
                       <dt>需求 ID</dt>
                       <dd className="break-all font-mono text-[10px] text-foreground">
                         {requirement.id}
                       </dd>
-                      {requirement.initialDescription ? (
-                        <>
-                          <dt>初始描述</dt>
-                          <dd className="whitespace-pre-wrap break-words text-foreground">
-                            {requirement.initialDescription}
-                          </dd>
-                        </>
-                      ) : null}
                     </dl>
                   </PopoverContent>
                 </Popover>
