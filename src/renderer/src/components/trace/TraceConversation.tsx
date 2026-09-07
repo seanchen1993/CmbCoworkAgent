@@ -56,6 +56,8 @@ interface TraceConversationStep {
 
 export interface TraceConversationSource {
   traceId?: string
+  /** 会话列表的摘要预览行：`_raw` 刻意没取，所以没有任何对话数据。 */
+  rawPending?: boolean
   userMessage?: string
   triggerSource?: string
   startedAt?: string
@@ -606,14 +608,21 @@ function buildTraceTimeline(trace: TraceConversationSource, traceOrder: number):
     }
   }
 
-  if (assistantCount === 0 && trace.outcome === "error") {
-    addAssistant(
-      trace.errorMessage?.trim() || "本次运行失败，trace 中没有记录最终回复。",
-      "",
-      trace.endedAt
-    )
-  } else if (assistantCount === 0 && trace.outcome === "cancelled") {
-    addAssistant("本次运行被取消，trace 中没有记录最终回复。", "", trace.endedAt)
+  // 「没有助手消息」有两种成因，只有一种能下结论：
+  //   - trace 真的没记录最终回复 → 按 outcome 说明原因；
+  //   - 这是列表的摘要预览行（rawPending），完整对话还在懒加载 → 什么都不知道。
+  // 对后者套用 outcome 文案会编造出「本次运行被取消，trace 中没有记录最终回复」
+  // 这种与事实相反的结论（加载完成后同一条 trace 明明有完整对话）。
+  if (assistantCount === 0 && !trace.rawPending) {
+    if (trace.outcome === "error") {
+      addAssistant(
+        trace.errorMessage?.trim() || "本次运行失败，trace 中没有记录最终回复。",
+        "",
+        trace.endedAt
+      )
+    } else if (trace.outcome === "cancelled") {
+      addAssistant("本次运行被取消，trace 中没有记录最终回复。", "", trace.endedAt)
+    }
   }
 
   const toolGroups = extractTimedToolGroups(trace)
@@ -1122,11 +1131,23 @@ export function TraceConversation({
   )
 }
 
+/**
+ * 整个 thread 还全是「摘要预览行」（`_raw` 刻意没取，完整对话在懒加载）。
+ *
+ * 这种状态下时间线里只有用户提问、一条回复都没有，顶部还会写「已聚合 N 条
+ * trace」，读起来像内容就这么多。所以这里不渲染半张脸的时间线，直接给占位。
+ * 混合状态（部分已加载）不算——那说明数据已经在陆续到位了。
+ */
+export function isThreadAwaitingFullLoad(traces: readonly TraceConversationSource[]): boolean {
+  return traces.length > 0 && traces.every((trace) => trace.rawPending === true)
+}
+
 export function TraceThreadConversation({
   traces,
   className,
   title = "Thread 对话还原",
   loading = false,
+  loadFailed = false,
   fillAvailableHeight = false,
   selectedTraceId
 }: {
@@ -1134,12 +1155,20 @@ export function TraceThreadConversation({
   className?: string
   title?: string
   loading?: boolean
+  /** 完整会话加载失败。用来把「还没到」和「拿不到了」分开——否则首帧（effect 还
+   * 没把 loading 置起来）会闪一下「尚未加载」。 */
+  loadFailed?: boolean
   /** Let the message list consume its parent's remaining height instead of using the compact 360px cap. */
   fillAvailableHeight?: boolean
   /** When set, the matching trace's messages are highlighted and scrolled into view. */
   selectedTraceId?: string | null
 }): React.JSX.Element {
   const conversation = useMemo(() => buildThreadConversation(traces), [traces])
+  // 会话列表给的是摘要预览行（不含 `_raw`），完整对话由 dashboard:threadTraces
+  // 懒加载后覆盖。全部还是预览时，时间线里只有用户提问、一条回复都没有——那不是
+  // 「还原出来的会话」，是半张脸，而且顶部还会写着「已聚合 N 条 trace」，读起来
+  // 像是内容就这么多。这种中间态直接显示加载占位，等完整数据到位再一次渲染。
+  const awaitingFullThread = isThreadAwaitingFullLoad(traces)
   const subagentCount = useMemo(() => traces.filter(isSubagentTrace).length, [traces])
   const projectNodeSummary = useMemo(() => summarizeThreadProjectNodes(traces), [traces])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -1157,7 +1186,7 @@ export function TraceThreadConversation({
     if (target) target.scrollIntoView({ behavior: "smooth", block: "center" })
   }, [selectedTraceId, conversation.messages.length])
 
-  if (conversation.messages.length === 0) {
+  if (awaitingFullThread || conversation.messages.length === 0) {
     return (
       <section
         className={cn(
@@ -1165,7 +1194,13 @@ export function TraceThreadConversation({
           className
         )}
       >
-        {loading ? "正在加载完整会话…" : "thread 中暂无可还原的对话内容"}
+        {awaitingFullThread
+          ? loadFailed
+            ? "完整对话加载失败"
+            : "正在加载完整会话…"
+          : loading
+            ? "正在加载完整会话…"
+            : "thread 中暂无可还原的对话内容"}
       </section>
     )
   }
