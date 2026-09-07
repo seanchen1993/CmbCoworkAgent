@@ -1087,7 +1087,7 @@ function App(): React.JSX.Element {
           </div>
           {/* Right: right panel toggle */}
           <div className="flex flex-1 h-full items-center justify-end pl-1 gap-1">
-            {showRightPanelModuleControls && !isAgentFocusActive && (
+            {showRightPanelModuleControls && !rightPanelCollapsed && !isAgentFocusActive && (
               <>
                 <button
                   type="button"
