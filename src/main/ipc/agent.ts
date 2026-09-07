@@ -346,6 +346,11 @@ import {
   shouldPauseGoalForEmptyTurn
 } from "../agent/goals/evaluator"
 import {
+  clearTurnCompletionGateState,
+  describeTurnCompletionFailure,
+  readTurnCompletionGateReport
+} from "../agent/turn-completion-integrity"
+import {
   evaluateGoalWithRuntimeRetry,
   formatGoalEvaluatorRuntimeFailureReason
 } from "../agent/goals/evaluator-runtime"
@@ -6444,6 +6449,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           emitGoalNotice(window, channel, threadId, notice)
         }
 
+        // The completion gate bounced the turn back to the model. Surface it:
+        // the retry costs the user a model call and changes what they see in the
+        // transcript, so it must not be a silent internal loop.
+        const sendTurnCompletionNotice = (input: {
+          kind: "defect" | "todo"
+          detail: string
+          attempt: number
+          maxAttempts: number
+        }): void => {
+          sendHookNotice(
+            input.kind === "todo"
+              ? `任务尚未完成（${input.detail}），已请求模型继续（${input.attempt}/${input.maxAttempts}）。`
+              : `模型未给出有效结果（${input.detail}），已请求模型重新作答（${input.attempt}/${input.maxAttempts}）。`
+          )
+        }
+
         let latestSerializedValuesMessagesForGoalFlush: unknown[] = []
 
         const sendGoalSubturnComplete = (): void => {
@@ -7736,7 +7757,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,
-              onWorkflowLaunched
+              onWorkflowLaunched,
+              onTurnCompletionRecovery: sendTurnCompletionNotice
             }),
             harnessContext: harnessAgentContext
           })
@@ -8914,6 +8936,36 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               if (!continued) break
             }
 
+            // ── Ordinary-path completion gate ──────────────────────────────
+            // Everything above this point can end with the graph simply having
+            // stopped producing events, which is NOT the same as the user's
+            // task being done. The in-graph gate (turn-completion-integrity.ts)
+            // already spent its bounded retries trying to get a valid final
+            // message and, for a plain chat turn, its todo nudges; if it still
+            // has an unresolved defect or open todos, this turn must settle as
+            // incomplete instead of emitting done + task-complete + "✅ 任务完成".
+            //
+            // Read AFTER the goal loop so goal continuation sub-turns — which
+            // run through the same graph and the same gate — are reflected. An
+            // already-degraded outcome (Stop hook halt, goal blocked) keeps its
+            // own, more specific reason.
+            if (invokeFinalOutcome === "success") {
+              const completionReport = readTurnCompletionGateReport(threadId, runToken)
+              const completionFailure = completionReport
+                ? describeTurnCompletionFailure(completionReport)
+                : null
+              if (completionFailure) {
+                // markInvokeIncomplete only — the settlement block below turns
+                // a non-success outcome into markAutoModeTerminal("error",
+                // "unknown", reason), the same terminal shape the Stop-hook and
+                // goal-blocked paths already produce. No new endReason code is
+                // minted here so managed-run policy keeps one incomplete rule.
+                markInvokeIncomplete(completionFailure)
+                sendHookNotice(completionFailure)
+                console.warn(`[Agent] Turn settled as incomplete: ${completionFailure}`)
+              }
+            }
+
             clearCoordinatorNotificationSelectedSkillsOnExit = true
             void settleDrainedCoordinatorNotifications("ack").catch((error) => {
               console.warn("[Agent] Coordinator notification settlement failed:", error)
@@ -9551,6 +9603,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
           }
         } finally {
+          // The gate's per-run state is process-global; every exit of this
+          // physical run (success, throw, abort) must drop it or the map grows
+          // for the process lifetime and a later run reusing the key would read
+          // a stale defect.
+          clearTurnCompletionGateState(threadId, runToken)
           // Safety net for EARLY RETURNS inside the try (Stop hook blocked
           // completion, PostSkillUse max revisions, goal-continuation halts…):
           // success settles on the ack path and thrown errors settle in the

@@ -72,6 +72,16 @@ export interface CheckpointAuthorityTranscriptMessage {
   end_at?: unknown
 }
 
+/**
+ * Prefix of the recovery prompt the turn-completion gate injects when the model
+ * ends a turn on an invalid final message (empty reply, truncated stream, a
+ * tool call the provider never structured). It is runtime scaffolding, not a
+ * user message: it must never render as a chat bubble, never be persisted as
+ * conversation, and never count as "the thread has user content".
+ * See src/main/agent/turn-completion-integrity.ts.
+ */
+export const TURN_COMPLETION_GATE_MARKER_PREFIX = "[[CMB_TURN_COMPLETION_GATE_V1:"
+
 export const WORKFLOW_NOTIFICATION_MARKER_PREFIX = "[[CMB_WORKFLOW_NOTIFICATION_V1:"
 /** Renderer-submitted trigger; the main process expands it into the real notification. */
 export const WORKFLOW_NOTIFICATION_TURN_TRIGGER = "[[CMB_WORKFLOW_NOTIFICATION_TURN]]"
@@ -597,12 +607,20 @@ function isGoalTranscriptArtifact(role: string, content: unknown): boolean {
   )
 }
 
+/**
+ * Runtime plumbing prompts: HumanMessages the runtime itself writes into the
+ * graph so the loop can continue, which no layer may treat as conversation.
+ * Keeps the historical name because main/renderer/db/projection all filter on
+ * this one predicate; the set it covers is workflow notification turns AND
+ * turn-completion-gate recovery prompts.
+ */
 export function isWorkflowPlumbingTranscriptContent(content: unknown): boolean {
   if (typeof content !== "string") return false
   const text = content.trimStart()
   return (
     text === WORKFLOW_NOTIFICATION_TURN_PROMPT ||
-    text.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
+    text.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX) ||
+    text.startsWith(TURN_COMPLETION_GATE_MARKER_PREFIX)
   )
 }
 
