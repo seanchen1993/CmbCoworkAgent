@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { NewRequirementDialog } from "./NewRequirementDialog"
@@ -19,6 +19,10 @@ type EntryScreen = "history" | "system" | "conversation"
 export function RequirementEntryView(): React.JSX.Element {
   const [screen, setScreen] = useState<EntryScreen>("history")
   const [selectedRequirement, setSelectedRequirement] = useState<RequirementRecord | null>(null)
+  const [selectedRequirementThreadId, setSelectedRequirementThreadId] = useState<string | null>(
+    null
+  )
+  const openRequirementRequestRef = useRef(0)
   const [autoGeneratePrd, setAutoGeneratePrd] = useState(false)
   const [requirements, setRequirements] = useState<RequirementRecord[]>([])
   const [requirementsLoaded, setRequirementsLoaded] = useState(false)
@@ -78,7 +82,7 @@ export function RequirementEntryView(): React.JSX.Element {
     setRequirementDialogOpen(true)
   }
 
-  const replaceRequirement = (requirement: RequirementRecord): void => {
+  const replaceRequirement = useCallback((requirement: RequirementRecord): void => {
     setRequirements((current) => {
       const existingIndex = current.findIndex((item) => item.id === requirement.id)
       if (existingIndex >= 0) {
@@ -89,17 +93,16 @@ export function RequirementEntryView(): React.JSX.Element {
       return sortRequirementsByUpdatedAt([...current, requirement])
     })
     setSelectedRequirement((current) => (current?.id === requirement.id ? requirement : current))
-  }
+  }, [])
 
   const ensureRequirementThread = async (
     requirement: RequirementRecord
-  ): Promise<RequirementRecord> => {
+  ): Promise<{ requirement: RequirementRecord; threadId: string }> => {
     const threadIds = getRequirementThreadIds(requirement)
     for (const threadId of threadIds) {
       const existingThread = await window.api.threads.get(threadId)
       if (existingThread) {
-        await selectThread(threadId, { preserveView: true })
-        return requirement
+        return { requirement, threadId }
       }
     }
 
@@ -127,22 +130,35 @@ export function RequirementEntryView(): React.JSX.Element {
     }
     const systemName =
       getSelectedRequirementSystem(requirement.systemId)?.name ?? requirement.system
-    return fromPersistedRequirement(result.requirement, systemName)
+    return {
+      requirement: fromPersistedRequirement(result.requirement, systemName),
+      threadId: thread.thread_id
+    }
   }
 
   const openRequirement = async (
     requirement: RequirementRecord,
     threadId?: string
   ): Promise<void> => {
+    const requestId = ++openRequirementRequestRef.current
     try {
-      const nextRequirement = threadId ? requirement : await ensureRequirementThread(requirement)
-      if (threadId) await selectThread(threadId, { preserveView: true })
+      const ensured = threadId
+        ? { requirement, threadId }
+        : await ensureRequirementThread(requirement)
+      if (requestId !== openRequirementRequestRef.current) return
+      const nextRequirement = ensured.requirement
+      const nextThreadId = ensured.threadId
+      if (nextThreadId) await selectThread(nextThreadId, { preserveView: true })
+      if (requestId !== openRequirementRequestRef.current) return
       replaceRequirement(nextRequirement)
       setSelectedRequirement(nextRequirement)
+      setSelectedRequirementThreadId(nextThreadId)
       setAutoGeneratePrd(false)
       setScreen("conversation")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "打开需求会话失败")
+      if (requestId === openRequirementRequestRef.current) {
+        toast.error(error instanceof Error ? error.message : "打开需求会话失败")
+      }
     }
   }
 
@@ -161,6 +177,7 @@ export function RequirementEntryView(): React.JSX.Element {
     setRequirements((current) => current.filter((item) => item.id !== requirement.id))
     if (selectedRequirement?.id === requirement.id) {
       setSelectedRequirement(null)
+      setSelectedRequirementThreadId(null)
       setScreen("history")
     }
     toast.success("需求、关联会话和归档文件已删除")
@@ -188,6 +205,7 @@ export function RequirementEntryView(): React.JSX.Element {
       {screen === "conversation" && selectedRequirement && (
         <RequirementConversationView
           requirement={selectedRequirement}
+          selectedThreadId={selectedRequirementThreadId}
           requirements={requirements}
           onSelectRequirement={openRequirement}
           onRequirementUpdated={replaceRequirement}
@@ -219,10 +237,14 @@ export function RequirementEntryView(): React.JSX.Element {
           system={selectedSystem}
           onOpenChange={setRequirementDialogOpen}
           onStartConversation={async (requirement, options) => {
-            const nextRequirement = await ensureRequirementThread(requirement)
+            const ensured = await ensureRequirementThread(requirement)
+            const nextRequirement = ensured.requirement
+            const nextThreadId = ensured.threadId
+            if (nextThreadId) await selectThread(nextThreadId, { preserveView: true })
             replaceRequirement(nextRequirement)
             setRequirementDialogOpen(false)
             setSelectedRequirement(nextRequirement)
+            setSelectedRequirementThreadId(nextThreadId)
             setAutoGeneratePrd(options?.autoGeneratePrd ?? true)
             setScreen("conversation")
           }}

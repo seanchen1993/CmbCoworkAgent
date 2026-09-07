@@ -120,7 +120,7 @@ function getStatusPresentation(status: string): {
   }
   if (status.includes("沟通")) {
     return {
-      tagClass: "border-status-info/20 bg-status-info/5 text-status-info/85",
+      tagClass: "border-status-warning/20 bg-status-warning/5 text-status-warning/85",
       dotClass: "bg-muted-foreground/35",
       showDot: false
     }

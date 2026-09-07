@@ -20,8 +20,7 @@ import {
   getDetailCode,
   type ImplementationDetail,
   type NamespaceTreeNode,
-  type ProductRequirement,
-  type RequirementDetail
+  type ProductRequirement
 } from "@/api/leanstar-requirements"
 
 export type NamespaceTreeSelection = {
@@ -209,8 +208,6 @@ export function NamespaceTreeSelector({
   )
   const [loading, setLoading] = useState<"requirements" | "details" | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [requirementDetail, setRequirementDetail] = useState<RequirementDetail | null>(null)
-  const [requirementDetailLoading, setRequirementDetailLoading] = useState(false)
 
   const leafNodes = useMemo(() => collectLeafNodes(tree), [tree])
 
@@ -256,7 +253,6 @@ export function NamespaceTreeSelector({
     setRequirements([])
     setDetails([])
     setSelectedDetailCode(null)
-    setRequirementDetail(null)
     onChange(null)
     setLoading("requirements")
     setError(null)
@@ -273,7 +269,6 @@ export function NamespaceTreeSelector({
     setRequirementCode(nextCode)
     setDetails([])
     setSelectedDetailCode(null)
-    setRequirementDetail(null)
     onChange(null)
     if (!nextCode || !selectedNamespace) return
     const requirement = requirements.find((item) => item.code === nextCode)
@@ -308,33 +303,6 @@ export function NamespaceTreeSelector({
       )
       .finally(() => setLoading(null))
   }
-
-  useEffect(() => {
-    if (!selectedDetailCode || !value?.requirement.code) {
-      setRequirementDetail(null)
-      setRequirementDetailLoading(false)
-      return
-    }
-    let cancelled = false
-    setRequirementDetailLoading(true)
-    void leanstarRequirementsApi
-      .getRequirementDetail(value.requirement.code)
-      .then((result) => {
-        if (!cancelled) setRequirementDetail(result)
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) {
-          setRequirementDetail(null)
-          setError(reason instanceof Error ? reason.message : "加载需求详情失败")
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setRequirementDetailLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [selectedDetailCode, value?.requirement.code])
 
   const toggleDetail = (detail: ImplementationDetail): void => {
     if (!value) return
@@ -521,20 +489,6 @@ export function NamespaceTreeSelector({
             <p className="mt-4 rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
               该需求特性暂无实施详情。
             </p>
-          )}
-          {selectedDetailCode && (requirementDetailLoading || requirementDetail) && (
-            <div className="mt-4 rounded-md border border-border bg-muted/20 p-3">
-              <div className="text-xs font-semibold text-foreground">需求详情</div>
-              {requirementDetailLoading ? (
-                <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-                  <LoaderCircle className="size-3.5 animate-spin" /> 加载需求详情中...
-                </div>
-              ) : requirementDetail ? (
-                <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-muted-foreground">
-                  {JSON.stringify(requirementDetail, null, 2)}
-                </pre>
-              ) : null}
-            </div>
           )}
         </div>
       )}

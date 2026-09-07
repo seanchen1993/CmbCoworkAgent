@@ -4080,6 +4080,11 @@ const api = {
         requirement?: RequirementRuntimeItem
         error?: string
       }>,
+    beginManifestSync: (payload: { reqId: string; threadId: string; requestId: string }) =>
+      ipcRenderer.invoke("requirements:begin-manifest-sync", payload) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     rename: (payload: { reqId: string; title: string }) =>
       ipcRenderer.invoke("requirements:rename", payload) as Promise<{
         success: boolean
@@ -4102,7 +4107,12 @@ const api = {
         requirement?: RequirementRuntimeItem
         error?: string
       }>,
-    syncManifest: (payload: { reqId: string; manifest: unknown }) =>
+    syncManifest: (payload: {
+      reqId: string
+      manifest: unknown
+      threadId?: string
+      requestId?: string
+    }) =>
       ipcRenderer.invoke("requirements:sync-manifest", payload) as Promise<{
         success: boolean
         requirement?: RequirementRuntimeItem

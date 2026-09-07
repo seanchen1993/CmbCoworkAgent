@@ -55,18 +55,11 @@ function getSourceTabLabel(sourceType: RequirementRecord["sourceType"]): string 
   return "旧需求（描述）"
 }
 
-function getInitialPreviewTab(requirement: RequirementRecord): PreviewTab {
-  if (isRequirementPublished(requirement) || isRequirementGenerated(requirement)) return "requirement-space"
-  return "source"
-}
-
 function normalizePrdFilePath(filePath: string): string {
   const normalized = filePath.trim().replace(/\\/g, "/").replace(/^\/+/, "")
   const prdMarker = normalized.toLowerCase().lastIndexOf("/prd/")
   if (prdMarker >= 0) return `/${normalized.slice(prdMarker + 1)}`
-  return (
-    normalized.toLowerCase() === "prd" || normalized.toLowerCase().startsWith("prd/")
-  )
+  return normalized.toLowerCase() === "prd" || normalized.toLowerCase().startsWith("prd/")
     ? `/${normalized}`
     : `/prd/${normalized}`
 }
@@ -119,8 +112,7 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
 
 function isRequirementSpacePublished(manifest: RequirementPrdManifest | null): boolean {
   return (
-    manifest?.prd.status.toLowerCase() === "published" ||
-    Boolean(manifest?.prd.prDetailUrl?.trim())
+    manifest?.prd.status.toLowerCase() === "published" || Boolean(manifest?.prd.prDetailUrl?.trim())
   )
 }
 
@@ -151,6 +143,7 @@ function buildRequirementInitializationMessage(requirement: RequirementRecord): 
 
 function RequirementConversationSession({
   requirement,
+  selectedThreadId: activeThreadId,
   requirements,
   onSelectRequirement,
   onRequirementUpdated,
@@ -160,6 +153,7 @@ function RequirementConversationSession({
   autoGeneratePrd
 }: {
   requirement: RequirementRecord
+  selectedThreadId: string | null
   requirements: RequirementRecord[]
   onSelectRequirement: (requirement: RequirementRecord, threadId?: string) => Promise<void>
   onRequirementUpdated: (requirement: RequirementRecord) => void
@@ -174,9 +168,18 @@ function RequirementConversationSession({
   const openSubagentFocusView = useAppStore((state) => state.openSubagentFocusView)
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
-    requirement.threadIds[0] ?? null
+    activeThreadId && requirement.threadIds.includes(activeThreadId)
+      ? activeThreadId
+      : (requirement.threadIds[0] ?? null)
   )
-  const threadId = selectedThreadId ?? requirement.threadIds[0] ?? null
+  const threadId =
+    activeThreadId && requirement.threadIds.includes(activeThreadId)
+      ? activeThreadId
+      : selectedThreadId && requirement.threadIds.includes(selectedThreadId)
+        ? selectedThreadId
+        : (requirement.threadIds[0] ?? null)
+  const currentThreadIdRef = useRef(threadId)
+  currentThreadIdRef.current = threadId
   const threadState = useThreadState(threadId)
   const setWorkspaceFiles = threadState?.setWorkspaceFiles
   const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
@@ -187,15 +190,19 @@ function RequirementConversationSession({
   const autoQueuedPrdGenerationRef = useRef(false)
   const continuationMessageThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
+  const manifestRequestRef = useRef(0)
   const publishRequestQueuedRef = useRef(false)
-  const [previewTab, setPreviewTab] = useState<PreviewTab>(() => getInitialPreviewTab(requirement))
+  // A requirement can own multiple conversations. Do not render a requirement-level PRD
+  // cache before the selected conversation's manifest has been read and validated.
+  const [previewTab, setPreviewTab] = useState<PreviewTab>("source")
   const [selectedPrdPath, setSelectedPrdPath] = useState<string | null>(null)
   const [prdPreviewReloadToken, setPrdPreviewReloadToken] = useState(0)
   const [sourcePreview, setSourcePreview] = useState("")
   const [sourcePreviewLoading, setSourcePreviewLoading] = useState(false)
   const [sourcePreviewError, setSourcePreviewError] = useState<string | null>(null)
   const [requirementSpaceManifest, setRequirementSpaceManifest] =
-    useState<RequirementPrdManifest | null>(() => requirement.prdManifest)
+    useState<RequirementPrdManifest | null>(null)
+  const [manifestThreadId, setManifestThreadId] = useState<string | null>(null)
   const [manifestLoading, setManifestLoading] = useState(false)
   const [manifestError, setManifestError] = useState<string | null>(null)
   const [publishRequestQueued, setPublishRequestQueued] = useState(false)
@@ -265,31 +272,47 @@ function RequirementConversationSession({
     (file) => !file.is_dir && file.path === effectiveSelectedPrdPath
   )
   const prdFileCount = prdFiles.filter((file) => !file.is_dir).length
+  const manifestBelongsToCurrentThread = manifestThreadId === threadId
   const prdGenerationCompleted =
-    isRequirementGenerated(requirement) ||
-    isRequirementPublished(requirement) ||
-    isRequirementPrdGenerationCompleted(requirementSpaceManifest)
+    manifestBelongsToCurrentThread && isRequirementPrdGenerationCompleted(requirementSpaceManifest)
   const requirementSpacePublished =
-    requirementSpaceManifest !== null
-      ? isRequirementSpacePublished(requirementSpaceManifest)
-      : isRequirementPublished(requirement)
+    manifestBelongsToCurrentThread && isRequirementSpacePublished(requirementSpaceManifest)
   const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
   const hasThreadState = threadState !== null
 
+  // Keep the preview aligned with the current requirement after PRD generation completes,
+  // including cases where the component mounts after the loading transition already ended.
   useEffect(() => {
-    setSelectedThreadId((current) => {
-      if (current && requirement.threadIds.includes(current)) return current
-      return requirement.threadIds[0] ?? null
-    })
-  }, [requirement.id, requirement.threadIds])
+    if (conversationLoading || !prdGenerationCompleted) return
+    setPreviewTab("requirement-space")
+  }, [conversationLoading, prdGenerationCompleted])
 
   useEffect(() => {
-    setRequirementSpaceManifest(requirement.prdManifest)
-  }, [requirement.id, requirement.prdManifest])
+    conversationLoadingObservedRef.current = false
+    manifestRequestRef.current += 1
+    setManifestLoading(false)
+    setManifestError(null)
+    setRequirementSpaceManifest(null)
+    setManifestThreadId(null)
+    setSelectedPrdPath(null)
+    setPreviewTab("source")
+    publishRequestQueuedRef.current = false
+    setPublishRequestQueued(false)
+    observedSubagentStatesRef.current.clear()
+  }, [threadId])
+
+  useEffect(() => {
+    setSelectedThreadId(
+      activeThreadId && requirement.threadIds.includes(activeThreadId)
+        ? activeThreadId
+        : (requirement.threadIds[0] ?? null)
+    )
+  }, [activeThreadId, requirement.id, requirement.threadIds])
 
   useEffect(() => {
     const sessionPaused =
-      threadState?.queueAutoDrainSuppressed === true || threadState?.goalUi.goal?.status === "paused"
+      threadState?.queueAutoDrainSuppressed === true ||
+      threadState?.goalUi.goal?.status === "paused"
     if (!sessionPaused || !publishRequestQueuedRef.current) return
     publishRequestQueuedRef.current = false
     setPublishRequestQueued(false)
@@ -336,7 +359,7 @@ function RequirementConversationSession({
     () => ({
       requirements,
       onSelectRequirement: async (item, nextThreadId) => {
-        if (nextThreadId) {
+        if (nextThreadId && item.id === requirement.id) {
           setSelectedThreadId(nextThreadId)
           await onSelectRequirement(item, nextThreadId)
         } else {
@@ -429,6 +452,7 @@ function RequirementConversationSession({
       onSelectRequirement,
       requirements,
       threadId,
+      requirement.id,
       requirement.system
     ]
   )
@@ -468,57 +492,81 @@ function RequirementConversationSession({
     void loadSourcePreview()
   }, [loadSourcePreview])
 
-  const loadRequirementSpaceManifest = useCallback(async (options?: { forceRead?: boolean }): Promise<RequirementPrdManifest | null> => {
-    setManifestLoading(true)
-    setManifestError(null)
-    try {
-      if (!options?.forceRead && isRequirementPrdGenerationCompleted(requirement.prdManifest)) {
-        const manifest = requirement.prdManifest
+  const loadRequirementSpaceManifest =
+    useCallback(async (): Promise<RequirementPrdManifest | null> => {
+      const requestId = ++manifestRequestRef.current
+      const requestThreadId = threadId
+      const requestToken = `${Date.now()}-${globalThis.crypto.randomUUID()}`
+      const isCurrentRequest = (): boolean =>
+        requestId === manifestRequestRef.current && requestThreadId === currentThreadIdRef.current
+      setManifestLoading(true)
+      setManifestError(null)
+      try {
+        if (!threadId) throw new Error("该需求尚未关联沟通会话")
+
+        const beginResult = await window.api.requirements.beginManifestSync({
+          reqId: requirement.id,
+          threadId,
+          requestId: requestToken
+        })
+        if (!beginResult.success) throw new Error(beginResult.error || "开始读取需求空间数据失败")
+
+        const result = await window.api.workspace.readFile(threadId, "/prd/prd-manifest.json")
+        if (!result.success && !result.error?.includes("ENOENT")) {
+          throw new Error(result.error || "读取 prd-manifest.json 失败")
+        }
+
+        let rawManifest: unknown = {}
+        let manifestCanSync = false
+        if (result.content !== undefined) {
+          try {
+            rawManifest = JSON.parse(result.content)
+            manifestCanSync = true
+          } catch {
+            // Invalid JSON cannot safely update the requirement-level index.
+          }
+        }
+        // Do not let a read from a previous session overwrite the active UI state.
+        if (!isCurrentRequest()) return null
+        const manifest = normalizeRequirementSpaceManifest(rawManifest)
+        if (manifestCanSync) {
+          const syncResult = await window.api.requirements.syncManifest({
+            reqId: requirement.id,
+            threadId: requestThreadId,
+            requestId: requestToken,
+            manifest: rawManifest
+          })
+          if (!isCurrentRequest()) return null
+          if (!syncResult.success)
+            throw new Error(syncResult.error || "同步 prd-manifest.json 失败")
+          if (syncResult.requirement) {
+            onRequirementUpdated(
+              fromPersistedRequirement(syncResult.requirement, requirement.system)
+            )
+          }
+        }
         setRequirementSpaceManifest(manifest)
+        setManifestThreadId(requestThreadId)
         if (isRequirementSpacePublished(manifest)) {
           publishRequestQueuedRef.current = false
           setPublishRequestQueued(false)
         }
         return manifest
+      } catch (error) {
+        if (!isCurrentRequest()) return null
+        setRequirementSpaceManifest(null)
+        setManifestThreadId(null)
+        setManifestError(error instanceof Error ? error.message : "读取需求空间数据失败")
+        return null
+      } finally {
+        if (isCurrentRequest()) setManifestLoading(false)
       }
-      if (!threadId) throw new Error("该需求尚未关联沟通会话")
+    }, [onRequirementUpdated, requirement.id, requirement.system, threadId])
 
-      const result = await window.api.workspace.readFile(threadId, "/prd/prd-manifest.json")
-      if (!result.success || result.content === undefined) {
-        throw new Error(result.error || "读取 prd-manifest.json 失败")
-      }
-
-      let rawManifest: unknown = {}
-      try {
-        rawManifest = JSON.parse(result.content)
-      } catch {
-        // Invalid JSON is stored as the empty manifest shape.
-      }
-      const syncResult = await window.api.requirements.syncManifest({
-        reqId: requirement.id,
-        manifest: rawManifest
-      })
-      if (!syncResult.success) {
-        throw new Error(syncResult.error || "同步 prd-manifest.json 失败")
-      }
-      const manifest = normalizeRequirementSpaceManifest(rawManifest)
-      if (syncResult.requirement) {
-        onRequirementUpdated(fromPersistedRequirement(syncResult.requirement, requirement.system))
-      }
-      setRequirementSpaceManifest(manifest)
-      if (isRequirementSpacePublished(manifest)) {
-        publishRequestQueuedRef.current = false
-        setPublishRequestQueued(false)
-      }
-      return manifest
-    } catch (error) {
-      setRequirementSpaceManifest(null)
-      setManifestError(error instanceof Error ? error.message : "读取需求空间数据失败")
-      return null
-    } finally {
-      setManifestLoading(false)
-    }
-  }, [onRequirementUpdated, requirement.id, requirement.prdManifest, requirement.system, threadId])
+  useEffect(() => {
+    if (!threadId) return
+    void loadRequirementSpaceManifest()
+  }, [loadRequirementSpaceManifest, threadId])
 
   const handlePublishToRequirementSpace = useCallback(async (): Promise<void> => {
     if (
@@ -675,7 +723,8 @@ function RequirementConversationSession({
     if (
       !autoGeneratePrd ||
       autoQueuedPrdGenerationRef.current ||
-      (isRequirementGenerated(requirement) || isRequirementPublished(requirement)) ||
+      isRequirementGenerated(requirement) ||
+      isRequirementPublished(requirement) ||
       !threadState ||
       threadState.historyLoading ||
       threadState.messages.length > 0 ||
@@ -720,8 +769,8 @@ function RequirementConversationSession({
     let cancelled = false
 
     const checkPrdCompletion = async (): Promise<void> => {
-      const manifest = await loadRequirementSpaceManifest({ forceRead: true })
-      if (cancelled) return
+      const manifest = await loadRequirementSpaceManifest()
+      if (cancelled || !manifest || currentThreadIdRef.current !== threadId) return
       const workspaceResult = await window.api.workspace.loadFromDisk(threadId)
       if (!cancelled && workspaceResult.success) {
         threadState.setWorkspaceFiles(workspaceResult.files)
@@ -756,11 +805,13 @@ function RequirementConversationSession({
   useEffect(() => {
     if (previewTab !== "requirement-space" || !prdGenerationCompleted) return
     void loadRequirementSpaceManifest()
-  }, [
-    loadRequirementSpaceManifest,
-    prdGenerationCompleted,
-    previewTab
-  ])
+  }, [loadRequirementSpaceManifest, prdGenerationCompleted, previewTab])
+
+  useEffect(() => {
+    if (!prdGenerationCompleted && (previewTab === "prd" || previewTab === "requirement-space")) {
+      setPreviewTab("source")
+    }
+  }, [prdGenerationCompleted, previewTab])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
@@ -1121,12 +1172,17 @@ function RequirementConversationSession({
                                       ) : (
                                         <Send className="size-3.5" />
                                       )}
-                                      {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
+                                      {publishRequestQueued
+                                        ? "发布请求已发送"
+                                        : "发布到需求空间3.0"}
                                     </Button>
                                   </span>
                                 </TooltipTrigger>
                                 {publishRequestQueued || conversationLoading ? (
-                                  <TooltipContent side="top" className="max-w-56 text-xs leading-relaxed">
+                                  <TooltipContent
+                                    side="top"
+                                    className="max-w-56 text-xs leading-relaxed"
+                                  >
                                     {publishRequestQueued
                                       ? "发布请求已提交，请稍候。"
                                       : "当前正在处理需求，请稍候再发布。"}
@@ -1173,7 +1229,10 @@ function RequirementConversationSession({
                                 </span>
                               </TooltipTrigger>
                               {conversationLoading || tokenSaving ? (
-                                  <TooltipContent side="top" className="max-w-56 text-xs leading-relaxed">
+                                <TooltipContent
+                                  side="top"
+                                  className="max-w-56 text-xs leading-relaxed"
+                                >
                                   {tokenSaving
                                     ? "身份验证正在处理中，请稍候。"
                                     : "当前正在处理需求，请稍候再进行身份验证。"}
@@ -1318,6 +1377,7 @@ function RequirementConversationSession({
 
 export function RequirementConversationView({
   requirement,
+  selectedThreadId,
   requirements,
   onSelectRequirement,
   onRequirementUpdated,
@@ -1327,6 +1387,7 @@ export function RequirementConversationView({
   autoGeneratePrd = false
 }: {
   requirement: RequirementRecord
+  selectedThreadId: string | null
   requirements: RequirementRecord[]
   onSelectRequirement: (requirement: RequirementRecord, threadId?: string) => Promise<void>
   onRequirementUpdated: (requirement: RequirementRecord) => void
@@ -1339,6 +1400,7 @@ export function RequirementConversationView({
     <RequirementConversationSession
       key={requirement.id}
       requirement={requirement}
+      selectedThreadId={selectedThreadId}
       requirements={requirements}
       onSelectRequirement={onSelectRequirement}
       onRequirementUpdated={onRequirementUpdated}

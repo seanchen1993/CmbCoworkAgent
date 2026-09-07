@@ -419,7 +419,11 @@ describe("requirement source preview", () => {
       }
     })) as {
       success: boolean
-      requirement?: { reqId: string; requirementPath: string; source: { type: string; initialDescription?: string } }
+      requirement?: {
+        reqId: string
+        requirementPath: string
+        source: { type: string; initialDescription?: string }
+      }
       error?: string
     }
 
@@ -462,11 +466,17 @@ describe("requirement source preview", () => {
     })) as { success: boolean; requirement: { reqId: string; requirementPath: string } }
     expect(created.success).toBe(true)
 
-    const first = (await attach!(null, { reqId: created.requirement.reqId, threadId: "thread-a" })) as {
+    const first = (await attach!(null, {
+      reqId: created.requirement.reqId,
+      threadId: "thread-a"
+    })) as {
       requirement: { threadIds: string[] }
     }
     expect(first.requirement.threadIds).toEqual(["thread-a"])
-    const second = (await attach!(null, { reqId: created.requirement.reqId, threadId: "thread-b" })) as {
+    const second = (await attach!(null, {
+      reqId: created.requirement.reqId,
+      threadId: "thread-b"
+    })) as {
       requirement: { threadIds: string[] }
     }
     expect(second.requirement.threadIds).toEqual(["thread-a", "thread-b"])
@@ -481,6 +491,68 @@ describe("requirement source preview", () => {
       threadId: "thread-a"
     })) as { requirement: { threadIds: string[] } }
     expect(detached.requirement.threadIds).toEqual(["thread-b"])
+    await remove!(null, created.requirement.reqId)
+  })
+
+  it("rejects stale manifest syncs after a newer conversation request", async () => {
+    const workDir = join(tempHome, "manifest-request-workspace")
+    mkdirSync(workDir)
+    const create = handlers.get("requirements:create")
+    const attach = handlers.get("requirements:attach-thread")
+    const begin = handlers.get("requirements:begin-manifest-sync")
+    const sync = handlers.get("requirements:sync-manifest")
+    const list = handlers.get("requirements:list")
+    const remove = handlers.get("requirements:delete")
+    const created = (await create!(null, {
+      systemId: "system-manifest",
+      title: "Manifest 竞态",
+      workDir,
+      source: { type: "text", fileName: "" }
+    })) as { success: boolean; requirement: { reqId: string } }
+    expect(created.success).toBe(true)
+    await attach!(null, { reqId: created.requirement.reqId, threadId: "thread-a" })
+    await attach!(null, { reqId: created.requirement.reqId, threadId: "thread-b" })
+
+    expect(begin && sync && list && remove).toBeTruthy()
+    expect(
+      await begin!(null, {
+        reqId: created.requirement.reqId,
+        threadId: "thread-a",
+        requestId: "request-a-1"
+      })
+    ).toMatchObject({ success: true })
+    expect(
+      await begin!(null, {
+        reqId: created.requirement.reqId,
+        threadId: "thread-b",
+        requestId: "request-b-1"
+      })
+    ).toMatchObject({ success: true })
+
+    expect(
+      await sync!(null, {
+        reqId: created.requirement.reqId,
+        threadId: "thread-a",
+        requestId: "request-a-1",
+        manifest: { prd: { status: "published" } }
+      })
+    ).toMatchObject({ success: false, error: "manifest 请求已过期" })
+    expect(
+      await sync!(null, {
+        reqId: created.requirement.reqId,
+        threadId: "thread-b",
+        requestId: "request-b-1",
+        manifest: { prd: { status: "generated" } }
+      })
+    ).toMatchObject({ success: true })
+
+    const current = (await list!(null)) as Array<{
+      reqId: string
+      prdManifest: { prd: { status: string } }
+    }>
+    expect(
+      current.find((item) => item.reqId === created.requirement.reqId)?.prdManifest.prd.status
+    ).toBe("generated")
     await remove!(null, created.requirement.reqId)
   })
 })

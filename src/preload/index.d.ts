@@ -2071,6 +2071,14 @@ interface CustomAPI {
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
       error?: string
     }>
+    beginManifestSync: (payload: {
+      reqId: string
+      threadId: string
+      requestId: string
+    }) => Promise<{
+      success: boolean
+      error?: string
+    }>
     rename: (payload: { reqId: string; title: string }) => Promise<{
       success: boolean
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
@@ -2094,6 +2102,8 @@ interface CustomAPI {
     syncManifest: (payload: {
       reqId: string
       manifest: unknown
+      threadId?: string
+      requestId?: string
     }) => Promise<{
       success: boolean
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]

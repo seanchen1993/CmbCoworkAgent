@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import {
   Archive,
   ArrowLeft,
   ArrowRight,
+  Eye,
   ExternalLink,
   FileCode2,
   FileText,
@@ -185,9 +186,8 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
   const [templatesLoading, setTemplatesLoading] = useState(true)
   const [templatesError, setTemplatesError] = useState<string | null>(null)
   const [selectedTemplateId, setSelectedTemplateId] = useState("")
-  const [hoveredTemplateId, setHoveredTemplateId] = useState<string | null>(null)
+  const [previewedTemplateId, setPreviewedTemplateId] = useState<string | null>(null)
   const [templatePreviewHeights, setTemplatePreviewHeights] = useState<Record<string, number>>({})
-  const templateHoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [templatePage, setTemplatePage] = useState(0)
   const [uploadedTemplate, setUploadedTemplate] = useState<UploadedFile | null>(null)
   const [templateUploading, setTemplateUploading] = useState(false)
@@ -417,14 +417,6 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
     templatePage * TEMPLATE_PAGE_SIZE,
     (templatePage + 1) * TEMPLATE_PAGE_SIZE
   )
-  const openTemplatePreview = (templateId: string): void => {
-    if (templateHoverCloseTimer.current) clearTimeout(templateHoverCloseTimer.current)
-    setHoveredTemplateId(templateId)
-  }
-  const closeTemplatePreview = (): void => {
-    if (templateHoverCloseTimer.current) clearTimeout(templateHoverCloseTimer.current)
-    templateHoverCloseTimer.current = setTimeout(() => setHoveredTemplateId(null), 120)
-  }
   const handleTemplatePreviewLoad = (templateId: string, frame: HTMLIFrameElement): void => {
     const documentHeight = Math.max(
       frame.contentDocument?.documentElement.scrollHeight ?? 0,
@@ -432,7 +424,9 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
       900
     )
     setTemplatePreviewHeights((heights) =>
-      heights[templateId] === documentHeight ? heights : { ...heights, [templateId]: documentHeight }
+      heights[templateId] === documentHeight
+        ? heights
+        : { ...heights, [templateId]: documentHeight }
     )
   }
   const orderedDesignSystems = [...designSystems].sort(compareDesignSystemsForDisplay)
@@ -721,14 +715,18 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
                         {visibleTemplates.map((template) => {
                           const active = template.id === selectedTemplateId
                           return (
-                            <Popover key={template.id} open={hoveredTemplateId === template.id}>
-                              <PopoverTrigger asChild>
+                            <Popover
+                              key={template.id}
+                              open={previewedTemplateId === template.id}
+                              onOpenChange={(open) =>
+                                setPreviewedTemplateId(open ? template.id : null)
+                              }
+                            >
+                              <div className="relative">
                                 <button
                                   type="button"
                                   aria-pressed={active}
                                   onClick={() => setSelectedTemplateId(template.id)}
-                                  onMouseEnter={() => openTemplatePreview(template.id)}
-                                  onMouseLeave={closeTemplatePreview}
                                   className={cn(
                                     "cursor-pointer overflow-hidden rounded-lg border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                     active
@@ -737,40 +735,50 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
                                   )}
                                 >
                                   <span className="block h-50 overflow-hidden bg-white">
-                                <iframe
-                                  title={`${template.name}模板预览`}
-                                  srcDoc={template.html}
-                                  sandbox=""
-                                  tabIndex={-1}
+                                    <iframe
+                                      title={`${template.name}模板预览`}
+                                      srcDoc={template.html}
+                                      sandbox=""
+                                      tabIndex={-1}
                                       className="pointer-events-none block h-[62.5rem] w-[500%] origin-top-left scale-[0.2] border-0 bg-white"
-                                />
-                              </span>
-                              <span className="flex gap-2 border-t border-border px-3 py-2.5">
-                                <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
-                                <span className="min-w-0">
-                                  <span className="block text-xs font-semibold text-foreground">
-                                    {template.name}
+                                    />
                                   </span>
-                                  <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
-                                    {template.description}
+                                  <span className="flex gap-2 border-t border-border px-3 py-2.5">
+                                    <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                                    <span className="min-w-0">
+                                      <span className="block text-xs font-semibold text-foreground">
+                                        {template.name}
+                                      </span>
+                                      <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                                        {template.description}
+                                      </span>
+                                    </span>
                                   </span>
-                                </span>
-                              </span>
                                 </button>
-                              </PopoverTrigger>
+                                <PopoverTrigger asChild>
+                                  <button
+                                    type="button"
+                                    aria-label={`预览 ${template.name} 模板`}
+                                    title="预览模板"
+                                    className="absolute right-2 top-2 inline-flex size-7 items-center justify-center rounded-md border border-border bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  >
+                                    <Eye className="size-3.5" />
+                                  </button>
+                                </PopoverTrigger>
+                              </div>
                               <PopoverContent
                                 side="right"
                                 align="start"
                                 sideOffset={12}
-                                onMouseEnter={openTemplatePreview.bind(null, template.id)}
-                                onMouseLeave={closeTemplatePreview}
                                 className="mb-6 w-[min(70vw,42rem)] p-2"
                               >
                                 <div className="mb-2 flex items-center justify-between gap-2 px-1">
                                   <span className="truncate text-xs font-semibold text-foreground">
                                     {template.name}
                                   </span>
-                                  <span className="text-[10px] text-muted-foreground">HTML 预览</span>
+                                  <span className="text-[10px] text-muted-foreground">
+                                    HTML 预览
+                                  </span>
                                 </div>
                                 <div className="h-[min(72vh,36rem)] overflow-y-auto overflow-x-hidden rounded border border-border bg-white">
                                   <div
@@ -786,7 +794,9 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
                                       onLoad={(event) =>
                                         handleTemplatePreviewLoad(template.id, event.currentTarget)
                                       }
-                                      style={{ height: `${templatePreviewHeights[template.id] ?? 900}px` }}
+                                      style={{
+                                        height: `${templatePreviewHeights[template.id] ?? 900}px`
+                                      }}
                                       className="pointer-events-none absolute left-0 top-0 block w-[156.25%] origin-top-left scale-[0.64] border-0 bg-white"
                                     />
                                   </div>

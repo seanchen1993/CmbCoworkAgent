@@ -140,9 +140,7 @@ type RequirementsIndexFile = {
   lastWorkDir?: string
 }
 
-function getRequirementThreadIds(
-  item: Pick<RequirementIndexItem, "threadIds">
-): string[] {
+function getRequirementThreadIds(item: Pick<RequirementIndexItem, "threadIds">): string[] {
   return [
     ...new Set(
       item.threadIds
@@ -630,7 +628,10 @@ async function attachRequirementThread(
   return toRuntimeRequirement(next)
 }
 
-async function detachRequirementThread(reqId: string, threadId: string): Promise<RequirementRuntimeItem> {
+async function detachRequirementThread(
+  reqId: string,
+  threadId: string
+): Promise<RequirementRuntimeItem> {
   const normalizedReqId = reqId?.trim()
   const normalizedThreadId = threadId?.trim()
   if (!normalizedReqId || !normalizedThreadId) throw new Error("需求编号和会话编号不能为空")
@@ -738,6 +739,64 @@ async function listRequirements(): Promise<RequirementRuntimeItem[]> {
 type SyncRequirementManifestPayload = {
   reqId: string
   manifest: unknown
+  threadId?: string
+  requestId?: string
+}
+
+type BeginRequirementManifestSyncPayload = {
+  reqId: string
+  threadId: string
+  requestId: string
+}
+
+const latestManifestRequestByRequirement = new Map<
+  string,
+  { threadId: string; requestId: string }
+>()
+
+const manifestOperationQueues = new Map<string, Promise<void>>()
+
+function enqueueManifestOperation<T>(reqId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = manifestOperationQueues.get(reqId) ?? Promise.resolve()
+  const next = previous.then(operation, operation)
+  let queued: Promise<void>
+  const tracked = next.then(
+    (value) => {
+      if (manifestOperationQueues.get(reqId) === queued) manifestOperationQueues.delete(reqId)
+      return value
+    },
+    (error: unknown) => {
+      if (manifestOperationQueues.get(reqId) === queued) manifestOperationQueues.delete(reqId)
+      throw error
+    }
+  )
+  queued = tracked.then(
+    () => undefined,
+    () => undefined
+  )
+  manifestOperationQueues.set(reqId, queued)
+  return next
+}
+
+async function beginRequirementManifestSync(
+  payload: BeginRequirementManifestSyncPayload
+): Promise<void> {
+  const normalizedReqId = payload?.reqId?.trim()
+  const normalizedThreadId = payload?.threadId?.trim()
+  if (!normalizedReqId || !normalizedThreadId || !payload.requestId?.trim()) {
+    throw new Error("manifest 请求参数无效")
+  }
+  await enqueueManifestOperation(normalizedReqId, async () => {
+    const item = (await readRequirementIndex()).find((entry) => entry.reqId === normalizedReqId)
+    if (!item) throw new Error(`需求不存在：${normalizedReqId}`)
+    if (!getRequirementThreadIds(item).includes(normalizedThreadId)) {
+      throw new Error("会话未绑定到该需求")
+    }
+    latestManifestRequestByRequirement.set(normalizedReqId, {
+      threadId: normalizedThreadId,
+      requestId: payload.requestId.trim()
+    })
+  })
 }
 
 async function syncRequirementManifest(
@@ -745,17 +804,33 @@ async function syncRequirementManifest(
 ): Promise<RequirementRuntimeItem> {
   const normalizedReqId = payload?.reqId?.trim()
   if (!normalizedReqId) throw new Error("需求编号不能为空")
-  const list = await readRequirementIndex()
-  const index = list.findIndex((entry) => entry.reqId === normalizedReqId)
-  if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
+  return enqueueManifestOperation(normalizedReqId, async () => {
+    const list = await readRequirementIndex()
+    const index = list.findIndex((entry) => entry.reqId === normalizedReqId)
+    if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
+    const normalizedThreadId = payload.threadId?.trim()
+    if (normalizedThreadId) {
+      if (!getRequirementThreadIds(list[index]).includes(normalizedThreadId)) {
+        throw new Error("会话未绑定到该需求")
+      }
+      if (
+        !payload.requestId?.trim() ||
+        latestManifestRequestByRequirement.get(normalizedReqId)?.threadId !== normalizedThreadId ||
+        latestManifestRequestByRequirement.get(normalizedReqId)?.requestId !==
+          payload.requestId.trim()
+      ) {
+        throw new Error("manifest 请求已过期")
+      }
+    }
 
-  const manifest = normalizePrdManifest(payload.manifest)
-  list[index] = {
-    ...list[index],
-    prdManifest: manifest
-  }
-  await writeRequirementIndex(list)
-  return toRuntimeRequirement(list[index])
+    const manifest = normalizePrdManifest(payload.manifest)
+    list[index] = {
+      ...list[index],
+      prdManifest: manifest
+    }
+    await writeRequirementIndex(list)
+    return toRuntimeRequirement(list[index])
+  })
 }
 
 async function getRequirementPrdPreview(reqId: string): Promise<RequirementPrdPreview> {
@@ -947,6 +1022,20 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
       return { success: false, error: error instanceof Error ? error.message : "保存 PRD 失败" }
     }
   })
+  ipcMain.handle(
+    "requirements:begin-manifest-sync",
+    async (_event, payload: BeginRequirementManifestSyncPayload) => {
+      try {
+        await beginRequirementManifestSync(payload)
+        return { success: true }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "开始同步 PRD manifest 失败"
+        }
+      }
+    }
+  )
   ipcMain.handle(
     "requirements:sync-manifest",
     async (_event, payload: SyncRequirementManifestPayload) => {
