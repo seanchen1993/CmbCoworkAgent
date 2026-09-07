@@ -62,7 +62,6 @@ describe("requirement source preview", () => {
     const create = handlers.get("requirements:create")
     const getWorkDir = handlers.get("requirements:get-work-dir")
     const list = handlers.get("requirements:list")
-    const getPrdPreview = handlers.get("requirements:get-prd-preview")
     const getSourcePreview = handlers.get("requirements:get-source-preview")
     const deleteRequirement = handlers.get("requirements:delete")
     const openWorkDir = handlers.get("requirements:open-work-dir")
@@ -72,7 +71,6 @@ describe("requirement source preview", () => {
     expect(create).toBeTypeOf("function")
     expect(getWorkDir).toBeTypeOf("function")
     expect(list).toBeTypeOf("function")
-    expect(getPrdPreview).toBeTypeOf("function")
     expect(getSourcePreview).toBeTypeOf("function")
     expect(deleteRequirement).toBeTypeOf("function")
     expect(openWorkDir).toBeTypeOf("function")
@@ -134,63 +132,6 @@ describe("requirement source preview", () => {
     expect(sourcePreview.content).toContain("- Apple")
     expect(sourcePreview.content).toContain("- Banana")
 
-    const emptyPrdPreview = (await getPrdPreview!(null, created.requirement!.reqId)) as {
-      success: boolean
-      preview?: {
-        generated: boolean
-        filePath: string | null
-        fileName: string | null
-        content: string
-      }
-      error?: string
-    }
-    expect(emptyPrdPreview.success, emptyPrdPreview.error).toBe(true)
-    expect(emptyPrdPreview.preview).toEqual({
-      generated: false,
-      filePath: null,
-      fileName: null,
-      content: ""
-    })
-
-    writeFileSync(join(prdDir, "notes.md"), "# Notes\n\nGenerated content", "utf-8")
-    const discoveredPrdPreview = (await getPrdPreview!(null, created.requirement!.reqId)) as {
-      success: boolean
-      preview?: {
-        generated: boolean
-        filePath: string | null
-        fileName: string | null
-        content: string
-      }
-      error?: string
-    }
-    expect(discoveredPrdPreview.success, discoveredPrdPreview.error).toBe(true)
-    expect(discoveredPrdPreview.preview).toMatchObject({
-      generated: false,
-      filePath: null,
-      fileName: null,
-      content: ""
-    })
-
-    writeFileSync(join(prdDir, "PRD.md"), "# Canonical PRD\n\nPreferred preview", "utf-8")
-    const canonicalPrdPreview = (await getPrdPreview!(null, created.requirement!.reqId)) as {
-      success: boolean
-      preview?: {
-        generated: boolean
-        filePath: string | null
-        fileName: string | null
-        content: string
-      }
-      error?: string
-    }
-    expect(canonicalPrdPreview.success, canonicalPrdPreview.error).toBe(true)
-    expect(canonicalPrdPreview.preview).toMatchObject({
-      generated: false,
-      filePath: null,
-      fileName: null,
-      content: ""
-    })
-
-    writeFileSync(join(prdDir, "full-prd.md"), "# Full PRD\n\nCompleted", "utf-8")
     const syncResult = (await syncManifest!(null, {
       reqId: created.requirement!.reqId,
       manifest: {

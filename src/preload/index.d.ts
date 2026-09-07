@@ -2046,16 +2046,6 @@ interface CustomAPI {
     selectWorkDir: () => Promise<{ success: boolean; workDir?: string | null; error?: string }>
     delete: (reqId: string) => Promise<{ success: boolean; error?: string }>
     openWorkDir: (reqId: string) => Promise<{ success: boolean; error?: string }>
-    getPrdPreview: (reqId: string) => Promise<{
-      success: boolean
-      preview?: {
-        generated: boolean
-        filePath: string | null
-        fileName: string | null
-        content: string
-      }
-      error?: string
-    }>
     getSourcePreview: (reqId: string) => Promise<{
       success: boolean
       content?: string

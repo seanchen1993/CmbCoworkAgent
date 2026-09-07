@@ -4051,17 +4051,6 @@ const api = {
       ipcRenderer.invoke("requirements:delete", reqId),
     openWorkDir: (reqId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke("requirements:open-work-dir", reqId),
-    getPrdPreview: (reqId: string) =>
-      ipcRenderer.invoke("requirements:get-prd-preview", reqId) as Promise<{
-        success: boolean
-        preview?: {
-          generated: boolean
-          filePath: string | null
-          fileName: string | null
-          content: string
-        }
-        error?: string
-      }>,
     getSourcePreview: (reqId: string) =>
       ipcRenderer.invoke("requirements:get-source-preview", reqId) as Promise<{
         success: boolean

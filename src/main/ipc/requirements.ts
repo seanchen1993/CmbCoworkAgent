@@ -51,13 +51,6 @@ export type RequirementRuntimeItem = RequirementIndexItem & {
   prdManifest: IndexedPrdManifest
 }
 
-export type RequirementPrdPreview = {
-  generated: boolean
-  filePath: string | null
-  fileName: string | null
-  content: string
-}
-
 type RequirementSourcePayload = {
   filename: string
   sourcePath?: string
@@ -123,7 +116,6 @@ const REQUIREMENTS_DIRNAME = "requirements"
 const REQUIREMENTS_INDEX_FILENAME = "index.json"
 const PRD_DIRNAME = "prd"
 const PRD_MANIFEST_FILENAME = "prd-manifest.json"
-const PRD_PREVIEW_FILENAME = "full-prd.md"
 const SOURCE_PREVIEW_FILENAME = "source-preview.md"
 const REQUIREMENT_SETTINGS_FILENAME = "settings.json"
 
@@ -483,23 +475,6 @@ async function readRequirementSourcePreview(item: RequirementIndexItem): Promise
   }
 }
 
-async function readRequirementPrdPreview(
-  item: RequirementIndexItem
-): Promise<RequirementPrdPreview> {
-  try {
-    const filePath = path.join(getRequirementPrdDir(item), PRD_PREVIEW_FILENAME)
-    const stats = await fs.stat(filePath)
-    if (!stats.isFile()) {
-      return { generated: false, filePath: null, fileName: null, content: "" }
-    }
-    const content = (await fs.readFile(filePath, "utf-8")).trim()
-    validateTextContent(content, "规范 PRD 预览内容")
-    return { generated: true, filePath, fileName: PRD_PREVIEW_FILENAME, content }
-  } catch {
-    return { generated: false, filePath: null, fileName: null, content: "" }
-  }
-}
-
 async function isRequirementWorkspaceMissing(item: RequirementIndexItem): Promise<boolean> {
   try {
     return !(await fs.stat(getRequirementRoot(item))).isDirectory()
@@ -692,7 +667,7 @@ async function saveRequirementPrd(payload: SavePrdPayload): Promise<RequirementR
       name: item.title,
       status: "generated",
       description: "",
-      file: PRD_PREVIEW_FILENAME
+      file: modules[0]?.filePath ?? ""
     },
     functions: modules.map((module) => ({
       fr: module.moduleId,
@@ -703,25 +678,6 @@ async function saveRequirementPrd(payload: SavePrdPayload): Promise<RequirementR
     }))
   }
   await writeJson(getRequirementPrdPath(item), prdManifest)
-  const prdPreview = [
-    `# ${item.title} PRD`,
-    "",
-    `> 版本 ${payload.version.trim()} · 由 PRD Agent 生成`,
-    "",
-    ...modules.flatMap((module) => [
-      `## ${module.name}`,
-      "",
-      payload.modules.find((entry) => safeSegment(entry.moduleId, "module") === module.moduleId)
-        ?.content ?? ""
-    ])
-  ].join("\n")
-  validateTextContent(prdPreview, "规范 PRD 内容")
-  await fs.writeFile(
-    path.join(getRequirementPrdDir(item), PRD_PREVIEW_FILENAME),
-    `${prdPreview}\n`,
-    "utf-8"
-  )
-
   const next: RequirementIndexItem = {
     ...item,
     updatedAt: new Date().toISOString(),
@@ -831,15 +787,6 @@ async function syncRequirementManifest(
     await writeRequirementIndex(list)
     return toRuntimeRequirement(list[index])
   })
-}
-
-async function getRequirementPrdPreview(reqId: string): Promise<RequirementPrdPreview> {
-  const normalizedReqId = reqId?.trim()
-  if (!normalizedReqId) throw new Error("需求编号不能为空")
-
-  const item = (await readRequirementIndex()).find((entry) => entry.reqId === normalizedReqId)
-  if (!item) throw new Error(`需求不存在：${normalizedReqId}`)
-  return readRequirementPrdPreview(item)
 }
 
 async function getRequirementSourcePreview(reqId: string): Promise<string> {
@@ -956,16 +903,6 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
       return {
         success: false,
         error: error instanceof Error ? error.message : "打开需求工作目录失败"
-      }
-    }
-  })
-  ipcMain.handle("requirements:get-prd-preview", async (_event, reqId: string) => {
-    try {
-      return { success: true, preview: await getRequirementPrdPreview(reqId) }
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : "读取规范 PRD 预览失败"
       }
     }
   })

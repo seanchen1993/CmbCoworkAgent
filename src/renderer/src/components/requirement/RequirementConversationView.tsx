@@ -688,6 +688,38 @@ function RequirementConversationSession({
     [prdFiles]
   )
 
+  const handlePrdOverviewFilePreview = useCallback(
+    async (filePath: string): Promise<void> => {
+      if (!threadId) return
+
+      const manifestPath = "/prd/prd-manifest.json"
+      const targetPath = normalizePrdFilePath(filePath)
+      let previewPath = manifestPath
+      try {
+        const result = await window.api.workspace.readFile(threadId, targetPath)
+        if (result.success && result.content !== undefined) previewPath = targetPath
+      } catch {
+        // Fall back to the manifest, which was successfully read for this tab.
+      }
+
+      const diskResult = await window.api.workspace.loadFromDisk(threadId)
+      if (diskResult.success) setWorkspaceFiles?.(diskResult.files)
+      const files = diskResult.success ? diskResult.files : prdFiles
+      const previewFile = files.find(
+        (file) =>
+          !file.is_dir && file.path.replace(/\\/g, "/").toLowerCase() === previewPath.toLowerCase()
+      )
+      if (!previewFile) {
+        toast.error("无法读取 PRD 文件或 prd-manifest.json")
+        return
+      }
+
+      setPreviewTab("prd")
+      setSelectedPrdPath(previewFile.path)
+    },
+    [prdFiles, setWorkspaceFiles, threadId]
+  )
+
   useEffect(() => {
     if (previewTab !== "prd" || !threadId) return
     void window.api.workspace.loadFromDisk(threadId).then((result) => {
@@ -1119,7 +1151,7 @@ function RequirementConversationSession({
                                   : "暂无关联 PRD 文件"
                               }
                               onClick={() =>
-                                handleFunctionFilePreview(requirementSpaceManifest.prd.file)
+                                handlePrdOverviewFilePreview(requirementSpaceManifest.prd.file)
                               }
                             />
                           </div>
