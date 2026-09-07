@@ -647,6 +647,61 @@ function testClearOnEveryRunExit(): void {
   )
 }
 
+function testInvokeWiresBoundedCheckpointRecoveryThroughSettlementFence(): void {
+  const replacementStart = agentIpc.indexOf("const replacement = await withThreadRunMutationLock")
+  assert(replacementStart >= 0, "new invoke replacement block exists")
+  const replacementBody = agentIpc.slice(replacementStart, replacementStart + 5000)
+
+  assertIncludes(
+    replacementBody,
+    'let predecessorSettlement: "settled" | "timed_out" = "settled"',
+    "invoke initializes a typed settlement outcome before checking the registered predecessor"
+  )
+  assertIncludes(
+    replacementBody,
+    "predecessorSettlement = await waitForReplacedRunToSettle(threadId)",
+    "invoke preserves a predecessor timeout instead of discarding the settlement outcome"
+  )
+  const abortOffset = replacementBody.indexOf("existingController.abort()")
+  const settlementWaitOffset = replacementBody.indexOf(
+    "predecessorSettlement = await waitForReplacedRunToSettle(threadId)"
+  )
+  assert(
+    abortOffset >= 0 &&
+      settlementWaitOffset > abortOffset &&
+      replacementBody.slice(abortOffset, settlementWaitOffset).includes("\n            }"),
+    "invoke waits for a still-registered settlement even after its controller was released"
+  )
+  assertIncludes(
+    replacementBody,
+    "allowBoundedCheckpointRecovery: canUseBoundedCheckpointRecovery(",
+    "invoke uses the shared bounded-recovery settlement gate"
+  )
+  assertIncludes(
+    replacementBody,
+    "predecessorSettlement,\n                timedOutPredecessorFence.hasPending(threadId)",
+    "bounded recovery requires both immediate settlement and no older timed-out predecessor"
+  )
+
+  const durableTailStart = agentIpc.indexOf(
+    "const durableRuntimeTailSetup = await awaitPhysicalStreamRunSetup({"
+  )
+  const durableTailEnd = agentIpc.indexOf(
+    'if (durableRuntimeTailSetup.status === "abandoned") return',
+    durableTailStart
+  )
+  assert(
+    durableTailStart >= 0 && durableTailEnd > durableTailStart,
+    "invoke durable-tail setup semantic boundary is present"
+  )
+  const durableTailBody = agentIpc.slice(durableTailStart, durableTailEnd)
+  assertIncludes(
+    durableTailBody,
+    "allowBoundedCheckpointRecovery",
+    "invoke forwards its fenced recovery decision to the durable-tail read"
+  )
+}
+
 function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
   assertIncludes(
     runSettlementFence,
@@ -2823,6 +2878,7 @@ function main(): void {
     testGuideRespectsActiveGoal,
     testGuideUsesCurrentRunPromptPipeline,
     testClearOnEveryRunExit,
+    testInvokeWiresBoundedCheckpointRecoveryThroughSettlementFence,
     testPhysicalRunSettlementCannotStrandQueuedReplacements,
     testManagedAutoModeTerminalRunsInsideSettlementFence,
     testStreamTranscriptBuffersArePhysicalRunScoped,
