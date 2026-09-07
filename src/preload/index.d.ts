@@ -137,7 +137,9 @@ import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
   ProjectMetricProjectsData,
-  ProjectMetricSummaryData
+  ProjectMetricSummaryData,
+  ProjectMetricTrendData,
+  ProjectMetricTrendFilters
 } from "../shared/project-metrics"
 import type {
   FeatureGateCheckOptions,
@@ -2591,6 +2593,9 @@ interface CustomAPI {
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>
+    projectMetricTrend: (
+      filters: ProjectMetricTrendFilters
+    ) => Promise<{ success: boolean; data?: ProjectMetricTrendData; error?: string }>
     projectMetricProjects: (
       filters: ProjectMetricFilters,
       options?: ProjectMetricListOptions
