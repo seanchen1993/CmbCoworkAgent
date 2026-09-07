@@ -72,9 +72,89 @@ function getStatusClass(status: string): string {
   if (status.includes("生成") && !status.includes("已发布")) {
     return "bg-status-info/10 text-status-info"
   }
-  if (status.includes("发布")) return "bg-status-warning/10 text-status-warning"
+  if (status.includes("发布")) return "bg-status-nominal/10 text-status-nominal"
   if (status.includes("交付")) return "bg-[#e9f2ec] text-[#44715a]"
   return "bg-[#a4e6a27a] text-[#1b7e30]"
+}
+
+function RequirementHistoryPopover({
+  label,
+  value,
+  className,
+  children
+}: {
+  label: string
+  value: string
+  className?: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearCloseTimer = (): void => {
+    if (!closeTimerRef.current) return
+    clearTimeout(closeTimerRef.current)
+    closeTimerRef.current = null
+  }
+
+  const showPopover = (): void => {
+    clearCloseTimer()
+    setOpen(true)
+  }
+
+  const hidePopover = (): void => {
+    clearCloseTimer()
+    closeTimerRef.current = setTimeout(() => {
+      setOpen(false)
+      closeTimerRef.current = null
+    }, 80)
+  }
+
+  useEffect(() => clearCloseTimer, [])
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) setOpen(false)
+      }}
+    >
+      <PopoverTrigger asChild>
+        <span
+          tabIndex={0}
+          role="button"
+          onPointerEnter={showPopover}
+          onPointerLeave={hidePopover}
+          onFocus={showPopover}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              hidePopover()
+            }
+          }}
+          className={cn(
+            "cursor-help outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-[#c26b4f]/45",
+            className
+          )}
+          aria-label={`${label}：${value}`}
+        >
+          {children}
+        </span>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="start"
+        sideOffset={6}
+        className="w-auto max-w-[420px] p-2.5 text-sm"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => event.preventDefault()}
+        onPointerEnter={showPopover}
+        onPointerLeave={hidePopover}
+      >
+        <div className="mb-1 font-semibold text-[#74695f]">{label}</div>
+        <div className="break-all whitespace-pre-wrap leading-5 text-[#302a25]">{value}</div>
+      </PopoverContent>
+    </Popover>
+  )
 }
 
 function RequirementSystem({
@@ -462,11 +542,13 @@ export function RequirementHistoryList({
                     <span className="min-w-0 truncate">
                       <RequirementSystem systemId={item.systemId} name={item.system} />
                     </span>
-                    <span className="flex min-w-0 items-center gap-1 truncate font-bold text-[#302a25]">
-                      <span className="min-w-0 truncate" title={item.title}>
-                        {item.title}
-                      </span>
-                    </span>
+                    <RequirementHistoryPopover
+                      label="需求名称"
+                      value={item.title}
+                      className="flex min-w-0 items-center gap-1 truncate font-bold text-[#302a25]"
+                    >
+                      <span className="min-w-0 truncate">{item.title}</span>
+                    </RequirementHistoryPopover>
                     <span
                       className={cn(
                         "truncate text-[11.5px]",
@@ -490,7 +572,9 @@ export function RequirementHistoryList({
                       ) : (
                         <Edit className="size-3 shrink-0 text-[#756a5f]" />
                       )}
-                      <span
+                      <RequirementHistoryPopover
+                        label="旧需求信息"
+                        value={getLegacyValue(item)}
                         className={cn(
                           "min-w-0 truncate underline decoration-dotted underline-offset-4",
                           sourceType === "file"
@@ -499,10 +583,9 @@ export function RequirementHistoryList({
                               ? "text-[#3970a5]"
                               : "text-[#756a5f]"
                         )}
-                        title={getLegacyValue(item)}
                       >
                         {getLegacyValue(item)}
-                      </span>
+                      </RequirementHistoryPopover>
                     </span>
                     <span className="flex min-w-0 items-center gap-1">
                       <RequirementWorkDir
