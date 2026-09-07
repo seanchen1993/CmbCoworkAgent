@@ -1445,9 +1445,9 @@ export function UniversalUploadDialog({
                 <div className="space-y-4">
                   <div className="flex items-center justify-between gap-3">
                     <div className="space-y-1">
-                      <h4 className="text-sm font-medium text-foreground">灰度用户 User IDs</h4>
+                      <h4 className="text-sm font-medium text-foreground">灰度用户</h4>
                       <p className="text-xs leading-5 text-muted-foreground">
-                        选填。填写后仅这些用户可在市场列表看到该资源；留空则默认所有用户可见。
+                        留空则所有用户可见。填入 2345，则所有 ID 包含 2345 的用户均可查看。
                       </p>
                     </div>
                     <Button
@@ -1472,7 +1472,7 @@ export function UniversalUploadDialog({
                         <div key={`gray-user-${index}`} className="flex items-center gap-2">
                           <Input
                             value={userIdValue}
-                            placeholder="输入 SAP ID 或用户标识"
+                            placeholder="输入用户 ID，如 2345"
                             onChange={(e) => updateGrayUserId(index, e.target.value)}
                             onBlur={normalizeGrayUserIdsState}
                             disabled={uploading}
@@ -1500,7 +1500,7 @@ export function UniversalUploadDialog({
                     <div className="space-y-1">
                       <h4 className="text-sm font-medium text-foreground">灰度组织</h4>
                       <p className="text-xs leading-5 text-muted-foreground">
-                        选填。填写后仅 pathName 包含这些组织的用户可在市场列表看到该资源；留空则默认所有用户可见。
+                        留空则所有用户可见。填入 研发中心，则所有组织路径包含 研发中心 的用户均可查看。
                       </p>
                     </div>
                     <Button
@@ -1525,7 +1525,7 @@ export function UniversalUploadDialog({
                         <div key={`gray-org-${index}`} className="flex items-center gap-2">
                           <Input
                             value={orgValue}
-                            placeholder="输入组织名称"
+                            placeholder="输入组织名，如 研发中心"
                             onChange={(e) => updateGrayOrg(index, e.target.value)}
                             onBlur={normalizeGrayOrgsState}
                             disabled={uploading}
