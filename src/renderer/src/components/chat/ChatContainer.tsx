@@ -66,6 +66,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { useAppStore } from "@/lib/store"
+import { GitChangeNotice } from "@/components/git/GitChangeNotice"
 import {
   consumePendingHarnessNextAction,
   getPendingHarnessNextAction,
@@ -868,13 +869,9 @@ const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
 
 interface ChatContainerProps {
   threadId: string
-  showGitChangeNotice?: boolean
   surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
-  onOpenGitPanel?: () => void
-  onDismissGitChangeNotice?: () => void
-  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
   onHarnessSessionCreated?: (threadId: string) => void
 }
 
@@ -1653,18 +1650,15 @@ function SystemPromptPreviewButton({
 
 export function ChatContainer({
   threadId,
-  showGitChangeNotice = false,
   surface = "default",
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
-  onOpenGitPanel,
-  onDismissGitChangeNotice,
-  onThreadGitStatusChange,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
   )
+  const setGitWorkspaceStatus = useAppStore((state) => state.setGitWorkspaceStatus)
   const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
   const resolvedReadOnlyReason =
     readOnlyReason ??
@@ -8211,34 +8205,7 @@ export function ChatContainer({
                 reserveLeftSpace && "md:pl-[20px]"
               )}
             >
-              {showGitChangeNotice && (
-                <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
-                  <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
-                    <AlertCircle className="size-3.5 shrink-0 text-status-warning" />
-                    <span className="truncate">检测到文件变更，可打开 Git 面板查看。</span>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={onOpenGitPanel}
-                      disabled={!onOpenGitPanel}
-                      className="rounded-md bg-status-warning/15 px-2.5 py-1 text-xs font-medium text-status-warning transition-colors hover:bg-status-warning/20 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      打开
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onDismissGitChangeNotice}
-                      disabled={!onDismissGitChangeNotice}
-                      className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-status-warning/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                      aria-label="关闭文件变更提示"
-                      title="关闭"
-                    >
-                      <X className="size-3.5" />
-                    </button>
-                  </div>
-                </div>
-              )}
+              <GitChangeNotice threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
                   visible={chatScrollUiState.mode === "detached"}
@@ -8426,7 +8393,7 @@ export function ChatContainer({
                       <WorkspacePicker
                         threadId={threadId}
                         environmentRailCollapsed={composerEnvironmentRailCollapsed}
-                        onGitStatusChange={onThreadGitStatusChange}
+                        onGitStatusChange={setGitWorkspaceStatus}
                       />
                       <GitBranchSwitcher
                         workspacePath={workspacePath}

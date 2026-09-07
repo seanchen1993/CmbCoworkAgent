@@ -9,26 +9,18 @@ const FileViewer = lazy(() => import("./FileViewer").then((m) => ({ default: m.F
 interface TabbedPanelProps {
   threadId: string
   showTabBar?: boolean
-  hasPendingGitDiffNotice?: boolean
   chatSurface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
-  onRequestOpenGitPanel?: () => void
-  onDismissGitChangeNotice?: () => void
-  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
   onHarnessSessionCreated?: (threadId: string) => void
 }
 
 export function TabbedPanel({
   threadId,
   showTabBar = true,
-  hasPendingGitDiffNotice = false,
   chatSurface = "default",
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
-  onRequestOpenGitPanel,
-  onDismissGitChangeNotice,
-  onThreadGitStatusChange,
   onHarnessSessionCreated
 }: TabbedPanelProps): React.JSX.Element {
   const activeTab = useThreadStateSelector(threadId, (state) => state.activeTab) ?? "agent"
@@ -68,13 +60,9 @@ export function TabbedPanel({
           <ChatContainer
             key={threadId}
             threadId={threadId}
-            showGitChangeNotice={hasPendingGitDiffNotice}
             surface={chatSurface}
             hideWelcomeSkillTabs={hideWelcomeSkillTabs}
             readOnlyReason={readOnlyReason}
-            onOpenGitPanel={onRequestOpenGitPanel}
-            onDismissGitChangeNotice={onDismissGitChangeNotice}
-            onThreadGitStatusChange={onThreadGitStatusChange}
             onHarnessSessionCreated={onHarnessSessionCreated}
           />
         ) : activeFile ? (

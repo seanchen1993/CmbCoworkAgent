@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import {
+  AlertCircle,
   Check,
   Gauge,
   Loader2,
@@ -41,6 +42,7 @@ import {
   setAppleIntelligenceGlowEnabled,
   subscribeAppleIntelligenceGlow
 } from "@/lib/apple-intelligence-glow"
+import { useAppStore } from "@/lib/store"
 import {
   getDarkThemePreference,
   getLightThemePreference,
@@ -120,7 +122,7 @@ function ThemeModePreview({
   )
 }
 
-export function GeneralPanel(): React.JSX.Element {
+export function GeneralPanel({ targetSection }: { targetSection?: string | null }): React.JSX.Element {
   const [closeBehavior, setCloseBehavior] = useState<WindowCloseBehavior | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -161,6 +163,14 @@ export function GeneralPanel(): React.JSX.Element {
     getDarkThemePreference,
     () => "codex-dark"
   )
+  const gitChangeNoticeEnabled = useAppStore((state) => state.gitChangeNoticeEnabled)
+  const setGitChangeNoticeEnabled = useAppStore((state) => state.setGitChangeNoticeEnabled)
+
+  useEffect(() => {
+    if (targetSection !== "git-change-notice") return
+    const target = document.getElementById("git-change-notice-settings")
+    target?.scrollIntoView({ behavior: "smooth", block: "center" })
+  }, [targetSection])
 
   const loadCloseBehavior = useCallback(async (): Promise<void> => {
     const revision = ++closeBehaviorRevisionRef.current
@@ -344,6 +354,16 @@ export function GeneralPanel(): React.JSX.Element {
     }
   }, [worktreeRemoveTimeoutDraft, worktreeRemoveTimeoutMinutes])
 
+  const handleGitChangeNoticeChange = useCallback(async (enabled: boolean): Promise<void> => {
+    try {
+      await setGitChangeNoticeEnabled(enabled)
+      toast.success(enabled ? "Git 变更提示已开启" : "Git 变更提示已关闭")
+    } catch (saveError) {
+      console.error("[GeneralPanel] Failed to save git change notice setting:", saveError)
+      toast.error("Git 变更提示设置保存失败")
+    }
+  }, [setGitChangeNoticeEnabled])
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-6 sm:p-8">
       <div className="mx-auto w-full max-w-3xl space-y-6">
@@ -425,7 +445,7 @@ export function GeneralPanel(): React.JSX.Element {
           </div>
         </section>
 
-        <section className="overflow-hidden rounded-xl border border-border/70 bg-muted/20">
+        <section id="git-change-notice-settings" className="overflow-hidden rounded-xl border border-border/70 bg-muted/20">
           <div className="border-b border-border/60 bg-muted/35 px-5 py-4">
             <h2 className="text-sm font-semibold text-foreground">任务运行</h2>
           </div>
@@ -484,6 +504,35 @@ export function GeneralPanel(): React.JSX.Element {
               )}
             </div>
           )}
+        </section>
+
+        <section className="overflow-hidden rounded-xl border border-border/70 bg-muted/20">
+          <div className="border-b border-border/60 bg-muted/35 px-5 py-4">
+            <h2 className="text-sm font-semibold text-foreground">Git</h2>
+          </div>
+          <div className="flex flex-col gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3 sm:pr-8">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-background/80 text-muted-foreground shadow-sm ring-1 ring-border/60">
+                <AlertCircle className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-foreground">Git 变更提示</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  检测到会话中有 Git 文件变更时，在会话顶部显示提示条。默认开启，关闭后将不再提示。
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2.5">
+              <span className="text-xs text-muted-foreground">
+                {gitChangeNoticeEnabled ? "已开启" : "已关闭"}
+              </span>
+              <Switch
+                checked={gitChangeNoticeEnabled}
+                onCheckedChange={handleGitChangeNoticeChange}
+                aria-label="Git 变更提示"
+              />
+            </div>
+          </div>
         </section>
 
         <section className="overflow-hidden rounded-xl border border-border/70 bg-muted/20">

@@ -2033,6 +2033,22 @@ export function setStoredDefaultModelId(modelId: string): void {
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 const CHAT_SCROLL_SETTINGS_KEY = "chatScrollSettings"
+const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
+
+export function getGitChangeNoticeEnabled(): boolean {
+  try {
+    return getSettingsStore().get(GIT_CHANGE_NOTICE_ENABLED_KEY, true) !== false
+  } catch (error) {
+    console.warn("[Storage] Failed to load Git change notice setting; using enabled:", error)
+    return true
+  }
+}
+
+export function setGitChangeNoticeEnabled(enabled: boolean): boolean {
+  const normalized = Boolean(enabled)
+  getSettingsStore().set(GIT_CHANGE_NOTICE_ENABLED_KEY, normalized)
+  return normalized
+}
 
 export function getWindowCloseBehavior(): WindowCloseBehavior {
   try {

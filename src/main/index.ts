@@ -100,6 +100,8 @@ const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed
 const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
 const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
 const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
+const GIT_CHANGE_NOTICE_GET_CHANNEL = "app:get-git-change-notice-enabled"
+const GIT_CHANGE_NOTICE_SET_CHANNEL = "app:set-git-change-notice-enabled"
 const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
 const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
@@ -442,6 +444,7 @@ import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from 
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import {
   getChatScrollSettings,
+  getGitChangeNoticeEnabled,
   getOpenworkDir,
   getStoredAgentGraphRecursionLimit,
   getStoredWorkflowWorktreeRemoveTimeoutMinutes,
@@ -449,6 +452,7 @@ import {
   getWindowCloseBehavior,
   isKeepAwakeEnabled,
   setChatScrollSettings,
+  setGitChangeNoticeEnabled,
   setStoredAgentGraphRecursionLimit,
   setStoredWorkflowWorktreeRemoveTimeoutMinutes,
   setStoredWorkflowWorktreeTimeoutMinutes,
@@ -1160,6 +1164,29 @@ if (browserNativeMessagingHostLaunch) {
         throw new Error("Invalid chat scroll settings")
       }
       return saveChatScrollSettings(settings as Parameters<typeof setChatScrollSettings>[0])
+    })
+
+    ipcMain.handle(GIT_CHANGE_NOTICE_GET_CHANNEL, (event) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Git change notice settings are only available to the main window")
+      }
+      return getGitChangeNoticeEnabled()
+    })
+
+    ipcMain.handle(GIT_CHANGE_NOTICE_SET_CHANNEL, (event, enabled: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Git change notice settings are only available to the main window")
+      }
+      if (typeof enabled !== "boolean") throw new Error("Invalid Git change notice setting")
+      return setGitChangeNoticeEnabled(enabled)
     })
 
     ipcMain.handle(AGENT_RUNTIME_SETTINGS_GET_CHANNEL, (event): AgentRuntimeSettings => {

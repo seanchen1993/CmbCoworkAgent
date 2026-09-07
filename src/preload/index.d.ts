@@ -222,6 +222,8 @@ interface ElectronAPI {
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
   getChatScrollSettings: () => Promise<ChatScrollSettings>
   setChatScrollSettings: (settings: Partial<ChatScrollSettings>) => Promise<ChatScrollSettings>
+  getGitChangeNoticeEnabled: () => Promise<boolean>
+  setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => () => void
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
   setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>

@@ -275,6 +275,8 @@ const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed
 const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
 const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
 const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
+const GIT_CHANGE_NOTICE_GET_CHANNEL = "app:get-git-change-notice-enabled"
+const GIT_CHANGE_NOTICE_SET_CHANNEL = "app:set-git-change-notice-enabled"
 const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
 const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
@@ -343,6 +345,10 @@ const electronAPI = {
     ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_GET_CHANNEL) as Promise<ChatScrollSettings>,
   setChatScrollSettings: (settings: Partial<ChatScrollSettings>): Promise<ChatScrollSettings> =>
     ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_SET_CHANNEL, settings) as Promise<ChatScrollSettings>,
+  getGitChangeNoticeEnabled: (): Promise<boolean> =>
+    ipcRenderer.invoke(GIT_CHANGE_NOTICE_GET_CHANNEL) as Promise<boolean>,
+  setGitChangeNoticeEnabled: (enabled: boolean): Promise<boolean> =>
+    ipcRenderer.invoke(GIT_CHANGE_NOTICE_SET_CHANNEL, enabled) as Promise<boolean>,
   onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => {
     const handler = (_event: unknown, settings: unknown): void => {
       if (!settings || typeof settings !== "object" || Array.isArray(settings)) return
