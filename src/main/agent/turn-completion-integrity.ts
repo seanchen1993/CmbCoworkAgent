@@ -83,13 +83,15 @@ const TRUNCATION_FINISH_REASONS = new Set([
 const TOOL_CALL_FINISH_REASONS = new Set(["tool_calls", "tool_use", "function_call"])
 
 /**
- * Unambiguous, provider-specific markers for "the model wrote a tool call as
- * TEXT because the harness never parsed it into a structured call".
+ * Provider-specific markers for "the model wrote a tool call as TEXT because the
+ * harness never parsed it into a structured call".
  *
- * Deliberately narrow. A generic `{"name": …, "arguments": …}` match was
- * rejected: a legitimate final answer that documents an API would trip it, and
- * a false positive here ends as a FAILED turn after the retries run out. These
- * forms never appear in ordinary prose.
+ * The marker list alone is not the test — see `containsTextualToolCall`. A bare
+ * substring match over these was wrong for THIS product: the users are
+ * developers, and a correct answer that explains tool-call parsing, quotes a
+ * `<tool_call>` tag inline, or reviews code containing one would trip it. A
+ * false positive here burns two retries and then settles a CORRECT turn as
+ * failed, which is worse than the bug being guarded against.
  */
 const TEXTUAL_TOOL_CALL_MARKERS = [
   "<function_calls>",
@@ -271,9 +273,39 @@ function countRawToolCalls(message: AIMessage): number {
   return Array.isArray(raw) ? raw.length : 0
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+/** Drop fenced blocks and inline code spans. Everything inside them is the model
+ * SHOWING a tool call, not ISSUING one — protocol explanations, examples and
+ * code review all live there. */
+function stripCodeSpans(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/~~~[\s\S]*?~~~/g, " ")
+    .replace(/`[^`\n]*`/g, " ")
+}
+
+/**
+ * True only when the model appears to have EMITTED a tool call as prose.
+ *
+ * Two filters, both aimed at the same failure: never fail a correct answer.
+ *   - code spans are stripped first (a quoted or fenced tag is documentation);
+ *   - the marker must OPEN a line. A model that emits a call instead of using
+ *     the tool API puts it on its own line; prose that mentions one has it mid
+ *     sentence ("代码里判断的是 <function=foo> 这种写法").
+ *
+ * This is deliberately biased toward MISSING a real textual call: a miss just
+ * returns to "the turn ends normally", which the other defect classes
+ * (empty_response / missing_finish_signal) usually catch anyway, while a false
+ * positive marks a correct turn failed.
+ */
 export function containsTextualToolCall(text: string): boolean {
-  const lowered = text.toLowerCase()
-  return TEXTUAL_TOOL_CALL_MARKERS.some((marker) => lowered.includes(marker.toLowerCase()))
+  const prose = stripCodeSpans(text).toLowerCase()
+  return TEXTUAL_TOOL_CALL_MARKERS.some((marker) =>
+    new RegExp(`(^|\n)[ \t>*-]*${escapeRegExp(marker.toLowerCase())}`).test(prose)
+  )
 }
 
 export interface InspectFinalMessageOptions {

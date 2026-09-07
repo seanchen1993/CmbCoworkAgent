@@ -156,16 +156,32 @@ describe("final message inspection", () => {
     expect(inspection.defect).toBe("textual_tool_call")
   })
 
-  it("does not flag prose that merely discusses tools", () => {
-    // The textual-tool-call heuristic is deliberately narrow: a false positive
-    // here ends as a FAILED turn once the retries run out.
+  it("still flags a call emitted on its own line after some prose", () => {
     const inspection = inspectFinalAssistantMessage(
-      aiMessage(
-        '你可以调用 read_file 工具，参数是 {"file_path": "a.ts"}，name/arguments 都是必填的。',
-        { finish_reason: "stop" }
-      )
+      aiMessage('好的，我来读取文件：\n<tool_call>{"name": "read_file"}</tool_call>', {
+        finish_reason: "stop"
+      })
     )
-    expect(inspection.defect).toBeNull()
+    expect(inspection.defect).toBe("textual_tool_call")
+  })
+
+  // 这个产品的用户就是开发者，问的就是工具调用怎么解析。误判的终点是把一个
+  // 正确回合判成失败——比漏判贵得多，所以下面每一种都必须放行。
+  it.each([
+    ["行内代码引用标签", "该解析器通过匹配 `<tool_call>` 标签识别工具调用。"],
+    ["句中裸提及标签", "代码里判断的是 <function=foo> 这种写法，注意不要漏掉闭合。"],
+    [
+      "围栏代码块里的示例",
+      '下面是模型误发的形态：\n```\n<tool_call>{"name":"x"}</tool_call>\n```\n应当被识别并重试。'
+    ],
+    [
+      "解释参数结构",
+      '你可以调用 read_file 工具，参数是 {"file_path": "a.ts"}，name/arguments 都是必填的。'
+    ]
+  ])("does not flag %s", (_label, content) => {
+    expect(
+      inspectFinalAssistantMessage(aiMessage(content, { finish_reason: "stop" })).defect
+    ).toBeNull()
   })
 
   it("treats a missing finish signal as EOF only for models known to send one", () => {

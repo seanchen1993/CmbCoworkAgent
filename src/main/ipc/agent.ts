@@ -450,6 +450,31 @@ const MAX_PENDING_MEMORY_FILE_PATHS = 512
 const MAX_MEMORY_BATCH_NOTICE_CHARACTERS = 512
 const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
+/**
+ * 完成门禁对所有物理运行入口一视同仁：invoke / resume / interrupt 跑的是同一张
+ * 图、同一个中间件（三者都传 currentRunMessageQueueOwnerToken），所以恢复回合里
+ * 的空回复、截断回复同样会被拦截并记录。只有 invoke 读报告的话，恢复入口照样
+ * 会把这些回合报成「任务完成」。
+ *
+ * 返回非 null 表示本回合不得按成功收尾。
+ */
+function readTurnCompletionFailure(threadId: string, runToken: string): string | null {
+  const report = readTurnCompletionGateReport(threadId, runToken)
+  return report ? describeTurnCompletionFailure(report) : null
+}
+
+/** 门禁重试的 UI 提示：重试要花掉用户一次模型调用，不能是静默的内部循环。 */
+function formatTurnCompletionRecoveryNotice(input: {
+  kind: "defect" | "todo"
+  detail: string
+  attempt: number
+  maxAttempts: number
+}): string {
+  return input.kind === "todo"
+    ? `任务尚未完成（${input.detail}），已请求模型继续（${input.attempt}/${input.maxAttempts}）。`
+    : `模型未给出有效结果（${input.detail}），已请求模型重新作答（${input.attempt}/${input.maxAttempts}）。`
+}
+
 const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 const SYSTEM_PROMPT_PREVIEW_IDS_ENV = "VITE_SYSTEM_PROMPT_PREVIEW_YST_IDS"
 const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
@@ -6458,11 +6483,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           attempt: number
           maxAttempts: number
         }): void => {
-          sendHookNotice(
-            input.kind === "todo"
-              ? `任务尚未完成（${input.detail}），已请求模型继续（${input.attempt}/${input.maxAttempts}）。`
-              : `模型未给出有效结果（${input.detail}），已请求模型重新作答（${input.attempt}/${input.maxAttempts}）。`
-          )
+          sendHookNotice(formatTurnCompletionRecoveryNotice(input))
         }
 
         let latestSerializedValuesMessagesForGoalFlush: unknown[] = []
@@ -8950,10 +8971,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             // already-degraded outcome (Stop hook halt, goal blocked) keeps its
             // own, more specific reason.
             if (invokeFinalOutcome === "success") {
-              const completionReport = readTurnCompletionGateReport(threadId, runToken)
-              const completionFailure = completionReport
-                ? describeTurnCompletionFailure(completionReport)
-                : null
+              const completionFailure = readTurnCompletionFailure(threadId, runToken)
               if (completionFailure) {
                 // markInvokeIncomplete only — the settlement block below turns
                 // a non-success outcome into markAutoModeTerminal("error",
@@ -10544,6 +10562,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             baseOptions: () => ({
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
+              onTurnCompletionRecovery: (input) =>
+                sendHookNotice(formatTurnCompletionRecoveryNotice(input)),
               workspacePath,
               coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
               coordinatorSelectedSkill: resumeCoordinatorSelectedSkill,
@@ -10929,9 +10949,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             turnStateShouldDispose = true
-            resumeAutoModeTerminal = createAutoModeTerminal("success", "normal")
+            // 与 invoke 同一套判定：门禁重试耗尽后仍是空回复 / 截断回复 / 未解析
+            // 出的工具调用时，这一回合不得报成任务完成。
+            const completionFailure = readTurnCompletionFailure(threadId, runToken)
+            if (completionFailure) sendHookNotice(completionFailure)
+            resumeAutoModeTerminal = completionFailure
+              ? createAutoModeTerminal("error", "unknown", completionFailure)
+              : createAutoModeTerminal("success", "normal")
             safeSendToWindow(window, channel, { type: "done" })
-            if (!boundaryGoalId) {
+            if (!completionFailure && !boundaryGoalId) {
               emitAppAttention({
                 kind: "task-complete",
                 threadId,
@@ -11048,6 +11074,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
           turnStateShouldDispose = true
         } finally {
+          // 门禁状态按 threadId::runToken 挂在进程级 Map 上；每个物理运行的每条
+          // 退出路径都必须清理，否则 Map 只增不减（三个入口都会产生状态）。
+          clearTurnCompletionGateState(threadId, runToken)
           await settlePhysicalAgentRun({
             kind: "resume",
             threadId,
@@ -11674,6 +11703,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
+              onTurnCompletionRecovery: (input) =>
+                sendHookNotice(formatTurnCompletionRecoveryNotice(input)),
               workspacePath,
               coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
               coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
@@ -12045,9 +12076,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             turnStateShouldDispose = true
-            interruptAutoModeTerminal = createAutoModeTerminal("success", "normal")
+            // 与 invoke 同一套判定：门禁重试耗尽后仍是空回复 / 截断回复 / 未解析
+            // 出的工具调用时，这一回合不得报成任务完成。
+            const completionFailure = readTurnCompletionFailure(threadId, runToken)
+            if (completionFailure) sendHookNotice(completionFailure)
+            interruptAutoModeTerminal = completionFailure
+              ? createAutoModeTerminal("error", "unknown", completionFailure)
+              : createAutoModeTerminal("success", "normal")
             safeSendToWindow(window, channel, { type: "done" })
-            if (!boundaryGoalId) {
+            if (!completionFailure && !boundaryGoalId) {
               emitAppAttention({
                 kind: "task-complete",
                 threadId,
@@ -12179,6 +12216,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
         }
       } finally {
+        // 同 resume：门禁状态必须随物理运行一起释放。
+        clearTurnCompletionGateState(threadId, runToken)
         await settlePhysicalAgentRun({
           kind: "interrupt",
           threadId,

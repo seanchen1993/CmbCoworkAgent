@@ -1504,9 +1504,13 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     `invoke, resume, and interrupt each have one completed boundary: got ${completionBoundaryIndexes.length}`
   )
   for (const [index, label] of ["invoke", "resume", "interrupt"].entries()) {
+    // 窗口只是为了把断言限制在同一个 handler 内，不是对结算体长度的约束。
+    // resume / interrupt 的结算体在接入完成门禁（readTurnCompletionFailure）后
+    // 变长了——门禁判定就该落在所有权围栏之后、done 之前，这里断言的正是那个
+    // 顺序本身。留出余量，别让「加一行就撞窗口」变成改测试的理由。
     const body = agentIpc.slice(
       completionBoundaryIndexes[index],
-      completionBoundaryIndexes[index] + 1000
+      completionBoundaryIndexes[index] + 1600
     )
     const fence =
       label === "invoke"
