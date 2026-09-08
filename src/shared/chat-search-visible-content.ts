@@ -6,8 +6,10 @@ import { projectGoalNoticeVisibleText } from "./goal-notice-presentation"
 
 const SKILL_OPEN = "<CMBDEVCLAW-SKILL-USE-V1>"
 const SKILL_CLOSE = "</CMBDEVCLAW-SKILL-USE-V1>"
-const BROWSER_PREFIX = "使用内置浏览器 browser_*工具："
-const BROWSER_NO_SCREENSHOT_PREFIX = "使用内置浏览器 browser_*工具（不允许使用截图功能）："
+const BROWSER_PREFIX =
+  "使用内置浏览器 browser_*工具。仅当当前模型支持图片识别/视觉输入时，才允许调用截图工具；否则不要调用截图工具，改用 DOM 快照、文本、locator、evaluate 等非视觉方式："
+const LEGACY_BROWSER_PREFIX = "使用内置浏览器 browser_*工具："
+const LEGACY_BROWSER_NO_SCREENSHOT_PREFIX = "使用内置浏览器 browser_*工具（不允许使用截图功能）："
 
 function projectSystemNoticeSearchText(text: string): string {
   const clean = text.replace(/^●\s*/, "").replace(/^(?:✓|Ⅱ)\s*/, "")
@@ -49,12 +51,15 @@ function parseUserTransportText(content: string): {
   }
 
   let browserSelected = false
-  if (visibleText.startsWith(BROWSER_NO_SCREENSHOT_PREFIX)) {
+  if (visibleText.startsWith(LEGACY_BROWSER_NO_SCREENSHOT_PREFIX)) {
     browserSelected = true
-    visibleText = visibleText.slice(BROWSER_NO_SCREENSHOT_PREFIX.length)
+    visibleText = visibleText.slice(LEGACY_BROWSER_NO_SCREENSHOT_PREFIX.length)
   } else if (visibleText.startsWith(BROWSER_PREFIX)) {
     browserSelected = true
     visibleText = visibleText.slice(BROWSER_PREFIX.length)
+  } else if (visibleText.startsWith(LEGACY_BROWSER_PREFIX)) {
+    browserSelected = true
+    visibleText = visibleText.slice(LEGACY_BROWSER_PREFIX.length)
   }
 
   return { visibleText, skillName, browserSelected }
