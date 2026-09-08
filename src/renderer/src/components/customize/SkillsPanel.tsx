@@ -49,12 +49,12 @@ import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
 import { UniversalUploadDialog } from "./MarketPanel/UniversalUploadDialog"
 import { toast } from "sonner"
-import {
-  MarketUpdateBadge,
-  isMarketVersionDifferent,
-  marketInstalledVersionStorage
-} from "./MarketPanel/MarketUpdateBadge"
+import { marketInstalledVersionStorage } from "./MarketPanel/MarketUpdateBadge"
 import { marketInstalledSourceStorage } from "./MarketPanel/market-installed-source-storage"
+import {
+  SkillMarketUpdate,
+  SkillMarketUpdateProvider
+} from "./SkillMarketUpdate"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
@@ -1881,14 +1881,28 @@ export function SkillsPanel(): React.JSX.Element {
     (skill: SkillMetadata | null | undefined): boolean => {
       if (!skill || skill.source !== "user") return false
       if (orgInstalledSkillNames.has(normalizeSkillName(skill.name))) return false
-      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
-      if (localMarked) return true
+      if (localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))) return true
       if (uploadedSkillNames.has(normalizeSkillName(skill.name))) return true
-      // 历史兜底：无市场同名记录时，仍按“本地上传”处理。
-      return !resolveMarketInfo(skill)
+      // 不再使用“无市场同名记录即视为本地上传”的兜底：
+      // marketSkillMap 异步加载（含 setTimeout 延迟与接口失败/未返回某项）时，
+      // 该兜底会把“从市场安装的他人技能”误判为“我上传的技能”，从而错误地展示“同步到市场”按钮。
+      // 仅依赖本地路径标记与已发布名称标记这两项正向证据判定归属。
+      return false
     },
-    [localUploadedSkillPaths, orgInstalledSkillNames, resolveMarketInfo, uploadedSkillNames]
+    [localUploadedSkillPaths, orgInstalledSkillNames, uploadedSkillNames]
   )
+
+  /**
+   * 技能更新成功后由 SkillMarketUpdate 组件回调：
+   * 清空旧文件映射、失效缓存并重扫技能目录、清理选中态（技能路径可能已变化）。
+   */
+  const handleSkillUpdated = useCallback(() => {
+    setSkillFilesMap({})
+    void refreshSkills(true).catch(console.error)
+    setSelectedSkill(null)
+    setSelectedFilePath(null)
+    setSelectedFileContent(null)
+  }, [refreshSkills])
 
   const selectedSkillMarketInfo = useMemo(
     () => (selectedSkill ? resolveMarketInfo(selectedSkill) : undefined),
@@ -1935,6 +1949,17 @@ export function SkillsPanel(): React.JSX.Element {
     [selectedSkill, selectedSkillUploadedInPanel]
   )
   const selectedSkillPublishLabel = "同步到市场"
+  /**
+   * 归属权门控：是否允许对该技能执行市场更新。
+   * 仅看“是不是我上传/组织级安装”，版本是否有更新的判定由 SkillMarketUpdate 内部完成。
+   */
+  const selectedSkillCanUpdateMarket = useMemo(() => {
+    const skill = selectedSkill
+    if (!skill || skill.source !== "user") return false
+    if (isSkillUploadedInPanel(skill)) return false
+    if (orgInstalledSkillNames.has(normalizeSkillName(skill.name))) return false
+    return true
+  }, [isSkillUploadedInPanel, orgInstalledSkillNames, selectedSkill])
   const selectedSkillDeleteDisabledReason = selectedSkillHideContent
     ? "精品技能是内置技能，不允许删除。你可以点击按钮不启动这个技能。"
     : undefined
@@ -2295,23 +2320,25 @@ export function SkillsPanel(): React.JSX.Element {
               />
             )}
             {marketInstalledCustomSkills.length > 0 && (
-              <SkillSection
-                title="我从应用市场安装的技能"
-                skills={visibleSkillGroups.market}
-                marketSkillMap={marketSkillMap}
-                uploadedSkillNames={uploadedSkillNames}
-                editedSkillPaths={editedSkillPaths}
-                expandedSkills={expandedSkills}
-                skillFilesMap={skillFilesMap}
-                selectedSkill={selectedSkill}
-                expandedDirNodes={expandedDirNodes}
-                disabledSkills={disabledSkills}
-                onToggleSkill={onToggleSkill}
-                onToggleDirNode={toggleDirNode}
-                onSelectFile={onSelectFile}
-                hideFeaturedMarketFiles
-                hideMarketTag
-              />
+              <SkillMarketUpdateProvider onUpdated={handleSkillUpdated}>
+                <SkillSection
+                  title="我从应用市场安装的技能"
+                  skills={visibleSkillGroups.market}
+                  marketSkillMap={marketSkillMap}
+                  uploadedSkillNames={uploadedSkillNames}
+                  editedSkillPaths={editedSkillPaths}
+                  expandedSkills={expandedSkills}
+                  skillFilesMap={skillFilesMap}
+                  selectedSkill={selectedSkill}
+                  expandedDirNodes={expandedDirNodes}
+                  disabledSkills={disabledSkills}
+                  onToggleSkill={onToggleSkill}
+                  onToggleDirNode={toggleDirNode}
+                  onSelectFile={onSelectFile}
+                  hideFeaturedMarketFiles
+                  hideMarketTag
+                />
+              </SkillMarketUpdateProvider>
             )}
             {orgInstalledCustomSkills.length > 0 && (
               <SkillSection
@@ -2376,6 +2403,8 @@ export function SkillsPanel(): React.JSX.Element {
             : undefined
         }
         publishLabel={selectedSkillPublishLabel}
+        canUpdateMarket={selectedSkillCanUpdateMarket}
+        onUpdated={handleSkillUpdated}
         canEdit={selectedSkillCanEdit}
         hideContentPreview={selectedSkillHideContent}
         onSaveContent={saveSkillFileContent}
@@ -2928,16 +2957,6 @@ function SkillItem(props: {
   const chineseName = getSkillChineseName(skill, marketInfo)
   const displayName = chineseName || skill.name
 
-  // 检测市场是否有更新版本：本地版本与市场版本不一致时提示
-  const localVersion =
-    skill.metadata?.version?.trim() ||
-    skill.version ||
-    marketInstalledVersionStorage.getVersion(skill.name, "orgSkill") ||
-    ""
-  const marketVersion = marketInfo?.version || ""
-  const updateAvailable =
-    hasMarketEntry && isMarketVersionDifferent(localVersion, marketVersion)
-
   return (
     <div
       className={cn(
@@ -2993,14 +3012,11 @@ function SkillItem(props: {
               市场
             </Badge>
           )}
-          {updateAvailable && (
-            <MarketUpdateBadge
-              typeLabel="技能"
-              installedVersion={localVersion}
-              currentVersion={marketVersion}
-              className="text-[10px] px-1.5 py-0"
-            />
-          )}
+          <SkillMarketUpdate
+            skill={skill}
+            marketVersion={marketInfo?.version}
+            hasMarketEntry={hasMarketEntry}
+          />
           {isEdited && (
             <Badge
               variant="outline"
@@ -3119,6 +3135,8 @@ export function SkillDetail(props: {
   deleteDisabledReason?: string
   onPublish?: () => void
   publishLabel?: string
+  canUpdateMarket?: boolean
+  onUpdated?: () => void
   canEdit?: boolean
   onSaveContent?: (filePath: string, content: string) => Promise<SaveSkillFileResult>
   isEdited?: boolean
@@ -3141,6 +3159,8 @@ export function SkillDetail(props: {
     deleteDisabledReason,
     onPublish,
     publishLabel = "发布到市场",
+    canUpdateMarket = false,
+    onUpdated,
     canEdit = false,
     onSaveContent,
     isEdited = false,
@@ -3233,15 +3253,6 @@ export function SkillDetail(props: {
     ? `当前没有在 SKILL.md frontmatter 里找到 version，所以这里显示的是默认值 ${DEFAULT_SKILL_VERSION}。`
     : "这个值直接读取自 SKILL.md frontmatter 里的 version 字段（已统一为小写 v 前缀）。"
   const isFeatured = isFeaturedSkill(marketInfo)
-  // 检测市场是否有更新版本：本地版本与市场版本不一致时提示
-  const detailLocalVersion =
-    skill.metadata?.version?.trim() ||
-    skill.version ||
-    marketInstalledVersionStorage.getVersion(skill.name, "orgSkill") ||
-    ""
-  const detailMarketVersion = marketInfo?.version || ""
-  const detailUpdateAvailable =
-    hasMarketEntry && isMarketVersionDifferent(detailLocalVersion, detailMarketVersion)
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const previewContent =
     isMarkdown && markdownFrontmatter.hasFrontmatter
@@ -3317,14 +3328,11 @@ export function SkillDetail(props: {
                     市场
                   </Badge>
                 )}
-                {detailUpdateAvailable && (
-                  <MarketUpdateBadge
-                    typeLabel="技能"
-                    installedVersion={detailLocalVersion}
-                    currentVersion={detailMarketVersion}
-                    className="text-[10px] px-2 py-0.5"
-                  />
-                )}
+                <SkillMarketUpdate
+                  skill={skill}
+                  marketVersion={marketInfo?.version}
+                  hasMarketEntry={hasMarketEntry}
+                />
                 {isEdited && (
                   <Badge
                     variant="outline"
@@ -3363,6 +3371,16 @@ export function SkillDetail(props: {
             </div>
             {!hideActions && (
               <div className="flex items-center gap-1.5 shrink-0">
+                {canUpdateMarket && (
+                  <SkillMarketUpdate
+                    variant="button"
+                    skill={skill}
+                    marketVersion={marketInfo?.version}
+                    hasMarketEntry={hasMarketEntry}
+                    canUpdate
+                    onUpdated={onUpdated}
+                  />
+                )}
                 {canEditCurrentFile && !isEditing && (
                   <Button
                     variant="outline"
