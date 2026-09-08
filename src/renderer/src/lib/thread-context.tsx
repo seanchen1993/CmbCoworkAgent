@@ -460,9 +460,16 @@ export interface RoutingResultState {
   routeReason: string
 }
 
-// Model retry indicator — shown inline in chat while the fetch layer is
-// retrying a transient model error. Cleared when the retry resolves.
+// Model retry indicator — shown inline in chat while the current turn is being
+// retried, by either the fetch layer (transient model error) or the completion
+// gate (invalid final message). Cleared when the retry resolves.
 export interface ModelRetryState {
+  /**
+   * 谁触发的重试。传输层（空响应 / 断流，主进程 retryStreamAfterDisconnect）和
+   * 完成门禁（模型给了无效终局，turn-completion-integrity）共用这一个横幅，
+   * 差别只在文案：门禁那边的 reason 已经是一句完整的话，直接原样渲染。
+   */
+  retryKind: "transport" | "completion_gate"
   attempt: number
   maxRetries: number
   reason: string
@@ -1503,6 +1510,7 @@ interface CustomEventData {
   resolvedTier?: "premium" | "economy"
   routeReason?: string
   // model_retry fields
+  retryKind?: "transport" | "completion_gate"
   attempt?: number
   maxRetries?: number
   reason?: string
@@ -4569,6 +4577,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           if (typeof data.attempt === "number" && typeof data.maxRetries === "number") {
             updateThreadState(threadId, () => ({
               modelRetry: {
+                retryKind: data.retryKind === "completion_gate" ? "completion_gate" : "transport",
                 attempt: data.attempt!,
                 maxRetries: data.maxRetries!,
                 reason: data.reason ?? "",
