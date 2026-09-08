@@ -2614,7 +2614,11 @@ function TaskItem({ todo }: { todo: Todo }): React.JSX.Element {
       )}
     >
       <Icon className={cn("size-4 shrink-0 mt-0.5", config.color)} />
-      <span className={cn("flex-1 text-sm", isDone && "line-through")}>{todo.content}</span>
+      <span
+        className={cn("min-w-0 flex-1 text-sm [overflow-wrap:anywhere]", isDone && "line-through")}
+      >
+        {todo.content}
+      </span>
       <Badge variant={config.badge} className="shrink-0 text-[10px]">
         {config.label}
       </Badge>
