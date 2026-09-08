@@ -255,6 +255,7 @@ export interface BrowserProfileImportPreview {
 }
 
 export interface BrowserProfileImportOptions {
+  autoImport?: boolean
   importCookies?: boolean
   profileDirectory?: string
   sourceBrowser: BrowserProfileImportSource

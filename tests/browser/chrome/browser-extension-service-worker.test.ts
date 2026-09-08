@@ -41,9 +41,18 @@ function loadServiceWorker() {
       respond: (value: unknown) => void
     ) => boolean
   >()
+  const alarms = new ChromeEvent<(alarm: { name: string }) => void>()
+  const createdAlarms: Array<{ name: string; options: Record<string, number> }> = []
   let nextTimerId = 1
 
   const chrome = {
+    alarms: {
+      clear: vi.fn(),
+      create: vi.fn((name: string, options: Record<string, number>) => {
+        createdAlarms.push({ name, options })
+      }),
+      onAlarm: alarms
+    },
     cookies: {
       getAll: vi.fn((_query: unknown, callback: (value: unknown[]) => void) => callback([])),
       getAllCookieStores: vi.fn((callback: (value: Array<{ id: string }>) => void) =>
@@ -111,19 +120,32 @@ function loadServiceWorker() {
     timer.callback()
   }
 
-  return { chrome, ports, runTimer, runtimeMessages, timers }
+  return { alarms, chrome, createdAlarms, ports, runTimer, runtimeMessages, timers }
 }
 
 describe("Chrome extension native host lifecycle", () => {
-  it("does not retry an initial connection failure or connect during status polling", () => {
+  it("retries an initial connection failure and then falls back to a minute-level alarm", () => {
     const worker = loadServiceWorker()
     expect(worker.chrome.runtime.connectNative).toHaveBeenCalledTimes(1)
 
     worker.ports[0].onDisconnect.emit()
-    expect(worker.timers).toHaveLength(0)
+    worker.runTimer(1000)
+    worker.ports[1].onDisconnect.emit()
+    worker.runTimer(3000)
+    worker.ports[2].onDisconnect.emit()
+    worker.runTimer(10000)
+    worker.ports[3].onDisconnect.emit()
+    expect(worker.createdAlarms).toEqual([
+      {
+        name: "cmb-native-host-reconnect",
+        options: { delayInMinutes: 1, periodInMinutes: 1 }
+      }
+    ])
 
     worker.runtimeMessages.emit({ type: "popup-status" }, undefined, vi.fn())
-    expect(worker.chrome.runtime.connectNative).toHaveBeenCalledTimes(1)
+    expect(worker.chrome.runtime.connectNative).toHaveBeenCalledTimes(4)
+    worker.alarms.emit({ name: "cmb-native-host-reconnect" })
+    expect(worker.chrome.runtime.connectNative).toHaveBeenCalledTimes(5)
   })
 
   it("limits recovery after a successful connection to three attempts", () => {

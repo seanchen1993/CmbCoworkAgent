@@ -1,4 +1,4 @@
-import { dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
+import { type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { getBrowserCdpConfig } from "../storage"
 import type {
   BrowserCookieBridgeErrorCode,
@@ -34,11 +34,13 @@ const BROWSER_COOKIE_BRIDGE_ERROR_CODES = new Set<BrowserCookieBridgeErrorCode>(
   "export_failed"
 ])
 const BROWSER_COOKIE_BRIDGE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserCookieBridge]`
+const AUTO_IMPORT_EXPORT_TIMEOUT_MS = 5_000
 
 let cookieBridgeServer: BrowserCookieBridgeServerInstance | null = null
 let browserProfileImportActiveForSession = false
 let browserProfileImportRuntimeEnabled = false
 let browserProfileImportRuntimeStartPromise: Promise<void> | null = null
+let browserProfileAutoImportAttempted = false
 
 function profileImportFailure(
   error: string,
@@ -182,8 +184,8 @@ async function startBrowserProfileImportRuntime(): Promise<void> {
 }
 
 async function importWindowsCookieData(
-  window: BrowserWindow,
-  browserService: BrowserService
+  browserService: BrowserService,
+  exportTimeoutMs?: number
 ): Promise<BrowserProfileImportResult> {
   let registration: Awaited<ReturnType<typeof ensureChromeNativeHostRegistration>>
   try {
@@ -205,23 +207,9 @@ async function importWindowsCookieData(
     }
   }
 
-  const confirmation = await dialog.showMessageBox(window, {
-    type: "question",
-    title: "导入 Chrome Cookie",
-    message: "从当前 Chrome Profile 导入全部网站 Cookie？",
-    detail:
-      "Cookie 将由 CmbCoworkAgent Chrome 扩展读取，不会读取 Chrome 的 Cookies 文件。请确认你已在扩展中授予网站访问权限。",
-    buttons: ["取消", "导入"],
-    defaultId: 1,
-    cancelId: 0
-  })
-  if (confirmation.response !== 1) {
-    return { ...extensionImportFailure("用户取消导入", undefined), cancelled: true }
-  }
-
   try {
     const server = await getCookieBridgeServer()
-    const exported = await server.exportCookies()
+    const exported = await server.exportCookies(exportTimeoutMs)
     const imported = await sanitizeChromeExtensionCookieExport(exported.cookies)
     const counts = await browserService.importProfileData(imported.data)
     const skippedCookies = exported.skippedCookies + imported.skippedCookies + counts.skippedCookies
@@ -287,8 +275,18 @@ async function importBrowserProfileData(
     return profileImportFailure("浏览器数据导入功能在当前会话未生效，请保存配置后重启应用", options)
   }
 
+  if (options.autoImport) {
+    if (browserProfileAutoImportAttempted) {
+      return extensionImportFailure("本次会话已完成自动导入尝试", "import_in_progress")
+    }
+    browserProfileAutoImportAttempted = true
+  }
+
   if (process.platform === "win32") {
-    return importWindowsCookieData(window, browserService)
+    return importWindowsCookieData(
+      browserService,
+      options.autoImport ? AUTO_IMPORT_EXPORT_TIMEOUT_MS : undefined
+    )
   }
 
   try {

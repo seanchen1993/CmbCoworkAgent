@@ -262,13 +262,38 @@ export function BrowserPanel({
   const [isCapturing, setIsCapturing] = useState(false)
   const [isResettingHome, setIsResettingHome] = useState(false)
   const [isImportingBrowserProfile, setIsImportingBrowserProfile] = useState(false)
+  const [isBrowserProfileImportSuccessful, setIsBrowserProfileImportSuccessful] = useState(false)
+  const [isBrowserProfileImportFailed, setIsBrowserProfileImportFailed] = useState(false)
   const [isProfileImportRuntimeEnabled, setIsProfileImportRuntimeEnabled] = useState(false)
   const [copiedConsole, setCopiedConsole] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [recordingBoxOpen, setRecordingBoxOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isHiddenByModalDialog, setIsHiddenByModalDialog] = useState(false)
+  const importFeedbackTimerRef = useRef<number | null>(null)
+  const autoImportTriggeredRef = useRef(false)
   const showBrowserWelcome = isInitialBrowserPage(state.url)
+
+  const markBrowserProfileImportFeedback = useCallback((successful: boolean) => {
+    setIsBrowserProfileImportSuccessful(successful)
+    setIsBrowserProfileImportFailed(!successful)
+    if (importFeedbackTimerRef.current !== null) {
+      window.clearTimeout(importFeedbackTimerRef.current)
+    }
+    importFeedbackTimerRef.current = window.setTimeout(() => {
+      importFeedbackTimerRef.current = null
+      setIsBrowserProfileImportSuccessful(false)
+      setIsBrowserProfileImportFailed(false)
+    }, 1000)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (importFeedbackTimerRef.current !== null) {
+        window.clearTimeout(importFeedbackTimerRef.current)
+      }
+    }
+  }, [])
 
   const applyBrowserState = useCallback((nextState: BrowserState) => {
     isSessionCreatedRef.current = nextState.created
@@ -425,6 +450,40 @@ export function BrowserPanel({
         applyBrowserState(nextState)
         if (!isUrlFocusedRef.current) setUrlInput(getBrowserAddressValue(nextState.url))
         scheduleStabilizedSync()
+        void window.api.browser
+          .isProfileImportRuntimeEnabled()
+          .then((enabled) => {
+            if (cancelled || !enabled || autoImportTriggeredRef.current) return null
+            autoImportTriggeredRef.current = true
+            return window.api.browser.importProfileData({
+              autoImport: true,
+              importCookies: true,
+              sourceBrowser: "chrome"
+            })
+          })
+          .then((result) => {
+            if (cancelled || !result) return
+            if (result.errorCode === "import_in_progress") return
+            if (!result.success) {
+              const message =
+                result.errorCode === "extension_not_connected"
+                  ? "Chrome 插件尚未连接"
+                  : result.errorCode === "permission_required"
+                    ? "Chrome 插件尚未授权读取 Cookie"
+                    : result.error || "自动导入 Cookie 未完成"
+              reportBrowserError(`自动导入 Cookie 未完成：${message}`)
+              markBrowserProfileImportFeedback(false)
+              return
+            }
+            markBrowserProfileImportFeedback(true)
+          })
+          .catch((error) => {
+            if (cancelled) return
+            const message = formatError(error) || "自动导入 Cookie 失败"
+            console.warn(`${BROWSER_PANEL_LOG_PREFIX} Automatic Cookie import failed: ${message}`)
+            reportBrowserError(`自动导入 Cookie 未完成：${message}`)
+            markBrowserProfileImportFeedback(false)
+          })
         console.info(
           `${BROWSER_PANEL_LOG_PREFIX} Browser session ${BROWSER_SESSION_ID} attached with state={${describeBrowserState(nextState)}}.`
         )
@@ -454,7 +513,15 @@ export function BrowserPanel({
         window.cancelAnimationFrame(frame)
       }
     }
-  }, [applyBrowserState, initialUrl, reloadToken, reportBrowserError, syncBounds, workspacePath])
+  }, [
+    applyBrowserState,
+    initialUrl,
+    markBrowserProfileImportFeedback,
+    reloadToken,
+    reportBrowserError,
+    syncBounds,
+    workspacePath
+  ])
 
   useEffect(() => {
     if (!state.created) return
@@ -660,40 +727,36 @@ export function BrowserPanel({
       })
       if (!result.success) {
         if (result.cancelled) return
-        if (result.errorCode === "native_host_not_registered") {
-          reportBrowserError(result.error || "请重启应用")
-        } else if (result.errorCode === "extension_not_connected") {
-          reportBrowserError("Chrome插件未连接！")
-        } else if (result.errorCode === "permission_required") {
-          reportBrowserError("Chrome插件未授权！")
-        } else {
-          reportBrowserError(result.error || "浏览器数据导入失败")
-        }
+        const message =
+          result.errorCode === "native_host_not_registered"
+            ? result.error || "请重启应用"
+            : result.errorCode === "extension_not_connected"
+              ? "Chrome插件未连接！"
+              : result.errorCode === "permission_required"
+                ? "Chrome插件未授权！"
+                : result.error || "浏览器数据导入失败"
+        reportBrowserError(message)
+        markBrowserProfileImportFeedback(false)
         return
       }
 
       applyBrowserState(await window.api.browser.getState())
-      const importedCookies = result.importedCookies ?? 0
-      const importedLocalStorage = result.importedLocalStorage ?? 0
-      const skipped = (result.skippedCookies ?? 0) + (result.skippedLocalStorage ?? 0)
-      const summary = `导入 Cookie ${importedCookies} 条，localStorage ${importedLocalStorage} 条`
-      const profileLabel = result.profileDirectory ? `（${result.profileDirectory}）` : ""
-      const message =
-        skipped > 0 ? `${summary}${profileLabel}，跳过 ${skipped} 条` : `${summary}${profileLabel}`
-      if (result.warning) {
-        toast.warning(`${result.warning}（${message}）`, { duration: 12_000 })
-      } else {
-        toast.success(message, { duration: 10_000 })
-      }
+      markBrowserProfileImportFeedback(true)
     } catch (error) {
-      console.error(
-        `${BROWSER_PANEL_LOG_PREFIX} Browser profile import failed: ${formatError(error)}`
-      )
-      reportBrowserError(formatError(error) || "浏览器数据导入失败")
+      const message = formatError(error) || "浏览器数据导入失败"
+      console.error(`${BROWSER_PANEL_LOG_PREFIX} Browser profile import failed: ${message}`)
+      reportBrowserError(message)
+      markBrowserProfileImportFeedback(false)
     } finally {
       setIsImportingBrowserProfile(false)
     }
-  }, [applyBrowserState, isProfileImportRuntimeEnabled, reportBrowserError, state.created])
+  }, [
+    applyBrowserState,
+    isProfileImportRuntimeEnabled,
+    markBrowserProfileImportFeedback,
+    reportBrowserError,
+    state.created
+  ])
 
   const consoleCount = state.consoleEntries.length
   const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
@@ -792,6 +855,10 @@ export function BrowserPanel({
           icon={
             isImportingBrowserProfile ? (
               <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+            ) : isBrowserProfileImportFailed ? (
+              <X className="size-4 text-destructive" strokeWidth={2} />
+            ) : isBrowserProfileImportSuccessful ? (
+              <Check className="size-4 text-green-500" strokeWidth={2} />
             ) : (
               <KeyRound className="size-4" strokeWidth={1.8} />
             )
