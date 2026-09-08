@@ -248,8 +248,13 @@ function testSuspectedTechnicalDetailMetricIsGatedAndNested(): void {
   )
   assertIncludes(
     projectModePanelSource,
-    "用户输入全文中累计包含 10 个及以上英文字母的会话数量",
-    "technical-detail metric should explain its conversation-count heuristic in the UI"
+    "用户实际输入中累计包含 10 个及以上英文字母的轮次数",
+    "technical-detail metric should explain its per-turn heuristic in the UI"
+  )
+  assertIncludes(
+    projectModePanelSource,
+    "所选技能、附件等自动附加内容不计入",
+    "technical-detail metric should say the composer's own blocks are excluded"
   )
   assertNotIncludes(
     projectModePanelSource,
@@ -257,6 +262,34 @@ function testSuspectedTechnicalDetailMetricIsGatedAndNested(): void {
     "technical-detail metric should not expose trace implementation details in the UI"
   )
 }
+function testDevStageMetricsShareTheConversationCountBasis(): void {
+  const usageSource = section(
+    dashboardSource,
+    "async function fetchProjectModePageUsage",
+    "/**\n * Code-adoption stats for project mode."
+  )
+  assertIncludes(
+    usageSource,
+    "countDevStageConversations(asRecord(mainAgentConversations.by_node).buckets)",
+    "DEV stage turn count should read the filtered main-Agent container, not the project bucket"
+  )
+  assertIncludes(
+    usageSource,
+    "countDevAssociatedFeatures(asRecord(mainAgentConversations.by_feature).buckets)",
+    "DEV associated features should read the filtered main-Agent container too"
+  )
+  assertNotIncludes(
+    usageSource,
+    "asRecord(b.by_node)",
+    "DEV stage turn count should no longer aggregate every trace in the project"
+  )
+  assertIncludes(
+    projectModePanelSource,
+    "DEV阶段轮次数",
+    "DEV stage column should be labelled as turns, matching its root-trace basis"
+  )
+}
+
 function testProjectListConversationCountExplainsItsScope(): void {
   assertIncludes(
     projectModePanelSource,
@@ -291,6 +324,8 @@ function run(): void {
   console.log("PASS dashboard project-list conversation-count scope hint")
   testSuspectedTechnicalDetailMetricIsGatedAndNested()
   console.log("PASS dashboard project-list suspected technical-detail metric")
+  testDevStageMetricsShareTheConversationCountBasis()
+  console.log("PASS dashboard project-list DEV stage metrics share conversation-count basis")
 }
 
 run()

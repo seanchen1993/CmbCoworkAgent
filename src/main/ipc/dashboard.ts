@@ -12912,32 +12912,36 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
+          // 对话数、疑似技术细节补充、DEV 阶段轮次数与 DEV 关联特性数共用同一口径：
+          // 主动触发的主 Agent root trace。DEV 两项此前挂在 by_project 下（与该
+          // filter 平级），把定时任务、心跳等后台触发和子 Agent trace 一并计入了，
+          // 与同一行的「对话数」对不上；现在一起收进 filter 内。
           main_agent_conversations: {
             filter: projectModeMainAgentConversationFilter(),
-            ...(includeSuspectedTechnicalDetail
-              ? {
-                  aggs: {
+            aggs: {
+              ...(includeSuspectedTechnicalDetail
+                ? {
                     suspected_technical_detail_supplements: {
                       filter: { term: { suspectedTechnicalDetailSupplement: true } }
                     }
                   }
+                : {}),
+              by_node: { terms: { field: "harnessNodeName", size: 100 } },
+              by_feature: {
+                terms: {
+                  field: "harnessFeatureSlug",
+                  size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+                },
+                aggs: {
+                  by_node: {
+                    terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
+                  }
                 }
-              : {})
-          },
-          skills: { terms: { field: "usedSkills", size: 100 } },
-          skill_source: { terms: { field: "skillSource", size: 100 } },
-          by_node: { terms: { field: "harnessNodeName", size: 100 } },
-          by_feature: {
-            terms: {
-              field: "harnessFeatureSlug",
-              size: PROJECT_MODE_FEATURE_SLUG_LIMIT
-            },
-            aggs: {
-              by_node: {
-                terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
               }
             }
           },
+          skills: { terms: { field: "usedSkills", size: 100 } },
+          skill_source: { terms: { field: "skillSource", size: 100 } },
           ...stageBucketTraceAggs()
         }
       }
@@ -12968,10 +12972,13 @@ async function fetchProjectModePageUsage(
         asNumber(asRecord(mainAgentConversations.suspected_technical_detail_supplements).doc_count)
       )
     }
-    perProjectDevStage.set(key, countDevStageConversations(asRecord(b.by_node).buckets))
+    perProjectDevStage.set(
+      key,
+      countDevStageConversations(asRecord(mainAgentConversations.by_node).buckets)
+    )
     perProjectDevAssociatedFeatures.set(
       key,
-      countDevAssociatedFeatures(asRecord(b.by_feature).buckets)
+      countDevAssociatedFeatures(asRecord(mainAgentConversations.by_feature).buckets)
     )
     perProjectSkills.set(
       key,

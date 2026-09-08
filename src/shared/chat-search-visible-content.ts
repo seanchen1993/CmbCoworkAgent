@@ -3,11 +3,16 @@ import { isGoalClearAlias } from "./goal-slash"
 import { projectMarkdownVisibleText } from "./markdown-visible-text"
 import { buildStreamingMarkdownPreview } from "./streaming-markdown-preview"
 import { projectGoalNoticeVisibleText } from "./goal-notice-presentation"
+import { SKILL_USE_TAG_NAME } from "./skill-use-block"
+import {
+  BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
+  BUILTIN_BROWSER_PROMPT_PREFIX
+} from "./user-input-transport"
 
-const SKILL_OPEN = "<CMBDEVCLAW-SKILL-USE-V1>"
-const SKILL_CLOSE = "</CMBDEVCLAW-SKILL-USE-V1>"
-const BROWSER_PREFIX = "使用内置浏览器 browser_*工具："
-const BROWSER_NO_SCREENSHOT_PREFIX = "使用内置浏览器 browser_*工具（不允许使用截图功能）："
+const SKILL_OPEN = `<${SKILL_USE_TAG_NAME}>`
+const SKILL_CLOSE = `</${SKILL_USE_TAG_NAME}>`
+const BROWSER_PREFIX = BUILTIN_BROWSER_PROMPT_PREFIX
+const BROWSER_NO_SCREENSHOT_PREFIX = BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX
 
 function projectSystemNoticeSearchText(text: string): string {
   const clean = text.replace(/^●\s*/, "").replace(/^(?:✓|Ⅱ)\s*/, "")

@@ -37,7 +37,7 @@ export function OverlayDrawer({
 
   return (
     <div
-      className={`absolute inset-0 z-[70] flex justify-end bg-black/10 ${
+      className={`absolute inset-0 z-50 flex justify-end bg-black/10 ${
         leaving ? "pointer-events-none" : "pointer-events-auto"
       }`}
       role="dialog"
