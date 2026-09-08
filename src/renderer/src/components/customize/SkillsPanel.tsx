@@ -1713,13 +1713,15 @@ export function SkillsPanel(): React.JSX.Element {
     (skill: SkillMetadata | null | undefined): boolean => {
       if (!skill || skill.source !== "user") return false
       if (orgInstalledSkillNames.has(normalizeSkillName(skill.name))) return false
-      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
-      if (localMarked) return true
+      if (localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))) return true
       if (uploadedSkillNames.has(normalizeSkillName(skill.name))) return true
-      // 历史兜底：无市场同名记录时，仍按“本地上传”处理。
-      return !resolveMarketInfo(skill)
+      // 不再使用“无市场同名记录即视为本地上传”的兜底：
+      // marketSkillMap 异步加载（含 setTimeout 延迟与接口失败/未返回某项）时，
+      // 该兜底会把“从市场安装的他人技能”误判为“我上传的技能”，从而错误地展示“同步到市场”按钮。
+      // 仅依赖本地路径标记与已发布名称标记这两项正向证据判定归属。
+      return false
     },
-    [localUploadedSkillPaths, orgInstalledSkillNames, resolveMarketInfo, uploadedSkillNames]
+    [localUploadedSkillPaths, orgInstalledSkillNames, uploadedSkillNames]
   )
 
   const selectedSkillMarketInfo = useMemo(
