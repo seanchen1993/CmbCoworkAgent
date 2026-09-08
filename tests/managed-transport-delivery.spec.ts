@@ -21,6 +21,7 @@ import {
 } from "../src/main/agent/managed-transport-delivery"
 import type { SchedulerRendererEvent } from "../src/main/agent/stream-converter"
 import { ImGoalRunBridge } from "../src/main/services/im/goal-runner"
+import { registerAgentRunImplementation, startAgentRun } from "../src/main/agent/agent-run-service"
 
 interface Mirrored {
   threadId: string
@@ -151,7 +152,10 @@ function testAnUnsupportedWindowMemberExplainsItself(): void {
     /BrowserWindow\.focus.*does not implement.*managed-transport-delivery\.ts/s,
     "an unsupported member must name itself and say where to fix it"
   )
-  assert.throws(() => (shim.webContents as Record<string, unknown>).executeJavaScript, /executeJavaScript/)
+  assert.throws(
+    () => (shim.webContents as Record<string, unknown>).executeJavaScript,
+    /executeJavaScript/
+  )
 }
 
 function testProbingTheShimStaysSafe(): void {
@@ -214,8 +218,42 @@ async function main(): Promise<void> {
     console.log(`PASS ${test.name}`)
   }
   await testGoalRunSurvivesWithNoDesktopWindow()
+  await testEverySettledRunClosesItsRendererStream()
   console.log("PASS testGoalRunSurvivesWithNoDesktopWindow")
   console.log("managed-transport-delivery.spec.ts passed")
+}
+
+async function testEverySettledRunClosesItsRendererStream(): Promise<void> {
+  for (const outcome of ["abort", "error", "early-return", "success"] as const) {
+    const recording = recorder()
+    const delivery = createManagedTransportAgentRunDelivery(recording.deps)
+    let releaseCleanup!: () => void
+    const cleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve
+    })
+    registerAgentRunImplementation(async (_request, runDelivery) => {
+      runDelivery.send("agent:stream:t1", { type: "custom", data: { type: "hook_notice" } })
+      if (outcome === "success") runDelivery.send("agent:stream:t1", { type: "done" })
+      await cleanup
+      // Cleanup can publish after an earlier terminal, reopening loading.
+      runDelivery.send("agent:stream:t1", { type: "custom", data: { type: "hook_notice" } })
+      if (outcome === "abort") throw new DOMException("stopped", "AbortError")
+      if (outcome === "error") throw new Error("failed")
+    })
+    const handle = await startAgentRun({ threadId: "t1", message: "hello" }, delivery, {
+      source: "im"
+    })
+    if (outcome !== "success") assert.notEqual(recording.mirrored.at(-1)?.event.type, "done")
+    releaseCleanup()
+    if (outcome === "abort" || outcome === "error") {
+      await assert.rejects(handle.completion)
+    } else {
+      await handle.completion
+    }
+    assert.equal(recording.mirrored.at(-1)?.event.type, "done", outcome)
+    assert.equal(recording.mirrored.at(-1)?.threadId, "t1")
+  }
+  console.log("PASS testEverySettledRunClosesItsRendererStream")
 }
 
 void main().catch((error) => {

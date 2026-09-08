@@ -173,6 +173,10 @@ export class BuiltinRobotManager {
     return this.service?.hasActiveRuns() === true
   }
 
+  abortThreadFromDesktop(threadId: string): boolean {
+    return this.service?.abortThreadFromDesktop(threadId) ?? false
+  }
+
   subscribe(listener: StatusListener): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)

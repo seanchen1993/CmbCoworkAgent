@@ -6637,9 +6637,14 @@ export function ChatContainer({
       }
       threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
-      // Passive remote streams are owned by IM. Desktop must not cross-source
-      // cancel them; use /停止 from the originating conversation instead.
-      return
+      // Cancel through IM's queue so its event, replies and runtime settle
+      // together. The managed stream terminal clears loading after cleanup.
+      try {
+        await window.api.builtinRobot.cancelThread(threadId)
+      } catch (err) {
+        console.error("[ChatContainer] Failed to cancel remote task:", err)
+        toast.error("停止远程任务失败，请重试")
+      }
     } else {
       // Match Claude Code coordinator semantics: the main stop button stops the
       // foreground turn only. Durable background workers are stopped explicitly

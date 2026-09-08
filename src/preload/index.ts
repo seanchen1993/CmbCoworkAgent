@@ -2833,6 +2833,8 @@ const api = {
     }
   },
   builtinRobot: {
+    cancelThread: (threadId: string): Promise<boolean> =>
+      ipcRenderer.invoke("builtinRobot:cancelThread", threadId),
     getStatus: (): Promise<BuiltinRobotStatus> =>
       ipcRenderer.invoke("builtinRobot:getStatus") as Promise<BuiltinRobotStatus>,
     getRemoteAccess: (): Promise<BuiltinRobotRemoteAccessOverview> =>

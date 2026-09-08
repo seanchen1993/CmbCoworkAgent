@@ -2095,6 +2095,7 @@ interface CustomAPI {
     ) => () => void
   }
   builtinRobot: {
+    cancelThread: (threadId: string) => Promise<boolean>
     getStatus: () => Promise<BuiltinRobotStatus>
     getRemoteAccess: () => Promise<BuiltinRobotRemoteAccessOverview>
     setThreadRemoteAccess: (

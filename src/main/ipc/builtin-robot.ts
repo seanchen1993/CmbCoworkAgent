@@ -6,6 +6,9 @@ import type {
   BuiltinRobotStatus
 } from "../types"
 import { builtinRobotManager } from "../services/im/manager"
+import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
+import { getLocalThreadRunLease } from "../agent/thread-run-lease"
+import { mirrorStandardTurnStreamToRenderer } from "../agent/renderer-stream-mirror"
 import {
   imRemoteApprovalService,
   remoteApprovalDesktopNotice
@@ -160,6 +163,17 @@ export function registerBuiltinRobotHandlers(ipcMain: IpcMain): void {
   })
   ipcMain.handle("builtinRobot:disconnect", (): Promise<BuiltinRobotStatus> => {
     return builtinRobotManager.disconnect()
+  })
+  ipcMain.handle("builtinRobot:cancelThread", (_event, threadId: unknown): boolean => {
+    if (typeof threadId !== "string" || !threadId.trim()) return false
+    const cancelled = builtinRobotManager.abortThreadFromDesktop(threadId)
+    // A stale spinner may outlive its run. Only clear it when no source owns
+    // this thread; never manufacture idle while a real run is cleaning up.
+    if (!cancelled && !getLocalThreadRunLease(threadId) && !hasActiveTopLevelAgentRun(threadId)) {
+      mirrorStandardTurnStreamToRenderer(threadId, { type: "done" })
+    }
+    console.info("[IM] Desktop cancellation requested", { threadId, cancelled })
+    return cancelled
   })
   ipcMain.handle("builtinRobot:cleanupLegacy", (_event, input: unknown): BuiltinRobotStatus => {
     const confirmed =

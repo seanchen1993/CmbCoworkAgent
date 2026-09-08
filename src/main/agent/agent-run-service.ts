@@ -24,6 +24,8 @@ export interface AgentRunDelivery {
   window: BrowserWindow
   send(channel: string, payload: unknown): void
   isAvailable(): boolean
+  /** Close a managed renderer stream after runtime cleanup, including aborts and early returns. */
+  finish?: (threadId: string) => void
 }
 
 export interface AgentRunHandle {
@@ -198,7 +200,9 @@ export async function startAgentRun(
   if (!delivery.isAvailable()) {
     throw new Error("Agent run delivery is unavailable")
   }
-  const completion = agentRunImplementation(request, delivery, context)
+  const completion = agentRunImplementation(request, delivery, context).finally(() => {
+    delivery.finish?.(request.threadId)
+  })
   return {
     threadId: request.threadId,
     completion

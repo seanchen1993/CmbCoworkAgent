@@ -153,6 +153,12 @@ export function createManagedTransportAgentRunDelivery(
   return {
     window: managedWindow as BrowserWindow,
     send: (channel, payload) => forward(channel, payload),
+    finish: (threadId) => {
+      // Abort paths may only notify the IM result collector, without sending
+      // a stream terminal. Close after cleanup even if an earlier done was sent:
+      // cleanup custom events can have reopened the renderer's loading state.
+      if (startedThreads.has(threadId)) mirror(threadId, { type: "done" })
+    },
     isAvailable: () => true
   }
 }

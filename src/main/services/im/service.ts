@@ -205,6 +205,10 @@ export class ImUnifiedBotService {
     return this.turnQueue.abortCurrentImEvent(conversationKey, eventId)
   }
 
+  abortThreadFromDesktop(threadId: string): boolean {
+    return this.turnQueue.abortThreadFromDesktop(threadId)
+  }
+
   hasActiveRuns(): boolean {
     return this.turnQueue.hasActiveRuns()
   }
