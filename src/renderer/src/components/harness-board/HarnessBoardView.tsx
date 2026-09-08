@@ -6352,7 +6352,7 @@ function RemoteFeatureAccessPanel({
             当前没有已接入的会话。打开上方开关后，可在招乎通过 /会话 选择此 Feature 并新建会话。
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className="max-h-72 space-y-2 overflow-y-auto">
             {relatedSessions.map((grant) => (
               <div key={grant.grantId} className="rounded border px-2.5 py-2">
                 <div className="flex items-center justify-between gap-2 text-xs">

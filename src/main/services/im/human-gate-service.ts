@@ -58,9 +58,9 @@ export class ImHumanGateService {
         ? featureGrant.featureTitleSnapshot
         : gate.featureId
     const text = [
-      `项目：${projectName}`,
-      `Feature：${featureName}`,
-      `来源会话：${threadTitle}`,
+      `项目：[${projectName}]`,
+      `特性：[${featureName}]`,
+      `来源会话：[${threadTitle}]`,
       "",
       gate.message,
       "",
