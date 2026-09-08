@@ -1260,7 +1260,7 @@ interface CustomAPI {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
       }>
     >
@@ -1278,7 +1278,7 @@ interface CustomAPI {
       interleavedThinking?: boolean
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
       tier?: "premium" | "economy"
     } | null>
     getBuiltinConfigs: () => Promise<
@@ -1299,7 +1299,7 @@ interface CustomAPI {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
         lockedFields: Array<"baseUrl" | "model" | "apiKey">
       }>
@@ -1316,7 +1316,7 @@ interface CustomAPI {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
       }
     ) => Promise<void>
@@ -1336,7 +1336,7 @@ interface CustomAPI {
       interleavedThinking?: boolean
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<void>
     // Backward-compatible alias, prefer upsertCustomConfig in new code.
@@ -1354,7 +1354,7 @@ interface CustomAPI {
       interleavedThinking?: boolean
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
     upsertUserInfo: (config: UserInfoConfig) => Promise<{ id: string }>
@@ -1371,7 +1371,7 @@ interface CustomAPI {
       topK?: number
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   ide: {
