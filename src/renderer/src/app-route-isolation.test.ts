@@ -47,6 +47,17 @@ describe("App route isolation", () => {
     expect(surface).toContain("正在切换任务")
   })
 
+  it("keeps the app shell's z-index out of the root stacking context", () => {
+    // 壳内的 z-index 必须关在自己的层叠上下文里。Radix 的 Dialog/Popover 都 portal 到
+    // document.body，是 #root 的兄弟；壳一旦不构成层叠上下文，壳内任何 positioned +
+    // z-index 的元素就会直接和 portal 比大小。侧边栏的 relative z-[60] 曾因此盖住
+    // DialogContent 的 z-50——窗口够宽时弹窗左边缘落在侧边栏右侧看不出来，窗口一窄
+    // 就压上去了。<Toaster /> 是这层壳的兄弟，不在隔离范围内。
+    expect(appSource).toContain(
+      '<div className="isolate flex flex-col h-screen overflow-hidden bg-background">'
+    )
+  })
+
   it("reserves automatic thread selection for startup bootstrap", () => {
     expect(appSource.match(/loadThreads\(\{ selectInitialThread: true \}\)/g)).toHaveLength(1)
 
