@@ -132,10 +132,15 @@ type RequirementsIndexFile = {
   lastWorkDir?: string
 }
 
-function getRequirementThreadIds(item: Pick<RequirementIndexItem, "threadIds">): string[] {
+function getRequirementThreadIds(item: {
+  threadIds?: unknown
+  threadId?: unknown
+}): string[] {
+  const persistedThreadIds = Array.isArray(item.threadIds) ? item.threadIds : []
+  const legacyThreadId = typeof item.threadId === "string" ? [item.threadId] : []
   return [
     ...new Set(
-      item.threadIds
+      [...persistedThreadIds, ...legacyThreadId]
         .filter((value): value is string => typeof value === "string")
         .map((value) => value.trim())
         .filter(Boolean)
@@ -267,7 +272,10 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
       status?: unknown
       prdGenerated?: unknown
     }
-    const normalizedThreadIds = getRequirementThreadIds(item)
+    const normalizedThreadIds = getRequirementThreadIds({
+      threadIds: item.threadIds,
+      threadId: _legacyThreadId
+    })
     delete item.workDir
     delete item.prdVersion
     delete item.prdPublished

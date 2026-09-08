@@ -496,4 +496,58 @@ describe("requirement source preview", () => {
     ).toBe("generated")
     await remove!(null, created.requirement.reqId)
   })
+
+  it("normalizes missing threadIds and migrates legacy threadId values", async () => {
+    const indexPath = join(tempHome, ".cmbcoworkagent", "requirements", "index.json")
+    const list = handlers.get("requirements:list")
+    const remove = handlers.get("requirements:delete")
+    expect(list && remove).toBeTruthy()
+
+    const legacyReqId = "req-legacy-thread-id"
+    writeFileSync(
+      indexPath,
+      JSON.stringify({
+        list: [
+          {
+            reqId: legacyReqId,
+            threadId: "legacy-thread",
+            systemId: "system-legacy",
+            title: "旧格式需求",
+            source: { type: "text", fileName: "" },
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          },
+          {
+            reqId: "req-missing-thread-ids",
+            threadIds: undefined,
+            systemId: "system-missing",
+            title: "缺失会话字段需求",
+            source: { type: "text", fileName: "" },
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        ]
+      }),
+      "utf-8"
+    )
+
+    const current = (await list!(null)) as Array<{
+      reqId: string
+      threadIds: string[]
+    }>
+    expect(current.find((item) => item.reqId === legacyReqId)?.threadIds).toEqual([
+      "legacy-thread"
+    ])
+    expect(current.find((item) => item.reqId === "req-missing-thread-ids")?.threadIds).toEqual([])
+
+    const persisted = JSON.parse(readFileSync(indexPath, "utf-8")) as {
+      list: Array<{ reqId: string; threadIds: string[]; threadId?: unknown }>
+    }
+    expect(persisted.list[0]).toMatchObject({ reqId: legacyReqId, threadIds: ["legacy-thread"] })
+    expect(persisted.list[0]).not.toHaveProperty("threadId")
+    expect(persisted.list[1].threadIds).toEqual([])
+
+    await remove!(null, legacyReqId)
+    await remove!(null, "req-missing-thread-ids")
+  })
 })

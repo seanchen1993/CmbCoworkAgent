@@ -12,6 +12,7 @@ import {
   type RequirementRecord
 } from "./requirement-data"
 import { getSelectedRequirementSystem, useRequirementStore } from "./requirement-store"
+import type { DesignSystemInfo } from "../design/types"
 import { useAppStore } from "@/lib/store"
 
 type EntryScreen = "history" | "system" | "conversation"
@@ -28,9 +29,9 @@ export function RequirementEntryView(): React.JSX.Element {
   const [requirementsLoaded, setRequirementsLoaded] = useState(false)
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
-  const setSystemList = useRequirementStore((state) => state.setSystemList)
   const selectedSystemId = useRequirementStore((state) => state.selectedSystemId)
   const setSelectedSystemId = useRequirementStore((state) => state.setSelectedSystemId)
+  const setSystemList = useRequirementStore((state) => state.setSystemList)
   const selectedSystem = useRequirementStore((state) =>
     getSelectedRequirementSystem(state.selectedSystemId)
   )
@@ -39,18 +40,39 @@ export function RequirementEntryView(): React.JSX.Element {
   const selectThread = useAppStore((state) => state.selectThread)
 
   const loadRequirements = useCallback(async (): Promise<RequirementRecord[]> => {
-    const [systems, persistedRequirements] = await Promise.all([
-      window.api.design.listSystems(),
-      window.api.requirements.list()
+    // 需求列表与系统列表并行加载，互不影响
+    // 系统列表加载后缓存到 store，SystemSelectionDialog 打开时若已有数据则跳过请求
+    const systemsPromise = window.api.design
+      .listSystems()
+      .then((systems) => {
+        // 仅在 store 为空时填充，避免覆盖 SystemSelectionDialog 已加载的数据
+        if (useRequirementStore.getState().systemList.length === 0) {
+          setSystemList(systems)
+        }
+        return systems
+      })
+      .catch((error: unknown) => {
+        console.error("加载系统列表失败", error)
+        return [] as DesignSystemInfo[]
+      })
+
+    const [persistedRequirements, systems] = await Promise.all([
+      window.api.requirements.list(),
+      systemsPromise
     ])
-    setSystemList(systems)
     const systemNames = new Map(systems.map((system) => [system.id, system.name]))
-    const nextRequirements = sortRequirementsByUpdatedAt(
-      persistedRequirements.map((item) =>
-        fromPersistedRequirement(item, systemNames.get(item.systemId) ?? item.systemId)
-      )
-    )
-    return nextRequirements
+    // 逐项容错：某条数据异常时跳过，避免整列加载失败
+    const validRequirements = Array.isArray(persistedRequirements)
+      ? persistedRequirements.flatMap((item) => {
+          try {
+            return [fromPersistedRequirement(item, systemNames.get(item.systemId) ?? item.systemId)]
+          } catch (error) {
+            console.error("解析需求项失败，已跳过", item?.reqId, error)
+            return []
+          }
+        })
+      : []
+    return sortRequirementsByUpdatedAt(validRequirements)
   }, [setSystemList])
 
   useEffect(() => {

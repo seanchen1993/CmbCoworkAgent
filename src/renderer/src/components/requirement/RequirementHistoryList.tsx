@@ -27,7 +27,6 @@ import { cn } from "@/lib/utils"
 import {
   getRequirementThreadIds,
   getRequirementModules,
-  isRequirementGenerated,
   isRequirementPublished,
   type RequirementRecord
 } from "./requirement-data"
@@ -35,9 +34,9 @@ import { filterRequirementsBySystem } from "./requirement-history-filter"
 
 const PAGE_SIZE = 10
 const HISTORY_GRID_COLUMNS =
-  "grid-cols-[88px_minmax(120px,1.12fr)_70px_minmax(160px,1.45fr)_minmax(130px,1.1fr)_120px_minmax(120px,1.15fr)_100px_120px_110px]"
+  "grid-cols-[140px_minmax(120px,1.12fr)_70px_minmax(160px,1.45fr)_minmax(130px,1.1fr)_120px_minmax(120px,1.15fr)_100px_120px_110px]"
 const SELECTION_HISTORY_GRID_COLUMNS =
-  "grid-cols-[32px_88px_minmax(120px,1.12fr)_70px_minmax(160px,1.45fr)_minmax(130px,1.1fr)_120px_minmax(120px,1.15fr)_100px_120px_110px]"
+  "grid-cols-[32px_140px_minmax(120px,1.12fr)_70px_minmax(160px,1.45fr)_minmax(130px,1.1fr)_120px_minmax(120px,1.15fr)_100px_120px_110px]"
 
 const SYSTEM_COLOR_OPTIONS = [
   { text: "#9b4b3a", background: "#fcebe5" },
@@ -151,7 +150,9 @@ function RequirementHistoryPopover({
         onPointerLeave={hidePopover}
       >
         <div className="mb-1 font-semibold text-[#74695f]">{label}</div>
-        <div className="break-all whitespace-pre-wrap leading-5 text-[#302a25]">{value}</div>
+        <div className="max-h-[300px] overflow-y-auto break-all whitespace-pre-wrap leading-5 text-[#302a25]">
+          {value}
+        </div>
       </PopoverContent>
     </Popover>
   )
@@ -646,10 +647,10 @@ export function RequirementHistoryList({
                     <span
                       className={cn(
                         "text-[12px] font-semibold tabular-nums flex  items-center",
-                        isRequirementGenerated(item) ? "text-[#5d554d]" : "text-[#958a7f]"
+                        hasModules ? "text-[#5d554d]" : "text-[#958a7f]"
                       )}
                     >
-                      {isRequirementGenerated(item) ? `${modules.length} 个` : "—"}
+                      {hasModules ? `${modules.length} 个` : "—"}
 
                       {hasModules ? (
                         <button
