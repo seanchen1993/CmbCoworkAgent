@@ -286,6 +286,10 @@ async function testAWorkflowNobodyCanReadStaysOnTheDesktop(): Promise<void> {
     const blindText = context.deliveryText(scriptless.id)
     assert(blindText.includes("需要在桌面确认"))
     assert(!/[A-F0-9]{6}/u.test(blindText), "a workflow with no script must carry no code")
+    // A different reason from the one above, and it must read as one.
+    assert(blindText.includes("没有附带可审阅的脚本"))
+    assert(!blindText.includes("内容过长"))
+    assert(blindText.includes("本轮会一直等待，请到桌面确认。"))
 
     // Too long to send: the reply would be truncated, so the fallback fires for
     // the same reason — a script that cannot be shown in full cannot be
@@ -299,8 +303,14 @@ async function testAWorkflowNobodyCanReadStaysOnTheDesktop(): Promise<void> {
     context.register(huge)
     await waitFor(() => context.deliveryText(huge.id).length > 0, "huge workflow notice")
     const hugeText = context.deliveryText(huge.id)
-    assert(hugeText.includes("无法在招乎中完整、安全地展示"))
     assert(!/[A-F0-9]{6}/u.test(hugeText), "a truncated workflow must carry no code")
+    // Name what is waiting: "操作 workflow 无法展示" told a reader neither which
+    // workflow nor whether the feature simply does not exist here.
+    assert(hugeText.includes("workflow-smoke-test"))
+    assert(hugeText.includes("内容过长"))
+    // And that it is blocking. No wait expires any more, so this turn really
+    // does sit there until someone opens the desktop.
+    assert(hugeText.includes("本轮会一直等待，请到桌面确认。"))
   } finally {
     context.service.dispose()
     context.database.close()
@@ -555,6 +565,12 @@ async function testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly(
     const gitText = context.deliveryText(git.id)
     assert(gitText.includes("需要在桌面确认"))
     assert(!/[A-F0-9]{6}/u.test(gitText))
+    // "This kind of operation is not supported here" must not be worded like
+    // "this particular one was too big to show" — they call for different
+    // reactions, and they used to share one sentence.
+    assert(gitText.includes("这类操作（git_commit）不支持从招乎批准。"))
+    assert(!gitText.includes("内容过长"))
+    assert(gitText.includes("本轮会一直等待，请到桌面确认。"))
 
     const outsidePath = join(tmpdir(), "must-not-leak", "outside.ts")
     const outside = approvalRequest({

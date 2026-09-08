@@ -208,6 +208,15 @@ function workflowApprovalArgs(request: ApprovalRequest): {
   }
 }
 
+/**
+ * Closing line for every notice that cannot be answered from Zhaohu.
+ *
+ * No wait expires any more (see remote-runner onWaitStart), so the turn really
+ * does sit there until someone opens the desktop. Saying so is the difference
+ * between "I will deal with it later" and "I am blocking a run right now".
+ */
+const DESKTOP_ONLY_WAIT_NOTICE = "本轮会一直等待，请到桌面确认。"
+
 function presentationFor(request: ApprovalRequest, workspacePath: string): ApprovalPresentation {
   const operation = approvalOperation(request)
   const allowedDecisions = (["approve", "reject"] as const).filter((decision) =>
@@ -221,7 +230,7 @@ function presentationFor(request: ApprovalRequest, workspacePath: string): Appro
         approvable: false,
         operation,
         summary: `${label}（仅桌面确认）`,
-        detail: "该请求不接受一次性批准，请回到桌面确认。",
+        detail: "该请求不接受一次性批准。",
         allowedDecisions: []
       }
     }
@@ -232,7 +241,7 @@ function presentationFor(request: ApprovalRequest, workspacePath: string): Appro
         approvable: false,
         operation,
         summary: `${label}（仅桌面确认）`,
-        detail: "该请求没有可展示的文件路径，请回到桌面确认。",
+        detail: "该请求没有可展示的文件路径。",
         allowedDecisions: []
       }
     }
@@ -257,7 +266,7 @@ function presentationFor(request: ApprovalRequest, workspacePath: string): Appro
         approvable: false,
         operation,
         summary: "执行命令（仅桌面确认）",
-        detail: "该请求没有可展示的命令，或不接受一次性批准，请回到桌面确认。",
+        detail: "该请求没有可展示的命令，或不接受一次性批准。",
         allowedDecisions: []
       }
     }
@@ -276,7 +285,9 @@ function presentationFor(request: ApprovalRequest, workspacePath: string): Appro
         approvable: false,
         operation,
         summary: "运行工作流（仅桌面确认）",
-        detail: "该请求没有可展示的工作流脚本，或不接受一次性批准，请回到桌面确认。",
+        detail: workflow
+          ? `运行工作流「${workflow.name}」\n该请求不接受一次性批准。`
+          : "运行工作流\n该请求没有附带可审阅的脚本，因此不提供远程批准。",
         allowedDecisions: []
       }
     }
@@ -314,7 +325,7 @@ function presentationFor(request: ApprovalRequest, workspacePath: string): Appro
     approvable: false,
     operation,
     summary: `${operation}（仅桌面确认）`,
-    detail: `操作 ${operation} 不支持从招乎批准，请回到桌面确认。`,
+    detail: `这类操作（${operation}）不支持从招乎批准。`,
     allowedDecisions: []
   }
 }
@@ -493,7 +504,7 @@ export class ImRemoteApprovalService {
           decisionCommands,
           "短码单次有效，在本轮等待期间一直可用。"
         ].join("\n")
-      : [`${route.prefix}需要在桌面确认`, presentation.detail].join("\n")
+      : [`${route.prefix}需要在桌面确认`, presentation.detail, DESKTOP_ONLY_WAIT_NOTICE].join("\n")
     const replies = buildImProactiveReplies({
       deliveryId: `approval-request:${registration.request.id}`,
       conversationKey: route.conversationKey,
@@ -505,7 +516,14 @@ export class ImRemoteApprovalService {
     ) {
       this.codes.delete(code.code)
       code = null
-      return this.publishDesktopOnlyNotice(registration, route, presentation.operation)
+      return this.publishDesktopOnlyNotice(
+        registration,
+        route,
+        [
+          presentation.summary,
+          `内容过长（约 ${text.length} 字），无法在招乎里完整展示，因此不提供远程批准。`
+        ].join("\n")
+      )
     }
     try {
       const outbox = await this.dependencies.events.enqueueProactiveReplies(replies)
@@ -525,16 +543,22 @@ export class ImRemoteApprovalService {
     }
   }
 
+  /**
+   * The request stays pending on the desktop; only the short code is withheld.
+   * `reason` must name what is waiting and say why it cannot be shown here —
+   * "操作 workflow 无法展示" told a reader neither which workflow nor whether
+   * the feature was simply unsupported.
+   */
   private async publishDesktopOnlyNotice(
     registration: Readonly<ApprovalBrokerRegistration>,
     route: RemoteApprovalRoute,
-    operation: string
+    reason: string
   ): Promise<void> {
     await this.dependencies.events.enqueueProactiveReplies(
       buildImProactiveReplies({
         deliveryId: `approval-request:${registration.request.id}`,
         conversationKey: route.conversationKey,
-        text: `${route.prefix}需要在桌面确认\n操作 ${operation} 无法在招乎中完整、安全地展示。`
+        text: [`${route.prefix}需要在桌面确认`, reason, DESKTOP_ONLY_WAIT_NOTICE].join("\n")
       })
     )
     this.drainReplies()
