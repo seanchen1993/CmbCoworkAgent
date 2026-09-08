@@ -7566,9 +7566,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         ...prev,
         [event.threadId]: event
       }))
+      const wasInitialized = initializedThreadsRef.current.has(event.threadId)
       initializeThread(event.threadId)
+      if (wasInitialized) {
+        void loadThreadHistory(event.threadId)
+      }
     })
-  }, [initializeThread])
+  }, [initializeThread, loadThreadHistory])
 
   useEffect(() => {
     return window.api.harnessBoard.onManagedRunThreadCreated((event) => {

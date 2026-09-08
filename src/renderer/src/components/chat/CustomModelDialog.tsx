@@ -25,7 +25,7 @@ interface CustomModelDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-type ThinkingEffort = "high" | "max"
+type ThinkingEffort = "low" | "high" | "max"
 
 interface CustomConfig {
   id?: string
@@ -101,6 +101,7 @@ const FALLBACK_LIMITS: TokenLimits = {
 
 const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
 const THINKING_EFFORT_OPTIONS: Array<{ value: ThinkingEffort; label: string }> = [
+  { value: "low", label: "Low" },
   { value: "high", label: "High" },
   { value: "max", label: "Max" }
 ]
@@ -185,7 +186,8 @@ function configFromItem(item: CustomModelItem, limits: TokenLimits): CustomConfi
     temperatureInput: String(item.temperature ?? limits.defaultTemperature),
     topPInput: String(item.topP ?? limits.defaultTopP),
     topKInput: String(item.topK ?? limits.defaultTopK),
-    interleavedThinking: item.interleavedThinking ?? defaultInterleavedThinkingForModel(item.model),
+    interleavedThinking:
+      defaultInterleavedThinkingForModel(item.model) && (item.interleavedThinking ?? true),
     enableThinking: item.enableThinking === true,
     enableThinkingEffort: item.enableThinkingEffort === true,
     thinkingEffort: item.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
@@ -806,9 +808,10 @@ export function CustomModelDialog({
                         model: nextModel,
                         ...(shouldUseNextSamplingDefault ? nextSamplingDefault : {}),
                         interleavedThinking:
-                          c.interleavedThinking === currentInterleavedDefault
+                          nextInterleavedDefault &&
+                          (c.interleavedThinking === currentInterleavedDefault
                             ? nextInterleavedDefault
-                            : c.interleavedThinking,
+                            : c.interleavedThinking),
                         enableThinking:
                           c.enableThinking === currentEnableThinkingDefault
                             ? nextEnableThinkingDefault
@@ -1045,40 +1048,42 @@ export function CustomModelDialog({
                 </div>
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">交错思考</label>
-                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
-                  <div>
-                    <div className="text-sm text-foreground">
-                      {config.interleavedThinking ? "已开启" : "已关闭"}
+              {defaultInterleavedThinkingForModel(config.model) && (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">交错思考</label>
+                  <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                    <div>
+                      <div className="text-sm text-foreground">
+                        {config.interleavedThinking ? "已开启" : "已关闭"}
+                      </div>
                     </div>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={config.interleavedThinking}
-                    disabled={!config.enableThinking}
-                    onClick={() =>
-                      setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
-                    }
-                    className={cn(
-                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
-                      !config.enableThinking
-                        ? "cursor-not-allowed bg-muted-foreground/20"
-                        : config.interleavedThinking
-                          ? "cursor-pointer bg-primary"
-                          : "cursor-pointer bg-muted-foreground/30"
-                    )}
-                  >
-                    <ToggleThumb
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={config.interleavedThinking}
+                      disabled={!config.enableThinking}
+                      onClick={() =>
+                        setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
+                      }
                       className={cn(
-                        "inline-block size-4",
-                        config.interleavedThinking ? "translate-x-4" : "translate-x-0"
+                        "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
+                        !config.enableThinking
+                          ? "cursor-not-allowed bg-muted-foreground/20"
+                          : config.interleavedThinking
+                            ? "cursor-pointer bg-primary"
+                            : "cursor-pointer bg-muted-foreground/30"
                       )}
-                    />
-                  </button>
+                    >
+                      <ToggleThumb
+                        className={cn(
+                          "inline-block size-4",
+                          config.interleavedThinking ? "translate-x-4" : "translate-x-0"
+                        )}
+                      />
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">智能路由档位</label>

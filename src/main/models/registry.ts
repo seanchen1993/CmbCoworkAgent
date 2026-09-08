@@ -167,7 +167,9 @@ function normalizeDefinition(
   const enableThinkingEffort =
     enableThinking && optionalBoolean(item.enableThinkingEffort, preset.enableThinkingEffort)
   const interleavedThinking =
-    enableThinking && optionalBoolean(item.interleavedThinking, preset.interleavedThinking)
+    enableThinking &&
+    /minimax/i.test(model) &&
+    optionalBoolean(item.interleavedThinking, preset.interleavedThinking)
   const apiKey =
     typeof item.apiKey === "string" && item.apiKey.trim() ? item.apiKey.trim() : undefined
 
@@ -204,7 +206,12 @@ function normalizeDefinition(
     enableThinking,
     enableThinkingEffort,
     interleavedThinking,
-    thinkingEffort: item.thinkingEffort === "max" ? "max" : preset.thinkingEffort,
+    thinkingEffort:
+      item.thinkingEffort === "low" ||
+      item.thinkingEffort === "high" ||
+      item.thinkingEffort === "max"
+        ? item.thinkingEffort
+        : preset.thinkingEffort,
     tier: item.tier === "economy" ? "economy" : item.tier === "premium" ? "premium" : preset.tier,
     source: "builtin",
     origin
@@ -280,8 +287,14 @@ function normalizeOverride(
       optionalBoolean(override.enableThinkingEffort, base.enableThinkingEffort ?? false),
     interleavedThinking:
       enableThinking &&
+      /minimax/i.test(base.model) &&
       optionalBoolean(override.interleavedThinking, base.interleavedThinking ?? false),
-    thinkingEffort: override.thinkingEffort === "max" ? "max" : base.thinkingEffort,
+    thinkingEffort:
+      override.thinkingEffort === "low" ||
+      override.thinkingEffort === "high" ||
+      override.thinkingEffort === "max"
+        ? override.thinkingEffort
+        : base.thinkingEffort,
     tier:
       override.tier === "economy" ? "economy" : override.tier === "premium" ? "premium" : base.tier
   }

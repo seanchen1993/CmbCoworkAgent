@@ -5,6 +5,8 @@ import { emitAppAttention } from "../app-attention-events"
 import { listAllSkills, listPluginSkills } from "../ipc/skills"
 import { normalizeSkillId } from "../skills/ids"
 import { createThreadService } from "../services/thread-service"
+import { materializeHarnessFeatureThreadGrant } from "../services/im/feature-thread-grant"
+import type { ImGrantRouteIdentity } from "../services/im/remote-grant-store"
 import { generateTitle } from "../services/title-generator"
 import { getDisabledSkills } from "../storage"
 import type { AgentInvokeParams, SkillMetadata, Thread } from "../types"
@@ -43,6 +45,7 @@ export interface CreateManagedHarnessSessionInput {
   nextAction: ManagedRunSessionAction
   workspacePath: string
   delivery: AgentRunDelivery
+  imRoute?: ImGrantRouteIdentity
 }
 
 function parseThreadMetadata(threadId: string): Record<string, unknown> {
@@ -253,13 +256,15 @@ export async function sendManagedProviderRetry(
 
 export async function sendManagedBizRetryReuseThread(
   threadId: string,
-  delivery: AgentRunDelivery
+  delivery: AgentRunDelivery,
+  message = "继续当前任务"
 ): Promise<void> {
+  const normalizedMessage = message.trim() || "继续当前任务"
   await startManagedAgentRun(
     threadId,
     {
-      modelMessage: "继续当前任务",
-      displayMessage: "继续当前任务（ManagedRun 业务重试）",
+      modelMessage: normalizedMessage,
+      displayMessage: normalizedMessage,
       userMessageId: uuid()
     },
     delivery
@@ -271,6 +276,15 @@ export async function createAndStartManagedHarnessSession(
 ): Promise<{ threadId: string; thread: Thread }> {
   const prepared = await prepareHarnessMessage(input.projectId, input.nextAction)
   const thread = await createManagedHarnessSession(input)
+  const grant = await materializeHarnessFeatureThreadGrant({
+    projectId: input.projectId,
+    featureId: input.featureId,
+    threadId: thread.threadId,
+    route: input.imRoute
+  })
+  if (grant.required && !grant.granted) {
+    throw new Error(grant.error || `无法为 ManagedRun 会话 ${thread.threadId} 创建招乎授权`)
+  }
   try {
     await startManagedAgentRun(thread.threadId, prepared, input.delivery)
   } catch (error) {

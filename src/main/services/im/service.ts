@@ -15,6 +15,8 @@ import { registerImDesktopCompletionReplyDrainer } from "./desktop-completion"
 import { imRemoteApprovalService } from "./remote-approval-service"
 import { imRemoteUserInputService } from "./remote-user-input-service"
 import { imInboxService } from "./inbox-service"
+import { imHumanGateService } from "./human-gate-service"
+import { imManagedBizRetryService } from "./managed-biz-retry-service"
 
 /**
  * Headless orchestration boundary used by the production WSS adapter and the
@@ -32,6 +34,8 @@ export class ImUnifiedBotService {
   private readonly unregisterDesktopCompletionReplyDrainer: () => void
   private readonly unregisterRemoteApprovalReplyDrainer: () => void
   private readonly unregisterRemoteUserInputReplyDrainer: () => void
+  private readonly unregisterHumanGateReplyDrainer: () => void
+  private readonly unregisterManagedBizRetryReplyDrainer: () => void
   private outboxRetryTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(
@@ -47,6 +51,10 @@ export class ImUnifiedBotService {
       this.replyClient
     )
     this.unregisterRemoteUserInputReplyDrainer = imRemoteUserInputService.registerReplyDrainer(
+      this.replyClient
+    )
+    this.unregisterHumanGateReplyDrainer = imHumanGateService.registerReplyDrainer(this.replyClient)
+    this.unregisterManagedBizRetryReplyDrainer = imManagedBizRetryService.registerReplyDrainer(
       this.replyClient
     )
     this.runner = new ImRemoteRunner({
@@ -176,6 +184,8 @@ export class ImUnifiedBotService {
     this.unregisterDesktopCompletionReplyDrainer()
     this.unregisterRemoteApprovalReplyDrainer()
     this.unregisterRemoteUserInputReplyDrainer()
+    this.unregisterHumanGateReplyDrainer()
+    this.unregisterManagedBizRetryReplyDrainer()
     return this.turnQueue.stop()
   }
 
