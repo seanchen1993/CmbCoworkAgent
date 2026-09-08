@@ -45,6 +45,8 @@ export function TabbedPanel({
   // Determine what to render based on active tab
   const isAgentTab = activeTab === "agent"
   const activeFile = openFiles.find((f) => f.path === activeTab)
+  const activeFilePreviewMode =
+    activeFile && /\.html?$/i.test(activeFile.path) ? "source" : undefined
 
   return (
     <div className="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden">
@@ -91,6 +93,7 @@ export function TabbedPanel({
                 filePath={activeFile.path}
                 threadId={threadId}
                 workspacePathKind="relative"
+                previewMode={activeFilePreviewMode}
                 requestLane="active-file-tab"
               />
             </Suspense>

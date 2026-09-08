@@ -504,7 +504,7 @@ export function FileViewer({
         />
       </div>
     )
-  } else if (htmlLike && !textPage?.truncated) {
+  } else if (htmlLike && previewMode !== "source" && !textPage?.truncated) {
     body = (
       <HtmlPreview
         content={content}
