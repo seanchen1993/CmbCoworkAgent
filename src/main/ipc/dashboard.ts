@@ -115,12 +115,18 @@ import {
   type StageBucket
 } from "../../shared/harness-stage-bucket"
 import { SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } from "../services/system-constraint-read-reporter"
-import type { ProjectMetricFilters, ProjectMetricListOptions } from "../../shared/project-metrics"
+import type {
+  ProjectMetricFilters,
+  ProjectMetricListOptions,
+  ProjectMetricTrendFilters
+} from "../../shared/project-metrics"
 import {
   fetchProjectMetricProjects,
   fetchProjectMetricSummary,
+  fetchProjectMetricTrend,
   makeMockProjectMetricProjects,
-  makeMockProjectMetricSummary
+  makeMockProjectMetricSummary,
+  makeMockProjectMetricTrend
 } from "./dashboard-project-metrics"
 
 // ─────────────────────────────────────────────────────────
@@ -14981,6 +14987,32 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         }
       } catch (e) {
         logDashboardRequestError("projectMetricSummary", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricTrend",
+    async (_, filters: ProjectMetricTrendFilters) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricTrend(filters) }
+      }
+      try {
+        const access = requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricTrend(filters, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricTrend", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

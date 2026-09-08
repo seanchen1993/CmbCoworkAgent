@@ -170,7 +170,11 @@ import {
   AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
   type ManagedAutoSendStreamStartEvent
 } from "../shared/harness-board-types"
-import type { ProjectMetricFilters, ProjectMetricListOptions } from "../shared/project-metrics"
+import type {
+  ProjectMetricFilters,
+  ProjectMetricListOptions,
+  ProjectMetricTrendFilters
+} from "../shared/project-metrics"
 import type {
   HarnessBoardCatalogPageInput,
   HarnessBoardCatalogPageResult
@@ -3857,6 +3861,10 @@ const api = {
       filters: ProjectMetricFilters
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricSummary", filters),
+    projectMetricTrend: (
+      filters: ProjectMetricTrendFilters
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricTrend", filters),
     projectMetricProjects: (
       filters: ProjectMetricFilters,
       options?: ProjectMetricListOptions
