@@ -247,7 +247,7 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     ])
     assert.equal(
       await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
-      "输入短码不存在、已过期或已使用。"
+      "输入短码不存在、已使用，或该问题已不在等待中。"
     )
   } finally {
     context.service.dispose()
@@ -281,7 +281,7 @@ async function testMultipleQuestionsRotateCodeAndAcceptCustomText(): Promise<voi
     assert(next.includes("/回答 D4E5F6 <编号>"))
     assert.equal(
       await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
-      "输入短码不存在、已过期或已使用。"
+      "输入短码不存在、已使用，或该问题已不在等待中。"
     )
     assert.equal(
       await context.service.resolveAnswer({
@@ -304,25 +304,31 @@ async function testMultipleQuestionsRotateCodeAndAcceptCustomText(): Promise<voi
   }
 }
 
-async function testExpiryDesktopRaceAndExplicitCommand(): Promise<void> {
+async function testLongWaitDesktopRaceAndExplicitCommand(): Promise<void> {
   const context = await createContext()
   try {
-    const expired = userInputRequest({ requestId: "request-expired" })
-    await context.publish(expired)
-    context.clock.now += 10 * 60_000 + 1
+    // A code carries no deadline. The run waiting on this question is not
+    // cancelled by elapsed time either, so a code that expired on its own
+    // would leave that run waiting with nothing able to answer it — and send
+    // the person holding the question on their phone back to the desktop,
+    // which is the thing answering from Zhaohu exists to avoid.
+    const lingering = userInputRequest({ requestId: "request-lingering" })
+    await context.publish(lingering)
+    context.clock.now += 6 * 60 * 60_000
     assert.equal(
       await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
-      "输入短码不存在、已过期或已使用。"
+      "已从招乎提交回答，任务将继续执行。"
     )
-    assert.equal(context.responses.length, 0)
+    assert.equal(context.responses.length, 1, "hours later the code must still answer")
 
-    context.removePending()
+    // What still ends a code is its question no longer pending — answered on
+    // the desktop, or the run cancelled.
     const desktopRace = userInputRequest({ requestId: "request-desktop-race" })
     await context.publish(desktopRace)
     context.removePending()
     assert.equal(
       await context.service.resolveAnswer({ argument: "D4E5F6 1", ...ROUTE }),
-      "输入短码不存在、已过期或已使用。"
+      "输入短码不存在、已使用，或该问题已不在等待中。"
     )
 
     assert.equal(parseImCommand("回答 012ABC 1"), null)
@@ -424,7 +430,7 @@ async function testConcurrentThreadsUseIndependentCodes(): Promise<void> {
 async function main(): Promise<void> {
   await testPromptAndSingleUseOptionAnswer()
   await testMultipleQuestionsRotateCodeAndAcceptCustomText()
-  await testExpiryDesktopRaceAndExplicitCommand()
+  await testLongWaitDesktopRaceAndExplicitCommand()
   await testDisabledRobotDoesNotPublish()
   await testAdvancedModesCanPublishAndResolve()
   await testConcurrentThreadsUseIndependentCodes()

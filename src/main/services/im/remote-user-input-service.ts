@@ -36,7 +36,6 @@ import {
 import { buildImProactiveReplies } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
 
-const DEFAULT_REMOTE_USER_INPUT_TTL_MINUTES = 10
 const REMOTE_USER_INPUT_MAX_CUSTOM_CHARACTERS = 4_000
 
 interface RemoteUserInputRoute {
@@ -52,8 +51,6 @@ interface RemoteUserInputSession {
   code: string
   questionIndex: number
   answers: Record<string, UserInputAnswer>
-  expiresAt: number
-  ttlMinutes: number
 }
 
 export interface ImRemoteUserInputAnswerNotice {
@@ -95,12 +92,6 @@ function canonicalDirectory(path: string): string | null {
   }
 }
 
-function ttlMinutesFromSettings(value: number): number {
-  return Number.isSafeInteger(value) && value >= 1 && value <= 60
-    ? value
-    : DEFAULT_REMOTE_USER_INPUT_TTL_MINUTES
-}
-
 function renderQuestion(session: RemoteUserInputSession): string {
   const question = session.request.questions[session.questionIndex]
   if (!question) throw new Error("remote user-input question index is invalid")
@@ -118,7 +109,7 @@ function renderQuestion(session: RemoteUserInputSession): string {
     "",
     `回复 /回答 ${session.code} <编号>`,
     `如以上选项都不合适：/回答 ${session.code} 其他 <你的回答>`,
-    `短码 ${session.ttlMinutes} 分钟内有效；普通文本不会被当作回答。`
+    `短码在本轮等待期间一直有效；普通文本不会被当作回答。`
   ].join("\n")
 }
 
@@ -230,13 +221,13 @@ export class ImRemoteUserInputService {
   }): Promise<string> {
     const settings = this.dependencies.getSettings()
     if (!settings.enabled) return "本设备的内置机器人已断开。"
-    this.pruneExpiredSessions()
+    this.pruneResolvedSessions()
 
     const parsed = input.argument.trim().match(/^([A-Fa-f0-9]{6})\s+([\s\S]+)$/u)
     if (!parsed) return "用法：/回答 <6位输入短码> <编号>，或 /回答 <短码> 其他 <内容>。"
     const code = parsed[1].toUpperCase()
     const session = this.codes.get(code)
-    if (!session) return "输入短码不存在、已过期或已使用。"
+    if (!session) return "输入短码不存在、已使用，或该问题已不在等待中。"
     if (
       session.route.principalId !== input.principalId ||
       session.route.conversationKey !== input.conversationKey
@@ -310,15 +301,12 @@ export class ImRemoteUserInputService {
       return
     }
     if (this.sessions.has(request.requestId)) return
-    const ttlMinutes = ttlMinutesFromSettings(settings.waitingDesktopTtlMinutes)
     const session: RemoteUserInputSession = {
       request,
       route,
       code: this.uniqueCode(),
       questionIndex: 0,
-      answers: {},
-      expiresAt: this.dependencies.now() + ttlMinutes * 60_000,
-      ttlMinutes
+      answers: {}
     }
     this.sessions.set(request.requestId, session)
     this.codes.set(session.code, session)
@@ -486,7 +474,7 @@ export class ImRemoteUserInputService {
   }
 
   private uniqueCode(excludedCode?: string): string {
-    this.pruneExpiredSessions()
+    this.pruneResolvedSessions()
     for (let attempt = 0; attempt < 32; attempt += 1) {
       const code = this.dependencies.createCode().trim().toUpperCase()
       if (/^[A-F0-9]{6}$/u.test(code) && code !== excludedCode && !this.codes.has(code)) {
@@ -496,11 +484,19 @@ export class ImRemoteUserInputService {
     throw new Error("unable to allocate a unique remote user-input code")
   }
 
-  private pruneExpiredSessions(): void {
-    const now = this.dependencies.now()
+  /**
+   * Drops sessions whose question is no longer pending, so no code outlives
+   * the request it answers.
+   *
+   * There is deliberately no clock here. The run waiting on this question is
+   * not cancelled by elapsed time either (see remote-runner onWaitStart), so a
+   * code that expired on its own would leave that run waiting with no way to
+   * answer it — the one outcome worse than waiting.
+   */
+  private pruneResolvedSessions(): void {
     for (const [requestId, session] of this.sessions) {
       const pending = this.dependencies.getPendingForThread(session.route.threadId)
-      if (session.expiresAt <= now || !pending || pending.requestId !== session.request.requestId) {
+      if (!pending || pending.requestId !== session.request.requestId) {
         this.removeSession(requestId)
       }
     }

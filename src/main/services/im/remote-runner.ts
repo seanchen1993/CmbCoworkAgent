@@ -197,6 +197,11 @@ export interface ImRemoteRunnerDependencies {
   notifyThreadChanged: () => void
   createRunId: () => string
   permitRenewIntervalMs: number
+  /**
+   * Inert. No desktop wait is bounded by a clock any more — see onWaitStart.
+   * Kept so stored builtin-robot settings and the IPC that writes them keep
+   * type-checking; remove it together with waitingDesktopTtlMinutes.
+   */
   waitingDesktopTtlMs: number
   setThreadLifecycle: (event: ImEventRecord, state: ImRemoteThreadLifecycleState) => Promise<void>
   onDetachedResultAvailable?: (notice: ImDetachedResultNotice) => void
@@ -806,11 +811,9 @@ export class ImRemoteRunner {
     const abortFromQueue = (): void => executionAbort.abort(queueSignal.reason)
     queueSignal.addEventListener("abort", abortFromQueue, { once: true })
     let permitRevokedReason: string | null = null
-    let waitingTimeoutReason: string | null = null
     const interactionFailure: {
       current: { reasonCode: string; message: string } | null
     } = { current: null }
-    let waitingTimer: ReturnType<typeof setTimeout> | undefined
     const activeInteractions = new Set<string>()
     let interactionMutation = Promise.resolve()
     const serializeInteractionMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -855,10 +858,6 @@ export class ImRemoteRunner {
                   }
                 )
               })
-            const waitingMinutes = Math.max(
-              1,
-              Math.ceil(this.dependencies.waitingDesktopTtlMs / 60_000)
-            )
             await this.dependencies.eventStore
               .enqueueProactiveReplies(
                 buildImProactiveReplies({
@@ -866,8 +865,8 @@ export class ImRemoteRunner {
                   conversationKey: waiting.conversationKey,
                   text:
                     interaction.kind === "user_input"
-                      ? `任务需要补充输入，问题与 /回答 指令将发送到当前招乎会话；也可在 ${waitingMinutes} 分钟内到对应桌面会话处理。`
-                      : "任务正在等待桌面确认；如已开启远程审批，也可随时通过招乎审批指令处理，本轮不会因为等待过久被取消。",
+                      ? "任务需要补充输入，问题与 /回答 指令将发送到当前招乎会话；也可到对应桌面会话处理。本轮会一直等你回答。"
+                      : "任务正在等待桌面确认；如已开启远程审批，也可随时通过招乎审批指令处理。本轮会一直等你决定。",
                   prefix: this.targetPrefixForEvent(waiting)
                 })
               )
@@ -907,26 +906,23 @@ export class ImRemoteRunner {
                 reason: error instanceof Error ? error.message : String(error)
               })
             })
-            // An approval waits without a deadline, matching the runtime's own
-            // rule (APPROVAL_TIMEOUT_MS is null): a safety gate must not be
-            // decided by the user being slow, and cancelling the turn under
-            // them is a decision. A question (user_input) still expires — its
-            // remote session expires on the same setting, so letting the run
-            // outlive it would only strand the turn with no way to answer.
+            // No clock is armed here, for either kind of wait.
             //
-            // The wait is bounded by the things that make it pointless rather
-            // than by a clock: permit revocation, the desktop going offline
+            // The desktop sets no answer deadline: an approval is never
+            // auto-rejected (APPROVAL_TIMEOUT_MS is null in runtime.ts), and a
+            // question only expires when the model or a Harness project asks
+            // for it via autoResolutionMs — a per-request choice that still
+            // works, and resolves the request instead of killing the run.
+            // Arriving over IM is not a reason to be stricter: the person is
+            // on a phone, away from the desk, which is exactly when a deadline
+            // they cannot meet does the most damage — the run is cancelled and
+            // the short code they were sent dies with it.
+            //
+            // The wait ends on the things that make it pointless rather than
+            // on elapsed time: permit revocation or the desktop going offline
             // (both abort from the renewal loop), a queue abort, or the user
             // stopping the run. Until one of those, the thread stays busy and
             // further IM messages on it defer as THREAD_BUSY.
-            if (interaction.kind !== "approval") {
-              waitingTimer = setTimeout(() => {
-                waitingTimeoutReason = "REMOTE_INTERACTION_TIMEOUT"
-                abortExecution(
-                  new DOMException("Remote desktop interaction timed out", "AbortError")
-                )
-              }, this.dependencies.waitingDesktopTtlMs)
-            }
           } catch (error) {
             interactionFailure.current = {
               reasonCode: "REMOTE_WAIT_STATE_FAILED",
@@ -980,10 +976,6 @@ export class ImRemoteRunner {
                 reason: error instanceof Error ? error.message : String(error)
               })
             })
-            if (waitingTimer) {
-              clearTimeout(waitingTimer)
-              waitingTimer = undefined
-            }
           } catch (error) {
             if (!permitRevokedReason && !interactionFailure.current) {
               interactionFailure.current = {
@@ -1101,23 +1093,6 @@ export class ImRemoteRunner {
         await this.deliverAndAcknowledge(terminal)
         return "outcome_unknown"
       }
-      if (waitingTimeoutReason) {
-        const reply = "等待桌面确认或补充输入已超时，本轮已取消；会话授权保持不变。"
-        const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
-          eventId: event.eventId,
-          state: "cancelled",
-          replies: buildImEventReplies({
-            event: latest,
-            text: reply,
-            prefix: this.targetPrefixForEvent(latest)
-          }),
-          resultText: reply,
-          reasonCode: waitingTimeoutReason,
-          retryable: false
-        })
-        await this.deliverAndAcknowledge(terminal)
-        return "cancelled"
-      }
       const interactionRejected = interactionFailure.current
       if (interactionRejected) {
         const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
@@ -1196,7 +1171,6 @@ export class ImRemoteRunner {
         this.activePermitRevocations.delete(event.eventId)
       }
       clearInterval(renewTimer)
-      if (waitingTimer) clearTimeout(waitingTimer)
       queueSignal.removeEventListener("abort", abortFromQueue)
       unregisterInteractionRoute()
       releaseLocalThreadRunLease(target.threadId, "im", runId)
