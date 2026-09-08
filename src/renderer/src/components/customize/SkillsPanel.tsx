@@ -158,6 +158,28 @@ function normalizeSkillPathKey(skillPath: string): string {
     .toLowerCase()
 }
 
+function isSkillPathCoveredByUploadedPath(
+  skillPath: string,
+  uploadedPaths: ReadonlySet<string>
+): boolean {
+  const skillPathKey = normalizeSkillPathKey(skillPath)
+  if (!skillPathKey) return false
+  for (const uploadedPath of uploadedPaths) {
+    if (!uploadedPath) continue
+    const uploadedRoot = uploadedPath.endsWith("/skill.md")
+      ? normalizeSkillPathKey(getSkillDir(uploadedPath))
+      : uploadedPath
+    if (
+      skillPathKey === uploadedPath ||
+      skillPathKey === uploadedRoot ||
+      skillPathKey.startsWith(`${uploadedRoot}/`)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 /**
  * 统一目录名 Key，用于把 upload 返回的目录名与 skills.list() 结果做匹配。
  */
@@ -223,6 +245,23 @@ function readOrgInstalledSkillNamesFromStorage(): Set<string> {
   }
 
   const versionRecords = marketInstalledVersionStorage.getRecords().orgSkill || {}
+  for (const name of Object.keys(versionRecords)) {
+    const normalized = normalizeSkillName(name)
+    if (normalized) names.add(normalized)
+  }
+
+  return names
+}
+
+function readMarketInstalledSkillNamesFromStorage(): Set<string> {
+  const names = new Set<string>()
+
+  for (const name of marketInstalledSourceStorage.getNames("skill")) {
+    const normalized = normalizeSkillName(name)
+    if (normalized) names.add(normalized)
+  }
+
+  const versionRecords = marketInstalledVersionStorage.getRecords().skill || {}
   for (const name of Object.keys(versionRecords)) {
     const normalized = normalizeSkillName(name)
     if (normalized) names.add(normalized)
@@ -1482,6 +1521,9 @@ export function SkillsPanel(): React.JSX.Element {
   const [orgInstalledSkillNames, setOrgInstalledSkillNames] = useState<Set<string>>(() =>
     readOrgInstalledSkillNamesFromStorage()
   )
+  const [marketInstalledSkillNames, setMarketInstalledSkillNames] = useState<Set<string>>(() =>
+    readMarketInstalledSkillNamesFromStorage()
+  )
   const [editedSkillPaths, setEditedSkillPaths] = useState<Set<string>>(() =>
     readEditedSkillPathSetFromStorage()
   )
@@ -1541,6 +1583,8 @@ export function SkillsPanel(): React.JSX.Element {
       }
       if (generation === skillRefreshGeneration.current) {
         setSkills(snapshot.localSkills)
+        setMarketInstalledSkillNames(readMarketInstalledSkillNamesFromStorage())
+        setOrgInstalledSkillNames(readOrgInstalledSkillNamesFromStorage())
         if (disabledAuthorityRevision === disabledSkillAuthorityRevisionRef.current) {
           publishDisabledSkillSnapshot(
             disabledSkillMutationCoordinatorRef.current.replaceAuthoritative(
@@ -1592,6 +1636,10 @@ export function SkillsPanel(): React.JSX.Element {
 
   const reloadOrgInstalledSkillNames = useCallback(() => {
     setOrgInstalledSkillNames(readOrgInstalledSkillNamesFromStorage())
+  }, [])
+
+  const reloadMarketInstalledSkillNames = useCallback(() => {
+    setMarketInstalledSkillNames(readMarketInstalledSkillNamesFromStorage())
   }, [])
 
   const reloadEditedSkillPaths = useCallback(() => {
@@ -1718,7 +1766,7 @@ export function SkillsPanel(): React.JSX.Element {
   const shouldHideMarketInstalledFeaturedFiles = useCallback(
     (skill: SkillMetadata): boolean => {
       if (skill.source !== "user") return false
-      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
+      const localMarked = isSkillPathCoveredByUploadedPath(skill.path, localUploadedSkillPaths)
       const uploadedByMe = uploadedSkillNames.has(normalizeSkillName(skill.name))
       if (localMarked || uploadedByMe) return false
       return isFeaturedSkill(marketSkillMap[normalizeSkillName(skill.name)])
@@ -1840,9 +1888,12 @@ export function SkillsPanel(): React.JSX.Element {
       if (res.success) {
         removeLocalUploadedSkillPathFromStorage(skill.path)
         removeEditedSkillPathFromStorage(skill.path)
+        marketInstalledSourceStorage.removeName(skill.name, "skill")
+        marketInstalledVersionStorage.removeVersion(skill.name, "skill")
         marketInstalledSourceStorage.removeName(skill.name, "orgSkill")
         marketInstalledVersionStorage.removeVersion(skill.name, "orgSkill")
         reloadLocalUploadedSkillPaths()
+        reloadMarketInstalledSkillNames()
         reloadOrgInstalledSkillNames()
         reloadEditedSkillPaths()
         setSelectedSkill(null)
@@ -1862,6 +1913,7 @@ export function SkillsPanel(): React.JSX.Element {
       refreshSkills,
       reloadEditedSkillPaths,
       reloadLocalUploadedSkillPaths,
+      reloadMarketInstalledSkillNames,
       reloadOrgInstalledSkillNames
     ]
   )
@@ -1880,16 +1932,18 @@ export function SkillsPanel(): React.JSX.Element {
   const isSkillUploadedInPanel = useCallback(
     (skill: SkillMetadata | null | undefined): boolean => {
       if (!skill || skill.source !== "user") return false
-      if (orgInstalledSkillNames.has(normalizeSkillName(skill.name))) return false
-      if (localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))) return true
-      if (uploadedSkillNames.has(normalizeSkillName(skill.name))) return true
+      const normalizedName = normalizeSkillName(skill.name)
+      if (isSkillPathCoveredByUploadedPath(skill.path, localUploadedSkillPaths)) return true
+      if (orgInstalledSkillNames.has(normalizedName)) return false
+      if (marketInstalledSkillNames.has(normalizedName)) return false
+      if (uploadedSkillNames.has(normalizedName)) return true
       // 不再使用“无市场同名记录即视为本地上传”的兜底：
       // marketSkillMap 异步加载（含 setTimeout 延迟与接口失败/未返回某项）时，
       // 该兜底会把“从市场安装的他人技能”误判为“我上传的技能”，从而错误地展示“同步到市场”按钮。
       // 仅依赖本地路径标记与已发布名称标记这两项正向证据判定归属。
       return false
     },
-    [localUploadedSkillPaths, orgInstalledSkillNames, uploadedSkillNames]
+    [localUploadedSkillPaths, marketInstalledSkillNames, orgInstalledSkillNames, uploadedSkillNames]
   )
 
   /**
