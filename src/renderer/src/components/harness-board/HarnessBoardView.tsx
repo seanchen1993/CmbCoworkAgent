@@ -7752,10 +7752,38 @@ function ProjectFeatureSidebar({
 
     const scrollIntent = scrollIntentRef.current
     if (scrollIntent === "top") {
-      viewport.scrollTop = 0
-      scrollTopRef.current = 0
+      const targetProjectId = isViewingSession
+        ? null
+        : (selectedFeature?.projectId ?? selectedProjectId)
+      const targetProject = groups.find((group) => group.project.projectId === targetProjectId)
+      const targetSlug = selectedFeature?.slug
+      const targetFeature = targetProject?.featureGroups.find((group) => group.slug === targetSlug)
+      if (
+        targetProject &&
+        (collapsedKeys.has(targetProject.key) ||
+          (targetFeature && collapsedKeys.has(targetFeature.key)))
+      ) {
+        return
+      }
+      const targetKey = targetFeature?.key ?? targetProject?.key
+      const target = Array.from(
+        viewport.querySelectorAll<HTMLElement>("[data-sidebar-group-key]")
+      ).find((element) => element.dataset.sidebarGroupKey === targetKey)
+      if (target) {
+        const viewportRect = viewport.getBoundingClientRect()
+        const targetRect = target.getBoundingClientRect()
+        if (targetRect.top < viewportRect.top) {
+          viewport.scrollTop += targetRect.top - viewportRect.top
+        } else if (targetRect.bottom > viewportRect.bottom) {
+          viewport.scrollTop += targetRect.bottom - viewportRect.bottom
+        }
+      } else if (!targetProjectId) {
+        viewport.scrollTop = 0
+      }
+      scrollTopRef.current = viewport.scrollTop
+      preserveScrollUntilRef.current = 0
       pendingScrollRestoreRef.current = null
-      scrollIntentRef.current = null
+      if (target || !targetProjectId) scrollIntentRef.current = null
     } else if (scrollIntent === "preserve") {
       const targetScrollTop = pendingScrollRestoreRef.current ?? scrollTopRef.current
       if (targetScrollTop > 0) {
@@ -7963,6 +7991,7 @@ function ProjectFeatureSidebar({
                   </div>
                 )}
                 <div
+                  data-sidebar-group-key={group.key}
                   className={cn(
                     "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
                     projectSelected
@@ -8112,6 +8141,7 @@ function ProjectFeatureSidebar({
                       return (
                         <div key={featureGroup.key} className="space-y-1">
                           <div
+                            data-sidebar-group-key={featureGroup.key}
                             className={cn(
                               "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
                               featureSelected
@@ -10903,15 +10933,7 @@ export function HarnessBoardView({
 
   const projectSidebarGroups = useMemo<ProjectSessionProjectGroup[]>(() => {
     const groups: ProjectSessionProjectGroup[] = []
-    // Group pinning is reserved for project/feature detail pages. Session selection
-    // should only highlight/open the thread; otherwise read-only clicks and focus
-    // reloads can look like project/feature activity and unexpectedly reorder groups.
-    const pinnedFeature = selectedFeature && !isViewingSession ? selectedFeature : null
-    const pinnedProjectId = pinnedFeature
-      ? pinnedFeature.projectId
-      : selectedProjectId && !selectedFeature && !selectedProjectSession && !isViewingSession
-        ? selectedProjectId
-        : null
+    // Detail and session selection must not change the sidebar group order.
     const knownProjectIds = new Set(sidebarProjects.map((project) => project.projectId))
     const featureOrderByProject = new Map<string, Map<string, number>>()
     for (const [projectId, detail] of Object.entries(detailsByProjectId)) {
@@ -10938,12 +10960,6 @@ export function HarnessBoardView({
           ...(deleted ? { deleted: true } : {})
         }))
         .sort((a, b) => {
-          const aPinned =
-            pinnedFeature?.projectId === project.projectId && pinnedFeature.slug === a.slug
-          const bPinned =
-            pinnedFeature?.projectId === project.projectId && pinnedFeature.slug === b.slug
-          if (aPinned !== bPinned) return aPinned ? -1 : 1
-
           // Keep feature group order independent from session updated_at. Message sends
           // should move the active session inside its group, not promote the whole feature.
           const order = featureOrderByProject.get(project.projectId)
@@ -10964,8 +10980,7 @@ export function HarnessBoardView({
       const projectSessions = getProjectLevelSessions(harnessSessionIndex, project.projectId)
       if (sessionsBySlug.size === 0 && projectSessions.length === 0) continue
 
-      const section: ProjectFeatureSessionGroupSection =
-        pinnedProjectId && project.projectId === pinnedProjectId ? "current" : "other"
+      const section: ProjectFeatureSessionGroupSection = "other"
 
       groups.push({
         key: `project:${project.projectId}`,
@@ -10999,8 +11014,7 @@ export function HarnessBoardView({
         projectId,
         readThreadHarnessProjectName(firstProjectSessionThread ?? firstFeatureThread)
       )
-      const section: ProjectFeatureSessionGroupSection =
-        pinnedProjectId && projectId === pinnedProjectId ? "current" : "other"
+      const section: ProjectFeatureSessionGroupSection = "other"
 
       groups.push({
         key: `deleted-project:${projectId}`,
@@ -11012,30 +11026,17 @@ export function HarnessBoardView({
       })
     }
 
-    if (!pinnedProjectId) return groups
-
     return groups
-      .map((group, index) => {
-        const priority = group.section === "current" ? 0 : group.section === "project" ? 1 : 2
-        return { group, index, priority }
-      })
-      .sort((a, b) => a.priority - b.priority || a.index - b.index)
-      .map(({ group }) => group)
   }, [
     detailsByProjectId,
     harnessSessionIndex,
-    isViewingSession,
     resolvedSidebarProjectIds,
     sidebarProjects,
-    selectedFeature,
-    selectedProjectId,
-    selectedProjectSession,
     threadsById
   ])
 
-  // Automatic sidebar folding follows the same rule as group pinning: only
-  // project/feature detail pages move the user's sidebar focus. Opening a
-  // session should highlight the thread without collapsing unrelated groups.
+  // Detail navigation expands its target without folding unrelated projects.
+  // Session selection preserves the user's sidebar expansion state.
   const autoCollapseFeature = selectedFeature && !isViewingSession ? selectedFeature : null
   const autoCollapseProjectId = autoCollapseFeature
     ? autoCollapseFeature.projectId
@@ -11043,31 +11044,28 @@ export function HarnessBoardView({
       ? selectedProjectId
       : null
 
+  const expandedDetailKeyRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!autoCollapseProjectId) return
+    if (!autoCollapseProjectId) {
+      expandedDetailKeyRef.current = null
+      return
+    }
+    const targetSlug = autoCollapseFeature?.slug
+    const detailKey = JSON.stringify([autoCollapseProjectId, targetSlug])
+    if (expandedDetailKeyRef.current === detailKey) return
+    const targetGroup = projectSidebarGroups.find(
+      (group) => group.project.projectId === autoCollapseProjectId
+    )
+    if (!targetGroup) return
+    const targetFeature = targetGroup.featureGroups.find((group) => group.slug === targetSlug)
+    if (targetSlug && !targetFeature) return
+    expandedDetailKeyRef.current = detailKey
 
     setCollapsedFeatureKeys((current) => {
       const next = new Set(current)
-      let changed = false
-
-      for (const group of projectSidebarGroups) {
-        const isCurrentProject = group.project.projectId === autoCollapseProjectId
-        const currentFeatureGroup = autoCollapseFeature
-          ? group.featureGroups.find(
-              (featureGroup) => featureGroup.slug === autoCollapseFeature.slug
-            )
-          : null
-
-        if (isCurrentProject) {
-          if (next.delete(group.key)) changed = true
-          if (currentFeatureGroup && next.delete(currentFeatureGroup.key)) changed = true
-        } else if (!isCurrentProject && !next.has(group.key)) {
-          next.add(group.key)
-          changed = true
-        }
-      }
-
-      return changed ? next : current
+      const projectChanged = next.delete(targetGroup.key)
+      const featureChanged = targetFeature ? next.delete(targetFeature.key) : false
+      return projectChanged || featureChanged ? next : current
     })
   }, [
     autoCollapseFeature?.projectId,

@@ -76,10 +76,10 @@ const DECISION_LABELS: Record<string, string> = {
 }
 
 const DECISION_SOURCE_LABELS: Record<string, string> = {
-  "controller:system": "自动决策",
-  "user:desktop": "桌面决策",
-  "user:im": "招乎决策",
-  "system:system": "系统决策"
+  "controller:system": "自动推进",
+  "user:desktop": "APP 操作",
+  "user:im": "招乎消息推进",
+  "system:system": "系统推进"
 }
 
 const STATUS_TEXT: Record<string, string> = {
@@ -233,14 +233,14 @@ function DecisionDetailsTooltip({
             <div className="mt-1 text-xs leading-5 opacity-90">{rule || "暂无规则说明"}</div>
           </div>
           <div className="px-3 py-2.5">
-            <div className="text-xs font-semibold">决策动作</div>
+            <div className="text-xs font-semibold">托管模式推荐动作</div>
             <div className="mt-1 text-xs leading-5 opacity-90">
               {proposedAction ? DECISION_LABELS[proposedAction] || proposedAction : "无预设动作"}
             </div>
           </div>
           {showFinalAction && decisionAction && (
             <div className="px-3 py-2.5">
-              <div className="text-xs font-semibold">最终动作</div>
+              <div className="text-xs font-semibold">用户最终动作</div>
               <div className="mt-1 text-xs leading-5 opacity-90">
                 {DECISION_LABELS[decisionAction] || decisionAction}
               </div>
@@ -362,13 +362,13 @@ function EventRow({
   return (
     <div className="grid gap-2 rounded-lg border border-border/60 bg-background/60 px-3 py-2.5 text-[11px] md:grid-cols-[132px_minmax(0,1fr)]">
       <div className="font-mono leading-5 text-muted-foreground">{event.createTime}</div>
-      <div
-        className={cn(
-          "relative min-w-0",
-          threadIds.length > 1 ? "pr-20" : threadIds.length === 1 ? "pr-8" : undefined
-        )}
-      >
-        <div className="flex min-h-5 flex-wrap items-center gap-x-2 gap-y-1 leading-5">
+      <div className="relative min-w-0">
+        <div
+          className={cn(
+            "flex min-h-5 flex-wrap items-center gap-x-2 gap-y-1 leading-5",
+            threadIds.length > 1 ? "pr-20" : threadIds.length === 1 ? "pr-8" : undefined
+          )}
+        >
           <span className="font-semibold text-foreground">
             {EVENT_LABELS[event.type] || event.type}
           </span>
