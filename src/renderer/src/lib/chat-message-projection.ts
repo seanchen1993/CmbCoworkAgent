@@ -48,15 +48,27 @@ function orderHintStructureKey(
 }
 
 function resolveBaselineLiveMessage(baseline: Message, live: Message): Message {
-  if (
-    baseline.role === "assistant" &&
-    !baseline.reasoning &&
-    typeof live.reasoning === "string" &&
-    live.reasoning.trim()
-  ) {
-    return { ...baseline, reasoning: live.reasoning }
+  if (baseline.role !== "assistant" || live.role !== "assistant") return baseline
+
+  const reasoning =
+    !baseline.reasoning && typeof live.reasoning === "string" && live.reasoning.trim()
+      ? live.reasoning
+      : undefined
+  // Durable data remains authoritative when it explicitly contains an array,
+  // including [] as a clear. A live non-empty value only fills a missing field.
+  const toolCalls =
+    !Array.isArray(baseline.tool_calls) &&
+    Array.isArray(live.tool_calls) &&
+    live.tool_calls.length > 0
+      ? live.tool_calls
+      : undefined
+
+  if (reasoning === undefined && toolCalls === undefined) return baseline
+  return {
+    ...baseline,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    ...(toolCalls !== undefined ? { tool_calls: toolCalls } : {})
   }
-  return baseline
 }
 
 /**
@@ -81,6 +93,7 @@ export function createChatMessageProjector(): (
   let previousUsedLiveProjection = false
   let previousOrderHintStructureKey = ""
   let baselineIndexById = new Map<string, number>()
+  let liveIndexById = new Map<string, number>()
   let messages: Message[] = []
   let indexById = new Map<string, number>()
   let contentVersion = 0
@@ -123,8 +136,11 @@ export function createChatMessageProjector(): (
         nextTail.role === previousTail.role &&
         nextTail.tool_call_id === previousTail.tool_call_id
       ) {
-        messages[displayIndex] = nextTail
-        changedMessages.push(nextTail)
+        const liveIndex = liveIndexById.get(nextTail.id)
+        const live = liveIndex === undefined ? undefined : liveMessages[liveIndex]
+        const nextMessage = live ? resolveBaselineLiveMessage(nextTail, live) : nextTail
+        messages[displayIndex] = nextMessage
+        changedMessages.push(nextMessage)
         contentVersion += 1
       } else {
         structureChanged = true
@@ -133,9 +149,10 @@ export function createChatMessageProjector(): (
 
     if (structureChanged) {
       baselineIndexById = new Map(baseline.map((message, index) => [message.id, index]))
-      const liveById = new Map(liveMessages.map((message) => [message.id, message]))
+      liveIndexById = new Map(liveMessages.map((message, index) => [message.id, index]))
       const merged = baseline.map((message) => {
-        const live = liveById.get(message.id)
+        const liveIndex = liveIndexById.get(message.id)
+        const live = liveIndex === undefined ? undefined : liveMessages[liveIndex]
         return live ? resolveBaselineLiveMessage(message, live) : message
       })
       for (const live of liveMessages) {

@@ -49,7 +49,11 @@ import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
 import { UniversalUploadDialog } from "./MarketPanel/UniversalUploadDialog"
 import { toast } from "sonner"
-import { marketInstalledVersionStorage } from "./MarketPanel/MarketUpdateBadge"
+import {
+  MarketUpdateBadge,
+  isMarketVersionDifferent,
+  marketInstalledVersionStorage
+} from "./MarketPanel/MarketUpdateBadge"
 import { marketInstalledSourceStorage } from "./MarketPanel/market-installed-source-storage"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -81,6 +85,7 @@ type SkillMarketInfo = Pick<
   | "guidance"
   | "user_id"
   | "version"
+  | "extra_json"
 >
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
@@ -574,7 +579,8 @@ function PublishSkillDialog(props: {
         version: skill.version || marketInfo?.version || undefined,
         guidance: skill.metadata?.guidance || marketInfo?.guidance || "",
         chinese_name: getSkillChineseName(skill, marketInfo),
-        user_id: marketInfo?.user_id
+        user_id: marketInfo?.user_id,
+        extra_json: marketInfo?.extra_json
       }}
       generatedFile={{
         label: "将自动打包当前技能目录为 zip 并上传",
@@ -1595,9 +1601,9 @@ export function SkillsPanel(): React.JSX.Element {
   const loadMarketSkills = useCallback(async () => {
     try {
       const res = await marketApi.getSkills()
-      if (!res.success || !res.data) return
+      const items = res.success && res.data ? res.data : []
       const next: Record<string, SkillMarketInfo> = {}
-      for (const item of res.data) {
+      for (const item of items) {
         const normalized = normalizeSkillName(item.name)
         if (!normalized) continue
         next[normalized] = {
@@ -1605,7 +1611,29 @@ export function SkillsPanel(): React.JSX.Element {
           chinese_name: item.chinese_name,
           category: item.category,
           description: item.description,
-          featured: item.featured
+          featured: item.featured,
+          guidance: item.guidance,
+          user_id: item.user_id,
+          version: item.version,
+          extra_json: item.extra_json
+        }
+      }
+      // 临时 mock 注入，用于验证「有更新」提示
+      if (import.meta.env.DEV) {
+        const mockName = "requirement-to-prd"
+        const mockNormalized = normalizeSkillName(mockName)
+        if (!next[mockNormalized]) {
+          next[mockNormalized] = {
+            name: mockName,
+            chinese_name: "需求转PRD",
+            category: "研发类场景/应用类研发",
+            description: "将需求描述转换为结构化 PRD 文档的技能，支持字段拆解、验收点整理和优先级标注。",
+            featured: "",
+            guidance: "可直接提问：帮我把这段需求描述转换为结构化 PRD。",
+            user_id: "10010001",
+            version: "1.2.0",
+            extra_json: JSON.stringify({ grayUserIds: ["10010001"] })
+          }
         }
       }
       setMarketSkillMap(next)
@@ -2130,22 +2158,31 @@ export function SkillsPanel(): React.JSX.Element {
                 </span>
                 <span className="relative">上传技能</span>
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-amber-300/55 bg-amber-500/[0.08] px-2 text-xs font-medium text-amber-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-amber-400/70 hover:bg-amber-500/[0.16] hover:shadow-md dark:text-amber-300"
-                onClick={handleOpenRecordSkill}
-                aria-label="录制技能"
-              >
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-amber-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-                />
-                <span className="relative flex size-4 items-center justify-center rounded-full bg-amber-500/15 ring-1 ring-amber-500/25 transition-transform duration-200 group-hover:scale-105">
-                  <Radio className="size-2.5" />
-                </span>
-                <span className="relative">录制技能</span>
-              </Button>
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-amber-300/55 bg-amber-500/[0.08] px-2 text-xs font-medium text-amber-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-amber-400/70 hover:bg-amber-500/[0.16] hover:shadow-md dark:text-amber-300"
+                      onClick={handleOpenRecordSkill}
+                      aria-label="录制技能"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-amber-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                      />
+                      <span className="relative flex size-4 items-center justify-center rounded-full bg-amber-500/15 ring-1 ring-amber-500/25 transition-transform duration-200 group-hover:scale-105">
+                        <Radio className="size-2.5" />
+                      </span>
+                      <span className="relative">录制技能</span>
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-60 text-xs leading-relaxed">
+                    这是合作共建功能，如有问题，请联系王文林
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
             <Button
               variant="outline"
@@ -2891,6 +2928,16 @@ function SkillItem(props: {
   const chineseName = getSkillChineseName(skill, marketInfo)
   const displayName = chineseName || skill.name
 
+  // 检测市场是否有更新版本：本地版本与市场版本不一致时提示
+  const localVersion =
+    skill.metadata?.version?.trim() ||
+    skill.version ||
+    marketInstalledVersionStorage.getVersion(skill.name, "orgSkill") ||
+    ""
+  const marketVersion = marketInfo?.version || ""
+  const updateAvailable =
+    hasMarketEntry && isMarketVersionDifferent(localVersion, marketVersion)
+
   return (
     <div
       className={cn(
@@ -2945,6 +2992,14 @@ function SkillItem(props: {
               <Store className="size-2.5 shrink-0" />
               市场
             </Badge>
+          )}
+          {updateAvailable && (
+            <MarketUpdateBadge
+              typeLabel="技能"
+              installedVersion={localVersion}
+              currentVersion={marketVersion}
+              className="text-[10px] px-1.5 py-0"
+            />
           )}
           {isEdited && (
             <Badge
@@ -3168,12 +3223,25 @@ export function SkillDetail(props: {
   const category = getSkillCategory(skill, marketInfo)
   const description = marketInfo?.description || skill.description || "暂无描述"
   const skillFrontmatterVersion = skill.metadata?.version?.trim() || ""
-  const resolvedSkillVersion = skillFrontmatterVersion || skill.version || DEFAULT_SKILL_VERSION
+  // 兼容用户填写 v1.0.1 / V1.0.1 / 1.0.1，统一展示为小写 v 前缀
+  const normalizedFrontmatterVersion = skillFrontmatterVersion.replace(/^[vV]+/, "")
+  const resolvedSkillVersion = skillFrontmatterVersion
+    ? `v${normalizedFrontmatterVersion}`
+    : skill.version || DEFAULT_SKILL_VERSION
   const skillVersionMissingInFrontmatter = !skillFrontmatterVersion
   const skillVersionTooltip = skillVersionMissingInFrontmatter
     ? `当前没有在 SKILL.md frontmatter 里找到 version，所以这里显示的是默认值 ${DEFAULT_SKILL_VERSION}。`
-    : "这个值直接读取自 SKILL.md frontmatter 里的 version 字段。"
+    : "这个值直接读取自 SKILL.md frontmatter 里的 version 字段（已统一为小写 v 前缀）。"
   const isFeatured = isFeaturedSkill(marketInfo)
+  // 检测市场是否有更新版本：本地版本与市场版本不一致时提示
+  const detailLocalVersion =
+    skill.metadata?.version?.trim() ||
+    skill.version ||
+    marketInstalledVersionStorage.getVersion(skill.name, "orgSkill") ||
+    ""
+  const detailMarketVersion = marketInfo?.version || ""
+  const detailUpdateAvailable =
+    hasMarketEntry && isMarketVersionDifferent(detailLocalVersion, detailMarketVersion)
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const previewContent =
     isMarkdown && markdownFrontmatter.hasFrontmatter
@@ -3248,6 +3316,14 @@ export function SkillDetail(props: {
                     <Store className="size-3 shrink-0" />
                     市场
                   </Badge>
+                )}
+                {detailUpdateAvailable && (
+                  <MarketUpdateBadge
+                    typeLabel="技能"
+                    installedVersion={detailLocalVersion}
+                    currentVersion={detailMarketVersion}
+                    className="text-[10px] px-2 py-0.5"
+                  />
                 )}
                 {isEdited && (
                   <Badge
@@ -3468,8 +3544,19 @@ export function SkillDetail(props: {
                   {content}
                 </pre>
               ) : (
-                <div className="streaming-markdown text-sm leading-relaxed">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
+                <div className="streaming-markdown text-sm leading-relaxed overflow-x-auto">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      table: ({ children }) => (
+                        <div className="streaming-markdown-table-wrap my-4 overflow-x-auto">
+                          <table className="w-full border-collapse">{children}</table>
+                        </div>
+                      )
+                    }}
+                  >
+                    {previewContent ?? ""}
+                  </ReactMarkdown>
                 </div>
               )}
             </div>

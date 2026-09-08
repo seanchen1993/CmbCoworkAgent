@@ -251,7 +251,8 @@ import {
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
   InterleavedThinkingChatOpenAICompletions,
-  ReasoningDisplayChatOpenAICompletions
+  ReasoningDisplayChatOpenAICompletions,
+  ToolCallAwareChatOpenAICompletions
 } from "./interleaved-thinking-completions"
 import {
   createMalformedToolCallGuardMiddleware,
@@ -4291,7 +4292,10 @@ export function getModelInstance(
       completions: new ChatOpenAICompletions(baseFields)
     } as never)
   } else {
-    model = new ChatOpenAI(baseFields)
+    model = new ChatOpenAI({
+      ...baseFields,
+      completions: new ToolCallAwareChatOpenAICompletions(baseFields)
+    } as never)
   }
 
   return purpose === "context-compaction" ? configureLocalCompactionTokenEstimation(model) : model
