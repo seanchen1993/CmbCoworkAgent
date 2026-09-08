@@ -84,11 +84,17 @@ describe("persisted active file preview isolation", () => {
   it("assembles bounded web-source pages and soft-wraps compact minified source", () => {
     expect(fileViewer).toContain("assembleBoundedTextPreview")
     expect(fileViewer).toContain("WEB_SOURCE_PREVIEW_MAX_BYTES")
-    expect(fileViewer).toContain("htmlLike && !textPage?.truncated")
+    expect(fileViewer).toContain('htmlLike && previewMode !== "source" && !textPage?.truncated')
     expect(codeViewer).toContain("shouldSoftWrapCodePreview")
     expect(codeViewer).toContain("shiki-content-soft-wrap")
     expect(rendererStyles).toContain(".shiki-content-soft-wrap pre")
     expect(rendererStyles).toContain(".shiki-content.shiki-content-soft-wrap .line")
+  })
+
+  it("opens HTML files from workspace tabs in source mode", () => {
+    expect(tabbedPanel).toContain('/\\.html?$/i.test(activeFile.path) ? "source" : undefined')
+    expect(tabbedPanel).toContain("previewMode={activeFilePreviewMode}")
+    expect(fileViewer).toContain('htmlLike && previewMode !== "source" && !textPage?.truncated')
   })
 
   it("requires a trusted-source grant instead of exposing renderer path-to-token minting", () => {
