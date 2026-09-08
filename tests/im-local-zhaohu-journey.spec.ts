@@ -703,7 +703,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     assert(journey.eventReplyText(approvalTask.event.eventId).includes("审批通过后任务完成"))
     assert.equal(journey.audits.getByRequestId("approval-request-journey")?.decision, "approve")
     const reusedApproval = await journey.send("/批准 A1B2C3")
-    assert(journey.eventReplyText(reusedApproval.event.eventId).includes("已过期或已使用"))
+    assert(journey.eventReplyText(reusedApproval.event.eventId).includes("已使用"))
 
     const ordinaryUserInputTask = await journey.send("询问发布范围：普通会话")
     await journey.waitForEventState(ordinaryUserInputTask.event.eventId, "waiting_desktop")

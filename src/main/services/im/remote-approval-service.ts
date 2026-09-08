@@ -23,7 +23,21 @@ import { imFeatureReplyPrefix, imInboxReplyPrefix, imThreadReplyPrefix } from ".
 import { buildImProactiveReplies, IM_REPLY_TRUNCATION_NOTICE } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
 
-const REMOTE_APPROVAL_CODE_TTL_MS = 10 * 60_000
+/**
+ * Approval short codes carry no deadline of their own.
+ *
+ * An approval is a human safety gate. The runtime never auto-rejects one
+ * (APPROVAL_TIMEOUT_MS is null in runtime.ts) precisely because the user
+ * stepping away must not decide it for them, so the Zhaohu code must not be
+ * the one place that does — a code that dies while its request is still
+ * pending leaves the person holding the notification with no way to answer it
+ * except walking back to the desktop.
+ *
+ * A code's lifetime is therefore exactly its request's: pruneResolvedCodes
+ * drops it as soon as the broker no longer holds that request (decided on the
+ * desktop, decided here, or the run was cancelled), and resolveCode consumes
+ * it on use. Codes cannot accumulate for a request that is no longer waiting.
+ */
 interface RemoteApprovalRoute {
   principalId: string
   conversationKey: string
@@ -40,7 +54,6 @@ interface RemoteApprovalCode {
   summary: string
   allowedDecisions: ReadonlyArray<"approve" | "reject">
   route: RemoteApprovalRoute
-  expiresAt: number
 }
 
 interface ApprovalPresentation {
@@ -63,7 +76,6 @@ interface RemoteApprovalDependencies {
   audits: ImRemoteApprovalAuditStore
   getThread: typeof getThread
   getSettings: typeof getBuiltinRobotSettings
-  now: () => number
   createCode: () => string
   warn: (message: string, error?: unknown) => void
 }
@@ -242,7 +254,6 @@ export class ImRemoteApprovalService {
       audits: dependencies.audits ?? imRemoteApprovalAuditStore,
       getThread: dependencies.getThread ?? getThread,
       getSettings: dependencies.getSettings ?? getBuiltinRobotSettings,
-      now: dependencies.now ?? Date.now,
       createCode: dependencies.createCode ?? (() => randomBytes(3).toString("hex").toUpperCase()),
       warn: dependencies.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
     }
@@ -285,11 +296,11 @@ export class ImRemoteApprovalService {
     if (!settings.enabled || !settings.remoteApprovalEnabled) {
       return "招乎远程审批未开启，请回到桌面确认。"
     }
-    this.pruneExpiredCodes()
+    this.pruneResolvedCodes()
     const code = input.code.trim().toUpperCase()
     if (!/^[A-F0-9]{6}$/u.test(code)) return "审批短码无效，请核对后重试。"
     const pendingCode = this.codes.get(code)
-    if (!pendingCode) return "审批短码不存在、已过期或已使用。"
+    if (!pendingCode) return "审批短码不存在、已使用，或该审批已不在等待中。"
     if (
       pendingCode.route.principalId !== input.principalId ||
       pendingCode.route.conversationKey !== input.conversationKey
@@ -325,10 +336,7 @@ export class ImRemoteApprovalService {
         "Remote approval audit persistence failed; decision was not applied.",
         error
       )
-      if (
-        pendingCode.expiresAt > this.dependencies.now() &&
-        this.dependencies.broker.get(pendingCode.requestId)
-      ) {
+      if (this.dependencies.broker.get(pendingCode.requestId)) {
         this.codes.set(code, pendingCode)
       }
       return "无法安全写入远程审批审计，本次决定未执行；请重试或回到桌面确认。"
@@ -384,8 +392,7 @@ export class ImRemoteApprovalService {
         operation: presentation.operation,
         summary: presentation.summary,
         allowedDecisions: presentation.allowedDecisions,
-        route,
-        expiresAt: this.dependencies.now() + REMOTE_APPROVAL_CODE_TTL_MS
+        route
       }
       this.codes.set(code.code, code)
     }
@@ -523,7 +530,7 @@ export class ImRemoteApprovalService {
   }
 
   private uniqueCode(): string {
-    this.pruneExpiredCodes()
+    this.pruneResolvedCodes()
     for (let attempt = 0; attempt < 32; attempt += 1) {
       const code = this.dependencies.createCode().trim().toUpperCase()
       if (/^[A-F0-9]{6}$/u.test(code) && !this.codes.has(code)) return code
@@ -531,12 +538,10 @@ export class ImRemoteApprovalService {
     throw new Error("unable to allocate a unique remote approval code")
   }
 
-  private pruneExpiredCodes(): void {
-    const now = this.dependencies.now()
+  /** Drops codes whose request is no longer waiting, so none outlive its gate. */
+  private pruneResolvedCodes(): void {
     for (const [code, pending] of this.codes) {
-      if (pending.expiresAt <= now || !this.dependencies.broker.get(pending.requestId)) {
-        this.codes.delete(code)
-      }
+      if (!this.dependencies.broker.get(pending.requestId)) this.codes.delete(code)
     }
   }
 

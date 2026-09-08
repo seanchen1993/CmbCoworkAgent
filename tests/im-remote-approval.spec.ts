@@ -123,7 +123,6 @@ async function createContext(
       remoteApprovalEnabled: options.remoteApprovalEnabled !== false,
       waitingDesktopTtlMinutes: 10
     }),
-    now: () => clock.now,
     createCode: () => generatedCodes.shift() ?? "ABC123",
     warn: (_message, error) => warnings.push(error)
   })
@@ -243,7 +242,7 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
     assert.deepEqual(context.desktopAuditNotices, ["approve:写入文件 src/billing.ts"])
     assert.equal(
       await context.service.resolveCode({ code: "A1B2C3", decision: "approve", ...ROUTE }),
-      "审批短码不存在、已过期或已使用。"
+      "审批短码不存在、已使用，或该审批已不在等待中。"
     )
     assert.equal(decisions.length, 1)
   } finally {
@@ -253,7 +252,7 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
   }
 }
 
-async function testAllowedDecisionAndExpiryRemainFailClosed(): Promise<void> {
+async function testAllowedDecisionsFailClosedAndCodesOutliveTheClock(): Promise<void> {
   const context = await createContext()
   try {
     const rejectOnly = approvalRequest({
@@ -284,20 +283,49 @@ async function testAllowedDecisionAndExpiryRemainFailClosed(): Promise<void> {
     )
     assert.deepEqual(decisions, [{ type: "reject", tool_call_id: rejectOnly.tool_call.id }])
 
-    const expiring = approvalRequest({
-      id: "request-expiring",
+    // A code carries no deadline. An approval is a safety gate the runtime
+    // never times out, so the notification someone is holding must still be
+    // answerable when they get back to it — otherwise the only way to answer a
+    // Zhaohu approval is to stop being remote and walk to the desktop, which
+    // is the whole thing remote approval exists to avoid.
+    const lingering = approvalRequest({
+      id: "request-lingering",
       operation: "write_file",
       cwd: context.root,
-      filePath: join(context.root, "expires.ts")
+      filePath: join(context.root, "lingering.ts")
     })
-    const expiringDecisions = context.register(expiring)
-    await waitFor(() => context.deliveryText(expiring.id).includes("D4E5F6"), "expiring approval")
-    context.clock.now += 10 * 60_000 + 1
-    assert.equal(
-      await context.service.resolveCode({ code: "D4E5F6", decision: "approve", ...ROUTE }),
-      "审批短码不存在、已过期或已使用。"
+    const lingeringDecisions = context.register(lingering)
+    await waitFor(() => context.deliveryText(lingering.id).includes("D4E5F6"), "lingering approval")
+    context.clock.now += 6 * 60 * 60_000
+    assert(
+      (
+        await context.service.resolveCode({ code: "D4E5F6", decision: "approve", ...ROUTE })
+      ).includes("一次性批准"),
+      "hours later the code must still answer the request it was issued for"
     )
-    assert.equal(expiringDecisions.length, 0)
+    assert.deepEqual(lingeringDecisions, [
+      { type: "approve", tool_call_id: lingering.tool_call.id }
+    ])
+
+    // What still ends a code is its request no longer waiting — decided on the
+    // desktop, or the run cancelled. Without that, codes would pile up for
+    // gates nobody can answer any more.
+    const decidedOnDesktop = approvalRequest({
+      id: "request-decided-on-desktop",
+      operation: "write_file",
+      cwd: context.root,
+      filePath: join(context.root, "desktop.ts")
+    })
+    context.register(decidedOnDesktop)
+    await waitFor(
+      () => context.deliveryText(decidedOnDesktop.id).includes("012ABC"),
+      "desktop-decided approval"
+    )
+    context.broker.unregister(decidedOnDesktop.id)
+    assert.equal(
+      await context.service.resolveCode({ code: "012ABC", decision: "approve", ...ROUTE }),
+      "审批短码不存在、已使用，或该审批已不在等待中。"
+    )
   } finally {
     context.service.dispose()
     context.database.close()
@@ -600,7 +628,7 @@ async function testAdvancedModesCanPublishAndResolve(): Promise<void> {
 async function main(): Promise<void> {
   await testDefaultOffDoesNotPublishOrResolve()
   await testWorkspaceApprovalIsSingleUseAndAudited()
-  await testAllowedDecisionAndExpiryRemainFailClosed()
+  await testAllowedDecisionsFailClosedAndCodesOutliveTheClock()
   await testAuditFlushFailureNeverResumesRuntime()
   await testDesktopDecisionWinsAuditFlushRace()
   await testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly()

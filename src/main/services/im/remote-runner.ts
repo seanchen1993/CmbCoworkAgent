@@ -867,7 +867,7 @@ export class ImRemoteRunner {
                   text:
                     interaction.kind === "user_input"
                       ? `任务需要补充输入，问题与 /回答 指令将发送到当前招乎会话；也可在 ${waitingMinutes} 分钟内到对应桌面会话处理。`
-                      : `任务正在等待桌面确认；如已开启远程审批，也可在 ${waitingMinutes} 分钟内通过招乎审批指令处理。`,
+                      : "任务正在等待桌面确认；如已开启远程审批，也可随时通过招乎审批指令处理，本轮不会因为等待过久被取消。",
                   prefix: this.targetPrefixForEvent(waiting)
                 })
               )
@@ -907,10 +907,26 @@ export class ImRemoteRunner {
                 reason: error instanceof Error ? error.message : String(error)
               })
             })
-            waitingTimer = setTimeout(() => {
-              waitingTimeoutReason = "REMOTE_INTERACTION_TIMEOUT"
-              abortExecution(new DOMException("Remote desktop interaction timed out", "AbortError"))
-            }, this.dependencies.waitingDesktopTtlMs)
+            // An approval waits without a deadline, matching the runtime's own
+            // rule (APPROVAL_TIMEOUT_MS is null): a safety gate must not be
+            // decided by the user being slow, and cancelling the turn under
+            // them is a decision. A question (user_input) still expires — its
+            // remote session expires on the same setting, so letting the run
+            // outlive it would only strand the turn with no way to answer.
+            //
+            // The wait is bounded by the things that make it pointless rather
+            // than by a clock: permit revocation, the desktop going offline
+            // (both abort from the renewal loop), a queue abort, or the user
+            // stopping the run. Until one of those, the thread stays busy and
+            // further IM messages on it defer as THREAD_BUSY.
+            if (interaction.kind !== "approval") {
+              waitingTimer = setTimeout(() => {
+                waitingTimeoutReason = "REMOTE_INTERACTION_TIMEOUT"
+                abortExecution(
+                  new DOMException("Remote desktop interaction timed out", "AbortError")
+                )
+              }, this.dependencies.waitingDesktopTtlMs)
+            }
           } catch (error) {
             interactionFailure.current = {
               reasonCode: "REMOTE_WAIT_STATE_FAILED",

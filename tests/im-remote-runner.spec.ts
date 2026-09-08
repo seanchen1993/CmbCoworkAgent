@@ -497,6 +497,59 @@ async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promi
   }
 }
 
+async function testApprovalWaitIsNotCancelledByTheWaitDeadline(): Promise<void> {
+  // The wait deadline exists for a question nobody answered. An approval is a
+  // different thing: the runtime never times one out (APPROVAL_TIMEOUT_MS is
+  // null), because letting the clock decide a safety gate IS a decision — and
+  // cancelling the turn under a person who is about to answer from Zhaohu is
+  // the worst version of it, since the code they were sent dies with the run.
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const runner = new ImRemoteRunner({
+    gateway,
+    eventStore: context.events,
+    conversationState: context.conversations,
+    capabilityGuard: featureCapabilityGuard(context),
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    setThreadLifecycle: async () => undefined,
+    createRunId: () => "run-feature-approval-wait",
+    waitingDesktopTtlMs: 5,
+    executeTurn: async ({ event, interactionWaitHooks, signal }) => {
+      assert(interactionWaitHooks)
+      await interactionWaitHooks.onWaitStart({
+        id: "approval-slow",
+        kind: "approval",
+        threadId: featureTarget.threadId
+      })
+      const notice = gateway.replies.at(-1)?.message.content ?? ""
+      assert(
+        !/\d+\s*分钟内/u.test(notice),
+        `an approval notice must not promise a window it no longer enforces: ${notice}`
+      )
+      // Well past a deadline that would have fired several times over.
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      assert(!signal.aborted, "the wait deadline must not abort an approval")
+      assert.equal(context.events.getEvent(event.eventId)?.state, "waiting_desktop")
+      await interactionWaitHooks.onWaitEnd({
+        id: "approval-slow",
+        kind: "approval",
+        threadId: featureTarget.threadId
+      })
+      return "批准后完成"
+    }
+  })
+  try {
+    const queued = await queueFeatureEvent(context, 1)
+    assert.equal(await runner.invoke(queued, new AbortController().signal), "completed")
+    const terminal = context.events.getEvent(queued.eventId)
+    assert.equal(terminal?.state, "completed")
+    assert.notEqual(terminal?.reasonCode, "REMOTE_INTERACTION_TIMEOUT")
+    assert(gateway.replies.at(-1)?.message.content.includes("批准后完成"))
+  } finally {
+    context.database.close()
+  }
+}
+
 async function testFeatureDesktopWaitTimeoutCancelsOnlyEvent(): Promise<void> {
   const context = await createContext()
   const gateway = new TestGateway()
@@ -615,6 +668,10 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   [
     "testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume",
     testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume
+  ],
+  [
+    "testApprovalWaitIsNotCancelledByTheWaitDeadline",
+    testApprovalWaitIsNotCancelledByTheWaitDeadline
   ],
   ["testFeatureDesktopWaitTimeoutCancelsOnlyEvent", testFeatureDesktopWaitTimeoutCancelsOnlyEvent],
   [
