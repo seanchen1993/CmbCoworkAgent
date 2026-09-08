@@ -1,4 +1,6 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
+import { join, resolve } from "node:path"
 import initSqlJs from "sql.js"
 import type {
   RemoteImAckV1,
@@ -497,6 +499,30 @@ async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promi
   }
 }
 
+function testEnteringAWaitArmsNoTimer(): void {
+  // The behavioural test below can only prove that a wait survives the seconds
+  // it is willing to sit there. It cannot prove the absence of a deadline —
+  // and a reintroduced one would be minutes long, so it would sail past.
+  //
+  // This reads the only place a wait deadline could live. onWaitStart is where
+  // both kinds of wait are set up; if no timer is created there, none exists.
+  const runner = readFileSync(
+    join(resolve(__dirname, ".."), "src/main/services/im/remote-runner.ts"),
+    "utf8"
+  )
+  const waitSetup = runner.slice(
+    runner.indexOf("onWaitStart: async (interaction) => {"),
+    runner.indexOf("onWaitEnd: async (interaction) => {")
+  )
+  assert(waitSetup.length > 0, "onWaitStart/onWaitEnd must still bracket the wait setup")
+  assert(
+    !waitSetup.includes("setTimeout("),
+    "entering a desktop wait must arm no timer: a question or approval sent to Zhaohu waits " +
+      "as long as the desktop would, and cancelling the run also kills the short code the " +
+      "person was sent"
+  )
+}
+
 async function testNoDesktopWaitIsCancelledByAClock(): Promise<void> {
   // Neither kind of wait has a deadline, and both are checked here because the
   // two used to differ and the reason they must not is the same.
@@ -518,9 +544,6 @@ async function testNoDesktopWaitIsCancelledByAClock(): Promise<void> {
       replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
       setThreadLifecycle: async () => undefined,
       createRunId: () => `run-feature-${kind}-wait`,
-      // A deadline short enough that any surviving timer fires many times over
-      // before the wait ends. Nothing may read it any more.
-      waitingDesktopTtlMs: 5,
       executeTurn: async ({ event, interactionWaitHooks, signal }) => {
         assert(interactionWaitHooks)
         await interactionWaitHooks.onWaitStart({
@@ -632,6 +655,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     "testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume",
     testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume
   ],
+  ["testEnteringAWaitArmsNoTimer", testEnteringAWaitArmsNoTimer],
   ["testNoDesktopWaitIsCancelledByAClock", testNoDesktopWaitIsCancelledByAClock],
   [
     "testInboxPolicyKeepsSchedulerButCutsRemoteRisks",

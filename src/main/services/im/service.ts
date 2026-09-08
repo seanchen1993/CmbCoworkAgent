@@ -46,7 +46,6 @@ export class ImUnifiedBotService {
   constructor(
     readonly gateway: ImGatewayClientPort = unavailableImGatewayClient,
     options: {
-      waitingDesktopTtlMs?: number
       skillCommands?: ImSkillCommandService
       getAgentRunDelivery?: () => AgentRunDelivery | null
       goalRuns?: ImGoalRunBridge
@@ -74,8 +73,7 @@ export class ImUnifiedBotService {
       gateway,
       replyClient: this.replyClient,
       goalRuns: this.goalRuns,
-      onDetachedResultAvailable: (notice) => this.modeNotificationPump.schedule(notice),
-      ...(options.waitingDesktopTtlMs ? { waitingDesktopTtlMs: options.waitingDesktopTtlMs } : {})
+      onDetachedResultAvailable: (notice) => this.modeNotificationPump.schedule(notice)
     })
     this.ingress = new ImIngressSequencer({
       inboxService: imInboxService,

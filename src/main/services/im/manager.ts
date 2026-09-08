@@ -153,11 +153,7 @@ export class BuiltinRobotManager {
       const settings = saveBuiltinRobotSettings(normalizedUpdates)
       if (!settings.enabled) {
         await this.stopNow()
-      } else if (
-        !previous.enabled ||
-        previous.gatewayUrl !== settings.gatewayUrl ||
-        previous.waitingDesktopTtlMinutes !== settings.waitingDesktopTtlMinutes
-      ) {
+      } else if (!previous.enabled || previous.gatewayUrl !== settings.gatewayUrl) {
         await this.stopNow()
         await this.startNow()
       } else if (!this.service) {
@@ -461,7 +457,6 @@ export class BuiltinRobotManager {
       }
     })
     const service = new ImUnifiedBotService(client, {
-      waitingDesktopTtlMs: settings.waitingDesktopTtlMinutes * 60_000,
       getAgentRunDelivery: this.getAgentRunDelivery
     })
     this.client = client

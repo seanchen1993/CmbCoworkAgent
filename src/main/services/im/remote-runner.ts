@@ -113,8 +113,6 @@ The current user message arrived through the managed enterprise IM robot. Treat 
 
 const MAX_COMPLETION_HOOK_REVISIONS = 2
 const COMPLETION_HOOK_REVISION_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
-const DEFAULT_WAITING_DESKTOP_TTL_MS = 10 * 60 * 1_000
-
 export type ImRemoteRunDisposition =
   | "completed"
   | "failed"
@@ -197,12 +195,6 @@ export interface ImRemoteRunnerDependencies {
   notifyThreadChanged: () => void
   createRunId: () => string
   permitRenewIntervalMs: number
-  /**
-   * Inert. No desktop wait is bounded by a clock any more — see onWaitStart.
-   * Kept so stored builtin-robot settings and the IPC that writes them keep
-   * type-checking; remove it together with waitingDesktopTtlMinutes.
-   */
-  waitingDesktopTtlMs: number
   setThreadLifecycle: (event: ImEventRecord, state: ImRemoteThreadLifecycleState) => Promise<void>
   onDetachedResultAvailable?: (notice: ImDetachedResultNotice) => void
   goalRuns: ImGoalRunBridge
@@ -769,7 +761,6 @@ export class ImRemoteRunner {
       notifyThreadChanged: dependencies.notifyThreadChanged ?? notifyRemoteThreadChanged,
       createRunId: dependencies.createRunId ?? randomUUID,
       permitRenewIntervalMs: dependencies.permitRenewIntervalMs ?? 30_000,
-      waitingDesktopTtlMs: dependencies.waitingDesktopTtlMs ?? DEFAULT_WAITING_DESKTOP_TTL_MS,
       setThreadLifecycle: dependencies.setThreadLifecycle ?? setRemoteThreadLifecycle,
       onDetachedResultAvailable: dependencies.onDetachedResultAvailable,
       goalRuns

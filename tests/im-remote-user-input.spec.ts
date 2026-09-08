@@ -109,8 +109,7 @@ async function createContext(
       enabled: options.enabled !== false,
       gatewayUrl: null,
       remoteAccess: "inbox-only",
-      remoteApprovalEnabled: false,
-      waitingDesktopTtlMinutes: 10
+      remoteApprovalEnabled: false
     }),
     getPendingForThread: (threadId) => pending.get(threadId) ?? null,
     submitResponse: (response, submitOptions) => {

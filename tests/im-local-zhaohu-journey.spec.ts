@@ -258,8 +258,7 @@ async function createJourney() {
         enabled: true,
         gatewayUrl: null,
         remoteAccess: "inbox-and-features",
-        remoteApprovalEnabled: true,
-        waitingDesktopTtlMinutes: 10
+        remoteApprovalEnabled: true
       }) as never,
     now: () => clock.now,
     createCode: () => "A1B2C3",
@@ -279,8 +278,7 @@ async function createJourney() {
         enabled: true,
         gatewayUrl: null,
         remoteAccess: "inbox-and-features",
-        remoteApprovalEnabled: true,
-        waitingDesktopTtlMinutes: 10
+        remoteApprovalEnabled: true
       }) as never,
     getPendingForThread: ((threadId: string) => pendingUserInputs.get(threadId) ?? null) as never,
     submitResponse: ((response: UserInputResponse) => {
@@ -377,7 +375,6 @@ async function createJourney() {
     notifyThreadChanged: () => undefined,
     createRunId: () => createId("run"),
     permitRenewIntervalMs: 60_000,
-    waitingDesktopTtlMs: 5_000,
     setThreadLifecycle: async () => undefined,
     executeTurn: async ({ event, signal, interactionWaitHooks }) => {
       executedMessages.push(event.messageText)

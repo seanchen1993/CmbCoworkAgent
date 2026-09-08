@@ -75,9 +75,6 @@ function settingsPatch(value: unknown): Partial<BuiltinRobotSettings> {
   if (typeof input.remoteApprovalEnabled === "boolean") {
     result.remoteApprovalEnabled = input.remoteApprovalEnabled
   }
-  if (Number.isSafeInteger(input.waitingDesktopTtlMinutes)) {
-    result.waitingDesktopTtlMinutes = Number(input.waitingDesktopTtlMinutes)
-  }
   return result
 }
 

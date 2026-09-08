@@ -120,8 +120,7 @@ async function createContext(
       enabled: true,
       gatewayUrl: null,
       remoteAccess: "inbox-only",
-      remoteApprovalEnabled: options.remoteApprovalEnabled !== false,
-      waitingDesktopTtlMinutes: 10
+      remoteApprovalEnabled: options.remoteApprovalEnabled !== false
     }),
     createCode: () => generatedCodes.shift() ?? "ABC123",
     warn: (_message, error) => warnings.push(error)
