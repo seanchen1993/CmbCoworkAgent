@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 
 const fileViewer = readFileSync(new URL("./FileViewer.tsx", import.meta.url), "utf8")
 const tabbedPanel = readFileSync(new URL("./TabbedPanel.tsx", import.meta.url), "utf8")
+const previewMode = readFileSync(new URL("../../lib/file-preview-mode.ts", import.meta.url), "utf8")
 const codeViewer = readFileSync(new URL("./CodeViewer.tsx", import.meta.url), "utf8")
 const rendererStyles = readFileSync(new URL("../../index.css", import.meta.url), "utf8")
 const highlightWorker = readFileSync(new URL("./code-highlight-worker.ts", import.meta.url), "utf8")
@@ -84,7 +85,7 @@ describe("persisted active file preview isolation", () => {
   it("assembles bounded web-source pages and soft-wraps compact minified source", () => {
     expect(fileViewer).toContain("assembleBoundedTextPreview")
     expect(fileViewer).toContain("WEB_SOURCE_PREVIEW_MAX_BYTES")
-    expect(fileViewer).toContain('htmlLike && previewMode !== "source" && !textPage?.truncated')
+    expect(fileViewer).toContain("textPreviewKind")
     expect(codeViewer).toContain("shouldSoftWrapCodePreview")
     expect(codeViewer).toContain("shiki-content-soft-wrap")
     expect(rendererStyles).toContain(".shiki-content-soft-wrap pre")
@@ -92,9 +93,10 @@ describe("persisted active file preview isolation", () => {
   })
 
   it("opens HTML files from workspace tabs in source mode", () => {
-    expect(tabbedPanel).toContain('/\\.html?$/i.test(activeFile.path) ? "source" : undefined')
+    expect(tabbedPanel).toContain("workspaceFilePreviewMode(activeFile.path)")
     expect(tabbedPanel).toContain("previewMode={activeFilePreviewMode}")
-    expect(fileViewer).toContain('htmlLike && previewMode !== "source" && !textPage?.truncated')
+    expect(fileViewer).toContain('previewKind === "html"')
+    expect(previewMode).toContain('input.previewMode !== "source"')
   })
 
   it("requires a trusted-source grant instead of exposing renderer path-to-token minting", () => {
