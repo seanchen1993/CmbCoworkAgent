@@ -32,6 +32,11 @@ import {
 } from "../agent/post-run-memory-maintenance"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+// The renderer composer emits this richer variant (description, when_to_use,
+// allowed_tools); skill-lifecycle/marker has a name+path-only twin under the
+// same tag. Match the composer so a remote turn persists what a desktop turn
+// would have.
+import { formatSkillUseBlock as formatComposerSkillUseBlock } from "../../shared/skill-use-block"
 import { resolveThreadOutputStyle, type AgentOutputStyle } from "../../shared/agent-output-style"
 import {
   areForcedCoordinatorRequestsAllowed,
@@ -6522,6 +6527,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const durableRuntimeTail = durableRuntimeTailSetup.value
         let userTranscriptMessagePersisted = false
         let visibleTranscriptUserMessage = message
+        // A managed transport resolves its skill out of band (trustedExplicitSkill)
+        // and hands us prose whose own markers were already neutralized, so the
+        // transcript would carry no record that a skill was chosen at all — the
+        // desktop draws its chip from a block inside the message text, which the
+        // renderer composer appends before submitting.
+        //
+        // Append the same block here so both paths render identically. Order is
+        // load-bearing twice over: the parser only accepts a block at the very
+        // end (anything after it is treated as prose), and appending ours after
+        // the neutralized text is what keeps a remote sender from forging one —
+        // theirs is defanged upstream, and only this one is ever added.
+        if (runExecutionContext.trustedExplicitSkill) {
+          visibleTranscriptUserMessage = [
+            visibleTranscriptUserMessage.trimEnd(),
+            formatComposerSkillUseBlock(runExecutionContext.trustedExplicitSkill)
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+        }
         let prefixedCoordinatorModeCommitted = false
 
         // A coordinator prefix is both a mode transition request and the first
