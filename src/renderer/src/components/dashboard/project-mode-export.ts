@@ -35,7 +35,7 @@ export const PROJECT_MODE_PROJECT_EXPORT_HEADER = [
   "总量口径·提交采纳明细",
   "总量口径·入库采纳率",
   "总量口径·入库采纳明细",
-  "DEV阶段会话数",
+  "DEV阶段轮次数",
   "DEV关联特性数",
   "Harness总量提交采纳率",
   "VibeCoding总量提交采纳率",
