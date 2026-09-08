@@ -32,7 +32,6 @@ import {
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
-import { normalizeChatScrollSettings, type ChatScrollSettings } from "../shared/chat-scroll"
 import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import {
   isAgentGraphRecursionLimit,
@@ -215,18 +214,13 @@ function checkpointFamiliesOf(
   return families
 }
 
-function registerCheckpointThreadId(
-  index: ThreadCheckpointArtifactIndex,
-  threadId: string
-): void {
+function registerCheckpointThreadId(index: ThreadCheckpointArtifactIndex, threadId: string): void {
   if (!SAFE_ID_RE.test(threadId)) return
   index.threadIds.add(threadId)
 
   for (const family of checkpointFamiliesOf(threadId)) {
     addCheckpointFamilyMember(
-      family.kind === "worker"
-        ? index.workerThreadIdsByParent
-        : index.workflowThreadIdsByParent,
+      family.kind === "worker" ? index.workerThreadIdsByParent : index.workflowThreadIdsByParent,
       family.parentThreadId,
       threadId
     )
@@ -297,19 +291,14 @@ function removeCheckpointFamilyMember(
   if (members.size === 0) membersByParent.delete(parentThreadId)
 }
 
-function forgetCheckpointThreadId(
-  index: ThreadCheckpointArtifactIndex,
-  threadId: string
-): void {
+function forgetCheckpointThreadId(index: ThreadCheckpointArtifactIndex, threadId: string): void {
   index.threadIds.delete(threadId)
   index.durableThreadIds.delete(threadId)
   index.quarantineFilenamesByThreadId.delete(threadId)
 
   for (const family of checkpointFamiliesOf(threadId)) {
     removeCheckpointFamilyMember(
-      family.kind === "worker"
-        ? index.workerThreadIdsByParent
-        : index.workflowThreadIdsByParent,
+      family.kind === "worker" ? index.workerThreadIdsByParent : index.workflowThreadIdsByParent,
       family.parentThreadId,
       threadId
     )
@@ -412,8 +401,7 @@ export function deleteThreadCheckpoint(threadId: string): void {
     threadCheckpointArtifactIndex.durableThreadIds.delete(threadId)
     const hasIndexedQuarantine =
       (threadCheckpointArtifactIndex.quarantineFilenamesByThreadId.get(threadId)?.size ?? 0) > 0
-    const hasRegisteredQuarantine =
-      listRegisteredSqliteQuarantineArtifacts(databasePath).length > 0
+    const hasRegisteredQuarantine = listRegisteredSqliteQuarantineArtifacts(databasePath).length > 0
     // Workflow subagents call this hot path after every completed run. Do not
     // retain one family-index entry per historical subagent for the process
     // lifetime; keep only ids that still own quarantine data for the parent's
@@ -734,9 +722,10 @@ function readMemorySettings(): MemorySettings {
       return memorySettingsCache
     }
     const parsed = JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8"))
-    memorySettingsCache = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as MemorySettings)
-      : {}
+    memorySettingsCache =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as MemorySettings)
+        : {}
     return memorySettingsCache
   } catch {
     memorySettingsCache = {}
@@ -1103,10 +1092,7 @@ function readDisabledSkillStoreSnapshot(): DisabledSkillStoreSnapshot {
       return { entries: [], fingerprint: "invalid", valid: false }
     }
     const content = readFileSync(DISABLED_SKILLS_FILE, "utf-8")
-    if (
-      Buffer.byteLength(content, "utf-8") >
-      SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES
-    ) {
+    if (Buffer.byteLength(content, "utf-8") > SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES) {
       return { entries: [], fingerprint: "invalid", valid: false }
     }
     const fingerprint = fingerprintDisabledSkillStoreText(content)
@@ -1186,10 +1172,7 @@ export function getDisabledSkillRuntimePolicy(): DisabledSkillRuntimePolicy {
   const snapshot = readDisabledSkillStoreSnapshot()
   const catalogGlobalRevision = getHookCatalogGlobalRevision()
   if (isSkillCatalogTopologyMutationBusy()) {
-    if (
-      lastKnownGoodDisabledSkillRuntimePolicy?.catalogGlobalRevision ===
-      catalogGlobalRevision
-    ) {
+    if (lastKnownGoodDisabledSkillRuntimePolicy?.catalogGlobalRevision === catalogGlobalRevision) {
       return lastKnownGoodDisabledSkillRuntimePolicy
     }
     return denyAllStandaloneSkillRuntimePolicy(catalogGlobalRevision)
@@ -1219,9 +1202,7 @@ export function getDisabledSkillRuntimePolicy(): DisabledSkillRuntimePolicy {
     lastKnownGoodDisabledSkillRuntimePolicy = policy
     return policy
   }
-  if (
-    lastKnownGoodDisabledSkillRuntimePolicy?.catalogGlobalRevision === catalogGlobalRevision
-  ) {
+  if (lastKnownGoodDisabledSkillRuntimePolicy?.catalogGlobalRevision === catalogGlobalRevision) {
     return lastKnownGoodDisabledSkillRuntimePolicy
   }
   return denyAllStandaloneSkillRuntimePolicy(catalogGlobalRevision)
@@ -1249,9 +1230,7 @@ export function isStandaloneSkillDisabledByRuntimePolicy(
   return isDiscoveredSkillDisabled(skill, policy.disabledSkillIdSet)
 }
 
-export function isDisabledSkillRuntimePolicyCurrent(
-  policy: DisabledSkillRuntimePolicy
-): boolean {
+export function isDisabledSkillRuntimePolicyCurrent(policy: DisabledSkillRuntimePolicy): boolean {
   return (
     !isSkillCatalogTopologyMutationBusy() &&
     policy.catalogGlobalRevision === getHookCatalogGlobalRevision()
@@ -2032,7 +2011,22 @@ export function setStoredDefaultModelId(modelId: string): void {
 }
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
-const CHAT_SCROLL_SETTINGS_KEY = "chatScrollSettings"
+const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
+
+export function getGitChangeNoticeEnabled(): boolean {
+  try {
+    return getSettingsStore().get(GIT_CHANGE_NOTICE_ENABLED_KEY, true) !== false
+  } catch (error) {
+    console.warn("[Storage] Failed to load Git change notice setting; using enabled:", error)
+    return true
+  }
+}
+
+export function setGitChangeNoticeEnabled(enabled: boolean): boolean {
+  const normalized = Boolean(enabled)
+  getSettingsStore().set(GIT_CHANGE_NOTICE_ENABLED_KEY, normalized)
+  return normalized
+}
 
 export function getWindowCloseBehavior(): WindowCloseBehavior {
   try {
@@ -2046,23 +2040,6 @@ export function getWindowCloseBehavior(): WindowCloseBehavior {
 export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
   const normalized = normalizeWindowCloseBehavior(behavior)
   getSettingsStore().set(WINDOW_CLOSE_BEHAVIOR_KEY, normalized)
-  return normalized
-}
-
-export function getChatScrollSettings(): ChatScrollSettings {
-  try {
-    return normalizeChatScrollSettings(
-      getSettingsStore().get(CHAT_SCROLL_SETTINGS_KEY, {}) as Partial<ChatScrollSettings>
-    )
-  } catch (error) {
-    console.warn("[Storage] Failed to load chat scroll settings; using defaults:", error)
-    return normalizeChatScrollSettings({})
-  }
-}
-
-export function setChatScrollSettings(settings: Partial<ChatScrollSettings>): ChatScrollSettings {
-  const normalized = normalizeChatScrollSettings(settings)
-  getSettingsStore().set(CHAT_SCROLL_SETTINGS_KEY, normalized)
   return normalized
 }
 
@@ -4375,10 +4352,7 @@ function collectSkillHookSourcesFromDir(
   if (!existsSync(sourceDir)) return result
 
   const pushSkill = (skill: ReturnType<typeof discoverSkillsSync>[number]): void => {
-    if (
-      respectDisabledList &&
-      isStandaloneSkillDisabledByRuntimePolicy(skill, runtimePolicy)
-    ) {
+    if (respectDisabledList && isStandaloneSkillDisabledByRuntimePolicy(skill, runtimePolicy)) {
       return
     }
     const skillDir = skill.rootDir
@@ -4545,10 +4519,7 @@ export function getEnabledSkillHookMetadata(): SkillHookMetadata[] {
     return _skillHookMetadataCache
   }
   const metadata = buildEnabledSkillHookMetadata()
-  if (
-    !topologyBusy &&
-    catalogGlobalRevision === getHookCatalogGlobalRevision()
-  ) {
+  if (!topologyBusy && catalogGlobalRevision === getHookCatalogGlobalRevision()) {
     _skillHookMetadataCache = metadata
     _skillHookMetadataCacheRevision = catalogGlobalRevision
   }

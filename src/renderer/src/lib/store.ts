@@ -25,7 +25,6 @@ import {
   normalizeCompleteMessageIds,
   normalizeMessageRoleCollisionIds
 } from "../../../shared/message-role-collision"
-import { normalizeChatScrollSettings, type ChatScrollSettings } from "../../../shared/chat-scroll"
 import { revalidateModelCatalog } from "./model-catalog-cache"
 import type { ThreadDeleteOptions, ThreadMetadataPatch } from "../../../main/types"
 import { chatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
@@ -942,7 +941,6 @@ interface AppState {
   // Settings dialog state
   settingsOpen: boolean
   browserCdpConfig: BrowserCdpConfig
-  chatScrollSettings: ChatScrollSettings
 
   // Sidebar state
   sidebarCollapsed: boolean
@@ -1003,6 +1001,7 @@ interface AppState {
   // Customize view state
   showCustomizeView: boolean
   customizeInitialTab: string | null
+  customizeInitialSection: string | null
   marketInitialSkillCategory: string | null
   marketInitialSkillSearchQuery: string | null
   marketInitialSkillDetailName: string | null
@@ -1041,9 +1040,14 @@ interface AppState {
 
   // Settings actions
   setSettingsOpen: (open: boolean) => void
-  setChatScrollSettings: (settings: ChatScrollSettings) => void
-  loadChatScrollSettings: () => Promise<void>
   setBrowserCdpConfig: (config: BrowserCdpConfig) => void
+  setGitChangeNoticeEnabled: (enabled: boolean) => Promise<void>
+  loadGitChangeNoticeEnabled: () => Promise<void>
+  gitChangeNoticeEnabled: boolean
+  gitChangeNoticePendingByThread: Record<string, boolean>
+  gitWorkspaceByThread: Record<string, boolean>
+  setGitChangeNoticePending: (threadId: string, pending: boolean) => void
+  setGitWorkspaceStatus: (threadId: string, isGit: boolean) => void
 
   // Sidebar actions
   toggleSidebar: () => void
@@ -1062,7 +1066,7 @@ interface AppState {
   setShowHarnessBoardView: (show: boolean) => void
 
   // Customize actions
-  setShowCustomizeView: (show: boolean, tab?: string) => void
+  setShowCustomizeView: (show: boolean, tab?: string, section?: string) => void
   setMarketInitialSkillCategory: (category: string | null) => void
   setMarketInitialSkillSearchQuery: (query: string | null) => void
   setMarketInitialSkillDetailName: (name: string | null) => void
@@ -1146,8 +1150,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   rightPanelTab: "todos",
   rightModule: "work",
   settingsOpen: false,
-  chatScrollSettings: normalizeChatScrollSettings({}),
   browserCdpConfig: DEFAULT_BROWSER_CDP_CONFIG,
+  gitChangeNoticeEnabled: true,
+  gitChangeNoticePendingByThread: {},
+  gitWorkspaceByThread: {},
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
   rightPanelWorkRequestSequence: 0,
@@ -1169,6 +1175,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   previousThreadId: null,
   showCustomizeView: false,
   customizeInitialTab: null,
+  customizeInitialSection: null,
   marketInitialSkillCategory: null,
   marketInitialSkillSearchQuery: null,
   marketInitialSkillDetailName: null,
@@ -1591,21 +1598,48 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ settingsOpen: open })
   },
 
-  setChatScrollSettings: (settings: ChatScrollSettings) => {
-    set({ chatScrollSettings: normalizeChatScrollSettings(settings) })
+  setBrowserCdpConfig: (browserCdpConfig: BrowserCdpConfig) => {
+    set({ browserCdpConfig })
   },
 
-  loadChatScrollSettings: async () => {
+  setGitChangeNoticeEnabled: async (enabled: boolean) => {
+    await window.electron.setGitChangeNoticeEnabled(enabled)
+    set({
+      gitChangeNoticeEnabled: enabled,
+      ...(enabled ? {} : { gitChangeNoticePendingByThread: {} })
+    })
+  },
+
+  loadGitChangeNoticeEnabled: async () => {
     try {
-      const chatScrollSettings = await window.electron.getChatScrollSettings()
-      get().setChatScrollSettings(chatScrollSettings)
+      const enabled = await window.electron.getGitChangeNoticeEnabled()
+      set({
+        gitChangeNoticeEnabled: enabled,
+        ...(enabled ? {} : { gitChangeNoticePendingByThread: {} })
+      })
     } catch (error) {
-      console.warn("[Store] Failed to load chat scroll settings; using defaults:", error)
+      console.warn("[Store] Failed to load Git change notice setting; using enabled:", error)
     }
   },
 
-  setBrowserCdpConfig: (browserCdpConfig: BrowserCdpConfig) => {
-    set({ browserCdpConfig })
+  setGitChangeNoticePending: (threadId: string, pending: boolean) => {
+    set((state) => {
+      if (pending && !state.gitChangeNoticeEnabled) return state
+      if (state.gitChangeNoticePendingByThread[threadId] === pending) return state
+      return {
+        gitChangeNoticePendingByThread: {
+          ...state.gitChangeNoticePendingByThread,
+          [threadId]: pending
+        }
+      }
+    })
+  },
+
+  setGitWorkspaceStatus: (threadId: string, isGit: boolean) => {
+    set((state) => {
+      if (state.gitWorkspaceByThread[threadId] === isGit) return state
+      return { gitWorkspaceByThread: { ...state.gitWorkspaceByThread, [threadId]: isGit } }
+    })
   },
 
   // Sidebar actions
@@ -2194,7 +2228,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  setShowCustomizeView: (show: boolean, tab?: string) => {
+  setShowCustomizeView: (show: boolean, tab?: string, section?: string) => {
     if (show) {
       set({
         showCustomizeView: true,
@@ -2203,6 +2237,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showClaudeCodeView: false,
         showDashboardView: false,
         customizeInitialTab: tab ?? null,
+        customizeInitialSection: section ?? null,
         mainView: "customize",
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
@@ -2216,6 +2251,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         showCustomizeView: false,
         customizeInitialTab: null,
+        customizeInitialSection: null,
         mainView: "thread",
         currentThreadId,
         previousThreadId: null

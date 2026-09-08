@@ -97,9 +97,8 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
-const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
-const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
-const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
+const GIT_CHANGE_NOTICE_GET_CHANNEL = "app:get-git-change-notice-enabled"
+const GIT_CHANGE_NOTICE_SET_CHANNEL = "app:set-git-change-notice-enabled"
 const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
 const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
@@ -441,14 +440,14 @@ import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "
 import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import {
-  getChatScrollSettings,
+  getGitChangeNoticeEnabled,
   getOpenworkDir,
   getStoredAgentGraphRecursionLimit,
   getStoredWorkflowWorktreeRemoveTimeoutMinutes,
   getStoredWorkflowWorktreeTimeoutMinutes,
   getWindowCloseBehavior,
   isKeepAwakeEnabled,
-  setChatScrollSettings,
+  setGitChangeNoticeEnabled,
   setStoredAgentGraphRecursionLimit,
   setStoredWorkflowWorktreeRemoveTimeoutMinutes,
   setStoredWorkflowWorktreeTimeoutMinutes,
@@ -642,16 +641,6 @@ function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBeha
     mainWindow.webContents.send(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, savedBehavior)
   }
   return savedBehavior
-}
-
-function saveChatScrollSettings(
-  settings: Parameters<typeof setChatScrollSettings>[0]
-): ReturnType<typeof setChatScrollSettings> {
-  const savedSettings = setChatScrollSettings(settings)
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, savedSettings)
-  }
-  return savedSettings
 }
 
 function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
@@ -1137,29 +1126,27 @@ if (browserNativeMessagingHostLaunch) {
       return saveWindowCloseBehavior(behavior)
     })
 
-    ipcMain.handle(CHAT_SCROLL_SETTINGS_GET_CHANNEL, (event) => {
+    ipcMain.handle(GIT_CHANGE_NOTICE_GET_CHANNEL, (event) => {
       if (
         !mainWindow ||
         mainWindow.isDestroyed() ||
         event.sender.id !== mainWindow.webContents.id
       ) {
-        throw new Error("Chat scroll settings are only available to the main window")
+        throw new Error("Git change notice settings are only available to the main window")
       }
-      return getChatScrollSettings()
+      return getGitChangeNoticeEnabled()
     })
 
-    ipcMain.handle(CHAT_SCROLL_SETTINGS_SET_CHANNEL, (event, settings: unknown) => {
+    ipcMain.handle(GIT_CHANGE_NOTICE_SET_CHANNEL, (event, enabled: unknown) => {
       if (
         !mainWindow ||
         mainWindow.isDestroyed() ||
         event.sender.id !== mainWindow.webContents.id
       ) {
-        throw new Error("Chat scroll settings are only available to the main window")
+        throw new Error("Git change notice settings are only available to the main window")
       }
-      if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
-        throw new Error("Invalid chat scroll settings")
-      }
-      return saveChatScrollSettings(settings as Parameters<typeof setChatScrollSettings>[0])
+      if (typeof enabled !== "boolean") throw new Error("Invalid Git change notice setting")
+      return setGitChangeNoticeEnabled(enabled)
     })
 
     ipcMain.handle(AGENT_RUNTIME_SETTINGS_GET_CHANNEL, (event): AgentRuntimeSettings => {

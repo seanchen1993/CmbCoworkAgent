@@ -447,6 +447,10 @@ interface DashboardTraceDetail {
   triggerSource?: string
   nodes?: TraceNode[]
   rawAvailable: boolean
+  /** true = `_raw` 是「列表预览刻意没取」，不是「这条 trace 坏了」。渲染层据此
+   * 拒绝把预览行当成对话来渲染——没有 raw 就没有对话数据，任何据此产出的内容
+   * 都是编造。 */
+  rawPending?: boolean
   rawError?: string
 }
 
@@ -2526,10 +2530,10 @@ function normalizeTraceDetail(
   // 预览批次没请求 _raw，跳过解析：省掉每行一次 JSON.parse + 建树，也避免把
   // 「没取」误报成「解析失败」。个别文档若仍带 _raw（旧索引/别的调用方），
   // 照常解析，不因预览标记而丢信息。
-  const parsed =
-    options?.preview && source._raw === undefined
-      ? { error: TRACE_PREVIEW_RAW_OMITTED }
-      : parseRawTrace(source._raw)
+  const rawOmittedForPreview = options?.preview === true && source._raw === undefined
+  const parsed = rawOmittedForPreview
+    ? { error: TRACE_PREVIEW_RAW_OMITTED }
+    : parseRawTrace(source._raw)
 
   if (parsed.trace) {
     const trace = normalizeParsedTrace(parsed.trace, source, hit)
@@ -2621,6 +2625,7 @@ function normalizeTraceDetail(
     evolvedSkills: asStringArray(source.evolvedSkills),
     triggerSource: normalizeTraceTriggerSource(source.triggerSource),
     rawAvailable: false,
+    ...(rawOmittedForPreview ? { rawPending: true as const } : {}),
     rawError: parsed.error
   })
 }

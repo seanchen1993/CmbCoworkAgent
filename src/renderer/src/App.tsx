@@ -51,6 +51,7 @@ import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
+import { useGitChangeNoticeListener } from "@/components/git/GitChangeNotice"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { getThemeDefinition } from "@/lib/theme-registry"
@@ -227,7 +228,7 @@ function App(): React.JSX.Element {
     currentThreadId,
     loadThreads,
     loadDashboardAllowed,
-    loadChatScrollSettings,
+    loadGitChangeNoticeEnabled,
     loadModels,
     dashboardAllowed,
     createThread,
@@ -247,13 +248,16 @@ function App(): React.JSX.Element {
     setShowCustomizeView,
     setEvolutionTab,
     setCloudEvolutionUpdates,
-    pluginVersion
+    pluginVersion,
+    gitChangeNoticePendingByThread,
+    gitWorkspaceByThread,
+    setGitChangeNoticePending
   } = useAppStore(
     useShallow((state) => ({
       currentThreadId: state.currentThreadId,
       loadThreads: state.loadThreads,
       loadDashboardAllowed: state.loadDashboardAllowed,
-      loadChatScrollSettings: state.loadChatScrollSettings,
+      loadGitChangeNoticeEnabled: state.loadGitChangeNoticeEnabled,
       loadModels: state.loadModels,
       dashboardAllowed: state.dashboardAllowed,
       createThread: state.createThread,
@@ -273,7 +277,10 @@ function App(): React.JSX.Element {
       setShowCustomizeView: state.setShowCustomizeView,
       setEvolutionTab: state.setEvolutionTab,
       setCloudEvolutionUpdates: state.setCloudEvolutionUpdates,
-      pluginVersion: state.pluginVersion
+      pluginVersion: state.pluginVersion,
+      gitChangeNoticePendingByThread: state.gitChangeNoticePendingByThread,
+      gitWorkspaceByThread: state.gitWorkspaceByThread,
+      setGitChangeNoticePending: state.setGitChangeNoticePending
     }))
   )
   const { ownedSkillKeys } = useMyUploadedSkills()
@@ -303,8 +310,6 @@ function App(): React.JSX.Element {
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
   const [browserFullscreen, setBrowserFullscreen] = useState(false)
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
-  const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
-  const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
 
   // Version and local-IP metadata belong to the application lifetime, not to a
   // ChatContainer. Keeping these listeners here avoids repeating IPC requests
@@ -704,37 +709,20 @@ function App(): React.JSX.Element {
     handlePreviewExpand()
   }, [handlePreviewCollapse, handlePreviewExpand, rightModule])
 
-  const setThreadPendingGitDiff = useCallback((threadId: string, pending: boolean) => {
-    setPendingGitDiffByThread((prev) => {
-      if (prev[threadId] === pending) return prev
-      return { ...prev, [threadId]: pending }
-    })
-  }, [])
-
-  const handleThreadGitStatusChange = useCallback((threadId: string, isGit: boolean) => {
-    setIsGitWorkspaceByThread((prev) => {
-      if (prev[threadId] === isGit) return prev
-      return { ...prev, [threadId]: isGit }
-    })
-  }, [])
-
   const handleHarnessActiveSessionThreadChange = useCallback((threadId: string | null) => {
     setHarnessSessionThreadId((prev) => (prev === threadId ? prev : threadId))
   }, [])
 
   const activeRightPanelThreadId = mainView === "harness" ? harnessSessionThreadId : currentThreadId
+  useGitChangeNoticeListener(activeRightPanelThreadId, rightModule)
   const renderedRightPanelThreadId =
     renderedMainView === "harness" ? renderedHarnessSessionThreadId : renderedThreadId
   const isActiveRightPanelThreadGit = activeRightPanelThreadId
-    ? Boolean(isGitWorkspaceByThread[activeRightPanelThreadId])
+    ? Boolean(gitWorkspaceByThread[activeRightPanelThreadId])
     : false
   const hasPendingGitDiff = activeRightPanelThreadId
-    ? Boolean(pendingGitDiffByThread[activeRightPanelThreadId] && isActiveRightPanelThreadGit)
-    : false
-  const renderedHasPendingGitDiff = renderedRightPanelThreadId
     ? Boolean(
-        pendingGitDiffByThread[renderedRightPanelThreadId] &&
-        isGitWorkspaceByThread[renderedRightPanelThreadId]
+        gitChangeNoticePendingByThread[activeRightPanelThreadId] && isActiveRightPanelThreadGit
       )
     : false
   const showRightPanelModuleControls =
@@ -742,18 +730,10 @@ function App(): React.JSX.Element {
 
   const selectGitModule = useCallback(() => {
     if (activeRightPanelThreadId) {
-      setThreadPendingGitDiff(activeRightPanelThreadId, false)
+      setGitChangeNoticePending(activeRightPanelThreadId, false)
     }
     openResourcePanelOverlay("git")
-  }, [
-    activeRightPanelThreadId,
-    setThreadPendingGitDiff
-  ])
-
-  const dismissGitChangeNotice = useCallback(() => {
-    if (!activeRightPanelThreadId) return
-    setThreadPendingGitDiff(activeRightPanelThreadId, false)
-  }, [activeRightPanelThreadId, setThreadPendingGitDiff])
+  }, [activeRightPanelThreadId, setGitChangeNoticePending])
 
   const rightModuleRef = useRef(rightModule)
   const previousActiveRightPanelThreadIdRef = useRef<string | null>(activeRightPanelThreadId)
@@ -824,28 +804,6 @@ function App(): React.JSX.Element {
     }
   }, [mainView])
 
-  useEffect(() => {
-    const cleanupFs = window.api.workspace.onFilesChanged((data) => {
-      // One physical-workspace event can affect many tasks. Fold every badge
-      // update into one React state transaction; ThreadProvider owns the one
-      // shared file-tree invalidation/scan.
-      setPendingGitDiffByThread((previous) => {
-        let next = previous
-        for (const threadId of data.threadIds) {
-          // Keep current behavior: when the user is already viewing this task's
-          // Git panel, do not raise a redundant notice for it.
-          if (rightModule === "git" && threadId === activeRightPanelThreadId) continue
-          if (previous[threadId] === true) continue
-          if (next === previous) next = { ...previous }
-          next[threadId] = true
-        }
-        return next
-      })
-    })
-
-    return cleanupFs
-  }, [activeRightPanelThreadId, rightModule])
-
   // Reset drag start on mouse up
   useEffect(() => {
     const handleMouseUp = (): void => {
@@ -874,7 +832,7 @@ function App(): React.JSX.Element {
         if (threads.length === 0) {
           await createThread()
         }
-        void loadChatScrollSettings()
+        await loadGitChangeNoticeEnabled()
       } catch (error) {
         console.error("Failed to initialize:", error)
       } finally {
@@ -882,7 +840,13 @@ function App(): React.JSX.Element {
       }
     }
     init()
-  }, [loadThreads, setBrowserCdpConfig, loadDashboardAllowed, loadChatScrollSettings, createThread])
+  }, [
+    loadThreads,
+    setBrowserCdpConfig,
+    loadDashboardAllowed,
+    loadGitChangeNoticeEnabled,
+    createThread
+  ])
 
   useEffect(() => {
     let cancelled = false
@@ -1117,11 +1081,13 @@ function App(): React.JSX.Element {
             className="flex flex-1 min-w-0 items-center justify-center gap-1.5"
           >
             <CmbDevClawLogo className="size-7 shrink-0 object-contain" />
-            <span className="app-badge-name">CMBDev<span className="text-red-500">Claw</span></span>
+            <span className="app-badge-name">
+              CMBDev<span className="text-red-500">Claw</span>
+            </span>
           </div>
           {/* Right: right panel toggle */}
           <div className="flex flex-1 h-full items-center justify-end pl-1 gap-1">
-            {showRightPanelModuleControls && !isAgentFocusActive && (
+            {showRightPanelModuleControls && !rightPanelCollapsed && !isAgentFocusActive && (
               <>
                 <button
                   type="button"
@@ -1283,16 +1249,7 @@ function App(): React.JSX.Element {
                         style={{ width: `${workerSplitLeftPercent}%` }}
                       >
                         {renderedThreadId ? (
-                          <TabbedPanel
-                            threadId={renderedThreadId}
-                            showTabBar={false}
-                            hasPendingGitDiffNotice={
-                              renderedHasPendingGitDiff && rightModule !== "git"
-                            }
-                            onRequestOpenGitPanel={selectGitModule}
-                            onDismissGitChangeNotice={dismissGitChangeNotice}
-                            onThreadGitStatusChange={handleThreadGitStatusChange}
-                          />
+                          <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
                         ) : (
                           <div className="flex flex-1 items-center justify-center text-muted-foreground">
                             选择或创建一个任务开始
@@ -1314,16 +1271,7 @@ function App(): React.JSX.Element {
                     !previewFullscreen && (
                       <main className={fullscreenMainClassName} style={fullscreenMainStyle}>
                         {renderedThreadId ? (
-                          <TabbedPanel
-                            threadId={renderedThreadId}
-                            showTabBar={false}
-                            hasPendingGitDiffNotice={
-                              renderedHasPendingGitDiff && rightModule !== "git"
-                            }
-                            onRequestOpenGitPanel={selectGitModule}
-                            onDismissGitChangeNotice={dismissGitChangeNotice}
-                            onThreadGitStatusChange={handleThreadGitStatusChange}
-                          />
+                          <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
                         ) : (
                           <div className="flex flex-1 items-center justify-center text-muted-foreground">
                             选择或创建一个任务开始
@@ -1423,10 +1371,6 @@ function App(): React.JSX.Element {
                   }
                 >
                   <HarnessBoardView
-                    hasPendingGitDiffNotice={renderedHasPendingGitDiff && rightModule !== "git"}
-                    onRequestOpenGitPanel={selectGitModule}
-                    onDismissGitChangeNotice={dismissGitChangeNotice}
-                    onThreadGitStatusChange={handleThreadGitStatusChange}
                     onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
                   />
                 </Suspense>

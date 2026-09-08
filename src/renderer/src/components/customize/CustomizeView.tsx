@@ -159,7 +159,14 @@ function CustomizePanelFallback(): React.JSX.Element {
 }
 
 export function CustomizeView(): React.JSX.Element {
-  const { setShowCustomizeView, customizeInitialTab, pendingEvolution, currentThreadId, threads } =
+  const {
+    setShowCustomizeView,
+    customizeInitialTab,
+    customizeInitialSection,
+    pendingEvolution,
+    currentThreadId,
+    threads
+  } =
     useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     customizeInitialTab === "commitPolicy"
@@ -270,7 +277,7 @@ export function CustomizeView(): React.JSX.Element {
 
       <Suspense fallback={<CustomizePanelFallback />}>
         {activeTab === "general" ? (
-          <GeneralPanel />
+          <GeneralPanel targetSection={customizeInitialSection} />
         ) : activeTab === "skills" ? (
           <SkillsPanel />
         ) : activeTab === "connectors" ? (
