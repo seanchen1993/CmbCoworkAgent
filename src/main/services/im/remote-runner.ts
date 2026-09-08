@@ -775,21 +775,45 @@ export class ImRemoteRunner {
   }
 
   async invoke(event: ImEventRecord, queueSignal: AbortSignal): Promise<ImRemoteRunDisposition> {
-    if (!this.dependencies.gateway.isAuthenticated()) return "deferred_gateway"
-
-    const permit = await this.dependencies.gateway.acquireExecutionPermit(event)
-    if (permit.status !== "granted" || !permit.leaseId || !permit.expiresAt) {
-      return "deferred_gateway"
+    if (!this.dependencies.gateway.isAuthenticated()) {
+      return this.defer(event, "deferred_gateway", "gateway is not authenticated")
     }
-    await this.recordPermit(event, permit)
 
     const runId = this.dependencies.createRunId()
     const target = event.targetSnapshot
     if (!target) {
       return this.finalizeRejected(event, "REMOTE_TARGET_INVALID", "消息没有可执行目标。")
     }
+
+    // Look before acquiring. A permit cannot be handed back — the gateway port
+    // offers acquire and renew and nothing else — and nothing renews one until
+    // the run itself starts, further down. So taking a permit and only then
+    // discovering the Thread is busy strands it: a desktop turn holds that
+    // Thread for minutes, and by the time the lease is released the permit
+    // this event is carrying has long expired.
+    //
+    // The claim below is still the authority; this only keeps the common case
+    // (a desktop turn in progress) from spending a permit it cannot use. A
+    // Thread that goes busy inside the window between the two behaves exactly
+    // as it did before.
+    if (getLocalThreadRunLease(target.threadId)) {
+      return this.defer(event, "deferred_thread_busy", "Thread is busy before permit acquisition")
+    }
+
+    const permit = await this.dependencies.gateway.acquireExecutionPermit(event)
+    if (permit.status !== "granted" || !permit.leaseId || !permit.expiresAt) {
+      return this.defer(
+        event,
+        "deferred_gateway",
+        `permit ${permit.status}${permit.reasonCode ? `: ${permit.reasonCode}` : ""}`
+      )
+    }
+    await this.recordPermit(event, permit)
+
     const claim = claimLocalThreadRunLease({ threadId: target.threadId, owner: "im", runId })
-    if (!claim.acquired) return "deferred_thread_busy"
+    if (!claim.acquired) {
+      return this.defer(event, "deferred_thread_busy", "Thread went busy after permit acquisition")
+    }
     const unregisterInteractionRoute = this.dependencies.interactionRoutes.register({
       eventId: event.eventId,
       principalId: event.principalId,
@@ -1166,6 +1190,31 @@ export class ImRemoteRunner {
       unregisterInteractionRoute()
       releaseLocalThreadRunLease(target.threadId, "im", runId)
     }
+  }
+
+  /**
+   * Records why a turn did not start, and leaves the event queued.
+   *
+   * Deferrals used to return silently, which is why a message that never ran
+   * was indistinguishable from one that was never received. What wakes an
+   * event depends on which of these it was: "deferred_thread_busy" is woken by
+   * the Thread's lease release, while "deferred_gateway" waits for the gateway
+   * to come back online (resumeQueued) or for the next inbound message — so
+   * the distinction is the first thing anyone needs when a message goes quiet.
+   */
+  private defer(
+    event: ImEventRecord,
+    disposition: Extract<ImRemoteRunDisposition, `deferred_${string}`>,
+    reason: string
+  ): ImRemoteRunDisposition {
+    console.log("[IM] Turn deferred, event stays queued:", {
+      eventId: event.eventId,
+      shortCode: eventShortCode(event.eventId),
+      threadId: event.targetSnapshot?.threadId,
+      disposition,
+      reason
+    })
+    return disposition
   }
 
   private async recordPermit(

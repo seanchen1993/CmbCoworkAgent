@@ -147,7 +147,10 @@ class TestGateway implements ImGatewayClientPort {
     this.acknowledgements.push(ack)
   }
 
+  permitAcquisitions = 0
+
   async acquireExecutionPermit(event: { leaseId: string }): Promise<ImExecutionPermitResult> {
+    this.permitAcquisitions += 1
     return {
       status: "granted",
       leaseId: event.leaseId,
@@ -353,6 +356,16 @@ async function runForeignOwnerReleaseWakeScenario(
     await queue.notify(queued.conversationKey)
     assert.equal(context.events.getEvent(queued.eventId)?.state, "queued")
     assert.equal(executions, 0)
+    // A permit cannot be handed back and nothing renews one before the run
+    // starts, so a Thread that is already busy must not spend one. It used to:
+    // the permit was acquired first and then abandoned when the claim failed,
+    // and it had expired by the time the desktop released the Thread minutes
+    // later — leaving the retry to ask for a permit while carrying a dead one.
+    assert.equal(
+      gateway.permitAcquisitions,
+      0,
+      "a busy Thread must not consume an execution permit it cannot use"
+    )
 
     assert(releaseLocalThreadRunLease(target.threadId, owner, foreignRunId))
     await waitFor(
@@ -361,6 +374,9 @@ async function runForeignOwnerReleaseWakeScenario(
     )
 
     assert.equal(executions, 1)
+    // And the run that finally happens uses a permit acquired for it, not one
+    // taken minutes earlier on an attempt that never ran.
+    assert.equal(gateway.permitAcquisitions, 1)
     assert.equal(gateway.replies.at(-1)?.message.content, `【远程收件箱】\n${owner} released`)
   } finally {
     await queue.stop()
