@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
-import type { AgentMode } from "../../agent/coordinator-mode"
 import { coordinatorWorkerManager } from "../../agent/coordinator-worker-manager"
 import { SqlGoalStore } from "../../agent/goals/goal-store"
 import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
@@ -20,7 +19,8 @@ import {
 import {
   ImFeatureBindingError,
   imFeatureBindingService,
-  type ImFeatureBindingService
+  type ImFeatureBindingService,
+  type ImFeatureSessionMode
 } from "./feature-binding-service"
 import {
   imRemoteGrantStore,
@@ -277,7 +277,7 @@ export class ImRemoteAccessService {
     grantId: string
     grantVersion: number
     /** Omitted lets the Feature's own configuration choose the session's mode. */
-    agentMode?: AgentMode
+    sessionMode?: ImFeatureSessionMode
   }): Promise<Extract<ImTargetSnapshot, { kind: "thread" }>> {
     const grant = this.dependencies.grants.getFeatureGrantById(input.grantId)
     if (!grant || grant.grantVersion !== input.grantVersion || grant.state !== "active") {
@@ -298,7 +298,7 @@ export class ImRemoteAccessService {
         projectId: grant.projectId,
         featureSlug: grant.featureSlug,
         targetId,
-        ...(input.agentMode ? { agentMode: input.agentMode } : {})
+        ...(input.sessionMode ? { sessionMode: input.sessionMode } : {})
       })
     } catch (error) {
       if (error instanceof ImFeatureBindingError) {

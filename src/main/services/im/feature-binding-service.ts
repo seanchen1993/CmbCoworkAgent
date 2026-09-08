@@ -44,6 +44,20 @@ export type ImFeatureValidationResult =
     }
   | { valid: false; reasonCode: string; message: string }
 
+/**
+ * A session's shape, as a person picks it in Zhaohu.
+ *
+ * Two fields rather than one because normal mode carries a second axis: the
+ * Feature vocabulary's solo and multi are both agentMode "normal" and differ
+ * only in whether subagents exist (thread-service.ts). Naming just the mode
+ * would let solo silently become multi, since thread-service defaults
+ * subagentsEnabled to true whenever it was not stated.
+ */
+export interface ImFeatureSessionMode {
+  agentMode: AgentMode
+  subagentsEnabled?: boolean
+}
+
 export interface ImCreatedFeatureThread {
   threadId: string
   /** Whatever the shared creation path settled on — requested, inherited or default. */
@@ -313,7 +327,7 @@ export class ImFeatureBindingService {
    * the same Feature produced a workflow session on the desktop and an ordinary
    * one from Zhaohu.
    *
-   * `agentMode` is therefore passed through only when a person asked for it,
+   * `sessionMode` is therefore passed through only when a person asked for it,
    * and its absence is what lets the Feature decide.
    */
   async createFeatureThread(input: {
@@ -322,7 +336,7 @@ export class ImFeatureBindingService {
     projectId: string
     featureSlug: string
     targetId: string
-    agentMode?: AgentMode
+    sessionMode?: ImFeatureSessionMode
   }): Promise<ImCreatedFeatureThread> {
     this.dependencies.conversationState.assertConversationOwner(
       input.conversationKey,
@@ -335,7 +349,14 @@ export class ImFeatureBindingService {
     const thread = await this.dependencies.createThread({
       title,
       workspacePath: validation.workspacePath,
-      ...(input.agentMode ? { agentMode: input.agentMode } : {}),
+      ...(input.sessionMode
+        ? {
+            agentMode: input.sessionMode.agentMode,
+            ...(input.sessionMode.subagentsEnabled === undefined
+              ? {}
+              : { subagentsEnabled: input.sessionMode.subagentsEnabled })
+          }
+        : {}),
       targetKind: "feature",
       remoteThread: true,
       remoteReadOnly: false,

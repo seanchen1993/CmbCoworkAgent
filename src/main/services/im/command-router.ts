@@ -1,7 +1,7 @@
-import type { AgentMode } from "../../agent/coordinator-mode"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getLocalThreadRunLease } from "../../agent/thread-run-lease"
 import { getThread } from "../../db"
+import type { ImFeatureSessionMode } from "./feature-binding-service"
 import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
 import { hasPendingUserInputForThread } from "../user-input"
 import {
@@ -102,29 +102,37 @@ interface ImCommandRouterDependencies {
 }
 
 /**
- * What a person types in Zhaohu, and the thread mode it selects.
+ * What a person types in Zhaohu, and the session it produces.
  *
- * Three words on purpose. The Feature's own configuration uses a different set
- * (solo / multi / agent_team / workflow) and the thread uses a third
- * (normal / coordinator / workflow); asking a remote user to know which layer
- * they are addressing would be a trap, since "workflow" appears in both and
- * "agent_team" appears in neither of the other two.
+ * These are the Feature's own words (agent_team shortened to Team), not the
+ * thread's — a person choosing here is choosing the shape of the work, and the
+ * Feature is the thing they can see. Solo and Multi are both agentMode
+ * "normal" and differ only in whether subagents exist, which is why the map
+ * carries a pair: naming the mode alone would let Solo become Multi, since
+ * thread-service defaults subagentsEnabled to true when nobody stated it.
+ *
+ * Omitting the word entirely is different from every entry here — that is what
+ * lets the Feature's configuration decide. With no configuration either, the
+ * shared path lands on normal + subagents, which is Multi.
  */
-const BIND_AGENT_MODES = new Map<string, AgentMode>([
-  ["normal", "normal"],
-  ["team", "coordinator"],
-  ["workflow", "workflow"]
+const BIND_SESSION_MODES = new Map<string, ImFeatureSessionMode>([
+  ["solo", { agentMode: "normal", subagentsEnabled: false }],
+  ["multi", { agentMode: "normal", subagentsEnabled: true }],
+  ["team", { agentMode: "coordinator" }],
+  ["workflow", { agentMode: "workflow" }]
 ])
 
-const BIND_AGENT_MODE_LABELS: Record<AgentMode, string> = {
-  normal: "Normal",
-  coordinator: "Team",
-  workflow: "Workflow"
-}
+const BIND_SESSION_MODE_CHOICES = "Solo / Multi / Team / Workflow"
 
-const BIND_AGENT_MODE_CHOICES = [...new Set(BIND_AGENT_MODES.keys())]
-  .map((word) => BIND_AGENT_MODE_LABELS[BIND_AGENT_MODES.get(word)!])
-  .join(" / ")
+/** Names a session the way the person who created it asked for it. */
+function bindSessionModeLabel(
+  metadata: string | Record<string, unknown> | null | undefined
+): string {
+  const parsed = parseStandardThreadMetadata(metadata)
+  if (parsed.agentMode === "coordinator") return "Team"
+  if (parsed.agentMode === "workflow") return "Workflow"
+  return parsed.metadata.subagentsEnabled === false ? "Solo" : "Multi"
+}
 
 function positiveIndex(argument: string): number | null {
   if (!/^\d+$/u.test(argument)) return null
@@ -236,7 +244,7 @@ export class ImCommandRouter {
     return [
       "可用指令：",
       "/会话 — 查看已在桌面授权的会话与特性",
-      `/绑定 <编号> [${BIND_AGENT_MODE_CHOICES}] — 切换到已有会话，或在特性下创建会话（模式仅用于新建，省略则跟随特性配置）`,
+      `/绑定 <编号> [${BIND_SESSION_MODE_CHOICES}] — 切换到已有会话，或在特性下创建会话（模式仅用于新建，省略则跟随特性配置）`,
       "/收件箱 — 切回默认聊天",
       "/技能 — 查看当前会话可用技能",
       "/<技能名> <任务> 或 /技能 <技能名或短码> <任务> — 指定技能执行",
@@ -286,7 +294,14 @@ export class ImCommandRouter {
           ? `${index + 1}. ${target.label}（${target.sessionKind === "project" ? "项目会话" : "普通会话"}）`
           : `${index + 1}. ${target.label}（特性，可创建新会话）`
       ),
-      "发送 /绑定 <编号> 切换。"
+      "发送 /绑定 <编号> 切换。",
+      // Only where it applies. The mode is a creation-time choice, so a list
+      // with no Feature in it has nothing to say about one.
+      ...(targets.some((target) => target.kind === "feature_grant")
+        ? [
+            `在特性下新建会话可指定模式：/绑定 <编号> ${BIND_SESSION_MODE_CHOICES}，省略则跟随特性配置。`
+          ]
+        : [])
     ].join("\n")
   }
 
@@ -296,11 +311,11 @@ export class ImCommandRouter {
   ): Promise<string> {
     const [indexText = "", ...modeWords] = argument.split(/\s+/u).filter(Boolean)
     const index = positiveIndex(indexText)
-    if (!index) return `用法：/绑定 <编号> [${BIND_AGENT_MODE_CHOICES}]。请先发送 /会话。`
+    if (!index) return `用法：/绑定 <编号> [${BIND_SESSION_MODE_CHOICES}]。请先发送 /会话。`
     const requestedModeWord = modeWords.join(" ").toLowerCase()
-    const requestedMode = requestedModeWord ? BIND_AGENT_MODES.get(requestedModeWord) : undefined
+    const requestedMode = requestedModeWord ? BIND_SESSION_MODES.get(requestedModeWord) : undefined
     if (requestedModeWord && !requestedMode) {
-      return `模式无效。可选：${BIND_AGENT_MODE_CHOICES}。`
+      return `模式无效。可选：${BIND_SESSION_MODE_CHOICES}。`
     }
     const selected = await this.dependencies.selections.select(
       input.conversationKey,
@@ -341,7 +356,7 @@ export class ImCommandRouter {
             route,
             grantId: selected.grantId,
             grantVersion,
-            ...(requestedMode ? { agentMode: requestedMode } : {})
+            ...(requestedMode ? { sessionMode: requestedMode } : {})
           })
     const currentEventId = this.dependencies.getCurrentEventId(
       input.conversationKey,
@@ -354,11 +369,9 @@ export class ImCommandRouter {
       // Report what the thread actually is, not what was requested: with no
       // mode word the Feature decided, and a reader cannot see that anywhere
       // else from Zhaohu.
-      const mode = parseStandardThreadMetadata(
-        this.dependencies.getThread(target.threadId)?.metadata
-      ).agentMode
+      const mode = bindSessionModeLabel(this.dependencies.getThread(target.threadId)?.metadata)
       return [
-        `已在【${selected.label}】下新建 ${BIND_AGENT_MODE_LABELS[mode]} 会话并切换。`,
+        `已在【${selected.label}】下新建 ${mode} 会话并切换。`,
         switchedDuringRun
           ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将发送到新会话。`
           : "后续普通消息将发送到这个新会话。"

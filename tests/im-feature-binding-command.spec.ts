@@ -121,12 +121,18 @@ async function createContext() {
     // The real path resolves the Feature's mode when the caller named none.
     const resolved = {
       ...(metadata ?? {}),
-      ...(metadata && "agentMode" in metadata ? {} : { agentMode: featureConfiguredAgentMode })
+      // Mirrors thread-service: a named mode wins, else the Feature's config,
+      // else normal + subagents — which is what the four words call Multi.
+      ...(metadata && "agentMode" in metadata
+        ? {}
+        : featureConfiguredAgentMode
+          ? { agentMode: featureConfiguredAgentMode }
+          : { agentMode: "normal", subagentsEnabled: true })
     }
     makeThread(threadId, resolved)
     return { thread_id: threadId, metadata: resolved }
   }
-  let featureConfiguredAgentMode = "workflow"
+  let featureConfiguredAgentMode: string | null = "workflow"
   const updateLocalThread = (
     threadId: string,
     patch: Partial<Omit<ThreadRow, "thread_id" | "created_at">>
@@ -208,7 +214,7 @@ async function createContext() {
   })
   return {
     createdThreadMetadata,
-    setFeatureConfiguredAgentMode: (mode: string) => {
+    setFeatureConfiguredAgentMode: (mode: string | null) => {
       featureConfiguredAgentMode = mode
     },
     root,
@@ -256,16 +262,18 @@ async function testBindModeOnlyAppliesWhereASessionIsCreated(): Promise<void> {
     })
     const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
     const featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+    // The list is what a person reads immediately before typing /绑定, so the
+    // mode has to be offered here and not only under /帮助.
+    assert(sessions.includes(`/绑定 <编号> Solo / Multi / Team / Workflow`), sessions)
 
-    // Three words a person can be expected to know. The Feature's own config
-    // uses solo/multi/agent_team/workflow and the thread uses
-    // normal/coordinator/workflow; neither vocabulary is offered here.
+    // The Feature's own words, so a person picks the shape of the work rather
+    // than translating between three vocabularies.
     const bad = await router.handle({
       ...commandInput,
-      command: parseImCommand(`/绑定 ${featureIndex} solo`)!
+      command: parseImCommand(`/绑定 ${featureIndex} agent_team`)!
     })
     assert(bad.includes("模式无效"), bad)
-    assert(bad.includes("Normal / Team / Workflow"), bad)
+    assert(bad.includes("Solo / Multi / Team / Workflow"), bad)
     assert.equal(context.createdThreadMetadata.length, 0, "an invalid mode must create nothing")
 
     // Team is the word; coordinator is what the thread becomes.
@@ -277,15 +285,39 @@ async function testBindModeOnlyAppliesWhereASessionIsCreated(): Promise<void> {
     assert.equal(context.createdThreadMetadata.at(-1)?.agentMode, "coordinator")
     assert(team.includes("Team 会话"), team)
 
-    // Naming a mode is what suppresses the Feature's configuration: the stub's
-    // Feature is configured workflow, and Normal must still win.
+    // Solo and Multi are the same mode and differ only in subagents. Naming
+    // just the mode would let Solo become Multi, because thread-service turns
+    // subagents on whenever nobody said otherwise — so both fields travel.
     await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
-    const normal = await router.handle({
+    const solo = await router.handle({
       ...commandInput,
-      command: parseImCommand(`/绑定 ${featureIndex} normal`)!
+      command: parseImCommand(`/绑定 ${featureIndex} SOLO`)!
     })
     assert.equal(context.createdThreadMetadata.at(-1)?.agentMode, "normal")
-    assert(normal.includes("Normal 会话"), normal)
+    assert.equal(context.createdThreadMetadata.at(-1)?.subagentsEnabled, false)
+    assert(solo.includes("Solo 会话"), solo)
+
+    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const multi = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex} multi`)!
+    })
+    assert.equal(context.createdThreadMetadata.at(-1)?.subagentsEnabled, true)
+    assert(multi.includes("Multi 会话"), multi)
+
+    // A Feature that configures nothing: no word, no config, and the shared
+    // path's own fallback is what the four words call Multi.
+    context.setFeatureConfiguredAgentMode(null)
+    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const unconfigured = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex}`)!
+    })
+    assert(
+      !("agentMode" in context.createdThreadMetadata.at(-1)!),
+      "an unqualified /绑定 must still leave the mode to the Feature"
+    )
+    assert(unconfigured.includes("Multi 会话"), unconfigured)
 
     // An existing session is a different operation: its checkpoints and any
     // running turn were produced under the mode it already has.
