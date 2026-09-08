@@ -17,6 +17,7 @@ import {
   RotateCcw,
   Settings2,
   ShieldAlert,
+  SquareArrowOutUpRight,
   Terminal,
   Trash2,
   Video,
@@ -70,6 +71,18 @@ function isInitialBrowserPage(url: string): boolean {
 
 function getBrowserAddressValue(url: string): string {
   return isInitialBrowserPage(url) ? "" : url
+}
+
+function normalizeExternalBrowserUrl(input: string): string {
+  const value = input.trim()
+  if (!value) return ""
+  if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:\/|$)/i.test(value)) {
+    return `http://${value}`
+  }
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) {
+    return value
+  }
+  return `https://${value}`
 }
 
 function isSameBounds(a: BrowserBounds | null, b: BrowserBounds): boolean {
@@ -758,6 +771,21 @@ export function BrowserPanel({
     state.created
   ])
 
+  const openCurrentUrlInExternalBrowser = useCallback(async () => {
+    const target = normalizeExternalBrowserUrl(urlInput || state.url)
+    if (!target || isInitialBrowserPage(target)) {
+      reportBrowserError("当前没有可打开的 URL")
+      return
+    }
+
+    try {
+      await window.electron.openExternal(target)
+    } catch (error) {
+      console.error(`${BROWSER_PANEL_LOG_PREFIX} External browser open failed: ${formatError(error)}`)
+      reportBrowserError(formatError(error) || "在浏览器打开失败")
+    }
+  }, [reportBrowserError, state.url, urlInput])
+
   const consoleCount = state.consoleEntries.length
   const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
   const consoleToggleTitle = latestConsoleEntry ? `控制台 (${consoleCount})` : "控制台"
@@ -770,6 +798,8 @@ export function BrowserPanel({
       : !state.created
         ? "内置浏览器尚未就绪"
         : "导入浏览器数据"
+  const externalBrowserUrl = normalizeExternalBrowserUrl(urlInput || state.url)
+  const externalBrowserOpenDisabled = !externalBrowserUrl || isInitialBrowserPage(externalBrowserUrl)
   const toggleFullscreen = (): void => {
     setIsFullscreen((prev) => !prev)
   }
@@ -867,6 +897,14 @@ export function BrowserPanel({
           aria-label="导入浏览器数据"
           disabled={browserProfileImportDisabled}
           onClick={() => void importBrowserProfileData()}
+        />
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          icon={<SquareArrowOutUpRight className="size-4" strokeWidth={1.8} />}
+          popoverContent="在浏览器打开"
+          aria-label="在浏览器打开"
+          disabled={externalBrowserOpenDisabled}
+          onClick={() => void openCurrentUrlInExternalBrowser()}
         />
         <IconPopoverButton
           className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
