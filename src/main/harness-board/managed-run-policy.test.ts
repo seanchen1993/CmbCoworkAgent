@@ -10,7 +10,7 @@ import type {
 } from "../../shared/harness-board-types"
 
 const baseRun: ManagedRunSnapshot = {
-  version: 2,
+  version: 2.5,
   runId: "mr_test",
   projectId: "project-1",
   featureId: "feature-1",
@@ -79,7 +79,13 @@ describe("resolveManagedRunDecision", () => {
         run: baseRun,
         feature: { ...feature, nextAction: undefined }
       })
-    ).toMatchObject({ decision: "fail", reasonCode: "next_action_missing_slash_skill" })
+    ).toMatchObject({
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "fail_managed_run",
+        reasonCode: "next_action_missing_slash_skill"
+      }
+    })
 
     expect(
       resolveManagedRunDecision({
@@ -88,8 +94,11 @@ describe("resolveManagedRunDecision", () => {
         terminal: successTerminal
       })
     ).toMatchObject({
-      decision: "biz_retry_reuse_thread",
-      reasonCode: "biz_retry_progress_detected"
+      policyResult: {
+        type: "biz_retry",
+        proposedAction: "continue_current_thread",
+        reasonCode: "biz_retry_progress_detected"
+      }
     })
   })
 
@@ -100,7 +109,13 @@ describe("resolveManagedRunDecision", () => {
         feature: { ...feature, currentNodeId: "dev.code" },
         terminal: successTerminal
       })
-    ).toMatchObject({ decision: "advance", reasonCode: "current_node_changed" })
+    ).toMatchObject({
+      policyResult: {
+        type: "biz_progress",
+        proposedAction: "start_new_thread",
+        reasonCode: "current_node_changed"
+      }
+    })
 
     for (const currentNodeStatus of ["done", "archived", "skipped"] as const) {
       expect(
@@ -109,7 +124,13 @@ describe("resolveManagedRunDecision", () => {
           feature: { ...feature, currentNodeStatus },
           terminal: successTerminal
         })
-      ).toMatchObject({ decision: "advance", reasonCode: "current_node_completed" })
+      ).toMatchObject({
+        policyResult: {
+          type: "biz_progress",
+          proposedAction: "start_new_thread",
+          reasonCode: "current_node_completed"
+        }
+      })
     }
   })
 
@@ -131,8 +152,11 @@ describe("resolveManagedRunDecision", () => {
         terminal: successTerminal
       })
     ).toMatchObject({
-      decision: "biz_retry_new_thread",
-      reasonCode: "biz_retry_no_progress"
+      policyResult: {
+        type: "biz_retry",
+        proposedAction: "start_new_thread",
+        reasonCode: "biz_retry_no_progress"
+      }
     })
   })
 
@@ -147,8 +171,11 @@ describe("resolveManagedRunDecision", () => {
         }
       })
     ).toMatchObject({
-      decision: "biz_retry_new_thread",
-      reasonCode: "biz_retry_context_limit"
+      policyResult: {
+        type: "biz_retry",
+        proposedAction: "start_new_thread",
+        reasonCode: "biz_retry_context_limit"
+      }
     })
   })
 
@@ -168,8 +195,11 @@ describe("resolveManagedRunDecision", () => {
         }
       })
     ).toMatchObject({
-      decision: "biz_retry_new_thread",
-      reasonCode: "biz_retry_no_progress"
+      policyResult: {
+        type: "biz_retry",
+        proposedAction: "start_new_thread",
+        reasonCode: "biz_retry_no_progress"
+      }
     })
 
     expect(
@@ -179,8 +209,11 @@ describe("resolveManagedRunDecision", () => {
         terminal: successTerminal
       })
     ).toMatchObject({
-      decision: "biz_retry_reuse_thread",
-      reasonCode: "biz_retry_progress_detected"
+      policyResult: {
+        type: "biz_retry",
+        proposedAction: "continue_current_thread",
+        reasonCode: "biz_retry_progress_detected"
+      }
     })
   })
 
@@ -192,8 +225,11 @@ describe("resolveManagedRunDecision", () => {
         terminal: successTerminal
       })
     ).toMatchObject({
-      decision: "fail",
-      reasonCode: "biz_retry_limit_exceeded",
+      policyResult: {
+        type: "biz_retry",
+        proposedAction: "fail_managed_run",
+        reasonCode: "biz_retry_limit_exceeded"
+      },
       summary: "当前任务重试超过限制次数"
     })
   })
@@ -209,6 +245,12 @@ describe("resolveManagedRunDecision", () => {
           contextUsage: { inputTokens: 999, maxTokens: 1000 }
         }
       })
-    ).toMatchObject({ decision: "provider_retry", reasonCode: "provider_error" })
+    ).toMatchObject({
+      policyResult: {
+        type: "provider_retry",
+        proposedAction: "schedule_provider_retry",
+        reasonCode: "provider_error"
+      }
+    })
   })
 })

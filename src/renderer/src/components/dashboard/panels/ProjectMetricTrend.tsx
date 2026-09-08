@@ -212,10 +212,6 @@ export function ProjectMetricTrend({
   const hasValues = chartData.some((point) =>
     metrics.some((metric) => MODES.some((mode) => point[`${metric.key}_${mode.key}`] !== null))
   )
-  const asymmetric =
-    Boolean(filters.adapterName) ||
-    filters.tokenConsumptionMin != null ||
-    filters.tokenConsumptionMax != null
 
   return (
     <div className="mt-5 rounded-lg border border-border bg-background p-4">
