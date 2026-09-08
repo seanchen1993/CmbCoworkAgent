@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { textPreviewKind, workspaceFilePreviewMode } from "./file-preview-mode"
+import { filePreviewModeForPath, textPreviewKind } from "./file-preview-mode"
 
 describe("workspace file preview mode", () => {
   it.each([
@@ -10,7 +10,7 @@ describe("workspace file preview mode", () => {
     "site/pages/index.Html",
     "site\\pages\\index.HtM"
   ])("opens %s as source", (filePath) => {
-    expect(workspaceFilePreviewMode(filePath)).toBe("source")
+    expect(filePreviewModeForPath(filePath)).toBe("source")
   })
 
   it.each([
@@ -21,7 +21,7 @@ describe("workspace file preview mode", () => {
     "component.tsx",
     "README.md"
   ])("leaves %s on its default preview", (filePath) => {
-    expect(workspaceFilePreviewMode(filePath)).toBeUndefined()
+    expect(filePreviewModeForPath(filePath)).toBeUndefined()
   })
 })
 
@@ -37,7 +37,7 @@ describe("text preview kind", () => {
     ).toBe("code")
   })
 
-  it("keeps explicit HTML preview behavior for non-workspace callers", () => {
+  it("keeps HTML as source even when a caller requests document preview", () => {
     expect(
       textPreviewKind({
         markdownLike: false,
@@ -45,7 +45,7 @@ describe("text preview kind", () => {
         previewMode: "preview",
         truncated: false
       })
-    ).toBe("html")
+    ).toBe("code")
   })
 
   it("does not render truncated HTML as a document", () => {

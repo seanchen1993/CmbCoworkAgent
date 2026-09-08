@@ -18,7 +18,6 @@ import { MediaViewer } from "./MediaViewer"
 import { PDFViewer } from "./PDFViewer"
 import { BinaryFileViewer } from "./BinaryFileViewer"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
-import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
 import {
   formatFilePreviewError,
   normalizeFilePreviewError,
@@ -42,15 +41,12 @@ interface FileViewerProps {
   externalPreviewGrant?: string
   /** Resolve a fresh capability before every external file read. */
   resolveExternalPreviewGrant?: () => Promise<string>
-  htmlFillHeight?: boolean
   reloadToken?: number
   previewMode?: FilePreviewMode
   /** Stable per surface so a persisted file tab cancels the prior task's preview. */
   requestLane?: string
 }
 
-const MAX_HTML_DEPENDENCY_REQUESTS = 8
-const MAX_HTML_DEPENDENCY_BYTES = 256 * 1024
 const MAX_MARKDOWN_IMAGE_REQUESTS = 32
 const MAX_MARKDOWN_IMAGE_SOURCE_BYTES = 32 * 1024 * 1024
 
@@ -79,7 +75,6 @@ export function FileViewer({
   workspacePathKind,
   externalPreviewGrant,
   resolveExternalPreviewGrant,
-  htmlFillHeight = true,
   reloadToken,
   previewMode,
   requestLane
@@ -108,8 +103,6 @@ export function FileViewer({
   const generationRef = useRef(0)
   const requestTokenRef = useRef("")
   const dependencyBudgetRef = useRef({
-    htmlRequests: 0,
-    htmlBytes: 0,
     imageRequests: 0,
     imageBytes: 0
   })
@@ -207,8 +200,6 @@ export function FileViewer({
     const requestToken = createRequestToken()
     requestTokenRef.current = requestToken
     dependencyBudgetRef.current = {
-      htmlRequests: 0,
-      htmlBytes: 0,
       imageRequests: 0,
       imageBytes: 0
     }
@@ -292,15 +283,9 @@ export function FileViewer({
       const generation = generationRef.current
       const requestToken = requestTokenRef.current
       dependencyBudgetRef.current = {
-        htmlRequests: 0,
-        htmlBytes: 0,
         imageRequests: 0,
         imageBytes: 0
       }
-      void window.api.workspace.cancelFilePreview({
-        lanePrefix: `${lane}:html`,
-        requestToken
-      })
       void window.api.workspace.cancelFilePreview({
         lanePrefix: `${lane}:image`,
         requestToken
@@ -336,41 +321,6 @@ export function FileViewer({
     const nextIndex = pageIndex - 1
     void navigateToOffset(pageOffsets[nextIndex], nextIndex, pageOffsets)
   }, [navigateToOffset, pageIndex, pageOffsets])
-
-  const readHtmlDependencyFile = useCallback(
-    async (resolvedPath: string): Promise<string | null> => {
-      const generation = generationRef.current
-      const budget = dependencyBudgetRef.current
-      if (budget.htmlRequests >= MAX_HTML_DEPENDENCY_REQUESTS) return null
-      budget.htmlRequests += 1
-      const dependencyLane = `${lane}:html:${shortPathHash(resolvedPath)}`
-      const readPage = async (offset: number): Promise<WorkspaceFilePreviewTextResult | null> => {
-        const previewSource = await previewSourceForPath(resolvedPath)
-        if (generation !== generationRef.current) return null
-        const result = await window.api.workspace.readFilePreview({
-          source: previewSource,
-          offset,
-          lane: dependencyLane,
-          requestToken: requestTokenRef.current
-        })
-        return generation === generationRef.current && result.success ? result : null
-      }
-      const first = await readPage(0)
-      if (!first) return null
-      const result = await assembleBoundedTextPreview(first, readPage, {
-        maxBytes: MAX_HTML_DEPENDENCY_BYTES,
-        maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
-      })
-      // Dependency reads run concurrently. Re-check and claim the shared budget
-      // synchronously after assembly so parallel assets cannot oversubscribe it.
-      if (result.truncated || budget.htmlBytes + result.contentBytes > MAX_HTML_DEPENDENCY_BYTES) {
-        return null
-      }
-      budget.htmlBytes += result.contentBytes
-      return result.content
-    },
-    [lane, previewSourceForPath]
-  )
 
   // Markdown images receive a short-lived protocol URL, never a base64 IPC payload.
   const readBinaryDependencyFile = useCallback(
@@ -510,18 +460,6 @@ export function FileViewer({
           readBinaryFile={readBinaryDependencyFile}
         />
       </div>
-    )
-  } else if (previewKind === "html") {
-    body = (
-      <HtmlPreview
-        content={content}
-        path={displayPath}
-        fillHeight={htmlFillHeight}
-        showHeader={false}
-        showModeToggle={false}
-        viewMode={previewMode}
-        readDependencyFile={readHtmlDependencyFile}
-      />
     )
   } else {
     body = <CodeViewer filePath={displayPath} content={content} />

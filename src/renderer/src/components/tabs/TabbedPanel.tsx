@@ -3,7 +3,7 @@ import { useThreadActions, useThreadStateSelector } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
 import { ChatContainer, type ChatSurface } from "@/components/chat/ChatContainer"
 import { ArrowLeft, Loader2 } from "lucide-react"
-import { workspaceFilePreviewMode } from "@/lib/file-preview-mode"
+import { filePreviewModeForPath } from "@/lib/file-preview-mode"
 
 const FileViewer = lazy(() => import("./FileViewer").then((m) => ({ default: m.FileViewer })))
 
@@ -46,7 +46,7 @@ export function TabbedPanel({
   // Determine what to render based on active tab
   const isAgentTab = activeTab === "agent"
   const activeFile = openFiles.find((f) => f.path === activeTab)
-  const activeFilePreviewMode = activeFile ? workspaceFilePreviewMode(activeFile.path) : undefined
+  const activeFilePreviewMode = activeFile ? filePreviewModeForPath(activeFile.path) : undefined
 
   return (
     <div className="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden">

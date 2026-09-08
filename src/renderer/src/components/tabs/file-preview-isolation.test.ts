@@ -43,6 +43,7 @@ const trustedToolPreview = readFileSync(
   "utf8"
 )
 const messageBubble = readFileSync(new URL("../chat/MessageBubble.tsx", import.meta.url), "utf8")
+const htmlPreview = readFileSync(new URL("../chat/previews/HtmlPreview.tsx", import.meta.url), "utf8")
 const agentRuntime = readFileSync(
   new URL("../../../../main/agent/runtime.ts", import.meta.url),
   "utf8"
@@ -71,7 +72,7 @@ describe("persisted active file preview isolation", () => {
     expect(fileViewer).not.toContain("base64Content")
     expect(fileViewer).toContain("openMediaPreview")
     expect(fileViewer).toContain("readFilePreview")
-    expect(fileViewer).toContain("MAX_HTML_DEPENDENCY_BYTES")
+    expect(fileViewer).not.toContain("HtmlPreview")
     expect(fileViewer).toContain("MAX_MARKDOWN_IMAGE_SOURCE_BYTES")
   })
 
@@ -93,10 +94,31 @@ describe("persisted active file preview isolation", () => {
   })
 
   it("opens HTML files from workspace tabs in source mode", () => {
-    expect(tabbedPanel).toContain("workspaceFilePreviewMode(activeFile.path)")
+    expect(tabbedPanel).toContain("filePreviewModeForPath(activeFile.path)")
     expect(tabbedPanel).toContain("previewMode={activeFilePreviewMode}")
-    expect(fileViewer).toContain('previewKind === "html"')
-    expect(previewMode).toContain('input.previewMode !== "source"')
+    expect(fileViewer).not.toContain("HtmlPreview")
+    expect(previewMode).not.toContain('return "html"')
+    expect(rightPanel).toContain("filePreviewModeForPath(filePath)")
+    expect(rightPanel).not.toContain("onRequestBrowserMode")
+    expect(rightPanel).not.toContain("browserPreviewUrl")
+    expect(resourcePanelOverlay).not.toContain('setMode("browser")')
+    expect(htmlPreview).toContain('sandbox="allow-scripts"')
+    expect(htmlPreview).not.toContain("allow-same-origin")
+  })
+
+  it("lets the file viewer own scrolling inside the available right-panel height", () => {
+    expect(rightPanel).not.toContain("PREVIEW_MAX_HEIGHT")
+    expect(rightPanel).not.toContain('height: "100vh"')
+    expect(rightPanel).toContain('data-testid="resource-preview-surface"')
+    expect(rightPanel).toContain('data-testid="resource-preview"')
+    expect(rightPanel).toContain('data-testid="resource-preview-content"')
+    expect(rightPanel).toContain(
+      'className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background"'
+    )
+    expect(rightPanel).not.toContain(
+      "overflow-y-auto overflow-x-hidden right-panel-scroll bg-background flex-1 min-h-0"
+    )
+    expect(rightPanel).toContain("{onFullscreenChange ? (")
   })
 
   it("requires a trusted-source grant instead of exposing renderer path-to-token minting", () => {
@@ -123,7 +145,12 @@ describe("persisted active file preview isolation", () => {
     expect(rightPanel).toContain("isCurrentOpenResourcePreviewIntent(")
     expect(resourcePreviewRequestHook).toContain("isCurrentOpenResourcePreviewIntent(")
     expect(resourcePreviewRequestHook).toContain("beginOpenResourcePreviewIntent(previousThreadId)")
-    expect(resourcePanelOverlay).toContain("!request.externalPreviewGrant")
+    expect(resourcePanelOverlay).toContain('setMode("preview")')
+    expect(rightPanel).toContain("const canRevealInFolder = resolved.inWorkspace")
+    expect(rightPanel).toContain("if (!resolved.inWorkspace)")
+    expect(rightPanel).toContain("if (!canRevealInFolder)")
+    expect(rightPanel).toContain("disabled={!canRevealInFolder}")
+    expect(rightPanel).toContain('data-testid="resource-preview-reveal"')
     expect(agentRuntime).toContain("createTrustedToolFilePreviewContextMiddleware(threadId)")
     expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "read")')
     expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "write")')

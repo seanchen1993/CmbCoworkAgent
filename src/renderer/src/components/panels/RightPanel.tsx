@@ -150,6 +150,7 @@ import {
   getPathExtension,
   type ResourceMessage
 } from "@/lib/latest-completed-resource"
+import { filePreviewModeForPath } from "@/lib/file-preview-mode"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -179,7 +180,6 @@ const HANDLE_HEIGHT = 6 // px
 const SECTION_GAP = 0 // px
 const MIN_CONTENT_HEIGHT = 60 // px
 const COLLAPSE_THRESHOLD = 55 // px - auto-collapse when below this
-const PREVIEW_MAX_HEIGHT = "100vh"
 const RIGHT_PANEL_SYNC_SKILL_PROJECTION_LIMIT = 256
 const RIGHT_PANEL_HOOK_SCOPE = "right-panel"
 const RIGHT_PANEL_GLOBAL_SUMMARY_SCOPE = "right-panel-global-summary"
@@ -359,7 +359,6 @@ interface RightPanelProps {
   listenForResourcePreview?: boolean
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
-  onRequestBrowserMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
   onBrowserFullscreenChange?: (isFullscreen: boolean) => void
 }
@@ -532,7 +531,6 @@ export function RightPanel({
   listenForResourcePreview = true,
   onRequestPreviewMode,
   onRequestWorkMode,
-  onRequestBrowserMode,
   onPreviewFullscreenChange,
   onBrowserFullscreenChange
 }: RightPanelProps): React.JSX.Element {
@@ -1378,15 +1376,10 @@ export function RightPanel({
       setPreviewReloadToken((version) => version + 1)
       if (!switchToPreview) return
       if (moduleModeRef.current === "git" || moduleModeRef.current === "browser") return
-      if (isHtmlPreviewPath(path) && !shouldUseExternalAuthorization) {
-        onRequestBrowserMode?.()
-      } else {
-        onRequestPreviewMode?.()
-      }
+      onRequestPreviewMode?.()
     },
     [
       currentThreadId,
-      onRequestBrowserMode,
       onRequestPreviewMode,
       replacePreviewExternalAuthorization
     ]
@@ -1474,15 +1467,10 @@ export function RightPanel({
         : null
     )
     setPreviewReloadToken((v) => v + 1)
-    if (isHtmlPreviewPath(filePath) && !shouldUseExternalAuthorization) {
-      onRequestBrowserMode?.()
-    } else {
-      onRequestPreviewMode?.()
-    }
+    onRequestPreviewMode?.()
     handleResourcePreviewRequestHandled()
   }, [
     currentThreadId,
-    onRequestBrowserMode,
     onRequestPreviewMode,
     activeResourcePreviewRequest,
     handleResourcePreviewRequestHandled,
@@ -2010,13 +1998,6 @@ export function RightPanel({
     !pluginsOpen &&
     !hooksOpen &&
     !lspOpen
-  const browserPreviewUrl = useMemo(() => {
-    if (!previewPathForCurrentThread || !isHtmlPreviewPath(previewPathForCurrentThread)) {
-      return null
-    }
-    return previewPathForCurrentThread
-  }, [previewPathForCurrentThread])
-
   const handleOpenGitFileFolder = useCallback(
     async (filePath: string): Promise<void> => {
       try {
@@ -2087,8 +2068,6 @@ export function RightPanel({
             <BrowserPanel
               threadId={currentThreadId ?? null}
               workspacePath={workspacePath ?? null}
-              initialUrl={browserPreviewUrl}
-              reloadToken={previewReloadToken}
               onFullscreenChange={onBrowserFullscreenChange}
             />
           </Suspense>
@@ -2096,10 +2075,10 @@ export function RightPanel({
       )}
 
       {moduleMode === "preview" && (
-        <div className="flex h-full min-h-0 flex-col rounded-2xl bg-background-elevated">
+        <div className="flex min-h-0 flex-1 flex-col rounded-2xl bg-background-elevated">
           <div
-            className="h-full min-h-0 bg-background-elevated"
-            style={{ height: PREVIEW_MAX_HEIGHT }}
+            data-testid="resource-preview-surface"
+            className="flex min-h-0 flex-1 flex-col bg-background-elevated"
           >
             {previewPathForCurrentThread ? (
               <ResourcePreview
@@ -2626,11 +2605,6 @@ function TaskItem({ todo }: { todo: Todo }): React.JSX.Element {
   )
 }
 
-function isHtmlPreviewPath(filePath: string): boolean {
-  const ext = getPathExtension(filePath)
-  return ext === "html" || ext === "htm"
-}
-
 function isAbsolutePath(filePath: string): boolean {
   return /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|\/)/.test(filePath)
 }
@@ -3092,6 +3066,8 @@ function ResourcePreview({
   const [copySuccess, setCopySuccess] = useState(false)
   const extension = getPathExtension(filePath).toLowerCase()
   const supportsSourceView = extension === "md" || extension === "markdown" || extension === "mdx"
+  const filePreviewMode =
+    filePreviewModeForPath(filePath) ?? (supportsSourceView ? previewMode : undefined)
   const previewFileType = useMemo(() => getFileType(fileName), [fileName])
 
   const resolved = useMemo(
@@ -3112,6 +3088,10 @@ function ResourcePreview({
       ),
     [externalPreviewGrant, resolveExternalPreviewGrant, resolved]
   )
+  const hasExternalPreviewAuthorization = Boolean(
+    externalPreviewGrant || resolveExternalPreviewGrant
+  )
+  const canRevealInFolder = resolved.inWorkspace || hasExternalPreviewAuthorization
   const isCopyableText = previewFileType.type === "code" || previewFileType.type === "text"
   const canCopyContent = isCopyableText && (resolved.inWorkspace || Boolean(externalPreviewGrant))
   const copyUnavailableReason = isCopyableText
@@ -3120,11 +3100,19 @@ function ResourcePreview({
   const fullPath = resolved.fullPath
 
   const openInFolder = useCallback(async () => {
+    if (!canRevealInFolder) {
+      toast.error("外部文件未获得可信来源授权")
+      return
+    }
     try {
-      if (externalPreviewGrant) {
+      if (!resolved.inWorkspace) {
         const grant = resolveExternalPreviewGrant
           ? await resolveExternalPreviewGrant()
           : externalPreviewGrant
+        if (!grant) {
+          toast.error("外部文件未获得可信来源授权")
+          return
+        }
         const result = await window.api.harnessBoard.revealRunArtifact({
           grant,
           filePath: fullPath
@@ -3138,7 +3126,13 @@ function ResourcePreview({
     } catch (error) {
       console.error("[ResourcePreview] Failed to show item in folder:", error)
     }
-  }, [externalPreviewGrant, fullPath, resolveExternalPreviewGrant])
+  }, [
+    canRevealInFolder,
+    externalPreviewGrant,
+    fullPath,
+    resolveExternalPreviewGrant,
+    resolved.inWorkspace
+  ])
 
   const toggleFullscreen = (): void => {
     setIsFullscreen((prev) => !prev)
@@ -3235,7 +3229,10 @@ function ResourcePreview({
   }, [onFullscreenChange])
 
   return (
-    <div className="border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
+    <div
+      data-testid="resource-preview"
+      className="flex h-full min-h-0 flex-col overflow-hidden border border-border/70 bg-background"
+    >
       <div className="sticky top-0 z-10 flex items-center justify-between gap-2 px-3 py-2 border-b border-border/70 bg-background-elevated/70 shrink-0">
         <div className="min-w-0">
           <div className="text-[12px] font-semibold truncate" title={filePath}>
@@ -3294,14 +3291,20 @@ function ResourcePreview({
           >
             <RotateCcw className="size-3.5" />
           </button>
-          <button
-            onClick={toggleFullscreen}
-            className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-            title={isFullscreen ? "缩小全屏" : "全屏预览"}
-            aria-label={isFullscreen ? "缩小全屏" : "全屏预览"}
-          >
-            {isFullscreen ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
-          </button>
+          {onFullscreenChange ? (
+            <button
+              onClick={toggleFullscreen}
+              className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+              title={isFullscreen ? "缩小全屏" : "全屏预览"}
+              aria-label={isFullscreen ? "缩小全屏" : "全屏预览"}
+            >
+              {isFullscreen ? (
+                <Minimize2 className="size-3.5" />
+              ) : (
+                <Maximize2 className="size-3.5" />
+              )}
+            </button>
+          ) : null}
           <button
             onClick={handleHidePreview}
             className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
@@ -3311,17 +3314,24 @@ function ResourcePreview({
             <EyeOff className="size-3.5" />
           </button>
           <button
+            data-testid="resource-preview-reveal"
             onClick={openInFolder}
-            className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-            title="打开文件所在文件夹"
-            aria-label="打开文件所在文件夹"
+            disabled={!canRevealInFolder}
+            className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground enabled:hover:text-foreground enabled:hover:bg-background-interactive transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+            title={canRevealInFolder ? "打开文件所在文件夹" : "外部文件未获得可信来源授权"}
+            aria-label={
+              canRevealInFolder ? "打开文件所在文件夹" : "外部文件未获得可信来源授权"
+            }
           >
             <FolderOpen className="size-3.5" />
           </button>
         </div>
       </div>
 
-      <div className="overflow-y-auto overflow-x-hidden right-panel-scroll bg-background flex-1 min-h-0">
+      <div
+        data-testid="resource-preview-content"
+        className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background"
+      >
         <Suspense fallback={<LazySectionFallback label="加载文件预览..." />}>
           <FileViewer
             threadId={threadId}
@@ -3330,9 +3340,8 @@ function ResourcePreview({
             workspacePathKind={previewFileSource.workspacePathKind}
             externalPreviewGrant={externalPreviewGrant}
             resolveExternalPreviewGrant={resolveExternalPreviewGrant}
-            htmlFillHeight
             reloadToken={reloadToken}
-            previewMode={supportsSourceView ? previewMode : undefined}
+            previewMode={filePreviewMode}
           />
         </Suspense>
       </div>

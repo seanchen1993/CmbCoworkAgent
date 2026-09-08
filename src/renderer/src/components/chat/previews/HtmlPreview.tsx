@@ -145,8 +145,8 @@ export function HtmlPreview({
                     width: "max(100%, 1000px)"
                   }
             }
-            // 预览场景需要脚本和同源能力（例如 localStorage）；同时保留 sandbox 隔离主页面上下文。
-            sandbox="allow-scripts allow-same-origin"
+            // Keep preview scripts in an opaque origin so they cannot reach the parent DOM or preload API.
+            sandbox="allow-scripts"
             scrolling={fillHeight ? "auto" : "no"}
             onLoad={syncHeight}
           />

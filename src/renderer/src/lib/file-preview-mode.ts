@@ -1,6 +1,6 @@
 export type FilePreviewMode = "preview" | "source"
 
-export type TextPreviewKind = "markdown" | "html" | "code"
+export type TextPreviewKind = "markdown" | "code"
 
 function fileExtension(filePath: string): string {
   const fileName = filePath.split(/[/\\]/).pop() ?? filePath
@@ -8,7 +8,7 @@ function fileExtension(filePath: string): string {
   return extensionIndex >= 0 ? fileName.slice(extensionIndex + 1).toLowerCase() : ""
 }
 
-export function workspaceFilePreviewMode(filePath: string): FilePreviewMode | undefined {
+export function filePreviewModeForPath(filePath: string): FilePreviewMode | undefined {
   const extension = fileExtension(filePath)
   return extension === "html" || extension === "htm" ? "source" : undefined
 }
@@ -20,6 +20,5 @@ export function textPreviewKind(input: {
   truncated: boolean
 }): TextPreviewKind {
   if (input.markdownLike) return "markdown"
-  if (input.htmlLike && input.previewMode !== "source" && !input.truncated) return "html"
   return "code"
 }

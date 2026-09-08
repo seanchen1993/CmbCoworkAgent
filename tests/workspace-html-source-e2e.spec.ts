@@ -1,5 +1,5 @@
 /**
- * Real Electron E2E for opening HTML files from the workspace file tree.
+ * Real Electron E2E for tool-file preview layout and workspace HTML source mode.
  *
  * Run:
  *   npm run test:workspace-html:e2e
@@ -12,7 +12,12 @@ import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { _electron as electron, type ElectronApplication, type Page } from "playwright"
+import {
+  _electron as electron,
+  type ElectronApplication,
+  type Locator,
+  type Page
+} from "playwright"
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const require = createRequire(import.meta.url)
@@ -29,6 +34,12 @@ const ELECTRON_LAUNCHER =
 const MAIN_ENTRY = join(PROJECT_ROOT, "out", "main", "index.js")
 const THREAD_TITLE = `Workspace HTML source E2E ${process.pid}-${Date.now()}`
 const LINKED_BRANCH = "workspace-html-e2e-linked-worktree"
+const LAYOUT_FILE_NAME = "layout-proof.txt"
+const LAYOUT_TOOL_CALL_ID = "workspace-preview-layout-read"
+const UNAUTHORIZED_FILE_NAME = "outside-secret.html"
+const UNAUTHORIZED_TOOL_CALL_ID = "workspace-preview-unauthorized-read"
+const PREVIEW_START_SENTINEL = "PREVIEW_START_SENTINEL"
+const PREVIEW_END_SENTINEL = "PREVIEW_END_SENTINEL"
 const HTML_FIXTURES = [
   { fileName: "source-proof.html", sentinel: "HTML_SOURCE_SENTINEL" },
   { fileName: "legacy-proof.HTM", sentinel: "HTM_SOURCE_SENTINEL" }
@@ -44,6 +55,10 @@ interface WindowWithApi {
         threadId?: string
       }>
       delete: (threadId: string) => Promise<void>
+      appendMessages: (
+        threadId: string,
+        messages: Array<Record<string, unknown>>
+      ) => Promise<{ count: number }>
     }
     workspace: {
       set: (threadId: string, workspacePath: string) => Promise<unknown>
@@ -195,9 +210,34 @@ async function waitForAppPage(app: ElectronApplication): Promise<Page> {
   throw new Error("No Electron renderer with preload API appeared within 30 seconds")
 }
 
-async function createWorkspaceThread(page: Page, workspacePath: string): Promise<string> {
-  return page.evaluate<string, { title: string; workspacePath: string }>(
-    async ({ title, workspacePath }) => {
+async function createWorkspaceThread(
+  page: Page,
+  workspacePath: string,
+  unauthorizedFilePath: string
+): Promise<string> {
+  return page.evaluate<
+    string,
+    {
+      title: string
+      workspacePath: string
+      layoutFileName: string
+      layoutToolCallId: string
+      previewStartSentinel: string
+      previewEndSentinel: string
+      unauthorizedFilePath: string
+      unauthorizedToolCallId: string
+    }
+  >(
+    async ({
+      title,
+      workspacePath,
+      layoutFileName,
+      layoutToolCallId,
+      previewStartSentinel,
+      previewEndSentinel,
+      unauthorizedFilePath,
+      unauthorizedToolCallId
+    }) => {
       const api = (window as unknown as WindowWithApi).api
       const thread = await api.threads.create({
         workspacePath,
@@ -213,7 +253,7 @@ async function createWorkspaceThread(page: Page, workspacePath: string): Promise
       )
       if (
         !workspaceState.success ||
-        !["source-proof.html", "legacy-proof.HTM"].every((fileName) =>
+        !["source-proof.html", "legacy-proof.HTM", layoutFileName].every((fileName) =>
           discoveredNames.has(fileName)
         )
       ) {
@@ -221,13 +261,92 @@ async function createWorkspaceThread(page: Page, workspacePath: string): Promise
           `Expected HTML fixtures before UI navigation: ${JSON.stringify(workspaceState)}`
         )
       }
+      const createdAt = Date.now()
+      const appended = await api.threads.appendMessages(threadId, [
+        {
+          id: "layout-user",
+          role: "user",
+          content: "请读取布局回归文件",
+          created_at: new Date(createdAt)
+        },
+        {
+          id: "layout-assistant-tool-call",
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: layoutToolCallId,
+              name: "read_file",
+              args: { path: layoutFileName }
+            }
+          ],
+          created_at: new Date(createdAt + 1)
+        },
+        {
+          id: "layout-tool-result",
+          role: "tool",
+          content: `${previewStartSentinel}\n${previewEndSentinel}`,
+          tool_call_id: layoutToolCallId,
+          name: "read_file",
+          status: "success",
+          is_error: false,
+          created_at: new Date(createdAt + 2)
+        },
+        {
+          id: "layout-assistant-complete",
+          role: "assistant",
+          content: "读取完成",
+          created_at: new Date(createdAt + 3)
+        },
+        {
+          id: "unauthorized-assistant-tool-call",
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: unauthorizedToolCallId,
+              name: "read_file",
+              args: { path: unauthorizedFilePath }
+            }
+          ],
+          created_at: new Date(createdAt + 4)
+        },
+        {
+          id: "unauthorized-tool-result",
+          role: "tool",
+          content: "outside source",
+          tool_call_id: unauthorizedToolCallId,
+          name: "read_file",
+          status: "success",
+          is_error: false,
+          created_at: new Date(createdAt + 5)
+        },
+        {
+          id: "unauthorized-assistant-complete",
+          role: "assistant",
+          content: "外部读取完成",
+          created_at: new Date(createdAt + 6)
+        }
+      ])
+      if (appended.count !== 7) {
+        throw new Error(`Expected seven persisted preview messages, received ${appended.count}`)
+      }
       return threadId
     },
-    { title: THREAD_TITLE, workspacePath }
+    {
+      title: THREAD_TITLE,
+      workspacePath,
+      layoutFileName: LAYOUT_FILE_NAME,
+      layoutToolCallId: LAYOUT_TOOL_CALL_ID,
+      previewStartSentinel: PREVIEW_START_SENTINEL,
+      previewEndSentinel: PREVIEW_END_SENTINEL,
+      unauthorizedFilePath,
+      unauthorizedToolCallId: UNAUTHORIZED_TOOL_CALL_ID
+    }
   )
 }
 
-async function openWorkspaceFiles(page: Page): Promise<void> {
+async function selectWorkspaceThread(page: Page): Promise<void> {
   await waitForApi(page)
 
   const threadEntry = page.getByText(THREAD_TITLE, { exact: true }).first()
@@ -254,6 +373,12 @@ async function openWorkspaceFiles(page: Page): Promise<void> {
   }
   await threadEntry.click()
   await page.waitForTimeout(750)
+}
+
+async function openWorkspaceFiles(page: Page): Promise<void> {
+  await selectWorkspaceThread(page)
+  const showRightPanel = page.getByRole("button", { name: "显示右侧面板" })
+  if ((await showRightPanel.count()) > 0) await showRightPanel.first().click()
 
   const workButton = page.getByRole("button", { name: "工作目录" })
   await workButton.waitFor({ timeout: 30_000 })
@@ -296,6 +421,174 @@ async function openWorkspaceFiles(page: Page): Promise<void> {
   }
 }
 
+interface PreviewGeometry {
+  parent: { top: number; bottom: number; height: number }
+  surface: { top: number; bottom: number; height: number }
+  root: { top: number; bottom: number; height: number }
+  content: { top: number; bottom: number; height: number }
+  bottomHitsContent: boolean
+}
+
+function closeEnough(left: number, right: number, tolerance = 3): boolean {
+  return Math.abs(left - right) <= tolerance
+}
+
+async function waitForStableLayout(page: Page): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolveFrame) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolveFrame()))
+      })
+  )
+}
+
+async function assertPreviewGeometry(page: Page, scope: Locator, label: string): Promise<void> {
+  const surface = scope.getByTestId("resource-preview-surface")
+  await surface.waitFor({ state: "visible", timeout: 30_000 })
+  await scope.getByTestId("resource-preview").waitFor({ state: "visible", timeout: 30_000 })
+  await scope.getByTestId("resource-preview-content").waitFor({ state: "visible", timeout: 30_000 })
+  await waitForStableLayout(page)
+
+  const geometry = await surface.evaluate<PreviewGeometry>((surfaceElement) => {
+    const parentElement = surfaceElement.parentElement
+    const rootElement = surfaceElement.querySelector<HTMLElement>('[data-testid="resource-preview"]')
+    const contentElement = surfaceElement.querySelector<HTMLElement>(
+      '[data-testid="resource-preview-content"]'
+    )
+    if (!parentElement || !rootElement || !contentElement) {
+      throw new Error("Preview geometry elements are incomplete")
+    }
+    const parentRect = parentElement.getBoundingClientRect()
+    const surfaceRect = surfaceElement.getBoundingClientRect()
+    const rootRect = rootElement.getBoundingClientRect()
+    const contentRect = contentElement.getBoundingClientRect()
+    const hit = document.elementFromPoint(
+      contentRect.left + Math.max(1, contentRect.width / 2),
+      contentRect.bottom - 2
+    )
+    return {
+      parent: { top: parentRect.top, bottom: parentRect.bottom, height: parentRect.height },
+      surface: { top: surfaceRect.top, bottom: surfaceRect.bottom, height: surfaceRect.height },
+      root: { top: rootRect.top, bottom: rootRect.bottom, height: rootRect.height },
+      content: { top: contentRect.top, bottom: contentRect.bottom, height: contentRect.height },
+      bottomHitsContent: Boolean(hit && contentElement.contains(hit))
+    }
+  })
+
+  assert(closeEnough(geometry.surface.top, geometry.parent.top), `${label} 预览顶部贴合容器`)
+  assert(closeEnough(geometry.surface.bottom, geometry.parent.bottom), `${label} 预览底部不越界`)
+  assert(closeEnough(geometry.surface.height, geometry.parent.height), `${label} 预览填满容器高度`)
+  assert(closeEnough(geometry.root.top, geometry.surface.top), `${label} 文件预览顶部完整`)
+  assert(closeEnough(geometry.root.bottom, geometry.surface.bottom), `${label} 文件预览底部完整`)
+  assert(closeEnough(geometry.root.height, geometry.surface.height), `${label} 文件预览高度完整`)
+  assert(
+    geometry.content.height > geometry.surface.height * 0.7,
+    `${label} 内容区占据主要可用高度`
+  )
+  assert(closeEnough(geometry.content.bottom, geometry.surface.bottom), `${label} 内容区延伸到底部`)
+  assert(geometry.bottomHitsContent, `${label} 底部不存在独立空白分块`)
+
+  const sourceViewer = scope
+    .locator(".shiki-wrapper")
+    .filter({ hasText: PREVIEW_END_SENTINEL })
+    .last()
+  await sourceViewer.waitFor({ state: "visible", timeout: 30_000 })
+  const viewport = scope
+    .getByTestId("resource-preview-content")
+    .locator("[data-radix-scroll-area-viewport]")
+    .first()
+  await viewport.waitFor({ state: "visible", timeout: 30_000 })
+  const scrollMetrics = await viewport.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight
+  }))
+  assert(scrollMetrics.scrollHeight > scrollMetrics.clientHeight, `${label} 长文件具有可滚动内容`)
+  await viewport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await waitForStableLayout(page)
+
+  const endLineGeometry = await sourceViewer.evaluate<
+    { top: number; bottom: number; contentTop: number; contentBottom: number },
+    string
+  >((element, sentinel) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+    let node = walker.nextNode()
+    while (node) {
+      const value = node.textContent ?? ""
+      const index = value.indexOf(sentinel)
+      if (index >= 0) {
+        const range = document.createRange()
+        range.setStart(node, index)
+        range.setEnd(node, index + sentinel.length)
+        const rect = range.getBoundingClientRect()
+        const content = element.closest<HTMLElement>('[data-testid="resource-preview-content"]')
+        if (!content) throw new Error("Preview content container is missing")
+        const contentRect = content.getBoundingClientRect()
+        return {
+          top: rect.top,
+          bottom: rect.bottom,
+          contentTop: contentRect.top,
+          contentBottom: contentRect.bottom
+        }
+      }
+      node = walker.nextNode()
+    }
+    throw new Error(`Sentinel ${sentinel} is missing from highlighted source`)
+  }, PREVIEW_END_SENTINEL)
+  assert(
+    endLineGeometry.top >= endLineGeometry.contentTop - 3 &&
+      endLineGeometry.bottom <= endLineGeometry.contentBottom + 3,
+    `${label} 滚动到底后末行完整可见`
+  )
+}
+
+async function openToolFilePreviewLayout(page: Page): Promise<void> {
+  await page.setViewportSize({ width: 1500, height: 900 })
+  await selectWorkspaceThread(page)
+
+  const showRightPanel = page.getByRole("button", { name: "显示右侧面板" })
+  if ((await showRightPanel.count()) > 0) await showRightPanel.first().click()
+
+  const previewEyes = page.getByRole("button", { name: "在右侧资源预览中打开" })
+  await previewEyes.first().waitFor({ state: "visible", timeout: 30_000 })
+  assert((await previewEyes.count()) === 2, "真实消息中展示两个工具文件预览入口")
+  const previewEye = previewEyes.first()
+  await previewEye.click()
+  await page.waitForFunction(
+    () => document.querySelector('button[aria-label="文件预览"]')?.getAttribute("aria-pressed") === "true",
+    undefined,
+    { timeout: 30_000 }
+  )
+  await page.getByRole("button", { name: "全屏预览" }).waitFor({ state: "visible" })
+  await assertPreviewGeometry(page, page.locator("body"), "普通右侧栏 1500×900")
+
+  await page.getByRole("button", { name: "隐藏预览并切换到工作目录" }).click()
+  await page.getByRole("button", { name: "隐藏右侧面板" }).click()
+  await page.setViewportSize({ width: 1200, height: 700 })
+  await previewEye.click()
+
+  const dialog = page.getByRole("dialog", { name: "文件预览" })
+  await dialog.waitFor({ state: "visible", timeout: 30_000 })
+  assert(
+    (await dialog.getByRole("button", { name: "全屏预览" }).count()) === 0,
+    "折叠抽屉不展示失效的全屏操作"
+  )
+  await assertPreviewGeometry(page, dialog, "折叠抽屉 1200×700")
+  await dialog.getByRole("button", { name: "关闭面板" }).click()
+
+  await previewEyes.nth(1).click()
+  await dialog.waitFor({ state: "visible", timeout: 30_000 })
+  await dialog.getByText(UNAUTHORIZED_FILE_NAME, { exact: true }).waitFor({ state: "visible" })
+  const revealButton = dialog.getByTestId("resource-preview-reveal")
+  assert(await revealButton.isDisabled(), "未授权外部路径不能调用系统文件夹打开操作")
+  await dialog
+    .getByText("文件预览需要授权", { exact: true })
+    .waitFor({ state: "visible", timeout: 30_000 })
+  log("PASS 未授权外部路径只显示受控拒绝提示")
+  await dialog.getByRole("button", { name: "关闭面板" }).click()
+}
+
 async function deleteWorkspaceThread(page: Page, threadId: string): Promise<void> {
   await page.evaluate<void, string>(async (id) => {
     await (window as unknown as WindowWithApi).api.threads.delete(id)
@@ -321,6 +614,7 @@ async function main(): Promise<void> {
   const openworkHome = join(testRoot, "cmbcoworkagent-home")
   const electronUserData = join(testRoot, "electron-user-data")
   const workspace = join(testRoot, "workspace")
+  const unauthorizedFilePath = join(testRoot, UNAUTHORIZED_FILE_NAME)
   const mainRepository = join(workspace, "main")
   const linkedWorktree = join(workspace, "linked")
   const isolatedTemp = join(testRoot, "temp")
@@ -359,6 +653,17 @@ async function main(): Promise<void> {
       "utf8"
     )
   }
+  writeFileSync(
+    join(workspace, LAYOUT_FILE_NAME),
+    [
+      PREVIEW_START_SENTINEL,
+      ...Array.from({ length: 78 }, (_, index) => `layout line ${String(index + 2).padStart(2, "0")}`),
+      PREVIEW_END_SENTINEL,
+      ""
+    ].join("\n"),
+    "utf8"
+  )
+  writeFileSync(unauthorizedFilePath, "<!doctype html><script>window.pwned = true</script>\n", "utf8")
 
   const cleanEnv = createElectronEnvironment({
     isolatedHome,
@@ -387,7 +692,7 @@ async function main(): Promise<void> {
     page.on("console", (message) =>
       console.log(`[workspace-html-e2e renderer:${message.type()}] ${message.text()}`)
     )
-    threadId = await createWorkspaceThread(page, workspace)
+    threadId = await createWorkspaceThread(page, workspace, unauthorizedFilePath)
 
     // Fixture creation is outside this feature journey. From the app reload
     // through both file opens, any unhandled renderer exception fails the E2E.
@@ -397,6 +702,7 @@ async function main(): Promise<void> {
       console.error(`[workspace-html-e2e renderer:pageerror] ${error.stack ?? error.message}`)
     })
     await page.reload({ waitUntil: "domcontentloaded" })
+    await openToolFilePreviewLayout(page)
     await openWorkspaceFiles(page)
     assert(rendererPageErrors.length === 0, "页面重载及文件操作未出现 renderer 异常")
     log("ALL PASS workspace HTML source E2E")
