@@ -198,7 +198,17 @@ async function createJourney() {
     getRunDetail: () => ({ sessions: [] }) as never,
     buildFeatureContext: () => ({ featureId: "feature-quick-pay" }) as never,
     getThread: (threadId) => threads.get(threadId) ?? null,
-    createThread: makeThread as never,
+    // Stands in for createThreadService, which the Feature path now uses so a
+    // session inherits the Feature's configured mode.
+    createThread: (async (metadata?: Record<string, unknown>) => {
+      const threadId = createId("feature-thread")
+      const resolved = {
+        ...(metadata ?? {}),
+        ...(metadata && "agentMode" in metadata ? {} : { agentMode: "workflow" })
+      }
+      makeThread(threadId, resolved)
+      return { thread_id: threadId, metadata: resolved }
+    }) as never,
     createId: () => createId("feature-thread")
   })
   const inbox = new ImInboxService({
@@ -478,7 +488,8 @@ async function createJourney() {
     abortCurrent: (conversationKey, threadId) =>
       queue.abortCurrentImEvent(conversationKey, undefined, threadId),
     getCurrentEventId: (conversationKey, threadId) =>
-      queue.getCurrentEventId(conversationKey, threadId)
+      queue.getCurrentEventId(conversationKey, threadId),
+    getThread: (threadId) => threads.get(threadId) ?? null
   })
   const ingress = new ImIngressSequencer({
     conversationState: conversations,
@@ -620,7 +631,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     assert(initialSessionsText.includes("支付平台 / 快捷支付（特性，可创建新会话）"))
     const featureIndex = selectionIndexContaining(initialSessionsText, "（特性，可创建新会话）")
     const featureBind = await journey.send(`/绑定 ${featureIndex}`)
-    assert(journey.eventReplyText(featureBind.event.eventId).includes("新建会话并切换"))
+    assert(journey.eventReplyText(featureBind.event.eventId).includes("会话并切换"))
     const featureTarget = journey.conversations.getActiveTarget(CONVERSATION_KEY)
     assert.equal(featureTarget?.kind, "thread")
     if (featureTarget?.kind !== "thread") throw new Error("Feature Thread target expected")

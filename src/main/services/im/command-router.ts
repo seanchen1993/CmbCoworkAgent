@@ -1,4 +1,7 @@
+import type { AgentMode } from "../../agent/coordinator-mode"
+import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getLocalThreadRunLease } from "../../agent/thread-run-lease"
+import { getThread } from "../../db"
 import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
 import { hasPendingUserInputForThread } from "../user-input"
 import {
@@ -95,7 +98,33 @@ interface ImCommandRouterDependencies {
   selections: ImSelectionContextStore
   abortCurrent: (conversationKey: string, threadId?: string) => boolean
   getCurrentEventId: (conversationKey: string, threadId?: string) => string | null
+  getThread: typeof getThread
 }
+
+/**
+ * What a person types in Zhaohu, and the thread mode it selects.
+ *
+ * Three words on purpose. The Feature's own configuration uses a different set
+ * (solo / multi / agent_team / workflow) and the thread uses a third
+ * (normal / coordinator / workflow); asking a remote user to know which layer
+ * they are addressing would be a trap, since "workflow" appears in both and
+ * "agent_team" appears in neither of the other two.
+ */
+const BIND_AGENT_MODES = new Map<string, AgentMode>([
+  ["normal", "normal"],
+  ["team", "coordinator"],
+  ["workflow", "workflow"]
+])
+
+const BIND_AGENT_MODE_LABELS: Record<AgentMode, string> = {
+  normal: "Normal",
+  coordinator: "Team",
+  workflow: "Workflow"
+}
+
+const BIND_AGENT_MODE_CHOICES = [...new Set(BIND_AGENT_MODES.keys())]
+  .map((word) => BIND_AGENT_MODE_LABELS[BIND_AGENT_MODES.get(word)!])
+  .join(" / ")
 
 function positiveIndex(argument: string): number | null {
   if (!/^\d+$/u.test(argument)) return null
@@ -124,7 +153,8 @@ export class ImCommandRouter {
       managedBizRetries: dependencies.managedBizRetries ?? imManagedBizRetryService,
       selections: dependencies.selections ?? imSelectionContextStore,
       abortCurrent: dependencies.abortCurrent ?? (() => false),
-      getCurrentEventId: dependencies.getCurrentEventId ?? (() => null)
+      getCurrentEventId: dependencies.getCurrentEventId ?? (() => null),
+      getThread: dependencies.getThread ?? getThread
     }
   }
 
@@ -206,7 +236,7 @@ export class ImCommandRouter {
     return [
       "可用指令：",
       "/会话 — 查看已在桌面授权的会话与特性",
-      "/绑定 <编号> — 切换到已有会话，或在特性下创建会话",
+      `/绑定 <编号> [${BIND_AGENT_MODE_CHOICES}] — 切换到已有会话，或在特性下创建会话（模式仅用于新建，省略则跟随特性配置）`,
       "/收件箱 — 切回默认聊天",
       "/技能 — 查看当前会话可用技能",
       "/<技能名> <任务> 或 /技能 <技能名或短码> <任务> — 指定技能执行",
@@ -264,8 +294,14 @@ export class ImCommandRouter {
     input: Parameters<ImCommandRouter["handle"]>[0],
     argument: string
   ): Promise<string> {
-    const index = positiveIndex(argument)
-    if (!index) return "用法：/绑定 <编号>。请先发送 /会话。"
+    const [indexText = "", ...modeWords] = argument.split(/\s+/u).filter(Boolean)
+    const index = positiveIndex(indexText)
+    if (!index) return `用法：/绑定 <编号> [${BIND_AGENT_MODE_CHOICES}]。请先发送 /会话。`
+    const requestedModeWord = modeWords.join(" ").toLowerCase()
+    const requestedMode = requestedModeWord ? BIND_AGENT_MODES.get(requestedModeWord) : undefined
+    if (requestedModeWord && !requestedMode) {
+      return `模式无效。可选：${BIND_AGENT_MODE_CHOICES}。`
+    }
     const selected = await this.dependencies.selections.select(
       input.conversationKey,
       "remote_target",
@@ -286,6 +322,14 @@ export class ImCommandRouter {
       conversationKey: input.conversationKey
     }
     const createsFeatureThread = selected.targetKind === "feature_grant"
+    // Only the Feature branch creates a session, so only it has a mode to
+    // choose. On an existing session the same argument would mean "change what
+    // this thread already is", which is a different operation with different
+    // risk — its checkpoints and any running turn were produced under the old
+    // mode — and it is not offered here.
+    if (requestedMode && !createsFeatureThread) {
+      return "模式只能在特性下新建会话时指定；已存在的会话请在桌面切换模式。"
+    }
     const target =
       selected.targetKind === "thread_grant"
         ? await this.dependencies.access.bindThreadGrant({
@@ -296,7 +340,8 @@ export class ImCommandRouter {
         : await this.dependencies.access.bindFeatureGrant({
             route,
             grantId: selected.grantId,
-            grantVersion
+            grantVersion,
+            ...(requestedMode ? { agentMode: requestedMode } : {})
           })
     const currentEventId = this.dependencies.getCurrentEventId(
       input.conversationKey,
@@ -306,8 +351,14 @@ export class ImCommandRouter {
       currentEventId && previous?.kind !== "inbox" && previous?.targetId !== target.targetId
     )
     if (createsFeatureThread) {
+      // Report what the thread actually is, not what was requested: with no
+      // mode word the Feature decided, and a reader cannot see that anywhere
+      // else from Zhaohu.
+      const mode = parseStandardThreadMetadata(
+        this.dependencies.getThread(target.threadId)?.metadata
+      ).agentMode
       return [
-        `已在【${selected.label}】下新建会话并切换。`,
+        `已在【${selected.label}】下新建 ${BIND_AGENT_MODE_LABELS[mode]} 会话并切换。`,
         switchedDuringRun
           ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将发送到新会话。`
           : "后续普通消息将发送到这个新会话。"
