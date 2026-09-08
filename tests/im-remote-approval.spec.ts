@@ -1,7 +1,8 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import initSqlJs from "sql.js"
 import { ApprovalDecisionBroker } from "../src/main/agent/approval-decision-broker"
 import type { ThreadRow } from "../src/main/db"
@@ -198,6 +199,30 @@ async function testDefaultOffDoesNotPublishOrResolve(): Promise<void> {
   }
 }
 
+function testNoRemoteCodePromiseSurvivesAsCopyOnly(): void {
+  // The bug this pins: the deadlines were removed from both services, the
+  // wait notice and the user-input prompt were reworded, and the approval
+  // prompt was not — so it kept telling people "短码 10 分钟内单次有效" about a
+  // code that no longer expires. Behaviour and copy are changed by different
+  // edits; only a check that reads both files at once catches the one you
+  // forgot.
+  const root = resolve(__dirname, "..")
+  for (const file of [
+    "src/main/services/im/remote-approval-service.ts",
+    "src/main/services/im/remote-user-input-service.ts",
+    "src/main/services/im/remote-runner.ts"
+  ]) {
+    const offending = readFileSync(join(root, file), "utf8")
+      .split("\n")
+      .filter((line) => /\d+\s*分钟/u.test(line) && !line.trimStart().startsWith("*"))
+    assert.deepEqual(
+      offending,
+      [],
+      `${file} still tells a remote user their code or turn expires:\n${offending.join("\n")}`
+    )
+  }
+}
+
 async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
   const context = await createContext()
   try {
@@ -216,6 +241,11 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
     assert(text.includes("写入文件：src/billing.ts"))
     assert(text.includes("/批准 A1B2C3"))
     assert(text.includes("/拒绝 A1B2C3"))
+    // The prompt is the only thing the person holding it can go on. It must not
+    // promise a window nothing enforces — someone who reads "10 分钟" and gets
+    // back an hour later will assume the code is dead and never try it.
+    assert(!/\d+\s*分钟/u.test(text), `the approval prompt must not promise a deadline: ${text}`)
+    assert(text.includes("短码单次有效"))
     assert(!text.includes(context.root), "approval text must not leak the absolute workspace path")
     assert.equal(context.sendPendingCount(), 1)
 
@@ -626,6 +656,7 @@ async function testAdvancedModesCanPublishAndResolve(): Promise<void> {
 
 async function main(): Promise<void> {
   await testDefaultOffDoesNotPublishOrResolve()
+  testNoRemoteCodePromiseSurvivesAsCopyOnly()
   await testWorkspaceApprovalIsSingleUseAndAudited()
   await testAllowedDecisionsFailClosedAndCodesOutliveTheClock()
   await testAuditFlushFailureNeverResumesRuntime()

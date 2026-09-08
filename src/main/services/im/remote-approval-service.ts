@@ -408,7 +408,7 @@ export class ImRemoteApprovalService {
           presentation.detail,
           "",
           decisionCommands,
-          "短码 10 分钟内单次有效。"
+          "短码单次有效，在本轮等待期间一直可用。"
         ].join("\n")
       : [`${route.prefix}需要在桌面确认`, presentation.detail].join("\n")
     const replies = buildImProactiveReplies({
