@@ -5,7 +5,9 @@ import type { AgentRunDelivery } from "../agent/agent-run-service"
 import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
 import { emitAppAttention } from "../app-attention-events"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
+import { imManagedBizRetryService } from "../services/im/managed-biz-retry-service"
 import { readHarnessFeatureMetadata } from "./service"
+import { hasPendingHumanGateForThread } from "./human-gate-service"
 import { inspectHarnessManagedFeatureStatus } from "./managed-feature-status"
 import {
   createAndStartManagedHarnessSession,
@@ -26,6 +28,9 @@ import type {
   ManagedRunChangeEvent,
   ManagedRunDecisionChangedField,
   ManagedRunDecisionFacts,
+  ManagedRunDecisionAction,
+  ManagedRunEvent,
+  ManagedRunPolicyResult,
   ManagedRunSessionAction,
   ManagedRunSnapshot,
   ManagedRunStartInput,
@@ -96,9 +101,9 @@ export function isActiveManagedRunSession(threadId: string): boolean {
     })
     return Boolean(
       record.snapshot &&
-        !record.corrupt &&
-        record.snapshot.status === "running" &&
-        record.snapshot.currentSession?.threadId === threadId
+      !record.corrupt &&
+      record.snapshot.status === "running" &&
+      record.snapshot.currentSession?.threadId === threadId
     )
   } catch (error) {
     console.warn("[ManagedRun] Failed to inspect active session:", { threadId, error })
@@ -159,7 +164,9 @@ export function validateManagedRunStart(input: ManagedRunStartValidationInput): 
 }
 
 function toManagedRunSessionAction(
-  nextAction: NonNullable<Awaited<ReturnType<typeof inspectHarnessManagedFeatureStatus>>["nextAction"]>
+  nextAction: NonNullable<
+    Awaited<ReturnType<typeof inspectHarnessManagedFeatureStatus>>["nextAction"]
+  >
 ): ManagedRunSessionAction {
   const slashSkill = nextAction.slashSkill?.trim() ?? ""
   const userMessage = nextAction.userMessage?.trim() ?? ""
@@ -198,6 +205,48 @@ function boundedManagedRunReason(reason: string): string {
   return normalized.length > MANAGED_RUN_REASON_MAX_LENGTH
     ? `${normalized.slice(0, MANAGED_RUN_REASON_MAX_LENGTH - 1)}…`
     : normalized
+}
+
+type ManagedRunSourceRef = Pick<ManagedRunEvent, "eventId" | "type">
+
+function recordManagedRunDecision(input: {
+  run: ManagedRunSnapshot
+  sourceEvent: ManagedRunSourceRef
+  policyResult: ManagedRunPolicyResult
+  decisionAction: ManagedRunDecisionAction
+  summary: string
+  decisionActor?: "controller" | "user" | "system"
+  decisionChannel?: "system" | "desktop" | "im"
+  sourceThreadId?: string
+  gateId?: string
+  scope?: "global" | "stage"
+}): { run: ManagedRunSnapshot; event: ManagedRunEvent } {
+  const event = managedRunStore.appendEvent(input.run, {
+    type: "managed_run_decision",
+    scope: input.scope ?? (input.run.decisionBaseline?.nodeId ? "stage" : "global"),
+    nodeId: input.run.decisionBaseline?.nodeId,
+    sourceEventId: input.sourceEvent.eventId,
+    sourceEventType: input.sourceEvent.type,
+    policyResult: input.policyResult,
+    decisionActor: input.decisionActor ?? "controller",
+    decisionChannel: input.decisionChannel ?? "system",
+    decisionAction: input.decisionAction,
+    sourceThreadId: input.sourceThreadId,
+    gateId: input.gateId,
+    summary: input.summary
+  })
+  const run = managedRunStore.updateSnapshot({
+    ...input.run,
+    lastDecision: {
+      policyResult: input.policyResult,
+      decisionActor: input.decisionActor ?? "controller",
+      decisionChannel: input.decisionChannel ?? "system",
+      decisionAction: input.decisionAction,
+      summary: input.summary,
+      createTime: event.createTime
+    }
+  })
+  return { run, event }
 }
 
 function buildManagedRunDecisionFacts(
@@ -250,12 +299,23 @@ function buildManagedRunDecisionFacts(
   }
 }
 
-function scheduleProviderRetry(run: ManagedRunSnapshot, delivery: AgentRunDelivery): void {
+function scheduleProviderRetry(
+  run: ManagedRunSnapshot,
+  delivery: AgentRunDelivery,
+  decisionEventId: string
+): void {
   if (isManagedRunStopRequested(run)) return
   const retryNumber = run.providerRetryCount + 1
   const retryPlan = resolveProviderRetryPlan(run.providerRetryCount)
   if (!retryPlan || !run.currentSession?.threadId || !run.decisionBaseline?.nodeId) {
-    void markTerminal(run, "failed", "模型服务重试已达到上限", "run_failed")
+    void markTerminal(
+      run,
+      "failed",
+      "模型服务重试已达到上限",
+      "run_failed",
+      decisionEventId,
+      "provider_retry_limit_exceeded"
+    )
     return
   }
   cancelProviderRetry(run.projectId, run.featureId)
@@ -271,9 +331,12 @@ function scheduleProviderRetry(run: ManagedRunSnapshot, delivery: AgentRunDelive
     {
       type: "provider_retry_scheduled",
       scope: "stage",
-      source: "agent_end_reason",
       nodeId: run.decisionBaseline.nodeId,
       threadId: run.currentSession.threadId,
+      decisionEventId,
+      retryNumber,
+      retryAt: nextRetryAt,
+      delayMs,
       reasonCode: `provider_error_${retryNumber}_of_3`,
       summary: `${delayMs / 1000} 秒后在原会话自动发送“继续当前任务”`
     }
@@ -312,95 +375,139 @@ async function processProviderRetry(
   scheduledRun: ManagedRunSnapshot,
   delivery: AgentRunDelivery
 ): Promise<void> {
-  await featureLocks.withKey(featureKey(scheduledRun.projectId, scheduledRun.featureId), async () => {
-    const record = managedRunStore.getRun(scheduledRun)
-    if (
-      !record.snapshot ||
-      record.corrupt ||
-      record.snapshot.status !== "running" ||
-      record.snapshot.nextRetryAt !== scheduledRun.nextRetryAt ||
-      isManagedRunStopRequested(record.snapshot)
-    ) return
-    if (hasActiveFeatureThread(scheduledRun.projectId, scheduledRun.featureId)) {
-      reschedulePendingProviderRetry(scheduledRun, delivery)
-      return
-    }
-
-    let feature: Awaited<ReturnType<typeof inspectHarnessManagedFeatureStatus>>
-    try {
-      feature = await inspectHarnessManagedFeatureStatus(
-        scheduledRun.projectId,
-        scheduledRun.featureId
+  await featureLocks.withKey(
+    featureKey(scheduledRun.projectId, scheduledRun.featureId),
+    async () => {
+      const record = managedRunStore.getRun(scheduledRun)
+      if (
+        !record.snapshot ||
+        record.corrupt ||
+        record.snapshot.status !== "running" ||
+        record.snapshot.nextRetryAt !== scheduledRun.nextRetryAt ||
+        isManagedRunStopRequested(record.snapshot)
       )
-    } catch (error) {
-      await markTerminal(
-        record.snapshot,
-        "failed",
-        error instanceof Error ? error.message : String(error),
-        "run_failed"
-      )
-      return
-    }
-    managedRunStore.appendEvent(record.snapshot, {
-      type: "feature_inspected",
-      scope: "stage",
-      source: "feature_status",
-      nodeId: feature.currentNodeId,
-      featureStatus: feature.featureStatus,
-      nodeStatus: feature.currentNodeStatus,
-      slashSkill: feature.nextAction?.slashSkill,
-      summary: "发送模型服务重试前重新检查当前阶段状态"
-    })
-    if (isManagedRunStopRequested(record.snapshot)) return
-    const inspectedDecision = resolveManagedRunDecision({
-      run: record.snapshot,
-      feature,
-      terminal: {
-        outcome: "error",
-        endReason: { code: "provider_error" }
+        return
+      if (hasActiveFeatureThread(scheduledRun.projectId, scheduledRun.featureId)) {
+        reschedulePendingProviderRetry(scheduledRun, delivery)
+        return
       }
-    })
-    if (inspectedDecision.decision !== "provider_retry") {
-      const running = managedRunStore.updateSnapshot({
-        ...record.snapshot,
-        status: "running",
-        nextRetryAt: undefined
-      })
-      await inspectAndLaunch(running, delivery)
-      return
-    }
-    const currentThreadId = record.snapshot.currentSession?.threadId
-    if (!currentThreadId) {
-      await markTerminal(record.snapshot, "failed", "模型服务重试缺少来源会话", "run_failed")
-      return
-    }
 
-    const running = managedRunStore.updateSnapshot(
-      { ...record.snapshot, status: "running", nextRetryAt: undefined },
-      {
-        type: "provider_retry_sent",
+      let feature: Awaited<ReturnType<typeof inspectHarnessManagedFeatureStatus>>
+      const sourceEvent = managedRunStore.appendEvent(record.snapshot, {
+        type: "provider_retry_timer_elapsed",
         scope: "stage",
-        source: "controller_policy",
-        nodeId: feature.currentNodeId,
-        threadId: currentThreadId,
-        reasonCode: `provider_error_${record.snapshot.providerRetryCount}_of_3`,
-        summary: "在原会话自动发送“继续当前任务”"
+        nodeId: record.snapshot.decisionBaseline?.nodeId,
+        threadId: record.snapshot.currentSession?.threadId,
+        retryNumber: record.snapshot.providerRetryCount,
+        summary: "模型服务重试等待时间已到"
+      })
+      try {
+        feature = await inspectHarnessManagedFeatureStatus(
+          scheduledRun.projectId,
+          scheduledRun.featureId
+        )
+      } catch (error) {
+        const failure = recordManagedRunDecision({
+          run: record.snapshot,
+          sourceEvent,
+          policyResult: {
+            type: "provider_retry",
+            proposedAction: "fail_managed_run",
+            reasonCode: "feature_inspection_failed"
+          },
+          decisionAction: "fail_managed_run",
+          summary: "模型服务重试前无法检查 Feature 状态"
+        })
+        await markTerminal(
+          failure.run,
+          "failed",
+          error instanceof Error ? error.message : String(error),
+          "run_failed",
+          failure.event.eventId,
+          "feature_inspection_failed"
+        )
+        return
       }
-    )
-    if (isManagedRunStopRequested(running)) return
-    try {
-      await sendManagedProviderRetry(currentThreadId, delivery)
-      const published = managedRunStore.updateSnapshot(running)
-      publishManagedRunChanged(lastRunSummary(published))
-    } catch (error) {
-      await markTerminal(
-        running,
-        "failed",
-        error instanceof Error ? error.message : String(error),
-        "run_failed"
-      )
+      if (isManagedRunStopRequested(record.snapshot)) return
+      const inspectedDecision = resolveManagedRunDecision({
+        run: record.snapshot,
+        feature,
+        terminal: {
+          outcome: "error",
+          endReason: { code: "provider_error" }
+        }
+      })
+      if (inspectedDecision.policyResult.type !== "provider_retry") {
+        const running = managedRunStore.updateSnapshot({
+          ...record.snapshot,
+          status: "running",
+          nextRetryAt: undefined
+        })
+        await inspectAndLaunch(running, delivery, sourceEvent)
+        return
+      }
+      const currentThreadId = record.snapshot.currentSession?.threadId
+      if (!currentThreadId) {
+        const missing = recordManagedRunDecision({
+          run: record.snapshot,
+          sourceEvent,
+          policyResult: {
+            type: "provider_retry",
+            proposedAction: "fail_managed_run",
+            reasonCode: "missing_current_thread"
+          },
+          decisionAction: "fail_managed_run",
+          summary: "模型服务重试缺少来源会话"
+        })
+        await markTerminal(
+          missing.run,
+          "failed",
+          "模型服务重试缺少来源会话",
+          "run_failed",
+          missing.event.eventId,
+          "missing_current_thread"
+        )
+        return
+      }
+
+      const retryDecision = recordManagedRunDecision({
+        run: { ...record.snapshot, status: "running", nextRetryAt: undefined },
+        sourceEvent,
+        policyResult: {
+          type: "provider_retry",
+          proposedAction: "continue_current_thread",
+          reasonCode: `provider_error_${record.snapshot.providerRetryCount}_of_3`,
+          facts: buildManagedRunDecisionFacts(record.snapshot, feature)
+        },
+        decisionAction: "continue_current_thread",
+        summary: "在原会话继续模型服务重试",
+        sourceThreadId: currentThreadId
+      })
+      const running = retryDecision.run
+      if (isManagedRunStopRequested(running)) return
+      try {
+        await sendManagedProviderRetry(currentThreadId, delivery)
+        const published = managedRunStore.updateSnapshot(running, {
+          type: "session_continued",
+          scope: "stage",
+          nodeId: feature.currentNodeId,
+          targetThreadId: currentThreadId,
+          decisionEventId: retryDecision.event.eventId,
+          summary: "已在原会话发送模型服务重试消息"
+        })
+        publishManagedRunChanged(lastRunSummary(published))
+      } catch (error) {
+        await markTerminal(
+          running,
+          "failed",
+          error instanceof Error ? error.message : String(error),
+          "run_failed",
+          retryDecision.event.eventId,
+          "provider_retry_action_failed"
+        )
+      }
     }
-  })
+  )
 }
 
 async function markTerminal(
@@ -408,24 +515,27 @@ async function markTerminal(
   status: "cancelled" | "failed" | "completed",
   reason: string,
   eventType: "run_cancelled" | "run_failed" | "run_completed",
+  decisionEventId: string,
   reasonCode?: string
 ): Promise<void> {
   cancelProviderRetry(run.projectId, run.featureId)
+  imManagedBizRetryService.removeRun(run.runId)
   const now = formatManagedRunTimestamp()
   const persistedReason = boundedManagedRunReason(reason)
   const next: ManagedRunSnapshot = {
     ...run,
     status,
-    ...(status === "cancelled" ? { cancellationReason: persistedReason, nextRetryAt: undefined } : {}),
+    ...(status === "cancelled"
+      ? { cancellationReason: persistedReason, nextRetryAt: undefined }
+      : {}),
     ...(status === "failed" ? { failureReason: persistedReason, nextRetryAt: undefined } : {}),
     ...(status === "completed" ? { completedAt: now, nextRetryAt: undefined } : {})
   }
   const persisted = managedRunStore.updateSnapshot(next, {
     type: eventType,
     scope: "global",
-    source: "managed_run",
     nodeId: next.decisionBaseline?.nodeId,
-    threadId: next.currentSession?.threadId,
+    decisionEventId,
     ...(reasonCode ? { reasonCode } : {}),
     summary: persistedReason
   })
@@ -436,99 +546,136 @@ async function markTerminal(
 async function inspectAndLaunch(
   run: ManagedRunSnapshot,
   delivery: AgentRunDelivery,
+  sourceEvent: ManagedRunSourceRef,
   terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">
 ): Promise<void> {
   if (isManagedRunStopRequested(run)) return
   const feature = await inspectHarnessManagedFeatureStatus(run.projectId, run.featureId)
   if (isManagedRunStopRequested(run)) return
-  managedRunStore.appendEvent(run, {
-    type: "feature_inspected",
-    scope: "stage",
-    source: "feature_status",
-    nodeId: feature.currentNodeId,
-    featureStatus: feature.featureStatus,
-    nodeStatus: feature.currentNodeStatus,
-    slashSkill: feature.nextAction?.slashSkill,
-    summary: `特性=${feature.featureStatus}，节点=${feature.currentNodeStatus}${feature.nextAction?.slashSkill ? `，技能=${feature.nextAction.slashSkill}` : ""}`
-  })
-
-  const decision = resolveManagedRunDecision({
+  const evaluation = resolveManagedRunDecision({
     run,
     feature,
     terminal
   })
   const decisionFacts = buildManagedRunDecisionFacts(run, feature, terminal)
-  const decidedRun = managedRunStore.updateSnapshot(run, {
-    type: "decision_made",
-    scope: "stage",
-    source: "controller_policy",
-    nodeId: feature.currentNodeId,
-    sourceThreadId: run.currentSession?.threadId,
-    decision: decision.decision,
-    reasonCode: decision.reasonCode,
-    decisionFacts,
-    decisionRule: decision.rule,
-    summary: decision.summary
+  const policyResult: ManagedRunPolicyResult = {
+    ...evaluation.policyResult,
+    facts: decisionFacts
+  }
+  if (
+    policyResult.type === "biz_retry" &&
+    (policyResult.proposedAction === "continue_current_thread" ||
+      policyResult.proposedAction === "start_new_thread")
+  ) {
+    const waitingForIm = await imManagedBizRetryService.request({
+      run,
+      sourceEvent,
+      policyResult,
+      summary: evaluation.summary,
+      delivery,
+      stageName: feature.currentNodeId,
+      nodeStatus: feature.currentNodeStatus,
+      contextUsageRatio: decisionFacts.contextUsageRatio,
+      nextAction: feature.nextAction ? toManagedRunSessionAction(feature.nextAction) : undefined
+    })
+    if (waitingForIm) return
+  }
+  const decision = recordManagedRunDecision({
+    run,
+    sourceEvent,
+    policyResult,
+    decisionAction: policyResult.proposedAction as ManagedRunDecisionAction,
+    summary: evaluation.summary,
+    sourceThreadId: run.currentSession?.threadId
   })
+  const decidedRun = decision.run
 
-  if (decision.decision === "complete") {
-    await markTerminal(decidedRun, "completed", decision.summary, "run_completed", decision.reasonCode)
+  if (policyResult.proposedAction === "complete_managed_run") {
+    await markTerminal(
+      decidedRun,
+      "completed",
+      evaluation.summary,
+      "run_completed",
+      decision.event.eventId,
+      policyResult.reasonCode
+    )
     return
   }
-  if (decision.decision === "fail") {
-    await markTerminal(decidedRun, "failed", decision.summary, "run_failed", decision.reasonCode)
+  if (policyResult.proposedAction === "fail_managed_run") {
+    await markTerminal(
+      decidedRun,
+      "failed",
+      evaluation.summary,
+      "run_failed",
+      decision.event.eventId,
+      policyResult.reasonCode
+    )
     return
   }
-  if (decision.decision === "provider_retry") {
+  if (policyResult.proposedAction === "schedule_provider_retry") {
     if (!resolveProviderRetryPlan(decidedRun.providerRetryCount)) {
-      await markTerminal(decidedRun, "failed", "模型服务重试已达到上限", "run_failed")
+      await markTerminal(
+        decidedRun,
+        "failed",
+        "模型服务重试已达到上限",
+        "run_failed",
+        decision.event.eventId,
+        "provider_retry_limit_exceeded"
+      )
       return
     }
-    scheduleProviderRetry(decidedRun, delivery)
+    scheduleProviderRetry(decidedRun, delivery, decision.event.eventId)
     return
   }
 
-  if (decision.decision === "biz_retry_reuse_thread") {
+  if (
+    policyResult.type === "biz_retry" &&
+    policyResult.proposedAction === "continue_current_thread"
+  ) {
     const currentThreadId = decidedRun.currentSession?.threadId
     if (!currentThreadId) {
-      await markTerminal(decidedRun, "failed", "业务重试缺少来源会话", "run_failed")
+      await markTerminal(
+        decidedRun,
+        "failed",
+        "业务重试缺少来源会话",
+        "run_failed",
+        decision.event.eventId,
+        "missing_current_thread"
+      )
       return
     }
-    const running = managedRunStore.updateSnapshot(
-      {
-        ...decidedRun,
-        status: "running",
-        decisionBaseline: {
-          nodeId: feature.currentNodeId,
-          featureStateHash: feature.featureStateHash,
-          featureStatus: feature.featureStatus,
-          nodeStatus: feature.currentNodeStatus,
-          nextActionHash: feature.nextActionHash
-        },
-        bizRetryCount: decidedRun.bizRetryCount + 1,
-        nextRetryAt: undefined
-      },
-      {
-        type: "biz_retry_reuse_thread",
-        scope: "stage",
-        source: "controller_policy",
+    const running = managedRunStore.updateSnapshot({
+      ...decidedRun,
+      status: "running",
+      decisionBaseline: {
         nodeId: feature.currentNodeId,
-        threadId: currentThreadId,
-        decision: decision.decision,
-        reasonCode: decision.reasonCode,
-        summary: decision.summary
-      }
-    )
+        featureStateHash: feature.featureStateHash,
+        featureStatus: feature.featureStatus,
+        nodeStatus: feature.currentNodeStatus,
+        nextActionHash: feature.nextActionHash
+      },
+      bizRetryCount: decidedRun.bizRetryCount + 1,
+      nextRetryAt: undefined
+    })
     if (isManagedRunStopRequested(running)) return
     try {
       await sendManagedBizRetryReuseThread(currentThreadId, delivery)
-      publishManagedRunChanged(lastRunSummary(running))
+      const continued = managedRunStore.updateSnapshot(running, {
+        type: "session_continued",
+        scope: "stage",
+        nodeId: feature.currentNodeId,
+        targetThreadId: currentThreadId,
+        decisionEventId: decision.event.eventId,
+        summary: evaluation.summary
+      })
+      publishManagedRunChanged(lastRunSummary(continued))
     } catch (error) {
       await markTerminal(
         running,
         "failed",
         error instanceof Error ? error.message : String(error),
         "run_failed",
+        decision.event.eventId,
         "platform_action_failed"
       )
     }
@@ -536,7 +683,13 @@ async function inspectAndLaunch(
   }
 
   if (!feature.nextAction) {
-    await markTerminal(decidedRun, "failed", "当前节点没有可执行的 nextAction", "run_failed")
+    await markTerminal(
+      decidedRun,
+      "failed",
+      "当前节点没有可执行的 nextAction",
+      "run_failed",
+      decision.event.eventId
+    )
     return
   }
 
@@ -547,7 +700,8 @@ async function inspectAndLaunch(
       decidedRun,
       "failed",
       "当前托管 Run 没有已确认的会话工作区",
-      "run_failed"
+      "run_failed",
+      decision.event.eventId
     )
     return
   }
@@ -563,7 +717,7 @@ async function inspectAndLaunch(
   if (isManagedRunStopRequested(decidedRun)) return
   try {
     const created = await createAndStartManagedHarnessSession(sessionInput)
-    const advancesStage = decision.decision === "advance"
+    const advancesStage = policyResult.type === "biz_progress"
     const persisted = managedRunStore.updateSnapshot(
       {
         ...decidedRun,
@@ -580,40 +734,24 @@ async function inspectAndLaunch(
         },
         providerRetryCount:
           terminal?.outcome === "success" || advancesStage ? 0 : decidedRun.providerRetryCount,
-        bizRetryCount:
-          decision.decision === "biz_retry_new_thread" ? decidedRun.bizRetryCount + 1 : 0,
-        nextRetryAt: undefined,
+        bizRetryCount: policyResult.type === "biz_retry" ? decidedRun.bizRetryCount + 1 : 0,
+        nextRetryAt: undefined
       },
       {
         type: "session_created",
         scope: "stage",
-        source: "controller_policy",
         nodeId: feature.currentNodeId,
         targetThreadId: created.threadId,
-        ...(workspacePath ? { workspacePath } : {}),
-        decision: decision.decision,
-        reasonCode: decision.reasonCode,
-        summary: decision.summary
+        decisionEventId: decision.event.eventId,
+        summary: evaluation.summary
       }
     )
-    if (decision.decision === "biz_retry_new_thread") {
-      managedRunStore.appendEvent(persisted, {
-        type: "biz_retry_new_thread",
-        scope: "stage",
-        source: "controller_policy",
-        nodeId: feature.currentNodeId,
-        targetThreadId: created.threadId,
-        decision: decision.decision,
-        reasonCode: decision.reasonCode,
-        summary: decision.summary
-      })
-    }
     managedRunStore.appendEvent(persisted, {
       type: "session_started",
       scope: "stage",
-      source: "managed_run",
       nodeId: feature.currentNodeId,
-      threadId: created.threadId,
+      targetThreadId: created.threadId,
+      decisionEventId: decision.event.eventId,
       summary: "托管运行的普通项目会话已启动"
     })
     publishManagedRunThreadCreated({
@@ -630,6 +768,7 @@ async function inspectAndLaunch(
       "failed",
       error instanceof Error ? error.message : String(error),
       "run_failed",
+      decision.event.eventId,
       error instanceof ManagedActionValidationError ? error.reasonCode : "platform_action_failed"
     )
   }
@@ -653,15 +792,33 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     assertManagedRunCanStart(input.projectId, input.featureId)
 
     const created = managedRunStore.createRun(input.projectId, input.featureId, workspacePath)
+    const sourceEvent = managedRunStore.appendEvent(created, {
+      type: "run_started",
+      scope: "global",
+      summary: "用户确认开启托管运行"
+    })
     publishManagedRunChanged(lastRunSummary(created))
     try {
-      await inspectAndLaunch(created, input.delivery)
+      await inspectAndLaunch(created, input.delivery, sourceEvent)
     } catch (error) {
+      const failed = recordManagedRunDecision({
+        run: created,
+        sourceEvent,
+        policyResult: {
+          type: "run_termination",
+          proposedAction: "fail_managed_run",
+          reasonCode: "managed_run_start_failed"
+        },
+        decisionAction: "fail_managed_run",
+        summary: "托管运行启动失败"
+      })
       await markTerminal(
-        created,
+        failed.run,
         "failed",
         error instanceof Error ? error.message : String(error),
-        "run_failed"
+        "run_failed",
+        failed.event.eventId,
+        "managed_run_start_failed"
       )
     }
     return lastRunSummary(created)
@@ -682,43 +839,327 @@ export async function stopManagedRun(input: ManagedRunStopInput): Promise<boolea
       stopRequestedRunIds.delete(input.runId)
       return false
     }
+    const sourceEvent = managedRunStore.appendEvent(current.snapshot, {
+      type: "run_stop_requested",
+      scope: "global",
+      summary: "用户请求停止托管运行"
+    })
+    const stopped = recordManagedRunDecision({
+      run: current.snapshot,
+      sourceEvent,
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "stop_managed_run",
+        reasonCode: "user_stop_requested"
+      },
+      decisionActor: "user",
+      decisionChannel: "desktop",
+      decisionAction: "stop_managed_run",
+      summary: "用户停止托管运行",
+      scope: "global"
+    })
     await markTerminal(
-      current.snapshot,
+      stopped.run,
       "cancelled",
       "用户停止托管模式，已有会话继续运行但不再自动推进",
-      "run_cancelled"
+      "run_cancelled",
+      stopped.event.eventId,
+      "user_stop_requested"
     )
     return true
   })
 }
 
-export async function cancelManagedRunForHumanGate(input: {
+export async function resolveManagedBizRetryDecision(input: {
+  decisionId: string
+  projectId: string
+  featureId: string
+  runId: string
+  originThreadId: string
+  policyResult: Extract<ManagedRunPolicyResult, { type: "biz_retry" }>
+  route: { principalId: string; conversationKey: string }
+  sourceEvent: ManagedRunSourceRef
+  summary: string
+  delivery: AgentRunDelivery
+  choice: "stop" | "continue" | "new_thread"
+  message?: string
+}): Promise<{ applied: boolean; message: string }> {
+  return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
+    const record = managedRunStore.getRun(input)
+    if (!record.snapshot || record.corrupt || record.snapshot.status !== "running") {
+      return { applied: false, message: "该托管运行已结束，操作未执行。" }
+    }
+    const run = record.snapshot
+    if (input.choice === "stop") {
+      const decision = recordManagedRunDecision({
+        run,
+        sourceEvent: input.sourceEvent,
+        policyResult: input.policyResult,
+        decisionActor: "user",
+        decisionChannel: "im",
+        decisionAction: "stop_managed_run",
+        summary: "用户通过招乎停止托管运行",
+        sourceThreadId: input.originThreadId,
+        scope: "global"
+      })
+      await markTerminal(
+        decision.run,
+        "cancelled",
+        "用户通过招乎停止托管运行",
+        "run_cancelled",
+        decision.event.eventId,
+        input.policyResult.reasonCode
+      )
+      return { applied: true, message: "托管运行已停止。" }
+    }
+
+    if (input.choice === "continue") {
+      if (
+        run.currentSession?.threadId !== input.originThreadId ||
+        !getThread(input.originThreadId)
+      ) {
+        return {
+          applied: false,
+          message: "来源会话已删除或不再是当前托管会话；可选择开启新会话或停止托管。"
+        }
+      }
+      await sendManagedBizRetryReuseThread(
+        input.originThreadId,
+        input.delivery,
+        input.message?.trim() || "继续当前任务"
+      )
+      const decision = recordManagedRunDecision({
+        run,
+        sourceEvent: input.sourceEvent,
+        policyResult: input.policyResult,
+        decisionActor: "user",
+        decisionChannel: "im",
+        decisionAction: "continue_current_thread",
+        summary: input.summary,
+        sourceThreadId: input.originThreadId
+      })
+      const continued = managedRunStore.updateSnapshot(decision.run, {
+        type: "session_continued",
+        scope: "stage",
+        nodeId: decision.run.decisionBaseline?.nodeId,
+        targetThreadId: input.originThreadId,
+        decisionEventId: decision.event.eventId,
+        summary: "已按招乎决策在原会话继续托管任务"
+      })
+      publishManagedRunChanged(lastRunSummary(continued))
+      return { applied: true, message: "已在当前托管会话继续执行。" }
+    }
+
+    let feature: Awaited<ReturnType<typeof inspectHarnessManagedFeatureStatus>>
+    let nextAction: ManagedRunSessionAction
+    try {
+      feature = await inspectHarnessManagedFeatureStatus(input.projectId, input.featureId)
+      if (!feature.nextAction) {
+        return { applied: false, message: "最新 Feature 状态没有可执行的 nextAction，短码仍有效。" }
+      }
+      nextAction = toManagedRunSessionAction(feature.nextAction)
+    } catch (error) {
+      if (error instanceof ManagedActionValidationError) {
+        return {
+          applied: false,
+          message: `最新 nextAction 不可执行：${error.message}。短码仍有效。`
+        }
+      }
+      throw error
+    }
+    const workspacePath = run.workspacePath?.trim()
+    if (!workspacePath) {
+      return { applied: false, message: "托管运行缺少会话工作区，短码仍有效。" }
+    }
+    const created = await createAndStartManagedHarnessSession({
+      projectId: input.projectId,
+      featureId: input.featureId,
+      runId: input.runId,
+      nodeId: feature.currentNodeId,
+      nextAction,
+      workspacePath,
+      delivery: input.delivery,
+      imRoute: input.route
+    })
+    const decision = recordManagedRunDecision({
+      run,
+      sourceEvent: input.sourceEvent,
+      policyResult: input.policyResult,
+      decisionActor: "user",
+      decisionChannel: "im",
+      decisionAction: "start_new_thread",
+      summary: input.summary,
+      sourceThreadId: input.originThreadId
+    })
+    const persisted = managedRunStore.updateSnapshot(
+      {
+        ...decision.run,
+        currentSession: { threadId: created.threadId },
+        decisionBaseline: {
+          nodeId: feature.currentNodeId,
+          featureStateHash: feature.featureStateHash,
+          featureStatus: feature.featureStatus,
+          nodeStatus: feature.currentNodeStatus,
+          nextActionHash: feature.nextActionHash
+        },
+        nextRetryAt: undefined
+      },
+      {
+        type: "session_created",
+        scope: "stage",
+        nodeId: feature.currentNodeId,
+        targetThreadId: created.threadId,
+        decisionEventId: decision.event.eventId,
+        summary: "已按招乎决策创建新的托管会话"
+      }
+    )
+    managedRunStore.appendEvent(persisted, {
+      type: "session_started",
+      scope: "stage",
+      nodeId: feature.currentNodeId,
+      targetThreadId: created.threadId,
+      decisionEventId: decision.event.eventId,
+      summary: "新的托管会话已启动"
+    })
+    publishManagedRunThreadCreated({
+      projectId: input.projectId,
+      featureId: input.featureId,
+      runId: input.runId,
+      threadId: created.threadId,
+      thread: created.thread
+    })
+    publishManagedRunChanged(lastRunSummary(persisted))
+    return { applied: true, message: "已创建并启动新的托管会话。" }
+  })
+}
+
+export async function recordManagedHumanGateDecision(input: {
+  gateId: string
   projectId: string
   featureId: string
   runId: string
   threadId: string
-  reasonCode: "human_gate_rejected" | "app_closed_during_human_gate"
-  summary: string
+  decision: "approve" | "reject"
+  channel: "desktop" | "im" | "system"
+  reasonCode?: string
 }): Promise<boolean> {
-  cancelProviderRetry(input.projectId, input.featureId)
   return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
     const record = managedRunStore.getRun(input)
     if (!record.snapshot || record.corrupt || record.snapshot.status !== "running") return false
-    managedRunStore.appendEvent(record.snapshot, {
-      type: "human_gate_rejected",
+    const gateSourceEvent = managedRunStore
+      .listEvents(record.snapshot, undefined, 500)
+      .events.find((event) => event.type === "human_gate_invoked" && event.gateId === input.gateId)
+    if (!gateSourceEvent) return false
+    const action = input.decision === "approve" ? "approve_human_gate" : "reject_human_gate"
+    const summary = input.decision === "approve" ? "Human Gate 已批准" : "Human Gate 已拒绝"
+    const interruptedAfterRestart = input.reasonCode === "app_closed_during_human_gate"
+    const sourceEvent = interruptedAfterRestart
+      ? managedRunStore.appendEvent(record.snapshot, {
+          type: "run_interrupted_after_restart",
+          scope: "global",
+          previousStatus: "running",
+          gateId: input.gateId,
+          sourceThreadId: input.threadId,
+          summary: "应用重启时发现待确认 Human Gate"
+        })
+      : gateSourceEvent
+    const decided = recordManagedRunDecision({
+      run: record.snapshot,
+      sourceEvent,
+      policyResult: interruptedAfterRestart
+        ? {
+            type: "run_termination",
+            proposedAction: "reject_human_gate",
+            reasonCode: "app_closed_during_human_gate"
+          }
+        : {
+            type: "human_gate",
+            reasonCode: input.reasonCode ?? `human_gate_${input.decision}`
+          },
+      decisionActor: interruptedAfterRestart
+        ? "system"
+        : input.channel === "system"
+          ? "controller"
+          : "user",
+      decisionChannel: input.channel === "system" ? "system" : input.channel,
+      decisionAction: action,
+      summary,
+      sourceThreadId: input.threadId,
+      gateId: input.gateId,
+      scope: interruptedAfterRestart ? "global" : undefined
+    })
+    managedRunStore.appendEvent(decided.run, {
+      type: input.decision === "approve" ? "human_gate_approved" : "human_gate_rejected",
       scope: "stage",
-      source: "human_gate",
+      nodeId: decided.run.decisionBaseline?.nodeId,
+      decisionEventId: decided.event.eventId,
+      gateId: input.gateId,
+      sourceThreadId: input.threadId,
+      summary
+    })
+    if (input.decision === "reject") {
+      await markTerminal(
+        decided.run,
+        "cancelled",
+        summary,
+        "run_cancelled",
+        decided.event.eventId,
+        input.reasonCode ?? "human_gate_rejected"
+      )
+    } else {
+      publishManagedRunChanged(lastRunSummary(decided.run))
+    }
+    return true
+  })
+}
+
+export async function failManagedRunForHumanGateConflict(input: {
+  gateId: string
+  projectId: string
+  featureId: string
+  runId: string
+  threadId: string
+}): Promise<boolean> {
+  return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
+    const record = managedRunStore.getRun(input)
+    if (!record.snapshot || record.corrupt || record.snapshot.status !== "running") return false
+    const sourceEvent = managedRunStore.appendEvent(record.snapshot, {
+      type: "human_gate_invoked",
+      scope: "stage",
       nodeId: record.snapshot.decisionBaseline?.nodeId,
-      threadId: input.threadId,
-      reasonCode: input.reasonCode,
-      summary: input.summary
+      gateId: input.gateId,
+      sourceThreadId: input.threadId,
+      summary: "Human Gate 与已有等待发生冲突"
+    })
+    const decided = recordManagedRunDecision({
+      run: record.snapshot,
+      sourceEvent,
+      policyResult: {
+        type: "human_gate",
+        proposedAction: "fail_managed_run",
+        reasonCode: "human_gate_conflict"
+      },
+      decisionAction: "fail_managed_run",
+      summary: "同 Feature 已存在待确认 Human Gate",
+      sourceThreadId: input.threadId,
+      gateId: input.gateId
+    })
+    managedRunStore.appendEvent(decided.run, {
+      type: "human_gate_conflict",
+      scope: "stage",
+      nodeId: decided.run.decisionBaseline?.nodeId,
+      decisionEventId: decided.event.eventId,
+      gateId: input.gateId,
+      sourceThreadId: input.threadId,
+      summary: "Human Gate 冲突请求已拒绝"
     })
     await markTerminal(
-      record.snapshot,
-      "cancelled",
-      input.summary,
-      "run_cancelled",
-      input.reasonCode
+      decided.run,
+      "failed",
+      "同 Feature 已存在待确认 Human Gate",
+      "run_failed",
+      decided.event.eventId,
+      "human_gate_conflict"
     )
     return true
   })
@@ -751,25 +1192,11 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
         key: `managed-mode:${feature.runId}:${input.threadId}`
       })
     }
-    if (record.snapshot.status === "cancelled") {
-      const persisted = managedRunStore.updateSnapshot(record.snapshot, {
-        type: "session_completed",
-        scope: "stage",
-        source: "agent_end_reason",
-        nodeId: record.snapshot.decisionBaseline?.nodeId,
-        threadId: input.threadId,
-        outcome: input.outcome,
-        endReason: input.endReason,
-        summary: `托管停止后会话结束：${input.outcome}/${input.endReason.code}`
-      })
-      publishManagedRunChanged(lastRunSummary(persisted))
-      return
-    }
+    if (record.snapshot.status === "cancelled") return
     if (record.snapshot.status !== "running") return
-    managedRunStore.appendEvent(record.snapshot, {
-      type: "session_completed",
+    const sourceEvent = managedRunStore.appendEvent(record.snapshot, {
+      type: "managed_agent_turn_ended",
       scope: "stage",
-      source: "agent_end_reason",
       nodeId: record.snapshot.decisionBaseline?.nodeId,
       threadId: input.threadId,
       outcome: input.outcome,
@@ -783,48 +1210,84 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
       (activeSnapshot.providerRetryCount > 0 || activeSnapshot.nextRetryAt)
     ) {
       cancelProviderRetry(activeSnapshot.projectId, activeSnapshot.featureId)
-      activeSnapshot = managedRunStore.updateSnapshot(
-        {
-          ...activeSnapshot,
-          providerRetryCount: 0,
-          nextRetryAt: undefined
-        },
-        {
-          type: "provider_retry_reset",
-          scope: "stage",
-          source: "agent_end_reason",
-          nodeId: activeSnapshot.decisionBaseline?.nodeId,
-          threadId: input.threadId,
-          reasonCode: "turn_succeeded",
-          summary: "本轮执行成功，模型服务重试次数已清零"
-        }
-      )
+      activeSnapshot = managedRunStore.updateSnapshot({
+        ...activeSnapshot,
+        providerRetryCount: 0,
+        nextRetryAt: undefined
+      })
     }
     try {
-      await inspectAndLaunch(activeSnapshot, input.delivery, {
+      await inspectAndLaunch(activeSnapshot, input.delivery, sourceEvent, {
         outcome: input.outcome,
         endReason: input.endReason,
         ...(input.contextUsage ? { contextUsage: input.contextUsage } : {})
       })
     } catch (error) {
+      const failed = recordManagedRunDecision({
+        run: activeSnapshot,
+        sourceEvent,
+        policyResult: {
+          type: "run_termination",
+          proposedAction: "fail_managed_run",
+          reasonCode: "controller_processing_failed"
+        },
+        decisionAction: "fail_managed_run",
+        summary: "托管控制器处理失败"
+      })
       await markTerminal(
-        activeSnapshot,
+        failed.run,
         "failed",
         error instanceof Error ? error.message : String(error),
-        "run_failed"
+        "run_failed",
+        failed.event.eventId,
+        "controller_processing_failed"
       )
     }
   })
 }
 
 export function handleAutoModeAgentCancelled(threadId: string): void {
+  if (hasPendingHumanGateForThread(threadId)) return
   const feature = readHarnessFeatureContext(threadId)
   if (!feature?.runId) return
-  void stopManagedRun({
-    projectId: feature.projectId,
-    featureId: feature.featureId,
-    runId: feature.runId
-  }).catch((error) => {
-    console.warn("[ManagedRun] Failed to stop managed run after session cancellation:", error)
-  })
+  void featureLocks
+    .withKey(featureKey(feature.projectId, feature.featureId), async () => {
+      const record = managedRunStore.getRun({
+        projectId: feature.projectId,
+        featureId: feature.featureId,
+        runId: feature.runId!
+      })
+      if (!record.snapshot || record.corrupt || record.snapshot.status !== "running") return
+      const sourceEvent = managedRunStore.appendEvent(record.snapshot, {
+        type: "session_run_aborted",
+        scope: "stage",
+        nodeId: record.snapshot.decisionBaseline?.nodeId,
+        threadId,
+        reasonCode: "user_aborted_agent_run",
+        summary: "用户终止当前托管会话的 Agent Run"
+      })
+      const decision = recordManagedRunDecision({
+        run: record.snapshot,
+        sourceEvent,
+        policyResult: {
+          type: "run_termination",
+          proposedAction: "stop_managed_run",
+          reasonCode: "session_run_aborted"
+        },
+        decisionAction: "stop_managed_run",
+        summary: "当前托管会话已终止，停止托管运行",
+        sourceThreadId: threadId
+      })
+      await markTerminal(
+        decision.run,
+        "cancelled",
+        "当前托管会话已被用户终止",
+        "run_cancelled",
+        decision.event.eventId,
+        "session_run_aborted"
+      )
+    })
+    .catch((error) => {
+      console.warn("[ManagedRun] Failed to stop managed run after session cancellation:", error)
+    })
 }

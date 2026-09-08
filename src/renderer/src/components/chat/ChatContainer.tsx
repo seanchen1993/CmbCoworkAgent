@@ -7479,12 +7479,20 @@ export function ChatContainer({
         <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground">
           <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-status-warning border-t-transparent" />
           <div className="min-w-0 flex-1">
-            <span>
-              模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
-              {modelRetry.maxRetries}
-              {modelRetry.delayMs > 0 && <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>}
-              …
-            </span>
+            {modelRetry.retryKind === "completion_gate" ? (
+              // 门禁那边的 reason 已经是一句完整的话（含 n/m），不要再套一层「模型暂时不可用」：
+              // 这一类重试不是模型不可用，是模型答了但答得不成立。
+              <span>{modelRetry.reason}</span>
+            ) : (
+              <span>
+                模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
+                {modelRetry.maxRetries}
+                {modelRetry.delayMs > 0 && (
+                  <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
+                )}
+                …
+              </span>
+            )}
           </div>
         </div>
       )}

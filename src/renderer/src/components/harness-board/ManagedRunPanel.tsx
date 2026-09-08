@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
   CircleDot,
+  Info,
   Loader2,
   MessageSquare,
   RefreshCw
@@ -22,17 +23,17 @@ import type {
 
 const EVENT_LABELS: Record<string, string> = {
   run_started: "启动托管运行",
-  feature_inspected: "检查当前状态",
-  decision_made: "托管运行决策",
+  managed_agent_turn_ended: "托管模式会话轮次结束",
+  provider_retry_timer_elapsed: "模型服务重试时间已到",
+  human_gate_invoked: "需要人工确认",
+  run_stop_requested: "请求停止托管",
+  session_run_aborted: "托管会话已终止",
+  run_interrupted_after_restart: "托管运行因重启中断",
+  managed_run_decision: "托管运行决策",
   session_created: "创建会话",
   session_started: "启动会话",
-  session_completed: "会话结束",
+  session_continued: "继续当前会话",
   provider_retry_scheduled: "等待模型服务重试",
-  provider_retry_sent: "发起模型服务重试",
-  provider_retry_reset: "模型服务已恢复",
-  biz_retry_reuse_thread: "继续当前任务",
-  biz_retry_new_thread: "重新执行当前阶段",
-  human_gate_requested: "需要人工确认",
   human_gate_approved: "用户同意推进",
   human_gate_rejected: "用户拒绝推进",
   human_gate_conflict: "同特性确认冲突，自动拒绝",
@@ -41,28 +42,44 @@ const EVENT_LABELS: Record<string, string> = {
   run_completed: "托管完成"
 }
 
-const HIDDEN_EVENT_TYPES = new Set<ManagedRunEvent["type"]>([
-  "feature_inspected",
+const GLOBAL_LIFECYCLE_EVENT_TYPES = new Set<ManagedRunEvent["type"]>([
+  "run_started",
+  "run_cancelled",
+  "run_failed",
+  "run_completed"
+])
+
+const ACTION_RESULT_EVENT_TYPES = new Set<ManagedRunEvent["type"]>([
+  "session_created",
+  "session_started",
+  "session_continued",
   "provider_retry_scheduled",
-  "session_started"
+  "human_gate_approved",
+  "human_gate_rejected",
+  "human_gate_conflict"
+])
+
+const RUN_LEVEL_DECISION_SOURCE_TYPES = new Set<ManagedRunEvent["type"]>([
+  "run_stop_requested",
+  "run_interrupted_after_restart"
 ])
 
 const DECISION_LABELS: Record<string, string> = {
-  advance: "创建新会话执行后续任务",
-  biz_retry_reuse_thread: "复用当前会话继续任务",
-  biz_retry_new_thread: "创建新会话重试当前阶段任务",
-  provider_retry: "复用当前会话重试模型服务",
-  fail: "结束托管运行",
-  complete: "完成托管运行"
+  start_new_thread: "开启新会话",
+  continue_current_thread: "继续当前会话",
+  schedule_provider_retry: "等待模型服务重试",
+  approve_human_gate: "批准 Human Gate",
+  reject_human_gate: "拒绝 Human Gate",
+  stop_managed_run: "停止本次托管运行",
+  complete_managed_run: "完成本次托管运行",
+  fail_managed_run: "结束本次托管并标记失败"
 }
 
-const DECISION_TIPS: Record<string, string> = {
-  advance: "推进到下一个阶段",
-  biz_retry_reuse_thread: "当前阶段尚未结束，复用当前会话继续执行",
-  biz_retry_new_thread: "当前阶段尚未结束，创建新会话重新执行",
-  provider_retry: "模型服务调用失败，在原会话中重试",
-  fail: "当前条件无法继续自动执行，结束托管运行",
-  complete: "特性已完成，结束托管运行"
+const DECISION_SOURCE_LABELS: Record<string, string> = {
+  "controller:system": "自动推进",
+  "user:desktop": "APP 操作",
+  "user:im": "招乎消息推进",
+  "system:system": "系统推进"
 }
 
 const STATUS_TEXT: Record<string, string> = {
@@ -96,21 +113,47 @@ function eventSummary(event: ManagedRunEvent): string {
   return EVENT_LABELS[event.type] || event.type
 }
 
-function DecisionBadge({
-  decision,
+function decisionStageNodeId(event: ManagedRunEvent): string | undefined {
+  if (event.type !== "managed_run_decision") return undefined
+  return event.nodeId || event.policyResult?.facts?.currentNodeId
+}
+
+function managedDecisionResult(event: ManagedRunEvent, events: ManagedRunEvent[]): string {
+  const related = events.filter((candidate) => candidate.decisionEventId === event.eventId)
+  const types = new Set(related.map((candidate) => candidate.type))
+  if (types.has("session_created") && types.has("session_started")) return "已开启新会话"
+  if (types.has("session_continued")) return "已继续当前会话"
+  if (types.has("provider_retry_scheduled")) return "已安排模型服务重试"
+  if (types.has("human_gate_approved")) return "Human Gate 已批准"
+  if (types.has("human_gate_rejected")) return "Human Gate 已拒绝"
+  if (types.has("human_gate_conflict")) return "Human Gate 发生冲突"
+  if (types.has("run_completed")) return "托管运行已完成"
+  if (types.has("run_failed")) return "托管运行已失败"
+  if (types.has("run_cancelled")) return "托管运行已取消"
+  return "等待执行结果"
+}
+
+function DecisionDetailsTooltip({
+  summary,
+  policyType,
+  proposedAction,
+  decisionAction,
+  showFinalAction,
   facts,
   rule,
-  stageLabels
+  stageLabels,
+  children
 }: {
-  decision?: string
+  summary: string
+  policyType?: string
+  proposedAction?: string
+  decisionAction?: string
+  showFinalAction: boolean
   facts?: ManagedRunDecisionFacts
   rule?: string
   stageLabels?: Map<string, string>
+  children: React.ReactNode
 }): React.JSX.Element | null {
-  if (!decision) return null
-  const label = DECISION_LABELS[decision]
-  if (!label) return null
-  const fallbackRule = DECISION_TIPS[decision]
   const changedFields =
     facts?.changedFields.map((field) => CHANGED_FIELD_TEXT[field] || field) ?? []
   return (
@@ -118,74 +161,92 @@ function DecisionBadge({
       <TooltipTrigger asChild>
         <span
           tabIndex={0}
-          className="cursor-help rounded-full border border-border/70 px-1.5 py-0.5 text-[10px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="inline-flex items-center gap-1 rounded-full border border-dashed border-border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:border-foreground/35 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          {label}
+          {children}
+          <Info className="size-3 shrink-0" />
         </span>
       </TooltipTrigger>
-      <TooltipContent className="max-w-96 p-3">
-        <div className="text-xs font-semibold">判断事实</div>
-        {facts ? (
-          <div className="mt-1.5 space-y-1 text-xs leading-5 opacity-90">
-            {facts.previousNodeId && facts.previousNodeId !== facts.currentNodeId && (
-              <div>
-                上一个阶段：{stageLabels?.get(facts.previousNodeId) || facts.previousNodeId}
+      <TooltipContent className="w-[min(32rem,calc(100vw-32px))] max-w-none p-0">
+        <div className="divide-y divide-border/50">
+          <div className="px-3 py-2.5">
+            <div className="text-xs font-semibold">判断事实</div>
+            {facts ? (
+              <div className="mt-1.5 space-y-1 text-xs leading-5 opacity-90">
+                {facts.previousNodeId && facts.previousNodeId !== facts.currentNodeId && (
+                  <div>
+                    上一个阶段：{stageLabels?.get(facts.previousNodeId) || facts.previousNodeId}
+                  </div>
+                )}
+                <div>当前阶段：{stageLabels?.get(facts.currentNodeId) || facts.currentNodeId}</div>
+                <div>特性状态：{STATUS_TEXT[facts.featureStatus] || facts.featureStatus}</div>
+                <div>
+                  阶段状态：{STATUS_TEXT[facts.currentNodeStatus] || facts.currentNodeStatus}
+                </div>
+                {facts.slashSkill && <div>执行技能：/{facts.slashSkill.replace(/^\/+/, "")}</div>}
+                {facts.initialInspection ? (
+                  <div>执行基线：当前托管运行尚未建立上一次检查基线</div>
+                ) : changedFields.length > 0 ? (
+                  <div>与上次相比：{changedFields.join("、")}发生变化</div>
+                ) : (
+                  <div>与上次相比：当前阶段、特性状态、阶段状态和执行指令均未变化</div>
+                )}
+                {facts.terminalOutcome && (
+                  <div>会话结果：{facts.terminalOutcome === "success" ? "成功" : "失败"}</div>
+                )}
+                {facts.terminalReason && <div>会话说明：{facts.terminalReason}</div>}
+                {policyType === "biz_retry" ? (
+                  <div>本次当前任务重试：{Math.min(facts.bizRetryCount + 1, 3)}/3</div>
+                ) : (
+                  facts.bizRetryCount > 0 && <div>当前任务已重试：{facts.bizRetryCount}/3</div>
+                )}
+                {policyType === "provider_retry" ? (
+                  <div>本次模型服务重试：{Math.min(facts.providerRetryCount + 1, 3)}/3</div>
+                ) : (
+                  facts.providerRetryCount > 0 && (
+                    <div>模型服务已重试：{facts.providerRetryCount}/3</div>
+                  )
+                )}
+                {policyType === "biz_retry" && facts.contextUsageRatio !== undefined && (
+                  <div>上下文占用：{Math.round(facts.contextUsageRatio * 1000) / 10}%</div>
+                )}
+                {policyType === "biz_retry" && facts.contextUsageRatio === undefined && (
+                  <div>上下文占用：无法计算，回退到执行基线判断</div>
+                )}
+                {policyType === "biz_retry" && facts.contextReuseThreshold !== undefined && (
+                  <div>上下文复用阈值：{facts.contextReuseThreshold * 100}%</div>
+                )}
+                {policyType === "biz_retry" && facts.contextReusable !== undefined && (
+                  <div>上下文判断：{facts.contextReusable ? "允许复用" : "不复用当前会话"}</div>
+                )}
               </div>
-            )}
-            <div>当前阶段：{stageLabels?.get(facts.currentNodeId) || facts.currentNodeId}</div>
-            <div>特性状态：{STATUS_TEXT[facts.featureStatus] || facts.featureStatus}</div>
-            <div>阶段状态：{STATUS_TEXT[facts.currentNodeStatus] || facts.currentNodeStatus}</div>
-            {facts.slashSkill && <div>执行技能：/{facts.slashSkill.replace(/^\/+/, "")}</div>}
-            {facts.initialInspection ? (
-              <div>执行基线：当前托管运行尚未建立上一次检查基线</div>
-            ) : changedFields.length > 0 ? (
-              <div>与上次相比：{changedFields.join("、")}发生变化</div>
             ) : (
-              <div>与上次相比：当前阶段、特性状态、阶段状态和执行指令均未变化</div>
-            )}
-            {facts.terminalOutcome && (
-              <div>会话结果：{facts.terminalOutcome === "success" ? "成功" : "失败"}</div>
-            )}
-            {facts.terminalReason && <div>会话说明：{facts.terminalReason}</div>}
-            {decision === "biz_retry_reuse_thread" || decision === "biz_retry_new_thread" ? (
-              <div>本次当前任务重试：{Math.min(facts.bizRetryCount + 1, 3)}/3</div>
-            ) : (
-              facts.bizRetryCount > 0 && <div>当前任务已重试：{facts.bizRetryCount}/3</div>
-            )}
-            {decision === "provider_retry" ? (
-              <div>本次模型服务重试：{Math.min(facts.providerRetryCount + 1, 3)}/3</div>
-            ) : (
-              facts.providerRetryCount > 0 && (
-                <div>模型服务已重试：{facts.providerRetryCount}/3</div>
-              )
-            )}
-            {(decision === "biz_retry_reuse_thread" || decision === "biz_retry_new_thread") &&
-              facts.contextUsageRatio !== undefined && (
-                <div>上下文占用：{Math.round(facts.contextUsageRatio * 1000) / 10}%</div>
-              )}
-            {(decision === "biz_retry_reuse_thread" || decision === "biz_retry_new_thread") &&
-              facts.contextUsageRatio === undefined && (
-                <div>上下文占用：无法计算，回退到执行基线判断</div>
-              )}
-            {(decision === "biz_retry_reuse_thread" || decision === "biz_retry_new_thread") &&
-              facts.contextReuseThreshold !== undefined && (
-                <div>上下文复用阈值：{facts.contextReuseThreshold * 100}%</div>
-              )}
-            {(decision === "biz_retry_reuse_thread" || decision === "biz_retry_new_thread") &&
-              facts.contextReusable !== undefined && (
-                <div>上下文判断：{facts.contextReusable ? "允许复用" : "不复用当前会话"}</div>
-              )}
-            {(decision === "biz_retry_reuse_thread" || decision === "biz_retry_new_thread") && (
-              <div>
-                重试方式：{decision === "biz_retry_reuse_thread" ? "复用当前会话" : "创建新会话"}
-              </div>
+              <div className="mt-1.5 text-xs opacity-90">暂无结构化判断事实</div>
             )}
           </div>
-        ) : (
-          <div className="mt-1.5 text-xs opacity-90">暂无结构化判断事实</div>
-        )}
-        <div className="mt-3 border-t border-border/50 pt-2 text-xs font-semibold">判断规则</div>
-        <div className="mt-1 text-xs leading-5 opacity-90">{rule || fallbackRule}</div>
+          <div className="px-3 py-2.5">
+            <div className="text-xs font-semibold">决策过程</div>
+            <div className="mt-1 text-xs leading-5 opacity-90">{summary}</div>
+          </div>
+          <div className="px-3 py-2.5">
+            <div className="text-xs font-semibold">判断规则</div>
+            <div className="mt-1 text-xs leading-5 opacity-90">{rule || "暂无规则说明"}</div>
+          </div>
+          <div className="px-3 py-2.5">
+            <div className="text-xs font-semibold">托管模式推荐动作</div>
+            <div className="mt-1 text-xs leading-5 opacity-90">
+              {proposedAction ? DECISION_LABELS[proposedAction] || proposedAction : "无预设动作"}
+            </div>
+          </div>
+          {showFinalAction && decisionAction && (
+            <div className="px-3 py-2.5">
+              <div className="text-xs font-semibold">用户最终动作</div>
+              <div className="mt-1 text-xs leading-5 opacity-90">
+                {DECISION_LABELS[decisionAction] || decisionAction}
+              </div>
+            </div>
+          )}
+        </div>
       </TooltipContent>
     </Tooltip>
   )
@@ -280,11 +341,13 @@ interface ManagedRunTimelineProps {
 
 function EventRow({
   event,
+  allEvents,
   stageLabels,
   sessionTitles,
   onSelectThread
 }: {
   event: ManagedRunEvent
+  allEvents: ManagedRunEvent[]
   stageLabels?: Map<string, string>
   sessionTitles?: Map<string, string>
   onSelectThread?: (threadId: string) => void
@@ -293,39 +356,56 @@ function EventRow({
     (threadId, index, values): threadId is string =>
       Boolean(threadId) && values.indexOf(threadId) === index
   )
-  const threadTitle = (threadId: string): string =>
-    sessionTitles?.get(threadId) || "关联会话"
+  const threadTitle = (threadId: string): string => sessionTitles?.get(threadId) || "关联会话"
   const threadRole = (threadId: string): string =>
-    event.sourceThreadId === threadId
-      ? "来源"
-      : event.targetThreadId === threadId
-        ? "目标"
-        : "关联"
+    event.sourceThreadId === threadId ? "来源" : event.targetThreadId === threadId ? "目标" : "关联"
   return (
     <div className="grid gap-2 rounded-lg border border-border/60 bg-background/60 px-3 py-2.5 text-[11px] md:grid-cols-[132px_minmax(0,1fr)]">
       <div className="font-mono leading-5 text-muted-foreground">{event.createTime}</div>
-      <div
-        className={cn(
-          "relative min-w-0",
-          threadIds.length > 1 ? "pr-20" : threadIds.length === 1 ? "pr-8" : undefined
-        )}
-      >
-        <div className="flex min-h-5 flex-wrap items-center gap-x-2 gap-y-1 leading-5">
+      <div className="relative min-w-0">
+        <div
+          className={cn(
+            "flex min-h-5 flex-wrap items-center gap-x-2 gap-y-1 leading-5",
+            threadIds.length > 1 ? "pr-20" : threadIds.length === 1 ? "pr-8" : undefined
+          )}
+        >
           <span className="font-semibold text-foreground">
             {EVENT_LABELS[event.type] || event.type}
           </span>
-          {event.type === "decision_made" && (
-            <DecisionBadge
-              decision={event.decision}
-              facts={event.decisionFacts}
-              rule={event.decisionRule}
+          {event.type === "managed_run_decision" && (
+            <DecisionDetailsTooltip
+              summary={event.summary}
+              policyType={event.policyResult?.type}
+              proposedAction={event.policyResult?.proposedAction}
+              decisionAction={event.decisionAction}
+              showFinalAction={event.decisionActor === "user"}
+              facts={event.policyResult?.facts}
+              rule={event.policyResult?.rule}
               stageLabels={stageLabels}
-            />
+            >
+              {DECISION_SOURCE_LABELS[`${event.decisionActor}:${event.decisionChannel}`] ||
+                "未知决策"}
+            </DecisionDetailsTooltip>
           )}
         </div>
-        {event.type !== "decision_made" &&
-          event.type !== "human_gate_approved" &&
-          event.type !== "session_completed" && (
+        {event.type === "managed_run_decision" && event.policyResult && event.decisionAction ? (
+          <div className="mt-2 grid grid-cols-2 gap-x-8 leading-5">
+            <div className="min-w-0">
+              <div className="text-muted-foreground">触发事件</div>
+              <div className="mt-0.5 text-foreground">
+                {event.sourceEventType
+                  ? EVENT_LABELS[event.sourceEventType] || event.sourceEventType
+                  : "未知事件"}
+              </div>
+            </div>
+            <div className="min-w-0">
+              <div className="text-muted-foreground">动作结果</div>
+              <div className="mt-0.5 text-foreground">
+                {managedDecisionResult(event, allEvents)}
+              </div>
+            </div>
+          </div>
+        ) : (
           <div className="mt-1 leading-5 text-muted-foreground">{eventSummary(event)}</div>
         )}
         {threadIds.length === 1 && (
@@ -403,9 +483,7 @@ export function ManagedRunTimeline({
   const [loading, setLoading] = useState(Boolean(run))
   const [loadingMore, setLoadingMore] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set())
-  const [collapsedCurrentGroups, setCollapsedCurrentGroups] = useState<Set<string>>(() => new Set())
-  const groupRefs = useRef(new Map<string, HTMLDivElement>())
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set(["global"]))
 
   const loadEvents = useCallback(
     async (cursor?: ManagedRunEventCursor, append = false): Promise<void> => {
@@ -440,26 +518,48 @@ export function ManagedRunTimeline({
   }, [loadEvents, run])
 
   useEffect(() => {
-    if (!selectedNodeId) return
-    groupRefs.current.get(selectedNodeId)?.scrollIntoView({ behavior: "smooth", block: "nearest" })
-  }, [selectedNodeId])
+    setExpandedGroups(new Set(["global"]))
+  }, [run?.runId])
 
   const stageLabels = useMemo(
     () => new Map(stages.map((stage) => [stage.id, stage.label])),
     [stages]
   )
-  const visibleEvents = useMemo(
-    () => [...events].reverse().filter((event) => !HIDDEN_EVENT_TYPES.has(event.type)),
-    [events]
-  )
-  const globalEvents = visibleEvents.filter((event) => event.scope === "global")
+  const visibleEvents = useMemo(() => {
+    const consumedSourceEventIds = new Set(
+      events
+        .filter((event) => event.type === "managed_run_decision")
+        .map((event) => event.sourceEventId)
+        .filter((eventId): eventId is string => Boolean(eventId))
+    )
+    return [...events].reverse().filter((event) => {
+      if (GLOBAL_LIFECYCLE_EVENT_TYPES.has(event.type)) return true
+      if (ACTION_RESULT_EVENT_TYPES.has(event.type)) return false
+      if (consumedSourceEventIds.has(event.eventId)) return false
+      if (event.type === "managed_run_decision") {
+        return (
+          (event.sourceEventType === undefined ||
+            !RUN_LEVEL_DECISION_SOURCE_TYPES.has(event.sourceEventType)) &&
+          Boolean(decisionStageNodeId(event))
+        )
+      }
+      return event.scope === "stage"
+    })
+  }, [events])
+  const globalEvents = visibleEvents.filter((event) => GLOBAL_LIFECYCLE_EVENT_TYPES.has(event.type))
   const stageGroups = useMemo(() => {
     const eventsByNodeId = new Map<string, ManagedRunEvent[]>()
     for (const event of visibleEvents) {
-      if (event.scope !== "stage" || !event.nodeId) continue
-      const group = eventsByNodeId.get(event.nodeId) ?? []
+      const nodeId =
+        event.type === "managed_run_decision"
+          ? decisionStageNodeId(event)
+          : event.scope === "stage"
+            ? event.nodeId
+            : undefined
+      if (!nodeId) continue
+      const group = eventsByNodeId.get(nodeId) ?? []
       group.push(event)
-      eventsByNodeId.set(event.nodeId, group)
+      eventsByNodeId.set(nodeId, group)
     }
     const workflowGroups = stages
       .map((stage) => ({
@@ -477,17 +577,11 @@ export function ManagedRunTimeline({
 
   if (!run) return null
 
-  const toggleGroup = (groupId: string, expanded: boolean, selected: boolean): void => {
+  const toggleGroup = (groupId: string, expanded: boolean): void => {
     setExpandedGroups((current) => {
       const next = new Set(current)
       if (expanded) next.delete(groupId)
       else next.add(groupId)
-      return next
-    })
-    setCollapsedCurrentGroups((current) => {
-      const next = new Set(current)
-      if (expanded && selected) next.add(groupId)
-      else next.delete(groupId)
       return next
     })
   }
@@ -499,15 +593,10 @@ export function ManagedRunTimeline({
     global = false
   ): React.JSX.Element => {
     const selected = !global && selectedNodeId === groupId
-    const expanded =
-      expandedGroups.has(groupId) || (selected && !collapsedCurrentGroups.has(groupId))
+    const expanded = expandedGroups.has(groupId)
     return (
       <div
         key={groupId}
-        ref={(element) => {
-          if (element) groupRefs.current.set(groupId, element)
-          else groupRefs.current.delete(groupId)
-        }}
         className={cn(
           "overflow-hidden rounded-xl border bg-background/70 transition-colors",
           selected ? "border-primary/45 ring-1 ring-primary/15" : "border-border/70"
@@ -518,7 +607,7 @@ export function ManagedRunTimeline({
           className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
           onClick={() => {
             if (!global) onSelectNode?.(groupId)
-            toggleGroup(groupId, expanded, selected)
+            toggleGroup(groupId, expanded)
           }}
           aria-expanded={expanded}
         >
@@ -541,12 +630,18 @@ export function ManagedRunTimeline({
           </span>
         </button>
         {expanded && (
-          <div className="space-y-2 border-t border-border/60 p-2.5">
+          <div
+            className={cn(
+              "space-y-2 border-t border-border/60 p-2.5",
+              !global && "max-h-[32rem] overflow-y-auto overscroll-contain"
+            )}
+          >
             {groupEvents.length > 0 ? (
               groupEvents.map((event) => (
                 <EventRow
                   key={event.eventId}
                   event={event}
+                  allEvents={events}
                   stageLabels={stageLabels}
                   sessionTitles={sessionTitles}
                   onSelectThread={onSelectThread}
@@ -590,23 +685,6 @@ export function ManagedRunTimeline({
             )}
           </Button>
         </div>
-
-        {run.lastDecision && (
-          <div className="mt-3 rounded-lg border border-border/70 bg-background/70 px-3 py-2 text-[11px]">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-semibold text-foreground">最近操作</span>
-              <DecisionBadge
-                decision={run.lastDecision.decision}
-                facts={run.lastDecision.facts}
-                rule={run.lastDecision.rule}
-                stageLabels={stageLabels}
-              />
-              <span className="text-[10px] text-muted-foreground">
-                {run.lastDecision.createTime}
-              </span>
-            </div>
-          </div>
-        )}
 
         {loading && events.length === 0 ? (
           <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">
