@@ -546,10 +546,29 @@ function App(): React.JSX.Element {
   }
 
   useEffect(() => {
+    const isExternalLink = (link: HTMLAnchorElement): boolean => {
+      const rawHref = link.getAttribute("href")?.trim() ?? ""
+      if (!rawHref) return false
+      if (
+        rawHref.startsWith("/") ||
+        rawHref.startsWith("codex-file://") ||
+        /^[a-zA-Z]:[\\/]/.test(rawHref)
+      ) {
+        return false
+      }
+      try {
+        const url = new URL(link.href)
+        return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:"
+      } catch {
+        return false
+      }
+    }
+
     document.addEventListener("click", (e) => {
+      if (e.defaultPrevented) return
       const target = e.target as HTMLElement
       const link = target.closest("a") // 找到点击的<a>标签
-      if (link && link.href) {
+      if (link instanceof HTMLAnchorElement && isExternalLink(link)) {
         e.preventDefault() // 阻止默认跳转
         window.electron.openExternal(link.href)
       }

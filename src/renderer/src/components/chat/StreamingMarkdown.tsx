@@ -16,10 +16,14 @@ import {
   buildStreamingMarkdownRenderPlan,
   getStreamingMarkdownDelayMs
 } from "../../lib/streaming-markdown-schedule"
+import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
+import { useAppStore } from "@/lib/store"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
 interface StreamingMarkdownProps {
   children: string
   isStreaming?: boolean
+  threadId?: string
 }
 
 function getLanguageLabel(className?: string): string | null {
@@ -32,6 +36,30 @@ function getNodeText(node: ReactNode): string {
   if (Array.isArray(node)) return node.map(getNodeText).join("")
   if (isValidElement<{ children?: ReactNode }>(node)) return getNodeText(node.props.children)
   return ""
+}
+
+function isAbsoluteFilePath(value: string): boolean {
+  return value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value)
+}
+
+function normalizePreviewFileHref(href?: string): string | null {
+  if (!href) return null
+  let decoded: string
+  try {
+    decoded = decodeURI(href)
+  } catch {
+    return null
+  }
+  if (decoded.startsWith("codex-file://")) {
+    try {
+      const url = new URL(decoded)
+      return `${url.hostname ? `/${url.hostname}` : ""}${url.pathname}`
+    } catch {
+      return null
+    }
+  }
+  const withoutLine = decoded.replace(/:\d+(?::\d+)?$/, "")
+  return isAbsoluteFilePath(withoutLine) ? withoutLine : null
 }
 
 function MarkdownCodeBlock({
@@ -177,17 +205,70 @@ const MARKDOWN_COMPONENTS: Components = {
 
 const MarkdownFragment = memo(function MarkdownFragment({
   text,
-  isStreaming
+  isStreaming,
+  threadId
 }: {
   text: string
   isStreaming: boolean
+  threadId?: string
 }): React.JSX.Element {
+  const setRightModule = useAppStore((state) => state.setRightModule)
+  const setRightPanelCollapsed = useAppStore((state) => state.setRightPanelCollapsed)
+  const components = useMemo<Components>(
+    () => ({
+      ...MARKDOWN_COMPONENTS,
+      a({ node: _node, href, children, ...props }) {
+        const previewPath = normalizePreviewFileHref(href)
+        if (!threadId || !previewPath) {
+          return (
+            <a href={href} {...props}>
+              {children}
+            </a>
+          )
+        }
+
+        const link = (
+          <a
+            href={href}
+            {...props}
+            onClick={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              event.nativeEvent.stopImmediatePropagation()
+              setRightPanelCollapsed(false)
+              setRightModule("preview")
+              emitOpenResourcePreview({
+                threadId,
+                filePath: previewPath,
+                workspacePathKind: "absolute"
+              })
+            }}
+          >
+            {children}
+          </a>
+        )
+
+        return (
+          <TooltipProvider delayDuration={150}>
+            <Tooltip>
+              <TooltipTrigger asChild>{link}</TooltipTrigger>
+              <TooltipContent side="top" className="max-w-80 break-all text-xs">
+                完整路径是：{previewPath}，你可以点击查看内容
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )
+      }
+    }),
+    [setRightModule, setRightPanelCollapsed, threadId]
+  )
+
   return (
     <div data-chat-search-text>
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
-        components={MARKDOWN_COMPONENTS}
+        components={components}
       >
         {text}
       </ReactMarkdown>
@@ -197,7 +278,8 @@ const MarkdownFragment = memo(function MarkdownFragment({
 
 export const StreamingMarkdown = memo(function StreamingMarkdown({
   children,
-  isStreaming = false
+  isStreaming = false,
+  threadId
 }: StreamingMarkdownProps): React.JSX.Element {
   const text = useThrottledStreamingText(children, isStreaming)
   const [expandedText, setExpandedText] = useState<string | null>(null)
@@ -223,14 +305,14 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
                 收起长内容
               </button>
             )}
-            <MarkdownFragment text={plan.head} isStreaming={isStreaming} />
+            <MarkdownFragment text={plan.head} isStreaming={isStreaming} threadId={threadId} />
           </>
         )
       }
 
       return (
         <>
-          <MarkdownFragment text={plan.head} isStreaming={isStreaming} />
+          <MarkdownFragment text={plan.head} isStreaming={isStreaming} threadId={threadId} />
           <div
             data-chat-search-ignore
             className="my-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
@@ -249,11 +331,11 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
               </button>
             )}
           </div>
-          <MarkdownFragment text={plan.tail} isStreaming={isStreaming} />
+          <MarkdownFragment text={plan.tail} isStreaming={isStreaming} threadId={threadId} />
         </>
       )
     },
-    [text, isStreaming, isExpanded]
+    [text, isStreaming, isExpanded, threadId]
   )
 
   return <div className="streaming-markdown">{rendered}</div>
