@@ -30,6 +30,7 @@ import {
   WEB_SOURCE_PREVIEW_MAX_BYTES,
   WEB_SOURCE_PREVIEW_MAX_PAGES
 } from "@/lib/text-preview-pages"
+import { textPreviewKind, type FilePreviewMode } from "@/lib/file-preview-mode"
 
 interface FileViewerProps {
   filePath: string
@@ -43,7 +44,7 @@ interface FileViewerProps {
   resolveExternalPreviewGrant?: () => Promise<string>
   htmlFillHeight?: boolean
   reloadToken?: number
-  previewMode?: "preview" | "source"
+  previewMode?: FilePreviewMode
   /** Stable per surface so a persisted file tab cancels the prior task's preview. */
   requestLane?: string
 }
@@ -488,8 +489,14 @@ export function FileViewer({
   }
 
   const content = textPage?.content ?? ""
+  const previewKind = textPreviewKind({
+    markdownLike,
+    htmlLike,
+    previewMode,
+    truncated: textPage?.truncated ?? false
+  })
   let body: React.JSX.Element
-  if (markdownLike) {
+  if (previewKind === "markdown") {
     body = (
       <div className="h-full min-h-0 overflow-y-auto right-panel-scroll">
         <MarkdownPreview
@@ -504,7 +511,7 @@ export function FileViewer({
         />
       </div>
     )
-  } else if (htmlLike && previewMode !== "source" && !textPage?.truncated) {
+  } else if (previewKind === "html") {
     body = (
       <HtmlPreview
         content={content}
