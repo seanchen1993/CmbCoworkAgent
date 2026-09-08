@@ -110,27 +110,26 @@ export class ImManagedBizRetryService {
         : input.run.featureId
     const assistantTail = this.lastAssistantTail(originThreadId)
     const nextActionText = input.nextAction
-      ? `若选择托管开启新会话，当前预计将调用 /${input.nextAction.slashSkill} 并输入 ${input.nextAction.userMessage}`
+      ? `若选择托管开启新会话，将调用 /${input.nextAction.slashSkill} 技能并输入 ${input.nextAction.userMessage}`
       : "当前没有可用的新会话动作；回复时会重新检查最新状态。"
     const contextText =
       input.contextUsageRatio === undefined
         ? "未知"
         : `${Math.round(input.contextUsageRatio * 100)}%`
     const text = [
-      `项目：${projectName}`,
-      `Feature：${featureName}`,
+      `托管模式运行项目${projectName}-特性${featureName}需要人工决策：`,
+      `触发人工决策原因：${input.summary}`,
       `当前阶段：${input.stageName}`,
       `节点状态：${input.nodeStatus}`,
-      "本轮 Agent 已结束但当前阶段未推进。",
       `上下文占用：${contextText}`,
       "",
-      "最后一条 assistant 消息：",
+      "最近一条大模型返回消息：",
       assistantTail || "（无可展示内容）",
       "",
       nextActionText,
       "",
       `/托管停止 ${code}`,
-      `/托管继续当前会话 ${code} <消息>`,
+      `/托管继续当前会话 ${code} <输入消息，不填默认继续当前任务>`,
       `/托管开启新会话 ${code}`
     ].join("\n")
     try {
