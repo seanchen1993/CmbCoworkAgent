@@ -39,6 +39,7 @@ import {
   buildGitPanelFileDiffState,
   buildGitPanelMetaState,
   buildGitPanelState,
+  collectChangedFileEntriesFromStatus,
   pathExistsForGitAdd,
   resolveSelectedChangedFilesForGitOps,
   shouldUseDefaultGitPush
@@ -489,6 +490,51 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
   )
 })
 
+describe("Git status path projection", () => {
+  it("keeps the event loop responsive while projecting 10k status entries", async () => {
+    // Warm the request-scoped git-root cache so this specifically measures the
+    // cooperative parser/path projection rather than the child git process.
+    await collectChangedFileEntriesFromStatus(repo, "?? warm.txt\0", [])
+    const statusOutput = `${Array.from(
+      { length: 10_000 },
+      (_, index) => `?? bulk/file-${index}.txt`
+    ).join("\0")}\0`
+    let ticks = 0
+    const ticker = setInterval(() => {
+      ticks += 1
+    }, 1)
+
+    try {
+      const files = await collectChangedFileEntriesFromStatus(repo, statusOutput, [])
+      expect(files).toHaveLength(10_000)
+      expect(ticks).toBeGreaterThan(0)
+    } finally {
+      clearInterval(ticker)
+    }
+  })
+
+  it("cancels a superseded large projection and preserves containment checks", async () => {
+    const statusOutput = `${Array.from(
+      { length: 10_000 },
+      (_, index) => `?? bulk/file-${index}.txt`
+    ).join("\0")}\0?? ../outside.txt\0`
+    const controller = new AbortController()
+    const projection = collectChangedFileEntriesFromStatus(repo, statusOutput, [], {
+      signal: controller.signal
+    })
+    setTimeout(() => controller.abort(), 0)
+
+    await expect(projection).rejects.toMatchObject({ name: "AbortError" })
+
+    const safe = await collectChangedFileEntriesFromStatus(
+      repo,
+      "?? inside.txt\0?? ../outside.txt\0",
+      []
+    )
+    expect(safe.map((entry) => entry.path)).toEqual(["inside.txt"])
+  })
+})
+
 describe("Agent commit path staging", () => {
   it.skipIf(process.platform === "win32")(
     "treats a dangling symlink as an existing Git path",
@@ -671,6 +717,86 @@ describe("buildGitPanelDiffState — workspace review scope", () => {
       expect(state.files.map((file) => file.path).sort()).toEqual(["B/b.txt", "C/c.txt"])
     } finally {
       rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it("reports worktree metadata for the selected repository instead of the parent workspace", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "gitpanel-worktree-target-"))
+    try {
+      const temporaryRepo = createRepo("gitpanel-worktree-main-")
+      const mainRepo = join(workspace, "main")
+      const linkedWorktree = join(workspace, "linked")
+      renameSync(temporaryRepo, mainRepo)
+      writeFileSync(join(mainRepo, "tracked.txt"), "initial\n")
+      gitIn(mainRepo, ["add", "."])
+      gitIn(mainRepo, ["commit", "-q", "-m", "initial"])
+      gitIn(mainRepo, ["worktree", "add", "-q", "-b", "linked-test", linkedWorktree])
+      writeFileSync(join(linkedWorktree, "tracked.txt"), "changed in worktree\n")
+
+      const repositories = await discoverWorkspaceGitRepositories(workspace)
+      const context = {
+        workspacePath: workspace,
+        isGitRepo: true,
+        isWorktree: false,
+        metadata: {},
+        repositories
+      } as GitPanelTestContext
+
+      const [mainMeta, linkedMeta, linkedDiff] = await Promise.all([
+        buildGitPanelMetaState("thread-main", context, { worktreePath: mainRepo }),
+        buildGitPanelMetaState("thread-linked", context, { worktreePath: linkedWorktree }),
+        buildGitPanelDiffState("thread-linked", context, {
+          worktreePath: linkedWorktree,
+          includeDiffs: false
+        })
+      ])
+
+      expect(mainMeta.isWorktree).toBe(false)
+      expect(linkedMeta.isWorktree).toBe(true)
+      expect(linkedMeta.worktreeBranch).toBe("linked-test")
+      expect(linkedDiff.isWorktree).toBe(true)
+      expect(linkedDiff.files.map((file) => file.path)).toContain("tracked.txt")
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps linked-worktree identity when it is the only repository below a parent", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "gitpanel-single-worktree-parent-"))
+    const mainRepo = createRepo("gitpanel-single-worktree-main-")
+    const linkedWorktree = join(workspace, "linked")
+    try {
+      writeFileSync(join(mainRepo, "tracked.txt"), "initial\n")
+      gitIn(mainRepo, ["add", "."])
+      gitIn(mainRepo, ["commit", "-q", "-m", "initial"])
+      gitIn(mainRepo, ["worktree", "add", "-q", "-b", "only-linked", linkedWorktree])
+
+      const repositories = await discoverWorkspaceGitRepositories(workspace)
+      const context = {
+        workspacePath: workspace,
+        isGitRepo: true,
+        isWorktree: false,
+        metadata: {},
+        repositories
+      } as GitPanelTestContext
+
+      expect(repositories).toHaveLength(1)
+      const [meta, diff] = await Promise.all([
+        buildGitPanelMetaState("thread-single-linked", context),
+        buildGitPanelDiffState("thread-single-linked", context, { includeDiffs: false })
+      ])
+
+      expect(meta.isWorktree).toBe(true)
+      expect(meta.worktreeBranch).toBe("only-linked")
+      expect(diff.isWorktree).toBe(true)
+    } finally {
+      try {
+        gitIn(mainRepo, ["worktree", "remove", "--force", linkedWorktree])
+      } catch {
+        // Cleanup still removes both temporary roots if Git already detached the worktree.
+      }
+      rmSync(workspace, { recursive: true, force: true })
+      rmSync(mainRepo, { recursive: true, force: true })
     }
   })
 

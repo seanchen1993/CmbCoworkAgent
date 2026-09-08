@@ -45,6 +45,11 @@ async function main(): Promise<void> {
       const snapshot = Buffer.from(db.export())
       db.close()
       await persistSqliteSnapshot(dbPath, snapshot, "test")
+      await writeFile(`${dbPath}-wal`, "native wal")
+      await writeFile(`${dbPath}-shm`, "native shm")
+      await writeFile(`${dbPath}.tmp-wal`, "temporary wal")
+      await writeFile(`${dbPath}.bak-shm`, "backup shm")
+      await writeFile(`${dbPath}.recovery.tmp-wal`, "recovery wal")
 
       const removedLive = deleteSqliteDurableFileSync(dbPath)
       assert.strictEqual(removedLive, true, "live file should have been removed")
@@ -86,6 +91,11 @@ async function main(): Promise<void> {
       assert.strictEqual(sqliteDurableVariantBase("x.sqlite.bak.tmp"), "x", "longest suffix wins")
       assert.strictEqual(sqliteDurableVariantBase("x.sqlite.flush.tmp"), "x")
       assert.strictEqual(sqliteDurableVariantBase("x.sqlite.recovery.tmp"), "x")
+      assert.strictEqual(sqliteDurableVariantBase("x.sqlite-wal"), "x")
+      assert.strictEqual(sqliteDurableVariantBase("x.sqlite-shm"), "x")
+      assert.strictEqual(sqliteDurableVariantBase("x.sqlite.tmp-wal"), "x")
+      assert.strictEqual(sqliteDurableVariantBase("x.sqlite.bak.tmp-shm"), "x")
+      assert.strictEqual(sqliteDurableVariantBase("x.sqlite.recovery.tmp-wal"), "x")
       assert.strictEqual(sqliteDurableVariantBase("x.sqlite.corrupt.123"), null, "forensic archive")
       assert.strictEqual(sqliteDurableVariantBase("x.sqlite.bak.123"), null, "quarantined bak")
       assert.strictEqual(sqliteDurableVariantBase("x.txt"), null)
@@ -93,6 +103,8 @@ async function main(): Promise<void> {
       // 隔离/取证文件识别器:线程删除时要连它们一起清(隐私残留)
       assert.strictEqual(sqliteQuarantineVariantBase("x.sqlite.corrupt.1719999999"), "x")
       assert.strictEqual(sqliteQuarantineVariantBase("x.sqlite.bak.1719999999"), "x")
+      assert.strictEqual(sqliteQuarantineVariantBase("x.sqlite.corrupt.1719999999-wal"), "x")
+      assert.strictEqual(sqliteQuarantineVariantBase("x.sqlite.bak.1719999999-shm"), "x")
       assert.strictEqual(
         sqliteQuarantineVariantBase("x.sqlite.bak"),
         null,

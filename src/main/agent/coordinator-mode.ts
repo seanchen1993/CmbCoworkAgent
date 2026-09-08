@@ -2,14 +2,19 @@ import type { DynamicStructuredTool } from "@langchain/core/tools"
 import type { SubAgent } from "deepagents"
 import { tool } from "langchain"
 import { z } from "zod"
+import {
+  resolveAgentModeFromMetadata,
+  type AgentMode
+} from "../../shared/agent-mode-metadata"
 import type {
   CoordinatorWorkerContinuationIntent,
   CoordinatorWorkerRole,
   CoordinatorWorkerSnapshot,
   CoordinatorWorkerWorkload
 } from "./coordinator-worker-manager"
+import { TASK_COMPLETION_AND_REPETITION_PROMPT } from "./system-prompt"
 
-export type AgentMode = "normal" | "coordinator" | "workflow"
+export type { AgentMode } from "../../shared/agent-mode-metadata"
 
 const COORDINATOR_BASE_DIR = ".cmbdevclaw/coordinator"
 const THREAD_ID_PATTERN = /^[A-Za-z0-9_-]+$/
@@ -358,27 +363,42 @@ function isSelectedSkillPromptBlock(block: string): boolean {
 }
 
 export function getAgentModeFromMetadata(metadata: Record<string, unknown>): AgentMode {
-  if (metadata.agentMode === "normal") {
-    return "normal"
+  return resolveAgentModeFromMetadata(metadata)
+}
+
+/**
+ * IPC run requests carry the renderer's last-known mode only as a routing hint.
+ * A different value is stale because persistent mode changes have their own
+ * guarded metadata mutation path.
+ */
+export function resolveCurrentAgentModeRequest(
+  requestedMode: unknown,
+  currentMode: AgentMode
+): AgentMode | undefined {
+  if (
+    (requestedMode === "normal" ||
+      requestedMode === "workflow" ||
+      requestedMode === "coordinator") &&
+    requestedMode === currentMode
+  ) {
+    return requestedMode
   }
-  if (metadata.agentMode === "workflow") {
-    return "workflow"
-  }
-  if (metadata.agentMode === "coordinator" || truthy(metadata.coordinatorMode)) {
-    return "coordinator"
-  }
-  return "normal"
+  return undefined
 }
 
 export function resolveCoordinatorModeRequest(
   message: string,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  options: { allowForcedRequests?: boolean } = {}
 ): CoordinatorRequest {
   const prefixPattern = /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?\s*/i
   const hasPrefix = prefixPattern.test(message)
-  const strippedMessage = hasPrefix ? message.replace(prefixPattern, "") : message
+  const allowForcedRequests = options.allowForcedRequests !== false
+  const strippedMessage = hasPrefix && allowForcedRequests
+    ? message.replace(prefixPattern, "")
+    : message
 
-  if (hasPrefix) {
+  if (hasPrefix && allowForcedRequests) {
     return {
       enabled: true,
       message: strippedMessage.trimStart(),
@@ -387,7 +407,7 @@ export function resolveCoordinatorModeRequest(
     }
   }
 
-  if (isCoordinatorModeForcedByEnvironment()) {
+  if (allowForcedRequests && isCoordinatorModeForcedByEnvironment()) {
     return {
       enabled: true,
       message,
@@ -468,6 +488,10 @@ export function buildCoordinatorSystemPrompt(options: CoordinatorPromptOptions):
 You orchestrate software engineering work across async workers. Your goal is to help the user achieve their objective with the least process that still gives reliable results.
 
 Every message you send is to the user. Worker results and system notifications are internal signals, not conversation partners. Never thank or acknowledge notifications; summarize new information for the user when it matters.
+
+${TASK_COMPLETION_AND_REPETITION_PROMPT}
+
+Coordinator worker launch or continuation is an asynchronous handoff, not a completion claim. Ending the current turn after a successful worker action does not mean the user's request is finished. Continue from task notifications until the whole request passes the required verification or is genuinely blocked.
 
 ## 1. Role
 

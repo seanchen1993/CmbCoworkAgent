@@ -20,6 +20,10 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -29,12 +33,15 @@ import type {
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
   LspStatus,
-  ChatXConfig,
   HookLoggingConfig,
   PluginHookMetadata,
   PluginDetail,
   PluginMetadata,
   SkillHookMetadata,
+  HookCatalogPage,
+  HookCatalogPageInput,
+  SkillPluginCatalogPage,
+  SkillPluginCatalogPageInput,
   AgentAutoCommitSettings,
   AgentAutoCommitWorkspaceCard,
   UserInputRequest,
@@ -48,6 +55,17 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadMetadataPatch,
+  ThreadMessageSearchOptions,
+  ThreadMessageSearchPage,
+  ThreadSummaryPage,
+  ThreadSummaryPageOptions,
+  ThreadGroupIdsOptions,
+  ThreadGroupIdsResult,
+  ThreadDeleteOptions,
+  ThreadMessagesPage,
+  ThreadMessagesPageOptions,
+  ThreadLegacyCheckpointBootstrapResult,
   SubagentTranscriptPage,
   SubagentTranscriptBlobExportResult,
   SubagentTranscriptBlobField
@@ -88,14 +106,39 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessRunArtifactGrantRefreshInput,
+  HarnessRunArtifactGrantRefreshResult,
+  HarnessRunArtifactRevealInput,
+  HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
+  ManagedAutoSendStreamStartEvent,
   HarnessDynamicWorkflowConfig,
-  HarnessWatchRefChangedEvent
+  HarnessWatchRefChangedEvent,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
+  HarnessHumanGateSnapshot,
+  ManagedRunEventCursor,
+  ManagedRunEventsPage,
+  ManagedRunIdentity,
+  ManagedRunChangeEvent,
+  ManagedRunStartInput,
+  ManagedRunStartValidationInput,
+  ManagedRunStopInput,
+  ManagedRunSummary,
+  ManagedRunThreadCreatedEvent,
+  HarnessBoardCatalogPageInput,
+  HarnessBoardCatalogPageResult
 } from "../shared/harness-board-types"
+import type {
+  ProjectMetricFilters,
+  ProjectMetricListOptions,
+  ProjectMetricProjectsData,
+  ProjectMetricSummaryData
+} from "../shared/project-metrics"
 import type {
   FeatureGateCheckOptions,
   FeatureGateCheckResult,
@@ -109,12 +152,56 @@ import type {
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
+import type { WorkspaceFilesChangedPayload } from "../shared/workspace-files-changed"
+import type {
+  WorkspaceFileScanOpenResult,
+  WorkspaceFileScanPageResult
+} from "../shared/workspace-file-scan"
+import type {
+  WorkspaceFilePreviewCancelRequest,
+  WorkspaceFilePreviewOpenMediaRequest,
+  WorkspaceFilePreviewOpenMediaResult,
+  WorkspaceFilePreviewReadRequest,
+  WorkspaceFilePreviewReadResult,
+  WorkspaceFilePreviewReleaseRequest,
+  ToolFilePreviewGrantRequest,
+  ToolFilePreviewGrantResult
+} from "../shared/workspace-file-preview"
+import type {
+  AttachmentBytesParseRequest,
+  AttachmentFileSelectionResult,
+  AttachmentGrantParseRequest
+} from "../shared/file-attachment"
+import type { ParsedAttachment } from "../main/file-parser"
+import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
+import type {
+  BrowserRecordingSession,
+  BrowserAttachOptions,
+  BrowserBounds,
+  BrowserCdpConfig,
+  BrowserScriptLibraryDeleteInput,
+  BrowserNavigateOptions,
+  BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportResult,
+  BrowserScriptExecutionInput,
+  BrowserScriptExecutionState,
+  BrowserRecordingDraftUpdateInput,
+  BrowserScreenshotResult,
+  ScriptRecordingStartOptions,
+  BrowserScriptLibraryEntry,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput,
+  BrowserState
+} from "../shared/browser-types"
 import type {
   CloseToTrayPromptAction,
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { ChatScrollSettings } from "../shared/chat-scroll"
+import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -132,9 +219,12 @@ interface ElectronAPI {
   getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
-  getChatScrollSettings: () => Promise<ChatScrollSettings>
-  setChatScrollSettings: (settings: Partial<ChatScrollSettings>) => Promise<ChatScrollSettings>
-  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => () => void
+  getGitChangeNoticeEnabled: () => Promise<boolean>
+  setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
+  getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
+  setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
+  setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
+  setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
@@ -418,6 +508,40 @@ interface DashboardCodeStats {
   adoptionRate: number | null
 }
 
+/** 研发效能面板：新增 (绿地) / 存量 (棕地) 分桶，unclassified 为迁移前事件。 */
+interface DashboardEfficiencyChangeKindStats extends DashboardCodeStats {
+  changeKind: "new" | "legacy" | "unclassified"
+}
+
+interface DashboardEfficiencyData {
+  scalability: {
+    slope: number | null
+    pendingReason: string
+  }
+  adoption: {
+    overall: DashboardCodeStats
+    byChangeKind: DashboardEfficiencyChangeKindStats[]
+    newRatioHistogram: { from: number; docCount: number }[]
+    unmeasuredRatio: number | null
+  }
+  compute: {
+    totalInputTokens: number
+    totalOutputTokens: number
+    totalTokens: number
+    cacheReadTokens: number
+    tokenTotalsConsistent: boolean
+    pushedAdoptedLines: number
+    tokensPerAdoptedLine: number | null
+    traceCount: number
+    codeProducingTraceCount: number
+    codeProducingTraceRatio: number | null
+  }
+  meta: {
+    projectCount: number
+    truncated: boolean
+  }
+}
+
 interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
@@ -438,10 +562,10 @@ interface DashboardUserListItem {
   count: number
   lastActiveAt?: string
   avgDurationMs: number
-  totalToolCalls: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  codeStats: DashboardCodeStats | null
 }
 
 interface DashboardUserListData {
@@ -518,6 +642,8 @@ interface DashboardUserDetail {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  /** 当前时间范围内该用户的代码生成、Commit 采纳与 Push 入库统计。 */
+  codeStats: DashboardCodeStats | null
   bySkill: Array<{ skill: string; count: number }>
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
@@ -562,6 +688,9 @@ interface DashboardProjectModeFeature {
   statusLabel?: string
   currentNodeStatusLabel?: string
   summary?: string
+  codeStats?: DashboardCodeStats | null
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  hookExecutions?: DashboardProjectModeHookStats | null
 }
 
 interface DashboardProjectModeSkillCount {
@@ -634,12 +763,15 @@ interface DashboardProjectModeProject {
   systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
+  suspectedTechnicalDetailConversationCount?: number
   devStageConversationCount: number
   devAssociatedFeatureCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  hookExecutions?: DashboardProjectModeHookStats | null
   stageBuckets: DashboardStageBuckets
 }
 
@@ -684,6 +816,7 @@ interface DashboardProjectModeProjectPageData {
   creatorOrgKeyword: string
   sortBy: DashboardProjectModeProjectSortKey | null
   sortOrder: DashboardProjectModeProjectSortOrder
+  showSuspectedTechnicalDetailMetric: boolean
   /**
    * True when more projects matched than the metric-sort enumeration cap, so the
    * ranking + total only cover the first N projects and the UI should warn that
@@ -792,10 +925,31 @@ interface DashboardProjectModeNodeStatus {
   codeStats: DashboardCodeStats | null
 }
 
+interface DashboardProjectModeConstraintReadStats {
+  traceCount: number
+  successfulReadCount: number
+  distinctFileCount: number
+  filesTruncated: boolean
+  files: Array<{ path: string; traceCount: number }>
+}
+
+interface DashboardProjectModeHookStats {
+  executionCount: number
+  blockedCount: number
+  byEvent: Array<{ event: string; count: number }>
+}
+
+interface DashboardProjectModeOperationalDetails {
+  constraintFiles: Array<{ path: string; traceCount: number }>
+  hookEvents: Array<{ event: string; count: number }>
+}
+
 interface DashboardProjectModeFeatureNode {
   nodeName: string
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  hookExecutions?: DashboardProjectModeHookStats | null
   byStatus: DashboardProjectModeNodeStatus[]
   /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */
   stageBuckets: DashboardStageBuckets
@@ -834,6 +988,13 @@ interface CustomAPI {
       threadId: string,
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
+    ) => () => void
+    onManagedAutoSendStreamStart: (
+      callback: (event: ManagedAutoSendStreamStartEvent) => void
+    ) => () => void
+    observeManagedAutoSendStream: (
+      runId: string,
+      callback: (event: StreamEvent) => void
     ) => () => void
     goalControl: (
       threadId: string,
@@ -879,6 +1040,7 @@ interface CustomAPI {
         mode: "messages" | "values"
         data: unknown
         workerTurn?: number
+        valuesSnapshotKind?: "full" | "append" | "tail"
       }) => void
     ) => () => void
     onCoordinatorWorkerHook: (threadId: string, callback: (envelope: unknown) => void) => () => void
@@ -891,14 +1053,17 @@ interface CustomAPI {
         expectedFocusToken?: string | null
       }
     ) => Promise<void>
-    isCoordinatorModeForced: () => Promise<boolean>
+    isCoordinatorModeForced: (threadId?: string) => Promise<boolean>
     canPreviewSystemPrompt: () => Promise<boolean>
     getSystemPromptPreview: (
       threadId: string
     ) => Promise<{ prompt: string | null; updatedAt: number | null }>
   }
   workflows: {
-    listRuns: (threadId: string) => Promise<unknown[]>
+    listRuns: (
+      threadId: string,
+      options?: { cursor?: string | null; limit?: number }
+    ) => Promise<{ runs: unknown[]; nextCursor: string | null }>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
     worktreeAction: (
@@ -931,7 +1096,12 @@ interface CustomAPI {
   }
   threads: {
     list: () => Promise<Thread[]>
-    get: (threadId: string) => Promise<Thread | null>
+    listPage: (options?: ThreadSummaryPageOptions) => Promise<ThreadSummaryPage>
+    listGroupIds: (options: ThreadGroupIdsOptions) => Promise<ThreadGroupIdsResult>
+    get: (
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
+    ) => Promise<Thread | null>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     fork: (params: ThreadForkParams) => Promise<ThreadForkResponse>
     listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
@@ -939,8 +1109,12 @@ interface CustomAPI {
       params: ThreadForkCheckpointForMessageParams
     ) => Promise<ForkableCheckpoint | null>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
+    patchMetadata: (threadId: string, patch: ThreadMetadataPatch) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
-    getSubagentTranscripts: (threadId: string) => Promise<Record<string, unknown>>
+    getSubagentTranscripts: (
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
+    ) => Promise<Record<string, unknown>>
     getSubagentTranscript: (
       threadId: string,
       subagentId: string,
@@ -957,8 +1131,17 @@ interface CustomAPI {
       threadId: string,
       transcripts: Record<string, unknown>
     ) => Promise<Record<string, unknown>>
-    delete: (threadId: string) => Promise<void>
+    delete: (threadId: string, options?: ThreadDeleteOptions) => Promise<void>
     getMessages: (threadId: string) => Promise<Message[]>
+    getMessagesPage: (
+      threadId: string,
+      options?: ThreadMessagesPageOptions
+    ) => Promise<ThreadMessagesPage>
+    searchMessages: (
+      threadId: string,
+      query: string,
+      options?: ThreadMessageSearchOptions
+    ) => Promise<ThreadMessageSearchPage>
     appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
     replaceMessageId: (
       threadId: string,
@@ -971,6 +1154,10 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
+    getLatestCheckpointRuntimeState: (threadId: string) => Promise<unknown | null>
+    bootstrapLegacyCheckpointTranscript: (
+      threadId: string
+    ) => Promise<ThreadLegacyCheckpointBootstrapResult | null>
     getGoalEvents: (
       threadId: string,
       options?: { restore?: boolean; limit?: number }
@@ -1026,6 +1213,12 @@ interface CustomAPI {
     onThreadsChanged: (callback: () => void) => () => void
   }
   models: {
+    getCatalog: () => Promise<{
+      models: ModelConfig[]
+      providers: Provider[]
+      defaultModelId: string
+      routingMode: "auto" | "pinned"
+    }>
     list: () => Promise<ModelConfig[]>
     listProviders: () => Promise<Provider[]>
     getDefault: () => Promise<string>
@@ -1192,7 +1385,10 @@ interface CustomAPI {
     get: (threadId?: string) => Promise<string | null>
     set: (threadId: string | undefined, path: string | null) => Promise<string | null>
     select: (threadId?: string) => Promise<string | null>
-    loadFromDisk: (threadId: string) => Promise<{
+    loadFromDisk: (
+      threadId: string,
+      workspacePath?: string
+    ) => Promise<{
       success: boolean
       files: Array<{
         path: string
@@ -1202,52 +1398,44 @@ interface CustomAPI {
       }>
       workspacePath?: string
       error?: string
+      truncated?: boolean
+      continuationAvailable?: boolean
     }>
+    fileScanOpen: (threadId: string, workspacePath?: string) => Promise<WorkspaceFileScanOpenResult>
+    fileScanNext: (
+      scanId: string,
+      threadId: string,
+      continuation?: string
+    ) => Promise<WorkspaceFileScanPageResult>
+    fileScanCancel: (scanId: string) => Promise<{ success: boolean }>
     ensureWatching: (threadId: string) => Promise<{ success: boolean; restarted?: boolean }>
-    setActiveThread: (threadId: string | null) => Promise<{ success: boolean; restarted?: boolean }>
-    readFile: (
-      threadId: string,
-      filePath: string
-    ) => Promise<{
+    setActiveThread: (threadId: string | null) => Promise<{
       success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
+      restarted?: boolean
+      workspacePath?: string | null
     }>
-    readBinaryFile: (
-      threadId: string,
-      filePath: string
-    ) => Promise<{
-      success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
-    }>
-    readExternalFile: (token: string) => Promise<{
-      success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
-    }>
-    readExternalBinaryFile: (token: string) => Promise<{
-      success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
-    }>
-    requestExternalFileRead: (filePath: string) => Promise<{
-      success: boolean
-      token?: string
-      fileName?: string
-      error?: string
-    }>
-    clearWorktreeContext: (threadId: string) => Promise<void>
+    authorizeToolFilePreview: (
+      request: ToolFilePreviewGrantRequest
+    ) => Promise<ToolFilePreviewGrantResult>
+    readFilePreview: (
+      request: WorkspaceFilePreviewReadRequest
+    ) => Promise<WorkspaceFilePreviewReadResult>
+    openMediaPreview: (
+      request: WorkspaceFilePreviewOpenMediaRequest
+    ) => Promise<WorkspaceFilePreviewOpenMediaResult>
+    cancelFilePreview: (request: WorkspaceFilePreviewCancelRequest) => Promise<{ success: boolean }>
+    releaseFilePreview: (
+      request: WorkspaceFilePreviewReleaseRequest
+    ) => Promise<{ success: boolean }>
+    clearWorktreeContext: (expected: {
+      threadId: string
+      workspacePath: string
+      gitRoot: string
+      branch: string
+    }) => Promise<void>
     saveWorktreeContext: (
       threadId: string,
+      expectedWorkspacePath: string,
       gitRoot: string,
       branch: string,
       baseBranch?: string,
@@ -1290,7 +1478,11 @@ interface CustomAPI {
     }>
     getGitPanelMeta: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: {
+        worktreePath?: string
+        includeSummary?: boolean
+        includePushability?: boolean
+      }
     ) => Promise<{
       success: boolean
       isWorktree: boolean
@@ -1377,6 +1569,9 @@ interface CustomAPI {
       hasPendingDiff: boolean
       changedFiles: number
     }>
+    cancelGitPanelReads: (
+      family?: "panel" | "changed-summary" | "summary" | "workspace-probe"
+    ) => Promise<void>
     isGit: (
       folderPath: string,
       options?: { includeWorktrees?: boolean; threadId?: string }
@@ -1398,6 +1593,7 @@ interface CustomAPI {
       error?: string
     }>
     createWorktree: (
+      threadId: string,
       gitRoot: string,
       branch: string
     ) => Promise<{
@@ -1455,9 +1651,7 @@ interface CustomAPI {
       success: boolean
       error?: string
     }>
-    onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
-    ) => () => void
+    onFilesChanged: (callback: (data: WorkspaceFilesChangedPayload) => void) => () => void
   }
   pet: {
     // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
@@ -1477,31 +1671,34 @@ interface CustomAPI {
     deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
   file: {
-    parse: (
-      filePath: string,
-      maxLength?: number
-    ) => Promise<{
+    parseSelected: (request: AttachmentGrantParseRequest) => Promise<{
       success: boolean
-      attachment?: {
-        filename: string
-        filePath: string
-        content: string
-        mimeType: string
-        size: number
-        truncated: boolean
-      }
+      attachment?: ParsedAttachment
       error?: string
     }>
-    getFilePath: (file: File) => string
-    select: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    parseBytes: (request: AttachmentBytesParseRequest) => Promise<{
+      success: boolean
+      attachment?: ParsedAttachment
+      error?: string
+    }>
+    select: () => Promise<AttachmentFileSelectionResult>
     selectDirectory: (options?: {
       title?: string
     }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
   }
   skills: {
+    catalog: {
+      read: (
+        input: SkillPluginCatalogPageInput,
+        requestScope: string
+      ) => Promise<SkillPluginCatalogPage>
+      cancel: (requestScope: string) => Promise<void>
+    }
     list: () => Promise<SkillMetadata[]>
     listPlugins: () => Promise<SkillMetadata[]>
+    requestPreviewGrant: (request: SkillPreviewGrantRequest) => Promise<SkillPreviewGrantResult>
+    cancelPreviewGrant: () => Promise<void>
     read: (skillPath: string) => Promise<{ success: boolean; content?: string; error?: string }>
     write: (skillPath: string, content: string) => Promise<{ success: boolean; error?: string }>
     readBinary: (
@@ -1518,6 +1715,7 @@ interface CustomAPI {
     }>
     getDisabled: () => Promise<string[]>
     setDisabled: (skillNames: string[]) => Promise<void>
+    setDisabledState: (skillId: string, disabled: boolean) => Promise<string[]>
     backupForCloudEvolution: (payload: {
       skillPath: string
       candidateId: string
@@ -1581,8 +1779,13 @@ interface CustomAPI {
     importConfig: (params: McpImportConfigApplyRequest) => Promise<McpImportApplyResult>
   }
   memory: {
-    listProjects: (request?: { workspacePath?: string | null }) => Promise<
-      Array<{
+    listProjects: (request?: {
+      workspacePath?: string | null
+      requestScope?: string
+      cursor?: string
+      limit?: number
+    }) => Promise<{
+      items: Array<{
         projectId: string
         displayName: string
         memoryDir: string
@@ -1592,13 +1795,22 @@ interface CustomAPI {
         indexSize: number
         isCurrent: boolean
       }>
-    >
+      nextCursor?: string
+      hasMore: boolean
+      totalCount: number
+      truncated: boolean
+      truncatedReasons: string[]
+      scanStats: { scannedEntries: number; scannedFiles: number; readBytes: number }
+    }>
     listFiles: (request?: {
       scope?: "global" | "project"
       workspacePath?: string | null
       projectId?: string | null
-    }) => Promise<
-      Array<{
+      requestScope?: string
+      cursor?: string
+      limit?: number
+    }) => Promise<{
+      items: Array<{
         name: string
         size: number
         modifiedAt: string
@@ -1607,15 +1819,41 @@ interface CustomAPI {
         description: string | null
         recallCount: number
       }>
-    >
+      nextCursor?: string
+      hasMore: boolean
+      totalCount: number
+      truncated: boolean
+      truncatedReasons: string[]
+      scanStats: { scannedEntries: number; scannedFiles: number; readBytes: number }
+      stats: {
+        fileCount: number
+        totalSize: number
+        indexSize: number
+        enabled: boolean
+        dreamEnabled: boolean
+        dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
+        scope: "global" | "project"
+        memoryDir: string
+        projectId?: string
+        gitRoot?: string
+      }
+    }>
     readFile: (
       name: string,
       request?: {
         scope?: "global" | "project"
         workspacePath?: string | null
         projectId?: string | null
+        requestScope?: string
       }
-    ) => Promise<string>
+    ) => Promise<{
+      content: string
+      bytesRead: number
+      totalBytes: number
+      truncated: boolean
+      truncatedReason?: "response-bytes" | "file-size"
+    }>
+    cancelCatalog: (requestScope?: string) => Promise<void>
     deleteFile: (
       name: string,
       request?: {
@@ -1633,6 +1871,7 @@ interface CustomAPI {
       scope?: "global" | "project"
       workspacePath?: string | null
       projectId?: string | null
+      requestScope?: string
     }) => Promise<{
       fileCount: number
       totalSize: number
@@ -1681,6 +1920,49 @@ interface CustomAPI {
   }
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
+  }
+  browser: {
+    attach: (options?: BrowserAttachOptions) => Promise<BrowserState>
+    detach: () => Promise<BrowserState>
+    setBounds: (bounds: BrowserBounds, visible?: boolean) => Promise<BrowserState>
+    navigate: (url: string, options?: BrowserNavigateOptions) => Promise<BrowserState>
+    goBack: () => Promise<BrowserState>
+    goForward: () => Promise<BrowserState>
+    reload: () => Promise<BrowserState>
+    stop: () => Promise<BrowserState>
+    clearConsole: () => Promise<BrowserState>
+    getState: () => Promise<BrowserState>
+    startScriptRecording: (
+      options?: ScriptRecordingStartOptions
+    ) => Promise<BrowserRecordingSession>
+    pauseScriptRecording: () => Promise<BrowserRecordingSession>
+    updateScriptRecordingDraft: (
+      input: BrowserRecordingDraftUpdateInput
+    ) => Promise<BrowserRecordingSession>
+    resumeScriptRecording: () => Promise<BrowserRecordingSession>
+    stopScriptRecording: () => Promise<BrowserRecordingSession>
+    getScriptRecording: () => Promise<BrowserRecordingSession>
+    saveScriptLibraryEntry: (
+      input: BrowserScriptLibrarySaveInput
+    ) => Promise<BrowserScriptLibraryEntry>
+    listScriptLibraryEntries: (
+      options?: BrowserScriptLibraryListOptions
+    ) => Promise<BrowserScriptLibraryEntry[]>
+    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput) => Promise<string>
+    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput) => Promise<void>
+    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput) => Promise<void>
+    executeRecordingScript: (input: BrowserScriptExecutionInput) => Promise<void>
+    getScriptExecutionState: () => Promise<BrowserScriptExecutionState>
+    cancelRecordingScriptExecution: () => Promise<boolean>
+    getCdpConfig: () => Promise<BrowserCdpConfig>
+    isProfileImportRuntimeEnabled: () => Promise<boolean>
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
+    captureScreenshot: () => Promise<BrowserScreenshotResult>
+    importProfileData: (options: BrowserProfileImportOptions) => Promise<BrowserProfileImportResult>
+    disposeAllForRendererUnload: () => void
+    onState: (callback: (state: BrowserState) => void) => () => void
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
+    onScriptExecutionState: (callback: (state: BrowserScriptExecutionState) => void) => () => void
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -1793,6 +2075,9 @@ interface CustomAPI {
       threadId: string,
       callback: (event: { type: string; [key: string]: unknown }) => void
     ) => () => void
+    listenToThreadActivity: (
+      callback: (activity: { threadId: string; type: string }) => void
+    ) => () => void
   }
   heartbeat: {
     getConfig: () => Promise<HeartbeatConfig>
@@ -1808,6 +2093,25 @@ interface CustomAPI {
       threadId: string,
       callback: (event: { type: string; [key: string]: unknown }) => void
     ) => () => void
+  }
+  builtinRobot: {
+    getStatus: () => Promise<BuiltinRobotStatus>
+    getRemoteAccess: () => Promise<BuiltinRobotRemoteAccessOverview>
+    setThreadRemoteAccess: (
+      threadId: string,
+      enabled: boolean
+    ) => Promise<BuiltinRobotRemoteAccessOverview>
+    setFeatureRemoteAccess: (
+      projectId: string,
+      featureSlug: string,
+      enabled: boolean
+    ) => Promise<BuiltinRobotRemoteAccessOverview>
+    listGrantableFeatures: () => Promise<BuiltinRobotGrantableFeature[]>
+    saveSettings: (updates: Partial<BuiltinRobotSettings>) => Promise<BuiltinRobotStatus>
+    reconnect: () => Promise<BuiltinRobotStatus>
+    disconnect: () => Promise<BuiltinRobotStatus>
+    cleanupLegacy: () => Promise<BuiltinRobotStatus>
+    onStatus: (callback: (status: BuiltinRobotStatus) => void) => () => void
   }
   plugins: {
     list: () => Promise<PluginMetadata[]>
@@ -1852,12 +2156,6 @@ interface CustomAPI {
       content: string
     ) => Promise<{ success: boolean; error?: string }>
   }
-  chatx: {
-    getConfig: () => Promise<ChatXConfig>
-    saveConfig: (updates: Partial<ChatXConfig>) => Promise<void>
-    restart: () => Promise<void>
-    cancelByThread: (threadId: string) => Promise<boolean>
-  }
   sandbox: {
     getMode: () => Promise<"none" | "unelevated" | "readonly" | "elevated">
     setMode: (mode: "none" | "unelevated" | "readonly" | "elevated") => Promise<void>
@@ -1886,6 +2184,10 @@ interface CustomAPI {
       pushResult?: { success: boolean; error?: string }
     }) => void
     onApprovalRequest: (threadId: string, callback: (request: unknown) => void) => () => void
+    onApprovalResolved: (
+      threadId: string,
+      callback: (data: { requestId: string; decision: "approve" | "reject" }) => void
+    ) => () => void
     onApprovalTimeout: (
       threadId: string,
       callback: (data: { requestId: string }) => void
@@ -1898,6 +2200,7 @@ interface CustomAPI {
   }
   userInput: {
     sendResponse: (response: UserInputResponse) => void
+    getPending: (threadId: string) => Promise<UserInputRequest | null>
     onRequest: (threadId: string, callback: (request: UserInputRequest) => void) => () => void
     onCancel: (
       threadId: string,
@@ -2098,6 +2401,8 @@ interface CustomAPI {
         input?: unknown
         output?: unknown
         metadata?: Record<string, unknown>
+        /** Recorded after the byte budget was spent: shape kept, payload dropped. */
+        truncated?: boolean
       }>
       modelCalls?: Array<{
         messageId?: string
@@ -2119,6 +2424,7 @@ interface CustomAPI {
           args: Record<string, unknown>
           result?: string
           durationMs?: number
+          truncated?: boolean
         }>
         tokenUsage?: {
           inputTokens?: number
@@ -2127,6 +2433,7 @@ interface CustomAPI {
           cacheReadTokens?: number
           cacheCreationTokens?: number
         }
+        truncated?: boolean
       }>
       steps: Array<{
         index: number
@@ -2137,7 +2444,9 @@ interface CustomAPI {
           args: Record<string, unknown>
           result?: string
           durationMs?: number
+          truncated?: boolean
         }>
+        truncated?: boolean
       }>
     } | null>
     deleteTraces: (traceIds: string[]) => Promise<{
@@ -2154,6 +2463,10 @@ interface CustomAPI {
     setTurnThreshold: (value: number) => Promise<void>
   }
   hooks: {
+    catalog: {
+      read: (input: HookCatalogPageInput) => Promise<HookCatalogPage>
+      cancel: (requestScope: string) => Promise<void>
+    }
     list: () => Promise<HookConfig[]>
     skills: {
       list: () => Promise<SkillHookMetadata[]>
@@ -2208,6 +2521,7 @@ interface CustomAPI {
     ) => Promise<FeatureGateCheckResult>
   }
   dashboard: {
+    cancelRequests: (families?: string[]) => Promise<{ cancelled: number }>
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
     isAnalysisAgentAllowed: () => Promise<boolean>
@@ -2268,6 +2582,17 @@ interface CustomAPI {
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
+    efficiency: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
+    projectMetricSummary: (
+      filters: ProjectMetricFilters
+    ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>
+    projectMetricProjects: (
+      filters: ProjectMetricFilters,
+      options?: ProjectMetricListOptions
+    ) => Promise<{ success: boolean; data?: ProjectMetricProjectsData; error?: string }>
     projectModeProjects: (
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions
@@ -2286,6 +2611,15 @@ interface CustomAPI {
       featureSlug: string,
       range: { from: string; to: string }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeFeatureNode[]; error?: string }>
+    projectModeOperationalDetails: (
+      scope: { projectId: string; featureSlug?: string; nodeName?: string },
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: DashboardProjectModeOperationalDetails
+      error?: string
+    }>
     pluginAggregate: (
       adapterName: string,
       range: { from: string; to: string }
@@ -2390,8 +2724,11 @@ interface CustomAPI {
       options?: DashboardSkillEvalOptions
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userProfiles: (
-      sapIds: string[]
-    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+      sapIds: string[],
+      options?: {
+        family?: "dashboard-market" | "project-mode-market" | "harness-market" | "customize-market"
+      }
+    ) => Promise<{ success: boolean; data?: DashboardAllUserItem[]; error?: string }>
     queryAllUser: () => Promise<{
       success: boolean
       data?: DashboardAllUserItem[]
@@ -2503,8 +2840,19 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: LocalGenAdoptionLines[]; error?: string }>
   }
   harnessBoard: {
+    catalogPage: (input: HarnessBoardCatalogPageInput) => Promise<HarnessBoardCatalogPageResult>
+    cancelCatalogRequests: (
+      scope?: "board" | "board-registry" | "board-sidebar" | "board-settings" | "chat-binding"
+    ) => Promise<void>
+    catalog: () => Promise<{
+      projects: HarnessProjectListItem[]
+      registry: HarnessAdapterRegistryItem[]
+    }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
+    getHumanGateForThread: (threadId: string) => Promise<HarnessHumanGateSnapshot | undefined>
+    approveHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
+    rejectHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
     getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
     getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
     saveDeployUnitMappings: (
@@ -2513,6 +2861,7 @@ interface CustomAPI {
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
+    cancelKnowledgePreviewRequests: () => Promise<void>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
@@ -2528,10 +2877,16 @@ interface CustomAPI {
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>
     getProjectReviews: (input: HarnessProjectReviewInput) => Promise<HarnessProjectReviewResult>
+    cancelEnterpriseRequests: (
+      requestScope: "board-batch" | "selected-project" | "reviews"
+    ) => Promise<void>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     updateFeatureDeployUnits: (
       input: HarnessFeatureDeployUnitUpdateInput
     ) => Promise<HarnessFeatureDeployUnitBinding>
+    validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
+    startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
+    stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
     getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
@@ -2546,10 +2901,29 @@ interface CustomAPI {
       projectIds: string[],
       options?: { watchRefs?: boolean }
     ) => Promise<Record<string, HarnessProjectDetailViewModel>>
+    stopWatchRefs: (scopeKey?: string) => Promise<void>
     getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
+    refreshRunArtifactGrant: (
+      input: HarnessRunArtifactGrantRefreshInput
+    ) => Promise<HarnessRunArtifactGrantRefreshResult>
+    revealRunArtifact: (
+      input: HarnessRunArtifactRevealInput
+    ) => Promise<HarnessRunArtifactRevealResult>
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
+    getManagedRunEvents: (
+      input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
+    ) => Promise<ManagedRunEventsPage>
+    cancelDialogTips: () => Promise<void>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
+    onManagedRunChanged: (callback: (event: ManagedRunChangeEvent) => void) => () => void
+    onManagedRunThreadCreated: (
+      callback: (event: ManagedRunThreadCreatedEvent) => void
+    ) => () => void
+    onHumanGateChanged: (callback: (event: HarnessHumanGateChangedEvent) => void) => () => void
+  }
+  app: {
+    restart: () => Promise<void>
   }
   update: {
     check: () => Promise<

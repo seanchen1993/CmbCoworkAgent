@@ -1,5 +1,7 @@
 import { tmpdir } from "os"
 import path from "path"
+import { execFileSync } from "child_process"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import { describe, expect, it, vi } from "vitest"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator, type RawExecuteFn, type RequestApprovalFn } from "./tool-orchestrator"
@@ -13,6 +15,28 @@ vi.mock("electron", () => ({
 }))
 
 describe("ToolOrchestrator YOLO git behavior", () => {
+  function initRepository(repoPath: string): void {
+    mkdirSync(repoPath, { recursive: true })
+    const git = (args: string[]): void => {
+      execFileSync("git", args, {
+        cwd: repoPath,
+        env: {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@t",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@t"
+        }
+      })
+    }
+    git(["init", "-q"])
+    writeFileSync(path.join(repoPath, "file.txt"), "initial\n")
+    git(["add", "."])
+    git(["commit", "-q", "-m", "initial"])
+    writeFileSync(path.join(repoPath, "file.txt"), "changed\n")
+  }
   it("runs git merge without an approval prompt in YOLO mode", async () => {
     const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
       output: "merge ok",
@@ -24,7 +48,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -49,7 +73,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute("git push --force", "C:/ai/CmbCoworkAgent", "none")
@@ -73,7 +97,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false
+      () => false
     )
 
     const result = await orchestrator.execute("git push --force", "C:/ai/CmbCoworkAgent", "none")
@@ -82,6 +106,30 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(result.output).toContain("Command rejected")
     expect(rawExecute).not.toHaveBeenCalled()
     expect(requestApproval).toHaveBeenCalledTimes(1)
+  })
+
+  it("marks ordinary shell approval requests as execute operations", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => false
+    )
+    const command = "custom-risky-command --inspect"
+
+    await orchestrator.execute(command, process.cwd(), "none")
+
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(requestApproval.mock.calls[0][0]).toMatchObject({
+      operation: "execute",
+      command
+    })
+    expect(rawExecute).not.toHaveBeenCalled()
   })
 
   it("reports push-specific cwd validation errors for routed git push commands", async () => {
@@ -95,7 +143,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false
+      () => false
     )
     const cwd = process.cwd()
     const missingGitCwd = path.join(cwd, ".missing-git-push-cwd-for-test")
@@ -117,7 +165,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true,
+      () => true,
       false,
       false
     )
@@ -146,7 +194,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false
+      () => false
     )
 
     const result = await orchestrator.execute(
@@ -161,53 +209,92 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).not.toHaveBeenCalled()
   })
 
-  it("executes isolated worktree commits in place and blocks pushes", async () => {
+  it("preserves native isolated Git commands and separately approves push", async () => {
     const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
-      output: "committed",
+      output: "native git",
       exitCode: 0,
       truncated: false
     })
-    const requestApproval = vi.fn<RequestApprovalFn>()
-    const isolatedGitMutation = vi.fn().mockResolvedValue({
-      output: "broker committed",
-      exitCode: 0,
-      truncated: false
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "approve",
+      tool_call_id: "isolated-push"
     })
     const orchestrator = new ToolOrchestrator(
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true,
+      () => true,
       false,
-      false,
-      isolatedGitMutation
+      false
     )
 
-    const committed = await orchestrator.execute("git commit -m isolated", process.cwd(), "none")
-    const pushed = await orchestrator.execute("git push origin HEAD", process.cwd(), "none")
+    for (const command of [
+      "git add src/a.ts",
+      'git add src/a.ts && git commit -m "isolated"',
+      "git commit --amend --no-edit",
+      "git commit --fixup HEAD"
+    ]) {
+      const result = await orchestrator.execute(command, process.cwd(), "none")
+      expect(result.exitCode, command).toBe(0)
+      expect(result.output, command).toBe("native git")
+    }
 
-    expect(committed.output).toBe("broker committed")
-    expect(isolatedGitMutation).toHaveBeenCalledWith("commit", "isolated", process.cwd())
-    expect(requestApproval).not.toHaveBeenCalled()
-    expect(pushed.exitCode).toBe(1)
-    expect(pushed.output).toContain("direct push")
-    expect(rawExecute).not.toHaveBeenCalled()
+    const pushed = await orchestrator.execute("git push origin HEAD", process.cwd(), "none")
+    expect(pushed.exitCode).toBe(0)
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(rawExecute).toHaveBeenCalledWith("git push origin HEAD", "none", process.cwd())
+
+    const forcePush = await orchestrator.execute(
+      "git push --force origin HEAD",
+      process.cwd(),
+      "none"
+    )
+    expect(forcePush.exitCode).toBe(1)
+    expect(forcePush.output).toContain("force push")
 
     for (const command of [
-      "git commit --amend -m rewritten",
-      "git commit --fixup HEAD -m rewritten",
-      "git commit -m partial -- src/a.ts",
-      "git commit -m chained && git status",
-      "git add src/a.ts",
-      "cd subdir && git add -A",
-      "git -C nested-repo commit -m nested",
-      "git -C nested-repo add -A"
+      "bash -lc 'git push origin HEAD'",
+      "git -c alias.pub='!git push origin HEAD' pub"
     ]) {
-      const rejected = await orchestrator.execute(command, process.cwd(), "none")
-      expect(rejected.exitCode, command).toBe(1)
-      expect(rejected.output, command).toContain("Command forbidden")
+      const indirectPush = await orchestrator.execute(command, process.cwd(), "none")
+      expect(indirectPush.exitCode, command).toBe(1)
+      expect(indirectPush.output, command).toContain("must be issued directly")
+      expect(rawExecute).not.toHaveBeenCalledWith(command, "none", process.cwd())
     }
-    expect(isolatedGitMutation).toHaveBeenCalledTimes(1)
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+  })
+
+  it("reads the latest global YOLO state for each operation", async () => {
+    let yoloMode = false
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "push ok",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "force-push"
+    })
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => yoloMode
+    )
+
+    const rejected = await orchestrator.execute("git push --force", process.cwd(), "none")
+    expect(rejected.exitCode).toBe(1)
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(rawExecute).not.toHaveBeenCalled()
+
+    yoloMode = true
+    const approved = await orchestrator.execute("git push --force", process.cwd(), "none")
+    expect(approved.exitCode).toBe(0)
+    expect(rawExecute).toHaveBeenCalledTimes(1)
+
+    yoloMode = false
+    await orchestrator.execute("git push --force", process.cwd(), "none")
+    expect(requestApproval).toHaveBeenCalledTimes(2)
   })
 
   it("rejects a bare commit instead of restaging unstaged hunks from indexed files", async () => {
@@ -217,10 +304,9 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false,
+      () => false,
       false,
       true,
-      undefined,
       process.cwd()
     )
 
@@ -245,10 +331,9 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false,
+      () => false,
       false,
       true,
-      undefined,
       workspace
     )
 
@@ -269,6 +354,83 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(rawExecute).not.toHaveBeenCalled()
   })
 
+  it("routes a commit from a multi-repository parent to a target-selection approval", async () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "agent-multi-repo-"))
+    try {
+      const repoA = path.join(workspace, "repo-a")
+      const repoB = path.join(workspace, "repo-b")
+      initRepository(repoA)
+      initRepository(repoB)
+      const rawExecute = vi.fn<RawExecuteFn>()
+      const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+        type: "reject",
+        tool_call_id: "test"
+      } satisfies ApprovalDecision)
+      const orchestrator = new ToolOrchestrator(
+        new ApprovalStore(),
+        rawExecute,
+        requestApproval,
+        () => false,
+        false,
+        true,
+        workspace
+      )
+
+      await orchestrator.execute('git commit -m "test" -- repo-a/file.txt', workspace, "none")
+
+      expect(requestApproval).toHaveBeenCalledTimes(1)
+      expect(requestApproval.mock.calls[0][0]).toMatchObject({
+        operation: "git_commit",
+        suggestedCommitFilePaths: ["repo-a/file.txt"],
+        suggestedCommitFileBasePath: path.resolve(workspace),
+        suggestedGitWorktreePath: undefined,
+        suggestedGitRepositories: [
+          { path: path.resolve(repoA), displayPath: "repo-a" },
+          { path: path.resolve(repoB), displayPath: "repo-b" }
+        ]
+      })
+      expect(rawExecute).not.toHaveBeenCalled()
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it("infers the only repository below a non-Git parent without showing a target selector", async () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "agent-single-child-repo-"))
+    try {
+      const repository = path.join(workspace, "repo-a")
+      initRepository(repository)
+      const rawExecute = vi.fn<RawExecuteFn>()
+      const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+        type: "reject",
+        tool_call_id: "test"
+      } satisfies ApprovalDecision)
+      const orchestrator = new ToolOrchestrator(
+        new ApprovalStore(),
+        rawExecute,
+        requestApproval,
+        () => false,
+        false,
+        true,
+        workspace
+      )
+
+      await orchestrator.execute('git commit -m "test" -- repo-a/file.txt', workspace, "none")
+
+      expect(requestApproval).toHaveBeenCalledTimes(1)
+      expect(requestApproval.mock.calls[0][0]).toMatchObject({
+        operation: "git_commit",
+        suggestedCommitFilePaths: ["file.txt"],
+        suggestedCommitFileBasePath: path.resolve(repository),
+        suggestedGitWorktreePath: path.resolve(repository),
+        suggestedGitRepositories: undefined
+      })
+      expect(rawExecute).not.toHaveBeenCalled()
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
   it("returns the ignored-only auto-dismiss reason to the Agent verbatim", async () => {
     const workspace = process.cwd()
     const message = "Agent 指定的文件均被 Git ignore，未发起提交。"
@@ -282,10 +444,9 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false,
+      () => false,
       false,
       true,
-      undefined,
       workspace
     )
 
@@ -315,10 +476,9 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         new ApprovalStore(),
         rawExecute,
         requestApproval,
-        false,
+        () => false,
         false,
         true,
-        undefined,
         workspace
       )
 
@@ -344,7 +504,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -366,7 +526,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -389,7 +549,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -415,7 +575,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
     const command = String.raw`echo \" ; git commit -m x -- package.json ; echo \"`
 

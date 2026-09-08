@@ -3,7 +3,17 @@ import { normalizeMarketSkillKey } from "@/components/dashboard/skill-market"
 
 const CLOUD_EVOLUTION_PROMPT_SIGNATURE_KEY = "trace-evolver-cloud-update-prompt-signature"
 const CLOUD_EVOLUTION_VIEWED_SIGNATURE_KEY = "trace-evolver-cloud-update-viewed-signature"
-const NOTIFIED_REVIEW_IDS_KEY = "trace-evolver-review-notified-candidate-ids"
+// V1 could record a candidate while the app was hidden, even though its in-app toast was
+// never visible. Start a fresh receipt set so those still-pending candidates get one repair
+// notification after this fix is deployed.
+const NOTIFIED_REVIEW_IDS_KEY = "trace-evolver-review-notified-candidate-ids-v2"
+
+export function canPresentReviewCandidateNotification(input: {
+  visibilityState: string
+  hasFocus: boolean
+}): boolean {
+  return input.visibilityState === "visible" && input.hasFocus
+}
 
 function readStorage(key: string): string {
   try {

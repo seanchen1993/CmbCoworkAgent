@@ -22,6 +22,9 @@ interface PendingUserInput {
   autoResolutionTimeout?: ReturnType<typeof setTimeout>
 }
 
+type PendingUserInputListener = (request: Readonly<UserInputRequest>) => void
+type RemovedUserInputListener = (requestId: string, threadId: string) => void
+
 interface RequestUserInputParams {
   threadId: string
   questions: UserInputQuestion[]
@@ -31,11 +34,40 @@ interface RequestUserInputParams {
     message?: string
   }
   abortSignal?: AbortSignal
+  /**
+   * Remote IM turns may keep running while no renderer is mounted. In that
+   * case the request stays in the main-process registry and is restored when a
+   * desktop window opens the Thread. Foreground desktop turns retain the
+   * existing fail-fast renderer acknowledgement behavior.
+   */
+  allowDeferredRenderer?: boolean
 }
 
 const pendingUserInputs = new Map<string, PendingUserInput>()
 const pendingUserInputThreads = new Map<string, string>()
+const pendingUserInputListeners = new Set<PendingUserInputListener>()
+const removedUserInputListeners = new Set<RemovedUserInputListener>()
 const USER_INPUT_ACK_TIMEOUT_MS = 5_000
+
+export function hasPendingUserInputForThread(threadId: string): boolean {
+  return pendingUserInputThreads.has(threadId)
+}
+
+export function getPendingUserInputForThread(threadId: string): UserInputRequest | null {
+  const requestId = pendingUserInputThreads.get(threadId)
+  if (!requestId) return null
+  return pendingUserInputs.get(requestId)?.request ?? null
+}
+
+export function subscribePendingUserInput(listener: PendingUserInputListener): () => void {
+  pendingUserInputListeners.add(listener)
+  return () => pendingUserInputListeners.delete(listener)
+}
+
+export function subscribeRemovedUserInput(listener: RemovedUserInputListener): () => void {
+  removedUserInputListeners.add(listener)
+  return () => removedUserInputListeners.delete(listener)
+}
 
 export class UserInputRequestRejectedError extends Error {
   readonly code: string
@@ -82,17 +114,31 @@ function cleanupPending(requestId: string): PendingUserInput | undefined {
     threadId: pending.request.threadId,
     key: `user-input:${requestId}`
   })
+  for (const listener of removedUserInputListeners) {
+    try {
+      listener(requestId, pending.request.threadId)
+    } catch (error) {
+      console.warn("[UserInput] Removed listener failed:", error)
+    }
+  }
   return pending
 }
 
 export function requestUserInput(params: RequestUserInputParams): Promise<UserInputResult> {
-  const { threadId, questions, autoResolutionMs, autoResolution, abortSignal } = params
+  const {
+    threadId,
+    questions,
+    autoResolutionMs,
+    autoResolution,
+    abortSignal,
+    allowDeferredRenderer = false
+  } = params
   if (abortSignal?.aborted) {
     return Promise.reject(new Error("User input request was cancelled before it was shown."))
   }
 
   const windows = getLiveWindows()
-  if (windows.length === 0) {
+  if (windows.length === 0 && !allowDeferredRenderer) {
     return Promise.reject(
       new UserInputRequestRejectedError(
         "no_renderer_window",
@@ -130,20 +176,22 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       reject(new Error("User input request was cancelled."))
     }
 
-    const ackTimeout = setTimeout(() => {
-      const pending = cleanupPending(request.requestId)
-      if (!pending) return
-      sendToThread(threadId, "cancel", {
-        requestId: request.requestId,
-        reason: "No renderer acknowledged this user input request."
-      })
-      pending.reject(
-        new UserInputRequestRejectedError(
-          "request_not_acknowledged",
-          "No renderer acknowledged this user input request. The user may not have this thread open."
-        )
-      )
-    }, USER_INPUT_ACK_TIMEOUT_MS)
+    const ackTimeout = allowDeferredRenderer
+      ? undefined
+      : setTimeout(() => {
+          const pending = cleanupPending(request.requestId)
+          if (!pending) return
+          sendToThread(threadId, "cancel", {
+            requestId: request.requestId,
+            reason: "No renderer acknowledged this user input request."
+          })
+          pending.reject(
+            new UserInputRequestRejectedError(
+              "request_not_acknowledged",
+              "No renderer acknowledged this user input request. The user may not have this thread open."
+            )
+          )
+        }, USER_INPUT_ACK_TIMEOUT_MS)
 
     const autoResolutionTimeout = autoResolutionMs === undefined
       ? undefined
@@ -198,6 +246,13 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       key: `user-input:${request.requestId}`
     })
     sendToThread(threadId, "request", request)
+    for (const listener of pendingUserInputListeners) {
+      try {
+        listener(request)
+      } catch (error) {
+        console.warn("[UserInput] Pending listener failed:", error)
+      }
+    }
   })
 }
 
@@ -211,9 +266,18 @@ export function acknowledgeUserInputRequest(requestId: string, threadId: string)
   return true
 }
 
-export function submitUserInputResponse(response: UserInputResponse): boolean {
+export function submitUserInputResponse(
+  response: UserInputResponse,
+  options: { notifyRenderer?: boolean; reason?: string } = {}
+): boolean {
   const pending = cleanupPending(response.requestId)
   if (!pending) return false
+  if (options.notifyRenderer) {
+    sendToThread(pending.request.threadId, "cancel", {
+      requestId: response.requestId,
+      reason: options.reason ?? "User input was answered outside the desktop renderer."
+    })
+  }
   pending.resolve({
     ...response,
     submittedAt: response.submittedAt ?? new Date().toISOString()

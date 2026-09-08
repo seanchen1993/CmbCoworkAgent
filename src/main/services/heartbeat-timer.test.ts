@@ -4,30 +4,47 @@ const mocks = vi.hoisted(() => ({
   config: {
     enabled: true,
     intervalMinutes: 30,
-    lastRunAt: null
-  }
+    prompt: "heartbeat",
+    modelId: "model",
+    workDir: "/workspace",
+    lastRunAt: null,
+    lastRunStatus: null,
+    lastRunError: null
+  },
+  getHeartbeatContent: vi.fn(),
+  resolveModel: vi.fn(),
+  getCheckpointer: vi.fn(),
+  closeCheckpointer: vi.fn(),
+  pinCheckpointer: vi.fn(),
+  reviveRetiredThread: vi.fn(),
+  reviveWorkflowThread: vi.fn(),
+  createThread: vi.fn(),
+  getThreadCore: vi.fn(),
+  updateThread: vi.fn()
 }))
 
 vi.mock("electron", () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock("../storage", () => ({
   getHeartbeatConfig: () => mocks.config,
-  getHeartbeatContent: vi.fn(),
+  getHeartbeatContent: mocks.getHeartbeatContent,
   saveHeartbeatConfig: vi.fn(),
   getGlobalRoutingMode: vi.fn()
 }))
-vi.mock("../routing", () => ({ resolveModel: vi.fn() }))
+vi.mock("../routing", () => ({ resolveModel: mocks.resolveModel }))
 vi.mock("../agent/runtime", () => ({
   createAgentRuntime: vi.fn(),
-  getCheckpointer: vi.fn(),
-  closeCheckpointer: vi.fn(),
-  pinCheckpointer: vi.fn(),
-  reviveRetiredThread: vi.fn()
+  getCheckpointer: mocks.getCheckpointer,
+  closeCheckpointer: mocks.closeCheckpointer,
+  pinCheckpointer: mocks.pinCheckpointer,
+  reviveRetiredThread: mocks.reviveRetiredThread
 }))
-vi.mock("../agent/workflow/run-store", () => ({ reviveWorkflowThread: vi.fn() }))
+vi.mock("../agent/workflow/run-store", () => ({
+  reviveWorkflowThread: mocks.reviveWorkflowThread
+}))
 vi.mock("../db", () => ({
-  createThread: vi.fn(),
-  getThread: vi.fn(),
-  updateThread: vi.fn()
+  createThread: mocks.createThread,
+  getThreadCore: mocks.getThreadCore,
+  updateThread: mocks.updateThread
 }))
 vi.mock("../agent/stream-converter", () => ({ StreamConverter: class {} }))
 vi.mock("./notify", () => ({ notifyIfBackground: vi.fn() }))
@@ -38,9 +55,11 @@ vi.mock("./heartbeat-session", () => ({ HEARTBEAT_THREAD_ID: "heartbeat" }))
 import {
   beginHeartbeatWorkspaceReset,
   isHeartbeatRunning,
+  runHeartbeatNow,
   startHeartbeat,
   stopHeartbeat
 } from "./heartbeat"
+import { withThreadRunMutationLock } from "../ipc/thread-run-mutation-lock"
 
 describe("heartbeat timer invalidation", () => {
   afterEach(() => {
@@ -67,5 +86,61 @@ describe("heartbeat timer invalidation", () => {
     staleCallback()
 
     expect(isHeartbeatRunning()).toBe(false)
+  })
+
+  it("waits for same-thread deletion cleanup before reviving and releases the lock on init failure", async () => {
+    let markBlockEntered = (): void => undefined
+    let releaseBlock = (): void => undefined
+    const blockEntered = new Promise<void>((resolve) => {
+      markBlockEntered = resolve
+    })
+    const block = new Promise<void>((resolve) => {
+      releaseBlock = resolve
+    })
+    const deletionCleanup = withThreadRunMutationLock("heartbeat", async () => {
+      markBlockEntered()
+      await block
+    })
+    await blockEntered
+
+    mocks.resolveModel.mockResolvedValue({
+      resolvedModelId: "model",
+      resolvedTier: "premium",
+      routeReason: "test"
+    })
+    mocks.getHeartbeatContent.mockReturnValue("- inspect workspace")
+    mocks.getThreadCore.mockReturnValue(null)
+    const releasePin = vi.fn()
+    mocks.pinCheckpointer.mockReturnValue(releasePin)
+    mocks.getCheckpointer.mockResolvedValue({
+      getTuple: vi.fn().mockRejectedValue(new Error("initial snapshot failed"))
+    })
+    mocks.closeCheckpointer.mockResolvedValue(undefined)
+
+    const heartbeat = runHeartbeatNow()
+    await vi.waitFor(() => expect(mocks.resolveModel).toHaveBeenCalledTimes(1))
+    expect(mocks.reviveRetiredThread).not.toHaveBeenCalled()
+    expect(mocks.reviveWorkflowThread).not.toHaveBeenCalled()
+    expect(mocks.createThread).not.toHaveBeenCalled()
+    expect(mocks.getCheckpointer).not.toHaveBeenCalled()
+
+    releaseBlock()
+    await deletionCleanup
+    await heartbeat
+
+    expect(mocks.reviveRetiredThread).toHaveBeenCalledWith("heartbeat")
+    expect(mocks.reviveWorkflowThread).toHaveBeenCalledWith("heartbeat")
+    expect(mocks.createThread).toHaveBeenCalledWith(
+      "heartbeat",
+      expect.objectContaining({ workspacePath: "/workspace", isHeartbeat: true })
+    )
+    expect(mocks.getCheckpointer).toHaveBeenCalledWith("heartbeat")
+    expect(releasePin).toHaveBeenCalledTimes(1)
+
+    let successorEntered = false
+    await withThreadRunMutationLock("heartbeat", async () => {
+      successorEntered = true
+    })
+    expect(successorEntered).toBe(true)
   })
 })

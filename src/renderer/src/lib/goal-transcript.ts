@@ -1,7 +1,15 @@
 import type { GoalEvent, Message } from "@/types"
-import { isWorkflowPlumbingTranscriptContent } from "../../../shared/checkpoint-transcript"
-import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../../../shared/goal-events"
-import { isGoalClearAlias, splitGoalTransportPayload } from "../../../shared/goal-slash"
+import {
+  isVisibleTranscriptMessage,
+  isWorkflowPlumbingTranscriptContent
+} from "../../../shared/checkpoint-transcript"
+import {
+  formatGoalUserEventMessage,
+  GOAL_USER_MESSAGE_EVENT_PREFIX,
+  isVisibleGoalUserEventMessage
+} from "../../../shared/goal-events"
+import { splitGoalTransportPayload } from "../../../shared/goal-slash"
+import { getMessageProviderOccurrenceIdentity } from "../../../shared/message-role-collision"
 import { isInternalGoalPromptMessage, type GoalNoticeEvent } from "./goal-notice-messages"
 
 export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "content">): boolean {
@@ -23,11 +31,7 @@ export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "conten
 export function isVisibleCheckpointTranscriptMessage(
   message: Pick<Message, "role" | "content">
 ): boolean {
-  return (
-    !isInternalGoalPromptMessage(message) &&
-    !isGoalTranscriptArtifact(message) &&
-    !isWorkflowPlumbingTranscriptContent(message.content)
-  )
+  return isVisibleTranscriptMessage(message.role, message.content)
 }
 
 export function buildCheckpointTranscriptForDisplay(messages: Message[]): Message[] {
@@ -35,10 +39,7 @@ export function buildCheckpointTranscriptForDisplay(messages: Message[]): Messag
 }
 
 export function formatGoalEventMessage(message: string): string {
-  const trimmed = message.trim()
-  return trimmed.startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)
-    ? trimmed.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length).trim()
-    : trimmed
+  return formatGoalUserEventMessage(message)
 }
 
 export function goalNoticeEventsToGoalUiEvents(
@@ -51,7 +52,9 @@ export function goalNoticeEventsToGoalUiEvents(
     goal_id: event.goal_id ?? null,
     active_window_id: event.active_window_id ?? null,
     message: event.message,
-    created_at: event.created_at
+    created_at: event.created_at,
+    transcript_ordinal: event.transcript_ordinal,
+    transcript_message_id: event.transcript_message_id
   }))
 }
 
@@ -64,26 +67,18 @@ export function isGoalUserEvent(event: Pick<GoalEvent, "message">): boolean {
   return event.message.trim().startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)
 }
 
-function shouldRestoreGoalUserCommandToTranscript(content: string): boolean {
-  const { commandText } = splitGoalTransportPayload(content)
-  const trimmed = commandText.trim()
-  if (!/^\/goal(?:\s|$)/i.test(trimmed)) return false
-
-  const arg = trimmed.slice("/goal".length).trim().toLowerCase()
-  if (arg === "" || arg === "status" || arg === "pause" || isGoalClearAlias(arg)) {
-    return false
-  }
-  return true
-}
-
 export function goalUserEventToMessage(event: GoalEvent): Message | null {
   if (!isGoalUserEvent(event)) return null
   const content = formatGoalEventMessage(event.message)
-  if (!shouldRestoreGoalUserCommandToTranscript(content)) return null
+  if (!isVisibleGoalUserEventMessage(event.message)) return null
 
   const createdAt = toGoalEventDate(event.created_at)
   return {
     id: `goal-user-event-${event.event_id}`,
+    ...(Number.isSafeInteger(event.transcript_ordinal) &&
+    (event.transcript_ordinal ?? -1) >= 0
+      ? { ordinal: event.transcript_ordinal as number }
+      : {}),
     role: "user",
     content,
     goal_id: event.goal_id,
@@ -250,23 +245,336 @@ export const sameGoalCommandMessage = (left: Message, right: Message): boolean =
   return Math.abs(leftTime - rightTime) <= 5_000
 }
 
+const GOAL_COMMAND_MATCH_WINDOW_MS = 5_000
+
+interface GoalCommandTimeBucket {
+  min: number
+  max: number
+}
+
+type GoalCommandTimeIndex = Map<number, GoalCommandTimeBucket>
+
+interface GoalCommandContentIndex {
+  activeWindowIds: Set<string>
+  goalIds: Set<string>
+  goalIdsWithoutActiveWindow: Set<string>
+  allTimes: GoalCommandTimeIndex
+  timesWithoutActiveWindow: GoalCommandTimeIndex
+  timesWithoutGoal: GoalCommandTimeIndex
+  timesWithoutActiveWindowOrGoal: GoalCommandTimeIndex
+}
+
+interface IndexedGoalCommand {
+  content: string
+  activeWindowId: string | null
+  goalId: string | null
+  time: number
+}
+
+function indexedGoalCommand(message: Message): IndexedGoalCommand | null {
+  if (message.role !== "user" || typeof message.content !== "string") return null
+  const time = message.created_at?.getTime?.() ?? 0
+  return {
+    content: normalizedGoalCommandContent(message.content),
+    activeWindowId: message.active_window_id ?? null,
+    goalId: message.goal_id ?? null,
+    time: Number.isFinite(time) ? time : 0
+  }
+}
+
+function addGoalCommandTime(index: GoalCommandTimeIndex, time: number): void {
+  const bucketId = Math.floor(time / GOAL_COMMAND_MATCH_WINDOW_MS)
+  const bucket = index.get(bucketId)
+  if (!bucket) {
+    index.set(bucketId, { min: time, max: time })
+    return
+  }
+  bucket.min = Math.min(bucket.min, time)
+  bucket.max = Math.max(bucket.max, time)
+}
+
+function hasGoalCommandTime(index: GoalCommandTimeIndex, time: number): boolean {
+  const minimum = time - GOAL_COMMAND_MATCH_WINDOW_MS
+  const maximum = time + GOAL_COMMAND_MATCH_WINDOW_MS
+  const firstBucket = Math.floor(minimum / GOAL_COMMAND_MATCH_WINDOW_MS)
+  const lastBucket = Math.floor(maximum / GOAL_COMMAND_MATCH_WINDOW_MS)
+  for (let bucketId = firstBucket; bucketId <= lastBucket; bucketId += 1) {
+    const bucket = index.get(bucketId)
+    if (bucket && bucket.max >= minimum && bucket.min <= maximum) return true
+  }
+  return false
+}
+
+function createGoalCommandContentIndex(): GoalCommandContentIndex {
+  return {
+    activeWindowIds: new Set(),
+    goalIds: new Set(),
+    goalIdsWithoutActiveWindow: new Set(),
+    allTimes: new Map(),
+    timesWithoutActiveWindow: new Map(),
+    timesWithoutGoal: new Map(),
+    timesWithoutActiveWindowOrGoal: new Map()
+  }
+}
+
+class GoalCommandDuplicateIndex {
+  private readonly byContent = new Map<string, GoalCommandContentIndex>()
+
+  constructor(messages: readonly Message[] = []) {
+    for (const message of messages) this.add(message)
+  }
+
+  add(message: Message): void {
+    const command = indexedGoalCommand(message)
+    if (!command) return
+    const contentIndex = this.byContent.get(command.content) ?? createGoalCommandContentIndex()
+    this.byContent.set(command.content, contentIndex)
+
+    if (command.activeWindowId) contentIndex.activeWindowIds.add(command.activeWindowId)
+    if (command.goalId) {
+      contentIndex.goalIds.add(command.goalId)
+      if (!command.activeWindowId) {
+        contentIndex.goalIdsWithoutActiveWindow.add(command.goalId)
+      }
+    }
+    addGoalCommandTime(contentIndex.allTimes, command.time)
+    if (!command.activeWindowId) {
+      addGoalCommandTime(contentIndex.timesWithoutActiveWindow, command.time)
+    }
+    if (!command.goalId) addGoalCommandTime(contentIndex.timesWithoutGoal, command.time)
+    if (!command.activeWindowId && !command.goalId) {
+      addGoalCommandTime(contentIndex.timesWithoutActiveWindowOrGoal, command.time)
+    }
+  }
+
+  hasEquivalent(message: Message): boolean {
+    const command = indexedGoalCommand(message)
+    if (!command) return false
+    const contentIndex = this.byContent.get(command.content)
+    if (!contentIndex) return false
+
+    if (command.activeWindowId) {
+      if (contentIndex.activeWindowIds.has(command.activeWindowId)) return true
+      if (
+        command.goalId &&
+        contentIndex.goalIdsWithoutActiveWindow.has(command.goalId)
+      ) {
+        return true
+      }
+      return hasGoalCommandTime(
+        command.goalId
+          ? contentIndex.timesWithoutActiveWindowOrGoal
+          : contentIndex.timesWithoutActiveWindow,
+        command.time
+      )
+    }
+
+    if (command.goalId) {
+      return (
+        contentIndex.goalIds.has(command.goalId) ||
+        hasGoalCommandTime(contentIndex.timesWithoutGoal, command.time)
+      )
+    }
+    return hasGoalCommandTime(contentIndex.allTimes, command.time)
+  }
+}
+
+function durableMessageOrdinal(message: Message): number | null {
+  return Number.isSafeInteger(message.ordinal) && (message.ordinal ?? -1) >= 0
+    ? (message.ordinal as number)
+    : null
+}
+
+/** Carry durable ordinals onto checkpoint rows whose reconstructed timestamps are not reliable. */
+export function restoreDurableTranscriptOrdinals(
+  messages: readonly Message[],
+  durableMessages: readonly Message[]
+): Message[] {
+  const durableOrdinals = new Map<string, number>()
+  for (const message of durableMessages) {
+    const ordinal = durableMessageOrdinal(message)
+    if (ordinal === null) continue
+    durableOrdinals.set(getMessageProviderOccurrenceIdentity(message), ordinal)
+  }
+  if (durableOrdinals.size === 0) return [...messages]
+  return messages.map((message) => {
+    if (durableMessageOrdinal(message) !== null) return message
+    const ordinal = durableOrdinals.get(getMessageProviderOccurrenceIdentity(message))
+    return ordinal === undefined ? message : { ...message, ordinal }
+  })
+}
+
+/**
+ * Restrict side-channel Goal rows to the durable page that owns their ordinal. An event without a
+ * legacy anchor is retained only when its equivalent durable command is already in this page, so
+ * an old timestamp can never pull it across a pagination boundary.
+ */
+export function filterGoalEventsForDurablePage(
+  durableMessages: readonly Message[],
+  goalEvents: readonly GoalEvent[]
+): GoalEvent[] {
+  const ordinals = durableMessages.flatMap((message) => {
+    const ordinal = durableMessageOrdinal(message)
+    return ordinal === null ? [] : [ordinal]
+  })
+  if (ordinals.length === 0) return [...goalEvents]
+  const minimum = Math.min(...ordinals)
+  const maximum = Math.max(...ordinals)
+  const durableCommands = new GoalCommandDuplicateIndex(durableMessages)
+  const durableUserMessageIds = new Set(
+    durableMessages.filter((message) => message.role === "user").map((message) => message.id)
+  )
+  return goalEvents.filter((event) => {
+    const message = goalUserEventToMessage(event)
+    if (!message) return true
+    if (event.transcript_message_id && durableUserMessageIds.has(event.transcript_message_id)) {
+      return true
+    }
+    if (durableCommands.hasEquivalent(message)) return true
+    const ordinal = durableMessageOrdinal(message)
+    return ordinal !== null && ordinal >= minimum && ordinal <= maximum
+  })
+}
+
+/** Merge only Goal rows proven to belong to this durable ordinal window. */
+export function mergeGoalUserEventsIntoDurablePage(
+  durableMessages: Message[],
+  goalEvents: readonly GoalEvent[],
+  pageBoundaryMessages: readonly Message[] = durableMessages
+): Message[] {
+  if (pageBoundaryMessages.length === 0 || goalEvents.length === 0) return durableMessages
+  const checkpointCommands = new GoalCommandDuplicateIndex(durableMessages)
+  const durableUserMessageIds = new Set(
+    durableMessages.filter((message) => message.role === "user").map((message) => message.id)
+  )
+  const ordinals = pageBoundaryMessages.flatMap((message) => {
+    const ordinal = durableMessageOrdinal(message)
+    return ordinal === null ? [] : [ordinal]
+  })
+  if (ordinals.length === 0) return durableMessages
+  const minimum = Math.min(...ordinals)
+  const maximum = Math.max(...ordinals)
+  const extras = goalEvents
+    .map((event, sourceIndex) => ({ event, message: goalUserEventToMessage(event), sourceIndex }))
+    .filter(
+      (entry): entry is { event: GoalEvent; message: Message; sourceIndex: number } =>
+        !!entry.message &&
+        !(
+          entry.event.transcript_message_id &&
+          durableUserMessageIds.has(entry.event.transcript_message_id)
+        ) &&
+        !checkpointCommands.hasEquivalent(entry.message) &&
+        durableMessageOrdinal(entry.message) !== null &&
+        (durableMessageOrdinal(entry.message) as number) >= minimum &&
+        (durableMessageOrdinal(entry.message) as number) <= maximum
+    )
+    .sort((left, right) => {
+      const ordinalDifference =
+        (durableMessageOrdinal(left.message) as number) -
+        (durableMessageOrdinal(right.message) as number)
+      return ordinalDifference || left.sourceIndex - right.sourceIndex
+    })
+  if (extras.length === 0) return durableMessages
+
+  const merged: Message[] = []
+  let extraIndex = 0
+  for (const durableMessage of durableMessages) {
+    const ordinal = durableMessageOrdinal(durableMessage)
+    while (
+      ordinal !== null &&
+      extraIndex < extras.length &&
+      (durableMessageOrdinal(extras[extraIndex].message) as number) <= ordinal
+    ) {
+      merged.push(extras[extraIndex].message)
+      extraIndex += 1
+    }
+    merged.push(durableMessage)
+  }
+  while (extraIndex < extras.length) {
+    merged.push(extras[extraIndex].message)
+    extraIndex += 1
+  }
+  return merged
+}
+
 function insertMessagesByTimePreservingCheckpointOrder(
   checkpointMessages: Message[],
-  extraMessages: readonly Message[]
+  extraMessages: readonly Message[],
+  pageStartTime = checkpointMessages[0]?.created_at.getTime() ?? Number.NEGATIVE_INFINITY
 ): Message[] {
   if (extraMessages.length === 0) return checkpointMessages
 
-  const merged = [...checkpointMessages]
-  for (const message of [...extraMessages].sort((left, right) => {
-    const timeDelta = left.created_at.getTime() - right.created_at.getTime()
-    return timeDelta || left.id.localeCompare(right.id)
-  })) {
-    if (merged.some((checkpoint) => sameGoalCommandMessage(checkpoint, message))) continue
+  const checkpointCommands = new GoalCommandDuplicateIndex(checkpointMessages)
+  const checkpointOrdinals = checkpointMessages.flatMap((message) => {
+    const ordinal = durableMessageOrdinal(message)
+    return ordinal === null ? [] : [ordinal]
+  })
+  if (checkpointOrdinals.length > 0) {
+    const minimum = Math.min(...checkpointOrdinals)
+    const maximum = Math.max(...checkpointOrdinals)
+    const eligible = extraMessages
+      .map((message, sourceIndex) => ({ message, sourceIndex }))
+      .filter(({ message }) => {
+        const ordinal = durableMessageOrdinal(message)
+        return (
+          ordinal !== null &&
+          ordinal >= minimum &&
+          ordinal <= maximum &&
+          !checkpointCommands.hasEquivalent(message)
+        )
+      })
+      .sort((left, right) => {
+        const difference =
+          (durableMessageOrdinal(left.message) as number) -
+          (durableMessageOrdinal(right.message) as number)
+        return difference || left.sourceIndex - right.sourceIndex
+      })
+    if (eligible.length === 0) return checkpointMessages
+    const merged: Message[] = []
+    let extraIndex = 0
+    for (const checkpoint of checkpointMessages) {
+      const checkpointOrdinal = durableMessageOrdinal(checkpoint)
+      while (
+        checkpointOrdinal !== null &&
+        extraIndex < eligible.length &&
+        (durableMessageOrdinal(eligible[extraIndex].message) as number) <= checkpointOrdinal
+      ) {
+        merged.push(eligible[extraIndex].message)
+        extraIndex += 1
+      }
+      merged.push(checkpoint)
+    }
+    while (extraIndex < eligible.length) {
+      merged.push(eligible[extraIndex].message)
+      extraIndex += 1
+    }
+    return merged
+  }
+  const eligibleMessages = extraMessages.filter(
+    (message) =>
+      message.created_at.getTime() >= pageStartTime &&
+      !checkpointCommands.hasEquivalent(message)
+  )
+  if (eligibleMessages.length === 0) return checkpointMessages
 
-    const messageTime = message.created_at.getTime()
-    let insertAt = merged.findIndex((checkpoint) => checkpoint.created_at.getTime() > messageTime)
-    if (insertAt < 0) insertAt = merged.length
-    merged.splice(insertAt, 0, message)
+  // Goal restore rows are chronological by contract. Merge the two ordered
+  // inputs directly so hydration remains O(messages + events).
+  const merged: Message[] = []
+  let extraIndex = 0
+  for (const checkpoint of checkpointMessages) {
+    const checkpointTime = checkpoint.created_at.getTime()
+    while (
+      extraIndex < eligibleMessages.length &&
+      eligibleMessages[extraIndex].created_at.getTime() < checkpointTime
+    ) {
+      merged.push(eligibleMessages[extraIndex])
+      extraIndex += 1
+    }
+    merged.push(checkpoint)
+  }
+  while (extraIndex < eligibleMessages.length) {
+    merged.push(eligibleMessages[extraIndex])
+    extraIndex += 1
   }
 
   return merged
@@ -286,6 +594,7 @@ export function buildRestoredCheckpointTranscript(
     .filter((message): message is Message => !!message)
   const consumedGoalUserMessageIds = new Set<string>()
   const restored: Message[] = []
+  const restoredGoalCommands = new GoalCommandDuplicateIndex()
   let visibleIndex = 0
 
   for (const rawMessage of rawCheckpointMessages) {
@@ -303,6 +612,7 @@ export function buildRestoredCheckpointTranscript(
       if (replacement) {
         consumedGoalUserMessageIds.add(replacement.id)
         restored.push(replacement)
+        restoredGoalCommands.add(replacement)
       }
       continue
     }
@@ -312,14 +622,19 @@ export function buildRestoredCheckpointTranscript(
 
     const visibleMessage = visibleCheckpointMessages[visibleIndex] ?? rawMessage
     visibleIndex += 1
-    if (restored.some((message) => sameGoalCommandMessage(message, visibleMessage))) continue
+    if (restoredGoalCommands.hasEquivalent(visibleMessage)) continue
     restored.push(visibleMessage)
+    restoredGoalCommands.add(visibleMessage)
   }
 
   const remainingGoalUserMessages = goalUserMessages.filter(
     (message) => !consumedGoalUserMessageIds.has(message.id)
   )
-  return insertMessagesByTimePreservingCheckpointOrder(restored, remainingGoalUserMessages)
+  return insertMessagesByTimePreservingCheckpointOrder(
+    restored,
+    remainingGoalUserMessages,
+    rawCheckpointMessages[0]?.created_at.getTime()
+  )
 }
 
 export function mergeGoalUserEventsIntoTranscript(
@@ -329,29 +644,8 @@ export function mergeGoalUserEventsIntoTranscript(
   const syntheticGoalUserMessages = goalEvents
     .map(goalUserEventToMessage)
     .filter((message): message is Message => !!message)
-    .filter(
-      (message) => !checkpointMessages.some((checkpoint) => sameGoalCommandMessage(checkpoint, message))
-    )
-
-  if (syntheticGoalUserMessages.length === 0) return checkpointMessages
-
-  const checkpointIndexById = new Map(
-    checkpointMessages.map((message, index) => [message.id, index])
+  return insertMessagesByTimePreservingCheckpointOrder(
+    checkpointMessages,
+    syntheticGoalUserMessages
   )
-  const merged = [...checkpointMessages, ...syntheticGoalUserMessages]
-  merged.sort((left, right) => {
-    const timeDelta = left.created_at.getTime() - right.created_at.getTime()
-    if (timeDelta !== 0) return timeDelta
-
-    const leftCheckpointIndex = checkpointIndexById.get(left.id) ?? -1
-    const rightCheckpointIndex = checkpointIndexById.get(right.id) ?? -1
-    if (leftCheckpointIndex >= 0 && rightCheckpointIndex >= 0) {
-      return leftCheckpointIndex - rightCheckpointIndex
-    }
-    if (leftCheckpointIndex >= 0) return -1
-    if (rightCheckpointIndex >= 0) return 1
-    return left.id.localeCompare(right.id)
-  })
-
-  return merged
 }

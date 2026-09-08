@@ -2,6 +2,7 @@ import { execFile } from "child_process"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { promisify } from "util"
+import { currentGitReadSignal, throwIfGitReadCancelled } from "./git-read-context"
 
 const execFileAsync = promisify(execFile)
 
@@ -68,11 +69,15 @@ async function hasGitMarker(directoryPath: string): Promise<boolean> {
 }
 
 async function runGit(worktreePath: string, args: string[]): Promise<string> {
+  const signal = currentGitReadSignal()
+  throwIfGitReadCancelled(signal)
   const { stdout } = await execFileAsync("git", ["-C", worktreePath, ...args], {
     env: GIT_BASE_ENV,
     timeout: GIT_CONTEXT_QUERY_TIMEOUT_MS,
+    signal,
     ...GIT_SPAWN_OPTIONS
   })
+  throwIfGitReadCancelled(signal)
   return stdout
 }
 
@@ -81,6 +86,7 @@ export async function getGitRootForPath(folderPath: string): Promise<string | nu
     const root = (await runGit(folderPath, ["rev-parse", "--show-toplevel"])).trim()
     return root ? path.resolve(root) : null
   } catch {
+    throwIfGitReadCancelled()
     return null
   }
 }
@@ -105,6 +111,7 @@ export async function discoverWorkspaceGitRepositories(
   workspacePath: string,
   options?: { maxDepth?: number; maxDirectories?: number }
 ): Promise<DiscoveredGitRepository[]> {
+  throwIfGitReadCancelled()
   const workspaceRoot = path.resolve(workspacePath)
   const workspaceGitRoot = await getGitRootForPath(workspaceRoot)
   if (workspaceGitRoot) {
@@ -119,6 +126,7 @@ export async function discoverWorkspaceGitRepositories(
   let scannedDirectories = 0
 
   while (queue.length > 0 && scannedDirectories < maxDirectories) {
+    throwIfGitReadCancelled()
     const current = queue.shift()
     if (!current) break
     const currentKey = normalizePathKey(current.directoryPath)
@@ -137,20 +145,21 @@ export async function discoverWorkspaceGitRepositories(
 
     if (current.depth >= maxDepth) continue
 
-    let entries: Array<{ name: string; isDirectory: () => boolean }>
     try {
-      entries = await fs.readdir(current.directoryPath, { withFileTypes: true })
+      const directory = await fs.opendir(current.directoryPath, { bufferSize: 64 })
+      for await (const entry of directory) {
+        throwIfGitReadCancelled()
+        if (queue.length + scannedDirectories >= maxDirectories) break
+        if (!entry.isDirectory()) continue
+        if (SKIP_DIR_NAMES.has(entry.name)) continue
+        queue.push({
+          directoryPath: path.join(current.directoryPath, entry.name),
+          depth: current.depth + 1
+        })
+      }
     } catch {
+      throwIfGitReadCancelled()
       continue
-    }
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      if (SKIP_DIR_NAMES.has(entry.name)) continue
-      queue.push({
-        directoryPath: path.join(current.directoryPath, entry.name),
-        depth: current.depth + 1
-      })
     }
   }
 
@@ -163,6 +172,7 @@ export async function resolveGitOperationPath(
   workspacePath: string,
   requestedPath?: string | null
 ): Promise<{ worktreePath: string; gitRoot: string } | { error: string }> {
+  throwIfGitReadCancelled()
   const workspaceRoot = path.resolve(workspacePath)
   const hasRequestedPath = typeof requestedPath === "string" && requestedPath.length > 0
   const candidatePath = path.resolve(hasRequestedPath ? requestedPath : workspaceRoot)
@@ -185,6 +195,7 @@ export async function resolveGitOperationPath(
     realWorkspaceRoot = resolvedPaths[0]
     realCandidatePath = resolvedPaths[1]
   } catch {
+    throwIfGitReadCancelled()
     return { error: "目标 Git 路径不存在或无法访问" }
   }
   const relativeToRealWorkspace = path.relative(realWorkspaceRoot, realCandidatePath)

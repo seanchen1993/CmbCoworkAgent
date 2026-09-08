@@ -4,6 +4,7 @@ import { sanitizeMcpExampleValue } from "../mcp/tool-example-store"
 import type { CustomModelConfig } from "../storage"
 import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
 import type { CodeExecMcpCall } from "./types"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 
 const MAX_SAVED_TOOL_METADATA_ERROR_LENGTH = 100
 const SAVED_TOOL_REWRITE_SYSTEM_PROMPT = `
@@ -300,10 +301,9 @@ export async function generateSavedToolRewrite(input: {
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    topP: config.topP,
+    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
-      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      ...topKModelKwargs(config.model, config.topK)
     },
     streaming: false
   })

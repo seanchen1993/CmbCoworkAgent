@@ -15,7 +15,7 @@ import path from "path"
 import { ApprovalStore } from "./approval-store"
 import {
   assessCommandSafety,
-  containsGitAddCommand,
+  containsIndirectGitPush,
   derivePermanentApprovalPattern,
   extractGitCommitPathspecs,
   extractGitCommitMessage,
@@ -23,11 +23,8 @@ import {
   isAmendOrFixupCommit,
   isChainedShellCommand,
   isForcePushCommand,
-  isGitAddCommand,
   isGitCommitCommand,
   isGitPushCommand,
-  isSimpleIsolatedGitCommitCommand,
-  isWholeScopeGitAddCommand,
   resolveGitCommandCwd,
   resolveGitPushCommandCwd,
   type CommandShellSyntax
@@ -54,11 +51,6 @@ export type RawExecuteFn = (
 
 /** Function to request interactive approval from the user (renderer). */
 export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecision>
-export type IsolatedGitMutationFn = (
-  operation: "stage" | "commit",
-  message: string | undefined,
-  cwd: string
-) => Promise<ExecuteResponse>
 
 /**
  * Generic prompt shown when a sandboxed command fails with output that looks like a
@@ -68,8 +60,7 @@ export type IsolatedGitMutationFn = (
 const SANDBOX_BYPASS_PROMPT_REASON =
   "命令在沙箱内执行失败，疑似受沙箱限制。是否允许我在沙箱外重试同一命令？"
 
-const AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE =
-  "Agent 指定的文件均被 Git ignore，未发起提交。"
+const AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE = "Agent 指定的文件均被 Git ignore，未发起提交。"
 
 function normalizeDirBoundaryKey(dir: string): string {
   const resolved = path.resolve(dir)
@@ -245,7 +236,7 @@ export class ToolOrchestrator {
     private approvalStore: ApprovalStore,
     private rawExecute: RawExecuteFn,
     private requestApproval: RequestApprovalFn,
-    private yoloMode: boolean = false,
+    private readYoloMode: () => boolean = () => false,
     /**
      * Auto-approve file edits (write_file/edit_file) WITHOUT prompting, while
      * still gating shell execution. Used by dynamic-workflow subagents: the user
@@ -256,7 +247,6 @@ export class ToolOrchestrator {
     private autoApproveFileEdits: boolean = false,
     /** Isolated worktree runtimes must never retry a denied command on the host. */
     private sandboxEscapeAllowed: boolean = true,
-    private isolatedGitMutation?: IsolatedGitMutationFn,
     /** Thread workspace boundary; execute() cwd may be a nested shell directory. */
     private workspacePath?: string
   ) {}
@@ -280,14 +270,16 @@ export class ToolOrchestrator {
     outsideShellSyntax: CommandShellSyntax = shellSyntax
   ): Promise<ExecuteResponse> {
     {
+      const yoloMode = this.readYoloMode()
       console.log(
-        `[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`
+        `[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${yoloMode}`
       )
 
       // 1. Assess command safety — always check, even in YOLO mode
       const safety = assessCommandSafety(command, cwd, {
         windowsShell:
           process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown",
+        nativeGitWorktree: !this.sandboxEscapeAllowed,
         shellSyntax
       })
       console.log(
@@ -303,59 +295,11 @@ export class ToolOrchestrator {
         }
       }
 
-      // An isolated workflow checkout is intentionally not a child of the thread's
-      // source workspace, so the Git Panel's thread-scoped commit/push IPC cannot
-      // authorize it. Commits go through a guarded host broker that stages only the
-      // assigned scope and advances only its branch. Direct push commands are rejected for
-      // app-owned transient branches; arbitrary project subprocesses and network access
-      // remain outside this worktree-integrity boundary and are explicitly treated as trusted.
-      if (!this.sandboxEscapeAllowed && isGitPushCommand(command, shellSyntax)) {
-        return {
-          output: "Command forbidden: direct push from an isolated workflow worktree is blocked",
-          exitCode: 1,
-          truncated: false
-        }
-      }
-      if (!this.sandboxEscapeAllowed && this.isolatedGitMutation) {
-        if (containsGitAddCommand(command)) {
-          if (!isGitAddCommand(command) || !isWholeScopeGitAddCommand(command)) {
-            return {
-              output:
-                "Command forbidden: isolated staging only supports `git add -A` or `git add --all`; commit automatically stages the assigned scope",
-              exitCode: 1,
-              truncated: false
-            }
-          }
-          return this.isolatedGitMutation("stage", undefined, cwd)
-        }
-        if (isGitCommitCommand(command, shellSyntax)) {
-          if (isChainedShellCommand(command, shellSyntax)) {
-            return {
-              output:
-                "Command forbidden: run isolated `git commit -m ...` as a standalone command; the broker stages the assigned scope automatically",
-              exitCode: 1,
-              truncated: false
-            }
-          }
-          if (!isSimpleIsolatedGitCommitCommand(command)) {
-            return {
-              output:
-                "Command forbidden: isolated commits support only `git commit -m <message>`; amend/fixup/squash, pathspecs, and staging options are not supported",
-              exitCode: 1,
-              truncated: false
-            }
-          }
-          const message = extractGitCommitMessage(command)
-          if (!message?.trim()) {
-            return {
-              output: "Command forbidden: isolated worktree commits require -m/--message",
-              exitCode: 1,
-              truncated: false
-            }
-          }
-          return this.isolatedGitMutation("commit", message, cwd)
-        }
-      }
+      // Isolated workflow agents use native Git in their assigned checkout. Do not
+      // route their add/commit commands through the ordinary task-card flow: Git must
+      // preserve the agent's real index, hooks, signing and command semantics. The
+      // LocalSandbox worktree guard has already rejected cross-worktree/shared-metadata
+      // operations before execution reaches this orchestrator.
 
       // 2.5 git commit → route through the task-card commit dialog instead of a plain
       // approval. The renderer collects the task card + message, performs the commit via
@@ -370,7 +314,7 @@ export class ToolOrchestrator {
           return {
             output:
               "检测到 `git commit` 与其他命令串联执行，任务卡片流程无法安全保留各段命令的路径和短路语义。" +
-              "请直接使用 `git commit -m \"摘要\" -- <明确文件路径>`；如需切换目录，请单独执行 cd 或使用 git -C。",
+              '请直接使用 `git commit -m "摘要" -- <明确文件路径>`；如需切换目录，请单独执行 cd 或使用 git -C。',
             exitCode: 1,
             truncated: false
           }
@@ -391,12 +335,51 @@ export class ToolOrchestrator {
           return {
             output:
               "检测到任务卡片提交流程无法安全复现的 Git 文件范围选项（如 -a、--patch 或 " +
-              "--pathspec-from-file）。请先运行 git status，再使用 `git commit -m \"摘要\" -- <明确文件路径>` 重试。",
+              '--pathspec-from-file）。请先运行 git status，再使用 `git commit -m "摘要" -- <明确文件路径>` 重试。',
             exitCode: 1,
             truncated: false
           }
         }
         return this.requestCardCommit(command, cwd, shellSyntax)
+      }
+
+      // A push from an app-owned transient branch is never silently approved by
+      // YOLO mode. LocalSandbox has already limited the refspec to this worktree's
+      // assigned branch; ask once, then execute the original native Git command so
+      // credentials and remote behavior are not rewritten by the source-workspace
+      // Git Panel flow.
+      if (!this.sandboxEscapeAllowed && containsIndirectGitPush(command, shellSyntax)) {
+        return {
+          output:
+            "Command forbidden: isolated worktree push must be issued directly as `git push <remote> HEAD` for explicit approval",
+          exitCode: 1,
+          truncated: false
+        }
+      }
+      if (!this.sandboxEscapeAllowed && isGitPushCommand(command, shellSyntax)) {
+        if (isForcePushCommand(command, shellSyntax)) {
+          return {
+            output: "Command forbidden: force push from an isolated workflow worktree is blocked",
+            exitCode: 1,
+            truncated: false
+          }
+        }
+        const approval = await this.requestApproval({
+          id: randomUUID(),
+          tool_call: { id: randomUUID(), name: "execute", args: { command } },
+          safety_level: "needs_approval",
+          operation: "execute",
+          command,
+          cwd,
+          reason: "Push the assigned isolated workflow branch to its matching remote branch?",
+          allowed_decisions: ["approve", "reject"],
+          allowed_approval_types: ["approve", "reject"]
+        })
+        const decision = this.mapDecisionToReview(approval.type)
+        if (decision === "denied" || decision === "abort") {
+          return { output: "Command rejected by user.", exitCode: 1, truncated: false }
+        }
+        return this.rawExecute(command, sandboxMode, cwd)
       }
 
       // 2.6 git push → route a plain (non-force) push through workspace:pushWorktree — the
@@ -409,6 +392,7 @@ export class ToolOrchestrator {
       // the current cwd — a `git -C <other>` push to a different repo would otherwise be
       // silently redirected to the thread's worktree.
       if (
+        this.sandboxEscapeAllowed &&
         isGitPushCommand(command, shellSyntax) &&
         !isForcePushCommand(command, shellSyntax) &&
         !isChainedShellCommand(command, shellSyntax)
@@ -421,28 +405,16 @@ export class ToolOrchestrator {
 
       // 3. YOLO mode: skip the initial command approval for safe + needs_approval
       // commands, but still require explicit approval before escaping the sandbox.
-      if (this.yoloMode) {
+      if (yoloMode) {
         const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(
-          command,
-          cwd,
-          sandboxMode,
-          result,
-          outsideShellSyntax
-        )
+        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax)
       }
 
       // 4. Safe commands → execute directly
       if (safety.level === "safe") {
         console.log("[Orchestrator] safe → rawExecute")
         const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(
-          command,
-          cwd,
-          sandboxMode,
-          result,
-          outsideShellSyntax
-        )
+        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax)
       }
 
       // 5. Needs approval → check cache, then ask user
@@ -463,6 +435,7 @@ export class ToolOrchestrator {
             id: randomUUID(),
             tool_call: { id: randomUUID(), name: "execute", args: { command } },
             safety_level: "needs_approval",
+            operation: "execute",
             command,
             cwd,
             reason: safety.reason,
@@ -529,7 +502,7 @@ export class ToolOrchestrator {
     const suggestedCommitMessage = extractGitCommitMessage(command, shellSyntax)
     const gitCommandCwd = resolveGitCommandCwd(command, cwd, shellSyntax)
     const workspaceBoundary = this.workspacePath ?? cwd
-    const gitCommandCwdError = await validateGitOperationCwd(
+    const gitCommandCwdError = await validateGitCommandCwd(
       workspaceBoundary,
       gitCommandCwd,
       "commit"
@@ -541,51 +514,88 @@ export class ToolOrchestrator {
         truncated: false
       }
     }
-    const gitRoot = await getGitRootForPath(gitCommandCwd)
-    if (!gitRoot) {
-      return {
-        output: "Git 仓库根目录在提交前发生变化；为避免提交到错误仓库，本次操作已取消。",
-        exitCode: 1,
-        truncated: false
-      }
-    }
-    const [representedGitRoot, realWorkspace, realGitRoot] =
-      await Promise.all([
-        representExistingPathWithinWorkspace(workspaceBoundary, gitRoot),
-        resolveExistingDirForBoundary(workspaceBoundary),
-        resolveExistingDirForBoundary(gitRoot)
-      ])
-    const operationTarget =
-      realWorkspace.exists &&
-      realGitRoot.exists &&
-      isPathInsideOrSame(realGitRoot.path, realWorkspace.path)
-        ? representedGitRoot
-        : path.resolve(workspaceBoundary)
-    const extractedPathspecs = Array.from(
-      new Set(extractGitCommitPathspecs(command, shellSyntax))
-    )
+    const extractedPathspecs = Array.from(new Set(extractGitCommitPathspecs(command, shellSyntax)))
     if (extractedPathspecs.length === 0) {
       return {
         output:
           "任务卡片提交流程必须指定明确文件路径，不能安全复现裸 `git commit` 的暂存区/未暂存片段语义。" +
-          "请先运行 git status，再使用 `git commit -m \"摘要\" -- <明确文件路径>` 重试。",
+          '请先运行 git status，再使用 `git commit -m "摘要" -- <明确文件路径>` 重试。',
         exitCode: 1,
         truncated: false
       }
     }
-    const suggestedCommitFilePaths = await projectExplicitPathsToTarget(
-      gitRoot,
-      gitCommandCwd,
-      operationTarget,
-      extractedPathspecs,
-      shellSyntax
-    )
-    if (!suggestedCommitFilePaths) {
-      return {
-        output: "无法可靠映射 Git 提交路径；为避免提交到错误范围，本次操作已取消。",
-        exitCode: 1,
-        truncated: false
+
+    let gitRoot = await getGitRootForPath(gitCommandCwd)
+    let operationTarget: string | undefined
+    let suggestedGitRepositories: ApprovalRequest["suggestedGitRepositories"]
+    let suggestedCommitFilePaths: string[]
+    let suggestedCommitFileBasePath: string
+
+    if (!gitRoot) {
+      const repositories = await discoverWorkspaceGitRepositories(gitCommandCwd)
+      if (repositories.length === 0) {
+        return {
+          output: "当前目录不是 Git 仓库，且未发现可提交的子仓库。",
+          exitCode: 1,
+          truncated: false
+        }
       }
+      if (repositories.length > 1) {
+        suggestedGitRepositories = repositories.map((repository) => ({
+          path: repository.repoPath,
+          displayPath: repository.displayPath,
+          gitRoot: repository.gitRoot
+        }))
+        suggestedCommitFilePaths = extractedPathspecs
+        suggestedCommitFileBasePath = gitCommandCwd
+      } else {
+        gitRoot = repositories[0].gitRoot
+        operationTarget = repositories[0].repoPath
+        suggestedCommitFileBasePath = operationTarget
+        const projectedPaths = await projectExplicitPathsToTarget(
+          gitRoot,
+          gitCommandCwd,
+          operationTarget,
+          extractedPathspecs,
+          shellSyntax
+        )
+        if (!projectedPaths) {
+          return {
+            output: "无法可靠映射 Git 提交路径；为避免提交到错误范围，本次操作已取消。",
+            exitCode: 1,
+            truncated: false
+          }
+        }
+        suggestedCommitFilePaths = projectedPaths
+      }
+    } else {
+      const [representedGitRoot, realWorkspace, realGitRoot] = await Promise.all([
+        representExistingPathWithinWorkspace(workspaceBoundary, gitRoot),
+        resolveExistingDirForBoundary(workspaceBoundary),
+        resolveExistingDirForBoundary(gitRoot)
+      ])
+      operationTarget =
+        realWorkspace.exists &&
+        realGitRoot.exists &&
+        isPathInsideOrSame(realGitRoot.path, realWorkspace.path)
+          ? representedGitRoot
+          : path.resolve(workspaceBoundary)
+      suggestedCommitFileBasePath = operationTarget
+      const projectedPaths = await projectExplicitPathsToTarget(
+        gitRoot,
+        gitCommandCwd,
+        operationTarget,
+        extractedPathspecs,
+        shellSyntax
+      )
+      if (!projectedPaths) {
+        return {
+          output: "无法可靠映射 Git 提交路径；为避免提交到错误范围，本次操作已取消。",
+          exitCode: 1,
+          truncated: false
+        }
+      }
+      suggestedCommitFilePaths = projectedPaths
     }
     console.log(
       `[Orchestrator] git commit → task-card dialog (cwd=${cwd}, gitCwd=${gitCommandCwd})`
@@ -599,8 +609,9 @@ export class ToolOrchestrator {
       cwd,
       suggestedCommitMessage,
       suggestedCommitFilePaths,
-      suggestedCommitFileBasePath: operationTarget,
+      suggestedCommitFileBasePath,
       suggestedGitWorktreePath: operationTarget,
+      suggestedGitRepositories,
       suggestedCommitFileSelectionSource: "pathspec",
       reason: "Git 提交需要选择任务卡片并确认",
       allowed_decisions: ["approve", "reject"],
@@ -710,13 +721,7 @@ export class ToolOrchestrator {
     if (!this.sandboxEscapeAllowed) return result
     // Single Codex-style bypass check — covers piped-spawn EPERM, git .git writes,
     // dubious ownership, ssh auth, generic EACCES/Access-is-denied/拒绝访问, etc.
-    return this.maybeRequestSandboxBypass(
-      command,
-      cwd,
-      sandboxMode,
-      result,
-      outsideShellSyntax
-    )
+    return this.maybeRequestSandboxBypass(command, cwd, sandboxMode, result, outsideShellSyntax)
   }
 
   /**
@@ -805,7 +810,7 @@ export class ToolOrchestrator {
     cwd: string
   ): Promise<boolean> {
     {
-      if (this.yoloMode || this.autoApproveFileEdits) return true
+      if (this.readYoloMode() || this.autoApproveFileEdits) return true
 
       const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")
       // Directory-based pattern for permanent approval: file:write:/dir/* or file:edit:/dir/*

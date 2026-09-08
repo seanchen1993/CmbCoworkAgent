@@ -1,0 +1,165 @@
+export interface ChatSearchDocument {
+  messageId: string
+  text: string
+  sortIndex?: number
+  /** The local text hit its bounded index limit and may need durable occurrence supplementation. */
+  truncated?: boolean
+  /** Durable raw content is intentionally different, so it must never supplement this row. */
+  durableAuthoritative?: boolean
+}
+
+export interface ChatSearchMatch {
+  messageId: string
+  occurrenceIndex: number
+  sortIndex?: number
+}
+
+export interface ChatSearchCorpus {
+  /** Changes only when persisted/search-stable content changes. */
+  stableDocuments: readonly ChatSearchDocument[]
+  /** The live suffix and any live overrides of persisted rows. */
+  dynamicDocuments: readonly ChatSearchDocument[]
+  dynamicMessageIds: ReadonlySet<string>
+}
+
+/** A durable hit already resident in the virtual list needs mounting, not another DB window. */
+export function shouldHydrateDurableSearchMatch(
+  messageId: string,
+  visibleMessageIndexById: ReadonlyMap<string, number>
+): boolean {
+  return !visibleMessageIndexById.has(messageId)
+}
+
+export function findChatSearchMatches(
+  documents: readonly ChatSearchDocument[],
+  rawQuery: string,
+  maxMatches = Number.POSITIVE_INFINITY
+): ChatSearchMatch[] {
+  const query = rawQuery.trim().toLocaleLowerCase()
+  const boundedMaxMatches = Math.max(0, Math.floor(maxMatches))
+  if (!query || boundedMaxMatches === 0) return []
+
+  const matches: ChatSearchMatch[] = []
+  for (const document of documents) {
+    const text = document.text.toLocaleLowerCase()
+    let offset = 0
+    let occurrenceIndex = 0
+    let matchIndex = text.indexOf(query, offset)
+    while (matchIndex >= 0 && matches.length < boundedMaxMatches) {
+      matches.push({
+        messageId: document.messageId,
+        occurrenceIndex,
+        ...(document.sortIndex === undefined ? {} : { sortIndex: document.sortIndex })
+      })
+      occurrenceIndex += 1
+      offset = matchIndex + query.length
+      matchIndex = text.indexOf(query, offset)
+    }
+    if (matches.length >= boundedMaxMatches) break
+  }
+  return matches
+}
+
+function mergeSortedMatches(
+  stable: readonly ChatSearchMatch[],
+  dynamic: readonly ChatSearchMatch[],
+  maxMatches: number
+): ChatSearchMatch[] {
+  const merged: ChatSearchMatch[] = []
+  let stableIndex = 0
+  let dynamicIndex = 0
+  while (
+    merged.length < maxMatches &&
+    (stableIndex < stable.length || dynamicIndex < dynamic.length)
+  ) {
+    const stableMatch = stable[stableIndex]
+    const dynamicMatch = dynamic[dynamicIndex]
+    if (!dynamicMatch) {
+      merged.push(stableMatch)
+      stableIndex += 1
+      continue
+    }
+    if (!stableMatch) {
+      merged.push(dynamicMatch)
+      dynamicIndex += 1
+      continue
+    }
+    if ((stableMatch.sortIndex ?? 0) <= (dynamicMatch.sortIndex ?? 0)) {
+      merged.push(stableMatch)
+      stableIndex += 1
+    } else {
+      merged.push(dynamicMatch)
+      dynamicIndex += 1
+    }
+  }
+  return merged
+}
+
+/**
+ * Caches matching for the stable history. While tokens update the dynamic
+ * suffix, only that suffix is searched again; the already-indexed history text
+ * is not revisited.
+ */
+export function createChatSearchMatcher(
+  maxMatches = Number.POSITIVE_INFINITY
+): (
+  corpus: ChatSearchCorpus,
+  query: string
+) => ChatSearchMatch[] {
+  const boundedMaxMatches = Math.max(0, Math.floor(maxMatches))
+  let previousStableDocuments: readonly ChatSearchDocument[] | null = null
+  let previousQuery = ""
+  let stableMatches: ChatSearchMatch[] = []
+  let stableDocumentMatches = new WeakMap<ChatSearchDocument, ChatSearchMatch[]>()
+  let previousDynamicIdKey = ""
+  let visibleStableMatches: readonly ChatSearchMatch[] = stableMatches
+
+  return (corpus, query) => {
+    const normalizedQuery = query.trim().toLocaleLowerCase()
+    if (!normalizedQuery) return []
+
+    if (
+      corpus.stableDocuments !== previousStableDocuments ||
+      normalizedQuery !== previousQuery
+    ) {
+      if (normalizedQuery !== previousQuery) {
+        stableDocumentMatches = new WeakMap()
+      }
+      const nextStableMatches: ChatSearchMatch[] = []
+      for (const document of corpus.stableDocuments) {
+        let documentMatches = stableDocumentMatches.get(document)
+        if (!documentMatches) {
+          documentMatches = findChatSearchMatches(
+            [document],
+            normalizedQuery,
+            boundedMaxMatches
+          )
+          stableDocumentMatches.set(document, documentMatches)
+        }
+        const remaining = boundedMaxMatches - nextStableMatches.length
+        if (remaining <= 0) break
+        nextStableMatches.push(...documentMatches.slice(0, remaining))
+      }
+      stableMatches = nextStableMatches
+      previousStableDocuments = corpus.stableDocuments
+      previousQuery = normalizedQuery
+      previousDynamicIdKey = "\u0001"
+    }
+
+    const dynamicIdKey = Array.from(corpus.dynamicMessageIds).sort().join("\u0000")
+    if (dynamicIdKey !== previousDynamicIdKey) {
+      visibleStableMatches =
+        corpus.dynamicMessageIds.size === 0
+          ? stableMatches
+          : stableMatches.filter((match) => !corpus.dynamicMessageIds.has(match.messageId))
+      previousDynamicIdKey = dynamicIdKey
+    }
+
+    const dynamicMatches = findChatSearchMatches(
+      corpus.dynamicDocuments,
+      normalizedQuery,
+      boundedMaxMatches
+    )
+    return mergeSortedMatches(visibleStableMatches, dynamicMatches, boundedMaxMatches)
+  }
+}

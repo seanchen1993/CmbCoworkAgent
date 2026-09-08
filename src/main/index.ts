@@ -1,4 +1,31 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerSaveBlocker, shell } from "electron"
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  powerSaveBlocker,
+  shell,
+  type IpcMainEvent
+} from "electron"
+import {
+  isBrowserNativeMessagingHostLaunch,
+  runBrowserNativeMessagingHost
+} from "./browser/chrome/browser-native-messaging-host"
+import { configureBrowserCdpEndpoint } from "./browser/cdp/browser-cdp"
+import { BUILTIN_BROWSER_LOG_PREFIX } from "../shared/browser-types"
+
+const MAIN_BROWSER_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[Main]`
+const RENDERER_BROWSER_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[RendererBrowser]`
+const browserNativeMessagingHostLaunch = isBrowserNativeMessagingHostLaunch()
+
+const browserCdpPort = configureBrowserCdpEndpoint(app.commandLine)
+if (browserCdpPort !== null) {
+  console.info(
+    `${MAIN_BROWSER_LOG_PREFIX} Browser CDP endpoint enabled on http://127.0.0.1:${browserCdpPort}.`
+  )
+}
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -7,6 +34,7 @@ if (process.platform === "linux") {
 }
 
 import { join } from "path"
+import { pathToFileURL } from "url"
 import { existsSync, rmSync } from "fs"
 import {
   writeMainLog,
@@ -15,6 +43,17 @@ import {
   flushLogsSync,
   initializeLogRedaction
 } from "./logging"
+import {
+  createMainLogForwarder,
+  createMainLogForwardingGate,
+  createSafeLogMethod,
+  createSafeLogProcessingGuard,
+  createSafeProcessErrorHandler,
+  isEpipeError,
+  isTrustedMainLogToggleRequest,
+  isTrustedRendererUrl,
+  resolveTrustedRendererUrl
+} from "./main-log-forwarding"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 import {
@@ -38,6 +77,18 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
+import {
+  configureAgentGraphRecursionLimit,
+  configureWorkflowWorktreeRemoveTimeoutMinutes,
+  configureWorkflowWorktreeTimeoutMinutes,
+  getAgentGraphRecursionLimit,
+  getWorkflowWorktreeRemoveTimeoutMinutes,
+  getWorkflowWorktreeTimeoutMinutes,
+  isAgentGraphRecursionLimit,
+  isWorkflowWorktreeRemoveTimeoutMinutes,
+  isWorkflowWorktreeTimeoutMinutes,
+  type AgentRuntimeSettings
+} from "../shared/agent-runtime-limits"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
@@ -46,11 +97,20 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
-const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
-const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
-const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
+const GIT_CHANGE_NOTICE_GET_CHANNEL = "app:get-git-change-notice-enabled"
+const GIT_CHANGE_NOTICE_SET_CHANNEL = "app:set-git-change-notice-enabled"
+const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
+const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
+const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
-let mainLogForwardingEnabled = false
+const mainLogForwardingGate = createMainLogForwardingGate()
+let mainWindow: BrowserWindow | null = null
+const trustedMainRendererUrl = resolveTrustedRendererUrl(
+  app.isPackaged
+    ? pathToFileURL(join(__dirname, "../renderer/index.html")).href
+    : process.env["ELECTRON_RENDERER_URL"]
+)
 const EVENT_CATEGORIES = new Set<EventCategory>([
   "skill",
   "git",
@@ -59,7 +119,7 @@ const EVENT_CATEGORIES = new Set<EventCategory>([
   "heartbeat",
   "memory",
   "hook",
-  "chatx",
+  "im",
   "workspace"
 ])
 
@@ -99,6 +159,17 @@ function getConsoleLevelName(level: number): string {
     default:
       return "LOG"
   }
+}
+
+function shouldMirrorRendererBrowserLog(message: string): boolean {
+  return message.startsWith(BUILTIN_BROWSER_LOG_PREFIX)
+}
+
+function formatMirroredRendererBrowserLog(message: string): string {
+  const suffix = message.startsWith(BUILTIN_BROWSER_LOG_PREFIX)
+    ? message.slice(BUILTIN_BROWSER_LOG_PREFIX.length)
+    : ` ${message}`
+  return `${RENDERER_BROWSER_LOG_PREFIX}${suffix}`
 }
 
 function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): string {
@@ -145,73 +216,115 @@ function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): strin
   }
 }
 
-function forwardMainLogToRenderer(level: string, args: unknown[]): void {
-  if (!mainLogForwardingEnabled) return
-  const message = args.map((arg) => safeFormatLogValue(arg)).join(" ")
-  const windows = BrowserWindow.getAllWindows()
-  for (const window of windows) {
-    if (window.isDestroyed() || window.webContents.isDestroyed()) continue
-    window.webContents.send(MAIN_LOG_EVENT_CHANNEL, { level, message })
+const forwardMainLogToRenderer = createMainLogForwarder({
+  channel: MAIN_LOG_EVENT_CHANNEL,
+  isEnabled: mainLogForwardingGate.isEnabled,
+  getWindows: () => (mainWindow ? [mainWindow] : []),
+  formatValue: safeFormatLogValue,
+  isTrustedWindow: (window) =>
+    window === mainWindow &&
+    isTrustedRendererUrl(window.webContents.getURL?.(), trustedMainRendererUrl) &&
+    isTrustedRendererUrl(window.webContents.mainFrame?.url, trustedMainRendererUrl)
+})
+
+function isTrustedMainLogToggleEvent(event: IpcMainEvent, enabled: unknown): boolean {
+  try {
+    const window = mainWindow
+    if (!window || window.isDestroyed()) return false
+    const contents = window.webContents
+    if (contents.isDestroyed()) return false
+    const mainFrame = contents.mainFrame
+    const senderFrame = event.senderFrame
+    if (!senderFrame) return false
+    if (mainFrame.detached || mainFrame.isDestroyed()) return false
+    return isTrustedMainLogToggleRequest({
+      enabled,
+      expectedWebContents: contents,
+      sender: event.sender,
+      expectedMainFrame: mainFrame,
+      senderFrame,
+      expectedRendererUrl: trustedMainRendererUrl,
+      senderUrl: contents.getURL(),
+      senderFrameUrl: senderFrame.url
+    })
+  } catch {
+    return false
   }
 }
 
-function withEpipeGuard<T extends (...args: unknown[]) => void>(fn: T): T {
-  return ((...args: Parameters<T>) => {
-    try {
-      fn(...args)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === "EPIPE") return
-      throw err
-    }
-  }) as T
+if (!browserNativeMessagingHostLaunch) {
+  // Capture the original methods before installing wrappers. Fatal-process logging
+  // deliberately uses these sinks without renderer forwarding, so it cannot enter
+  // the same webContents.send -> console.error chain that raised the exception.
+  const rawConsole = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+    debug: console.debug.bind(console),
+    trace: console.trace.bind(console)
+  }
+  const logProcessingGuard = createSafeLogProcessingGuard()
+  const createMainConsoleMethod = (
+    level: string,
+    sink: (...args: unknown[]) => void
+  ): ((...args: unknown[]) => void) =>
+    createSafeLogMethod({
+      level,
+      persist: writeMainLog,
+      forward: forwardMainLogToRenderer,
+      sink,
+      processingGuard: logProcessingGuard
+    })
+
+  // Native messaging reserves stdout exclusively for length-prefixed protocol frames.
+  console.log = createMainConsoleMethod("INFO", rawConsole.log)
+  console.info = createMainConsoleMethod("INFO", rawConsole.info)
+  console.warn = createMainConsoleMethod("WARN", rawConsole.warn)
+  console.error = createMainConsoleMethod("ERROR", rawConsole.error)
+  console.debug = createMainConsoleMethod("DEBUG", rawConsole.debug)
+  console.trace = createMainConsoleMethod("DEBUG", rawConsole.trace)
+
+  const writeEmergencyError = createSafeLogMethod({
+    level: "ERROR",
+    persist: writeMainLog,
+    sink: rawConsole.error,
+    processingGuard: logProcessingGuard
+  })
+
+  const handleStdoutError = createSafeProcessErrorHandler({
+    prefix: "[Main] stdout error:",
+    write: writeEmergencyError
+  })
+  const handleUncaughtException = createSafeProcessErrorHandler({
+    prefix: "[Main] Uncaught exception:",
+    write: writeEmergencyError,
+    flush: flushLogsSync
+  })
+
+  // Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
+  // or when the renderer window is destroyed while the main process is still logging).
+  process.stdout.on("error", handleStdoutError)
+  process.stderr.on("error", (error: unknown) => {
+    if (isEpipeError(error)) return
+    // Don't re-log to stderr here to avoid infinite loop
+  })
+  process.on("uncaughtException", handleUncaughtException)
+  process.on("unhandledRejection", (reason) => {
+    writeEmergencyError("[Main] Unhandled rejection:", reason)
+  })
+
+  // Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
+  // does not fire Node's `exit` event, so flush the log tail before quitting.
+  // `once` lets a second signal fall through to default force-kill if quit hangs.
+  const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
+    console.warn(`[Main] received ${signal}, flushing logs and quitting`)
+    flushLogsSync()
+    app.quit()
+  }
+  process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
+  process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 }
-
-function withMainFileLogging<T extends (...args: unknown[]) => void>(level: string, fn: T): T {
-  return ((...args: Parameters<T>) => {
-    const redactedArgs = writeMainLog(level, args)
-    forwardMainLogToRenderer(level, redactedArgs)
-    fn(...(redactedArgs as Parameters<T>))
-  }) as T
-}
-
-// Guard console writes so broken stdout/stderr pipes don't crash main process.
-console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
-console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
-console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
-console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
-console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
-console.trace = withEpipeGuard(withMainFileLogging("DEBUG", console.trace.bind(console)))
-
-// Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
-// or when the renderer window is destroyed while the main process is still logging).
-process.stdout.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return
-  console.error("[Main] stdout error:", err)
-})
-process.stderr.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return
-  // Don't re-log to stderr here to avoid infinite loop
-})
-process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return // silently ignore broken pipe
-  console.error("[Main] Uncaught exception:", err)
-  // Persist the buffered tail (incl. this error) in case the process dies next.
-  flushLogsSync()
-})
-process.on("unhandledRejection", (reason) => {
-  console.error("[Main] Unhandled rejection:", reason)
-})
-
-// Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
-// does not fire Node's `exit` event, so flush the log tail before quitting.
-// `once` lets a second signal fall through to default force-kill if quit hangs.
-const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
-  console.warn(`[Main] received ${signal}, flushing logs and quitting`)
-  flushLogsSync()
-  app.quit()
-}
-process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
-process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 import {
   disposeAllAgentThreadStates,
   hasAnyActiveAgentTasks,
@@ -221,36 +334,75 @@ import {
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
+import { registerWorkspaceFilePreviewHandlers } from "./ipc/file-preview"
+import { closeWorkspaceFilePreviewWorker } from "./workspace-file-preview/client"
+import { closeFileAttachmentParserWorker } from "./file-attachment-parser/client"
+import {
+  closeWorkspaceFilePreviewProtocol,
+  registerWorkspaceFilePreviewProtocol,
+  registerWorkspaceFilePreviewScheme
+} from "./workspace-file-preview/media-protocol"
 import { registerSkillsHandlers } from "./ipc/skills"
+import { closeSkillPluginCatalogWorker } from "./skill-plugin-catalog/client"
 import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
+import { closeMemoryCatalogWorker } from "./memory-catalog/client"
 import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
 import { registerPluginFileHandlers } from "./ipc/plugin-files"
 import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
-import { registerChatXHandlers } from "./ipc/chatx"
 import { registerHooksHandlers } from "./ipc/hooks"
+import { closeHookCatalogWorker } from "./hook-catalog/client"
 import { flushHookLogs, pruneOldHookLogs } from "./hooks/persistence"
 import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
+import { closeDashboardEsWorker } from "./services/dashboard-es-client"
 import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
+import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
+import { recoverHumanGatesAtStartup } from "./harness-board/human-gate-service"
+import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
+import {
+  getHarnessProjectRootPath,
+  initializeHarnessManagedRunProjectDirectories,
+  listHarnessManagedRunProjectDirectories
+} from "./harness-board/service"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { registerManagedLinkHandlers } from "./ipc/managed-links"
-import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
+import {
+  closeHarnessWatchRefWorker,
+  stopAllHarnessWatchRefs
+} from "./harness-board/watch-ref-watcher"
+import { closeHarnessAdapterDetailWorker } from "./harness-board/adapter-detail-client"
+import { closeHarnessCatalogWorker } from "./harness-board/catalog-client"
+import { closeHarnessKnowledgePreviewWorker } from "./harness-board/knowledge-preview-client"
+import { closeHarnessEnterpriseProjectionWorker } from "./harness-board/enterprise-projection-client"
+import { closeHarnessJsonCodecWorker } from "./harness-board/json-codec-client"
 import { registerUserInputHandlers } from "./ipc/user-input"
+import { registerBuiltinRobotHandlers } from "./ipc/builtin-robot"
+import { registerBuiltinBrowserIpc } from "./ipc/browser"
+import {
+  beginBuiltinBrowserAppQuitCleanup,
+  disposeBuiltinBrowserForMainWindowEvent
+} from "./browser/builtin-browser-lifecycle"
 import { stopAllLsp } from "./lsp"
-import { initializeTraceStorageSecurity, setTraceReporter } from "./agent/trace/collector"
+import {
+  flushPendingTraceReports,
+  hasPendingTraceReports,
+  flushTraceWriteQueue,
+  initializeTraceStorageSecurity,
+  setTraceReporter
+} from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { startHarnessStatusReporter } from "./services/harness-status-reporter"
@@ -259,7 +411,14 @@ import {
   startRegisteredGitHookEventSync,
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
-import { getAllThreads, initializeDatabase, flush } from "./db"
+import { getAllThreadSummaries, initializeDatabase, flush } from "./db"
+import { closeThreadMessageHydrationWorker } from "./thread-message-hydration/client"
+import { closeCheckpointRuntimeProjectionWorker } from "./checkpointer/runtime-projection-client"
+import { closeThreadMetadataHydrationWorker } from "./thread-metadata-hydration/client"
+import { closeAllWorkspaceFileScans } from "./workspace-file-scan/manager"
+import { stopAllWatching } from "./services/workspace-watcher"
+import { closeLegacySubagentTranscriptMigrations } from "./legacy-subagent-migration/coordinator"
+import { closeSubagentTranscriptStartupWorker } from "./subagent-transcript-startup/client"
 import {
   hasActiveScheduledTaskRuns,
   startScheduler,
@@ -272,7 +431,6 @@ import {
   stopHeartbeat,
   stopHeartbeatAndWait
 } from "./services/heartbeat"
-import { hasActiveChatXRuns, startChatX, stopChatX, stopChatXAndWait } from "./services/chatx"
 import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
@@ -282,17 +440,24 @@ import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "
 import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import {
-  getChatScrollSettings,
+  getGitChangeNoticeEnabled,
   getOpenworkDir,
+  getStoredAgentGraphRecursionLimit,
+  getStoredWorkflowWorktreeRemoveTimeoutMinutes,
+  getStoredWorkflowWorktreeTimeoutMinutes,
   getWindowCloseBehavior,
   isKeepAwakeEnabled,
-  setChatScrollSettings,
+  setGitChangeNoticeEnabled,
+  setStoredAgentGraphRecursionLimit,
+  setStoredWorkflowWorktreeRemoveTimeoutMinutes,
+  setStoredWorkflowWorktreeTimeoutMinutes,
   setKeepAwakeEnabled,
   setWindowCloseBehavior
 } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
+import { builtinRobotManager } from "./services/im/manager"
 import {
   configurePetWindow,
   createPetWindow,
@@ -301,8 +466,12 @@ import {
   registerPetHandlers
 } from "./pet"
 
-let mainWindow: BrowserWindow | null = null
+// Custom schemes must be declared before app readiness. The handler itself is
+// installed after readiness, together with the IPC endpoints below.
+registerWorkspaceFilePreviewScheme()
+
 let loginWindow: BrowserWindow | null = null
+let browserService: ReturnType<typeof registerBuiltinBrowserIpc> | null = null
 let closeToTrayPromptOpen = false
 let closeToTrayPromptRequestId = 0
 let closeToTrayPromptTimer: NodeJS.Timeout | null = null
@@ -326,6 +495,15 @@ function schedulePetStartupAfterMainLoad(window: BrowserWindow): void {
     markPetStartupReady()
   }, PET_STARTUP_DELAY_MS)
   petStartupTimer.unref?.()
+}
+
+function disposeBrowserServiceForMainWindow(reason: string): void {
+  disposeBuiltinBrowserForMainWindowEvent({
+    browserService,
+    isAppQuitting: isAppQuitting(),
+    logPrefix: MAIN_BROWSER_LOG_PREFIX,
+    reason
+  })
 }
 
 function cleanupLegacySkillEvalRecords(): void {
@@ -395,14 +573,16 @@ function applyMacDockIcon(): void {
 
   // 宠物透明窗口会额外创建 BrowserWindow；macOS 下重复应用 Dock 图标可避免开发态图标被重置。
   app.dock.show()
-  const iconPath = getFirstExistingPath([
-    ...(isDev ? [getDevMacDockIconPath()] : []),
-    join(__dirname, "../../resources/icon.png"),
-    join(app.getAppPath(), "resources/icon.png"),
-    join(__dirname, "../resources/icon.png"),
-    join(app.getAppPath(), "build/icon.png"),
-    join(process.cwd(), "build/icon.png")
-  ].filter((path): path is string => Boolean(path)))
+  const iconPath = getFirstExistingPath(
+    [
+      ...(isDev ? [getDevMacDockIconPath()] : []),
+      join(__dirname, "../../resources/icon.png"),
+      join(app.getAppPath(), "resources/icon.png"),
+      join(__dirname, "../resources/icon.png"),
+      join(app.getAppPath(), "build/icon.png"),
+      join(process.cwd(), "build/icon.png")
+    ].filter((path): path is string => Boolean(path))
+  )
 
   if (isDev) {
     console.log(`[icon] mac dock icon path: ${iconPath ?? "not found"}`)
@@ -449,9 +629,9 @@ function clearCloseToTrayPromptState(): void {
 function hasActiveForegroundRuns(): boolean {
   return (
     hasAnyActiveAgentTasks() ||
-    hasActiveChatXRuns() ||
     hasActiveScheduledTaskRuns() ||
-    isHeartbeatRunning()
+    isHeartbeatRunning() ||
+    builtinRobotManager.hasActiveRuns()
   )
 }
 
@@ -461,16 +641,6 @@ function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBeha
     mainWindow.webContents.send(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, savedBehavior)
   }
   return savedBehavior
-}
-
-function saveChatScrollSettings(
-  settings: Parameters<typeof setChatScrollSettings>[0]
-): ReturnType<typeof setChatScrollSettings> {
-  const savedSettings = setChatScrollSettings(settings)
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, savedSettings)
-  }
-  return savedSettings
 }
 
 function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
@@ -543,6 +713,7 @@ function createWindow(): void {
   mainWindow.on("blur", showPendingAppAttention)
 
   mainWindow.on("unresponsive", () => {
+    mainLogForwardingGate.disableForLifecycle()
     console.warn("[Main] BrowserWindow became unresponsive")
   })
 
@@ -553,6 +724,15 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: "deny" }
+  })
+
+  // Every new top-level document must opt in again from its trusted main frame.
+  // This also closes the teardown race while a previously trusted frame reloads.
+  mainWindow.webContents.on("will-navigate", () => {
+    mainLogForwardingGate.disableForLifecycle()
+  })
+  mainWindow.webContents.once("destroyed", () => {
+    mainLogForwardingGate.disableForLifecycle()
   })
 
   // Electron does not provide an application context menu automatically.
@@ -577,30 +757,39 @@ function createWindow(): void {
   // mid-turn reload/reconnect contract, so block browser refresh shortcuts.
   mainWindow.webContents.on("before-input-event", (event, input) => {
     const isRefreshShortcut =
-      input.key === "F5" ||
-      ((input.meta || input.control) && input.key.toLowerCase() === "r")
+      input.key === "F5" || ((input.meta || input.control) && input.key.toLowerCase() === "r")
     if (isRefreshShortcut) event.preventDefault()
   })
 
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
+    if (shouldMirrorRendererBrowserLog(message)) {
+      const location = sourceId ? `${sourceId}:${line}` : `line:${line}`
+      console.log(`${formatMirroredRendererBrowserLog(message)} (${location})`)
+    }
   })
 
-  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
-    clearCloseToTrayPromptState()
-    console.error("[Main] Renderer failed to load:", {
-      errorCode,
-      errorDescription,
-      validatedURL
-    })
-  })
+  mainWindow.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL) => {
+      clearCloseToTrayPromptState()
+      console.error("[Main] Renderer failed to load:", {
+        errorCode,
+        errorDescription,
+        validatedURL
+      })
+    }
+  )
 
   mainWindow.webContents.on("did-start-loading", () => {
+    mainLogForwardingGate.disableForLifecycle()
     clearCloseToTrayPromptState()
   })
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    mainLogForwardingGate.disableForLifecycle()
     clearCloseToTrayPromptState()
+    disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
   })
 
@@ -625,7 +814,7 @@ function createWindow(): void {
     const renderUrl = import.meta.env.VITE_RENDER_URL
     if (!renderUrl) {
       mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
-    }else{
+    } else {
       mainWindow.loadURL(renderUrl)
     }
   }
@@ -641,7 +830,10 @@ function createWindow(): void {
       trayAvailable,
       hasActiveForegroundRuns: hasActiveForegroundRuns()
     })
-    if (decision.action === "allow-close") return
+    if (decision.action === "allow-close") {
+      mainLogForwardingGate.disableForLifecycle()
+      return
+    }
 
     event.preventDefault()
     if (!mainWindow) return
@@ -655,10 +847,12 @@ function createWindow(): void {
   })
 
   mainWindow.on("closed", () => {
+    mainLogForwardingGate.disableForLifecycle()
     console.warn("[Main] Main window closed", {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
+    disposeBrowserServiceForMainWindow("the main window closed")
     cancelDelayedPetStartup()
     clearCloseToTrayPromptState()
     mainWindow = null
@@ -693,7 +887,7 @@ function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
   const workspaces: string[] = []
   const seen = new Set<string>()
 
-  for (const thread of getAllThreads().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
+  for (const thread of getAllThreadSummaries().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
     if (!thread.metadata) continue
     try {
       const metadata = JSON.parse(thread.metadata)
@@ -720,9 +914,19 @@ function prewarmRecentSandboxWorkspaces(): void {
   LocalSandbox.prewarmForWorkspaces(workspaces)
 }
 
-// Ensure only a single instance is running (prevents duplicate schedulers on Windows)
-const gotTheLock = app.requestSingleInstanceLock()
-if (!gotTheLock) {
+// Native hosts must not participate in the desktop app's single-instance lifecycle.
+const gotTheLock = browserNativeMessagingHostLaunch ? false : app.requestSingleInstanceLock()
+if (browserNativeMessagingHostLaunch) {
+  void runBrowserNativeMessagingHost().then(
+    () => app.exit(typeof process.exitCode === "number" ? process.exitCode : 0),
+    (error) => {
+      process.stderr.write(
+        `[CmbBrowserNativeHost] ${error instanceof Error ? error.message : String(error)}\n`
+      )
+      app.exit(1)
+    }
+  )
+} else if (!gotTheLock) {
   app.quit()
 } else {
   app.on("second-instance", () => {
@@ -730,6 +934,10 @@ if (!gotTheLock) {
   })
 
   app.whenReady().then(async () => {
+    configureAgentGraphRecursionLimit(getStoredAgentGraphRecursionLimit())
+    configureWorkflowWorktreeTimeoutMinutes(getStoredWorkflowWorktreeTimeoutMinutes())
+    configureWorkflowWorktreeRemoveTimeoutMinutes(getStoredWorkflowWorktreeRemoveTimeoutMinutes())
+
     // Set app user model id for windows
     if (process.platform === "win32") {
       app.setAppUserModelId("CMBDevClaw")
@@ -742,52 +950,58 @@ if (!gotTheLock) {
       applyMacDockIcon
     })
 
-    try {
-      await flushLogs()
-      const logRedaction = initializeLogRedaction()
-      if (logRedaction.failedFiles > 0) {
+    // Historical migration is background maintenance. New writes are already
+    // redacted and the logging layer serializes migration against per-file flush,
+    // so window creation never waits for old log discovery or rewriting.
+    void initializeLogRedaction()
+      .then((logRedaction) => {
+        if (logRedaction.failedFiles > 0) {
+          console.warn(
+            `[Main] Historical log redaction incomplete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}, failed=${logRedaction.failedFiles}`
+          )
+        } else if (!logRedaction.alreadyComplete && logRedaction.redactedFiles > 0) {
+          console.log(
+            `[Main] Historical log redaction complete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}`
+          )
+        }
+      })
+      .catch((error) => {
         console.warn(
-          `[Main] Historical log redaction incomplete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}, failed=${logRedaction.failedFiles}`
+          `[Main] Historical log redaction failed: ${error instanceof Error ? error.message : String(error)}`
         )
-      } else if (!logRedaction.alreadyComplete && logRedaction.redactedFiles > 0) {
-        console.log(
-          `[Main] Historical log redaction complete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}`
-        )
-      }
-    } catch (error) {
-      console.warn(
-        `[Main] Historical log redaction failed: ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
+      })
 
-    try {
-      const traceStorage = initializeTraceStorageSecurity()
-      if (!traceStorage.ready) {
+    // New encrypted writes are safe immediately; legacy inventory/migration is
+    // resumable background maintenance and must not delay first-window startup.
+    void initializeTraceStorageSecurity()
+      .then((traceStorage) => {
+        if (!traceStorage.ready) {
+          console.warn(
+            `[Main] Encrypted trace storage unavailable; local trace writes will fail closed: ${traceStorage.reason ?? "unknown reason"}`
+          )
+        } else if (traceStorage.mode === "plaintext") {
+          console.warn(
+            "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
+          )
+        } else if (traceStorage.migrationSkipped) {
+          console.log(
+            `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
+          )
+        } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
+          console.warn(
+            `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`
+          )
+        } else {
+          console.log(
+            `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=0`
+          )
+        }
+      })
+      .catch((error) => {
         console.warn(
-          `[Main] Encrypted trace storage unavailable; local trace writes will fail closed: ${traceStorage.reason ?? "unknown reason"}`
+          `[Main] Trace storage initialization failed; local trace writes will fail closed: ${error instanceof Error ? error.message : String(error)}`
         )
-      } else if (traceStorage.mode === "plaintext") {
-        console.warn(
-          "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
-        )
-      } else if (traceStorage.migrationSkipped) {
-        console.log(
-          `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
-        )
-      } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
-        console.warn(
-          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`
-        )
-      } else {
-        console.log(
-          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=0`
-        )
-      }
-    } catch (error) {
-      console.warn(
-        `[Main] Trace storage initialization failed; local trace writes will fail closed: ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
+      })
 
     // Default open or close DevTools by F12 in development
     if (isDev) {
@@ -811,6 +1025,12 @@ if (!gotTheLock) {
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
+    await initializeHarnessManagedRunProjectDirectories()
+    configureManagedRunProjectDirectories({
+      resolveProjectDirectory: getHarnessProjectRootPath,
+      listProjectDirectories: listHarnessManagedRunProjectDirectories
+    })
+
     // Periodically upsert Harness Board project/feature status into the event
     // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
     // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
@@ -819,6 +1039,8 @@ if (!gotTheLock) {
 
     // Initialize database
     await initializeDatabase()
+    await recoverHumanGatesAtStartup()
+    recoverManagedRunsAtStartup()
     cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)
@@ -834,6 +1056,8 @@ if (!gotTheLock) {
     registerWorkflowHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
     registerModelHandlers(ipcMain)
+    registerWorkspaceFilePreviewHandlers(ipcMain)
+    registerWorkspaceFilePreviewProtocol()
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
     registerScheduledTaskHandlers(ipcMain)
@@ -845,7 +1069,6 @@ if (!gotTheLock) {
     registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)
     registerOptimizerHandlers(ipcMain)
-    registerChatXHandlers(ipcMain)
     registerHooksHandlers(ipcMain)
     // Best-effort cleanup of stale hook-log jsonl files. Doesn't block startup.
     void pruneOldHookLogs().catch((e) => console.warn("[Main] pruneOldHookLogs error:", e))
@@ -866,6 +1089,8 @@ if (!gotTheLock) {
     registerManagedLinkHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
+    registerBuiltinRobotHandlers(ipcMain)
+    browserService = registerBuiltinBrowserIpc(ipcMain, () => mainWindow, browserCdpPort)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
@@ -901,30 +1126,112 @@ if (!gotTheLock) {
       return saveWindowCloseBehavior(behavior)
     })
 
-    ipcMain.handle(CHAT_SCROLL_SETTINGS_GET_CHANNEL, (event) => {
+    ipcMain.handle(GIT_CHANGE_NOTICE_GET_CHANNEL, (event) => {
       if (
         !mainWindow ||
         mainWindow.isDestroyed() ||
         event.sender.id !== mainWindow.webContents.id
       ) {
-        throw new Error("Chat scroll settings are only available to the main window")
+        throw new Error("Git change notice settings are only available to the main window")
       }
-      return getChatScrollSettings()
+      return getGitChangeNoticeEnabled()
     })
 
-    ipcMain.handle(CHAT_SCROLL_SETTINGS_SET_CHANNEL, (event, settings: unknown) => {
+    ipcMain.handle(GIT_CHANGE_NOTICE_SET_CHANNEL, (event, enabled: unknown) => {
       if (
         !mainWindow ||
         mainWindow.isDestroyed() ||
         event.sender.id !== mainWindow.webContents.id
       ) {
-        throw new Error("Chat scroll settings are only available to the main window")
+        throw new Error("Git change notice settings are only available to the main window")
       }
-      if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
-        throw new Error("Invalid chat scroll settings")
-      }
-      return saveChatScrollSettings(settings as Parameters<typeof setChatScrollSettings>[0])
+      if (typeof enabled !== "boolean") throw new Error("Invalid Git change notice setting")
+      return setGitChangeNoticeEnabled(enabled)
     })
+
+    ipcMain.handle(AGENT_RUNTIME_SETTINGS_GET_CHANNEL, (event): AgentRuntimeSettings => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Agent runtime settings are only available to the main window")
+      }
+      return {
+        recursionLimit: getAgentGraphRecursionLimit(),
+        workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+        workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
+      }
+    })
+
+    ipcMain.handle(
+      AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isAgentGraphRecursionLimit(value)) {
+          throw new Error("Agent graph recursion limit must be an integer between 25 and 100000")
+        }
+        const persisted = setStoredAgentGraphRecursionLimit(value)
+        return {
+          recursionLimit: configureAgentGraphRecursionLimit(persisted),
+          workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+          workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
+        }
+      }
+    )
+
+    ipcMain.handle(
+      WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isWorkflowWorktreeTimeoutMinutes(value)) {
+          throw new Error("Workflow worktree timeout must be an integer between 1 and 120 minutes")
+        }
+        const persisted = setStoredWorkflowWorktreeTimeoutMinutes(value)
+        return {
+          recursionLimit: getAgentGraphRecursionLimit(),
+          workflowWorktreeTimeoutMinutes: configureWorkflowWorktreeTimeoutMinutes(persisted),
+          workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
+        }
+      }
+    )
+
+    ipcMain.handle(
+      WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isWorkflowWorktreeRemoveTimeoutMinutes(value)) {
+          throw new Error(
+            "Workflow worktree removal timeout must be an integer between 1 and 10 minutes"
+          )
+        }
+        const persisted = setStoredWorkflowWorktreeRemoveTimeoutMinutes(value)
+        return {
+          recursionLimit: getAgentGraphRecursionLimit(),
+          workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+          workflowWorktreeRemoveTimeoutMinutes:
+            configureWorkflowWorktreeRemoveTimeoutMinutes(persisted)
+        }
+      }
+    )
 
     ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
@@ -946,8 +1253,8 @@ if (!gotTheLock) {
         return
       }
 
-      // A background ChatX message can start while the ordinary close prompt is
-      // open. Upgrade to the non-suppressible safety prompt before quitting.
+      // A background task can start while the ordinary close prompt is open.
+      // Upgrade to the non-suppressible safety prompt before quitting.
       if (needsActiveRunConfirmation()) {
         clearCloseToTrayPromptState()
         requestWindowCloseChoice(promptWindow, "active-runs")
@@ -1009,8 +1316,9 @@ if (!gotTheLock) {
       performAction()
     })
 
-    ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
-      mainLogForwardingEnabled = Boolean(enabled)
+    ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (event, enabled: unknown) => {
+      if (typeof enabled !== "boolean" || !isTrustedMainLogToggleEvent(event, enabled)) return
+      mainLogForwardingGate.setFromTrustedRenderer(enabled)
     })
 
     // Track event handler for client-side telemetry
@@ -1041,6 +1349,14 @@ if (!gotTheLock) {
       return app.getVersion()
     })
 
+    ipcMain.handle("app:restart", async () => {
+      // Mark the app as quitting first so the main window doesn't collapse into
+      // the tray when we intentionally relaunch from the renderer.
+      setAppQuitting(true)
+      app.relaunch()
+      app.quit()
+    })
+
     ipcMain.handle("open-login-window", async () => {
       if (!loginWindow) {
         loginWindow = new BrowserWindow({
@@ -1050,14 +1366,19 @@ if (!gotTheLock) {
             contextIsolation: true,
             nodeIntegration: false,
             webviewTag: true,
-            preload: join(__dirname, "../preload/index.js"),
-          },
+            preload: join(__dirname, "../preload/index.js")
+          }
         })
       }
-      loginWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-        "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-        "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-        "&response_type=code")
+      loginWindow.loadURL(
+        `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+          "&redirect_uri=" +
+          encodeURIComponent(
+            `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+          ) +
+          "&response_type=code"
+      )
     })
 
     ipcMain.handle("close-login-window", async () => {
@@ -1065,22 +1386,28 @@ if (!gotTheLock) {
         loginWindow.close()
         loginWindow = null
       }
-      if(mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("notify-login-msg",'login')
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("notify-login-msg", "login")
       }
     })
 
     ipcMain.handle("open-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed() && !isDev) {
-        mainWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-          "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-          "&response_type=code")
+      if (mainWindow && !mainWindow.isDestroyed() && !isDev) {
+        mainLogForwardingGate.disableForLifecycle()
+        mainWindow.loadURL(
+          `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+            "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+            "&redirect_uri=" +
+            encodeURIComponent(
+              `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+            ) +
+            "&response_type=code"
+        )
       }
     })
 
     ipcMain.handle("close-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
       }
     })
@@ -1109,9 +1436,9 @@ if (!gotTheLock) {
     await initialModelCatalogLoad
 
     // Start scheduled task scheduler and heartbeat service
+    await builtinRobotManager.start(app.getVersion())
     startScheduler()
     startHeartbeat()
-    startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
     markFullBackupCleanupReady(selfCheckResult)
@@ -1152,11 +1479,13 @@ if (!gotTheLock) {
   app.on("before-quit", (event) => {
     const activeSessions = hasActiveSessions()
     const activeTasks = hasActiveForegroundRuns()
+    const pendingTraceReports = hasPendingTraceReports()
     console.warn("[Main] before-quit", {
       sessionEndDone,
       sessionEndInProgress,
       hasActiveSessions: activeSessions,
       hasActiveTasks: activeTasks,
+      hasPendingTraceReports: pendingTraceReports,
       pet: getPetWindowDebugInfo()
     })
     if (sessionEndDone) {
@@ -1169,7 +1498,7 @@ if (!gotTheLock) {
       event.preventDefault()
       return
     }
-    if (!activeSessions && !activeTasks) {
+    if (!activeSessions && !activeTasks && !pendingTraceReports) {
       sessionEndDone = true
       setAppQuitting(true)
       return
@@ -1180,9 +1509,9 @@ if (!gotTheLock) {
       try {
         const shutdownResults = await Promise.allSettled([
           shutdownAllAgentTasks(5_000),
-          stopChatXAndWait(5_000),
           stopSchedulerAndWait(5_000),
-          stopHeartbeatAndWait(5_000)
+          stopHeartbeatAndWait(5_000),
+          builtinRobotManager.stop()
         ])
         for (const result of shutdownResults) {
           if (result.status === "rejected") {
@@ -1195,6 +1524,9 @@ if (!gotTheLock) {
       } catch (error) {
         console.warn("[Main] SessionEnd hooks error:", error)
       } finally {
+        await flushPendingTraceReports(5_000).catch((error) => {
+          console.warn("[Main] Pending trace report flush error:", error)
+        })
         disposeAllAgentThreadStates()
         sessionEndDone = true
         sessionEndInProgress = false
@@ -1205,11 +1537,19 @@ if (!gotTheLock) {
   })
 
   let quitting = false
+  let quitCleanupDone = false
   app.on("will-quit", (e) => {
     console.warn("[Main] will-quit", {
       quitting,
+      quitCleanupDone,
       pet: getPetWindowDebugInfo()
     })
+    if (quitCleanupDone) {
+      // Cleanup already finished during a previous will-quit cycle.
+      // Let Electron quit naturally — this gives Chromium time to properly
+      // release the CDP debug socket, preventing zombie sockets on Windows.
+      return
+    }
     if (quitting) {
       // Re-entry: user pressed Cmd+Q again while cleanup is running. Just block.
       e.preventDefault()
@@ -1220,13 +1560,18 @@ if (!gotTheLock) {
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)
+    const disposeBuiltinBrowserAfterAppCleanup = beginBuiltinBrowserAppQuitCleanup(
+      browserService,
+      MAIN_BROWSER_LOG_PREFIX
+    )
+    browserService = null
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()
     stopHeartbeat()
-    stopChatX()
     stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
+    stopAllWatching()
     stopRegisteredGitHookEventSync()
     stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
@@ -1237,19 +1582,102 @@ if (!gotTheLock) {
     }
 
     const cleanup = Promise.all([
+      builtinRobotManager
+        .stop()
+        .catch((err) => console.warn("[Main] stop built-in robot error:", err)),
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
+      closeThreadMessageHydrationWorker().catch((err) =>
+        console.warn("[Main] closeThreadMessageHydrationWorker error:", err)
+      ),
+      closeCheckpointRuntimeProjectionWorker().catch((err) =>
+        console.warn("[Main] closeCheckpointRuntimeProjectionWorker error:", err)
+      ),
+      closeThreadMetadataHydrationWorker().catch((err) =>
+        console.warn("[Main] closeThreadMetadataHydrationWorker error:", err)
+      ),
+      closeAllWorkspaceFileScans().catch((err) =>
+        console.warn("[Main] closeAllWorkspaceFileScans error:", err)
+      ),
+      closeWorkspaceFilePreviewWorker().catch((err) =>
+        console.warn("[Main] closeWorkspaceFilePreviewWorker error:", err)
+      ),
+      closeFileAttachmentParserWorker().catch((err) =>
+        console.warn("[Main] closeFileAttachmentParserWorker error:", err)
+      ),
+      closeLegacySubagentTranscriptMigrations().catch((err) =>
+        console.warn("[Main] closeLegacySubagentTranscriptMigrations error:", err)
+      ),
+      closeSubagentTranscriptStartupWorker().catch((err) =>
+        console.warn("[Main] closeSubagentTranscriptStartupWorker error:", err)
+      ),
+      closeHarnessAdapterDetailWorker().catch((err) =>
+        console.warn("[Main] closeHarnessAdapterDetailWorker error:", err)
+      ),
+      closeHarnessCatalogWorker().catch((err) =>
+        console.warn("[Main] closeHarnessCatalogWorker error:", err)
+      ),
+      closeHarnessKnowledgePreviewWorker().catch((err) =>
+        console.warn("[Main] closeHarnessKnowledgePreviewWorker error:", err)
+      ),
+      closeHarnessEnterpriseProjectionWorker().catch((err) =>
+        console.warn("[Main] closeHarnessEnterpriseProjectionWorker error:", err)
+      ),
+      closeHarnessJsonCodecWorker().catch((err) =>
+        console.warn("[Main] closeHarnessJsonCodecWorker error:", err)
+      ),
+      closeHarnessWatchRefWorker().catch((err) =>
+        console.warn("[Main] closeHarnessWatchRefWorker error:", err)
+      ),
+      closeDashboardEsWorker().catch((err) =>
+        console.warn("[Main] closeDashboardEsWorker error:", err)
+      ),
+      closeSkillPluginCatalogWorker().catch((err) =>
+        console.warn("[Main] closeSkillPluginCatalogWorker error:", err)
+      ),
+      closeHookCatalogWorker().catch((err) =>
+        console.warn("[Main] closeHookCatalogWorker error:", err)
+      ),
+      closeMemoryCatalogWorker().catch((err) =>
+        console.warn("[Main] closeMemoryCatalogWorker error:", err)
+      ),
+      flushTraceWriteQueue().catch((err) =>
+        console.warn("[Main] flushTraceWriteQueue error:", err)
+      ),
+      Promise.resolve().then(() => closeWorkspaceFilePreviewProtocol()),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
-    ])
+    ]).finally(() => {
+      disposeBuiltinBrowserAfterAppCleanup()
+    })
 
     const CLEANUP_TIMEOUT_MS = 10_000
     const FORCE_FLUSH_GRACE_MS = 2_000
     const HARD_EXIT_TIMEOUT_MS = CLEANUP_TIMEOUT_MS + FORCE_FLUSH_GRACE_MS + 500
+    const NATURAL_EXIT_TIMEOUT_MS = 5_000
 
     let exitStarted = false
     let cancelHardExit: (() => void) | null = null
 
-    const exitImmediately = (): void => {
+    const armHardExitDeadline = (timeoutMs: number, reason: string): void => {
+      if (cancelHardExit) {
+        cancelHardExit()
+      }
+      cancelHardExit = scheduleHardDeadline(() => {
+        console.error(reason)
+        flushLogsSync()
+        hardExit()
+      }, timeoutMs)
+    }
+
+    const gracefulExit = (): void => {
+      quitCleanupDone = true
+      // Give Electron/Chromium a short bounded window to quit naturally so the
+      // CDP socket can be released cleanly, but never wait forever here.
+      armHardExitDeadline(NATURAL_EXIT_TIMEOUT_MS, "[Main] Natural quit deadline reached")
+      app.quit()
+    }
+
+    const hardExit = (): void => {
       if (cancelHardExit) {
         cancelHardExit()
         cancelHardExit = null
@@ -1266,22 +1694,21 @@ if (!gotTheLock) {
         // grace period, but never let a stalled disk keep the process alive.
         await Promise.all([
           waitBestEffort(flush(), FORCE_FLUSH_GRACE_MS),
+          waitBestEffort(flushTraceWriteQueue(), FORCE_FLUSH_GRACE_MS),
           waitBestEffort(flushLogs(), FORCE_FLUSH_GRACE_MS)
         ])
+        hardExit()
       } else {
         await flush()
+        await flushTraceWriteQueue()
         await flushLogs()
+        gracefulExit()
       }
-      exitImmediately()
     }
 
     // Independent hard deadline: even if cleanup finishes just before its timer
     // and the normal async flush then stalls, the process still exits.
-    cancelHardExit = scheduleHardDeadline(() => {
-      console.error("[Main] Hard exit deadline reached")
-      flushLogsSync()
-      exitImmediately()
-    }, HARD_EXIT_TIMEOUT_MS)
+    armHardExitDeadline(HARD_EXIT_TIMEOUT_MS, "[Main] Hard exit deadline reached")
 
     // Give async cleanup up to 10s, then switch to bounded best-effort flushes.
     const forceTimer = setTimeout(() => {

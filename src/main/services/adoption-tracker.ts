@@ -33,7 +33,7 @@ import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises
 import { existsSync, mkdirSync, statSync } from "fs"
 import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
 import { createHash, randomUUID } from "crypto"
-import { execFile, execFileSync } from "child_process"
+import { execFile } from "child_process"
 import { promisify } from "util"
 import { gzipSync, gunzipSync } from "zlib"
 import * as iconv from "iconv-lite"
@@ -52,8 +52,19 @@ import type {
   LocalGeneratedLineStatus,
   LocalGenAdoptionLines
 } from "../../shared/adoption-trace-types"
-import { buildEvent, getEventReporter, type CoworkEvent } from "./event-reporter"
+import {
+  buildEvent,
+  getEventReporter,
+  type CoworkEvent,
+  type EventReportResult,
+  type IEventReporter
+} from "./event-reporter"
 import { getGitRootForPath } from "./git-repository-discovery"
+import {
+  attributeChangeKind,
+  normalizeChangeKind,
+  normalizeNewRatio
+} from "./change-kind-classifier"
 import { getTestCodeMatchRule, type TestCodeMatchRule } from "./adoption-file-policy"
 import {
   cleanupAdoptionDeliveryRecords,
@@ -75,6 +86,7 @@ import {
   listPendingGenPaths,
   markCommitJobProcessing,
   markCommitJobRetry,
+  markOutboxDeferred,
   markOutboxDelivered,
   markOutboxFailed,
   markOutboxSending,
@@ -92,6 +104,7 @@ import {
   type CommitJobStatus,
   type CommitJobRow,
   type EventOutboxInput,
+  type EventOutboxRow,
   type GenIndexRow
 } from "./adoption-index"
 
@@ -138,6 +151,7 @@ const CODE_GEN_OUTBOX_DRAIN_DELAY_MS = 750
 const OUTBOX_MAX_ATTEMPTS = 10
 const OUTBOX_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000
 const OUTBOX_SENDING_STALE_MS = 2 * 60 * 1000
+const OUTBOX_REPORT_DEADLINE_MS = 12 * 1000
 const COMMIT_JOB_POLL_INTERVAL_MS = 30 * 1000
 const COMMIT_JOB_BATCH_SIZE = 5
 const DELIVERY_RECORD_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
@@ -298,22 +312,18 @@ export interface RecordGenInput {
   /** Optional: workspace root — used to turn absolute path into relative. */
   workspacePath?: string
   /**
-   * Optional: non-blank lines removed by this tool call. When provided, the
-   * tracker uses this directly. write_file passes 0 here (it can only create
-   * new files).
+   * Optional: non-blank old-only lines removed or replaced by this tool call.
+   * When provided, the tracker uses this directly. write_file passes 0 here
+   * because it can only create new files.
    */
   deletedLineCount?: number
   /**
    * Optional: the local `old_string` fragment being replaced by edit_file.
-   * Together with `newString` and `occurrences` the tracker derives a cheap
-   * net-deletion count in the microtask — no full-file scan, no references
-   * to editor buffers retained. Slight over/undercount at oldString boundary
-   * lines is accepted: deletedLineCount is an auxiliary metric; the primary
-   * adoption signal is `generatedContent` (= newString) retention.
+   * Together with `generatedContent` and `occurrences`, the tracker derives
+   * matching new-only and old-only line multisets without reading the full file
+   * or retaining editor buffers.
    */
   oldString?: string
-  /** Optional: the local `new_string` fragment. See `oldString`. */
-  newString?: string
   /** Optional: replacement count returned by the edit tool. Defaults to 1. */
   occurrences?: number
   /**
@@ -375,10 +385,15 @@ let currentShardStartMs = 0
  */
 let appendChain: Promise<unknown> = Promise.resolve()
 
+/** Accepted recordGen calls that have not finished their asynchronous git/JSONL/index work. */
+const inFlightRecordGenTasks = new Set<Promise<void>>()
+
 /** In-flight measurement dedup keyed by absolute file path. */
 const inFlightFileMeasurements = new Set<string>()
 
 let outboxDrainPromise: Promise<void> | null = null
+let outboxLifecycleGeneration = 0
+let outboxLifecycleController = new AbortController()
 let commitJobDrainPromise: Promise<void> | null = null
 const inFlightCommitJobs = new Map<string, Promise<boolean>>()
 
@@ -501,34 +516,39 @@ export function isCodeFile(filePath: string): boolean {
 
 const GIT_WORKTREE_CACHE_MAX = 256
 const gitWorkTreeCache = new Map<string, boolean>()
+const gitWorkTreeRequests = new Map<string, Promise<boolean>>()
 
-function isInsideGitWorkTree(absPath: string): boolean {
-  const dir = dirname(absPath)
-  const cached = gitWorkTreeCache.get(dir)
-  if (cached !== undefined) return cached
-
-  let inside = false
-  try {
-    const out = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd: dir,
-      encoding: "utf-8",
-      timeout: 5000,
-      maxBuffer: 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"]
-    })
-    inside = out.trim() === "true"
-  } catch {
-    // Not a repo / git error / git missing — treat as outside a work tree.
-    inside = false
-  }
-
-  // Bounded cache (Map preserves insertion order → evict oldest first).
+function rememberGitWorkTreeResult(dir: string, inside: boolean): boolean {
+  // Bounded cache (Map preserves insertion order -> evict oldest first).
   if (!gitWorkTreeCache.has(dir) && gitWorkTreeCache.size >= GIT_WORKTREE_CACHE_MAX) {
     const oldest = gitWorkTreeCache.keys().next().value
     if (oldest !== undefined) gitWorkTreeCache.delete(oldest)
   }
   gitWorkTreeCache.set(dir, inside)
   return inside
+}
+
+async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
+  const dir = dirname(absPath)
+  const cached = gitWorkTreeCache.get(dir)
+  if (cached !== undefined) return cached
+  const inFlight = gitWorkTreeRequests.get(dir)
+  if (inFlight) return inFlight
+
+  const request = execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
+    cwd: dir,
+    encoding: "utf-8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+    windowsHide: true
+  })
+    .then(({ stdout }) => rememberGitWorkTreeResult(dir, stdout.trim() === "true"))
+    .catch(() => rememberGitWorkTreeResult(dir, false))
+    .finally(() => {
+      if (gitWorkTreeRequests.get(dir) === request) gitWorkTreeRequests.delete(dir)
+    })
+  gitWorkTreeRequests.set(dir, request)
+  return request
 }
 
 // ─────────────────────────────────────────────────────────
@@ -546,23 +566,6 @@ function fnv1a32(input: string): number {
 
 function normalizeLine(line: string): string {
   return line.trim().replace(/\s+/g, " ")
-}
-
-/**
- * Count non-blank, whitespace-normalised lines in `content`. Mirrors the
- * normalisation used by `computeLineHashes` so the count matches the number of
- * hashes we would actually compare. Exported so write/edit tool call sites can
- * compute `deletedLineCount` against the same definition the tracker uses for
- * added lines.
- */
-export function countNonBlankLines(content: string): number {
-  if (!content) return 0
-  const lines = content.split(/\r?\n/)
-  let count = 0
-  for (const raw of lines) {
-    if (normalizeLine(raw).length > 0) count++
-  }
-  return count
 }
 
 function computeLineHashes(content: string): Uint32Array {
@@ -601,33 +604,53 @@ function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occu
   return occurrences > 0 ? occurrences : 1
 }
 
+export interface NetLineChangeCounts {
+  generatedLineCount: number
+  deletedLineCount: number
+}
+
 /**
- * Count only net-new, non-blank lines without expanding replaceAll occurrences
- * into a potentially huge baseline. Used by the oversize fast path, where we
- * deliberately skip persistence/hashing details but still need an accurate
- * denominator for telemetry.
+ * Count new-only and old-only non-blank lines as multisets, without expanding
+ * replaceAll occurrences into a potentially huge baseline. An old-only line is
+ * a deletion or replacement, so equal-size rewrites remain visible instead of
+ * looking like pure additions.
  */
-export function countNetGeneratedLines(
+export function countNetLineChanges(
   input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
-): number {
+): NetLineChangeCounts {
   const generatedCounts = buildLineHashCounts(computeLineHashes(input.generatedContent))
   const generationOccurrences = getGenerationOccurrenceCount(input)
 
   if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
-    let total = 0
-    for (const count of generatedCounts.values()) total += count * generationOccurrences
-    return total
+    let generatedLineCount = 0
+    for (const count of generatedCounts.values()) {
+      generatedLineCount += count * generationOccurrences
+    }
+    return { generatedLineCount, deletedLineCount: 0 }
   }
 
   const oldCounts = buildLineHashCounts(computeLineHashes(input.oldString))
   const deletionOccurrences = getDeletionOccurrenceCount(input)
-  let total = 0
+  let generatedLineCount = 0
+  let deletedLineCount = 0
   for (const [hash, count] of generatedCounts) {
     const generated = count * generationOccurrences
-    const unchanged = (oldCounts.get(hash) ?? 0) * deletionOccurrences
-    total += Math.max(0, generated - unchanged)
+    const old = (oldCounts.get(hash) ?? 0) * deletionOccurrences
+    generatedLineCount += Math.max(0, generated - old)
+    deletedLineCount += Math.max(0, old - generated)
   }
-  return total
+  for (const [hash, count] of oldCounts) {
+    if (generatedCounts.has(hash)) continue
+    deletedLineCount += count * deletionOccurrences
+  }
+  return { generatedLineCount, deletedLineCount }
+}
+
+/** Backward-compatible projection used by existing oversize-count callers/tests. */
+export function countNetGeneratedLines(
+  input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
+): number {
+  return countNetLineChanges(input).generatedLineCount
 }
 
 function repeatLineEntries(entries: LineEntry[], occurrences: number): LineEntry[] {
@@ -789,18 +812,11 @@ function getDeletionOccurrenceCount(input: Pick<RecordGenInput, "occurrences">):
   return Math.max(0, Math.floor(input.occurrences))
 }
 
-function deriveDeletedLineCount(input: RecordGenInput): number {
-  if (typeof input.deletedLineCount === "number") {
-    return Math.max(0, input.deletedLineCount)
+function resolveDeletedLineCount(input: RecordGenInput, detectedLineCount: number): number {
+  if (typeof input.deletedLineCount === "number" && Number.isFinite(input.deletedLineCount)) {
+    return Math.max(0, Math.floor(input.deletedLineCount))
   }
-  if (typeof input.oldString !== "string") return 0
-
-  const occurrences = getDeletionOccurrenceCount(input)
-  if (occurrences === 0) return 0
-
-  const oldNonBlank = countNonBlankLines(input.oldString)
-  const newNonBlank = typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
-  return Math.max(0, oldNonBlank - newNonBlank) * occurrences
+  return Math.max(0, Math.floor(detectedLineCount))
 }
 
 function normalizeUsedSkills(skills: unknown): string[] {
@@ -848,7 +864,19 @@ function retryDelayMs(
   delays: readonly number[] = COMMIT_JOB_RETRY_DELAYS_MS
 ): number {
   const fallback = delays[Math.min(attemptsBeforeCurrentAttempt, delays.length - 1)]
-  return Math.max(fallback, retryAfterMs ?? 0)
+  const safeRetryAfterMs =
+    typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs)
+      ? Math.min(OUTBOX_RETRY_WINDOW_MS, Math.max(0, Math.ceil(retryAfterMs)))
+      : 0
+  return Math.max(fallback, safeRetryAfterMs)
+}
+
+function nextOutboxAttemptAt(row: EventOutboxRow, delayMs: number, now = Date.now()): number {
+  const retryDeadline = row.created_at + OUTBOX_RETRY_WINDOW_MS
+  const safeDelayMs = Number.isFinite(delayMs)
+    ? Math.min(OUTBOX_RETRY_WINDOW_MS, Math.max(0, Math.ceil(delayMs)))
+    : 0
+  return Math.min(retryDeadline, now + safeDelayMs)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -995,6 +1023,18 @@ export function setAdoptionContext(threadId: string, ctx: AdoptionContext): void
   // Merge so a later setUsedSkills call doesn't wipe modelId set earlier.
   const prior = threadContexts.get(threadId)
   threadContexts.set(threadId, { ...(prior ?? {}), ...ctx })
+}
+
+/** Apply a late asynchronous enrichment only while the originating trace still owns the thread. */
+export function patchAdoptionContextForTrace(
+  threadId: string,
+  expectedTraceId: string,
+  ctx: AdoptionContext
+): boolean {
+  const prior = threadContexts.get(threadId)
+  if (!prior || prior.traceId !== expectedTraceId) return false
+  threadContexts.set(threadId, { ...prior, ...ctx })
+  return true
 }
 
 export function clearAdoptionContext(threadId: string, expectedTraceId?: string): void {
@@ -1165,11 +1205,26 @@ export function recordGen(input: RecordGenInput): void {
   console.log(
     `[AdoptionTracker] recordGen: tool=${input.tool} file=${input.filePath} threadId=${input.threadId}`
   )
-  queueMicrotask(() => {
-    doRecordGen(input).catch((e) => {
-      console.warn("[AdoptionTracker] recordGen unexpected error:", e)
+  const task = new Promise<void>((resolveTask) => {
+    queueMicrotask(() => {
+      void doRecordGen(input)
+        .catch((e) => {
+          console.warn("[AdoptionTracker] recordGen unexpected error:", e)
+        })
+        .finally(resolveTask)
     })
   })
+  inFlightRecordGenTasks.add(task)
+  void task.then(() => {
+    inFlightRecordGenTasks.delete(task)
+  })
+}
+
+/** @internal Standalone regression seam; production recordGen remains fire-and-forget. */
+export async function waitForAdoptionRecordGenIdleForTest(): Promise<void> {
+  while (inFlightRecordGenTasks.size > 0) {
+    await Promise.all([...inFlightRecordGenTasks])
+  }
 }
 
 function buildCodeGenerationProperties(args: {
@@ -1198,6 +1253,10 @@ function buildCodeGenerationProperties(args: {
     skillSource,
     testMatchRule
   } = args
+  // Bucketing for the 研发效能 panel: 新增 (绿地) vs 存量迭代 (棕地). Derived here
+  // from counts this function already has, and mirrored onto the commit-time
+  // `code_adopt` event so ES can slice adoption rates without a two-step join.
+  const { newRatio, changeKind } = attributeChangeKind(lineCount, deletedLineCount)
   return {
     schemaVersion: 1,
     eventId,
@@ -1208,6 +1267,10 @@ function buildCodeGenerationProperties(args: {
     language: extname(absPath).slice(1).toLowerCase() || null,
     lineCount,
     deletedLineCount,
+    // Explicitly mapped as `double` in ES. Do not reuse the legacy `newRatio`
+    // field: its first 0/1 value can make dynamic mapping lock it to `long`.
+    netNewRatio: newRatio,
+    changeKind,
     usedSkills,
     ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: ctx.modelId ?? null,
@@ -1270,7 +1333,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // isInsideGitWorkTree). Non-git files never reach a commit and are where
     // external platforms own reporting via their own hook — skipping them here
     // avoids double-counting and removes events that could never close the loop.
-    if (!isInsideGitWorkTree(absPath)) {
+    if (!(await isInsideGitWorkTree(absPath))) {
       console.log(`[AdoptionTracker] recordGen skip — not in a git work tree: ${input.filePath}`)
       return
     }
@@ -1294,12 +1357,14 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     const createdAt = Date.now()
 
     if (Math.max(rawLineCount, rawOldLineCount) > MAX_LINES_FOR_MEASURE) {
+      const lineChanges = countNetLineChanges(input)
       emitSkippedLargeAtGen({
         eventId,
         input,
         absPath,
         relPath,
-        lineCount: countNetGeneratedLines(input),
+        lineCount: lineChanges.generatedLineCount,
+        deletedLineCount: resolveDeletedLineCount(input, lineChanges.deletedLineCount),
         createdAt,
         ctx,
         testMatchRule
@@ -1321,6 +1386,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         absPath,
         relPath,
         lineCount: baseline.generatedLineHashes.length,
+        deletedLineCount: resolveDeletedLineCount(input, baseline.supersededLineHashes.length),
         createdAt,
         ctx,
         testMatchRule
@@ -1335,20 +1401,18 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       return
     }
     // `hashes` is the net-new baseline. For edit_file this removes unchanged
-    // oldString context from newString, while `oldLineHashes` keeps only the
-    // old-only lines that should supersede earlier agent generations.
+    // oldString context from generatedContent, while `oldLineHashes` keeps only
+    // the old-only lines that should supersede earlier agent generations.
     const reportedLineCount = hashes.length
 
     // ── JSONL record ────────────────────────────────────
-    // Derive net-deletion count here (in the microtask), NOT at the tool
-    // call site — this keeps edit_file's hot path free of any O(N) scan for
-    // files that are about to be filtered out anyway (non-code, oversize,
-    // empty-after-normalization — all handled above).
-    // Only the local `oldString` / `newString` fragments are scanned — no
-    // full-file reads — so the cost is proportional to the edit size, not
-    // the file size. Boundary-line merging (e.g. oldString ending mid-line)
-    // can introduce small +/- 1 errors; acceptable for an auxiliary metric.
-    const deletedLineCount = deriveDeletedLineCount(input)
+    // The old-only baseline counts both outright deletions and replaced lines.
+    // Reusing it here keeps classification consistent with adoption supersession
+    // and avoids another scan of the edit fragment.
+    const deletedLineCount = resolveDeletedLineCount(input, oldLineHashes.length)
+    // 新增/存量 bucket for the 研发效能 panel. Computed once here so the sqlite row
+    // and the cloud `code_gen` event can never disagree.
+    const changeAttribution = attributeChangeKind(reportedLineCount, deletedLineCount)
     const usedSkills = normalizeUsedSkills(ctx.usedSkills)
     const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
     const generationProperties = buildCodeGenerationProperties({
@@ -1422,6 +1486,10 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         harness_node_status: ctx.harnessNodeStatus ?? null,
         harness_adapter_name: ctx.harnessAdapterName ?? null,
         harness_adapter_version: ctx.harnessAdapterVersion ?? null,
+        // Persisted so the commit-time `code_adopt` event can carry the bucket
+        // without re-deriving it from a diff that has since moved on.
+        new_ratio: changeAttribution.newRatio,
+        change_kind: changeAttribution.changeKind,
         ...observabilityColumns
       },
       toOutboxEvent(generationEvent, createdAt)
@@ -1457,13 +1525,24 @@ function emitSkippedLargeAtGen(args: {
   absPath: string
   relPath: string
   lineCount: number
+  deletedLineCount: number
   createdAt: number
   /** Attribution snapshot taken before any await — see doRecordGen. */
   ctx: AdoptionContext
   testMatchRule: TestCodeMatchRule | null
 }): void {
-  const { eventId, input, absPath, relPath, lineCount, createdAt, ctx, testMatchRule } = args
-  const deletedLineCount = deriveDeletedLineCount(input)
+  const {
+    eventId,
+    input,
+    absPath,
+    relPath,
+    lineCount,
+    deletedLineCount,
+    createdAt,
+    ctx,
+    testMatchRule
+  } = args
+  const changeAttribution = attributeChangeKind(lineCount, deletedLineCount)
   const usedSkills = normalizeUsedSkills(ctx.usedSkills)
   const observabilityProps = buildObservabilityEventProperties(ctx, input.threadId)
   const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
@@ -1491,9 +1570,9 @@ function emitSkippedLargeAtGen(args: {
 
   const generationEvent = buildEvent("code_gen", "code_adoption", generationProperties)
 
-  // Terminal L2/L3 equivalent — no hashing possible, so persist skipped_large
-  // immediately. The complete envelope (including its top-level eventId) is
-  // immutable in the outbox and reused for every retry.
+  // Terminal L2/L3 equivalent — no persisted per-line baseline, so persist
+  // skipped_large immediately. The complete envelope (including its top-level
+  // eventId) is immutable in the outbox and reused for every retry.
   const adoptEvent = buildEvent("code_adopt", "code_adoption", {
     schemaVersion: 1,
     eventId: `a_${randomUUID()}`,
@@ -1522,6 +1601,8 @@ function emitSkippedLargeAtGen(args: {
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    netNewRatio: changeAttribution.newRatio,
+    changeKind: changeAttribution.changeKind,
     ...observabilityProps
   })
   if (
@@ -1891,6 +1972,11 @@ async function buildMeasurementsForFile(
         harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
         harnessAdapterVersion: pending.harness_adapter_version ?? null,
+        // Carried over from gen time. The adopted/effective line counts live on
+        // this event, so the bucket has to travel with them — otherwise slicing
+        // adoption by 新增/存量 would need a join back to code_gen.
+        netNewRatio: normalizeNewRatio(pending.new_ratio),
+        changeKind: normalizeChangeKind(pending.change_kind),
         ...observabilityProps
       })
       const details = buildLocalAdoptLineDetailsRow({
@@ -2864,7 +2950,75 @@ function scheduleBatchedCodeGenOutboxDrain(): void {
   if (typeof codeGenOutboxDrainTimer.unref === "function") codeGenOutboxDrainTimer.unref()
 }
 
-async function drainAdoptionEventOutbox(): Promise<void> {
+const OUTBOX_REPORT_CANCELLED = { kind: "outbox-report-cancelled" } as const
+type OutboxReportCancelled = typeof OUTBOX_REPORT_CANCELLED
+const OUTBOX_REPORT_TIMED_OUT = { kind: "outbox-report-timed-out" } as const
+type OutboxReportTimedOut = typeof OUTBOX_REPORT_TIMED_OUT
+type OutboxReportOutcome = EventReportResult | OutboxReportCancelled | OutboxReportTimedOut
+
+function isOutboxReportCancelled(result: OutboxReportOutcome): result is OutboxReportCancelled {
+  return result === OUTBOX_REPORT_CANCELLED
+}
+
+function isOutboxReportTimedOut(result: OutboxReportOutcome): result is OutboxReportTimedOut {
+  return result === OUTBOX_REPORT_TIMED_OUT
+}
+
+function isOutboxLifecycleCurrent(generation: number, signal: AbortSignal): boolean {
+  return initialized && generation === outboxLifecycleGeneration && !signal.aborted
+}
+
+function unrefAdoptionTimer(timer: ReturnType<typeof setTimeout>): void {
+  if (typeof timer === "object" && timer && "unref" in timer) timer.unref()
+}
+
+async function reportOutboxEventWithDeadline(
+  reporter: IEventReporter,
+  event: CoworkEvent,
+  signal: AbortSignal,
+  onAttempt: () => void
+): Promise<EventReportResult | OutboxReportCancelled | OutboxReportTimedOut> {
+  if (signal.aborted) return OUTBOX_REPORT_CANCELLED
+
+  // Start through a microtask so flushAdoptionEventOutbox can publish its
+  // single-flight placeholder before arbitrary custom reporter code runs.
+  const reportPromise = Promise.resolve().then(
+    async (): Promise<EventReportResult | OutboxReportCancelled> => {
+      if (signal.aborted) return OUTBOX_REPORT_CANCELLED
+      onAttempt()
+      return await reporter.report(event)
+    }
+  )
+  // Promise.race does not observe a rejection that happens after timeout or
+  // lifecycle cancellation. Keep a terminal handler attached for that case.
+  void reportPromise.catch(() => undefined)
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  let removeAbortListener: (() => void) | undefined
+  const timeoutPromise = new Promise<OutboxReportTimedOut>((resolvePromise) => {
+    timeoutId = setTimeout(() => {
+      resolvePromise(OUTBOX_REPORT_TIMED_OUT)
+    }, OUTBOX_REPORT_DEADLINE_MS)
+    unrefAdoptionTimer(timeoutId)
+  })
+  const cancellationPromise = new Promise<OutboxReportCancelled>((resolvePromise) => {
+    const cancel = () => resolvePromise(OUTBOX_REPORT_CANCELLED)
+    signal.addEventListener("abort", cancel, { once: true })
+    removeAbortListener = () => signal.removeEventListener("abort", cancel)
+    // Abort may have happened between the initial check and listener registration.
+    if (signal.aborted) cancel()
+  })
+
+  try {
+    return await Promise.race([reportPromise, timeoutPromise, cancellationPromise])
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+    removeAbortListener?.()
+  }
+}
+
+async function drainAdoptionEventOutbox(generation: number, signal: AbortSignal): Promise<void> {
+  if (!isOutboxLifecycleCurrent(generation, signal)) return
   // A code_gen envelope and its measurement baseline share the in-memory
   // transaction. Never expose either to the reporter until the current sql.js
   // image is safely exported; failures stay queued for the next poll.
@@ -2872,14 +3026,17 @@ async function drainAdoptionEventOutbox(): Promise<void> {
     console.warn("[AdoptionTracker] outbox drain deferred — adoption index flush failed")
     return
   }
+  if (!isOutboxLifecycleCurrent(generation, signal)) return
   resetInterruptedOutboxEvents(Date.now() - OUTBOX_SENDING_STALE_MS)
   const rows = listDueOutboxEvents(Date.now(), OUTBOX_BATCH_SIZE)
   for (const row of rows) {
+    if (!isOutboxLifecycleCurrent(generation, signal)) return
     if (Date.now() - row.created_at >= OUTBOX_RETRY_WINDOW_MS) {
       markOutboxFailed(row.event_id, "retry window expired after 24 hours", Date.now(), true)
       continue
     }
     if (!markOutboxSending(row.event_id)) continue
+    let reporterInvoked = false
     try {
       const event = JSON.parse(row.payload_json) as CoworkEvent
       if (
@@ -2890,47 +3047,81 @@ async function drainAdoptionEventOutbox(): Promise<void> {
       ) {
         throw new Error("outbox payload identity does not match its immutable key")
       }
-      const result = await getEventReporter().report(event)
-      if (result.ok) {
+      const reporter = getEventReporter()
+      const result = await reportOutboxEventWithDeadline(reporter, event, signal, () => {
+        reporterInvoked = true
+      })
+      if (isOutboxReportCancelled(result)) return
+      if (!isOutboxLifecycleCurrent(generation, signal)) return
+      const reportTimedOut = isOutboxReportTimedOut(result)
+      const reportResult: EventReportResult = reportTimedOut
+        ? {
+            ok: false,
+            retryable: true,
+            error: `event reporter exceeded ${OUTBOX_REPORT_DEADLINE_MS}ms deadline`,
+            attempted: true
+          }
+        : result
+      if (reportResult.ok) {
         markOutboxDelivered(row.event_id)
       } else {
-        const delay = retryDelayMs(row.attempts, result.retryAfterMs, OUTBOX_RETRY_DELAYS_MS)
-        const attemptLimitReached = row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
-        const error = attemptLimitReached
-          ? `${result.error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})`
-          : result.error
-        markOutboxFailed(
-          row.event_id,
-          error,
-          Date.now() + delay,
-          !result.retryable || attemptLimitReached
-        )
+        const attempted = reportResult.attempted !== false
+        const delay = retryDelayMs(row.attempts, reportResult.retryAfterMs, OUTBOX_RETRY_DELAYS_MS)
+        const nextAttemptAt = nextOutboxAttemptAt(row, delay)
+        if (!reportResult.retryable) {
+          markOutboxFailed(row.event_id, reportResult.error, nextAttemptAt, true, {
+            consumeAttempt: attempted,
+            requireSending: true
+          })
+        } else if (!attempted) {
+          markOutboxDeferred(row.event_id, reportResult.error, nextAttemptAt)
+        } else {
+          const attemptLimitReached = row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
+          const error = attemptLimitReached
+            ? `${reportResult.error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})`
+            : reportResult.error
+          markOutboxFailed(row.event_id, error, nextAttemptAt, attemptLimitReached, {
+            consumeAttempt: true,
+            requireSending: true
+          })
+        }
       }
+      // A hung custom reporter is usually shared by the whole batch. Avoid
+      // multiplying the 12-second safety deadline across up to 25 rows.
+      if (reportTimedOut) break
     } catch (e) {
+      if (!isOutboxLifecycleCurrent(generation, signal)) return
       const error = e instanceof Error ? e.message : String(e)
       // A malformed immutable payload cannot become valid through retry. An
       // unexpected reporter exception can, so JSON/identity failures are
       // dead-lettered immediately; transient failures stop at the attempt cap.
-      const malformed = error.includes("outbox payload identity") || e instanceof SyntaxError
-      const attemptLimitReached = row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
+      const malformed =
+        !reporterInvoked && (error.includes("outbox payload identity") || e instanceof SyntaxError)
+      const attemptLimitReached = reporterInvoked && row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
+      const delay = retryDelayMs(row.attempts, undefined, OUTBOX_RETRY_DELAYS_MS)
       markOutboxFailed(
         row.event_id,
         attemptLimitReached ? `${error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})` : error,
-        Date.now() + retryDelayMs(row.attempts, undefined, OUTBOX_RETRY_DELAYS_MS),
-        malformed || attemptLimitReached
+        nextOutboxAttemptAt(row, delay),
+        malformed || attemptLimitReached,
+        { consumeAttempt: reporterInvoked, requireSending: true }
       )
     }
   }
-  flushAdoptionIndex()
+  if (isOutboxLifecycleCurrent(generation, signal)) flushAdoptionIndex()
 }
 
 /** Flush all currently due adoption events. Exported for deterministic tests. */
 export function flushAdoptionEventOutbox(): Promise<void> {
   if (!initialized) return Promise.resolve()
   if (outboxDrainPromise) return outboxDrainPromise
-  const task = drainAdoptionEventOutbox().catch((e) => {
-    console.warn("[AdoptionTracker] outbox drain failed:", e)
-  })
+  const generation = outboxLifecycleGeneration
+  const signal = outboxLifecycleController.signal
+  const task = Promise.resolve()
+    .then(() => drainAdoptionEventOutbox(generation, signal))
+    .catch((e) => {
+      console.warn("[AdoptionTracker] outbox drain failed:", e)
+    })
   outboxDrainPromise = task
   void task.then(() => {
     if (outboxDrainPromise === task) outboxDrainPromise = null
@@ -2996,18 +3187,28 @@ async function sweep(): Promise<void> {
 // Lifecycle
 // ─────────────────────────────────────────────────────────
 
-export async function initializeAdoptionTracker(): Promise<void> {
-  if (initialized) return
+export async function initializeAdoptionTracker(): Promise<boolean> {
+  if (initialized) return true
   try {
     getAdoptionDir() // ensure dir exists
-    await initializeAdoptionIndex()
+    if (!(await initializeAdoptionIndex())) {
+      console.warn("[AdoptionTracker] index unavailable — tracker disabled")
+      return false
+    }
     // Apply the new payload limits immediately to databases created by older
     // builds instead of waiting for the first periodic sweep.
     trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
     trimAdoptLineDetails(LOCAL_ADOPT_DETAILS_MAX_ROWS, LOCAL_ADOPT_DETAILS_MAX_BYTES)
     resetInterruptedCommitJobs()
     resetInterruptedOutboxEvents(Date.now())
-    flushAdoptionIndex()
+    if (!flushAdoptionIndex()) {
+      console.warn("[AdoptionTracker] initial durable index flush failed — tracker disabled")
+      closeAdoptionIndex()
+      return false
+    }
+    outboxLifecycleGeneration += 1
+    outboxLifecycleController.abort()
+    outboxLifecycleController = new AbortController()
     initialized = true
 
     sweepTimer = setInterval(() => {
@@ -3031,14 +3232,22 @@ export async function initializeAdoptionTracker(): Promise<void> {
     })
 
     console.log("[AdoptionTracker] initialized")
+    return true
   } catch (e) {
     console.warn("[AdoptionTracker] init failed — tracker disabled:", e)
-    initialized = false
+    shutdownAdoptionTracker()
+    return false
   }
 }
 
 export function shutdownAdoptionTracker(): void {
   initialized = false
+  outboxLifecycleGeneration += 1
+  outboxLifecycleController.abort()
+  // A custom reporter may never settle. The lifecycle abort above releases
+  // the old drain, while clearing this pointer lets a reinitialized tracker
+  // start independently instead of inheriting the obsolete single-flight.
+  outboxDrainPromise = null
   if (sweepTimer) {
     clearInterval(sweepTimer)
     sweepTimer = null

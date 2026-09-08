@@ -279,9 +279,138 @@ async function run(): Promise<void> {
       console.log("PASS workflow background teardown waits for process-tree termination")
     }
 
+    // A normally completed Windows background shell must close its kernel Job
+    // and reap daemonized descendants, even when they retain redirected handles.
+    if (process.platform === "win32") {
+      for (const daemonStdio of ["ignore", "inherit"] as const) {
+        const marker = join(workspace, `daemonized-background-child-${daemonStdio}.txt`)
+        const pidFile = join(workspace, `daemonized-background-child-${daemonStdio}.pid`)
+        const daemonScript = `const fs=require('fs');setInterval(()=>fs.appendFileSync(${JSON.stringify(marker)},'x'),20)`
+        const launcher = nodeCommand(
+          `const fs=require('fs');const {spawn}=require('child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(daemonScript)}],{detached:true,stdio:${JSON.stringify(daemonStdio)}});fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));child.unref()`
+        )
+        const daemonSandbox = new LocalSandbox({
+          rootDir: workspace,
+          runId: `windows-daemonized-background-child-${daemonStdio}`,
+          windowsSandbox: "none",
+          timeout: 30_000,
+          maxOutputBytes: 100_000
+        })
+        let daemonPid = 0
+        try {
+          const started = await daemonSandbox.executeBackground(launcher)
+          assert.match(started, /Background task started/, `unexpected start result: ${started}`)
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            try {
+              daemonPid = Number((await readFile(pidFile, "utf8")).trim())
+              if (daemonPid > 0 && (await readFile(marker, "utf8")).length > 0) break
+            } catch {
+              // The launcher and child are still starting.
+            }
+            await delay(20)
+          }
+          assert.ok(daemonPid > 0, `daemonized ${daemonStdio} child pid must be published`)
+
+          for (let attempt = 0; attempt < 150; attempt += 1) {
+            if (!LocalSandbox.hasActiveExecutionTasks()) break
+            await delay(20)
+          }
+          assert.equal(
+            LocalSandbox.hasActiveExecutionTasks(),
+            false,
+            `normal ${daemonStdio} background completion must settle descendant cleanup`
+          )
+          let afterCleanup = ""
+          try {
+            afterCleanup = await readFile(marker, "utf8")
+          } catch {
+            // The Job Object may terminate the daemon before its first write.
+          }
+          await delay(400)
+          let afterDelay = ""
+          try {
+            afterDelay = await readFile(marker, "utf8")
+          } catch {
+            // No marker is the strongest successful outcome.
+          }
+          assert.equal(
+            afterDelay,
+            afterCleanup,
+            `a daemonized ${daemonStdio} Windows child must not survive its background task`
+          )
+          assert.throws(
+            () => process.kill(daemonPid, 0),
+            `daemonized ${daemonStdio} child pid must no longer be alive`
+          )
+          console.log(
+            `PASS Windows normal completion reaps daemonized ${daemonStdio} descendants`
+          )
+        } finally {
+          if (daemonPid > 0) {
+            try {
+              process.kill(daemonPid, "SIGKILL")
+              await delay(100)
+            } catch {
+              // Expected after successful cleanup.
+            }
+          }
+        }
+      }
+    }
+
+    // Application shutdown must also find a detached execute after its foreground
+    // agent turn has ended, then wait for the real process tree before returning.
+    {
+      const marker = join(workspace, "background-only-app-drain.txt")
+      const shutdownSandbox = new LocalSandbox({
+        rootDir: workspace,
+        runId: "background-only-app-shutdown",
+        windowsSandbox: "none",
+        timeout: 30_000,
+        maxOutputBytes: 100_000
+      })
+      const writer = nodeCommand(
+        `const fs=require('fs');process.on('SIGTERM',()=>{});setInterval(()=>fs.appendFileSync(${JSON.stringify(marker)},'x'),20)`
+      )
+      const started = await shutdownSandbox.executeBackground(writer)
+      assert.match(started, /Background task started/, `unexpected start result: ${started}`)
+      let initial = ""
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        try {
+          initial = await readFile(marker, "utf8")
+        } catch {
+          initial = ""
+        }
+        if (initial.length > 0) break
+        await delay(20)
+      }
+      assert.ok(initial.length > 0, "background-only writer must start before app shutdown")
+      assert.equal(
+        LocalSandbox.hasActiveExecutionTasks(),
+        true,
+        "background-only execute must keep the application task guard active"
+      )
+
+      LocalSandbox.beginApplicationShutdown()
+      const [tasksSettled, treesSettled] = await Promise.all([
+        LocalSandbox.cancelAllBackgroundTasksAndWait(5_000),
+        LocalSandbox.killAllAndWait(5_000)
+      ])
+      assert.equal(tasksSettled, true, "application shutdown must settle detached task ownership")
+      assert.equal(treesSettled, true, "application shutdown must settle physical process trees")
+      const afterShutdown = await readFile(marker, "utf8")
+      await delay(400)
+      assert.equal(
+        await readFile(marker, "utf8"),
+        afterShutdown,
+        "bounded app shutdown must leave no background-only writer alive"
+      )
+      console.log("PASS app shutdown drains background-only execute process trees")
+    }
+
     console.log("PASS local-sandbox background cap suite")
   } finally {
-    await rm(workspace, { recursive: true, force: true })
+    await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 }
 

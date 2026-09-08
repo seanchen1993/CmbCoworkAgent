@@ -145,10 +145,10 @@ function toFeatureSnapshot(feature: HarnessFeatureSummary): Record<string, unkno
   }
 }
 
-function buildProjectDoc(
+async function buildProjectDoc(
   project: HarnessProjectListItem,
   detail: HarnessProjectDetailViewModel | undefined
-): { docId: string; doc: Record<string, unknown> } {
+): Promise<{ docId: string; doc: Record<string, unknown> }> {
   const features = (detail?.runs ?? []).map(toFeatureSnapshot)
   const docId = projectDocId(project.projectId)
 
@@ -156,7 +156,7 @@ function buildProjectDoc(
   // carries id/name but not version, so resolve it separately). Best-effort.
   let adapterVersion: string | undefined
   try {
-    adapterVersion = getHarnessProjectAdapterSnapshot(project.projectId)?.version || undefined
+    adapterVersion = (await getHarnessProjectAdapterSnapshot(project.projectId))?.version || undefined
   } catch {
     adapterVersion = undefined
   }
@@ -321,7 +321,7 @@ async function reportOneProject(
   detail: HarnessProjectDetailViewModel | undefined,
   relayBaseUrl: string
 ): Promise<"reported" | "skipped"> {
-  const { docId, doc } = buildProjectDoc(project, detail)
+  const { docId, doc } = await buildProjectDoc(project, detail)
   const props = (doc as { properties?: { featureCount?: unknown } }).properties
   const newFeatureCount = typeof props?.featureCount === "number" ? props.featureCount : 0
 
@@ -363,7 +363,7 @@ async function pollOnce(): Promise<void> {
 
   let allProjects: HarnessProjectListItem[] = []
   try {
-    allProjects = listHarnessProjects()
+    allProjects = await listHarnessProjects()
   } catch (e) {
     console.warn("[HarnessStatusReporter] Failed to list projects:", e)
     return
@@ -424,7 +424,7 @@ export async function reportProjectSnapshotNow(projectId: string): Promise<void>
 
   let project: HarnessProjectListItem | undefined
   try {
-    project = listHarnessProjects().find((p) => p.projectId === id)
+    project = (await listHarnessProjects()).find((p) => p.projectId === id)
   } catch (e) {
     console.warn("[HarnessStatusReporter] reportNow: failed to list projects:", e)
     return

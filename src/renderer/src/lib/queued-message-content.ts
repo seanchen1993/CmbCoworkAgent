@@ -3,6 +3,10 @@ import type { QueuedMessage } from "@/types"
 // don't resolve the "@/" path alias for runtime values. skill-marker has no
 // imports of its own, so the chain stays alias-free.
 import { parseSkillUseBlock } from "../features/slash-commands/skill-marker"
+import {
+  formatBuiltinBrowserTranscriptMessage,
+  formatBuiltinBrowserTransportMessage
+} from "../features/builtin-browser/chat-integration"
 
 // ── Queued-message content builders ───────────────────────────────────────────
 // A QueuedMessage stores its parts (text / attachment XML / display prefix / skill
@@ -12,7 +16,8 @@ import { parseSkillUseBlock } from "../features/slash-commands/skill-marker"
 // and sending it directly.
 
 export function getQueuedModelContent(message: QueuedMessage): string {
-  const primary = `${message.text}${message.attachmentModelBlocks ?? ""}`.trim()
+  const text = formatBuiltinBrowserTransportMessage(message.text, message.builtinBrowser === true)
+  const primary = `${text}${message.attachmentModelBlocks ?? ""}`.trim()
   return [primary, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
 }
 
@@ -20,7 +25,8 @@ export function getQueuedDisplayContent(message: QueuedMessage): string {
   const primary = message.attachmentDisplayPrefix
     ? [message.attachmentDisplayPrefix, message.text.trim()].filter(Boolean).join("\n\n")
     : message.text.trim()
-  return [primary, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
+  const visible = formatBuiltinBrowserTranscriptMessage(primary, message.builtinBrowser === true)
+  return [visible, message.skillBlock].filter((part) => part && part.trim()).join("\n\n")
 }
 
 export function getQueuedPreview(message: QueuedMessage): string {

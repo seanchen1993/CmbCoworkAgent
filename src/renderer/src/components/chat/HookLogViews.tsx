@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import type { HookLogBucket, HookLogEntry } from "@/lib/thread-context"
+import { formatHookClockTime, HOOK_TIME_ZONE_LABEL } from "../../../../shared/hook-time"
 
 /** Status descriptor for an executed log row. */
 function entryStatus(log: HookLogEntry): { ok: boolean; text: string } {
@@ -131,8 +132,11 @@ function HookLogEntryRow({ log }: { log: HookLogEntry }): React.JSX.Element {
         {typeof log.durationMs === "number" && log.kind === "executed" && (
           <span className="text-[10px] text-muted-foreground/70 shrink-0">{log.durationMs}ms</span>
         )}
-        <span className="text-[10px] text-muted-foreground/60 shrink-0">
-          {log.timestamp.toLocaleTimeString()}
+        <span
+          className="text-[10px] text-muted-foreground/60 shrink-0"
+          title={HOOK_TIME_ZONE_LABEL}
+        >
+          {formatHookClockTime(log.timestamp) ?? "时间无效"}
         </span>
         <span className="text-muted-foreground/60 shrink-0">{expanded ? "▲" : "▼"}</span>
       </button>
@@ -257,7 +261,7 @@ export function HookLogModal({
           <DialogTitle className="flex items-center gap-2 text-base">
             <span>Hook 执行记录</span>
             <span className="text-xs font-normal text-muted-foreground">
-              · 此轮 {entries.length} 次
+              · 此轮 {entries.length} 次 · {HOOK_TIME_ZONE_LABEL}
             </span>
           </DialogTitle>
           {bucket?.turnPreview && (
