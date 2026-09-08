@@ -78,7 +78,8 @@ async function ensureRequirementToPrdSkill(): Promise<void> {
     "skill",
     false,
     marketSkill.featured === "精品",
-    marketSkill
+    marketSkill,
+    { allowNestedNameDuplicates: true }
   )
   if (!installResult.success) {
     throw new Error(installResult.error || `安装技能「${REQUIRED_PRD_SKILL_NAME}」失败`)

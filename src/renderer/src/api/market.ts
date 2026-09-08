@@ -475,7 +475,8 @@ export const marketApi = {
     type: MarketItemType,
     downloadToLocal = false,
     _isFeatured = false,
-    item?: MarketItem
+    item?: MarketItem,
+    options?: { allowNestedNameDuplicates?: boolean }
   ): Promise<DownloadResponse> {
     void _isFeatured
     console.log(`Downloading ${type} item: ${name}`)
@@ -495,7 +496,11 @@ export const marketApi = {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.skills?.upload === "function") {
-          const uploadResult = await window.api.skills.upload(arrayBuffer, filename)
+          const uploadResult = await window.api.skills.upload(
+            arrayBuffer,
+            filename,
+            options ? { allowNestedNameDuplicates: options.allowNestedNameDuplicates } : undefined
+          )
           return {
             success: uploadResult.success,
             error: uploadResult.error
