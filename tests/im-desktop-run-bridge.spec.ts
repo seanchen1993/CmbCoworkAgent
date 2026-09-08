@@ -73,12 +73,70 @@ function stubRun(
 function run(
   input: PreparedRemoteStandardTurnInput,
   captured: Captured,
-  behaviour: (context: AgentRunExecutionContext) => Promise<void>
+  behaviour: (context: AgentRunExecutionContext) => Promise<void>,
+  announced?: Array<{ threadId: string; id: string; content: string; beforeRun: boolean }>
 ): Promise<string> {
+  let started = false
   return executeRemoteStandardTurnOnDesktopRunBody(input, {
     getDelivery: () => delivery,
-    startRun: stubRun(captured, behaviour)
+    startRun: (request, runDelivery, context) => {
+      started = true
+      return stubRun(captured, behaviour)(request, runDelivery, context)
+    },
+    // Always stubbed: the real one reaches BrowserWindow, which no spec has.
+    announceUserMessage: (threadId, message) => {
+      announced?.push({ threadId, ...message, beforeRun: !started })
+    }
   })
+}
+
+async function testTheUserMessageIsShownBeforeTheAssistantAnswers(): Promise<void> {
+  // A desktop viewer of this Thread has no local echo of a message typed into
+  // IM. The run body persists it but never pushes it, and the renderer only
+  // reloads history when the turn ends — so without this the viewer watches
+  // the assistant answer a question that is not on screen yet.
+  const announced: Array<{ threadId: string; id: string; content: string; beforeRun: boolean }> = []
+  const captured: Captured = { request: null, context: null }
+  const input = baseInput()
+  await run(
+    input,
+    captured,
+    async (context) => {
+      await context.onFinalAssistant?.({ messageId: "m1", finalText: "构建通过。" })
+      context.onRunTerminated?.({ outcome: "success", code: "normal" })
+    },
+    announced
+  )
+
+  assert.deepEqual(announced, [
+    {
+      threadId: input.threadId,
+      id: input.userMessageId,
+      content: input.rawMessage,
+      beforeRun: true
+    }
+  ])
+  // The id must be the one the run body persists under and puts on the
+  // HumanMessage, or the values snapshot carrying it later adds a second
+  // bubble instead of merging onto this row.
+  assert.equal(announced[0].id, captured.request?.userMessageId)
+}
+
+async function testAnInternalNotificationTurnAnnouncesNothing(): Promise<void> {
+  // Its prompt is plumbing, not something a person said — the same reason the
+  // run body skips persisting a visible transcript message for it.
+  const announced: Array<{ threadId: string; id: string; content: string; beforeRun: boolean }> = []
+  const captured: Captured = { request: null, context: null }
+  await run(
+    baseInput({ internalNotificationTurn: true }),
+    captured,
+    async (context) => {
+      context.onRunTerminated?.({ outcome: "success", code: "normal" })
+    },
+    announced
+  )
+  assert.deepEqual(announced, [])
+  assert.equal(captured.request?.coordinatorInternalNotification, true)
 }
 
 function testInboxOnlyRuntimeOptionsTravelOnThePolicy(): void {
@@ -382,7 +440,9 @@ async function main(): Promise<void> {
     testAFailedRunRethrowsTheOriginalError,
     testAFailureWithoutAnErrorObjectStillFails,
     testASuccessfulTerminalDoesNotMaskTheReply,
-    testTheAuthorizationCheckReachesTheRunBody
+    testTheAuthorizationCheckReachesTheRunBody,
+    testTheUserMessageIsShownBeforeTheAssistantAnswers,
+    testAnInternalNotificationTurnAnnouncesNothing
   ]) {
     await test()
     console.log(`PASS ${test.name}`)

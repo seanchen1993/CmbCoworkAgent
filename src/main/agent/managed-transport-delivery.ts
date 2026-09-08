@@ -1,9 +1,6 @@
 import type { BrowserWindow } from "electron"
 import type { AgentRunDelivery } from "./agent-run-service"
-import {
-  broadcastToRenderers,
-  mirrorStandardTurnStreamToRenderer
-} from "./renderer-stream-mirror"
+import { broadcastToRenderers, mirrorStandardTurnStreamToRenderer } from "./renderer-stream-mirror"
 import { StreamConverter, type SchedulerRendererEvent } from "./stream-converter"
 
 /**
@@ -51,10 +48,7 @@ interface DesktopStreamEnvelope {
  * sanitizeStreamDataForRenderer, so they are converted as a turn scope — the
  * renderer merges those instead of replacing durable history with one turn.
  */
-function toRendererEvents(
-  converter: StreamConverter,
-  payload: unknown
-): SchedulerRendererEvent[] {
+function toRendererEvents(converter: StreamConverter, payload: unknown): SchedulerRendererEvent[] {
   if (!payload || typeof payload !== "object") return []
   const envelope = payload as DesktopStreamEnvelope
 
@@ -99,6 +93,40 @@ function explainUnsupportedWindowMembers<T extends object>(shim: T): T {
           `src/main/agent/managed-transport-delivery.ts if a managed run can genuinely serve it.`
       )
     }
+  })
+}
+
+/**
+ * Paints a managed transport's user message in an open Thread right away.
+ *
+ * The desktop renderer draws the user's bubble the moment they press Enter. A
+ * run started from IM has no such local echo, and nothing else fills the gap:
+ * the run body persists the message to the transcript, but `threads:changed`
+ * only reloads the sidebar list, and `started` only raises a loading flag
+ * (thread-context.tsx). The bubble therefore first appears when the turn ends
+ * and the renderer reloads history — so a viewer watches the assistant answer
+ * a question that is not on screen yet.
+ *
+ * The id must be the one the run body persists under, which is also the id it
+ * puts on the HumanMessage. The values snapshot that carries that message
+ * later then merges onto this row instead of adding a second bubble, and the
+ * post-run history reload matches it too.
+ *
+ * A turn that dies before the run body persists anything leaves this row
+ * showing until the terminal history reload drops it. That window is narrow —
+ * persistence happens before the authorization fence and before prompt
+ * hooks — and showing what the user sent beside the failure beats showing the
+ * failure alone.
+ */
+export function announceManagedTurnUserMessage(
+  threadId: string,
+  message: { id: string; content: string },
+  mirror: typeof mirrorStandardTurnStreamToRenderer = mirrorStandardTurnStreamToRenderer
+): void {
+  if (!message.content.trim()) return
+  mirror(threadId, {
+    type: "turn-messages",
+    messages: [{ id: message.id, role: "user", content: message.content }]
   })
 }
 

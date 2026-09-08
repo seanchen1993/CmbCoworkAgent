@@ -3,7 +3,10 @@ import {
   type AgentRunDelivery,
   type AgentRunExecutionContext
 } from "../../agent/agent-run-service"
-import { createManagedTransportAgentRunDelivery } from "../../agent/managed-transport-delivery"
+import {
+  announceManagedTurnUserMessage,
+  createManagedTransportAgentRunDelivery
+} from "../../agent/managed-transport-delivery"
 import type { RemoteTurnPolicy } from "../../agent/standard-thread-turn"
 import { createManagedRunResultCollector } from "./managed-run-result"
 import type { PreparedRemoteStandardTurnInput } from "./remote-runner"
@@ -62,11 +65,13 @@ export const IM_UNTRUSTED_INPUT_SYSTEM_PROMPT =
 export interface DesktopRunBridgeDependencies {
   startRun: typeof startAgentRun
   getDelivery: () => AgentRunDelivery
+  announceUserMessage: typeof announceManagedTurnUserMessage
 }
 
 const defaultDependencies: DesktopRunBridgeDependencies = {
   startRun: startAgentRun,
-  getDelivery: createManagedTransportAgentRunDelivery
+  getDelivery: createManagedTransportAgentRunDelivery,
+  announceUserMessage: announceManagedTurnUserMessage
 }
 
 /**
@@ -77,12 +82,27 @@ export async function executeRemoteStandardTurnOnDesktopRunBody(
   input: PreparedRemoteStandardTurnInput,
   dependencies: Partial<DesktopRunBridgeDependencies> = {}
 ): Promise<string> {
-  const { startRun, getDelivery } = { ...defaultDependencies, ...dependencies }
+  const { startRun, getDelivery, announceUserMessage } = {
+    ...defaultDependencies,
+    ...dependencies
+  }
 
   // The user's transcript message is NOT written here. The run body owns it:
   // persistVisibleUserTranscriptMessage (agent.ts) writes it under this same
   // userMessageId, and already skips the marker prompts of internal
   // notification turns. Writing it here too would upsert the same row twice.
+  //
+  // Showing it is a separate problem, and it is this path's to solve: the run
+  // body persists but never pushes, and a desktop viewer of this Thread has no
+  // local echo of a message typed into IM. An internal notification turn is
+  // excluded for the same reason the run body excludes it — its prompt is
+  // plumbing, not something a person said.
+  if (!input.internalNotificationTurn) {
+    announceUserMessage(input.threadId, {
+      id: input.userMessageId,
+      content: input.rawMessage
+    })
+  }
 
   const collected = createManagedRunResultCollector({ cancelledMessage: "IM run was cancelled" })
 

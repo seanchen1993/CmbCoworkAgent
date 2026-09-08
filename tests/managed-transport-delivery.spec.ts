@@ -16,6 +16,7 @@
 
 import assert from "node:assert/strict"
 import {
+  announceManagedTurnUserMessage,
   createManagedTransportAgentRunDelivery,
   MANAGED_TRANSPORT_WINDOW_ID
 } from "../src/main/agent/managed-transport-delivery"
@@ -174,9 +175,12 @@ async function testGoalRunSurvivesWithNoDesktopWindow(): Promise<void> {
   // "主窗口尚未就绪" whenever mainWindow was null, so an IM Goal turn failed
   // outright if nobody had the desktop open.
   let started = false
+  const announced: Array<{ threadId: string; id: string }> = []
   const bridge = new ImGoalRunBridge({
     getDelivery: () => createManagedTransportAgentRunDelivery(recorder().deps),
     hasActiveGoal: () => false,
+    // The real one reaches BrowserWindow, which no spec has.
+    announceUserMessage: (threadId, message) => announced.push({ threadId, id: message.id }),
     startRun: async (request, delivery, context) => {
       started = true
       assert.equal(delivery.isAvailable(), true)
@@ -201,6 +205,48 @@ async function testGoalRunSurvivesWithNoDesktopWindow(): Promise<void> {
 
   assert.equal(started, true, "the goal run must reach startAgentRun without a window")
   assert.equal(reply, "done")
+  assert.deepEqual(
+    announced,
+    [{ threadId: "t1", id: "u1" }],
+    "a Goal turn from IM must also show what the user asked before answering it"
+  )
+}
+
+function testAManagedTurnCanShowItsUserMessageImmediately(): void {
+  // Without this the bubble only appears when the turn ends and the renderer
+  // reloads history, so a desktop viewer sees the assistant answer a question
+  // that is not on screen. threads:changed does not help — it reloads the
+  // sidebar list, not an open Thread's messages.
+  const mirrored: Array<[string, unknown]> = []
+  announceManagedTurnUserMessage(
+    "t1",
+    { id: "im:42:user", content: "  重建索引要改应用代码吗  " },
+    (threadId, event) => mirrored.push([threadId, event])
+  )
+  assert.deepEqual(mirrored, [
+    [
+      "t1",
+      {
+        type: "turn-messages",
+        messages: [{ id: "im:42:user", role: "user", content: "  重建索引要改应用代码吗  " }]
+      }
+    ]
+  ])
+
+  // turn-messages, never full-messages: a projected turn snapshot must merge
+  // into durable history rather than replace it.
+  const [, event] = mirrored[0] as [string, { type: string }]
+  assert.equal(event.type, "turn-messages")
+}
+
+function testAnEmptyUserMessageIsNotAnnounced(): void {
+  // Mirrors persistVisibleUserTranscriptMessage, which treats blank content as
+  // nothing to record. An empty bubble is worse than no bubble.
+  const mirrored: unknown[] = []
+  announceManagedTurnUserMessage("t1", { id: "m1", content: "   \n  " }, (_thread, event) =>
+    mirrored.push(event)
+  )
+  assert.deepEqual(mirrored, [])
 }
 
 async function main(): Promise<void> {
@@ -212,7 +258,9 @@ async function main(): Promise<void> {
     testWindowShimRoutesThroughTheSameTranslation,
     testSyntheticIdCannotCollideWithARealWindow,
     testAnUnsupportedWindowMemberExplainsItself,
-    testProbingTheShimStaysSafe
+    testProbingTheShimStaysSafe,
+    testAManagedTurnCanShowItsUserMessageImmediately,
+    testAnEmptyUserMessageIsNotAnnounced
   ]) {
     test()
     console.log(`PASS ${test.name}`)

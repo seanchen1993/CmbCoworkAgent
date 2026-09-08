@@ -7,6 +7,7 @@ import {
   type AgentRunFinalAssistant,
   type AgentRunGoalNotice
 } from "../../agent/agent-run-service"
+import { announceManagedTurnUserMessage } from "../../agent/managed-transport-delivery"
 import { createManagedRunResultCollector } from "./managed-run-result"
 import { goalManager } from "../../agent/goals/runtime"
 import { parseGoalSlashCommand } from "../../agent/goals/slash"
@@ -45,6 +46,7 @@ interface ImGoalRunBridgeDependencies {
   startRun: typeof startAgentRun
   controlGoal: typeof controlAgentGoal
   hasActiveGoal: (threadId: string) => boolean
+  announceUserMessage: typeof announceManagedTurnUserMessage
 }
 
 function invocationMessage(prepared: PreparedSkillTurn): string {
@@ -68,7 +70,8 @@ export class ImGoalRunBridge {
       startRun: dependencies.startRun ?? startAgentRun,
       controlGoal: dependencies.controlGoal ?? controlAgentGoal,
       hasActiveGoal:
-        dependencies.hasActiveGoal ?? ((threadId) => goalManager.getActive(threadId) !== null)
+        dependencies.hasActiveGoal ?? ((threadId) => goalManager.getActive(threadId) !== null),
+      announceUserMessage: dependencies.announceUserMessage ?? announceManagedTurnUserMessage
     }
   }
 
@@ -135,6 +138,16 @@ export class ImGoalRunBridge {
     context: AgentRunExecutionContext
   }): Promise<string> {
     const delivery = this.requireDelivery()
+
+    // Same gap as the ordinary IM turn: a Goal turn started from IM has no
+    // local echo in a desktop viewer of this Thread, so its prompt would only
+    // surface after the run ends. See announceManagedTurnUserMessage.
+    if (!input.coordinatorInternalNotification) {
+      this.dependencies.announceUserMessage(input.threadId, {
+        id: input.userMessageId,
+        content: input.message
+      })
+    }
 
     // Shared with the ordinary IM turn so the two cannot drift on how a run's
     // outcome is read — a failed run resolves its completion promise like any

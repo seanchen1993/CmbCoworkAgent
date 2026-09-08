@@ -19,6 +19,8 @@ async function main(): Promise<void> {
   const bridge = new ImGoalRunBridge({
     getDelivery: () => delivery,
     hasActiveGoal: () => false,
+    // The real one reaches BrowserWindow, which no spec has.
+    announceUserMessage: () => undefined,
     controlGoal: async (request, _delivery, context) => {
       capturedContext = context
       const notice = {
