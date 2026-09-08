@@ -199,6 +199,115 @@ async function testDefaultOffDoesNotPublishOrResolve(): Promise<void> {
   }
 }
 
+function workflowRequest(input: {
+  id: string
+  cwd: string
+  script?: string
+  tokenBudget?: number
+}): ApprovalRequest {
+  return {
+    id: input.id,
+    tool_call: {
+      id: `tool-${input.id}`,
+      name: "workflow",
+      args: {
+        name: "workflow-smoke-test",
+        description: "最小可用的 workflow 冒烟测试：3 个并行 agent + 汇总",
+        phases: ["Fan-out", "Synthesize"],
+        ...(input.script === undefined ? {} : { scriptPreview: input.script }),
+        argsPreview: "(none)",
+        ...(input.tokenBudget === undefined ? {} : { tokenBudget: input.tokenBudget })
+      },
+      metadata: null,
+      status: "pending",
+      thread_values: null,
+      title: null
+    },
+    allowed_decisions: ["approve", "reject"],
+    safety_level: "needs_approval",
+    cwd: input.cwd,
+    // Mirrors the real request: the desktop offers a session-wide allow too.
+    allowed_approval_types: ["approve", "approve_session", "reject"]
+  } as ApprovalRequest
+}
+
+async function testAWorkflowLaunchIsApprovableWithItsWholeScript(): Promise<void> {
+  const context = await createContext()
+  try {
+    const script = [
+      "export const meta = {",
+      "  name: 'workflow-smoke-test',",
+      "  phases: [{ title: 'Fan-out' }, { title: 'Synthesize' }]",
+      "}",
+      "await Promise.all([agent('a'), agent('b'), agent('c')])"
+    ].join("\n")
+    const workflow = workflowRequest({ id: "request-workflow", cwd: context.root, script })
+    const decisions = context.register(workflow)
+    await waitFor(() => context.deliveryText(workflow.id).includes("A1B2C3"), "workflow approval")
+    const text = context.deliveryText(workflow.id)
+
+    assert(text.includes("运行工作流：workflow-smoke-test"))
+    assert(text.includes("阶段（2）：Fan-out → Synthesize"))
+    assert(text.includes("Token 预算上限：未设置（无上限）"))
+    assert(text.includes("将在后台启动多个子代理"))
+    // The WHOLE script, not a description of it. This is a security gate: a
+    // hidden tail is where the dangerous part would live.
+    assert(text.includes(script), `the full script must reach the approver:\n${text}`)
+    assert(!text.includes(IM_REPLY_TRUNCATION_NOTICE))
+    assert(text.includes("/批准 A1B2C3"))
+
+    const result = await context.service.resolveCode({
+      code: "A1B2C3",
+      decision: "approve",
+      ...ROUTE
+    })
+    assert(result.includes("一次性批准"))
+    // approve, never approve_session — a remote yes covers this launch only,
+    // even though the desktop card offers 本会话允许 for the same request.
+    assert.deepEqual(decisions, [{ type: "approve", tool_call_id: workflow.tool_call.id }])
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testAWorkflowNobodyCanReadStaysOnTheDesktop(): Promise<void> {
+  const context = await createContext()
+  try {
+    // No script to audit: approving would be authorizing sub-agents to write
+    // files and run commands sight unseen.
+    const scriptless = workflowRequest({ id: "request-workflow-blind", cwd: context.root })
+    context.register(scriptless)
+    await waitFor(
+      () => context.deliveryText(scriptless.id).length > 0,
+      "scriptless workflow notice"
+    )
+    const blindText = context.deliveryText(scriptless.id)
+    assert(blindText.includes("需要在桌面确认"))
+    assert(!/[A-F0-9]{6}/u.test(blindText), "a workflow with no script must carry no code")
+
+    // Too long to send: the reply would be truncated, so the fallback fires for
+    // the same reason — a script that cannot be shown in full cannot be
+    // audited in full. Real scripts run to 512 KiB, well past the 8 × 2800
+    // character reply ceiling, so this is the common case, not a corner.
+    const huge = workflowRequest({
+      id: "request-workflow-huge",
+      cwd: context.root,
+      script: `// ${"x".repeat(30_000)}`
+    })
+    context.register(huge)
+    await waitFor(() => context.deliveryText(huge.id).length > 0, "huge workflow notice")
+    const hugeText = context.deliveryText(huge.id)
+    assert(hugeText.includes("无法在招乎中完整、安全地展示"))
+    assert(!/[A-F0-9]{6}/u.test(hugeText), "a truncated workflow must carry no code")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 function testNoRemoteCodePromiseSurvivesAsCopyOnly(): void {
   // The bug this pins: the deadlines were removed from both services, the
   // wait notice and the user-input prompt were reworded, and the approval
@@ -658,6 +767,8 @@ async function main(): Promise<void> {
   await testDefaultOffDoesNotPublishOrResolve()
   testNoRemoteCodePromiseSurvivesAsCopyOnly()
   await testWorkspaceApprovalIsSingleUseAndAudited()
+  await testAWorkflowLaunchIsApprovableWithItsWholeScript()
+  await testAWorkflowNobodyCanReadStaysOnTheDesktop()
   await testAllowedDecisionsFailClosedAndCodesOutliveTheClock()
   await testAuditFlushFailureNeverResumesRuntime()
   await testDesktopDecisionWinsAuditFlushRace()

@@ -166,6 +166,48 @@ function toolCallCommand(request: ApprovalRequest): string | null {
   return typeof nested.command === "string" && nested.command.trim() ? nested.command.trim() : null
 }
 
+/**
+ * A workflow launch, as the approval card describes it.
+ *
+ * Returns null unless the script is present. Launching a dynamic workflow puts
+ * sub-agents in the workspace that can write files and run commands, so the
+ * desktop card deliberately shows the WHOLE script — a hidden tail can carry
+ * the dangerous part (see the comment on the request in workflow/tool.ts).
+ * Approving from Zhaohu must clear the same bar: no script, no remote
+ * approval. The token budget travels for the same reason — an unbounded run is
+ * a materially different thing to say yes to.
+ */
+function workflowApprovalArgs(request: ApprovalRequest): {
+  name: string
+  description: string
+  phases: string[]
+  args: string
+  script: string
+  tokenBudget: string
+} | null {
+  const args = request.tool_call?.args
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null
+  const record = args as Record<string, unknown>
+  const name = typeof record.name === "string" ? record.name.trim() : ""
+  const script = typeof record.scriptPreview === "string" ? record.scriptPreview.trim() : ""
+  if (!name || !script) return null
+  return {
+    name,
+    description: typeof record.description === "string" ? record.description.trim() : "",
+    phases: Array.isArray(record.phases)
+      ? record.phases.filter(
+          (phase): phase is string => typeof phase === "string" && !!phase.trim()
+        )
+      : [],
+    args: typeof record.argsPreview === "string" ? record.argsPreview.trim() : "",
+    script,
+    tokenBudget:
+      typeof record.tokenBudget === "number" && Number.isFinite(record.tokenBudget)
+        ? `${record.tokenBudget.toLocaleString()} tokens`
+        : "未设置（无上限）"
+  }
+}
+
 function presentationFor(request: ApprovalRequest, workspacePath: string): ApprovalPresentation {
   const operation = approvalOperation(request)
   const allowedDecisions = (["approve", "reject"] as const).filter((decision) =>
@@ -224,6 +266,47 @@ function presentationFor(request: ApprovalRequest, workspacePath: string): Appro
       operation,
       summary: `执行命令：${command}`,
       detail: `执行命令：\n${command}`,
+      allowedDecisions
+    }
+  }
+  if (operation === "workflow") {
+    const workflow = workflowApprovalArgs(request)
+    if (!workflow || !oneShotDecisionAllowed) {
+      return {
+        approvable: false,
+        operation,
+        summary: "运行工作流（仅桌面确认）",
+        detail: "该请求没有可展示的工作流脚本，或不接受一次性批准，请回到桌面确认。",
+        allowedDecisions: []
+      }
+    }
+    // The whole script goes out. If that makes the reply too long to send, the
+    // caller's truncation check drops the code and falls back to the
+    // desktop-only notice — the right outcome, since a script that cannot be
+    // shown in full cannot be audited in full.
+    //
+    // "本会话允许" stays a desktop decision: allowedDecisions only ever carries
+    // approve/reject, so a remote yes authorizes this one launch and nothing
+    // after it.
+    return {
+      approvable: true,
+      operation,
+      summary: `运行工作流：${workflow.name}`,
+      detail: [
+        `运行工作流：${workflow.name}`,
+        workflow.description,
+        workflow.phases.length > 0
+          ? `阶段（${workflow.phases.length}）：${workflow.phases.join(" → ")}`
+          : "",
+        workflow.args && workflow.args !== "(none)" ? `参数：${workflow.args}` : "",
+        `Token 预算上限：${workflow.tokenBudget}`,
+        "将在后台启动多个子代理，可读写文件、执行命令。请通读脚本后再决定。",
+        "",
+        "完整脚本：",
+        workflow.script
+      ]
+        .filter(Boolean)
+        .join("\n"),
       allowedDecisions
     }
   }
