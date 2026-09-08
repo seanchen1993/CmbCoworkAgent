@@ -1035,7 +1035,20 @@ function App(): React.JSX.Element {
 
   return (
     <ThreadProvider>
-      <div className="flex flex-col h-screen overflow-hidden bg-background">
+      {/*
+        isolate：把 app 内部的 z-index 关进自己的层叠上下文。
+
+        Radix 的 Dialog/Popover/Tooltip 都 portal 到 document.body，是 #root 的兄弟。
+        而这层壳原本 position:static、z-index:auto，不构成层叠上下文，于是壳内任何
+        positioned + z-index 的元素都是直接在「根层叠上下文」里和 portal 比大小——
+        侧边栏的 relative z-[60]（下面 dashboard / claudecode 两处）就这样盖住了
+        DialogContent 的 z-50。窗口够宽时弹窗（max-w-1080 居中）左边缘落在侧边栏
+        右侧看不出来，窗口一窄就压上去了。
+
+        isolate 之后壳内 z-index 只在壳内部比较，永远越不过 portal。全局 toaster 与
+        宠物状态桥是这层壳的兄弟节点（见下方 return 末尾），不在隔离范围内。
+      */}
+      <div className="isolate flex flex-col h-screen overflow-hidden bg-background">
         {/* Titlebar - logo centered, right panel toggle on right */}
         <div className="flex h-9 w-full shrink-0 app-drag-region items-center border-b border-border">
           {/* Left: sidebar toggle */}
