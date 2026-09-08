@@ -4676,10 +4676,40 @@ function notifyStreamDisconnectRetry(
     type: "custom",
     data: {
       type: "model_retry",
+      retryKind: "transport",
       attempt,
       maxRetries: STREAM_DISCONNECT_MAX_RETRIES,
       reason,
       delayMs: streamDisconnectRetryDelay(attempt)
+    }
+  })
+}
+
+/**
+ * 门禁续跑复用传输层重试的横幅。
+ *
+ * 对用户来说「模型被重试」和「模型被要求重答」是同一件事——这一轮多花了一次
+ * 模型调用、屏幕上会多出一段回答——不该一个是 2.2 秒的 toast、一个是常驻横幅。
+ * 两者的差别只在文案，由 retryKind 区分。
+ *
+ * 没有 delayMs：门禁不等待，判定完立刻跳回模型。横幅的存活区间因此是「门禁做出
+ * 判定」到「重答的第一个 token 到达」，由 renderer 既有的清除路径负责收尾
+ * （真实 assistant token 到达 / isLoading 转 false / 出错），无需额外的 clear 事件。
+ */
+function notifyTurnCompletionRetry(
+  window: BrowserWindow,
+  channel: string,
+  input: { kind: "defect" | "todo"; detail: string; attempt: number; maxAttempts: number }
+): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "model_retry",
+      retryKind: "completion_gate",
+      attempt: input.attempt,
+      maxRetries: input.maxAttempts,
+      reason: formatTurnCompletionRecoveryNotice(input),
+      delayMs: 0
     }
   })
 }
@@ -6495,7 +6525,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           attempt: number
           maxAttempts: number
         }): void => {
-          sendHookNotice(formatTurnCompletionRecoveryNotice(input))
+          if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
+          notifyTurnCompletionRetry(window, channel, input)
         }
 
         let latestSerializedValuesMessagesForGoalFlush: unknown[] = []
@@ -10574,8 +10605,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             baseOptions: () => ({
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
-              onTurnCompletionRecovery: (input) =>
-                sendHookNotice(formatTurnCompletionRecoveryNotice(input)),
+              onTurnCompletionRecovery: (input) => {
+                if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
+                notifyTurnCompletionRetry(window, channel, input)
+              },
               workspacePath,
               coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
               coordinatorSelectedSkill: resumeCoordinatorSelectedSkill,
@@ -11716,8 +11749,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
-              onTurnCompletionRecovery: (input) =>
-                sendHookNotice(formatTurnCompletionRecoveryNotice(input)),
+              onTurnCompletionRecovery: (input) => {
+                if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
+                notifyTurnCompletionRetry(window, channel, input)
+              },
               workspacePath,
               coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
               coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
