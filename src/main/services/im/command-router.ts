@@ -20,6 +20,7 @@ import {
 import {
   ImRemoteAccessError,
   imRemoteAccessService,
+  type ImAuthorizedRemoteTarget,
   type ImRemoteAccessService
 } from "./remote-access-service"
 import { imRemoteApprovalService, type ImRemoteApprovalService } from "./remote-approval-service"
@@ -50,6 +51,7 @@ export type ImCommandName =
   | "managed_stop"
   | "managed_continue"
   | "managed_new_thread"
+  | "switch_target"
   | "retired"
 
 export interface ParsedImCommand {
@@ -74,7 +76,8 @@ const COMMANDS = new Map<string, ImCommandName>([
   ["门禁拒绝", "human_gate_reject"],
   ["托管停止", "managed_stop"],
   ["托管继续当前会话", "managed_continue"],
-  ["托管开启新会话", "managed_new_thread"]
+  ["托管开启新会话", "managed_new_thread"],
+  ["切换", "switch_target"]
 ])
 
 export function parseImCommand(message: string): ParsedImCommand | null {
@@ -140,6 +143,11 @@ function positiveIndex(argument: string): number | null {
   return Number.isSafeInteger(value) && value > 0 ? value : null
 }
 
+/** Compares names the way a person retypes them: case and spacing forgiven. */
+function normalizeTargetName(value: string): string {
+  return value.replace(/\s+/gu, " ").trim().toLowerCase()
+}
+
 function targetLabel(target: ImTargetSnapshot): string {
   if (target.kind === "inbox") return "收件箱"
   if (target.kind === "thread") return target.title
@@ -203,6 +211,8 @@ export class ImCommandRouter {
           return await this.resolveManagedBizRetry(input, "continue")
         case "managed_new_thread":
           return await this.resolveManagedBizRetry(input, "new_thread")
+        case "switch_target":
+          return await this.switchToNamedTarget(input, input.command.argument)
         case "retired":
           return "/项目 和 /功能 已合并为 /会话，请发送 /会话 查看已在桌面授权的目标。"
       }
@@ -245,6 +255,7 @@ export class ImCommandRouter {
       "可用指令：",
       "/会话 — 查看已在桌面授权的会话与特性",
       `/绑定 <编号> [${BIND_SESSION_MODE_CHOICES}] — 切换到已有会话，或在特性下创建会话（模式仅用于新建，省略则跟随特性配置）`,
+      "/切换 <会话名称> — 按名称切回某个会话，名称就是回复开头【】里的那个",
       "/收件箱 — 切回默认聊天",
       "/技能 — 查看当前会话可用技能",
       "/<技能名> <任务> 或 /技能 <技能名或短码> <任务> — 指定技能执行",
@@ -379,6 +390,91 @@ export class ImCommandRouter {
     }
     return [
       `已绑定并切换到【${targetLabel(target)}】。`,
+      switchedDuringRun
+        ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将发送到当前会话。`
+        : "后续普通消息将发送到这个会话。"
+    ].join("\n")
+  }
+
+  /**
+   * Switches back to a session by the name the reply prefix already shows.
+   *
+   * Deliberately not by number: /会话 numbering lives in a 5-minute selection
+   * context that every /会话 rebuilds, so a number printed in a background
+   * reply is stale or meaningless by the time anyone reads it. The name in
+   * 【会话：X】 is on screen, does not expire, and cannot drift onto a
+   * different target.
+   *
+   * Only existing sessions are matched. A Feature entry would CREATE a session
+   * rather than return to one, and "switch" must never mean "start something
+   * new" — /绑定 stays the command that creates.
+   */
+  private async switchToNamedTarget(
+    input: Parameters<ImCommandRouter["handle"]>[0],
+    argument: string
+  ): Promise<string> {
+    const query = normalizeTargetName(argument)
+    if (!query) return "用法：/切换 <会话名称>。名称就是回复开头【】里的那个。"
+    const route = { principalId: input.principalId, conversationKey: input.conversationKey }
+    const targets = await this.dependencies.access.listAuthorizedTargets(route)
+    const sessions = targets.filter(
+      (target): target is Extract<ImAuthorizedRemoteTarget, { kind: "thread_grant" }> =>
+        target.kind === "thread_grant"
+    )
+    const exact = sessions.filter((target) => normalizeTargetName(target.label) === query)
+    const matches =
+      exact.length > 0
+        ? exact
+        : sessions.filter((target) => normalizeTargetName(target.label).includes(query))
+
+    if (matches.length === 0) {
+      const feature = targets.find(
+        (target) =>
+          target.kind === "feature_grant" && normalizeTargetName(target.label).includes(query)
+      )
+      return feature
+        ? `【${feature.label}】是特性，不是会话；在它下面新建会话请发送 /会话 后用 /绑定 <编号>。`
+        : `没有找到可切换的会话「${argument.trim()}」。它可能已在桌面关闭远程访问；请发送 /会话 查看当前可用目标。`
+    }
+
+    if (matches.length > 1) {
+      // Renumbering here is safe in a way it would not be inside a background
+      // reply: the person just asked for this list, so the numbers they are
+      // about to use are the ones they are looking at.
+      await this.dependencies.selections.create(
+        input.conversationKey,
+        "remote_target",
+        matches.map((target) => ({
+          id: target.grantId,
+          label: target.label,
+          targetKind: target.kind,
+          grantId: target.grantId,
+          grantVersion: target.grantVersion
+        }))
+      )
+      return [
+        `有 ${matches.length} 个会话叫这个名字：`,
+        ...matches.map((target, index) => `${index + 1}. ${target.label}`),
+        "发送 /绑定 <编号> 选择。"
+      ].join("\n")
+    }
+
+    const [selected] = matches
+    const previous = this.selectedTarget(input.conversationKey)
+    const target = await this.dependencies.access.bindThreadGrant({
+      route,
+      grantId: selected.grantId,
+      grantVersion: selected.grantVersion
+    })
+    const currentEventId = this.dependencies.getCurrentEventId(
+      input.conversationKey,
+      previous?.threadId
+    )
+    const switchedDuringRun = Boolean(
+      currentEventId && previous?.kind !== "inbox" && previous?.targetId !== target.targetId
+    )
+    return [
+      `已切换到【${targetLabel(target)}】。`,
       switchedDuringRun
         ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将发送到当前会话。`
         : "后续普通消息将发送到这个会话。"

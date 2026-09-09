@@ -515,6 +515,47 @@ async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promi
   }
 }
 
+function testTheLastReplyOfADetachedTurnShowsTheWayBack(): void {
+  // "（切换前任务）" said what happened but not what it costs: a reply typed
+  // under this message goes wherever the person is bound now, not to the
+  // session that produced it. The way back must be in the message, and it must
+  // be the name already printed there — /会话 numbering expires in five
+  // minutes, so a number would be stale by the time anyone read it.
+  const runner = readFileSync(
+    join(resolve(__dirname, ".."), "src/main/services/im/remote-runner.ts"),
+    "utf8"
+  )
+  const terminal = runner.slice(
+    runner.indexOf("private terminalPrefixForEvent("),
+    runner.indexOf("private targetPrefixForEvent(")
+  )
+  assert(terminal.length > 0, "the terminal prefix must still be composed here")
+  assert(terminal.includes("/切换 "), "the terminal prefix must name the way back")
+  assert(
+    !/\/绑定\s*<?\d/u.test(terminal),
+    "a number here would point at a selection context that has expired"
+  )
+
+  // Mid-turn notices keep the plain prefix: the turn is not over, and those
+  // messages are already long.
+  const waitNotice = runner.slice(
+    runner.indexOf("onWaitStart: async (interaction) => {"),
+    runner.indexOf("onWaitEnd: async (interaction) => {")
+  )
+  assert(
+    waitNotice.includes("prefix: this.targetPrefixForEvent(") &&
+      !waitNotice.includes("prefix: this.terminalPrefixForEvent("),
+    "a waiting notice must not carry the switch-back line"
+  )
+
+  // Every terminal reply does carry it; buildImEventReplies is only used for
+  // those, so none may fall back to the plain prefix.
+  assert(
+    !/buildImEventReplies\(\{[^}]*targetPrefixForEvent/su.test(runner),
+    "a terminal reply that kept the plain prefix would silently lose the way back"
+  )
+}
+
 function testEnteringAWaitArmsNoTimer(): void {
   // The behavioural test below can only prove that a wait survives the seconds
   // it is willing to sit there. It cannot prove the absence of a deadline —
@@ -670,6 +711,10 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   [
     "testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume",
     testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume
+  ],
+  [
+    "testTheLastReplyOfADetachedTurnShowsTheWayBack",
+    testTheLastReplyOfADetachedTurnShowsTheWayBack
   ],
   ["testEnteringAWaitArmsNoTimer", testEnteringAWaitArmsNoTimer],
   ["testNoDesktopWaitIsCancelledByAClock", testNoDesktopWaitIsCancelledByAClock],

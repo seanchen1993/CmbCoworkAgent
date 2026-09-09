@@ -71,7 +71,7 @@ import {
   type ImExecutionPermitResult,
   type ImGatewayClientPort
 } from "./gateway-client"
-import { imTargetReplyPrefix } from "./reply-context"
+import { imTargetReplyPrefix, SWITCHED_TARGET_MARK } from "./reply-context"
 import { buildImEventReplies, buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
 import {
   imRemoteInteractionRouteRegistry,
@@ -1080,7 +1080,7 @@ export class ImRemoteRunner {
       const replies = buildImEventReplies({
         event: executing,
         text: result,
-        prefix: this.targetPrefixForEvent(executing)
+        prefix: this.terminalPrefixForEvent(executing)
       })
       const completed = await this.dependencies.eventStore.completeEvent(
         executing.eventId,
@@ -1099,7 +1099,7 @@ export class ImRemoteRunner {
           replies: buildImEventReplies({
             event: latest,
             text: reply,
-            prefix: this.targetPrefixForEvent(latest)
+            prefix: this.terminalPrefixForEvent(latest)
           }),
           resultText: reply,
           reasonCode: permitRevokedReason,
@@ -1116,7 +1116,7 @@ export class ImRemoteRunner {
           replies: buildImEventReplies({
             event: latest,
             text: interactionRejected.message,
-            prefix: this.targetPrefixForEvent(latest)
+            prefix: this.terminalPrefixForEvent(latest)
           }),
           resultText: interactionRejected.message,
           reasonCode: interactionRejected.reasonCode,
@@ -1133,7 +1133,7 @@ export class ImRemoteRunner {
           replies: buildImEventReplies({
             event: latest,
             text: reply,
-            prefix: this.targetPrefixForEvent(latest)
+            prefix: this.terminalPrefixForEvent(latest)
           }),
           resultText: reply,
           reasonCode: "REMOTE_EVENT_CANCELLED",
@@ -1173,7 +1173,7 @@ export class ImRemoteRunner {
         replies: buildImEventReplies({
           event: latest,
           text: reply,
-          prefix: this.targetPrefixForEvent(latest)
+          prefix: this.terminalPrefixForEvent(latest)
         }),
         resultText: reply,
         reasonCode,
@@ -1240,7 +1240,7 @@ export class ImRemoteRunner {
       replies: buildImEventReplies({
         event,
         text: message,
-        prefix: this.targetPrefixForEvent(event)
+        prefix: this.terminalPrefixForEvent(event)
       }),
       resultText: message,
       reasonCode,
@@ -1321,6 +1321,35 @@ export class ImRemoteRunner {
 
   private isGeneratedRemoteThreadTitle(title: string | null): boolean {
     return Boolean(title?.startsWith("Thread ") || / · 远程会话 \d+$/u.test(title ?? ""))
+  }
+
+  /**
+   * Prefix for a turn's LAST reply, with the way back when it is not the
+   * session the person is currently bound to.
+   *
+   * "（切换前任务）" alone said what happened but not what it costs: a reply
+   * typed under this message goes to whatever is bound now, not to the session
+   * that produced it. The name is the one already printed in the prefix, and
+   * /切换 takes exactly that, so the instruction needs nothing the reader has
+   * to look up. Numbers are deliberately not offered — /会话 numbering expires
+   * in five minutes and is rebuilt by every /会话, so a number printed here
+   * would be stale or point somewhere else by the time it is read.
+   *
+   * Only the terminal reply carries it. Mid-turn notices (waiting for
+   * approval, asking a question) are already long, and the turn is not over.
+   */
+  private terminalPrefixForEvent(event: ImEventRecord): string | undefined {
+    const prefix = this.targetPrefixForEvent(event)
+    if (!prefix || !prefix.includes(SWITCHED_TARGET_MARK)) return prefix
+    const snapshot = event.targetSnapshot
+    if (!snapshot || snapshot.kind !== "thread") return prefix
+    // A deleted Thread cannot be switched back to; say nothing rather than
+    // point at it. A revoked grant still reaches /切换, which explains itself.
+    const thread = this.dependencies.getThread(snapshot.threadId)
+    if (!thread) return prefix
+    const name = (thread.title?.trim() || snapshot.title || "").trim()
+    if (!name) return prefix
+    return [prefix, `回复不会发到这个会话。要继续它，请发送 /切换 ${name}`].join("\n")
   }
 
   private targetPrefixForEvent(event: ImEventRecord): string | undefined {

@@ -10,8 +10,12 @@ function readableLabel(value: string | null | undefined, fallback: string): stri
     : `${points.slice(0, MAX_CONTEXT_LABEL_CHARACTERS - 1).join("")}…`
 }
 
+/** Marks a reply whose target is no longer the bound one. Exported so callers
+ * can react to it without re-deriving the comparison or matching on prose. */
+export const SWITCHED_TARGET_MARK = "（切换前任务）"
+
 function withSwitchNotice(prefix: string, switched: boolean): string {
-  return `${prefix}${switched ? "（切换前任务）" : ""}`
+  return `${prefix}${switched ? SWITCHED_TARGET_MARK : ""}`
 }
 
 export function imInboxReplyPrefix(switched = false): string {

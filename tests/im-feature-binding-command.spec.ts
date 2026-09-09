@@ -241,6 +241,78 @@ function selectionIndexContaining(list: string, marker: string): number {
   return Number(match[1])
 }
 
+async function testSwitchBackByTheNameTheReplyAlreadyShows(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+    await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex}`)!
+    })
+    const created = context.conversations.getActiveTarget("conversation-1")
+    assert.equal(created?.kind, "thread")
+    if (created?.kind !== "thread") throw new Error("thread target expected")
+
+    // Move away, the way a person does when a second task starts.
+    await router.handle({ ...commandInput, command: parseImCommand("/收件箱")! })
+    assert.equal(context.conversations.getActiveTarget("conversation-1")?.kind, "inbox")
+
+    // The name is the one the reply prefix prints; no number, nothing to look up.
+    const switched = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/切换 ${created.title}`)!
+    })
+    assert(switched.includes("已切换到"), switched)
+    assert.equal(
+      context.conversations.getActiveTarget("conversation-1")?.targetId,
+      created.targetId
+    )
+
+    // Case and spacing are forgiven, because people retype rather than copy.
+    await router.handle({ ...commandInput, command: parseImCommand("/收件箱")! })
+    const relaxed = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/切换   ${created.title.toUpperCase()}`)!
+    })
+    assert(relaxed.includes("已切换到"), relaxed)
+
+    const unknown = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/切换 不存在的会话")!
+    })
+    assert(unknown.includes("没有找到可切换的会话"), unknown)
+    assert(unknown.includes("/会话"), "a dead end must say where to look next")
+
+    // A Feature would CREATE a session; "switch" must never mean "start new".
+    const feature = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/切换 支付平台")!
+    })
+    assert(feature.includes("是特性，不是会话"), feature)
+    assert(feature.includes("/绑定"), feature)
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function testBindModeOnlyAppliesWhereASessionIsCreated(): Promise<void> {
   const context = await createContext()
   const router = new ImCommandRouter({
@@ -1015,6 +1087,7 @@ async function testExplicitRetryCreatesNewEventWithOriginalSnapshot(): Promise<v
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
+  ["testSwitchBackByTheNameTheReplyAlreadyShows", testSwitchBackByTheNameTheReplyAlreadyShows],
   ["testBindModeOnlyAppliesWhereASessionIsCreated", testBindModeOnlyAppliesWhereASessionIsCreated],
   [
     "testFeatureCreateGrantCreatesIndependentThreadGrants",
