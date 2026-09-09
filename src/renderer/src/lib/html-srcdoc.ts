@@ -1,4 +1,4 @@
-export interface InlineHtmlSiblingAssetsOptions {
+export interface StaticHtmlPreviewDocumentOptions {
   html: string
   htmlPath?: string
   readTextFile?: (resolvedPath: string) => Promise<string | null>
@@ -180,18 +180,6 @@ function resolveSiblingPath(htmlPath: string, dependencyPath: string): string | 
 }
 
 /**
- * 转义内联脚本中的 `</script>` 片段，防止浏览器提前闭合 script 标签。
- * 典型场景：
- * - JS 字符串里出现 `</script>`（如模板字符串、HTML 片段）会破坏 DOM 结构。
- *
- * @param content JS 源码文本
- * @returns 适合放入 `<script>` 标签文本节点的安全内容
- */
-function escapeInlineScriptContent(content: string): string {
-  return content.replace(/<\/script/gi, "<\\/script")
-}
-
-/**
  * 把 DOM 文档序列化回 HTML 字符串，并尽量保留标准文档形态。
  * 设计点：
  * - 优先保留 doctype，避免渲染进入 quirks mode。
@@ -208,41 +196,91 @@ function serializeDocument(doc: Document): string {
   return `${doctype}\n${htmlElement.outerHTML}`
 }
 
+function escapeInlineStyleContent(content: string): string {
+  // `style` is an HTML raw-text element. Escape a closing tag before serializing so CSS cannot
+  // become markup only when the final srcDoc is parsed for a second time.
+  return content.replace(/<\/style/gi, "\\3C /style")
+}
+
+const STATIC_HTML_PREVIEW_CSP = [
+  "default-src 'none'",
+  "script-src 'none'",
+  "style-src 'unsafe-inline'",
+  "img-src data: blob:",
+  "font-src data: blob:",
+  "media-src data: blob:",
+  "connect-src 'none'",
+  "frame-src 'none'",
+  "object-src 'none'",
+  "worker-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'"
+].join("; ")
+
+function hardenStaticHtmlDocument(doc: Document): void {
+  doc
+    .querySelectorAll(
+      "script, iframe, frame, fencedframe, object, embed, portal, webview, applet, base, link[href]"
+    )
+    .forEach((element) => element.remove())
+  for (const meta of Array.from(doc.querySelectorAll<HTMLMetaElement>("meta[http-equiv]"))) {
+    const directive = meta.getAttribute("http-equiv")?.trim().toLowerCase()
+    if (directive === "refresh" || directive === "content-security-policy") meta.remove()
+  }
+  for (const element of Array.from(doc.querySelectorAll<HTMLElement>("*"))) {
+    for (const attribute of Array.from(element.attributes)) {
+      if (/^on/i.test(attribute.name)) element.removeAttribute(attribute.name)
+    }
+  }
+  doc.querySelectorAll("a, area").forEach((element) => {
+    element.removeAttribute("href")
+    element.removeAttribute("xlink:href")
+    element.removeAttribute("ping")
+  })
+  doc
+    .querySelectorAll("form[action], button[formaction], input[formaction]")
+    .forEach((element) => {
+      element.removeAttribute("action")
+      element.removeAttribute("formaction")
+    })
+  doc.querySelectorAll("[autoplay]").forEach((element) => element.removeAttribute("autoplay"))
+
+  const policy = doc.createElement("meta")
+  policy.setAttribute("http-equiv", "Content-Security-Policy")
+  policy.setAttribute("content", STATIC_HTML_PREVIEW_CSP)
+  doc.head.prepend(policy)
+}
+
 /**
- * 将 HTML 中“同级外链 css/js 依赖”内联成 `style/script`，返回可直接渲染的 srcDoc。
+ * 为工作目录文件标签构建静态 HTML 预览文档。
  *
  * 目标：
- * - 在 Electron 预览中彻底绕开 `file://` 外链限制。
- * - 仍然保持 HTML 主体结构不变，尽可能只替换依赖标签本身。
+ * - 同级 CSS 通过受控文件读取内联，保留页面 UI 样式。
+ * - 不执行脚本，也不允许网络、导航、表单、嵌套页面或插件内容。
+ * - 永远返回已加固文档，调用方不得先把原始 HTML 放进 iframe。
  *
  * 行为约束：
- * - 仅处理同级相对路径依赖（由 `isSameLevelRelativePath` 定义）。
+ * - 仅处理同级相对 CSS（由 `isSameLevelRelativePath` 定义）。
  * - 读取失败时静默跳过该依赖，不中断整体预览。
- * - 通过缓存避免同一依赖重复读取，降低 IPC/磁盘开销。
+ * - 所有 script 和其他主动内容都会在序列化前移除。
  *
  * @param options.html 原始 HTML 内容
  * @param options.htmlPath 当前 HTML 文件路径（用于解析同级依赖）
  * @param options.readTextFile 由调用方注入的读文件能力（通常来自 preload API）
- * @returns 内联后的 HTML；若缺少必要上下文则返回原始 HTML
+ * @returns 可安全放入受限 iframe.srcDoc 的静态 HTML
  */
-export async function inlineHtmlSiblingAssets({
+export async function buildStaticHtmlPreviewDocument({
   html,
   htmlPath,
   readTextFile
-}: InlineHtmlSiblingAssetsOptions): Promise<string> {
-  if (!htmlPath || !readTextFile) return html
-
+}: StaticHtmlPreviewDocumentOptions): Promise<string> {
   const parser = new DOMParser()
   const doc = parser.parseFromString(html, "text/html")
-  // 仅处理外链 css/js，保持原 HTML 结构与执行顺序尽量不变。
+
+  // Only same-directory stylesheets may be loaded through the bounded workspace reader.
   const stylesheetLinks = Array.from(
     doc.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"][href]')
   )
-  const scriptTags = Array.from(doc.querySelectorAll<HTMLScriptElement>("script[src]"))
-
-  if (stylesheetLinks.length === 0 && scriptTags.length === 0) {
-    return html
-  }
 
   const readCache = new Map<string, Promise<string | null>>()
   /**
@@ -252,7 +290,7 @@ export async function inlineHtmlSiblingAssets({
    * - 读取异常统一转为 `null`，让上层按“该资源不可用”处理即可。
    */
   const readWithCache = (resolvedPath: string): Promise<string | null> => {
-    // 同一个依赖可能被多次引用，做一次缓存避免重复 IPC/磁盘读取。
+    if (!readTextFile) return Promise.resolve(null)
     const cached = readCache.get(resolvedPath)
     if (cached) return cached
     const request = readTextFile(resolvedPath).catch(() => null)
@@ -260,42 +298,36 @@ export async function inlineHtmlSiblingAssets({
     return request
   }
 
-  await Promise.all([
-    ...stylesheetLinks.map(async (link) => {
-      const href = link.getAttribute("href")
-      if (!href) return
+  if (htmlPath && readTextFile) {
+    await Promise.all(
+      stylesheetLinks.map(async (link) => {
+        const href = link.getAttribute("href")
+        if (!href) return
 
-      const resolvedPath = resolveSiblingPath(htmlPath, href)
-      if (!resolvedPath) return
+        const resolvedPath = resolveSiblingPath(htmlPath, href)
+        if (!resolvedPath) return
 
-      const cssContent = await readWithCache(resolvedPath)
-      if (cssContent == null) return
+        const cssContent = await readWithCache(resolvedPath)
+        if (cssContent == null) return
 
-      const styleTag = doc.createElement("style")
-      styleTag.setAttribute("data-inline-from", href)
-      styleTag.textContent = cssContent
-      link.replaceWith(styleTag)
-    }),
-    ...scriptTags.map(async (script) => {
-      const src = script.getAttribute("src")
-      if (!src) return
+        const styleTag = doc.createElement("style")
+        styleTag.setAttribute("data-inline-from", href)
+        styleTag.textContent = escapeInlineStyleContent(cssContent)
+        link.replaceWith(styleTag)
+      })
+    )
+  }
 
-      const resolvedPath = resolveSiblingPath(htmlPath, src)
-      if (!resolvedPath) return
-
-      const jsContent = await readWithCache(resolvedPath)
-      if (jsContent == null) return
-
-      const inlineScript = doc.createElement("script")
-      const type = script.getAttribute("type")
-      if (type) inlineScript.setAttribute("type", type)
-      if (script.hasAttribute("nomodule")) inlineScript.setAttribute("nomodule", "")
-      inlineScript.setAttribute("data-inline-from", src)
-      // 防止脚本内容中的 </script> 提前截断标签。
-      inlineScript.textContent = escapeInlineScriptContent(jsContent)
-      script.replaceWith(inlineScript)
-    })
-  ])
-
-  return serializeDocument(doc)
+  // Reparse until serialization is stable. This closes mutation-XSS gaps where markup only
+  // appears after a sanitized DOM is serialized and parsed again by iframe.srcDoc.
+  let currentDocument = doc
+  let previous = ""
+  for (let pass = 0; pass < 4; pass += 1) {
+    hardenStaticHtmlDocument(currentDocument)
+    const serialized = serializeDocument(currentDocument)
+    if (serialized === previous) return serialized
+    previous = serialized
+    currentDocument = parser.parseFromString(serialized, "text/html")
+  }
+  throw new Error("Static HTML preview did not reach a safe serialization fixed point")
 }

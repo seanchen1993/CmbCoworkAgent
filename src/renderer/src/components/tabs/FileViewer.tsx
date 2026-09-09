@@ -18,6 +18,7 @@ import { MediaViewer } from "./MediaViewer"
 import { PDFViewer } from "./PDFViewer"
 import { BinaryFileViewer } from "./BinaryFileViewer"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
+import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
 import {
   formatFilePreviewError,
   normalizeFilePreviewError,
@@ -29,7 +30,11 @@ import {
   WEB_SOURCE_PREVIEW_MAX_BYTES,
   WEB_SOURCE_PREVIEW_MAX_PAGES
 } from "@/lib/text-preview-pages"
-import { textPreviewKind, type FilePreviewMode } from "@/lib/file-preview-mode"
+import {
+  textPreviewKind,
+  type FilePreviewMode,
+  type HtmlPreviewPolicy
+} from "@/lib/file-preview-mode"
 
 interface FileViewerProps {
   filePath: string
@@ -43,10 +48,14 @@ interface FileViewerProps {
   resolveExternalPreviewGrant?: () => Promise<string>
   reloadToken?: number
   previewMode?: FilePreviewMode
+  /** Fail-closed: only the workspace file tab may opt into static HTML rendering. */
+  htmlPreviewPolicy?: HtmlPreviewPolicy
   /** Stable per surface so a persisted file tab cancels the prior task's preview. */
   requestLane?: string
 }
 
+const MAX_HTML_DEPENDENCY_REQUESTS = 8
+const MAX_HTML_DEPENDENCY_BYTES = 256 * 1024
 const MAX_MARKDOWN_IMAGE_REQUESTS = 32
 const MAX_MARKDOWN_IMAGE_SOURCE_BYTES = 32 * 1024 * 1024
 
@@ -77,6 +86,7 @@ export function FileViewer({
   resolveExternalPreviewGrant,
   reloadToken,
   previewMode,
+  htmlPreviewPolicy,
   requestLane
 }: FileViewerProps): React.JSX.Element | null {
   const generatedLane = useId().replace(/[^a-zA-Z\d_-]/g, "")
@@ -90,6 +100,11 @@ export function FileViewer({
   const ext = fileName.includes(".") ? (fileName.split(".").pop()?.toLowerCase() ?? "") : ""
   const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
   const htmlLike = ext === "html" || ext === "htm"
+  const allowHtmlRender =
+    htmlPreviewPolicy === "workspace-static" &&
+    !externalFullPath &&
+    workspacePathKind === "relative" &&
+    Boolean(threadId)
   const webSourceLike = shouldAssembleWebSourcePreview(fileName)
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
@@ -103,6 +118,8 @@ export function FileViewer({
   const generationRef = useRef(0)
   const requestTokenRef = useRef("")
   const dependencyBudgetRef = useRef({
+    htmlRequests: 0,
+    htmlBytes: 0,
     imageRequests: 0,
     imageBytes: 0
   })
@@ -200,6 +217,8 @@ export function FileViewer({
     const requestToken = createRequestToken()
     requestTokenRef.current = requestToken
     dependencyBudgetRef.current = {
+      htmlRequests: 0,
+      htmlBytes: 0,
       imageRequests: 0,
       imageBytes: 0
     }
@@ -283,9 +302,15 @@ export function FileViewer({
       const generation = generationRef.current
       const requestToken = requestTokenRef.current
       dependencyBudgetRef.current = {
+        htmlRequests: 0,
+        htmlBytes: 0,
         imageRequests: 0,
         imageBytes: 0
       }
+      void window.api.workspace.cancelFilePreview({
+        lanePrefix: `${lane}:html`,
+        requestToken
+      })
       void window.api.workspace.cancelFilePreview({
         lanePrefix: `${lane}:image`,
         requestToken
@@ -321,6 +346,39 @@ export function FileViewer({
     const nextIndex = pageIndex - 1
     void navigateToOffset(pageOffsets[nextIndex], nextIndex, pageOffsets)
   }, [navigateToOffset, pageIndex, pageOffsets])
+
+  const readHtmlDependencyFile = useCallback(
+    async (resolvedPath: string): Promise<string | null> => {
+      const generation = generationRef.current
+      const budget = dependencyBudgetRef.current
+      if (budget.htmlRequests >= MAX_HTML_DEPENDENCY_REQUESTS) return null
+      budget.htmlRequests += 1
+      const dependencyLane = `${lane}:html:${shortPathHash(resolvedPath)}`
+      const readPage = async (offset: number): Promise<WorkspaceFilePreviewTextResult | null> => {
+        const previewSource = await previewSourceForPath(resolvedPath)
+        if (generation !== generationRef.current) return null
+        const result = await window.api.workspace.readFilePreview({
+          source: previewSource,
+          offset,
+          lane: dependencyLane,
+          requestToken: requestTokenRef.current
+        })
+        return generation === generationRef.current && result.success ? result : null
+      }
+      const first = await readPage(0)
+      if (!first) return null
+      const result = await assembleBoundedTextPreview(first, readPage, {
+        maxBytes: MAX_HTML_DEPENDENCY_BYTES,
+        maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
+      })
+      if (result.truncated || budget.htmlBytes + result.contentBytes > MAX_HTML_DEPENDENCY_BYTES) {
+        return null
+      }
+      budget.htmlBytes += result.contentBytes
+      return result.content
+    },
+    [lane, previewSourceForPath]
+  )
 
   // Markdown images receive a short-lived protocol URL, never a base64 IPC payload.
   const readBinaryDependencyFile = useCallback(
@@ -442,6 +500,7 @@ export function FileViewer({
   const previewKind = textPreviewKind({
     markdownLike,
     htmlLike,
+    allowHtmlRender,
     previewMode,
     truncated: textPage?.truncated ?? false
   })
@@ -460,6 +519,18 @@ export function FileViewer({
           readBinaryFile={readBinaryDependencyFile}
         />
       </div>
+    )
+  } else if (previewKind === "html") {
+    body = (
+      <HtmlPreview
+        content={content}
+        path={displayPath}
+        fillHeight
+        showHeader={false}
+        showModeToggle={false}
+        viewMode="preview"
+        readDependencyFile={readHtmlDependencyFile}
+      />
     )
   } else {
     body = <CodeViewer filePath={displayPath} content={content} />

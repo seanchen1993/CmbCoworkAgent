@@ -150,7 +150,7 @@ import {
   getPathExtension,
   type ResourceMessage
 } from "@/lib/latest-completed-resource"
-import { filePreviewModeForPath } from "@/lib/file-preview-mode"
+import { resourcePreviewModeForPath } from "@/lib/file-preview-mode"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -3067,7 +3067,7 @@ function ResourcePreview({
   const extension = getPathExtension(filePath).toLowerCase()
   const supportsSourceView = extension === "md" || extension === "markdown" || extension === "mdx"
   const filePreviewMode =
-    filePreviewModeForPath(filePath) ?? (supportsSourceView ? previewMode : undefined)
+    resourcePreviewModeForPath(filePath) ?? (supportsSourceView ? previewMode : undefined)
   const previewFileType = useMemo(() => getFileType(fileName), [fileName])
 
   const resolved = useMemo(

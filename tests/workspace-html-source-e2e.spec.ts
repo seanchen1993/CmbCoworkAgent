@@ -1,5 +1,5 @@
 /**
- * Real Electron E2E for tool-file preview layout and workspace HTML source mode.
+ * Real Electron E2E for tool-file source preview and workspace-tab static HTML UI.
  *
  * Run:
  *   npm run test:workspace-html:e2e
@@ -34,15 +34,31 @@ const ELECTRON_LAUNCHER =
 const MAIN_ENTRY = join(PROJECT_ROOT, "out", "main", "index.js")
 const THREAD_TITLE = `Workspace HTML source E2E ${process.pid}-${Date.now()}`
 const LINKED_BRANCH = "workspace-html-e2e-linked-worktree"
-const LAYOUT_FILE_NAME = "layout-proof.txt"
+const LAYOUT_FILE_NAME = "source-proof.html"
 const LAYOUT_TOOL_CALL_ID = "workspace-preview-layout-read"
 const UNAUTHORIZED_FILE_NAME = "outside-secret.html"
 const UNAUTHORIZED_TOOL_CALL_ID = "workspace-preview-unauthorized-read"
+const STATIC_STYLE_FILE_NAME = "source-proof.css"
+const BLOCKED_PREVIEW_ORIGIN = "https://preview-security.invalid"
 const PREVIEW_START_SENTINEL = "PREVIEW_START_SENTINEL"
 const PREVIEW_END_SENTINEL = "PREVIEW_END_SENTINEL"
 const HTML_FIXTURES = [
-  { fileName: "source-proof.html", sentinel: "HTML_SOURCE_SENTINEL" },
-  { fileName: "legacy-proof.HTM", sentinel: "HTM_SOURCE_SENTINEL" }
+  {
+    fileName: "source-proof.html",
+    sentinel: "HTML_SOURCE_SENTINEL",
+    testId: "workspace-html-source-ui",
+    expectedDisplay: "flex",
+    expectedBackground: "rgb(17, 34, 51)",
+    expectedBorderRadius: "18px"
+  },
+  {
+    fileName: "legacy-proof.HTM",
+    sentinel: "HTM_SOURCE_SENTINEL",
+    testId: "workspace-html-legacy-ui",
+    expectedDisplay: "grid",
+    expectedBackground: "rgb(51, 34, 17)",
+    expectedBorderRadius: "12px"
+  }
 ] as const
 
 interface WindowWithApi {
@@ -375,7 +391,7 @@ async function selectWorkspaceThread(page: Page): Promise<void> {
   await page.waitForTimeout(750)
 }
 
-async function openWorkspaceFiles(page: Page): Promise<void> {
+async function openWorkspaceFiles(page: Page, blockedPreviewRequests: string[]): Promise<void> {
   await selectWorkspaceThread(page)
   const showRightPanel = page.getByRole("button", { name: "显示右侧面板" })
   if ((await showRightPanel.count()) > 0) await showRightPanel.first().click()
@@ -393,32 +409,52 @@ async function openWorkspaceFiles(page: Page): Promise<void> {
     await fileEntry.waitFor({ timeout: 30_000 })
     await fileEntry.click()
 
-    await page.waitForFunction(
-      (sentinel) =>
-        Array.from(document.querySelectorAll(".shiki-wrapper")).some((element) =>
-          element.textContent?.includes(sentinel)
-        ),
-      fixture.sentinel,
-      { timeout: 30_000 }
+    const iframe = page.locator("iframe.html-preview-light-canvas").last()
+    await iframe.waitFor({ state: "visible", timeout: 30_000 })
+    const iframeTitle = ((await iframe.getAttribute("title")) ?? "").replace(/\\/g, "/")
+    assert(
+      iframeTitle === fixture.fileName || iframeTitle.endsWith(`/${fixture.fileName}`),
+      `${fixture.fileName} 工作目录入口打开对应 HTML`
     )
+    assert((await iframe.getAttribute("sandbox")) === "", `${fixture.fileName} 使用零权限沙箱`)
 
-    const sourceViewer = page.locator(".shiki-wrapper").filter({ hasText: fixture.sentinel }).last()
-    const sourceText = (await sourceViewer.textContent()) ?? ""
-    assert(sourceText.includes("<!doctype html>"), `${fixture.fileName} 展示完整 HTML 源码`)
-    assert(sourceText.includes("<script>"), `${fixture.fileName} 的标签未被执行或吞掉`)
-
-    const matchingIframeCount = await page.locator("iframe").evaluateAll(
-      (frames, expectedFileName) =>
-        frames.filter((frame) => {
-          const normalizedTitle = (frame.getAttribute("title") ?? "").replace(/\\/g, "/")
-          return (
-            normalizedTitle === expectedFileName || normalizedTitle.endsWith(`/${expectedFileName}`)
-          )
-        }).length,
-      fixture.fileName
+    const frame = iframe.contentFrame()
+    const ui = frame.getByTestId(fixture.testId)
+    await ui.waitFor({ state: "visible", timeout: 30_000 })
+    const style = await ui.evaluate((element) => {
+      const computed = getComputedStyle(element)
+      return {
+        display: computed.display,
+        backgroundColor: computed.backgroundColor,
+        borderRadius: computed.borderRadius
+      }
+    })
+    assert(style.display === fixture.expectedDisplay, `${fixture.fileName} 展示 UI 布局样式`)
+    assert(
+      style.backgroundColor === fixture.expectedBackground,
+      `${fixture.fileName} 展示 UI 背景样式`
     )
-    assert(matchingIframeCount === 0, `${fixture.fileName} 未进入 iframe 网页预览`)
+    assert(
+      style.borderRadius === fixture.expectedBorderRadius,
+      `${fixture.fileName} 展示 UI 圆角样式`
+    )
+    assert(
+      (await frame.locator("html").getAttribute("data-e2e-executed")) === null,
+      `${fixture.fileName} 不执行工作区脚本`
+    )
+    assert((await frame.locator("script").count()) === 0, `${fixture.fileName} 移除脚本节点`)
+    assert((await frame.locator("iframe").count()) === 0, `${fixture.fileName} 移除嵌套页面`)
+    assert(
+      (await frame.locator('meta[http-equiv="refresh" i]').count()) === 0,
+      `${fixture.fileName} 移除自动跳转`
+    )
+    assert(
+      (await page.locator(".shiki-wrapper").filter({ hasText: fixture.sentinel }).count()) === 0,
+      `${fixture.fileName} 工作目录入口不展示源码视图`
+    )
   }
+
+  assert(blockedPreviewRequests.length === 0, "静态 HTML 预览没有发起外部网络请求")
 }
 
 interface PreviewGeometry {
@@ -543,6 +579,17 @@ async function assertPreviewGeometry(page: Page, scope: Locator, label: string):
   )
 }
 
+async function assertToolHtmlSource(scope: Locator, label: string): Promise<void> {
+  const content = scope.getByTestId("resource-preview-content")
+  const sourceViewer = content.locator(".shiki-wrapper").filter({ hasText: "HTML_SOURCE_SENTINEL" })
+  await sourceViewer.waitFor({ state: "visible", timeout: 30_000 })
+  const sourceText = (await sourceViewer.textContent()) ?? ""
+  assert(sourceText.includes("<!doctype html>"), `${label} 会话小眼睛展示 HTML 原文`)
+  assert(sourceText.includes("<script>"), `${label} 会话源码保留 script 标签文本`)
+  assert(sourceText.includes(PREVIEW_END_SENTINEL), `${label} 会话源码完整到末行`)
+  assert((await content.locator("iframe").count()) === 0, `${label} 会话小眼睛不渲染 HTML`)
+}
+
 async function openToolFilePreviewLayout(page: Page): Promise<void> {
   await page.setViewportSize({ width: 1500, height: 900 })
   await selectWorkspaceThread(page)
@@ -561,6 +608,7 @@ async function openToolFilePreviewLayout(page: Page): Promise<void> {
     { timeout: 30_000 }
   )
   await page.getByRole("button", { name: "全屏预览" }).waitFor({ state: "visible" })
+  await assertToolHtmlSource(page.locator("body"), "普通右侧栏")
   await assertPreviewGeometry(page, page.locator("body"), "普通右侧栏 1500×900")
 
   await page.getByRole("button", { name: "隐藏预览并切换到工作目录" }).click()
@@ -574,6 +622,7 @@ async function openToolFilePreviewLayout(page: Page): Promise<void> {
     (await dialog.getByRole("button", { name: "全屏预览" }).count()) === 0,
     "折叠抽屉不展示失效的全屏操作"
   )
+  await assertToolHtmlSource(dialog, "折叠抽屉")
   await assertPreviewGeometry(page, dialog, "折叠抽屉 1200×700")
   await dialog.getByRole("button", { name: "关闭面板" }).click()
 
@@ -635,30 +684,70 @@ async function main(): Promise<void> {
     mkdirSync(directory, { recursive: true })
   }
   initializeRepository(mainRepository, linkedWorktree)
-  for (const fixture of HTML_FIXTURES) {
-    writeFileSync(
-      join(workspace, fixture.fileName),
-      [
-        "<!doctype html>",
-        "<html>",
-        '  <body style="display: none">',
-        `    <!-- ${fixture.sentinel} -->`,
-        "    <script>",
-        '      document.documentElement.dataset.e2eExecuted = "true"',
-        "    </script>",
-        "  </body>",
-        "</html>",
-        ""
-      ].join("\n"),
-      "utf8"
-    )
-  }
   writeFileSync(
-    join(workspace, LAYOUT_FILE_NAME),
+    join(workspace, STATIC_STYLE_FILE_NAME),
     [
-      PREVIEW_START_SENTINEL,
-      ...Array.from({ length: 78 }, (_, index) => `layout line ${String(index + 2).padStart(2, "0")}`),
-      PREVIEW_END_SENTINEL,
+      ".workspace-preview-card {",
+      "  display: flex;",
+      "  align-items: center;",
+      "  min-height: 180px;",
+      "  padding: 24px;",
+      "  color: rgb(255, 255, 255);",
+      "  background-color: rgb(17, 34, 51);",
+      "  border-radius: 18px;",
+      "}",
+      `.network-probe { background-image: url("${BLOCKED_PREVIEW_ORIGIN}/css-pixel.png"); }`,
+      `</style><meta http-equiv="refresh" content="0;url=${BLOCKED_PREVIEW_ORIGIN}/css-breakout"><style>`,
+      ""
+    ].join("\n"),
+    "utf8"
+  )
+  writeFileSync(
+    join(workspace, HTML_FIXTURES[0].fileName),
+    [
+      "<!doctype html>",
+      "<html>",
+      "  <head>",
+      `    <link rel="stylesheet" href="./${STATIC_STYLE_FILE_NAME}">`,
+      `    <link rel="stylesheet" href="${BLOCKED_PREVIEW_ORIGIN}/external.css">`,
+      `    <meta http-equiv="refresh" content="0;url=${BLOCKED_PREVIEW_ORIGIN}/refresh">`,
+      "  </head>",
+      "  <body>",
+      `    <!-- ${PREVIEW_START_SENTINEL} -->`,
+      ...Array.from(
+        { length: 78 },
+        (_, index) => `    <!-- layout line ${String(index + 2).padStart(2, "0")} -->`
+      ),
+      `    <main data-testid="${HTML_FIXTURES[0].testId}" class="workspace-preview-card network-probe">`,
+      `      ${HTML_FIXTURES[0].sentinel} · 工作目录 HTML UI 预览`,
+      "    </main>",
+      `    <img src="${BLOCKED_PREVIEW_ORIGIN}/image.png" alt="blocked network probe">`,
+      `    <iframe src="${BLOCKED_PREVIEW_ORIGIN}/nested-frame"></iframe>`,
+      "    <script>",
+      '      document.documentElement.dataset.e2eExecuted = "true"',
+      `      fetch("${BLOCKED_PREVIEW_ORIGIN}/script-fetch")`,
+      "    </script>",
+      `    <!-- ${PREVIEW_END_SENTINEL} -->`,
+      "  </body>",
+      "</html>",
+      ""
+    ].join("\n"),
+    "utf8"
+  )
+  writeFileSync(
+    join(workspace, HTML_FIXTURES[1].fileName),
+    [
+      "<!doctype html>",
+      "<html>",
+      "  <body>",
+      `    <main data-testid="${HTML_FIXTURES[1].testId}" style="display:grid;background-color:rgb(51, 34, 17);border-radius:12px;min-height:160px">`,
+      `      ${HTML_FIXTURES[1].sentinel} · 工作目录 HTM UI 预览`,
+      "    </main>",
+      "    <script>",
+      '      document.documentElement.dataset.e2eExecuted = "true"',
+      "    </script>",
+      "  </body>",
+      "</html>",
       ""
     ].join("\n"),
     "utf8"
@@ -679,6 +768,7 @@ async function main(): Promise<void> {
   let app: ElectronApplication | undefined
   let page: Page | undefined
   let threadId: string | undefined
+  const blockedPreviewRequests: string[] = []
   try {
     app = await electron.launch({
       executablePath: ELECTRON_LAUNCHER,
@@ -689,6 +779,10 @@ async function main(): Promise<void> {
     })
     page = await waitForAppPage(app)
     await waitForApi(page)
+    await page.route(`${BLOCKED_PREVIEW_ORIGIN}/**`, async (route) => {
+      blockedPreviewRequests.push(route.request().url())
+      await route.abort("blockedbyclient")
+    })
     page.on("console", (message) =>
       console.log(`[workspace-html-e2e renderer:${message.type()}] ${message.text()}`)
     )
@@ -703,7 +797,7 @@ async function main(): Promise<void> {
     })
     await page.reload({ waitUntil: "domcontentloaded" })
     await openToolFilePreviewLayout(page)
-    await openWorkspaceFiles(page)
+    await openWorkspaceFiles(page, blockedPreviewRequests)
     assert(rendererPageErrors.length === 0, "页面重载及文件操作未出现 renderer 异常")
     log("ALL PASS workspace HTML source E2E")
   } finally {
