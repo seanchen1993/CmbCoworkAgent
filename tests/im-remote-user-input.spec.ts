@@ -9,6 +9,8 @@ import { ImCommandRouter, parseImCommand } from "../src/main/services/im/command
 import { ImConversationStateStore } from "../src/main/services/im/conversation-state"
 import { ImEventStore } from "../src/main/services/im/event-store"
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
+import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
+import { ImCardPublisher } from "../src/main/services/im/card-publisher"
 import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
 import { ImRemoteUserInputService } from "../src/main/services/im/remote-user-input-service"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
@@ -99,7 +101,31 @@ async function createContext(
   let sendPendingCount = 0
   const generatedCodes = ["A1B2C3", "D4E5F6", "012ABC", "789DEF"]
 
+  const cardUpdates: Array<{ interactionId: string; content: unknown[] }> = []
+  const cardInteractions = new ImCardInteractionStore(
+    (() => {
+      let sequence = 0
+      return () => `interaction-${++sequence}`
+    })(),
+    () => clock.now
+  )
+  const cards = new ImCardPublisher({
+    interactions: cardInteractions,
+    createIdempotencyKey: () => `card-idem-${cardUpdates.length}`,
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async () => ({ state: "accepted" }) as const,
+      updateCard: async (update) => {
+        cardUpdates.push({ interactionId: update.interactionId, content: [...update.content] })
+        return { state: "accepted" } as const
+      },
+      acknowledgeCardReceipt: async () => undefined
+    } as never,
+    warn: (_message, error) => warnings.push(error)
+  })
+
   const service = new ImRemoteUserInputService({
+    cards,
     conversations,
     access: { getThreadGrant: (threadId) => grants.getThreadGrant(threadId) },
     grants,
@@ -180,6 +206,8 @@ async function createContext(
     emit,
     publish,
     sendPendingCount: () => sendPendingCount,
+    cardUpdates,
+    cardInteractions,
     removePending: (threadId = "thread-1") => {
       const removed = pending.get(threadId)
       if (!removed) return
@@ -426,6 +454,41 @@ async function testConcurrentThreadsUseIndependentCodes(): Promise<void> {
   }
 }
 
+/**
+ * submitUserInputResponse removes the pending request while still on the stack,
+ * and that removal reaches removeSession before submitResponse has returned. The
+ * card must still end on the answer the reader gave: closing it as "已在桌面处理"
+ * would tell them the desktop handled something they answered from Zhaohu.
+ */
+async function testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = userInputRequest({ requestId: "request-card-outcome" })
+    await context.publish(request)
+    await waitFor(
+      () => context.cardInteractions.findByRequestRef(request.requestId) !== undefined,
+      "question card"
+    )
+
+    const reply = await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE })
+    assert(reply.includes("已从招乎提交回答"), reply)
+    await waitFor(() => context.cardUpdates.length > 0, "terminal card")
+
+    assert.equal(context.cardUpdates.length, 1, "the card must be closed exactly once")
+    const rendered = JSON.stringify(context.cardUpdates[0]!.content)
+    assert(rendered.includes("已回答"), rendered)
+    assert(
+      !rendered.includes("已在桌面处理"),
+      "a Zhaohu answer must not be credited to the desktop"
+    )
+    assert(rendered.includes("CSV"), "the terminal card must show what was answered")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function main(): Promise<void> {
   await testPromptAndSingleUseOptionAnswer()
   await testMultipleQuestionsRotateCodeAndAcceptCustomText()
@@ -433,6 +496,7 @@ async function main(): Promise<void> {
   await testDisabledRobotDoesNotPublish()
   await testAdvancedModesCanPublishAndResolve()
   await testConcurrentThreadsUseIndependentCodes()
+  await testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled()
   console.log("IM remote user-input tests passed")
 }
 

@@ -58,6 +58,15 @@ interface RemoteUserInputSession {
   code: string
   questionIndex: number
   answers: Record<string, UserInputAnswer>
+  /**
+   * The outcome this session is about to publish on its card.
+   *
+   * submitUserInputResponse removes the pending request synchronously, and that
+   * removal calls removeSession before submitResponse has even returned. Without
+   * this the answer the reader just gave would close their card as "已在桌面处理"
+   * — crediting the desktop for something they did from Zhaohu.
+   */
+  pendingCardOutcome?: string
 }
 
 export interface ImRemoteUserInputAnswerNotice {
@@ -283,11 +292,15 @@ export class ImRemoteUserInputService {
       answers: { ...session.answers },
       submittedAt: new Date(this.dependencies.now()).toISOString()
     }
+    // Claimed before the call, not after: submitResponse closes the card through
+    // its synchronous removal listener while still on the stack below.
+    session.pendingCardOutcome = "已回答"
     const submitted = this.dependencies.submitResponse(response, {
       notifyRenderer: true,
       reason: "已从招乎完成补充输入。"
     })
     if (!submitted) {
+      session.pendingCardOutcome = undefined
       this.removeSession(session.request.requestId)
       return "这项补充输入已在桌面处理或不再有效。"
     }
@@ -669,7 +682,7 @@ export class ImRemoteUserInputService {
     if (!session) return
     this.sessions.delete(requestId)
     if (this.codes.get(session.code) === session) this.codes.delete(session.code)
-    this.resolveCardFor(session, "已在桌面处理")
+    this.resolveCardFor(session, session.pendingCardOutcome ?? "已在桌面处理")
   }
 
   private drainReplies(): void {
