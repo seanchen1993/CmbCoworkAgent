@@ -303,15 +303,16 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     const chained = previous
       .catch(() => undefined)
       .then(() => this.sendCardCommand(type, interactionId, payload))
-    this.cardChains.set(
-      interactionId,
-      chained.then(
-        () => undefined,
-        () => undefined
-      )
+    const link = chained.then(
+      () => undefined,
+      () => undefined
     )
-    void chained.finally(() => {
-      if (this.cardChains.get(interactionId) === undefined) return
+    this.cardChains.set(interactionId, link)
+    // Dropped once nothing is queued behind it. Without this the map keeps one
+    // entry per interaction for the life of the connection, and a desktop that
+    // stays open for weeks accumulates every card it has ever published.
+    void link.then(() => {
+      if (this.cardChains.get(interactionId) === link) this.cardChains.delete(interactionId)
     })
     return chained
   }

@@ -447,12 +447,17 @@ export function assertRemoteImCardReceiptV1(
   if (receipt.conversationKey !== undefined && receipt.conversationKey !== null) {
     requireNonEmptyString(receipt.conversationKey, "receipt.conversationKey")
   }
-  if (
-    receipt.kind !== undefined &&
-    receipt.kind !== null &&
-    !CARD_INTERACTION_KINDS.has(receipt.kind as ImCardInteractionKind)
-  ) {
-    throw new ImGatewayContractError("INVALID_PAYLOAD", "receipt.kind is not supported")
+  // Deliberately not rejected when unrecognised. `kind` only chooses the wording
+  // of a closing card, and refusing the whole receipt over it discards a real
+  // button press: the click is never applied, never answered, and never
+  // acknowledged, so the gateway redelivers it for as long as it exists.
+  if (receipt.kind !== undefined && receipt.kind !== null) {
+    if (typeof receipt.kind !== "string") {
+      throw new ImGatewayContractError("INVALID_PAYLOAD", "receipt.kind must be a string")
+    }
+    if (!CARD_INTERACTION_KINDS.has(receipt.kind as ImCardInteractionKind)) {
+      delete (receipt as Record<string, unknown>).kind
+    }
   }
   if (!Array.isArray(receipt.feedback)) {
     throw new ImGatewayContractError("INVALID_PAYLOAD", "receipt.feedback must be an array")

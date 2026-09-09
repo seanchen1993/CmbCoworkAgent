@@ -589,6 +589,120 @@ async function testAnUpdateDuringTheSendStillLands(): Promise<void> {
   console.log("PASS testAnUpdateDuringTheSendStillLands")
 }
 
+/**
+ * The gateway stores APPROVAL/USER_INPUT and the contract carries
+ * approval/user_input, and a receipt that fails validation is dropped without
+ * being acknowledged — so it is redelivered forever while the gate it belongs
+ * to stays open. A casing mismatch on a rendering hint is therefore fatal to
+ * every legitimate click, which is exactly how it escaped review once.
+ *
+ * These assert the storage spellings directly rather than the wire ones, so the
+ * test fails if either side is normalized away.
+ */
+function testAnUnknownKindNeverCostsTheClick(): void {
+  const base = {
+    schemaVersion: 1 as const,
+    receiptId: "receipt-kind",
+    interactionId: "interaction-1",
+    tag: "k".repeat(32),
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  }
+  for (const stored of ["APPROVAL", "USER_INPUT", "something-new"]) {
+    const receipt = { ...base, kind: stored }
+    assertRemoteImCardReceiptV1(receipt)
+    assert.equal(
+      (receipt as { kind?: string }).kind,
+      undefined,
+      "an unrecognised kind must be dropped, not carried through as itself"
+    )
+  }
+  for (const wire of ["approval", "user_input"]) {
+    const receipt = { ...base, kind: wire }
+    assertRemoteImCardReceiptV1(receipt)
+    assert.equal((receipt as { kind?: string }).kind, wire)
+  }
+  console.log("PASS testAnUnknownKindNeverCostsTheClick")
+}
+
+/**
+ * A stale close must not paint over the card that recorded the decision. The
+ * desktop releases an interaction as it writes that terminal card, so a click
+ * arriving right afterwards resolves to nothing and asks the gateway to close a
+ * card that was closed a moment ago.
+ */
+async function testAStaleCloseCannotOverwriteADecision(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const interactions = new ImCardInteractionStore()
+  const publisher = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions,
+    isThreadLive: () => true,
+    warn: () => undefined
+  })
+  const router = new ImCardReceiptRouter({
+    cards: publisher,
+    approvals: { resolveCardClick: async () => "unused" },
+    userInput: { resolveCardAnswers: async () => "unused" },
+    events: { enqueueProactiveReplies: async () => [] },
+    warn: () => undefined
+  })
+
+  const interaction = await publisher.publish({
+    kind: "approval",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "CODE02",
+    targetLabel: "会话：桌面会话",
+    build: (tag) =>
+      buildApprovalCard({
+        targetLabel: "会话：桌面会话",
+        operation: "写入文件",
+        detail: "src/a.ts",
+        tag,
+        allowedDecisions: ["approve", "reject"],
+        fallbackCommands: "/批准 CODE02"
+      })
+  })
+  assert(interaction)
+
+  // The decision lands and releases the interaction.
+  await publisher.resolve(interaction.interactionId, [
+    { type: "title", content: "需要批准" },
+    { type: "status", content: "已批准", style: 3 }
+  ])
+  // A click for the now-forgotten card arrives immediately afterwards.
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-late",
+    interactionId: interaction.interactionId,
+    kind: "approval",
+    tag: interaction.tag,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+
+  const versionless = gateway.updated.filter((update) => update.cardVersion === undefined)
+  assert.equal(versionless.length, 1, "the stale close is still attempted")
+  assert.equal(
+    versionless[0]!.cardVersion,
+    undefined,
+    "it cannot claim a version, so the gateway must be the one to refuse it"
+  )
+  // The gateway is the authority here: it drops a version-less update once the
+  // card has been updated. Assert the desktop hands it what it needs to decide.
+  const decision = gateway.updated.find((update) => update.cardVersion !== undefined)
+  assert(decision, "the decision must have claimed a version")
+  assert(JSON.stringify(decision.content).includes("已批准"))
+  console.log("PASS testAStaleCloseCannotOverwriteADecision")
+}
+
 async function main(): Promise<void> {
   testEveryBuiltCardSatisfiesTheContract()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
@@ -600,6 +714,8 @@ async function main(): Promise<void> {
   testAnUnresolvedReceiptIsAValidPayload()
   await testAForgottenCardIsActuallyClosed()
   await testAnUpdateDuringTheSendStillLands()
+  testAnUnknownKindNeverCostsTheClick()
+  await testAStaleCloseCannotOverwriteADecision()
 }
 
 void main().catch((error) => {

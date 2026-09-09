@@ -123,10 +123,13 @@ export class ImCardReceiptRouter {
     }
 
     const { interaction, suffix } = resolved
+    // `!= null` on purpose: the validator accepts an explicit null, and treating
+    // it as a value here would refuse the click as an owner mismatch — the same
+    // null-versus-absent asymmetry that made an unresolved receipt fatal, just
+    // moved one layer in.
     if (
       interaction.principalId !== receipt.principalId ||
-      (receipt.conversationKey !== undefined &&
-        interaction.conversationKey !== receipt.conversationKey)
+      (receipt.conversationKey != null && interaction.conversationKey !== receipt.conversationKey)
     ) {
       this.dependencies.warn(
         `Zhaohu card receipt did not match its interaction owner: interactionId=${interaction.interactionId}`
