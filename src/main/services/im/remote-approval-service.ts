@@ -10,6 +10,8 @@ import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getThread } from "../../db"
 import { getBuiltinRobotSettings } from "../../storage"
 import type { ApprovalRequest } from "../../types"
+import { buildApprovalCard, buildResolvedCard, type CardComponent } from "./card-builder"
+import { imCardPublisher, type ImCardPublisher } from "./card-publisher"
 import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
 import { imEventStore, type ImEventStore } from "./event-store"
 import { imRemoteAccessService, type ImRemoteAccessService } from "./remote-access-service"
@@ -74,6 +76,7 @@ interface RemoteApprovalDependencies {
   grants: ImRemoteGrantStore
   events: Pick<ImEventStore, "enqueueProactiveReplies" | "markOutboxFailed">
   audits: ImRemoteApprovalAuditStore
+  cards: ImCardPublisher
   getThread: typeof getThread
   getSettings: typeof getBuiltinRobotSettings
   createCode: () => string
@@ -346,6 +349,7 @@ export class ImRemoteApprovalService {
       grants: dependencies.grants ?? imRemoteGrantStore,
       events: dependencies.events ?? imEventStore,
       audits: dependencies.audits ?? imRemoteApprovalAuditStore,
+      cards: dependencies.cards ?? imCardPublisher,
       getThread: dependencies.getThread ?? getThread,
       getSettings: dependencies.getSettings ?? getBuiltinRobotSettings,
       createCode: dependencies.createCode ?? (() => randomBytes(3).toString("hex").toUpperCase()),
@@ -466,6 +470,12 @@ export class ImRemoteApprovalService {
         this.dependencies.warn("Remote approval audit listener failed.", error)
       }
     }
+    this.resolveCardFor(
+      code,
+      pendingCode.operation,
+      input.decision === "approve" ? "已批准" : "已拒绝",
+      input.decision === "approve" ? "approved" : "rejected"
+    )
     return input.decision === "approve"
       ? "已从招乎一次性批准，任务将继续执行。"
       : "已从招乎拒绝，本次工具调用不会执行。"
@@ -537,10 +547,92 @@ export class ImRemoteApprovalService {
         return
       }
       this.drainReplies()
+      if (code) await this.publishCard(code, presentation)
     } catch (error) {
       if (code) this.codes.delete(code.code)
       throw error
     }
+  }
+
+  /**
+   * The card is published only after the text notice is durably queued and the
+   * request is confirmed still pending, so the reader never sees a card for a
+   * gate that already closed and never sees one without its short code.
+   */
+  private async publishCard(
+    code: RemoteApprovalCode,
+    presentation: ApprovalPresentation
+  ): Promise<void> {
+    const fallbackCommands = [
+      ...(code.allowedDecisions.includes("approve") ? [`/批准 ${code.code}`] : []),
+      ...(code.allowedDecisions.includes("reject") ? [`/拒绝 ${code.code}`] : [])
+    ].join("   或   ")
+    await this.dependencies.cards.publish({
+      kind: "approval",
+      threadId: code.route.threadId,
+      principalId: code.route.principalId,
+      conversationKey: code.route.conversationKey,
+      // The short code is the addressable identity of this gate. Routing a
+      // click through it means the card cannot take a decision the typed
+      // command could not: same authorization, same audit, same single use.
+      requestRef: code.code,
+      targetLabel: code.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
+      build: (tag) =>
+        buildApprovalCard({
+          targetLabel: code.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
+          operation: presentation.operation,
+          detail: presentation.detail,
+          tag,
+          allowedDecisions: code.allowedDecisions,
+          fallbackCommands
+        })
+    })
+  }
+
+  /**
+   * Applies a card click by replaying it as the short code it carries.
+   *
+   * There is deliberately no second decision path here. A click reaches the
+   * runtime through exactly the code `resolveCode` consumes, so whichever of
+   * the two arrives first wins and the other is told the code is spent — which
+   * is also what makes clicking twice, or clicking after typing, safe.
+   */
+  async resolveCardClick(input: {
+    interactionId: string
+    requestRef: string
+    decision: "approve" | "reject"
+    principalId: string
+    conversationKey: string
+  }): Promise<string> {
+    const message = await this.resolveCode({
+      code: input.requestRef,
+      decision: input.decision,
+      principalId: input.principalId,
+      conversationKey: input.conversationKey
+    })
+    return message
+  }
+
+  /**
+   * `operation` is passed in rather than looked up: every caller has already
+   * consumed the short code from `this.codes` before the card can be closed,
+   * so reading it back here would always fall through to a placeholder.
+   */
+  private resolveCardFor(
+    requestRef: string,
+    operation: string,
+    outcome: string,
+    outcomeStyle: "approved" | "rejected" | "neutral"
+  ): void {
+    const interaction = this.dependencies.cards.interactions.findByRequestRef(requestRef)
+    if (!interaction) return
+    const content: CardComponent[] = buildResolvedCard({
+      targetLabel: interaction.targetLabel,
+      operation,
+      outcome,
+      outcomeStyle
+    })
+    this.dependencies.cards.resolveDetached(interaction.interactionId, content)
   }
 
   /**
@@ -652,9 +744,17 @@ export class ImRemoteApprovalService {
     }
   }
 
+  /**
+   * The desktop decided, or the run was cancelled. The card in Zhaohu is still
+   * showing "待处理" and still clickable, so it has to be closed here too —
+   * otherwise the next person to scroll back finds a live-looking button for a
+   * request that ended long ago.
+   */
   private removeRequestCodes(requestId: string): void {
     for (const [code, pending] of this.codes) {
-      if (pending.requestId === requestId) this.codes.delete(code)
+      if (pending.requestId !== requestId) continue
+      this.codes.delete(code)
+      this.resolveCardFor(code, pending.operation, "已在桌面处理", "neutral")
     }
   }
 

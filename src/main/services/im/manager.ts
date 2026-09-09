@@ -16,6 +16,8 @@ import type {
 } from "../../types"
 import { notifyRemoteThreadChanged } from "../../agent/renderer-stream-mirror"
 import { refreshEnterpriseLogin } from "../enterprise-login-refresh"
+import { imCardPublisher } from "./card-publisher"
+import { imCardReceiptRouter } from "./card-receipt-router"
 import { imConversationStateStore } from "./conversation-state"
 import { imEventStore } from "./event-store"
 import { ImGatewayWsClient, type ImGatewayWsStatus } from "./gateway-ws-client"
@@ -406,6 +408,9 @@ export class BuiltinRobotManager {
         if (eventId && this.service) await this.service.handleLeaseRevoked(eventId, reasonCode)
         this.emitStatus()
       },
+      onCardReceipt: async (receipt) => {
+        await imCardReceiptRouter.handle(receipt)
+      },
       onRoutesSynchronized: async (routes, principalId, defaultConversationKey) => {
         const activeRoutes = routes.filter(
           (route) => route.principalId === principalId && route.state === "active"
@@ -463,6 +468,10 @@ export class BuiltinRobotManager {
     const service = new ImUnifiedBotService(client, {
       getAgentRunDelivery: this.getAgentRunDelivery
     })
+    // Cards travel outside the durable reply outbox: they are an enhancement
+    // over a notice that is already queued, so they follow the live transport
+    // and are simply skipped while it is down.
+    imCardPublisher.setGateway(client)
     this.client = client
     this.service = service
     this.activeIdentityToken = identity.token

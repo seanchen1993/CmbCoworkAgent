@@ -2,14 +2,19 @@ import { randomUUID } from "node:crypto"
 import WebSocket from "ws"
 import {
   ImGatewayContractError,
+  assertRemoteImCardReceiptV1,
   assertRemoteImEventV1,
   type RemoteImAckV1,
+  type RemoteImCardReceiptV1,
+  type RemoteImCardSendV1,
+  type RemoteImCardUpdateV1,
   type RemoteImEventV1,
   type RemoteImReplyV1
 } from "../../../shared/im-gateway-contract"
 import type { BuiltinRobotConnectionState, BuiltinRobotRouteStatus } from "../../types"
 import type {
   ImExecutionPermitResult,
+  ImCardSubmissionResult,
   ImGatewayClientPort,
   ImReplySubmissionResult
 } from "./gateway-client"
@@ -64,6 +69,7 @@ export interface ImGatewayWsClientOptions {
   capabilities?: string[]
   onRemoteEvent: (event: RemoteImEventV1) => void | Promise<void>
   onLeaseRevoked?: (payload: Record<string, unknown>) => void | Promise<void>
+  onCardReceipt?: (receipt: RemoteImCardReceiptV1) => void | Promise<void>
   onAuthenticationRequired?: (rejectedToken: string) => boolean | Promise<boolean>
   onRoutesSynchronized?: (
     routes: readonly BuiltinRobotRouteStatus[],
@@ -173,6 +179,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private readonly permitCommandByEvent = new Map<string, string>()
   private readonly replyCommands = new Map<string, PendingCommand<ImReplySubmissionResult>>()
   private readonly replyCommandByIdempotencyKey = new Map<string, string>()
+  private readonly cardCommands = new Map<string, PendingCommand<ImCardSubmissionResult>>()
+  private readonly cardCommandByInteraction = new Map<string, string>()
   private readonly now: () => number
   private status: ImGatewayWsStatus = {
     connectionState: "offline",
@@ -248,6 +256,100 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
 
   renewExecutionPermit(event: ImEventRecord): Promise<ImExecutionPermitResult> {
     return this.requestPermit("EXECUTION_PERMIT_RENEW", event)
+  }
+
+  /**
+   * A card never blocks its gate. Every failure here resolves to `rejected`
+   * instead of throwing, because the caller has already published the text and
+   * short code that actually answer the request — a thrown error would only
+   * tempt a caller into treating a cosmetic failure as a fatal one.
+   */
+  sendCard(card: RemoteImCardSendV1): Promise<ImCardSubmissionResult> {
+    return this.submitCard(
+      "CARD_SEND",
+      card.interactionId,
+      card as unknown as Record<string, unknown>
+    )
+  }
+
+  updateCard(update: RemoteImCardUpdateV1): Promise<ImCardSubmissionResult> {
+    return this.submitCard(
+      "CARD_UPDATE",
+      update.interactionId,
+      update as unknown as Record<string, unknown>
+    )
+  }
+
+  async acknowledgeCardReceipt(receiptId: string): Promise<void> {
+    this.sendCommand("CARD_RECEIPT_ACK", { receiptId })
+  }
+
+  private submitCard(
+    type: "CARD_SEND" | "CARD_UPDATE",
+    interactionId: string,
+    payload: Record<string, unknown>
+  ): Promise<ImCardSubmissionResult> {
+    if (!this.isAuthenticated()) {
+      return Promise.resolve({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" })
+    }
+    if (this.cardCommandByInteraction.has(interactionId)) {
+      return Promise.resolve({ state: "rejected", reasonCode: "CARD_COMMAND_IN_FLIGHT" })
+    }
+    return new Promise<ImCardSubmissionResult>((resolve) => {
+      const commandId = randomUUID()
+      const settle = (result: ImCardSubmissionResult): void => {
+        this.cardCommands.delete(commandId)
+        if (this.cardCommandByInteraction.get(interactionId) === commandId) {
+          this.cardCommandByInteraction.delete(interactionId)
+        }
+        resolve(result)
+      }
+      const timer = setTimeout(
+        () => settle({ state: "rejected", reasonCode: "GATEWAY_CARD_TIMEOUT" }),
+        COMMAND_TIMEOUT_MS
+      )
+      this.cardCommands.set(commandId, {
+        resolve: (result) => {
+          clearTimeout(timer)
+          settle(result)
+        },
+        reject: (error) => {
+          clearTimeout(timer)
+          settle({
+            state: "rejected",
+            reasonCode: (error as ImGatewayCommandError).reasonCode ?? "GATEWAY_CARD_FAILED"
+          })
+        },
+        timer
+      })
+      this.cardCommandByInteraction.set(interactionId, commandId)
+      try {
+        this.sendCommand(type, payload, commandId)
+      } catch {
+        clearTimeout(timer)
+        settle({ state: "rejected", reasonCode: "GATEWAY_CARD_FAILED" })
+      }
+    })
+  }
+
+  private resolveCard(payload: Record<string, unknown>, commandId: string | null): void {
+    if (!commandId) throw new ImGatewayProtocolError("Card result is missing correlation fields")
+    const pending = this.cardCommands.get(commandId)
+    if (!pending) return
+    assertOnlyKeys(payload, ["interactionId", "state", "reasonCode"], "CARD_ACCEPTED payload")
+    const interactionId = nonEmptyString(payload.interactionId)
+    if (!interactionId || this.cardCommandByInteraction.get(interactionId) !== commandId) {
+      throw new ImGatewayProtocolError("Card result correlation does not match")
+    }
+    const state = String(payload.state ?? "").toUpperCase()
+    if (state !== "ACCEPTED" && state !== "REJECTED") {
+      throw new ImGatewayProtocolError("Card result has an invalid state")
+    }
+    pending.resolve(
+      state === "ACCEPTED"
+        ? { state: "accepted" }
+        : { state: "rejected", reasonCode: nonEmptyString(payload.reasonCode) ?? "CARD_REJECTED" }
+    )
   }
 
   submitReply(reply: RemoteImReplyV1): Promise<ImReplySubmissionResult> {
@@ -585,6 +687,20 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       case "PERMIT_RESULT":
         this.resolvePermit(payload, commandId)
         return
+      case "CARD_ACCEPTED":
+        this.resolveCard(payload, commandId)
+        return
+      case "CARD_RECEIPT": {
+        if (!messageId) throw new ImGatewayProtocolError("CARD_RECEIPT missing messageId")
+        assertOnlyKeys(payload, ["receipt"], "CARD_RECEIPT payload")
+        const receipt = record(payload.receipt) as unknown
+        assertRemoteImCardReceiptV1(receipt)
+        if (!this.status.principalId || receipt.principalId !== this.status.principalId) {
+          throw new ImGatewayProtocolError("CARD_RECEIPT principal does not match WELCOME")
+        }
+        await this.options.onCardReceipt?.(receipt)
+        return
+      }
       case "REPLY_ACCEPTED":
       case "REPLY_RESULT":
         this.resolveReply(payload, commandId)
@@ -982,7 +1098,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         this.authenticationRefreshInFlight = false
         const refreshedToken = this.options.token()?.trim()
         if (!refreshed || !refreshedToken || refreshedToken === rejectedToken) {
-          this.scheduleAuthenticationRefreshRetry(rejectedToken, generation, trigger, "not-refreshed")
+          this.scheduleAuthenticationRefreshRetry(
+            rejectedToken,
+            generation,
+            trigger,
+            "not-refreshed"
+          )
           return
         }
         console.info("[IM Gateway] token-refresh:succeeded", { trigger })
@@ -1064,12 +1185,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       console.info("[IM Gateway] token-refresh:proactive", {
         expiresAt: new Date(expiresAt).toISOString()
       })
-      this.beginAuthenticationRefresh(
-        token,
-        this.connectionGeneration,
-        socket,
-        "proactive"
-      )
+      this.beginAuthenticationRefresh(token, this.connectionGeneration, socket, "proactive")
     }, delay)
   }
 
@@ -1099,7 +1215,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   }
 
   private rejectPending(error: Error): void {
-    for (const pending of [...this.permitCommands.values(), ...this.replyCommands.values()]) {
+    for (const pending of [
+      ...this.permitCommands.values(),
+      ...this.replyCommands.values(),
+      ...this.cardCommands.values()
+    ]) {
       clearTimeout(pending.timer)
       pending.reject(error)
     }
@@ -1107,5 +1227,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.permitCommandByEvent.clear()
     this.replyCommands.clear()
     this.replyCommandByIdempotencyKey.clear()
+    this.cardCommands.clear()
+    this.cardCommandByInteraction.clear()
   }
 }

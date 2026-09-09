@@ -13,7 +13,7 @@
  */
 
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import type {
   AgentRunDelivery,
@@ -182,18 +182,23 @@ function testNoImPathWavesThroughAFileEdit(): void {
   // event or from interactionWaitHooks, so even an unattended scheduler
   // reminder can ask its owner. Re-enabling autoApproveFileEdits anywhere here
   // would let untrusted remote input write to the workspace unreviewed.
-  for (const file of [
-    "src/main/services/im/desktop-run-bridge.ts",
-    "src/main/services/im/remote-runner.ts",
-    "src/main/services/im/goal-runner.ts",
-    "src/main/services/im/inbox-scheduler.ts"
-  ]) {
-    const source = readFileSync(join(PROJECT_ROOT, file), "utf8")
+  //
+  // The whole directory is swept rather than a list of known entry points. A
+  // list only guards the paths that existed when it was written, and every new
+  // remote surface — a card click, the next transport — arrives as a new file
+  // that a list would silently exempt on the day it matters most.
+  const imDirectory = join(PROJECT_ROOT, "src/main/services/im")
+  const files = readdirSync(imDirectory, { recursive: true, encoding: "utf8" }).filter((entry) =>
+    entry.endsWith(".ts")
+  )
+  assert(files.length > 0, "the IM service directory must be readable")
+  for (const file of files) {
+    const source = readFileSync(join(imDirectory, file), "utf8")
     for (const line of source.split("\n")) {
       if (line.trimStart().startsWith("*") || line.trimStart().startsWith("//")) continue
       assert(
         !line.includes("autoApproveFileEdits"),
-        `${file} must not auto-approve file edits for an IM turn: ${line.trim()}`
+        `src/main/services/im/${file} must not auto-approve file edits for an IM turn: ${line.trim()}`
       )
     }
   }

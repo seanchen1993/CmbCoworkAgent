@@ -4,6 +4,7 @@ import { parseGoalSlashCommand } from "../../agent/goals/slash"
 import { ImConversationTurnQueue } from "./conversation-turn-queue"
 import type { ImIngressResult } from "./ingress-sequencer"
 import { ImIngressSequencer } from "./ingress-sequencer"
+import { imCardReceiptRouter } from "./card-receipt-router"
 import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
 import { registerImInboxSchedulerGateway } from "./inbox-scheduler"
 import { ImRemoteRunner, createImTurnQueueHandler, setRemoteThreadLifecycle } from "./remote-runner"
@@ -45,6 +46,7 @@ export class ImUnifiedBotService {
   private readonly unregisterRemoteUserInputReplyDrainer: () => void
   private readonly unregisterHumanGateReplyDrainer: () => void
   private readonly unregisterManagedBizRetryReplyDrainer: () => void
+  private readonly unregisterCardReceiptReplyDrainer: () => void
   private outboxRetryTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(
@@ -68,6 +70,9 @@ export class ImUnifiedBotService {
     )
     this.unregisterHumanGateReplyDrainer = imHumanGateService.registerReplyDrainer(this.replyClient)
     this.unregisterManagedBizRetryReplyDrainer = imManagedBizRetryService.registerReplyDrainer(
+      this.replyClient
+    )
+    this.unregisterCardReceiptReplyDrainer = imCardReceiptRouter.registerReplyDrainer(
       this.replyClient
     )
     this.goalRuns =
@@ -245,6 +250,7 @@ export class ImUnifiedBotService {
     this.unregisterRemoteUserInputReplyDrainer()
     this.unregisterHumanGateReplyDrainer()
     this.unregisterManagedBizRetryReplyDrainer()
+    this.unregisterCardReceiptReplyDrainer()
     this.modeNotificationPump.stop()
     return this.turnQueue.stop()
   }
