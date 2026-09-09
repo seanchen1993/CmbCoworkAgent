@@ -227,6 +227,11 @@ function normalizeUrlInput(input: string, workspacePath: string | null): string 
   return `https://${value}`
 }
 
+export function shouldReloadAfterProfileImport(currentUrl: string): boolean {
+  const value = currentUrl.trim()
+  return Boolean(value && value !== "about:blank")
+}
+
 function getUrlPermissionError(url: string, workspacePath: string | null): string | null {
   void workspacePath
   let parsed: URL
@@ -506,8 +511,11 @@ export class BrowserService {
 
     const skippedLocalStorage = data.localStorage.length
     if (this.activeSession && !this.activeSession.view.webContents.isDestroyed()) {
-      this.activeSession.view.webContents.reload()
-      this.emitState(this.activeSession.id)
+      const currentUrl = this.activeSession.view.webContents.getURL()
+      if (shouldReloadAfterProfileImport(currentUrl)) {
+        this.activeSession.view.webContents.reload()
+        this.emitState(this.activeSession.id)
+      }
     }
 
     return {
