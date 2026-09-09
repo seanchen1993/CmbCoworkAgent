@@ -108,7 +108,6 @@ const GENERIC_SELECTOR_PATTERN =
 const CONTAINER_TEST_ID_PATTERN =
   /(?:^|[-_])(area|container|wrapper|panel|section|group|list|content|body|header|footer|root)(?:$|[-_])/iu
 const INTERACTIVE_TAG_NAMES = new Set(["button", "a", "input", "textarea", "select", "option"])
-const SCRIPT_RECORDER_DEBUG_PREFIX = "[Browser][ScriptRecorderDebug]"
 const FRAME_ELEMENT_SELECTOR_CACHE = new Map<string, string>()
 const FRAME_INJECTION_PROMISES = new Map<string, Promise<void>>()
 const FRAME_CHANNEL_FRAME_CACHE = new Map<string, WebFrameMain>()
@@ -566,22 +565,6 @@ function buildFramePath(frame: WebFrameMain): string[] {
   return chain
 }
 
-function describeFrameAncestry(frame: WebFrameMain): Array<{
-  url: string
-  token: string
-}> {
-  const ancestry: Array<{ url: string; token: string }> = []
-  let current: WebFrameMain | null = frame
-  while (current) {
-    ancestry.unshift({
-      url: current.url || "(empty)",
-      token: current.frameToken || "(none)"
-    })
-    current = current.parent
-  }
-  return ancestry
-}
-
 function buildFrameSelectorFallback(frame: WebFrameMain): string {
   const parent = frame.parent
   if (!parent) return "iframe"
@@ -626,9 +609,6 @@ async function cacheFrameElementSelector(frame: WebFrameMain): Promise<void> {
     const selector = await executeScriptRecorderScriptInIsolatedWorld(parent, helperScript)
     if (typeof selector === "string" && selector.trim()) {
       FRAME_ELEMENT_SELECTOR_CACHE.set(frameCacheKey(frame), selector.trim())
-      console.info(
-        `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-selector-cached source=isolated frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${parent.url || "(empty)"} index=${index} selector=${JSON.stringify(selector.trim())}`
-      )
       return
     }
   } catch {
@@ -639,9 +619,6 @@ async function cacheFrameElementSelector(frame: WebFrameMain): Promise<void> {
     const selector = await parent.executeJavaScript(helperScript)
     if (typeof selector === "string" && selector.trim()) {
       FRAME_ELEMENT_SELECTOR_CACHE.set(frameCacheKey(frame), selector.trim())
-      console.info(
-        `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-selector-cached source=page frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${parent.url || "(empty)"} index=${index} selector=${JSON.stringify(selector.trim())}`
-      )
       return
     }
   } catch {
@@ -650,9 +627,6 @@ async function cacheFrameElementSelector(frame: WebFrameMain): Promise<void> {
 
   const fallbackSelector = buildFrameSelectorFallback(frame)
   FRAME_ELEMENT_SELECTOR_CACHE.set(frameCacheKey(frame), fallbackSelector)
-  console.info(
-    `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-selector-cached source=fallback frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${parent.url || "(empty)"} index=${index} selector=${JSON.stringify(fallbackSelector)}`
-  )
 }
 
 function buildNavigationAction(url: string): BrowserRecordedAction {
@@ -845,16 +819,6 @@ export function stopScriptRecording(): BrowserRecordingSession {
 
   activeSession.status = "completed"
   activeSession.stoppedAt = now()
-  console.info(
-    `${SCRIPT_RECORDER_DEBUG_PREFIX} session-stopped actions=${JSON.stringify(
-      activeSession.actions.map((action) => ({
-        kind: action.kind,
-        framePath: action.locator?.framePath ?? [],
-        selector: action.locator?.selector,
-        playwrightLocator: action.locator?.playwrightLocator
-      }))
-    )}`
-  )
   pendingExplicitNavigation = null
   lastSession = activeSession
   activeSession = null
@@ -892,7 +856,6 @@ async function installScriptRecorderInternal(frame: WebFrameMain): Promise<void>
   const script = buildPlaywrightScriptRecorderInjectionScript(channelId)
 
   try {
-    let injectionMode: "isolated" | "page" = "isolated"
     let injectionResult: unknown
     try {
       injectionResult = await executeScriptRecorderScriptInIsolatedWorld(frame, script)
@@ -902,22 +865,15 @@ async function installScriptRecorderInternal(frame: WebFrameMain): Promise<void>
       }
     } catch {
       injectionResult = await frame.executeJavaScript(script)
-      injectionMode = "page"
     }
     const resolvedChannelId =
       typeof injectionResult === "string" && injectionResult.trim()
         ? injectionResult.trim()
         : channelId
     FRAME_CHANNEL_FRAME_CACHE.set(resolvedChannelId, frame)
-    console.info(
-      `${SCRIPT_RECORDER_DEBUG_PREFIX} injected mode=${injectionMode} frame=${frame.url || "(empty)"} token=${frame.frameToken} channel=${resolvedChannelId} parent=${frame.parent?.url || "(root)"}`
-    )
     await cacheFrameElementSelector(frame)
   } catch {
     // Cross-origin or transient frames may reject injection; ignore and keep recording other frames.
-    console.info(
-      `${SCRIPT_RECORDER_DEBUG_PREFIX} inject-skipped frame=${frame.url || "(empty)"} token=${frame.frameToken}`
-    )
   }
 }
 
@@ -950,14 +906,8 @@ export async function installScriptRecorderForFrameById(
   if (!activeSession || activeSession.status !== "recording") return
   const frame = webFrameMain.fromId(frameProcessId, frameRoutingId)
   if (!frame || frame.detached || frame.isDestroyed()) {
-    console.info(
-      `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-by-id-miss pid=${frameProcessId} rid=${frameRoutingId}`
-    )
     return
   }
-  console.info(
-    `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-by-id-hit pid=${frameProcessId} rid=${frameRoutingId} frame=${frame.url || "(empty)"} token=${frame.frameToken}`
-  )
   await installScriptRecorderForSubtree(frame)
 }
 
@@ -977,28 +927,14 @@ export function recordScriptRecorderConsoleMessage(frame: WebFrameMain, message:
   const resolvedFrame =
     mappedFrame && !mappedFrame.isDestroyed() && !mappedFrame.detached ? mappedFrame : frame
   const framePath = buildFramePath(resolvedFrame)
-  console.info(
-    `${SCRIPT_RECORDER_DEBUG_PREFIX} console-message-received electronFrame=${frame.url || "(empty)"} electronToken=${frame.frameToken || "(none)"} resolvedFrame=${resolvedFrame.url || "(empty)"} resolvedToken=${resolvedFrame.frameToken || "(none)"} resolvedFrom=${mappedFrame ? "channel" : "electron"} ancestry=${JSON.stringify(describeFrameAncestry(resolvedFrame))} computedPath=${JSON.stringify(framePath)} payload=${JSON.stringify(diagnostic)}`
-  )
   const playwrightEvent = parsePlaywrightScriptRecorderEvent(message, framePath)
   if (playwrightEvent) {
-    console.info(
-      `${SCRIPT_RECORDER_DEBUG_PREFIX} console-event frame=${resolvedFrame.url || "(empty)"} token=${resolvedFrame.frameToken || "(none)"} path=${JSON.stringify(framePath)} type=${playwrightEvent.type}`
-    )
     const action = normalizeScriptEvent(playwrightEvent as ScriptRecorderEvent, framePath)
     if (action) {
       appendAction(activeSession, action)
-      console.info(
-        `${SCRIPT_RECORDER_DEBUG_PREFIX} action-appended kind=${action.kind} target=${"target" in action ? action.target || "" : ""} framePath=${JSON.stringify(action.locator?.framePath ?? [])} selector=${JSON.stringify(action.locator?.selector ?? "")} playwrightLocator=${JSON.stringify(action.locator?.playwrightLocator ?? "")} actionCount=${activeSession.actions.length}`
-      )
-    } else {
-      console.info(`${SCRIPT_RECORDER_DEBUG_PREFIX} action-dropped type=${playwrightEvent.type}`)
     }
     return
   }
-  console.info(
-    `${SCRIPT_RECORDER_DEBUG_PREFIX} console-message-dropped action=${diagnostic.actionName ?? "(unknown)"} clickCount=${diagnostic.clickCount ?? "(none)"} reason=${diagnostic.actionName === "click" && diagnostic.clickCount === 0 ? "synthetic-click" : "unsupported-or-invalid-action"}`
-  )
 }
 
 export function resetScriptRecordingForTests(): void {

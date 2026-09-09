@@ -1,8 +1,5 @@
 import { useCallback, useEffect, useRef } from "react"
-import {
-  BUILTIN_BROWSER_LOG_PREFIX,
-  BROWSER_SESSION_ID
-} from "../../../../shared/browser-types"
+import { BUILTIN_BROWSER_LOG_PREFIX, BROWSER_SESSION_ID } from "../../../../shared/browser-types"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import { useAppStore } from "@/lib/store"
 
@@ -48,7 +45,7 @@ export function useBrowserViewLifecycle({
     (overlayModule === "browser" && Boolean(overlayThreadId))
 
   const hideBrowserSession = useCallback((reason: string) => {
-    console.info(`${BROWSER_APP_LOG_PREFIX} Hiding Browser session ${BROWSER_SESSION_ID} because ${reason}.`)
+    void reason
     void window.api.browser.setBounds(HIDDEN_BROWSER_BOUNDS, false).catch((error) => {
       console.error(
         `${BROWSER_APP_LOG_PREFIX} Browser session ${BROWSER_SESSION_ID} hide failed: ${formatBrowserViewLifecycleError(error)}.`
@@ -57,30 +54,11 @@ export function useBrowserViewLifecycle({
   }, [])
 
   useEffect(() => {
-    console.info(
-      `${BROWSER_APP_LOG_PREFIX} Browser panel visibility snapshot: visible=${isBrowserPanelVisible} module=${rightModule} collapsed=${rightPanelCollapsed} agentFocus=${isAgentFocusActive} mainView=${mainView} currentThreadId=${currentThreadId ?? "(none)"} harnessThreadId=${harnessSessionThreadId ?? "(none)"} session=${BROWSER_SESSION_ID}.`
-    )
-  }, [
-    currentThreadId,
-    harnessSessionThreadId,
-    isAgentFocusActive,
-    isBrowserPanelVisible,
-    mainView,
-    overlayModule,
-    overlayThreadId,
-    rightModule,
-    rightPanelCollapsed
-  ])
-
-  useEffect(() => {
     rendererUnloadBrowserCleanupSentRef.current = false
 
     const handleRendererUnloadBrowserCleanup = (): void => {
       if (rendererUnloadBrowserCleanupSentRef.current) return
       rendererUnloadBrowserCleanupSentRef.current = true
-      console.info(
-        `${BROWSER_APP_LOG_PREFIX} Renderer unload requested BrowserView cleanup; session=${BROWSER_SESSION_ID} browserPanelVisible=${isBrowserPanelVisible}.`
-      )
       window.api.browser.disposeAllForRendererUnload()
     }
 
@@ -91,17 +69,15 @@ export function useBrowserViewLifecycle({
       window.removeEventListener("beforeunload", handleRendererUnloadBrowserCleanup)
       window.removeEventListener("pagehide", handleRendererUnloadBrowserCleanup)
     }
-  }, [isBrowserPanelVisible])
+  }, [])
 
   useEffect(() => {
     if (isBrowserPanelVisible) {
       wasBrowserPanelVisibleRef.current = true
-      console.info(`${BROWSER_APP_LOG_PREFIX} Browser panel became visible; session=${BROWSER_SESSION_ID}.`)
       return
     }
 
     if (!wasBrowserPanelVisibleRef.current) {
-      console.info(`${BROWSER_APP_LOG_PREFIX} Browser panel hidden with no visible Browser session to hide.`)
       return
     }
     wasBrowserPanelVisibleRef.current = false
@@ -119,9 +95,6 @@ export function useBrowserViewLifecycle({
 
       modalDialogOpenRef.current = modalDialogOpen
       window.dispatchEvent(new Event(MODAL_DIALOG_CHANGE_EVENT))
-      console.info(
-        `${BROWSER_APP_LOG_PREFIX} Modal dialog visibility changed: open=${modalDialogOpen}; session=${BROWSER_SESSION_ID}.`
-      )
       if (modalDialogOpen && wasBrowserPanelVisibleRef.current) {
         hideBrowserSession("a modal dialog is open")
       }
@@ -155,9 +128,6 @@ export function useBrowserViewLifecycle({
       if (requestedThreadId && activeThreadId && requestedThreadId !== activeThreadId) return
       if (requestedThreadId && !activeThreadId) return
       onRequestBrowserPanel()
-      console.info(
-        `${BROWSER_APP_LOG_PREFIX} Showing Browser panel for ${requestedThreadId || activeThreadId || "active thread"}.`
-      )
     })
   }, [
     currentThreadId,

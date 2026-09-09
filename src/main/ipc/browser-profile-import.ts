@@ -83,6 +83,36 @@ function sanitizeProfileImportError(error: unknown): string {
   )
 }
 
+function describeBrowserProfileImportResult(result: BrowserProfileImportResult): string {
+  const attempt = result.success ? "succeeded" : "failed"
+  const method = result.importMethod ?? "unknown"
+  const code = result.errorCode ? ` code=${result.errorCode}` : ""
+  const warning = result.warning ? ` warning=${result.warning}` : ""
+  const error = result.error ? ` error=${result.error}` : ""
+  return `${attempt} method=${method} importedCookies=${result.importedCookies} skippedCookies=${result.skippedCookies}${code}${warning}${error}`
+}
+
+function logBrowserProfileImportResult(
+  browserService: BrowserService,
+  result: BrowserProfileImportResult,
+  options: BrowserProfileImportOptions
+): void {
+  const mode = options.autoImport ? "auto" : "manual"
+  const message = `Cookie import ${mode} ${describeBrowserProfileImportResult(result)}`
+  if (result.success && !result.warning) {
+    console.info(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} ${message}`)
+  } else if (result.success) {
+    console.warn(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} ${message}`)
+  } else {
+    console.warn(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} ${message}`)
+  }
+  browserService.appendConsoleEntry({
+    level: result.success && !result.warning ? "info" : "warn",
+    message,
+    sourceId: "BrowserCookieImport"
+  })
+}
+
 function mergeSkippedWebsites(
   ...lists: Array<BrowserProfileImportSkippedWebsite[] | undefined>
 ): BrowserProfileImportSkippedWebsite[] {
@@ -153,18 +183,10 @@ async function startBrowserProfileImportRuntime(): Promise<void> {
   if (browserProfileImportRuntimeStartPromise) return browserProfileImportRuntimeStartPromise
 
   browserProfileImportRuntimeStartPromise = (async () => {
-    console.log(
-      `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} starting browser profile import runtime, enabled=${browserProfileImportActiveForSession}`
-    )
     const server = await getCookieBridgeServer()
     await server.start()
-    console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} cookie bridge server started`)
     try {
-      const registration = await ensureChromeNativeHostRegistration()
-      console.log(
-        `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} native host registration result`,
-        registration
-      )
+      await ensureChromeNativeHostRegistration()
     } catch (error) {
       console.warn(
         `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} registration failed: ${error instanceof Error ? error.message : String(error)}`
@@ -246,9 +268,6 @@ export function stopBrowserProfileImportRuntime(): void {
 function initializeBrowserProfileImportRuntimeForSession(): void {
   const startupConfig = getBrowserCdpConfig()
   browserProfileImportActiveForSession = startupConfig.profileImportEnabled === true
-  console.log(
-    `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} registerBrowserProfileImportHandlers, profileImportEnabled=${startupConfig.profileImportEnabled}, activeForSession=${browserProfileImportActiveForSession}`
-  )
   if (browserProfileImportActiveForSession) {
     void startBrowserProfileImportRuntime().catch((error) => {
       console.warn(
@@ -283,10 +302,12 @@ async function importBrowserProfileData(
   }
 
   if (process.platform === "win32") {
-    return importWindowsCookieData(
+    const result = await importWindowsCookieData(
       browserService,
       options.autoImport ? AUTO_IMPORT_EXPORT_TIMEOUT_MS : undefined
     )
+    logBrowserProfileImportResult(browserService, result, options)
+    return result
   }
 
   try {
@@ -298,7 +319,7 @@ async function importBrowserProfileData(
     const counts = await browserService.importProfileData(imported.data)
     const skippedCookies = counts.skippedCookies + imported.skippedCookies
     const skippedWebsites = mergeSkippedWebsites(imported.skippedWebsites, counts.skippedWebsites)
-    return {
+    const result: BrowserProfileImportResult = {
       success: true,
       sourceBrowser: "chrome",
       importMethod: "profile",
@@ -315,8 +336,12 @@ async function importBrowserProfileData(
             ? "部分 Cookie 因加密、分区或格式限制被跳过"
             : undefined
     }
+    logBrowserProfileImportResult(browserService, result, options)
+    return result
   } catch (error) {
-    return profileImportFailure(sanitizeProfileImportError(error), options)
+    const result = profileImportFailure(sanitizeProfileImportError(error), options)
+    logBrowserProfileImportResult(browserService, result, options)
+    return result
   }
 }
 

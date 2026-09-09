@@ -64,6 +64,12 @@ const BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME =
   "h-8 min-w-8 shrink-0 rounded-md px-1 transition-colors hover:bg-muted"
 const BROWSER_PANEL_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserPanel]`
 const APP_DOWNLOAD_URL = import.meta.env.VITE_APP_DOWNLOAD_URL?.trim()
+const AUTO_COOKIE_IMPORT_RETRY_DELAYS_MS = [1500, 4000, 8000] as const
+const AUTO_COOKIE_IMPORT_RETRYABLE_ERROR_CODES = new Set([
+  "extension_not_connected",
+  "import_timeout",
+  "import_in_progress"
+])
 
 function isInitialBrowserPage(url: string): boolean {
   return !url || url === "about:blank"
@@ -93,19 +99,8 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function formatBounds(bounds: BrowserBounds | null | undefined): string {
-  if (!bounds) return "(none)"
-  return `${bounds.x},${bounds.y} ${bounds.width}x${bounds.height}`
-}
-
-function formatRect(rect: DOMRect | null | undefined): string {
-  if (!rect) return "(none)"
-  return `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)}`
-}
-
-function describeBrowserState(state: BrowserState | null | undefined): string {
-  if (!state) return "(none)"
-  return `created=${state.created} visible=${state.visible} loading=${state.isLoading} url=${state.url || "(empty)"} title=${state.title || "(empty)"}`
+function isAutomaticCookieImportRetryable(errorCode: string | undefined): boolean {
+  return Boolean(errorCode && AUTO_COOKIE_IMPORT_RETRYABLE_ERROR_CODES.has(errorCode))
 }
 
 function detectRendererZoomLevel(): number {
@@ -267,9 +262,9 @@ export function BrowserPanel({
   const isUrlFocusedRef = useRef(false)
   const lastInitialNavigationRef = useRef<string | null>(null)
   const pendingSyncReasonRef = useRef<string | null>(null)
-  const lastObservedStateRef = useRef<BrowserState | null>(null)
   const consoleScrollerRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<BrowserState>(EMPTY_STATE)
+  const [panelError, setPanelError] = useState<string | null>(null)
   const [urlInput, setUrlInput] = useState("")
   const [isUrlFocused, setIsUrlFocused] = useState(false)
   const [isCapturing, setIsCapturing] = useState(false)
@@ -315,8 +310,55 @@ export function BrowserPanel({
   }, [])
 
   const reportBrowserError = useCallback((error: string) => {
-    setState((current) => (current.error === error ? current : { ...current, error }))
+    setPanelError(error)
   }, [])
+
+  const reportBrowserNotice = useCallback((message: string) => {
+    setPanelError(message)
+  }, [])
+
+  const clearBrowserError = useCallback(() => {
+    setPanelError(null)
+    setState((current) => (current.error ? { ...current, error: undefined } : current))
+  }, [])
+
+  const clearPanelError = useCallback(() => {
+    setPanelError(null)
+  }, [])
+
+  const runAutomaticCookieImport = useCallback(async (): Promise<void> => {
+    for (let attempt = 0; attempt <= AUTO_COOKIE_IMPORT_RETRY_DELAYS_MS.length; attempt += 1) {
+      const result = await window.api.browser.importProfileData({
+        autoImport: attempt === 0,
+        importCookies: true,
+        sourceBrowser: "chrome"
+      })
+      if (result.errorCode === "import_in_progress") return
+      if (result.success) {
+        clearPanelError()
+        markBrowserProfileImportFeedback(true)
+        return
+      }
+
+      const message =
+        result.errorCode === "extension_not_connected"
+          ? "Chrome 插件尚未连接"
+          : result.errorCode === "permission_required"
+            ? "Chrome 插件尚未授权读取 Cookie"
+            : result.error || "自动导入 Cookie 未完成"
+      const retryDelay = AUTO_COOKIE_IMPORT_RETRY_DELAYS_MS[attempt]
+      console.warn(
+        `${BROWSER_PANEL_LOG_PREFIX} Automatic Cookie import attempt ${attempt + 1} failed: ${message}`
+      )
+      if (retryDelay === undefined || !isAutomaticCookieImportRetryable(result.errorCode)) {
+        reportBrowserError(`未能自动导入 Cookie：${message}。请重启 Chrome 后点击钥匙按钮手动重试。`)
+        markBrowserProfileImportFeedback(false)
+        return
+      }
+      reportBrowserNotice(`自动导入 Cookie 暂未完成：${message}，正在重试...`)
+      await new Promise((resolve) => window.setTimeout(resolve, retryDelay))
+    }
+  }, [clearPanelError, markBrowserProfileImportFeedback, reportBrowserError, reportBrowserNotice])
 
   useEffect(() => {
     let cancelled = false
@@ -341,43 +383,24 @@ export function BrowserPanel({
   }, [reportBrowserError])
 
   useEffect(() => {
-    console.info(
-      `${BROWSER_PANEL_LOG_PREFIX} Subscribing to Browser state channel for ${BROWSER_SESSION_ID}.`
-    )
     const unsubscribe = window.api.browser.onState((nextState) => {
-      const previousState = lastObservedStateRef.current
-      if (!previousState || !browserStatesEqual(previousState, nextState)) {
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} State update for ${BROWSER_SESSION_ID}: prev={${describeBrowserState(previousState)}} next={${describeBrowserState(nextState)}}.`
-        )
-      }
-      lastObservedStateRef.current = nextState
       applyBrowserState(nextState)
       if (!isUrlFocusedRef.current) {
         setUrlInput(getBrowserAddressValue(nextState.url))
       }
     })
     return () => {
-      console.info(
-        `${BROWSER_PANEL_LOG_PREFIX} Unsubscribing Browser state channel for ${BROWSER_SESSION_ID}.`
-      )
       unsubscribe()
     }
   }, [applyBrowserState])
 
   const syncBounds = useCallback(
-    (reason: string) => {
+    (_reason: string) => {
       if (!isSessionCreatedRef.current) {
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; session not created.`
-        )
         return
       }
       const element = viewportRef.current
       if (!element) {
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport missing.`
-        )
         return
       }
       const rect = element.getBoundingClientRect()
@@ -397,9 +420,6 @@ export function BrowserPanel({
       const initialBrowserPage = isInitialBrowserPageRef.current
       const visible = layoutVisible && !modalDialogOpen && !initialBrowserPage
       if (!layoutVisible && hasVisibleBoundsRef.current) {
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport hidden after first visible; rect=${formatRect(rect)} zoom=${zoomLevel} lastBounds=${formatBounds(lastBoundsRef.current)}.`
-        )
         return
       }
       if (
@@ -408,14 +428,9 @@ export function BrowserPanel({
       ) {
         return
       }
-      const previousBounds = lastBoundsRef.current
-      const previousVisible = lastBrowserViewVisibleRef.current
       lastBoundsRef.current = bounds
       lastBrowserViewVisibleRef.current = visible
       if (layoutVisible) hasVisibleBoundsRef.current = true
-      console.info(
-        `${BROWSER_PANEL_LOG_PREFIX} Syncing bounds for ${BROWSER_SESSION_ID}; reason=${reason}; rect=${formatRect(rect)} zoom=${zoomLevel} nextBounds=${formatBounds(bounds)} nextVisible=${visible} modalDialogOpen=${modalDialogOpen} initialBrowserPage=${initialBrowserPage} prevBounds=${formatBounds(previousBounds)} prevVisible=${previousVisible ?? "(none)"} hasVisibleOnce=${hasVisibleBoundsRef.current}.`
-      )
       void window.api.browser
         .setBounds(bounds, visible)
         .then(applyBrowserState)
@@ -452,10 +467,6 @@ export function BrowserPanel({
       }
     }
 
-    console.info(
-      `${BROWSER_PANEL_LOG_PREFIX} Mounting BrowserPanel for ${BROWSER_SESSION_ID}; workspacePath=${workspacePath || "(none)"} initialUrl=${initialUrl || "(none)"} reloadToken=${reloadToken ?? "(none)"}.`
-    )
-    console.info(`${BROWSER_PANEL_LOG_PREFIX} Attaching Browser session ${BROWSER_SESSION_ID}.`)
     window.api.browser
       .attach({ workspacePath, visible: false })
       .then((nextState) => {
@@ -468,27 +479,7 @@ export function BrowserPanel({
           .then((enabled) => {
             if (cancelled || !enabled || autoImportTriggeredRef.current) return null
             autoImportTriggeredRef.current = true
-            return window.api.browser.importProfileData({
-              autoImport: true,
-              importCookies: true,
-              sourceBrowser: "chrome"
-            })
-          })
-          .then((result) => {
-            if (cancelled || !result) return
-            if (result.errorCode === "import_in_progress") return
-            if (!result.success) {
-              const message =
-                result.errorCode === "extension_not_connected"
-                  ? "Chrome 插件尚未连接"
-                  : result.errorCode === "permission_required"
-                    ? "Chrome 插件尚未授权读取 Cookie"
-                    : result.error || "自动导入 Cookie 未完成"
-              reportBrowserError(`自动导入 Cookie 未完成：${message}`)
-              markBrowserProfileImportFeedback(false)
-              return
-            }
-            markBrowserProfileImportFeedback(true)
+            return runAutomaticCookieImport()
           })
           .catch((error) => {
             if (cancelled) return
@@ -497,9 +488,6 @@ export function BrowserPanel({
             reportBrowserError(`自动导入 Cookie 未完成：${message}`)
             markBrowserProfileImportFeedback(false)
           })
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Browser session ${BROWSER_SESSION_ID} attached with state={${describeBrowserState(nextState)}}.`
-        )
       })
       .catch((error) => {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Browser attach failed: ${formatError(error)}`)
@@ -514,9 +502,6 @@ export function BrowserPanel({
     window.addEventListener("scroll", handleScroll, true)
 
     return () => {
-      console.info(
-        `${BROWSER_PANEL_LOG_PREFIX} Unmounting BrowserPanel for ${BROWSER_SESSION_ID}; lastBounds=${formatBounds(lastBoundsRef.current)} lastVisible=${lastBrowserViewVisibleRef.current ?? "(none)"} localState={${describeBrowserState(lastObservedStateRef.current)}}.`
-      )
       cancelled = true
       for (const timer of timers) window.clearTimeout(timer)
       observer.disconnect()
@@ -532,6 +517,7 @@ export function BrowserPanel({
     markBrowserProfileImportFeedback,
     reloadToken,
     reportBrowserError,
+    runAutomaticCookieImport,
     syncBounds,
     workspacePath
   ])
@@ -610,7 +596,6 @@ export function BrowserPanel({
     if (lastInitialNavigationRef.current === key) return
     lastInitialNavigationRef.current = key
 
-    console.info(`${BROWSER_PANEL_LOG_PREFIX} Opening initial URL ${target}.`)
     window.api.browser
       .navigate(target, { workspacePath })
       .then((nextState) => {
@@ -622,9 +607,6 @@ export function BrowserPanel({
         if (!isUrlFocusedRef.current) {
           setUrlInput(nextState.url || target)
         }
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Initial URL opened as ${nextState.url || target}.`
-        )
       })
       .catch((error) => {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Initial URL open failed: ${formatError(error)}`)
@@ -645,7 +627,6 @@ export function BrowserPanel({
           return
         }
         setUrlInput(nextState.url || target)
-        console.info(`${BROWSER_PANEL_LOG_PREFIX} Navigated to ${nextState.url || target}.`)
       } catch (error) {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Navigation failed: ${formatError(error)}`)
         reportBrowserError(formatError(error) || "页面加载失败")
@@ -747,13 +728,16 @@ export function BrowserPanel({
               ? "Chrome插件未连接！"
               : result.errorCode === "permission_required"
                 ? "Chrome插件未授权！"
-                : result.error || "浏览器数据导入失败"
+                : result.error
+                  ? `${result.error}。请重启 Chrome 后再手动重试。`
+                  : "浏览器数据导入失败，请重启 Chrome 后再手动重试。"
         reportBrowserError(message)
         markBrowserProfileImportFeedback(false)
         return
       }
 
       applyBrowserState(await window.api.browser.getState())
+      clearPanelError()
       markBrowserProfileImportFeedback(true)
     } catch (error) {
       const message = formatError(error) || "浏览器数据导入失败"
@@ -765,6 +749,7 @@ export function BrowserPanel({
     }
   }, [
     applyBrowserState,
+    clearPanelError,
     isProfileImportRuntimeEnabled,
     markBrowserProfileImportFeedback,
     reportBrowserError,
@@ -788,6 +773,7 @@ export function BrowserPanel({
 
   const consoleCount = state.consoleEntries.length
   const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
+  const visibleError = panelError || state.error
   const consoleToggleTitle = latestConsoleEntry ? `控制台 (${consoleCount})` : "控制台"
   const browserProfileImportDisabled =
     isImportingBrowserProfile || !state.created || !isProfileImportRuntimeEnabled
@@ -922,10 +908,17 @@ export function BrowserPanel({
         />
       </div>
 
-      {state.error && (
+      {visibleError && (
         <div className="flex shrink-0 items-center gap-2 border-b border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <ShieldAlert className="size-4 shrink-0" strokeWidth={1.8} />
-          <span className="min-w-0 truncate">{state.error}</span>
+          <span className="min-w-0 flex-1 truncate">{visibleError}</span>
+          <IconPopoverButton
+            className="size-6 shrink-0 rounded transition-colors hover:bg-destructive/10"
+            icon={<X className="size-3.5" strokeWidth={2} />}
+            popoverContent="关闭错误提示"
+            aria-label="关闭错误提示"
+            onClick={clearBrowserError}
+          />
         </div>
       )}
 

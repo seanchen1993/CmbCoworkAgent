@@ -81,10 +81,7 @@ function registerBrowserRendererLifecycleIpc({
       return
     }
 
-    const disposedSessionId = browserService.disposeAll()
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Renderer unload cleanup requested by sender ${event.sender.id}; disposed=${disposedSessionId ?? "(none)"}.`
-    )
+    browserService.disposeAll()
   })
 }
 
