@@ -57,6 +57,7 @@ interface ConversationPresencePageSummary {
   total: number
   hasVisibleMessages?: boolean
   legacyCheckpointMigrationStatus?: "migrating" | "complete" | null
+  legacyMessageTimesPending?: boolean
 }
 
 export const THREAD_HISTORY_HYDRATION_MAX_AUTO_RETRIES = 6
@@ -171,7 +172,9 @@ export function shouldBootstrapLegacyCheckpointTranscript(
   // non-empty; it does not prove that an older checkpoint prefix was copied.
   // The durable table becomes the full transcript authority only after the
   // one-time migration marker is complete.
-  return page.legacyCheckpointMigrationStatus !== "complete"
+  return (
+    page.legacyCheckpointMigrationStatus !== "complete" || page.legacyMessageTimesPending === true
+  )
 }
 
 export function shouldAwaitCheckpointConversationPresence(

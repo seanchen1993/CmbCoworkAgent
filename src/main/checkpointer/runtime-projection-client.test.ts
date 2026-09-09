@@ -1073,6 +1073,9 @@ describe("checkpoint runtime projection worker", () => {
     })
     const legacyDatabase = new DatabaseSync(databasePath)
     legacyDatabase.exec("ALTER TABLE checkpoint_message_snapshots DROP COLUMN generation")
+    legacyDatabase.exec(
+      "DELETE FROM checkpoint_schema_migrations WHERE migration_id = 'checkpoint-message-generation-v1'"
+    )
     legacyDatabase.close()
 
     const client = createClient()

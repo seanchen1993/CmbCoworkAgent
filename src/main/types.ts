@@ -224,6 +224,8 @@ export interface Message {
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number
+  /** Storage provenance; legacy or lossy previews must not become checkpoint authority. */
+  recovery_integrity?: "verified" | "unverified"
   reasoning?: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
@@ -362,8 +364,12 @@ export interface ThreadMessagesPage {
    * conversation can be trusted; `complete` makes the durable table authoritative.
    */
   legacyCheckpointMigrationStatus?: "migrating" | "complete" | null
+  /** Older completed imports may still need the worker's one-time timing backfill. */
+  legacyMessageTimesPending?: boolean
   /** Durable rows represented by bounded previews because their payload exceeded the page budget. */
   truncatedMessageIds?: string[]
+  /** Present only on recovery reads, after checking every returned row's storage provenance. */
+  recoveryIntegrity?: "verified" | "unverified"
 }
 
 export interface ThreadLegacyCheckpointMigrationStats {

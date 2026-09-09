@@ -1,5 +1,9 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite"
 import { existsSync } from "node:fs"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { ensureMessageSnapshotGeneration as migrateMessageSnapshotGeneration } from "./message-snapshot-schema"
+import { migrateLegacyMessageTimes } from "./legacy-message-times"
+import { isLosslessTranscriptPayload } from "../../shared/transcript-recovery-integrity"
 import { randomUUID } from "node:crypto"
 import type {
   CheckpointRuntimeProjectionStats,
@@ -828,36 +832,12 @@ function exactSourceIsStillLatest(
 }
 
 function ensureMessageSnapshotGeneration(database: DatabaseSync): void {
-  let transactionStarted = false
-  try {
-    database.exec("BEGIN IMMEDIATE")
-    transactionStarted = true
-    const columns = database
-      .prepare("PRAGMA table_info(checkpoint_message_snapshots)")
-      .all() as Array<{ name?: unknown }>
-    if (!columns.some((column) => column.name === "generation")) {
-      database.exec(
-        `ALTER TABLE checkpoint_message_snapshots
-         ADD COLUMN generation TEXT NOT NULL DEFAULT ''`
-      )
-    }
-    database.exec(
-      `UPDATE checkpoint_message_snapshots
-       SET generation = lower(hex(randomblob(16)))
-       WHERE generation IS NULL OR typeof(generation) != 'text' OR length(generation) = 0`
-    )
-    database.exec("COMMIT")
-    transactionStarted = false
-  } catch (error) {
-    if (transactionStarted) {
-      try {
-        database.exec("ROLLBACK")
-      } catch {
-        // Keep the original migration failure.
-      }
-    }
-    throw error
-  }
+  database.exec(`CREATE TABLE IF NOT EXISTS checkpoint_schema_migrations (
+    migration_id TEXT PRIMARY KEY,
+    applied_at INTEGER NOT NULL
+  )`)
+  // The adapter borrows this connection; the worker retains its ownership.
+  migrateMessageSnapshotGeneration(new NativeSqliteAdapter(database))
 }
 
 /**
@@ -1179,6 +1159,7 @@ function hydrateRawCheckpointMessages(
 }
 
 interface DurableLegacyCheckpointMessage {
+  recoveryIntegrity: number
   messageId: string
   providerSourceId: string | null
   providerOccurrence: number | null
@@ -1323,6 +1304,15 @@ function buildDurableLegacyCheckpointMessages(
     const providerTuple =
       role === "assistant" ? getMessageProviderTupleFromMetadata(additionalKwargs) : undefined
     candidates.push({
+      recoveryIntegrity:
+        content === rawContent &&
+        !kwargs.reasoning &&
+        !additionalKwargs.reasoning &&
+        isLosslessTranscriptPayload(content, toolCalls) &&
+        contentJson === rawContentJson &&
+        toolCallsJson === rawToolCallsJson
+          ? 1
+          : 0,
       id: sourceId,
       content,
       ...providerTuple,
@@ -1342,6 +1332,7 @@ function buildDurableLegacyCheckpointMessages(
     })
   }
   return normalizeCompleteSnapshotMessageIds([], candidates).map((message) => ({
+    recoveryIntegrity: message.recoveryIntegrity,
     messageId: message.id,
     providerSourceId: message.provider_source_id ?? null,
     providerOccurrence: message.provider_occurrence ?? null,
@@ -1417,6 +1408,9 @@ function migrateLegacyMessagesIntoDurableRows(input: {
       .get(input.threadId) as Record<string, unknown> | undefined
     const sameMigration = existingState?.checkpoint_id === input.checkpointId
     if (sameMigration && existingState?.status === "complete") {
+      migrateLegacyMessageTimes(database, input.threadId, input.checkpointId, input.messages, () =>
+        throwIfCancelled(input.cancellation)
+      )
       return {
         checkpointId: input.checkpointId,
         totalMessages: input.messages.length,
@@ -1505,12 +1499,18 @@ function migrateLegacyMessagesIntoDurableRows(input: {
       | undefined
     let offset = Math.max(0, Number(state?.next_index) || 0)
     let fragmentOffset = Math.max(0, Number(state?.current_fragment_index) || 0)
+    const hasRecoveryIntegrity = database
+      .prepare("PRAGMA table_info(thread_messages)")
+      .all()
+      .some((column) => column.name === "recovery_integrity")
     const insert = database.prepare(
       `INSERT OR IGNORE INTO thread_messages (
          thread_id, message_id, provider_source_id, provider_occurrence, role,
          content_json, tool_calls_json, tool_call_id, name, status, is_error,
          content_priority, goal_id, active_window_id, created_at, start_at, end_at, ordinal
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?)`
+         ${hasRecoveryIntegrity ? ", recovery_integrity" : ""}
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?
+         ${hasRecoveryIntegrity ? ", ?" : ""})`
     )
     const moveReservedDuplicate = database.prepare(
       `UPDATE thread_messages
@@ -1578,7 +1578,8 @@ function migrateLegacyMessagesIntoDurableRows(input: {
               fragmentMessage.status,
               fragmentMessage.isError,
               fragmentMessage.createdAt,
-              offset
+              offset,
+              ...(hasRecoveryIntegrity ? [fragmentMessage.recoveryIntegrity] : [])
             )
             insertedMessage = Number(inserted.changes)
             if (insertedMessage === 0) {
@@ -1729,11 +1730,17 @@ function migrateLegacyMessagesIntoDurableRows(input: {
             message.status,
             message.isError,
             message.createdAt,
-            index
+            index,
+            ...(hasRecoveryIntegrity ? [message.recoveryIntegrity] : [])
           )
           insertedInBatch += Number(inserted.changes)
           if (Number(inserted.changes) === 0) {
-            moveReservedDuplicate.run(index, input.threadId, message.messageId, input.messages.length)
+            moveReservedDuplicate.run(
+              index,
+              input.threadId,
+              message.messageId,
+              input.messages.length
+            )
           }
         }
         database
@@ -1820,6 +1827,9 @@ function migrateLegacyMessagesIntoDurableRows(input: {
       }
     }
 
+    migrateLegacyMessageTimes(database, input.threadId, input.checkpointId, input.messages, () =>
+      throwIfCancelled(input.cancellation)
+    )
     return {
       checkpointId: input.checkpointId,
       totalMessages: input.messages.length,
@@ -2507,17 +2517,13 @@ function inspectBoundedCheckpointMessageSource(
        WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
        LIMIT 1`
     )
-    .get(row.threadId, row.checkpointNs, row.checkpointId) as
-    | Record<string, unknown>
-    | undefined
+    .get(row.threadId, row.checkpointNs, row.checkpointId) as Record<string, unknown> | undefined
   if (!source) {
     throw new Error("[CheckpointRuntimeWorker] Checkpoint changed during bounded read")
   }
   const sourceType = typeof source.type === "string" ? source.type : "json"
   if (sourceType !== "json") {
-    throw new Error(
-      `[CheckpointRuntimeWorker] Unsupported checkpoint serialization: ${sourceType}`
-    )
+    throw new Error(`[CheckpointRuntimeWorker] Unsupported checkpoint serialization: ${sourceType}`)
   }
   if (source.message_type === "array") {
     const messageCount = Number(source.inline_count)

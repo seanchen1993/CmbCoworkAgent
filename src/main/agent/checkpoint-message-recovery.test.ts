@@ -45,6 +45,7 @@ function page(
     hasMore: false,
     total: messages.length,
     legacyCheckpointMigrationStatus: "complete",
+    recoveryIntegrity: "verified",
     ...options
   }
 }
@@ -147,6 +148,45 @@ function insertHydrationMessage(
 }
 
 describe("checkpoint message recovery source", () => {
+  it("preserves multimodal content and exact tool arguments during interrupt recovery", async () => {
+    const content = [
+      { type: "text", text: "inspect this image" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,audit" } }
+    ] as unknown as Message["content"]
+    const toolCalls = [{ id: "tool-1", name: "inspect", args: { options: { detail: "high" } } }]
+    readPageMock.mockResolvedValue(
+      page([
+        { ...persistedMessage("u-1"), content },
+        { ...persistedMessage("a-1", "assistant"), tool_calls: toolCalls }
+      ])
+    )
+    const recovered = await recoverMainCheckpointMessages(recoveryContext({ interrupt: true }))
+    expect(recovered?.complete).toBe(true)
+    expect(recovered?.messages[0]).toMatchObject({ content })
+    expect(recovered?.messages[1]).toMatchObject({ tool_calls: toolCalls })
+  })
+
+  it.each([undefined, "unverified"] as const)(
+    "rejects uncertified storage even when the complete page fits (%s)",
+    async (recoveryIntegrity) => {
+      readPageMock.mockResolvedValue(
+        page(
+          [
+            persistedMessage("u-1"),
+            {
+              ...persistedMessage("a-1", "assistant"),
+              tool_calls: [{ id: "tool-1", name: "inspect", args: { nested: "[Object]" } }]
+            }
+          ],
+          { recoveryIntegrity }
+        )
+      )
+      await expect(
+        recoverMainCheckpointMessages(recoveryContext({ interrupt: true }))
+      ).resolves.toBeNull()
+    }
+  )
+
   it("uses a bounded checkpoint fence and removes duplicate durable ids", async () => {
     readPageMock.mockImplementation(async (_threadId, options) => {
       expect(options).toMatchObject({

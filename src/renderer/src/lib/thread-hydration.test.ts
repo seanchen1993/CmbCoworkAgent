@@ -249,6 +249,21 @@ describe("thread conversation presence hydration", () => {
     ).toBe("nonempty")
   })
 
+  it("revisits completed legacy imports only while their timing backfill is pending", () => {
+    const page = {
+      total: 2,
+      hasVisibleMessages: true,
+      legacyCheckpointMigrationStatus: "complete" as const,
+      legacyMessageTimesPending: true
+    }
+    expect(shouldBootstrapLegacyCheckpointTranscript(page)).toBe(true)
+    expect(shouldAwaitCheckpointConversationPresence(page)).toBe(false)
+    expect(shouldKeepMainTranscriptLoadingAfterPage({ succeeded: true, page })).toBe(true)
+    expect(
+      shouldBootstrapLegacyCheckpointTranscript({ ...page, legacyMessageTimesPending: false })
+    ).toBe(false)
+  })
+
   it("keeps an unmarked internal-only legacy page unknown until checkpoint restore", () => {
     const ambiguousLegacyPage = {
       total: 3,
