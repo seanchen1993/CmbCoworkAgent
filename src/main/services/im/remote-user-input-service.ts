@@ -653,11 +653,17 @@ export class ImRemoteUserInputService {
     }
   }
 
+  /**
+   * The desktop answered, or the run was cancelled. The form in Zhaohu is still
+   * showing a live submit button, so it has to be closed here too — otherwise
+   * the next person to scroll back submits into a request that ended long ago.
+   */
   private removeSession(requestId: string): void {
     const session = this.sessions.get(requestId)
     if (!session) return
     this.sessions.delete(requestId)
     if (this.codes.get(session.code) === session) this.codes.delete(session.code)
+    this.resolveCardFor(session, "已在桌面处理")
   }
 
   private drainReplies(): void {

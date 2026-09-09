@@ -117,6 +117,11 @@ export class ImCardPublisher {
   async resolve(interactionId: string, content: CardComponent[]): Promise<boolean> {
     const cardVersion = this.dependencies.interactions.nextCardVersion(interactionId)
     if (cardVersion === null) return false
+    // Released before the await, not after it. Two paths can close the same
+    // card almost at once — a click deciding it and the desktop noticing the
+    // request is gone — and releasing later leaves a window where the second
+    // one claims a higher version and lands the wrong terminal wording.
+    this.dependencies.interactions.release(interactionId)
     try {
       const update: RemoteImCardUpdateV1 = {
         schemaVersion: 1,
@@ -136,8 +141,6 @@ export class ImCardPublisher {
     } catch (error) {
       this.dependencies.warn("Zhaohu interaction card could not be updated.", error)
       return false
-    } finally {
-      this.dependencies.interactions.release(interactionId)
     }
   }
 
