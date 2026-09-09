@@ -45,7 +45,11 @@ import {
 import { SkillDisabledMutationCoordinator } from "@/lib/skill-disabled-mutation-coordinator"
 import { SKILL_PLUGIN_CATALOG_RENDER_BATCH } from "@/lib/skill-plugin-catalog"
 import { marketApi, type MarketItem } from "../../api/market"
-import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
+import {
+  buildUploaderIdCandidates,
+  DEFAULT_SCENE_CATEGORY,
+  getUploaderIdCandidates
+} from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
 import { UniversalUploadDialog } from "./MarketPanel/UniversalUploadDialog"
 import { toast } from "sonner"
@@ -90,18 +94,19 @@ type SkillMarketInfo = Pick<
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
 type PublishSuccessPayload = { skillName: string; mode: PublishMode }
+type CustomSkillOwnershipGroup = "uploaded" | "market" | "org"
 type UploadedItemRecord = {
   name: string
   type: "skill" | "mcp" | "plugin"
   uploadedAt?: string
 }
-type LocalUploadedSkillPathRecord = {
-  path: string
-  uploadedAt?: string
-}
 type EditedSkillPathRecord = {
   path: string
   editedAt?: string
+}
+type UserInfoLite = {
+  sapId?: string | null
+  ystId?: string | null
 }
 
 const KNOWN_TEXT_EXTS = new Set([
@@ -142,7 +147,6 @@ const KNOWN_TEXT_EXTS = new Set([
   "log"
 ])
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
-const LOCAL_UPLOADED_SKILL_PATHS_KEY = "skills_panel_uploaded_skill_paths"
 const EDITED_SKILL_PATHS_KEY = "skills_panel_edited_skill_paths"
 const DEFAULT_SKILL_VERSION = "v1.0.0"
 
@@ -156,43 +160,6 @@ function normalizeSkillPathKey(skillPath: string): string {
     .replace(/\\/g, "/")
     .trim()
     .toLowerCase()
-}
-
-function isSkillPathCoveredByUploadedPath(
-  skillPath: string,
-  uploadedPaths: ReadonlySet<string>
-): boolean {
-  const skillPathKey = normalizeSkillPathKey(skillPath)
-  if (!skillPathKey) return false
-  for (const uploadedPath of uploadedPaths) {
-    if (!uploadedPath) continue
-    const uploadedRoot = uploadedPath.endsWith("/skill.md")
-      ? normalizeSkillPathKey(getSkillDir(uploadedPath))
-      : uploadedPath
-    if (
-      skillPathKey === uploadedPath ||
-      skillPathKey === uploadedRoot ||
-      skillPathKey.startsWith(`${uploadedRoot}/`)
-    ) {
-      return true
-    }
-  }
-  return false
-}
-
-/**
- * 统一目录名 Key，用于把 upload 返回的目录名与 skills.list() 结果做匹配。
- */
-function normalizeDirNameKey(dirName: string): string {
-  return (
-    String(dirName || "")
-      .replace(/\\/g, "/")
-      .split("/")
-      .filter(Boolean)
-      .pop()
-      ?.trim()
-      .toLowerCase() || ""
-  )
 }
 
 /**
@@ -251,79 +218,6 @@ function readOrgInstalledSkillNamesFromStorage(): Set<string> {
   }
 
   return names
-}
-
-function readMarketInstalledSkillNamesFromStorage(): Set<string> {
-  const names = new Set<string>()
-
-  for (const name of marketInstalledSourceStorage.getNames("skill")) {
-    const normalized = normalizeSkillName(name)
-    if (normalized) names.add(normalized)
-  }
-
-  const versionRecords = marketInstalledVersionStorage.getRecords().skill || {}
-  for (const name of Object.keys(versionRecords)) {
-    const normalized = normalizeSkillName(name)
-    if (normalized) names.add(normalized)
-  }
-
-  return names
-}
-
-/**
- * 读取“通过 SkillsPanel 上传过”的技能路径集合。
- * 该集合用于判定：这是“我自己上传”的技能，而不是从市场安装来的技能。
- */
-function readLocalUploadedSkillPathSetFromStorage(): Set<string> {
-  try {
-    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
-    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
-    if (!Array.isArray(parsed)) return new Set()
-
-    const paths = new Set<string>()
-    for (const item of parsed) {
-      if (!item?.path) continue
-      paths.add(normalizeSkillPathKey(item.path))
-    }
-    return paths
-  } catch (storageError) {
-    console.warn("[SkillsPanel] Failed to read local uploaded skill paths:", storageError)
-    return new Set()
-  }
-}
-
-/**
- * 记录“该技能是从 SkillsPanel 上传”的来源标记。
- */
-function markLocalUploadedSkillPathInStorage(skillPath: string): void {
-  try {
-    const keyPath = normalizeSkillPathKey(skillPath)
-    if (!keyPath) return
-    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
-    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
-    const records = Array.isArray(parsed) ? parsed : []
-    const next = records.filter((item) => normalizeSkillPathKey(item?.path || "") !== keyPath)
-    next.push({ path: skillPath, uploadedAt: new Date().toISOString() })
-    localStorage.setItem(LOCAL_UPLOADED_SKILL_PATHS_KEY, JSON.stringify(next))
-  } catch (storageError) {
-    console.warn("[SkillsPanel] Failed to mark local uploaded skill path:", storageError)
-  }
-}
-
-/**
- * 删除技能时同步移除本地上传来源标记，防止脏数据累积。
- */
-function removeLocalUploadedSkillPathFromStorage(skillPath: string): void {
-  try {
-    const keyPath = normalizeSkillPathKey(skillPath)
-    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
-    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
-    const records = Array.isArray(parsed) ? parsed : []
-    const next = records.filter((item) => normalizeSkillPathKey(item?.path || "") !== keyPath)
-    localStorage.setItem(LOCAL_UPLOADED_SKILL_PATHS_KEY, JSON.stringify(next))
-  } catch (storageError) {
-    console.warn("[SkillsPanel] Failed to remove local uploaded skill path:", storageError)
-  }
 }
 
 /**
@@ -405,6 +299,16 @@ function getSkillCategory(skill: SkillMetadata, marketInfo: SkillMarketInfo | un
 
 function isFeaturedSkill(marketInfo: SkillMarketInfo | undefined): boolean {
   return marketInfo?.featured === "精品"
+}
+
+function doesSkillMarketInfoBelongToCurrentUser(
+  marketInfo: SkillMarketInfo | undefined,
+  currentUserIdCandidates: ReadonlySet<string>
+): boolean {
+  if (!marketInfo?.user_id || currentUserIdCandidates.size === 0) return false
+  return getUploaderIdCandidates(marketInfo.user_id).some((candidate) =>
+    currentUserIdCandidates.has(candidate)
+  )
 }
 
 function splitMarkdownFrontmatter(
@@ -831,6 +735,14 @@ function countSkillTreeSkills(node: SkillTreeNode): number {
     (node.skill ? 1 : 0) +
     node.children.reduce((sum, child) => sum + countSkillTreeSkills(child), 0)
   )
+}
+
+function getSkillTreePathKey(skill: SkillMetadata): string {
+  return getSkillTreePath(skill)
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => normalizeSkillId(segment))
+    .join("/")
 }
 
 function splitSkillsByEnabled(
@@ -1488,6 +1400,7 @@ export function SkillsPanel(): React.JSX.Element {
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
   const [skillFilesMap, setSkillFilesMap] = useState<Record<string, string[]>>({})
   const [marketSkillMap, setMarketSkillMap] = useState<Record<string, SkillMarketInfo>>({})
+  const [marketSkillCatalogReady, setMarketSkillCatalogReady] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<SkillMetadata | null>(null)
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const [selectedFileContent, setSelectedFileContent] = useState<string | null>(null)
@@ -1515,15 +1428,11 @@ export function SkillsPanel(): React.JSX.Element {
   const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
     readUploadedSkillNamesFromStorage()
   )
-  const [localUploadedSkillPaths, setLocalUploadedSkillPaths] = useState<Set<string>>(() =>
-    readLocalUploadedSkillPathSetFromStorage()
-  )
   const [orgInstalledSkillNames, setOrgInstalledSkillNames] = useState<Set<string>>(() =>
     readOrgInstalledSkillNamesFromStorage()
   )
-  const [marketInstalledSkillNames, setMarketInstalledSkillNames] = useState<Set<string>>(() =>
-    readMarketInstalledSkillNamesFromStorage()
-  )
+  const [currentUserIdCandidates, setCurrentUserIdCandidates] = useState<Set<string>>(new Set())
+  const [currentUserIdCandidatesReady, setCurrentUserIdCandidatesReady] = useState(false)
   const [editedSkillPaths, setEditedSkillPaths] = useState<Set<string>>(() =>
     readEditedSkillPathSetFromStorage()
   )
@@ -1583,7 +1492,6 @@ export function SkillsPanel(): React.JSX.Element {
       }
       if (generation === skillRefreshGeneration.current) {
         setSkills(snapshot.localSkills)
-        setMarketInstalledSkillNames(readMarketInstalledSkillNamesFromStorage())
         setOrgInstalledSkillNames(readOrgInstalledSkillNamesFromStorage())
         if (disabledAuthorityRevision === disabledSkillAuthorityRevisionRef.current) {
           publishDisabledSkillSnapshot(
@@ -1630,24 +1538,50 @@ export function SkillsPanel(): React.JSX.Element {
     setUploadedSkillNames(readUploadedSkillNamesFromStorage())
   }, [])
 
-  const reloadLocalUploadedSkillPaths = useCallback(() => {
-    setLocalUploadedSkillPaths(readLocalUploadedSkillPathSetFromStorage())
-  }, [])
-
   const reloadOrgInstalledSkillNames = useCallback(() => {
     setOrgInstalledSkillNames(readOrgInstalledSkillNamesFromStorage())
-  }, [])
-
-  const reloadMarketInstalledSkillNames = useCallback(() => {
-    setMarketInstalledSkillNames(readMarketInstalledSkillNamesFromStorage())
   }, [])
 
   const reloadEditedSkillPaths = useCallback(() => {
     setEditedSkillPaths(readEditedSkillPathSetFromStorage())
   }, [])
 
+  const loadCurrentUserIdCandidates = useCallback(async () => {
+    try {
+      setCurrentUserIdCandidatesReady(false)
+      if (typeof window.api?.models?.getUserInfo !== "function") {
+        setCurrentUserIdCandidates(new Set())
+        setCurrentUserIdCandidatesReady(true)
+        return
+      }
+      const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
+      const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+      setCurrentUserIdCandidates(
+        new Set(normalizedIds.flatMap((id) => buildUploaderIdCandidates(id)))
+      )
+    } catch (error) {
+      console.warn("[SkillsPanel] Failed to load current user id candidates:", error)
+      setCurrentUserIdCandidates(new Set())
+    } finally {
+      setCurrentUserIdCandidatesReady(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadCurrentUserIdCandidates()
+    const unsubscribeLogin = window.electron?.ipcRenderer?.on?.("notify-login-msg", () => {
+      void loadCurrentUserIdCandidates()
+    })
+    return () => {
+      unsubscribeLogin?.()
+    }
+  }, [loadCurrentUserIdCandidates])
+
   const loadMarketSkills = useCallback(async () => {
     try {
+      setMarketSkillCatalogReady(false)
       const res = await marketApi.getSkills()
       const items = res.success && res.data ? res.data : []
       const next: Record<string, SkillMarketInfo> = {}
@@ -1685,6 +1619,7 @@ export function SkillsPanel(): React.JSX.Element {
         }
       }
       setMarketSkillMap(next)
+      setMarketSkillCatalogReady(true)
     } catch (e) {
       console.warn("[SkillsPanel] Failed to load market skills:", e)
     }
@@ -1766,12 +1701,18 @@ export function SkillsPanel(): React.JSX.Element {
   const shouldHideMarketInstalledFeaturedFiles = useCallback(
     (skill: SkillMetadata): boolean => {
       if (skill.source !== "user") return false
-      const localMarked = isSkillPathCoveredByUploadedPath(skill.path, localUploadedSkillPaths)
-      const uploadedByMe = uploadedSkillNames.has(normalizeSkillName(skill.name))
-      if (localMarked || uploadedByMe) return false
-      return isFeaturedSkill(marketSkillMap[normalizeSkillName(skill.name)])
+      if (!marketSkillCatalogReady || !currentUserIdCandidatesReady) return false
+      const marketInfo = marketSkillMap[normalizeSkillName(skill.name)]
+      if (!marketInfo) return false
+      if (doesSkillMarketInfoBelongToCurrentUser(marketInfo, currentUserIdCandidates)) return false
+      return isFeaturedSkill(marketInfo)
     },
-    [localUploadedSkillPaths, marketSkillMap, uploadedSkillNames]
+    [
+      currentUserIdCandidates,
+      currentUserIdCandidatesReady,
+      marketSkillCatalogReady,
+      marketSkillMap
+    ]
   )
 
   const onToggleSkill = useCallback(
@@ -1886,14 +1827,11 @@ export function SkillsPanel(): React.JSX.Element {
         return
       const res = await window.api.skills.delete(skill.path)
       if (res.success) {
-        removeLocalUploadedSkillPathFromStorage(skill.path)
         removeEditedSkillPathFromStorage(skill.path)
         marketInstalledSourceStorage.removeName(skill.name, "skill")
         marketInstalledVersionStorage.removeVersion(skill.name, "skill")
         marketInstalledSourceStorage.removeName(skill.name, "orgSkill")
         marketInstalledVersionStorage.removeVersion(skill.name, "orgSkill")
-        reloadLocalUploadedSkillPaths()
-        reloadMarketInstalledSkillNames()
         reloadOrgInstalledSkillNames()
         reloadEditedSkillPaths()
         setSelectedSkill(null)
@@ -1912,14 +1850,13 @@ export function SkillsPanel(): React.JSX.Element {
     [
       refreshSkills,
       reloadEditedSkillPaths,
-      reloadLocalUploadedSkillPaths,
-      reloadMarketInstalledSkillNames,
       reloadOrgInstalledSkillNames
     ]
   )
 
   const builtinSkills = useMemo(() => skills.filter((s) => s.source === "project"), [skills])
   const customSkills = useMemo(() => skills.filter((s) => s.source === "user"), [skills])
+  const customSkillOwnershipReady = marketSkillCatalogReady && currentUserIdCandidatesReady
 
   const resolveMarketInfo = useCallback(
     (skill: SkillMetadata): SkillMarketInfo | undefined => {
@@ -1929,21 +1866,78 @@ export function SkillsPanel(): React.JSX.Element {
     [marketSkillMap]
   )
 
-  const isSkillUploadedInPanel = useCallback(
-    (skill: SkillMetadata | null | undefined): boolean => {
-      if (!skill || skill.source !== "user") return false
+  const directCustomSkillOwnershipGroup = useCallback(
+    (skill: SkillMetadata | null | undefined): CustomSkillOwnershipGroup | null => {
+      if (!skill || skill.source !== "user") return null
+      if (!customSkillOwnershipReady) return null
       const normalizedName = normalizeSkillName(skill.name)
-      if (isSkillPathCoveredByUploadedPath(skill.path, localUploadedSkillPaths)) return true
-      if (orgInstalledSkillNames.has(normalizedName)) return false
-      if (marketInstalledSkillNames.has(normalizedName)) return false
-      if (uploadedSkillNames.has(normalizedName)) return true
-      // 不再使用“无市场同名记录即视为本地上传”的兜底：
-      // marketSkillMap 异步加载（含 setTimeout 延迟与接口失败/未返回某项）时，
-      // 该兜底会把“从市场安装的他人技能”误判为“我上传的技能”，从而错误地展示“同步到市场”按钮。
-      // 仅依赖本地路径标记与已发布名称标记这两项正向证据判定归属。
-      return false
+      if (orgInstalledSkillNames.has(normalizedName)) return "org"
+      const marketInfo = marketSkillMap[normalizedName]
+      if (!marketInfo) return "uploaded"
+      return doesSkillMarketInfoBelongToCurrentUser(marketInfo, currentUserIdCandidates)
+        ? "uploaded"
+        : "market"
     },
-    [localUploadedSkillPaths, marketInstalledSkillNames, orgInstalledSkillNames, uploadedSkillNames]
+    [
+      currentUserIdCandidates,
+      customSkillOwnershipReady,
+      marketSkillMap,
+      orgInstalledSkillNames
+    ]
+  )
+
+  const customSkillOwnershipGroups = useMemo(() => {
+    const pathGroup = new Map<string, CustomSkillOwnershipGroup>()
+    const directGroups = new Map<string, CustomSkillOwnershipGroup>()
+
+    for (const skill of customSkills) {
+      const pathKey = getSkillTreePathKey(skill)
+      const directGroup = directCustomSkillOwnershipGroup(skill)
+      if (!pathKey || !directGroup) continue
+      pathGroup.set(pathKey, directGroup)
+      directGroups.set(getSkillMetadataId(skill), directGroup)
+    }
+
+    const next = new Map<string, CustomSkillOwnershipGroup>()
+    const sortedSkills = [...customSkills].sort(
+      (a, b) => getSkillTreePathKey(a).split("/").length - getSkillTreePathKey(b).split("/").length
+    )
+
+    for (const skill of sortedSkills) {
+      const skillId = getSkillMetadataId(skill)
+      const pathKey = getSkillTreePathKey(skill)
+      const directGroup = directGroups.get(skillId)
+      if (!pathKey || !directGroup) continue
+
+      const segments = pathKey.split("/").filter(Boolean)
+      let inheritedGroup: CustomSkillOwnershipGroup | undefined
+      for (let length = segments.length - 1; length > 0; length--) {
+        const ancestorPath = segments.slice(0, length).join("/")
+        const ancestorGroup = pathGroup.get(ancestorPath)
+        if (ancestorGroup) {
+          inheritedGroup = ancestorGroup
+          break
+        }
+      }
+
+      next.set(skillId, inheritedGroup ?? directGroup)
+    }
+
+    return next
+  }, [customSkills, directCustomSkillOwnershipGroup])
+
+  const getCustomSkillOwnershipGroup = useCallback(
+    (skill: SkillMetadata | null | undefined): CustomSkillOwnershipGroup | null => {
+      if (!skill || skill.source !== "user") return null
+      return customSkillOwnershipGroups.get(getSkillMetadataId(skill)) ?? null
+    },
+    [customSkillOwnershipGroups]
+  )
+
+  const isSkillUploadedInPanel = useCallback(
+    (skill: SkillMetadata | null | undefined): boolean =>
+      getCustomSkillOwnershipGroup(skill) === "uploaded",
+    [getCustomSkillOwnershipGroup]
   )
 
   /**
@@ -1963,16 +1957,17 @@ export function SkillsPanel(): React.JSX.Element {
     [resolveMarketInfo, selectedSkill]
   )
   /**
-   * “我自己在 SkillsPanel 上传”的判定：
-   * 优先依赖本地路径标记；其次兜底为“用户技能且市场中无同名项”（历史数据兼容）。
+   * “我上传的技能”的展示归属：
+   * 市场中无同名项，或市场同名项由当前用户上传。
    */
   const selectedSkillUploadedInPanel = useMemo(
     () => isSkillUploadedInPanel(selectedSkill),
     [isSkillUploadedInPanel, selectedSkill]
   )
   const selectedSkillUploadedByMe = useMemo(
-    () => !!selectedSkill && uploadedSkillNames.has(normalizeSkillName(selectedSkill.name)),
-    [selectedSkill, uploadedSkillNames]
+    () =>
+      doesSkillMarketInfoBelongToCurrentUser(selectedSkillMarketInfo, currentUserIdCandidates),
+    [currentUserIdCandidates, selectedSkillMarketInfo]
   )
   const selectedSkillIsEdited = useMemo(
     () => !!selectedSkill && editedSkillPaths.has(normalizeSkillPathKey(selectedSkill.path)),
@@ -2084,38 +2079,31 @@ export function SkillsPanel(): React.JSX.Element {
 
   const openPublishDialog = useCallback(
     (skill: SkillMetadata) => {
-      // 已发布过则“更新发布”，否则“一键发布”。
-      const mode: PublishMode = uploadedSkillNames.has(normalizeSkillName(skill.name))
+      const marketInfo = resolveMarketInfo(skill)
+      const mode: PublishMode = doesSkillMarketInfoBelongToCurrentUser(
+        marketInfo,
+        currentUserIdCandidates
+      )
         ? "update"
         : "upload"
       setPublishMode(mode)
       setPublishSkill(skill)
       setPublishDialogOpen(true)
     },
-    [uploadedSkillNames]
+    [currentUserIdCandidates, resolveMarketInfo]
   )
 
   const uploadedCustomSkills = useMemo(
-    () => customSkills.filter((skill) => isSkillUploadedInPanel(skill)),
-    [customSkills, isSkillUploadedInPanel]
+    () => customSkills.filter((skill) => getCustomSkillOwnershipGroup(skill) === "uploaded"),
+    [customSkills, getCustomSkillOwnershipGroup]
   )
   const orgInstalledCustomSkills = useMemo(
-    () =>
-      customSkills.filter(
-        (skill) =>
-          !isSkillUploadedInPanel(skill) &&
-          orgInstalledSkillNames.has(normalizeSkillName(skill.name))
-      ),
-    [customSkills, isSkillUploadedInPanel, orgInstalledSkillNames]
+    () => customSkills.filter((skill) => getCustomSkillOwnershipGroup(skill) === "org"),
+    [customSkills, getCustomSkillOwnershipGroup]
   )
   const marketInstalledCustomSkills = useMemo(
-    () =>
-      customSkills.filter(
-        (skill) =>
-          !isSkillUploadedInPanel(skill) &&
-          !orgInstalledSkillNames.has(normalizeSkillName(skill.name))
-      ),
-    [customSkills, isSkillUploadedInPanel, orgInstalledSkillNames]
+    () => customSkills.filter((skill) => getCustomSkillOwnershipGroup(skill) === "market"),
+    [customSkills, getCustomSkillOwnershipGroup]
   )
 
   const filteredBuiltin = useMemo(
@@ -2339,6 +2327,18 @@ export function SkillsPanel(): React.JSX.Element {
                 </Button>
               </div>
             )}
+            {skillCatalogLoadState === "ready" &&
+              customSkills.length > orgInstalledCustomSkills.length &&
+              !customSkillOwnershipReady && (
+                <div
+                  className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <Loader2 className="size-3.5 shrink-0 animate-spin" />
+                  <span>正在同步应用市场技能归属…</span>
+                </div>
+              )}
             {builtinSkills.length > 0 && (
               <SkillSection
                 title="内置技能"
@@ -2469,26 +2469,9 @@ export function SkillsPanel(): React.JSX.Element {
       <UploadSkillDialog
         open={uploadDialogOpen}
         onOpenChange={setUploadDialogOpen}
-        onSuccess={(uploadedSkillDirName) => {
+        onSuccess={() => {
           setSkillFilesMap({})
-          void refreshSkills(true)
-            .then((nextSkills) => {
-              if (!uploadedSkillDirName) return
-              /**
-               * 上传成功后把“目录名（upload 返回）”映射回技能 path，并写入“本面板上传”的来源标记。
-               * 这里用目录名匹配，兼容 frontmatter name 与目录名不完全一致的场景。
-               */
-              const dirNameKey = normalizeDirNameKey(uploadedSkillDirName)
-              const matched = nextSkills.find((item) => {
-                const normalizedDir = getSkillDir(item.path).replace(/\\/g, "/")
-                const dirName = normalizedDir.split("/").filter(Boolean).pop() || ""
-                return normalizeDirNameKey(dirName) === dirNameKey
-              })
-              if (!matched) return
-              markLocalUploadedSkillPathInStorage(matched.path)
-              reloadLocalUploadedSkillPaths()
-            })
-            .catch(console.error)
+          void refreshSkills(true).catch(console.error)
         }}
       />
 
