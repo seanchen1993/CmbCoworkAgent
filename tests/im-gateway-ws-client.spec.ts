@@ -172,6 +172,18 @@ async function main(): Promise<void> {
             }
           })
         )
+      } else if (envelope.type === "CARD_SEND") {
+        // A gateway built before cards fails WsMessageType.valueOf and answers
+        // with an unknown-type rejection rather than CARD_ACCEPTED.
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "ERROR",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: { reasonCode: "INVALID_PAYLOAD", message: "Unknown message type" }
+          })
+        )
       } else if (envelope.type === "REMOTE_REPLY") {
         const segment = envelope.payload.segment as Record<string, unknown>
         connected.send(
@@ -495,6 +507,36 @@ async function main(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 1_200))
   assert.equal(missingRobotHelloCount, 1, "gateway configuration errors must not reconnect-loop")
   missingRobotClient.stop()
+
+  // UAT runs a gateway that predates cards. A card must degrade there without
+  // stalling: the approval it decorates has already been published as text with
+  // a working short code, and waiting out a 15s command timeout for every
+  // notification would be a regression the old path never had.
+  const legacyGatewayClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  legacyGatewayClient.start()
+  await waitFor(() => legacyGatewayClient.isAuthenticated(), "legacy gateway session")
+  const startedAt = Date.now()
+  const cardResult = await legacyGatewayClient.sendCard({
+    schemaVersion: 1,
+    interactionId: "interaction-legacy",
+    conversationKey: "conversation-1",
+    idempotencyKey: "idem-legacy",
+    tag: "L".repeat(32),
+    kind: "approval",
+    content: [{ type: "title", content: "需要批准" }]
+  })
+  assert.equal(cardResult.state, "rejected")
+  assert.equal(cardResult.reasonCode, "INVALID_PAYLOAD")
+  assert(
+    Date.now() - startedAt < 3_000,
+    "an old gateway must reject a card immediately, not through the command timeout"
+  )
+  legacyGatewayClient.stop()
 
   await new Promise<void>((resolve) => server.close(() => resolve()))
   console.log("im-gateway-ws-client.spec.ts passed")

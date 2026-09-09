@@ -954,6 +954,15 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       )
       return
     }
+    // A gateway that predates cards answers CARD_SEND with INVALID_PAYLOAD for
+    // an unknown message type. Resolving here rather than letting the command
+    // time out keeps the degradation immediate and silent: the reader already
+    // has the text notice and its short code.
+    const cardPending = commandId ? this.cardCommands.get(commandId) : undefined
+    if (cardPending) {
+      cardPending.resolve({ state: "rejected", reasonCode })
+      return
+    }
     if (commandId && (commandId === this.helloCommandId || commandId === this.syncCommandId)) {
       this.helloCommandId = null
       this.syncCommandId = null

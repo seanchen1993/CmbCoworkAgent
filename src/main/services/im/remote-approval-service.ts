@@ -547,10 +547,19 @@ export class ImRemoteApprovalService {
         return
       }
       this.drainReplies()
-      if (code) await this.publishCard(code, presentation)
     } catch (error) {
       if (code) this.codes.delete(code.code)
       throw error
+    }
+    // Deliberately outside the block above. That catch revokes the short code,
+    // which by this point the reader has already been given — letting a card
+    // failure reach it would take away the one way they had to answer.
+    if (code) {
+      try {
+        await this.publishCard(code, presentation)
+      } catch (error) {
+        this.dependencies.warn("Remote approval card could not be published.", error)
+      }
     }
   }
 

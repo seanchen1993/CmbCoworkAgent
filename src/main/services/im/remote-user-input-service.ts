@@ -436,10 +436,16 @@ export class ImRemoteUserInputService {
         return
       }
       this.drainReplies()
-      await this.publishCard(session)
     } catch (error) {
       this.removeSession(request.requestId)
       throw error
+    }
+    // Outside the block above for the same reason as the approval path: that
+    // catch drops the session and its short code, which the reader already has.
+    try {
+      await this.publishCard(session)
+    } catch (error) {
+      this.dependencies.warn("Remote user-input card could not be published.", error)
     }
   }
 
