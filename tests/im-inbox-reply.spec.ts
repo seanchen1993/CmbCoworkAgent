@@ -156,7 +156,7 @@ function testReplySegmentationAndStableEnvelope(): void {
       threadTitle: "验收会话",
       switched: true
     }),
-    "【Feature：支付平台 / 快捷支付｜会话：验收会话】（切换前任务）"
+    "【Feature：支付平台 / 快捷支付｜会话：验收会话】（非当前绑定会话）"
   )
 }
 

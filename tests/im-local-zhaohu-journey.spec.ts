@@ -684,8 +684,8 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     await journey.waitForEventState(longTask.event.eventId, "completed")
     const longReply = journey.eventReplyText(longTask.event.eventId)
     assert(longReply.includes("【会话：检查 Feature 当前状态】"))
-    assert(longReply.includes("切换前任务"))
-    assert(!journey.eventReplyText(queuedInbox.event.eventId).includes("切换前任务"))
+    assert(longReply.includes("非当前绑定会话"))
+    assert(!journey.eventReplyText(queuedInbox.event.eventId).includes("非当前绑定会话"))
 
     const sessions = await journey.send("/会话")
     const sessionsText = journey.eventReplyText(sessions.event.eventId)

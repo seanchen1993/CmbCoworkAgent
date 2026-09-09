@@ -509,14 +509,14 @@ async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promi
     )
     assert.equal(context.events.getEvent(queued.eventId)?.state, "completed")
     assert(gateway.replies.at(-1)?.message.content.includes("审批后完成"))
-    assert(gateway.replies.at(-1)?.message.content.includes("切换前任务"))
+    assert(gateway.replies.at(-1)?.message.content.includes("非当前绑定会话"))
   } finally {
     context.database.close()
   }
 }
 
 function testTheLastReplyOfADetachedTurnShowsTheWayBack(): void {
-  // "（切换前任务）" said what happened but not what it costs: a reply typed
+  // The mark says the target is not the bound one; on its own it does not say
   // under this message goes wherever the person is bound now, not to the
   // session that produced it. The way back must be in the message, and it must
   // be the name already printed there — /会话 numbering expires in five

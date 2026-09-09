@@ -1327,7 +1327,7 @@ export class ImRemoteRunner {
    * Prefix for a turn's LAST reply, with the way back when it is not the
    * session the person is currently bound to.
    *
-   * "（切换前任务）" alone said what happened but not what it costs: a reply
+   * The mark alone says the target is not the bound one, but not what that
    * typed under this message goes to whatever is bound now, not to the session
    * that produced it. The name is the one already printed in the prefix, and
    * /切换 takes exactly that, so the instruction needs nothing the reader has
