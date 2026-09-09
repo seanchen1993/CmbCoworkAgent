@@ -705,7 +705,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // shows the tool, and never downgrades real args back to {}.
   private subagentTranscriptToolCallsByMessage = new Map<
     string,
-    Map<string, { id: string; name: string; args: Record<string, unknown> }>
+    Map<string, { id: string; name: string; args: Record<string, unknown>; index?: number }>
   >()
 
   private subagentLogSequence = 0
@@ -3249,13 +3249,23 @@ export class ElectronIPCTransport implements UseStreamTransport {
             true,
             toolCallAccumulationScope
           )
-          const completedChunkCalls = this.completedToolCallsFromAccumulatedChunks(
-            kwargs.tool_call_chunks ?? [],
-            toolCallAccumulationScope
-          )
+          // Reserve the provider's slot before its arguments finish parsing.
+          // Parallel calls may finish JSON in a different order from their index.
+          const chunkCalls = (kwargs.tool_call_chunks ?? []).flatMap((chunk) => {
+            const id = this.resolveToolCallChunkId(chunk, toolCallAccumulationScope)
+            if (!id) return []
+            const parsed = this.parseAccumulatedToolCall(id, toolCallAccumulationScope)
+            return [{ id, name: chunk.name, ...parsed, index: chunk.index }]
+          })
           const transcriptToolCalls = this.accumulateSubagentTranscriptToolCalls(
             assistantState.transcriptMessageId,
-            [...hydratedTranscriptCalls, ...completedChunkCalls]
+            [
+              ...hydratedTranscriptCalls.map((call, index) => ({
+                ...call,
+                ...(isCompleteAssistantSnapshot && { index })
+              })),
+              ...chunkCalls
+            ]
           )
           // Update currentTool from the latest tool name (known before args
           // finish streaming) so the card reflects the in-flight tool promptly.
@@ -7166,12 +7176,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
    * by tool id. Keeps the tool call as soon as its name is known (so the
    * execution process renders it immediately, even before args finish
    * streaming) and upgrades the args in place when non-empty args arrive,
-   * without ever downgrading real args back to {}. Returns the full set in
-   * stable insertion order for re-emission every chunk.
+   * without ever downgrading real args back to {}. Provider indexes order known
+   * slots; index-less calls retain their relative arrival positions.
    */
   private accumulateSubagentTranscriptToolCalls(
     messageKey: string,
-    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown>; index?: number }>
   ): Array<{ id: string; name: string; args: Record<string, unknown> }> {
     let byToolId = this.subagentTranscriptToolCallsByMessage.get(messageKey)
     if (!byToolId) {
@@ -7185,12 +7195,27 @@ export class ElectronIPCTransport implements UseStreamTransport {
       byToolId.set(toolCall.id, {
         id: toolCall.id,
         name: toolCall.name || prev?.name || "",
+        index:
+          Number.isInteger(toolCall.index) && toolCall.index! >= 0 ? toolCall.index : prev?.index,
         args: this.hasToolArgs(toolCall.args) ? toolCall.args! : (prev?.args ?? toolCall.args ?? {})
       })
     }
 
     pruneMapToLimit(this.subagentTranscriptToolCallsByMessage, MAX_TRACKED_MESSAGE_TOOL_CALLS)
-    return Array.from(byToolId.values())
+    return this.getSubagentTranscriptToolCalls(messageKey)
+  }
+
+  private getSubagentTranscriptToolCalls(messageKey: string): CompletedToolCall[] {
+    const calls = Array.from(
+      this.subagentTranscriptToolCallsByMessage.get(messageKey)?.values() ?? []
+    )
+    const indexed = calls.filter((call) => call.index !== undefined)
+    indexed.sort((left, right) => left.index! - right.index!)
+    let indexedOffset = 0
+    return calls.map((call) => {
+      const ordered = call.index === undefined ? call : indexed[indexedOffset++]
+      return { id: ordered.id, name: ordered.name, args: ordered.args }
+    })
   }
 
   private rememberCompletedToolCallsForMessage(
@@ -7679,9 +7704,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     assistant.projectedReasoning = reasoning
     assistant.lastSnapshotLength = assistant.contentLength + assistant.reasoningLength
     assistant.lastSnapshotAt = Date.now()
-    const toolCalls = Array.from(
-      this.subagentTranscriptToolCallsByMessage.get(assistant.transcriptMessageId)?.values() ?? []
-    )
+    const toolCalls = this.getSubagentTranscriptToolCalls(assistant.transcriptMessageId)
     return [
       this.createSubagentLogEntryEvent({
         kind: "assistant",
@@ -7750,9 +7773,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (content === assistant.projectedContent && reasoning === assistant.projectedReasoning) {
       return []
     }
-    const toolCalls = Array.from(
-      this.subagentTranscriptToolCallsByMessage.get(assistant.transcriptMessageId)?.values() ?? []
-    )
+    const toolCalls = this.getSubagentTranscriptToolCalls(assistant.transcriptMessageId)
     return [
       this.createSubagentLogEntryEvent({
         kind: "assistant",
