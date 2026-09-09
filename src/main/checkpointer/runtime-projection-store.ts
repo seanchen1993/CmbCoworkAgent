@@ -18,6 +18,11 @@ import {
   isWorkflowPlumbingTranscriptContent
 } from "../../shared/checkpoint-transcript"
 import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
+import { extractVisibleReasoning } from "../../shared/model-reasoning"
+import {
+  normalizeTranscriptReasoning,
+  TRANSCRIPT_REASONING_MAX_CHARS
+} from "../../shared/transcript-reasoning"
 import {
   buildCheckpointRuntimeProjection,
   CHECKPOINT_RUNTIME_PROJECTION_VERSION
@@ -1184,6 +1189,7 @@ interface DurableLegacyCheckpointMessage {
   providerOccurrence: number | null
   role: "user" | "assistant" | "system" | "tool"
   contentJson: string
+  reasoning: string | null
   toolCallsJson: string | null
   toolCallId: string | null
   name: string | null
@@ -1276,6 +1282,12 @@ function buildDurableLegacyCheckpointMessages(
     if (additionalKwargs.cmb_internal_coordinator_notification === true) continue
 
     const role = serializedMessageRole(message, kwargs)
+    const reasoning =
+      role === "assistant"
+        ? (normalizeTranscriptReasoning(
+            extractVisibleReasoning(message, TRANSCRIPT_REASONING_MAX_CHARS)
+          ) ?? null)
+        : null
     const rawIdValue = kwargs.id ?? (typeof message.id === "string" ? message.id : undefined)
     const sourceId =
       typeof rawIdValue === "string" && rawIdValue.trim()
@@ -1328,6 +1340,7 @@ function buildDurableLegacyCheckpointMessages(
       ...providerTuple,
       role,
       contentJson,
+      reasoning,
       toolCallsJson,
       toolCallId: typeof toolCallId === "string" ? toolCallId : null,
       name: typeof name === "string" ? name : null,
@@ -1336,6 +1349,7 @@ function buildDurableLegacyCheckpointMessages(
       createdAt: baseTime + index,
       estimatedBytes:
         Buffer.byteLength(contentJson, "utf8") +
+        Buffer.byteLength(reasoning ?? "", "utf8") +
         Buffer.byteLength(toolCallsJson ?? "", "utf8") +
         1024,
       contentFragments
@@ -1347,6 +1361,7 @@ function buildDurableLegacyCheckpointMessages(
     providerOccurrence: message.provider_occurrence ?? null,
     role: message.role,
     contentJson: message.contentJson,
+    reasoning: message.reasoning,
     toolCallsJson: message.toolCallsJson,
     toolCallId: message.toolCallId,
     name: message.name,
@@ -1508,9 +1523,9 @@ function migrateLegacyMessagesIntoDurableRows(input: {
     const insert = database.prepare(
       `INSERT OR IGNORE INTO thread_messages (
          thread_id, message_id, provider_source_id, provider_occurrence, role,
-         content_json, tool_calls_json, tool_call_id, name, status, is_error,
+         content_json, reasoning, tool_calls_json, tool_call_id, name, status, is_error,
          content_priority, goal_id, active_window_id, created_at, start_at, end_at, ordinal
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?)`
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?)`
     )
     const moveReservedDuplicate = database.prepare(
       `UPDATE thread_messages
@@ -1572,6 +1587,7 @@ function migrateLegacyMessagesIntoDurableRows(input: {
               fragmentMessage.providerOccurrence,
               fragmentMessage.role,
               fragmentMessage.contentJson,
+              fragmentMessage.reasoning,
               fragmentMessage.toolCallsJson,
               fragmentMessage.toolCallId,
               fragmentMessage.name,
@@ -1723,6 +1739,7 @@ function migrateLegacyMessagesIntoDurableRows(input: {
             message.providerOccurrence,
             message.role,
             message.contentJson,
+            message.reasoning,
             message.toolCallsJson,
             message.toolCallId,
             message.name,

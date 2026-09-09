@@ -170,6 +170,7 @@ import {
 } from "../../shared/stream-message-wire-mode"
 import {
   resolveStreamTranscriptFlush,
+  readStreamTranscriptReasoning,
   type QueuedStreamTranscriptMessage,
   type StreamTranscriptAssistantIdentity
 } from "./stream-transcript-flush"
@@ -3614,6 +3615,8 @@ function persistedMessageFromStreamPayload(payload: unknown): QueuedStreamTransc
     ? (kwargs.tool_calls as Message["tool_calls"])
     : undefined
   const streamContentMode = streamPayloadContentMode(payload)
+  const reasoningUpdate =
+    role === "assistant" ? readStreamTranscriptReasoning(payload, streamContentMode) : {}
   const streamToolCallContentMode = streamToolCallContentModeFromMessageMode(streamContentMode)
   const streamToolCallChunks: StreamToolCallChunk[] = Array.isArray(kwargs.tool_call_chunks)
     ? kwargs.tool_call_chunks.flatMap((value) => {
@@ -3630,6 +3633,7 @@ function persistedMessageFromStreamPayload(payload: unknown): QueuedStreamTransc
     : []
   if (
     role !== "tool" &&
+    !reasoningUpdate.reasoning &&
     (typeof content === "string" ? content.length === 0 : content.length === 0) &&
     (!toolCalls || toolCalls.length === 0) &&
     streamToolCallChunks.length === 0
@@ -3650,6 +3654,7 @@ function persistedMessageFromStreamPayload(payload: unknown): QueuedStreamTransc
     ...providerTuple,
     role,
     content,
+    ...reasoningUpdate,
     ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
     ...(role === "tool" && toolCallId ? { tool_call_id: toolCallId } : {}),
     ...(role === "tool" && name ? { name } : {}),
