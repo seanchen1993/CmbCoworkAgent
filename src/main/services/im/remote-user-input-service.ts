@@ -359,6 +359,11 @@ export class ImRemoteUserInputService {
     conversationKey: string
     feedback: ReadonlyArray<{ key: string; value: string }>
   }): Promise<string> {
+    // The typed path checks this first; a card must not become a way around a
+    // switch the operator turned off.
+    if (!this.dependencies.getSettings().enabled) {
+      return "招乎远程回答未开启，请回到桌面处理。"
+    }
     const session = this.sessions.get(input.requestId)
     if (!session) return "这项补充输入不存在、已提交，或已不在等待中。"
     if (

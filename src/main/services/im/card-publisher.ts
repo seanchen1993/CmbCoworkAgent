@@ -13,6 +13,7 @@ import {
   type ImCardInteraction,
   type ImCardInteractionStore
 } from "./card-interaction-store"
+import { getThread } from "../../db"
 import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
 
 /**
@@ -30,6 +31,7 @@ type CardWarn = (message: string, error?: unknown) => void
 interface CardPublisherDependencies {
   gateway: ImGatewayClientPort
   interactions: ImCardInteractionStore
+  isThreadLive: (threadId: string) => boolean
   createIdempotencyKey: () => string
   warn: CardWarn
 }
@@ -41,6 +43,7 @@ export class ImCardPublisher {
     this.dependencies = {
       gateway: overrides.gateway ?? unavailableImGatewayClient,
       interactions: overrides.interactions ?? imCardInteractionStore,
+      isThreadLive: overrides.isThreadLive ?? ((threadId) => Boolean(getThread(threadId))),
       createIdempotencyKey:
         overrides.createIdempotencyKey ??
         (() => `card:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`),
@@ -71,6 +74,14 @@ export class ImCardPublisher {
     build: (tag: string) => CardComponent[]
   }): Promise<ImCardInteraction | null> {
     if (!this.dependencies.gateway.isAuthenticated()) return null
+    // Retention is the thread's, so collect cards whose thread is gone before
+    // adding another. Doing it here keeps the store self-maintaining rather than
+    // depending on a timer nobody would notice had stopped.
+    try {
+      this.dependencies.interactions.pruneThreads(this.dependencies.isThreadLive)
+    } catch (error) {
+      this.dependencies.warn("Zhaohu card retention sweep failed.", error)
+    }
     const interaction = this.dependencies.interactions.register({
       kind: input.kind,
       threadId: input.threadId,
@@ -142,6 +153,35 @@ export class ImCardPublisher {
       this.dependencies.warn("Zhaohu interaction card could not be updated.", error)
       return false
     }
+  }
+
+  /**
+   * Closes a card this desktop no longer tracks.
+   *
+   * `resolve` cannot do this: it opens by claiming the next version from the
+   * in-memory store, and a forgotten interaction is not in it, so the call
+   * returns false before reaching the gateway. That made the whole
+   * close-a-stale-card path unreachable — exactly the path that stops a decided
+   * request from showing live buttons forever.
+   *
+   * No version is sent. The desktop cannot know the stored one, and nothing
+   * else is writing to a card it has forgotten, so the gateway assigns it.
+   */
+  closeForgotten(interactionId: string, content: CardComponent[]): void {
+    void (async () => {
+      try {
+        const update: RemoteImCardUpdateV1 = { schemaVersion: 1, interactionId, content }
+        assertRemoteImCardUpdateV1(update)
+        const result = await this.dependencies.gateway.updateCard(update)
+        if (result.state !== "accepted") {
+          this.dependencies.warn(
+            `Zhaohu stale card was not closed (${result.reasonCode ?? "unknown"}); its buttons still look live.`
+          )
+        }
+      } catch (error) {
+        this.dependencies.warn("Zhaohu stale card could not be closed.", error)
+      }
+    })()
   }
 
   /** Fire-and-forget variant for paths that must not await platform latency. */

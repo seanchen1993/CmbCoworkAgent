@@ -318,19 +318,31 @@ export interface RemoteImCardUpdateV1 {
    * Monotonic per interaction. update-custom-card has no idempotency header and
    * no ordering guarantee, so a late update carrying a lower version must be
    * dropped rather than allowed to overwrite the newer terminal state.
+   *
+   * Omitted only when closing a card the desktop no longer tracks — after a
+   * restart, or once the interaction has been released. There is no live writer
+   * to race in that case, and the desktop cannot know the stored version, so the
+   * gateway assigns the next one. A live update must always claim its version.
    */
-  cardVersion: number
+  cardVersion?: number
   content: ReadonlyArray<Record<string, unknown>>
 }
 
 export interface RemoteImCardReceiptV1 {
   schemaVersion: typeof IM_GATEWAY_SCHEMA_VERSION
   receiptId: string
-  /** Absent when the click carried a tag the gateway could not resolve. */
+  /**
+   * A click whose tag the gateway could not resolve carries neither of these.
+   * That is a real and deliverable shape — the reader still pressed a button
+   * and still deserves an answer — so both are optional rather than a payload
+   * the desktop is entitled to reject.
+   */
   interactionId?: string
+  conversationKey?: string
+  /** The card's kind, so a stale card is closed with its own wording. */
+  kind?: ImCardInteractionKind
   tag: string
   principalId: string
-  conversationKey: string
   /** Empty for a plain operate button; populated by an interactive form. */
   feedback: ReadonlyArray<{ key: string; value: string }>
   occurredAt: string
@@ -402,10 +414,12 @@ export function assertRemoteImCardSendV1(value: unknown): asserts value is Remot
 
 export function assertRemoteImCardUpdateV1(value: unknown): asserts value is RemoteImCardUpdateV1 {
   const card = requireRecord(value, "card")
-  assertExactKeys(card, ["schemaVersion", "interactionId", "cardVersion", "content"], [], "card")
+  assertExactKeys(card, ["schemaVersion", "interactionId", "content"], ["cardVersion"], "card")
   assertSchemaVersion(card.schemaVersion)
   requireNonEmptyString(card.interactionId, "card.interactionId")
-  requirePositiveInteger(card.cardVersion, "card.cardVersion")
+  if (card.cardVersion !== undefined && card.cardVersion !== null) {
+    requirePositiveInteger(card.cardVersion, "card.cardVersion")
+  }
   requireComponentArray(card.content, "card.content")
 }
 
@@ -415,26 +429,30 @@ export function assertRemoteImCardReceiptV1(
   const receipt = requireRecord(value, "receipt")
   assertExactKeys(
     receipt,
-    [
-      "schemaVersion",
-      "receiptId",
-      "tag",
-      "principalId",
-      "conversationKey",
-      "feedback",
-      "occurredAt"
-    ],
-    ["interactionId"],
+    ["schemaVersion", "receiptId", "tag", "principalId", "feedback", "occurredAt"],
+    ["interactionId", "conversationKey", "kind"],
     "receipt"
   )
   assertSchemaVersion(receipt.schemaVersion)
   requireNonEmptyString(receipt.receiptId, "receipt.receiptId")
   requireNonEmptyString(receipt.tag, "receipt.tag")
   requireNonEmptyString(receipt.principalId, "receipt.principalId")
-  requireNonEmptyString(receipt.conversationKey, "receipt.conversationKey")
   requireIsoInstant(receipt.occurredAt, "receipt.occurredAt")
-  if (receipt.interactionId !== undefined) {
+  // Jackson serializes an absent value as an explicit null rather than omitting
+  // the key, so null has to mean the same thing as missing here. Treating the
+  // two differently is what let a routine unresolved click close the socket.
+  if (receipt.interactionId !== undefined && receipt.interactionId !== null) {
     requireNonEmptyString(receipt.interactionId, "receipt.interactionId")
+  }
+  if (receipt.conversationKey !== undefined && receipt.conversationKey !== null) {
+    requireNonEmptyString(receipt.conversationKey, "receipt.conversationKey")
+  }
+  if (
+    receipt.kind !== undefined &&
+    receipt.kind !== null &&
+    !CARD_INTERACTION_KINDS.has(receipt.kind as ImCardInteractionKind)
+  ) {
+    throw new ImGatewayContractError("INVALID_PAYLOAD", "receipt.kind is not supported")
   }
   if (!Array.isArray(receipt.feedback)) {
     throw new ImGatewayContractError("INVALID_PAYLOAD", "receipt.feedback must be an array")

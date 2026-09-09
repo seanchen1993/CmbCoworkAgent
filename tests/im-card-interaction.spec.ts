@@ -15,6 +15,7 @@ import { ApprovalDecisionBroker } from "../src/main/agent/approval-decision-brok
 import type { ThreadRow } from "../src/main/db"
 import type { ApprovalDecision, ApprovalRequest } from "../src/main/types"
 import {
+  assertRemoteImCardReceiptV1,
   assertRemoteImCardSendV1,
   assertRemoteImCardUpdateV1,
   type RemoteImCardReceiptV1,
@@ -443,6 +444,151 @@ function testEveryBuiltCardSatisfiesTheContract(): void {
   console.log("PASS testEveryBuiltCardSatisfiesTheContract")
 }
 
+/**
+ * The gateway sends what an unresolved click actually looks like: no
+ * interaction, no route. Rejecting that shape closed the socket, and because an
+ * unacknowledged receipt is redelivered, the connection cycled for as long as
+ * the receipt existed — taking every approval, reply and permit with it.
+ */
+function testAnUnresolvedReceiptIsAValidPayload(): void {
+  assertRemoteImCardReceiptV1({
+    schemaVersion: 1,
+    receiptId: "receipt-unresolved",
+    interactionId: null,
+    conversationKey: null,
+    kind: null,
+    tag: "u".repeat(32),
+    principalId: ROUTE.principalId,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  assertRemoteImCardReceiptV1({
+    schemaVersion: 1,
+    receiptId: "receipt-omitted",
+    tag: "v".repeat(32),
+    principalId: ROUTE.principalId,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  console.log("PASS testAnUnresolvedReceiptIsAValidPayload")
+}
+
+/**
+ * A click on a card the desktop has forgotten must actually close it. The close
+ * used to run through `resolve`, which starts by claiming a version from the
+ * in-memory store — and the only way to reach this path is for the interaction
+ * to be absent from that store, so it returned before reaching the gateway.
+ */
+async function testAForgottenCardIsActuallyClosed(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const publisher = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions: new ImCardInteractionStore(),
+    isThreadLive: () => true,
+    warn: () => undefined
+  })
+  const router = new ImCardReceiptRouter({
+    cards: publisher,
+    approvals: { resolveCardClick: async () => "unused" },
+    userInput: { resolveCardAnswers: async () => "unused" },
+    events: { enqueueProactiveReplies: async () => [] },
+    warn: () => undefined
+  })
+
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-stale",
+    interactionId: "interaction-long-gone",
+    kind: "user_input",
+    tag: "w".repeat(32),
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+
+  assert.equal(gateway.updated.length, 1, "the stale card must be closed")
+  assert.equal(gateway.updated[0]!.interactionId, "interaction-long-gone")
+  assert.equal(
+    gateway.updated[0]!.cardVersion,
+    undefined,
+    "a forgotten card cannot claim a version; the gateway assigns it"
+  )
+  const rendered = JSON.stringify(gateway.updated[0]!.content)
+  assert(rendered.includes("已失效"), rendered)
+  assert(
+    rendered.includes("需要你的选择"),
+    "a stale question card must not be closed with the approval title"
+  )
+  console.log("PASS testAForgottenCardIsActuallyClosed")
+}
+
+/**
+ * The interaction is addressable from the moment it is registered, so a gate
+ * resolved while its card is still being sent can still claim a version and
+ * issue its terminal update.
+ *
+ * The transport half of this — that the client no longer refuses an overlapping
+ * command — lives in im-gateway-ws-client.spec.ts, because the guard being
+ * tested is in the real client and a stub gateway cannot show it.
+ */
+async function testAnUpdateDuringTheSendStillLands(): Promise<void> {
+  const gateway = new RecordingGateway()
+  let releaseSend: (() => void) | null = null
+  const slowSend = new Promise<void>((resolve) => {
+    releaseSend = resolve
+  })
+  const originalSend = gateway.sendCard.bind(gateway)
+  gateway.sendCard = async (card) => {
+    await slowSend
+    return originalSend(card)
+  }
+
+  const interactions = new ImCardInteractionStore()
+  const publisher = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions,
+    isThreadLive: () => true,
+    warn: () => undefined
+  })
+
+  const publishing = publisher.publish({
+    kind: "approval",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "CODE01",
+    targetLabel: "会话：桌面会话",
+    build: (tag) =>
+      buildApprovalCard({
+        targetLabel: "会话：桌面会话",
+        operation: "写入文件",
+        detail: "src/a.ts",
+        tag,
+        allowedDecisions: ["approve", "reject"],
+        fallbackCommands: "/批准 CODE01"
+      })
+  })
+
+  // The desktop decides while the send is still in flight.
+  const interaction = interactions.findByRequestRef("CODE01")
+  assert(interaction, "the interaction must be addressable during the send")
+  const resolving = publisher.resolve(interaction.interactionId, [
+    { type: "title", content: "需要批准" },
+    { type: "status", content: "已在桌面处理", style: 5 }
+  ])
+
+  releaseSend!()
+  await publishing
+  const updated = await resolving
+
+  assert.equal(updated, true, "the terminal update must not be dropped as in-flight")
+  assert.equal(gateway.sent.length, 1)
+  assert.equal(gateway.updated.length, 1, "the card must end on the decision that resolved it")
+  console.log("PASS testAnUpdateDuringTheSendStillLands")
+}
+
 async function main(): Promise<void> {
   testEveryBuiltCardSatisfiesTheContract()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
@@ -451,6 +597,9 @@ async function main(): Promise<void> {
   await testAClickFromAnotherPrincipalIsRefused()
   await testAClickOnAForgottenCardIsExplainedNotSwallowed()
   await testAnUnsendableCardLeavesTheShortCodeWorking()
+  testAnUnresolvedReceiptIsAValidPayload()
+  await testAForgottenCardIsActuallyClosed()
+  await testAnUpdateDuringTheSendStillLands()
 }
 
 void main().catch((error) => {

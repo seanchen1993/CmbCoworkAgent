@@ -181,6 +181,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private readonly replyCommandByIdempotencyKey = new Map<string, string>()
   private readonly cardCommands = new Map<string, PendingCommand<ImCardSubmissionResult>>()
   private readonly cardCommandByInteraction = new Map<string, string>()
+  /** One command at a time per interaction, in submission order. */
+  private readonly cardChains = new Map<string, Promise<void>>()
   private readonly now: () => number
   private status: ImGatewayWsStatus = {
     connectionState: "offline",
@@ -292,8 +294,35 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     if (!this.isAuthenticated()) {
       return Promise.resolve({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" })
     }
-    if (this.cardCommandByInteraction.has(interactionId)) {
-      return Promise.resolve({ state: "rejected", reasonCode: "CARD_COMMAND_IN_FLIGHT" })
+    // Queued behind whatever is already in flight for this interaction rather
+    // than refused. A card's send and its terminal update routinely overlap —
+    // the desktop can resolve a gate during the send round trip — and refusing
+    // the update dropped it for good, leaving a decided request showing live
+    // buttons in Zhaohu forever.
+    const previous = this.cardChains.get(interactionId) ?? Promise.resolve()
+    const chained = previous
+      .catch(() => undefined)
+      .then(() => this.sendCardCommand(type, interactionId, payload))
+    this.cardChains.set(
+      interactionId,
+      chained.then(
+        () => undefined,
+        () => undefined
+      )
+    )
+    void chained.finally(() => {
+      if (this.cardChains.get(interactionId) === undefined) return
+    })
+    return chained
+  }
+
+  private sendCardCommand(
+    type: "CARD_SEND" | "CARD_UPDATE",
+    interactionId: string,
+    payload: Record<string, unknown>
+  ): Promise<ImCardSubmissionResult> {
+    if (!this.isAuthenticated()) {
+      return Promise.resolve({ state: "rejected", reasonCode: "DESKTOP_OFFLINE" })
     }
     return new Promise<ImCardSubmissionResult>((resolve) => {
       const commandId = randomUUID()
@@ -691,14 +720,27 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         this.resolveCard(payload, commandId)
         return
       case "CARD_RECEIPT": {
-        if (!messageId) throw new ImGatewayProtocolError("CARD_RECEIPT missing messageId")
-        assertOnlyKeys(payload, ["receipt"], "CARD_RECEIPT payload")
-        const receipt = record(payload.receipt) as unknown
-        assertRemoteImCardReceiptV1(receipt)
-        if (!this.status.principalId || receipt.principalId !== this.status.principalId) {
-          throw new ImGatewayProtocolError("CARD_RECEIPT principal does not match WELCOME")
+        // Never fatal. A card is an affordance; a receipt the desktop cannot
+        // read is a lost button press, not a reason to drop the session that
+        // carries every approval, reply and permit. Closing the socket here
+        // also could not recover: the receipt is redelivered until it is
+        // acknowledged, so a single unreadable one would cycle the connection
+        // for as long as it existed.
+        try {
+          if (!messageId) throw new ImGatewayProtocolError("CARD_RECEIPT missing messageId")
+          assertOnlyKeys(payload, ["receipt"], "CARD_RECEIPT payload")
+          const receipt = record(payload.receipt) as unknown
+          assertRemoteImCardReceiptV1(receipt)
+          if (!this.status.principalId || receipt.principalId !== this.status.principalId) {
+            throw new ImGatewayProtocolError("CARD_RECEIPT principal does not match WELCOME")
+          }
+          await this.options.onCardReceipt?.(receipt)
+        } catch (error) {
+          console.warn(
+            "[IM Gateway] card-receipt:rejected",
+            error instanceof Error ? error.message : "unknown"
+          )
         }
-        await this.options.onCardReceipt?.(receipt)
         return
       }
       case "REPLY_ACCEPTED":
@@ -1238,5 +1280,6 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.replyCommandByIdempotencyKey.clear()
     this.cardCommands.clear()
     this.cardCommandByInteraction.clear()
+    this.cardChains.clear()
   }
 }
