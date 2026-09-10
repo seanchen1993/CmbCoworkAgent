@@ -38,6 +38,11 @@ interface CardPublisherDependencies {
 
 export class ImCardPublisher {
   private readonly dependencies: CardPublisherDependencies
+  /** Terminal cards whose send was never confirmed, awaiting a live gateway. */
+  private readonly pendingClosures = new Map<
+    string,
+    { cardVersion: number; content: CardComponent[] }
+  >()
 
   constructor(overrides: Partial<CardPublisherDependencies> = {}) {
     this.dependencies = {
@@ -47,7 +52,7 @@ export class ImCardPublisher {
       createIdempotencyKey:
         overrides.createIdempotencyKey ??
         (() => `card:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`),
-      warn: overrides.warn ?? (() => {})
+      warn: overrides.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
     }
   }
 
@@ -82,6 +87,10 @@ export class ImCardPublisher {
     } catch (error) {
       this.dependencies.warn("Zhaohu card retention sweep failed.", error)
     }
+    // Not awaited, and only after registering: `publish` must put the interaction
+    // in the store before its first await, or a terminal update racing the send
+    // finds nothing to address and the card's real outcome is lost.
+    void this.retryPendingClosures()
     const interaction = this.dependencies.interactions.register({
       kind: input.kind,
       threadId: input.threadId,
@@ -133,6 +142,23 @@ export class ImCardPublisher {
   async resolve(interactionId: string, content: CardComponent[]): Promise<boolean> {
     const cardVersion = this.dependencies.interactions.nextCardVersion(interactionId)
     if (cardVersion === null) return false
+    return this.sendTerminalUpdate(interactionId, cardVersion, content)
+  }
+
+  /**
+   * Sends one terminal card, and keeps it if the outcome is unknown.
+   *
+   * The interaction is released before the send — a second writer must not be
+   * able to claim a higher version and land the wrong wording — so nothing else
+   * remembers this update. Without the pending record, a timeout or a dropped
+   * connection lost the card's real outcome for good: it would keep showing live
+   * buttons for a decided request, and the next press could only mark it dead.
+   */
+  private async sendTerminalUpdate(
+    interactionId: string,
+    cardVersion: number,
+    content: CardComponent[]
+  ): Promise<boolean> {
     // Released before the await, not after it. Two paths can close the same
     // card almost at once — a click deciding it and the desktop noticing the
     // request is gone — and releasing later leaves a window where the second
@@ -148,15 +174,33 @@ export class ImCardPublisher {
       assertRemoteImCardUpdateV1(update)
       const result = await this.dependencies.gateway.updateCard(update)
       if (result.state !== "accepted") {
+        if (result.resultUnknown) {
+          this.pendingClosures.set(interactionId, { cardVersion, content })
+        }
         this.dependencies.warn(
           `Zhaohu interaction card was not updated (${result.reasonCode ?? "unknown"}); it still shows as pending.`
         )
         return false
       }
+      this.pendingClosures.delete(interactionId)
       return true
     } catch (error) {
+      this.pendingClosures.set(interactionId, { cardVersion, content })
       this.dependencies.warn("Zhaohu interaction card could not be updated.", error)
       return false
+    }
+  }
+
+  /**
+   * Re-sends terminal cards whose outcome was never confirmed. Called when the
+   * gateway comes back, and opportunistically before publishing another card.
+   */
+  async retryPendingClosures(): Promise<void> {
+    if (this.pendingClosures.size === 0) return
+    if (!this.dependencies.gateway.isAuthenticated()) return
+    for (const [interactionId, pending] of [...this.pendingClosures]) {
+      this.pendingClosures.delete(interactionId)
+      await this.sendTerminalUpdate(interactionId, pending.cardVersion, pending.content)
     }
   }
 

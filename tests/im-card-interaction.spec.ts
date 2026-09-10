@@ -47,6 +47,7 @@ class RecordingGateway implements Partial<ImGatewayClientPort> {
   readonly acknowledged: string[] = []
   authenticated = true
   accept = true
+  updateOutcome: { state: "rejected"; reasonCode?: string; resultUnknown?: boolean } | null = null
 
   isAuthenticated(): boolean {
     return this.authenticated
@@ -60,6 +61,7 @@ class RecordingGateway implements Partial<ImGatewayClientPort> {
   }
   async updateCard(update: RemoteImCardUpdateV1) {
     assertRemoteImCardUpdateV1(update)
+    if (this.updateOutcome) return this.updateOutcome
     this.updated.push(update)
     return { state: "accepted" } as const
   }
@@ -719,6 +721,121 @@ async function testAStaleCloseCannotOverwriteADecision(): Promise<void> {
   console.log("PASS testAStaleCloseCannotOverwriteADecision")
 }
 
+/**
+ * A terminal card whose send was never confirmed must be re-sent. The
+ * interaction is released before the send, so nothing else remembers it: losing
+ * it here leaves a decided request showing live buttons, and the next press can
+ * only mark the card dead — the real outcome is gone for good.
+ */
+async function testAnUnconfirmedClosureIsRetried(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const interactions = new ImCardInteractionStore()
+  const publisher = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions,
+    isThreadLive: () => true,
+    warn: () => undefined
+  })
+  const interaction = interactions.register({
+    kind: "approval",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "CODE03",
+    targetLabel: "会话：桌面会话"
+  })
+
+  const terminal = [
+    { type: "title", content: "需要批准" },
+    { type: "status", content: "已批准", style: 3 }
+  ]
+  gateway.updateOutcome = {
+    state: "rejected",
+    reasonCode: "GATEWAY_CARD_TIMEOUT",
+    resultUnknown: true
+  }
+  assert.equal(await publisher.resolve(interaction.interactionId, terminal), false)
+  assert.equal(gateway.updated.length, 0, "the card never reached the gateway")
+
+  // The session comes back.
+  gateway.updateOutcome = null
+  await publisher.retryPendingClosures()
+  assert.equal(gateway.updated.length, 1, "the unconfirmed closure must be re-sent")
+  assert(JSON.stringify(gateway.updated[0]!.content).includes("已批准"))
+
+  // And only once.
+  await publisher.retryPendingClosures()
+  assert.equal(gateway.updated.length, 1, "a confirmed closure is not re-sent")
+  console.log("PASS testAnUnconfirmedClosureIsRetried")
+}
+
+/**
+ * A click whose answer could not be stored must not be acknowledged: the
+ * gateway would stop redelivering and the press would look to the reader like
+ * it did nothing. The decision itself is applied exactly once even so.
+ */
+async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const interactions = new ImCardInteractionStore()
+  const publisher = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions,
+    isThreadLive: () => true,
+    warn: () => undefined
+  })
+  const interaction = interactions.register({
+    kind: "approval",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "CODE04",
+    targetLabel: "会话：桌面会话"
+  })
+
+  let storageWorks = false
+  let decisions = 0
+  const router = new ImCardReceiptRouter({
+    cards: publisher,
+    approvals: {
+      resolveCardClick: async () => {
+        decisions += 1
+        return "已从招乎一次性批准，任务将继续执行。"
+      }
+    },
+    userInput: { resolveCardAnswers: async () => "unused" },
+    events: {
+      enqueueProactiveReplies: async () => {
+        if (!storageWorks) throw new Error("outbox is unavailable")
+        return []
+      }
+    },
+    warn: () => undefined
+  })
+
+  const receipt = {
+    schemaVersion: 1 as const,
+    receiptId: "receipt-storage",
+    interactionId: interaction.interactionId,
+    kind: "approval" as const,
+    tag: `${interaction.tag}:approve`,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  }
+
+  await router.handle(receipt)
+  assert.equal(decisions, 1, "the decision is applied")
+  assert.deepEqual(gateway.acknowledged, [], "a receipt whose answer was lost is not acknowledged")
+
+  // The gateway redelivers it.
+  storageWorks = true
+  await router.handle(receipt)
+  assert.equal(decisions, 1, "a redelivery must not decide a second time")
+  assert.deepEqual(gateway.acknowledged, ["receipt-storage"], "now it is acknowledged")
+  console.log("PASS testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued")
+}
+
 async function main(): Promise<void> {
   testEveryBuiltCardSatisfiesTheContract()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
@@ -732,6 +849,8 @@ async function main(): Promise<void> {
   await testAnUpdateDuringTheSendStillLands()
   testAnUnknownKindNeverCostsTheClick()
   await testAStaleCloseCannotOverwriteADecision()
+  await testAnUnconfirmedClosureIsRetried()
+  await testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued()
 }
 
 void main().catch((error) => {

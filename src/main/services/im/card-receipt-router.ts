@@ -49,7 +49,7 @@ export class ImCardReceiptRouter {
    * oldest entries are the safest to forget — the gateway stops redelivering
    * once a receipt is acknowledged, so an id this old is not coming back.
    */
-  private readonly appliedReceipts = new Set<string>()
+  private readonly appliedReceipts = new Map<string, string>()
   /** Two frames for one receipt can arrive together; apply them in order. */
   private handling: Promise<void> = Promise.resolve()
 
@@ -83,23 +83,29 @@ export class ImCardReceiptRouter {
   }
 
   private async handleOne(receipt: RemoteImCardReceiptV1): Promise<void> {
-    if (this.appliedReceipts.has(receipt.receiptId)) {
-      await this.dependencies.cards.acknowledgeReceipt(receipt.receiptId)
-      return
+    // The decision and its answer are acknowledged separately. Applying a click
+    // twice would decide twice; failing to tell the reader anything leaves them
+    // staring at a card that did nothing. So a redelivery re-sends the answer
+    // this receipt already earned, and never re-applies it.
+    let message = this.appliedReceipts.get(receipt.receiptId)
+    if (message === undefined) {
+      try {
+        message = await this.apply(receipt)
+      } catch (error) {
+        this.dependencies.warn("Zhaohu card receipt could not be applied.", error)
+        message = "处理这次点击时出错了，请回到桌面确认，或使用消息里的短码。"
+      }
+      this.appliedReceipts.set(receipt.receiptId, message)
+      if (this.appliedReceipts.size > MAX_REMEMBERED_RECEIPTS) {
+        const oldest = this.appliedReceipts.keys().next()
+        if (!oldest.done) this.appliedReceipts.delete(oldest.value)
+      }
     }
-    let message: string
-    try {
-      message = await this.apply(receipt)
-    } catch (error) {
-      this.dependencies.warn("Zhaohu card receipt could not be applied.", error)
-      message = "处理这次点击时出错了，请回到桌面确认，或使用消息里的短码。"
-    }
-    this.appliedReceipts.add(receipt.receiptId)
-    if (this.appliedReceipts.size > MAX_REMEMBERED_RECEIPTS) {
-      const oldest = this.appliedReceipts.values().next()
-      if (!oldest.done) this.appliedReceipts.delete(oldest.value)
-    }
-    await this.reply(receipt, message)
+
+    // Only acknowledged once the answer is durably queued. Acknowledging a
+    // reply that never persisted stops the gateway redelivering, and the press
+    // then looks to the reader like it did nothing at all.
+    if (!(await this.reply(receipt, message))) return
     await this.dependencies.cards.acknowledgeReceipt(receipt.receiptId)
   }
 
@@ -162,16 +168,19 @@ export class ImCardReceiptRouter {
     })
   }
 
-  private async reply(receipt: RemoteImCardReceiptV1, message: string): Promise<void> {
+  /** True once the answer is durably queued, or when there is nowhere to send it. */
+  private async reply(receipt: RemoteImCardReceiptV1, message: string): Promise<boolean> {
     // A click the gateway could not place has no route of its own. It still gets
     // acknowledged by the caller, so it will not be redelivered forever; there is
     // simply nowhere to send the explanation.
     const conversationKey = receipt.conversationKey
     if (!conversationKey) {
+      // Nothing to redeliver into, so hold the gateway to nothing: acknowledge
+      // and stop, rather than churning a receipt that can never be answered.
       this.dependencies.warn(
         `Zhaohu card receipt has no conversation to answer: receiptId=${receipt.receiptId}`
       )
-      return
+      return true
     }
     try {
       await this.dependencies.events.enqueueProactiveReplies(
@@ -183,13 +192,14 @@ export class ImCardReceiptRouter {
       )
     } catch (error) {
       this.dependencies.warn("Zhaohu card receipt reply could not be queued.", error)
-      return
+      return false
     }
     const drainer = this.replyDrainer
-    if (!drainer) return
+    if (!drainer) return true
     void drainer.sendPending().catch((error) => {
       this.dependencies.warn("Zhaohu card receipt reply remains queued.", error)
     })
+    return true
   }
 }
 

@@ -412,6 +412,10 @@ export class BuiltinRobotManager {
         await imCardReceiptRouter.handle(receipt)
       },
       onRoutesSynchronized: async (routes, principalId, defaultConversationKey) => {
+        // The session is authoritative again, so re-send any terminal card whose
+        // outcome was never confirmed. Left unsent, a decided request keeps live
+        // buttons and the next press can only mark the card dead.
+        void imCardPublisher.retryPendingClosures()
         const activeRoutes = routes.filter(
           (route) => route.principalId === principalId && route.state === "active"
         )
