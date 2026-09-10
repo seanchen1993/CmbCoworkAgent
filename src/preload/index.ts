@@ -134,6 +134,9 @@ import type {
   HarnessFeatureCreateResult,
   HarnessFeatureDeployUnitBinding,
   HarnessFeatureDeployUnitUpdateInput,
+  HarnessFeatureImManagementUpdateInput,
+  HarnessFeatureThreadGrantInput,
+  HarnessFeatureThreadGrantResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -167,7 +170,11 @@ import {
   AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
   type ManagedAutoSendStreamStartEvent
 } from "../shared/harness-board-types"
-import type { ProjectMetricFilters, ProjectMetricListOptions } from "../shared/project-metrics"
+import type {
+  ProjectMetricFilters,
+  ProjectMetricListOptions,
+  ProjectMetricTrendFilters
+} from "../shared/project-metrics"
 import type {
   HarnessBoardCatalogPageInput,
   HarnessBoardCatalogPageResult
@@ -1373,7 +1380,7 @@ const api = {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
       }>
     > => {
@@ -1392,7 +1399,7 @@ const api = {
           interleavedThinking?: boolean
           enableThinking?: boolean
           enableThinkingEffort?: boolean
-          thinkingEffort?: "high" | "max"
+          thinkingEffort?: "low" | "high" | "max"
           tier?: "premium" | "economy"
         }>
       >
@@ -1413,7 +1420,7 @@ const api = {
       interleavedThinking?: boolean
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
       tier?: "premium" | "economy"
     } | null> => {
       return ipcRenderer.invoke("models:getCustomConfig", id) as Promise<{
@@ -1430,7 +1437,7 @@ const api = {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
       } | null>
     },
@@ -1452,7 +1459,7 @@ const api = {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
         lockedFields: Array<"baseUrl" | "model" | "apiKey">
       }>
@@ -1471,7 +1478,7 @@ const api = {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
       }
     ): Promise<void> => {
@@ -1499,7 +1506,7 @@ const api = {
       interleavedThinking?: boolean
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
       tier?: "premium" | "economy"
     }): Promise<void> => {
       return ipcRenderer.invoke("models:setCustomConfig", config) as Promise<void>
@@ -1518,7 +1525,7 @@ const api = {
       interleavedThinking?: boolean
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
       tier?: "premium" | "economy"
     }): Promise<{ id: string }> => {
       return ipcRenderer.invoke("models:upsertCustomConfig", config) as Promise<{ id: string }>
@@ -1543,7 +1550,7 @@ const api = {
       topK?: number
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
     }): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       return ipcRenderer.invoke("models:testConnection", params) as Promise<{
         success: boolean
@@ -3881,6 +3888,10 @@ const api = {
       filters: ProjectMetricFilters
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricSummary", filters),
+    projectMetricTrend: (
+      filters: ProjectMetricTrendFilters
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricTrend", filters),
     projectMetricProjects: (
       filters: ProjectMetricFilters,
       options?: ProjectMetricListOptions
@@ -4355,6 +4366,20 @@ const api = {
         "harnessBoard:updateFeatureDeployUnits",
         input
       ) as Promise<HarnessFeatureDeployUnitBinding>,
+    setFeatureImManagement: (
+      input: HarnessFeatureImManagementUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> =>
+      ipcRenderer.invoke(
+        "harnessBoard:setFeatureImManagement",
+        input
+      ) as Promise<HarnessFeatureDeployUnitBinding>,
+    ensureFeatureThreadImGrant: (
+      input: HarnessFeatureThreadGrantInput
+    ): Promise<HarnessFeatureThreadGrantResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:ensureFeatureThreadImGrant",
+        input
+      ) as Promise<HarnessFeatureThreadGrantResult>,
     validateManagedRunStart: (input: ManagedRunStartValidationInput): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:validateManagedRunStart", input) as Promise<void>,
     startManagedRun: (input: ManagedRunStartInput): Promise<ManagedRunSummary> =>

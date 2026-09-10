@@ -186,6 +186,9 @@ export interface DashboardTraceDetail {
   triggerSource?: string
   nodes?: DashboardTraceNode[]
   rawAvailable: boolean
+  /** true = 这是会话列表的摘要预览行，完整对话还在懒加载。渲染层不得把它当成
+   * 对话来渲染。 */
+  rawPending?: boolean
   rawError?: string
 }
 
@@ -1899,6 +1902,7 @@ function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
     ...(raw.triggerSource ? { triggerSource: String(raw.triggerSource) } : {}),
     nodes: Array.isArray(raw.nodes) ? raw.nodes : undefined,
     rawAvailable: raw.rawAvailable === true,
+    ...(raw.rawPending === true ? { rawPending: true } : {}),
     ...(raw.rawError ? { rawError: String(raw.rawError) } : {})
   }
 }

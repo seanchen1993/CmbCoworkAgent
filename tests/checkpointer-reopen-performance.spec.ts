@@ -81,6 +81,9 @@ function normalizedSql(sql: string): string {
 function assertBoundedSetupStatement(sql: string): void {
   const normalized = normalizedSql(sql)
   const forbidden = [
+    "BEGIN IMMEDIATE",
+    "PRAGMA TABLE_INFO(CHECKPOINT_MESSAGE_SNAPSHOTS)",
+    "UPDATE CHECKPOINT_MESSAGE_SNAPSHOTS SET GENERATION",
     "PRAGMA TABLE_INFO(CHECKPOINTS)",
     "UPDATE CHECKPOINTS SET CHECKPOINT_TS",
     "UPDATE CHECKPOINTS SET FORK_BOUNDARY_MARKER",
@@ -129,8 +132,8 @@ async function seedNamespaces(databasePath: string, threadId: string): Promise<v
   const snapshotStatement = database.prepare(
     `INSERT INTO checkpoint_message_snapshots
      (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, prefix_length,
-      message_count, type, suffix)
-     VALUES (?, ?, ?, NULL, 0, 0, ?, ?)`
+      message_count, generation, type, suffix)
+     VALUES (?, ?, ?, NULL, 0, 0, 'seed-generation', ?, ?)`
   )
   database.exec("BEGIN")
   try {
@@ -234,7 +237,7 @@ async function main(): Promise<void> {
       .get() as { count: number }
     raw.close()
     assert.equal(Number(snapshotCount.count), NAMESPACE_COUNT)
-    assert.equal(Number(migrationCount.count), 1)
+    assert.equal(Number(migrationCount.count), 2)
 
     let parentCheckpointId = "seed"
     for (let reopen = 1; reopen <= 5; reopen += 1) {

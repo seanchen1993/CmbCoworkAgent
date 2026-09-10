@@ -1984,7 +1984,7 @@ function ProjectListSection({
         <>
           <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-            项目、插件、项目状态、特性数为当前状态；对话数、DEV 阶段会话数、DEV
+            项目、插件、项目状态、特性数为当前状态；对话数、DEV 阶段轮次数、DEV
             关联特性数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
             流程采纳率、系统约束读取与运行时 Hook
             按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
@@ -2124,7 +2124,7 @@ function ProjectListSection({
                 <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
                   <div className="ml-auto flex w-fit items-center gap-1">
                     <span>疑似技术细节补充</span>
-                    <InfoHint hint="统计用户输入全文中累计包含 10 个及以上英文字母的会话数量，用于识别疑似补充技术细节的会话。结果基于规则估算，仅供参考。" />
+                    <InfoHint hint="统计用户实际输入中累计包含 10 个及以上英文字母的轮次数，用于识别疑似补充技术细节的轮次；所选技能、附件等自动附加内容不计入。结果基于规则估算，仅供参考。" />
                   </div>
                 </th>
               ) : null}
@@ -2141,9 +2141,9 @@ function ProjectListSection({
               <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="所选时间范围内的 DEV 阶段会话数，以及这些会话关联的去重特性数；未关联特性的 DEV 会话仅计入会话数"
+                title="所选时间范围内的 DEV 阶段轮次数，以及这些轮次关联的去重特性数；未关联特性的 DEV 轮次仅计入轮次数。与「对话数」同口径，仅统计主动触发的主 Agent 轮次"
               >
-                <div>DEV阶段会话数</div>
+                <div>DEV阶段轮次数</div>
                 <div>DEV关联特性数</div>
               </th>
               <th

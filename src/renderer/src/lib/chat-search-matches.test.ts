@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   createChatSearchMatcher,
+  boundChatSearchCorpus,
   shouldHydrateDurableSearchMatch,
   type ChatSearchCorpus,
   type ChatSearchDocument
@@ -11,6 +12,18 @@ function corpus(stableDocuments: readonly ChatSearchDocument[]): ChatSearchCorpu
 }
 
 describe("incremental stable chat search matcher", () => {
+  it("shares the retention budget across stable history and live overrides", () => {
+    const documents = Array.from({ length: 500 }, (_, index) => ({ messageId: `id-${index}`,
+      sortIndex: index, text: "x".repeat(8192) }))
+    const live = { messageId: "live", sortIndex: 501, text: "x".repeat(256 * 1024) }
+    const bounded = boundChatSearchCorpus({ ...corpus(documents), dynamicDocuments: [live],
+      dynamicMessageIds: new Set(["live"]) })
+    expect(bounded.truncated).toBe(true)
+    expect(bounded.dynamicDocuments).toEqual([live])
+    expect([...bounded.stableDocuments, ...bounded.dynamicDocuments]
+      .reduce((sum, doc) => sum + doc.text.length, 0)).toBeLessThanOrEqual(4 * 1024 * 1024)
+    expect(boundChatSearchCorpus(bounded).truncated).toBe(true)
+  })
   it("reveals a resident durable result even when the bounded local corpus omitted it", () => {
     const localCorpus = corpus([{ messageId: "local-only", text: "needle" }])
     const residentIndexes = new Map([["resident-outside-local-corpus", 501]])

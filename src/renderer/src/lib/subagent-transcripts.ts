@@ -231,6 +231,13 @@ function mergeTranscriptToolCalls(
     next.push(toolCall)
   }
 
+  // A cumulative list that covers every known call can correct an earlier
+  // partial stream's arrival order. Sparse updates must not move omitted calls.
+  const incomingIds = new Set(incoming.map((toolCall) => toolCall.id).filter(Boolean))
+  if (next.every((toolCall) => toolCall.id && incomingIds.has(toolCall.id))) {
+    const rank = new Map(incoming.map((toolCall, index) => [toolCall.id, index]))
+    next.sort((left, right) => rank.get(left.id)! - rank.get(right.id)!)
+  }
   return next
 }
 
@@ -248,31 +255,16 @@ function findMatchingToolMessageIndex(
   toolCall: NonNullable<Message["tool_calls"]>[number],
   toolMessages: Message[],
   usedIndexes: Set<number>,
-  toolCallIndex: number,
-  toolCallCount: number
+  unmatchedCalls: NonNullable<Message["tool_calls"]>
 ): number | undefined {
-  const namedMatchIndex = toolMessages.findIndex(
-    (message, index) =>
-      !usedIndexes.has(index) &&
-      Boolean(message.tool_call_id) &&
-      Boolean(toolCall.name) &&
-      message.name === toolCall.name
+  // Legacy placeholder IDs may be repaired only by a unique name on BOTH
+  // sides. Completion order cannot identify concurrent same-name calls.
+  if (!toolCall.name) return undefined
+  if (unmatchedCalls.filter((call) => call.name === toolCall.name).length !== 1) return undefined
+  const candidates = toolMessages.flatMap((message, index) =>
+    !usedIndexes.has(index) && message.name === toolCall.name ? [index] : []
   )
-  if (namedMatchIndex >= 0) return namedMatchIndex
-
-  if (
-    toolMessages.length === toolCallCount &&
-    toolMessages[toolCallIndex]?.tool_call_id &&
-    !usedIndexes.has(toolCallIndex)
-  ) {
-    return toolCallIndex
-  }
-
-  if (toolCallCount === 1 && toolMessages.length === 1 && !usedIndexes.has(0)) {
-    return 0
-  }
-
-  return undefined
+  return candidates.length === 1 ? candidates[0] : undefined
 }
 
 function dedupeToolCallsById(
@@ -335,14 +327,18 @@ export function reconcileTranscriptToolCallsWithResults(messages: Message[]): Me
     const toolMessages = followingToolMessages(messages, index)
     if (toolMessages.length === 0) return message
 
-    const usedToolMessageIndexes = new Set<number>()
+    const callIds = new Set(message.tool_calls.map((toolCall) => toolCall.id))
+    // Reserve every exact match before considering a legacy name fallback.
+    // Otherwise A can steal B's result while B is still later in the list.
+    const usedToolMessageIndexes = new Set(
+      toolMessages.flatMap((result, index) =>
+        result.tool_call_id && callIds.has(result.tool_call_id) ? [index] : []
+      )
+    )
     const exactResultIds = new Set(toolMessages.map((toolMessage) => toolMessage.tool_call_id))
-    const nextToolCalls = message.tool_calls.map((toolCall, toolCallIndex) => {
+    const unmatchedCalls = message.tool_calls.filter((call) => !exactResultIds.has(call.id))
+    const nextToolCalls = message.tool_calls.map((toolCall) => {
       if (toolCall.id && exactResultIds.has(toolCall.id)) {
-        const exactIndex = toolMessages.findIndex(
-          (toolMessage) => toolMessage.tool_call_id === toolCall.id
-        )
-        if (exactIndex >= 0) usedToolMessageIndexes.add(exactIndex)
         return toolCall
       }
 
@@ -350,8 +346,7 @@ export function reconcileTranscriptToolCallsWithResults(messages: Message[]): Me
         toolCall,
         toolMessages,
         usedToolMessageIndexes,
-        toolCallIndex,
-        message.tool_calls!.length
+        unmatchedCalls
       )
       if (matchIndex === undefined) return toolCall
 

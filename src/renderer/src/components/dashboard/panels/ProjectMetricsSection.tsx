@@ -23,13 +23,15 @@ import {
 } from "@/components/ui/select"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { ProjectMetricTrend } from "./ProjectMetricTrend"
 import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
   ProjectMetricProjectsData,
   ProjectMetricProjectItem,
   ProjectMetricSummaryData,
-  ProjectMetricSummaryGroup
+  ProjectMetricSummaryGroup,
+  ProjectMetricTrendFilters
 } from "../../../../../shared/project-metrics"
 
 const PHASE_OPTIONS = [
@@ -652,9 +654,8 @@ export function ProjectMetricsSection({
     return () => clearTimeout(timer)
   }, [functionPointMax, functionPointMin, tokenConsumptionMax, tokenConsumptionMin])
 
-  const filters = useMemo<ProjectMetricFilters>(
+  const trendFilters = useMemo<ProjectMetricTrendFilters>(
     () => ({
-      range,
       upperOrgLv1,
       phaseStatuses,
       functionPointMin: nullableNumber(debouncedFunctionPointMin),
@@ -670,9 +671,12 @@ export function ProjectMetricsSection({
       debouncedTokenConsumptionMax,
       debouncedTokenConsumptionMin,
       phaseStatuses,
-      range,
       upperOrgLv1
     ]
+  )
+  const filters = useMemo<ProjectMetricFilters>(
+    () => ({ ...trendFilters, range }),
+    [trendFilters, range]
   )
   const listOptions = useMemo<ProjectMetricListOptions>(
     () => ({
@@ -782,6 +786,41 @@ export function ProjectMetricsSection({
             setPage(1)
           }}
         />
+        <Select
+          value={adapterName || ALL_VALUE}
+          disabled={developmentMode === "non_devclaw"}
+          onValueChange={(value) => {
+            setAdapterName(value === ALL_VALUE ? "" : value)
+            setPage(1)
+          }}
+        >
+          <SelectTrigger
+            className={cn(FILTER_CONTROL_CLASS, "w-40 justify-between px-3 [&>svg]:shrink-0")}
+          >
+            <SelectValue placeholder="全部插件" />
+          </SelectTrigger>
+          <SelectContent
+            align="start"
+            className="w-56 p-2"
+            viewportClassName="max-h-64 space-y-0.5 p-0"
+          >
+            <SelectItem
+              value={ALL_VALUE}
+              className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
+            >
+              全部插件
+            </SelectItem>
+            {(summary?.pluginOptions ?? []).map((plugin) => (
+              <SelectItem
+                key={plugin}
+                value={plugin}
+                className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
+              >
+                {plugin}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Input
           type="number"
           min="0"
@@ -830,26 +869,6 @@ export function ProjectMetricsSection({
           placeholder="Token 消耗上限"
           className={cn(FILTER_CONTROL_CLASS, "w-32")}
         />
-        <Select
-          value={adapterName || ALL_VALUE}
-          disabled={developmentMode === "non_devclaw"}
-          onValueChange={(value) => {
-            setAdapterName(value === ALL_VALUE ? "" : value)
-            setPage(1)
-          }}
-        >
-          <SelectTrigger className={cn(FILTER_CONTROL_CLASS, "w-48")}>
-            <SelectValue placeholder="全部插件" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_VALUE}>全部插件</SelectItem>
-            {(summary?.pluginOptions ?? []).map((plugin) => (
-              <SelectItem key={plugin} value={plugin}>
-                {plugin}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
       </div>
 
       {truncated ? (
@@ -858,6 +877,8 @@ export function ProjectMetricsSection({
           条，当前结果基于截断数据，可能存在统计不完整或开发方式误分类。
         </div>
       ) : null}
+
+      <ProjectMetricTrend filters={trendFilters} refreshKey={refreshKey} />
 
       <div className="mt-5">
         <SummaryComparison

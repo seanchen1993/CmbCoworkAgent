@@ -4,7 +4,10 @@ import type {
   ProjectMetricProjectItem,
   ProjectMetricProjectsData,
   ProjectMetricSummaryData,
-  ProjectMetricSummaryGroup
+  ProjectMetricSummaryGroup,
+  ProjectMetricTrendData,
+  ProjectMetricTrendDateField,
+  ProjectMetricTrendFilters
 } from "../../shared/project-metrics"
 
 type EsQuery = (
@@ -202,10 +205,11 @@ function effectiveRoomNames(
 
 function buildFactBaseFilters(
   filters: ProjectMetricFilters,
-  allowedRoomNames: string[] | null
+  allowedRoomNames: string[] | null,
+  dateField: ProjectMetricTrendDateField = "createDate"
 ): Record<string, unknown>[] {
   const result: Record<string, unknown>[] = [
-    { range: { createDate: projectDateRange(filters.range) } }
+    { range: { [dateField]: projectDateRange(filters.range) } }
   ]
   const rooms = effectiveRoomNames(uniqueSorted(filters.upperOrgLv1 ?? []), allowedRoomNames)
   const phases = uniqueSorted(filters.phaseStatuses ?? [])
@@ -448,12 +452,13 @@ async function fetchFactSummary(
   deps: ProjectMetricDependencies,
   filters: ProjectMetricFilters,
   allDevclawCodes: string[],
-  selectedDevclawCodes: string[]
+  selectedDevclawCodes: string[],
+  dateField: ProjectMetricTrendDateField = "createDate"
 ): Promise<FactSummaryGroups> {
   const raw = (await queryProjectMetricEs(deps, "总体事实聚合", deps.factIndex, {
     size: 0,
     track_total_hits: false,
-    query: { bool: { filter: buildFactBaseFilters(filters, deps.allowedRoomNames) } },
+    query: { bool: { filter: buildFactBaseFilters(filters, deps.allowedRoomNames, dateField) } },
     aggs: {
       by_project_type: {
         filters: {
@@ -477,7 +482,8 @@ async function fetchFactSummary(
 async function fetchSelectedDevclawFacts(
   deps: ProjectMetricDependencies,
   filters: ProjectMetricFilters,
-  selectedDevclawCodes: string[]
+  selectedDevclawCodes: string[],
+  dateField: ProjectMetricTrendDateField = "createDate"
 ): Promise<FactProject[]> {
   if (selectedDevclawCodes.length === 0) return []
   const raw = (await queryProjectMetricEs(deps, "DevClaw 项目事实", deps.factIndex, {
@@ -486,7 +492,7 @@ async function fetchSelectedDevclawFacts(
     query: {
       bool: {
         filter: [
-          ...buildFactBaseFilters(filters, deps.allowedRoomNames),
+          ...buildFactBaseFilters(filters, deps.allowedRoomNames, dateField),
           { terms: { prjCode: selectedDevclawCodes } }
         ]
       }
@@ -793,15 +799,24 @@ export async function fetchProjectMetricSummary(
   deps: ProjectMetricDependencies
 ): Promise<ProjectMetricSummaryData> {
   const snapshot = await fetchLeanSnapshotState(deps)
+  return fetchProjectMetricSummaryWithSnapshot(filters, deps, snapshot)
+}
+
+async function fetchProjectMetricSummaryWithSnapshot(
+  filters: ProjectMetricFilters,
+  deps: ProjectMetricDependencies,
+  snapshot: LeanSnapshotState,
+  dateField: ProjectMetricTrendDateField = "createDate"
+): Promise<ProjectMetricSummaryData> {
   const selectedCodes = selectedDevclawPrjCodes(snapshot, filters.adapterName)
   const tokenConsumptionFiltered = hasTokenConsumptionFilter(filters)
   let factSummary!: FactSummaryGroups
   let devclawFacts!: FactProject[]
   await Promise.all([
-    fetchFactSummary(deps, filters, snapshot.prjCodes, selectedCodes).then((value) => {
+    fetchFactSummary(deps, filters, snapshot.prjCodes, selectedCodes, dateField).then((value) => {
       factSummary = value
     }),
-    fetchSelectedDevclawFacts(deps, filters, selectedCodes).then((value) => {
+    fetchSelectedDevclawFacts(deps, filters, selectedCodes, dateField).then((value) => {
       devclawFacts = value
     })
   ])
@@ -826,7 +841,8 @@ export async function fetchProjectMetricSummary(
       deps,
       filters,
       snapshot.prjCodes,
-      devclawFacts.map((project) => project.prjCode)
+      devclawFacts.map((project) => project.prjCode),
+      dateField
     )
     factSummary.devclaw = filteredSummary.devclaw
   }
@@ -888,6 +904,90 @@ export async function fetchProjectMetricSummary(
     groups: [devclaw, factSummary.nonDevclaw],
     pluginOptions: snapshot.pluginOptions,
     truncated: snapshot.truncated
+  }
+}
+
+function recentProjectMetricMonths(): Array<{
+  month: string
+  range: ProjectMetricFilters["range"]
+}> {
+  const current = shanghaiDateParts(new Date().toString())
+  return Array.from({ length: 6 }, (_, index) => {
+    const first = new Date(Date.UTC(current.year, current.month - 7 + index, 1))
+    const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0))
+    const month = `${first.getUTCFullYear()}-${String(first.getUTCMonth() + 1).padStart(2, "0")}`
+    return {
+      month,
+      range: { from: `${month}-01`, to: `${month}-${last.getUTCDate()}` }
+    }
+  })
+}
+
+export async function fetchProjectMetricTrend(
+  filters: ProjectMetricTrendFilters,
+  deps: ProjectMetricDependencies
+): Promise<ProjectMetricTrendData> {
+  const snapshot = await fetchLeanSnapshotState(deps)
+  // endDate 的月份范围查询本身排除无结项日期的项目，不叠加立项日期条件。
+  const dateField = filters.dateField === "endDate" ? "endDate" : "createDate"
+  // 共用一次项目快照；每月复用总体指标的完整筛选和计算口径。
+  const results = await Promise.all(
+    recentProjectMetricMonths().map(async ({ month, range }) => ({
+      month,
+      summary: await fetchProjectMetricSummaryWithSnapshot(
+        { ...filters, range },
+        deps,
+        snapshot,
+        dateField
+      )
+    }))
+  )
+  return {
+    months: results.map(({ month, summary }) => ({ month, groups: summary.groups })),
+    truncated: results.some(({ summary }) => summary.truncated)
+  }
+}
+
+export function makeMockProjectMetricTrend(
+  filters: ProjectMetricTrendFilters
+): ProjectMetricTrendData {
+  return {
+    months: recentProjectMetricMonths().map(({ month, range }, index) => {
+      const summary = makeMockProjectMetricSummary({ ...filters, range })
+      return {
+        month,
+        groups: summary.groups.map((group) => {
+          const factor =
+            (group.developmentMode === "devclaw" ? 1.25 - index * 0.05 : 1.1 - index * 0.02) +
+            (filters.dateField === "endDate" ? 0.08 : 0)
+          return {
+            ...group,
+            avgBugCount: group.avgBugCount === null ? null : group.avgBugCount * factor,
+            avgFuncPointCount:
+              group.avgFuncPointCount === null ? null : group.avgFuncPointCount / factor,
+            defectDensityPer100Fp:
+              group.defectDensityPer100Fp === null
+                ? null
+                : group.defectDensityPer100Fp * factor * factor,
+            avgTestLeadDays: group.avgTestLeadDays === null ? null : group.avgTestLeadDays * factor,
+            avgDeliveryDays: group.avgDeliveryDays === null ? null : group.avgDeliveryDays * factor,
+            avgInputTokens: group.avgInputTokens === null ? null : group.avgInputTokens * factor,
+            avgOutputTokens: group.avgOutputTokens === null ? null : group.avgOutputTokens * factor,
+            avgPushedAdoptedLines:
+              group.avgPushedAdoptedLines === null ? null : group.avgPushedAdoptedLines / factor,
+            inputTokensPerAdoptedLine:
+              group.inputTokensPerAdoptedLine === null
+                ? null
+                : group.inputTokensPerAdoptedLine * factor * factor,
+            outputTokensPerAdoptedLine:
+              group.outputTokensPerAdoptedLine === null
+                ? null
+                : group.outputTokensPerAdoptedLine * factor * factor
+          }
+        })
+      }
+    }),
+    truncated: false
   }
 }
 

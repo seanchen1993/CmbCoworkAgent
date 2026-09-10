@@ -1,7 +1,8 @@
+import { NativeSqliteAdapter, openNativeSqliteDatabase } from "../db/native-sqlite-adapter"
 import {
-  NativeSqliteAdapter,
-  openNativeSqliteDatabase
-} from "../db/native-sqlite-adapter"
+  ensureMessageSnapshotGeneration,
+  MESSAGE_SNAPSHOT_GENERATION_MIGRATION
+} from "./message-snapshot-schema"
 import { resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { sqliteFileSize } from "../utils/sqlite-durable-file"
@@ -605,7 +606,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * Keep the marker in the same transaction as the data changes so a crash can
    * only expose either the complete migration or an empty marker that retries.
    */
-  private async migrateCheckpointSchemaOnce(database: NativeSqliteAdapter): Promise<void> {
+  private async migrateCheckpointSchemaOnce(database: NativeSqliteAdapter): Promise<boolean> {
     database.run(`
       CREATE TABLE IF NOT EXISTS checkpoint_schema_migrations (
         migration_id TEXT PRIMARY KEY,
@@ -613,10 +614,13 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       )
     `)
     const applied = database.exec(
-      `SELECT 1 FROM checkpoint_schema_migrations WHERE migration_id = ? LIMIT 1`,
-      [CHECKPOINT_SCHEMA_MIGRATION_ID]
+      `SELECT migration_id FROM checkpoint_schema_migrations WHERE migration_id IN (?, ?)`,
+      [CHECKPOINT_SCHEMA_MIGRATION_ID, MESSAGE_SNAPSHOT_GENERATION_MIGRATION]
     )
-    if (applied[0]?.values.length) return
+    const appliedIds = new Set(applied[0]?.values.map((row) => row[0]))
+    if (appliedIds.has(CHECKPOINT_SCHEMA_MIGRATION_ID)) {
+      return appliedIds.has(MESSAGE_SNAPSHOT_GENERATION_MIGRATION)
+    }
 
     // Metadata decoding can yield. Finish it before acquiring SQLite's writer
     // lock so another connection can never synchronously busy-wait while this
@@ -637,13 +641,11 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       if (concurrentlyApplied[0]?.values.length) {
         database.run("COMMIT")
         migrationStarted = false
-        return
+        return false
       }
 
       const tableInfo = database.exec("PRAGMA table_info(checkpoints)")
-      const columns = new Set(
-        (tableInfo[0]?.values ?? []).map((row) => String(row[1] ?? ""))
-      )
+      const columns = new Set((tableInfo[0]?.values ?? []).map((row) => String(row[1] ?? "")))
       if (!columns.has("checkpoint_ts")) {
         database.run(`ALTER TABLE checkpoints ADD COLUMN checkpoint_ts TEXT`)
       }
@@ -692,6 +694,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       }
       throw error
     }
+    return false
   }
 
   private pruneAllCheckpointNamespaces(database: NativeSqliteAdapter): void {
@@ -806,44 +809,6 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       )
     `)
 
-    // The runtime-projection worker can open the same legacy database before a
-    // saver is initialized. Serialize the PRAGMA/ALTER pair across connections
-    // so two cold-upgrade paths cannot both observe the column as missing.
-    let messageSnapshotMigrationStarted = false
-    try {
-      this.db.run("BEGIN IMMEDIATE")
-      messageSnapshotMigrationStarted = true
-      const messageSnapshotColumns = new Set(
-        (this.db.exec("PRAGMA table_info(checkpoint_message_snapshots)")[0]?.values ?? []).map(
-          (row) => String(row[1] ?? "")
-        )
-      )
-      if (!messageSnapshotColumns.has("generation")) {
-        this.db.run(
-          `ALTER TABLE checkpoint_message_snapshots
-           ADD COLUMN generation TEXT NOT NULL DEFAULT ''`
-        )
-      }
-      // Backfill legacy rows entirely inside SQLite; never deserialize a long
-      // transcript merely to establish its optimistic-concurrency identity.
-      this.db.run(
-        `UPDATE checkpoint_message_snapshots
-         SET generation = lower(hex(randomblob(16)))
-         WHERE generation IS NULL OR typeof(generation) != 'text' OR length(generation) = 0`
-      )
-      this.db.run("COMMIT")
-      messageSnapshotMigrationStarted = false
-    } catch (error) {
-      if (messageSnapshotMigrationStarted) {
-        try {
-          this.db.run("ROLLBACK")
-        } catch {
-          // Preserve the schema migration error; a failed BEGIN has no txn.
-        }
-      }
-      throw error
-    }
-
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_checkpoint_message_snapshot_parent
       ON checkpoint_message_snapshots (thread_id, checkpoint_ns, parent_checkpoint_id)
@@ -878,7 +843,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     // Publish every table needed by the projection worker before the first
     // asynchronous legacy decode. A worker may observe the database while that
     // cold migration yields; at that point it must see a complete base schema.
-    await this.migrateCheckpointSchemaOnce(this.db)
+    const generationReady = await this.migrateCheckpointSchemaOnce(this.db)
+    if (!generationReady) ensureMessageSnapshotGeneration(this.db)
     this.isSetup = true
   }
 

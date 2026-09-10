@@ -1,5 +1,10 @@
+// Relative (not "@/") so this module stays importable from unit tests that
+// don't resolve the "@/" path alias for runtime values.
+import { BUILTIN_BROWSER_PROMPT_PREFIX } from "../../../../shared/user-input-transport"
+
+export { BUILTIN_BROWSER_PROMPT_PREFIX }
+
 export const BUILTIN_BROWSER_COMMAND_ID = "builtin-browser"
-export const BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 browser_*工具："
 export const BUILTIN_BROWSER_SCREENSHOT_DISABLED_PROMPT = "（不允许使用截图功能）"
 
 let builtinBrowserScreenshotEnabled = false

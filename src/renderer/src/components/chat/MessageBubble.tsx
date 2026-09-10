@@ -365,6 +365,7 @@ interface ToolResultInfo {
 }
 
 interface MessageBubbleProps {
+  searchLocation?: import("../../../../shared/chat-search-types").ChatSearchLocation
   message: Message
   previousMessage?: Message | null
   isStreaming?: boolean
@@ -410,7 +411,8 @@ function MessageBubbleImpl({
   isLoading,
   hasUserAfterHead = false,
   assistantDurationMs,
-  userSendTimeLabel = null
+  userSendTimeLabel = null,
+  searchLocation
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -662,12 +664,18 @@ function MessageBubbleImpl({
               <SkillChip label={skillContent.skillName} compact className="mr-2" />
             )}
             {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-            <span data-chat-search-text>{browserContent.visibleText}</span>
+            <span data-chat-search-text data-chat-search-block-index={0}
+              data-chat-search-source-start={0} data-chat-search-source-end={displayContent.length}
+            >{browserContent.visibleText}</span>
           </div>
         )
       }
       return (
-        <StreamingMarkdown isStreaming={isStreaming} threadId={threadId}>
+        <StreamingMarkdown
+          isStreaming={isStreaming}
+          threadId={threadId}
+          searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
+        >
           {displayContent}
         </StreamingMarkdown>
       )
@@ -692,12 +700,20 @@ function MessageBubbleImpl({
                   <SkillChip label={skillContent.skillName} compact className="mr-2" />
                 )}
                 {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-                <span data-chat-search-text>{browserContent.visibleText}</span>
+                <span data-chat-search-text data-chat-search-block-index={index}
+                  data-chat-search-source-start={0} data-chat-search-source-end={displayText.length}
+                >{browserContent.visibleText}</span>
               </div>
             )
           }
           return (
-            <StreamingMarkdown key={index} isStreaming={isStreaming} threadId={threadId}>
+            <StreamingMarkdown
+              key={index}
+              isStreaming={isStreaming}
+              threadId={threadId}
+              searchBlockIndex={index}
+              searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}
+            >
               {displayText}
             </StreamingMarkdown>
           )
@@ -1274,6 +1290,7 @@ function areMessageBubblePropsEqual(
     previous.hasUserAfterHead === next.hasUserAfterHead &&
     previous.assistantDurationMs === next.assistantDurationMs &&
     previous.userSendTimeLabel === next.userSendTimeLabel &&
+    previous.searchLocation === next.searchLocation &&
     areMessageToolRenderInputsEqual(previous.message, previous, next)
   )
 }

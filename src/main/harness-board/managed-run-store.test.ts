@@ -45,36 +45,51 @@ describe("ManagedRunStore", () => {
     const store = makeStore()
     const snapshot = store.createRun("project-1", "feature-1")
 
+    const started = store.appendEvent(snapshot, { type: "run_started", summary: "启动" })
     const updated = store.updateSnapshot(snapshot, {
-      type: "decision_made",
+      type: "managed_run_decision",
       scope: "stage",
-      source: "controller_policy",
-      decision: "advance",
-      reasonCode: "next_action_resolved",
-      decisionFacts: {
-        currentNodeId: "dev.plan",
-        featureStatus: "in_progress",
-        currentNodeStatus: "in_progress",
-        slashSkill: "dev-plan",
-        changedFields: ["currentNode"],
-        initialInspection: false,
-        bizRetryCount: 0,
-        providerRetryCount: 0,
-        terminalOutcome: "success"
+      sourceEventId: started.eventId,
+      sourceEventType: started.type,
+      decisionActor: "controller",
+      decisionChannel: "system",
+      decisionAction: "start_new_thread",
+      policyResult: {
+        type: "biz_progress",
+        proposedAction: "start_new_thread",
+        reasonCode: "next_action_resolved",
+        facts: {
+          currentNodeId: "dev.plan",
+          featureStatus: "in_progress",
+          currentNodeStatus: "in_progress",
+          slashSkill: "dev-plan",
+          changedFields: ["currentNode"],
+          initialInspection: false,
+          bizRetryCount: 0,
+          providerRetryCount: 0,
+          terminalOutcome: "success"
+        },
+        rule: "阶段发生变化时推进。"
       },
-      decisionRule: "阶段发生变化时推进。",
       summary: "创建下一个工作单元"
     })
     const event = store.listEvents(snapshot).events.at(-1)
 
-    expect(event?.version).toBe(2)
+    expect(event?.version).toBe(2.5)
     expect(event?.eventId).toEqual(expect.any(String))
     expect(event?.createTime).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u)
     expect(updated.lastDecision).toMatchObject({
-      decision: "advance",
-      reasonCode: "next_action_resolved",
-      rule: "阶段发生变化时推进。",
-      facts: { changedFields: ["currentNode"] }
+      policyResult: {
+        type: "biz_progress",
+        proposedAction: "start_new_thread",
+        reasonCode: "next_action_resolved",
+        rule: "阶段发生变化时推进。",
+        facts: { changedFields: ["currentNode"] }
+      },
+      decisionActor: "controller",
+      decisionChannel: "system",
+      decisionAction: "start_new_thread",
+      summary: "创建下一个工作单元"
     })
     expect(store.getLatestRun("project-1", "feature-1")?.lastDecision).toEqual(updated.lastDecision)
   })
@@ -112,11 +127,12 @@ describe("ManagedRunStore", () => {
     const snapshot = store.createRun("project-1", "feature-1")
     for (let index = 0; index < 4; index += 1) {
       store.appendEvent(snapshot, {
-        type: "feature_inspected",
+        type: "managed_agent_turn_ended",
         nodeId: "dev.plan",
-        featureStatus: "in_progress",
-        nodeStatus: "in_progress",
-        summary: `Inspect ${index}`
+        threadId: `thread-${index}`,
+        outcome: "success",
+        endReason: { code: "normal" },
+        summary: `Turn ${index}`
       })
     }
 
@@ -127,55 +143,58 @@ describe("ManagedRunStore", () => {
     expect(first.hasMore).toBe(true)
     expect(first.nextCursor).toEqual(expect.any(String))
     expect(second.events).toHaveLength(2)
-    expect(first.events.map((event) => event.summary)).toEqual(["Inspect 2", "Inspect 3"])
-    expect(second.events.map((event) => event.summary)).toEqual(["Inspect 0", "Inspect 1"])
+    expect(first.events.map((event) => event.summary)).toEqual(["Turn 2", "Turn 3"])
+    expect(second.events.map((event) => event.summary)).toEqual(["Turn 0", "Turn 1"])
     expect(second.events[0]?.eventId).not.toBe(first.events[0]?.eventId)
   })
 
   it("truncates a malformed journal tail before appending", () => {
     const store = makeStore()
     const snapshot = store.createRun("project-1", "feature-1")
+    const started = store.appendEvent(snapshot, { type: "run_started", summary: "启动" })
     appendFileSync(eventPath(store, snapshot.runId), "{broken-tail")
 
     store.appendEvent(snapshot, {
-      type: "decision_made",
-      decision: "advance",
-      decisionFacts: {
-        currentNodeId: "dev.plan",
-        featureStatus: "in_progress",
-        currentNodeStatus: "in_progress",
-        changedFields: [],
-        initialInspection: false,
-        bizRetryCount: 0,
-        providerRetryCount: 0
+      type: "managed_run_decision",
+      sourceEventId: started.eventId,
+      sourceEventType: started.type,
+      decisionActor: "controller",
+      decisionChannel: "system",
+      decisionAction: "start_new_thread",
+      policyResult: {
+        type: "biz_progress",
+        proposedAction: "start_new_thread",
+        reasonCode: "initial_action_resolved",
+        rule: "测试尾行修复后仍可写入决策事件。"
       },
-      decisionRule: "测试尾行修复后仍可写入决策事件。",
       summary: "尾行修复后继续"
     })
 
     expect(store.listEvents(snapshot).events.map((event) => event.type)).toEqual([
       "run_started",
-      "decision_made"
+      "managed_run_decision"
     ])
   })
 
   it("preserves a valid final event that is missing only its newline", () => {
     const store = makeStore()
     const snapshot = store.createRun("project-1", "feature-1")
+    store.appendEvent(snapshot, { type: "run_started", summary: "启动" })
     const path = eventPath(store, snapshot.runId)
     truncateSync(path, statSync(path).size - 1)
 
     store.appendEvent(snapshot, {
-      type: "feature_inspected",
+      type: "managed_agent_turn_ended",
       nodeId: "dev.plan",
-      featureStatus: "in_progress",
-      nodeStatus: "in_progress",
+      threadId: "thread-1",
+      outcome: "success",
+      endReason: { code: "normal" },
       summary: "补齐换行后继续"
     })
 
     expect(store.listEvents(snapshot).events.map((event) => event.type)).toEqual([
       "run_started",
-      "feature_inspected"
+      "managed_agent_turn_ended"
     ])
   })
 
@@ -184,7 +203,7 @@ describe("ManagedRunStore", () => {
     const snapshot = store.createRun("project-1", "feature-1")
 
     store.appendEvent(snapshot, {
-      type: "session_completed",
+      type: "managed_agent_turn_ended",
       scope: "stage",
       threadId: "thread-1",
       outcome: "error",
@@ -193,7 +212,7 @@ describe("ManagedRunStore", () => {
     })
 
     expect(store.listEvents(snapshot).events.at(-1)).toMatchObject({
-      type: "session_completed",
+      type: "managed_agent_turn_ended",
       outcome: "error",
       endReason: { code: "provider_error", message: "upstream unavailable" }
     })
@@ -205,12 +224,13 @@ describe("ManagedRunStore", () => {
     appendFileSync(
       eventPath(store, snapshot.runId),
       `{broken}\n${JSON.stringify({
-        version: 2,
+        version: 2.5,
         eventId: "later-event",
         createTime: "2026-08-23 20:00:00",
-        type: "decision_made",
+        type: "run_stop_requested",
         runId: snapshot.runId,
-        scope: "stage"
+        scope: "global",
+        summary: "请求停止"
       })}\n`
     )
 
@@ -244,30 +264,42 @@ describe("ManagedRunStore", () => {
     appendFileSync(
       eventPath(store, snapshot.runId),
       `${JSON.stringify({
-        version: 2,
+        version: 2.5,
         eventId: "invalid-decision",
         createTime: "2026-08-24 10:00:00",
-        type: "decision_made",
+        type: "managed_run_decision",
         runId: snapshot.runId,
         scope: "stage",
-        decision: "advance",
-        decisionFacts: {
-          currentNodeId: "dev.plan",
-          featureStatus: "in_progress",
-          currentNodeStatus: "in_progress",
-          changedFields: "currentNode",
-          initialInspection: false,
-          bizRetryCount: 0,
-          providerRetryCount: 0
+        sourceEventId: "source-event",
+        sourceEventType: "run_started",
+        decisionActor: "controller",
+        decisionChannel: "system",
+        decisionAction: "start_new_thread",
+        policyResult: {
+          type: "biz_progress",
+          proposedAction: "start_new_thread",
+          reasonCode: "initial_action_resolved",
+          facts: {
+            currentNodeId: "dev.plan",
+            featureStatus: "in_progress",
+            currentNodeStatus: "in_progress",
+            changedFields: "currentNode",
+            initialInspection: false,
+            bizRetryCount: 0,
+            providerRetryCount: 0
+          },
+          rule: "无效 facts 不应通过校验"
         },
-        decisionRule: "无效 facts 不应通过校验"
+        summary: "无效决策"
       })}\n${JSON.stringify({
-        version: 2,
+        version: 2.5,
         eventId: "later-run-failed",
         createTime: "2026-08-24 10:00:01",
         type: "run_failed",
         runId: snapshot.runId,
-        scope: "global"
+        scope: "global",
+        decisionEventId: "invalid-decision",
+        summary: "失败"
       })}\n`
     )
 
@@ -278,9 +310,29 @@ describe("ManagedRunStore", () => {
   it("keeps terminal history while allowing a later run", () => {
     const store = makeStore()
     const first = store.createRun("project-1", "feature-1")
+    const started = store.appendEvent(first, { type: "run_started", summary: "启动" })
+    const decision = store.appendEvent(first, {
+      type: "managed_run_decision",
+      sourceEventId: started.eventId,
+      sourceEventType: started.type,
+      decisionActor: "controller",
+      decisionChannel: "system",
+      decisionAction: "complete_managed_run",
+      policyResult: {
+        type: "run_termination",
+        proposedAction: "complete_managed_run",
+        reasonCode: "feature_terminal"
+      },
+      summary: "特性已进入终态"
+    })
     const completed = store.updateSnapshot(
       { ...first, status: "completed" },
-      { type: "run_completed", scope: "global", summary: "完成" }
+      {
+        type: "run_completed",
+        scope: "global",
+        decisionEventId: decision.eventId,
+        summary: "完成"
+      }
     )
     expect(store.findRunningRun("project-1", "feature-1")).toBeNull()
 

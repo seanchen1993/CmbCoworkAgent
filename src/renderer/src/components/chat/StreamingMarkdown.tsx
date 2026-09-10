@@ -1,6 +1,8 @@
 import ReactMarkdown, { type Components } from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
 import remarkGfm from "remark-gfm"
+import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
+import { ChatSearchContext } from "./ChatSearchContext"
 import { Check, Copy } from "lucide-react"
 import {
   memo,
@@ -25,6 +27,8 @@ interface StreamingMarkdownProps {
   children: string
   isStreaming?: boolean
   threadId?: string
+  searchBlockIndex?: number
+  searchLocation?: ChatSearchLocation
 }
 
 function MarkdownCodeBlock({
@@ -171,11 +175,13 @@ const MARKDOWN_COMPONENTS: Components = {
 const MarkdownFragment = memo(function MarkdownFragment({
   text,
   isStreaming,
-  threadId
+  threadId,
+  start = 0
 }: {
   text: string
   isStreaming: boolean
   threadId?: string
+  start?: number
 }): React.JSX.Element {
   const renderCodeBlock = useMemo(
     () =>
@@ -208,7 +214,11 @@ const MarkdownFragment = memo(function MarkdownFragment({
   })
 
   return (
-    <div data-chat-search-text>
+    <div
+      data-chat-search-text
+      data-chat-search-source-start={start}
+      data-chat-search-source-end={start + text.length}
+    >
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
@@ -223,7 +233,9 @@ const MarkdownFragment = memo(function MarkdownFragment({
 export const StreamingMarkdown = memo(function StreamingMarkdown({
   children,
   isStreaming = false,
-  threadId
+  threadId,
+  searchBlockIndex = 0,
+  searchLocation
 }: StreamingMarkdownProps): React.JSX.Element {
   const text = useThrottledStreamingText(children, isStreaming)
   const [expandedText, setExpandedText] = useState<string | null>(null)
@@ -239,6 +251,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
       if (plan.renderFullDocument) {
         return (
           <>
+            <ChatSearchContext location={searchLocation} />
             {!isStreaming && isExpanded && (
               <button
                 data-chat-search-ignore
@@ -268,6 +281,8 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
             {!isStreaming && (
               <button
                 type="button"
+                data-chat-search-expand-markdown
+                aria-expanded={false}
                 className="ml-2 underline underline-offset-2 hover:text-foreground"
                 onClick={() => setExpandedText(text)}
               >
@@ -275,12 +290,22 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
               </button>
             )}
           </div>
-          <MarkdownFragment text={plan.tail} isStreaming={isStreaming} threadId={threadId} />
+          <ChatSearchContext location={searchLocation} />
+          <MarkdownFragment
+            text={plan.tail}
+            start={text.length - plan.tail.length}
+            isStreaming={isStreaming}
+            threadId={threadId}
+          />
         </>
       )
     },
-    [text, isStreaming, isExpanded, threadId]
+    [text, isStreaming, isExpanded, threadId, searchLocation]
   )
 
-  return <div className="streaming-markdown">{rendered}</div>
+  return (
+    <div className="streaming-markdown" data-chat-search-block-index={searchBlockIndex}>
+      {rendered}
+    </div>
+  )
 })

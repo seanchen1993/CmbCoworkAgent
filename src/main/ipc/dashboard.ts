@@ -115,12 +115,18 @@ import {
   type StageBucket
 } from "../../shared/harness-stage-bucket"
 import { SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } from "../services/system-constraint-read-reporter"
-import type { ProjectMetricFilters, ProjectMetricListOptions } from "../../shared/project-metrics"
+import type {
+  ProjectMetricFilters,
+  ProjectMetricListOptions,
+  ProjectMetricTrendFilters
+} from "../../shared/project-metrics"
 import {
   fetchProjectMetricProjects,
   fetchProjectMetricSummary,
+  fetchProjectMetricTrend,
   makeMockProjectMetricProjects,
-  makeMockProjectMetricSummary
+  makeMockProjectMetricSummary,
+  makeMockProjectMetricTrend
 } from "./dashboard-project-metrics"
 
 // ─────────────────────────────────────────────────────────
@@ -441,6 +447,10 @@ interface DashboardTraceDetail {
   triggerSource?: string
   nodes?: TraceNode[]
   rawAvailable: boolean
+  /** true = `_raw` 是「列表预览刻意没取」，不是「这条 trace 坏了」。渲染层据此
+   * 拒绝把预览行当成对话来渲染——没有 raw 就没有对话数据，任何据此产出的内容
+   * 都是编造。 */
+  rawPending?: boolean
   rawError?: string
 }
 
@@ -2520,10 +2530,10 @@ function normalizeTraceDetail(
   // 预览批次没请求 _raw，跳过解析：省掉每行一次 JSON.parse + 建树，也避免把
   // 「没取」误报成「解析失败」。个别文档若仍带 _raw（旧索引/别的调用方），
   // 照常解析，不因预览标记而丢信息。
-  const parsed =
-    options?.preview && source._raw === undefined
-      ? { error: TRACE_PREVIEW_RAW_OMITTED }
-      : parseRawTrace(source._raw)
+  const rawOmittedForPreview = options?.preview === true && source._raw === undefined
+  const parsed = rawOmittedForPreview
+    ? { error: TRACE_PREVIEW_RAW_OMITTED }
+    : parseRawTrace(source._raw)
 
   if (parsed.trace) {
     const trace = normalizeParsedTrace(parsed.trace, source, hit)
@@ -2615,6 +2625,7 @@ function normalizeTraceDetail(
     evolvedSkills: asStringArray(source.evolvedSkills),
     triggerSource: normalizeTraceTriggerSource(source.triggerSource),
     rawAvailable: false,
+    ...(rawOmittedForPreview ? { rawPending: true as const } : {}),
     rawError: parsed.error
   })
 }
@@ -12901,32 +12912,36 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
+          // 对话数、疑似技术细节补充、DEV 阶段轮次数与 DEV 关联特性数共用同一口径：
+          // 主动触发的主 Agent root trace。DEV 两项此前挂在 by_project 下（与该
+          // filter 平级），把定时任务、心跳等后台触发和子 Agent trace 一并计入了，
+          // 与同一行的「对话数」对不上；现在一起收进 filter 内。
           main_agent_conversations: {
             filter: projectModeMainAgentConversationFilter(),
-            ...(includeSuspectedTechnicalDetail
-              ? {
-                  aggs: {
+            aggs: {
+              ...(includeSuspectedTechnicalDetail
+                ? {
                     suspected_technical_detail_supplements: {
                       filter: { term: { suspectedTechnicalDetailSupplement: true } }
                     }
                   }
+                : {}),
+              by_node: { terms: { field: "harnessNodeName", size: 100 } },
+              by_feature: {
+                terms: {
+                  field: "harnessFeatureSlug",
+                  size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+                },
+                aggs: {
+                  by_node: {
+                    terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
+                  }
                 }
-              : {})
-          },
-          skills: { terms: { field: "usedSkills", size: 100 } },
-          skill_source: { terms: { field: "skillSource", size: 100 } },
-          by_node: { terms: { field: "harnessNodeName", size: 100 } },
-          by_feature: {
-            terms: {
-              field: "harnessFeatureSlug",
-              size: PROJECT_MODE_FEATURE_SLUG_LIMIT
-            },
-            aggs: {
-              by_node: {
-                terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
               }
             }
           },
+          skills: { terms: { field: "usedSkills", size: 100 } },
+          skill_source: { terms: { field: "skillSource", size: 100 } },
           ...stageBucketTraceAggs()
         }
       }
@@ -12957,10 +12972,13 @@ async function fetchProjectModePageUsage(
         asNumber(asRecord(mainAgentConversations.suspected_technical_detail_supplements).doc_count)
       )
     }
-    perProjectDevStage.set(key, countDevStageConversations(asRecord(b.by_node).buckets))
+    perProjectDevStage.set(
+      key,
+      countDevStageConversations(asRecord(mainAgentConversations.by_node).buckets)
+    )
     perProjectDevAssociatedFeatures.set(
       key,
-      countDevAssociatedFeatures(asRecord(b.by_feature).buckets)
+      countDevAssociatedFeatures(asRecord(mainAgentConversations.by_feature).buckets)
     )
     perProjectSkills.set(
       key,
@@ -14976,6 +14994,32 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         }
       } catch (e) {
         logDashboardRequestError("projectMetricSummary", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricTrend",
+    async (_, filters: ProjectMetricTrendFilters) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricTrend(filters) }
+      }
+      try {
+        const access = requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricTrend(filters, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricTrend", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

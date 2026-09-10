@@ -6,7 +6,7 @@ export interface SkillUseBlockMetadata {
   allowedTools?: string[] | null
 }
 
-const SKILL_USE_TAG_NAME = "CMBDEVCLAW-SKILL-USE-V1"
+export const SKILL_USE_TAG_NAME = "CMBDEVCLAW-SKILL-USE-V1"
 
 function escapeXml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")

@@ -30,6 +30,11 @@ import {
   WEB_SOURCE_PREVIEW_MAX_BYTES,
   WEB_SOURCE_PREVIEW_MAX_PAGES
 } from "@/lib/text-preview-pages"
+import {
+  textPreviewKind,
+  type FilePreviewMode,
+  type HtmlPreviewPolicy
+} from "@/lib/file-preview-mode"
 
 interface FileViewerProps {
   filePath: string
@@ -41,9 +46,10 @@ interface FileViewerProps {
   externalPreviewGrant?: string
   /** Resolve a fresh capability before every external file read. */
   resolveExternalPreviewGrant?: () => Promise<string>
-  htmlFillHeight?: boolean
   reloadToken?: number
-  previewMode?: "preview" | "source"
+  previewMode?: FilePreviewMode
+  /** Fail-closed: only the workspace file tab may opt into static HTML rendering. */
+  htmlPreviewPolicy?: HtmlPreviewPolicy
   /** Stable per surface so a persisted file tab cancels the prior task's preview. */
   requestLane?: string
 }
@@ -78,9 +84,9 @@ export function FileViewer({
   workspacePathKind,
   externalPreviewGrant,
   resolveExternalPreviewGrant,
-  htmlFillHeight = true,
   reloadToken,
   previewMode,
+  htmlPreviewPolicy,
   requestLane
 }: FileViewerProps): React.JSX.Element | null {
   const generatedLane = useId().replace(/[^a-zA-Z\d_-]/g, "")
@@ -94,6 +100,11 @@ export function FileViewer({
   const ext = fileName.includes(".") ? (fileName.split(".").pop()?.toLowerCase() ?? "") : ""
   const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
   const htmlLike = ext === "html" || ext === "htm"
+  const allowHtmlRender =
+    htmlPreviewPolicy === "workspace-static" &&
+    !externalFullPath &&
+    workspacePathKind === "relative" &&
+    Boolean(threadId)
   const webSourceLike = shouldAssembleWebSourcePreview(fileName)
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
@@ -360,8 +371,6 @@ export function FileViewer({
         maxBytes: MAX_HTML_DEPENDENCY_BYTES,
         maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
       })
-      // Dependency reads run concurrently. Re-check and claim the shared budget
-      // synchronously after assembly so parallel assets cannot oversubscribe it.
       if (result.truncated || budget.htmlBytes + result.contentBytes > MAX_HTML_DEPENDENCY_BYTES) {
         return null
       }
@@ -488,8 +497,15 @@ export function FileViewer({
   }
 
   const content = textPage?.content ?? ""
+  const previewKind = textPreviewKind({
+    markdownLike,
+    htmlLike,
+    allowHtmlRender,
+    previewMode,
+    truncated: textPage?.truncated ?? false
+  })
   let body: React.JSX.Element
-  if (markdownLike) {
+  if (previewKind === "markdown") {
     body = (
       <div className="h-full min-h-0 overflow-y-auto right-panel-scroll">
         <MarkdownPreview
@@ -504,15 +520,15 @@ export function FileViewer({
         />
       </div>
     )
-  } else if (htmlLike && !textPage?.truncated) {
+  } else if (previewKind === "html") {
     body = (
       <HtmlPreview
         content={content}
         path={displayPath}
-        fillHeight={htmlFillHeight}
+        fillHeight
         showHeader={false}
         showModeToggle={false}
-        viewMode={previewMode}
+        viewMode="preview"
         readDependencyFile={readHtmlDependencyFile}
       />
     )

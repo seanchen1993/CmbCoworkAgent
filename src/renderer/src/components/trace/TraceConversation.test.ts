@@ -7,6 +7,7 @@ import {
 import {
   buildThreadConversation,
   buildTraceConversation,
+  isThreadAwaitingFullLoad,
   type TraceConversationSource
 } from "./TraceConversation"
 import { summarizeThreadProjectNodes } from "./trace-project-node-summary"
@@ -403,5 +404,93 @@ describe("skeleton entries", () => {
     const assistants = conversation.messages.filter((message) => message.role === "assistant")
     expect(assistants).toHaveLength(1)
     expect(String((assistants[0] as unknown as { content?: string }).content)).toContain("有内容")
+  })
+})
+
+/**
+ * 会话列表改成摘要预览（不含 `_raw`）之后，预览行没有任何对话数据：没有
+ * modelCalls、没有 steps、没有 nodes。此前的兜底会拿 outcome 去补一句「本次运行
+ * 被取消，trace 中没有记录最终回复」——那是拿缺失的数据下结论，线上实际表现是
+ * 加载中的会话满屏「被取消」，加载完成后同一条 trace 明明有完整对话。
+ */
+describe("摘要预览行不得被当成对话渲染", () => {
+  const previewTrace = (
+    overrides: Partial<TraceConversationSource> = {}
+  ): TraceConversationSource => ({
+    traceId: "preview-1",
+    startedAt: "2026-09-04T12:08:56.000Z",
+    endedAt: "2026-09-04T12:19:39.000Z",
+    executionMode: "normal",
+    userMessage: "",
+    rawPending: true,
+    ...overrides
+  })
+
+  it("不给预览行编造「被取消」的结论", () => {
+    const conversation = buildTraceConversation(previewTrace({ outcome: "cancelled" }))
+    expect(conversation.assistantText).toBe("")
+    expect(JSON.stringify(conversation.messages)).not.toContain("本次运行被取消")
+  })
+
+  it("不给预览行编造「运行失败」的结论", () => {
+    const conversation = buildTraceConversation(
+      previewTrace({ outcome: "error", errorMessage: "" })
+    )
+    expect(JSON.stringify(conversation.messages)).not.toContain("本次运行失败")
+  })
+
+  it("真正取消 / 失败的 trace 仍然照常说明原因", () => {
+    // 兜底本身是对的，只是不该套在「数据还没取回来」的行上。
+    const cancelled = buildTraceConversation({
+      traceId: "real-1",
+      startedAt: "2026-09-04T12:08:56.000Z",
+      outcome: "cancelled",
+      userMessage: "帮我改一下"
+    })
+    expect(JSON.stringify(cancelled.messages)).toContain("本次运行被取消")
+
+    const failed = buildTraceConversation({
+      traceId: "real-2",
+      startedAt: "2026-09-04T12:08:56.000Z",
+      outcome: "error",
+      errorMessage: "模型服务不可用",
+      userMessage: "帮我改一下"
+    })
+    expect(JSON.stringify(failed.messages)).toContain("模型服务不可用")
+  })
+
+  it("预览行仍会保留已索引的用户提问", () => {
+    const conversation = buildTraceConversation(
+      previewTrace({ userMessage: "需求ID: 6382", outcome: "success" })
+    )
+    expect(conversation.userText).toContain("6382")
+    expect(conversation.assistantText).toBe("")
+  })
+})
+
+describe("整个 thread 还是摘要预览时不渲染时间线", () => {
+  const preview = (id: string): TraceConversationSource => ({
+    traceId: id,
+    startedAt: "2026-09-04T12:08:56.000Z",
+    rawPending: true
+  })
+  const loaded = (id: string): TraceConversationSource => ({
+    traceId: id,
+    startedAt: "2026-09-04T12:08:56.000Z",
+    userMessage: "帮我改一下",
+    modelCalls: [{ outputMessage: { content: "改好了" } }]
+  })
+
+  it("全部是预览行 → 显示占位而不是半张脸的时间线", () => {
+    expect(isThreadAwaitingFullLoad([preview("a"), preview("b")])).toBe(true)
+  })
+
+  it("已经有数据陆续到位就照常渲染", () => {
+    expect(isThreadAwaitingFullLoad([preview("a"), loaded("b")])).toBe(false)
+    expect(isThreadAwaitingFullLoad([loaded("a")])).toBe(false)
+  })
+
+  it("空列表不算「等待加载」，走原来的空态文案", () => {
+    expect(isThreadAwaitingFullLoad([])).toBe(false)
   })
 })

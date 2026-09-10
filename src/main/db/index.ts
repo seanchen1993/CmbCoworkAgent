@@ -5,6 +5,16 @@ import {
 } from "../storage"
 import { type NativeSqliteAdapter, openNativeSqliteDatabase } from "./native-sqlite-adapter"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
+import { ensureLegacyMessageTimeArchive } from "../checkpointer/legacy-message-times"
+import {
+  decodeTranscriptRecoveryIntegrity,
+  isLosslessTranscriptPayload,
+  mergeTranscriptRecoveryIntegrity
+} from "../../shared/transcript-recovery-integrity"
+import {
+  mergeTranscriptReasoningUpdates,
+  normalizeTranscriptReasoning
+} from "../../shared/transcript-reasoning"
 import {
   GOAL_UI_EVENT_LIMIT,
   GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -28,10 +38,12 @@ import {
 } from "../../shared/checkpoint-transcript"
 import { projectCoordinatorTranscriptNoise } from "../../shared/internal-notification-turn"
 import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
-import { getCollapsedToolCallSummary } from "../../shared/tool-call-summary"
-import { projectVisibleChatSearchContentWithMetadata } from "../../shared/chat-search-visible-content"
+import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../shared/chat-search-plan"
+import { iterateChatSearchLocations, projectChatSearchPlan } from "../../shared/chat-search-index"
+import type { ChatSearchLocation } from "../../shared/chat-search-types"
 import type {
   Message,
+  ThreadMessageWrite,
   ThreadMessageSearchMatch,
   ThreadMessageSearchOptions,
   ThreadMessageSearchPage,
@@ -408,7 +420,10 @@ function mergeAliasedToolCalls(
   return mergeToolCalls(sourceToolCalls, targetToolCalls)
 }
 
-function mergeNormalizedThreadMessages(existing: Message, incoming: Message): Message {
+function mergeNormalizedThreadMessages(
+  existing: ThreadMessageWrite,
+  incoming: ThreadMessageWrite
+): ThreadMessageWrite {
   const existingCreatedAt = normalizeTimestamp(existing.created_at)
   const incomingCreatedAt = normalizeTimestamp(incoming.created_at)
   const existingContentPriority = existing.content_priority ?? 0
@@ -423,6 +438,11 @@ function mergeNormalizedThreadMessages(existing: Message, incoming: Message): Me
   return {
     ...existing,
     ...incoming,
+    recovery_integrity: mergeTranscriptRecoveryIntegrity(
+      existing.recovery_integrity,
+      incoming.recovery_integrity
+    ),
+    ...mergeTranscriptReasoningUpdates(existing, incoming),
     content: hasAuthoritativeIncomingContent
       ? normalizeMessageContent(incoming.content)
       : existingContentPriority > incomingContentPriority
@@ -513,12 +533,14 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
       provider_occurrence INTEGER,
       role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system', 'tool')),
       content_json TEXT NOT NULL,
+      reasoning TEXT,
       tool_calls_json TEXT,
       tool_call_id TEXT,
       name TEXT,
       status TEXT,
       is_error INTEGER,
       content_priority INTEGER,
+      recovery_integrity INTEGER,
       goal_id TEXT,
       active_window_id TEXT,
       created_at INTEGER NOT NULL,
@@ -605,6 +627,13 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
       throw error
     }
   }
+
+  runSchemaMigration("thread-message-reasoning-v1", () => {
+    const columns = db!.exec("PRAGMA table_info(thread_messages)")[0]?.values ?? []
+    if (!columns.some((column) => column[1] === "reasoning")) {
+      db!.run("ALTER TABLE thread_messages ADD COLUMN reasoning TEXT")
+    }
+  })
 
   db.run(`
     CREATE TABLE IF NOT EXISTS thread_message_buckets (
@@ -828,6 +857,10 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   if (!hasThreadMessageActiveWindowId) {
     db.run("ALTER TABLE thread_messages ADD COLUMN active_window_id TEXT")
   }
+  if (!threadMessageColumns.some((row) => row[1] === "recovery_integrity")) {
+    // NULL deliberately leaves pre-upgrade rows uncertified; no history scan.
+    db.run("ALTER TABLE thread_messages ADD COLUMN recovery_integrity INTEGER")
+  }
   const hasThreadMessageContentPriority = threadMessageColumns.some(
     (row) => row[1] === "content_priority"
   )
@@ -847,6 +880,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
     db.run("ALTER TABLE thread_messages ADD COLUMN provider_occurrence INTEGER")
   }
 
+  ensureLegacyMessageTimeArchive(db)
   db.run(`CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at)`)
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_thread_messages_thread_order ON thread_messages(thread_id, ordinal, created_at)`
@@ -930,12 +964,14 @@ interface ThreadMessageRow {
   provider_occurrence: number | null
   role: Message["role"]
   content_json: string
+  reasoning: string | null
   tool_calls_json: string | null
   tool_call_id: string | null
   name: string | null
   status: string | null
   is_error: number | null
   content_priority: number | null
+  recovery_integrity: number | null
   goal_id: string | null
   active_window_id: string | null
   created_at: number
@@ -965,7 +1001,10 @@ function isMessageRole(value: unknown): value is Message["role"] {
   return value === "user" || value === "assistant" || value === "system" || value === "tool"
 }
 
-function normalizeThreadMessageInput(message: Message, fallbackTime: number): Message | null {
+function normalizeThreadMessageInput(
+  message: ThreadMessageWrite,
+  fallbackTime: number
+): ThreadMessageWrite | null {
   const id = typeof message.id === "string" ? message.id.trim() : ""
   if (!id || !isMessageRole(message.role)) return null
   const inferredProviderSourceId = getMessageProviderSourceId({ ...message, id })
@@ -980,6 +1019,8 @@ function normalizeThreadMessageInput(message: Message, fallbackTime: number): Me
   const createdAt = normalizeTimestamp(message.created_at, fallbackTime) ?? fallbackTime
   const startAt = normalizeTimestamp(message.start_at)
   const endAt = normalizeTimestamp(message.end_at)
+  const reasoning =
+    message.role === "assistant" ? normalizeTranscriptReasoning(message.reasoning) : undefined
 
   return {
     id,
@@ -987,6 +1028,18 @@ function normalizeThreadMessageInput(message: Message, fallbackTime: number): Me
     ...(providerOccurrence ? { provider_occurrence: providerOccurrence } : {}),
     role: message.role,
     content: normalizeMessageContent(message.content),
+    recovery_integrity:
+      message.recovery_integrity !== "unverified" &&
+      !message.reasoning &&
+      isLosslessTranscriptPayload(message.content, message.tool_calls)
+        ? "verified"
+        : "unverified",
+    ...(reasoning
+      ? {
+          reasoning,
+          reasoning_mode: message.reasoning_mode
+        }
+       : {}),
     ...(Array.isArray(message.tool_calls)
       ? { tool_calls: clampToolCalls(message.tool_calls) }
       : {}),
@@ -1010,10 +1063,10 @@ function normalizeThreadMessageInput(message: Message, fallbackTime: number): Me
 }
 
 function coalesceNormalizedThreadMessages(
-  messages: readonly Message[],
+  messages: readonly ThreadMessageWrite[],
   fallbackTime: number
-): Message[] {
-  const merged: Message[] = []
+): ThreadMessageWrite[] {
+  const merged: ThreadMessageWrite[] = []
   const indexByIdentity = new Map<string, number>()
 
   for (const input of messages) {
@@ -1161,12 +1214,14 @@ function threadMessageRowToMessage(row: ThreadMessageRow, appendedText = ""): Me
   return {
     id: row.message_id,
     ordinal: row.ordinal,
+    recovery_integrity: decodeTranscriptRecoveryIntegrity(row.recovery_integrity),
     ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
     ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
       ? { provider_occurrence: row.provider_occurrence }
       : {}),
     role: row.role,
     content,
+    ...(row.reasoning ? { reasoning: normalizeTranscriptReasoning(row.reasoning) } : {}),
     ...(toolCalls ? { tool_calls: toolCalls } : {}),
     ...(row.tool_call_id ? { tool_call_id: row.tool_call_id } : {}),
     ...(row.name ? { name: row.name } : {}),
@@ -1560,6 +1615,7 @@ export function getThreadMessagesPage(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
                   AS estimated_bytes
          FROM thread_messages AS m
@@ -1578,6 +1634,7 @@ export function getThreadMessagesPage(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
                   AS estimated_bytes
          FROM thread_messages AS m
@@ -1596,6 +1653,7 @@ export function getThreadMessagesPage(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
                   AS estimated_bytes
          FROM thread_messages AS m
@@ -1613,6 +1671,7 @@ export function getThreadMessagesPage(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
                   AS estimated_bytes
          FROM thread_messages AS m
@@ -1719,10 +1778,7 @@ interface ThreadMessageSearchCandidate {
   toolCallsTruncated: boolean
 }
 
-interface ThreadMessageSearchTextResult {
-  occurrenceCount: number
-  matchPosition: number
-}
+
 
 function parseThreadMessageSearchJson(raw: string | null): {
   valid: boolean
@@ -1734,62 +1790,6 @@ function parseThreadMessageSearchJson(raw: string | null): {
   } catch {
     return { valid: false, value: undefined }
   }
-}
-
-function threadMessageSearchJsonScalar(value: unknown): string {
-  if (typeof value === "string") return value
-  if (typeof value === "number" || typeof value === "boolean") return String(value)
-  if (value === null || value === undefined) return ""
-  try {
-    return JSON.stringify(value) ?? ""
-  } catch {
-    return ""
-  }
-}
-
-/** Reproduce the searchable projection without SQLite building group_concat copies. */
-function buildThreadMessageSearchDocument(
-  contentText: string,
-  toolCalls: readonly { name?: unknown; args?: unknown }[] | undefined
-): string {
-  if (!toolCalls) return contentText
-  const toolText = toolCalls
-    .map((toolCall) => {
-      return getCollapsedToolCallSummary({
-        name: threadMessageSearchJsonScalar(toolCall.name),
-        args:
-          toolCall.args && typeof toolCall.args === "object" && !Array.isArray(toolCall.args)
-            ? (toolCall.args as Record<string, unknown>)
-            : undefined
-      })
-    })
-    .join("\n")
-  return `${contentText}\n${toolText}`
-}
-
-/** Find and count non-overlapping occurrences while allocating one normalized copy. */
-function inspectThreadMessageSearchText(
-  searchText: string,
-  normalizedQuery: string
-): ThreadMessageSearchTextResult {
-  const normalizedText = searchText.toLowerCase()
-  const matchPosition = normalizedText.indexOf(normalizedQuery)
-  if (matchPosition < 0) return { occurrenceCount: 0, matchPosition: -1 }
-
-  let occurrenceCount = 0
-  let offset = matchPosition
-  while (offset >= 0) {
-    occurrenceCount += 1
-    offset = normalizedText.indexOf(normalizedQuery, offset + normalizedQuery.length)
-  }
-  return { occurrenceCount, matchPosition }
-}
-
-function threadMessageSearchPreview(searchText: string, matchPosition: number): string {
-  return searchText.slice(
-    Math.max(0, matchPosition - 80),
-    Math.max(0, matchPosition - 80) + THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT
-  )
 }
 
 /**
@@ -2108,23 +2108,30 @@ export function searchThreadMessages(
       if (inspectedBytes + candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
       inspectedBytes += candidateBytes
 
-      const visibleProjection = projectVisibleChatSearchContentWithMetadata(
+      const searchPlan = createChatSearchPlan(
         candidate.role,
         coordinatorProjection.contentChanged
           ? coordinatorProjection.contentText
           : displayCandidateContent
       )
-      if (visibleProjection.truncated) truncatedRows = true
-      const documentText = buildThreadMessageSearchDocument(
-        visibleProjection.text,
-        coordinatorProjection.visibleToolCalls
-      )
-      const documentMatch = inspectThreadMessageSearchText(documentText, query)
-      const occurrenceCount = documentMatch.occurrenceCount
-      const preview =
-        documentMatch.matchPosition >= 0
-          ? threadMessageSearchPreview(documentText, documentMatch.matchPosition)
-          : ""
+      appendChatSearchToolSummaries(searchPlan, coordinatorProjection.visibleToolCalls ?? [])
+      const projectedSegments = projectChatSearchPlan(searchPlan)
+      if (searchPlan.truncated) truncatedRows = true
+      const found = iterateChatSearchLocations(projectedSegments, query, 1001)
+      // Budget individual locations before constructing a possibly oversized first response row.
+      const locations: ChatSearchLocation[] = []
+      let locationBytes = 0
+      for (const location of found) {
+        const bytes = Buffer.byteLength(JSON.stringify(location), "utf8") + 1
+        if (locationBytes + bytes > 48 * 1024 || locations.length >= 1000) {
+          truncatedRows = true
+          break
+        }
+        locations.push(location)
+        locationBytes += bytes
+      }
+      const occurrenceCount = locations.length
+      const preview = locations[0]?.context.slice(0, THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT) ?? ""
 
       advancedCandidateCount = header.index + 1
       lastAdvancedCandidate = header.candidate
@@ -2135,6 +2142,7 @@ export function searchThreadMessages(
           role: candidate.role,
           createdAt: candidate.createdAt,
           occurrenceCount,
+          locations,
           preview
         })
         if (rawMatches.length >= limit + 1) break
@@ -4170,8 +4178,8 @@ function threadMessageRowHasProviderIdentityConflict(
 function applyThreadMessageIdAliases(
   database: NativeSqliteAdapter,
   threadId: string,
-  messages: readonly Message[]
-): Message[] {
+  messages: readonly ThreadMessageWrite[]
+): ThreadMessageWrite[] {
   const aliasCandidates = messages.map((message) => {
     const messageId = typeof message.id === "string" ? message.id.trim() : ""
     if (!messageId) return { message, messageId, canonicalId: "", aliasRole: undefined }
@@ -4288,7 +4296,8 @@ export function appendThreadMessageTextDelta(threadId: string, message: Message)
     providerOccurrence === undefined ||
     message.tool_call_id ||
     (message.tool_calls?.length ?? 0) > 0 ||
-    (message.content_priority ?? 0) > 0
+    (message.content_priority ?? 0) > 0 ||
+    message.reasoning !== undefined
   ) {
     return false
   }
@@ -4302,6 +4311,7 @@ export function appendThreadMessageTextDelta(threadId: string, message: Message)
        m.tool_calls_json,
        m.tool_call_id,
        m.content_priority,
+       m.recovery_integrity,
        tail.fragment_id AS tail_fragment_id,
        tail.content_text AS tail_content_text,
        COALESCE(
@@ -4332,6 +4342,7 @@ export function appendThreadMessageTextDelta(threadId: string, message: Message)
         tool_calls_json?: unknown
         tool_call_id?: unknown
         content_priority?: unknown
+        recovery_integrity?: unknown
         tail_fragment_id?: unknown
         tail_content_text?: unknown
         total_chars?: unknown
@@ -4358,6 +4369,12 @@ export function appendThreadMessageTextDelta(threadId: string, message: Message)
 
   const remainingChars = Math.max(0, THREAD_MESSAGE_TEXT_LIMIT - totalChars)
   const delta = message.content.slice(0, remainingChars)
+  if (delta.length !== message.content.length && row.recovery_integrity !== 0) {
+    database.run(
+      "UPDATE thread_messages SET recovery_integrity = 0 WHERE thread_id = ? AND message_id = ?",
+      [threadId, messageId]
+    )
+  }
   if (!delta) return true
   const updatedTotalChars = totalChars + delta.length
   const tailFragmentId = Number(row?.tail_fragment_id)
@@ -4422,7 +4439,7 @@ export function appendThreadMessageTextDelta(threadId: string, message: Message)
 
 export function upsertThreadMessages(
   threadId: string,
-  messages: readonly Message[],
+  messages: readonly ThreadMessageWrite[],
   options: UpsertThreadMessagesOptions = {}
 ): number {
   if (messages.length === 0) return 0
@@ -4627,8 +4644,17 @@ export function upsertThreadMessages(
             preferExisting: existingContentPriority > incomingContentPriority
           })
         : clampToolCalls(normalized.tool_calls)
+      const nextRecoveryIntegrity =
+        normalized.recovery_integrity === "verified" &&
+        (!existing || existing.recovery_integrity === 1) &&
+        isLosslessTranscriptPayload(nextContent, nextToolCalls)
+          ? 1
+          : 0
       const nextContentPriority = Math.max(existingContentPriority, incomingContentPriority)
       const contentJson = safeJsonStringify(nextContent)
+      const reasoning =
+        mergeTranscriptReasoningUpdates({ reasoning: existing?.reasoning ?? undefined }, normalized)
+          .reasoning ?? null
       const toolCallsJson = Array.isArray(nextToolCalls) ? safeJsonStringify(nextToolCalls) : null
       const toolCallId = normalized.tool_call_id ?? existing?.tool_call_id ?? null
       const name = normalized.name ?? existing?.name ?? null
@@ -4661,15 +4687,16 @@ export function upsertThreadMessages(
       if (existing) {
         database.run(
           `UPDATE thread_messages
-           SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?,
+           SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, reasoning = ?, tool_calls_json = ?, tool_call_id = ?,
                name = ?, status = ?, is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?,
-               created_at = ?, start_at = ?, end_at = ?
+               created_at = ?, start_at = ?, end_at = ?, recovery_integrity = ?
            WHERE thread_id = ? AND message_id = ?`,
           [
             providerSourceId,
             providerOccurrence,
             normalized.role,
             contentJson,
+            reasoning,
             toolCallsJson,
             toolCallId,
             name,
@@ -4681,6 +4708,7 @@ export function upsertThreadMessages(
             nextCreatedAt,
             nextStartAt,
             nextEndAt,
+            nextRecoveryIntegrity,
             threadId,
             normalized.id
           ]
@@ -4699,10 +4727,10 @@ export function upsertThreadMessages(
         messageCount += 1
         database.run(
           `INSERT INTO thread_messages (
-             thread_id, message_id, provider_source_id, provider_occurrence, role, content_json, tool_calls_json, tool_call_id,
+             thread_id, message_id, provider_source_id, provider_occurrence, role, content_json, reasoning, tool_calls_json, tool_call_id,
              name, status, is_error, content_priority, goal_id, active_window_id, created_at, start_at, end_at,
-             ordinal
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ordinal, recovery_integrity
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             threadId,
             normalized.id,
@@ -4710,6 +4738,7 @@ export function upsertThreadMessages(
             providerOccurrence,
             normalized.role,
             contentJson,
+            reasoning,
             toolCallsJson,
             toolCallId,
             name,
@@ -4721,7 +4750,8 @@ export function upsertThreadMessages(
             nextCreatedAt,
             nextStartAt,
             nextEndAt,
-            ordinal
+            ordinal,
+            nextRecoveryIntegrity
           ]
         )
       }
@@ -5127,15 +5157,19 @@ export function replaceThreadMessageId(
       ])
       database.run(
         `UPDATE thread_messages
-         SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
+         SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, reasoning = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
              is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
-             end_at = ?, ordinal = ?
+             end_at = ?, ordinal = ?, recovery_integrity = ?
          WHERE thread_id = ? AND message_id = ?`,
         [
           mergedProviderSourceId,
           mergedProviderOccurrence,
           target.role ?? source.role,
           safeJsonStringify(mergedContent),
+          mergeTranscriptReasoningUpdates(
+            { reasoning: source.reasoning ?? undefined },
+            { reasoning: target.reasoning ?? undefined }
+          ).reasoning ?? null,
           Array.isArray(mergedToolCalls) ? safeJsonStringify(mergedToolCalls) : null,
           target.tool_call_id ?? source.tool_call_id,
           target.name ?? source.name,
@@ -5151,6 +5185,11 @@ export function replaceThreadMessageId(
           target.start_at ?? source.start_at,
           target.end_at ?? source.end_at,
           Math.min(Number(source.ordinal), Number(target.ordinal)),
+          source.recovery_integrity === 1 &&
+          target.recovery_integrity === 1 &&
+          isLosslessTranscriptPayload(mergedContent, mergedToolCalls)
+            ? 1
+            : 0,
           threadId,
           toId
         ]
