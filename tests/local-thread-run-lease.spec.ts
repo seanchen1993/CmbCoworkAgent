@@ -242,11 +242,20 @@ function testRuntimeEntryPointArchitecture(): void {
   )
   assert(
     count(desktop, "rejectDesktopRunForForeignOwner(threadId, window, channel)") === 2 &&
-      count(
-        desktop,
-        "rejectDesktopRunForForeignOwner(threadId, window, channel, runExecutionContext)"
-      ) === 1,
+      // Matched loosely on purpose. The invoke call grew an argument and a
+      // formatter split it across lines, and the exact-text version of this
+      // check then failed for a reason that had nothing to do with the property
+      // it guards.
+      /rejectDesktopRunForForeignOwner\(\s*threadId,\s*window,\s*channel,\s*runExecutionContext\b/.test(
+        desktop
+      ),
     "all Runtime starts reject a visible foreign owner before stateful work, while invoke can recognize its externally managed lease"
+  )
+  assert(
+    /rejectDesktopRunForForeignOwner\([\s\S]{0,200}?isTrustedCoordinatorNotificationInvoke\s*\?\s*"coordinator"\s*:\s*isWorkflowNotificationInvoke\s*\?\s*"workflow"/.test(
+      desktop
+    ),
+    "an automatic summary that loses the lease yields quietly instead of reporting a fault nobody caused"
   )
   const cancelHandler = desktop.slice(desktop.indexOf('"agent:cancel"'))
   assertSourceOrder(

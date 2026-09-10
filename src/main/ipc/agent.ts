@@ -270,7 +270,8 @@ import {
 } from "../agent/workflow/notification"
 import {
   COORDINATOR_NOTIFICATION_PROMPT_PREFIX,
-  INTERNAL_NOTIFICATION_TRIGGER_SOURCE
+  INTERNAL_NOTIFICATION_TRIGGER_SOURCE,
+  type BackgroundNotificationOwner
 } from "../../shared/internal-notification-turn"
 import {
   coordinatorWorkerManager,
@@ -8116,6 +8117,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // Expose this turn's attempts to the catch handler (same array ref).
           lastFailoverByChannel.set(channel, failoverAttempts)
           const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
+          // Recorded on every background task this turn launches — a workflow or
+          // a coordinator worker — so the answer survives to a restart, when the
+          // run that made it is gone. Explicit when the caller had to tell it
+          // apart from the lease; the lease's answer otherwise.
+          const backgroundNotificationOwner: BackgroundNotificationOwner =
+            runExecutionContext.backgroundNotificationOwner ??
+            (runExecutionContext.localRunLease?.managedExternally ? "managed" : "desktop")
           const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({
             source: runExecutionContext.source,
             runLease: {
@@ -8163,14 +8171,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,
               onWorkflowLaunched,
-              // Bound to the run, not the thread: the same conversation can be
-              // driven from the desktop one turn and from Zhaohu the next, so
-              // "is this thread connected to IM" answers the wrong question.
-              // managedExternally is the same discriminator the lease uses for
-              // "who owns this run's lifecycle".
-              workflowNotificationOwner: runExecutionContext.localRunLease?.managedExternally
-                ? "managed"
-                : "desktop",
+              backgroundNotificationOwner,
               onTurnCompletionRecovery: sendTurnCompletionNotice
             }),
             harnessContext: harnessAgentContext,

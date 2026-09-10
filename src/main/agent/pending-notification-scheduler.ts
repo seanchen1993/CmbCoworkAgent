@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto"
 import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "../../shared/checkpoint-transcript"
 import { COORDINATOR_NOTIFICATION_PROMPT } from "../../shared/internal-notification-turn"
+import {
+  isCoordinatorModeForcedForMetadata,
+  isProjectModeAgentTeamEnabled
+} from "../../shared/project-mode-agent-team"
 import { getThread } from "../db"
+import { isCoordinatorModeForcedByEnvironment } from "./coordinator-mode"
 import { parseStandardThreadMetadata } from "./standard-thread-turn"
 import { startAgentRun, type AgentRunDelivery } from "./agent-run-service"
 import { createManagedTransportAgentRunDelivery } from "./managed-transport-delivery"
@@ -26,7 +31,7 @@ import { workflowRunManager } from "./workflow/run-manager"
  * as an agent error on a conversation the user had only left open.
  *
  * Everything routes here now: a live completion, a reopened thread, and a
- * restart all ask this scheduler, and it answers from the run's own recorded
+ * restart all ask this scheduler, and it answers from the task's own recorded
  * owner rather than from whatever the caller could see.
  *
  * The turn runs on the managed transport, so a desktop with the thread open
@@ -36,6 +41,21 @@ import { workflowRunManager } from "./workflow/run-manager"
 
 /** Matches the renderer hold this replaced, so Stop feels the same. */
 const SUPPRESS_AFTER_STOP_MS = 15_000
+
+/**
+ * A summary that failed is retried, but not forever.
+ *
+ * The old renderer retried a busy thread on a 1s timer up to 30 times. That
+ * budget belonged to polling; waiting on the lease needs none of it. What is
+ * still needed is a bound on a summary that keeps *failing* — the notification
+ * stays queued on purpose, so an unbounded wake loop would spin on it.
+ */
+const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
+  import.meta.env?.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED
+)
+
+const MAX_SUMMARY_ATTEMPTS = 3
+const RETRY_AFTER_FAILURE_MS = 2_000
 
 export type PendingNotificationSkipReason =
   | "no-pending-notification"
@@ -55,6 +75,9 @@ interface SchedulerDependencies {
   startRun: typeof startAgentRun
   getDelivery: () => AgentRunDelivery
   createRunId: () => string
+  isCoordinatorModeForcedByEnvironment: () => boolean
+  setTimer: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>
+  clearTimer: (timer: ReturnType<typeof setTimeout>) => void
   log: (message: string, detail: Record<string, unknown>) => void
 }
 
@@ -63,6 +86,9 @@ const defaultDependencies: SchedulerDependencies = {
   startRun: startAgentRun,
   getDelivery: createManagedTransportAgentRunDelivery,
   createRunId: () => randomUUID(),
+  isCoordinatorModeForcedByEnvironment,
+  setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimer: (timer) => clearTimeout(timer),
   // Never the message body: these lines exist to explain a decision, and a
   // summary prompt carries whatever the task was working on.
   log: (message, detail) => console.log(`[PendingNotification] ${message}`, detail)
@@ -72,10 +98,22 @@ export class PendingNotificationScheduler {
   private readonly dependencies: SchedulerDependencies
   /** Threads with a check in flight, so concurrent asks collapse into one. */
   private readonly checking = new Set<string>()
+  /**
+   * Threads that asked again while a check was already running.
+   *
+   * Collapsing concurrent asks is right; dropping them is not. A check holds
+   * this thread for the whole summary turn, and a second worker finishing
+   * underneath it would otherwise wait for an event that has already passed.
+   */
+  private readonly recheckRequested = new Set<string>()
   /** Threads whose check was deferred until the current run releases the lease. */
   private readonly waitingForIdle = new Set<string>()
   /** Threads the user just stopped; see suppressAfterStop. */
   private readonly suppressedUntil = new Map<string, number>()
+  /** Wake-ups for holds that expire on their own clock, not on a lease. */
+  private readonly wakeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** Consecutive failed summary attempts, per thread; see MAX_SUMMARY_ATTEMPTS. */
+  private readonly failedAttempts = new Map<string, number>()
   private unsubscribeLeaseReleased: (() => void) | null = null
 
   constructor(overrides: Partial<SchedulerDependencies> = {}) {
@@ -100,9 +138,13 @@ export class PendingNotificationScheduler {
   stop(): void {
     this.unsubscribeLeaseReleased?.()
     this.unsubscribeLeaseReleased = null
+    for (const timer of this.wakeTimers.values()) this.dependencies.clearTimer(timer)
+    this.wakeTimers.clear()
     this.waitingForIdle.clear()
     this.checking.clear()
+    this.recheckRequested.clear()
     this.suppressedUntil.clear()
+    this.failedAttempts.clear()
   }
 
   /**
@@ -112,16 +154,24 @@ export class PendingNotificationScheduler {
    * a notification waiting, and without this the summary turn starts again the
    * instant the cancelled run releases the thread — which reads as the stop
    * button not working. The hold expires rather than latching, so a result is
-   * delayed, never dropped.
+   * delayed, never dropped — which is only true because expiry wakes a check of
+   * its own: the thread it is holding is idle, so no lease release is coming.
    */
   suppressAfterStop(threadId: string, suppressed = true): void {
     if (!suppressed) {
       // The user said something new, which is a clearer signal than the timer:
       // they are back, and whatever they stopped is no longer what they mean.
-      this.suppressedUntil.delete(threadId)
+      const wasHeld = this.suppressedUntil.delete(threadId)
+      this.cancelWake(threadId)
+      // Lifting the hold early also cancels the wake that came with it, so the
+      // held summary would have nothing left to bring it back. Checking now
+      // finds the thread busy with whatever the user just sent and defers onto
+      // that run's lease, which is the wake it should have been waiting for.
+      if (wasHeld) this.requestCheck(threadId)
       return
     }
     this.suppressedUntil.set(threadId, Date.now() + SUPPRESS_AFTER_STOP_MS)
+    this.scheduleWake(threadId, SUPPRESS_AFTER_STOP_MS)
   }
 
   /** Fire-and-forget entry for callers that cannot await (IPC, event handlers). */
@@ -134,28 +184,101 @@ export class PendingNotificationScheduler {
     })
   }
 
-  async check(threadId: string): Promise<PendingNotificationOutcome> {
-    if (this.checking.has(threadId)) return { started: false, reason: "thread-busy" }
+  /**
+   * @param options.retry marks a wake this scheduler set for itself after a
+   * failure. Anything else — an IPC request, a reopened thread, a lease going
+   * idle — is a fresh reason to try, and clears the failure budget so a run of
+   * bad luck cannot disable the summary for the life of the process.
+   */
+  async check(
+    threadId: string,
+    options: { retry?: boolean } = {}
+  ): Promise<PendingNotificationOutcome> {
+    if (!options.retry) this.failedAttempts.delete(threadId)
+    if (this.checking.has(threadId)) {
+      this.recheckRequested.add(threadId)
+      return { started: false, reason: "thread-busy" }
+    }
     this.checking.add(threadId)
     try {
-      return await this.checkOnce(threadId)
+      let outcome = await this.checkOnce(threadId)
+      // Only after a turn actually ran. That is the one window with no other
+      // wake coming: a second worker can finish while the first is being
+      // summarised, and the lease release it would have waited for is this
+      // scheduler's own. Every other outcome already has a wake — a lease
+      // release, or the timer set with the hold or the failure.
+      //
+      // Bounded by external asks, not by what it finds: each pass consumes the
+      // flag, and only another caller can set it again.
+      while (outcome.started && this.recheckRequested.delete(threadId)) {
+        outcome = await this.checkOnce(threadId)
+      }
+      return outcome
     } finally {
       this.checking.delete(threadId)
+      this.recheckRequested.delete(threadId)
     }
   }
 
+  /** A hold that ends on its own clock needs its own wake; a lease is not coming. */
+  private scheduleWake(threadId: string, delayMs: number, options: { retry?: boolean } = {}): void {
+    this.cancelWake(threadId)
+    this.wakeTimers.set(
+      threadId,
+      this.dependencies.setTimer(() => {
+        this.wakeTimers.delete(threadId)
+        void this.check(threadId, options).catch((error) => {
+          this.dependencies.log("check failed", {
+            threadId,
+            reason: error instanceof Error ? error.message : String(error)
+          })
+        })
+      }, delayMs)
+    )
+  }
+
+  private cancelWake(threadId: string): void {
+    const timer = this.wakeTimers.get(threadId)
+    if (timer === undefined) return
+    this.dependencies.clearTimer(timer)
+    this.wakeTimers.delete(threadId)
+  }
+
   /**
-   * Coordinator results carry their own ownership signal, per worker rather
-   * than per run: a managed runner that takes a worker's result marks it
-   * suppressed, and that mark is persisted, so a restart reaches the same
-   * answer. Reused here instead of adding a second notion of ownership.
+   * Records a failed summary and says whether to try again.
+   *
+   * The turn's own failure handling already leaves the notification queued, so
+   * the result is not lost either way; this only decides whether to reach for it
+   * again now or leave it to the next hydrate.
+   */
+  private noteFailure(threadId: string, kind: "workflow" | "coordinator"): void {
+    const attempts = (this.failedAttempts.get(threadId) ?? 0) + 1
+    this.failedAttempts.set(threadId, attempts)
+    if (attempts >= MAX_SUMMARY_ATTEMPTS) {
+      this.dependencies.log("giving up on the summary turn for now", {
+        threadId,
+        kind,
+        attempts,
+        reason: "summary-attempts-exhausted"
+      })
+      return
+    }
+    this.scheduleWake(threadId, RETRY_AFTER_FAILURE_MS, { retry: true })
+  }
+
+  /**
+   * Coordinator results record who owes their summary, per worker rather than
+   * per run: a worker launched from Zhaohu is summarised by the transport that
+   * launched it, and the mark is persisted so a restart reaches the same answer.
    *
    * There is nothing to claim — the manager holds the queue and drops each
    * notification when its turn acknowledges it — so the lease is what keeps two
    * turns from starting, exactly as it does for workflow.
    */
   private async checkCoordinator(threadId: string): Promise<PendingNotificationOutcome> {
-    if (!coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)) {
+    if (!coordinatorWorkerManager.hasAutoRunnableNotifications(threadId, { owner: "desktop" })) {
+      // Either nothing is waiting, or what is waiting belongs to the transport
+      // that launched it. Both mean this scheduler has nothing to do.
       return { started: false, reason: "no-pending-notification" }
     }
 
@@ -197,37 +320,66 @@ export class PendingNotificationScheduler {
           userMessageId: `coordinator-notification:${notificationRunId}`
         },
         this.dependencies.getDelivery(),
-        {
-          source: "desktop",
-          localRunLease: {
-            owner: "desktop",
-            runId: notificationRunId,
-            managedExternally: true
-          }
-        }
+        this.runContext(notificationRunId)
       )
       await handle.completion
+      this.failedAttempts.delete(threadId)
       return { started: true }
     } catch (error) {
       // The manager only drops a notification when a turn acknowledges it, so a
-      // failure leaves it queued and the next idle wake picks it up again.
+      // failure leaves it queued and a bounded retry picks it up again.
       this.dependencies.log("summary turn failed", {
         threadId,
         kind: "coordinator",
         notificationRunId,
         reason: error instanceof Error ? error.message : String(error)
       })
+      this.noteFailure(threadId, "coordinator")
       return { started: false, reason: "thread-busy" }
     } finally {
       releaseLocalThreadRunLease(threadId, "desktop", notificationRunId)
     }
   }
 
+  /**
+   * The lease is released here rather than by the run body, and the summary is
+   * owed to the desktop rather than to a transport. Those are different
+   * questions and the context says both explicitly — inferring the second from
+   * the first marked anything this turn launched as managed, leaving it to a
+   * runner with no callback for it.
+   */
+  private runContext(notificationRunId: string): Parameters<typeof startAgentRun>[2] {
+    return {
+      source: "desktop",
+      localRunLease: {
+        owner: "desktop",
+        runId: notificationRunId,
+        managedExternally: true
+      },
+      backgroundNotificationOwner: "desktop"
+    }
+  }
+
+  /**
+   * Whether an automatic summary is even a thing on this thread.
+   *
+   * Reads the mode the run body would resolve, not just the persisted one: the
+   * environment can force coordinator on a thread whose metadata still says
+   * normal, and treating that as "not a background mode" silently drops every
+   * summary on it.
+   */
+  private isCoordinatorThread(metadata: Record<string, unknown>): boolean {
+    if (metadata.agentMode === "coordinator") return true
+    if (!this.dependencies.isCoordinatorModeForcedByEnvironment()) return false
+    return isCoordinatorModeForcedForMetadata(metadata, PROJECT_MODE_AGENT_TEAM_ENABLED, true)
+  }
+
   private async checkOnce(threadId: string): Promise<PendingNotificationOutcome> {
     const suppressedUntil = this.suppressedUntil.get(threadId)
     if (suppressedUntil !== undefined) {
       if (suppressedUntil > Date.now()) {
-        this.waitingForIdle.add(threadId)
+        // Waits on the timer set with the hold, not on a lease: the thread this
+        // is holding is idle by definition, so no release is coming.
         return { started: false, reason: "suppressed-after-stop" }
       }
       this.suppressedUntil.delete(threadId)
@@ -236,20 +388,22 @@ export class PendingNotificationScheduler {
     if (!thread) return { started: false, reason: "thread-missing" }
     const metadata = parseStandardThreadMetadata(thread.metadata)
     const workspacePath = metadata.workspacePath
-    if (metadata.agentMode === "coordinator") return await this.checkCoordinator(threadId)
+    if (this.isCoordinatorThread(metadata.metadata)) {
+      return await this.checkCoordinator(threadId)
+    }
     if (metadata.agentMode !== "workflow" || !workspacePath) {
       return { started: false, reason: "not-a-background-mode" }
     }
 
-    // Claimed before anything else can look at it: the claim is what stops a
-    // second checker picking up the same run, and it is released again on every
-    // path that does not go on to run the turn.
-    const run = await workflowRunManager.claimPendingNotificationAsync(workspacePath, threadId)
+    // Peeked, not claimed. The run body claims exactly one notification and owns
+    // its release on every settle path; claiming here as well meant the body
+    // found the run already in flight, treated it as a stale trigger and ended
+    // without summarising, leaving the mark set for the life of the process.
+    const run = await workflowRunManager.findPendingNotificationAsync(workspacePath, threadId)
     if (!run) return { started: false, reason: "no-pending-notification" }
 
     const owner = run.notificationOwner ?? "desktop"
     if (owner === "managed") {
-      workflowRunManager.clearNotificationInFlight(run.runId)
       this.dependencies.log("left to the managed runner", {
         threadId,
         runId: run.runId,
@@ -263,7 +417,6 @@ export class PendingNotificationScheduler {
     if (existingLease) {
       // Yield, never preempt. The notification keeps its undelivered mark, so
       // going idle brings it straight back.
-      workflowRunManager.clearNotificationInFlight(run.runId)
       this.waitingForIdle.add(threadId)
       this.dependencies.log("deferred until the thread is idle", {
         threadId,
@@ -282,7 +435,6 @@ export class PendingNotificationScheduler {
       runId: notificationRunId
     })
     if (!claim.acquired) {
-      workflowRunManager.clearNotificationInFlight(run.runId)
       this.waitingForIdle.add(threadId)
       return { started: false, reason: "thread-busy" }
     }
@@ -302,31 +454,22 @@ export class PendingNotificationScheduler {
           userMessageId: `workflow-notification:${notificationRunId}`
         },
         this.dependencies.getDelivery(),
-        {
-          source: "desktop",
-          // Released here, not by the run body: the in-flight mark has to
-          // outlive the run so a failure frees it for a retry instead of
-          // leaving the notification claimed by a run that is already gone.
-          localRunLease: {
-            owner: "desktop",
-            runId: notificationRunId,
-            managedExternally: true
-          }
-        }
+        this.runContext(notificationRunId)
       )
       await handle.completion
+      this.failedAttempts.delete(threadId)
       return { started: true }
     } catch (error) {
-      // A failed summary must not count as delivered. The persisted
-      // notificationDelivered flag is only written by a turn that succeeded, so
-      // clearing the in-flight mark is enough to make it eligible again.
+      // A failed summary must not count as delivered. The run body releases its
+      // own claim on every settle path, including this one, so the notification
+      // is eligible again; this only decides whether to reach for it now.
       this.dependencies.log("summary turn failed", {
         threadId,
         runId: run.runId,
         notificationRunId,
         reason: error instanceof Error ? error.message : String(error)
       })
-      workflowRunManager.clearNotificationInFlight(run.runId)
+      this.noteFailure(threadId, "workflow")
       return { started: false, reason: "thread-busy" }
     } finally {
       releaseLocalThreadRunLease(threadId, "desktop", notificationRunId)

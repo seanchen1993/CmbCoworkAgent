@@ -1,4 +1,5 @@
 import type { BrowserWindow } from "electron"
+import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
 import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import type { AgentInvokeParams } from "../types"
 import type { RuntimeInteractionWaitHooks } from "./runtime"
@@ -93,6 +94,20 @@ export interface AgentRunExecutionContext {
     /** The caller releases the lease only after its own durable settlement. */
     managedExternally?: boolean
   }
+  /**
+   * Who owes the follow-up summary for background work this run launches.
+   *
+   * Deliberately separate from `localRunLease.managedExternally`, which answers
+   * "who releases the lease". Those coincide for a transport-driven run and come
+   * apart for the main-process scheduler, whose own summary turn releases its
+   * own lease but is desktop-owned throughout — inferring one from the other
+   * marked a workflow launched from a scheduler turn as managed, leaving it to a
+   * transport that had no callback for it.
+   *
+   * Defaults to the lease's answer when unset, which is right for every caller
+   * that has not had to tell the two apart.
+   */
+  backgroundNotificationOwner?: BackgroundNotificationOwner
   signal?: AbortSignal
   /**
    * Re-checks the caller's authorization against the thread state the run body

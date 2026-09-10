@@ -278,8 +278,14 @@ export class ImRemoteModeNotificationPump {
               reason: error instanceof Error ? error.message : String(error)
             })
           })
+          // Only workers this transport launched. The desktop scheduler walks
+          // the same threads from the other side, and both used to answer yes
+          // for the same result — the loser of the run-lease race surfaced as an
+          // agent error on a conversation the user had only left open.
           if (
-            this.dependencies.coordinator.hasAutoRunnableNotifications(target.snapshot.threadId)
+            this.dependencies.coordinator.hasAutoRunnableNotifications(target.snapshot.threadId, {
+              owner: "managed"
+            })
           ) {
             this.schedule({ ...base, kind: "coordinator" })
           }

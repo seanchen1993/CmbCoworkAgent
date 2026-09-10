@@ -631,6 +631,60 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "electron transport supplies the trusted internal coordinator notification prompt"
   )
 
+  // The decision to run a follow-up summary is no longer the renderer's. It used
+  // to be, and this block guarded it here; the assertions below follow it to the
+  // main-process scheduler rather than being dropped. What is genuinely gone —
+  // the retry budgets, the attempt counters and the retry-on-idle handoffs — was
+  // state for deciding something the page no longer decides, and has no
+  // equivalent to assert: the scheduler waits on the run lease instead.
+  const notificationScheduler = await readProjectFile(
+    "src/main/agent/pending-notification-scheduler.ts"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "isCoordinatorModeForcedForMetadata",
+    "the scheduler scopes the environment coordinator override before dropping a summary"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "isCoordinatorModeForcedByEnvironment()",
+    "the scheduler resolves the mode the run body would run, not just the persisted one"
+  )
+  assertIncludes(
+    notificationScheduler,
+    'agentMode: "coordinator"',
+    "the scheduler auto-runs notification turns in coordinator mode"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "coordinatorInternalNotification: true",
+    "the scheduler marks auto notification turns as trusted internal coordinator work"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "onLocalThreadRunLeaseReleased(",
+    "a summary deferred for a busy thread waits on the lease that blocked it"
+  )
+  assertIncludes(
+    notificationScheduler,
+    'hasAutoRunnableNotifications(threadId, { owner: "desktop" })',
+    "the scheduler only claims coordinator results the desktop launched"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "findPendingNotificationAsync",
+    "the scheduler peeks at a workflow notification and leaves the claim to the run body"
+  )
+
+  const notificationPump = await readProjectFile(
+    "src/main/services/im/remote-mode-notification-pump.ts"
+  )
+  assertIncludes(
+    notificationPump,
+    'owner: "managed"',
+    "the Zhaohu pump only restores coordinator results its own transport launched"
+  )
+
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
   assertIncludes(
     threadContext,
@@ -644,33 +698,8 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "isCoordinatorModeMetadata(thread?.metadata)",
-    "thread context treats legacy coordinator metadata as coordinator mode"
-  )
-  assertIncludes(
-    threadContext,
     "environmentCoordinatorThreadIdsRef.current.has(threadId)",
     "thread context allows environment-forced coordinator notification turns without persisting metadata"
-  )
-  assertIncludes(
-    threadContext,
-    "window.api.agent.isCoordinatorModeForced(threadId)",
-    "thread context scopes the coordinator override before dropping cold-start notifications"
-  )
-  assertIncludes(
-    threadContext,
-    "isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode",
-    "thread context suppresses auto notification turns only for explicitly normal threads"
-  )
-  assertIncludes(
-    threadContext,
-    'agent_mode: "coordinator"',
-    "thread context auto-runs notification turns in coordinator mode"
-  )
-  assertIncludes(
-    threadContext,
-    "coordinator_internal_notification: true",
-    "thread context marks auto notification turns as trusted internal coordinator work"
   )
   assertIncludes(
     threadContext,
@@ -687,44 +716,11 @@ async function testRendererSendsAgentMode(): Promise<void> {
     /const messageId =\s*msg\.kwargs\?\.id \?\? \(typeof msg\.id === "string" \? msg\.id : `msg-\$\{index\}`\)/,
     "thread context uses LangChain message kwargs.id before serialized class-path ids"
   )
-  assertIncludes(
-    threadContext,
-    "if (!streamData?.stream)",
-    "thread context retries notification auto-run until the stream exists"
-  )
-  assertIncludes(
-    threadContext,
-    "wasLoading && loadingStates[threadId] === false",
-    "thread context checks pending notifications when a busy stream becomes idle"
-  )
-  assertIncludes(
-    threadContext,
-    "const coordinatorNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})",
-    "thread context tracks notification turns that were deferred because the stream was still busy or missing"
-  )
-  assertIncludes(
-    threadContext,
-    "coordinatorNotificationRetryOnIdleRef.current[threadId] = true",
-    "thread context marks pending notifications for a retry-on-idle handoff when the stream is unavailable or still loading"
-  )
-  assertIncludes(
-    threadContext,
-    "(coordinatorNotificationAttemptsRef.current[threadId] ?? 0) > 0 ||",
-    "thread context reschedules coordinator notification on idle when an attempt is outstanding or a busy-deferred retry is pending"
-  )
-  // #2: workflow notifications get the SAME retry-on-idle handoff as coordinator,
-  // so a foreground turn longer than the bounded retry budget doesn't strand the
-  // workflow completion turn until the next hydrate.
-  assertIncludes(
-    threadContext,
-    "workflowNotificationRetryOnIdleRef.current[threadId] = true",
-    "thread context defers a busy workflow notification to a retry-on-idle handoff"
-  )
-  assertIncludes(
-    threadContext,
-    "if (workflowNotificationRetryOnIdleRef.current[threadId]) {",
-    "thread context reschedules a deferred workflow notification when the thread goes idle"
-  )
+  // The renderer's own busy check read this thread's stream, which says nothing
+  // about a run driven from Zhaohu — the reason the same completion was
+  // summarised twice. Its replacement is asserted on the scheduler above: a
+  // deferred summary waits on the run lease, which is the only signal that can
+  // change the answer for either surface.
   assertIncludes(
     threadContext,
     "const hasRunningWorker = workers.some(",
@@ -745,11 +741,6 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "if (!initializedThreadsRef.current.has(threadId)) return false",
     "thread context does not keep polling cold threads whose coordinator notifications cannot auto-run yet"
   )
-  assertMatches(
-    threadContext,
-    /if \(isThreadMetadataExplicitNormalMode\(threadId\) && !isEnvironmentCoordinatorMode\) \{\s*delete coordinatorNotificationAttemptsRef\.current\[threadId\][\s\S]*?return\s*\}/,
-    "thread context lets unresolved terminal notifications drop out of the periodic refresh loop when explicit normal mode suppresses coordinator auto-runs"
-  )
   assertIncludes(
     threadContext,
     "hasPendingTerminalNotification",
@@ -764,11 +755,6 @@ async function testRendererSendsAgentMode(): Promise<void> {
     threadContext,
     "worker.suppress_notification_auto_run !== true",
     "thread context ignores user-suppressed terminal worker notifications in both unresolved polling and terminal refresh scheduling"
-  )
-  assertIncludes(
-    threadContext,
-    "delete coordinatorNotificationAttemptsRef.current[threadId]",
-    "thread context clears coordinator notification retry counters after success, no-pending, and retry exhaustion"
   )
   assertIncludes(
     threadContext,
@@ -3337,11 +3323,7 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
   const subagentContext = await readProjectFile("src/main/hooks/subagent-context.ts")
 
-  assertIncludes(
-    runtime,
-    "agentId?: string",
-    "runtime accepts an optional hook agent identity"
-  )
+  assertIncludes(runtime, "agentId?: string", "runtime accepts an optional hook agent identity")
   assertIncludes(
     runtime,
     "rootDir: fileRoot,\n    agentId,",
@@ -3370,7 +3352,7 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertIncludes(
     workflowSubagent,
-    'const agentId = `${request.runId}:agent:${request.agentIndex}`',
+    "const agentId = `${request.runId}:agent:${request.agentIndex}`",
     "workflow leaves derive a stable run-scoped agent id"
   )
   assertIncludes(

@@ -6628,6 +6628,81 @@ async function testCancelledWorkerSuppressAutoRunPersistsAcrossRestore(): Promis
   })
 }
 
+async function testWorkerNotificationOwnerPersistsAcrossRestore(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const threadId = "thread-notification-owner"
+    const manager = new CoordinatorWorkerManager()
+
+    // Two results waiting on one thread, launched from different surfaces —
+    // the ordinary case when somebody has a Zhaohu-driven conversation open on
+    // the desktop. Both the desktop scheduler and the Zhaohu pump walk this
+    // thread; without an owner recorded per worker they both answer yes for
+    // both results and race for the run lease.
+    const fromZhaohu = await manager.startWorkerAndPersist({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      role: "implementer",
+      description: "Launched from Zhaohu",
+      prompt: "work",
+      notificationOwner: "managed",
+      runner: async () => ({ summary: "managed result" })
+    })
+    const fromDesktop = await manager.startWorkerAndPersist({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      role: "implementer",
+      description: "Launched from the desktop",
+      prompt: "work",
+      runner: async () => ({ summary: "desktop result" })
+    })
+    await manager.waitForTerminalPersistence(threadId, [
+      fromZhaohu.worker_id,
+      fromDesktop.worker_id
+    ])
+
+    const assertSplit = (subject: CoordinatorWorkerManager, label: string): void => {
+      assert(
+        subject.hasAutoRunnableNotifications(threadId),
+        `${label}: an unfiltered ask still means "is anything waiting"`
+      )
+      assert(
+        subject.hasAutoRunnableNotifications(threadId, { owner: "managed" }),
+        `${label}: the Zhaohu-launched result is the transport's to summarise`
+      )
+      assert(
+        subject.hasAutoRunnableNotifications(threadId, { owner: "desktop" }),
+        `${label}: the desktop-launched result is the desktop's to summarise`
+      )
+    }
+    assertSplit(manager, "live")
+
+    const persisted = await readJson(workerStatePath(workspace, threadId, fromZhaohu.worker_id))
+    assert(
+      persisted.notification_owner === "managed",
+      "the launching surface should be persisted with the worker state"
+    )
+
+    const restored = new CoordinatorWorkerManager()
+    await restored.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "full"
+    })
+    assertSplit(restored, "restored")
+
+    // Each side sees only its own once the other's result is acknowledged.
+    await restored.acknowledgeNotifications(threadId, [fromDesktop.worker_id])
+    assert(
+      restored.hasAutoRunnableNotifications(threadId, { owner: "managed" }),
+      "acknowledging the desktop's result must not consume the transport's"
+    )
+    assert(
+      !restored.hasAutoRunnableNotifications(threadId, { owner: "desktop" }),
+      "the desktop has nothing left to summarise once its own result is acknowledged"
+    )
+  })
+}
+
 async function testCancelledWorkerDismissesNotificationAfterTerminalPersist(): Promise<void> {
   await withTempDir("coordinator-worker-manager", async (workspace) => {
     const threadId = "thread-cancel-dismiss"
@@ -7893,6 +7968,8 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker cancel all preserves completed notifications")
   await testCancelledWorkerSuppressAutoRunPersistsAcrossRestore()
   console.log("PASS coordinator worker cancelled auto-run suppression restore")
+  await testWorkerNotificationOwnerPersistsAcrossRestore()
+  console.log("PASS coordinator worker notification owner restore")
   await testCancelledWorkerDismissesNotificationAfterTerminalPersist()
   console.log("PASS coordinator worker cancelled notification dismissal")
   await testSingleCancelledWorkerCanDismissNotificationAfterTerminalPersist()

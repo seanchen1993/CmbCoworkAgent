@@ -1,5 +1,6 @@
 import os from "os"
 import type { AgentShellAccess } from "../agent-registry"
+import type { BackgroundNotificationOwner } from "../../../shared/internal-notification-turn"
 
 /**
  * Dynamic Workflows — shared types and limits.
@@ -506,12 +507,8 @@ export interface PersistedWorkflowRun {
   notificationOwner?: WorkflowNotificationOwner
 }
 
-/**
- * "desktop" — a renderer drove the run and submits the summary turn itself.
- * "managed" — a run body owns the whole lifecycle (Zhaohu, scheduler); it
- * produces the summary and the desktop only mirrors the result.
- */
-export type WorkflowNotificationOwner = "desktop" | "managed"
+/** See BackgroundNotificationOwner; a workflow run is one such background task. */
+export type WorkflowNotificationOwner = BackgroundNotificationOwner
 
 /**
  * Resume arg/journal policy (pure, unit-tested). Lives here (no electron deps) so

@@ -341,9 +341,9 @@ import {
 } from "./workflow/subagent"
 import {
   isWorkflowSubagentThreadOf,
-  type WorkflowWorktreeIsolationBoundary,
-  type WorkflowNotificationOwner
+  type WorkflowWorktreeIsolationBoundary
 } from "./workflow/types"
+import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
 import {
   createTraceCollectorSafely,
   finishTraceInBackground,
@@ -4372,8 +4372,9 @@ export interface CreateAgentRuntimeOptions {
   managedExecution?: boolean
   /** Turn-local observer invoked only after a Dynamic Workflow launch succeeds. */
   onWorkflowLaunched?: (runId: string) => void
-  /** Recorded on any workflow this turn launches; see WorkflowNotificationOwner. */
-  workflowNotificationOwner?: WorkflowNotificationOwner
+  /** Recorded on any background task this turn launches — a workflow run or a
+   * coordinator worker. See BackgroundNotificationOwner. */
+  backgroundNotificationOwner?: BackgroundNotificationOwner
   /** Immutable checkout/git boundary for a dynamic-workflow worktree agent.
    * Its workspaceRoot moves only the agent's file view; workspacePath remains
    * the host identity for hooks, thread data, memory and the agent registry. */
@@ -4614,7 +4615,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
     onWorkflowLaunched,
-    workflowNotificationOwner,
+    backgroundNotificationOwner,
     hookTurnId,
     actionStationarityTurnId = hookTurnId,
     onHookSkippedFactory,
@@ -5509,7 +5510,7 @@ The workspace root is: ${fileRoot}`
         workspacePath,
         modelId,
         onLaunched: onWorkflowLaunched,
-        notificationOwner: workflowNotificationOwner,
+        notificationOwner: backgroundNotificationOwner,
         // Run-before approval gate (aligns with Claude Code's "Review dynamic
         // workflow before running"): the model writing a workflow can fan out
         // many file-editing subagents and spend real tokens, so the user
@@ -6441,6 +6442,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, input.selectedSkill),
             selectedSkill: input.selectedSkill,
             runner: coordinatorWorkerRunner,
+            notificationOwner: backgroundNotificationOwner,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           }),
@@ -6464,6 +6466,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
             selectedSkill,
             runner: coordinatorWorkerRunner,
+            // A worker continued from a different surface than the one that
+            // started it changes hands: the summary is owed to whoever is
+            // driving now, not to whoever launched the first turn.
+            notificationOwner: backgroundNotificationOwner,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           })
