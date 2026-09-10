@@ -29,6 +29,23 @@ function isAbsoluteFilePath(value: string): boolean {
   return value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value)
 }
 
+function normalizePathForCompare(value: string): string {
+  return stripLineSuffix(value).replace(/\\/g, "/").replace(/\/+$/, "")
+}
+
+function isWorkspaceFilePath(
+  filePath: string,
+  workspacePath: string | null | undefined
+): boolean {
+  if (!workspacePath) return false
+  const normalizedFilePath = normalizePathForCompare(filePath)
+  const normalizedWorkspacePath = normalizePathForCompare(workspacePath)
+  return (
+    normalizedFilePath === normalizedWorkspacePath ||
+    normalizedFilePath.startsWith(`${normalizedWorkspacePath}/`)
+  )
+}
+
 function stripLineSuffix(value: string): string {
   return value.replace(/:\d+(?::\d+)?$/, "")
 }
@@ -57,7 +74,10 @@ function isLocalhostFileUrl(value: string): string | null {
   return isAbsoluteFilePath(stripLineSuffix(filePath)) ? stripLineSuffix(filePath) : null
 }
 
-function normalizePreviewFileHref(href?: string): string | null {
+function normalizePreviewFileHref(
+  href: string | undefined,
+  workspacePath: string | null | undefined
+): string | null {
   if (!href) return null
   let decoded: string
   try {
@@ -74,9 +94,13 @@ function normalizePreviewFileHref(href?: string): string | null {
     }
   }
   const localhostFilePath = isLocalhostFileUrl(decoded)
-  if (localhostFilePath) return localhostFilePath
+  if (localhostFilePath && isWorkspaceFilePath(localhostFilePath, workspacePath)) {
+    return localhostFilePath
+  }
   const withoutLine = stripLineSuffix(decoded)
-  return isAbsoluteFilePath(withoutLine) ? withoutLine : null
+  return isAbsoluteFilePath(withoutLine) && isWorkspaceFilePath(withoutLine, workspacePath)
+    ? withoutLine
+    : null
 }
 
 function joinWorkspacePath(workspacePath: string, filePath: string): string {
@@ -175,11 +199,14 @@ async function buildWorkspaceFilePreviewIndex(
 
 function resolveInlinePreviewPath(
   value: string,
-  filePreviewIndex: Map<string, string>
+  filePreviewIndex: Map<string, string>,
+  workspacePath: string | null | undefined
 ): string | null {
   const candidate = stripLineSuffix(value.trim())
   if (!candidate || candidate.endsWith("/") || candidate.endsWith("\\")) return null
-  if (isAbsoluteFilePath(candidate)) return candidate
+  if (isAbsoluteFilePath(candidate)) {
+    return isWorkspaceFilePath(candidate, workspacePath) ? candidate : null
+  }
   return filePreviewIndex.get(candidate) ?? null
 }
 
@@ -286,7 +313,7 @@ export function useMarkdownFilePreviewComponents({
     () => ({
       ...baseComponents,
       a({ node: _node, href, children, ...props }) {
-        const previewPath = normalizePreviewFileHref(href)
+        const previewPath = normalizePreviewFileHref(href, workspacePath)
         if (!threadId || !previewPath) {
           return (
             <a href={href} {...props}>
@@ -314,7 +341,9 @@ export function useMarkdownFilePreviewComponents({
           return renderCodeBlock({ rawCode, language, className, children })
         }
 
-        const previewPath = threadId ? resolveInlinePreviewPath(rawCode, filePreviewIndex) : null
+        const previewPath = threadId
+          ? resolveInlinePreviewPath(rawCode, filePreviewIndex, workspacePath)
+          : null
         if (threadId && previewPath) {
           return (
             <MarkdownFilePreviewLink href={previewPath} previewPath={previewPath} threadId={threadId}>
@@ -330,6 +359,6 @@ export function useMarkdownFilePreviewComponents({
         )
       }
     }),
-    [baseComponents, filePreviewIndex, renderCodeBlock, threadId]
+    [baseComponents, filePreviewIndex, renderCodeBlock, threadId, workspacePath]
   )
 }
