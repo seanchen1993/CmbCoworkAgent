@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "../../shared/checkpoint-transcript"
+import { COORDINATOR_NOTIFICATION_PROMPT } from "../../shared/internal-notification-turn"
 import { getThread } from "../db"
 import { parseStandardThreadMetadata } from "./standard-thread-turn"
 import { startAgentRun, type AgentRunDelivery } from "./agent-run-service"
@@ -10,6 +11,7 @@ import {
   onLocalThreadRunLeaseReleased,
   releaseLocalThreadRunLease
 } from "./thread-run-lease"
+import { coordinatorWorkerManager } from "./coordinator-worker-manager"
 import { workflowRunManager } from "./workflow/run-manager"
 
 /**
@@ -32,12 +34,16 @@ import { workflowRunManager } from "./workflow/run-manager"
  * ordinary desktop input changes — this only owns the automatic follow-up.
  */
 
+/** Matches the renderer hold this replaced, so Stop feels the same. */
+const SUPPRESS_AFTER_STOP_MS = 15_000
+
 export type PendingNotificationSkipReason =
   | "no-pending-notification"
   | "owned-by-managed-runner"
   | "thread-missing"
   | "not-a-background-mode"
   | "thread-busy"
+  | "suppressed-after-stop"
 
 export interface PendingNotificationOutcome {
   started: boolean
@@ -68,6 +74,8 @@ export class PendingNotificationScheduler {
   private readonly checking = new Set<string>()
   /** Threads whose check was deferred until the current run releases the lease. */
   private readonly waitingForIdle = new Set<string>()
+  /** Threads the user just stopped; see suppressAfterStop. */
+  private readonly suppressedUntil = new Map<string, number>()
   private unsubscribeLeaseReleased: (() => void) | null = null
 
   constructor(overrides: Partial<SchedulerDependencies> = {}) {
@@ -94,6 +102,26 @@ export class PendingNotificationScheduler {
     this.unsubscribeLeaseReleased = null
     this.waitingForIdle.clear()
     this.checking.clear()
+    this.suppressedUntil.clear()
+  }
+
+  /**
+   * Holds off the automatic summary after the user presses Stop.
+   *
+   * Stop has to actually stop. A coordinator whose workers already finished has
+   * a notification waiting, and without this the summary turn starts again the
+   * instant the cancelled run releases the thread — which reads as the stop
+   * button not working. The hold expires rather than latching, so a result is
+   * delayed, never dropped.
+   */
+  suppressAfterStop(threadId: string, suppressed = true): void {
+    if (!suppressed) {
+      // The user said something new, which is a clearer signal than the timer:
+      // they are back, and whatever they stopped is no longer what they mean.
+      this.suppressedUntil.delete(threadId)
+      return
+    }
+    this.suppressedUntil.set(threadId, Date.now() + SUPPRESS_AFTER_STOP_MS)
   }
 
   /** Fire-and-forget entry for callers that cannot await (IPC, event handlers). */
@@ -116,11 +144,99 @@ export class PendingNotificationScheduler {
     }
   }
 
+  /**
+   * Coordinator results carry their own ownership signal, per worker rather
+   * than per run: a managed runner that takes a worker's result marks it
+   * suppressed, and that mark is persisted, so a restart reaches the same
+   * answer. Reused here instead of adding a second notion of ownership.
+   *
+   * There is nothing to claim — the manager holds the queue and drops each
+   * notification when its turn acknowledges it — so the lease is what keeps two
+   * turns from starting, exactly as it does for workflow.
+   */
+  private async checkCoordinator(threadId: string): Promise<PendingNotificationOutcome> {
+    if (!coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)) {
+      return { started: false, reason: "no-pending-notification" }
+    }
+
+    const existingLease = getLocalThreadRunLease(threadId)
+    if (existingLease) {
+      this.waitingForIdle.add(threadId)
+      this.dependencies.log("deferred until the thread is idle", {
+        threadId,
+        kind: "coordinator",
+        blockedBy: existingLease.owner,
+        reason: "thread-busy"
+      })
+      return { started: false, reason: "thread-busy" }
+    }
+
+    const notificationRunId = `pending-notification:${this.dependencies.createRunId()}`
+    const claim = claimLocalThreadRunLease({
+      threadId,
+      owner: "desktop",
+      runId: notificationRunId
+    })
+    if (!claim.acquired) {
+      this.waitingForIdle.add(threadId)
+      return { started: false, reason: "thread-busy" }
+    }
+
+    this.dependencies.log("running the summary turn", {
+      threadId,
+      kind: "coordinator",
+      notificationRunId
+    })
+    try {
+      const handle = await this.dependencies.startRun(
+        {
+          threadId,
+          message: COORDINATOR_NOTIFICATION_PROMPT,
+          agentMode: "coordinator",
+          coordinatorInternalNotification: true,
+          userMessageId: `coordinator-notification:${notificationRunId}`
+        },
+        this.dependencies.getDelivery(),
+        {
+          source: "desktop",
+          localRunLease: {
+            owner: "desktop",
+            runId: notificationRunId,
+            managedExternally: true
+          }
+        }
+      )
+      await handle.completion
+      return { started: true }
+    } catch (error) {
+      // The manager only drops a notification when a turn acknowledges it, so a
+      // failure leaves it queued and the next idle wake picks it up again.
+      this.dependencies.log("summary turn failed", {
+        threadId,
+        kind: "coordinator",
+        notificationRunId,
+        reason: error instanceof Error ? error.message : String(error)
+      })
+      return { started: false, reason: "thread-busy" }
+    } finally {
+      releaseLocalThreadRunLease(threadId, "desktop", notificationRunId)
+    }
+  }
+
   private async checkOnce(threadId: string): Promise<PendingNotificationOutcome> {
+    const suppressedUntil = this.suppressedUntil.get(threadId)
+    if (suppressedUntil !== undefined) {
+      if (suppressedUntil > Date.now()) {
+        this.waitingForIdle.add(threadId)
+        return { started: false, reason: "suppressed-after-stop" }
+      }
+      this.suppressedUntil.delete(threadId)
+    }
     const thread = this.dependencies.getThread(threadId)
     if (!thread) return { started: false, reason: "thread-missing" }
     const metadata = parseStandardThreadMetadata(thread.metadata)
     const workspacePath = metadata.workspacePath
+    if (metadata.agentMode === "coordinator") return await this.checkCoordinator(threadId)
     if (metadata.agentMode !== "workflow" || !workspacePath) {
       return { started: false, reason: "not-a-background-mode" }
     }

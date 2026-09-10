@@ -516,9 +516,19 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
    * that a Zhaohu run body is already producing the same summary.
    */
   ipc.handle(
-    "workflow:request-pending-notification",
+    "agent:request-pending-notification",
     async (_event, { threadId }: { threadId: string }): Promise<void> => {
       pendingNotificationScheduler.requestCheck(threadId)
+    }
+  )
+
+  ipc.handle(
+    "agent:suppress-pending-notification",
+    async (
+      _event,
+      { threadId, suppressed }: { threadId: string; suppressed?: boolean }
+    ): Promise<void> => {
+      pendingNotificationScheduler.suppressAfterStop(threadId, suppressed !== false)
     }
   )
 

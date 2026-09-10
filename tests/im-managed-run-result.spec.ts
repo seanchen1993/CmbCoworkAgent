@@ -182,10 +182,13 @@ async function testTheCallersOwnFinalAssistantStillRuns(): Promise<void> {
 function testResumeStatusNoticesSurviveTerminalFallback(): void {
   const agent = readFileSync(join(PROJECT_ROOT, "src/main/ipc/agent.ts"), "utf8")
   const entry = agent.slice(agent.indexOf("registerAgentRunImplementation(("))
-  const wrapper = entry.slice(
-    entry.indexOf("let terminalReported = false"),
-    entry.indexOf("return agentRunExecutionContextStorage.run(")
-  )
+  // Matched loosely on purpose: this slice used to name the call verbatim, and a
+  // formatter wrapping it onto two lines silently turned indexOf into -1 — the
+  // whole run body then landed in the evaluated wrapper and the failure pointed
+  // at a missing global rather than at the real cause.
+  const wrapperEnd = entry.search(/return agentRunExecutionContextStorage\s*\n?\s*\.?run\(/)
+  assert(wrapperEnd > 0, "the run-body wrapper boundary must still be findable")
+  const wrapper = entry.slice(entry.indexOf("let terminalReported = false"), wrapperEnd)
   const resume = entry.slice(entry.indexOf('if (goalCommand.type === "resume")'))
   // Execute the actual early-return branches and once-only wrapper. The rest
   // of the run body requires Electron; these status replies need no runtime.

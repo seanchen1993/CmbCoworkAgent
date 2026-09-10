@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import { PendingNotificationScheduler } from "./pending-notification-scheduler"
+import { coordinatorWorkerManager } from "./coordinator-worker-manager"
 import { workflowRunManager } from "./workflow/run-manager"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "./thread-run-lease"
 import type { PersistedWorkflowRun } from "./workflow/types"
@@ -56,6 +57,23 @@ function createScheduler(run: PersistedWorkflowRun | null) {
   return { scheduler, startRun, cleared }
 }
 
+function createCoordinatorScheduler(autoRunnable: boolean) {
+  const startRun = vi.fn(async () => ({ completion: Promise.resolve() }) as never)
+  vi.spyOn(coordinatorWorkerManager, "hasAutoRunnableNotifications").mockReturnValue(autoRunnable)
+  const scheduler = new PendingNotificationScheduler({
+    getThread: (() =>
+      ({
+        thread_id: THREAD,
+        metadata: JSON.stringify({ workspacePath: WORKSPACE, agentMode: "coordinator" })
+      }) as never) as never,
+    startRun: startRun as never,
+    getDelivery: (() => ({}) as never) as never,
+    createRunId: () => "fixed",
+    log: () => undefined
+  })
+  return { scheduler, startRun }
+}
+
 describe("pending notification scheduler", () => {
   it("leaves a Zhaohu-owned summary to the runner that started it", async () => {
     const { scheduler, startRun, cleared } = createScheduler(
@@ -101,6 +119,38 @@ describe("pending notification scheduler", () => {
       releaseLocalThreadRunLease(THREAD, "im", "im-run")
       vi.restoreAllMocks()
     }
+  })
+
+  it("leaves a coordinator result its managed runner already marked as taken", async () => {
+    // hasAutoRunnableNotifications is the per-worker ownership mark, persisted,
+    // so a restart answers the same way a live event did.
+    const { scheduler, startRun } = createCoordinatorScheduler(false)
+    const outcome = await scheduler.check(THREAD)
+    expect(outcome).toEqual({ started: false, reason: "no-pending-notification" })
+    expect(startRun).not.toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  it("runs a coordinator summary the desktop still owns", async () => {
+    const { scheduler, startRun } = createCoordinatorScheduler(true)
+    await scheduler.check(THREAD)
+    expect(startRun).toHaveBeenCalledTimes(1)
+    vi.restoreAllMocks()
+  })
+
+  it("holds the summary after a stop, and lets a new user message release it", async () => {
+    const { scheduler, startRun } = createCoordinatorScheduler(true)
+    scheduler.suppressAfterStop(THREAD)
+    expect(await scheduler.check(THREAD)).toEqual({
+      started: false,
+      reason: "suppressed-after-stop"
+    })
+    expect(startRun).not.toHaveBeenCalled()
+
+    scheduler.suppressAfterStop(THREAD, false)
+    await scheduler.check(THREAD)
+    expect(startRun).toHaveBeenCalledTimes(1)
+    vi.restoreAllMocks()
   })
 
   it("does not summarise twice when two checks race one completion", async () => {

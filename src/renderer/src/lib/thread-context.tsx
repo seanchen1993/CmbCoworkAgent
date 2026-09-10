@@ -28,11 +28,7 @@ import {
 } from "../../../shared/context-compaction-events"
 import { resolveHydratedThreadModel } from "../../../shared/thread-model-selection"
 import { LatestRequestGate } from "../../../shared/latest-request-gate"
-import {
-  isCoordinatorModeMetadata,
-  isExplicitNormalModeMetadata,
-  isWorkflowModeMetadata
-} from "./coordinator-mode-helpers"
+import { isExplicitNormalModeMetadata, isWorkflowModeMetadata } from "./coordinator-mode-helpers"
 import {
   applyWorkflowProgressEvent,
   type WorkflowProgressEventView,
@@ -1048,11 +1044,6 @@ const createDefaultThreadState = (): ThreadState => ({
   workflowRun: null
 })
 
-function isThreadMetadataInCoordinatorMode(threadId: string): boolean {
-  const thread = useAppStore.getState().threads.find((item) => item.thread_id === threadId)
-  return isCoordinatorModeMetadata(thread?.metadata)
-}
-
 function isThreadMetadataExplicitNormalMode(threadId: string): boolean {
   const thread = useAppStore.getState().threads.find((item) => item.thread_id === threadId)
   return isExplicitNormalModeMetadata(thread?.metadata)
@@ -1141,9 +1132,6 @@ const defaultStreamData: StreamData = {
   stream: null
 }
 const EMPTY_HOOK_LOG_BUCKETS: HookLogBucket[] = []
-const COORDINATOR_NOTIFICATION_RETRY_MS = 1_000
-const COORDINATOR_NOTIFICATION_MAX_RETRIES = 30
-const COORDINATOR_NOTIFICATION_SUPPRESS_MS = 15_000
 const INITIAL_THREAD_MESSAGES_PAGE_LIMIT = 128
 const INITIAL_THREAD_MESSAGES_PAGE_BYTE_BUDGET = 1024 * 1024
 /** Hard cap for the active main transcript's resident JS message objects. */
@@ -1757,12 +1745,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Stream data store (not React state - we use subscriptions)
   const streamDataRef = useRef<Record<string, StreamData>>({})
   const streamSubscribersRef = useRef<Record<string, Set<() => void>>>({})
-  const previousLoadingStatesRef = useRef<Record<string, boolean>>({})
-  const coordinatorNotificationTimersRef = useRef<Record<string, number>>({})
-  const coordinatorNotificationAttemptsRef = useRef<Record<string, number>>({})
-  const coordinatorNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})
-  const coordinatorNotificationAutoRunSuppressedRef = useRef<Set<string>>(new Set())
-  const coordinatorNotificationSuppressTimersRef = useRef<Record<string, number>>({})
   const contextCompactionDismissTimersRef = useRef<Record<string, number>>({})
   const subagentTranscriptPersistTimersRef = useRef<Record<string, number>>({})
   const subagentTranscriptPersistRetryTimersRef = useRef<Record<string, number>>({})
@@ -3577,99 +3559,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }
   }, [saveSubagentTranscripts])
 
+  /**
+   * Hands a possible coordinator summary to the main process, like the workflow
+   * path above and for the same reason: whether one should run depends on the
+   * worker result's own ownership mark and on a run lease, neither of which the
+   * page can see. Its previous busy check read this thread's stream, which says
+   * nothing about a run driven from Zhaohu.
+   */
   const scheduleCoordinatorNotificationTurn = useCallback((threadId: string) => {
-    if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
-    if (coordinatorNotificationTimersRef.current[threadId] !== undefined) return
-
-    coordinatorNotificationTimersRef.current[threadId] = window.setTimeout(async () => {
-      delete coordinatorNotificationTimersRef.current[threadId]
-      if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
-
-      try {
-        const hasPendingNotification =
-          await window.api.agent.hasCoordinatorWorkerNotifications(threadId)
-        if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
-        if (!hasPendingNotification) {
-          delete coordinatorNotificationAttemptsRef.current[threadId]
-          delete coordinatorNotificationRetryOnIdleRef.current[threadId]
-          return
-        }
-
-        let isEnvironmentCoordinatorMode = environmentCoordinatorThreadIdsRef.current.has(threadId)
-        if (!isThreadMetadataInCoordinatorMode(threadId) && !isEnvironmentCoordinatorMode) {
-          try {
-            isEnvironmentCoordinatorMode = await window.api.agent.isCoordinatorModeForced(threadId)
-            if (isEnvironmentCoordinatorMode) {
-              environmentCoordinatorThreadIdsRef.current.add(threadId)
-              updateThreadState(threadId, (state) =>
-                state.coordinatorWorkers.length > 0
-                  ? { coordinatorWorkers: [...state.coordinatorWorkers] }
-                  : {}
-              )
-            }
-          } catch (error) {
-            console.warn("[ThreadContext] Failed to check coordinator mode override:", error)
-          }
-          if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
-        }
-
-        if (isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode) {
-          delete coordinatorNotificationAttemptsRef.current[threadId]
-          delete coordinatorNotificationRetryOnIdleRef.current[threadId]
-          return
-        }
-
-        const streamData = streamDataRef.current[threadId]
-        if (!streamData?.stream) {
-          coordinatorNotificationRetryOnIdleRef.current[threadId] = true
-          const attempts = (coordinatorNotificationAttemptsRef.current[threadId] ?? 0) + 1
-          coordinatorNotificationAttemptsRef.current[threadId] = attempts
-          if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
-            scheduleCoordinatorNotificationTurn(threadId)
-          } else {
-            delete coordinatorNotificationAttemptsRef.current[threadId]
-          }
-          return
-        }
-
-        if (streamData.isLoading) {
-          coordinatorNotificationRetryOnIdleRef.current[threadId] = true
-          const attempts = (coordinatorNotificationAttemptsRef.current[threadId] ?? 0) + 1
-          coordinatorNotificationAttemptsRef.current[threadId] = attempts
-          if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
-            scheduleCoordinatorNotificationTurn(threadId)
-          } else {
-            delete coordinatorNotificationAttemptsRef.current[threadId]
-          }
-          return
-        }
-
-        const threadState = threadStatesRef.current[threadId] ?? createDefaultThreadState()
-        if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
-        await streamData.stream.submit(null, {
-          config: {
-            configurable: {
-              thread_id: threadId,
-              model_id: threadState.currentModel || undefined,
-              agent_mode: "coordinator",
-              coordinator_internal_notification: true
-            }
-          }
-        })
-        delete coordinatorNotificationAttemptsRef.current[threadId]
-        delete coordinatorNotificationRetryOnIdleRef.current[threadId]
-      } catch (error) {
-        if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
-        console.warn("[ThreadContext] Failed to auto-run coordinator notification turn:", error)
-        const attempts = (coordinatorNotificationAttemptsRef.current[threadId] ?? 0) + 1
-        coordinatorNotificationAttemptsRef.current[threadId] = attempts
-        if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
-          scheduleCoordinatorNotificationTurn(threadId)
-        } else {
-          delete coordinatorNotificationAttemptsRef.current[threadId]
-        }
-      }
-    }, COORDINATOR_NOTIFICATION_RETRY_MS)
+    void window.api.workflows.requestPendingNotification(threadId).catch((error) => {
+      console.warn("[ThreadContext] Failed to request the coordinator summary turn:", error)
+    })
   }, [])
 
   /**
@@ -3699,47 +3599,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
-  const suppressCoordinatorNotificationAutoRun = useCallback(
-    (threadId: string) => {
-      coordinatorNotificationAutoRunSuppressedRef.current.add(threadId)
-      const existingSuppressTimer = coordinatorNotificationSuppressTimersRef.current[threadId]
-      if (existingSuppressTimer !== undefined) {
-        window.clearTimeout(existingSuppressTimer)
-      }
-      const coordinatorNotificationTimer = coordinatorNotificationTimersRef.current[threadId]
-      if (coordinatorNotificationTimer !== undefined) {
-        window.clearTimeout(coordinatorNotificationTimer)
-      }
-      delete coordinatorNotificationTimersRef.current[threadId]
-      delete coordinatorNotificationAttemptsRef.current[threadId]
-      delete coordinatorNotificationRetryOnIdleRef.current[threadId]
-      coordinatorNotificationSuppressTimersRef.current[threadId] = window.setTimeout(() => {
-        delete coordinatorNotificationSuppressTimersRef.current[threadId]
-        if (!coordinatorNotificationAutoRunSuppressedRef.current.delete(threadId)) return
-        scheduleCoordinatorNotificationTurn(threadId)
-      }, COORDINATOR_NOTIFICATION_SUPPRESS_MS)
-    },
-    [scheduleCoordinatorNotificationTurn]
-  )
-
-  useEffect(() => {
-    const previous = previousLoadingStatesRef.current
-    for (const [threadId, wasLoading] of Object.entries(previous)) {
-      if (wasLoading && loadingStates[threadId] === false) {
-        // Coordinator: reschedule the worker-completion notification if any worker
-        // is still awaiting it (or a busy-deferred attempt is pending).
-        const workers = threadStatesRef.current[threadId]?.coordinatorWorkers ?? []
-        if (
-          workers.length > 0 &&
-          ((coordinatorNotificationAttemptsRef.current[threadId] ?? 0) > 0 ||
-            coordinatorNotificationRetryOnIdleRef.current[threadId])
-        ) {
-          scheduleCoordinatorNotificationTurn(threadId)
-        }
-      }
-    }
-    previousLoadingStatesRef.current = loadingStates
-  }, [loadingStates, scheduleCoordinatorNotificationTurn, scheduleWorkflowNotificationTurn])
+  /**
+   * Forwards Stop's hold to the scheduler that now owns the decision. Kept as a
+   * context method so callers do not need to know where it went.
+   */
+  const suppressCoordinatorNotificationAutoRun = useCallback((threadId: string) => {
+    void window.api.workflows.suppressPendingNotification(threadId).catch((error) => {
+      console.warn("[ThreadContext] Failed to hold the summary turn after stop:", error)
+    })
+  }, [])
 
   useEffect(() => {
     const unresolvedThreadIds = unresolvedCoordinatorThreadIdsKey
@@ -4994,12 +4862,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           // Old buckets stay around (up to HOOK_LOG_BUCKET_RING_SIZE) so a
           // user can scroll back and inspect what hooks ran in earlier turns.
           if (normalizedMessage.role === "user") {
-            coordinatorNotificationAutoRunSuppressedRef.current.delete(threadId)
-            const suppressTimer = coordinatorNotificationSuppressTimersRef.current[threadId]
-            if (suppressTimer !== undefined) {
-              window.clearTimeout(suppressTimer)
-            }
-            delete coordinatorNotificationSuppressTimersRef.current[threadId]
+            // A new user message lifts the hold Stop put on the summary.
+            void window.api.workflows
+              .suppressPendingNotification(threadId, false)
+              .catch(() => undefined)
             const pendingSourceTurnIds =
               pendingHookLogBucketOpensRef.current[threadId] ?? new Set<string>()
             pendingSourceTurnIds.add(message.id)
@@ -7671,20 +7537,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         window.clearTimeout(subagentTranscriptPersistRetryTimer)
         delete subagentTranscriptPersistRetryTimersRef.current[threadId]
       }
-      const coordinatorNotificationTimer = coordinatorNotificationTimersRef.current[threadId]
-      if (coordinatorNotificationTimer !== undefined) {
-        window.clearTimeout(coordinatorNotificationTimer)
-      }
-      delete coordinatorNotificationTimersRef.current[threadId]
-      delete coordinatorNotificationAttemptsRef.current[threadId]
-      delete coordinatorNotificationRetryOnIdleRef.current[threadId]
-      coordinatorNotificationAutoRunSuppressedRef.current.delete(threadId)
-      const coordinatorNotificationSuppressTimer =
-        coordinatorNotificationSuppressTimersRef.current[threadId]
-      if (coordinatorNotificationSuppressTimer !== undefined) {
-        window.clearTimeout(coordinatorNotificationSuppressTimer)
-      }
-      delete coordinatorNotificationSuppressTimersRef.current[threadId]
       const contextCompactionDismissTimer = contextCompactionDismissTimersRef.current[threadId]
       if (contextCompactionDismissTimer !== undefined) {
         window.clearTimeout(contextCompactionDismissTimer)
@@ -7811,10 +7663,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (subagentTranscriptHydrationRetryTimersRef.current[threadId] !== undefined) return false
       if (threadHistoryHydrationRetryTimersRef.current[threadId] !== undefined) return false
       if (subagentTranscriptPersistChainsRef.current[threadId]) return false
-      if (coordinatorNotificationTimersRef.current[threadId] !== undefined) return false
-      if (coordinatorNotificationRetryOnIdleRef.current[threadId]) return false
-      if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return false
-      if (coordinatorNotificationSuppressTimersRef.current[threadId] !== undefined) return false
       if (contextCompactionDismissTimersRef.current[threadId] !== undefined) return false
       return true
     },
@@ -7868,9 +7716,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete subagentTranscriptUrgentIdsRef.current[threadId]
       delete subagentTranscriptPersistRetryCountRef.current[threadId]
       subagentTranscriptPersistRecoveryRequestsRef.current.delete(threadId)
-      delete coordinatorNotificationAttemptsRef.current[threadId]
-      delete coordinatorNotificationRetryOnIdleRef.current[threadId]
-      delete previousLoadingStatesRef.current[threadId]
 
       const previousLoadingStates = loadingStatesRef.current
       if (Object.prototype.hasOwnProperty.call(previousLoadingStates, threadId)) {

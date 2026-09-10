@@ -1027,9 +1027,16 @@ const api = {
     hydrate: (threadId: string): Promise<unknown> => {
       return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
     },
+    /** Holds off the automatic summary after the user presses Stop. */
+    suppressPendingNotification: (threadId: string, suppressed = true): Promise<void> => {
+      return ipcRenderer.invoke("agent:suppress-pending-notification", {
+        threadId,
+        suppressed
+      }) as Promise<void>
+    },
     /** Asks the main process to consider a pending summary; it decides and runs it. */
     requestPendingNotification: (threadId: string): Promise<void> => {
-      return ipcRenderer.invoke("workflow:request-pending-notification", {
+      return ipcRenderer.invoke("agent:request-pending-notification", {
         threadId
       }) as Promise<void>
     },
