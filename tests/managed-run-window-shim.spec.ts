@@ -101,6 +101,37 @@ function testWindowOnlyWorkIsGatedOnHavingAWindow(): void {
   // the one gated above. Deliberately not asserted by counting call sites: the
   // count is four higher than the reachable one, and a test that says otherwise
   // would be asserting something false.
+
+  // One gate for both kinds of summary. The subscription is set up before the
+  // run body has even resolved which mode it is running, so a workflow summary
+  // and a Team summary cannot diverge here — worth pinning, because the same
+  // crash was reported for both and it would be easy to "fix it again" for one
+  // of them and believe the other was separate.
+  const gateAt = agent.indexOf("? subscribeWindowClosed(window, onWindowClosed)")
+  const modeResolvedAt = agent.indexOf("const effectiveAgentMode: AgentMode")
+  assert(gateAt > 0 && modeResolvedAt > 0, "both anchors must still exist")
+  assert(
+    gateAt < modeResolvedAt,
+    "the window-close gate must stay ahead of mode resolution, so workflow and " +
+      "coordinator summaries are covered by the one check"
+  )
+}
+
+/** Both scheduler entry points hand their turn the same windowless delivery. */
+function testBothSummaryKindsRunOnTheManagedTransport(): void {
+  const scheduler = read("src/main/agent/pending-notification-scheduler.ts")
+  const runSummaryCalls = [...scheduler.matchAll(/this\.runSummaryTurn\(/g)]
+  assert(
+    runSummaryCalls.length === 2,
+    `both the workflow and the coordinator check must go through runSummaryTurn; ` +
+      `found ${runSummaryCalls.length}`
+  )
+  const deliveryCalls = [...scheduler.matchAll(/this\.dependencies\.getDelivery\(\)/g)]
+  assert(
+    deliveryCalls.length === 1,
+    `runSummaryTurn is the single place that picks the delivery, so neither kind ` +
+      `can quietly get a different one; found ${deliveryCalls.length}`
+  )
 }
 
 function main(): void {
@@ -108,6 +139,8 @@ function main(): void {
   console.log("PASS testTheShimRefusesWindowOnlyMembers")
   testWindowOnlyWorkIsGatedOnHavingAWindow()
   console.log("PASS testWindowOnlyWorkIsGatedOnHavingAWindow")
+  testBothSummaryKindsRunOnTheManagedTransport()
+  console.log("PASS testBothSummaryKindsRunOnTheManagedTransport")
   console.log("managed-run-window-shim.spec.ts passed")
 }
 
