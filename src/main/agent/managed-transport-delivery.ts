@@ -16,6 +16,20 @@ import { StreamConverter, type SchedulerRendererEvent } from "./stream-converter
 export const MANAGED_TRANSPORT_WINDOW_ID = -1
 
 const AGENT_STREAM_PREFIX = "agent:stream:"
+/**
+ * Ambient sub-channel for a coordinator's internal summary turn.
+ *
+ * It exists to keep those frames out of the renderer's foreground listener, and
+ * used to have a subscriber because the page submitted that turn itself. It no
+ * longer does — the main-process scheduler owns the decision — so a summary
+ * published here reached nobody at all: no content, no error, and not even the
+ * `done` that closes the page's loading state. The turn ran, cost tokens, and
+ * showed up only on the next history reload.
+ *
+ * A request-scoped channel (`…:request:<id>`) still belongs to a listener the
+ * renderer opened for its own invoke and is left alone.
+ */
+const COORDINATOR_INTERNAL_SUFFIX = ":coordinator-internal"
 
 /**
  * The run body publishes on `agent:stream:<threadId>`, whose only subscribers
@@ -23,12 +37,16 @@ const AGENT_STREAM_PREFIX = "agent:stream:"
  * transport's run has no such listener, so its stream would reach nobody.
  *
  * Thread ids are `[A-Za-z0-9_-]+`, so a colon after the id marks a narrower
- * sub-channel (request-scoped, coordinator-internal). Those belong to a
- * specific renderer subscription and are forwarded untouched.
+ * sub-channel. The coordinator-internal one is ambient and belongs to this
+ * thread's standing background stream; anything else is a specific renderer
+ * subscription and is forwarded untouched.
  */
 function baseStreamThreadId(channel: string): string | null {
   if (!channel.startsWith(AGENT_STREAM_PREFIX)) return null
-  const threadId = channel.slice(AGENT_STREAM_PREFIX.length)
+  let threadId = channel.slice(AGENT_STREAM_PREFIX.length)
+  if (threadId.endsWith(COORDINATOR_INTERNAL_SUFFIX)) {
+    threadId = threadId.slice(0, -COORDINATOR_INTERNAL_SUFFIX.length)
+  }
   if (!threadId || threadId.includes(":")) return null
   return threadId
 }

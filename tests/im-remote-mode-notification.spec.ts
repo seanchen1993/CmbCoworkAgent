@@ -385,6 +385,61 @@ async function testActiveGoalLeavesDesktopWorkflowRunsAlone(): Promise<void> {
   }
 }
 
+/**
+ * A background summary the user can watch has to be one they can stop.
+ *
+ * Stop dispatches on who owns the run, and these were owned by neither place it
+ * looked: not in IM's turn queue, and holding their lease under "im" rather
+ * than "desktop". Pressing Stop returned false and the summary ran on.
+ */
+async function testStopReachesASummaryThisPumpIsRunning(): Promise<void> {
+  let aborted = false
+  let started = false
+  const pump = new ImRemoteModeNotificationPump({
+    conversations: conversations() as never,
+    capabilityGuard: { evaluate: async () => allowed("coordinator") } as never,
+    getThread: () => thread("coordinator"),
+    coordinator: {
+      restoreWorkersForThread: async () => [],
+      hasNotifications: () => true,
+      hasAutoRunnableNotifications: () => true,
+      drainNotifications: () => ["<task-notification><task-id>w1</task-id></task-notification>"],
+      getWorkerSelectedSkill: async () => undefined,
+      restoreNotifications: () => undefined,
+      restoreNotificationMessages: async () => undefined,
+      acknowledgeNotificationMessages: async () => undefined
+    } as never,
+    workflow: {} as never,
+    executeTurn: async (input) =>
+      await new Promise<string>((resolve, reject) => {
+        started = true
+        input.signal.addEventListener("abort", () => {
+          aborted = true
+          reject(new Error("aborted"))
+        })
+      }),
+    goalRuns: {} as never,
+    events: { enqueueProactiveReplies: async () => [] },
+    replyClient: { sendPending: async () => ({ sent: 0, unknown: 0, failed: 0, deferred: 0 }) },
+    createRunId: () => "run-stoppable",
+    hasActiveGoal: () => false
+  })
+  try {
+    pump.schedule(notice("coordinator"))
+    await waitFor(() => started, "the summary never started")
+
+    assert.equal(pump.cancelThread(target.threadId), true, "stop should own this run")
+    await waitFor(() => aborted, "the running summary was not aborted")
+    assert.equal(
+      pump.cancelThread("some-other-thread"),
+      false,
+      "stopping another thread must not claim this one"
+    )
+  } finally {
+    pump.stop()
+  }
+}
+
 async function main(): Promise<void> {
   await testCoordinatorResultIsFoldedAndAcknowledged()
   console.log("PASS testCoordinatorResultIsFoldedAndAcknowledged")
@@ -396,6 +451,8 @@ async function main(): Promise<void> {
   console.log("PASS testActiveGoalLeavesDesktopCoordinatorResultsAlone")
   await testActiveGoalLeavesDesktopWorkflowRunsAlone()
   console.log("PASS testActiveGoalLeavesDesktopWorkflowRunsAlone")
+  await testStopReachesASummaryThisPumpIsRunning()
+  console.log("PASS testStopReachesASummaryThisPumpIsRunning")
   console.log("im-remote-mode-notification.spec.ts passed")
 }
 

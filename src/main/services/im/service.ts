@@ -217,7 +217,13 @@ export class ImUnifiedBotService {
   }
 
   abortThreadFromDesktop(threadId: string): boolean {
-    return this.turnQueue.abortThreadFromDesktop(threadId)
+    // Both, not either: a thread can have an ordinary turn in the queue and a
+    // background summary in the pump, and the pump's runs were reachable from
+    // neither of the two places Stop looked — not in this queue, and holding
+    // their lease under "im" rather than "desktop".
+    const queued = this.turnQueue.abortThreadFromDesktop(threadId)
+    const summarising = this.modeNotificationPump.cancelThread(threadId)
+    return queued || summarising
   }
 
   hasActiveRuns(): boolean {

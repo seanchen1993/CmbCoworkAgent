@@ -92,18 +92,49 @@ function testOnlyTheThreadWideChannelIsTranslated(): void {
   const { mirrored, broadcasts, deps } = recorder()
   const delivery = createManagedTransportAgentRunDelivery(deps)
 
-  // Request-scoped and coordinator-internal sub-channels belong to a specific
-  // renderer subscription; rewriting them onto the thread stream would deliver
-  // one run's frames to every listener of that thread.
-  delivery.send("agent:stream:t1:req-7", { type: "done" })
-  delivery.send("agent:stream:t1:coordinator-internal", { type: "done" })
+  // A request-scoped sub-channel belongs to a listener the renderer opened for
+  // its own invoke; rewriting it onto the thread stream would deliver one run's
+  // frames to every listener of that thread.
+  delivery.send("agent:stream:t1:request:req-7", { type: "done" })
   delivery.send("threads:changed", undefined)
 
   assert.equal(mirrored.length, 0, "sub-channels must not be rewritten onto the thread stream")
   assert.deepEqual(
     broadcasts.map((entry) => entry.channel),
-    ["agent:stream:t1:req-7", "agent:stream:t1:coordinator-internal", "threads:changed"],
+    ["agent:stream:t1:request:req-7", "threads:changed"],
     "everything else is forwarded untouched"
+  )
+}
+
+function testTheCoordinatorInternalChannelReachesTheThreadStream(): void {
+  const { mirrored, broadcasts, deps } = recorder()
+  const delivery = createManagedTransportAgentRunDelivery(deps)
+
+  // This assertion used to say the opposite, and was right at the time: the
+  // page submitted its own coordinator summary and opened a listener for this
+  // sub-channel. It no longer submits — the main-process scheduler owns that
+  // decision — so a summary published here reached nobody: no content, no
+  // error, not even the `done` that closes the page's loading state. The turn
+  // ran and cost tokens, and appeared only on the next history reload.
+  delivery.send("agent:stream:t1:coordinator-internal", {
+    type: "custom",
+    data: { type: "token_usage", total: 12 }
+  })
+  delivery.finish("t1")
+
+  assert.equal(broadcasts.length, 0, "the ambient summary channel has no renderer subscriber")
+  assert.deepEqual(
+    mirrored.map((entry) => entry.event),
+    [
+      { type: "started" },
+      { type: "custom", data: { type: "token_usage", total: 12 } },
+      { type: "done" }
+    ],
+    "a coordinator summary reaches the thread's standing background stream"
+  )
+  assert.ok(
+    mirrored.every((entry) => entry.threadId === "t1"),
+    "and lands on the thread it belongs to"
   )
 }
 
@@ -255,6 +286,7 @@ async function main(): Promise<void> {
     testStreamFramesReachTheChannelTheRendererListensOn,
     testLifecycleAndCustomEventsSurviveTranslation,
     testOnlyTheThreadWideChannelIsTranslated,
+    testTheCoordinatorInternalChannelReachesTheThreadStream,
     testWindowShimRoutesThroughTheSameTranslation,
     testSyntheticIdCannotCollideWithARealWindow,
     testAnUnsupportedWindowMemberExplainsItself,

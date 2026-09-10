@@ -220,7 +220,10 @@ export class ImRemoteModeNotificationPump {
   private readonly active = new Set<string>()
   private readonly retryAttempts = new Map<string, number>()
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
-  private readonly abortControllers = new Map<string, AbortController>()
+  private readonly abortControllers = new Map<
+    string,
+    { controller: AbortController; threadId: string }
+  >()
   private readonly unregisterLeaseListener: () => void
   private stopped = false
 
@@ -323,12 +326,41 @@ export class ImRemoteModeNotificationPump {
     this.stopped = true
     for (const timer of this.timers.values()) clearTimeout(timer)
     this.timers.clear()
-    for (const controller of this.abortControllers.values()) {
+    for (const { controller } of this.abortControllers.values()) {
       controller.abort(new DOMException("IM notification pump stopped", "AbortError"))
     }
     this.abortControllers.clear()
     this.pending.clear()
     this.unregisterLeaseListener()
+  }
+
+  /**
+   * Stops a background summary this pump is running on the given thread.
+   *
+   * Stop dispatches on who owns the run, and these are owned by neither of the
+   * two places it looked: they are not in IM's turn queue, and their lease is
+   * held under "im" rather than "desktop". A summary the user could watch was
+   * therefore not one they could stop. Also drops anything still queued for the
+   * thread, so stopping does not simply hand over to the next notice.
+   */
+  cancelThread(threadId: string): boolean {
+    let cancelled = false
+    for (const [key, notice] of [...this.pending]) {
+      if (notice.threadId !== threadId) continue
+      this.pending.delete(key)
+      const timer = this.timers.get(key)
+      if (timer) {
+        clearTimeout(timer)
+        this.timers.delete(key)
+      }
+      cancelled = true
+    }
+    for (const entry of this.abortControllers.values()) {
+      if (entry.threadId !== threadId) continue
+      entry.controller.abort(new DOMException("Stopped from the desktop", "AbortError"))
+      cancelled = true
+    }
+    return cancelled
   }
 
   private kick(key: string, delayMs: number): void {
@@ -398,7 +430,9 @@ export class ImRemoteModeNotificationPump {
     if (!claim.acquired) return true
 
     const controller = new AbortController()
-    this.abortControllers.set(routeKey(notice), controller)
+    // Keyed by route, but Stop asks by thread — the route key carries the
+    // conversation and target, not the thread — so the thread travels with it.
+    this.abortControllers.set(routeKey(notice), { controller, threadId: notice.threadId })
     try {
       if (this.dependencies.hasActiveGoal(notice.threadId)) {
         return await this.processActiveGoalNotification(notice, decision, runId, controller.signal)
