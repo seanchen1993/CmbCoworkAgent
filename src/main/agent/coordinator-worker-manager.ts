@@ -1949,9 +1949,24 @@ export class CoordinatorWorkerManager {
     return [...(this.notificationsByParent.get(normalized) ?? [])]
   }
 
-  hasNotifications(parentThreadId: string): boolean {
+  /**
+   * Whether anything is queued for this thread, suppressed or not.
+   *
+   * `owner` narrows it to one surface. Asking unscoped is how a transport
+   * decided it still had work after draining its own share: the other side's
+   * results were still queued, so it kept taking the run lease and retrying
+   * against a queue it was never going to consume.
+   */
+  hasNotifications(
+    parentThreadId: string,
+    options: { owner?: BackgroundNotificationOwner } = {}
+  ): boolean {
     const normalized = normalizeThreadId(parentThreadId)
-    return (this.notificationsByParent.get(normalized)?.length ?? 0) > 0
+    const notifications = this.notificationsByParent.get(normalized) ?? []
+    if (options.owner === undefined) return notifications.length > 0
+    return notifications.some(
+      (notification) => this.notificationOwner(normalized, notification) === options.owner
+    )
   }
 
   /**

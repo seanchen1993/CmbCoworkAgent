@@ -418,13 +418,21 @@ export class ImRemoteModeNotificationPump {
     runId: string,
     signal: AbortSignal
   ): Promise<boolean> {
+    // Owner-scoped like the plain paths below. A goal turn is still this
+    // transport reporting its own results; asking whether the thread has any
+    // pending work at all meant that once its own share was reported, the
+    // desktop's leftovers kept it taking the run lease and retrying against a
+    // queue it was never going to consume.
     if (notice.kind === "coordinator") {
       await this.restoreCoordinator(notice)
-      if (!this.dependencies.coordinator.hasNotifications(notice.threadId)) return false
+      if (!this.dependencies.coordinator.hasNotifications(notice.threadId, { owner: "managed" })) {
+        return false
+      }
     } else {
       const pending = await this.dependencies.workflow.findPendingNotificationAsync(
         decision.workspacePath,
-        notice.threadId
+        notice.threadId,
+        { owner: "managed" }
       )
       if (!pending) return Boolean(this.dependencies.workflow.activeRunId(notice.threadId))
     }
@@ -467,12 +475,14 @@ export class ImRemoteModeNotificationPump {
         })
     })
 
+    // "Is there another one for me", not "is anything still queued".
     return notice.kind === "coordinator"
-      ? this.dependencies.coordinator.hasNotifications(notice.threadId)
+      ? this.dependencies.coordinator.hasNotifications(notice.threadId, { owner: "managed" })
       : Boolean(
           await this.dependencies.workflow.findPendingNotificationAsync(
             decision.workspacePath,
-            notice.threadId
+            notice.threadId,
+            { owner: "managed" }
           )
         )
   }
@@ -580,7 +590,10 @@ export class ImRemoteModeNotificationPump {
       ])
       throw error
     }
-    return deferred.length > 0 || this.dependencies.coordinator.hasNotifications(notice.threadId)
+    return (
+      deferred.length > 0 ||
+      this.dependencies.coordinator.hasNotifications(notice.threadId, { owner: "managed" })
+    )
   }
 
   private async processWorkflow(

@@ -280,6 +280,111 @@ async function testActiveGoalConsumesCoordinatorNotificationThroughSharedRun(): 
   }
 }
 
+/**
+ * The Goal branch sits in front of both plain paths and asked a different
+ * question than they do: "does this thread have pending work" rather than "does
+ * it have pending work of mine". Once this transport had reported its own share,
+ * the desktop's leftovers kept it answering yes — taking the run lease, starting
+ * another Goal summary, and retrying against a queue it was never going to
+ * consume.
+ *
+ * The fakes below honour the owner argument, which the existing ones ignore.
+ * That is what makes the difference visible at all.
+ */
+async function testActiveGoalLeavesDesktopCoordinatorResultsAlone(): Promise<void> {
+  let goalRuns = 0
+  const asked: (string | undefined)[] = []
+  const pump = new ImRemoteModeNotificationPump({
+    conversations: conversations() as never,
+    capabilityGuard: { evaluate: async () => allowed("coordinator") } as never,
+    getThread: () => thread("coordinator"),
+    coordinator: {
+      restoreWorkersForThread: async () => [],
+      // The only thing queued belongs to the desktop.
+      hasNotifications: (_threadId: string, options?: { owner?: string }) => {
+        asked.push(options?.owner)
+        return options?.owner !== "managed"
+      },
+      hasAutoRunnableNotifications: (_threadId: string, options?: { owner?: string }) =>
+        options?.owner !== "managed"
+    } as never,
+    workflow: {} as never,
+    executeTurn: async () => {
+      throw new Error("active Goal notification must not use the standalone mode runner")
+    },
+    goalRuns: {
+      run: async () => {
+        goalRuns += 1
+        return ""
+      }
+    } as never,
+    events: { enqueueProactiveReplies: async () => [] },
+    replyClient: { sendPending: async () => ({ sent: 0, unknown: 0, failed: 0, deferred: 0 }) },
+    createRunId: () => "run-active-goal-foreign",
+    hasActiveGoal: () => true
+  })
+  try {
+    pump.schedule(notice("coordinator"))
+    await waitFor(() => asked.length > 0, "the Goal branch never checked for pending work")
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(goalRuns, 0, "a desktop-owned result must not drive a Zhaohu Goal summary")
+    assert.ok(
+      asked.every((owner) => owner === "managed"),
+      "the Goal branch must ask only about its own results"
+    )
+  } finally {
+    pump.stop()
+  }
+}
+
+async function testActiveGoalLeavesDesktopWorkflowRunsAlone(): Promise<void> {
+  let goalRuns = 0
+  const asked: (string | undefined)[] = []
+  const pump = new ImRemoteModeNotificationPump({
+    conversations: conversations() as never,
+    capabilityGuard: { evaluate: async () => allowed("workflow") } as never,
+    getThread: () => thread("workflow"),
+    coordinator: {} as never,
+    workflow: {
+      activeRunId: () => null,
+      findPendingNotificationAsync: async (
+        _workspacePath: string,
+        _threadId: string,
+        options?: { owner?: string }
+      ) => {
+        asked.push(options?.owner)
+        // A desktop-started run is pending; nothing here is this transport's.
+        return options?.owner === "managed" ? null : { runId: "wf_desktop" }
+      }
+    } as never,
+    executeTurn: async () => {
+      throw new Error("active Goal notification must not use the standalone mode runner")
+    },
+    goalRuns: {
+      run: async () => {
+        goalRuns += 1
+        return ""
+      }
+    } as never,
+    events: { enqueueProactiveReplies: async () => [] },
+    replyClient: { sendPending: async () => ({ sent: 0, unknown: 0, failed: 0, deferred: 0 }) },
+    createRunId: () => "run-active-goal-foreign-workflow",
+    hasActiveGoal: () => true
+  })
+  try {
+    pump.schedule(notice("workflow"))
+    await waitFor(() => asked.length > 0, "the Goal branch never looked for a pending run")
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(goalRuns, 0, "a desktop-started workflow must not drive a Zhaohu Goal summary")
+    assert.ok(
+      asked.every((owner) => owner === "managed"),
+      "the Goal branch must look only for runs its own transport started"
+    )
+  } finally {
+    pump.stop()
+  }
+}
+
 async function main(): Promise<void> {
   await testCoordinatorResultIsFoldedAndAcknowledged()
   console.log("PASS testCoordinatorResultIsFoldedAndAcknowledged")
@@ -287,6 +392,10 @@ async function main(): Promise<void> {
   console.log("PASS testWorkflowResultIsFoldedAndSettled")
   await testActiveGoalConsumesCoordinatorNotificationThroughSharedRun()
   console.log("PASS testActiveGoalConsumesCoordinatorNotificationThroughSharedRun")
+  await testActiveGoalLeavesDesktopCoordinatorResultsAlone()
+  console.log("PASS testActiveGoalLeavesDesktopCoordinatorResultsAlone")
+  await testActiveGoalLeavesDesktopWorkflowRunsAlone()
+  console.log("PASS testActiveGoalLeavesDesktopWorkflowRunsAlone")
   console.log("im-remote-mode-notification.spec.ts passed")
 }
 
