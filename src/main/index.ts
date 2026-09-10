@@ -718,6 +718,9 @@ function createWindow(): void {
     console.warn("[Main] BrowserWindow became unresponsive")
   })
 
+  /** One recovery per window: see the render-process-gone handler below. */
+  let rendererRecovered = false
+
   mainWindow.on("responsive", () => {
     console.info("[Main] BrowserWindow recovered responsiveness")
   })
@@ -792,6 +795,26 @@ function createWindow(): void {
     clearCloseToTrayPromptState()
     disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
+
+    // Reload once. A dead renderer leaves the window blank with no way back,
+    // and the process is gone so nothing in it can offer one. `reason` is the
+    // part worth keeping: "oom" and "crashed" look identical on screen and
+    // point at completely different causes.
+    //
+    // Once, not always: a fault that recurs on load would otherwise reload
+    // forever, and each cycle costs the log line that identifies it. A window
+    // that has already been recovered stays blank until the user restarts.
+    if (rendererRecovered) {
+      console.error(
+        `[Main] Renderer process gone again (${details.reason}); not reloading a second time`
+      )
+      return
+    }
+    rendererRecovered = true
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      console.warn(`[Main] Reloading the renderer after ${details.reason}`)
+      mainWindow.webContents.reload()
+    }
   })
 
   mainWindow.webContents.on("did-finish-load", () => {
@@ -1428,9 +1451,7 @@ if (browserNativeMessagingHostLaunch) {
     // The managed delivery broadcasts on the thread-scoped channel the renderer
     // subscribes to for background runs, so an open session renders it live and
     // a closed one simply misses nothing.
-    builtinRobotManager.setAgentRunDeliveryResolver(() =>
-      createManagedTransportAgentRunDelivery()
-    )
+    builtinRobotManager.setAgentRunDeliveryResolver(() => createManagedTransportAgentRunDelivery())
     setAppAttentionHandler(requestAppAttention)
     await initializeAppTray({
       getMainWindow: () => mainWindow,
