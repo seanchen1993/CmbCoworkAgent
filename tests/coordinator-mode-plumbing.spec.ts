@@ -670,10 +670,15 @@ async function testRendererSendsAgentMode(): Promise<void> {
     'hasAutoRunnableNotifications(threadId, { owner: "desktop" })',
     "the scheduler only claims coordinator results the desktop launched"
   )
+  assertMatches(
+    notificationScheduler,
+    /findPendingNotificationAsync\(workspacePath, threadId, \{\s*owner: "desktop"\s*\}\)/,
+    "the scheduler peeks at a workflow notification it owns and leaves the claim to the run body"
+  )
   assertIncludes(
     notificationScheduler,
-    "findPendingNotificationAsync",
-    "the scheduler peeks at a workflow notification and leaves the claim to the run body"
+    "onRunTerminated:",
+    "a summary that reported a failure and returned normally is not counted as delivered"
   )
 
   const notificationPump = await readProjectFile(
@@ -683,6 +688,18 @@ async function testRendererSendsAgentMode(): Promise<void> {
     notificationPump,
     'owner: "managed"',
     "the Zhaohu pump only restores coordinator results its own transport launched"
+  )
+  assertMatches(
+    notificationPump,
+    /drainNotifications\(notice\.threadId, \{ owner: "managed" \}\)/,
+    "the Zhaohu pump takes only its own results off the queue, not the desktop's"
+  )
+
+  const remoteRunner = await readProjectFile("src/main/services/im/remote-runner.ts")
+  assertIncludes(
+    remoteRunner,
+    'backgroundNotificationOwner: "managed"',
+    "background work a Zhaohu turn launches is owed back to Zhaohu, including from a summary turn"
   )
 
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
@@ -1300,10 +1317,20 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     /const parsedCoordinatorSelectedSkill =\s+extractCoordinatorSelectedSkill\(effectiveMessage\) \?\? undefined/,
     "agent invoke extracts structured selected skill metadata before prompt adaptation"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "await prepareQueuedCoordinatorNotificationsForPrompt(threadId",
+    /await prepareQueuedCoordinatorNotificationsForPrompt\(\s*threadId/,
     "agent invoke derives selected skill context from the current drained notifications"
+  )
+  assertMatches(
+    agentIpc,
+    /prepareQueuedCoordinatorNotificationsForPrompt\(\s*threadId,\s*isCoordinatorNotificationTurn \? backgroundNotificationOwner : undefined/,
+    "an automatic summary drains only the results its own surface owes, while a user turn takes the queue"
+  )
+  assertMatches(
+    agentIpc,
+    /claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
+    "a workflow summary claims a run its own surface owes, not whichever is newest"
   )
   assertIncludes(
     agentIpc,
@@ -1773,7 +1800,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "drainNotifications(threadId)",
+    "drainNotifications(threadId, { owner })",
     "agent IPC drains worker notifications into next coordinator turn"
   )
   assertIncludes(

@@ -8,7 +8,7 @@ import {
 import { getThread } from "../db"
 import { isCoordinatorModeForcedByEnvironment } from "./coordinator-mode"
 import { parseStandardThreadMetadata } from "./standard-thread-turn"
-import { startAgentRun, type AgentRunDelivery } from "./agent-run-service"
+import { startAgentRun, type AgentRunDelivery, type AgentRunTerminal } from "./agent-run-service"
 import { createManagedTransportAgentRunDelivery } from "./managed-transport-delivery"
 import {
   claimLocalThreadRunLease,
@@ -57,9 +57,11 @@ const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
 const MAX_SUMMARY_ATTEMPTS = 3
 const RETRY_AFTER_FAILURE_MS = 2_000
 
+/** Terminal codes that mean a decision was made, not that something went wrong. */
+const NON_RETRYABLE_TERMINAL_CODES = new Set(["hook_halt", "failure_fuse", "prompt_blocked"])
+
 export type PendingNotificationSkipReason =
   | "no-pending-notification"
-  | "owned-by-managed-runner"
   | "thread-missing"
   | "not-a-background-mode"
   | "thread-busy"
@@ -311,7 +313,7 @@ export class PendingNotificationScheduler {
       notificationRunId
     })
     try {
-      const handle = await this.dependencies.startRun(
+      const terminal = await this.runSummaryTurn(
         {
           threadId,
           message: COORDINATOR_NOTIFICATION_PROMPT,
@@ -319,16 +321,13 @@ export class PendingNotificationScheduler {
           coordinatorInternalNotification: true,
           userMessageId: `coordinator-notification:${notificationRunId}`
         },
-        this.dependencies.getDelivery(),
-        this.runContext(notificationRunId)
+        notificationRunId
       )
-      await handle.completion
-      this.failedAttempts.delete(threadId)
-      return { started: true }
-    } catch (error) {
       // The manager only drops a notification when a turn acknowledges it, so a
-      // failure leaves it queued and a bounded retry picks it up again.
-      this.dependencies.log("summary turn failed", {
+      // failed summary leaves it queued and a bounded retry picks it up again.
+      return this.settle(threadId, "coordinator", notificationRunId, terminal)
+    } catch (error) {
+      this.dependencies.log("summary turn could not start", {
         threadId,
         kind: "coordinator",
         notificationRunId,
@@ -341,23 +340,83 @@ export class PendingNotificationScheduler {
     }
   }
 
+  /** Turns a reported terminal into an outcome, and decides about a retry. */
+  private settle(
+    threadId: string,
+    kind: "workflow" | "coordinator",
+    notificationRunId: string,
+    terminal: AgentRunTerminal
+  ): PendingNotificationOutcome {
+    if (terminal.outcome === "success") {
+      this.failedAttempts.delete(threadId)
+      return { started: true }
+    }
+    this.dependencies.log("summary turn did not deliver", {
+      threadId,
+      kind,
+      notificationRunId,
+      outcome: terminal.outcome,
+      code: terminal.code,
+      retryable: this.isRetryable(terminal)
+    })
+    if (this.isRetryable(terminal)) this.noteFailure(threadId, kind)
+    else this.failedAttempts.delete(threadId)
+    return { started: false, reason: "thread-busy" }
+  }
+
   /**
-   * The lease is released here rather than by the run body, and the summary is
-   * owed to the desktop rather than to a transport. Those are different
-   * questions and the context says both explicitly — inferring the second from
-   * the first marked anything this turn launched as managed, leaving it to a
-   * runner with no callback for it.
+   * Runs one summary turn and reports what actually happened to it.
+   *
+   * The run body reports failures to the renderer and then returns normally, so
+   * its completion promise resolves either way. Reading only that counted a
+   * provider error as a delivered summary — it cleared the failure budget and
+   * scheduled nothing, which is the ordinary case this retry exists for. The
+   * classification comes from onRunTerminated, which the body is contracted to
+   * fire exactly once; `catch` still covers what genuinely throws, which is
+   * setup and transport rather than the model.
    */
-  private runContext(notificationRunId: string): Parameters<typeof startAgentRun>[2] {
-    return {
+  private async runSummaryTurn(
+    request: Parameters<typeof startAgentRun>[0],
+    notificationRunId: string
+  ): Promise<AgentRunTerminal> {
+    let terminal: AgentRunTerminal | undefined
+    const handle = await this.dependencies.startRun(request, this.dependencies.getDelivery(), {
       source: "desktop",
+      // The lease is released here rather than by the run body, and the summary
+      // is owed to the desktop rather than to a transport. Those are different
+      // questions and this says both explicitly — inferring the second from the
+      // first marked anything the turn launched as managed, leaving it to a
+      // runner with no callback for it.
       localRunLease: {
         owner: "desktop",
         runId: notificationRunId,
         managedExternally: true
       },
-      backgroundNotificationOwner: "desktop"
-    }
+      backgroundNotificationOwner: "desktop",
+      onRunTerminated: (reported) => {
+        terminal = reported
+      }
+    })
+    await handle.completion
+    // The body's own finally reports `unknown` for anything it did not
+    // classify, so an absent terminal means the contract was not met at all.
+    // Not treated as success: a summary that silently did nothing is exactly
+    // what this was supposed to stop.
+    return terminal ?? { outcome: "unknown", code: "unreported" }
+  }
+
+  /**
+   * Whether a non-success terminal should be tried again.
+   *
+   * A halt is a decision, not a fault: a hook, the failure fuse or a blocked
+   * prompt stopped this turn on purpose, and retrying fights that. A provider
+   * error is the case this budget exists for. `unknown` covers an aborted run
+   * too — retried, because the deliberate abort is the Stop button, and Stop
+   * already holds the summary off through its own path.
+   */
+  private isRetryable(terminal: AgentRunTerminal): boolean {
+    if (terminal.outcome === "success") return false
+    return !NON_RETRYABLE_TERMINAL_CODES.has(terminal.code)
   }
 
   /**
@@ -399,18 +458,15 @@ export class PendingNotificationScheduler {
     // its release on every settle path; claiming here as well meant the body
     // found the run already in flight, treated it as a stale trigger and ended
     // without summarising, leaving the mark set for the life of the process.
-    const run = await workflowRunManager.findPendingNotificationAsync(workspacePath, threadId)
-    if (!run) return { started: false, reason: "no-pending-notification" }
-
-    const owner = run.notificationOwner ?? "desktop"
-    if (owner === "managed") {
-      this.dependencies.log("left to the managed runner", {
-        threadId,
-        runId: run.runId,
-        owner,
-        reason: "owned-by-managed-runner"
-      })
-      return { started: false, reason: "owned-by-managed-runner" }
+    const run = await workflowRunManager.findPendingNotificationAsync(workspacePath, threadId, {
+      owner: "desktop"
+    })
+    if (!run) {
+      // Either nothing is waiting or what is waiting belongs to the transport
+      // that started it. Filtered in the lookup rather than checked afterwards:
+      // the scan is newest-first, so a managed run standing in front of an older
+      // desktop one used to hide it for good.
+      return { started: false, reason: "no-pending-notification" }
     }
 
     const existingLease = getLocalThreadRunLease(threadId)
@@ -421,7 +477,6 @@ export class PendingNotificationScheduler {
       this.dependencies.log("deferred until the thread is idle", {
         threadId,
         runId: run.runId,
-        owner,
         blockedBy: existingLease.owner,
         reason: "thread-busy"
       })
@@ -442,28 +497,24 @@ export class PendingNotificationScheduler {
     this.dependencies.log("running the summary turn", {
       threadId,
       runId: run.runId,
-      owner,
       notificationRunId
     })
     try {
-      const handle = await this.dependencies.startRun(
+      const terminal = await this.runSummaryTurn(
         {
           threadId,
           message: WORKFLOW_NOTIFICATION_TURN_PROMPT,
           agentMode: "workflow",
           userMessageId: `workflow-notification:${notificationRunId}`
         },
-        this.dependencies.getDelivery(),
-        this.runContext(notificationRunId)
+        notificationRunId
       )
-      await handle.completion
-      this.failedAttempts.delete(threadId)
-      return { started: true }
-    } catch (error) {
       // A failed summary must not count as delivered. The run body releases its
-      // own claim on every settle path, including this one, so the notification
-      // is eligible again; this only decides whether to reach for it now.
-      this.dependencies.log("summary turn failed", {
+      // own claim on every settle path, so the notification is eligible again;
+      // this only decides whether to reach for it now.
+      return this.settle(threadId, "workflow", notificationRunId, terminal)
+    } catch (error) {
+      this.dependencies.log("summary turn could not start", {
         threadId,
         runId: run.runId,
         notificationRunId,

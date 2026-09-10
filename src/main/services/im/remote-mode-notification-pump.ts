@@ -291,26 +291,22 @@ export class ImRemoteModeNotificationPump {
           }
         } else if (mode === "workflow") {
           const activeRunId = this.dependencies.workflow.activeRunId(target.snapshot.threadId)
-          const pendingRun = activeRunId
-            ? null
-            : await this.dependencies.workflow.findPendingNotificationAsync(
-                target.snapshot.workspacePath,
-                target.snapshot.threadId
-              )
           // A pending notification is only ours if the run that produced it was
           // started from here. This loop walks threads that are *connected* to
           // Zhaohu, which is a different question: the same conversation can be
           // driven from the desktop, and after a restart that desktop run's
           // summary would otherwise be taken over and answered into Zhaohu.
-          if (pendingRun && (pendingRun.notificationOwner ?? "desktop") !== "managed") {
-            console.log("[IM] Pending workflow notification left to the desktop", {
-              threadId: target.snapshot.threadId,
-              runId: pendingRun.runId,
-              owner: pendingRun.notificationOwner ?? "desktop",
-              reason: "run_not_started_from_im"
-            })
-            continue
-          }
+          //
+          // Filtered rather than checked after the fact: the scan is
+          // newest-first, so a desktop-owned run standing in front of an older
+          // managed one used to hide it for good.
+          const pendingRun = activeRunId
+            ? null
+            : await this.dependencies.workflow.findPendingNotificationAsync(
+                target.snapshot.workspacePath,
+                target.snapshot.threadId,
+                { owner: "managed" }
+              )
           if (activeRunId || pendingRun) {
             this.schedule({
               ...base,
@@ -504,8 +500,11 @@ export class ImRemoteModeNotificationPump {
     signal: AbortSignal
   ): Promise<boolean> {
     await this.restoreCoordinator(notice)
+    // Only what this transport launched. Draining the thread took the desktop's
+    // pending results too, and reported them into Zhaohu instead of to the
+    // person watching the desktop.
     const queued = toNotifications(
-      this.dependencies.coordinator.drainNotifications(notice.threadId)
+      this.dependencies.coordinator.drainNotifications(notice.threadId, { owner: "managed" })
     )
     if (queued.length === 0) return false
 

@@ -450,6 +450,12 @@ export async function executePreparedRemoteStandardTurn(
         workspacePath,
         abortSignal: signal,
         agentMode,
+        // Both sources here are managed transports — this function exists for
+        // turns whose lifecycle the transport owns and delivers back over its
+        // own channel. A workflow or a worker started from one of them is owed
+        // to it, and defaulting to the desktop left the summary to a scheduler
+        // that correctly refuses to run it.
+        backgroundNotificationOwner: "managed",
         disableSubagents: agentMode === "normal" && metadata.subagentsEnabled === false,
         coordinatorSelectedSkill,
         coordinatorExplicitSelectedSkill: coordinatorSelectedSkill,

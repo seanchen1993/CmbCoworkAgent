@@ -6690,15 +6690,39 @@ async function testWorkerNotificationOwnerPersistsAcrossRestore(): Promise<void>
     })
     assertSplit(restored, "restored")
 
-    // Each side sees only its own once the other's result is acknowledged.
-    await restored.acknowledgeNotifications(threadId, [fromDesktop.worker_id])
+    // Draining is where it actually matters. Checking ownership at the entry to
+    // a turn and then taking the whole queue reported the Zhaohu result into a
+    // desktop summary its reader never sees.
+    const desktopBatch = restored.drainNotifications(threadId, { owner: "desktop" })
+    assert(desktopBatch.length === 1, "the desktop takes only its own result")
+    assert(
+      desktopBatch[0]?.includes(fromDesktop.worker_id),
+      "the desktop batch should be the desktop-launched worker's result"
+    )
     assert(
       restored.hasAutoRunnableNotifications(threadId, { owner: "managed" }),
-      "acknowledging the desktop's result must not consume the transport's"
+      "the transport's result stays queued for the transport"
     )
     assert(
       !restored.hasAutoRunnableNotifications(threadId, { owner: "desktop" }),
-      "the desktop has nothing left to summarise once its own result is acknowledged"
+      "the desktop has nothing left once it has taken its own"
+    )
+
+    const managedBatch = restored.drainNotifications(threadId, { owner: "managed" })
+    assert(managedBatch.length === 1, "the transport still gets its own result")
+    assert(
+      managedBatch[0]?.includes(fromZhaohu.worker_id),
+      "the managed batch should be the Zhaohu-launched worker's result"
+    )
+    assert(!restored.hasNotifications(threadId), "the queue is empty once both sides have taken")
+
+    // A turn the user started still takes everything: they are looking at the
+    // thread, and it is the only path that can surface a managed result whose
+    // conversation is no longer connected.
+    restored.restoreNotifications(threadId, [...desktopBatch, ...managedBatch])
+    assert(
+      restored.drainNotifications(threadId).length === 2,
+      "an unfiltered drain still takes the whole queue"
     )
   })
 }

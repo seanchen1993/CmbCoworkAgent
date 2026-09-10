@@ -3079,8 +3079,18 @@ function getActiveOrPersistedCoordinatorNotificationSelectedSkills(
   return parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
 }
 
+/**
+ * @param owner restricts the drain to results this surface owes a summary for.
+ * Passed only by an automatic summary turn: two of those can be pending on one
+ * thread at once, and whichever won the run lease used to consume both — so a
+ * Zhaohu result was reported into a desktop turn its reader never sees. A turn
+ * the user started takes everything, deliberately: the person is looking at the
+ * thread, and it is also the only path that can surface a managed result whose
+ * conversation is no longer connected.
+ */
 async function prepareQueuedCoordinatorNotificationsForPrompt(
   threadId: string,
+  owner: BackgroundNotificationOwner | undefined,
   onDeferred?: () => void
 ): Promise<{
   queuedNotifications: CoordinatorTurnNotification[]
@@ -3088,7 +3098,7 @@ async function prepareQueuedCoordinatorNotificationsForPrompt(
   notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined>
 }> {
   const queuedNotifications = toCoordinatorTurnNotifications(
-    coordinatorWorkerManager.drainNotifications(threadId)
+    coordinatorWorkerManager.drainNotifications(threadId, { owner })
   )
   try {
     const { promptNotifications, deferredNotifications } =
@@ -7076,6 +7086,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // High-water mark of input tokens — hoisted for catch/finally access
         let highWaterInputTokens = 0
         let autoModeTerminal: AutoModeTerminal | undefined
+        // Recorded on every background task this turn launches — a workflow or a
+        // coordinator worker — so the answer survives to a restart, when the run
+        // that made it is gone, and it is also what an automatic summary drains
+        // by. Explicit when the caller had to tell it apart from the lease; the
+        // lease's answer otherwise.
+        const backgroundNotificationOwner: BackgroundNotificationOwner =
+          runExecutionContext.backgroundNotificationOwner ??
+          (runExecutionContext.localRunLease?.managedExternally ? "managed" : "desktop")
         const workflowLaunchedRunIds = new Set<string>()
         const onWorkflowLaunched = (runId: string): void => {
           const normalized = runId.trim()
@@ -7265,9 +7283,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
           if (matchesWorkflowNotificationPrompt && parsedThreadMetadata.agentMode === "workflow") {
+            // Scoped to this turn's owner. The trigger only ever arrives from an
+            // automatic summary, and two of those can be pending on one thread:
+            // claiming whatever was newest let a desktop turn report a run owed
+            // to Zhaohu, whose reader then never heard about it.
             const pendingWorkflowRun = await workflowRunManager.claimPendingNotificationAsync(
               workspacePath,
-              threadId
+              threadId,
+              { owner: backgroundNotificationOwner }
             )
             if (!pendingWorkflowRun) {
               console.log("[Workflow] Ignoring stale workflow notification trigger", { threadId })
@@ -7883,13 +7906,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               queuedNotifications: notifications,
               promptNotifications,
               notificationSelectedSkills
-            } = await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
-              if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
-              safeSendToWindow(window, channel, {
-                type: "custom",
-                data: { type: "coordinator_notification_deferred" }
-              })
-            })
+            } = await prepareQueuedCoordinatorNotificationsForPrompt(
+              threadId,
+              isCoordinatorNotificationTurn ? backgroundNotificationOwner : undefined,
+              () => {
+                if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
+                safeSendToWindow(window, channel, {
+                  type: "custom",
+                  data: { type: "coordinator_notification_deferred" }
+                })
+              }
+            )
             throwIfInvokeAborted()
             drainedCoordinatorNotifications = promptNotifications
             coordinatorNotificationsConsumed = promptNotifications.length === 0
@@ -8117,13 +8144,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // Expose this turn's attempts to the catch handler (same array ref).
           lastFailoverByChannel.set(channel, failoverAttempts)
           const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
-          // Recorded on every background task this turn launches — a workflow or
-          // a coordinator worker — so the answer survives to a restart, when the
-          // run that made it is gone. Explicit when the caller had to tell it
-          // apart from the lease; the lease's answer otherwise.
-          const backgroundNotificationOwner: BackgroundNotificationOwner =
-            runExecutionContext.backgroundNotificationOwner ??
-            (runExecutionContext.localRunLease?.managedExternally ? "managed" : "desktop")
           const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({
             source: runExecutionContext.source,
             runLease: {

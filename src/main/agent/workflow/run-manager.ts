@@ -1488,22 +1488,34 @@ class WorkflowRunManager {
     this.notificationOwners.set(run.runId, run.notificationOwner ?? "desktop")
   }
 
-  /** Async production lookup backed by runs.index's pending set. */
+  /**
+   * Async production lookup backed by runs.index's pending set.
+   *
+   * `owner` filters rather than just checking the newest: the scan returns
+   * newest-first, so a run owed to the other surface would otherwise stand in
+   * front of an older one this caller does own and block it indefinitely.
+   */
   async findPendingNotificationAsync(
     workspacePath: string,
-    threadId: string
+    threadId: string,
+    options: { owner?: WorkflowNotificationOwner } = {}
   ): Promise<PersistedWorkflowRun | null> {
+    const ownedByCaller = (run: PersistedWorkflowRun): boolean =>
+      options.owner === undefined || (run.notificationOwner ?? "desktop") === options.owner
     for (const snapshot of this.flushFailedRuns.values()) {
       if (
         snapshot.threadId === threadId &&
         !snapshot.notificationDelivered &&
-        !this.inFlightNotifications.has(snapshot.runId)
+        !this.inFlightNotifications.has(snapshot.runId) &&
+        ownedByCaller(snapshot)
       ) {
         return snapshot
       }
     }
-    const run = await findUndeliveredTerminalRunAsync(workspacePath, threadId)
-    if (run && this.inFlightNotifications.has(run.runId)) return null
+    const run = await findUndeliveredTerminalRunAsync(workspacePath, threadId, (candidate) => {
+      if (this.inFlightNotifications.has(candidate.runId)) return false
+      return ownedByCaller(candidate)
+    })
     if (run) this.rememberNotificationOwner(run)
     return run
   }
@@ -1514,9 +1526,10 @@ class WorkflowRunManager {
    * the same event-loop turn. */
   async claimPendingNotificationAsync(
     workspacePath: string,
-    threadId: string
+    threadId: string,
+    options: { owner?: WorkflowNotificationOwner } = {}
   ): Promise<PersistedWorkflowRun | null> {
-    const run = await this.findPendingNotificationAsync(workspacePath, threadId)
+    const run = await this.findPendingNotificationAsync(workspacePath, threadId, options)
     if (!run || this.inFlightNotifications.has(run.runId)) return null
     this.inFlightNotifications.add(run.runId)
     return run

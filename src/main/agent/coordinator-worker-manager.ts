@@ -1893,12 +1893,55 @@ export class CoordinatorWorkerManager {
     return this.readWorkers(parentThreadId)
   }
 
-  drainNotifications(parentThreadId: string): string[] {
+  /**
+   * Takes queued notifications off the thread so a turn can report them.
+   *
+   * `owner` takes only the ones launched from that surface and leaves the rest
+   * queued. Without it, whichever side won the run lease drained both — so a
+   * Zhaohu result could be consumed by a desktop summary and never reach the
+   * reader who asked for it. Checking ownership at the entry to a turn is not
+   * enough; it has to hold where the notifications actually leave the queue.
+   */
+  drainNotifications(
+    parentThreadId: string,
+    options: { owner?: BackgroundNotificationOwner } = {}
+  ): string[] {
     const normalized = normalizeThreadId(parentThreadId)
     const notifications = this.notificationsByParent.get(normalized) ?? []
-    this.notificationsByParent.delete(normalized)
+    const taken: string[] = []
+    const left: string[] = []
+    for (const notification of notifications) {
+      if (
+        options.owner === undefined ||
+        this.notificationOwner(normalized, notification) === options.owner
+      ) {
+        taken.push(notification)
+      } else {
+        left.push(notification)
+      }
+    }
+    if (left.length > 0) this.notificationsByParent.set(normalized, left)
+    else this.notificationsByParent.delete(normalized)
     this.touchParentCache(normalized)
-    return [...notifications]
+    return taken
+  }
+
+  /**
+   * Which surface owes this queued notification a summary.
+   *
+   * A notification whose worker id no longer resolves to a record reads as the
+   * desktop's, which is where an orphaned result should surface rather than
+   * disappearing into a transport that never launched it.
+   */
+  private notificationOwner(
+    normalizedParentThreadId: string,
+    notification: string
+  ): BackgroundNotificationOwner {
+    const workerId = this.extractNotificationWorkerId(notification)
+    if (!workerId) return "desktop"
+    const record = this.getParentMap(normalizedParentThreadId)?.get(workerId)
+    if (!record) return "desktop"
+    return record.notificationOwner ?? "desktop"
   }
 
   peekNotifications(parentThreadId: string): string[] {
@@ -1929,12 +1972,10 @@ export class CoordinatorWorkerManager {
     const notifications = this.notificationsByParent.get(normalized) ?? []
     return notifications.some((notification) => {
       const workerId = this.extractNotificationWorkerId(notification)
-      if (!workerId) return options.owner === undefined || options.owner === "desktop"
-      const record = this.getParentMap(normalized)?.get(workerId)
-      if (!record) return options.owner === undefined || options.owner === "desktop"
-      if (record.suppressNotificationAutoRun === true) return false
+      const record = workerId ? this.getParentMap(normalized)?.get(workerId) : undefined
+      if (record?.suppressNotificationAutoRun === true) return false
       if (options.owner === undefined) return true
-      return (record.notificationOwner ?? "desktop") === options.owner
+      return this.notificationOwner(normalized, notification) === options.owner
     })
   }
 

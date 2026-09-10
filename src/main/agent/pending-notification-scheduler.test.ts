@@ -3,7 +3,7 @@ import { PendingNotificationScheduler } from "./pending-notification-scheduler"
 import { coordinatorWorkerManager } from "./coordinator-worker-manager"
 import { workflowRunManager } from "./workflow/run-manager"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "./thread-run-lease"
-import type { AgentRunExecutionContext } from "./agent-run-service"
+import type { AgentRunExecutionContext, AgentRunTerminal } from "./agent-run-service"
 import type { PersistedWorkflowRun } from "./workflow/types"
 
 /**
@@ -14,10 +14,9 @@ import type { PersistedWorkflowRun } from "./workflow/types"
  * somebody has the thread open while a remote run finishes.
  *
  * The fake run body below matters as much as any assertion. A `startRun` stub
- * that only resolves cannot see the run body claim the notification, and that
- * blind spot is exactly where the first version of this scheduler broke: it
- * claimed the notification for itself, the body then found it already in flight
- * and ended as a stale trigger, and nothing was ever summarised.
+ * that only resolves cannot see the run body claim the notification, and it
+ * cannot report a failure the way the real body does — it sends the error to
+ * the renderer and returns normally. Both blind spots hid a real defect.
  */
 
 const THREAD = "thread-1"
@@ -45,33 +44,49 @@ function persistedRun(overrides: Partial<PersistedWorkflowRun> = {}): PersistedW
 }
 
 /**
- * Stands in for the pending set the real manager keeps on disk: a run is
- * discoverable until somebody claims it, and a delivered turn removes it. The
- * scheduler and the run body both go through this, so a claim taken twice is
- * visible here the way it is in production.
+ * Stands in for the pending set the real manager keeps on disk: runs are
+ * discoverable newest-first until somebody claims one, the lookup honours the
+ * owner filter, and a delivered turn removes it. The scheduler and the run body
+ * both go through this, so a claim taken twice is visible here the way it is in
+ * production.
  */
 function pendingRuns(...runs: PersistedWorkflowRun[]) {
   const queue = [...runs]
   const inFlight = new Set<string>()
   const delivered = new Set<string>()
-  const next = (): PersistedWorkflowRun | null =>
-    queue.find((run) => !inFlight.has(run.runId) && !delivered.has(run.runId)) ?? null
+  const next = (owner?: "desktop" | "managed"): PersistedWorkflowRun | null =>
+    queue.find(
+      (run) =>
+        !inFlight.has(run.runId) &&
+        !delivered.has(run.runId) &&
+        (owner === undefined || (run.notificationOwner ?? "desktop") === owner)
+    ) ?? null
 
-  vi.spyOn(workflowRunManager, "findPendingNotificationAsync").mockImplementation(async () =>
-    next()
+  vi.spyOn(workflowRunManager, "findPendingNotificationAsync").mockImplementation(
+    async (_workspacePath, _threadId, options) => next(options?.owner)
   )
-  vi.spyOn(workflowRunManager, "claimPendingNotificationAsync").mockImplementation(async () => {
-    const run = next()
-    if (run) inFlight.add(run.runId)
-    return run
-  })
+  vi.spyOn(workflowRunManager, "claimPendingNotificationAsync").mockImplementation(
+    async (_workspacePath, _threadId, options) => {
+      const run = next(options?.owner)
+      if (run) inFlight.add(run.runId)
+      return run
+    }
+  )
   vi.spyOn(workflowRunManager, "clearNotificationInFlight").mockImplementation((runId) => {
     inFlight.delete(runId)
   })
   return {
-    /** What the run body does: claim one, report it, mark it delivered. */
-    deliverOne: async (): Promise<PersistedWorkflowRun | null> => {
-      const claimed = await workflowRunManager.claimPendingNotificationAsync(WORKSPACE, THREAD)
+    /**
+     * What the run body does: claim one of its own, report it, mark it
+     * delivered. Owner-scoped like the real one — claiming whatever was newest
+     * let a desktop summary report a run owed to Zhaohu.
+     */
+    deliverOne: async (
+      owner: "desktop" | "managed" = "desktop"
+    ): Promise<PersistedWorkflowRun | null> => {
+      const claimed = await workflowRunManager.claimPendingNotificationAsync(WORKSPACE, THREAD, {
+        owner
+      })
       if (claimed) {
         delivered.add(claimed.runId)
         workflowRunManager.clearNotificationInFlight(claimed.runId)
@@ -91,12 +106,21 @@ function createHarness(options: {
   agentMode: string
   runBody?: () => Promise<void>
   environmentForcesCoordinator?: boolean
+  /**
+   * What the run body reports through onRunTerminated. Defaults to an ordinary
+   * success; the interesting cases resolve normally while reporting a failure,
+   * because that is exactly what the real body does with a model error.
+   */
+  terminal?: AgentRunTerminal
 }): Harness {
   const runBody = options.runBody ?? (async () => undefined)
-  const startRun = vi.fn(async () => {
-    await runBody()
-    return { completion: Promise.resolve() } as never
-  })
+  const startRun = vi.fn(
+    async (_request: unknown, _delivery: unknown, context: AgentRunExecutionContext) => {
+      await runBody()
+      context.onRunTerminated?.(options.terminal ?? { outcome: "success", code: "normal" })
+      return { completion: Promise.resolve() } as never
+    }
+  )
   const queued: (() => void)[] = []
   const scheduler = new PendingNotificationScheduler({
     getThread: (() =>
@@ -170,10 +194,30 @@ describe("pending notification scheduler", () => {
 
     const outcome = await scheduler.check(THREAD)
 
-    expect(outcome).toEqual({ started: false, reason: "owned-by-managed-runner" })
+    expect(outcome).toEqual({ started: false, reason: "no-pending-notification" })
     expect(startRun).not.toHaveBeenCalled()
     // Left claimable, or the managed runner has nothing to pick up either.
-    expect(await runs.deliverOne()).not.toBeNull()
+    expect(await runs.deliverOne("managed")).not.toBeNull()
+  })
+
+  it("still finds an older desktop run standing behind a managed one", async () => {
+    // The scan is newest-first. Reading the newest and deciding from it meant a
+    // run owed to Zhaohu stood in front of the desktop's own and hid it for good.
+    const runs = pendingRuns(
+      persistedRun({ runId: "wf_new", notificationOwner: "managed" }),
+      persistedRun({ runId: "wf_old", notificationOwner: "desktop" })
+    )
+    let claimedByBody: PersistedWorkflowRun | null | undefined
+    const { scheduler, startRun } = createHarness({
+      agentMode: "workflow",
+      runBody: async () => {
+        claimedByBody = await runs.deliverOne()
+      }
+    })
+
+    expect(await scheduler.check(THREAD)).toEqual({ started: true })
+    expect(startRun).toHaveBeenCalledTimes(1)
+    expect(claimedByBody?.runId).toBe("wf_old")
   })
 
   it("treats a run recorded before ownership existed as the desktop's", async () => {
@@ -320,13 +364,39 @@ describe("pending notification scheduler", () => {
     await vi.waitFor(() => expect(startRun).toHaveBeenCalledTimes(1))
   })
 
+  it("retries a model failure the run body reported and then swallowed", async () => {
+    coordinatorOwnedBy("desktop")
+    // The body sends the error to the renderer and returns normally, so the
+    // completion promise resolves. Reading only that counted this as a
+    // delivered summary: the failure budget was cleared and nothing retried.
+    const { scheduler, startRun, timers } = createHarness({
+      agentMode: "coordinator",
+      terminal: { outcome: "error", code: "provider_error", message: "upstream unavailable" }
+    })
+
+    expect((await scheduler.check(THREAD)).started).toBe(false)
+    expect(startRun).toHaveBeenCalledTimes(1)
+    expect(timers.pending()).toBe(1)
+  })
+
+  it("does not retry a summary a hook deliberately halted", async () => {
+    coordinatorOwnedBy("desktop")
+    const { scheduler, startRun, timers } = createHarness({
+      agentMode: "coordinator",
+      terminal: { outcome: "error", code: "hook_halt", message: "Stop hook halted the turn" }
+    })
+
+    expect((await scheduler.check(THREAD)).started).toBe(false)
+    expect(startRun).toHaveBeenCalledTimes(1)
+    // A halt is a decision, not a fault. Retrying it fights whoever made it.
+    expect(timers.pending()).toBe(0)
+  })
+
   it("stops retrying a summary that keeps failing, and tries again when asked afresh", async () => {
     coordinatorOwnedBy("desktop")
     const { scheduler, startRun, timers } = createHarness({
       agentMode: "coordinator",
-      runBody: async () => {
-        throw new Error("provider unavailable")
-      }
+      terminal: { outcome: "error", code: "provider_error" }
     })
 
     await scheduler.check(THREAD)
