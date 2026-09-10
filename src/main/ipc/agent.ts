@@ -6922,6 +6922,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           suppressNotificationAutoRun?: boolean
           stream?: { mode: "messages" | "values"; data: unknown }
         }): void => {
+          // Ahead of the active-run gate, deliberately. A background worker
+          // normally finishes *after* the turn that launched it — that is what
+          // makes its result detached — so gating this told the transport only
+          // in the rare case where it had no need to be told. Nothing else
+          // wakes that transport for a worker result, and once the desktop
+          // scheduler started correctly leaving managed results alone, a Team
+          // worker started from Zhaohu was summarised by nobody at all.
+          if (event.notification && event.suppressNotificationAutoRun !== true) {
+            notifyManagedDetachedResult(runExecutionContext, {
+              kind: "coordinator",
+              threadId
+            })
+          }
           if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
           if (event.stream) {
             sendCoordinatorWorkerStream(
@@ -6955,12 +6968,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               event.notification,
               suppressNotificationAutoRun
             )
-          }
-          if (event.notification && event.suppressNotificationAutoRun !== true) {
-            notifyManagedDetachedResult(runExecutionContext, {
-              kind: "coordinator",
-              threadId
-            })
           }
         }
         const onCoordinatorNotificationAction = (notificationIds: string[]): void => {

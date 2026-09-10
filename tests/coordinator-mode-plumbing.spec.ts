@@ -705,6 +705,29 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "and asks whether there is another one for itself, not for the desktop"
   )
 
+  // A Team worker started from Zhaohu runs on the desktop run body, and it
+  // normally finishes long after the turn that launched it — that is what makes
+  // its result detached. Telling the transport was behind the same active-run
+  // gate as the renderer frames, so it fired only in the case where the
+  // transport had no need to know; nothing else wakes it for a worker result.
+  // That was survivable while the desktop summarised everything, and became a
+  // dead end the moment the scheduler started leaving managed results alone.
+  const invokeWorkerEvent = agentIpc.slice(
+    agentIpc.indexOf("const onCoordinatorWorkerEvent = (event: {"),
+    agentIpc.indexOf("const onCoordinatorNotificationAction = (notificationIds: string[])")
+  )
+  assertIncludes(
+    invokeWorkerEvent,
+    "notifyManagedDetachedResult(runExecutionContext",
+    "the invoke path tells a managed transport that a worker result is waiting"
+  )
+  assertSourceOrder(
+    invokeWorkerEvent,
+    "notifyManagedDetachedResult(runExecutionContext",
+    "if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return",
+    "and does it before the active-run gate, since a detached result outlives its run"
+  )
+
   const builtinRobotIpc = await readProjectFile("src/main/ipc/builtin-robot.ts")
   assertIncludes(
     builtinRobotIpc,
