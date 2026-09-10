@@ -17,7 +17,7 @@ import {
   releaseLocalThreadRunLease
 } from "./thread-run-lease"
 import { coordinatorWorkerManager } from "./coordinator-worker-manager"
-import { workflowRunManager } from "./workflow/run-manager"
+import { onWorkflowNotificationBroadcast, workflowRunManager } from "./workflow/run-manager"
 
 /**
  * The single place that decides whether a completed background task gets its
@@ -130,17 +130,23 @@ export class PendingNotificationScheduler {
   /** Consecutive failed summary attempts, per thread; see MAX_SUMMARY_ATTEMPTS. */
   private readonly failedAttempts = new Map<string, number>()
   private unsubscribeLeaseReleased: (() => void) | null = null
+  private unsubscribeWorkflowNotification: (() => void) | null = null
 
   constructor(overrides: Partial<SchedulerDependencies> = {}) {
     this.dependencies = { ...defaultDependencies, ...overrides }
   }
 
   /**
-   * Wakes deferred checks when a thread goes idle.
+   * Subscribes to the two events that can make a waiting summary runnable.
    *
    * A notification deferred for a busy thread has no timer of its own — it waits
    * for the lease that blocked it, which is the only event that can change the
    * answer. Polling would race the same way the two schedulers did.
+   *
+   * A completed workflow is the other one. It used to be acted on by whichever
+   * renderer received the broadcast, and a broadcast to no open window reaches
+   * nobody — so a run that finished with the app closed to the tray waited for
+   * the next hydrate rather than being summarised when it finished.
    */
   start(): void {
     if (this.unsubscribeLeaseReleased) return
@@ -148,11 +154,16 @@ export class PendingNotificationScheduler {
       if (!this.waitingForIdle.delete(lease.threadId)) return
       void this.check(lease.threadId)
     })
+    this.unsubscribeWorkflowNotification = onWorkflowNotificationBroadcast((threadId) => {
+      this.requestCheck(threadId)
+    })
   }
 
   stop(): void {
     this.unsubscribeLeaseReleased?.()
     this.unsubscribeLeaseReleased = null
+    this.unsubscribeWorkflowNotification?.()
+    this.unsubscribeWorkflowNotification = null
     for (const timer of this.wakeTimers.values()) this.dependencies.clearTimer(timer)
     this.wakeTimers.clear()
     this.waitingForIdle.clear()

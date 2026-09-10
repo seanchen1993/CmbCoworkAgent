@@ -122,14 +122,49 @@ export interface WorkflowChannelPayload {
   notificationOwner?: WorkflowNotificationOwner
 }
 
+/**
+ * Main-process listeners for "a completed run is waiting to be reported".
+ *
+ * The broadcast below reaches renderers, which is where this signal used to be
+ * acted on — the page received it and asked for the summary. The page no longer
+ * decides that, and a broadcast to no open window reaches nobody, so a workflow
+ * that finished with the app closed to the tray waited for the next hydrate
+ * instead of being summarised. Listeners registered here are told regardless.
+ */
+const workflowNotificationListeners = new Set<(threadId: string) => void>()
+
+export function onWorkflowNotificationBroadcast(
+  listener: (threadId: string) => void
+): () => void {
+  workflowNotificationListeners.add(listener)
+  return () => {
+    workflowNotificationListeners.delete(listener)
+  }
+}
+
 function broadcast(threadId: string, payload: WorkflowChannelPayload): void {
-  const channel = `${WORKFLOW_EVENTS_CHANNEL_PREFIX}${threadId}`
-  for (const window of BrowserWindow.getAllWindows()) {
-    try {
-      if (!window.isDestroyed()) window.webContents.send(channel, payload)
-    } catch (error) {
-      console.warn("[Workflow] Broadcast failed:", error)
+  // Main-process listeners first: they are what acts on a completed run now, so
+  // they must not be skipped by anything that goes wrong on the way to a window.
+  if (payload.type === "workflow_notification") {
+    for (const listener of workflowNotificationListeners) {
+      try {
+        listener(threadId)
+      } catch (error) {
+        console.warn("[Workflow] Notification listener failed:", error)
+      }
     }
+  }
+  const channel = `${WORKFLOW_EVENTS_CHANNEL_PREFIX}${threadId}`
+  try {
+    for (const window of BrowserWindow.getAllWindows()) {
+      try {
+        if (!window.isDestroyed()) window.webContents.send(channel, payload)
+      } catch (error) {
+        console.warn("[Workflow] Broadcast failed:", error)
+      }
+    }
+  } catch (error) {
+    console.warn("[Workflow] Broadcast could not reach any window:", error)
   }
 }
 

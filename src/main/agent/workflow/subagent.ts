@@ -1803,6 +1803,31 @@ function structuredOutputInterruptMessage(snapshot: unknown): string | null {
 /** Consumes a [mode, data] stream and returns the last "values" snapshot. */
 /** Exported for the tap-isolation regression test (display-only onValues must not
  * change the return value or stop semantics; a throwing tap must be swallowed). */
+/**
+ * Stops the graph, not just our reading of it.
+ *
+ * Breaking out of a `for await` calls the iterator's `return()`, which cancels
+ * the ReadableStream we are reading — and nothing else. LangGraph aborts a run
+ * only from `IterableReadableStreamWithAbortSignal.cancel()`, and the source it
+ * builds has no cancel handler for `reader.cancel()` to reach, so the graph runs
+ * on: more model turns, more tool calls, unsupervised and billed, writing tokens
+ * into a controller we already closed (which is where the flood of
+ * "Controller is already closed" warnings came from).
+ *
+ * Cancels only this stream's own derived controller, never the caller's signal —
+ * aborting that would reject the raceWithAbort around this call and throw away
+ * the result we just accepted.
+ */
+async function stopGraphStream(stream: AsyncIterable<unknown>): Promise<void> {
+  const cancel = (stream as { cancel?: (reason?: unknown) => Promise<void> | void }).cancel
+  if (typeof cancel !== "function") return
+  try {
+    await cancel.call(stream)
+  } catch {
+    /* teardown is best-effort; the caller already has what it needs */
+  }
+}
+
 export async function consumeValuesStream(
   stream: AsyncIterable<unknown>,
   signal: AbortSignal,
@@ -1811,7 +1836,13 @@ export async function consumeValuesStream(
 ): Promise<unknown> {
   let lastValues: unknown
   for await (const chunk of stream) {
-    if (signal.aborted) break
+    // The config signal already tears the run down here, so this is belt and
+    // braces — but this file has long guarded against a stream that never
+    // honours that signal, and the cost of asking twice is nothing.
+    if (signal.aborted) {
+      await stopGraphStream(stream)
+      break
+    }
     if (!Array.isArray(chunk) || chunk.length < 2) continue
     const [mode, data] = chunk as [string, unknown]
     if (mode === "values") {
@@ -1829,7 +1860,13 @@ export async function consumeValuesStream(
       // Structured subagents can stop as soon as a schema-valid structured_output
       // call has been captured; invalid tool calls keep streaming so the model can
       // read the repair feedback and call the tool again.
-      if (shouldStop?.(lastValues)) break
+      //
+      // Nothing has aborted the run at this point — we are leaving early because
+      // we have the answer — so this is the path that actually needed stopping.
+      if (shouldStop?.(lastValues)) {
+        await stopGraphStream(stream)
+        break
+      }
     }
   }
   return lastValues

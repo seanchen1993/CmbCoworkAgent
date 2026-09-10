@@ -62,6 +62,7 @@ function pendingRuns(...runs: PersistedWorkflowRun[]) {
         (owner === undefined || (run.notificationOwner ?? "desktop") === owner)
     ) ?? null
 
+  vi.spyOn(workflowRunManager, "findPendingNotification").mockImplementation(() => next())
   vi.spyOn(workflowRunManager, "findPendingNotificationAsync").mockImplementation(
     async (_workspacePath, _threadId, options) => next(options?.owner)
   )
@@ -357,6 +358,33 @@ describe("pending notification scheduler", () => {
     // going to bring the held summary back, so this has to.
     scheduler.suppressAfterStop(THREAD, false)
     await vi.waitFor(() => expect(startRun).toHaveBeenCalledTimes(1))
+  })
+
+  it("summarises a finished workflow with no window open to relay it", async () => {
+    const runs = pendingRuns(persistedRun({ notificationOwner: "desktop" }))
+    const { scheduler, startRun } = createHarness({
+      agentMode: "workflow",
+      runBody: async () => {
+        await runs.deliverOne()
+      }
+    })
+    scheduler.start()
+    try {
+      // The run manager broadcasts this to renderers, and the page used to be
+      // what acted on it. It no longer decides, and a broadcast to no open
+      // window reaches nobody — so a run that finished with the app closed to
+      // the tray waited for the next hydrate instead of being reported. There
+      // is no window here either, which is the point.
+      workflowRunManager.kickNextPendingNotification(WORKSPACE, THREAD)
+      await vi.waitFor(() => expect(startRun).toHaveBeenCalledTimes(1))
+    } finally {
+      scheduler.stop()
+    }
+
+    // And the subscription is given back, or a stopped scheduler keeps working.
+    workflowRunManager.kickNextPendingNotification(WORKSPACE, THREAD)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(startRun).toHaveBeenCalledTimes(1)
   })
 
   it("wakes itself when a stop hold expires, since no lease is coming", async () => {
