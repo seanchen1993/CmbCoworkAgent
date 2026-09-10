@@ -155,9 +155,9 @@ async function ensureChromeNativeHostRegistration() {
 }
 
 async function readChromeProfileImportData(options: BrowserProfileImportOptions) {
-  const { readBrowserProfileImportData } =
-    await import("../browser/chrome/browser-profile-importer")
-  return readBrowserProfileImportData(options)
+  const { getBrowserProfileImportWorkerClient } =
+    await import("../browser/chrome/browser-profile-import-worker-client")
+  return getBrowserProfileImportWorkerClient().readProfile(options)
 }
 
 async function sanitizeChromeExtensionCookieExport(cookies: CmbChromeCookie[]) {

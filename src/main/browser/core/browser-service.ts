@@ -163,6 +163,24 @@ function sortedSkippedWebsites(
   )
 }
 
+async function runCookieImportPool(
+  cookies: BrowserSessionCookie[],
+  importOneCookie: (cookie: BrowserSessionCookie) => Promise<void>,
+  concurrency = 24
+): Promise<void> {
+  let nextIndex = 0
+  const workerCount = Math.min(concurrency, cookies.length)
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < cookies.length) {
+        const cookie = cookies[nextIndex]
+        nextIndex += 1
+        await importOneCookie(cookie)
+      }
+    })
+  )
+}
+
 type PathApi = typeof posix
 
 function usesWindowsPaths(...paths: Array<string | null | undefined>): boolean {
@@ -486,18 +504,18 @@ export class BrowserService {
     const skippedWebsites = new Map<string, BrowserProfileImportSkippedWebsite>()
     let importedCookies = 0
     let skippedCookies = 0
-    for (const cookie of data.cookies) {
+    const importOneCookie = async (cookie: BrowserSessionCookie): Promise<void> => {
       if (cookie.partitionKey !== undefined && cookie.partitionKey !== null) {
         skippedCookies += 1
         addSkippedWebsite(skippedWebsites, cookie, "partitioned")
-        continue
+        return
       }
 
       const details = browserProfileCookieDetails(cookie)
       if (!details) {
         skippedCookies += 1
         addSkippedWebsite(skippedWebsites, cookie, "invalid")
-        continue
+        return
       }
 
       try {
@@ -508,6 +526,7 @@ export class BrowserService {
         addSkippedWebsite(skippedWebsites, cookie, "browser_rejected")
       }
     }
+    await runCookieImportPool(data.cookies, importOneCookie)
 
     const skippedLocalStorage = data.localStorage.length
     if (this.activeSession && !this.activeSession.view.webContents.isDestroyed()) {
