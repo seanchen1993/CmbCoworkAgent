@@ -3,7 +3,6 @@ import rehypeHighlight from "rehype-highlight"
 import remarkGfm from "remark-gfm"
 import { Check, Copy } from "lucide-react"
 import {
-  isValidElement,
   memo,
   startTransition,
   useEffect,
@@ -16,50 +15,16 @@ import {
   buildStreamingMarkdownRenderPlan,
   getStreamingMarkdownDelayMs
 } from "../../lib/streaming-markdown-schedule"
-import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
-import { useAppStore } from "@/lib/store"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import {
+  getMarkdownLanguageLabel,
+  getMarkdownNodeText,
+  useMarkdownFilePreviewComponents
+} from "./markdown-file-preview-components"
 
 interface StreamingMarkdownProps {
   children: string
   isStreaming?: boolean
   threadId?: string
-}
-
-function getLanguageLabel(className?: string): string | null {
-  const match = /language-([\w-]+)/.exec(className || "")
-  return match?.[1] ?? null
-}
-
-function getNodeText(node: ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") return String(node)
-  if (Array.isArray(node)) return node.map(getNodeText).join("")
-  if (isValidElement<{ children?: ReactNode }>(node)) return getNodeText(node.props.children)
-  return ""
-}
-
-function isAbsoluteFilePath(value: string): boolean {
-  return value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value)
-}
-
-function normalizePreviewFileHref(href?: string): string | null {
-  if (!href) return null
-  let decoded: string
-  try {
-    decoded = decodeURI(href)
-  } catch {
-    return null
-  }
-  if (decoded.startsWith("codex-file://")) {
-    try {
-      const url = new URL(decoded)
-      return `${url.hostname ? `/${url.hostname}` : ""}${url.pathname}`
-    } catch {
-      return null
-    }
-  }
-  const withoutLine = decoded.replace(/:\d+(?::\d+)?$/, "")
-  return isAbsoluteFilePath(withoutLine) ? withoutLine : null
 }
 
 function MarkdownCodeBlock({
@@ -179,8 +144,8 @@ const MARKDOWN_COMPONENTS: Components = {
   },
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   code({ node: _node, className, children, ...props }) {
-    const rawCode = getNodeText(children)
-    const language = getLanguageLabel(className)
+    const rawCode = getMarkdownNodeText(children)
+    const language = getMarkdownLanguageLabel(className)
     const isBlock = !!language || rawCode.includes("\n")
 
     if (isBlock) {
@@ -212,56 +177,35 @@ const MarkdownFragment = memo(function MarkdownFragment({
   isStreaming: boolean
   threadId?: string
 }): React.JSX.Element {
-  const setRightModule = useAppStore((state) => state.setRightModule)
-  const setRightPanelCollapsed = useAppStore((state) => state.setRightPanelCollapsed)
-  const components = useMemo<Components>(
-    () => ({
-      ...MARKDOWN_COMPONENTS,
-      a({ node: _node, href, children, ...props }) {
-        const previewPath = normalizePreviewFileHref(href)
-        if (!threadId || !previewPath) {
-          return (
-            <a href={href} {...props}>
-              {children}
-            </a>
-          )
-        }
-
-        const link = (
-          <a
-            href={href}
-            {...props}
-            onClick={(event) => {
-              event.preventDefault()
-              event.stopPropagation()
-              event.nativeEvent.stopImmediatePropagation()
-              setRightPanelCollapsed(false)
-              setRightModule("preview")
-              emitOpenResourcePreview({
-                threadId,
-                filePath: previewPath,
-                workspacePathKind: "absolute"
-              })
-            }}
-          >
-            {children}
-          </a>
-        )
-
-        return (
-          <TooltipProvider delayDuration={150}>
-            <Tooltip>
-              <TooltipTrigger asChild>{link}</TooltipTrigger>
-              <TooltipContent side="top" className="max-w-80 break-all text-xs">
-                完整路径是：{previewPath}，你可以点击查看内容
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )
-      }
-    }),
-    [setRightModule, setRightPanelCollapsed, threadId]
+  const renderCodeBlock = useMemo(
+    () =>
+      ({
+        rawCode,
+        language,
+        className,
+        children
+      }: {
+        rawCode: string
+        language: string | null
+        className?: string
+        children: ReactNode
+      }) => (
+        <MarkdownCodeBlock
+          code={rawCode.replace(/\n$/, "")}
+          language={language}
+          className={className}
+        >
+          {children}
+        </MarkdownCodeBlock>
+      ),
+    []
   )
+  const components = useMarkdownFilePreviewComponents({
+    baseComponents: MARKDOWN_COMPONENTS,
+    threadId,
+    text,
+    renderCodeBlock
+  })
 
   return (
     <div data-chat-search-text>
