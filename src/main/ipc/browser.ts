@@ -98,6 +98,10 @@ function registerBrowserControlIpc({ browserService, ipcMain }: BrowserIpcContex
     return browserService.setBounds(bounds, visible)
   })
 
+  ipcMain.handle("browser:setZoomFactor", (_event, zoomFactor: number) => {
+    return browserService.setZoomFactor(zoomFactor)
+  })
+
   ipcMain.handle(
     "browser:navigate",
     async (_event, url: string, options?: BrowserNavigateOptions) => {

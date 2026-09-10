@@ -29,6 +29,11 @@ import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialo
 import { BrowserScriptRecordingControls } from "./BrowserScriptRecordingControls"
 import { BrowserCdpConfigCard } from "./BrowserCdpConfigCard"
 import {
+  BrowserOptionsMenu,
+  MAX_BROWSER_ZOOM_FACTOR,
+  MIN_BROWSER_ZOOM_FACTOR
+} from "./BrowserOptionsMenu"
+import {
   BUILTIN_BROWSER_LOG_PREFIX,
   BROWSER_SESSION_ID,
   type BrowserBounds,
@@ -51,6 +56,7 @@ const EMPTY_STATE: BrowserState = {
   isLoading: false,
   canGoBack: false,
   canGoForward: false,
+  zoomFactor: 1,
   visible: false,
   created: false,
   consoleEntries: []
@@ -127,6 +133,7 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
     a.isLoading === b.isLoading &&
     a.canGoBack === b.canGoBack &&
     a.canGoForward === b.canGoForward &&
+    a.zoomFactor === b.zoomFactor &&
     a.visible === b.visible &&
     a.created === b.created &&
     (a.error ?? "") === (b.error ?? "") &&
@@ -771,6 +778,23 @@ export function BrowserPanel({
     }
   }, [reportBrowserError, state.url, urlInput])
 
+  const updateBrowserZoom = useCallback(
+    async (zoomFactor: number) => {
+      if (!state.created) return
+      try {
+        const normalizedZoomFactor = Math.min(
+          MAX_BROWSER_ZOOM_FACTOR,
+          Math.max(MIN_BROWSER_ZOOM_FACTOR, Math.round(zoomFactor * 100) / 100)
+        )
+        applyBrowserState(await window.api.browser.setZoomFactor(normalizedZoomFactor))
+      } catch (error) {
+        console.error(`${BROWSER_PANEL_LOG_PREFIX} Zoom update failed: ${formatError(error)}`)
+        reportBrowserError(formatError(error) || "页面缩放失败")
+      }
+    },
+    [applyBrowserState, reportBrowserError, state.created]
+  )
+
   const consoleCount = state.consoleEntries.length
   const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
   const visibleError = panelError || state.error
@@ -793,6 +817,11 @@ export function BrowserPanel({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-background-elevated px-2">
+        <BrowserOptionsMenu
+          browserCreated={state.created}
+          zoomFactor={state.zoomFactor}
+          onZoomChange={(zoomFactor) => void updateBrowserZoom(zoomFactor)}
+        />
         <IconPopoverButton
           className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
           icon={<ArrowLeft className="size-4" strokeWidth={1.8} />}

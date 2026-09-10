@@ -41,6 +41,8 @@ import type {
 
 const MAX_BROWSER_CONSOLE_ENTRIES = 200
 const MAX_BROWSER_CONSOLE_MESSAGE_CHARS = 4_000
+const MIN_BROWSER_ZOOM_FACTOR = 0.25
+const MAX_BROWSER_ZOOM_FACTOR = 5
 const BROWSER_PROFILE_PARTITION = "persist:cmbdevclaw-browser-profile"
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
 
@@ -66,6 +68,11 @@ function normalizeBounds(bounds: BrowserBounds): Rectangle {
 
 function rectanglesEqual(a: Rectangle, b: Rectangle): boolean {
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
+}
+
+function normalizeZoomFactor(value: number): number {
+  if (!Number.isFinite(value)) return 1
+  return Math.min(MAX_BROWSER_ZOOM_FACTOR, Math.max(MIN_BROWSER_ZOOM_FACTOR, value))
 }
 
 function formatError(error: unknown): string {
@@ -404,6 +411,22 @@ export class BrowserService {
     return this.getState()
   }
 
+  setZoomFactor(zoomFactor: number): BrowserState {
+    const sessionId = BROWSER_SESSION_ID
+    const session = this.getActiveSession()
+    if (!session) {
+      console.warn(
+        `${BROWSER_SERVICE_LOG_PREFIX} Ignored zoom update for inactive Browser session ${sessionId}.`
+      )
+      return this.getState()
+    }
+
+    const nextZoomFactor = normalizeZoomFactor(zoomFactor)
+    session.view.webContents.setZoomFactor(nextZoomFactor)
+    this.emitState(sessionId)
+    return this.getState()
+  }
+
   async navigate(inputUrl: string, options: BrowserNavigateOptions = {}): Promise<BrowserState> {
     const sessionId = BROWSER_SESSION_ID
     const session = this.getActiveSession()
@@ -562,6 +585,7 @@ export class BrowserService {
         isLoading: false,
         canGoBack: false,
         canGoForward: false,
+        zoomFactor: 1,
         visible: false,
         created: false,
         consoleEntries: []
@@ -577,6 +601,7 @@ export class BrowserService {
       isLoading: isDestroyed ? false : webContents.isLoading(),
       canGoBack: isDestroyed ? false : webContents.canGoBack(),
       canGoForward: isDestroyed ? false : webContents.canGoForward(),
+      zoomFactor: isDestroyed ? 1 : webContents.getZoomFactor(),
       visible: session.view.getVisible(),
       created: true,
       consoleEntries: session.consoleEntries.slice(),

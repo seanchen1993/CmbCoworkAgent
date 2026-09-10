@@ -1925,6 +1925,7 @@ interface CustomAPI {
     attach: (options?: BrowserAttachOptions) => Promise<BrowserState>
     detach: () => Promise<BrowserState>
     setBounds: (bounds: BrowserBounds, visible?: boolean) => Promise<BrowserState>
+    setZoomFactor: (zoomFactor: number) => Promise<BrowserState>
     navigate: (url: string, options?: BrowserNavigateOptions) => Promise<BrowserState>
     goBack: () => Promise<BrowserState>
     goForward: () => Promise<BrowserState>

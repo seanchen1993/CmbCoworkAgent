@@ -392,6 +392,9 @@ function createBrowserApi() {
     setBounds: (bounds: BrowserBounds, visible?: boolean): Promise<BrowserState> => {
       return ipcRenderer.invoke("browser:setBounds", bounds, visible) as Promise<BrowserState>
     },
+    setZoomFactor: (zoomFactor: number): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setZoomFactor", zoomFactor) as Promise<BrowserState>
+    },
     navigate: (url: string, options?: BrowserNavigateOptions): Promise<BrowserState> => {
       return ipcRenderer.invoke("browser:navigate", url, options) as Promise<BrowserState>
     },
