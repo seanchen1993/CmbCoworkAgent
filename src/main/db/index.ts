@@ -34,8 +34,9 @@ import {
 } from "../../shared/checkpoint-transcript"
 import { projectCoordinatorTranscriptNoise } from "../../shared/internal-notification-turn"
 import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
-import { getCollapsedToolCallSummary } from "../../shared/tool-call-summary"
-import { projectVisibleChatSearchContentWithMetadata } from "../../shared/chat-search-visible-content"
+import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../shared/chat-search-plan"
+import { iterateChatSearchLocations, projectChatSearchPlan } from "../../shared/chat-search-index"
+import type { ChatSearchLocation } from "../../shared/chat-search-types"
 import type {
   Message,
   ThreadMessageSearchMatch,
@@ -1743,10 +1744,7 @@ interface ThreadMessageSearchCandidate {
   toolCallsTruncated: boolean
 }
 
-interface ThreadMessageSearchTextResult {
-  occurrenceCount: number
-  matchPosition: number
-}
+
 
 function parseThreadMessageSearchJson(raw: string | null): {
   valid: boolean
@@ -1758,62 +1756,6 @@ function parseThreadMessageSearchJson(raw: string | null): {
   } catch {
     return { valid: false, value: undefined }
   }
-}
-
-function threadMessageSearchJsonScalar(value: unknown): string {
-  if (typeof value === "string") return value
-  if (typeof value === "number" || typeof value === "boolean") return String(value)
-  if (value === null || value === undefined) return ""
-  try {
-    return JSON.stringify(value) ?? ""
-  } catch {
-    return ""
-  }
-}
-
-/** Reproduce the searchable projection without SQLite building group_concat copies. */
-function buildThreadMessageSearchDocument(
-  contentText: string,
-  toolCalls: readonly { name?: unknown; args?: unknown }[] | undefined
-): string {
-  if (!toolCalls) return contentText
-  const toolText = toolCalls
-    .map((toolCall) => {
-      return getCollapsedToolCallSummary({
-        name: threadMessageSearchJsonScalar(toolCall.name),
-        args:
-          toolCall.args && typeof toolCall.args === "object" && !Array.isArray(toolCall.args)
-            ? (toolCall.args as Record<string, unknown>)
-            : undefined
-      })
-    })
-    .join("\n")
-  return `${contentText}\n${toolText}`
-}
-
-/** Find and count non-overlapping occurrences while allocating one normalized copy. */
-function inspectThreadMessageSearchText(
-  searchText: string,
-  normalizedQuery: string
-): ThreadMessageSearchTextResult {
-  const normalizedText = searchText.toLowerCase()
-  const matchPosition = normalizedText.indexOf(normalizedQuery)
-  if (matchPosition < 0) return { occurrenceCount: 0, matchPosition: -1 }
-
-  let occurrenceCount = 0
-  let offset = matchPosition
-  while (offset >= 0) {
-    occurrenceCount += 1
-    offset = normalizedText.indexOf(normalizedQuery, offset + normalizedQuery.length)
-  }
-  return { occurrenceCount, matchPosition }
-}
-
-function threadMessageSearchPreview(searchText: string, matchPosition: number): string {
-  return searchText.slice(
-    Math.max(0, matchPosition - 80),
-    Math.max(0, matchPosition - 80) + THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT
-  )
 }
 
 /**
@@ -2132,23 +2074,30 @@ export function searchThreadMessages(
       if (inspectedBytes + candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
       inspectedBytes += candidateBytes
 
-      const visibleProjection = projectVisibleChatSearchContentWithMetadata(
+      const searchPlan = createChatSearchPlan(
         candidate.role,
         coordinatorProjection.contentChanged
           ? coordinatorProjection.contentText
           : displayCandidateContent
       )
-      if (visibleProjection.truncated) truncatedRows = true
-      const documentText = buildThreadMessageSearchDocument(
-        visibleProjection.text,
-        coordinatorProjection.visibleToolCalls
-      )
-      const documentMatch = inspectThreadMessageSearchText(documentText, query)
-      const occurrenceCount = documentMatch.occurrenceCount
-      const preview =
-        documentMatch.matchPosition >= 0
-          ? threadMessageSearchPreview(documentText, documentMatch.matchPosition)
-          : ""
+      appendChatSearchToolSummaries(searchPlan, coordinatorProjection.visibleToolCalls ?? [])
+      const projectedSegments = projectChatSearchPlan(searchPlan)
+      if (searchPlan.truncated) truncatedRows = true
+      const found = iterateChatSearchLocations(projectedSegments, query, 1001)
+      // Budget individual locations before constructing a possibly oversized first response row.
+      const locations: ChatSearchLocation[] = []
+      let locationBytes = 0
+      for (const location of found) {
+        const bytes = Buffer.byteLength(JSON.stringify(location), "utf8") + 1
+        if (locationBytes + bytes > 48 * 1024 || locations.length >= 1000) {
+          truncatedRows = true
+          break
+        }
+        locations.push(location)
+        locationBytes += bytes
+      }
+      const occurrenceCount = locations.length
+      const preview = locations[0]?.context.slice(0, THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT) ?? ""
 
       advancedCandidateCount = header.index + 1
       lastAdvancedCandidate = header.candidate
@@ -2159,6 +2108,7 @@ export function searchThreadMessages(
           role: candidate.role,
           createdAt: candidate.createdAt,
           occurrenceCount,
+          locations,
           preview
         })
         if (rawMatches.length >= limit + 1) break

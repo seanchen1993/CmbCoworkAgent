@@ -1,6 +1,13 @@
+import type { ChatSearchLocation, ChatSearchPlan } from "../../../shared/chat-search-types"
+import { findChatSearchLocations, projectChatSearchPlan } from "../../../shared/chat-search-index"
+
 export interface ChatSearchDocument {
   messageId: string
   text: string
+  /** Avoid a second joined raw string when the worker consumes admitted segments. */
+  textUnits?: number
+  /** Admitted source slices. Projection/matching runs in the search worker. */
+  plan?: ChatSearchPlan
   sortIndex?: number
   /** The local text hit its bounded index limit and may need durable occurrence supplementation. */
   truncated?: boolean
@@ -11,15 +18,37 @@ export interface ChatSearchDocument {
 export interface ChatSearchMatch {
   messageId: string
   occurrenceIndex: number
+  location?: ChatSearchLocation
   sortIndex?: number
 }
 
 export interface ChatSearchCorpus {
+  truncated?: boolean
   /** Changes only when persisted/search-stable content changes. */
   stableDocuments: readonly ChatSearchDocument[]
   /** The live suffix and any live overrides of persisted rows. */
   dynamicDocuments: readonly ChatSearchDocument[]
   dynamicMessageIds: ReadonlySet<string>
+}
+
+export function chatSearchDocumentUnits(document: ChatSearchDocument): number {
+  return document.textUnits ?? document.text.length
+}
+
+/** Stable and live documents share one retention budget, including live overrides. */
+export function boundChatSearchCorpus(corpus: ChatSearchCorpus): ChatSearchCorpus {
+  const documents = [...corpus.stableDocuments.filter((doc) => !corpus.dynamicMessageIds.has(doc.messageId)),
+    ...corpus.dynamicDocuments].sort((a, b) => (b.sortIndex ?? 0) - (a.sortIndex ?? 0))
+  const retained = new Set<ChatSearchDocument>()
+  let units = 0
+  for (const document of documents) {
+    if (retained.size >= 500 || units + chatSearchDocumentUnits(document) > 4 * 1024 * 1024) break
+    retained.add(document)
+    units += chatSearchDocumentUnits(document)
+  }
+  return { ...corpus, truncated: Boolean(corpus.truncated) || retained.size < documents.length,
+    stableDocuments: corpus.stableDocuments.filter((doc) => retained.has(doc)),
+    dynamicDocuments: corpus.dynamicDocuments.filter((doc) => retained.has(doc)) }
 }
 
 /** A durable hit already resident in the virtual list needs mounting, not another DB window. */
@@ -35,13 +64,23 @@ export function findChatSearchMatches(
   rawQuery: string,
   maxMatches = Number.POSITIVE_INFINITY
 ): ChatSearchMatch[] {
-  const query = rawQuery.trim().toLocaleLowerCase()
+  const query = rawQuery.trim().toLowerCase()
   const boundedMaxMatches = Math.max(0, Math.floor(maxMatches))
   if (!query || boundedMaxMatches === 0) return []
 
   const matches: ChatSearchMatch[] = []
   for (const document of documents) {
-    const text = document.text.toLocaleLowerCase()
+    if (document.plan) {
+      const locations = findChatSearchLocations(
+        projectChatSearchPlan(document.plan), query, boundedMaxMatches - matches.length
+      )
+      locations.forEach((location, occurrenceIndex) => matches.push({
+        messageId: document.messageId, occurrenceIndex, location, sortIndex: document.sortIndex
+      }))
+      if (matches.length >= boundedMaxMatches) break
+      continue
+    }
+    const text = document.text.toLowerCase()
     let offset = 0
     let occurrenceIndex = 0
     let matchIndex = text.indexOf(query, offset)
@@ -115,7 +154,7 @@ export function createChatSearchMatcher(
   let visibleStableMatches: readonly ChatSearchMatch[] = stableMatches
 
   return (corpus, query) => {
-    const normalizedQuery = query.trim().toLocaleLowerCase()
+    const normalizedQuery = query.trim().toLowerCase()
     if (!normalizedQuery) return []
 
     if (

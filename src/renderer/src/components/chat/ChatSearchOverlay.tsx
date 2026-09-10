@@ -1,7 +1,10 @@
 /* eslint-disable react-refresh/only-export-components -- colocated search contracts and bounded runtime primitives are tested directly */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { ChevronUp, ChevronDown, X, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { findChatSearchLocationRange, mapChatSearchDom } from "@/lib/chat-search-dom"
+import { chatSearchLocationKey, type ChatSearchLocation,
+  type ChatSearchReveal } from "../../../../shared/chat-search-types"
 import {
   createChatSearchMatcher,
   type ChatSearchCorpus,
@@ -37,6 +40,7 @@ export interface DurableChatSearchMatch {
   occurrenceCount: number
   preview: string
   occurrenceOffset?: number
+  locations?: ChatSearchLocation[]
 }
 
 export interface DurableChatSearchPage {
@@ -58,12 +62,16 @@ export type RevealDurableMessage = (
 ) => Promise<void> | void
 
 interface ChatSearchOverlayProps {
+  searchLocalCorpus?: (corpus: ChatSearchCorpus, query: string) => Promise<ChatSearchMatch[]>
+  onRevealSearchContext?: (reveal: ChatSearchReveal | null) => void
+  onCancelLocalSearch?: () => void
+  validateSearchLocation?: (reveal: ChatSearchReveal, signal: AbortSignal) => Promise<boolean>
   open: boolean
   onClose: () => void
   /** Returns the scrollable viewport element to search and scroll within. */
   getViewport: () => HTMLElement | null
   /** Returns the stable-history and live-tail search indexes after the debounce. */
-  getSearchCorpus: () => ChatSearchCorpus
+  getSearchCorpus: (signal?: AbortSignal) => ChatSearchCorpus | Promise<ChatSearchCorpus>
   /** Ensures a virtualized message row is mounted before highlighting it. */
   onRevealMessage: (messageId: string) => void
   /** Searches durable pages beyond the currently loaded renderer window. */
@@ -150,6 +158,28 @@ export function prepareUserContentForSearchHighlight(row: HTMLElement): boolean 
     return Number.isFinite(threshold) && content.scrollHeight > threshold + 8
   }
   return false
+}
+
+/** User clipping already has bounded DOM; Markdown must never be automatically expanded. */
+export function prepareChatContentForSearchHighlight(row: HTMLElement): boolean {
+  return prepareUserContentForSearchHighlight(row)
+}
+
+/** A message or paragraph can be taller than the viewport; center the actual text range. */
+export function scrollChatSearchRangeIntoView(viewport: HTMLElement, range: Range): void {
+  const rect = range.getBoundingClientRect()
+  if (rect.height <= 0) return
+  const viewportRect = viewport.getBoundingClientRect()
+  const target =
+    viewport.scrollTop +
+    rect.top -
+    viewportRect.top -
+    viewport.clientTop -
+    (viewport.clientHeight - Math.min(rect.height, viewport.clientHeight)) / 2
+  viewport.scrollTo({
+    top: Math.max(0, Math.min(target, viewport.scrollHeight - viewport.clientHeight)),
+    behavior: "auto"
+  })
 }
 
 /**
@@ -293,7 +323,9 @@ export async function scanDurableChatSearch({
         Math.floor(localCoverage.occurrenceCount || 0)
       )
       if (localCoverage.authoritative) continue
-      const missingOccurrences = Math.max(0, requestedOccurrences - localOccurrenceCount)
+      // Disjoint local ranges are not a prefix. Never infer missing positions from their count.
+      if (localOccurrenceCount > 0) continue
+      const missingOccurrences = requestedOccurrences
       if (missingOccurrences === 0) continue
       const remaining = occurrenceLimit - retainedOccurrenceCount
       if (remaining <= 0) {
@@ -304,7 +336,7 @@ export async function scanDurableChatSearch({
       const boundedMatch: DurableChatSearchMatch = {
         ...match,
         occurrenceCount: retainedOccurrences,
-        occurrenceOffset: localOccurrenceCount,
+        ...(match.locations ? { locations: match.locations.slice(0, retainedOccurrences) } : {}),
         preview: boundDurableSearchPreview(match.preview)
       }
       retained.push(boundedMatch)
@@ -348,84 +380,39 @@ export async function scanDurableChatSearch({
   return result(false)
 }
 
+function searchMatchKey(match: ChatSearchMatch): string {
+  return `${match.messageId}\u0000${match.location
+    ? chatSearchLocationKey(match.location) : match.occurrenceIndex}`
+}
+
 export function mergeChatSearchResults(
   localMatches: readonly ChatSearchMatch[],
   durableMatches: readonly DurableChatSearchMatch[],
   limit = CHAT_SEARCH_RESULT_LIMIT
 ): { matches: OverlayChatSearchMatch[]; truncated: boolean } {
-  const boundedLimit = Math.max(0, Math.floor(limit))
-  const localMessageIds = new Set(localMatches.map((match) => match.messageId))
-  const boundedLocal = localMatches.slice(0, boundedLimit)
-  const durableCapacity = Math.max(0, boundedLimit - boundedLocal.length)
-  const matches: OverlayChatSearchMatch[] = []
-  const loadedExtras = new Map<string, DurableChatSearchMatch>()
-  let truncated = localMatches.length > boundedLimit
-
-  // Durable results which are not loaded are older than the locally loaded tail.
-  // Restore transcript order after the backend's newest-to-oldest page order.
-  const orderedDurable = [...durableMatches].sort((left, right) => {
-    if (left.ordinal !== right.ordinal) return left.ordinal - right.ordinal
-    return left.messageId.localeCompare(right.messageId)
-  })
-  const seenDurableIds = new Set<string>()
-  for (const durableMatch of orderedDurable) {
-    if (localMessageIds.has(durableMatch.messageId)) {
-      if (durableMatch.occurrenceOffset !== undefined) {
-        loadedExtras.set(durableMatch.messageId, durableMatch)
-      }
-      continue
-    }
-    if (
-      matches.length >= durableCapacity ||
-      seenDurableIds.has(durableMatch.messageId)
-    ) {
-      truncated = true
-      continue
-    }
-    seenDurableIds.add(durableMatch.messageId)
-    const occurrenceCount = Math.max(1, Math.floor(durableMatch.occurrenceCount || 1))
-    const occurrenceOffset = Math.max(0, Math.floor(durableMatch.occurrenceOffset || 0))
-    for (let occurrenceIndex = 0; occurrenceIndex < occurrenceCount; occurrenceIndex += 1) {
-      if (matches.length >= durableCapacity) {
-        truncated = true
-        break
-      }
-      matches.push({
-        messageId: durableMatch.messageId,
-        occurrenceIndex: occurrenceOffset + occurrenceIndex,
-        sortIndex: durableMatch.ordinal,
-        durableMatch
-      })
+  const cap = Math.max(0, Math.floor(limit))
+  const localIds = new Set(localMatches.map((match) => match.messageId))
+  const candidates: OverlayChatSearchMatch[] = [...localMatches.slice(0, cap + 1)]
+  let truncated = localMatches.length > cap
+  const durableCapacity = Math.max(0, cap - Math.min(localMatches.length, cap))
+  let added = 0
+  const seen = new Set<string>()
+  for (const durable of [...durableMatches].sort((a, b) => a.ordinal - b.ordinal ||
+    a.messageId.localeCompare(b.messageId))) {
+    // A resident snapshot owns its row. Never attach positions from a different projection.
+    if (localIds.has(durable.messageId) || seen.has(durable.messageId)) continue
+    seen.add(durable.messageId)
+    const count = durable.locations?.length ?? Math.min(cap, durable.occurrenceCount)
+    for (let index = 0; index < count; index += 1) {
+      if (added >= durableCapacity) { truncated = true; break }
+      candidates.push({ messageId: durable.messageId, sortIndex: durable.ordinal,
+        occurrenceIndex: index, location: durable.locations?.[index], durableMatch: durable })
+      added += 1
     }
   }
-
-  const lastLocalIndex = new Map<string, number>()
-  boundedLocal.forEach((match, index) => lastLocalIndex.set(match.messageId, index))
-  for (let localIndex = 0; localIndex < boundedLocal.length; localIndex += 1) {
-    const localMatch = boundedLocal[localIndex]
-    if (matches.length >= boundedLimit) {
-      truncated = true
-      break
-    }
-    matches.push(localMatch)
-    if (lastLocalIndex.get(localMatch.messageId) !== localIndex) continue
-    const extra = loadedExtras.get(localMatch.messageId)
-    if (!extra) continue
-    const occurrenceCount = Math.max(0, Math.floor(extra.occurrenceCount || 0))
-    const occurrenceOffset = Math.max(0, Math.floor(extra.occurrenceOffset || 0))
-    for (let extraIndex = 0; extraIndex < occurrenceCount; extraIndex += 1) {
-      if (matches.length >= boundedLimit) {
-        truncated = true
-        break
-      }
-      matches.push({
-        messageId: localMatch.messageId,
-        occurrenceIndex: occurrenceOffset + extraIndex,
-        sortIndex: localMatch.sortIndex
-      })
-    }
-  }
-  return { matches, truncated }
+  candidates.sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0) ||
+    a.messageId.localeCompare(b.messageId) || a.occurrenceIndex - b.occurrenceIndex)
+  return { matches: candidates.slice(0, cap), truncated: truncated || candidates.length > cap }
 }
 
 /** Return non-overlapping match offsets without allocating beyond `limit`. */
@@ -434,8 +421,8 @@ export function collectNeedleOffsets(
   rawQuery: string,
   limit = CHAT_SEARCH_HIGHLIGHT_RANGE_LIMIT
 ): number[] {
-  const text = rawText.toLocaleLowerCase()
-  const query = rawQuery.toLocaleLowerCase()
+  const text = rawText.toLowerCase()
+  const query = rawQuery.toLowerCase()
   const boundedLimit = Math.max(0, Math.floor(limit))
   if (!query || boundedLimit === 0) return []
 
@@ -511,34 +498,7 @@ export function isSearchableChatTextNode(node: Node, row: HTMLElement): boolean 
 
 /** Walk the mounted active row and collect paint ranges matching `query`. */
 export function collectMatchRanges(viewport: HTMLElement, query: string): Range[] {
-  const needle = query.toLocaleLowerCase()
-  if (!needle) return []
-
-  const walker = document.createTreeWalker(viewport, NodeFilter.SHOW_TEXT, {
-    acceptNode(node: Node): number {
-      return isSearchableChatTextNode(node, viewport)
-        ? NodeFilter.FILTER_ACCEPT
-        : NodeFilter.FILTER_REJECT
-    }
-  })
-
-  const ranges: Range[] = []
-  let current = walker.nextNode()
-  while (current && ranges.length < CHAT_SEARCH_HIGHLIGHT_RANGE_LIMIT) {
-    const offsets = collectNeedleOffsets(
-      current.nodeValue ?? "",
-      needle,
-      CHAT_SEARCH_HIGHLIGHT_RANGE_LIMIT - ranges.length
-    )
-    for (const offset of offsets) {
-      const range = document.createRange()
-      range.setStart(current, offset)
-      range.setEnd(current, offset + needle.length)
-      ranges.push(range)
-    }
-    current = walker.nextNode()
-  }
-  return ranges
+  return mapChatSearchDom(viewport, query).ranges.map((entry) => entry.range)
 }
 
 export function formatChatSearchStatus(
@@ -558,6 +518,10 @@ export function formatChatSearchStatus(
 }
 
 export function ChatSearchOverlay({
+  searchLocalCorpus,
+  onRevealSearchContext,
+  onCancelLocalSearch,
+  validateSearchLocation,
   open,
   onClose,
   getViewport,
@@ -574,6 +538,9 @@ export function ChatSearchOverlay({
   const [durableScanning, setDurableScanning] = useState(false)
   const [searchTruncated, setSearchTruncated] = useState(false)
   const [durableSearchFailed, setDurableSearchFailed] = useState(false)
+  const localScanStateRef = useRef({ scanning: false, truncated: false, failed: false })
+  const localRequestRef = useRef(0)
+  const localCorpusAbortRef = useRef<AbortController | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const matchesRef = useRef<OverlayChatSearchMatch[]>([])
   const localMatchesRef = useRef<ChatSearchMatch[]>([])
@@ -583,11 +550,33 @@ export function ChatSearchOverlay({
   const durableScanStateRef = useRef({ scanning: false, truncated: false, failed: false })
   const highlightFrameRef = useRef<number | null>(null)
   const highlightGenerationRef = useRef(0)
+  const pendingNavigationRef = useRef<number | null>(null)
+  const validationAbortRef = useRef<AbortController | null>(null)
+  const contextRevealRef = useRef<ChatSearchReveal | null>(null)
+  const contextRefreshFrameRef = useRef<number | null>(null)
+  const revealCallbacksRef = useRef({
+    onRevealMessage,
+    onRevealDurableMessage,
+    onRevealSearchContext,
+    validateSearchLocation
+  })
+  useLayoutEffect(() => {
+    // A durable page replaces the parent's visible-index map. Async continuations must use
+    // the callbacks from that commit, not the map captured before hydration began.
+    revealCallbacksRef.current = {
+      onRevealMessage,
+      onRevealDurableMessage,
+      onRevealSearchContext,
+      validateSearchLocation
+    }
+  }, [onRevealMessage, onRevealDurableMessage, onRevealSearchContext, validateSearchLocation])
+
   const searchGenerationRef = useRef(0)
   const searchMatcherRef = useRef(createChatSearchMatcher(CHAT_SEARCH_RESULT_LIMIT + 1))
   const autoRevealedQueryRef = useRef("")
   const durableRevealIdentityRef = useRef("")
   const getSearchCorpusRef = useRef(getSearchCorpus)
+  const searchLocalCorpusRef = useRef(searchLocalCorpus)
   const localSearchThrottleRef = useRef<
     LeadingTrailingThrottle<{ generation: number; query: string }> | null
   >(null)
@@ -599,6 +588,38 @@ export function ChatSearchOverlay({
   // concurrent rendering, where an impure updater would run twice.
   const activeIndexRef = useRef(0)
   const apiSupported = useMemo(() => supportsHighlightApi(), [])
+
+  useEffect(() => {
+    if (!open) return
+    const viewport = getViewport()
+    if (!viewport) return
+    const cancelNavigationFromInput = (): void => {
+      if (pendingNavigationRef.current === null) return
+      highlightGenerationRef.current += 1
+      pendingNavigationRef.current = null
+      validationAbortRef.current?.abort()
+      if (highlightFrameRef.current !== null) {
+        cancelAnimationFrame(highlightFrameRef.current)
+        highlightFrameRef.current = null
+      }
+      onCancelDurableReveal?.()
+    }
+    viewport.addEventListener("wheel", cancelNavigationFromInput, { passive: true })
+    viewport.addEventListener("touchstart", cancelNavigationFromInput, { passive: true })
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+        cancelNavigationFromInput()
+      }
+    }
+    viewport.addEventListener("keydown", onKeyDown)
+    viewport.addEventListener("pointerdown", cancelNavigationFromInput, { passive: true })
+    return () => {
+      viewport.removeEventListener("wheel", cancelNavigationFromInput)
+      viewport.removeEventListener("touchstart", cancelNavigationFromInput)
+      viewport.removeEventListener("keydown", onKeyDown)
+      viewport.removeEventListener("pointerdown", cancelNavigationFromInput)
+    }
+  }, [getViewport, onCancelDurableReveal, open])
 
   const setActive = useCallback((next: number): void => {
     activeIndexRef.current = next
@@ -633,14 +654,57 @@ export function ChatSearchOverlay({
 
   const revealAndHighlight = useCallback(
     (match: OverlayChatSearchMatch, rawQuery: string, scroll: boolean): void => {
+      const findRow = (): { viewport: HTMLElement; row: HTMLElement } | null => {
+        const viewport = getViewport()
+        const row = viewport
+          ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-chat-message-id]")).find(
+              (candidate) => candidate.dataset.chatMessageId === match.messageId
+            )
+          : undefined
+        return viewport && row ? { viewport, row } : null
+      }
+      if (!scroll) {
+        // Token refreshes only repaint a mounted row. They must neither cancel a pending
+        // navigation nor mount an offscreen result and pull a detached reader back to it.
+        if (pendingNavigationRef.current !== null) return
+        const mounted = findRow()
+        const range =
+          mounted && match.location
+            ? findChatSearchLocationRange(mounted.row, match.location, rawQuery)
+            : null
+        const ranges = match.location
+          ? range
+            ? [range]
+            : []
+          : mounted
+            ? collectMatchRanges(mounted.row, rawQuery.trim())
+            : []
+        applyHighlights(ranges, match.location ? 0 : match.occurrenceIndex)
+        return
+      }
       const generation = highlightGenerationRef.current + 1
       const searchGeneration = searchGenerationRef.current
       highlightGenerationRef.current = generation
+      pendingNavigationRef.current = generation
+      validationAbortRef.current?.abort()
+      const validation = new AbortController()
+      validationAbortRef.current = validation
+      revealCallbacksRef.current.onRevealSearchContext?.(null)
+      contextRevealRef.current = null
       if (highlightFrameRef.current !== null) {
         cancelAnimationFrame(highlightFrameRef.current)
         highlightFrameRef.current = null
       }
 
+      const finish = (): void => {
+        if (pendingNavigationRef.current === generation) pendingNavigationRef.current = null
+        highlightFrameRef.current = null
+      }
+      let stableFrames = 0
+      let previousRangeTop: number | null = null
+      let previousScrollHeight = 0
+      let contextRequested = false
+      let cachedRange: Range | null = null
       const tryHighlight = (attempt: number): void => {
         if (
           highlightGenerationRef.current !== generation ||
@@ -648,38 +712,82 @@ export function ChatSearchOverlay({
         ) {
           return
         }
-        const viewport = getViewport()
-        const row = viewport
-          ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-chat-message-id]")).find(
-              (candidate) => candidate.dataset.chatMessageId === match.messageId
-            )
-          : undefined
-        if (!row) {
+        const mounted = findRow()
+        if (!mounted) {
           if (attempt >= SEARCH_REVEAL_MAX_FRAMES) {
-            highlightFrameRef.current = null
+            finish()
             return
           }
           highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
           return
         }
 
-        if (prepareUserContentForSearchHighlight(row)) {
+        const { viewport, row } = mounted
+        if (!match.location && row.querySelector("[data-chat-search-expand-markdown]")) {
+          // A legacy count-only reply cannot identify a position across folded gaps.
+          clearHighlights()
+          finish()
+          return
+        }
+        if (prepareChatContentForSearchHighlight(row)) {
           if (attempt >= SEARCH_REVEAL_MAX_FRAMES) {
-            highlightFrameRef.current = null
+            finish()
             return
           }
           highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
           return
         }
 
-        const ranges = collectMatchRanges(row, rawQuery.trim())
-        highlightFrameRef.current = null
+        if (
+          cachedRange &&
+          (!cachedRange.startContainer.isConnected ||
+            !cachedRange.toString().toLowerCase().includes(rawQuery.trim().toLowerCase()))
+        )
+          cachedRange = null
+        const locationRange = match.location
+          ? (cachedRange ?? findChatSearchLocationRange(row, match.location, rawQuery))
+          : null
+        if (match.location && !locationRange && !contextRequested) {
+          contextRequested = true
+          const reveal = { messageId: match.messageId, location: match.location }
+          contextRevealRef.current = reveal
+          revealCallbacksRef.current.onRevealSearchContext?.(reveal)
+          highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
+          return
+        }
+        const ranges = match.location
+          ? locationRange
+            ? [locationRange]
+            : []
+          : collectMatchRanges(row, rawQuery.trim())
+        const activeOccurrence = match.location ? 0 : match.occurrenceIndex
         if (apiSupported && ranges.length > 0) {
-          applyHighlights(ranges, Math.min(match.occurrenceIndex, ranges.length - 1))
+          applyHighlights(ranges, activeOccurrence)
         } else {
           clearHighlights()
         }
-        if (scroll) row.scrollIntoView({ block: "center", behavior: "smooth" })
+        const activeRange = ranges[activeOccurrence]
+        cachedRange = activeRange ?? null
+        if (activeRange) {
+          const rect = activeRange.getBoundingClientRect()
+          stableFrames =
+            rect.height > 0 &&
+            previousRangeTop !== null &&
+            Math.abs(rect.top - previousRangeTop) < 1 &&
+            viewport.scrollHeight === previousScrollHeight
+              ? stableFrames + 1
+              : 0
+          scrollChatSearchRangeIntoView(viewport, activeRange)
+          previousRangeTop = activeRange.getBoundingClientRect().top
+          previousScrollHeight = viewport.scrollHeight
+        }
+        // Expanding Markdown changes the virtual row's measured height. Its ResizeObserver
+        // can adjust scrollTop after this frame; retain navigation until layout has settled.
+        if (stableFrames >= 2 || attempt >= SEARCH_REVEAL_MAX_FRAMES) {
+          finish()
+        } else {
+          highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
+        }
       }
 
       const revealMountedRow = (): void => {
@@ -689,53 +797,69 @@ export function ChatSearchOverlay({
         ) {
           return
         }
-        onRevealMessage(match.messageId)
-        tryHighlight(0)
+        revealCallbacksRef.current.onRevealMessage(match.messageId)
+        const validate = revealCallbacksRef.current.validateSearchLocation
+        if (match.location && validate) {
+          void validate({ messageId: match.messageId, location: match.location }, validation.signal)
+            .then((valid) => {
+              if (highlightGenerationRef.current !== generation || validation.signal.aborted) return
+              if (valid) tryHighlight(0)
+              else {
+                clearHighlights()
+                finish()
+              }
+            })
+            .catch(() => {
+              if (highlightGenerationRef.current === generation) {
+                clearHighlights()
+                finish()
+              }
+            })
+        } else tryHighlight(0)
       }
 
-      if (match.durableMatch && !onRevealDurableMessage) {
+      const revealDurable = revealCallbacksRef.current.onRevealDurableMessage
+      if (match.durableMatch && !revealDurable) {
         // The bounded preview is still useful when the caller deliberately avoids hydrating a
         // non-contiguous history page. Do not spend 60 animation frames polling for a row that
         // cannot be mounted in this mode.
         clearHighlights()
+        finish()
         return
       }
-      if (match.durableMatch && onRevealDurableMessage) {
+      if (match.durableMatch && revealDurable) {
         void Promise.resolve()
-          .then(() => onRevealDurableMessage(match.durableMatch as DurableChatSearchMatch))
+          .then(() => revealDurable(match.durableMatch as DurableChatSearchMatch))
           .then(revealMountedRow)
           .catch(() => {
-            if (highlightGenerationRef.current === generation) clearHighlights()
+            if (highlightGenerationRef.current === generation) {
+              clearHighlights()
+              finish()
+            }
           })
         return
       }
       revealMountedRow()
     },
-    [
-      apiSupported,
-      applyHighlights,
-      getViewport,
-      onRevealDurableMessage,
-      onRevealMessage
-    ]
+    [apiSupported, applyHighlights, getViewport]
   )
 
   const publishMatches = useCallback(
     (rawQuery: string, repaint: boolean, allowAutoReveal: boolean): void => {
       const previousMatch = matchesRef.current[activeIndexRef.current]
-      const previousKey = previousMatch
-        ? `${previousMatch.messageId}\u0000${previousMatch.occurrenceIndex}`
-        : ""
+      const previousKey = previousMatch ? searchMatchKey(previousMatch) : ""
       const merged = mergeChatSearchResults(
         localMatchesRef.current,
-        durableMatchesRef.current
+        durableMatchesRef.current.filter(
+          (match) => !localDocumentCoverageRef.current.get(match.messageId)
+        )
       )
       matchesRef.current = merged.matches
 
       let nextIndex = 0
       if (previousKey) {
         const retainedIndex = merged.matches.findIndex(
-          (match) => `${match.messageId}\u0000${match.occurrenceIndex}` === previousKey
+          (match) => searchMatchKey(match) === previousKey
         )
         nextIndex =
           retainedIndex >= 0
@@ -746,17 +870,42 @@ export function ChatSearchOverlay({
       setActive(nextIndex)
 
       const scanState = durableScanStateRef.current
-      setDurableScanning(scanState.scanning)
-      setSearchTruncated(merged.truncated || scanState.truncated)
-      setDurableSearchFailed(scanState.failed)
+      const localState = localScanStateRef.current
+      setDurableScanning(scanState.scanning || localState.scanning)
+      setSearchTruncated(merged.truncated || scanState.truncated || localState.truncated)
+      setDurableSearchFailed(scanState.failed || localState.failed)
 
       const activeMatch = merged.matches[nextIndex]
       if (!activeMatch) {
+        contextRevealRef.current = null
+        revealCallbacksRef.current.onRevealSearchContext?.(null)
         clearHighlights()
         return
       }
+      const previousContext = contextRevealRef.current
+      if (
+        repaint &&
+        previousContext &&
+        activeMatch.location &&
+        pendingNavigationRef.current === null &&
+        (previousContext.messageId !== activeMatch.messageId ||
+          chatSearchLocationKey(previousContext.location) !==
+            chatSearchLocationKey(activeMatch.location))
+      ) {
+        const reveal = { messageId: activeMatch.messageId, location: activeMatch.location }
+        contextRevealRef.current = reveal
+        revealCallbacksRef.current.onRevealSearchContext?.(reveal)
+        if (contextRefreshFrameRef.current !== null)
+          cancelAnimationFrame(contextRefreshFrameRef.current)
+        const generation = searchGenerationRef.current
+        contextRefreshFrameRef.current = requestAnimationFrame(() => {
+          contextRefreshFrameRef.current = null
+          if (searchGenerationRef.current === generation)
+            revealAndHighlight(activeMatch, rawQuery, false)
+        })
+      }
 
-      const normalizedQuery = rawQuery.trim().toLocaleLowerCase()
+      const normalizedQuery = rawQuery.trim().toLowerCase()
       if (allowAutoReveal && autoRevealedQueryRef.current !== normalizedQuery) {
         autoRevealedQueryRef.current = normalizedQuery
         revealAndHighlight(activeMatch, rawQuery, true)
@@ -769,37 +918,73 @@ export function ChatSearchOverlay({
 
   useEffect(() => {
     getSearchCorpusRef.current = getSearchCorpus
+    searchLocalCorpusRef.current = searchLocalCorpus
     publishMatchesRef.current = publishMatches
-  }, [getSearchCorpus, publishMatches])
+  }, [getSearchCorpus, publishMatches, searchLocalCorpus])
 
   useEffect(() => {
     const throttle = createLeadingTrailingThrottle<{ generation: number; query: string }>(
       (task) => {
-        if (searchGenerationRef.current !== task.generation) return
-        const corpus = getSearchCorpusRef.current()
-        const matches = searchMatcherRef.current(corpus, task.query)
-        // Keep one sentinel past the cap so the UI can report truncation.
-        localMatchesRef.current = matches.slice(0, CHAT_SEARCH_RESULT_LIMIT + 1)
-        const occurrenceCounts = new Map<string, number>()
-        for (const match of localMatchesRef.current) {
-          occurrenceCounts.set(match.messageId, (occurrenceCounts.get(match.messageId) ?? 0) + 1)
-        }
-        localOccurrenceCountsRef.current = occurrenceCounts
-        const coverage = new Map<string, boolean>()
-        for (const document of corpus.stableDocuments) {
-          coverage.set(
-            document.messageId,
-            Boolean(document.durableAuthoritative) || !document.truncated
+        const request = ++localRequestRef.current
+        localCorpusAbortRef.current?.abort()
+        const controller = new AbortController()
+        localCorpusAbortRef.current = controller
+        void (async () => {
+          if (searchGenerationRef.current !== task.generation) return
+          localScanStateRef.current = { scanning: true, truncated: false, failed: false }
+          publishMatchesRef.current(task.query, false, false)
+          const corpus = await getSearchCorpusRef.current(controller.signal)
+          if (
+            searchGenerationRef.current !== task.generation ||
+            localRequestRef.current !== request
           )
-        }
-        for (const document of corpus.dynamicDocuments) {
-          coverage.set(
-            document.messageId,
-            Boolean(document.durableAuthoritative) || !document.truncated
+            return
+          const matches = searchLocalCorpusRef.current
+            ? await searchLocalCorpusRef.current(corpus, task.query)
+            : searchMatcherRef.current(corpus, task.query)
+          if (
+            searchGenerationRef.current !== task.generation ||
+            localRequestRef.current !== request
           )
-        }
-        localDocumentCoverageRef.current = coverage
-        publishMatchesRef.current(task.query, true, true)
+            return
+          // Keep one sentinel past the cap so the UI can report truncation.
+          localMatchesRef.current = matches.slice(0, CHAT_SEARCH_RESULT_LIMIT + 1)
+          const occurrenceCounts = new Map<string, number>()
+          for (const match of localMatchesRef.current) {
+            occurrenceCounts.set(match.messageId, (occurrenceCounts.get(match.messageId) ?? 0) + 1)
+          }
+          localOccurrenceCountsRef.current = occurrenceCounts
+          const coverage = new Map<string, boolean>()
+          for (const document of corpus.stableDocuments) {
+            coverage.set(
+              document.messageId,
+              Boolean(document.durableAuthoritative) || !document.truncated
+            )
+          }
+          for (const document of corpus.dynamicDocuments) {
+            coverage.set(
+              document.messageId,
+              Boolean(document.durableAuthoritative) || !document.truncated
+            )
+          }
+          localDocumentCoverageRef.current = coverage
+          localScanStateRef.current = {
+            scanning: false,
+            failed: false,
+            truncated:
+              Boolean(corpus.truncated) ||
+              [...corpus.stableDocuments, ...corpus.dynamicDocuments].some((doc) => doc.truncated)
+          }
+          publishMatchesRef.current(task.query, true, true)
+        })().catch(() => {
+          if (
+            searchGenerationRef.current !== task.generation ||
+            localRequestRef.current !== request
+          )
+            return
+          localScanStateRef.current = { scanning: false, truncated: true, failed: true }
+          publishMatchesRef.current(task.query, false, false)
+        })
       }
     )
     localSearchThrottleRef.current = throttle
@@ -809,7 +994,7 @@ export function ChatSearchOverlay({
     }
   }, [])
 
-  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const normalizedQuery = query.trim().toLowerCase()
 
   // Query/open identity owns the durable scan generation. Streaming content
   // updates do not restart the database scan; they only schedule local work.
@@ -825,9 +1010,18 @@ export function ChatSearchOverlay({
     durableRevealIdentityRef.current = nextRevealIdentity
 
     const generation = searchGenerationRef.current + 1
+    onCancelLocalSearch?.()
     searchGenerationRef.current = generation
+    localRequestRef.current += 1
+    localCorpusAbortRef.current?.abort()
+    validationAbortRef.current?.abort()
+    contextRevealRef.current = null
+    if (contextRefreshFrameRef.current !== null) cancelAnimationFrame(contextRefreshFrameRef.current)
+    localScanStateRef.current = { scanning: false, truncated: false, failed: false }
+    revealCallbacksRef.current.onRevealSearchContext?.(null)
     localSearchThrottleRef.current?.cancel()
     highlightGenerationRef.current += 1
+    pendingNavigationRef.current = null
     autoRevealedQueryRef.current = ""
     localMatchesRef.current = []
     localOccurrenceCountsRef.current = new Map()
@@ -889,7 +1083,7 @@ export function ChatSearchOverlay({
       active = false
       window.clearTimeout(timer)
     }
-  }, [normalizedQuery, onCancelDurableReveal, open, searchDurableMessages])
+  }, [normalizedQuery, onCancelDurableReveal, onCancelLocalSearch, open, searchDurableMessages])
 
   // Leading/trailing max-wait throttling guarantees progress during an
   // uninterrupted token stream while still coalescing the hot path.
@@ -920,7 +1114,9 @@ export function ChatSearchOverlay({
   // Clear highlights whenever the overlay is closed or unmounts.
   useEffect(() => {
     if (open) return
+    revealCallbacksRef.current.onRevealSearchContext?.(null)
     highlightGenerationRef.current += 1
+    pendingNavigationRef.current = null
     if (highlightFrameRef.current !== null) {
       cancelAnimationFrame(highlightFrameRef.current)
       highlightFrameRef.current = null
@@ -931,6 +1127,9 @@ export function ChatSearchOverlay({
   useEffect(() => {
     return () => {
       searchGenerationRef.current += 1
+      localCorpusAbortRef.current?.abort()
+      validationAbortRef.current?.abort()
+      if (contextRefreshFrameRef.current !== null) cancelAnimationFrame(contextRefreshFrameRef.current)
       highlightGenerationRef.current += 1
       if (highlightFrameRef.current !== null) {
         cancelAnimationFrame(highlightFrameRef.current)

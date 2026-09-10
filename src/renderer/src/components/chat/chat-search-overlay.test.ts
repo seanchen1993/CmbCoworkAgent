@@ -10,7 +10,9 @@ import {
   formatChatSearchStatus,
   isSearchableChatTextNode,
   mergeChatSearchResults,
+  prepareChatContentForSearchHighlight,
   prepareUserContentForSearchHighlight,
+  scrollChatSearchRangeIntoView,
   scanDurableChatSearch,
   type DurableChatSearchMatch,
   type DurableChatSearchPage
@@ -323,6 +325,46 @@ describe("bounded renderer search results", () => {
     expect(source).not.toContain("历史消息：")
   })
 
+  it("never auto-expands Markdown even when a row contains multiple folded blocks", () => {
+    const clicks = [vi.fn(), vi.fn()]
+    const row = {
+      querySelector: () => null,
+      querySelectorAll: () => clicks.map((click) => ({ click }))
+    } as unknown as HTMLElement
+    expect(prepareChatContentForSearchHighlight(row)).toBe(false)
+    for (const click of clicks) expect(click).not.toHaveBeenCalled()
+    expect(
+      prepareChatContentForSearchHighlight({
+        querySelector: () => null,
+        querySelectorAll: () => []
+      } as unknown as HTMLElement)
+    ).toBe(false)
+  })
+
+  it("centers the text occurrence inside its viewport and clamps either boundary", () => {
+    const scrollTo = vi.fn()
+    const viewport = {
+      scrollTop: 400,
+      scrollHeight: 3000,
+      clientHeight: 400,
+      clientTop: 2,
+      getBoundingClientRect: () => ({ top: 80 }),
+      scrollTo
+    } as unknown as HTMLElement
+    const rangeAt = (top: number, height = 20): Range =>
+      ({ getBoundingClientRect: () => ({ top, height }) }) as unknown as Range
+
+    scrollChatSearchRangeIntoView(viewport, rangeAt(1600))
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 1728, behavior: "auto" })
+    scrollChatSearchRangeIntoView(viewport, rangeAt(-500))
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: "auto" })
+    scrollChatSearchRangeIntoView(viewport, rangeAt(5000))
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 2600, behavior: "auto" })
+    scrollTo.mockClear()
+    scrollChatSearchRangeIntoView(viewport, rangeAt(100, 0))
+    expect(scrollTo).not.toHaveBeenCalled()
+  })
+
   it("preserves local/live matches, de-duplicates durable message ids, and caps expansion", () => {
     const localMatches: ChatSearchMatch[] = [
       { messageId: "loaded", occurrenceIndex: 0, sortIndex: 10 },
@@ -347,13 +389,13 @@ describe("bounded renderer search results", () => {
     expect(merged.matches.filter((match) => match.messageId === "loaded")).toHaveLength(1)
   })
 
-  it("retains durable occurrences beyond a truncated local document", () => {
+  it("does not infer missing positions from a truncated local document's occurrence count", () => {
     const merged = mergeChatSearchResults(
       [{ messageId: "large", occurrenceIndex: 0, sortIndex: 10 }],
       [{ ...durableMatch("large", 10, 1), occurrenceOffset: 1 }],
       10
     )
-    expect(merged.matches.map((match) => match.occurrenceIndex)).toEqual([0, 1])
+    expect(merged.matches.map((match) => match.occurrenceIndex)).toEqual([0])
   })
 
   it("caps CSS match offsets and durable preview allocation", () => {

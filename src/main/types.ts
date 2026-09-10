@@ -398,6 +398,7 @@ export interface ThreadMessageSearchOptions {
 }
 
 export interface ThreadMessageSearchMatch {
+  locations?: import("../shared/chat-search-types").ChatSearchLocation[]
   messageId: string
   ordinal: number
   role: Message["role"]

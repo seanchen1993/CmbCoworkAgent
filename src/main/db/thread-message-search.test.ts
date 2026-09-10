@@ -50,6 +50,24 @@ function collectSearchMatches(threadId: string, query: string): string[] {
 }
 
 describe("bounded durable thread message search", () => {
+  it("budgets dense occurrence coordinates before serializing the first response row", () => {
+    const threadId = "search-coordinate-response-budget"
+    threadDb.createThread(threadId)
+    threadDb.upsertThreadMessages(threadId, [{ id: "dense-hits", role: "assistant",
+      created_at: new Date(1), content: "needle \\ \" 😀\n".repeat(6000) }])
+    const page = threadDb.searchThreadMessages(threadId, "needle")
+    expect(page.truncated).toBe(true)
+    const match = page.matches[0]
+    expect(match.locations?.length).toBeGreaterThan(0)
+    expect(match.occurrenceCount).toBe(match.locations?.length)
+    expect(match.occurrenceCount).toBeLessThan(6000)
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(
+      threadDb.THREAD_MESSAGE_SEARCH_RESPONSE_BYTE_BUDGET
+    )
+    for (const location of match.locations ?? []) {
+      expect(location.context.slice(location.contextStart, location.contextEnd)).toBe("needle")
+    }
+  })
   it("searches structured content, tool calls, and cross-fragment text with stable cursors", () => {
     const threadId = "bounded-search-correctness"
     threadDb.createThread(threadId)
@@ -357,6 +375,20 @@ describe("bounded durable thread message search", () => {
     expect(found).toEqual([...ids].sort().reverse())
     expect(new Set(found).size).toBe(ids.length)
     expect(sawResponseTruncation).toBe(true)
+  })
+
+  it("finds the expandable middle of a completed long answer", () => {
+    const threadId = "search-expandable-middle"
+    threadDb.createThread(threadId)
+    threadDb.upsertThreadMessages(threadId, [{
+      id: "folded-answer", role: "assistant", created_at: new Date(1),
+      content: `${"x".repeat(20_000)}\n\n**folded-search-target**\n\n${"y".repeat(80_000)}`
+    }])
+    expect(threadDb.searchThreadMessages(threadId, "folded-search-target")).toMatchObject({
+      matches: [{ messageId: "folded-answer", occurrenceCount: 1 }],
+      hasMore: false,
+      truncated: false
+    })
   })
 
   it("searches only tool calls and structured blocks retained by transcript hydration", () => {
