@@ -1190,8 +1190,38 @@ function App(): React.JSX.Element {
           </div>
         ) : null}
 
-        {/* Design 面板 */}
-        {mainView === "design" && (
+        {/* 需求模式面板 */}
+        {mainView === "design" && activeModeTab === "requirements" && (
+          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+              <Suspense
+                fallback={
+                  <div className="flex flex-1 flex-col items-center justify-center gap-4 bg-gradient-to-b from-background to-muted/30">
+                    <div className="relative flex size-14 items-center justify-center">
+                      <div className="absolute inset-0 animate-ping rounded-2xl bg-primary/15" />
+                      <div className="relative flex size-14 items-center justify-center rounded-2xl bg-primary/8 ring-1 ring-primary/15">
+                        <ClipboardList className="size-6 text-primary/70" strokeWidth={1.8} />
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-center gap-2">
+                      <p className="text-sm font-medium text-foreground/80">正在进入需求模式</p>
+                      <div className="flex items-center gap-1.5">
+                        <span className="size-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:-0.3s]" />
+                        <span className="size-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:-0.15s]" />
+                        <span className="size-1.5 rounded-full bg-primary/50 animate-bounce" />
+                      </div>
+                    </div>
+                  </div>
+                }
+              >
+                <RequirementEntryView />
+              </Suspense>
+            </main>
+          </div>
+        )}
+
+        {/* 设计模式面板 */}
+        {mainView === "design" && activeModeTab === "design" && (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
               <Suspense
@@ -1201,7 +1231,7 @@ function App(): React.JSX.Element {
                   </div>
                 }
               >
-                {activeModeTab === "requirements" ? <RequirementEntryView /> : <DesignModeEntryView />}
+                <DesignModeEntryView />
               </Suspense>
             </main>
           </div>
