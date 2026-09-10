@@ -1,0 +1,6 @@
+{
+  "type": "failed",
+  "eventId": "event-invalid-ack",
+  "leaseId": "lease-invalid-ack",
+  "reasonCode": "REMOTE_RUNTIME_FAILED"
+}

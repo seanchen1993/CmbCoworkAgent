@@ -39,6 +39,7 @@ import type {
   DashboardTraceTriggerScope,
   DashboardTraceViewMode
 } from "./use-dashboard"
+import { unwrapThreadTracesResponse } from "./thread-traces-response"
 
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -407,7 +408,7 @@ function outcomeClass(outcome: string): string {
   if (outcome === "error") return "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30"
   if (outcome === "unknown")
     return "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
-  return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400 border-zinc-500/20"
+  return "border-border bg-muted text-muted-foreground"
 }
 
 function shortTraceId(value?: string): string {
@@ -505,11 +506,21 @@ function TraceCard({
           </span>
         )}
       </div>
-      <p className="line-clamp-3 text-xs leading-5 text-foreground/80">
+      <p
+        className={cn(
+          "line-clamp-3 text-xs leading-5",
+          conversation.userText ? "text-foreground/80" : "text-muted-foreground/60"
+        )}
+      >
         {conversation.userText ||
           (conversation.internalNotificationKind
             ? internalNotificationPreview(conversation.internalNotificationKind)
-            : "无用户输入记录")}
+            : // 预览行没有 `_raw`：子 Agent / workflow trace 的输入正文存在 raw 的根
+              // 节点里，索引字段 userMessage 是空的。此时断言「无用户输入记录」是
+              // 拿缺失的数据下结论——它跟「这条 trace 真的没有用户输入」是两回事。
+              trace.rawPending
+              ? "选中该会话后显示完整内容"
+              : "无用户输入记录")}
       </p>
       {conversation.assistantText && (
         <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
@@ -819,6 +830,8 @@ export function TraceExplorer({
     {}
   )
   const [threadLoadingId, setThreadLoadingId] = useState<string | null>(null)
+  // 最近一次失败的会话 id。只记一个：横幅只讲当前选中的会话，切走再切回会重试。
+  const [threadLoadErrorId, setThreadLoadErrorId] = useState<string | null>(null)
   const activeViewMode = viewMode ?? localViewMode
   const handleViewModeChange = (mode: DashboardTraceViewMode): void => {
     if (!viewMode) setLocalViewMode(mode)
@@ -829,13 +842,10 @@ export function TraceExplorer({
   const defaultLoadThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
       const api = window.api?.dashboard
-      if (!api || typeof api.threadTraces !== "function") return []
-      try {
-        const res = await api.threadTraces(threadId)
-        return res?.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
-      } catch {
-        return []
+      if (!api || typeof api.threadTraces !== "function") {
+        throw new Error("当前环境不支持加载完整会话")
       }
+      return unwrapThreadTracesResponse(await api.threadTraces(threadId))
     },
     []
   )
@@ -885,6 +895,7 @@ export function TraceExplorer({
     if (threadTraceCache[selectedThreadId]) return
     let cancelled = false
     setThreadLoadingId(selectedThreadId)
+    setThreadLoadErrorId((current) => (current === selectedThreadId ? null : current))
     void effectiveLoadThreadTraces(selectedThreadId)
       .then((full) => {
         if (cancelled) return
@@ -893,6 +904,13 @@ export function TraceExplorer({
             ? prev
             : { ...prev, [selectedThreadId]: Array.isArray(full) ? full : [] }
         )
+      })
+      .catch((error) => {
+        // 关键：失败不写缓存。写进去的话 `if (threadTraceCache[id]) return` 会把这
+        // 个会话永久锁在「只有摘要」的状态；不写则切走再切回就会重试。
+        if (cancelled) return
+        console.warn("[Dashboard] 加载完整会话失败:", error)
+        setThreadLoadErrorId(selectedThreadId)
       })
       .finally(() => {
         if (!cancelled)
@@ -1034,11 +1052,24 @@ export function TraceExplorer({
     )
   }
 
+  // thread 列表是摘要预览（不含 _raw），完整对话在选中会话时懒加载。加载还在飞
+  // 的那一小段窗口里 selectedTrace 仍是预览行，此时提示「缺少 raw」是误报——
+  // 加载完成后 threadTraceCache 会用带 _raw 的完整 trace 覆盖它。加载失败时预览行
+  // 同样没有 raw，但原因不是「这条 trace 缺内容」，得说清楚，否则用户既不知道
+  // 发生了什么、也不知道还能重试。
+  const threadLoadFailed =
+    activeViewMode === "thread" && !threadLoading && selectedThreadId === threadLoadErrorId
+  const rawMissingNotice = threadLoadFailed
+    ? "完整会话加载失败，当前仅显示摘要。切换到其他会话再切回可重试。"
+    : selectedTrace && !selectedTrace.rawAvailable && !threadLoading
+      ? selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"
+      : null
+
   const conversationContent = (
     <>
-      {selectedTrace && !selectedTrace.rawAvailable && (
+      {rawMissingNotice && (
         <div className="mb-3 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-          {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"}
+          {rawMissingNotice}
         </div>
       )}
       {selectedTrace ? (
@@ -1047,6 +1078,7 @@ export function TraceExplorer({
             traces={selectedThreadGroup.traces}
             className={fullscreen ? "min-h-0 flex-1" : undefined}
             loading={threadLoading}
+            loadFailed={threadLoadFailed}
             fillAvailableHeight={fullscreen}
             selectedTraceId={selectedTrace.traceId}
           />

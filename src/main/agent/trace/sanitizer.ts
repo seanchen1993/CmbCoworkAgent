@@ -1,3 +1,8 @@
+import {
+  TRACE_TRUNCATION_MARKER_PREFIX,
+  TRACE_TRUNCATION_MARKER_SUFFIX,
+  splitTruncatedText
+} from "./bounds"
 import type {
   AgentTrace,
   TraceChatMessage,
@@ -66,11 +71,24 @@ function truncateString(
   state.originalBytesApprox += byteSize(value)
 
   if (effective.tail <= 0) {
-    return `${value.slice(0, effective.head)}\n...[trace truncated: binary-like value, omitted ${value.length - effective.head} chars]...`
+    return `${value.slice(0, effective.head)}\n...[二进制内容，已省略 ${value.length - effective.head} 字符]...`
+  }
+
+  // Collection may already have cut this to a head and a tail. Narrow the two
+  // halves separately and carry its omitted count forward: slicing across the
+  // marker would take the "tail" from the middle of the original and present it
+  // as the end, and would report an omitted count for the wrong string.
+  const existing = splitTruncatedText(value)
+  if (existing) {
+    const head = existing.head.slice(0, effective.head)
+    const tail = existing.tail.slice(-effective.tail)
+    const omitted =
+      existing.omitted + (existing.head.length - head.length) + (existing.tail.length - tail.length)
+    return `${head}${TRACE_TRUNCATION_MARKER_PREFIX}${omitted}${TRACE_TRUNCATION_MARKER_SUFFIX}${tail}`
   }
 
   const omitted = Math.max(0, value.length - effective.head - effective.tail)
-  return `${value.slice(0, effective.head)}\n...[trace truncated: omitted ${omitted} chars]...\n${value.slice(-effective.tail)}`
+  return `${value.slice(0, effective.head)}${TRACE_TRUNCATION_MARKER_PREFIX}${omitted}${TRACE_TRUNCATION_MARKER_SUFFIX}${value.slice(-effective.tail)}`
 }
 
 function truncateSerialized(
@@ -100,7 +118,7 @@ function sanitizeUnknown(
   if (depth >= MAX_DEPTH) {
     state.fields.add(path)
     state.originalBytesApprox += byteSize(value)
-    return "[trace truncated: max depth]"
+    return "[已省略：超出嵌套深度]"
   }
 
   if (Array.isArray(value)) {
@@ -470,10 +488,37 @@ function sanitizeTraceFields(
   return { trace: sanitized, state }
 }
 
+/**
+ * Metadata the tree is built from rather than displayed: the conversation view
+ * pairs a tool with its result on toolCallId, and getTotalToolCalls reads the
+ * per-node counts. The summary drops payload, not structure.
+ */
+const STRUCTURAL_NODE_METADATA_KEYS = [
+  "toolCallId",
+  "messageId",
+  "toolCallCount",
+  "toolNames",
+  "index"
+] as const
+
+function pickStructuralMetadata(
+  metadata: Record<string, unknown> | undefined
+): Record<string, unknown> {
+  if (!metadata) return {}
+  const picked: Record<string, unknown> = {}
+  for (const key of STRUCTURAL_NODE_METADATA_KEYS) {
+    if (metadata[key] !== undefined) picked[key] = metadata[key]
+  }
+  return picked
+}
+
 function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): AgentTrace {
   const summarizedSteps = trace.steps.map((step) => ({
     index: step.index,
     startedAt: step.startedAt,
+    // A skeleton is not an empty call — without this the summary reads as a
+    // model that produced nothing, rather than a turn whose payload was cut.
+    ...(step.truncated ? { truncated: true } : {}),
     assistantText: truncateString(
       step.assistantText ?? "",
       LIMITS.compressedMessage,
@@ -483,6 +528,7 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
     toolCalls: step.toolCalls.map((toolCall) => ({
       name: toolCall.name,
       args: {},
+      ...(toolCall.truncated ? { truncated: true } : {}),
       ...(toolCall.durationMs !== undefined ? { durationMs: toolCall.durationMs } : {}),
       ...(toolCall.result !== undefined
         ? {
@@ -513,8 +559,13 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
         state,
         true
       ),
-      toolCalls: call.toolCalls.map((toolCall) => ({ name: toolCall.name, args: {} })),
-      tokenUsage: call.tokenUsage
+      toolCalls: call.toolCalls.map((toolCall) => ({
+        name: toolCall.name,
+        args: {},
+        ...(toolCall.truncated ? { truncated: true } : {})
+      })),
+      tokenUsage: call.tokenUsage,
+      ...(call.truncated ? { truncated: true } : {})
     })),
     nodes: trace.nodes?.map((node) => ({
       id: node.id,
@@ -524,6 +575,7 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
       status: node.status,
       startedAt: node.startedAt,
       endedAt: node.endedAt,
+      ...(node.truncated ? { truncated: true } : {}),
       // Keep a hard-capped, serialized form of input/output so the dashboard
       // execution tree still shows tool args/results for oversized traces
       // instead of empty panels. The compressedValue limit bounds each field.
@@ -552,9 +604,12 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
           }
         : {}),
       metadata:
-        node.metadata?.tokenUsage ||
-        (typeof node.metadata?.reasoning === "string" && node.metadata.reasoning)
+        node.metadata &&
+        (Object.keys(pickStructuralMetadata(node.metadata)).length > 0 ||
+          node.metadata.tokenUsage ||
+          (typeof node.metadata.reasoning === "string" && node.metadata.reasoning))
           ? {
+              ...pickStructuralMetadata(node.metadata),
               ...(node.metadata?.tokenUsage ? { tokenUsage: node.metadata.tokenUsage } : {}),
               ...(typeof node.metadata?.reasoning === "string" && node.metadata.reasoning
                 ? {

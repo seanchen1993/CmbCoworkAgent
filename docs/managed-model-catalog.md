@@ -13,14 +13,14 @@
       {
         "id": "minimax-m2p5-229b-w8a8",
         "name": "MiniMax M2.5",
-        "baseUrl": "http://open-llm.uat.cmbchina.cn/llm/minimax-m2p5-229b-w8a8/v1",
+        "baseUrl": "https://llm.example.test/v1",
         "model": "minimax-m2p5-229b-w8a8",
         "tier": "premium"
       },
       {
         "id": "deepseek-v4-flash-284b-a13b-w8a8",
         "name": "DeepSeek V4 Flash",
-        "baseUrl": "http://open-llm.uat.cmbchina.cn/llm/deepseek-v4-flash-284b-a13b-w8a8/v1",
+        "baseUrl": "https://llm.example.test/v1",
         "model": "deepseek-v4-flash-284b-a13b-w8a8",
         "tier": "economy"
       }

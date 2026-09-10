@@ -1,8 +1,10 @@
 import { GitCommit, Maximize2, Minimize2, Eye, Minus, Plus } from "lucide-react"
-import { memo, useEffect, useMemo, useState } from "react"
+import { memo, useEffect, useMemo, useState, useSyncExternalStore } from "react"
 import { VirtualList } from "@/components/ui/virtual-list"
 import { cn } from "@/lib/utils"
-import { parseUnifiedDiffRows, type DiffRow } from "@/lib/diff-utils"
+import { buildLineDiffRows, type DiffRow } from "@/lib/diff-utils"
+import { DEFAULT_THEME_ID, getThemeDefinition } from "@/lib/theme-registry"
+import { getThemePreference, subscribeThemePreference } from "@/lib/theme-preference"
 
 type DiffViewerModule = typeof import("react-diff-viewer-continued")
 
@@ -12,6 +14,43 @@ let diffViewerModulePromise: Promise<DiffViewerModule> | null = null
 const DIFF_ROW_HEIGHT = 20
 /** Diff lines exceeding this threshold switch to virtualized rendering in fullscreen. */
 const VIRTUALIZED_DIFF_LINE_THRESHOLD = 200
+
+const DIFF_VIEWER_THEME_VARIABLES = {
+  diffViewerBackground: "var(--background-elevated)",
+  diffViewerColor: "var(--foreground)",
+  addedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 88%, var(--status-nominal)), color-mix(in lab, var(--background-elevated) 80%, var(--status-nominal)))",
+  addedColor: "var(--foreground)",
+  removedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 88%, var(--status-critical)), color-mix(in lab, var(--background-elevated) 80%, var(--status-critical)))",
+  removedColor: "var(--foreground)",
+  changedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 88%, var(--status-warning)), color-mix(in lab, var(--background-elevated) 80%, var(--status-warning)))",
+  wordAddedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 72%, var(--status-nominal)), color-mix(in lab, var(--background-elevated) 64%, var(--status-nominal)))",
+  wordRemovedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 72%, var(--status-critical)), color-mix(in lab, var(--background-elevated) 64%, var(--status-critical)))",
+  addedGutterBackground:
+    "light-dark(color-mix(in lab, var(--background) 82%, var(--status-nominal)), color-mix(in lab, var(--background) 70%, var(--status-nominal)))",
+  removedGutterBackground:
+    "light-dark(color-mix(in lab, var(--background) 82%, var(--status-critical)), color-mix(in lab, var(--background) 70%, var(--status-critical)))",
+  gutterBackground: "var(--background)",
+  gutterBackgroundDark: "var(--background-interactive)",
+  highlightBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 82%, var(--status-warning)), color-mix(in lab, var(--background-elevated) 72%, var(--status-warning)))",
+  highlightGutterBackground:
+    "light-dark(color-mix(in lab, var(--background) 74%, var(--status-warning)), color-mix(in lab, var(--background) 64%, var(--status-warning)))",
+  codeFoldGutterBackground: "var(--background-interactive)",
+  codeFoldBackground: "var(--background-interactive)",
+  emptyLineBackground: "var(--background)",
+  gutterColor: "var(--tertiary-foreground)",
+  addedGutterColor: "var(--status-nominal-foreground)",
+  removedGutterColor: "var(--status-critical-foreground)",
+  codeFoldContentColor: "var(--muted-foreground)",
+  diffViewerTitleBackground: "var(--background-interactive)",
+  diffViewerTitleColor: "var(--foreground)",
+  diffViewerTitleBorderColor: "var(--border)"
+} as const
 
 function renderDiffListItem(row: DiffRow): React.ReactNode {
   if (row.type === "file") {
@@ -223,6 +262,12 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [diffViewerModule, setDiffViewerModule] = useState<DiffViewerModule | null>(null)
   const [diffViewerLoadError, setDiffViewerLoadError] = useState<string | null>(null)
+  const themePreference = useSyncExternalStore(
+    subscribeThemePreference,
+    getThemePreference,
+    () => DEFAULT_THEME_ID
+  )
+  const isDarkTheme = getThemeDefinition(themePreference).colorScheme === "dark"
 
   useEffect(() => {
     if (diffViewerModule) return
@@ -253,26 +298,6 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
     return parseUnifiedDiffFiles(diffToUse)
   }, [diffToUse, oldValue, newValue])
 
-  // Parse unified diff into rows for virtualized rendering (only needed for large diffs)
-  const virtualizedDiffRows = useMemo<DiffRow[]>(() => {
-    if (oldValue !== undefined || newValue !== undefined) return []
-    const totalLineCount = diffFiles.reduce((sum, f) => sum + f.totalLines, 0)
-    if (totalLineCount <= VIRTUALIZED_DIFF_LINE_THRESHOLD) return []
-    return parseUnifiedDiffRows(diffToUse)
-  }, [diffToUse, diffFiles, oldValue, newValue])
-
-  const shouldVirtualizeFullscreen =
-    virtualizedDiffRows.length > 0 && !(oldValue !== undefined || newValue !== undefined)
-
-  useEffect(() => {
-    setSelectedFileId((current) => {
-      if (current && diffFiles.some((file) => file.id === current)) {
-        return current
-      }
-      return diffFiles[0]?.id ?? null
-    })
-  }, [diffFiles])
-
   const selectedFile = diffFiles.find((file) => file.id === selectedFileId) ?? diffFiles[0]
   const totalAddedLines = diffFiles.reduce((sum, file) => sum + file.addedLines, 0)
   const totalRemovedLines = diffFiles.reduce((sum, file) => sum + file.removedLines, 0)
@@ -281,11 +306,26 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
   const newContent = selectedFile?.newContent ?? ""
   const totalLines = selectedFile?.totalLines ?? 0
 
+  const isDirectDiff = oldValue !== undefined || newValue !== undefined
+  const shouldVirtualizeFullscreen =
+    isFullscreen && !isDirectDiff && totalLines > VIRTUALIZED_DIFF_LINE_THRESHOLD
+
+  // Keep the O(1) DOM behavior for large diffs, but derive rows from the same two
+  // text sides used by the preview. Defer the line diff until fullscreen is opened.
+  const virtualizedDiffRows = useMemo<DiffRow[]>(() => {
+    if (!shouldVirtualizeFullscreen || !selectedFile) return []
+    return buildLineDiffRows(
+      selectedFile.oldContent,
+      selectedFile.newContent,
+      selectedFile.displayPath
+    )
+  }, [selectedFile, shouldVirtualizeFullscreen])
+
   const sourceOldContent = oldValue ?? oldContent
   const sourceNewContent = newValue ?? newContent
 
   const isLargeDiff = totalLines > 100
-  const maxPreviewLines = 20
+  const maxPreviewLines = 30
 
   const getPreviewContent = (content: string, maxLines: number) => {
     const lines = content.split("\n")
@@ -330,10 +370,14 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
               title={file.displayPath}
             >
               <span className="truncate font-mono">{file.displayPath}</span>
-              {file.isNewFile && <span className="rounded bg-green-100 px-1 text-green-700">new</span>}
-              {file.isDeletedFile && <span className="rounded bg-red-100 px-1 text-red-700">del</span>}
-              {file.addedLines > 0 && <span className="text-green-700">+{file.addedLines}</span>}
-              {file.removedLines > 0 && <span className="text-red-700">-{file.removedLines}</span>}
+              {file.isNewFile && <span className="rounded bg-status-nominal/10 px-1 text-status-nominal">new</span>}
+              {file.isDeletedFile && <span className="rounded bg-status-critical/10 px-1 text-status-critical">del</span>}
+              {file.addedLines > 0 && (
+                <span className="text-status-nominal-foreground">+{file.addedLines}</span>
+              )}
+              {file.removedLines > 0 && (
+                <span className="text-status-critical-foreground">-{file.removedLines}</span>
+              )}
             </button>
           )
         })}
@@ -399,7 +443,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
               }
             : undefined
         }
-        useDarkTheme={false}
+        useDarkTheme={isDarkTheme}
         loadingElement={() => (
           <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
             <div className="size-3 rounded-full bg-primary/40 animate-pulse" />
@@ -410,42 +454,23 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
         compareMethod={viewerUsesPreview ? DiffMethod.LINES : DiffMethod.WORDS}
         styles={{
           variables: {
-            light: {
-              diffViewerBackground: "#ffffff",
-              diffViewerColor: "#292524",
-              addedBackground: "#dcfce7",
-              addedColor: "#166534",
-              removedBackground: "#fee2e2",
-              removedColor: "#991b1b",
-              wordAddedBackground: "#bbf7d0",
-              wordRemovedBackground: "#fecaca",
-              addedGutterBackground: "#bbf7d0",
-              removedGutterBackground: "#fecaca",
-              gutterBackground: "#FAF9F6",
-              gutterBackgroundDark: "#F0EEE9",
-              highlightBackground: "#fef9c3",
-              highlightGutterBackground: "#fef08a",
-              codeFoldGutterBackground: "#F5F3EF",
-              codeFoldBackground: "#F5F3EF",
-              emptyLineBackground: "#F5F3EF",
-              gutterColor: "#A8A29E",
-              addedGutterColor: "#16a34a",
-              removedGutterColor: "#dc2626",
-              codeFoldContentColor: "#A8A29E",
-              diffViewerTitleBackground: "#F0EEE9",
-              diffViewerTitleColor: "#44403C",
-              diffViewerTitleBorderColor: "#EEECE7"
-            }
+            light: DIFF_VIEWER_THEME_VARIABLES,
+            dark: DIFF_VIEWER_THEME_VARIABLES
           },
           diffContainer: {
             width: "100%",
             minWidth: "100%",
             maxWidth: "100%",
-            maxHeight: fullscreen ? "100%" : "22rem",
-            minHeight: fullscreen ? "100%" : "80px",
+            ...(!fullscreen && {
+              "col:first-of-type": {
+                width: "2rem"
+              }
+            }),
+            maxHeight: fullscreen ? "100%" : undefined,
+            minHeight: fullscreen ? "100%" : "0",
             overflow: "auto",
             overflowX: "hidden",
-            height: fullscreen ? "100%" : undefined,
+            height: "100%",
             borderRadius: "0",
             pre: {
               width: "100%",
@@ -467,8 +492,9 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
             // fontSize: "0.75rem",
           },
           gutter: {
-            minWidth: "2.5rem",
-            padding: "0 0.5rem"
+            width: "2rem",
+            minWidth: "2rem",
+            padding: "0 0.25rem"
           }
         }}
       />
@@ -476,7 +502,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
   }
 
   return (
-    <>
+    <div className="flex h-full min-h-0 w-full flex-col">
       {/* Header toolbar */}
       <div className="flex items-center justify-between gap-2 px-3 py-2 bg-muted/60 border-b border-border">
         {/* Left: icon + title + stats */}
@@ -535,7 +561,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
           <button
             type="button"
             onClick={() => setIsFullscreen(true)}
-            className="inline-flex items-center gap-1 rounded border border-amber-300/80 bg-background px-2 py-1 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-100/60 dark:border-amber-700 dark:text-amber-200 dark:hover:bg-amber-900/50"
+            className="w-[90px] inline-flex items-center gap-1 rounded border border-amber-300/80 bg-background px-2 py-1 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-100/60 dark:border-amber-700 dark:text-amber-200 dark:hover:bg-amber-900/50"
           >
             <Eye className="size-3" />
             查看全部
@@ -545,10 +571,11 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
 
       {/* Diff content */}
       <div
-        className="relative font-mono bg-white overflow-auto w-full"
-        style={{ maxHeight: "22rem", minHeight: "5rem" }}
+        className="relative flex min-h-0 w-full flex-1 flex-col overflow-hidden bg-background-elevated font-mono"
       >
-        {makeDiffViewer(false)}
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+          {makeDiffViewer(false)}
+        </div>
       </div>
 
       {/* Fullscreen modal */}
@@ -608,13 +635,13 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
 
           {/* Modal content */}
           <div className="flex-1 overflow-hidden p-4">
-            <div className="h-full rounded-md border border-border overflow-auto bg-white font-mono text-xs">
+            <div className="h-full overflow-auto rounded-md border border-border bg-background-elevated font-mono text-xs">
               {makeDiffViewer(true)}
             </div>
           </div>
         </div>
       )}
-    </>
+    </div>
   )
 })
 

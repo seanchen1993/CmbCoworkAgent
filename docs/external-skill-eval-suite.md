@@ -18,7 +18,7 @@ Example external suite location:
 
 ## Stable Runtime Outputs
 
-By default, traces are written under:
+By default, encrypted trace envelopes are written under:
 
 ```text
 ~/.cmbcoworkagent/traces/<threadId>/<traceId>.jsonl
@@ -36,6 +36,19 @@ Both roots can be redirected by environment variables when a suite launches the 
 CMB_COWORK_AGENT_HOME=/tmp/cmb-skill-eval/agent-home
 CMB_COWORK_TRACES_DIR=/tmp/cmb-skill-eval/traces
 ```
+
+Production trace files are encrypted at rest and must be read through the app's trace APIs. An
+external regression suite that must parse JSONL directly can explicitly opt into plaintext only
+for an isolated directory containing synthetic, non-sensitive fixtures:
+
+```bash
+CMB_COWORK_AGENT_HOME=/tmp/cmb-skill-eval/agent-home
+CMB_COWORK_TRACES_DIR=/tmp/cmb-skill-eval/traces
+CMB_COWORK_TRACE_STORAGE_MODE=plaintext
+```
+
+Never use `plaintext` for real user conversations, production workspaces, credentials, source
+code, or other internal data. See [Trace local storage security](trace-local-storage-security.md).
 
 External suites should always use an isolated `CMB_COWORK_AGENT_HOME`. `recordSkillEvalForTrace` runs for every completed trace, so using the default home will write suite results into the developer's normal product data and pollute the in-app Skill 评估 page.
 
@@ -67,6 +80,7 @@ The app only reads these environment variables for trace and skill-eval storage:
 ```bash
 CMB_COWORK_AGENT_HOME=/tmp/cmb-skill-eval/agent-home
 CMB_COWORK_TRACES_DIR=/tmp/cmb-skill-eval/traces
+CMB_COWORK_TRACE_STORAGE_MODE=plaintext
 ```
 
 An external suite can define its own runner contract for prompts, case IDs, and workspaces. These `SKILL_EVAL_*` variables are suggested suite/provider conventions only; the app does not read them:

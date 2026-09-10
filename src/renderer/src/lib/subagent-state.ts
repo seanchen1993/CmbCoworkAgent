@@ -10,6 +10,35 @@ export function isTerminalSubagentStatus(status?: Subagent["status"]): boolean {
   return !!status && TERMINAL_SUBAGENT_STATUSES.has(status)
 }
 
+function subagentDisplayTimestamp(subagent: Subagent): number {
+  const value = subagent.completedAt ?? subagent.startedAt
+  if (!value) return Number.NEGATIVE_INFINITY
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY
+}
+
+/** Surface active work first, then show terminal history from newest to oldest. */
+export function orderSubagentsForDisplay(subagents: readonly Subagent[]): Subagent[] {
+  const running: Subagent[] = []
+  const pending: Subagent[] = []
+  const terminal: Array<{ subagent: Subagent; originalIndex: number }> = []
+  subagents.forEach((subagent, originalIndex) => {
+    if (subagent.status === "running") running.push(subagent)
+    else if (subagent.status === "pending") pending.push(subagent)
+    else terminal.push({ subagent, originalIndex })
+  })
+  terminal.sort((left, right) => {
+    const leftTimestamp = subagentDisplayTimestamp(left.subagent)
+    const rightTimestamp = subagentDisplayTimestamp(right.subagent)
+    if (leftTimestamp !== rightTimestamp) return rightTimestamp - leftTimestamp
+    const leftSpawnIndex = left.subagent.spawnIndex ?? Number.NEGATIVE_INFINITY
+    const rightSpawnIndex = right.subagent.spawnIndex ?? Number.NEGATIVE_INFINITY
+    if (leftSpawnIndex !== rightSpawnIndex) return rightSpawnIndex - leftSpawnIndex
+    return right.originalIndex - left.originalIndex
+  })
+  return [...running, ...pending, ...terminal.map(({ subagent }) => subagent)]
+}
+
 export function resolveIncomingSubagentStatus(input: {
   incomingStatus?: string
   existingStatus?: Subagent["status"]

@@ -60,6 +60,7 @@ export interface CheckpointAuthorityTranscriptMessage {
   provider_occurrence?: number
   role?: string
   content?: unknown
+  reasoning?: string
   tool_calls?: unknown[]
   tool_call_id?: string
   name?: string
@@ -71,6 +72,16 @@ export interface CheckpointAuthorityTranscriptMessage {
   start_at?: unknown
   end_at?: unknown
 }
+
+/**
+ * Prefix of the recovery prompt the turn-completion gate injects when the model
+ * ends a turn on an invalid final message (empty reply, truncated stream, a
+ * tool call the provider never structured). It is runtime scaffolding, not a
+ * user message: it must never render as a chat bubble, never be persisted as
+ * conversation, and never count as "the thread has user content".
+ * See src/main/agent/turn-completion-integrity.ts.
+ */
+export const TURN_COMPLETION_GATE_MARKER_PREFIX = "[[CMB_TURN_COMPLETION_GATE_V1:"
 
 export const WORKFLOW_NOTIFICATION_MARKER_PREFIX = "[[CMB_WORKFLOW_NOTIFICATION_V1:"
 /** Renderer-submitted trigger; the main process expands it into the real notification. */
@@ -233,8 +244,10 @@ export function mergeCheckpointAuthorityTranscriptMessage<
   if (base.role && incoming.role && base.role !== incoming.role) return base
 
   const checkpointClearsToolCallContent = isCheckpointEmptyAssistantToolCallMessage(base)
+  const reasoning = base.reasoning || incoming.reasoning
   return {
     ...base,
+    ...(reasoning ? { reasoning } : {}),
     content: checkpointClearsToolCallContent
       ? base.content
       : mergeCheckpointAuthorityContent(base.content, incoming.content),
@@ -597,20 +610,51 @@ function isGoalTranscriptArtifact(role: string, content: unknown): boolean {
   )
 }
 
+/**
+ * Runtime plumbing prompts: HumanMessages the runtime itself writes into the
+ * graph so the loop can continue, which no layer may treat as conversation.
+ * Keeps the historical name because main/renderer/db/projection all filter on
+ * this one predicate; the set it covers is workflow notification turns AND
+ * turn-completion-gate recovery prompts.
+ */
 export function isWorkflowPlumbingTranscriptContent(content: unknown): boolean {
   if (typeof content !== "string") return false
   const text = content.trimStart()
   return (
     text === WORKFLOW_NOTIFICATION_TURN_PROMPT ||
-    text.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
+    text.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX) ||
+    text.startsWith(TURN_COMPLETION_GATE_MARKER_PREFIX)
   )
 }
 
-function isVisibleTranscriptMessage(role: string, content: unknown): boolean {
+/**
+ * Shared definition of a user-visible conversation row. Keep durable-message,
+ * checkpoint and renderer guards on this one predicate so internal goal and
+ * workflow plumbing cannot accidentally lock an otherwise empty task.
+ */
+export function isVisibleTranscriptMessage(role: string, content: unknown): boolean {
   return (
     !isInternalGoalPrompt(role, content) &&
     !isGoalTranscriptArtifact(role, content) &&
     !isWorkflowPlumbingTranscriptContent(content)
+  )
+}
+
+/**
+ * A starting goal prompt is internal transport, but the renderer restores it
+ * as a visible `/goal <objective>` bubble when the sidecar event has not been
+ * persisted yet. Mutation guards therefore count it as conversation state
+ * while display filtering continues to hide the raw prompt itself.
+ */
+export function isRestorableConversationTranscriptMessage(
+  role: string,
+  content: unknown
+): boolean {
+  if (isVisibleTranscriptMessage(role, content)) return true
+  return (
+    isInternalGoalPrompt(role, content) &&
+    typeof content === "string" &&
+    content.trimStart().startsWith("[Starting active goal]")
   )
 }
 

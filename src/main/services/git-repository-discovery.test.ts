@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -58,6 +58,22 @@ describe("discoverWorkspaceGitRepositories", () => {
     expect(repositories.every((repo) => repo.isWorkspaceRoot === false)).toBe(true)
   })
 
+  it("discovers both a main checkout and its linked worktree below a non-Git parent", async () => {
+    const workspace = createWorkspace()
+    const mainRepo = join(workspace, "main")
+    const linkedWorktree = join(workspace, "linked")
+    initRepo(mainRepo)
+    gitIn(mainRepo, ["worktree", "add", "-q", "-b", "linked-test", linkedWorktree])
+
+    const repositories = await discoverWorkspaceGitRepositories(workspace)
+
+    expect(repositories.map((repo) => repo.displayPath)).toEqual(["linked", "main"])
+    expect(repositories.map((repo) => repo.repoPath)).toEqual([
+      realpathSync(linkedWorktree),
+      realpathSync(mainRepo)
+    ])
+  })
+
   it("keeps the existing single-repo behavior when the workspace itself is a Git repo", async () => {
     const workspace = createWorkspace()
     initRepo(workspace)
@@ -110,4 +126,54 @@ describe("discoverWorkspaceGitRepositories", () => {
       gitRoot: repoB
     })
   })
+
+  it("rejects a workspace child symlink that escapes to an external repository", async () => {
+    const workspace = createWorkspace()
+    const externalRepo = createWorkspace()
+    const linkPath = join(workspace, "outside-repo")
+    initRepo(externalRepo)
+    symlinkSync(externalRepo, linkPath, process.platform === "win32" ? "junction" : "dir")
+
+    await expect(resolveGitOperationPath(workspace, linkPath)).resolves.toEqual({
+      error: "目标 Git 路径解析后不在当前工作区内"
+    })
+  })
+
+  it("supports a workspace whose root itself is a symlink or junction", async () => {
+    const container = createWorkspace()
+    const realRepo = join(container, "real-repo")
+    const linkedWorkspace = join(container, "linked-workspace")
+    initRepo(realRepo)
+    symlinkSync(realRepo, linkedWorkspace, process.platform === "win32" ? "junction" : "dir")
+
+    await expect(resolveGitOperationPath(linkedWorkspace)).resolves.toEqual({
+      worktreePath: realpathSync(realRepo),
+      gitRoot: realpathSync(realRepo)
+    })
+  })
+
+  it("does not confuse a dot-prefixed child with parent traversal", async () => {
+    const workspace = createWorkspace()
+    const repoPath = join(workspace, "..repo")
+    initRepo(repoPath)
+
+    await expect(resolveGitOperationPath(workspace, repoPath)).resolves.toMatchObject({
+      worktreePath: realpathSync(repoPath)
+    })
+  })
+
+  it.skipIf(process.platform === "win32")(
+    "preserves trailing spaces in a requested repository path",
+    async () => {
+      const workspace = createWorkspace()
+      const spacedRepo = join(workspace, "repo ")
+      const plainRepo = join(workspace, "repo")
+      initRepo(spacedRepo)
+      initRepo(plainRepo)
+
+      await expect(resolveGitOperationPath(workspace, spacedRepo)).resolves.toMatchObject({
+        worktreePath: realpathSync(spacedRepo)
+      })
+    }
+  )
 })

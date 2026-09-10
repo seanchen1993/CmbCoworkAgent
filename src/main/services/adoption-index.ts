@@ -19,7 +19,19 @@
  */
 
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "fs"
 import { dirname, join } from "path"
 import { getOpenworkDir } from "../storage"
 import { TRACE_OBSERVABILITY_SCHEMA_VERSION } from "../agent/trace/types"
@@ -39,22 +51,268 @@ function getAdoptionIndexPath(): string {
 let db: SqlJsDatabase | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let dirty = false
+let primarySnapshotIdentity: SnapshotIdentity | null = null
+let primaryNeedsFsync = false
+let durabilityRepairPending = false
+let saveRetryAttempt = 0
+let lastSaveFailureLogAt = 0
+const SQLITE_FILE_HEADER = Buffer.from("SQLite format 3\0", "utf8")
+const SAVE_DEBOUNCE_MS = 500
+const SAVE_RETRY_INITIAL_MS = 1_000
+const SAVE_RETRY_MAX_MS = 30_000
+const SAVE_FAILURE_LOG_INTERVAL_MS = 30_000
+
+interface SnapshotIdentity {
+  dev: number
+  ino: number
+  size: number
+  mtimeMs: number
+  ctimeMs: number
+}
+
+interface AdoptionSnapshotPaths {
+  primary: string
+  primaryTemp: string
+}
+
+type SnapshotReplace = (source: string, destination: string) => void
+type SnapshotFsync = (fileDescriptor: number) => void
+let snapshotReplaceForTest: SnapshotReplace | null = null
+let snapshotFsyncForTest: SnapshotFsync | null = null
+
+function getAdoptionSnapshotPaths(): AdoptionSnapshotPaths {
+  const primary = getAdoptionIndexPath()
+  return {
+    primary,
+    primaryTemp: `${primary}.tmp`
+  }
+}
+
+function cleanupAdoptionSnapshotTemps(paths = getAdoptionSnapshotPaths()): void {
+  try {
+    rmSync(paths.primaryTemp, { force: true })
+  } catch {
+    // A stale temp is harmless; the next atomic write will retry cleanup.
+  }
+}
+
+function snapshotIdentity(path: string): SnapshotIdentity {
+  const stats = statSync(path)
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    ctimeMs: stats.ctimeMs
+  }
+}
+
+function snapshotIdentityFromDescriptor(fileDescriptor: number): SnapshotIdentity {
+  const stats = fstatSync(fileDescriptor)
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    ctimeMs: stats.ctimeMs
+  }
+}
+
+function sameSnapshotIdentity(left: SnapshotIdentity, right: SnapshotIdentity): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  )
+}
+
+function fsyncFileBestEffort(fileDescriptor: number): void {
+  try {
+    const fsyncSnapshot = snapshotFsyncForTest ?? fsyncSync
+    fsyncSnapshot(fileDescriptor)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code
+    if (code !== "EINVAL" && code !== "ENOSYS" && code !== "ENOTSUP") throw error
+  }
+}
+
+function fsyncDirectoryBestEffort(directory: string): void {
+  let directoryDescriptor: number | undefined
+  try {
+    directoryDescriptor = openSync(directory, "r")
+    fsyncFileBestEffort(directoryDescriptor)
+  } catch {
+    // Windows does not allow opening directories this way. The file itself was
+    // fsynced before rename, so directory syncing is an optional durability step.
+  } finally {
+    if (directoryDescriptor !== undefined) {
+      try {
+        closeSync(directoryDescriptor)
+      } catch {
+        // Best effort only.
+      }
+    }
+  }
+}
+
+function replaceSnapshotAtomically(
+  destination: string,
+  tempPath: string,
+  snapshot: Uint8Array,
+  durable: boolean
+): void {
+  const directory = dirname(destination)
+  if (!existsSync(directory)) mkdirSync(directory, { recursive: true })
+  rmSync(tempPath, { force: true })
+
+  let fileDescriptor: number | undefined
+  try {
+    fileDescriptor = openSync(tempPath, "w", 0o600)
+    writeFileSync(fileDescriptor, snapshot)
+    if (durable) fsyncFileBestEffort(fileDescriptor)
+    closeSync(fileDescriptor)
+    fileDescriptor = undefined
+    const replaceSnapshot = snapshotReplaceForTest ?? renameSync
+    replaceSnapshot(tempPath, destination)
+    primarySnapshotIdentity = snapshotIdentity(destination)
+    primaryNeedsFsync = !durable
+    if (durable) fsyncDirectoryBestEffort(directory)
+  } finally {
+    if (fileDescriptor !== undefined) {
+      try {
+        closeSync(fileDescriptor)
+      } catch {
+        // Preserve the original write error.
+      }
+    }
+    try {
+      rmSync(tempPath, { force: true })
+    } catch {
+      // Best-effort cleanup after a failed replacement.
+    }
+  }
+}
+
+function persistAdoptionSnapshot(snapshot: Uint8Array, durable: boolean): void {
+  const paths = getAdoptionSnapshotPaths()
+  replaceSnapshotAtomically(paths.primary, paths.primaryTemp, snapshot, durable)
+}
+
+function persistDirtyAdoptionIndex(durable: boolean): void {
+  if (!db || !dirty) return
+  const snapshot = db.export()
+  persistAdoptionSnapshot(snapshot, durable)
+  dirty = false
+}
+
+function isCurrentPrimarySnapshot(path: string): boolean {
+  if (!primarySnapshotIdentity) return false
+  try {
+    return sameSnapshotIdentity(snapshotIdentity(path), primarySnapshotIdentity)
+  } catch {
+    return false
+  }
+}
+
+function fsyncCurrentPrimarySnapshot(path: string): boolean {
+  if (!primarySnapshotIdentity) return false
+  let fileDescriptor: number | undefined
+  try {
+    // FlushFileBuffers requires a writable descriptor on Windows.
+    fileDescriptor = openSync(path, "r+")
+    if (!sameSnapshotIdentity(snapshotIdentityFromDescriptor(fileDescriptor), primarySnapshotIdentity)) {
+      return false
+    }
+    fsyncFileBestEffort(fileDescriptor)
+    if (!isCurrentPrimarySnapshot(path)) return false
+    primaryNeedsFsync = false
+    fsyncDirectoryBestEffort(dirname(path))
+    return true
+  } catch {
+    return false
+  } finally {
+    if (fileDescriptor !== undefined) {
+      try {
+        closeSync(fileDescriptor)
+      } catch {
+        // The durability decision was already made from fsync and identity checks.
+      }
+    }
+  }
+}
+
+function ensureDurablePrimarySnapshot(): void {
+  if (!db) return
+  const primary = getAdoptionSnapshotPaths().primary
+  if (!isCurrentPrimarySnapshot(primary)) {
+    persistAdoptionSnapshot(db.export(), true)
+    dirty = false
+    return
+  }
+  if (primaryNeedsFsync && !fsyncCurrentPrimarySnapshot(primary)) {
+    persistAdoptionSnapshot(db.export(), true)
+    dirty = false
+  }
+}
+
+/** Test-only failure injection for the final atomic replace operation. */
+export function setAdoptionIndexSnapshotReplaceForTest(replace: SnapshotReplace | null): void {
+  if (process.env.NODE_ENV !== "test") return
+  snapshotReplaceForTest = replace
+}
+
+/** Test-only durability probe for distinguishing debounced and explicit saves. */
+export function setAdoptionIndexSnapshotFsyncForTest(fsync: SnapshotFsync | null): void {
+  if (process.env.NODE_ENV !== "test") return
+  snapshotFsyncForTest = fsync
+}
+
+function saveRetryDelay(attempt: number): number {
+  return Math.min(SAVE_RETRY_INITIAL_MS * 2 ** Math.max(0, attempt - 1), SAVE_RETRY_MAX_MS)
+}
+
+function warnSaveFailure(message: string, error: unknown): void {
+  const now = Date.now()
+  if (lastSaveFailureLogAt !== 0 && now - lastSaveFailureLogAt < SAVE_FAILURE_LOG_INTERVAL_MS) return
+  lastSaveFailureLogAt = now
+  console.warn(message, error)
+}
+
+function armSaveTimer(delay: number): void {
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    if (!db || (!dirty && !durabilityRepairPending)) return
+    try {
+      if (durabilityRepairPending) {
+        if (dirty) persistDirtyAdoptionIndex(true)
+        else persistAdoptionSnapshot(db.export(), true)
+        ensureDurablePrimarySnapshot()
+        durabilityRepairPending = false
+      } else {
+        persistDirtyAdoptionIndex(false)
+      }
+      saveRetryAttempt = 0
+      lastSaveFailureLogAt = 0
+    } catch (error) {
+      saveRetryAttempt = Math.min(saveRetryAttempt + 1, 16)
+      warnSaveFailure("[AdoptionIndex] save failed; retry scheduled:", error)
+      armSaveTimer(saveRetryDelay(saveRetryAttempt))
+    }
+  }, delay)
+  if (typeof saveTimer.unref === "function") saveTimer.unref()
+}
 
 function scheduleSave(): void {
   if (!db) return
   dirty = true
+  if (saveRetryAttempt > 0) {
+    if (!saveTimer) armSaveTimer(saveRetryDelay(saveRetryAttempt))
+    return
+  }
   if (saveTimer) clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    if (db && dirty) {
-      try {
-        const data = db.export()
-        writeFileSync(getAdoptionIndexPath(), Buffer.from(data))
-        dirty = false
-      } catch (e) {
-        console.warn("[AdoptionIndex] save failed:", e)
-      }
-    }
-  }, 500)
+  armSaveTimer(SAVE_DEBOUNCE_MS)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -116,6 +374,15 @@ export interface GenIndexRow {
   workflow_agent_index: number | null
   workflow_phase: string | null
   workflow_agent_label: string | null
+  /**
+   * Added-line share of this generation, `generated / (generated + deleted)`.
+   * Persisted raw (not just the derived label) so the bucketing threshold can
+   * be re-tuned later without re-collecting. Null on rows written before the
+   * column existed, and on generations that touched no lines.
+   */
+  new_ratio: number | null
+  /** "new" | "legacy", derived from `new_ratio`. Null on pre-migration rows. */
+  change_kind: string | null
 }
 
 export interface AdoptLineDetailsRow {
@@ -176,6 +443,13 @@ export interface EventOutboxRow {
   delivered_at: number | null
 }
 
+export interface MarkOutboxFailureOptions {
+  /** Increment attempts for a report that actually reached the reporter. */
+  consumeAttempt?: boolean
+  /** Ignore stale completions unless this process still owns the sending claim. */
+  requireSending?: boolean
+}
+
 export type CommitJobStatus = "pending" | "processing" | "completed"
 
 export interface CommitJobInput {
@@ -220,19 +494,54 @@ export interface AdoptionMeasurementCommitResult {
 // Lifecycle
 // ─────────────────────────────────────────────────────────
 
-export async function initializeAdoptionIndex(): Promise<void> {
-  if (db) return
+function openValidatedAdoptionSnapshot(
+  SQL: Awaited<ReturnType<typeof initSqlJs>>,
+  path: string
+): SqlJsDatabase {
+  const snapshot = readFileSync(path)
+  if (
+    snapshot.length < SQLITE_FILE_HEADER.length ||
+    !snapshot.subarray(0, SQLITE_FILE_HEADER.length).equals(SQLITE_FILE_HEADER)
+  ) {
+    throw new Error(`invalid SQLite header: ${path}`)
+  }
 
-  const dbPath = getAdoptionIndexPath()
+  const candidate = new SQL.Database(snapshot)
+  // Atomic replacement prevents partial snapshots in normal operation. Avoid a
+  // startup PRAGMA quick_check here: it scans the whole database on the Electron
+  // main thread, while schema reads below already fail closed for malformed files.
+  return candidate
+}
+
+export async function initializeAdoptionIndex(): Promise<boolean> {
+  if (db) return true
+
+  const paths = getAdoptionSnapshotPaths()
+  const dbPath = paths.primary
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  dirty = false
+  primarySnapshotIdentity = null
+  primaryNeedsFsync = false
+  durabilityRepairPending = false
+  saveRetryAttempt = 0
+  lastSaveFailureLogAt = 0
+  const directory = dirname(dbPath)
+  if (!existsSync(directory)) mkdirSync(directory, { recursive: true })
+  cleanupAdoptionSnapshotTemps(paths)
+
   try {
     const SQL = await initSqlJs()
+    const primaryExists = existsSync(paths.primary)
 
-    if (existsSync(dbPath)) {
-      const buffer = readFileSync(dbPath)
-      db = new SQL.Database(buffer)
-    } else {
-      const dir = dirname(dbPath)
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    if (primaryExists) {
+      db = openValidatedAdoptionSnapshot(SQL, paths.primary)
+      primarySnapshotIdentity = snapshotIdentity(paths.primary)
+    }
+
+    if (!db) {
       db = new SQL.Database()
     }
 
@@ -283,7 +592,9 @@ export async function initializeAdoptionIndex(): Promise<void> {
         workflow_run_id TEXT,
         workflow_agent_index INTEGER,
         workflow_phase TEXT,
-        workflow_agent_label TEXT
+        workflow_agent_label TEXT,
+        new_ratio REAL,
+        change_kind TEXT
       )
     `)
 
@@ -340,7 +651,9 @@ export async function initializeAdoptionIndex(): Promise<void> {
       "workflow_run_id TEXT",
       "workflow_agent_index INTEGER",
       "workflow_phase TEXT",
-      "workflow_agent_label TEXT"
+      "workflow_agent_label TEXT",
+      "new_ratio REAL",
+      "change_kind TEXT"
     ]) {
       try {
         db.run(`ALTER TABLE gen_events ADD COLUMN ${col}`)
@@ -427,37 +740,78 @@ export async function initializeAdoptionIndex(): Promise<void> {
 
     scheduleSave()
     console.log("[AdoptionIndex] initialized at", dbPath)
+    return true
   } catch (e) {
     console.warn("[AdoptionIndex] init failed (tracker will degrade gracefully):", e)
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
+    try {
+      db?.close()
+    } catch {
+      // Best effort after a partially initialized sql.js database.
+    }
     db = null
+    dirty = false
+    primarySnapshotIdentity = null
+    primaryNeedsFsync = false
+    durabilityRepairPending = false
+    saveRetryAttempt = 0
+    lastSaveFailureLogAt = 0
+    cleanupAdoptionSnapshotTemps(paths)
+    return false
   }
 }
 
-export function flushAdoptionIndex(): boolean {
+function flushAdoptionIndexInternal(retryOnFailure: boolean): boolean {
   if (saveTimer) {
     clearTimeout(saveTimer)
     saveTimer = null
   }
-  if (db && dirty) {
+  if (db) {
     try {
-      const data = db.export()
-      writeFileSync(getAdoptionIndexPath(), Buffer.from(data))
-      dirty = false
+      if (dirty) persistDirtyAdoptionIndex(true)
+      ensureDurablePrimarySnapshot()
+      durabilityRepairPending = false
+      saveRetryAttempt = 0
+      lastSaveFailureLogAt = 0
       return true
     } catch (e) {
-      console.warn("[AdoptionIndex] flush failed:", e)
+      warnSaveFailure("[AdoptionIndex] flush failed:", e)
+      durabilityRepairPending = true
+      if (retryOnFailure && !saveTimer) {
+        saveRetryAttempt = Math.min(saveRetryAttempt + 1, 16)
+        armSaveTimer(saveRetryDelay(saveRetryAttempt))
+      }
       return false
     }
   }
   return db !== null
 }
 
-export function closeAdoptionIndex(): void {
-  flushAdoptionIndex()
+export function flushAdoptionIndex(): boolean {
+  return flushAdoptionIndexInternal(true)
+}
+
+export function closeAdoptionIndex(): boolean {
+  const hadDatabase = db !== null
+  const flushed = flushAdoptionIndexInternal(false)
+  if (hadDatabase && !flushed) {
+    console.warn("[AdoptionIndex] closing without a verified durable primary snapshot")
+  }
   if (db) {
     db.close()
     db = null
   }
+  dirty = false
+  primarySnapshotIdentity = null
+  primaryNeedsFsync = false
+  durabilityRepairPending = false
+  saveRetryAttempt = 0
+  lastSaveFailureLogAt = 0
+  cleanupAdoptionSnapshotTemps()
+  return !hadDatabase || flushed
 }
 
 // ─────────────────────────────────────────────────────────
@@ -484,8 +838,9 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
         subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
         coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
-        workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+        new_ratio, change_kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -532,7 +887,9 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         row.workflow_run_id,
         row.workflow_agent_index,
         row.workflow_phase,
-        row.workflow_agent_label
+        row.workflow_agent_label,
+        row.new_ratio ?? null,
+        row.change_kind ?? null
       ]
     )
     scheduleSave()
@@ -573,6 +930,7 @@ export function findPendingGensForFile(
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
             coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
             workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+            new_ratio, change_kind,
             tool
        FROM gen_events
       WHERE file_path = ? AND measured = 0 AND created_at >= ?${hasMax ? " AND created_at <= ?" : ""}
@@ -609,6 +967,7 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
             coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
             workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+            new_ratio, change_kind,
             tool
        FROM gen_events
       WHERE event_id = ?`
@@ -1014,7 +1373,7 @@ export function markOutboxSending(eventId: string): boolean {
     const now = Date.now()
     db.run(
       `UPDATE event_outbox
-          SET status = 'sending', attempts = attempts + 1, updated_at = ?
+          SET status = 'sending', updated_at = ?
         WHERE event_id = ? AND status IN ('pending', 'retry')`,
       [now, eventId]
     )
@@ -1046,19 +1405,23 @@ export function getAdoptLineDetails(
   }
 }
 
-export function markOutboxDelivered(eventId: string): void {
-  if (!db) return
+export function markOutboxDelivered(eventId: string): boolean {
+  if (!db) return false
   try {
     const now = Date.now()
     db.run(
       `UPDATE event_outbox
-          SET status = 'delivered', delivered_at = ?, updated_at = ?, last_error = NULL
-        WHERE event_id = ?`,
+          SET status = 'delivered', attempts = attempts + 1,
+              delivered_at = ?, updated_at = ?, last_error = NULL
+        WHERE event_id = ? AND status = 'sending'`,
       [now, now, eventId]
     )
-    scheduleSave()
+    const changed = db.getRowsModified() > 0
+    if (changed) scheduleSave()
+    return changed
   } catch (e) {
     console.warn("[AdoptionIndex] markOutboxDelivered failed:", e)
+    return false
   }
 }
 
@@ -1066,20 +1429,59 @@ export function markOutboxFailed(
   eventId: string,
   error: string,
   nextAttemptAt: number,
-  permanent: boolean
-): void {
-  if (!db) return
+  permanent: boolean,
+  options: MarkOutboxFailureOptions = {}
+): boolean {
+  if (!db) return false
+  try {
+    const now = Date.now()
+    const consumeAttempt = options.consumeAttempt === true ? 1 : 0
+    const sendingGuard = options.requireSending === true ? " AND status = 'sending'" : ""
+    db.run(
+      `UPDATE event_outbox
+          SET status = ?, attempts = attempts + ?, next_attempt_at = ?,
+              last_error = ?, updated_at = ?
+        WHERE event_id = ?${sendingGuard}`,
+      [
+        permanent ? "dead_letter" : "retry",
+        consumeAttempt,
+        nextAttemptAt,
+        error.slice(0, 2000),
+        now,
+        eventId
+      ]
+    )
+    const changed = db.getRowsModified() > 0
+    if (changed) scheduleSave()
+    return changed
+  } catch (e) {
+    console.warn("[AdoptionIndex] markOutboxFailed failed:", e)
+    return false
+  }
+}
+
+/**
+ * Return a claimed row to retry without consuming an upload attempt. This is
+ * reserved for reporter-side admission/backoff decisions where fetch was never
+ * called. Restricting the update to `sending` prevents a stale completion from
+ * rolling back a newer delivery state.
+ */
+export function markOutboxDeferred(eventId: string, error: string, nextAttemptAt: number): boolean {
+  if (!db) return false
   try {
     const now = Date.now()
     db.run(
       `UPDATE event_outbox
-          SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
-        WHERE event_id = ?`,
-      [permanent ? "dead_letter" : "retry", nextAttemptAt, error.slice(0, 2000), now, eventId]
+          SET status = 'retry', next_attempt_at = ?, last_error = ?, updated_at = ?
+        WHERE event_id = ? AND status = 'sending'`,
+      [nextAttemptAt, error.slice(0, 2000), now, eventId]
     )
-    scheduleSave()
+    const changed = db.getRowsModified() > 0
+    if (changed) scheduleSave()
+    return changed
   } catch (e) {
-    console.warn("[AdoptionIndex] markOutboxFailed failed:", e)
+    console.warn("[AdoptionIndex] markOutboxDeferred failed:", e)
+    return false
   }
 }
 

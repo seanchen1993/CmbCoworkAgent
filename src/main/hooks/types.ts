@@ -230,6 +230,12 @@ export interface HookConfig {
 export interface HookResult {
   exitCode: number | null
   stdout: string
+  /**
+   * Original stdout for a successfully parsed structured Hook protocol envelope.
+   * The runner clears `stdout` so control JSON is never injected into tool feedback,
+   * while execution records use this field to keep the hook response observable.
+   */
+  rawStdout?: string
   stderr: string
   blocked: boolean // exit code 2 = intentional block (PreToolUse / UserPromptSubmit)
   /** Structured fields parsed from JSON stdout (exit 0 only) */
@@ -244,7 +250,12 @@ export interface HookResult {
   /** Reason message for halting; shown to user when continue=false. */
   stopReason?: string
   /** PostToolUse only: "block" re-feeds the hook reason to the LLM for retry. */
-  decision?: "block" | "approve"
+  decision?: "block" | "approve" | "human_gate"
+  /** Runtime-derived source of a structured decision; never accepted from Hook stdout. */
+  decisionSource?: {
+    hookId: string
+    pluginId?: string
+  }
   /** Explanation paired with decision="block" — forwarded to the agent. */
   reason?: string
   /**

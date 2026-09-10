@@ -165,6 +165,7 @@ export function ProductivityPanel({
               <Tooltip
                 contentStyle={{
                   backgroundColor: "var(--color-card)",
+                  color: "var(--color-foreground)",
                   border: "1px solid var(--color-border)",
                   borderRadius: 8,
                   fontSize: 12

@@ -10,7 +10,11 @@
  */
 
 import { ElectronIPCTransport } from "../src/renderer/src/lib/electron-transport.ts"
-import { useAppStore, type WorkerFocusView } from "../src/renderer/src/lib/store.ts"
+import {
+  applyWorkerFocusTailUpdateToMergedMessages,
+  useAppStore,
+  type WorkerFocusView
+} from "../src/renderer/src/lib/store.ts"
 import {
   getSubagentTranscriptsFromThreadValues,
   mergeSubagentTranscripts,
@@ -81,7 +85,8 @@ function resetWorkerFocusStore(): void {
   useAppStore.setState({
     workerFocusView: null,
     workerFocusMessagesThreadId: null,
-    workerFocusMessages: []
+    workerFocusMessages: [],
+    workerFocusMessagesContentVersion: 0
   })
 }
 
@@ -94,6 +99,185 @@ function openWorkerFocusViewForTest(
     description: "Inspect worker stream",
     ...view
   })
+}
+
+function testWorkerFocusTailUpdatesDoNotReadHistoricalMessages(): void {
+  const workerThreadId = "thread-123__worker__tail-performance"
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-123",
+    workerId: "tail-performance",
+    workerThreadId
+  })
+
+  try {
+    const baseline = Array.from({ length: 2_000 }, (_, index): Message => ({
+      id: `worker-tail-performance-${index}`,
+      role: "assistant",
+      content: `historical-${index}`,
+      created_at: new Date("2026-01-01T00:00:00.000Z")
+    }))
+    useAppStore.getState().appendWorkerFocusMessages(workerThreadId, baseline)
+    const storedBaseline = useAppStore.getState().workerFocusMessages
+    const baselineVersion = useAppStore.getState().workerFocusMessagesContentVersion
+    const panelBaseline = storedBaseline.slice()
+
+    for (const message of storedBaseline.slice(0, -1)) {
+      const id = message.id
+      Object.defineProperty(message, "id", {
+        configurable: true,
+        enumerable: true,
+        get(): string {
+          throw new Error(`historical worker message was rescanned: ${id}`)
+        }
+      })
+    }
+
+    const previousTail = storedBaseline.at(-1)
+    assert(previousTail, "worker focus performance baseline should have a tail message")
+    Object.defineProperty(storedBaseline, "slice", {
+      configurable: true,
+      value(): never {
+        throw new Error("worker focus tail update copied the complete live array")
+      }
+    })
+
+    let previousLiveTail = previousTail
+    const guardedPanelBaseline = new Proxy(panelBaseline, {
+      get(target, property, receiver) {
+        if (property === "slice") {
+          throw new Error("worker focus panel tail update copied the complete merged array")
+        }
+        return Reflect.get(target, property, receiver)
+      }
+    })
+    let updatedPanelMessages: Message[] | undefined = guardedPanelBaseline
+    for (let frame = 1; frame <= 128; frame += 1) {
+      useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+        {
+          ...previousLiveTail,
+          content: `updated live tail ${frame}`,
+          created_at: new Date()
+        }
+      ])
+      const updatedMessages = useAppStore.getState().workerFocusMessages
+      assert(
+        updatedMessages === storedBaseline,
+        "ordinary worker tail frames must retain the complete live array reference"
+      )
+      updatedPanelMessages = applyWorkerFocusTailUpdateToMergedMessages(
+        updatedPanelMessages ?? guardedPanelBaseline,
+        previousLiveTail,
+        updatedMessages
+      )
+      assert(
+        updatedPanelMessages === guardedPanelBaseline,
+        "ordinary worker tail frames must retain the complete merged array reference"
+      )
+      previousLiveTail = updatedMessages.at(-1)!
+    }
+    const updatedMessages = useAppStore.getState().workerFocusMessages
+
+    assert(updatedMessages.length === 2_000, "tail update must keep the bounded history length")
+    assert(
+      updatedMessages.at(-1)?.content === "updated live tail 128" &&
+        updatedPanelMessages?.at(-1)?.content === "updated live tail 128",
+      "the store and panel tail fast paths must preserve the cumulative live content"
+    )
+    assert(
+      useAppStore.getState().workerFocusMessagesContentVersion === baselineVersion + 128,
+      "each in-place worker tail update must publish an independent content version"
+    )
+    assert(
+      updatedPanelMessages?.[0] === panelBaseline[0],
+      "the panel tail fast path must preserve historical message references"
+    )
+
+    const checkpointEnrichedPanelBaseline = panelBaseline.slice()
+    checkpointEnrichedPanelBaseline[checkpointEnrichedPanelBaseline.length - 1] = {
+      ...previousTail,
+      content: [{ type: "text", text: String(previousTail.content) }]
+    }
+    assert(
+      applyWorkerFocusTailUpdateToMergedMessages(
+        checkpointEnrichedPanelBaseline,
+        previousTail,
+        updatedMessages
+      ) === undefined,
+      "checkpoint-enriched panel tails must fall back to full replay reconciliation"
+    )
+  } finally {
+    resetWorkerFocusStore()
+  }
+}
+
+function testWorkerFocusValuesTailDeltaDoesNotReadHistoricalMessages(): void {
+  const parentThreadId = "thread-123"
+  const workerThreadId = `${parentThreadId}__worker__values-tail-performance`
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: parentThreadId,
+    workerId: "values-tail-performance",
+    workerThreadId
+  })
+
+  try {
+    const transport = new ElectronIPCTransport()
+    const initial = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamValuesEvent([aiMessage({ id: "values-tail", content: "A" })], {
+        valuesSnapshotKind: "full",
+        workerTurn: 1
+      }) as never,
+      parentThreadId
+    )
+    assert(initial.length === 1, "the initial worker values snapshot should seed one message")
+
+    const baseline = Array.from({ length: 1_999 }, (_, index): Message => ({
+      id: `values-tail-history-${index}`,
+      role: "assistant",
+      content: `historical-${index}`,
+      created_at: new Date("2026-01-01T00:00:00.000Z")
+    }))
+    baseline.push(initial[0])
+    useAppStore.getState().appendWorkerFocusMessages(workerThreadId, baseline, {
+      orderedSnapshot: true
+    })
+    const storedBaseline = useAppStore.getState().workerFocusMessages
+    const baselineVersion = useAppStore.getState().workerFocusMessagesContentVersion
+    for (const message of storedBaseline.slice(0, -1)) {
+      const id = message.id
+      Object.defineProperty(message, "id", {
+        configurable: true,
+        enumerable: true,
+        get(): string {
+          throw new Error(`incremental values rescanned worker history: ${id}`)
+        }
+      })
+    }
+
+    const tail = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamValuesEvent([aiMessage({ id: "values-tail", content: "AB" })], {
+        valuesSnapshotKind: "tail",
+        workerTurn: 1
+      }) as never,
+      parentThreadId
+    )
+    assert(tail.length === 1, "a worker values tail frame should stay a one-message delta")
+    useAppStore.getState().appendWorkerFocusMessages(workerThreadId, tail, {
+      orderedSnapshot: false
+    })
+    assert(
+      useAppStore.getState().workerFocusMessages === storedBaseline &&
+        useAppStore.getState().workerFocusMessages.at(-1)?.content === "AB",
+      "the bounded worker values tail must update the trusted store tail"
+    )
+    assert(
+      useAppStore.getState().workerFocusMessagesContentVersion === baselineVersion + 1,
+      "a worker values tail delta must publish the in-place content version"
+    )
+  } finally {
+    resetWorkerFocusStore()
+  }
 }
 
 function aiMessage(input: {
@@ -225,11 +409,18 @@ function streamMessageEvent(message: unknown, metadata: Record<string, unknown> 
   }
 }
 
-function streamValuesEvent(messages: unknown[]): unknown {
+function streamValuesEvent(
+  messages: unknown[],
+  options: {
+    valuesSnapshotKind?: "full" | "append" | "tail"
+    workerTurn?: number
+  } = {}
+): unknown {
   return {
     type: "stream",
     mode: "values",
-    data: { messages }
+    data: { messages },
+    ...options
   }
 }
 
@@ -5082,6 +5273,181 @@ async function testRuntimeAgentModeEventUpdatesCurrentStreamParsing(): Promise<v
   }
 }
 
+function mainReasoningMessageEvents(
+  events: SdkEvent[],
+  messageId: string
+): Record<string, unknown>[] {
+  return events
+    .filter((event) => event.event === "messages" && Array.isArray(event.data))
+    .map((event) => asRecord((event.data as unknown[])[0]))
+    .filter(
+      (message) => message.id === messageId && typeof message.reasoning === "string"
+    )
+}
+
+async function testMainReasoningSnapshotsCoalesceWithinThrottleWindow(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            queueMicrotask(() => {
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-coalesced", reasoning: "first" })
+                )
+              )
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-coalesced", reasoning: " second" })
+                )
+              )
+            })
+            const doneTimer = setTimeout(() => callback({ type: "done" }), 140)
+            return () => clearTimeout(doneTimer)
+          }
+        }
+      }
+    }
+
+    const events = await collectStreamEvents(new ElectronIPCTransport(), {
+      input: { messages: [{ type: "human", content: "Think" }] },
+      config: { configurable: { thread_id: "thread-123", model_id: "test-model" } },
+      signal: new AbortController().signal
+    })
+    const reasoningMessages = mainReasoningMessageEvents(events, "main-reasoning-coalesced")
+    assert(
+      reasoningMessages.length === 1 && reasoningMessages[0]?.reasoning === "first second",
+      "reasoning snapshots inside 50ms should collapse to the latest cumulative value"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
+}
+
+async function testMainReasoningFlushesBeforeToolBoundary(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            queueMicrotask(() => {
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-tool", reasoning: "inspect" })
+                )
+              )
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-tool", reasoning: " files" })
+                )
+              )
+              callback(
+                streamMessageEvent(
+                  aiMessage({
+                    id: "main-reasoning-tool",
+                    toolCalls: [{ id: "read-call", name: "read_file", args: { path: "a.txt" } }]
+                  })
+                )
+              )
+              callback({ type: "done" })
+            })
+            return () => undefined
+          }
+        }
+      }
+    }
+
+    const events = await collectStreamEvents(new ElectronIPCTransport(), {
+      input: { messages: [{ type: "human", content: "Inspect" }] },
+      config: { configurable: { thread_id: "thread-123", model_id: "test-model" } },
+      signal: new AbortController().signal
+    })
+    const reasoningMessages = mainReasoningMessageEvents(events, "main-reasoning-tool")
+    const reasoningIndex = events.findIndex((event) => {
+      if (event.event !== "messages" || !Array.isArray(event.data)) return false
+      return asRecord(event.data[0]).reasoning === "inspect files"
+    })
+    const toolIndex = events.findIndex((event) => {
+      if (event.event !== "messages" || !Array.isArray(event.data)) return false
+      return Array.isArray(asRecord(event.data[0]).tool_calls)
+    })
+    assert(
+      reasoningMessages.length === 1 && reasoningIndex >= 0 && toolIndex > reasoningIndex,
+      "tool start must synchronously flush the latest reasoning before the tool event"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
+}
+
+async function testMainReasoningFlushesAtStreamEnd(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            queueMicrotask(() => {
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-end", reasoning: "final" })
+                )
+              )
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-end", reasoning: " thought" })
+                )
+              )
+              callback({ type: "done" })
+            })
+            return () => undefined
+          }
+        }
+      }
+    }
+
+    const events = await collectStreamEvents(new ElectronIPCTransport(), {
+      input: { messages: [{ type: "human", content: "Finish" }] },
+      config: { configurable: { thread_id: "thread-123", model_id: "test-model" } },
+      signal: new AbortController().signal
+    })
+    const reasoningMessages = mainReasoningMessageEvents(events, "main-reasoning-end")
+    const snapshots = customEvents(events, "coordinator_ai_snapshot_message").filter((event) => {
+      const assistantMessage = asRecord(event.assistantMessage)
+      return assistantMessage.id === "main-reasoning-end"
+    })
+    assert(
+      reasoningMessages.length === 1 && reasoningMessages[0]?.reasoning === "final thought",
+      "stream end must retain the latest cumulative reasoning message"
+    )
+    assert(
+      snapshots.length === 1 &&
+        asRecord(snapshots[0]?.assistantMessage).reasoning === "final thought",
+      "stream end must also flush the matching durable reasoning snapshot"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
+}
+
 async function testFallbackToolMessageIdIsStableAcrossRepeatedMessages(): Promise<void> {
   const transport = new ElectronIPCTransport()
   const toolResult = streamMessageEvent(
@@ -7033,8 +7399,8 @@ async function testLaterValuesErrorUpgradesCompletedSubagentMonotonically(): Pro
   >
   const staleFinals = customEvents(staleSuccess, "subagent_transcript_message")
   assert(
-    stillFailed?.[0]?.status === "failed",
-    "a stale successful replay must not downgrade a failed subagent"
+    !stillFailed || stillFailed[0]?.status === "failed",
+    "a stale successful replay must not downgrade or rebroadcast a failed subagent"
   )
   assert(
     staleFinals.length === 0,
@@ -11703,6 +12069,10 @@ async function run(): Promise<void> {
   console.log("PASS worker full values preserve historical ids across turns")
   testWorkerOccurrenceReplayStateRegressions()
   console.log("PASS worker occurrence replay state regressions")
+  testWorkerFocusTailUpdatesDoNotReadHistoricalMessages()
+  console.log("PASS worker focus tail updates skip historical message rescans")
+  testWorkerFocusValuesTailDeltaDoesNotReadHistoricalMessages()
+  console.log("PASS worker focus values tail deltas skip historical message rescans")
   testRepeatedToolCallIdsUseOccurrenceScopedResults()
   console.log("PASS repeated tool-call ids use occurrence-scoped results")
   testCrossRoleProviderIdCollisionSurvivesTransportConversion()
@@ -11781,6 +12151,12 @@ async function run(): Promise<void> {
   console.log("PASS electron transport restores normal values-mode tool messages")
   await testRuntimeAgentModeEventUpdatesCurrentStreamParsing()
   console.log("PASS electron transport updates current stream parsing from agent_mode event")
+  await testMainReasoningSnapshotsCoalesceWithinThrottleWindow()
+  console.log("PASS electron transport coalesces main reasoning snapshots every 50ms")
+  await testMainReasoningFlushesBeforeToolBoundary()
+  console.log("PASS electron transport flushes main reasoning before tool start")
+  await testMainReasoningFlushesAtStreamEnd()
+  console.log("PASS electron transport flushes main reasoning at stream end")
   await testQueuedSubagentSnapshotsCoalesceAndStayBounded()
   console.log("PASS electron transport coalesces bounded queued subagent snapshots")
   await testQueuedFinalCorrectionsPreserveRepairMetadata()

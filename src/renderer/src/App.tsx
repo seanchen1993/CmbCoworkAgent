@@ -1,19 +1,29 @@
-import { useEffect, useState, useCallback, useRef, useLayoutEffect, lazy, Suspense } from "react"
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  lazy,
+  Suspense
+} from "react"
 import {
   Briefcase,
   Eye,
   GitBranch,
+  Globe2,
   GripVertical,
   Loader2,
-  MessageSquare,
-  Palette,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
-  PanelRightOpen,
-  Workflow
+  PanelRightOpen
 } from "lucide-react"
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
+import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
 import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
@@ -40,16 +50,21 @@ const DesignView = lazy(() =>
   import("@/components/design/DesignView").then((m) => ({ default: m.DesignView }))
 )
 import { ResizeHandle } from "@/components/ui/resizable"
+import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
+import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
-import { useAppStore } from "@/lib/store"
-import { useFeatureGate } from "@/lib/feature-gates"
+import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
+import { useGitChangeNoticeListener } from "@/components/git/GitChangeNotice"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
-import { initMMJ } from "../js/mmjUtils"
+import { getThemeDefinition } from "@/lib/theme-registry"
+import { getThemePreference, subscribeThemePreference } from "@/lib/theme-preference"
+import { initMMJ, updateMMJUserInfo } from "../js/mmjUtils"
 import { toast, Toaster } from "sonner"
 import { useShallow } from "zustand/react/shallow"
 import { evolutionApi } from "@/api/evolution"
 import {
+  canPresentReviewCandidateNotification,
   cloudEvolutionUpdateSignature,
   getCloudEvolutionPromptSignature,
   hasUnreadCloudEvolutionUpdates,
@@ -61,7 +76,19 @@ import {
   unnotifiedReviewCandidates
 } from "@/lib/evolution-notices"
 import { useMyUploadedSkills } from "@/lib/use-my-uploaded-skills"
-import { FEATURE_GATES } from "../../shared/feature-gates"
+import {
+  configureAppCatalogLoaders,
+  ensureDisabledSkillsChangedInvalidationSource,
+  ensureSkillsChangedInvalidationSource,
+  revalidateSkillCatalog
+} from "@/lib/app-catalog-cache"
+import { loadPluginCatalogPages, loadSkillCatalogPages } from "@/lib/skill-plugin-catalog"
+import { invalidateModelCatalogCache } from "@/lib/model-catalog-cache"
+
+configureAppCatalogLoaders({
+  skills: (key, isCurrent) => loadSkillCatalogPages(key, "app-skill-catalog", isCurrent),
+  plugins: (key, isCurrent) => loadPluginCatalogPages(key, "app-plugin-catalog", isCurrent)
+})
 interface UserInfoConfig {
   sapId: string
   ystId: string
@@ -81,10 +108,7 @@ async function migrateDisabledSkillsFromLocalStorage(): Promise<void> {
     if (!saved) return
     const parsed = JSON.parse(saved) as unknown
     if (!Array.isArray(parsed) || parsed.length === 0) return
-    const current = await window.api.skills.getDisabled()
-    if (current.length === 0) {
-      await window.api.skills.setDisabled(parsed.filter((s): s is string => typeof s === "string"))
-    }
+    await window.api.skills.setDisabled(parsed.filter((s): s is string => typeof s === "string"))
     localStorage.removeItem("disabled-skills")
   } catch {
     /* migration is best-effort */
@@ -94,11 +118,15 @@ async function migrateDisabledSkillsFromLocalStorage(): Promise<void> {
 const LEFT_MIN = 200
 const LEFT_MAX = 400
 const LEFT_DEFAULT = 280
+const LEFT_RESIZE_HANDLE_WIDTH = 6
 
 const RIGHT_MIN = 250
 const RIGHT_MAX = 1600
 const RIGHT_DEFAULT = 300
 const RIGHT_PREVIEW_EXPAND_VW = 0.35
+const BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT = 66.67
+const BROWSER_FULLSCREEN_MIN_PANEL_PERCENT = 20
+const BROWSER_FULLSCREEN_MAX_PANEL_PERCENT = 80
 
 interface WorkerSplitHandleProps {
   onDrag: (totalDelta: number) => void
@@ -156,21 +184,55 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
       aria-orientation="vertical"
       title="拖动调整主对话和代理记录宽度"
       onMouseDown={handleMouseDown}
-      className="group relative z-20 flex h-full w-5 shrink-0 cursor-col-resize select-none items-center justify-center border-x border-stone-300/70 bg-stone-100/55 shadow-[0_0_18px_rgba(120,113,108,0.12)] backdrop-blur transition-colors hover:border-stone-400/80 hover:bg-stone-200/45 dark:border-stone-700/70 dark:bg-stone-900/35 dark:hover:border-stone-500/80 dark:hover:bg-stone-800/45"
+      className="group relative z-20 flex h-full w-5 shrink-0 cursor-col-resize select-none items-center justify-center border-x border-border bg-background-interactive/55 shadow-[0_0_18px_rgba(0,0,0,0.08)] backdrop-blur transition-colors hover:border-border-emphasis hover:bg-background-interactive"
     >
       <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-gradient-to-b from-transparent via-stone-500/45 to-transparent" />
-      <div className="relative flex h-12 w-3 items-center justify-center rounded-full border border-stone-300/80 bg-background text-stone-500 opacity-75 shadow-sm transition-all group-hover:scale-105 group-hover:border-stone-400 group-hover:text-stone-700 group-hover:opacity-100 dark:border-stone-700 dark:text-stone-400 dark:group-hover:text-stone-200">
+      <div className="relative flex h-12 w-3 items-center justify-center rounded-full border border-border bg-background text-muted-foreground opacity-75 shadow-sm transition-all group-hover:scale-105 group-hover:border-border-emphasis group-hover:text-foreground group-hover:opacity-100">
         <GripVertical className="size-3" strokeWidth={2.2} />
       </div>
     </div>
   )
 }
 
+function AnimatedThreadSidebar({
+  hidden,
+  width,
+  onResize
+}: {
+  hidden: boolean
+  width: number
+  onResize: (totalDelta: number) => void
+}): React.JSX.Element {
+  return (
+    <div
+      data-app-route-control
+      aria-hidden={hidden}
+      className={`flex shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out ${
+        hidden ? "pointer-events-none opacity-0" : "opacity-100"
+      }`}
+      style={{ width: hidden ? 0 : width + LEFT_RESIZE_HANDLE_WIDTH }}
+    >
+      <div style={{ width }} className="shrink-0">
+        <ThreadSidebar />
+      </div>
+      <ResizeHandle onDrag={onResize} />
+    </div>
+  )
+}
+
 function App(): React.JSX.Element {
+  const themePreference = useSyncExternalStore(
+    subscribeThemePreference,
+    getThemePreference,
+    getThemePreference
+  )
+  const toastTheme = getThemeDefinition(themePreference).colorScheme
   const {
     currentThreadId,
     loadThreads,
     loadDashboardAllowed,
+    loadGitChangeNoticeEnabled,
+    loadModels,
     dashboardAllowed,
     createThread,
     mainView,
@@ -179,20 +241,27 @@ function App(): React.JSX.Element {
     rightPanelCollapsed,
     toggleRightPanel,
     rightPanelWorkRequest,
+    rightModule,
+    setRightModule,
+    setBrowserCdpConfig,
     setPendingEvolution,
     workerFocusView,
     subagentFocusView,
     workflowAgentFocusView,
     setShowCustomizeView,
-    setShowDesignView,
-    setShowHarnessBoardView,
     setEvolutionTab,
-    setCloudEvolutionUpdates
+    setCloudEvolutionUpdates,
+    pluginVersion,
+    gitChangeNoticePendingByThread,
+    gitWorkspaceByThread,
+    setGitChangeNoticePending
   } = useAppStore(
     useShallow((state) => ({
       currentThreadId: state.currentThreadId,
       loadThreads: state.loadThreads,
       loadDashboardAllowed: state.loadDashboardAllowed,
+      loadGitChangeNoticeEnabled: state.loadGitChangeNoticeEnabled,
+      loadModels: state.loadModels,
       dashboardAllowed: state.dashboardAllowed,
       createThread: state.createThread,
       mainView: state.mainView,
@@ -201,28 +270,83 @@ function App(): React.JSX.Element {
       rightPanelCollapsed: state.rightPanelCollapsed,
       toggleRightPanel: state.toggleRightPanel,
       rightPanelWorkRequest: state.rightPanelWorkRequest,
+      rightModule: state.rightModule,
+      setRightModule: state.setRightModule,
+      setBrowserCdpConfig: state.setBrowserCdpConfig,
       setPendingEvolution: state.setPendingEvolution,
       workerFocusView: state.workerFocusView,
       subagentFocusView: state.subagentFocusView,
       workflowAgentFocusView: state.workflowAgentFocusView,
       setShowCustomizeView: state.setShowCustomizeView,
-      setShowDesignView: state.setShowDesignView,
-      setShowHarnessBoardView: state.setShowHarnessBoardView,
       setEvolutionTab: state.setEvolutionTab,
-      setCloudEvolutionUpdates: state.setCloudEvolutionUpdates
+      setCloudEvolutionUpdates: state.setCloudEvolutionUpdates,
+      pluginVersion: state.pluginVersion,
+      gitChangeNoticePendingByThread: state.gitChangeNoticePendingByThread,
+      gitWorkspaceByThread: state.gitWorkspaceByThread,
+      setGitChangeNoticePending: state.setGitChangeNoticePending
     }))
   )
-  const { enabled: projectModeEnabled } = useFeatureGate(FEATURE_GATES.projectMode)
   const { ownedSkillKeys } = useMyUploadedSkills()
+
+  useEffect(() => {
+    ensureSkillsChangedInvalidationSource((listener) => window.api.skills.onChanged(listener))
+    ensureDisabledSkillsChangedInvalidationSource((listener) =>
+      window.api.hooks.onChanged(listener)
+    )
+  }, [])
+
+  useEffect(() => {
+    void loadModels()
+    return window.api.models.onChanged(() => {
+      invalidateModelCatalogCache()
+      void loadModels(true)
+    })
+  }, [loadModels])
+
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
+  const [browserFullscreenRightPercent, setBrowserFullscreenRightPercent] = useState(
+    BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT
+  )
   const [workerSplitLeftPercent, setWorkerSplitLeftPercent] = useState(50)
-  const [rightModule, setRightModule] = useState<"work" | "preview" | "git">("work")
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
+  const [browserFullscreen, setBrowserFullscreen] = useState(false)
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
-  const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
-  const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
+
+  // Version and local-IP metadata belong to the application lifetime, not to a
+  // ChatContainer. Keeping these listeners here avoids repeating IPC requests
+  // and user-info refreshes every time a thread surface remounts.
+  useEffect(() => {
+    const { ipcRenderer } = window.electron
+    const removeVersionListener = ipcRenderer.on("version", (version: unknown) => {
+      if (typeof version !== "string" || !version) return
+      localStorage.setItem("version", version)
+      updateMMJUserInfo()
+    })
+    const removeIpListener = ipcRenderer.on("ip", (ip: unknown) => {
+      if (typeof ip !== "string" || !ip) return
+      localStorage.setItem("localIp", ip)
+    })
+
+    void Promise.allSettled([
+      ipcRenderer.invoke("get-version").then((version: unknown) => {
+        if (typeof version !== "string" || !version) return
+        localStorage.setItem("version", version)
+        updateMMJUserInfo()
+      }),
+      ipcRenderer.invoke("get-local-ip").then((ip: unknown) => {
+        if (typeof ip !== "string" || !ip) return
+        localStorage.setItem("localIp", ip)
+        updateMMJUserInfo()
+      })
+    ])
+
+    return () => {
+      if (typeof removeVersionListener === "function") removeVersionListener()
+      if (typeof removeIpListener === "function") removeIpListener()
+    }
+  }, [])
 
   const [zoomLevel, setZoomLevel] = useState(1)
   const [bus, setBus] = useState(true)
@@ -237,33 +361,82 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
-  const selectDesignProjectMode = useCallback(() => {
-    if (!projectModeEnabled) {
-      toast.info("敬请期待")
-      return
-    }
-    setShowHarnessBoardView(true)
-  }, [projectModeEnabled, setShowHarnessBoardView])
+
+  // Keep the route consumed by the expensive center/right surfaces atomic. A
+  // task click updates the lightweight sidebar immediately, while React may
+  // finish the old surface and yield before committing the new task/mode as a
+  // single unit. In particular, the center must never render task B while the
+  // right panel still reads task A from the global store.
+  const selectedRenderRoute = useMemo(
+    () => ({
+      mainView,
+      threadId: currentThreadId,
+      harnessSessionThreadId,
+      workerFocusView,
+      subagentFocusView,
+      workflowAgentFocusView
+    }),
+    [
+      currentThreadId,
+      harnessSessionThreadId,
+      mainView,
+      subagentFocusView,
+      workerFocusView,
+      workflowAgentFocusView
+    ]
+  )
+  const renderedRoute = useDeferredValue(selectedRenderRoute)
+  const renderRoutePending = renderedRoute !== selectedRenderRoute
+  const renderedMainView = renderedRoute.mainView
+  const renderedThreadId = renderedRoute.threadId
+  const renderedHarnessSessionThreadId = renderedRoute.harnessSessionThreadId
+  const isRightPanelFullscreen = previewFullscreen || browserFullscreen
+  const showRightResizeHandle = !previewFullscreen
+  const fullscreenMainClassName = browserFullscreen
+    ? "relative flex min-w-0 flex-col overflow-hidden"
+    : "relative flex flex-1 min-w-0 flex-col overflow-hidden"
+  const fullscreenMainStyle = browserFullscreen
+    ? { flex: `${100 - browserFullscreenRightPercent} 1 0%` }
+    : undefined
+  const fullscreenRightPanelClassName = browserFullscreen
+    ? "min-w-0"
+    : isRightPanelFullscreen
+      ? "min-w-0 flex-1"
+      : "shrink-0 pl-0"
+  const fullscreenRightPanelStyle = browserFullscreen
+    ? { flex: `${browserFullscreenRightPercent} 1 0%` }
+    : isRightPanelFullscreen
+      ? undefined
+      : { width: rightWidth }
   const isThreadWorkerFocusActive =
-    mainView === "thread" &&
-    Boolean(currentThreadId && workerFocusView?.threadId === currentThreadId)
+    renderedMainView === "thread" &&
+    Boolean(renderedThreadId && renderedRoute.workerFocusView?.threadId === renderedThreadId)
   const isHarnessWorkerFocusActive =
-    mainView === "harness" &&
-    Boolean(harnessSessionThreadId && workerFocusView?.threadId === harnessSessionThreadId)
+    renderedMainView === "harness" &&
+    Boolean(
+      renderedHarnessSessionThreadId &&
+      renderedRoute.workerFocusView?.threadId === renderedHarnessSessionThreadId
+    )
   const isWorkerFocusActive = isThreadWorkerFocusActive || isHarnessWorkerFocusActive
   const isThreadSubagentFocusActive =
-    mainView === "thread" &&
-    Boolean(currentThreadId && subagentFocusView?.threadId === currentThreadId)
+    renderedMainView === "thread" &&
+    Boolean(renderedThreadId && renderedRoute.subagentFocusView?.threadId === renderedThreadId)
   const isHarnessSubagentFocusActive =
-    mainView === "harness" &&
-    Boolean(harnessSessionThreadId && subagentFocusView?.threadId === harnessSessionThreadId)
+    renderedMainView === "harness" &&
+    Boolean(
+      renderedHarnessSessionThreadId &&
+      renderedRoute.subagentFocusView?.threadId === renderedHarnessSessionThreadId
+    )
   const isSubagentFocusActive = isThreadSubagentFocusActive || isHarnessSubagentFocusActive
   const isThreadWorkflowAgentFocusActive =
-    mainView === "thread" &&
-    Boolean(currentThreadId && workflowAgentFocusView?.threadId === currentThreadId)
+    renderedMainView === "thread" &&
+    Boolean(renderedThreadId && renderedRoute.workflowAgentFocusView?.threadId === renderedThreadId)
   const isHarnessWorkflowAgentFocusActive =
-    mainView === "harness" &&
-    Boolean(harnessSessionThreadId && workflowAgentFocusView?.threadId === harnessSessionThreadId)
+    renderedMainView === "harness" &&
+    Boolean(
+      renderedHarnessSessionThreadId &&
+      renderedRoute.workflowAgentFocusView?.threadId === renderedHarnessSessionThreadId
+    )
   const isWorkflowAgentFocusActive =
     isThreadWorkflowAgentFocusActive || isHarnessWorkflowAgentFocusActive
   const isAgentFocusActive =
@@ -288,11 +461,10 @@ function App(): React.JSX.Element {
       if (workerFocusTransportRef.current !== transport) return
       const messages = transport.convertFocusedCoordinatorWorkerIPCEvent(event, threadId)
       if (messages.length > 0) {
-        useAppStore
-          .getState()
-          .appendWorkerFocusMessages(workerThreadId, messages, {
-            orderedSnapshot: event.mode === "values"
-          })
+        useAppStore.getState().appendWorkerFocusMessages(workerThreadId, messages, {
+          orderedSnapshot:
+            event.mode === "values" && (event.valuesSnapshotKind ?? "full") === "full"
+        })
       }
     })
 
@@ -391,8 +563,12 @@ function App(): React.JSX.Element {
 
   // Track drag start widths
   const dragStartWidths = useRef<{ left: number; right: number } | null>(null)
+  const rightPanelSplitRef = useRef<HTMLDivElement>(null)
   const workerSplitRef = useRef<HTMLDivElement>(null)
   const workerSplitStartRef = useRef<{ leftPercent: number; width: number } | null>(null)
+  const browserFullscreenSplitStartRef = useRef<{ rightPercent: number; width: number } | null>(
+    null
+  )
   const previewCollapsedWidthRef = useRef<number | null>(null)
 
   // Set platform-specific titlebar insets and track zoom
@@ -453,13 +629,30 @@ function App(): React.JSX.Element {
 
   const handleRightResize = useCallback(
     (totalDelta: number) => {
+      if (browserFullscreen) {
+        if (!browserFullscreenSplitStartRef.current) {
+          browserFullscreenSplitStartRef.current = {
+            rightPercent: browserFullscreenRightPercent,
+            width: rightPanelSplitRef.current?.clientWidth || window.innerWidth
+          }
+        }
+        const { rightPercent, width } = browserFullscreenSplitStartRef.current
+        const nextPercent = rightPercent - (totalDelta / Math.max(1, width)) * 100
+        setBrowserFullscreenRightPercent(
+          Math.min(
+            BROWSER_FULLSCREEN_MAX_PANEL_PERCENT,
+            Math.max(BROWSER_FULLSCREEN_MIN_PANEL_PERCENT, nextPercent)
+          )
+        )
+        return
+      }
       if (!dragStartWidths.current) {
         dragStartWidths.current = { left: leftWidth, right: rightWidth }
       }
       const newWidth = dragStartWidths.current.right - totalDelta
       setRightWidth(Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, newWidth)))
     },
-    [leftWidth, rightWidth]
+    [browserFullscreen, browserFullscreenRightPercent, leftWidth, rightWidth]
   )
 
   const handleWorkerSplitResize = useCallback(
@@ -495,67 +688,80 @@ function App(): React.JSX.Element {
   }, [])
 
   const selectPreviewModule = useCallback(() => {
-    setRightModule("preview")
-    handlePreviewExpand()
-  }, [handlePreviewExpand])
+    openResourcePanelOverlay("preview")
+  }, [])
 
   const selectWorkModule = useCallback(() => {
     setRightModule("work")
-    handlePreviewCollapse()
-  }, [handlePreviewCollapse])
+  }, [setRightModule])
+
+  const selectBrowserModule = useCallback(() => {
+    openResourcePanelOverlay("browser")
+  }, [])
 
   useEffect(() => {
-    if (rightPanelWorkRequest?.target !== "systemConstraints") return
+    if (!rightPanelWorkRequest) return
     setRightModule("work")
-    handlePreviewCollapse()
-  }, [handlePreviewCollapse, rightPanelWorkRequest])
+  }, [rightPanelWorkRequest, setRightModule])
 
-  const setThreadPendingGitDiff = useCallback((threadId: string, pending: boolean) => {
-    setPendingGitDiffByThread((prev) => {
-      if (prev[threadId] === pending) return prev
-      return { ...prev, [threadId]: pending }
-    })
-  }, [])
-
-  const handleThreadGitStatusChange = useCallback((threadId: string, isGit: boolean) => {
-    setIsGitWorkspaceByThread((prev) => {
-      if (prev[threadId] === isGit) return prev
-      return { ...prev, [threadId]: isGit }
-    })
-  }, [])
+  useEffect(() => {
+    if (rightModule === "work") {
+      handlePreviewCollapse()
+      return
+    }
+    handlePreviewExpand()
+  }, [handlePreviewCollapse, handlePreviewExpand, rightModule])
 
   const handleHarnessActiveSessionThreadChange = useCallback((threadId: string | null) => {
     setHarnessSessionThreadId((prev) => (prev === threadId ? prev : threadId))
   }, [])
 
   const activeRightPanelThreadId = mainView === "harness" ? harnessSessionThreadId : currentThreadId
+  useGitChangeNoticeListener(activeRightPanelThreadId, rightModule)
+  const renderedRightPanelThreadId =
+    renderedMainView === "harness" ? renderedHarnessSessionThreadId : renderedThreadId
   const isActiveRightPanelThreadGit = activeRightPanelThreadId
-    ? Boolean(isGitWorkspaceByThread[activeRightPanelThreadId])
+    ? Boolean(gitWorkspaceByThread[activeRightPanelThreadId])
     : false
   const hasPendingGitDiff = activeRightPanelThreadId
-    ? Boolean(pendingGitDiffByThread[activeRightPanelThreadId] && isActiveRightPanelThreadGit)
+    ? Boolean(
+        gitChangeNoticePendingByThread[activeRightPanelThreadId] && isActiveRightPanelThreadGit
+      )
     : false
   const showRightPanelModuleControls =
     mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
 
   const selectGitModule = useCallback(() => {
     if (activeRightPanelThreadId) {
-      setThreadPendingGitDiff(activeRightPanelThreadId, false)
+      setGitChangeNoticePending(activeRightPanelThreadId, false)
     }
-    setRightModule("git")
-    handlePreviewExpand()
-  }, [activeRightPanelThreadId, handlePreviewExpand, setThreadPendingGitDiff])
+    openResourcePanelOverlay("git")
+  }, [activeRightPanelThreadId, setGitChangeNoticePending])
 
-  const dismissGitChangeNotice = useCallback(() => {
-    if (!activeRightPanelThreadId) return
-    setThreadPendingGitDiff(activeRightPanelThreadId, false)
-  }, [activeRightPanelThreadId, setThreadPendingGitDiff])
+  const rightModuleRef = useRef(rightModule)
+  const previousActiveRightPanelThreadIdRef = useRef<string | null>(activeRightPanelThreadId)
+  const previousMainViewRef = useRef(mainView)
+  rightModuleRef.current = rightModule
 
   useEffect(() => {
-    // Keep right panel behavior predictable: when switching thread or entering thread view,
-    // always fall back to workspace mode.
-    setRightModule("work")
-    handlePreviewCollapse()
+    const previousActiveRightPanelThreadId = previousActiveRightPanelThreadIdRef.current
+    const previousMainView = previousMainViewRef.current
+    previousActiveRightPanelThreadIdRef.current = activeRightPanelThreadId
+    previousMainViewRef.current = mainView
+
+    const shouldPreserveCurrentModule =
+      rightModuleRef.current === "browser" &&
+      (mainView === "thread" || mainView === "harness") &&
+      previousMainView === mainView &&
+      Boolean(previousActiveRightPanelThreadId) &&
+      Boolean(activeRightPanelThreadId) &&
+      previousActiveRightPanelThreadId !== activeRightPanelThreadId
+
+    if (!shouldPreserveCurrentModule) {
+      // Keep right panel behavior predictable when entering thread-like views and for
+      // non-browser module switches between threads.
+      setRightModule("work")
+    }
 
     try {
       // 主应用已经处于打开/查看状态，清空宠物完成任务提醒队列。
@@ -563,7 +769,7 @@ function App(): React.JSX.Element {
     } catch (error) {
       console.warn("[App] Failed to clear pet completed tasks:", error)
     }
-  }, [activeRightPanelThreadId, mainView, handlePreviewCollapse])
+  }, [activeRightPanelThreadId, mainView, setRightModule])
 
   useEffect(() => {
     if (mainView !== "harness") {
@@ -601,23 +807,12 @@ function App(): React.JSX.Element {
     }
   }, [mainView])
 
-  useEffect(() => {
-    const cleanupFs = window.api.workspace.onFilesChanged((data) => {
-      const changedThreadId = data.threadId
-      if (!changedThreadId) return
-      // Keep current behavior: when user is already in current thread's Git panel, don't raise notice.
-      if (rightModule === "git" && changedThreadId === activeRightPanelThreadId) return
-      setThreadPendingGitDiff(changedThreadId, true)
-    })
-
-    return cleanupFs
-  }, [activeRightPanelThreadId, rightModule, setThreadPendingGitDiff])
-
   // Reset drag start on mouse up
   useEffect(() => {
     const handleMouseUp = (): void => {
       dragStartWidths.current = null
       workerSplitStartRef.current = null
+      browserFullscreenSplitStartRef.current = null
     }
     document.addEventListener("mouseup", handleMouseUp)
     return () => document.removeEventListener("mouseup", handleMouseUp)
@@ -627,11 +822,20 @@ function App(): React.JSX.Element {
     async function init(): Promise<void> {
       try {
         await migrateDisabledSkillsFromLocalStorage()
-        await Promise.all([loadThreads(), loadDashboardAllowed()])
+        const [, , loadedBrowserCdpConfig] = await Promise.all([
+          loadThreads({ selectInitialThread: true }),
+          loadDashboardAllowed(),
+          window.api.browser.getCdpConfig().catch((error: unknown) => {
+            console.error("Failed to load Browser CDP config during initialization:", error)
+            return DEFAULT_BROWSER_CDP_CONFIG
+          })
+        ])
+        setBrowserCdpConfig(loadedBrowserCdpConfig)
         const threads = useAppStore.getState().threads
         if (threads.length === 0) {
           await createThread()
         }
+        await loadGitChangeNoticeEnabled()
       } catch (error) {
         console.error("Failed to initialize:", error)
       } finally {
@@ -639,14 +843,20 @@ function App(): React.JSX.Element {
       }
     }
     init()
-  }, [loadThreads, createThread])
+  }, [
+    loadThreads,
+    setBrowserCdpConfig,
+    loadDashboardAllowed,
+    loadGitChangeNoticeEnabled,
+    createThread
+  ])
 
   useEffect(() => {
     let cancelled = false
 
     const checkOptimizedSkillUpdates = async (): Promise<void> => {
       try {
-        const installedSkills = await window.api.skills.list()
+        const installedSkills = (await revalidateSkillCatalog(pluginVersion)).localSkills
         const updates = await evolutionApi.listAvailableUpdates(installedSkills)
         if (cancelled) return
 
@@ -688,28 +898,48 @@ function App(): React.JSX.Element {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [setCloudEvolutionUpdates, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
+  }, [
+    pluginVersion,
+    setCloudEvolutionUpdates,
+    setEvolutionTab,
+    setPendingEvolution,
+    setShowCustomizeView
+  ])
 
-  // 「待审批发布」提醒：本分支把进化审批权限放开给个人后，技能创建者需要被
-  // 提醒自己上传的技能跑出了优化候选、正等待其审批发布。仅面向个人，管理员不在此提醒范围内。
+  // 「待审批发布」提醒：按技能归属提醒创建者，不向管理员广播与其无关的候选。
   useEffect(() => {
     let cancelled = false
+    let checkInFlight = false
+
+    const notificationSurfaceIsActive = (): boolean =>
+      canPresentReviewCandidateNotification({
+        visibilityState: document.visibilityState,
+        hasFocus: document.hasFocus()
+      })
 
     const checkPendingReviewCandidates = async (): Promise<void> => {
+      // An in-renderer toast is not a delivery when the app is hidden or behind another
+      // application. Defer both the request and its receipt until focus returns.
+      if (!notificationSurfaceIsActive() || checkInFlight) return
+
       try {
         // 个人只有上传过技能才可能拥有可审批候选；无技能时直接跳过拉取。
         if (ownedSkillKeys.size === 0) return
+        checkInFlight = true
 
         const awaiting = await evolutionApi.listCandidates("awaiting_review", 50)
         if (cancelled) return
 
         const reviewable = reviewableCandidates(awaiting, ownedSkillKeys)
+        // The badge represents outstanding work, not merely a toast that has never fired.
+        if (reviewable.length > 0) setPendingEvolution(true)
+
         // 只对「从未通知过」的新候选提醒，保证每条候选只发一次。
         const fresh = unnotifiedReviewCandidates(reviewable)
         if (fresh.length === 0) return
-        markReviewCandidatesNotified(fresh)
-
-        setPendingEvolution(true)
+        // Focus may have changed while the request was in flight. Do not consume the
+        // notification if the user can no longer see it.
+        if (!notificationSurfaceIsActive()) return
 
         const first = fresh[0]
         const message =
@@ -726,16 +956,27 @@ function App(): React.JSX.Element {
             }
           }
         })
+        // Record delivery only after a visible toast has actually been scheduled.
+        markReviewCandidatesNotified(fresh)
       } catch (error) {
         console.warn("[SkillReviewPrompt] failed to check pending review candidates:", error)
+      } finally {
+        checkInFlight = false
       }
     }
 
     void checkPendingReviewCandidates()
-    const timer = window.setInterval(() => void checkPendingReviewCandidates(), 30 * 60 * 1000)
+    const checkWhenForeground = (): void => {
+      if (notificationSurfaceIsActive()) void checkPendingReviewCandidates()
+    }
+    window.addEventListener("focus", checkWhenForeground)
+    window.addEventListener("online", checkWhenForeground)
+    document.addEventListener("visibilitychange", checkWhenForeground)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      window.removeEventListener("focus", checkWhenForeground)
+      window.removeEventListener("online", checkWhenForeground)
+      document.removeEventListener("visibilitychange", checkWhenForeground)
     }
   }, [ownedSkillKeys, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
 
@@ -751,8 +992,7 @@ function App(): React.JSX.Element {
   useEffect(() => {
     return window.api.threads.onThreadsChanged(async () => {
       try {
-        const threads = await window.api.threads.list()
-        useAppStore.setState({ threads })
+        await useAppStore.getState().loadThreads()
       } catch (err) {
         console.error("[App] Failed to reload threads:", err)
       }
@@ -764,8 +1004,7 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const onFocus = async (): Promise<void> => {
       try {
-        const threads = await window.api.threads.list()
-        useAppStore.setState({ threads })
+        await useAppStore.getState().loadThreads()
         window.api.pet.clearCompletedTasks()
       } catch {
         // ignore
@@ -787,17 +1026,32 @@ function App(): React.JSX.Element {
 
   if (!bus) {
     return (
-      <div className="flex h-screen items-center justify-center bg-background">
-        <div className="text-muted-foreground">
-          目前仅供零售客户经营开发团队使用，暂不对外提供服务...,有任何疑问请联系 范雄
+      <>
+        <div className="flex h-screen items-center justify-center bg-background">
+          <div className="text-muted-foreground">
+            目前仅供零售客户经营开发团队使用，暂不对外提供服务...,有任何疑问请联系 范雄
+          </div>
         </div>
-      </div>
+      </>
     )
   }
 
   return (
     <ThreadProvider>
-      <div className="flex flex-col h-screen overflow-hidden bg-background">
+      {/*
+        isolate：把 app 内部的 z-index 关进自己的层叠上下文。
+
+        Radix 的 Dialog/Popover/Tooltip 都 portal 到 document.body，是 #root 的兄弟。
+        而这层壳原本 position:static、z-index:auto，不构成层叠上下文，于是壳内任何
+        positioned + z-index 的元素都是直接在「根层叠上下文」里和 portal 比大小——
+        侧边栏的 relative z-[60]（下面 dashboard / claudecode 两处）就这样盖住了
+        DialogContent 的 z-50。窗口够宽时弹窗（max-w-1080 居中）左边缘落在侧边栏
+        右侧看不出来，窗口一窄就压上去了。
+
+        isolate 之后壳内 z-index 只在壳内部比较，永远越不过 portal。全局 toaster 与
+        宠物状态桥是这层壳的兄弟节点（见下方 return 末尾），不在隔离范围内。
+      */}
+      <div className="isolate flex flex-col h-screen overflow-hidden bg-background">
         {/* Titlebar - logo centered, right panel toggle on right */}
         <div className="flex h-9 w-full shrink-0 app-drag-region items-center border-b border-border">
           {/* Left: sidebar toggle */}
@@ -805,50 +1059,7 @@ function App(): React.JSX.Element {
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
-            {mainView === "design" && (
-              <div
-                role="tablist"
-                aria-label="工作模式"
-                className="ml-1 flex h-8 items-center gap-0.5 rounded-md bg-muted p-0.5"
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={false}
-                  onClick={() => setShowDesignView(false)}
-                  className="inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-semibold text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
-                >
-                  <MessageSquare className="size-3 shrink-0" />
-                  对话模式
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={false}
-                  aria-disabled={!projectModeEnabled}
-                  onClick={selectDesignProjectMode}
-                  title={projectModeEnabled ? "切换到项目模式" : "项目模式暂未开放"}
-                  className={`inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors ${
-                    projectModeEnabled
-                      ? "text-muted-foreground hover:bg-background hover:text-foreground"
-                      : "cursor-not-allowed text-muted-foreground/50"
-                  }`}
-                >
-                  <Workflow className="size-3 shrink-0" />
-                  项目模式
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected
-                  className="inline-flex h-7 items-center gap-1 rounded border border-border/70 bg-background px-2 text-xs font-semibold text-foreground shadow-sm"
-                >
-                  <Palette className="size-3 shrink-0" />
-                  设计模式
-                </button>
-              </div>
-            )}
-            {mainView !== "customize" && mainView !== "design" && !isAgentFocusActive && (
+            {mainView !== "customize" && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -885,75 +1096,14 @@ function App(): React.JSX.Element {
             }}
             className="flex flex-1 min-w-0 items-center justify-center gap-1.5"
           >
-            <svg
-              className="size-7 shrink-0"
-              viewBox="0 0 120 120"
-              fill="none"
-              style={{ animation: "lobster-sway-bounce 2.5s ease-in-out infinite" }}
-            >
-              <defs>
-                <linearGradient id="title-lobster" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#ff4d4d" />
-                  <stop offset="100%" stopColor="#991b1b" />
-                </linearGradient>
-              </defs>
-              <path
-                d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z"
-                fill="url(#title-lobster)"
-              />
-              <path
-                d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z"
-                fill="url(#title-lobster)"
-              />
-              <path
-                d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z"
-                fill="url(#title-lobster)"
-              />
-              <g
-                style={{
-                  animation: "antenna-left 2.5s ease-in-out infinite",
-                  transformOrigin: "45px 15px"
-                }}
-              >
-                <path
-                  d="M45 15 Q35 5 30 8"
-                  stroke="#ff4d4d"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                />
-              </g>
-              <g
-                style={{
-                  animation: "antenna-right 2.5s ease-in-out infinite 0.3s",
-                  transformOrigin: "75px 15px"
-                }}
-              >
-                <path
-                  d="M75 15 Q85 5 90 8"
-                  stroke="#ff4d4d"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                />
-              </g>
-              <g
-                style={{
-                  animation: "lobster-blink 4s ease-in-out infinite",
-                  transformOrigin: "60px 35px"
-                }}
-              >
-                <circle cx="45" cy="35" r="6" fill="#050810" />
-                <circle cx="75" cy="35" r="6" fill="#050810" />
-                <circle cx="46" cy="34" r="2.5" fill="#00e5cc" />
-                <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
-              </g>
-            </svg>
+            <CmbDevClawLogo className="size-7 shrink-0 object-contain" />
             <span className="app-badge-name">
               CMBDev<span className="text-red-500">Claw</span>
             </span>
           </div>
           {/* Right: right panel toggle */}
           <div className="flex flex-1 h-full items-center justify-end pl-1 gap-1">
-            {showRightPanelModuleControls && !isAgentFocusActive && (
+            {showRightPanelModuleControls && !rightPanelCollapsed && !isAgentFocusActive && (
               <>
                 <button
                   type="button"
@@ -988,6 +1138,19 @@ function App(): React.JSX.Element {
                 <button
                   type="button"
                   className={`${panelToggleBaseClass} ${
+                    rightModule === "browser" ? moduleActiveClass : moduleInactiveClass
+                  }`}
+                  onClick={selectBrowserModule}
+                  title="内置浏览器"
+                  aria-label="内置浏览器"
+                  aria-pressed={rightModule === "browser"}
+                >
+                  <Globe2 size={16} className="shrink-0" strokeWidth={1.8} />
+                  <span>浏览器</span>
+                </button>
+                <button
+                  type="button"
+                  className={`${panelToggleBaseClass} ${
                     rightModule === "work" ? moduleActiveClass : moduleInactiveClass
                   }`}
                   onClick={selectWorkModule}
@@ -1000,7 +1163,7 @@ function App(): React.JSX.Element {
                 </button>
               </>
             )}
-            {mainView !== "customize" && mainView !== "design" && !isAgentFocusActive && (
+            {mainView !== "customize" && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -1031,36 +1194,136 @@ function App(): React.JSX.Element {
           </div>
         </div>
 
-        {/* Main content below titlebar */}
-        {mainView === "customize" ? (
-          <div className="flex flex-1 overflow-hidden bg-grid-subtle">
-            <main className="flex flex-1 flex-col min-w-0 overflow-hidden">
-              <Suspense
-                fallback={
-                  <div className="flex flex-1 items-center justify-center">
-                    <Loader2 className="size-6 animate-spin text-muted-foreground" />
+        {/*
+          Main content below titlebar. The lightweight sidebar remains above the
+          transition shield so rapid A -> B -> C navigation can supersede stale
+          hydration; stale center/right controls cannot mutate the previous task.
+        */}
+        <div
+          className="relative flex min-h-0 flex-1 overflow-hidden"
+          aria-busy={renderRoutePending}
+          onKeyDownCapture={(event) => {
+            if (!renderRoutePending) return
+            const target = event.target
+            if (target instanceof Element && target.closest("[data-app-route-control]")) return
+            event.preventDefault()
+            event.stopPropagation()
+          }}
+        >
+          {renderedMainView === "customize" ? (
+            <div className="flex flex-1 overflow-hidden bg-grid-subtle">
+              <main className="flex flex-1 flex-col min-w-0 overflow-hidden">
+                <Suspense
+                  fallback={
+                    <div className="flex flex-1 items-center justify-center">
+                      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                    </div>
+                  }
+                >
+                  <CustomizeView />
+                </Suspense>
+              </main>
+            </div>
+          ) : renderedMainView !== "claudecode" &&
+            renderedMainView !== "dashboard" &&
+            renderedMainView !== "harness" &&
+            renderedMainView !== "design" ? (
+            <div
+              ref={rightPanelSplitRef}
+              className="relative flex flex-1 overflow-hidden bg-grid-subtle"
+            >
+              {/* Left Sidebar */}
+              {!sidebarCollapsed && !isAgentFocusActive && (
+                <AnimatedThreadSidebar
+                  hidden={browserFullscreen}
+                  width={leftWidth}
+                  onResize={handleLeftResize}
+                />
+              )}
+
+              {renderedMainView === "kanban" ? (
+                <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+                  <Suspense
+                    fallback={
+                      <div className="flex flex-1 items-center justify-center">
+                        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                      </div>
+                    }
+                  >
+                    <KanbanView />
+                  </Suspense>
+                </main>
+              ) : (
+                <>
+                  {/* Center - Content Panel */}
+                  {isAgentFocusActive ? (
+                    <main
+                      ref={workerSplitRef}
+                      className="relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
+                    >
+                      <section
+                        className="flex min-w-0 flex-col overflow-hidden"
+                        style={{ width: `${workerSplitLeftPercent}%` }}
+                      >
+                        {renderedThreadId ? (
+                          <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
+                        ) : (
+                          <div className="flex flex-1 items-center justify-center text-muted-foreground">
+                            选择或创建一个任务开始
+                          </div>
+                        )}
+                      </section>
+                      <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
+                      <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                        {isWorkflowAgentFocusActive ? (
+                          <WorkflowAgentStreamPanel />
+                        ) : isWorkerFocusActive ? (
+                          <WorkerStreamPanel />
+                        ) : (
+                          <SubagentStreamPanel />
+                        )}
+                      </section>
+                    </main>
+                  ) : (
+                    !previewFullscreen && (
+                      <main className={fullscreenMainClassName} style={fullscreenMainStyle}>
+                        {renderedThreadId ? (
+                          <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
+                        ) : (
+                          <div className="flex flex-1 items-center justify-center text-muted-foreground">
+                            选择或创建一个任务开始
+                          </div>
+                        )}
+                      </main>
+                    )
+                  )}
+                </>
+              )}
+
+              {renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
+                <>
+                  {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
+                  {/* Right Panel - floating style */}
+                  <div style={fullscreenRightPanelStyle} className={fullscreenRightPanelClassName}>
+                    <RightPanel
+                      threadId={renderedThreadId}
+                      moduleMode={rightModule}
+                      onRequestPreviewMode={selectPreviewModule}
+                      onRequestWorkMode={selectWorkModule}
+                      onPreviewFullscreenChange={setPreviewFullscreen}
+                      onBrowserFullscreenChange={setBrowserFullscreen}
+                    />
                   </div>
-                }
-              >
-                <CustomizeView />
-              </Suspense>
-            </main>
-          </div>
-        ) : mainView !== "claudecode" &&
-          mainView !== "dashboard" &&
-          mainView !== "design" &&
-          mainView !== "harness" ? (
-          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
-            {/* Left Sidebar */}
-            {!sidebarCollapsed && !isAgentFocusActive && (
-              <>
-                <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
-            )}
-            {mainView === "kanban" ? (
+                </>
+              )}
+            </div>
+          ) : null}
+
+          {renderedMainView === "design" && (
+            <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+              {!sidebarCollapsed && (
+                <AnimatedThreadSidebar hidden={false} width={leftWidth} onResize={handleLeftResize} />
+              )}
               <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
                 <Suspense
                   fallback={
@@ -1069,247 +1332,178 @@ function App(): React.JSX.Element {
                     </div>
                   }
                 >
-                  <KanbanView />
+                  <DesignView />
                 </Suspense>
               </main>
-            ) : (
-              <>
-                {/* Center - Content Panel */}
-                {isAgentFocusActive ? (
-                  <main
-                    ref={workerSplitRef}
-                    className="relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
+            </div>
+          )}
+
+          {/* Dashboard 面板 */}
+          {renderedMainView === "dashboard" && dashboardAllowed === true && (
+            <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+              {!sidebarCollapsed && (
+                <>
+                  <div
+                    data-app-route-control
+                    style={{ width: leftWidth }}
+                    className="relative z-[60] shrink-0"
                   >
-                    <section
-                      className="flex min-w-0 flex-col overflow-hidden"
-                      style={{ width: `${workerSplitLeftPercent}%` }}
-                    >
-                      {currentThreadId ? (
-                        <TabbedPanel
-                          threadId={currentThreadId}
-                          showTabBar={false}
-                          hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
-                          onRequestOpenGitPanel={selectGitModule}
-                          onDismissGitChangeNotice={dismissGitChangeNotice}
-                          onThreadGitStatusChange={handleThreadGitStatusChange}
-                        />
-                      ) : (
-                        <div className="flex flex-1 items-center justify-center text-muted-foreground">
-                          选择或创建一个任务开始
-                        </div>
-                      )}
-                    </section>
-                    <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
-                    <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                      {isWorkflowAgentFocusActive ? (
-                        <WorkflowAgentStreamPanel />
-                      ) : isWorkerFocusActive ? (
-                        <WorkerStreamPanel />
-                      ) : (
-                        <SubagentStreamPanel />
-                      )}
-                    </section>
-                  </main>
-                ) : (
-                  !previewFullscreen && (
-                    <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-                      {currentThreadId ? (
-                        <TabbedPanel
-                          threadId={currentThreadId}
-                          showTabBar={false}
-                          hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
-                          onRequestOpenGitPanel={selectGitModule}
-                          onDismissGitChangeNotice={dismissGitChangeNotice}
-                          onThreadGitStatusChange={handleThreadGitStatusChange}
-                        />
-                      ) : (
-                        <div className="flex flex-1 items-center justify-center text-muted-foreground">
-                          选择或创建一个任务开始
-                        </div>
-                      )}
-                    </main>
-                  )
-                )}
-              </>
-            )}
-
-            {mainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
-              <>
-                {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
-                {/* Right Panel - floating style */}
-                <div
-                  style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+                    <ThreadSidebar />
+                  </div>
+                  <ResizeHandle onDrag={handleLeftResize} />
+                </>
+              )}
+              <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+                <Suspense
+                  fallback={
+                    <div className="flex flex-1 items-center justify-center">
+                      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                    </div>
+                  }
                 >
-                  <RightPanel
-                    moduleMode={rightModule}
-                    onRequestPreviewMode={selectPreviewModule}
-                    onRequestWorkMode={selectWorkModule}
-                    onPreviewFullscreenChange={setPreviewFullscreen}
+                  <DashboardView />
+                </Suspense>
+              </main>
+            </div>
+          )}
+
+          {/* Harness Board 面板 */}
+          {renderedMainView === "harness" && (
+            <div
+              ref={isHarnessAgentFocusActive ? workerSplitRef : rightPanelSplitRef}
+              className="relative flex flex-1 overflow-hidden bg-grid-subtle"
+            >
+              {!sidebarCollapsed && !isHarnessAgentFocusActive && (
+                <AnimatedThreadSidebar
+                  hidden={browserFullscreen}
+                  width={leftWidth}
+                  onResize={handleLeftResize}
+                />
+              )}
+              <main
+                key="harness-main"
+                style={
+                  isHarnessAgentFocusActive
+                    ? { width: `${workerSplitLeftPercent}%` }
+                    : fullscreenMainStyle
+                }
+                className={
+                  previewFullscreen &&
+                  renderedHarnessSessionThreadId &&
+                  !rightPanelCollapsed &&
+                  !isHarnessAgentFocusActive
+                    ? "hidden"
+                    : isHarnessAgentFocusActive
+                      ? "relative flex min-w-0 flex-col overflow-hidden"
+                      : fullscreenMainClassName
+                }
+              >
+                <Suspense
+                  fallback={
+                    <div className="flex flex-1 items-center justify-center">
+                      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                    </div>
+                  }
+                >
+                  <HarnessBoardView
+                    onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
                   />
-                </div>
-              </>
-            )}
-          </div>
-        ) : null}
-
-        {/* Design 面板 */}
-        {mainView === "design" && (
-          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
-            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-              <Suspense
-                fallback={
-                  <div className="flex flex-1 items-center justify-center">
-                    <Loader2 className="size-6 animate-spin text-muted-foreground" />
-                  </div>
-                }
-              >
-                <DesignView />
-              </Suspense>
-            </main>
-          </div>
-        )}
-
-        {/* Dashboard 面板 */}
-        {mainView === "dashboard" && dashboardAllowed === true && (
-          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
-            {!sidebarCollapsed && (
-              <>
-                <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
-            )}
-            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-              <Suspense
-                fallback={
-                  <div className="flex flex-1 items-center justify-center">
-                    <Loader2 className="size-6 animate-spin text-muted-foreground" />
-                  </div>
-                }
-              >
-                <DashboardView />
-              </Suspense>
-            </main>
-          </div>
-        )}
-
-        {/* Harness Board 面板 */}
-        {mainView === "harness" && (
-          <div
-            ref={isHarnessAgentFocusActive ? workerSplitRef : undefined}
-            className="relative flex flex-1 overflow-hidden bg-grid-subtle"
-          >
-            {!sidebarCollapsed && !isHarnessAgentFocusActive && (
-              <>
-                <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
-            )}
-            <main
-              key="harness-main"
-              style={
-                isHarnessAgentFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined
-              }
-              className={
-                previewFullscreen &&
-                harnessSessionThreadId &&
+                </Suspense>
+              </main>
+              {isHarnessAgentFocusActive && (
+                <>
+                  <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
+                  <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                    {isHarnessWorkflowAgentFocusActive ? (
+                      <WorkflowAgentStreamPanel />
+                    ) : isHarnessWorkerFocusActive ? (
+                      <WorkerStreamPanel />
+                    ) : (
+                      <SubagentStreamPanel />
+                    )}
+                  </section>
+                </>
+              )}
+              {renderedHarnessSessionThreadId &&
                 !rightPanelCollapsed &&
-                !isHarnessAgentFocusActive
-                  ? "hidden"
-                  : isHarnessAgentFocusActive
-                    ? "relative flex min-w-0 flex-col overflow-hidden"
-                    : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
+                !isHarnessAgentFocusActive && (
+                  <>
+                    {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
+                    <div
+                      style={fullscreenRightPanelStyle}
+                      className={fullscreenRightPanelClassName}
+                    >
+                      <RightPanel
+                        threadId={renderedHarnessSessionThreadId}
+                        moduleMode={rightModule}
+                        showSystemConstraints={renderedMainView === "harness"}
+                        onRequestPreviewMode={selectPreviewModule}
+                        onRequestWorkMode={selectWorkModule}
+                        onPreviewFullscreenChange={setPreviewFullscreen}
+                        onBrowserFullscreenChange={setBrowserFullscreen}
+                      />
+                    </div>
+                  </>
+                )}
+            </div>
+          )}
+
+          {/* Claude Code 面板：首次进入时再加载代码；之后保持挂载，切换视图时仅隐藏。 */}
+          {(claudeCodeMounted || renderedMainView === "claudecode") && (
+            <div
+              className={
+                renderedMainView === "claudecode"
+                  ? "relative flex flex-1 overflow-hidden bg-grid-subtle"
+                  : "hidden"
               }
             >
-              <Suspense
-                fallback={
-                  <div className="flex flex-1 items-center justify-center">
-                    <Loader2 className="size-6 animate-spin text-muted-foreground" />
+              {/* claudecode 模式下也显示侧边栏 */}
+              {renderedMainView === "claudecode" && !sidebarCollapsed && (
+                <>
+                  <div
+                    data-app-route-control
+                    style={{ width: leftWidth }}
+                    className="relative z-[60] shrink-0"
+                  >
+                    <ThreadSidebar />
                   </div>
-                }
-              >
-                <HarnessBoardView
-                  hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
-                  onRequestOpenGitPanel={selectGitModule}
-                  onDismissGitChangeNotice={dismissGitChangeNotice}
-                  onThreadGitStatusChange={handleThreadGitStatusChange}
-                  onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
-                />
-              </Suspense>
-            </main>
-            {isHarnessAgentFocusActive && (
-              <>
-                <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
-                <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                  {isHarnessWorkflowAgentFocusActive ? (
-                    <WorkflowAgentStreamPanel />
-                  ) : isHarnessWorkerFocusActive ? (
-                    <WorkerStreamPanel />
-                  ) : (
-                    <SubagentStreamPanel />
-                  )}
-                </section>
-              </>
-            )}
-            {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
-              <>
-                {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
-                <div
-                  style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+                  <ResizeHandle onDrag={handleLeftResize} />
+                </>
+              )}
+              <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+                <Suspense
+                  fallback={
+                    <div className="flex flex-1 items-center justify-center">
+                      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                    </div>
+                  }
                 >
-                  <RightPanel
-                    threadId={harnessSessionThreadId}
-                    moduleMode={rightModule}
-                    showSystemConstraints={mainView === "harness"}
-                    onRequestPreviewMode={selectPreviewModule}
-                    onRequestWorkMode={selectWorkModule}
-                    onPreviewFullscreenChange={setPreviewFullscreen}
-                  />
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Claude Code 面板：首次进入时再加载代码；之后保持挂载，切换视图时仅隐藏。 */}
-        {(claudeCodeMounted || mainView === "claudecode") && (
-          <div
-            className={
-              mainView === "claudecode"
-                ? "relative flex flex-1 overflow-hidden bg-grid-subtle"
-                : "hidden"
-            }
-          >
-            {/* claudecode 模式下也显示侧边栏 */}
-            {mainView === "claudecode" && !sidebarCollapsed && (
-              <>
-                <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
-            )}
-            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-              <Suspense
-                fallback={
-                  <div className="flex flex-1 items-center justify-center">
-                    <Loader2 className="size-6 animate-spin text-muted-foreground" />
-                  </div>
-                }
-              >
-                <ClaudeCodePanel visible={mainView === "claudecode"} />
-              </Suspense>
-            </main>
-          </div>
-        )}
+                  <ClaudeCodePanel visible={renderedMainView === "claudecode"} />
+                </Suspense>
+              </main>
+            </div>
+          )}
+          {renderRoutePending && (
+            <div
+              className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-background/20 backdrop-blur-[1px]"
+              role="status"
+              aria-live="polite"
+            >
+              <div className="flex items-center gap-2 rounded-md border border-border/70 bg-background/90 px-3 py-2 text-xs text-muted-foreground shadow-sm">
+                <Loader2 className="size-3.5 animate-spin" />
+                正在切换任务…
+              </div>
+            </div>
+          )}
+          <ResourcePanelOverlay
+            isAgentFocusActive={isAgentFocusActive}
+            renderedMainView={renderedMainView}
+            renderedPanelThreadId={renderedRightPanelThreadId}
+          />
+        </div>
       </div>
       <PetStateBridge />
-      <Toaster position="top-center" richColors duration={2200} />
+      <Toaster position="top-center" richColors duration={2200} theme={toastTheme} />
     </ThreadProvider>
   )
 }

@@ -14,6 +14,7 @@ import {
   TraceCollector,
   createTraceCollectorSafely,
   finishTraceInBackground,
+  flushTraceWriteQueue,
   runTraceSideEffect,
   setTraceReporter
 } from "../src/main/agent/trace/collector.ts"
@@ -324,6 +325,7 @@ async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
 
     const trace = await tracer.finish("success")
     await waitFor(() => reportedTrace !== undefined)
+    await flushTraceWriteQueue()
 
     assert(trace.threadId === "thread-telemetry-unit", "trace should keep thread id")
     assert(trace.modelId === "model-a", "trace should keep model id")
@@ -603,6 +605,7 @@ async function testTraceCollectorSanitizesLargeFields(): Promise<void> {
       makeLongText("ERROR_HEAD_", "e", "_ERROR_TAIL", 4000)
     )
     await waitFor(() => reportedTrace !== undefined)
+    await flushTraceWriteQueue()
 
     assert(
       trace.userMessage === userMessage,
@@ -701,6 +704,7 @@ async function testTraceCollectorPreservesUnknownOutcomeNodes(): Promise<void> {
 
     const reason = "Goal paused: needs user input"
     const trace = await tracer.finish("unknown", reason)
+    await flushTraceWriteQueue()
     const nodes = trace.nodes ?? []
     const root = nodes.find((node) => node.type === "trace")
     const llmNode = nodes.find((node) => node.id === llmNodeId)
@@ -773,26 +777,35 @@ function testTraceTreeBuilderPreservesUnknownOutcome(): void {
 }
 
 async function run(): Promise<void> {
-  testSkillUsageDetectorNormalizesVersions()
-  console.log("PASS Skill usage detector version normalization")
-  testStreamSkillUsageObservation()
-  console.log("PASS stream Skill usage observation")
-  await testTraceSidecarFailureIsolation()
-  console.log("PASS trace sidecar failure isolation")
-  await testSkillUsageDetectorReadsSkillMetadataDirectly()
-  console.log("PASS Skill usage detector direct SKILL.md metadata lookup")
-  await testTraceCollectorReportsVersionedSkills()
-  console.log("PASS trace collector telemetry usedSkills normalization")
-  await testTraceCollectorObservabilityContext()
-  console.log("PASS trace collector observability context")
-  await testTraceCollectorCountsSubagentMetadataTools()
-  console.log("PASS trace collector subagent metadata tool count")
-  await testTraceCollectorSanitizesLargeFields()
-  console.log("PASS trace collector trace field sanitization")
-  await testTraceCollectorPreservesUnknownOutcomeNodes()
-  console.log("PASS trace collector unknown outcome node status")
-  testTraceTreeBuilderPreservesUnknownOutcome()
-  console.log("PASS trace tree builder unknown outcome status")
+  const previousStorageMode = process.env.CMB_COWORK_TRACE_STORAGE_MODE
+  // These legacy telemetry assertions inspect JSONL directly. Production uses
+  // encrypted storage; codec/migration behavior is covered by local-storage.test.ts.
+  process.env.CMB_COWORK_TRACE_STORAGE_MODE = "plaintext"
+  try {
+    testSkillUsageDetectorNormalizesVersions()
+    console.log("PASS Skill usage detector version normalization")
+    testStreamSkillUsageObservation()
+    console.log("PASS stream Skill usage observation")
+    await testTraceSidecarFailureIsolation()
+    console.log("PASS trace sidecar failure isolation")
+    await testSkillUsageDetectorReadsSkillMetadataDirectly()
+    console.log("PASS Skill usage detector direct SKILL.md metadata lookup")
+    await testTraceCollectorReportsVersionedSkills()
+    console.log("PASS trace collector telemetry usedSkills normalization")
+    await testTraceCollectorObservabilityContext()
+    console.log("PASS trace collector observability context")
+    await testTraceCollectorCountsSubagentMetadataTools()
+    console.log("PASS trace collector subagent metadata tool count")
+    await testTraceCollectorSanitizesLargeFields()
+    console.log("PASS trace collector trace field sanitization")
+    await testTraceCollectorPreservesUnknownOutcomeNodes()
+    console.log("PASS trace collector unknown outcome node status")
+    testTraceTreeBuilderPreservesUnknownOutcome()
+    console.log("PASS trace tree builder unknown outcome status")
+  } finally {
+    if (previousStorageMode === undefined) delete process.env.CMB_COWORK_TRACE_STORAGE_MODE
+    else process.env.CMB_COWORK_TRACE_STORAGE_MODE = previousStorageMode
+  }
 }
 
 run().catch((error: Error) => {

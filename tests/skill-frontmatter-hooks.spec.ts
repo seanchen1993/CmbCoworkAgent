@@ -5,7 +5,7 @@
  *   npx tsx tests/skill-frontmatter-hooks.spec.ts
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import { parseSkillFrontmatter } from "../src/main/skills/frontmatter.ts"
@@ -71,8 +71,9 @@ async function testFrontmatterHooksBecomeHookConfigs(): Promise<void> {
   await withTempDir("skill-frontmatter-hooks", async (dir) => {
     const skillDir = join(dir, "demo-skill")
     await mkdir(skillDir, { recursive: true })
+    const skillMdPath = join(skillDir, "SKILL.md")
     await writeFile(
-      join(skillDir, "SKILL.md"),
+      skillMdPath,
       `---
 name: demo-skill
 description: demo
@@ -107,6 +108,8 @@ hooks:
 `,
       "utf8"
     )
+    const hookMtime = new Date("2025-03-04T05:06:07.000Z")
+    await utimes(skillMdPath, hookMtime, hookMtime)
 
     const hooks = parseSkillFrontmatterHooks(skillDir, "demo-skill")
     assert(hooks.length === 2, `expected two hooks from frontmatter, got ${hooks.length}`)
@@ -122,6 +125,17 @@ hooks:
     assert(pre!.forcedOutcome === "always-revise", "forcedOutcome should be preserved")
     assert(pre!.forcedReason === "需要按技能规范修订", "forcedReason should be preserved")
     assert(pre!.onBlock?.requiredSkill === "demo-skill", "onBlock.requiredSkill should parse")
+    assert(
+      pre!.updatedAt === hookMtime.toISOString(),
+      `updatedAt should use SKILL.md mtime, got ${pre!.updatedAt}`
+    )
+    const skillStats = await stat(skillMdPath)
+    const expectedCreatedAt =
+      (skillStats.birthtime.getTime() > 0 ? skillStats.birthtime : skillStats.ctime).toISOString()
+    assert(
+      pre!.createdAt === expectedCreatedAt,
+      `createdAt should use SKILL.md birthtime/ctime fallback, got ${pre!.createdAt}`
+    )
 
     const post = hooks.find((hook) => hook.event === "PostSkillUse")
     assert(post !== undefined, "PostSkillUse hook should exist")
@@ -130,7 +144,7 @@ hooks:
       `PostSkillUse matcher should default to skill name, got ${post!.matcher}`
     )
     assert(post!.type === "prompt", `PostSkillUse should be prompt, got ${post!.type}`)
-    assert(post!.modelId === "local-fast", `modelId should be preserved, got ${post!.modelId}`)
+    assert(post!.model === "local-fast", `legacy modelId should normalize to model, got ${post!.model}`)
     assert(post!.fallback === "block", `fallback should be block, got ${post!.fallback}`)
   })
 }

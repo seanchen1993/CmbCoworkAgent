@@ -870,8 +870,10 @@ process.stdin.on('end', () => {
 async function testWorkspaceHookCwdSupportsChinesePath(): Promise<void> {
   await withTempDir("hook-workspace-cwd", async (dir) => {
     const workspaceRoot = join(dir, "360用户文件")
+    const sourceRoot = join(dir, "source-checkout")
     const skillRoot = join(dir, "skills", "cwd-skill")
     await mkdir(workspaceRoot, { recursive: true })
+    await mkdir(sourceRoot, { recursive: true })
     await mkdir(skillRoot, { recursive: true })
     const out = join(dir, "workspace-cwd.txt")
     const command = nodeCommand(`
@@ -883,12 +885,13 @@ fs.writeFileSync(${JSON.stringify(out)}, process.cwd())
       matcher: "*",
       command,
       hookSourceType: "workspace",
-      hookSourceRoot: workspaceRoot,
-      hookSourcePath: join(workspaceRoot, ".cmbdevclaw", "hooks", "check.json")
+      hookSourceRoot: sourceRoot,
+      hookSourcePath: join(sourceRoot, ".cmbdevclaw", "hooks", "check.json")
     })
     await runHooks([hook], "PreToolUse", {
       toolName: "execute",
-      workspacePath: workspaceRoot,
+      workspacePath: sourceRoot,
+      workspaceHookCwd: workspaceRoot,
       skillRoot
     })
     assert(existsSync(out), "workspace hook should have written cwd output")

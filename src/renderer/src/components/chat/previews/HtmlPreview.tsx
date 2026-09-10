@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { PenLine } from "lucide-react"
 import { CodeViewer } from "@/components/tabs/CodeViewer"
-import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
 import { VisualEditLayer } from "@/components/visual-edit/VisualEditLayer"
 import type {
   ClawVisualAnnotation,
   ClawVisualFeedbackContext,
   ClawVisualTargetKind
 } from "@/components/visual-edit/visual-edit-types"
+import { buildStaticHtmlPreviewDocument } from "@/lib/html-srcdoc"
 
 interface HtmlPreviewProps {
   content: string
@@ -36,6 +36,13 @@ function getFileName(path: string): string {
   return path.split("/").pop() || path
 }
 
+const PREVIEW_BUILD_ERROR_DOCUMENT = [
+  "<!doctype html>",
+  "<html><head>",
+  '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'">',
+  "</head><body><p>无法生成安全的 HTML 预览。</p></body></html>"
+].join("")
+
 export function HtmlPreview({
   content,
   path,
@@ -49,8 +56,8 @@ export function HtmlPreview({
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [iframeHeight, setIframeHeight] = useState<number>(480)
   const [internalViewMode, setInternalViewMode] = useState<"preview" | "source">("preview")
-  const [srcDocContent, setSrcDocContent] = useState(content)
   const [visualEditActive, setVisualEditActive] = useState(false)
+  const [srcDocContent, setSrcDocContent] = useState<string | null>(null)
   const currentViewMode = viewMode ?? internalViewMode
   const canUseVisualEdit = Boolean(visualEdit && currentViewMode === "preview")
 
@@ -58,27 +65,21 @@ export function HtmlPreview({
     let isCancelled = false
 
     async function buildSrcDoc(): Promise<void> {
-      if (!path || !readDependencyFile) {
-        setSrcDocContent(content)
-        return
-      }
-
-      // 先渲染原始内容，再异步替换为“内联同级依赖”后的 srcDoc，避免空白闪烁。
-      setSrcDocContent(content)
-      const htmlWithInlinedAssets = await inlineHtmlSiblingAssets({
+      setSrcDocContent(null)
+      const safeDocument = await buildStaticHtmlPreviewDocument({
         html: content,
         htmlPath: path,
         readTextFile: readDependencyFile
       })
 
       if (!isCancelled) {
-        setSrcDocContent(htmlWithInlinedAssets)
+        setSrcDocContent(safeDocument)
       }
     }
 
     buildSrcDoc().catch(() => {
       if (!isCancelled) {
-        setSrcDocContent(content)
+        setSrcDocContent(PREVIEW_BUILD_ERROR_DOCUMENT)
       }
     })
 
@@ -153,9 +154,20 @@ export function HtmlPreview({
         className={`w-full overflow-auto ${fillHeight ? "flex-1 min-h-0" : ""}`}
         style={fillHeight ? undefined : { maxHeight: "80vh" }}
       >
-        {currentViewMode === "preview" ? (
+        {currentViewMode === "preview" && srcDocContent === null ? (
           <div
-            className="relative"
+            className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground"
+            aria-busy="true"
+          >
+            正在生成安全 HTML 预览...
+          </div>
+        ) : currentViewMode === "preview" ? (
+          <div className="relative">
+            <iframe
+              ref={iframeRef}
+              title={path || "html-preview"}
+              srcDoc={srcDocContent ?? PREVIEW_BUILD_ERROR_DOCUMENT}
+              className={`html-preview-light-canvas border-0 ${fillHeight ? "h-full" : ""}`}
             style={
               fillHeight
                 ? { height: "100%", minWidth: "1000px", width: "max(100%, 1000px)" }
@@ -165,14 +177,9 @@ export function HtmlPreview({
                     width: "max(100%, 1000px)"
                   }
             }
-          >
-            <iframe
-              ref={iframeRef}
-              title={path || "html-preview"}
-              srcDoc={srcDocContent}
-              className="h-full w-full border-0"
-              // 预览场景需要脚本和同源能力（例如 localStorage）；同时保留 sandbox 隔离主页面上下文。
-              sandbox="allow-scripts allow-same-origin"
+              // Static HTML has scripts removed; same-origin is retained only for visual annotations.
+              sandbox="allow-same-origin"
+              referrerPolicy="no-referrer"
               scrolling={fillHeight ? "auto" : "no"}
               onLoad={syncHeight}
             />

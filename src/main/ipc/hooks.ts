@@ -13,10 +13,19 @@ import {
   trustWorkspaceHookFile
 } from "../storage"
 import type { UntrustedWorkspaceHook } from "../storage"
-import type { HookLoggingConfig, SkillHookMetadata } from "../types"
+import type {
+  HookCatalogPage,
+  HookCatalogPageInput,
+  HookLoggingConfig,
+  SkillHookMetadata
+} from "../types"
 import { notifyHookLoggingChanged, notifyHooksChanged } from "../hooks/notifications"
 import { clearOnceStateForHook } from "../hooks/runner"
 import { fireSetupMaintenance } from "../hooks/session-lifecycle"
+import {
+  cancelHookCatalogScope,
+  readHookCatalogPageInWorker
+} from "../hook-catalog/client"
 import {
   isSupportedHookEvent,
   SUPPORTED_HOOK_EVENTS,
@@ -199,6 +208,38 @@ function validateHookConfig(config: HookUpsert): void {
 
 export function registerHooksHandlers(ipcMain: IpcMain): void {
   console.log("[Hooks] Registering hooks IPC handlers...")
+
+  ipcMain.handle(
+    "hooks:catalog:read",
+    async (event, rawInput: HookCatalogPageInput): Promise<HookCatalogPage> => {
+      const requestScope =
+        typeof rawInput?.requestScope === "string" && rawInput.requestScope.trim()
+          ? rawInput.requestScope.trim().slice(0, 128)
+          : "right-panel"
+      const input: HookCatalogPageInput = {
+        requestScope,
+        ...(typeof rawInput?.workspacePath === "string" && rawInput.workspacePath
+          ? { workspacePath: rawInput.workspacePath.slice(0, 32_768) }
+          : {}),
+        ...(typeof rawInput?.revision === "string" && rawInput.revision
+          ? { revision: rawInput.revision.slice(0, 256) }
+          : {}),
+        ...(typeof rawInput?.cursor === "string" && rawInput.cursor
+          ? { cursor: rawInput.cursor.slice(0, 256) }
+          : {}),
+        ...(typeof rawInput?.limit === "number" ? { limit: rawInput.limit } : {})
+      }
+      return readHookCatalogPageInWorker(input, `${event.sender.id}:${requestScope}`)
+    }
+  )
+
+  ipcMain.handle("hooks:catalog:cancel", (event, rawScope?: string): void => {
+    const scope =
+      typeof rawScope === "string" && rawScope.trim()
+        ? rawScope.trim().slice(0, 128)
+        : "right-panel"
+    cancelHookCatalogScope(`${event.sender.id}:${scope}`)
+  })
 
   ipcMain.handle("hooks:list", async (): Promise<HookConfig[]> => {
     return getHooks()

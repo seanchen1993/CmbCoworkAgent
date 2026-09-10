@@ -16,6 +16,7 @@ import {
   type CoordinatorWorkerRunResult,
   type CoordinatorWorkerRunInput
 } from "../src/main/agent/coordinator-worker-manager.ts"
+import { CoordinatorWorkerRestoreIndexStore } from "../src/main/agent/coordinator-worker-restore-index.ts"
 import { usesCaseInsensitiveCoordinatorPathMatching } from "../src/main/agent/coordinator-worker-paths.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -43,6 +44,88 @@ function deferred<T>(): {
     reject = rej
   })
   return { promise, resolve, reject }
+}
+
+interface TestRestoreIndexEntry {
+  worker_id: string
+  status: "running" | "completed" | "failed" | "cancelled"
+  notification_acknowledged: boolean
+  recency: number
+}
+
+class BlockingCoordinatorWorkerRestoreIndexStore extends CoordinatorWorkerRestoreIndexStore {
+  readonly loadEntered = deferred<void>()
+  readonly releaseLoad = deferred<void>()
+  private blockNextLoad = true
+
+  override async loadCandidates(
+    workersDir: string,
+    mode: "active" | "recent",
+    signal?: AbortSignal
+  ) {
+    if (this.blockNextLoad) {
+      this.blockNextLoad = false
+      this.loadEntered.resolve(undefined)
+      await this.releaseLoad.promise
+    }
+    return super.loadCandidates(workersDir, mode, signal)
+  }
+}
+
+class SingleFlightProbeRestoreIndexStore extends CoordinatorWorkerRestoreIndexStore {
+  readonly firstLoadEntered = deferred<void>()
+  readonly releaseFirstLoad = deferred<void>()
+  entries: TestRestoreIndexEntry[] = []
+  loadModes: Array<"active" | "recent"> = []
+  maxConcurrentLoads = 0
+  private concurrentLoads = 0
+
+  override async loadCandidates(
+    _workersDir: string,
+    mode: "active" | "recent",
+    signal?: AbortSignal
+  ) {
+    this.concurrentLoads += 1
+    this.maxConcurrentLoads = Math.max(this.maxConcurrentLoads, this.concurrentLoads)
+    this.loadModes.push(mode)
+    try {
+      if (this.loadModes.length === 1) {
+        this.firstLoadEntered.resolve(undefined)
+        await this.releaseFirstLoad.promise
+      }
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException("Restore cancelled.", "AbortError")
+      }
+      return {
+        entries:
+          mode === "active"
+            ? this.entries.filter(
+                (entry) =>
+                  entry.status === "running" || entry.notification_acknowledged === false
+              )
+            : [...this.entries],
+        overflow: false
+      }
+    } finally {
+      this.concurrentLoads -= 1
+    }
+  }
+}
+
+async function writeCompleteRestoreIndex(
+  workersDir: string,
+  entries: TestRestoreIndexEntry[]
+): Promise<void> {
+  await writeFile(
+    join(workersDir, ".restore-index-v1.json"),
+    JSON.stringify({
+      version: 1,
+      complete: true,
+      overflow: false,
+      entries
+    }),
+    "utf8"
+  )
 }
 
 async function waitFor(
@@ -777,6 +860,7 @@ async function testTerminalResultPersistenceFailurePersistsFailedState(): Promis
         "persisted worker state should keep the original summary alongside the persistence failure"
       )
 
+      await manager.waitForTerminalPersistence(threadId, [started.worker_id])
       const notifications = manager.drainNotifications(threadId)
       assert(
         notifications.length === 1 && notifications[0].includes("<status>failed</status>"),
@@ -786,6 +870,27 @@ async function testTerminalResultPersistenceFailurePersistsFailedState(): Promis
         notifications[0]?.includes("finished but cannot persist result") &&
           notifications[0].includes("Worker result persistence failed"),
         "terminal persistence failure notification should preserve summary context"
+      )
+
+      const workersDir = join(
+        workspace,
+        ".cmbdevclaw",
+        "coordinator",
+        threadId,
+        "workers"
+      )
+      await rm(workersDir, { recursive: true, force: true })
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      let workersDirRecreated = false
+      try {
+        await access(workersDir)
+        workersDirRecreated = true
+      } catch {
+        // Expected: the terminal/index drain completed before the directory was removed.
+      }
+      assert(
+        !workersDirRecreated,
+        "terminal persistence drain must prevent a late restore-index write from recreating workers"
       )
     } finally {
       console.warn = originalWarn
@@ -5321,6 +5426,515 @@ async function testRestoreMissingDirectoryIsNoop(): Promise<void> {
   })
 }
 
+async function testRestoreCanBeCancelledWhileScanningHistory(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const restoreIndexStore = new CoordinatorWorkerRestoreIndexStore()
+    const manager = new CoordinatorWorkerManager({ restoreIndexStore })
+    const threadId = "thread-cancel-restore-history"
+    const workersDir = join(workspace, ".cmbdevclaw", "coordinator", threadId, "workers")
+    await mkdir(workersDir, { recursive: true })
+
+    const createdAt = "2026-04-29T00:00:00.000Z"
+    const restoreEntries = await Promise.all(
+      Array.from({ length: 32 }, async (_, index) => {
+        const workerId = `implementer-${10_000 + index}-1`
+        const state = {
+          worker_id: workerId,
+          worker_thread_id: `${threadId}__worker__${workerId}`,
+          parent_thread_id: threadId,
+          role: "implementer",
+          description: `Historical worker ${index}`,
+          status: "completed",
+          turns: 1,
+          created_at: createdAt,
+          updated_at: createdAt,
+          finished_at: createdAt,
+          notification_acknowledged: false,
+          tool_call_count: 0,
+          last_event: "Worker completed."
+        }
+        await restoreIndexStore.writeWorkerState(
+          join(workersDir, `${workerId}.json`),
+          JSON.stringify(state),
+          {
+            worker_id: workerId,
+            status: "completed",
+            notification_acknowledged: false,
+            updated_at: createdAt
+          }
+        )
+        return {
+          worker_id: workerId,
+          status: "completed" as const,
+          notification_acknowledged: false,
+          recency: 10_000 + index
+        }
+      })
+    )
+    await writeCompleteRestoreIndex(workersDir, restoreEntries)
+
+    const controller = new AbortController()
+    const abortedGetter = Object.getOwnPropertyDescriptor(
+      AbortSignal.prototype,
+      "aborted"
+    )?.get
+    assert(abortedGetter, "AbortSignal.aborted should expose its native getter")
+    let abortChecks = 0
+    Object.defineProperty(controller.signal, "aborted", {
+      configurable: true,
+      get: () => {
+        abortChecks += 1
+        if (abortChecks === 40) {
+          controller.abort(new DOMException("Superseded by another thread.", "AbortError"))
+        }
+        return abortedGetter.call(controller.signal) as boolean
+      }
+    })
+    const restore = manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "full",
+      signal: controller.signal
+    })
+
+    let aborted = false
+    try {
+      await restore
+    } catch (error) {
+      aborted = error instanceof Error && error.name === "AbortError"
+    }
+    assert(aborted, "history restore should reject with AbortError after a foreground switch")
+    assert(
+      manager.readWorkers(threadId).length === 0,
+      "cancelled history restore must not commit a partially hydrated worker map"
+    )
+
+    const restored = await manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "active"
+    })
+    assert(restored.length === 32, "re-entering the task should restore every pending worker")
+    const notifications = manager.drainNotifications(threadId)
+    assert(
+      notifications.length === 32,
+      "re-entering after a cancelled restore should enqueue every pending notification"
+    )
+    assert(
+      new Set(
+        notifications.map((notification) => extractXmlTagValue(notification, "task-id"))
+      ).size === 32,
+      "re-entering after cancellation must not duplicate restored notifications"
+    )
+  })
+}
+
+async function testConcurrentRecentAndActiveRestoreIsSingleFlight(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const restoreIndexStore = new SingleFlightProbeRestoreIndexStore()
+    const manager = new CoordinatorWorkerManager({ restoreIndexStore })
+    const threadId = "thread-concurrent-restore"
+    const pendingWorkerId = "implementer-20000-1"
+    const workersDir = join(workspace, ".cmbdevclaw", "coordinator", threadId, "workers")
+    await mkdir(workersDir, { recursive: true })
+    const pendingState = {
+      worker_id: pendingWorkerId,
+      worker_thread_id: `${threadId}__worker__${pendingWorkerId}`,
+      parent_thread_id: threadId,
+      role: "implementer",
+      workload: "read_only",
+      description: "Concurrent restore must commit once",
+      status: "completed",
+      turns: 3,
+      created_at: "2026-04-29T00:00:00.000Z",
+      updated_at: "2026-04-29T00:01:00.000Z",
+      finished_at: "2026-04-29T00:01:00.000Z",
+      summary: "durable result",
+      notification_acknowledged: false,
+      tool_call_count: 1,
+      last_event: "Worker completed."
+    }
+    await restoreIndexStore.writeWorkerState(
+      join(workersDir, `${pendingWorkerId}.json`),
+      JSON.stringify(pendingState),
+      {
+        worker_id: pendingWorkerId,
+        status: "completed",
+        notification_acknowledged: false,
+        updated_at: "2026-04-29T00:01:00.000Z"
+      }
+    )
+
+    const liveRun = deferred<CoordinatorWorkerRunResult>()
+    const live = await manager.startWorkerAndPersist({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      role: "implementer",
+      workload: "read_only",
+      description: "Live worker must beat a stale restore snapshot",
+      prompt: "stay live",
+      runner: async () => liveRun.promise
+    })
+    const staleLiveState = {
+      ...pendingState,
+      worker_id: live.worker_id,
+      worker_thread_id: live.worker_thread_id,
+      description: "Stale disk snapshot must lose",
+      turns: 99,
+      summary: "stale disk result"
+    }
+    await restoreIndexStore.writeWorkerState(
+      join(workersDir, `${live.worker_id}.json`),
+      JSON.stringify(staleLiveState),
+      {
+        worker_id: live.worker_id,
+        status: "completed",
+        notification_acknowledged: false,
+        updated_at: "2026-04-29T00:01:00.000Z"
+      }
+    )
+    await writeCompleteRestoreIndex(workersDir, [
+      {
+        worker_id: live.worker_id,
+        status: "completed",
+        notification_acknowledged: false,
+        recency: Date.now()
+      },
+      {
+        worker_id: pendingWorkerId,
+        status: "completed",
+        notification_acknowledged: false,
+        recency: 20_000
+      }
+    ])
+
+    restoreIndexStore.entries = [
+      {
+        worker_id: live.worker_id,
+        status: "completed",
+        notification_acknowledged: false,
+        recency: Date.now()
+      },
+      {
+        worker_id: pendingWorkerId,
+        status: "completed",
+        notification_acknowledged: false,
+        recency: 20_000
+      }
+    ]
+
+    const recentRestore = manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "recent",
+      onUpdateKey: "recent"
+    })
+    await restoreIndexStore.firstLoadEntered.promise
+    const activeRestore = manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "active",
+      onUpdateKey: "active"
+    })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert(
+      restoreIndexStore.loadModes.length === 1 &&
+        restoreIndexStore.maxConcurrentLoads === 1,
+      "the active restore must remain queued while the recent restore is staging"
+    )
+    restoreIndexStore.releaseFirstLoad.resolve(undefined)
+    const [recent, active] = await Promise.all([recentRestore, activeRestore])
+    assert(
+      restoreIndexStore.loadModes.join(",") === "recent",
+      "the serialized active restore should use explicit hydration instead of a duplicate load"
+    )
+
+    assert(recent.length === 2 && active.length === 2, "both restores should see two workers")
+    const recentLive = recent.find((worker) => worker.worker_id === live.worker_id)
+    const activeLive = active.find((worker) => worker.worker_id === live.worker_id)
+    assert(
+      recentLive?.status === "running" && activeLive?.status === "running",
+      "concurrent restore modes must preserve the existing live record"
+    )
+    assert(
+      recentLive?.turns === 1 && activeLive?.turns === 1 && !recentLive.summary,
+      "the queued restore must not overwrite live turns or summary with stale disk state"
+    )
+    const notifications = manager.drainNotifications(threadId)
+    assert(
+      notifications.length === 1 &&
+        extractXmlTagValue(notifications[0], "task-id") === pendingWorkerId,
+      "concurrent restores must enqueue the pending disk notification exactly once"
+    )
+
+    liveRun.resolve({ summary: "live worker completed" })
+    await manager.waitForTerminalPersistence(threadId, [live.worker_id])
+    const liveNotifications = manager.drainNotifications(threadId)
+    assert(
+      liveNotifications.length === 1 &&
+        extractXmlTagValue(liveNotifications[0], "task-id") === live.worker_id,
+      "the preserved live worker should enqueue only its own eventual notification"
+    )
+  })
+}
+
+async function testForgetThreadInvalidatesRunningAndQueuedRestores(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const restoreIndexStore = new BlockingCoordinatorWorkerRestoreIndexStore()
+    const manager = new CoordinatorWorkerManager({ restoreIndexStore })
+    const threadId = "thread-forget-queued-restore"
+    const workerId = "implementer-30000-1"
+    const workersDir = join(workspace, ".cmbdevclaw", "coordinator", threadId, "workers")
+    const state = {
+      worker_id: workerId,
+      worker_thread_id: `${threadId}__worker__${workerId}`,
+      parent_thread_id: threadId,
+      role: "implementer",
+      workload: "read_only",
+      description: "Queued restore must be invalidated by forgetThread",
+      status: "completed",
+      turns: 1,
+      created_at: "2026-04-29T00:00:00.000Z",
+      updated_at: "2026-04-29T00:01:00.000Z",
+      finished_at: "2026-04-29T00:01:00.000Z",
+      summary: "pending result",
+      notification_acknowledged: false,
+      tool_call_count: 0,
+      last_event: "Worker completed."
+    }
+    await restoreIndexStore.writeWorkerState(
+      join(workersDir, `${workerId}.json`),
+      JSON.stringify(state),
+      {
+        worker_id: workerId,
+        status: "completed",
+        notification_acknowledged: false,
+        updated_at: "2026-04-29T00:01:00.000Z"
+      }
+    )
+    await writeCompleteRestoreIndex(workersDir, [
+      {
+        worker_id: workerId,
+        status: "completed",
+        notification_acknowledged: false,
+        recency: 30_000
+      }
+    ])
+
+    const runningRestore = manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "recent"
+    })
+    await restoreIndexStore.loadEntered.promise
+    const queuedRestore = manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "active"
+    })
+
+    manager.forgetThread(threadId)
+    restoreIndexStore.releaseLoad.resolve(undefined)
+    const invalidated = await Promise.allSettled([runningRestore, queuedRestore])
+    assert(
+      invalidated.every(
+        (result) => result.status === "rejected" && result.reason?.name === "AbortError"
+      ),
+      "forgetThread should invalidate both the running restore and calls waiting in its queue"
+    )
+    assert(
+      manager.readWorkers(threadId).length === 0 && !manager.hasNotifications(threadId),
+      "invalidated restores must not commit records or notifications after forgetThread"
+    )
+
+    const freshRestore = await manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "active"
+    })
+    assert(freshRestore.length === 1, "a fresh restore after forgetThread should still succeed")
+    assert(
+      manager.drainNotifications(threadId).length === 1,
+      "the fresh restore should enqueue the pending notification exactly once"
+    )
+  })
+}
+
+async function testRestoreRepairsHalfCommittedTerminalNotification(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const restoreIndexStore = new CoordinatorWorkerRestoreIndexStore()
+    const manager = new CoordinatorWorkerManager({ restoreIndexStore })
+    const threadId = "thread-repair-half-committed-restore"
+    const workerId = "implementer-31000-1"
+    const workersDir = join(workspace, ".cmbdevclaw", "coordinator", threadId, "workers")
+    const state = {
+      worker_id: workerId,
+      worker_thread_id: `${threadId}__worker__${workerId}`,
+      parent_thread_id: threadId,
+      role: "implementer",
+      workload: "read_only",
+      description: "Repair a terminal record committed before notification enqueue",
+      status: "completed",
+      turns: 1,
+      created_at: "2026-04-29T00:00:00.000Z",
+      updated_at: "2026-04-29T00:01:00.000Z",
+      finished_at: "2026-04-29T00:01:00.000Z",
+      summary: "pending result",
+      notification_acknowledged: false,
+      tool_call_count: 0,
+      last_event: "Worker completed."
+    }
+    await restoreIndexStore.writeWorkerState(
+      join(workersDir, `${workerId}.json`),
+      JSON.stringify(state),
+      {
+        worker_id: workerId,
+        status: "completed",
+        notification_acknowledged: false,
+        updated_at: "2026-04-29T00:01:00.000Z"
+      }
+    )
+    await writeCompleteRestoreIndex(workersDir, [
+      {
+        worker_id: workerId,
+        status: "completed",
+        notification_acknowledged: false,
+        recency: 31_000
+      }
+    ])
+
+    const internals = manager as unknown as {
+      enqueueNotification(record: unknown): Promise<string | undefined>
+    }
+    const enqueueNotification = internals.enqueueNotification.bind(manager)
+    let failBeforeFirstEnqueue = true
+    internals.enqueueNotification = async (record): Promise<string | undefined> => {
+      if (failBeforeFirstEnqueue) {
+        failBeforeFirstEnqueue = false
+        throw new Error("Injected pre-enqueue interruption")
+      }
+      return enqueueNotification(record)
+    }
+
+    const firstRestore = await manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "recent"
+    })
+    assert(firstRestore.length === 1, "the first restore should atomically commit the terminal row")
+    assert(
+      manager.drainNotifications(threadId).length === 0,
+      "the injected interruption should leave the committed terminal row not yet enqueued"
+    )
+
+    internals.enqueueNotification = enqueueNotification
+    const retriedRestore = await manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "active"
+    })
+    assert(retriedRestore.length === 1, "retry should reuse the explicitly hydrated worker map")
+    const repairedNotifications = manager.drainNotifications(threadId)
+    assert(
+      repairedNotifications.length === 1 &&
+        extractXmlTagValue(repairedNotifications[0], "task-id") === workerId,
+      "the hydration fastpath should repair the half-committed notification exactly once"
+    )
+
+    await manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "recent"
+    })
+    assert(
+      manager.drainNotifications(threadId).length === 0,
+      "later restore fastpaths must not enqueue the repaired notification twice"
+    )
+  })
+}
+
+async function testClearInvalidatesRunningAndQueuedRestores(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const restoreIndexStore = new BlockingCoordinatorWorkerRestoreIndexStore()
+    const manager = new CoordinatorWorkerManager({ restoreIndexStore })
+    const threadId = "thread-clear-queued-restore"
+    const workerId = "implementer-32000-1"
+    const workersDir = join(workspace, ".cmbdevclaw", "coordinator", threadId, "workers")
+    const state = {
+      worker_id: workerId,
+      worker_thread_id: `${threadId}__worker__${workerId}`,
+      parent_thread_id: threadId,
+      role: "implementer",
+      workload: "read_only",
+      description: "Queued restore must be invalidated by manager clear",
+      status: "completed",
+      turns: 1,
+      created_at: "2026-04-29T00:00:00.000Z",
+      updated_at: "2026-04-29T00:01:00.000Z",
+      finished_at: "2026-04-29T00:01:00.000Z",
+      summary: "pending result",
+      notification_acknowledged: false,
+      tool_call_count: 0,
+      last_event: "Worker completed."
+    }
+    await restoreIndexStore.writeWorkerState(
+      join(workersDir, `${workerId}.json`),
+      JSON.stringify(state),
+      {
+        worker_id: workerId,
+        status: "completed",
+        notification_acknowledged: false,
+        updated_at: "2026-04-29T00:01:00.000Z"
+      }
+    )
+    await writeCompleteRestoreIndex(workersDir, [
+      {
+        worker_id: workerId,
+        status: "completed",
+        notification_acknowledged: false,
+        recency: 32_000
+      }
+    ])
+
+    const runningRestore = manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "recent"
+    })
+    await restoreIndexStore.loadEntered.promise
+    const queuedRestore = manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "active"
+    })
+
+    manager.clear()
+    restoreIndexStore.releaseLoad.resolve(undefined)
+    const invalidated = await Promise.allSettled([runningRestore, queuedRestore])
+    assert(
+      invalidated.every(
+        (result) => result.status === "rejected" && result.reason?.name === "AbortError"
+      ),
+      "manager clear should invalidate both running and queued restores through its epoch"
+    )
+    assert(
+      manager.readWorkers(threadId).length === 0 && !manager.hasNotifications(threadId),
+      "epoch-invalidated restores must not commit rows or notifications after clear"
+    )
+
+    const freshRestore = await manager.restoreWorkersForThread({
+      parentThreadId: threadId,
+      workspacePath: workspace,
+      mode: "active"
+    })
+    assert(freshRestore.length === 1, "a restore captured after clear should use the new epoch")
+    assert(
+      manager.drainNotifications(threadId).length === 1,
+      "the post-clear restore should enqueue the pending notification exactly once"
+    )
+  })
+}
+
 async function testRestoreDoesNotClobberActiveWorker(): Promise<void> {
   await withTempDir("coordinator-worker-manager", async (workspace) => {
     const manager = new CoordinatorWorkerManager()
@@ -7145,6 +7759,16 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker progress throttling")
   await testStaleProgressFromInterruptedRunIsIgnored()
   console.log("PASS coordinator worker stale progress guard")
+  await testRestoreCanBeCancelledWhileScanningHistory()
+  console.log("PASS coordinator worker restore cancellation")
+  await testConcurrentRecentAndActiveRestoreIsSingleFlight()
+  console.log("PASS coordinator worker concurrent restore single-flight")
+  await testForgetThreadInvalidatesRunningAndQueuedRestores()
+  console.log("PASS coordinator worker queued restore invalidation")
+  await testRestoreRepairsHalfCommittedTerminalNotification()
+  console.log("PASS coordinator worker half-committed notification repair")
+  await testClearInvalidatesRunningAndQueuedRestores()
+  console.log("PASS coordinator worker restore epoch invalidation")
   await testWorkerWriteSafetyAndReadOnlyParallelism()
   console.log("PASS coordinator worker write safety and read-only parallelism")
   await testNotificationAcknowledgement()

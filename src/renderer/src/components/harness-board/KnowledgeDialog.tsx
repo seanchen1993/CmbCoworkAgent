@@ -759,12 +759,12 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                                     <SelectItem
                                       key={label.label}
                                       value={label.label}
-                                      className="focus:bg-accent/10 focus:text-black [&>span]:flex-1 [&>span]:min-w-0 mb-2"
+                                      className="mb-2 focus:bg-accent/10 focus:text-foreground [&>span]:min-w-0 [&>span]:flex-1"
                                     >
                                       <div>
                                         <div>{label.label}</div>
                                         <div className="flex items-center justify-between mt-0.5 gap-3">
-                                          <span className="text-xs text-gray-500 truncate">
+                                          <span className="truncate text-xs text-muted-foreground">
                                             {label.triggerUser}（{label.startDate}）
                                           </span>
                                           <span
@@ -821,12 +821,12 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                                     <SelectItem
                                       key={label.label}
                                       value={label.label}
-                                      className="focus:bg-accent/10 focus:text-black [&>span]:flex-1 [&>span]:min-w-0 mb-2"
+                                      className="mb-2 focus:bg-accent/10 focus:text-foreground [&>span]:min-w-0 [&>span]:flex-1"
                                     >
                                       <div>
                                         <div>{label.label}</div>
                                         <div className="flex items-center justify-between mt-0.5 gap-3">
-                                          <span className="text-xs text-gray-500 truncate">
+                                          <span className="truncate text-xs text-muted-foreground">
                                             {label.triggerUser}（{label.startDate}）
                                           </span>
                                           <span

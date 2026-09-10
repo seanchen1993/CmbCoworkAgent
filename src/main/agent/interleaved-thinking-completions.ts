@@ -1,7 +1,11 @@
 import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager"
 import type { BaseMessage } from "@langchain/core/messages"
-import type { ChatGenerationChunk } from "@langchain/core/outputs"
-import { ChatOpenAICompletions } from "@langchain/openai"
+import type { ChatGenerationChunk, ChatResult } from "@langchain/core/outputs"
+import {
+  ChatOpenAICompletions,
+  convertMessagesToCompletionsMessageParams,
+  type OpenAIClient
+} from "@langchain/openai"
 
 const THINK_OPEN_TAG = "<think>"
 const THINK_CLOSE_TAG = "</think>"
@@ -133,16 +137,46 @@ function mergeReasoningIntoContent(content: unknown, reasoning: unknown): string
   return contentText ? `${reasoningBlock}\n${contentText}` : reasoningBlock
 }
 
-export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompletions {
+export class ToolCallAwareChatOpenAICompletions extends ChatOpenAICompletions {
+  override _convertCompletionsDeltaToBaseMessageChunk(
+    ...args: Parameters<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]>
+  ): ReturnType<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]> {
+    const [delta, rawResponse, defaultRole] = args
+    // Some OpenAI-compatible providers omit role for the entire completion stream.
+    // A generic leading text or empty chunk also loses later tools during concat,
+    // so every role-less chunk must use the assistant completion default.
+    // The upstream converter still prefers delta.role over this fallback.
+    return super._convertCompletionsDeltaToBaseMessageChunk(
+      delta,
+      rawResponse,
+      defaultRole ?? "assistant"
+    )
+  }
+}
+
+export class InterleavedThinkingChatOpenAICompletions extends ToolCallAwareChatOpenAICompletions {
   private thinkingOpen = false
   private readonly exposeReasoning: boolean
+  private readonly requestFields: unknown
 
   constructor(fields?: unknown, options?: { exposeReasoning?: boolean }) {
     super(fields as never)
+    this.requestFields = fields
     this.exposeReasoning = options?.exposeReasoning === true
   }
 
   override async *_streamResponseChunks(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun
+  ): AsyncGenerator<ChatGenerationChunk> {
+    const requestCompletions = new InterleavedThinkingChatOpenAICompletions(this.requestFields, {
+      exposeReasoning: this.exposeReasoning
+    })
+    yield* requestCompletions.streamResponseChunksWithRequestState(messages, options, runManager)
+  }
+
+  private async *streamResponseChunksWithRequestState(
     messages: BaseMessage[],
     options: this["ParsedCallOptions"],
     runManager?: CallbackManagerForLLMRun
@@ -254,7 +288,7 @@ export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompleti
   }
 }
 
-export class ReasoningDisplayChatOpenAICompletions extends ChatOpenAICompletions {
+export class ReasoningDisplayChatOpenAICompletions extends ToolCallAwareChatOpenAICompletions {
   override _convertCompletionsMessageToBaseMessage(
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]> {
@@ -293,5 +327,87 @@ export class ReasoningDisplayChatOpenAICompletions extends ChatOpenAICompletions
       )
       return super._convertCompletionsDeltaToBaseMessageChunk(...args)
     }
+  }
+}
+
+const DEEPSEEK_MESSAGES = Symbol("deepseekMessages")
+type DeepSeekRequestOptions = OpenAIClient.RequestOptions & {
+  [DEEPSEEK_MESSAGES]?: OpenAIClient.Chat.ChatCompletionMessageParam[]
+}
+
+/** Keep reasoning in durable message metadata, and replay it as a sibling of content. */
+export class DeepSeekChatOpenAICompletions extends ReasoningDisplayChatOpenAICompletions {
+  private reasoningMessages(messages: BaseMessage[]) {
+    return messages.flatMap((message) =>
+      convertMessagesToCompletionsMessageParams({ messages: [message], model: this.model }).map(
+        (param) =>
+          param.role === "assistant"
+            ? {
+                ...param,
+                reasoning_content: extractReasoningFromRecord(
+                  message as unknown as Record<string, unknown>
+                )
+              }
+            : param
+      )
+    )
+  }
+
+  override _generate(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun
+  ): Promise<ChatResult> {
+    // Non-streaming LangChain forwards options.options to completionWithRetry.
+    // Streaming invoke delegates to our _streamResponseChunks instead.
+    return super._generate(
+      messages,
+      this.invocationParams(options).stream
+        ? options
+        : {
+            ...options,
+            options: {
+              ...options.options,
+              [DEEPSEEK_MESSAGES]: this.reasoningMessages(messages)
+            }
+          },
+      runManager
+    )
+  }
+
+  override async *_streamResponseChunks(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun
+  ): AsyncGenerator<ChatGenerationChunk> {
+    yield* super._streamResponseChunks(
+      messages,
+      // Streaming LangChain forwards the call options directly. Keep this
+      // metadata call-local so concurrent requests never share message state.
+      { ...options, [DEEPSEEK_MESSAGES]: this.reasoningMessages(messages) },
+      runManager
+    )
+  }
+
+  override completionWithRetry(
+    request: OpenAIClient.Chat.ChatCompletionCreateParamsStreaming,
+    requestOptions?: OpenAIClient.RequestOptions
+  ): Promise<AsyncIterable<OpenAIClient.Chat.Completions.ChatCompletionChunk>>
+  override completionWithRetry(
+    request: OpenAIClient.Chat.ChatCompletionCreateParamsNonStreaming,
+    requestOptions?: OpenAIClient.RequestOptions
+  ): Promise<OpenAIClient.Chat.Completions.ChatCompletion>
+  override completionWithRetry(
+    request: OpenAIClient.Chat.ChatCompletionCreateParams,
+    requestOptions?: DeepSeekRequestOptions
+  ) {
+    const { [DEEPSEEK_MESSAGES]: messages, ...httpOptions } = requestOptions ?? {}
+    const body = messages ? { ...request, messages } : request
+    return body.stream
+      ? super.completionWithRetry(body, httpOptions)
+      : super.completionWithRetry(
+          body as OpenAIClient.Chat.ChatCompletionCreateParamsNonStreaming,
+          httpOptions
+        )
   }
 }

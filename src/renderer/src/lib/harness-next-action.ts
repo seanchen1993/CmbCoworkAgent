@@ -1,4 +1,12 @@
-import type { HarnessWorkflowNextAction } from "@/types"
+import type { HarnessWorkflowNextAction, SkillMetadata } from "@/types"
+import {
+  mergeChatSkills,
+  selectSkillForSlashName
+} from "@/features/slash-commands/skill-merge"
+import { normalizeSkillId } from "./skill-ids"
+import { normalizeHarnessNextAction } from "../../../shared/harness-run-next-action"
+
+export { normalizeHarnessNextAction }
 
 type Listener = () => void
 
@@ -9,36 +17,6 @@ let version = 0
 function emitChange(): void {
   version += 1
   for (const listener of listeners) listener()
-}
-
-export function normalizeHarnessNextAction(value: unknown): HarnessWorkflowNextAction | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
-  const record = value as Record<string, unknown>
-  const slashSkill = typeof record.slashSkill === "string" ? record.slashSkill.trim() : ""
-  const userMessage = typeof record.userMessage === "string" ? record.userMessage.trim() : ""
-  const dialogTips = typeof record.dialogTips === "string" ? record.dialogTips.trim() : ""
-  const preferredPlugin =
-    record.preferredPlugin && typeof record.preferredPlugin === "object" && !Array.isArray(record.preferredPlugin)
-      ? record.preferredPlugin as Record<string, unknown>
-      : null
-  const preferredPluginId =
-    typeof preferredPlugin?.id === "string" ? preferredPlugin.id.trim() : ""
-  const preferredPluginName =
-    typeof preferredPlugin?.name === "string" ? preferredPlugin.name.trim() : ""
-  const nextAction = {
-    ...(slashSkill ? { slashSkill } : {}),
-    ...(userMessage ? { userMessage } : {}),
-    ...(dialogTips ? { dialogTips } : {}),
-    ...(preferredPluginId || preferredPluginName
-      ? {
-          preferredPlugin: {
-            ...(preferredPluginId ? { id: preferredPluginId } : {}),
-            ...(preferredPluginName ? { name: preferredPluginName } : {})
-          }
-        }
-      : {})
-  }
-  return Object.keys(nextAction).length > 0 ? nextAction : undefined
 }
 
 export function setPendingHarnessNextAction(threadId: string, value: unknown): void {
@@ -77,4 +55,46 @@ export function subscribePendingHarnessNextActions(listener: Listener): () => vo
 
 export function getPendingHarnessNextActionVersion(): number {
   return version
+}
+
+export async function resolveHarnessNextActionSkill(
+  projectId: string,
+  slashSkill: string
+): Promise<SkillMetadata | null> {
+  const pluginSkillsPromise =
+    typeof window.api.skills.listPlugins === "function"
+      ? window.api.skills.listPlugins().catch((error) => {
+          console.warn("[HarnessNextAction] Failed to load plugin skills:", error)
+          return []
+        })
+      : Promise.resolve([])
+  const [loadedSkills, pluginSkills, disabledList] = await Promise.all([
+    window.api.skills.list(),
+    pluginSkillsPromise,
+    window.api.skills.getDisabled()
+  ])
+  let preferredPlugin: { id?: string; name?: string } | null = null
+  try {
+    const projects = await window.api.harnessBoard.listProjects()
+    const project = projects.find((item) => item.projectId === projectId)
+    if (project) {
+      preferredPlugin = {
+        id: project.harnessAdapter.id,
+        name: project.harnessAdapter.name
+      }
+    }
+  } catch {
+    // Keep the same non-critical fallback as the chat skill loader.
+  }
+
+  const availableSkills = loadedSkills.filter(
+    (skill) => skill.source === "project" || skill.source === "user"
+  )
+  const merged = mergeChatSkills(
+    availableSkills,
+    pluginSkills,
+    new Set(disabledList.map(normalizeSkillId)),
+    preferredPlugin
+  )
+  return selectSkillForSlashName(merged, slashSkill, preferredPlugin)
 }

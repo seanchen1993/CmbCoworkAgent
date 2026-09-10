@@ -1,12 +1,29 @@
 import ReactMarkdown, { type Components } from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
 import remarkGfm from "remark-gfm"
+import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
+import { ChatSearchContext } from "./ChatSearchContext"
 import { Check, Copy } from "lucide-react"
-import { isValidElement, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import {
+  isValidElement,
+  memo,
+  startTransition,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode
+} from "react"
+import {
+  buildStreamingMarkdownRenderPlan,
+  getStreamingMarkdownDelayMs
+} from "../../lib/streaming-markdown-schedule"
 
 interface StreamingMarkdownProps {
   children: string
   isStreaming?: boolean
+  searchBlockIndex?: number
+  searchLocation?: ChatSearchLocation
 }
 
 function getLanguageLabel(className?: string): string | null {
@@ -48,7 +65,7 @@ function MarkdownCodeBlock({
 
   return (
     <div className="streaming-markdown-code-block">
-      <div className="streaming-markdown-code-header">
+      <div data-chat-search-ignore className="streaming-markdown-code-header">
         <span className="streaming-markdown-code-language">{language || "text"}</span>
         <button
           type="button"
@@ -76,10 +93,10 @@ const REHYPE_PLUGINS = [rehypeHighlight]
 const NO_REHYPE_PLUGINS: typeof REHYPE_PLUGINS = []
 
 // During streaming the parent re-renders on every token. Re-parsing the full
-// Markdown each time is ~O(n²) over a long answer, so we coalesce updates to at
-// most one parse per throttle window. When streaming ends we flush immediately
-// so the final render is complete and fully highlighted.
-const STREAM_THROTTLE_MS = 50
+// Markdown each time is ~O(n²) over a long answer, so the refresh interval grows
+// with the accumulated text. That keeps parse work near a fixed CPU budget while
+// preserving the existing 50 ms cadence for short answers. Completion still
+// flushes immediately below and restores syntax highlighting.
 
 function useThrottledStreamingText(text: string, isStreaming: boolean): string {
   const [throttled, setThrottled] = useState(text)
@@ -106,9 +123,9 @@ function useThrottledStreamingText(text: string, isStreaming: boolean): string {
       timerRef.current = null
       if (flushedRef.current !== textRef.current) {
         flushedRef.current = textRef.current
-        setThrottled(textRef.current)
+        startTransition(() => setThrottled(textRef.current))
       }
-    }, STREAM_THROTTLE_MS)
+    }, getStreamingMarkdownDelayMs(text.length))
   }, [text, isStreaming])
 
   useEffect(
@@ -118,8 +135,8 @@ function useThrottledStreamingText(text: string, isStreaming: boolean): string {
     []
   )
 
-  // While streaming, render the throttled snapshot; once done, render the full
-  // final text immediately so nothing is lost and highlighting runs on completion.
+  // While streaming, render the throttled snapshot. Completion exposes the latest
+  // full text to the bounded render planner below without another state update.
   return isStreaming ? throttled : text
 }
 
@@ -162,16 +179,18 @@ const MARKDOWN_COMPONENTS: Components = {
   }
 }
 
-export const StreamingMarkdown = memo(function StreamingMarkdown({
-  children,
-  isStreaming = false
-}: StreamingMarkdownProps): React.JSX.Element {
-  const text = useThrottledStreamingText(children, isStreaming)
-
-  // Memoize the parsed tree so per-token parent re-renders don't re-run
-  // ReactMarkdown when the throttled text hasn't changed.
-  const rendered = useMemo(
-    () => (
+const MarkdownFragment = memo(function MarkdownFragment({
+  text,
+  isStreaming,
+  start = 0
+}: {
+  text: string
+  isStreaming: boolean
+  start?: number
+}): React.JSX.Element {
+  return (
+    <div data-chat-search-text data-chat-search-source-start={start}
+      data-chat-search-source-end={start + text.length}>
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
@@ -179,9 +198,77 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
       >
         {text}
       </ReactMarkdown>
-    ),
-    [text, isStreaming]
+    </div>
+  )
+})
+
+export const StreamingMarkdown = memo(function StreamingMarkdown({
+  children,
+  isStreaming = false,
+  searchBlockIndex = 0,
+  searchLocation
+}: StreamingMarkdownProps): React.JSX.Element {
+  const text = useThrottledStreamingText(children, isStreaming)
+  const [expandedText, setExpandedText] = useState<string | null>(null)
+  const isExpanded = !isStreaming && expandedText === text
+
+  // Per-token parent renders reuse this tree until the throttle fires. Extremely
+  // long live answers use two bounded fragments: the stable head remains memoized
+  // and only the active tail is reparsed. Completion stays bounded until the user
+  // explicitly expands the full document, avoiding a large synchronous done spike.
+  const rendered = useMemo(
+    () => {
+      const plan = buildStreamingMarkdownRenderPlan(text, isStreaming, isExpanded)
+      if (plan.renderFullDocument) {
+        return (
+          <>
+            <ChatSearchContext location={searchLocation} />
+            {!isStreaming && isExpanded && (
+              <button
+                data-chat-search-ignore
+                type="button"
+                className="mb-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground hover:bg-muted/70"
+                onClick={() => setExpandedText(null)}
+              >
+                收起长内容
+              </button>
+            )}
+            <MarkdownFragment text={plan.head} isStreaming={isStreaming} />
+          </>
+        )
+      }
+
+      return (
+        <>
+          <MarkdownFragment text={plan.head} isStreaming={isStreaming} />
+          <div
+            data-chat-search-ignore
+            className="my-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+            role="status"
+          >
+            {isStreaming ? "流式内容较长，已临时" : "内容较长，已"}折叠中间{
+              plan.omittedCharacters.toLocaleString()
+            } 个字符{isStreaming ? "。" : "以保持页面流畅。"}
+            {!isStreaming && (
+              <button
+                type="button"
+                data-chat-search-expand-markdown
+                aria-expanded={false}
+                className="ml-2 underline underline-offset-2 hover:text-foreground"
+                onClick={() => setExpandedText(text)}
+              >
+                展开全文
+              </button>
+            )}
+          </div>
+          <ChatSearchContext location={searchLocation} />
+          <MarkdownFragment text={plan.tail} start={text.length - plan.tail.length}
+            isStreaming={isStreaming} />
+        </>
+      )
+    },
+    [text, isStreaming, isExpanded, searchLocation]
   )
 
-  return <div className="streaming-markdown">{rendered}</div>
+  return <div className="streaming-markdown" data-chat-search-block-index={searchBlockIndex}>{rendered}</div>
 })

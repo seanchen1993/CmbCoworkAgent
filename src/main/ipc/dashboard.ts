@@ -6,12 +6,18 @@
  * these IPC handlers for security.
  */
 
-import { ipcMain, dialog, BrowserWindow } from "electron"
+import { ipcMain, dialog, BrowserWindow, type IpcMainInvokeEvent } from "electron"
+import { serialize } from "node:v8"
 import { getUserInfo } from "../storage"
 import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
+import { rehydrateTraceContent } from "../agent/trace/content-refs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
+import {
+  redactTraceDetailForDisplay,
+  redactTraceSkillEvalRecordForDisplay
+} from "../agent/trace/display-redaction"
 import { TRACE_OBSERVABILITY_SCHEMA_VERSION } from "../agent/trace/types"
 import type {
   AgentTrace,
@@ -35,6 +41,28 @@ import {
   type DashboardCodeStats,
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
+import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
+import {
+  buildProjectModeOperationalAggs,
+  parseProjectModeOperationalStats,
+  type ProjectModeConstraintFileStat,
+  type ProjectModeConstraintReadStats,
+  type ProjectModeHookEventStat,
+  type ProjectModeHookStats,
+  type ProjectModeOperationalDetails,
+  type ProjectModeOperationalStats
+} from "./project-mode-operational-metrics"
+import {
+  buildChangeKindAggs,
+  buildComputeEfficiency,
+  buildNewRatioHistogramAgg,
+  buildPendingScalability,
+  computeUnmeasuredRatio,
+  makeMockEfficiency,
+  normalizeChangeKindBuckets,
+  normalizeNewRatioHistogram,
+  type DashboardEfficiencyData
+} from "./dashboard-efficiency"
 import {
   executeDashboardEsQuery,
   type DashboardEsIndexAlias,
@@ -45,12 +73,61 @@ import {
   type DashboardAnalysisAgentInput
 } from "../services/dashboard-analysis-agent"
 import {
+  DASHBOARD_ES_FALLBACK_BYTE_LIMIT,
+  DASHBOARD_ES_OUTPUT_BYTE_LIMIT,
+  DASHBOARD_ES_RESPONSE_TOO_LARGE,
+  DASHBOARD_HOME_ENDPOINT_OUTPUT_BYTE_LIMITS,
+  DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT,
+  DASHBOARD_HOME_RANKING_QUERY_OUTPUT_BYTE_LIMIT,
+  DASHBOARD_USER_DIRECTORY_MAX_ITEMS,
+  DASHBOARD_USER_DIRECTORY_MAX_PAGES,
+  DASHBOARD_USER_DIRECTORY_OUTPUT_BYTE_LIMIT,
+  DASHBOARD_USER_DIRECTORY_PAGE_SIZE,
+  type DashboardEsProjection
+} from "../services/dashboard-es-protocol"
+import {
+  isDashboardEsRequestCancelled,
+  isDashboardEsResponseTooLarge,
+  isDashboardEsWorkerUnavailable,
+  queryDashboardEsInWorker
+} from "../services/dashboard-es-client"
+import {
+  DashboardRequestCancelledError,
+  DashboardRequestCoordinator,
+  getDashboardRequestSignal,
+  isDashboardRequestCancelled
+} from "../services/dashboard-request-coordinator"
+import { projectDashboardEsResponse } from "../services/dashboard-view-model-projection"
+import {
+  buildThreadListPreviewBody,
+  MAX_THREAD_LIST_BUCKETS,
+  orderThreadListPreviewHits,
+  collectPagedThreadTraces,
+  parseThreadListKeys,
+  threadListBucketsNeeded,
+  threadListKeysAgg,
+  threadListPreviewSourceIncludes
+} from "./dashboard-trace-thread-list"
+import {
   STAGE_BUCKET_LABELS,
   STAGE_DONE_LABEL,
   STAGE_IN_PROGRESS_LABEL,
-  isHarnessDevStageNodeName,
   type StageBucket
 } from "../../shared/harness-stage-bucket"
+import { SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } from "../services/system-constraint-read-reporter"
+import type {
+  ProjectMetricFilters,
+  ProjectMetricListOptions,
+  ProjectMetricTrendFilters
+} from "../../shared/project-metrics"
+import {
+  fetchProjectMetricProjects,
+  fetchProjectMetricSummary,
+  fetchProjectMetricTrend,
+  makeMockProjectMetricProjects,
+  makeMockProjectMetricSummary,
+  makeMockProjectMetricTrend
+} from "./dashboard-project-metrics"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -72,8 +149,11 @@ function getEsAuth(): { username: string; password: string } | null {
   return { username, password }
 }
 
-function getEsIndex(type: "trace" | "event" | "skillEval"): string {
+function getEsIndex(type: "trace" | "event" | "skillEval" | "projectFact"): string {
   if (type === "trace") return (import.meta.env.VITE_ES_INDEX_TRACE as string) || "devclaw_trace"
+  if (type === "projectFact") {
+    return (import.meta.env.VITE_ES_INDEX_PROJECT_INFO as string) || "devclaw_project_info"
+  }
   if (type === "skillEval") {
     return (import.meta.env.VITE_ES_INDEX_SKILL_EVAL as string) || "devclaw_skill_eval_record"
   }
@@ -85,6 +165,16 @@ function getEsIndex(type: "trace" | "event" | "skillEval"): string {
 // ─────────────────────────────────────────────────────────
 
 let nodeIndex = 0
+const dashboardRequestCoordinator = new DashboardRequestCoordinator()
+
+function enforceDashboardIpcByteLimit<T>(label: string, value: T, byteLimit: number): T {
+  if (serialize(value).byteLength <= byteLimit) return value
+  const error = new Error(`${label} response exceeds the ${byteLimit} byte IPC limit`) as Error & {
+    code?: string
+  }
+  error.code = DASHBOARD_ES_RESPONSE_TOO_LARGE
+  throw error
+}
 
 function getErrorDetail(error: Error): string {
   const cause = error.cause
@@ -100,6 +190,12 @@ function getErrorDetail(error: Error): string {
 
 function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error {
   const detail = lastError ? getErrorDetail(lastError) : "unknown error"
+  // 体积超限和节点不可达是两类问题：前者重试多少次、换几个节点都一样，报成
+  // 「请检查网络连接」只会把排查引到错误方向（本次线上就是这么被误导的）。
+  if (isDashboardEsResponseTooLarge(lastError)) {
+    console.warn("[Dashboard] ES response too large:", detail)
+    return new Error("本次查询返回的数据量过大，请缩小时间范围或减少每页条数后重试")
+  }
   console.warn(`[Dashboard] All ${nodes.length} ES nodes failed. Last error:`, detail)
   return new Error("请检查网络连接后重试")
 }
@@ -107,7 +203,11 @@ function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error
 async function esQuery(
   index: string,
   body: Record<string, unknown>,
-  options?: { timeoutMs?: number }
+  options?: {
+    timeoutMs?: number
+    outputByteLimit?: number
+    projection?: DashboardEsProjection
+  }
 ): Promise<unknown> {
   const nodes = getEsNodes()
   if (nodes.length === 0) throw new Error("ES_NODES not configured")
@@ -119,33 +219,156 @@ async function esQuery(
       "Basic " + Buffer.from(`${auth.username}:${auth.password}`).toString("base64")
   }
 
-  // Round-robin with fallback
+  // Round-robin is preserved, but response streaming, JSON parsing and recursive
+  // normalization happen in the reusable Node worker. The worker also applies
+  // input and output byte ceilings before the value can be cloned back to main.
   const startIdx = nodeIndex
-  let lastError: Error | null = null
+  const orderedNodes = nodes.map((_, offset) => nodes[(startIdx + offset) % nodes.length])
+  nodeIndex = (startIdx + 1) % nodes.length
+  const signal = getDashboardRequestSignal()
+  const path = `/${index}/_search`
+  const bodyText = JSON.stringify(body)
 
-  for (let i = 0; i < nodes.length; i++) {
-    const idx = (startIdx + i) % nodes.length
-    const url = `${nodes[idx]}/${index}/_search`
-    nodeIndex = (idx + 1) % nodes.length
-
-    try {
-      const resp = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(options?.timeoutMs ?? 15_000)
-      })
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "")
-        throw new Error(`ES ${resp.status}: ${text.slice(0, 200)}`)
-      }
-      return await resp.json()
-    } catch (e) {
-      lastError = e instanceof Error ? e : new Error(String(e))
-      console.warn(`[Dashboard] ES node ${nodes[idx]} failed:`, getErrorDetail(lastError))
+  try {
+    return await queryDashboardEsInWorker({
+      nodes: orderedNodes,
+      method: "POST",
+      path,
+      headers,
+      bodyText,
+      timeoutMs: options?.timeoutMs ?? 15_000,
+      signal,
+      outputByteLimit: options?.outputByteLimit,
+      projection: options?.projection
+    })
+  } catch (error) {
+    if (isDashboardEsRequestCancelled(error) || isDashboardRequestCancelled(error)) throw error
+    if (!isDashboardEsWorkerUnavailable(error)) {
+      throw makeEsUnavailableError(nodes, error instanceof Error ? error : new Error(String(error)))
     }
+
+    // Packaging failures should not make a small dashboard query unusable. This
+    // fallback is deliberately tiny so synchronous JSON.parse can never regain
+    // the multi-megabyte main-process failure mode that the worker removes.
+    console.warn("[Dashboard] ES worker unavailable; using bounded fallback:", error.message)
+    const raw = await esQuerySmallFallback(
+      orderedNodes,
+      path,
+      "POST",
+      headers,
+      bodyText,
+      options?.timeoutMs ?? 15_000,
+      signal
+    )
+    const value = options?.projection ? projectDashboardEsResponse(raw, options.projection) : raw
+    const outputByteLimit = options?.outputByteLimit ?? DASHBOARD_ES_OUTPUT_BYTE_LIMIT
+    if (serialize(value).byteLength > outputByteLimit) {
+      const outputError = new Error(
+        `Dashboard fallback response exceeds the ${outputByteLimit} byte limit`
+      ) as Error & { code?: string }
+      outputError.code = DASHBOARD_ES_RESPONSE_TOO_LARGE
+      throw outputError
+    }
+    return value
+  }
+}
+
+async function readBoundedFallbackBytes(
+  response: Response,
+  byteLimit: number,
+  signal?: AbortSignal
+): Promise<Uint8Array> {
+  const declaredLength = Number(response.headers.get("content-length") ?? 0)
+  if (Number.isFinite(declaredLength) && declaredLength > byteLimit) {
+    await response.body?.cancel().catch(() => undefined)
+    const error = new Error(`Dashboard response exceeds the ${byteLimit} byte limit`) as Error & {
+      code?: string
+    }
+    error.code = DASHBOARD_ES_RESPONSE_TOO_LARGE
+    throw error
+  }
+  if (!response.body) return new Uint8Array()
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  try {
+    while (true) {
+      if (signal?.aborted) throw new DashboardRequestCancelledError()
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value?.byteLength) continue
+      totalBytes += value.byteLength
+      if (totalBytes > byteLimit) {
+        void reader.cancel().catch(() => undefined)
+        const error = new Error(
+          `Dashboard response exceeds the ${byteLimit} byte limit`
+        ) as Error & { code?: string }
+        error.code = DASHBOARD_ES_RESPONSE_TOO_LARGE
+        throw error
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
   }
 
+  const joined = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    joined.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return joined
+}
+
+async function esQuerySmallFallback(
+  nodes: string[],
+  path: string,
+  method: "GET" | "POST",
+  headers: Record<string, string>,
+  bodyText: string | undefined,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<unknown> {
+  let lastError: Error | null = null
+  for (const node of nodes) {
+    if (signal?.aborted) throw new DashboardRequestCancelledError()
+    const controller = new AbortController()
+    const abort = (): void => controller.abort(new DashboardRequestCancelledError())
+    signal?.addEventListener("abort", abort, { once: true })
+    const timeout = setTimeout(
+      () => controller.abort(new Error("Dashboard ES request timed out")),
+      timeoutMs
+    )
+    timeout.unref()
+    try {
+      const response = await fetch(`${node.replace(/\/+$/, "")}${path}`, {
+        method,
+        headers,
+        body: method === "GET" ? undefined : bodyText,
+        signal: controller.signal
+      })
+      if (!response.ok) {
+        const bytes = await readBoundedFallbackBytes(response, 4 * 1024, signal).catch(
+          () => new Uint8Array()
+        )
+        throw new Error(`ES ${response.status}: ${new TextDecoder().decode(bytes).slice(0, 200)}`)
+      }
+      const bytes = await readBoundedFallbackBytes(
+        response,
+        DASHBOARD_ES_FALLBACK_BYTE_LIMIT,
+        signal
+      )
+      return JSON.parse(new TextDecoder().decode(bytes)) as unknown
+    } catch (error) {
+      if (signal?.aborted) throw new DashboardRequestCancelledError()
+      lastError = error instanceof Error ? error : new Error(String(error))
+    } finally {
+      clearTimeout(timeout)
+      signal?.removeEventListener("abort", abort)
+    }
+  }
   throw makeEsUnavailableError(nodes, lastError)
 }
 
@@ -224,6 +447,10 @@ interface DashboardTraceDetail {
   triggerSource?: string
   nodes?: TraceNode[]
   rawAvailable: boolean
+  /** true = `_raw` 是「列表预览刻意没取」，不是「这条 trace 坏了」。渲染层据此
+   * 拒绝把预览行当成对话来渲染——没有 raw 就没有对话数据，任何据此产出的内容
+   * 都是编造。 */
+  rawPending?: boolean
   rawError?: string
 }
 
@@ -523,10 +750,10 @@ interface DashboardUserListItem {
   count: number
   lastActiveAt?: string
   avgDurationMs: number
-  totalToolCalls: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  codeStats: DashboardCodeStats | null
 }
 
 interface DashboardUserListData {
@@ -624,6 +851,8 @@ interface DashboardUserDetail {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  /** 当前时间范围内该用户的代码生成、Commit 采纳与 Push 入库统计。 */
+  codeStats: DashboardCodeStats | null
   bySkill: Array<{ skill: string; count: number }>
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
@@ -786,6 +1015,25 @@ interface DashboardTraceExportPayload {
   traces: DashboardTraceDetail[]
 }
 
+interface DashboardUserTraceExportPayload {
+  sapId: string
+  ystId?: string
+  userName: string
+  range: TimeRange
+  page: number
+  pageSize: number
+  totalItems: number
+  viewMode: TraceViewMode
+  triggerScope: TraceTriggerScope
+  projectMode: boolean
+  traces: DashboardTraceDetail[]
+}
+
+interface DashboardThreadTraceExport {
+  threadId: string
+  traces: DashboardTraceDetail[]
+}
+
 interface CommitDetailsOptions {
   page?: number
   pageSize?: number
@@ -846,9 +1094,14 @@ const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 const TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV = "VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS"
 const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
+const DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_IDS_ENV =
+  "VITE_DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_YST_IDS"
 // 评奖辅助看板当前仅开放给这四个 ystId；env 可覆盖，留空则回退到此默认名单，
 // 保证即使未配置环境变量也严格只对这四人可见。
 const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855,231858"
+const DASHBOARD_SKILL_EVAL_IDS_ENV = "VITE_DASHBOARD_SKILL_EVAL_YST_IDS"
+// 技能评估 tab 白名单；env 可覆盖，留空则回退到此默认名单。
+const DASHBOARD_SKILL_EVAL_DEFAULT_IDS = "383331"
 
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
@@ -876,6 +1129,19 @@ function getDashboardAwardsAdminIds(): Set<string> {
     (import.meta.env[DASHBOARD_AWARDS_ADMIN_IDS_ENV] as string | undefined) || ""
   ).trim()
   return splitEnvIds(configured || DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS)
+}
+
+function getDashboardSkillEvalAllowedIds(): Set<string> {
+  const configured = String(
+    (import.meta.env[DASHBOARD_SKILL_EVAL_IDS_ENV] as string | undefined) || ""
+  ).trim()
+  return splitEnvIds(configured || DASHBOARD_SKILL_EVAL_DEFAULT_IDS)
+}
+
+function getDashboardSuspectedTechnicalDetailAllowedIds(): Set<string> {
+  return splitEnvIds(
+    import.meta.env[DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_IDS_ENV] as string | undefined
+  )
 }
 
 function getDashboardAccessContext(): DashboardAccessContext {
@@ -930,6 +1196,15 @@ function requireDashboardProjectModeAccess(): DashboardAccessContext {
   return access
 }
 
+/** Project-list heuristic metric gate; production access comes only from encrypted .env. */
+function isDashboardSuspectedTechnicalDetailAllowed(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
+  if (import.meta.env.DEV) return true
+  if (!access.loggedIn || !access.ystId) return false
+  return getDashboardSuspectedTechnicalDetailAllowedIds().has(access.ystId)
+}
+
 // 评奖辅助看板（技能贡献奖 / 技能应用奖）的访问门禁：仅 DASHBOARD_AWARDS_ADMIN
 // 名单内的 ystId 可见（默认仅四人）。DEV 直接放行便于本地预览。
 function isDashboardAwardsAdmin(
@@ -948,6 +1223,16 @@ function requireDashboardAwardsAccess(): DashboardAccessContext {
     throw new Error("无评奖辅助看板访问权限")
   }
   return access
+}
+
+// 技能评估 tab 的访问门禁：仅 DASHBOARD_SKILL_EVAL 白名单内的 ystId 可见。
+// DEV 直接放行便于本地预览。
+function isDashboardSkillEvalAllowed(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
+  if (import.meta.env.DEV) return true
+  if (!access.loggedIn || !access.ystId) return false
+  return getDashboardSkillEvalAllowedIds().has(access.ystId)
 }
 
 function isDashboardAnalysisAgentAllowed(): boolean {
@@ -1056,6 +1341,12 @@ function buildProjectModeOrgFilter(
   return { bool: { filter: filters } }
 }
 
+function projectMetricAllowedRoomNames(access: DashboardAccessContext): string[] | null {
+  if (isDashboardProjectModeAdmin(access)) return null
+  const roomName = access.upperOrgLv1.trim()
+  return roomName ? [roomName] : []
+}
+
 function getDashboardEsIndexByAlias(): Record<DashboardEsIndexAlias, string> {
   return {
     event: getEsIndex("event"),
@@ -1125,9 +1416,11 @@ function escapeWildcard(value: string): string {
 }
 
 function safeExportFileName(value: string): string {
-  const cleaned = value
-    .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+  const withoutControlCharacters = Array.from(value.trim(), (character) =>
+    character.charCodeAt(0) <= 0x1f ? "-" : character
+  ).join("")
+  const cleaned = withoutControlCharacters
+    .replace(/[<>:"/\\|?*]/g, "-")
     .replace(/\s+/g, " ")
     .replace(/-+/g, "-")
     .slice(0, 80)
@@ -1165,6 +1458,78 @@ function stringifyExportValue(value: unknown): string {
   }
 }
 
+function appendTraceExportMarkdown(
+  lines: string[],
+  trace: DashboardTraceDetail,
+  traceHeadingLevel = 2
+): void {
+  const traceHeading = "#".repeat(traceHeadingLevel)
+  const sectionHeading = "#".repeat(traceHeadingLevel + 1)
+  const nodeHeading = "#".repeat(traceHeadingLevel + 2)
+
+  lines.push(`${traceHeading} Trace ${escapeMarkdown(trace.traceId || "-")}`, "")
+  lines.push(`- Thread ID: \`${escapeMarkdown(trace.threadId || "-")}\``)
+  lines.push(`- Time: ${trace.startedAt || "-"}`)
+  lines.push(`- Outcome: ${trace.outcome || "-"}`)
+  lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
+  lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
+  lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
+  lines.push(
+    `- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`
+  )
+  if (trace.userName || trace.sapId || trace.ystId) {
+    lines.push(
+      `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
+    )
+  }
+  if (trace.usedSkills.length > 0) {
+    lines.push(
+      `- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`
+    )
+  }
+  lines.push("")
+
+  if (trace.userMessage.trim()) {
+    lines.push(`${sectionHeading} User Message`, "", trace.userMessage.trim(), "")
+  }
+
+  if (trace.nodes && trace.nodes.length > 0) {
+    lines.push(`${sectionHeading} Trace Nodes`, "")
+    for (const node of trace.nodes) {
+      lines.push(
+        `${nodeHeading} ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`,
+        ""
+      )
+      const metadata = [
+        `id: \`${escapeMarkdown(node.id)}\``,
+        node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
+        node.status ? `status: \`${escapeMarkdown(node.status)}\`` : null,
+        `startedAt: ${node.startedAt}`,
+        node.endedAt ? `endedAt: ${node.endedAt}` : null
+      ].filter(Boolean)
+      lines.push(`_${metadata.join(", ")}_`, "")
+      if (node.input !== undefined) {
+        lines.push("INPUT", "", "```json", stringifyExportValue(node.input), "```", "")
+      }
+      if (node.output !== undefined) {
+        lines.push("OUTPUT", "", "```json", stringifyExportValue(node.output), "```", "")
+      }
+      if (node.metadata && Object.keys(node.metadata).length > 0) {
+        lines.push("METADATA", "", "```json", stringifyExportValue(node.metadata), "```", "")
+      }
+    }
+  } else {
+    lines.push(
+      `${sectionHeading} Trace Summary`,
+      "",
+      "```json",
+      stringifyExportValue(trace),
+      "```",
+      ""
+    )
+  }
+}
+
 function formatTraceExportMarkdown(
   payload: DashboardTraceExportPayload,
   exportedAt: string
@@ -1182,59 +1547,60 @@ function formatTraceExportMarkdown(
   ]
 
   for (const trace of payload.traces) {
-    lines.push(`## Trace ${escapeMarkdown(trace.traceId || "-")}`, "")
-    lines.push(`- Thread ID: \`${escapeMarkdown(trace.threadId || "-")}\``)
-    lines.push(`- Time: ${trace.startedAt || "-"}`)
-    lines.push(`- Outcome: ${trace.outcome || "-"}`)
-    lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
-    lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
-    lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
-    lines.push(
-      `- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`
-    )
-    if (trace.userName || trace.sapId || trace.ystId) {
-      lines.push(
-        `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
-      )
-    }
-    if (trace.usedSkills.length > 0) {
-      lines.push(
-        `- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`
-      )
-    }
-    lines.push("")
+    appendTraceExportMarkdown(lines, trace)
+  }
 
-    if (trace.userMessage.trim()) {
-      lines.push("### User Message", "", trace.userMessage.trim(), "")
-    }
+  return `${lines.join("\n").trimEnd()}\n`
+}
 
-    if (trace.nodes && trace.nodes.length > 0) {
-      lines.push("### Trace Nodes", "")
-      for (const node of trace.nodes) {
-        lines.push(
-          `#### ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`,
-          ""
-        )
-        const metadata = [
-          `id: \`${escapeMarkdown(node.id)}\``,
-          node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
-          node.status ? `status: \`${escapeMarkdown(node.status)}\`` : null,
-          `startedAt: ${node.startedAt}`,
-          node.endedAt ? `endedAt: ${node.endedAt}` : null
-        ].filter(Boolean)
-        lines.push(`_${metadata.join(", ")}_`, "")
-        if (node.input !== undefined) {
-          lines.push("INPUT", "", "```json", stringifyExportValue(node.input), "```", "")
-        }
-        if (node.output !== undefined) {
-          lines.push("OUTPUT", "", "```json", stringifyExportValue(node.output), "```", "")
-        }
-        if (node.metadata && Object.keys(node.metadata).length > 0) {
-          lines.push("METADATA", "", "```json", stringifyExportValue(node.metadata), "```", "")
-        }
+function traceExportThreadId(trace: DashboardTraceDetail): string {
+  return trace.rootThreadId || trace.threadId || "unknown-thread"
+}
+
+function groupTraceExportThreads(traces: DashboardTraceDetail[]): DashboardThreadTraceExport[] {
+  const grouped = new Map<string, DashboardTraceDetail[]>()
+  for (const trace of traces) {
+    const threadId = traceExportThreadId(trace)
+    const threadTraces = grouped.get(threadId) ?? []
+    threadTraces.push(trace)
+    grouped.set(threadId, threadTraces)
+  }
+  return Array.from(grouped, ([threadId, threadTraces]) => ({ threadId, traces: threadTraces }))
+}
+
+function formatUserTraceExportMarkdown(
+  payload: DashboardUserTraceExportPayload,
+  exportedAt: string
+): string {
+  const viewLabel = payload.viewMode === "thread" ? "Thread" : "Trace"
+  const totalLabel = payload.viewMode === "thread" ? "Threads" : "Traces"
+  const lines: string[] = [
+    `# 用户 ${viewLabel} 历史 · ${escapeMarkdown(payload.userName || payload.sapId)}`,
+    "",
+    `- User: ${escapeMarkdown(payload.userName || "-")}`,
+    `- SAP ID: \`${escapeMarkdown(payload.sapId)}\``,
+    ...(payload.ystId ? [`- YST ID: \`${escapeMarkdown(payload.ystId)}\``] : []),
+    `- Range: ${payload.range.from} 至 ${payload.range.to}`,
+    `- View Mode: ${viewLabel}`,
+    `- Trigger Scope: ${payload.triggerScope}`,
+    `- Project Mode: ${payload.projectMode ? "yes" : "no"}`,
+    `- Page: ${payload.page}`,
+    `- Page Size: ${payload.pageSize}`,
+    `- Total ${totalLabel}: ${payload.totalItems}`,
+    `- Exported: ${exportedAt}`,
+    ""
+  ]
+
+  if (payload.viewMode === "thread") {
+    for (const thread of groupTraceExportThreads(payload.traces)) {
+      lines.push(`## Thread ${escapeMarkdown(thread.threadId)}`, "")
+      for (const trace of thread.traces) {
+        appendTraceExportMarkdown(lines, trace, 3)
       }
-    } else {
-      lines.push("### Trace Summary", "", "```json", stringifyExportValue(trace), "```", "")
+    }
+  } else {
+    for (const trace of payload.traces) {
+      appendTraceExportMarkdown(lines, trace)
     }
   }
 
@@ -1246,7 +1612,7 @@ function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayloa
   const skill = asString(payload.skill).trim()
   const range = asRecord(payload.range)
   const traces = Array.isArray(payload.traces)
-    ? payload.traces.map((trace) => trace as DashboardTraceDetail)
+    ? payload.traces.map((trace) => redactTraceDetailForDisplay(trace as DashboardTraceDetail))
     : []
   const page = typeof payload.page === "number" ? payload.page : undefined
   const pageSize = typeof payload.pageSize === "number" ? payload.pageSize : undefined
@@ -1260,6 +1626,39 @@ function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayloa
     page: clampLimit(page, 1, 1000),
     pageSize: clampLimit(pageSize, 10, 50),
     totalTraces: asNumber(payload.totalTraces, traces.length),
+    traces
+  }
+}
+
+function normalizeUserTraceExportPayload(value: unknown): DashboardUserTraceExportPayload {
+  const payload = asRecord(value)
+  const range = asRecord(payload.range)
+  const viewMode = normalizeTraceViewMode(payload.viewMode)
+  const traces = Array.isArray(payload.traces)
+    ? payload.traces.map((trace) => redactTraceDetailForDisplay(trace as DashboardTraceDetail))
+    : []
+
+  return {
+    sapId: asString(payload.sapId).trim(),
+    ystId: asOptionalString(payload.ystId)?.trim() || undefined,
+    userName: asString(payload.userName).trim(),
+    range: {
+      from: asString(range.from),
+      to: asString(range.to)
+    },
+    page: clampLimit(typeof payload.page === "number" ? payload.page : undefined, 1, 1000),
+    pageSize: clampLimit(
+      typeof payload.pageSize === "number" ? payload.pageSize : undefined,
+      10,
+      50
+    ),
+    totalItems: asNumber(
+      payload.totalItems,
+      viewMode === "thread" ? groupTraceExportThreads(traces).length : traces.length
+    ),
+    viewMode,
+    triggerScope: normalizeTraceTriggerScope(payload.triggerScope),
+    projectMode: payload.projectMode === true,
     traces
   }
 }
@@ -1699,7 +2098,9 @@ function parsePluginSkillSourceBuckets(raw: unknown): PluginSkillSourceBucket[] 
   return Array.from(result.values())
 }
 
-function subtractPluginSkillCountsBySkill(sourceBuckets: PluginSkillSourceBucket[]): Map<string, number> {
+function subtractPluginSkillCountsBySkill(
+  sourceBuckets: PluginSkillSourceBucket[]
+): Map<string, number> {
   const result = new Map<string, number>()
   for (const bucket of sourceBuckets) {
     result.set(bucket.skill, (result.get(bucket.skill) ?? 0) + bucket.count)
@@ -1737,31 +2138,6 @@ function combineSkillCountBuckets(
   return result.slice(0, Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : result.length)
 }
 
-function makeSkillAdoptionStatsBucket(item: DashboardSkillCodeAdoptionStats): Record<string, unknown> {
-  return {
-    key: item.skill,
-    ...(item.id ? { id: { value: item.id } } : {}),
-    ...(item.sourceRef ? { source_ref: { value: item.sourceRef } } : {}),
-    is_plugin: { value: item.isPlugin === true },
-    plugin_name: { value: item.pluginName ?? null },
-    generated_lines: { value: item.generatedLines },
-    measured_generated_lines: { value: item.measuredGeneratedLines },
-    effective_generated_lines: { value: item.effectiveGeneratedLines },
-    unmeasured_generated_lines: { value: item.unmeasuredGeneratedLines },
-    inclusive_effective_generated_lines: { value: item.inclusiveEffectiveGeneratedLines },
-    adopted_lines: { value: item.adoptedLines },
-    measured_adoption_rate: { value: item.measuredAdoptionRate },
-    inclusive_adoption_rate: { value: item.inclusiveAdoptionRate },
-    commit_count: { value: item.commitCount },
-    pushed_measured_generated_lines: { value: item.pushedMeasuredGeneratedLines },
-    pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
-    pushed_adopted_lines: { value: item.pushedAdoptedLines },
-    pushed_adoption_rate: { value: item.pushedAdoptionRate },
-    inclusive_pushed_adoption_rate: { value: item.inclusivePushedAdoptionRate },
-    pushed_commit_count: { value: item.pushedCommitCount }
-  }
-}
-
 function subtractSkillCodeStats(
   item: DashboardSkillCodeAdoptionStats,
   subtract: DashboardSkillCodeAdoptionStats
@@ -1797,7 +2173,8 @@ function addSkillCodeStats(
       measuredGeneratedLines: item.measuredGeneratedLines + add.measuredGeneratedLines,
       effectiveGeneratedLines: item.effectiveGeneratedLines + add.effectiveGeneratedLines,
       adoptedLines: item.adoptedLines + add.adoptedLines,
-      pushedMeasuredGeneratedLines: item.pushedMeasuredGeneratedLines + add.pushedMeasuredGeneratedLines,
+      pushedMeasuredGeneratedLines:
+        item.pushedMeasuredGeneratedLines + add.pushedMeasuredGeneratedLines,
       pushedEffectiveGeneratedLines:
         item.pushedEffectiveGeneratedLines + add.pushedEffectiveGeneratedLines,
       pushedAdoptedLines: item.pushedAdoptedLines + add.pushedAdoptedLines,
@@ -1920,6 +2297,22 @@ function normalizeTraceTriggerSource(value: unknown): TraceTriggerSource {
     : "chat"
 }
 
+/**
+ * 会话预览列表用的 _source 白名单：在完整白名单基础上去掉 `_raw`。
+ *
+ * `_raw` 是整条 trace 的序列化原文（含全部模型调用与工具输入输出），单条常在
+ * 十 KB 量级。thread 视图一页要回带「pageSize 个会话 × 每会话最多
+ * THREAD_LIST_TRACES_PER_THREAD 条」，带上 `_raw` 就是几百份原文，直接顶穿
+ * DASHBOARD_ES_OUTPUT_BYTE_LIMIT（6 MiB），整页查询失败。
+ *
+ * 列表本来就只是预览：卡片头部的工具数/Token/成败计数全部来自已索引的摘要
+ * 字段，而完整对话在用户选中某个会话时由 `dashboard:threadTraces` 单独懒加载
+ * （见 TraceHistoryDialog 的 threadTraceCache）。所以预览阶段不取 `_raw`。
+ */
+function dashboardTraceSummarySourceIncludes(): string[] {
+  return threadListPreviewSourceIncludes(dashboardTraceSourceIncludes())
+}
+
 function dashboardTraceSourceIncludes(): string[] {
   return [
     "_raw",
@@ -2012,11 +2405,26 @@ function codeSkillAdoptionBucketAggs(
   }
 }
 
-function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
+/**
+ * Prefer the totals the collector counted as the turn ran. Summing modelCalls
+ * understates any turn that went past TRACE_MAX_MODEL_CALLS, and the array is
+ * still the only source for traces recorded before those fields existed.
+ */
+function summarizeTraceTokenUsage(
+  trace: Pick<AgentTrace, "modelCalls" | "totalInputTokens" | "totalOutputTokens" | "totalTokens">
+): {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
 } {
+  if (typeof trace.totalTokens === "number" || typeof trace.totalInputTokens === "number") {
+    return {
+      totalInputTokens: trace.totalInputTokens ?? 0,
+      totalOutputTokens: trace.totalOutputTokens ?? 0,
+      totalTokens: trace.totalTokens ?? 0
+    }
+  }
+  const modelCalls = trace.modelCalls
   if (!Array.isArray(modelCalls) || modelCalls.length === 0) {
     return { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
   }
@@ -2048,10 +2456,14 @@ function parseRawTrace(raw: unknown): { trace?: AgentTrace; error?: string } {
 }
 
 function normalizeParsedTrace(
-  trace: AgentTrace,
+  rawTrace: AgentTrace,
   source: Record<string, unknown>,
   hit: EsSearchHit
 ): AgentTrace {
+  // Uploaded traces keep one copy of each repeated value. This is the boundary
+  // where cloud data re-enters the app, so put the copies back here — every
+  // consumer downstream (trace detail, conversation view) sees a whole trace.
+  const trace = rehydrateTraceContent(rawTrace)
   const candidate = trace as Partial<AgentTrace>
   const startedAt = candidate.startedAt || asString(source.startedAt)
   const endedAt = candidate.endedAt || asString(source.endedAt, startedAt)
@@ -2101,13 +2513,31 @@ function countUserInputRequests(nodes: TraceNode[] | undefined): number {
   return nodes.filter((node) => node.type === "tool" && node.name === "request_user_input").length
 }
 
-function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
+/** 预览行是「故意没取 _raw」，不是「这条 trace 坏了」。文案要说清楚，否则
+ * 列表里每一行都会挂上一条误导性的「缺少 _raw」告警。 */
+const TRACE_PREVIEW_RAW_OMITTED = "列表仅展示摘要，选中该会话后自动加载完整对话"
+
+interface NormalizeTraceDetailOptions {
+  /** true 表示这批 hit 走的是 dashboardTraceSummarySourceIncludes()（无 _raw）。 */
+  preview?: boolean
+}
+
+function normalizeTraceDetail(
+  hit: EsSearchHit,
+  options?: NormalizeTraceDetailOptions
+): DashboardTraceDetail {
   const source = hit._source ?? {}
-  const parsed = parseRawTrace(source._raw)
+  // 预览批次没请求 _raw，跳过解析：省掉每行一次 JSON.parse + 建树，也避免把
+  // 「没取」误报成「解析失败」。个别文档若仍带 _raw（旧索引/别的调用方），
+  // 照常解析，不因预览标记而丢信息。
+  const rawOmittedForPreview = options?.preview === true && source._raw === undefined
+  const parsed = rawOmittedForPreview
+    ? { error: TRACE_PREVIEW_RAW_OMITTED }
+    : parseRawTrace(source._raw)
 
   if (parsed.trace) {
     const trace = normalizeParsedTrace(parsed.trace, source, hit)
-    const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    const usage = summarizeTraceTokenUsage(trace)
     const fallbackInputTokens = asNumber(source.totalInputTokens)
     const fallbackOutputTokens = asNumber(source.totalOutputTokens)
     const fallbackTotalTokens = asNumber(
@@ -2126,7 +2556,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       rawError = `解析 trace 树失败：${e instanceof Error ? e.message : String(e)}`
     }
 
-    return {
+    return redactTraceDetailForDisplay({
       traceId: trace.traceId || asString(source.traceId, hit._id ?? ""),
       threadId: trace.threadId || asString(source.threadId),
       startedAt: trace.startedAt || asString(source.startedAt),
@@ -2163,12 +2593,12 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       ...(nodes ? { nodes } : {}),
       rawAvailable: !rawError,
       ...(rawError ? { rawError } : {})
-    }
+    })
   }
 
   const fallbackInputTokens = asNumber(source.totalInputTokens)
   const fallbackOutputTokens = asNumber(source.totalOutputTokens)
-  return {
+  return redactTraceDetailForDisplay({
     traceId: asString(source.traceId, hit._id ?? ""),
     threadId: asString(source.threadId),
     startedAt: asString(source.startedAt),
@@ -2195,12 +2625,13 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     evolvedSkills: asStringArray(source.evolvedSkills),
     triggerSource: normalizeTraceTriggerSource(source.triggerSource),
     rawAvailable: false,
+    ...(rawOmittedForPreview ? { rawPending: true as const } : {}),
     rawError: parsed.error
-  }
+  })
 }
 
 function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
-  const usage = summarizeTraceTokenUsage(trace.modelCalls)
+  const usage = summarizeTraceTokenUsage(trace)
   let nodes: TraceNode[] | undefined
   let rawError: string | undefined
   try {
@@ -2209,7 +2640,7 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     rawError = `解析 trace 树失败：${e instanceof Error ? e.message : String(e)}`
   }
 
-  return {
+  return redactTraceDetailForDisplay({
     traceId: trace.traceId,
     threadId: trace.threadId,
     startedAt: trace.startedAt,
@@ -2233,7 +2664,7 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     ...(nodes ? { nodes } : {}),
     rawAvailable: !rawError,
     ...(rawError ? { rawError } : {})
-  }
+  })
 }
 
 function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
@@ -2531,8 +2962,7 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
       // Prefer the paired gen's rootThreadId (source of truth for root session
       // display); fall back to the adopt row when there is no paired gen (e.g.
       // the "无配对 gen 事件" row) so its 会话 still renders.
-      threadId:
-        (gen ? eventRootThreadId(gen) : undefined) ?? eventRootThreadId(adopt) ?? null
+      threadId: (gen ? eventRootThreadId(gen) : undefined) ?? eventRootThreadId(adopt) ?? null
     }
   })
 
@@ -2680,38 +3110,23 @@ async function fetchOverview(
   }
 
   const [traceRaw, codeRaw] = await Promise.all([
-    esQuery(getEsIndex("trace"), traceBody),
-    esQuery(getEsIndex("event"), codeBody)
+    esQuery(getEsIndex("trace"), traceBody, {
+      projection: { kind: "overview-trace", granularity },
+      outputByteLimit: DASHBOARD_HOME_RANKING_QUERY_OUTPUT_BYTE_LIMIT
+    }),
+    esQuery(getEsIndex("event"), codeBody, {
+      projection: { kind: "overview-code" },
+      outputByteLimit: DASHBOARD_HOME_RANKING_QUERY_OUTPUT_BYTE_LIMIT
+    })
   ])
-  const codeStats = normalizeCodeStatsFromAggs(codeRaw)
-  const skillCodeAdoption = combineSkillCodeAdoptionStats(
-    normalizeSkillCodeAdoptionBuckets(codeRaw),
-    normalizeSkillCodeAdoptionBuckets(codeRaw, "by_skill_source_adoption")
+  return enforceDashboardIpcByteLimit(
+    "Dashboard overview",
+    {
+      ...asRecord(traceRaw),
+      ...asRecord(codeRaw)
+    },
+    DASHBOARD_HOME_ENDPOINT_OUTPUT_BYTE_LIMITS.overview
   )
-  const traceRecord = asRecord(traceRaw)
-  return {
-    ...traceRecord,
-    aggregations: {
-      ...asRecord(traceRecord.aggregations),
-      code_generated_lines: { value: codeStats.generatedLines },
-      code_deleted_lines: { value: codeStats.deletedLines },
-      code_effective_generated_lines: { value: codeStats.effectiveGeneratedLines },
-      code_measured_generated_lines: { value: codeStats.measuredGeneratedLines },
-      code_unmeasured_generated_lines: { value: codeStats.unmeasuredGeneratedLines },
-      code_inclusive_effective_generated_lines: {
-        value: codeStats.inclusiveEffectiveGeneratedLines
-      },
-      code_adopted_lines: { value: codeStats.adoptedLines },
-      code_pushed_measured_generated_lines: { value: codeStats.pushedMeasuredGeneratedLines },
-      code_pushed_effective_generated_lines: { value: codeStats.pushedEffectiveGeneratedLines },
-      code_pushed_adopted_lines: { value: codeStats.pushedAdoptedLines },
-      code_pushed_commit_count: { value: codeStats.pushedCommitCount },
-      code_skill_source: asRecord(asRecord(codeRaw).aggregations).skill_source,
-      code_by_skill_adoption: {
-        buckets: skillCodeAdoption.map((item) => makeSkillAdoptionStatsBucket(item))
-      }
-    }
-  }
 }
 
 async function fetchModelStats(
@@ -2756,7 +3171,14 @@ async function fetchModelStats(
       }
     }
   }
-  return esQuery(getEsIndex("trace"), body)
+  return enforceDashboardIpcByteLimit(
+    "Dashboard model stats",
+    await esQuery(getEsIndex("trace"), body, {
+      projection: { kind: "model-stats" },
+      outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
+    }),
+    DASHBOARD_HOME_ENDPOINT_OUTPUT_BYTE_LIMITS.modelStats
+  )
 }
 
 function buildUpperOrgLv1Filter(upperOrgLv1: string): Record<string, unknown> {
@@ -2984,7 +3406,17 @@ async function fetchUserStats(
       }
     }
   }
-  return esQuery(getEsIndex("trace"), body)
+  return enforceDashboardIpcByteLimit(
+    "Dashboard user stats",
+    await esQuery(getEsIndex("trace"), body, {
+      projection: {
+        kind: "user-stats",
+        selectedUpperOrgLv1: selectedOrgs.length === 1 ? selectedOrgs[0] : null
+      },
+      outputByteLimit: DASHBOARD_HOME_RANKING_QUERY_OUTPUT_BYTE_LIMIT
+    }),
+    DASHBOARD_HOME_ENDPOINT_OUTPUT_BYTE_LIMITS.userStats
+  )
 }
 
 function getLatestHitSource(
@@ -3019,11 +3451,62 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
     count: asNumber(bucket.doc_count),
     lastActiveAt: asOptionalString(source.startedAt),
     avgDurationMs: asNumber(asRecord(bucket.avg_duration).value),
-    totalToolCalls: asNumber(asRecord(bucket.total_tool_calls).value),
     totalInputTokens,
     totalOutputTokens,
-    totalTokens
+    totalTokens,
+    codeStats: null
   }
+}
+
+async function fetchUserListCodeStats(
+  sapIds: string[],
+  range: TimeRange,
+  upperOrgLv1: string | null,
+  options?: { projectMode?: boolean }
+): Promise<Map<string, DashboardCodeStats>> {
+  const normalizedSapIds = Array.from(new Set(sapIds.map((sapId) => sapId.trim()).filter(Boolean)))
+  if (normalizedSapIds.length === 0) return new Map()
+
+  // Keep the per-user code metrics on the same time and department scope as the
+  // platform overview. Restricting the event query to the visible page avoids a
+  // large all-user aggregation on every list request.
+  const orgFilter = upperOrgLv1 ? buildOrgLevelMatchFilter(upperOrgLv1) : null
+  const scopeFilters: Record<string, unknown>[] = [
+    ...(orgFilter ? [orgFilter] : []),
+    ...(options?.projectMode ? [{ exists: { field: "properties.harnessProjectId" } }] : [])
+  ]
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    null,
+    range,
+    scopeFilters
+  )
+  const raw = asRecord(
+    await esQuery(getEsIndex("event"), {
+      size: 0,
+      query: {
+        bool: {
+          filter: [{ terms: { sapId: normalizedSapIds } }],
+          should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+          minimum_should_match: 1
+        }
+      },
+      aggs: {
+        users: {
+          terms: { field: "sapId", size: normalizedSapIds.length },
+          aggs: perBucketAggs
+        }
+      }
+    })
+  )
+
+  const result = new Map<string, DashboardCodeStats>()
+  const buckets = asRecord(asRecord(raw.aggregations).users).buckets
+  for (const rawBucket of Array.isArray(buckets) ? buckets : []) {
+    const bucket = asRecord(rawBucket)
+    const sapId = asString(bucket.key)
+    if (sapId) result.set(sapId, normalizeCodeStatsFromContainer(bucket))
+  }
+  return result
 }
 
 async function fetchUserList(
@@ -3080,7 +3563,6 @@ async function fetchUserList(
             }
           },
           avg_duration: { avg: { field: "durationMs" } },
-          total_tool_calls: { sum: { field: "totalToolCalls" } },
           total_input_tokens: { sum: { field: "totalInputTokens" } },
           total_output_tokens: { sum: { field: "totalOutputTokens" } },
           total_tokens: { sum: { field: "totalTokens" } }
@@ -3094,13 +3576,22 @@ async function fetchUserList(
   const usersAgg = asRecord(aggs.users)
   const allBuckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
   const buckets = allBuckets.slice(offset, offset + pageSize)
+  const items = buckets
+    .map((bucket) => normalizeUserListBucket(asRecord(bucket)))
+    .filter((item) => item.sapId)
+  const codeStatsBySapId = await fetchUserListCodeStats(
+    items.map((item) => item.sapId),
+    range,
+    upperOrgLv1
+  )
   const totalActiveUsers = asNumber(asRecord(aggs.total_active_users).value)
   const nextOffset = offset + pageSize
   const hasMoreBuckets = asNumber(usersAgg.sum_other_doc_count) > 0
   return {
-    items: buckets
-      .map((bucket) => normalizeUserListBucket(asRecord(bucket)))
-      .filter((item) => item.sapId),
+    items: items.map((item) => ({
+      ...item,
+      codeStats: codeStatsBySapId.get(item.sapId) ?? null
+    })),
     pageSize,
     ...(hasMoreBuckets && nextOffset < 10_000 ? { nextAfterKey: { offset: nextOffset } } : {}),
     totalActiveUsers
@@ -3511,67 +4002,28 @@ function normalizeTermsBucketList(
 }
 
 // ── 会话（thread）列表分页：用户页 / 技能页 thread 视图共用同一套逻辑 ──
-// 会话按最近活跃时间倒序取桶后切片分页；该上限同时约束 terms 桶数与可翻到的
-// 最深页（page * pageSize ≤ 上限）。单用户 / 单技能的会话量有界，300 足够。
-const MAX_THREAD_LIST_BUCKETS = 300
-// 每个会话在列表里展开渲染的 trace 数上限。会话内 trace 通常很少；超大会话的
-// 完整还原由「Thread 对话还原」抽屉（fetchThreadTraces）负责，列表无需全量。
-const THREAD_LIST_TRACES_PER_THREAD = 50
-
-/** 当前页所需的 terms 桶数（取到第 page 页末尾，封顶 MAX_THREAD_LIST_BUCKETS）。 */
-function threadListBucketsNeeded(page: number, pageSize: number): number {
-  return Math.min(page * pageSize, MAX_THREAD_LIST_BUCKETS)
-}
-
 /**
- * 「按会话分页」的聚合定义：按 rootThreadId 分桶（按最近活跃倒序）、每桶回带该会话
- * 的 trace（升序、最多 THREAD_LIST_TRACES_PER_THREAD 条）。用户页与技能页 thread
- * 视图共用，保证两边口径完全一致。历史数据需要回填 rootThreadId=threadId。
+ * 「按会话分页」的两阶段实现：阶段 1 只定位当页会话，阶段 2 只为当页会话回带
+ * 预览 trace（不含 `_raw`）。查询构造与切片是纯函数，见
+ * ./dashboard-trace-thread-list。这里只负责发起阶段 2 的查询并归一化命中。
  */
-function threadListAgg(bucketsNeeded: number): Record<string, unknown> {
-  return {
-    total_threads: { cardinality: { field: "rootThreadId" } },
-    by_thread: {
-      terms: {
-        field: "rootThreadId",
-        size: bucketsNeeded,
-        order: { latest_started_at: "desc" }
-      },
-      aggs: {
-        latest_started_at: { max: { field: "startedAt" } },
-        traces: {
-          top_hits: {
-            size: THREAD_LIST_TRACES_PER_THREAD,
-            sort: [{ startedAt: { order: "asc" } }],
-            _source: { includes: dashboardTraceSourceIncludes() }
-          }
-        }
-      }
-    }
-  }
-}
-
-/**
- * 解析 threadListAgg 的结果容器（含 total_threads + by_thread），按当前页切片，
- * 并把当页每个会话的全部 trace 摊平返回，交给客户端按 thread 归组（每组完整、不跨页）。
- */
-function parseThreadListContainer(
-  container: Record<string, unknown>,
-  page: number,
-  pageSize: number
-): { traces: DashboardTraceDetail[]; totalThreads: number } {
-  const totalThreads = Math.min(
-    asNumber(asRecord(container.total_threads).value),
-    MAX_THREAD_LIST_BUCKETS
-  )
-  const buckets = asRecord(container.by_thread).buckets
-  const fromBucket = (page - 1) * pageSize
-  const selected = Array.isArray(buckets) ? buckets.slice(fromBucket, fromBucket + pageSize) : []
-  const traces = selected.flatMap((bucket) => {
-    const hits = asRecord(asRecord(asRecord(bucket).traces).hits).hits
-    return Array.isArray(hits) ? hits.map((hit) => normalizeTraceDetail(hit as EsSearchHit)) : []
+async function fetchThreadListPreviewTraces(
+  threadIds: string[],
+  baseFilter: unknown[],
+  accessFilter: Record<string, unknown> | null
+): Promise<DashboardTraceDetail[]> {
+  if (threadIds.length === 0) return []
+  const body = buildThreadListPreviewBody({
+    threadIds,
+    baseFilter,
+    accessFilter,
+    sourceIncludes: dashboardTraceSummarySourceIncludes()
   })
-  return { traces, totalThreads }
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
+  return orderThreadListPreviewHits(aggs, threadIds).map((hit) =>
+    normalizeTraceDetail(hit as EsSearchHit, { preview: true })
+  )
 }
 
 async function fetchUserDetail(
@@ -3635,7 +4087,7 @@ async function fetchUserDetail(
             ...statsAggs,
             thread_list: {
               filter: traceAccessFilter ?? { match_all: {} },
-              aggs: threadListAgg(threadListBucketsNeeded(tracePage, tracePageSize))
+              aggs: threadListKeysAgg(threadListBucketsNeeded(tracePage, tracePageSize))
             }
           }
         }
@@ -3653,7 +4105,12 @@ async function fetchUserDetail(
           _source: { includes: dashboardTraceSourceIncludes() }
         }
 
-  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const [raw, codeStatsBySapId] = await Promise.all([
+    esQuery(getEsIndex("trace"), body) as Promise<EsSearchResponse>,
+    fetchUserListCodeStats([normalizedSapId], range, null, {
+      projectMode: options?.projectMode
+    })
+  ])
   const rawRecord = asRecord(raw)
   const aggs = asRecord(rawRecord.aggregations)
   const userInfo = getLatestHitSource(aggs, "latest_user_info")
@@ -3671,12 +4128,13 @@ async function fetchUserDetail(
   let traces: DashboardTraceDetail[]
   let total: number
   if (traceViewMode === "thread") {
-    const parsed = parseThreadListContainer(asRecord(aggs.thread_list), tracePage, tracePageSize)
-    traces = parsed.traces
+    // 阶段 1 的会话 id 与统计聚合同批返回；阶段 2 只为当页会话补预览 trace。
+    const parsed = parseThreadListKeys(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    traces = await fetchThreadListPreviewTraces(parsed.threadIds, baseFilter, traceAccessFilter)
     total = parsed.totalThreads
   } else {
     const hits = raw.hits?.hits ?? []
-    traces = hits.map(normalizeTraceDetail)
+    traces = hits.map((hit) => normalizeTraceDetail(hit))
     total = getTotalHits(raw, hits.length)
   }
 
@@ -3693,6 +4151,7 @@ async function fetchUserDetail(
     totalInputTokens,
     totalOutputTokens,
     totalTokens,
+    codeStats: codeStatsBySapId.get(normalizedSapId) ?? null,
     bySkill: normalizeTermsBucketList(
       asRecord(aggs.by_skill).buckets,
       "skill"
@@ -4416,7 +4875,7 @@ async function fetchSkillEvalRecordPage(
     ? await fetchTraceDetailsForSkillEvalRecords(pageRecords)
     : undefined
   const pageRuns = aggregateSkillEvalTaskRuns(
-    skillEvalStoredRecordsToDashboardRuns(pageRecords, traceDetails, skillFilter)
+    skillEvalStoredRecordsToDashboardRuns(pageRecords, traceDetails, skillFilter, undefined, true)
   )
     .sort(compareSkillEvalRunsByStartedAtDesc)
     .slice(0, size)
@@ -4605,7 +5064,8 @@ function skillEvalStoredRecordsToDashboardRuns(
   records: TraceSkillEvalRecord[],
   traceDetails?: Map<string, DashboardTraceDetail>,
   skillFilter?: SkillEvalFilter,
-  allowedSkillNames?: Set<string>
+  allowedSkillNames?: Set<string>,
+  redactForDisplay = false
 ): DashboardSkillEvalRun[] {
   return records
     .filter((record) => {
@@ -4614,7 +5074,8 @@ function skillEvalStoredRecordsToDashboardRuns(
       }
       return hasAllowedSkillName(record.skillName, allowedSkillNames)
     })
-    .map((record) => {
+    .map((rawRecord) => {
+      const record = redactForDisplay ? redactTraceSkillEvalRecordForDisplay(rawRecord) : rawRecord
       const fallbackTraceDetail = fallbackTraceDetailFromSkillEvalRecord(record)
       const traceDetail = traceDetails?.get(record.traceId) ?? fallbackTraceDetail
       // Current window semantics keep these arrays equal; the context fallback is for
@@ -5249,7 +5710,7 @@ async function fetchSkillUserStats(
           { exists: { field: "ystId" } },
           { bool: { must_not: { term: { ystId: "" } } } },
           skillFilter
-        ],
+        ]
       }
     },
     aggs: {
@@ -5362,14 +5823,44 @@ async function fetchUserProfilesBySapIds(sapIds: string[]): Promise<unknown> {
       }
     }
   }
-  return esQuery(getEsIndex("trace"), body)
+  return esQuery(getEsIndex("trace"), body, {
+    projection: { kind: "user-directory" },
+    outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
+  })
+}
+
+function readUserDirectoryProjection(raw: unknown): {
+  items: DashboardAllUserItem[]
+  afterKey?: Record<string, string>
+} {
+  const record = asRecord(raw)
+  const items = Array.isArray(record.items) ? (record.items as DashboardAllUserItem[]) : []
+  const afterKey = asRecord(record.afterKey)
+  return {
+    items,
+    ...(Object.keys(afterKey).length > 0 ? { afterKey: afterKey as Record<string, string> } : {})
+  }
+}
+
+function estimatedUserDirectoryItemBytes(item: DashboardAllUserItem): number {
+  return (
+    64 +
+    Buffer.byteLength(item.sapId, "utf8") +
+    Buffer.byteLength(item.userName, "utf8") +
+    Buffer.byteLength(item.orgName, "utf8") +
+    Buffer.byteLength(item.upperOrgLv0 ?? "", "utf8") +
+    Buffer.byteLength(item.upperOrgLv1 ?? "", "utf8")
+  )
 }
 
 async function queryAllUser(): Promise<DashboardAllUserItem[]> {
   const users: DashboardAllUserItem[] = []
   let afterKey: Record<string, string> | undefined
+  let estimatedBytes = 0
+  let pageCount = 0
 
   do {
+    pageCount += 1
     const body = {
       size: 0,
       query: {
@@ -5380,7 +5871,7 @@ async function queryAllUser(): Promise<DashboardAllUserItem[]> {
       aggs: {
         by_sap: {
           composite: {
-            size: 1000,
+            size: DASHBOARD_USER_DIRECTORY_PAGE_SIZE,
             sources: [{ sapId: { terms: { field: "sapId" } } }],
             ...(afterKey ? { after: afterKey } : {})
           },
@@ -5401,48 +5892,37 @@ async function queryAllUser(): Promise<DashboardAllUserItem[]> {
       }
     }
 
-    const response = (await esQuery(getEsIndex("trace"), body)) as {
-      aggregations?: {
-        by_sap?: {
-          after_key?: Record<string, string>
-          buckets?: Array<{
-            key?: { sapId?: string }
-            user_name?: { buckets?: Array<{ key?: string }> }
-            org_name?: { buckets?: Array<{ key?: string }> }
-            latest_user_info?: {
-              hits?: {
-                hits?: Array<{
-                  _source?: {
-                    userName?: string
-                    orgName?: string
-                    upperOrgLv0?: string
-                    upperOrgLv1?: string
-                  }
-                }>
-              }
-            }
-          }>
-        }
-      }
-    }
-
-    for (const bucket of response.aggregations?.by_sap?.buckets ?? []) {
-      const sapId = String(bucket.key?.sapId || "").trim()
-      if (!sapId) continue
-      const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
-      users.push({
-        sapId,
-        userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? "",
-        orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
-        upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
-        upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
+    const response = readUserDirectoryProjection(
+      await esQuery(getEsIndex("trace"), body, {
+        projection: { kind: "user-directory" },
+        outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
       })
+    )
+
+    for (const item of response.items) {
+      const itemBytes = estimatedUserDirectoryItemBytes(item)
+      if (
+        users.length >= DASHBOARD_USER_DIRECTORY_MAX_ITEMS ||
+        estimatedBytes + itemBytes > DASHBOARD_USER_DIRECTORY_OUTPUT_BYTE_LIMIT
+      ) {
+        return enforceDashboardIpcByteLimit(
+          "Dashboard user directory",
+          users,
+          DASHBOARD_USER_DIRECTORY_OUTPUT_BYTE_LIMIT
+        )
+      }
+      users.push(item)
+      estimatedBytes += itemBytes
     }
 
-    afterKey = response.aggregations?.by_sap?.after_key
-  } while (afterKey)
+    afterKey = response.afterKey
+  } while (afterKey && pageCount < DASHBOARD_USER_DIRECTORY_MAX_PAGES)
 
-  return users
+  return enforceDashboardIpcByteLimit(
+    "Dashboard user directory",
+    users,
+    DASHBOARD_USER_DIRECTORY_OUTPUT_BYTE_LIMIT
+  )
 }
 
 // 返回时间范围内出现过的 LV1 组织列表，用于运营面板顶部的全量组织筛选下拉。
@@ -5534,19 +6014,28 @@ async function fetchProductivity(
   }
 
   const [commitRaw, codeRaw] = await Promise.all([
-    esQuery(getEsIndex("event"), body),
-    esQuery(getEsIndex("event"), codeBody)
+    esQuery(getEsIndex("event"), body, {
+      projection: { kind: "productivity-commit", granularity, range },
+      outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
+    }),
+    esQuery(getEsIndex("event"), codeBody, {
+      projection: { kind: "productivity-code" },
+      outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
+    })
   ])
   const commitRecord = asRecord(commitRaw)
-  const codeAggs = asRecord(asRecord(codeRaw).aggregations)
-  return {
-    ...commitRecord,
-    aggregations: {
-      ...asRecord(commitRecord.aggregations),
-      total_insertions: { value: asRecord(codeAggs.code_generated_lines).value ?? 0 },
-      total_deletions: { value: asRecord(codeAggs.code_deleted_lines).value ?? 0 }
-    }
-  }
+  const codeRecord = asRecord(codeRaw)
+  const totalCommits = asNumber(commitRecord.totalCommits)
+  const activeUsers = asNumber(commitRecord.activeUsers)
+  return enforceDashboardIpcByteLimit(
+    "Dashboard productivity",
+    {
+      ...commitRecord,
+      ...codeRecord,
+      avgCommitsPerUser: activeUsers > 0 ? totalCommits / activeUsers : 0
+    },
+    DASHBOARD_HOME_ENDPOINT_OUTPUT_BYTE_LIMITS.productivity
+  )
 }
 
 async function fetchFeedback(
@@ -5666,7 +6155,7 @@ async function fetchFeedback(
 // Two-tier model (core usage + value result) for advanced capabilities.
 // Event-side metrics come from the `event` index by `eventName`
 // (heartbeat.run.completed / memory.write.applied / skill.evolution.* /
-// chatx.message.processed / hook.executed).
+// im.event.processed / hook.executed).
 // Tool-call-based metrics (memory_search/get, java_lsp, code_exec, deferred
 // tools) and post-evolution skill usage are REUSED from the `trace` index
 // (`toolNames`, `evolvedSkills`) instead of double-emitting events for things
@@ -5715,40 +6204,13 @@ interface AdvFeatureMetrics {
   proposalAccepted: number
   evolvedTraces: number
   evolvedUsages: number
-  chatxReplied: number
-  chatxCancelled: number
-  chatxError: number
+  imCompleted: number
+  imCancelled: number
+  imError: number
   hookTotal: number
   hookBlocked: number
   codeExec: number
   savedTool: number
-  claudeCodeLaunches: number
-}
-
-function advAggDocCount(agg: unknown): number {
-  if (!agg || typeof agg !== "object") return 0
-  const v = (agg as Record<string, unknown>).doc_count
-  return typeof v === "number" ? v : 0
-}
-
-function advAggValue(agg: unknown): number {
-  if (!agg || typeof agg !== "object") return 0
-  const v = (agg as Record<string, unknown>).value
-  return typeof v === "number" ? v : 0
-}
-
-function advTermBuckets(agg: unknown): Array<{ key: string; doc_count: number }> {
-  if (!agg || typeof agg !== "object") return []
-  const buckets = (agg as Record<string, unknown>).buckets
-  if (!Array.isArray(buckets)) return []
-  return buckets.map((b) => ({
-    key: String((b as Record<string, unknown>).key ?? ""),
-    doc_count: Number((b as Record<string, unknown>).doc_count ?? 0)
-  }))
-}
-
-function advBucketCount(buckets: Array<{ key: string; doc_count: number }>, key: string): number {
-  return buckets.find((b) => b.key === key)?.doc_count ?? 0
 }
 
 function assembleAdvancedFeatureCards(
@@ -5757,7 +6219,7 @@ function assembleAdvancedFeatureCards(
 ): AdvancedFeaturesResult {
   const hbTotal = m.hbActionable + m.hbSilent + m.hbError + m.hbCancelled
   const memTotal = m.memSearch + m.memGet + m.memWrite
-  const chatxTotal = m.chatxReplied + m.chatxCancelled + m.chatxError
+  const imTotal = m.imCompleted + m.imCancelled + m.imError
   const progTotal = m.codeExec + m.savedTool
 
   return {
@@ -5808,15 +6270,15 @@ function assembleAdvancedFeatureCards(
         items: []
       },
       {
-        key: "chatx",
-        label: "机器人 ChatX",
-        value: chatxTotal,
+        key: "im",
+        label: "内置统一机器人",
+        value: imTotal,
         valueLabel: "处理消息数",
-        hint: `成功回复 ${m.chatxReplied} 条`,
+        hint: `成功完成 ${m.imCompleted} 条`,
         items: [
-          { label: "已回复", count: m.chatxReplied, tone: "good" },
-          { label: "取消", count: m.chatxCancelled, tone: "warn" },
-          { label: "错误", count: m.chatxError, tone: "bad" }
+          { label: "已完成", count: m.imCompleted, tone: "good" },
+          { label: "取消", count: m.imCancelled, tone: "warn" },
+          { label: "错误/未知", count: m.imError, tone: "bad" }
         ]
       },
       {
@@ -5839,16 +6301,6 @@ function assembleAdvancedFeatureCards(
         items: [
           { label: "code_exec", count: m.codeExec, tone: "neutral" },
           { label: "保存工具", count: m.savedTool, tone: "neutral" }
-        ]
-      },
-      {
-        key: "claudeCode",
-        label: "Claude Code",
-        value: m.claudeCodeLaunches,
-        valueLabel: "启动次数",
-        hint: `选择目录启动会话 ${m.claudeCodeLaunches} 次`,
-        items: [
-          { label: "目录启动", count: m.claudeCodeLaunches, tone: "good" }
         ]
       }
     ]
@@ -5885,23 +6337,13 @@ async function fetchAdvancedFeatures(
       evo_published: { filter: { term: { eventName: "skill.evolution.cloud.published" } } },
       proposal_triggered: { filter: { term: { eventName: "skill.proposal.triggered" } } },
       proposal_accepted: { filter: { term: { eventName: "skill.proposal.accepted" } } },
-      chatx: {
-        filter: { term: { eventName: "chatx.message.processed" } },
+      im: {
+        filter: { term: { eventName: "im.event.processed" } },
         aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
       },
       hooks: {
         filter: { term: { eventName: "hook.executed" } },
         aggs: { blocked: { filter: { term: { "properties.blocked": true } } } }
-      },
-      claude_code_launches: {
-        filter: {
-          bool: {
-            filter: [
-              { term: { eventName: "workspace.launch.started" } },
-              { term: { "properties.surface": "claude_code" } }
-            ]
-          }
-        }
       }
     }
   }
@@ -5925,57 +6367,25 @@ async function fetchAdvancedFeatures(
   }
 
   const [eventResRaw, traceResRaw] = await Promise.all([
-    esQuery(getEsIndex("event"), eventBody),
-    esQuery(getEsIndex("trace"), traceBody)
+    esQuery(getEsIndex("event"), eventBody, {
+      projection: { kind: "advanced-event" },
+      outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
+    }),
+    esQuery(getEsIndex("trace"), traceBody, {
+      projection: { kind: "advanced-trace" },
+      outputByteLimit: DASHBOARD_HOME_QUERY_OUTPUT_BYTE_LIMIT
+    })
   ])
+  const metrics = {
+    ...asRecord(eventResRaw),
+    ...asRecord(traceResRaw)
+  } as unknown as AdvFeatureMetrics
 
-  const eAggs =
-    ((eventResRaw as Record<string, unknown>)?.aggregations as Record<string, unknown>) ?? {}
-  const tAggs =
-    ((traceResRaw as Record<string, unknown>)?.aggregations as Record<string, unknown>) ?? {}
-
-  const hbOutcome = advTermBuckets(
-    (eAggs.heartbeat as Record<string, unknown> | undefined)?.by_outcome
+  return enforceDashboardIpcByteLimit(
+    "Dashboard advanced features",
+    assembleAdvancedFeatureCards(metrics, "es"),
+    DASHBOARD_HOME_ENDPOINT_OUTPUT_BYTE_LIMITS.advancedFeatures
   )
-  const evoOutcome = advTermBuckets(
-    (eAggs.evo_run as Record<string, unknown> | undefined)?.by_outcome
-  )
-  const chatxOutcome = advTermBuckets(
-    (eAggs.chatx as Record<string, unknown> | undefined)?.by_outcome
-  )
-  const toolBuckets = advTermBuckets(tAggs.by_tool)
-
-  const metrics: AdvFeatureMetrics = {
-    hbActionable: advBucketCount(hbOutcome, "actionable"),
-    hbSilent: advBucketCount(hbOutcome, "silent"),
-    hbError: advBucketCount(hbOutcome, "error"),
-    hbCancelled: advBucketCount(hbOutcome, "cancelled"),
-    memSearch: advBucketCount(toolBuckets, "memory_search"),
-    memGet: advBucketCount(toolBuckets, "memory_get"),
-    memWrite: advAggDocCount(eAggs.memory_write),
-    lsp: advBucketCount(toolBuckets, "java_lsp"),
-    evoCandidates: advBucketCount(evoOutcome, "candidates"),
-    evoEmpty: advBucketCount(evoOutcome, "empty"),
-    evoRunError: advBucketCount(evoOutcome, "error"),
-    evoAccepted: advAggDocCount(eAggs.evo_accepted),
-    evoRejected: advAggDocCount(eAggs.evo_rejected),
-    evoCloud: advAggDocCount(eAggs.evo_cloud),
-    cloudPublished: advAggDocCount(eAggs.evo_published),
-    proposalTriggered: advAggDocCount(eAggs.proposal_triggered),
-    proposalAccepted: advAggDocCount(eAggs.proposal_accepted),
-    evolvedTraces: advAggDocCount(tAggs.evolved_traces),
-    evolvedUsages: advAggValue(tAggs.evolved_usages),
-    chatxReplied: advBucketCount(chatxOutcome, "replied"),
-    chatxCancelled: advBucketCount(chatxOutcome, "cancelled"),
-    chatxError: advBucketCount(chatxOutcome, "error"),
-    hookTotal: advAggDocCount(eAggs.hooks),
-    hookBlocked: advAggDocCount((eAggs.hooks as Record<string, unknown> | undefined)?.blocked),
-    codeExec: advBucketCount(toolBuckets, "code_exec"),
-    savedTool: advBucketCount(toolBuckets, "save_code_exec_tool"),
-    claudeCodeLaunches: advAggDocCount(eAggs.claude_code_launches)
-  }
-
-  return assembleAdvancedFeatureCards(metrics, "es")
 }
 
 function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
@@ -6007,14 +6417,13 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     proposalAccepted: k(4),
     evolvedTraces: k(9),
     evolvedUsages: k(14),
-    chatxReplied: k(12),
-    chatxCancelled: k(2),
-    chatxError: k(1),
+    imCompleted: k(12),
+    imCancelled: k(2),
+    imError: k(1),
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),
-    savedTool: k(6),
-    claudeCodeLaunches: k(11)
+    savedTool: k(6)
   }
 
   return assembleAdvancedFeatureCards(metrics, "mock")
@@ -6055,11 +6464,13 @@ async function fetchSkillRecentTraces(
       query: {
         bool: { filter: filters }
       },
-      aggs: threadListAgg(threadListBucketsNeeded(currentPage, size))
+      aggs: threadListKeysAgg(threadListBucketsNeeded(currentPage, size))
     }
     const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
     const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
-    const { traces, totalThreads } = parseThreadListContainer(aggs, currentPage, size)
+    // 数据权限过滤已并入 filters，阶段 2 无需再单独传 accessFilter。
+    const { threadIds, totalThreads } = parseThreadListKeys(aggs, currentPage, size)
+    const traces = await fetchThreadListPreviewTraces(threadIds, filters, null)
     return {
       traces,
       total: totalThreads,
@@ -6085,7 +6496,7 @@ async function fetchSkillRecentTraces(
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   return {
-    traces: (raw.hits?.hits ?? []).map(normalizeTraceDetail),
+    traces: (raw.hits?.hits ?? []).map((hit) => normalizeTraceDetail(hit)),
     total: getTotalHits(raw, raw.hits?.hits?.length ?? 0),
     page: currentPage,
     pageSize: size,
@@ -6101,6 +6512,9 @@ async function fetchSkillRecentTraces(
 // - 仍保留组织级数据权限过滤；
 // - 按 startedAt 升序返回（从首条到末条），上限 MAX_THREAD_TRACES 防止单 thread 过大撑爆查询。
 const MAX_THREAD_TRACES = 200
+/** 单批条数。25 条 × 单条几十 KB ≈ 1 MiB 量级，对 6 MiB 上限留足余量；最多 8 次
+ * 串行请求，延迟可接受。 */
+const THREAD_TRACES_FETCH_CHUNK = 25
 
 interface ThreadTracesOptions {
   scope?: "platform" | "project"
@@ -6130,23 +6544,26 @@ async function fetchThreadTraces(
     filters,
     projectScoped ? buildProjectModeAccessFilter(access) : buildTraceAccessFilter(access)
   )
-  const body = {
-    track_total_hits: false,
-    size: MAX_THREAD_TRACES,
-    sort: [{ startedAt: { order: "asc" } }],
-    query: { bool: { filter: filters } },
-    _source: { includes: dashboardTraceSourceIncludes() }
-  }
-  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
-  const seen = new Set<string>()
-  return (raw.hits?.hits ?? [])
-    .map(normalizeTraceDetail)
-    .filter((trace) => {
-      const key = trace.traceId || `${trace.threadId}:${trace.startedAt}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
-    })
+  // 分批拉取：这条通路回带完整 `_raw`，一次 200 条就可能顶穿 6 MiB。分页与去重
+  // 是纯逻辑，见 collectPagedThreadTraces（含 from/size 的取舍与边界说明）。
+  return collectPagedThreadTraces({
+    maxTraces: MAX_THREAD_TRACES,
+    chunkSize: THREAD_TRACES_FETCH_CHUNK,
+    fetchPage: async (from, size) => {
+      const body = {
+        track_total_hits: false,
+        from,
+        size,
+        sort: [{ startedAt: { order: "asc" } }],
+        query: { bool: { filter: filters } },
+        _source: { includes: dashboardTraceSourceIncludes() }
+      }
+      const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+      return raw.hits?.hits ?? []
+    },
+    normalize: (hit) => normalizeTraceDetail(hit),
+    dedupeKey: (trace) => trace.traceId || `${trace.threadId}:${trace.startedAt}`
+  })
 }
 
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {
@@ -7745,7 +8162,8 @@ function makeMockSkillEvalSummary(
     records,
     traceDetails,
     baseFilter,
-    allowedSkillNames
+    allowedSkillNames,
+    true
   )
     .filter((run) => matchesSkillSearch(run.skillName, skillSearch))
     .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
@@ -7964,6 +8382,15 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
   const count = Math.max(3, 150 - index * 3)
   const totalInputTokens = count * (820 + (index % 7) * 120)
   const totalOutputTokens = count * (240 + (index % 5) * 80)
+  const generatedLines = count * (5 + (index % 4))
+  const measuredGeneratedLines = Math.round(generatedLines * (0.68 + (index % 3) * 0.06))
+  const effectiveGeneratedLines = Math.round(measuredGeneratedLines * 0.92)
+  const adoptedLines = Math.round(effectiveGeneratedLines * (0.64 + (index % 4) * 0.07))
+  const pushedEffectiveGeneratedLines = Math.round(effectiveGeneratedLines * 0.78)
+  const pushedAdoptedLines = Math.min(
+    pushedEffectiveGeneratedLines,
+    Math.round(adoptedLines * 0.72)
+  )
   return {
     sapId: `10010${String(index + 1).padStart(3, "0")}`,
     ystId: `2743${String(index + 1).padStart(3, "0")}`,
@@ -7972,10 +8399,23 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
     count,
     lastActiveAt: new Date(Date.now() - index * 42 * 60 * 1000).toISOString(),
     avgDurationMs: 4200 + (index % 9) * 650,
-    totalToolCalls: count * (2 + (index % 4)),
     totalInputTokens,
     totalOutputTokens,
-    totalTokens: totalInputTokens + totalOutputTokens
+    totalTokens: totalInputTokens + totalOutputTokens,
+    codeStats:
+      index % 11 === 10
+        ? null
+        : makeDashboardCodeStats({
+            generatedLines,
+            deletedLines: Math.round(generatedLines * 0.08),
+            measuredGeneratedLines,
+            effectiveGeneratedLines,
+            adoptedLines,
+            pushedMeasuredGeneratedLines: Math.round(measuredGeneratedLines * 0.8),
+            pushedEffectiveGeneratedLines,
+            pushedAdoptedLines,
+            pushedCommitCount: Math.max(1, Math.round(count / 12))
+          })
   }
 }
 
@@ -8166,12 +8606,13 @@ function makeMockUserDetail(
       const threadStartMs = new Date(range.to).getTime() - threadOrdinal * 3 * 60 * 60 * 1000
       const sourceGroup = baseTraceGroups[threadOrdinal % baseTraceGroups.length]?.traces ?? []
       return namespaceMockTraceDetails(sourceGroup, threadId, {
-          sapId,
-          ystId: user.ystId,
-          userName: user.userName,
-          orgName: user.orgName,
-          userIp: `10.0.1.${20 + (threadOrdinal % 200)}`,
-          startedAt: (traceIndex) => new Date(threadStartMs + traceIndex * 8 * 60 * 1000).toISOString()
+        sapId,
+        ystId: user.ystId,
+        userName: user.userName,
+        orgName: user.orgName,
+        userIp: `10.0.1.${20 + (threadOrdinal % 200)}`,
+        startedAt: (traceIndex) =>
+          new Date(threadStartMs + traceIndex * 8 * 60 * 1000).toISOString()
       })
     })
   }
@@ -8184,10 +8625,11 @@ function makeMockUserDetail(
     upperOrgLv1: user.upperOrgLv1,
     totalCalls: user.count,
     avgDurationMs: user.avgDurationMs,
-    totalToolCalls: user.totalToolCalls,
+    totalToolCalls: user.count * (2 + (index % 4)),
     totalInputTokens: user.totalInputTokens,
     totalOutputTokens: user.totalOutputTokens,
     totalTokens: user.totalTokens,
+    codeStats: user.codeStats,
     bySkill: [
       { skill: "代码审查", count: Math.floor(user.count * 0.34) },
       { skill: "单元测试", count: Math.floor(user.count * 0.22) },
@@ -8255,10 +8697,126 @@ function makeMockStageBuckets(
   }
 }
 
+/** DEV mock helper: deterministic feature telemetry, then merge it to project scope. */
+function makeMockFeatureOperationalStats(
+  projectId: string,
+  featureSlug: string
+): ProjectModeOperationalStats {
+  const seed = `${projectId}/${featureSlug}`
+  let hash = 0
+  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0
+  const traceCount = 2 + (hash % 7)
+  const successfulReadCount = traceCount * 2 + (hash % 5)
+  const preToolUseCount = 3 + (hash % 11)
+  const postToolUseCount = 2 + (hash % 7)
+  return {
+    systemConstraintReads: {
+      traceCount,
+      successfulReadCount,
+      distinctFileCount: 2,
+      filesTruncated: false,
+      files: [
+        { path: "sys/project.md", traceCount },
+        { path: `sys/features/${featureSlug}.md`, traceCount: Math.max(1, traceCount - 1) }
+      ]
+    },
+    hookExecutions: {
+      executionCount: preToolUseCount + postToolUseCount,
+      blockedCount: hash % 3,
+      byEvent: [
+        { event: "PreToolUse", count: preToolUseCount },
+        { event: "PostToolUse", count: postToolUseCount }
+      ]
+    }
+  }
+}
+
+/** DEV mock for the lazy detail endpoint; deliberately long enough to exercise both scroll areas. */
+function makeMockProjectModeOperationalDetails(
+  scope: ProjectModeOperationalDetailScope
+): ProjectModeOperationalDetails {
+  const scopeSeed = [scope.projectId, scope.featureSlug, scope.nodeName].filter(Boolean).join("/")
+  const constraintFiles: ProjectModeConstraintFileStat[] = [
+    { path: "sys/project.md", traceCount: 13 },
+    ...Array.from({ length: 17 }, (_, index) => ({
+      path: `sys/rules/${String(index + 1).padStart(2, "0")}-${scopeSeed || "project"}.md`,
+      traceCount: Math.max(1, 12 - (index % 12))
+    }))
+  ]
+  const hookEvents = [
+    "PreToolUse",
+    "PostToolUse",
+    "UserPromptSubmit",
+    "SessionStart",
+    "SessionEnd",
+    "Stop",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "Notification"
+  ].map((event, index) => ({ event, count: Math.max(1, 21 - index * 2) }))
+  return { constraintFiles, hookEvents }
+}
+
+function mergeMockOperationalStats(
+  items: Array<Pick<ProjectModeFeatureView, "systemConstraintReads" | "hookExecutions">>
+): ProjectModeOperationalStats {
+  const constraints = items
+    .map((item) => item.systemConstraintReads)
+    .filter((item): item is ProjectModeConstraintReadStats => Boolean(item))
+  const hooks = items
+    .map((item) => item.hookExecutions)
+    .filter((item): item is ProjectModeHookStats => Boolean(item))
+
+  const files = new Map<string, number>()
+  for (const constraint of constraints) {
+    for (const file of constraint.files) {
+      files.set(file.path, (files.get(file.path) ?? 0) + file.traceCount)
+    }
+  }
+  const hookEvents = new Map<string, number>()
+  for (const hook of hooks) {
+    for (const event of hook.byEvent) {
+      hookEvents.set(event.event, (hookEvents.get(event.event) ?? 0) + event.count)
+    }
+  }
+
+  return {
+    systemConstraintReads:
+      constraints.length > 0
+        ? {
+            traceCount: constraints.reduce((sum, item) => sum + item.traceCount, 0),
+            successfulReadCount: constraints.reduce(
+              (sum, item) => sum + item.successfulReadCount,
+              0
+            ),
+            distinctFileCount: files.size,
+            filesTruncated: constraints.some((item) => item.filesTruncated),
+            files: [...files.entries()]
+              .map(([path, traceCount]) => ({ path, traceCount }))
+              .sort((a, b) => b.traceCount - a.traceCount || a.path.localeCompare(b.path))
+          }
+        : null,
+    hookExecutions:
+      hooks.length > 0
+        ? {
+            executionCount: hooks.reduce((sum, item) => sum + item.executionCount, 0),
+            blockedCount: hooks.reduce((sum, item) => sum + item.blockedCount, 0),
+            byEvent: [...hookEvents.entries()]
+              .map(([event, count]) => ({ event, count }))
+              .sort((a, b) => b.count - a.count || a.event.localeCompare(b.event))
+          }
+        : null
+  }
+}
+
 function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): DashboardProjectModeData {
   // stageBuckets is derived from each draft's totals after assembly (see below).
   const projectDrafts: Array<
-    Omit<ProjectModeProjectView, "stageBuckets" | "devStageConversationCount">
+    Omit<
+      ProjectModeProjectView,
+      "stageBuckets" | "devStageConversationCount" | "devAssociatedFeatureCount"
+    >
   > = [
     {
       projectId: "proj-cmb-cowork",
@@ -8470,7 +9028,13 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     )
     project.features.forEach((feature, idx) => {
       feature.codeStats = featureStats[idx]
+      const operational = makeMockFeatureOperationalStats(project.projectId, feature.slug)
+      feature.systemConstraintReads = operational.systemConstraintReads
+      feature.hookExecutions = operational.hookExecutions
     })
+    const projectOperational = mergeMockOperationalStats(project.features)
+    project.systemConstraintReads = projectOperational.systemConstraintReads
+    project.hookExecutions = projectOperational.hookExecutions
   }
   const mockCreators: Array<
     Pick<
@@ -8512,14 +9076,22 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     Object.assign(project, mockCreators[index % mockCreators.length])
   })
   // 由各项目自身的代码/对话总量派生 stage×skill 三桶（DEV 演示用）。
-  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => ({
-    ...project,
-    devStageConversationCount: Math.round(project.conversationCount * 0.4),
-    lifecycleCreatedAt:
-      project.lifecycleCreatedAt ??
-      new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
-    stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
-  }))
+  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => {
+    const devStageConversationCount = Math.round(project.conversationCount * 0.4)
+    return {
+      ...project,
+      suspectedTechnicalDetailConversationCount: Math.round(project.conversationCount * 0.35),
+      devStageConversationCount,
+      devAssociatedFeatureCount:
+        devStageConversationCount > 0
+          ? Math.min(project.featureCount, Math.max(1, Math.ceil(devStageConversationCount / 10)))
+          : 0,
+      lifecycleCreatedAt:
+        project.lifecycleCreatedAt ??
+        new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
+      stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
+    }
+  })
   // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
   // DEV：把偶数下标的 mock 项目视为「精益项目」，让「仅精益项目」开关在无 ES 时也能可见地筛选。
@@ -8755,6 +9327,25 @@ function makeMockProjectModeProjects(
   options?: ProjectModeProjectPageOptions
 ): ProjectModeProjectPageData {
   return makeMockProjectModeProjectPage(makeMockProjectMode(range, options).projects, options)
+}
+
+function makeMockProjectModeExportData(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): ProjectModeExportData {
+  const mock = makeMockProjectMode(range, opts)
+  const archivedProjectTotal = mock.projects.filter(
+    (project) => project.lifecycleStatus === "archived"
+  ).length
+  return {
+    users: mock.analytics.topUsers,
+    projects: mock.projects,
+    projectTotal: mock.projects.length,
+    activeProjectTotal: mock.projects.length - archivedProjectTotal,
+    archivedProjectTotal,
+    projectLimit: PROJECT_MODE_EXPORT_PROJECT_LIMIT,
+    projectsTruncated: false
+  }
 }
 
 const MOCK_PROJECT_THREAD_NODE_NAMES = [
@@ -9139,9 +9730,7 @@ function makeMockTraceWithConversation(args: {
   }
 }
 
-function isSubagentMockTrace(
-  observability: Partial<AgentTrace> | undefined
-): boolean {
+function isSubagentMockTrace(observability: Partial<AgentTrace> | undefined): boolean {
   return observability?.traceKind === "subagent" || Boolean(observability?.subagentKind)
 }
 
@@ -9413,7 +10002,8 @@ function makeMockSubagentSessionTraces(skill: string, range: TimeRange): AgentTr
       durationMs: 72_000,
       skill,
       userIndex: 3,
-      userMessage: "用 Ultra Workflow 模式走一遍需求拆解、实现和验证，并展示 workflow agent trace。",
+      userMessage:
+        "用 Ultra Workflow 模式走一遍需求拆解、实现和验证，并展示 workflow agent trace。",
       assistantSummary:
         "Ultra Workflow 已启动：规划、实现、验证三个阶段会以 workflow agent 子 trace 回挂到同一个 root thread。",
       toolCalls: [
@@ -9444,8 +10034,7 @@ function makeMockSubagentSessionTraces(skill: string, range: TimeRange): AgentTr
         "Dev Agent 已完成实现：写入 mock trace 组，展示为 Workflow Agent Dev-代码实现，并保留 phase 标签。",
       initialReasoning:
         "需要复用真实 workflow agent 的字段结构，才能同时验证 phase 标签与父子 trace 归并。",
-      finalReasoning:
-        "mock 已沿用真实字段结构，展示层无需为 DEV 数据增加特殊判断。",
+      finalReasoning: "mock 已沿用真实字段结构，展示层无需为 DEV 数据增加特殊判断。",
       toolCalls: [
         {
           name: "read_file",
@@ -9560,7 +10149,8 @@ function makeMockSubagentSessionTraces(skill: string, range: TimeRange): AgentTr
       skill,
       userIndex: 7,
       userMessage: "Task Agent：读取 TraceConversation 并返回摘要。",
-      assistantSummary: "已读取组件：对话还原会按角色展示用户、助手和工具调用，并显示 parent/root 标签。",
+      assistantSummary:
+        "已读取组件：对话还原会按角色展示用户、助手和工具调用，并显示 parent/root 标签。",
       finalReasoning:
         "Solo Task 是同步子调用，子 Agent 结果应嵌在 task 工具调用位置，并保留可展开的思考摘要。",
       toolCalls: [
@@ -9938,14 +10528,18 @@ function makeMockSkillDetail(
           (_, threadIndex) => {
             const mockIndex = startIndex + threadIndex
             const sourceGroup = baseTraceGroups[mockIndex % baseTraceGroups.length]?.traces ?? []
-            return namespaceMockTraceDetails(sourceGroup, `skill-page-${tracePage}-${threadIndex}`, {
-              startedAt: (traceIndex) =>
-                new Date(
-                  new Date(range.to).getTime() -
-                    mockIndex * 35 * 60 * 1000 +
-                    traceIndex * 5 * 60 * 1000
-                ).toISOString()
-            })
+            return namespaceMockTraceDetails(
+              sourceGroup,
+              `skill-page-${tracePage}-${threadIndex}`,
+              {
+                startedAt: (traceIndex) =>
+                  new Date(
+                    new Date(range.to).getTime() -
+                      mockIndex * 35 * 60 * 1000 +
+                      traceIndex * 5 * 60 * 1000
+                  ).toISOString()
+              }
+            )
           }
         ).flat()
       : Array.from(
@@ -9953,10 +10547,14 @@ function makeMockSkillDetail(
           (_, traceIndex) => {
             const mockIndex = startIndex + traceIndex
             const trace = baseTraces[mockIndex % baseTraces.length]
-            return namespaceMockTraceDetails([trace], `skill-trace-page-${tracePage}-${traceIndex}`, {
-              startedAt: () =>
-                new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
-            })[0]
+            return namespaceMockTraceDetails(
+              [trace],
+              `skill-trace-page-${tracePage}-${traceIndex}`,
+              {
+                startedAt: () =>
+                  new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+              }
+            )[0]
           }
         )
   return {
@@ -10420,6 +11018,10 @@ interface ProjectModeFeatureView {
   summary?: string
   /** This-range code adoption for the feature (sliced by harnessFeatureSlug); absent if no code data. */
   codeStats?: DashboardCodeStats | null
+  /** This-range successful system-constraint reads, deduplicated across workflow stages. */
+  systemConstraintReads?: ProjectModeConstraintReadStats | null
+  /** This-range runtime hook executions attributed to the feature. */
+  hookExecutions?: ProjectModeHookStats | null
 }
 
 interface ProjectModeSkillCount {
@@ -10496,12 +11098,20 @@ interface ProjectModeProjectView {
   systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
+  /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
+  suspectedTechnicalDetailConversationCount?: number
   /** Conversations whose current workflow node belongs to the Dev group. */
   devStageConversationCount: number
+  /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
+  devAssociatedFeatureCount: number
   hasError: boolean
   features: ProjectModeFeatureView[]
   topSkills: ProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  /** This-range successful system-constraint reads, deduplicated across features/stages. */
+  systemConstraintReads?: ProjectModeConstraintReadStats | null
+  /** This-range runtime hook executions attributed to the project. */
+  hookExecutions?: ProjectModeHookStats | null
   stageBuckets: DashboardStageBuckets
 }
 
@@ -10545,6 +11155,8 @@ interface ProjectModeProjectPageData {
   creatorOrgKeyword: string
   sortBy: ProjectModeProjectSortKey | null
   sortOrder: ProjectModeProjectSortOrder
+  /** Whether the current viewer may receive and see the heuristic metric. */
+  showSuspectedTechnicalDetailMetric: boolean
   /**
    * True when more projects matched than the metric-sort enumeration cap
    * (`PROJECT_MODE_PROJECT_ID_LIMIT`), so the ranking + total only reflect the
@@ -10552,6 +11164,16 @@ interface ProjectModeProjectPageData {
    * ES from/size + cardinality total, which the cap does not bound).
    */
   truncated: boolean
+}
+
+interface ProjectModeExportData {
+  users: ProjectModeTopUser[]
+  projects: ProjectModeProjectView[]
+  projectTotal: number
+  activeProjectTotal: number
+  archivedProjectTotal: number
+  projectLimit: number
+  projectsTruncated: boolean
 }
 
 interface ProjectModeProjectPageOptions extends OrgFilterOptions {
@@ -10814,6 +11436,42 @@ function projectModeTraceFilters(
     { exists: { field: "harnessProjectId" } },
     ...(orgFilterClause ? [orgFilterClause] : [])
   ]
+}
+
+/**
+ * Project-list conversation count = user-initiated main-Agent turns only.
+ *
+ * Child traces inherit `triggerSource=chat` from their root turn, so the active-trigger
+ * filter alone would still count coordinator workers / workflow agents / task agents.
+ * Documents written before multi-Agent observability have no traceKind or parent fields;
+ * treat those legacy records as root turns for backwards-compatible time ranges.
+ */
+function projectModeMainAgentConversationFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      filter: [
+        buildChatTriggeredTraceFilter(),
+        {
+          bool: {
+            should: [
+              { term: { traceKind: "root" } },
+              { term: { "traceKind.keyword": "root" } },
+              {
+                bool: {
+                  must_not: [
+                    { exists: { field: "traceKind" } },
+                    { exists: { field: "parentTraceId" } },
+                    { exists: { field: "subagentKind" } }
+                  ]
+                }
+              }
+            ],
+            minimum_should_match: 1
+          }
+        }
+      ]
+    }
+  }
 }
 
 /** Build the `name@version` key used to merge adapter rows across snapshot + usage. */
@@ -11092,6 +11750,8 @@ function sliceProjectModeProjects(
     creatorOrgKeyword,
     sortBy,
     sortOrder,
+    // DEV is intentionally open so the gated column can be previewed locally.
+    showSuspectedTechnicalDetailMetric: true,
     // Mock paginates the in-memory list directly, so it is never cap-truncated.
     truncated: false
   }
@@ -11113,7 +11773,9 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
       statusLabel: asOptionalString(f.overallStatusLabel),
       currentNodeStatusLabel: asOptionalString(f.currentNodeStatusLabel),
       summary: asOptionalString(f.summary),
-      codeStats: null
+      codeStats: null,
+      systemConstraintReads: null,
+      hookExecutions: null
     }
   })
   return {
@@ -11144,10 +11806,13 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     featureCount: asNumber(props.featureCount, features.length),
     conversationCount: 0,
     devStageConversationCount: 0,
+    devAssociatedFeatureCount: 0,
     hasError: typeof props.error === "string" && props.error.length > 0,
     features,
     topSkills: [],
     codeStats: null,
+    systemConstraintReads: null,
+    hookExecutions: null,
     // Filled with real per-range buckets when the page enriches usage/code; the
     // snapshot hit alone carries no per-turn attribution.
     stageBuckets: emptyStageBuckets()
@@ -11522,12 +12187,12 @@ async function fetchProjectModeProjectPageHits(
             { "properties.lifecycleCreatedAt": { order: sortOrder, missing: "_last" } },
             { "properties.projectId": { order: "asc" } }
           ]
-      : sortBy === "archivedAt"
-        ? [
-            { "properties.lifecycleUpdatedAt": { order: sortOrder, missing: "_last" } },
-            { "properties.projectId": { order: "asc" } }
-          ]
-        : [{ "properties.name": { order: "asc" } }, { "properties.projectId": { order: "asc" } }]
+        : sortBy === "archivedAt"
+          ? [
+              { "properties.lifecycleUpdatedAt": { order: sortOrder, missing: "_last" } },
+              { "properties.projectId": { order: "asc" } }
+            ]
+          : [{ "properties.name": { order: "asc" } }, { "properties.projectId": { order: "asc" } }]
 
   const body = {
     track_total_hits: false,
@@ -11579,6 +12244,174 @@ const PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES = [
   "upperOrgLv1",
   "properties"
 ]
+
+const PROJECT_MODE_EXPORT_SNAPSHOT_PAGE_SIZE = 500
+const PROJECT_MODE_EXPORT_PROJECT_LIMIT = 2000
+const PROJECT_MODE_EXPORT_PROJECT_ID_PAGE_SIZE = 1000
+
+interface ProjectModeExportSnapshotResult {
+  projects: ProjectModeProjectView[]
+  total: number
+  activeTotal: number
+  archivedTotal: number
+  truncated: boolean
+}
+
+async function fetchProjectModeExportSnapshotGroup(
+  filters: Record<string, unknown>[],
+  archived: boolean,
+  limit: number
+): Promise<{ projects: ProjectModeProjectView[]; total: number }> {
+  const projects = new Map<string, ProjectModeProjectView>()
+  const seenCursors = new Set<string>()
+  let searchAfter: Array<string | number> | undefined
+  let total = 0
+  let firstPage = true
+
+  while (true) {
+    const remaining = Math.max(0, limit - projects.size)
+    const pageSize = Math.min(PROJECT_MODE_EXPORT_SNAPSHOT_PAGE_SIZE, remaining)
+    const body: Record<string, unknown> = {
+      track_total_hits: firstPage,
+      size: pageSize,
+      query: {
+        bool: {
+          filter: [
+            ...filters,
+            archived
+              ? { term: { "properties.lifecycleStatus": "archived" } }
+              : { bool: { must_not: { term: { "properties.lifecycleStatus": "archived" } } } }
+          ]
+        }
+      },
+      sort: [
+        { "properties.lifecycleCreatedAt": { order: "desc", missing: "_last" } },
+        { "properties.projectId": { order: "asc" } }
+      ],
+      _source: { includes: PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES }
+    }
+    if (searchAfter) body.search_after = searchAfter
+
+    const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
+    const hits = raw.hits?.hits ?? []
+    if (firstPage) {
+      total = getTotalHits(raw, hits.length)
+      firstPage = false
+    }
+    if (pageSize === 0 || hits.length === 0) break
+
+    for (const hit of hits) {
+      const project = parseProjectModeSnapshotHit(hit)
+      if (project) projects.set(project.projectId, project)
+      if (projects.size >= limit) break
+    }
+    if (projects.size >= limit || hits.length < pageSize) break
+
+    const nextSearchAfter = hits[hits.length - 1]?.sort
+    if (!nextSearchAfter || nextSearchAfter.length === 0) {
+      throw new Error("项目导出分页游标缺失，无法保证数据顺序")
+    }
+    const cursor = JSON.stringify(nextSearchAfter)
+    if (seenCursors.has(cursor)) {
+      throw new Error("项目导出分页游标重复，无法保证数据顺序")
+    }
+    seenCursors.add(cursor)
+    searchAfter = nextSearchAfter
+  }
+
+  return { projects: [...projects.values()], total }
+}
+
+/**
+ * Read at most the first 2,000 current project snapshots for export, ordered like
+ * the workbook (non-archived first, then newest creation time). Exact matching
+ * totals are returned separately so a truncated workbook remains explicit.
+ */
+async function fetchProjectModeExportSnapshotProjects(
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<ProjectModeExportSnapshotResult> {
+  const filters = projectModeSnapshotFilters(
+    buildProjectModeOrgFilter(opts, access),
+    opts?.fromLeanOnly === true
+  )
+  const active = await fetchProjectModeExportSnapshotGroup(
+    filters,
+    false,
+    PROJECT_MODE_EXPORT_PROJECT_LIMIT
+  )
+  const archived = await fetchProjectModeExportSnapshotGroup(
+    filters,
+    true,
+    Math.max(0, PROJECT_MODE_EXPORT_PROJECT_LIMIT - active.projects.length)
+  )
+  const projects = [...active.projects, ...archived.projects]
+  const total = active.total + archived.total
+  return {
+    projects,
+    total,
+    activeTotal: active.total,
+    archivedTotal: archived.total,
+    truncated: total > PROJECT_MODE_EXPORT_PROJECT_LIMIT
+  }
+}
+
+/**
+ * Resolve every matching project id only when the lean-project filter needs to
+ * scope the full user analysis. This is intentionally independent from the
+ * 2,000-row project worksheet limit.
+ */
+async function fetchProjectModeExportProjectIds(
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<string[]> {
+  const filters = projectModeSnapshotFilters(
+    buildProjectModeOrgFilter(opts, access),
+    opts?.fromLeanOnly === true
+  )
+  const projectIds: string[] = []
+  const seenCursors = new Set<string>()
+  let after: Record<string, string | number> | undefined
+
+  while (true) {
+    const raw = (await esQuery(getEsIndex("event"), {
+      size: 0,
+      track_total_hits: false,
+      query: { bool: { filter: filters } },
+      aggs: {
+        projects: {
+          composite: {
+            size: PROJECT_MODE_EXPORT_PROJECT_ID_PAGE_SIZE,
+            sources: [{ project_id: { terms: { field: "properties.projectId" } } }],
+            ...(after ? { after } : {})
+          }
+        }
+      }
+    })) as EsSearchResponse
+    const projectsAgg = asRecord(asRecord(raw.aggregations).projects)
+    const buckets = projectsAgg.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+    for (const bucket of buckets) {
+      const projectId = asString(asRecord(asRecord(bucket).key).project_id)
+      if (projectId) projectIds.push(projectId)
+    }
+
+    const nextAfter = Object.fromEntries(
+      Object.entries(asRecord(projectsAgg.after_key)).filter(
+        ([, value]) => typeof value === "string" || typeof value === "number"
+      )
+    ) as Record<string, string | number>
+    if (Object.keys(nextAfter).length === 0) break
+    const cursor = JSON.stringify(nextAfter)
+    if (seenCursors.has(cursor)) {
+      throw new Error("项目用户导出范围分页游标重复，无法保证全量数据")
+    }
+    seenCursors.add(cursor)
+    after = nextAfter
+  }
+
+  return projectIds
+}
 
 /**
  * Resolve the full set of project ids matching the list filters (no
@@ -11746,7 +12579,7 @@ async function fetchProjectModeProjectPageMetricSorted(
  */
 const PROJECT_MODE_PROJECT_ID_LIMIT = 10000
 const PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE = 10
-/** Per-project cap on feature buckets returned by the nested feature code-stats agg. */
+/** Per-project cap on feature buckets returned by nested per-feature aggregations. */
 const PROJECT_MODE_FEATURE_SLUG_LIMIT = 200
 
 /** Composite map key pairing a project id with one of its feature slugs. */
@@ -11774,7 +12607,11 @@ function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
     const latestHits = asRecord(asRecord(b.latest_user_info).hits).hits
     const latestHit = Array.isArray(latestHits) ? asRecord(latestHits[0]) : {}
     const source = asRecord(latestHit._source)
-    const sapId = asString(b.key, asString(source.sapId))
+    const rawKey = b.key
+    const sapId =
+      typeof rawKey === "string"
+        ? rawKey
+        : asString(asRecord(rawKey).sap_id, asString(source.sapId))
     if (!sapId) continue
     const ystId = asOptionalString(source.ystId)
     const userName = asString(source.userName, sapId)
@@ -11947,14 +12784,86 @@ async function fetchProjectModeUsage(
   }
 }
 
-function countDevStageConversations(rawBuckets: unknown): number {
-  if (!Array.isArray(rawBuckets)) return 0
-  return rawBuckets.reduce((total, bucket) => {
-    const item = asRecord(bucket)
-    return isHarnessDevStageNodeName(asString(item.key))
-      ? total + asNumber(item.doc_count)
-      : total
-  }, 0)
+const PROJECT_MODE_EXPORT_USER_PAGE_SIZE = 1000
+
+/**
+ * All project-mode users for Excel export. Composite pagination avoids the
+ * top-10 terms cap used by the on-screen ranking and keeps daily overview
+ * requests lightweight.
+ */
+async function fetchProjectModeExportUsers(
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext,
+  leanProjectIds?: string[]
+): Promise<ProjectModeTopUser[]> {
+  if (leanProjectIds && leanProjectIds.length === 0) return []
+
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const users: ProjectModeTopUser[] = []
+  const seenCursors = new Set<string>()
+  let after: Record<string, string | number> | undefined
+
+  while (true) {
+    const composite: Record<string, unknown> = {
+      size: PROJECT_MODE_EXPORT_USER_PAGE_SIZE,
+      sources: [{ sap_id: { terms: { field: "sapId" } } }],
+      ...(after ? { after } : {})
+    }
+    const raw = (await esQuery(getEsIndex("trace"), {
+      size: 0,
+      query: {
+        bool: {
+          filter: [
+            ...projectModeTraceFilters(range, orgFilterClause),
+            buildNonEmptySapIdFilter(),
+            ...(leanProjectIds ? [{ terms: { harnessProjectId: leanProjectIds } }] : [])
+          ]
+        }
+      },
+      aggs: {
+        users: {
+          composite,
+          aggs: {
+            latest_user_info: {
+              top_hits: {
+                size: 1,
+                sort: [{ startedAt: { order: "desc" } }],
+                _source: {
+                  includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+                }
+              }
+            }
+          }
+        }
+      }
+    })) as EsSearchResponse
+
+    const usersAgg = asRecord(asRecord(raw.aggregations).users)
+    const buckets = usersAgg.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+    users.push(...parseProjectModeTopUserBuckets(buckets))
+
+    const nextAfter = Object.fromEntries(
+      Object.entries(asRecord(usersAgg.after_key)).filter(
+        ([, value]) => typeof value === "string" || typeof value === "number"
+      )
+    ) as Record<string, string | number>
+    if (Object.keys(nextAfter).length === 0) break
+    const cursor = JSON.stringify(nextAfter)
+    if (seenCursors.has(cursor)) {
+      throw new Error("项目用户导出分页游标重复，无法保证全量数据")
+    }
+    seenCursors.add(cursor)
+    after = nextAfter
+  }
+
+  return users.sort(
+    (a, b) =>
+      b.count - a.count ||
+      a.userName.localeCompare(b.userName, "zh-CN", { numeric: true }) ||
+      a.sapId.localeCompare(b.sapId)
+  )
 }
 
 async function fetchProjectModePageUsage(
@@ -11964,18 +12873,25 @@ async function fetchProjectModePageUsage(
   access: DashboardAccessContext
 ): Promise<{
   perProject: Map<string, number>
+  perProjectSuspectedTechnicalDetail: Map<string, number>
   perProjectDevStage: Map<string, number>
+  perProjectDevAssociatedFeatures: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
   perProjectStageConversations: Map<string, Record<StageBucket, number>>
 }> {
+  const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   const perProject = new Map<string, number>()
+  const perProjectSuspectedTechnicalDetail = new Map<string, number>()
   const perProjectDevStage = new Map<string, number>()
+  const perProjectDevAssociatedFeatures = new Map<string, number>()
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
   const perProjectStageConversations = new Map<string, Record<StageBucket, number>>()
   if (projectIds.length === 0) {
     return {
       perProject,
+      perProjectSuspectedTechnicalDetail,
       perProjectDevStage,
+      perProjectDevAssociatedFeatures,
       perProjectSkills,
       perProjectStageConversations
     }
@@ -11996,9 +12912,36 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
+          // 对话数、疑似技术细节补充、DEV 阶段轮次数与 DEV 关联特性数共用同一口径：
+          // 主动触发的主 Agent root trace。DEV 两项此前挂在 by_project 下（与该
+          // filter 平级），把定时任务、心跳等后台触发和子 Agent trace 一并计入了，
+          // 与同一行的「对话数」对不上；现在一起收进 filter 内。
+          main_agent_conversations: {
+            filter: projectModeMainAgentConversationFilter(),
+            aggs: {
+              ...(includeSuspectedTechnicalDetail
+                ? {
+                    suspected_technical_detail_supplements: {
+                      filter: { term: { suspectedTechnicalDetailSupplement: true } }
+                    }
+                  }
+                : {}),
+              by_node: { terms: { field: "harnessNodeName", size: 100 } },
+              by_feature: {
+                terms: {
+                  field: "harnessFeatureSlug",
+                  size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+                },
+                aggs: {
+                  by_node: {
+                    terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
+                  }
+                }
+              }
+            }
+          },
           skills: { terms: { field: "usedSkills", size: 100 } },
           skill_source: { terms: { field: "skillSource", size: 100 } },
-          by_node: { terms: { field: "harnessNodeName", size: 100 } },
           ...stageBucketTraceAggs()
         }
       }
@@ -12009,7 +12952,9 @@ async function fetchProjectModePageUsage(
   if (!Array.isArray(buckets)) {
     return {
       perProject,
+      perProjectSuspectedTechnicalDetail,
       perProjectDevStage,
+      perProjectDevAssociatedFeatures,
       perProjectSkills,
       perProjectStageConversations
     }
@@ -12019,20 +12964,37 @@ async function fetchProjectModePageUsage(
     const b = asRecord(bucket)
     const key = asString(b.key)
     if (!key) continue
-    perProject.set(key, asNumber(b.doc_count))
-    perProjectDevStage.set(key, countDevStageConversations(asRecord(b.by_node).buckets))
+    const mainAgentConversations = asRecord(b.main_agent_conversations)
+    perProject.set(key, asNumber(mainAgentConversations.doc_count))
+    if (includeSuspectedTechnicalDetail) {
+      perProjectSuspectedTechnicalDetail.set(
+        key,
+        asNumber(asRecord(mainAgentConversations.suspected_technical_detail_supplements).doc_count)
+      )
+    }
+    perProjectDevStage.set(
+      key,
+      countDevStageConversations(asRecord(mainAgentConversations.by_node).buckets)
+    )
+    perProjectDevAssociatedFeatures.set(
+      key,
+      countDevAssociatedFeatures(asRecord(mainAgentConversations.by_feature).buckets)
+    )
     perProjectSkills.set(
       key,
-      combineSkillCountBuckets(
-        asRecord(b.skills).buckets,
-        asRecord(b.skill_source).buckets,
-        10
-      )
+      combineSkillCountBuckets(asRecord(b.skills).buckets, asRecord(b.skill_source).buckets, 10)
     )
     perProjectStageConversations.set(key, parseStageBucketConversations(b))
   }
 
-  return { perProject, perProjectDevStage, perProjectSkills, perProjectStageConversations }
+  return {
+    perProject,
+    perProjectSuspectedTechnicalDetail,
+    perProjectDevStage,
+    perProjectDevAssociatedFeatures,
+    perProjectSkills,
+    perProjectStageConversations
+  }
 }
 
 /**
@@ -12332,7 +13294,7 @@ async function fetchProjectModeAggregateCodeStats(
   }
 }
 
-async function fetchProjectModeProjectCodeStats(
+async function fetchProjectModeProjectMetrics(
   projectIds: string[],
   range: TimeRange,
   opts: OrgFilterOptions | undefined,
@@ -12341,62 +13303,176 @@ async function fetchProjectModeProjectCodeStats(
   byProject: Map<string, DashboardCodeStats>
   byFeature: Map<string, DashboardCodeStats>
   byProjectStage: Map<string, Record<StageBucket, DashboardCodeStats>>
+  operationalByProject: Map<string, ProjectModeOperationalStats>
+  operationalByFeature: Map<string, ProjectModeOperationalStats>
 }> {
   if (projectIds.length === 0) {
     return {
       byProject: new Map<string, DashboardCodeStats>(),
       byFeature: new Map(),
-      byProjectStage: new Map()
+      byProjectStage: new Map(),
+      operationalByProject: new Map(),
+      operationalByFeature: new Map()
     }
   }
 
-  // 同一个 perBucketAggs 既统计项目整体，又作为 by_feature 桶的子聚合按特性 slug 切片，
-  // 一次请求即可拿到项目 + 特性两个粒度的采纳明细（与 by_adapter→by_version 复用同理）。
+  // One event request carries code-adoption plus operational telemetry at both
+  // project and feature scope. Constraint summary documents are emitted once
+  // per Trace x stage, so the rollups cardinality-dedupe traceId instead of
+  // adding stage doc_counts (which would double-count a Trace spanning stages).
+  const scopedProjectIds = projectIds.slice(0, PROJECT_MODE_PROJECT_ID_LIMIT)
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
-  const raw = await fetchProjectModeCodeAggs(
-    projectIds,
+  const extraFilters = orgFilterClause ? [orgFilterClause] : []
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    scopedProjectIds,
     range,
-    (perBucketAggs, scopedProjectIds) => ({
+    extraFilters
+  )
+  const constraintFilters: Record<string, unknown>[] = [
+    { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
+    timeRangeFilter("eventTime", range),
+    { terms: { "properties.harnessProjectId": scopedProjectIds } },
+    ...extraFilters
+  ]
+  const hookFilters: Record<string, unknown>[] = [
+    { term: { eventName: "hook.executed" } },
+    timeRangeFilter("eventTime", range),
+    { terms: { "properties.harnessProjectId": scopedProjectIds } },
+    ...extraFilters
+  ]
+  const projectOperationalAggs = buildProjectModeOperationalAggs(constraintFilters, hookFilters, {
+    dedupeConstraintTraces: true,
+    constraintFileLimit: 20,
+    hookEventLimit: 32
+  })
+  const featureOperationalAggs = buildProjectModeOperationalAggs(constraintFilters, hookFilters, {
+    dedupeConstraintTraces: true,
+    constraintFileLimit: 10,
+    hookEventLimit: 16
+  })
+  const raw = (await esQuery(getEsIndex("event"), {
+    size: 0,
+    query: {
+      bool: {
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } },
+          { bool: { filter: constraintFilters } },
+          { bool: { filter: hookFilters } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
       by_project: {
         terms: { field: "properties.harnessProjectId", size: Math.max(1, scopedProjectIds.length) },
         aggs: {
           ...perBucketAggs,
+          ...projectOperationalAggs,
           by_feature: {
             terms: {
               field: "properties.harnessFeatureSlug",
               size: PROJECT_MODE_FEATURE_SLUG_LIMIT
             },
-            aggs: perBucketAggs
+            aggs: { ...perBucketAggs, ...featureOperationalAggs }
           },
           ...stageBucketCodeAggs(perBucketAggs)
         }
       }
-    }),
-    orgFilterClause ? [orgFilterClause] : []
-  )
+    }
+  })) as EsSearchResponse
   const projectAggs = asRecord(asRecord(raw).aggregations)
   const projectBuckets = asRecord(projectAggs.by_project).buckets
   const byProject = new Map<string, DashboardCodeStats>()
   const byFeature = new Map<string, DashboardCodeStats>()
   const byProjectStage = new Map<string, Record<StageBucket, DashboardCodeStats>>()
+  const operationalByProject = new Map<string, ProjectModeOperationalStats>()
+  const operationalByFeature = new Map<string, ProjectModeOperationalStats>()
   if (Array.isArray(projectBuckets)) {
     for (const bucket of projectBuckets) {
       const b = asRecord(bucket)
       const projectId = asString(b.key)
       if (!projectId) continue
-      byProject.set(projectId, normalizeCodeStatsFromContainer(b))
-      byProjectStage.set(projectId, parseStageBucketCodeStats(b))
+      const hasProjectCodeEvents =
+        asNumber(asRecord(b.code_gen).doc_count) > 0 ||
+        asNumber(asRecord(b.code_adopt_measured).doc_count) > 0
+      if (hasProjectCodeEvents) {
+        byProject.set(projectId, normalizeCodeStatsFromContainer(b))
+        byProjectStage.set(projectId, parseStageBucketCodeStats(b))
+      }
+      operationalByProject.set(projectId, parseProjectModeOperationalStats(b))
       const featureBuckets = asRecord(b.by_feature).buckets
       if (!Array.isArray(featureBuckets)) continue
       for (const featureBucket of featureBuckets) {
         const fb = asRecord(featureBucket)
         const slug = asString(fb.key)
         if (!slug) continue
-        byFeature.set(projectFeatureKey(projectId, slug), normalizeCodeStatsFromContainer(fb))
+        const key = projectFeatureKey(projectId, slug)
+        const hasFeatureCodeEvents =
+          asNumber(asRecord(fb.code_gen).doc_count) > 0 ||
+          asNumber(asRecord(fb.code_adopt_measured).doc_count) > 0
+        if (hasFeatureCodeEvents) {
+          byFeature.set(key, normalizeCodeStatsFromContainer(fb))
+        }
+        operationalByFeature.set(key, parseProjectModeOperationalStats(fb))
       }
     }
   }
-  return { byProject, byFeature, byProjectStage }
+  return {
+    byProject,
+    byFeature,
+    byProjectStage,
+    operationalByProject,
+    operationalByFeature
+  }
+}
+
+/** Add this-range trace/code metrics to current project snapshots. */
+async function enrichProjectModeProjectViews(
+  projects: ProjectModeProjectView[],
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<ProjectModeProjectView[]> {
+  const projectIds = projects.map((project) => project.projectId)
+  const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
+  // Key code stats on the page's project ids (not just those with conversations)
+  // so a project ranked high by 原始生成行数 still shows its adoption columns.
+  const [usage, code] = await Promise.all([
+    fetchProjectModePageUsage(projectIds, range, opts, access),
+    fetchProjectModeProjectMetrics(projectIds, range, opts, access)
+  ])
+  return projects.map((project) => ({
+    ...project,
+    conversationCount: usage.perProject.get(project.projectId) ?? 0,
+    ...(includeSuspectedTechnicalDetail
+      ? {
+          suspectedTechnicalDetailConversationCount:
+            usage.perProjectSuspectedTechnicalDetail.get(project.projectId) ?? 0
+        }
+      : {}),
+    devStageConversationCount: usage.perProjectDevStage.get(project.projectId) ?? 0,
+    devAssociatedFeatureCount: usage.perProjectDevAssociatedFeatures.get(project.projectId) ?? 0,
+    topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
+    codeStats: code.byProject.get(project.projectId) ?? null,
+    systemConstraintReads:
+      code.operationalByProject.get(project.projectId)?.systemConstraintReads ?? null,
+    hookExecutions: code.operationalByProject.get(project.projectId)?.hookExecutions ?? null,
+    stageBuckets: buildStageBuckets(
+      usage.perProjectStageConversations.get(project.projectId),
+      code.byProjectStage.get(project.projectId)
+    ),
+    features: project.features.map((feature) => {
+      const key = projectFeatureKey(project.projectId, feature.slug)
+      const operational = code.operationalByFeature.get(key)
+      return {
+        ...feature,
+        codeStats: code.byFeature.get(key) ?? null,
+        systemConstraintReads: operational?.systemConstraintReads ?? null,
+        hookExecutions: operational?.hookExecutions ?? null
+      }
+    })
+  }))
 }
 
 /** One list page: ES-paginated snapshot projects enriched with this-range usage / code. */
@@ -12414,30 +13490,54 @@ async function fetchProjectModeProjectPage(
   const sliced = metricSort
     ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
     : await fetchProjectModeProjectPageHits(options, access)
-  const projectIds = sliced.projects.map((project) => project.projectId)
-  const usage = await fetchProjectModePageUsage(projectIds, range, options, access)
-  // Key code stats on the page's project ids (not just those with conversations)
-  // so a project ranked high by 原始生成行数 still shows its adoption columns.
-  const code = await fetchProjectModeProjectCodeStats(projectIds, range, options, access)
   return {
     ...sliced,
     sortBy,
     sortOrder,
-    projects: sliced.projects.map((project) => ({
-      ...project,
-      conversationCount: usage.perProject.get(project.projectId) ?? 0,
-      devStageConversationCount: usage.perProjectDevStage.get(project.projectId) ?? 0,
-      topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
-      codeStats: code.byProject.get(project.projectId) ?? null,
-      stageBuckets: buildStageBuckets(
-        usage.perProjectStageConversations.get(project.projectId),
-        code.byProjectStage.get(project.projectId)
-      ),
-      features: project.features.map((feature) => ({
-        ...feature,
-        codeStats: code.byFeature.get(projectFeatureKey(project.projectId, feature.slug)) ?? null
-      }))
-    }))
+    showSuspectedTechnicalDetailMetric: isDashboardSuspectedTechnicalDetailAllowed(access),
+    projects: await enrichProjectModeProjectViews(sliced.projects, range, options, access)
+  }
+}
+
+const PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE = 100
+
+/** Fetch the full user-analysis and project-list datasets used by Excel export. */
+async function fetchProjectModeExportData(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<ProjectModeExportData> {
+  const access = requireDashboardProjectModeAccess()
+  const snapshotResult = await fetchProjectModeExportSnapshotProjects(opts, access)
+  const snapshots = snapshotResult.projects
+  const leanProjectIds =
+    opts?.fromLeanOnly === true
+      ? snapshotResult.truncated
+        ? await fetchProjectModeExportProjectIds(opts, access)
+        : snapshots.map((project) => project.projectId)
+      : undefined
+  const usersPromise = fetchProjectModeExportUsers(range, opts, access, leanProjectIds)
+  const projectsPromise = (async (): Promise<ProjectModeProjectView[]> => {
+    const projects: ProjectModeProjectView[] = []
+    for (
+      let offset = 0;
+      offset < snapshots.length;
+      offset += PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE
+    ) {
+      const batch = snapshots.slice(offset, offset + PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE)
+      projects.push(...(await enrichProjectModeProjectViews(batch, range, opts, access)))
+    }
+    return projects
+  })()
+
+  const [users, projects] = await Promise.all([usersPromise, projectsPromise])
+  return {
+    users,
+    projects,
+    projectTotal: snapshotResult.total,
+    activeProjectTotal: snapshotResult.activeTotal,
+    archivedProjectTotal: snapshotResult.archivedTotal,
+    projectLimit: PROJECT_MODE_EXPORT_PROJECT_LIMIT,
+    projectsTruncated: snapshotResult.truncated
   }
 }
 
@@ -12618,6 +13718,117 @@ async function fetchProjectModeProjectCommits(
     pageSize,
     pushedOnly,
     items: attachCommitAdoption(items, adoptionMap)
+  }
+}
+
+/**
+ * 研发效能面板 payload.
+ *
+ * Scope is fixed rather than user-toggleable: project mode AND bound to a Lean
+ * project. That is the premise the three metrics are defined against, so it is
+ * applied here instead of being exposed as a filter the viewer could turn off
+ * and silently change what the numbers mean.
+ */
+async function fetchDashboardEfficiency(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<DashboardEfficiencyData> {
+  const access = requireDashboardProjectModeAccess()
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+
+  // Lean project ids come from the self-healing snapshot (the sole source of
+  // truth for projectFromLean). An empty set is meaningful, not an error: it
+  // means no Lean-bound projects matched, and every terms IN [] below then
+  // aggregates to zero.
+  const { ids: leanProjectIds, truncated } = await fetchProjectModeFilteredProjectIds(
+    projectModeSnapshotFilters(orgFilterClause, true)
+  )
+
+  const codeExtraFilters = [
+    ...(orgFilterClause ? [orgFilterClause] : []),
+    { exists: { field: "properties.harnessProjectId" } },
+    { terms: { "properties.harnessProjectId": leanProjectIds } }
+  ]
+
+  const [changeKindRaw, overallRaw, traceRaw, codeTraceRaw] = await Promise.all([
+    // 指标 2 — adoption split by 新增 / 存量.
+    fetchProjectModeCodeAggs(
+      null,
+      range,
+      (perBucketAggs) => ({
+        ...buildChangeKindAggs(perBucketAggs),
+        ...buildNewRatioHistogramAgg()
+      }),
+      codeExtraFilters
+    ),
+    // Unsplit totals, used for the unmeasured-share credibility indicator.
+    fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, codeExtraFilters),
+    // 指标 3 numerator — tokens live on the trace index.
+    esQuery(getEsIndex("trace"), {
+      size: 0,
+      track_total_hits: false,
+      query: {
+        bool: {
+          filter: [
+            ...projectModeTraceFilters(range, orgFilterClause),
+            { terms: { harnessProjectId: leanProjectIds } }
+          ]
+        }
+      },
+      aggs: {
+        trace_count: { value_count: { field: "traceId" } },
+        project_count: { cardinality: { field: "harnessProjectId" } },
+        total_input_tokens: { sum: { field: "totalInputTokens" } },
+        total_output_tokens: { sum: { field: "totalOutputTokens" } },
+        total_tokens: { sum: { field: "totalTokens" } },
+        // Flattened at trace-finish time (see summarizeTraceCacheTokens);
+        // a part of the input total, not an addition to it.
+        cache_read_tokens: { sum: { field: "cacheReadTokens" } }
+      }
+    }),
+    // Traces that actually produced code, so the panel can show how much of the
+    // token spend went to conversations that never wrote anything.
+    esQuery(getEsIndex("event"), {
+      size: 0,
+      track_total_hits: false,
+      query: {
+        bool: {
+          filter: [
+            { term: { eventName: "code_gen" } },
+            timeRangeFilter("eventTime", range),
+            ...codeExtraFilters
+          ]
+        }
+      },
+      aggs: { code_traces: { cardinality: { field: "properties.traceId" } } }
+    })
+  ])
+
+  const overall = normalizeCodeStatsFromAggs(overallRaw)
+  const traceAggs = asRecord(asRecord(traceRaw).aggregations)
+  const codeTraceAggs = asRecord(asRecord(codeTraceRaw).aggregations)
+
+  return {
+    scalability: buildPendingScalability(),
+    adoption: {
+      overall,
+      byChangeKind: normalizeChangeKindBuckets(changeKindRaw),
+      newRatioHistogram: normalizeNewRatioHistogram(changeKindRaw),
+      unmeasuredRatio: computeUnmeasuredRatio(overall)
+    },
+    compute: buildComputeEfficiency({
+      totalInputTokens: asNumber(asRecord(traceAggs.total_input_tokens).value),
+      totalOutputTokens: asNumber(asRecord(traceAggs.total_output_tokens).value),
+      totalTokens: asNumber(asRecord(traceAggs.total_tokens).value),
+      cacheReadTokens: asNumber(asRecord(traceAggs.cache_read_tokens).value),
+      pushedAdoptedLines: overall.pushedAdoptedLines,
+      traceCount: asNumber(asRecord(traceAggs.trace_count).value),
+      codeProducingTraceCount: asNumber(asRecord(codeTraceAggs.code_traces).value)
+    }),
+    meta: {
+      projectCount: asNumber(asRecord(traceAggs.project_count).value),
+      truncated
+    }
   }
 }
 
@@ -12812,15 +14023,20 @@ async function fetchProjectModeTraces(
       aggs: {
         thread_list: {
           filter: traceAccessFilter ?? { match_all: {} },
-          aggs: threadListAgg(threadListBucketsNeeded(tracePage, tracePageSize))
+          aggs: threadListKeysAgg(threadListBucketsNeeded(tracePage, tracePageSize))
         }
       }
     }
     const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
     const aggs = asRecord((raw as unknown as Record<string, unknown>).aggregations)
-    const parsed = parseThreadListContainer(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    const parsed = parseThreadListKeys(asRecord(aggs.thread_list), tracePage, tracePageSize)
+    const traces = await fetchThreadListPreviewTraces(
+      parsed.threadIds,
+      baseFilter,
+      traceAccessFilter
+    )
     return {
-      traces: parsed.traces,
+      traces,
       tracePage,
       tracePageSize,
       total: parsed.totalThreads,
@@ -12845,7 +14061,7 @@ async function fetchProjectModeTraces(
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   const hits = raw.hits?.hits ?? []
   return {
-    traces: hits.map(normalizeTraceDetail),
+    traces: hits.map((hit) => normalizeTraceDetail(hit)),
     tracePage,
     tracePageSize,
     // from+size 只能触达前 max_result_window 条，故按相同上限收口 total，
@@ -12863,11 +14079,13 @@ interface ProjectModeNodeStatus {
   codeStats: DashboardCodeStats | null
 }
 
-/** One workflow node (stage) breakdown row for a feature: conversations + code adoption. */
+/** One workflow node (stage) breakdown row for a feature. */
 interface ProjectModeFeatureNode {
   nodeName: string
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  systemConstraintReads?: ProjectModeConstraintReadStats | null
+  hookExecutions?: ProjectModeHookStats | null
   /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
   byStatus: ProjectModeNodeStatus[]
   /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因），口径同列表行。 */
@@ -12902,6 +14120,156 @@ const NODE_STATUS_TERMS_SIZE = 16
  * bucket (reusing the shared stage×skill 未归因 label for口径一致性).
  */
 const UNATTRIBUTED_NODE_NAME = STAGE_BUCKET_LABELS.unattributed
+
+interface ProjectModeOperationalDetailScope {
+  projectId: string
+  featureSlug?: string
+  nodeName?: string
+}
+
+const PROJECT_MODE_OPERATIONAL_DETAIL_PAGE_SIZE = 500
+
+function harnessNodeNameEventFilterClause(nodeName: string): Record<string, unknown> {
+  if (nodeName === UNATTRIBUTED_NODE_NAME) {
+    return {
+      bool: { must_not: { exists: { field: "properties.harnessNodeName" } } }
+    }
+  }
+  return { term: { "properties.harnessNodeName": nodeName } }
+}
+
+async function fetchAllProjectModeConstraintFiles(
+  filters: Record<string, unknown>[]
+): Promise<ProjectModeConstraintFileStat[]> {
+  const files: ProjectModeConstraintFileStat[] = []
+  const seenAfterKeys = new Set<string>()
+  let after: Record<string, unknown> | undefined
+
+  for (;;) {
+    const raw = (await esQuery(getEsIndex("event"), {
+      size: 0,
+      query: { bool: { filter: filters } },
+      aggs: {
+        items: {
+          composite: {
+            size: PROJECT_MODE_OPERATIONAL_DETAIL_PAGE_SIZE,
+            sources: [
+              {
+                path: { terms: { field: "properties.constraintFiles" } }
+              }
+            ],
+            ...(after ? { after } : {})
+          },
+          aggs: {
+            trace_count: { cardinality: { field: "properties.traceId" } }
+          }
+        }
+      }
+    })) as EsSearchResponse
+    const items = asRecord(asRecord(raw.aggregations).items)
+    const buckets = items.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+
+    for (const bucket of buckets) {
+      const b = asRecord(bucket)
+      const path = asString(asRecord(b.key).path)
+      if (!path) continue
+      const traceCount = asNumber(asRecord(b.trace_count).value)
+      files.push({ path, traceCount: traceCount > 0 ? traceCount : asNumber(b.doc_count) })
+    }
+
+    const nextAfter = asRecord(items.after_key)
+    if (Object.keys(nextAfter).length === 0) break
+    const signature = JSON.stringify(nextAfter)
+    if (seenAfterKeys.has(signature)) break
+    seenAfterKeys.add(signature)
+    after = nextAfter
+  }
+
+  return files.sort((a, b) => b.traceCount - a.traceCount || a.path.localeCompare(b.path))
+}
+
+async function fetchAllProjectModeHookEvents(
+  filters: Record<string, unknown>[]
+): Promise<ProjectModeHookEventStat[]> {
+  const events: ProjectModeHookEventStat[] = []
+  const seenAfterKeys = new Set<string>()
+  let after: Record<string, unknown> | undefined
+
+  for (;;) {
+    const raw = (await esQuery(getEsIndex("event"), {
+      size: 0,
+      query: { bool: { filter: filters } },
+      aggs: {
+        items: {
+          composite: {
+            size: PROJECT_MODE_OPERATIONAL_DETAIL_PAGE_SIZE,
+            sources: [
+              {
+                event: { terms: { field: "properties.event" } }
+              }
+            ],
+            ...(after ? { after } : {})
+          }
+        }
+      }
+    })) as EsSearchResponse
+    const items = asRecord(asRecord(raw.aggregations).items)
+    const buckets = items.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+
+    for (const bucket of buckets) {
+      const b = asRecord(bucket)
+      const event = asString(asRecord(b.key).event)
+      if (event) events.push({ event, count: asNumber(b.doc_count) })
+    }
+
+    const nextAfter = asRecord(items.after_key)
+    if (Object.keys(nextAfter).length === 0) break
+    const signature = JSON.stringify(nextAfter)
+    if (seenAfterKeys.has(signature)) break
+    seenAfterKeys.add(signature)
+    after = nextAfter
+  }
+
+  return events.sort((a, b) => b.count - a.count || a.event.localeCompare(b.event))
+}
+
+/** Complete operational lists are fetched lazily so the project list query stays compact. */
+async function fetchProjectModeOperationalDetails(
+  scope: ProjectModeOperationalDetailScope,
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<ProjectModeOperationalDetails> {
+  const access = requireDashboardProjectModeAccess()
+  const projectId = typeof scope?.projectId === "string" ? scope.projectId.trim() : ""
+  const featureSlug = typeof scope?.featureSlug === "string" ? scope.featureSlug.trim() : ""
+  const nodeName = typeof scope?.nodeName === "string" ? scope.nodeName.trim() : ""
+  if (!projectId) return { constraintFiles: [], hookEvents: [] }
+
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const contextFilters: Record<string, unknown>[] = [
+    ...(orgFilterClause ? [orgFilterClause] : []),
+    { term: { "properties.harnessProjectId": projectId } },
+    ...(featureSlug ? [{ term: { "properties.harnessFeatureSlug": featureSlug } }] : []),
+    ...(nodeName ? [harnessNodeNameEventFilterClause(nodeName)] : [])
+  ]
+  const constraintFilters: Record<string, unknown>[] = [
+    { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
+    timeRangeFilter("eventTime", range),
+    ...contextFilters
+  ]
+  const hookFilters: Record<string, unknown>[] = [
+    { term: { eventName: "hook.executed" } },
+    timeRangeFilter("eventTime", range),
+    ...contextFilters
+  ]
+  const [constraintFiles, hookEvents] = await Promise.all([
+    fetchAllProjectModeConstraintFiles(constraintFilters),
+    fetchAllProjectModeHookEvents(hookFilters)
+  ])
+  return { constraintFiles, hookEvents }
+}
 
 /**
  * Trace filter clause scoping to one stage by name. The 未归因 stage is the
@@ -12948,6 +14316,52 @@ function codeNodeStatusAgg(perBucketAggs: Record<string, unknown>): Record<strin
           aggs: perBucketAggs
         },
         ...stageBucketCodeAggs(perBucketAggs)
+      }
+    }
+  }
+}
+
+/**
+ * Feature-stage event aggregation shared by code-adoption, successful system-
+ * constraint reads and hook executions. Keeping all event-side metrics under
+ * one `by_node` tree avoids an extra ES request (or a per-read event scan) when
+ * the user expands a feature's stage breakdown.
+ */
+function featureNodeEventAgg(
+  perBucketAggs: Record<string, unknown>,
+  codeGenFilters: Record<string, unknown>[],
+  codeAdoptFilters: Record<string, unknown>[],
+  constraintFilters: Record<string, unknown>[],
+  hookFilters: Record<string, unknown>[]
+): Record<string, unknown> {
+  const codeEventFilter = {
+    bool: {
+      should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+      minimum_should_match: 1
+    }
+  }
+  return {
+    by_node: {
+      terms: {
+        field: "properties.harnessNodeName",
+        size: PROJECT_MODE_FEATURE_SLUG_LIMIT,
+        missing: UNATTRIBUTED_NODE_NAME
+      },
+      aggs: {
+        ...perBucketAggs,
+        // Scope status rows to code events. Otherwise hook/constraint documents
+        // would create misleading zero-code status rows in the existing UI.
+        code_status_scope: {
+          filter: codeEventFilter,
+          aggs: {
+            by_status: {
+              terms: { field: "properties.harnessNodeStatus", size: NODE_STATUS_TERMS_SIZE },
+              aggs: perBucketAggs
+            }
+          }
+        },
+        ...stageBucketCodeAggs(perBucketAggs),
+        ...buildProjectModeOperationalAggs(constraintFilters, hookFilters)
       }
     }
   }
@@ -13000,10 +14414,19 @@ function parseCodeNodeBuckets(aggregations: unknown): {
       const b = asRecord(bucket)
       const nodeName = asString(b.key)
       if (!nodeName) continue
-      codeByNode.set(nodeName, normalizeCodeStatsFromContainer(b))
-      codeStageByNode.set(nodeName, parseStageBucketCodeStats(b))
+      const scopedCodeEvents = asRecord(b.code_status_scope)
+      // The combined feature query also contains constraint/hook-only buckets.
+      // Do not turn those into misleading all-zero code stats. Legacy callers
+      // have no code_status_scope and retain their original parsing behavior.
+      if (!("code_status_scope" in b) || asNumber(scopedCodeEvents.doc_count) > 0) {
+        codeByNode.set(nodeName, normalizeCodeStatsFromContainer(b))
+        codeStageByNode.set(nodeName, parseStageBucketCodeStats(b))
+      }
       const statusMap = new Map<string, DashboardCodeStats>()
-      const statusBuckets = asRecord(b.by_status).buckets
+      const scopedStatusBuckets = asRecord(scopedCodeEvents.by_status).buckets
+      const statusBuckets = Array.isArray(scopedStatusBuckets)
+        ? scopedStatusBuckets
+        : asRecord(b.by_status).buckets
       if (Array.isArray(statusBuckets)) {
         for (const sb of statusBuckets) {
           const s = asRecord(sb)
@@ -13017,18 +14440,52 @@ function parseCodeNodeBuckets(aggregations: unknown): {
   return { codeByNode, codeStatusByNode, codeStageByNode }
 }
 
+/** Parse the non-code metrics carried by the combined feature-stage event agg. */
+function parseFeatureOperationalNodeBuckets(aggregations: unknown): {
+  constraintReadsByNode: Map<string, ProjectModeConstraintReadStats>
+  hookExecutionsByNode: Map<string, ProjectModeHookStats>
+} {
+  const constraintReadsByNode = new Map<string, ProjectModeConstraintReadStats>()
+  const hookExecutionsByNode = new Map<string, ProjectModeHookStats>()
+  const buckets = asRecord(asRecord(aggregations).by_node).buckets
+  if (!Array.isArray(buckets)) return { constraintReadsByNode, hookExecutionsByNode }
+
+  for (const bucket of buckets) {
+    const b = asRecord(bucket)
+    const nodeName = asString(b.key)
+    if (!nodeName) continue
+    const operational = parseProjectModeOperationalStats(b)
+    if (operational.systemConstraintReads) {
+      constraintReadsByNode.set(nodeName, operational.systemConstraintReads)
+    }
+    if (operational.hookExecutions) {
+      hookExecutionsByNode.set(nodeName, operational.hookExecutions)
+    }
+  }
+
+  return { constraintReadsByNode, hookExecutionsByNode }
+}
+
 /** Merge parsed trace + event node maps into the sorted stage breakdown (with status sub-rows). */
 function buildFeatureNodeBreakdown(
   trace: ReturnType<typeof parseTraceNodeBuckets>,
-  code: ReturnType<typeof parseCodeNodeBuckets>
+  code: ReturnType<typeof parseCodeNodeBuckets>,
+  operational?: ReturnType<typeof parseFeatureOperationalNodeBuckets>
 ): ProjectModeFeatureNode[] {
-  const nodeNames = new Set<string>([...trace.conversationByNode.keys(), ...code.codeByNode.keys()])
+  const nodeNames = new Set<string>([
+    ...trace.conversationByNode.keys(),
+    ...code.codeByNode.keys(),
+    ...(operational?.constraintReadsByNode.keys() ?? []),
+    ...(operational?.hookExecutionsByNode.keys() ?? [])
+  ])
   return (
     [...nodeNames]
       .map((nodeName) => ({
         nodeName,
         conversationCount: trace.conversationByNode.get(nodeName) ?? 0,
         codeStats: code.codeByNode.get(nodeName) ?? null,
+        systemConstraintReads: operational?.constraintReadsByNode.get(nodeName) ?? null,
+        hookExecutions: operational?.hookExecutionsByNode.get(nodeName) ?? null,
         byStatus: buildNodeStatusBreakdown(
           trace.convStatusByNode.get(nodeName),
           code.codeStatusByNode.get(nodeName)
@@ -13081,23 +14538,65 @@ async function fetchProjectModeFeatureNodes(
     },
     aggs: traceNodeStatusAgg()
   }
-  const traceRaw = (await esQuery(getEsIndex("trace"), traceBody)) as EsSearchResponse
-  const traceParsed = parseTraceNodeBuckets(
-    (traceRaw as unknown as Record<string, unknown>).aggregations
-  )
-
-  // 2) code adoption per stage (+ status sub-breakdown) — event index, scoped to feature.
-  // Mirror fetchProjectModeProjectCodeStats: carry the same org/access filter so
-  // a non-admin never sees other orgs' code events for this project+feature.
+  // 2) Code adoption + operational telemetry share one event-side by-stage
+  // aggregation. Mirror fetchProjectModeProjectMetrics' org/access filter so
+  // a non-admin never sees another org's events for this project+feature.
   const orgFilterClause = buildProjectModeOrgFilter(undefined, access)
-  const codeRaw = await fetchProjectModeCodeAggs([normalizedProjectId], range, codeNodeStatusAgg, [
+  const eventContextFilters: Record<string, unknown>[] = [
     ...(orgFilterClause ? [orgFilterClause] : []),
+    { term: { "properties.harnessProjectId": normalizedProjectId } },
     { term: { "properties.harnessFeatureSlug": normalizedFeatureSlug } }
+  ]
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    null,
+    range,
+    eventContextFilters
+  )
+  const constraintFilters: Record<string, unknown>[] = [
+    { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
+    timeRangeFilter("eventTime", range),
+    ...eventContextFilters
+  ]
+  const hookFilters: Record<string, unknown>[] = [
+    { term: { eventName: "hook.executed" } },
+    timeRangeFilter("eventTime", range),
+    ...eventContextFilters
+  ]
+  const eventBody = {
+    size: 0,
+    query: {
+      bool: {
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } },
+          { bool: { filter: constraintFilters } },
+          { bool: { filter: hookFilters } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: featureNodeEventAgg(
+      perBucketAggs,
+      codeGenFilters,
+      codeAdoptFilters,
+      constraintFilters,
+      hookFilters
+    )
+  }
+
+  // Trace and event indices are independent; query them concurrently so adding
+  // operational metrics does not add another serial round trip to stage expand.
+  const [traceRaw, eventRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), traceBody) as Promise<EsSearchResponse>,
+    esQuery(getEsIndex("event"), eventBody) as Promise<EsSearchResponse>
   ])
-  const codeParsed = parseCodeNodeBuckets(asRecord(codeRaw).aggregations)
+  const traceParsed = parseTraceNodeBuckets(traceRaw.aggregations)
+  const eventAggregations = eventRaw.aggregations
+  const codeParsed = parseCodeNodeBuckets(eventAggregations)
+  const operationalParsed = parseFeatureOperationalNodeBuckets(eventAggregations)
 
   // 3) union of stages seen in either index; keep conversation-busiest first.
-  return buildFeatureNodeBreakdown(traceParsed, codeParsed)
+  return buildFeatureNodeBreakdown(traceParsed, codeParsed, operationalParsed)
 }
 
 /** DEV mock: a deterministic per-node breakdown derived from project/feature seed. */
@@ -13122,7 +14621,7 @@ function makeMockProjectModeFeatureNodes(
     pushedCommitCount: 3
   })
   const split = splitMockCodeStatsAcrossFeatures(base, nodeNames.length)
-  const nodes = nodeNames.map((nodeName, i) => {
+  const nodes: ProjectModeFeatureNode[] = nodeNames.map((nodeName, i) => {
     // Unsigned shift (>>>) so a high-bit seed never yields a negative count; +1 so
     // every mock stage shows a non-empty status sub-breakdown.
     const conversationCount = 1 + ((h >>> (i * 4)) % 8)
@@ -13131,10 +14630,29 @@ function makeMockProjectModeFeatureNodes(
     // Split the stage's code stats across its two statuses so the mock shows the
     // full four-rate breakdown (with numerator/denominator) under each status.
     const statusSplit = codeStats ? splitMockCodeStatsAcrossFeatures(codeStats, 2) : []
+    const successfulReadCount = conversationCount * 2 + i
     return {
       nodeName,
       conversationCount,
       codeStats,
+      systemConstraintReads: {
+        traceCount: conversationCount,
+        successfulReadCount,
+        distinctFileCount: 2,
+        filesTruncated: false,
+        files: [
+          { path: "sys/project.md", traceCount: conversationCount },
+          { path: `sys/stages/${i + 1}.md`, traceCount: Math.max(1, conversationCount - 1) }
+        ]
+      },
+      hookExecutions: {
+        executionCount: conversationCount * 3,
+        blockedCount: i === 2 ? 1 : 0,
+        byEvent: [
+          { event: "PreToolUse", count: conversationCount * 2 },
+          { event: "PostToolUse", count: conversationCount }
+        ]
+      },
       byStatus: [
         { status: "进行中", conversationCount: inProgress, codeStats: statusSplit[0] ?? null },
         {
@@ -13155,6 +14673,8 @@ function makeMockProjectModeFeatureNodes(
     nodeName: UNATTRIBUTED_NODE_NAME,
     conversationCount: unattributedConversations,
     codeStats: unattributedCode,
+    systemConstraintReads: null,
+    hookExecutions: null,
     byStatus: [],
     stageBuckets: {
       pluginConstrained: { conversationCount: 0, codeStats: null },
@@ -13257,7 +14777,93 @@ function makeMockPluginAggregate(adapterName: string): DashboardPluginAggregate 
 // IPC Registration
 // ─────────────────────────────────────────────────────────
 
+type DashboardRequestHandler<TArgs extends unknown[], TResult> = (
+  event: IpcMainInvokeEvent,
+  ...args: TArgs
+) => TResult | Promise<TResult>
+
+function registerLatestDashboardHandler<TArgs extends unknown[], TResult>(
+  target: typeof ipcMain,
+  channel: string,
+  handler: DashboardRequestHandler<TArgs, TResult>,
+  resolveFamily: (...args: TArgs) => string = () => channel
+): void {
+  target.handle(channel, async (event, ...rawArgs) => {
+    const args = rawArgs as TArgs
+    const family = resolveFamily(...args)
+    try {
+      return await dashboardRequestCoordinator.run(event.sender, family, () =>
+        Promise.resolve(handler(event, ...args))
+      )
+    } catch (error) {
+      if (isDashboardRequestCancelled(error) || isDashboardEsRequestCancelled(error)) {
+        return { success: false, cancelled: true, error: "Request cancelled" }
+      }
+      throw error
+    }
+  })
+}
+
+function getSkillEvalRequestFamily(options?: DashboardSkillEvalOptions): string {
+  const mode = options?.listOnly
+    ? "list"
+    : options?.statsOnly
+      ? "stats"
+      : options?.recentOnly
+        ? "recent"
+        : "full"
+  const skillNames = options?.skillNames
+    ?.slice(0, 16)
+    .map((name) => name.slice(0, 64))
+    .join(",")
+  const skill = (skillNames || options?.skillName?.trim() || "all").slice(0, 256)
+  const version = (options?.skillVersion?.trim() || "all").slice(0, 64)
+  return `dashboard:skillEvalSummary:${mode}:${skill}:${version}`
+}
+
+type DashboardUserProfilesFamily =
+  | "dashboard-market"
+  | "project-mode-market"
+  | "harness-market"
+  | "customize-market"
+
+interface DashboardUserProfilesOptions {
+  family?: DashboardUserProfilesFamily
+}
+
+const DASHBOARD_USER_PROFILES_FAMILIES = new Set<DashboardUserProfilesFamily>([
+  "dashboard-market",
+  "project-mode-market",
+  "harness-market",
+  "customize-market"
+])
+
+function getUserProfilesRequestFamily(options?: DashboardUserProfilesOptions): string {
+  const family = options?.family
+  return `dashboard:userProfiles:${
+    family && DASHBOARD_USER_PROFILES_FAMILIES.has(family) ? family : "default"
+  }`
+}
+
+function logDashboardRequestError(label: string, error: unknown): void {
+  if (isDashboardRequestCancelled(error) || isDashboardEsRequestCancelled(error)) return
+  console.error(`[Dashboard] ${label} error:`, error)
+}
+
 export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
+  _ipcMain.handle("dashboard:cancelRequests", (event, families?: unknown) => {
+    const sanitizedFamilies = Array.isArray(families)
+      ? families
+          .filter((family): family is string => typeof family === "string")
+          .map((family) => family.trim())
+          .filter((family) => family.length > 0 && family.length <= 512)
+          .slice(0, 32)
+      : undefined
+    return {
+      cancelled: dashboardRequestCoordinator.cancel(event.sender.id, sanitizedFamilies)
+    }
+  })
+
   _ipcMain.handle("dashboard:isAllowed", async () => {
     return getDashboardAccessContext().loggedIn
   })
@@ -13282,26 +14888,35 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return isDashboardAwardsAdmin()
   })
 
-  _ipcMain.handle("dashboard:esQuery", async (_, input: DashboardEsQueryInput) => {
-    try {
-      const access = requireDashboardAccess()
-      const result = await executeDashboardEsQuery(input, {
-        nodes: getEsNodes(),
-        auth: getEsAuth(),
-        indexByAlias: getDashboardEsIndexByAlias(),
-        injectedFilters: buildDashboardEsQueryFilters(input, access),
-        access: {
-          sapId: access.sapId,
-          ystId: access.ystId,
-          unrestricted: access.unrestricted
-        }
-      })
-      return { success: true, data: result }
-    } catch (e) {
-      console.error("[Dashboard] esQuery error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
-    }
+  _ipcMain.handle("dashboard:isSkillEvalAllowed", async () => {
+    return isDashboardSkillEvalAllowed()
   })
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:esQuery",
+    async (_, input: DashboardEsQueryInput) => {
+      try {
+        const access = requireDashboardAccess()
+        const result = await executeDashboardEsQuery(input, {
+          nodes: getEsNodes(),
+          auth: getEsAuth(),
+          indexByAlias: getDashboardEsIndexByAlias(),
+          injectedFilters: buildDashboardEsQueryFilters(input, access),
+          access: {
+            sapId: access.sapId,
+            ystId: access.ystId,
+            unrestricted: access.unrestricted
+          },
+          signal: getDashboardRequestSignal()
+        })
+        return { success: true, data: result }
+      } catch (e) {
+        logDashboardRequestError("esQuery", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
 
   _ipcMain.handle("dashboard:analysisAgent", async (_, input: DashboardAnalysisAgentInput) => {
     try {
@@ -13328,7 +14943,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   })
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectMode",
     async (_, range: TimeRange, _granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockProjectMode(range, opts) }
@@ -13336,13 +14952,107 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         requireDashboardProjectModeAccess()
         return { success: true, data: await fetchProjectMode(range, opts) }
       } catch (e) {
-        console.error("[Dashboard] projectMode error:", e)
+        logDashboardRequestError("projectMode", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:efficiency",
+    async (_, range: TimeRange, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockEfficiency() }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchDashboardEfficiency(range, opts) }
+      } catch (e) {
+        logDashboardRequestError("efficiency", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricSummary",
+    async (_, filters: ProjectMetricFilters) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricSummary(filters) }
+      }
+      try {
+        const access = requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricSummary(filters, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricSummary", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricTrend",
+    async (_, filters: ProjectMetricTrendFilters) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricTrend(filters) }
+      }
+      try {
+        const access = requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricTrend(filters, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricTrend", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricProjects",
+    async (_, filters: ProjectMetricFilters, options?: ProjectMetricListOptions) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricProjects(filters, options) }
+      }
+      try {
+        const access = requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricProjects(filters, options ?? {}, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricProjects", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeCodeStats",
     async (_, range: TimeRange, opts: OrgFilterOptions | undefined, source: string | null) => {
       if (import.meta.env.DEV) {
@@ -13356,13 +15066,14 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         requireDashboardProjectModeAccess()
         return { success: true, data: await fetchProjectModeCodeStatsBySource(range, opts, source) }
       } catch (e) {
-        console.error("[Dashboard] projectModeCodeStats error:", e)
+        logDashboardRequestError("projectModeCodeStats", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeProjects",
     async (_, range: TimeRange, options?: ProjectModeProjectPageOptions) => {
       if (import.meta.env.DEV)
@@ -13371,13 +15082,30 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         requireDashboardProjectModeAccess()
         return { success: true, data: await fetchProjectModeProjectPage(range, options) }
       } catch (e) {
-        console.error("[Dashboard] projectModeProjects error:", e)
+        logDashboardRequestError("projectModeProjects", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )
 
   _ipcMain.handle(
+    "dashboard:projectModeExportData",
+    async (_, range: TimeRange, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectModeExportData(range, opts) }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchProjectModeExportData(range, opts) }
+      } catch (e) {
+        console.error("[Dashboard] projectModeExportData error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeTraces",
     async (_, projectId: string, range: TimeRange, options?: ProjectModeTracesOptions) => {
       if (import.meta.env.DEV)
@@ -13386,13 +15114,14 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         requireDashboardProjectModeAccess()
         return { success: true, data: await fetchProjectModeTraces(projectId, range, options) }
       } catch (e) {
-        console.error("[Dashboard] projectModeTraces error:", e)
+        logDashboardRequestError("projectModeTraces", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeFeatureNodes",
     async (_, projectId: string, featureSlug: string, range: TimeRange) => {
       if (import.meta.env.DEV)
@@ -13404,22 +15133,59 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
           data: await fetchProjectModeFeatureNodes(projectId, featureSlug, range)
         }
       } catch (e) {
-        console.error("[Dashboard] projectModeFeatureNodes error:", e)
+        logDashboardRequestError("projectModeFeatureNodes", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
-    }
+    },
+    (projectId, featureSlug) =>
+      `dashboard:projectModeFeatureNodes:${projectId.slice(0, 128)}:${featureSlug.slice(0, 128)}`
   )
 
-  _ipcMain.handle("dashboard:pluginAggregate", async (_, adapterName: string, range: TimeRange) => {
-    if (import.meta.env.DEV) return { success: true, data: makeMockPluginAggregate(adapterName) }
-    try {
-      requireDashboardProjectModeAccess()
-      return { success: true, data: await fetchPluginAggregate(adapterName, range) }
-    } catch (e) {
-      console.error("[Dashboard] pluginAggregate error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectModeOperationalDetails",
+    async (
+      _,
+      scope: ProjectModeOperationalDetailScope,
+      range: TimeRange,
+      opts?: OrgFilterOptions
+    ) => {
+      if (import.meta.env.DEV) {
+        return {
+          success: true,
+          data: makeMockProjectModeOperationalDetails(scope ?? { projectId: "" })
+        }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectModeOperationalDetails(scope, range, opts)
+        }
+      } catch (e) {
+        logDashboardRequestError("projectModeOperationalDetails", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    (scope) =>
+      `dashboard:projectModeOperationalDetails:${(scope?.projectId ?? "").slice(0, 128)}:${(scope?.featureSlug ?? "").slice(0, 128)}:${(scope?.nodeName ?? "").slice(0, 128)}`
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:pluginAggregate",
+    async (_, adapterName: string, range: TimeRange) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockPluginAggregate(adapterName) }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchPluginAggregate(adapterName, range) }
+      } catch (e) {
+        logDashboardRequestError("pluginAggregate", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    (adapterName) => `dashboard:pluginAggregate:${adapterName.slice(0, 256)}`
+  )
 
   _ipcMain.handle(
     "dashboard:projectModeFeatureCommits",
@@ -13467,50 +15233,53 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:overview",
     async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockOverview(range, opts) }
       try {
         return { success: true, data: await fetchOverview(range, granularity, opts) }
       } catch (e) {
-        console.error("[Dashboard] overview error:", e)
+        logDashboardRequestError("overview", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:modelStats",
     async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockModelStats(opts) }
       try {
         return { success: true, data: await fetchModelStats(range, granularity, opts) }
       } catch (e) {
-        console.error("[Dashboard] modelStats error:", e)
+        logDashboardRequestError("modelStats", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )
 
-  _ipcMain.handle("dashboard:orgOptions", async (_, range: TimeRange) => {
+  registerLatestDashboardHandler(_ipcMain, "dashboard:orgOptions", async (_, range: TimeRange) => {
     if (import.meta.env.DEV) return { success: true, data: makeMockOrgOptions() }
     try {
       return { success: true, data: await fetchOrgOptions(range) }
     } catch (e) {
-      console.error("[Dashboard] orgOptions error:", e)
+      logDashboardRequestError("orgOptions", e)
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   })
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:userStats",
     async (_, range: TimeRange, granularity: Granularity, opts?: UserStatsOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockUserStats(range, opts) }
       try {
         return { success: true, data: await fetchUserStats(range, granularity, opts) }
       } catch (e) {
-        console.error("[Dashboard] userStats error:", e)
+        logDashboardRequestError("userStats", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -13588,7 +15357,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:skillEvalSummary",
     async (_, range: TimeRange, options?: DashboardSkillEvalOptions) => {
       if (import.meta.env.DEV)
@@ -13596,10 +15366,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       try {
         return { success: true, data: await fetchSkillEvalSummary(range, options) }
       } catch (e) {
-        console.error("[Dashboard] skillEvalSummary error:", e)
+        logDashboardRequestError("skillEvalSummary", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
-    }
+    },
+    (_range, options) => getSkillEvalRequestFamily(options)
   )
 
   _ipcMain.handle(
@@ -13683,41 +15454,62 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle("dashboard:userProfiles", async (_, sapIds: string[]) => {
-    const sanitizedSapIds = Array.isArray(sapIds)
-      ? sapIds.filter((id): id is string => typeof id === "string")
-      : []
-    if (import.meta.env.DEV) {
-      return { success: true, data: makeMockUserProfilesBySapIds(sanitizedSapIds) }
-    }
-    try {
-      return { success: true, data: await fetchUserProfilesBySapIds(sanitizedSapIds) }
-    } catch (e) {
-      console.error("[Dashboard] userProfiles error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:userProfiles",
+    async (_, sapIds: string[], options?: DashboardUserProfilesOptions) => {
+      void options
+      const sanitizedSapIds = Array.isArray(sapIds)
+        ? Array.from(
+            new Set(
+              sapIds
+                .filter((id): id is string => typeof id === "string")
+                .map((id) => id.trim())
+                .filter(Boolean)
+            )
+          ).slice(0, 500)
+        : []
+      if (import.meta.env.DEV) {
+        const projected = projectDashboardEsResponse(
+          makeMockUserProfilesBySapIds(sanitizedSapIds),
+          { kind: "user-directory" }
+        )
+        return { success: true, data: readUserDirectoryProjection(projected).items }
+      }
+      try {
+        const data = readUserDirectoryProjection(
+          await fetchUserProfilesBySapIds(sanitizedSapIds)
+        ).items
+        return { success: true, data }
+      } catch (e) {
+        logDashboardRequestError("userProfiles", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    (_sapIds, options) => getUserProfilesRequestFamily(options)
+  )
 
-  _ipcMain.handle("dashboard:queryAllUser", async () => {
+  registerLatestDashboardHandler(_ipcMain, "dashboard:queryAllUser", async () => {
     if (import.meta.env.DEV) {
       return { success: true, data: makeMockAllUsers() }
     }
     try {
       return { success: true, data: await queryAllUser() }
     } catch (e) {
-      console.error("[Dashboard] queryAllUser error:", e)
+      logDashboardRequestError("queryAllUser", e)
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   })
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:productivity",
     async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockProductivity(range, opts) }
       try {
         return { success: true, data: await fetchProductivity(range, granularity, opts) }
       } catch (e) {
-        console.error("[Dashboard] productivity error:", e)
+        logDashboardRequestError("productivity", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -13737,14 +15529,15 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:advancedFeatures",
     async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) => {
       if (import.meta.env.DEV) return { success: true, data: makeMockAdvancedFeatures(range) }
       try {
         return { success: true, data: await fetchAdvancedFeatures(range, granularity, opts) }
       } catch (e) {
-        console.error("[Dashboard] advancedFeatures error:", e)
+        logDashboardRequestError("advancedFeatures", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -13919,11 +15712,72 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   })
 
+  _ipcMain.handle("dashboard:exportUserTraces", async (event, rawPayload: unknown) => {
+    try {
+      const payload = normalizeUserTraceExportPayload(rawPayload)
+      if (!payload.sapId) return { success: false, error: "sapId is required" }
+      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+
+      const exportedAt = new Date().toISOString()
+      const date = exportedAt.slice(0, 10)
+      const viewLabel = payload.viewMode === "thread" ? "threads" : "traces"
+      const displayName = payload.userName || payload.sapId
+      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+        title: `导出用户 ${payload.viewMode === "thread" ? "Thread" : "Trace"} 历史`,
+        defaultPath: `${safeExportFileName(`${displayName}-${payload.sapId}`)}-${viewLabel}-page-${payload.page}-${date}.zip`,
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+      })
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true }
+      }
+
+      const zip = new AdmZip()
+      zip.addFile(
+        `${viewLabel}.md`,
+        Buffer.from(formatUserTraceExportMarkdown(payload, exportedAt), "utf-8")
+      )
+      const commonPayload = {
+        version: 1,
+        exportedAt,
+        exportType: payload.viewMode,
+        user: {
+          sapId: payload.sapId,
+          ...(payload.ystId ? { ystId: payload.ystId } : {}),
+          userName: payload.userName
+        },
+        range: payload.range,
+        page: payload.page,
+        pageSize: payload.pageSize,
+        totalItems: payload.totalItems,
+        triggerScope: payload.triggerScope,
+        projectMode: payload.projectMode
+      }
+      const data =
+        payload.viewMode === "thread"
+          ? { ...commonPayload, threads: groupTraceExportThreads(payload.traces) }
+          : { ...commonPayload, traces: payload.traces }
+      zip.addFile(`${viewLabel}.json`, Buffer.from(`${stringifyExportValue(data)}\n`, "utf-8"))
+      zip.writeZip(result.filePath)
+
+      return { success: true, filePath: result.filePath }
+    } catch (e) {
+      console.error("[Dashboard] exportUserTraces error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
   _ipcMain.handle(
     "dashboard:exportExcel",
     async (
       _,
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      sheets: Array<{
+        name: string
+        header: string[]
+        rows: (string | number)[][]
+        summaryRows?: (string | number)[][]
+      }>,
       options?: { fileName?: string }
     ) => {
       try {
@@ -13932,13 +15786,19 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
         const wb = XLSX.utils.book_new()
         for (const sheet of sheets) {
-          const wsData = [sheet.header, ...sheet.rows]
+          const summaryRows = sheet.summaryRows ?? []
+          const wsData = [
+            ...summaryRows,
+            ...(summaryRows.length > 0 ? [[]] : []),
+            sheet.header,
+            ...sheet.rows
+          ]
           const ws = XLSX.utils.aoa_to_sheet(wsData)
 
           // Auto-size columns based on content
           const colWidths = sheet.header.map((h, i) => {
             let maxLen = h.length
-            for (const row of sheet.rows) {
+            for (const row of [...summaryRows, ...sheet.rows]) {
               const cellLen = String(row[i] ?? "").length
               if (cellLen > maxLen) maxLen = cellLen
             }

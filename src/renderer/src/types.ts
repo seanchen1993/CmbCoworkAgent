@@ -90,8 +90,6 @@ import type {
   HeartbeatConfig,
   PluginMetadata,
   PluginManifest,
-  ChatXConfig,
-  ChatXRobotConfig,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -156,6 +154,8 @@ import type {
   HarnessDynamicWorkflowTemplate,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
+  HarnessBoardCatalogPageInput,
+  HarnessBoardCatalogPageResult,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
@@ -170,6 +170,9 @@ import type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
+  HarnessHumanGateSnapshot,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
   HarnessWorkflowNextAction,
   HarnessWorkflow
 } from "../../shared/harness-board-types"
@@ -191,8 +194,6 @@ export type {
   HeartbeatConfig,
   PluginMetadata,
   PluginManifest,
-  ChatXConfig,
-  ChatXRobotConfig,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -252,6 +253,8 @@ export type {
   HarnessDynamicWorkflowTemplate,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
+  HarnessBoardCatalogPageInput,
+  HarnessBoardCatalogPageResult,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
@@ -267,6 +270,9 @@ export type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
+  HarnessHumanGateSnapshot,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
   HarnessWorkflowNextAction,
   HarnessWorkflow
 }
@@ -285,6 +291,8 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Durable transcript order. Present on messages read from thread_messages pages. */
+  ordinal?: number
   provider_source_id?: string
   provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
@@ -297,6 +305,10 @@ export interface Message {
   // Large transcript fields are persisted out-of-line. The renderer keeps the
   // hydrated value for display and the reference for compact subsequent saves.
   content_ref?: SubagentTranscriptBlobRef
+  /** Renderer-only acknowledgement/journal metadata for live subagent text. */
+  content_persisted_length?: number
+  content_pending_delta?: string
+  content_stream_delta?: string
   // Internal transcript aliases used to collapse a provisional subagent
   // assistant row into its stable task-completion row across reloads/replays.
   replaced_message_ids?: string[]
@@ -319,6 +331,9 @@ export interface Message {
   reasoning_is_projection?: boolean
   reasoning_full_length?: number
   reasoning_ref?: SubagentTranscriptBlobRef
+  reasoning_persisted_length?: number
+  reasoning_pending_delta?: string
+  reasoning_stream_delta?: string
   tool_calls?: ToolCall[]
   tool_calls_ref?: SubagentTranscriptBlobRef
   // For tool messages - links result to its tool call
@@ -344,6 +359,7 @@ export interface Message {
  *   - `attachmentModelBlocks`   <attachment>…</attachment> XML appended for the model
  *   - `attachmentDisplayPrefix` "📎 name" lines shown in the user's bubble
  *   - `skillBlock`              trailing slash-command skill block, if any
+ *   - `builtinBrowser`          whether the draft should use the built-in browser prompt
  *   - `modelId`                 model selected when the draft was composed
  *   - `handoffRequestedAt`      set once the message has been steered into the
  *                               current run (awaiting injection); cleared on run end
@@ -354,6 +370,7 @@ export interface QueuedMessage {
   attachmentModelBlocks?: string
   attachmentDisplayPrefix?: string
   skillBlock?: string
+  builtinBrowser?: boolean
   modelId?: string
   handoffRequestedAt?: Date
   created_at: Date
@@ -367,6 +384,9 @@ export interface GoalEvent {
   active_window_id?: string | null
   message: string
   created_at: Date | string | number
+  /** Durable location of the matching Goal turn (or its first runtime message). */
+  transcript_ordinal?: number | null
+  transcript_message_id?: string | null
 }
 
 export interface GoalSnapshot {
@@ -458,6 +478,12 @@ export interface HITLRequest {
   suggestedCommitMessage?: string
   suggestedCommitFilePaths?: string[]
   suggestedCommitFileBasePath?: string
+  suggestedGitWorktreePath?: string
+  suggestedGitRepositories?: Array<{
+    path: string
+    displayPath: string
+    gitRoot: string
+  }>
   suggestedCommitFileSelectionSource?: "pathspec" | "staged"
 }
 
@@ -513,3 +539,16 @@ export type {
   HookInjectUserContext,
   HookUserContextField
 } from "../../main/hooks/types"
+export type {
+  BuiltinRobotConnectionState,
+  BuiltinRobotDiagnostics,
+  BuiltinRobotFeatureGrantStatus,
+  BuiltinRobotIdentityState,
+  BuiltinRobotFeatureBindingStatus,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
+  BuiltinRobotRouteStatus,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
+  BuiltinRobotThreadGrantStatus
+} from "../../main/types"

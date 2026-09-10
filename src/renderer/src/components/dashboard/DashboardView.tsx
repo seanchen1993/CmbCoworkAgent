@@ -65,6 +65,8 @@ import {
   type DashboardUserListItem,
   type DashboardProjectModeFeature,
   type DashboardProjectModeFeatureNode,
+  type DashboardProjectModeOperationalDetailScope,
+  type DashboardProjectModeOperationalDetails,
   type DashboardPluginAggregate,
   type DashboardProjectModeData,
   type DashboardAwardSkillContribution,
@@ -81,6 +83,7 @@ import {
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
+import { EfficiencyPanel } from "./panels/EfficiencyPanel"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
 import { ModelPanel } from "./panels/ModelPanel"
@@ -88,6 +91,7 @@ import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
 import { AdvancedFeaturesPanel } from "./panels/AdvancedFeaturesPanel"
 import { TraceExplorer, TraceHistoryDialog, TraceTriggerScopeToggle } from "./TraceHistoryDialog"
+import { unwrapThreadTracesResponse } from "./thread-traces-response"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
 import { UncommittedCodeDialog } from "./UncommittedCodeDialog"
 import { marketApi, type MarketItem } from "../../api/market"
@@ -104,13 +108,19 @@ import {
   parseUploaderIdentity,
   type UploaderProfileInfo
 } from "../../lib/skill-data-service"
+import {
+  buildProjectModeProjectExportRows,
+  buildProjectModeProjectExportSummaryRows,
+  buildProjectModeUserExportRows,
+  PROJECT_MODE_PROJECT_EXPORT_HEADER,
+  PROJECT_MODE_USER_EXPORT_HEADER
+} from "./project-mode-export"
+import { ACTIVE_USER_EXPORT_HEADER, buildActiveUserExportRows } from "./active-user-export"
 
 type UserInfoLite = {
   sapId?: string
   ystId?: string
 }
-
-const SKILL_EVAL_DOC_URL = "https://doc.cmbchina.com/f/v?id=_41lRJE"
 
 // ─────────────────────────────────────────────────────────
 // Time control bar
@@ -122,7 +132,8 @@ const GRANULARITY_OPTIONS: { value: Granularity; label: string }[] = [
   { value: "month", label: "月" },
   { value: "custom", label: "自定义" }
 ]
-const DEFAULT_CUSTOM_RANGE_MAX_DAYS = 31
+// 普通用户可查询一个季度；取自然季度可能出现的最大跨度（含首尾日期）。
+const DEFAULT_CUSTOM_RANGE_MAX_DAYS = 92
 const ADMIN_CUSTOM_RANGE_MAX_DAYS = 366
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 
@@ -141,6 +152,7 @@ type DashboardExcelSheet = {
   name: string
   header: string[]
   rows: (string | number)[][]
+  summaryRows?: (string | number)[][]
 }
 
 type DashboardAnalysisScope = "platform" | "project"
@@ -1093,7 +1105,7 @@ type DashboardSubPage =
       projectMode?: boolean
     }
 
-type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "awards"
+type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "efficiency" | "awards"
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -1134,15 +1146,21 @@ function formatDateOnly(iso?: string): string {
   return date.toLocaleDateString("zh-CN")
 }
 
-async function fetchAllActiveUsersForExport(range: TimeRange): Promise<DashboardUserListItem[]> {
+async function fetchAllActiveUsersForExport(
+  range: TimeRange,
+  filters?: { keyword?: string | null; upperOrgLv1?: string | null }
+): Promise<DashboardUserListItem[]> {
   const users: DashboardUserListItem[] = []
+  const seenSapIds = new Set<string>()
+  const seenCursors = new Set<string>()
   let afterKey: Record<string, string | number> | undefined
 
   for (let page = 0; page < USER_LIST_EXPORT_MAX_PAGES; page++) {
     const result = await window.api.dashboard.userList(range, {
       pageSize: USER_LIST_EXPORT_PAGE_SIZE,
       afterKey: afterKey ?? null,
-      keyword: null
+      keyword: filters?.keyword ?? null,
+      upperOrgLv1: filters?.upperOrgLv1 ?? null
     })
 
     if (!result.success) {
@@ -1151,9 +1169,16 @@ async function fetchAllActiveUsersForExport(range: TimeRange): Promise<Dashboard
 
     const data = result.data
     if (!data) break
-    users.push(...data.items)
+    for (const user of data.items) {
+      if (seenSapIds.has(user.sapId)) continue
+      seenSapIds.add(user.sapId)
+      users.push(user)
+    }
 
     if (!data.nextAfterKey) break
+    const cursor = JSON.stringify(data.nextAfterKey)
+    if (seenCursors.has(cursor)) throw new Error("活跃用户导出分页游标重复，无法保证全量数据")
+    seenCursors.add(cursor)
     afterKey = data.nextAfterKey
   }
 
@@ -1342,14 +1367,20 @@ function UserMetricCard({
   )
 }
 
+function formatLineFraction(numerator: number, denominator: number): string {
+  return `${formatNumber(numerator)} / ${formatNumber(denominator)} 行`
+}
+
 function UserListPage({
   data,
   loading,
   error,
   canGoPrevious,
   canGoNext,
+  exporting,
   onBack,
   onRefresh,
+  onExport,
   onPrevious,
   onNext,
   searchValue,
@@ -1368,8 +1399,10 @@ function UserListPage({
   error: string | null
   canGoPrevious: boolean
   canGoNext: boolean
+  exporting: boolean
   onBack: () => void
   onRefresh: () => void
+  onExport: () => void
   onPrevious: () => void
   onNext: () => void
   searchValue: string
@@ -1401,20 +1434,37 @@ function UserListPage({
             </p>
           </div>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-1.5"
-          onClick={onRefresh}
-          disabled={loading}
-        >
-          {loading ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="size-3.5" />
-          )}
-          刷新
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={onExport}
+            disabled={exporting || loading}
+            title="导出当前时间范围和查询条件下的全部活跃用户"
+          >
+            {exporting ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Download className="size-3.5" />
+            )}
+            导出
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={onRefresh}
+            disabled={loading}
+          >
+            {loading ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="size-3.5" />
+            )}
+            刷新
+          </Button>
+        </div>
       </div>
 
       <div className="rounded-xl border border-border bg-card">
@@ -1516,13 +1566,28 @@ function UserListPage({
           </div>
         ) : (
           <div className="overflow-auto">
-            <table className="w-full text-xs">
+            <table className="min-w-[1320px] w-full text-xs">
               <thead>
                 <tr className="border-b border-border bg-muted/30 text-muted-foreground">
                   <th className="px-3 py-2 text-left font-medium">用户</th>
                   <th className="px-3 py-2 text-left font-medium">部门</th>
                   <th className="px-3 py-2 text-right font-medium">调用次数</th>
-                  <th className="px-3 py-2 text-right font-medium">工具调用</th>
+                  <th className="px-3 py-2 text-right font-medium">代码生成行数</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
+                    已 Commit 采纳行数
+                  </th>
+                  <th
+                    className="px-3 py-2 text-right font-medium"
+                    title="已 Commit 采纳行数 ÷（已测量有效生成行数 + 未提交生成行数）"
+                  >
+                    总量提交采纳率
+                  </th>
+                  <th
+                    className="px-3 py-2 text-right font-medium"
+                    title="已 Push 采纳行数 ÷（已测量有效生成行数 + 未提交生成行数）"
+                  >
+                    总量入库采纳率
+                  </th>
                   <th className="px-3 py-2 text-right font-medium">Token</th>
                   <th className="px-3 py-2 text-left font-medium">最近活跃</th>
                 </tr>
@@ -1548,7 +1613,38 @@ function UserListPage({
                         : user.orgName || "—"}
                     </td>
                     <td className="px-3 py-2 text-right font-medium">{formatNumber(user.count)}</td>
-                    <td className="px-3 py-2 text-right">{formatNumber(user.totalToolCalls)}</td>
+                    <td className="px-3 py-2 text-right">
+                      {user.codeStats ? formatNumber(user.codeStats.generatedLines) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {user.codeStats ? formatNumber(user.codeStats.adoptedLines) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <div className="font-medium text-cyan-600 dark:text-cyan-400">
+                        {formatPercent(user.codeStats?.inclusiveAdoptionRate ?? null)}
+                      </div>
+                      {user.codeStats ? (
+                        <div className="mt-0.5 whitespace-nowrap text-[10px] tabular-nums text-muted-foreground">
+                          {formatLineFraction(
+                            user.codeStats.adoptedLines,
+                            user.codeStats.inclusiveEffectiveGeneratedLines
+                          )}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <div className="font-medium text-emerald-600 dark:text-emerald-400">
+                        {formatPercent(user.codeStats?.inclusivePushedAdoptionRate ?? null)}
+                      </div>
+                      {user.codeStats ? (
+                        <div className="mt-0.5 whitespace-nowrap text-[10px] tabular-nums text-muted-foreground">
+                          {formatLineFraction(
+                            user.codeStats.pushedAdoptedLines,
+                            user.codeStats.inclusiveEffectiveGeneratedLines
+                          )}
+                        </div>
+                      ) : null}
+                    </td>
                     <td className="px-3 py-2 text-right">
                       {formatCompactTokens(user.totalTokens)}
                     </td>
@@ -1559,7 +1655,7 @@ function UserListPage({
                 ))}
                 {(data?.items ?? []).length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-3 py-10 text-center text-muted-foreground">
+                    <td colSpan={9} className="px-3 py-10 text-center text-muted-foreground">
                       {hasSearchKeyword ? "未找到匹配用户" : "当前时间范围内暂无活跃用户"}
                       {hasDepartmentFilter ? `（部门：${departmentFilter}）` : ""}
                     </td>
@@ -1587,6 +1683,8 @@ function UserDetailPage({
   onTraceNext,
   onTraceViewModeChange,
   onTraceTriggerScopeChange,
+  onExportPage,
+  exporting,
   loadThreadTraces
 }: {
   data: DashboardUserDetail | null
@@ -1601,6 +1699,8 @@ function UserDetailPage({
   onTraceNext: () => void
   onTraceViewModeChange: (mode: DashboardTraceViewMode) => void
   onTraceTriggerScopeChange: (scope: DashboardTraceTriggerScope) => void
+  onExportPage: () => void
+  exporting: boolean
   loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
@@ -1682,6 +1782,75 @@ function UserDetailPage({
             </div>
           </div>
 
+          <div className="rounded-xl border border-border bg-card p-4">
+            <div className="mb-3">
+              <h3 className="text-xs font-semibold text-foreground">代码生成与采纳</h3>
+              <p className="mt-0.5 text-[10px] text-muted-foreground">
+                当前时间范围；Commit 采纳与已 Push 入库分别统计
+              </p>
+            </div>
+            {data.codeStats ? (
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <UserMetricCard
+                  label="代码生成行数"
+                  value={formatNumber(data.codeStats.generatedLines)}
+                  sub={`未提交 ${formatNumber(data.codeStats.unmeasuredGeneratedLines)} 行`}
+                />
+                <UserMetricCard
+                  label="已 Commit 采纳行数"
+                  value={formatNumber(data.codeStats.adoptedLines)}
+                  sub={`有效生成 ${formatNumber(data.codeStats.effectiveGeneratedLines)} 行`}
+                />
+                <UserMetricCard
+                  label="已 Push 采纳行数"
+                  value={formatNumber(data.codeStats.pushedAdoptedLines)}
+                  sub={`${formatNumber(data.codeStats.pushedCommitCount)} 个 Commit 已 Push`}
+                />
+                <UserMetricCard
+                  label="总量有效生成行数"
+                  value={formatNumber(data.codeStats.inclusiveEffectiveGeneratedLines)}
+                  sub="已测量有效 + 未提交生成"
+                />
+                <UserMetricCard
+                  label="总量提交采纳率"
+                  value={formatPercent(data.codeStats.inclusiveAdoptionRate)}
+                  sub={formatLineFraction(
+                    data.codeStats.adoptedLines,
+                    data.codeStats.inclusiveEffectiveGeneratedLines
+                  )}
+                />
+                <UserMetricCard
+                  label="总量入库采纳率"
+                  value={formatPercent(data.codeStats.inclusivePushedAdoptionRate)}
+                  sub={formatLineFraction(
+                    data.codeStats.pushedAdoptedLines,
+                    data.codeStats.inclusiveEffectiveGeneratedLines
+                  )}
+                />
+                <UserMetricCard
+                  label="提交采纳率"
+                  value={formatPercent(data.codeStats.measuredAdoptionRate)}
+                  sub={formatLineFraction(
+                    data.codeStats.adoptedLines,
+                    data.codeStats.effectiveGeneratedLines
+                  )}
+                />
+                <UserMetricCard
+                  label="入库采纳率"
+                  value={formatPercent(data.codeStats.pushedAdoptionRate)}
+                  sub={formatLineFraction(
+                    data.codeStats.pushedAdoptedLines,
+                    data.codeStats.pushedEffectiveGeneratedLines
+                  )}
+                />
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
+                当前时间范围内暂无该用户的代码生成或采纳数据
+              </div>
+            )}
+          </div>
+
           <div className="grid grid-cols-3 gap-4">
             <div className="rounded-xl border border-border bg-card p-4">
               <h3 className="mb-3 text-xs font-medium text-muted-foreground">常用 Skill</h3>
@@ -1749,6 +1918,21 @@ function UserDetailPage({
                     type="button"
                     variant="outline"
                     size="sm"
+                    className="gap-1"
+                    onClick={onExportPage}
+                    disabled={exporting || loading || data.traces.length === 0}
+                  >
+                    {exporting ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Download className="size-3.5" />
+                    )}
+                    导出本页
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
                     onClick={onTracePrevious}
                     disabled={!canTracePrevious}
                   >
@@ -1783,21 +1967,25 @@ function DashboardTabBar({
   onChange,
   projectModeAllowed,
   awardsAdmin,
+  skillEvalAllowed,
   rightContent
 }: {
   activeTab: DashboardMainTab
   onChange: (tab: DashboardMainTab) => void
   projectModeAllowed: boolean
   awardsAdmin: boolean
+  skillEvalAllowed: boolean
   rightContent?: ReactNode
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
     ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
+    // 研发效能沿用项目模式的可见性：两者统计范围同源（项目模式 + 精益项目）。
+    ...(projectModeAllowed ? ([{ id: "efficiency", label: "研发效能" }] as const) : []),
     // 评奖辅助看板仅对管理员名单可见。
-    ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : [])
-    // 技能评估 tab 暂时隐藏（仅移除入口，skill-eval 相关逻辑/内容/类型均保留，需要时取消注释即可恢复）
-    // { id: "skill-eval", label: "技能评估" }
+    ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : []),
+    // 技能评估 tab 仅对 DASHBOARD_SKILL_EVAL 白名单可见。
+    ...(skillEvalAllowed ? ([{ id: "skill-eval", label: "技能评估" }] as const) : [])
   ]
 
   return (
@@ -2569,6 +2757,10 @@ export function DashboardView(): React.JSX.Element {
     projectMode,
     projectModeLoading,
     projectModeError,
+    efficiency,
+    efficiencyLoading,
+    efficiencyError,
+    fetchEfficiency,
     projectModeCodeSource,
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,
@@ -2590,6 +2782,7 @@ export function DashboardView(): React.JSX.Element {
   } = useDashboard()
 
   const [exporting, setExporting] = useState(false)
+  const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
@@ -2616,6 +2809,8 @@ export function DashboardView(): React.JSX.Element {
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   // 评奖辅助看板访问门禁（仅 DASHBOARD_AWARDS_ADMIN 名单）。
   const [awardsAdmin, setAwardsAdmin] = useState(false)
+  // 技能评估 tab 访问门禁（仅 DASHBOARD_SKILL_EVAL 白名单）。
+  const [skillEvalAllowed, setSkillEvalAllowed] = useState(false)
   const [awardSkillContribs, setAwardSkillContribs] = useState<
     DashboardAwardSkillContribution[] | null
   >(null)
@@ -2675,19 +2870,25 @@ export function DashboardView(): React.JSX.Element {
   useEffect(() => {
     let cancelled = false
 
+    // 项目模式与研发效能共用同一道权限门，失去权限时两个 tab 都要退回总览，
+    // 否则停在已经不再渲染的 tab 上会看到一片空白。
+    const leaveProjectModeGatedTabs = (): void => {
+      setActiveMainTab((current) =>
+        current === "project-mode" || current === "efficiency" ? "overview" : current
+      )
+    }
+
     window.api.dashboard
       .isProjectModeAllowed()
       .then((allowed) => {
         if (cancelled) return
         setProjectModeAllowed(allowed)
-        if (!allowed) {
-          setActiveMainTab((current) => (current === "project-mode" ? "overview" : current))
-        }
+        if (!allowed) leaveProjectModeGatedTabs()
       })
       .catch(() => {
         if (cancelled) return
         setProjectModeAllowed(false)
-        setActiveMainTab((current) => (current === "project-mode" ? "overview" : current))
+        leaveProjectModeGatedTabs()
       })
 
     return () => {
@@ -2711,6 +2912,21 @@ export function DashboardView(): React.JSX.Element {
         if (cancelled) return
         setAwardsAdmin(false)
         setActiveMainTab((current) => (current === "awards" ? "overview" : current))
+      })
+
+    window.api.dashboard
+      .isSkillEvalAllowed()
+      .then((allowed) => {
+        if (cancelled) return
+        setSkillEvalAllowed(allowed)
+        if (!allowed) {
+          setActiveMainTab((current) => (current === "skill-eval" ? "overview" : current))
+        }
+      })
+      .catch(() => {
+        if (cancelled) return
+        setSkillEvalAllowed(false)
+        setActiveMainTab((current) => (current === "skill-eval" ? "overview" : current))
       })
 
     window.api.dashboard
@@ -2772,6 +2988,7 @@ export function DashboardView(): React.JSX.Element {
   const [subPage, setSubPage] = useState<DashboardSubPage>({ kind: "main" })
   const [userList, setUserList] = useState<DashboardUserListData | null>(null)
   const [userListLoading, setUserListLoading] = useState(false)
+  const [userListExporting, setUserListExporting] = useState(false)
   const [userListError, setUserListError] = useState<string | null>(null)
   const [userListSearchValue, setUserListSearchValue] = useState("")
   const [userListSearchKeyword, setUserListSearchKeyword] = useState("")
@@ -2792,6 +3009,7 @@ export function DashboardView(): React.JSX.Element {
     useState<DashboardTraceViewMode>("thread")
   const [userDetailTraceTriggerScope, setUserDetailTraceTriggerScope] =
     useState<DashboardTraceTriggerScope>("active")
+  const [userDetailTraceExporting, setUserDetailTraceExporting] = useState(false)
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
@@ -2909,6 +3127,13 @@ export function DashboardView(): React.JSX.Element {
     selectedOrgLv1List,
     fromLeanProjectsOnly
   ])
+
+  // 研发效能 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
+  // 不挂「仅精益项目」开关——该范围在后端固定，不随开关变化。
+  useEffect(() => {
+    if (activeMainTab !== "efficiency" || !projectModeAllowed) return
+    void fetchEfficiency(range, selectedOrgLv1List)
+  }, [activeMainTab, fetchEfficiency, projectModeAllowed, range, selectedOrgLv1List])
 
   // 评奖辅助看板懒加载：进入 tab + 名单可见时拉取；时间范围变化重拉。
   // 技能贡献奖需待应用市场技能（个人构建）加载完成后再查。
@@ -3243,9 +3468,7 @@ export function DashboardView(): React.JSX.Element {
     let cancelled = false
 
     async function loadUploaderProfiles(items: MarketItem[]): Promise<void> {
-      // 与技能市场（MarketPanel）一致：用全量用户目录 queryAllUser 反查创建人，
-      // 而不是按使用埋点聚合的 userProfiles —— 否则像精品技能这种作者本人无使用记录的，
-      // 聚合里查不到对应 SAP 桶，创建人就会显示 “—”。
+      // 只按当前市场条目的已知上传者 ID 查询，避免挂载看板时加载完整用户目录。
       // 每个 user_id 对应一组候选 SAP，作为 resolveSkillUploaderExportInfo 的查表 key。
       const candidatesByUserId = new Map<string, string[]>()
       for (const item of items) {
@@ -3269,15 +3492,20 @@ export function DashboardView(): React.JSX.Element {
         return map
       }
 
-      if (typeof window.api?.dashboard?.queryAllUser !== "function") {
+      if (typeof window.api?.dashboard?.userProfiles !== "function") {
         if (!cancelled) setSkillUploaderProfiles(buildFallbackMap())
         return
       }
 
       try {
-        const response = await window.api.dashboard.queryAllUser()
+        const requestedSapIds = Array.from(
+          new Set(Array.from(candidatesByUserId.values()).flat())
+        )
+        const response = await window.api.dashboard.userProfiles(requestedSapIds, {
+          family: "dashboard-market"
+        })
         if (!response.success || !response.data) {
-          throw new Error(response.error || "获取全量用户信息失败")
+          throw new Error(response.error || "获取上传者信息失败")
         }
 
         const allUsers = response.data.filter((user) => user.sapId?.trim())
@@ -3476,10 +3704,15 @@ export function DashboardView(): React.JSX.Element {
     if (activeMainTab === "project-mode") {
       void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
     }
+    if (activeMainTab === "efficiency") {
+      void fetchEfficiency(range, selectedOrgLv1List)
+      setProjectMetricRefreshKey((current) => current + 1)
+    }
   }, [
     activeMainTab,
     clearSkillEval,
     fetchProjectMode,
+    fetchEfficiency,
     granularity,
     range,
     refresh,
@@ -3522,6 +3755,21 @@ export function DashboardView(): React.JSX.Element {
       return Array.isArray(res.data) ? (res.data as DashboardProjectModeFeatureNode[]) : []
     },
     [range]
+  )
+
+  const loadProjectOperationalDetails = useCallback(
+    async (
+      scope: DashboardProjectModeOperationalDetailScope
+    ): Promise<DashboardProjectModeOperationalDetails> => {
+      const res = await window.api.dashboard.projectModeOperationalDetails(scope, range, {
+        upperOrgLv1: selectedOrgLv1List
+      })
+      if (!res.success || !res.data) {
+        throw new Error(res.error ?? "获取运行明细失败")
+      }
+      return res.data as DashboardProjectModeOperationalDetails
+    },
+    [range, selectedOrgLv1List]
   )
 
   // 插件聚合的按阶段细分，跟随面板当前时间范围（range 变化即得到新回调，展开中的细分会重拉）。
@@ -3869,6 +4117,34 @@ export function DashboardView(): React.JSX.Element {
     setUserListSearchKeyword("")
   }, [loadUserList, userListSearchKeyword])
 
+  const handleUserListExport = useCallback(async () => {
+    setUserListExporting(true)
+    try {
+      const users = await fetchAllActiveUsersForExport(range, {
+        keyword: userListSearchKeyword || null,
+        upperOrgLv1: userListDepartmentFilter || null
+      })
+      const result = await window.api.dashboard.exportExcel(
+        [
+          {
+            name: "活跃用户列表",
+            header: ACTIVE_USER_EXPORT_HEADER,
+            rows: buildActiveUserExportRows(users)
+          }
+        ],
+        { fileName: "活跃用户列表" }
+      )
+      if (!result.success && !result.canceled) {
+        throw new Error(result.error ?? "导出活跃用户列表失败")
+      }
+    } catch (error) {
+      console.error("[Dashboard] Active user export failed:", error)
+      window.alert(error instanceof Error ? error.message : "导出活跃用户列表失败")
+    } finally {
+      setUserListExporting(false)
+    }
+  }, [range, userListDepartmentFilter, userListSearchKeyword])
+
   const handleUserDetailBack = useCallback(() => {
     if (subPage.kind === "user-detail" && subPage.backTo === "user-list") {
       setSubPage({ kind: "user-list" })
@@ -3899,6 +4175,33 @@ export function DashboardView(): React.JSX.Element {
     setUserDetailTracePage(1)
   }, [])
 
+  const handleUserTraceExport = useCallback(async () => {
+    if (!userDetail || userDetail.traces.length === 0) return
+    setUserDetailTraceExporting(true)
+    try {
+      const result = await window.api.dashboard.exportUserTraces({
+        sapId: userDetail.sapId,
+        ystId: userDetail.ystId,
+        userName: userDetail.userName,
+        range,
+        page: userDetail.tracePage,
+        pageSize: userDetail.tracePageSize || USER_TRACE_PAGE_SIZE,
+        totalItems: userDetail.total,
+        viewMode: userDetail.traceViewMode ?? userDetailTraceViewMode,
+        triggerScope: userDetail.traceTriggerScope ?? userDetailTraceTriggerScope,
+        projectMode: subPage.kind === "user-detail" && Boolean(subPage.projectMode),
+        traces: userDetail.traces
+      })
+      if (!result.success && !result.canceled) {
+        window.alert(result.error || "导出用户会话记录失败")
+      }
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "导出用户会话记录失败")
+    } finally {
+      setUserDetailTraceExporting(false)
+    }
+  }, [range, subPage, userDetail, userDetailTraceTriggerScope, userDetailTraceViewMode])
+
   const handleProjectTracePrevious = useCallback(() => {
     setProjectTracePage((prev) => Math.max(1, prev - 1))
   }, [])
@@ -3919,8 +4222,10 @@ export function DashboardView(): React.JSX.Element {
 
   const loadProjectThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
-      const res = await window.api.dashboard.threadTraces(threadId, { scope: "project" })
-      return res.success && Array.isArray(res.data) ? res.data : []
+      // 同上：失败抛出，交给 TraceExplorer 显示并允许重试，别缓存成空成功。
+      return unwrapThreadTracesResponse(
+        await window.api.dashboard.threadTraces(threadId, { scope: "project" })
+      )
     },
     []
   )
@@ -4049,7 +4354,7 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleSkillEvalDocOpen = useCallback(() => {
-    void window.electron.openExternal(SKILL_EVAL_DOC_URL)
+    void window.electron.openManagedLink("skillEvalDoc")
   }, [])
 
   const handleCommitTotalClick = useCallback(() => {
@@ -4429,43 +4734,13 @@ export function DashboardView(): React.JSX.Element {
         }
       }
 
-      const activeUsers = await fetchAllActiveUsersForExport(range)
+      const activeUsers = await fetchAllActiveUsersForExport(range, {
+        upperOrgLv1: buildDepartmentPrefill(selectedOrgLv1List) || null
+      })
       sheets.push({
         name: "活跃用户列表",
-        header: [
-          "排名",
-          "SAP ID",
-          "YST ID",
-          "用户名",
-          "部门",
-          "一级部门",
-          "下级部门",
-          "调用次数",
-          "工具调用",
-          "输入Token",
-          "输出Token",
-          "总Token",
-          "平均耗时",
-          "最近活跃"
-        ],
-        rows: activeUsers.map((user, index) => [
-          index + 1,
-          user.sapId,
-          user.ystId || "",
-          user.userName || "",
-          user.upperOrgLv1 && user.upperOrgLv0
-            ? `${user.upperOrgLv1}/${user.upperOrgLv0}`
-            : user.orgName || "",
-          user.upperOrgLv1 || "",
-          user.upperOrgLv0 || "",
-          user.count,
-          user.totalToolCalls,
-          user.totalInputTokens,
-          user.totalOutputTokens,
-          user.totalTokens,
-          formatDuration(user.avgDurationMs),
-          formatDateTime(user.lastActiveAt)
-        ])
+        header: ACTIVE_USER_EXPORT_HEADER,
+        rows: buildActiveUserExportRows(activeUsers)
       })
 
       if (sheets.length === 0) return
@@ -4496,6 +4771,14 @@ export function DashboardView(): React.JSX.Element {
     if (!projectMode) return
     setExporting(true)
     try {
+      const exportDataResult = await window.api.dashboard.projectModeExportData(range, {
+        upperOrgLv1: selectedOrgLv1List,
+        fromLeanOnly: fromLeanProjectsOnly
+      })
+      if (!exportDataResult.success || !exportDataResult.data) {
+        throw new Error(exportDataResult.error ?? "获取项目导出明细失败")
+      }
+      const exportData = exportDataResult.data
       const sheets: DashboardExcelSheet[] = []
       const summary = projectMode.summary
       const codeStats = summary.codeStats
@@ -4527,20 +4810,18 @@ export function DashboardView(): React.JSX.Element {
         })
       }
 
-      if (projectMode.analytics.topUsers.length > 0) {
-        sheets.push({
-          name: "项目用户分析",
-          header: ["排名", "SAP ID", "YST ID", "用户名", "部门", "项目对话数"],
-          rows: projectMode.analytics.topUsers.map((user, index) => [
-            index + 1,
-            user.sapId,
-            user.ystId || "",
-            user.userName,
-            user.orgName || "—",
-            user.count
-          ])
-        })
-      }
+      sheets.push({
+        name: "项目用户分析",
+        header: PROJECT_MODE_USER_EXPORT_HEADER,
+        rows: buildProjectModeUserExportRows(exportData.users)
+      })
+
+      sheets.push({
+        name: "项目列表",
+        header: PROJECT_MODE_PROJECT_EXPORT_HEADER,
+        rows: buildProjectModeProjectExportRows(exportData.projects),
+        summaryRows: buildProjectModeProjectExportSummaryRows(exportData)
+      })
 
       if (projectMode.analytics.byOrg.length > 0) {
         sheets.push({
@@ -4687,10 +4968,20 @@ export function DashboardView(): React.JSX.Element {
       } else if (!result.canceled && result.error) {
         console.error("[Dashboard] Project mode export failed:", result.error)
       }
+    } catch (error) {
+      console.error("[Dashboard] Project mode export failed:", error)
+      window.alert(error instanceof Error ? error.message : "导出项目运营概览失败")
     } finally {
       setExporting(false)
     }
-  }, [projectMode, range, selectedOrgLv1List, marketSkillMap, skillUploaderProfiles])
+  }, [
+    projectMode,
+    range,
+    selectedOrgLv1List,
+    fromLeanProjectsOnly,
+    marketSkillMap,
+    skillUploaderProfiles
+  ])
 
   const projectTraces = projectTraceData?.traces ?? []
   const projectTracePageSize = projectTraceData?.tracePageSize ?? PROJECT_TRACE_PAGE_SIZE
@@ -4772,6 +5063,7 @@ export function DashboardView(): React.JSX.Element {
           onChange={setActiveMainTab}
           projectModeAllowed={projectModeAllowed}
           awardsAdmin={awardsAdmin}
+          skillEvalAllowed={skillEvalAllowed}
           rightContent={
             activeMainTab === "skill-eval" ? (
               <Button
@@ -4820,6 +5112,7 @@ export function DashboardView(): React.JSX.Element {
             error={userListError}
             canGoPrevious={userListBackStack.length > 0}
             canGoNext={Boolean(userList?.nextAfterKey)}
+            exporting={userListExporting}
             onBack={() => setSubPage({ kind: "main" })}
             onRefresh={() =>
               loadUserList(
@@ -4829,6 +5122,7 @@ export function DashboardView(): React.JSX.Element {
                 userListDepartmentFilter
               )
             }
+            onExport={handleUserListExport}
             onPrevious={handleUserListPrevious}
             onNext={handleUserListNext}
             searchValue={userListSearchValue}
@@ -4858,6 +5152,8 @@ export function DashboardView(): React.JSX.Element {
             onTraceNext={handleUserTraceNext}
             onTraceViewModeChange={handleUserTraceViewModeChange}
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
+            onExportPage={handleUserTraceExport}
+            exporting={userDetailTraceExporting}
             loadThreadTraces={subPage.projectMode ? loadProjectThreadTraces : undefined}
           />
         </ScrollArea>
@@ -4879,7 +5175,7 @@ export function DashboardView(): React.JSX.Element {
                 exporting={exporting}
               />
             </div>
-          ) : activeMainTab === "skill-eval" ? (
+          ) : activeMainTab === "skill-eval" && skillEvalAllowed ? (
             <div className="space-y-6 p-6">
               <SkillEvalDashboardPanel
                 data={skillEval}
@@ -4945,6 +5241,7 @@ export function DashboardView(): React.JSX.Element {
                 onOpenFeatureCommits={handleProjectOpenFeatureCommits}
                 onOpenProjectCommits={handleProjectOpenProjectCommits}
                 loadFeatureNodes={loadProjectFeatureNodes}
+                loadOperationalDetails={loadProjectOperationalDetails}
                 loadPluginAggregate={loadPluginAggregateNodes}
                 fetchAdapterProjectPage={fetchAdapterProjectPage}
                 onSkillClick={handleSkillClick}
@@ -4972,6 +5269,15 @@ export function DashboardView(): React.JSX.Element {
                 marketSkillKeys={marketSkillKeys}
               />
             </div>
+          ) : activeMainTab === "efficiency" && projectModeAllowed ? (
+            <EfficiencyPanel
+              data={efficiency}
+              loading={efficiencyLoading}
+              error={efficiencyError}
+              range={range}
+              upperOrgLv1={selectedOrgLv1List}
+              projectMetricRefreshKey={projectMetricRefreshKey}
+            />
           ) : (
             <div className="space-y-6 p-6">
               {/* Overview */}
