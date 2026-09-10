@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import {
   Plus,
   Trash2,
@@ -6,7 +6,6 @@ import {
   Pin,
   PinOff,
   Loader2,
-  AlertCircle,
   Briefcase,
   LayoutDashboard,
   Cpu,
@@ -17,9 +16,7 @@ import {
   Maximize2,
   Minimize2,
   FolderPlus,
-  Download,
-  GitFork,
-  HeartPulse
+  GitFork
 } from "lucide-react"
 import { toast } from "sonner"
 import type { ChatXRobotConfig } from "@/types"
@@ -42,7 +39,7 @@ import {
   useAllThreadStates,
   useThreadContext
 } from "@/lib/thread-context"
-import { cn, truncate } from "@/lib/utils"
+import { cn } from "@/lib/utils"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
 import {
   ContextMenu,
@@ -52,7 +49,10 @@ import {
   ContextMenuTrigger
 } from "@/components/ui/context-menu"
 import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
+import { getDisplayThreadTitle, ThreadListItem } from "./ThreadListItem"
 import type { ForkableCheckpoint, Thread, ThreadForkOverrides } from "@/types"
+
+export { ThreadListItem } from "./ThreadListItem"
 
 const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
 const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
@@ -111,26 +111,6 @@ function readStoredStringRecord(key: string): Record<string, string> {
   }
 }
 
-function formatCompactTime(date: Date | string): string {
-  const d = typeof date === "string" ? new Date(date) : date
-  const now = new Date()
-  const diff = now.getTime() - d.getTime()
-
-  const minutes = Math.floor(diff / 60000)
-  const hours = Math.floor(minutes / 60)
-  const days = Math.floor(hours / 24)
-
-  if (minutes < 1) return "刚刚"
-  if (minutes < 60) return `${minutes}分钟`
-  if (hours < 24) return `${hours}小时`
-  if (days < 7) return `${days}天`
-
-  const month = d.getMonth() + 1
-  const day = d.getDate()
-  if (d.getFullYear() === now.getFullYear()) return `${month}/${day}`
-  return `${String(d.getFullYear()).slice(2)}/${month}/${day}`
-}
-
 function formatCheckpointTime(value?: string): string {
   if (!value) return "未知时间"
   const date = new Date(value)
@@ -160,21 +140,6 @@ function getForkUnstableReasonLabel(reason?: ForkableCheckpoint["unstableReason"
   }
 }
 
-function getDisplayThreadTitle(thread: Thread): string {
-  const title = thread.title?.trim()
-
-  if (!title || title === "..." || title === "…") {
-    return truncate(thread.thread_id, 20)
-  }
-
-  if (title.startsWith("[Heartbeat]")) return title.slice(12).trim()
-  if (title.startsWith("[定时]")) return title.slice(5).trim()
-  if (title.startsWith("[远端机器人] ")) return `(远端) ${title.slice(8).trim()}`
-  if (title.startsWith("[机器人] ")) return title.slice(6).trim()
-
-  return title
-}
-
 function getProjectDisplayName(
   path: string | null,
   projectNameOverrides: Record<string, string>
@@ -196,273 +161,6 @@ function getProjectDisplayName(
     hasCustomName: customName !== defaultName
   }
 }
-
-// Thread status indicator that shows loading, interrupted, or default state
-function ThreadStatusIcon({
-  isLoading,
-  pendingApproval,
-  scheduledTaskLoading
-}: {
-  isLoading: boolean
-  pendingApproval: boolean
-  scheduledTaskLoading: boolean
-}): React.JSX.Element | null {
-  if (isLoading || scheduledTaskLoading) {
-    return <Loader2 className="size-4 shrink-0 text-status-info animate-spin" />
-  }
-
-  if (pendingApproval) {
-    return <AlertCircle className="size-4 shrink-0 text-status-warning" />
-  }
-
-  return null
-}
-
-function ThreadListItemImpl({
-  thread,
-  isLoading,
-  hasPendingApproval,
-  hasPendingUserInput,
-  hasContextReminder,
-  scheduledTaskLoading,
-  isSelected,
-  isEditing,
-  isUnread,
-  editingTitle,
-  onSelect,
-  onDelete,
-  onExport,
-  onFork,
-  onForkFromCheckpoint,
-  onRunFinished,
-  onStartEditing,
-  onSaveTitle,
-  onCancelEditing,
-  onEditingTitleChange,
-  isExporting,
-  isForking = false,
-  hoverTitle
-}: {
-  thread: Thread
-  isLoading: boolean
-  hasPendingApproval: boolean
-  hasPendingUserInput: boolean
-  hasContextReminder: boolean
-  scheduledTaskLoading: boolean
-  isExporting: boolean
-  isForking?: boolean
-  isSelected: boolean
-  isEditing: boolean
-  isUnread: boolean
-  editingTitle: string
-  onSelect: () => void
-  onDelete: () => void
-  onExport: () => void
-  onFork?: () => void
-  onForkFromCheckpoint?: () => void
-  onRunFinished: () => void
-  onStartEditing: () => void
-  onSaveTitle: () => void
-  onCancelEditing: () => void
-  onEditingTitleChange: (value: string) => void
-  hoverTitle?: string
-}): React.JSX.Element {
-  const isRunning = isLoading || scheduledTaskLoading
-  const forkDisabled = isRunning || hasPendingApproval || hasPendingUserInput || isForking
-  const wasRunningRef = useRef(false)
-  const onRunFinishedRef = useRef(onRunFinished)
-
-  useEffect(() => {
-    onRunFinishedRef.current = onRunFinished
-  }, [onRunFinished])
-
-  useEffect(() => {
-    if (wasRunningRef.current && !isRunning) {
-      onRunFinishedRef.current()
-    }
-    wasRunningRef.current = isRunning
-  }, [isRunning])
-
-  const displayTitle = getDisplayThreadTitle(thread)
-  const pendingUserInputBadge = hasPendingUserInput ? (
-    <span className="ml-1 shrink-0 rounded-sm border border-status-warning/45 bg-status-warning/10 px-1.5 py-0.5 text-[10px] leading-none text-status-warning">
-      等待用户回复
-    </span>
-  ) : null
-
-  return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <div
-          className={cn(
-            "group flex items-center gap-2 rounded-sm px-3 py-2 cursor-pointer transition-colors overflow-hidden",
-            isSelected
-              ? "bg-sidebar-accent text-sidebar-accent-foreground"
-              : "hover:bg-sidebar-accent/50"
-          )}
-          onClick={() => {
-            if (!isEditing) {
-              onSelect()
-            }
-          }}
-        >
-          <ThreadStatusIcon
-            isLoading={isLoading}
-            pendingApproval={hasPendingApproval}
-            scheduledTaskLoading={scheduledTaskLoading}
-          />
-          <div className="flex-1 min-w-0 overflow-hidden">
-            {isEditing ? (
-              <input
-                type="text"
-                value={editingTitle}
-                onChange={(e) => onEditingTitleChange(e.target.value)}
-                onBlur={onSaveTitle}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") onSaveTitle()
-                  if (e.key === "Escape") onCancelEditing()
-                }}
-                className="w-full bg-background border border-border rounded px-1 py-0.5 text-sm outline-none focus:ring-1 focus:ring-ring"
-                autoFocus
-                onClick={(e) => e.stopPropagation()}
-              />
-            ) : (
-              <div
-                className="flex min-w-0 items-center text-sm"
-                title={hoverTitle ?? thread.title ?? thread.thread_id}
-              >
-                {thread.title?.startsWith("[定时]") ? (
-                  <>
-                    <span className="shrink-0 text-[10px] px-1 py-px rounded bg-primary/15 text-primary font-medium">
-                      定时
-                    </span>
-                    <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
-                    {pendingUserInputBadge}
-                  </>
-                ) : thread.title?.startsWith("[Heartbeat]") ? (
-                  <>
-                    <HeartPulse className="mr-1 size-3 shrink-0 text-red-400" />
-                    <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
-                    {pendingUserInputBadge}
-                  </>
-                ) : (
-                  <>
-                    <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
-                    {pendingUserInputBadge}
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-          {hasContextReminder && !isRunning ? (
-            <span className="size-2 rounded-full bg-status-warning shrink-0" />
-          ) : (
-            isUnread && !isRunning && <span className="size-2 rounded-full bg-blue-500 shrink-0" />
-          )}
-          <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
-            <span className="absolute right-0 text-[10px] text-muted-foreground transition-opacity group-hover:opacity-0">
-              {formatCompactTime(thread.updated_at)}
-            </span>
-            <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
-              <IconPopoverButton
-                icon={<Pencil className="size-3" />}
-                popoverContent="重命名会话"
-                stopPropagation
-                className="size-6 rounded-sm p-0 hover:bg-accent/20"
-                onClick={onStartEditing}
-              />
-              <IconPopoverButton
-                icon={<Trash2 className="size-3" />}
-                popoverContent={isRunning ? "任务运行中，无法删除" : "删除会话"}
-                disabled={isRunning}
-                stopPropagation
-                className={cn(
-                  "size-6 rounded-sm p-0 hover:bg-accent/20",
-                  isRunning && "cursor-not-allowed !opacity-30"
-                )}
-                onClick={onDelete}
-              />
-            </span>
-          </span>
-        </div>
-      </ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuItem onClick={onStartEditing}>
-          <Pencil className="size-4 mr-2" />
-          重命名
-        </ContextMenuItem>
-        <ContextMenuItem onClick={onExport} disabled={isRunning || isExporting}>
-          {isExporting ? (
-            <Loader2 className="size-4 mr-2 animate-spin" />
-          ) : (
-            <Download className="size-4 mr-2" />
-          )}
-          {isRunning ? "运行中，无法导出" : isExporting ? "正在导出" : "导出会话"}
-        </ContextMenuItem>
-        {onFork ? (
-          <ContextMenuItem onClick={onFork} disabled={forkDisabled}>
-            {isForking ? (
-              <Loader2 className="size-4 mr-2 animate-spin" />
-            ) : (
-              <GitFork className="size-4 mr-2" />
-            )}
-            {isForking ? "正在 fork" : forkDisabled ? "当前状态无法 fork" : "Fork 当前会话"}
-          </ContextMenuItem>
-        ) : null}
-        {onForkFromCheckpoint ? (
-          <ContextMenuItem onClick={onForkFromCheckpoint} disabled={forkDisabled}>
-            {isForking ? (
-              <Loader2 className="size-4 mr-2 animate-spin" />
-            ) : (
-              <GitFork className="size-4 mr-2" />
-            )}
-            从 checkpoint fork
-          </ContextMenuItem>
-        ) : null}
-        <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onClick={onDelete} disabled={isRunning}>
-          <Trash2 className="size-4 mr-2" />
-          {isRunning ? "运行中，无法删除" : "删除"}
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
-  )
-}
-
-type ThreadListItemProps = Parameters<typeof ThreadListItemImpl>[0]
-
-// Re-render a row only when its own rendered data changes. Callback props are
-// intentionally excluded from the comparison: the parent recreates them on every
-// render, but each row's closures always act on its own thread, so their identity
-// is irrelevant. Without this, a single thread's state tick (loading / approval /
-// unread / …) in allThreadStates re-rendered EVERY row in the list.
-function areThreadListItemPropsEqual(
-  prev: ThreadListItemProps,
-  next: ThreadListItemProps
-): boolean {
-  if (
-    prev.thread !== next.thread ||
-    prev.isLoading !== next.isLoading ||
-    prev.hasPendingApproval !== next.hasPendingApproval ||
-    prev.hasPendingUserInput !== next.hasPendingUserInput ||
-    prev.hasContextReminder !== next.hasContextReminder ||
-    prev.scheduledTaskLoading !== next.scheduledTaskLoading ||
-    prev.isExporting !== next.isExporting ||
-    prev.isForking !== next.isForking ||
-    prev.isSelected !== next.isSelected ||
-    prev.isEditing !== next.isEditing ||
-    prev.isUnread !== next.isUnread ||
-    Boolean(prev.onForkFromCheckpoint) !== Boolean(next.onForkFromCheckpoint) ||
-    prev.hoverTitle !== next.hoverTitle
-  ) {
-    return false
-  }
-  // editingTitle only affects the row currently being edited.
-  if (next.isEditing && prev.editingTitle !== next.editingTitle) return false
-  return true
-}
-
-export const ThreadListItem = memo(ThreadListItemImpl, areThreadListItemPropsEqual)
 
 export function ThreadSidebar(): React.JSX.Element {
   const {

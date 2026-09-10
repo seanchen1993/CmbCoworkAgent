@@ -1,13 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowLeft,
-  AlertCircle,
   ChevronDown,
   ChevronRight,
   ClipboardList,
   createLucideIcon,
-  GitFork,
-  Loader2,
   Plus,
   RefreshCw,
   Search,
@@ -34,6 +31,7 @@ import {
   getRequirementThreadIds,
   type RequirementRecord
 } from "@/components/requirement/requirement-data"
+import { ThreadListItem } from "./ThreadListItem"
 
 const ListChevronsUpDown = createLucideIcon("ListChevronsUpDown", [
   ["path", { d: "M4 6h10", key: "line-1" }],
@@ -74,29 +72,6 @@ let requirementSidebarScrollTop = 0
 
 function rememberRequirementSidebarScrollTop(viewport: HTMLElement): void {
   requirementSidebarScrollTop = viewport.scrollTop
-}
-
-function displayTitle(title: string | null | undefined, id: string): string {
-  const value = title?.trim()
-  return value && value !== "..." && value !== "…" ? value : id.slice(0, 20)
-}
-
-function formatCompactTime(date: Date | string): string {
-  const value = typeof date === "string" ? new Date(date) : date
-  if (Number.isNaN(value.getTime())) return ""
-  const now = new Date()
-  const diff = Math.max(0, now.getTime() - value.getTime())
-  const minutes = Math.floor(diff / 60000)
-  const hours = Math.floor(minutes / 60)
-  const days = Math.floor(hours / 24)
-  if (minutes < 1) return "刚刚"
-  if (minutes < 60) return `${minutes}分钟`
-  if (hours < 24) return `${hours}小时`
-  if (days < 7) return `${days}天`
-  const month = value.getMonth() + 1
-  const day = value.getDate()
-  if (value.getFullYear() === now.getFullYear()) return `${month}/${day}`
-  return `${String(value.getFullYear()).slice(2)}/${month}/${day}`
 }
 
 function formatDateTime(date: Date | string): string {
@@ -177,24 +152,6 @@ function getPrdStatusLabel(status: string): string {
   return status.includes("发布") ? "已发布到需求空间3.0" : status || "未设置"
 }
 
-function ThreadStatusIcon({
-  isLoading,
-  pendingApproval,
-  scheduledTaskLoading
-}: {
-  isLoading: boolean
-  pendingApproval: boolean
-  scheduledTaskLoading: boolean
-}): React.JSX.Element | null {
-  if (isLoading || scheduledTaskLoading) {
-    return <Loader2 className="size-3.5 shrink-0 animate-spin text-status-info" />
-  }
-  if (pendingApproval) {
-    return <AlertCircle className="size-3.5 shrink-0 text-status-warning" />
-  }
-  return null
-}
-
 export function RequirementThreadSidebar({
   mode
 }: RequirementThreadSidebarProps): React.JSX.Element {
@@ -213,6 +170,7 @@ export function RequirementThreadSidebar({
   const [renameValue, setRenameValue] = useState("")
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
   const [editingThreadTitle, setEditingThreadTitle] = useState("")
+  const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<{
     requirement: RequirementRecord
     threadId?: string
@@ -223,6 +181,7 @@ export function RequirementThreadSidebar({
   const initialTargetThreadIdRef = useRef(currentThreadId)
   const initialTargetScrolledRef = useRef(false)
   const hoverCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const exportingThreadIdRef = useRef<string | null>(null)
   const showRequirementInfo = (id: string): void => {
     if (hoverCloseTimerRef.current) clearTimeout(hoverCloseTimerRef.current)
     setHoveredRequirementId(id)
@@ -235,12 +194,15 @@ export function RequirementThreadSidebar({
   const requirementIdByThreadId = useMemo(() => {
     const result = new Map<string, string>()
     for (const requirement of mode.requirements) {
-      for (const threadId of getRequirementThreadIds(requirement)) result.set(threadId, requirement.id)
+      for (const threadId of getRequirementThreadIds(requirement))
+        result.set(threadId, requirement.id)
     }
     return result
   }, [mode.requirements])
   const grouped = useMemo(() => {
-    const requirementById = new Map(mode.requirements.map((requirement) => [requirement.id, requirement]))
+    const requirementById = new Map(
+      mode.requirements.map((requirement) => [requirement.id, requirement])
+    )
     const byRequirement = new Map<string, typeof threads>()
     for (const thread of threads) {
       const metadataId =
@@ -337,6 +299,28 @@ export function RequirementThreadSidebar({
       await mode.onSelectRequirement(updated, forked.thread_id)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Fork 会话失败")
+    }
+  }
+
+  const exportConversation = async (threadId: string): Promise<void> => {
+    if (exportingThreadIdRef.current) return
+    exportingThreadIdRef.current = threadId
+    setExportingThreadId(threadId)
+    try {
+      const result = await window.api.threads.exportSession(threadId)
+      if (result.canceled) return
+      if (result.success) {
+        toast.success("会话已导出")
+        return
+      }
+      toast.error(result.error || "导出会话失败")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导出会话失败")
+    } finally {
+      if (exportingThreadIdRef.current === threadId) {
+        exportingThreadIdRef.current = null
+        setExportingThreadId(null)
+      }
     }
   }
 
@@ -634,9 +618,7 @@ export function RequirementThreadSidebar({
                       </dd>
                       <dt>更新时间</dt>
                       <dd className="text-foreground">
-                        {requirement.updatedAt
-                          ? formatDateTime(requirement.updatedAt)
-                          : "未设置"}
+                        {requirement.updatedAt ? formatDateTime(requirement.updatedAt) : "未设置"}
                       </dd>
                       <dt>需求 ID</dt>
                       <dd className="break-all font-mono text-[10px] text-foreground">
@@ -664,101 +646,46 @@ export function RequirementThreadSidebar({
                       const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
 
                       return (
-                        <div
+                        <ThreadListItem
                           key={thread.thread_id}
-                          data-requirement-thread-id={thread.thread_id}
-                          className={`group relative flex items-center gap-1 rounded-sm px-2 py-1.5 text-xs ${currentThreadId === thread.thread_id ? "bg-sidebar-accent text-sidebar-accent-foreground" : "hover:bg-sidebar-accent/40 focus-within:bg-sidebar-accent/40"}`}
-                        >
-                          <ThreadStatusIcon
-                            isLoading={isLoading}
-                            pendingApproval={hasPendingApproval}
-                            scheduledTaskLoading={scheduledTaskLoading}
-                          />
-                          {editingThreadId === thread.thread_id ? (
-                            <input
-                              type="text"
-                              value={editingThreadTitle}
-                              onChange={(event) => setEditingThreadTitle(event.target.value)}
-                              onBlur={() => void saveThreadTitle()}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter") void saveThreadTitle()
-                                if (event.key === "Escape") {
-                                  setEditingThreadId(null)
-                                  setEditingThreadTitle("")
-                                }
-                              }}
-                              className="h-7 w-full min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-sm outline-none focus:ring-1 focus:ring-ring"
-                              autoFocus
-                              onClick={(event) => event.stopPropagation()}
-                            />
-                          ) : (
-                            <button
-                              type="button"
-                              className="flex min-w-0 flex-1 items-center truncate text-left"
-                              onPointerDown={rememberScrollPosition}
-                              onClick={() => void selectConversation(requirement, thread.thread_id)}
-                              title={thread.title || thread.thread_id}
-                            >
-                              <span className="min-w-0 flex-1 truncate">
-                                {displayTitle(thread.title, thread.thread_id)}
-                              </span>
-                              {hasPendingUserInput ? (
-                                <span className="ml-1 shrink-0 rounded-sm border border-status-warning/45 bg-status-warning/10 px-1.5 py-px text-[10px] leading-none text-status-warning">
-                                  等待用户回复
-                                </span>
-                              ) : null}
-                            </button>
-                          )}
-                          {editingThreadId !== thread.thread_id && (
-                            <>
-                              <span className="relative ml-auto flex h-6 w-12 shrink-0 items-center justify-end overflow-hidden transition-[width] duration-150 group-hover:w-0 group-focus-within:w-0">
-                                <span className="absolute right-0 text-[10px] text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
-                                  {formatCompactTime(thread.updated_at)}
-                                </span>
-                              </span>
-                              {hasContextReminder && !isLoading ? (
-                                <span
-                                  className="size-2 shrink-0 rounded-full bg-status-warning"
-                                  title="有待处理提醒"
-                                  aria-label="有待处理提醒"
-                                />
-                              ) : null}
-                              <span className="relative flex h-6 w-0 shrink-0 items-center justify-end overflow-hidden transition-[width] duration-150 group-hover:w-[4.5rem] group-focus-within:w-[4.5rem]">
-                                <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-                                  <IconPopoverButton
-                                    icon={<Pencil className="size-3" />}
-                                    popoverContent="重命名会话"
-                                    className="size-6 shrink-0 rounded-sm p-0 hover:bg-accent/20"
-                                    onClick={() => {
-                                      setEditingThreadId(thread.thread_id)
-                                      setEditingThreadTitle(thread.title || "")
-                                    }}
-                                    aria-label="重命名会话"
-                                    stopPropagation
-                                  />
-                                  <IconPopoverButton
-                                    icon={<GitFork className="size-3" />}
-                                    popoverContent="Fork 会话"
-                                    className="size-6 shrink-0 rounded-sm p-0 hover:bg-accent/20"
-                                    onClick={() => void fork(requirement, thread.thread_id)}
-                                    aria-label="Fork 会话"
-                                    stopPropagation
-                                  />
-                                  <IconPopoverButton
-                                    icon={<Trash2 className="size-3" />}
-                                    popoverContent="删除会话"
-                                    className="size-6 shrink-0 rounded-sm p-0 hover:bg-destructive/10 hover:text-destructive"
-                                    onClick={() =>
-                                      setDeleteTarget({ requirement, threadId: thread.thread_id })
-                                    }
-                                    aria-label="删除会话"
-                                    stopPropagation
-                                  />
-                                </span>
-                              </span>
-                            </>
-                          )}
-                        </div>
+                          thread={thread}
+                          dataThreadId={thread.thread_id}
+                          isLoading={isLoading}
+                          hasPendingApproval={hasPendingApproval}
+                          hasPendingUserInput={hasPendingUserInput}
+                          hasContextReminder={hasContextReminder}
+                          scheduledTaskLoading={scheduledTaskLoading}
+                          isExporting={exportingThreadId === thread.thread_id}
+                          isSelected={currentThreadId === thread.thread_id}
+                          isEditing={editingThreadId === thread.thread_id}
+                          isUnread={false}
+                          editingTitle={editingThreadTitle}
+                          rowPaddingClassName="px-2 py-1.5"
+                          statusIconSize="compact"
+                          showInlineFork
+                          showInlineExport
+                          className="gap-1 text-xs hover:bg-sidebar-accent/40 focus-within:bg-sidebar-accent/40"
+                          onSelect={() => {
+                            rememberScrollPosition()
+                            void selectConversation(requirement, thread.thread_id)
+                          }}
+                          onDelete={() =>
+                            setDeleteTarget({ requirement, threadId: thread.thread_id })
+                          }
+                          onExport={() => void exportConversation(thread.thread_id)}
+                          onFork={() => void fork(requirement, thread.thread_id)}
+                          onRunFinished={() => {}}
+                          onStartEditing={() => {
+                            setEditingThreadId(thread.thread_id)
+                            setEditingThreadTitle(thread.title || "")
+                          }}
+                          onSaveTitle={() => void saveThreadTitle()}
+                          onCancelEditing={() => {
+                            setEditingThreadId(null)
+                            setEditingThreadTitle("")
+                          }}
+                          onEditingTitleChange={setEditingThreadTitle}
+                        />
                       )
                     })}
                     {requirementThreads.length === 0 && (
