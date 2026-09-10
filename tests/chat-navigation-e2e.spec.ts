@@ -117,6 +117,21 @@ async function expectVisibleMatch(page: Page, text: string, messageId: string): 
   }, `visible ${text} in ${messageId}`)
 }
 
+async function expectMessageTime(page: Page, messageId: string, expected: string): Promise<void> {
+  const timestamp = page.locator(`[data-chat-message-id="${messageId}"] time`)
+  await timestamp.waitFor({ state: "attached" })
+  assert.equal((await timestamp.innerText()).trim(), expected)
+  assert.equal(await timestamp.getAttribute("datetime"), expected.replace(/^开始于 /, ""))
+  const opacity = await timestamp.evaluate((element) => {
+    let value = 1
+    for (let node: Element | null = element; node; node = node.parentElement) {
+      value *= Number(getComputedStyle(node).opacity)
+    }
+    return value
+  })
+  assert.equal(opacity, 1, "timestamp must remain visible without hovering its message")
+}
+
 async function main(): Promise<void> {
   const isolated = mkdtempSync(join(tmpdir(), "cmb-chat-navigation-e2e-"))
   mkdirSync(artifacts, { recursive: true })
@@ -251,7 +266,9 @@ async function main(): Promise<void> {
               id: `${kind}-${index}`,
               role,
               content,
-              created_at: new Date(Date.now() + index)
+              created_at: new Date(2025, 11, 31, 23, 59, 45 + index),
+              start_at: new Date(2025, 11, 31, 23, 59, 45 + index),
+              end_at: new Date(2025, 11, 31, 23, 59, 46 + index)
             }
           })
           if (messages.length) {
@@ -289,6 +306,12 @@ async function main(): Promise<void> {
       await clickThread(titles[kind])
       await page.locator(`[data-chat-message-id="${kind}-${last}"]`).waitFor()
     }
+    await page.mouse.move(0, 0)
+    await expectMessageTime(page, "history-319", "2026-01-01 00:05")
+    await page.reload({ waitUntil: "domcontentloaded" })
+    await clickThread(titles.history)
+    await expectMessageTime(page, "history-319", "2026-01-01 00:05")
+    pass("full user date survives SQLite persistence and renderer reload across a year boundary")
     await clickThread(titles.running)
     const composer = page.locator("textarea.composer-textarea")
     await composer.fill("Start navigation regression stream")
@@ -311,6 +334,22 @@ async function main(): Promise<void> {
       .first()
       .waitFor()
     pass("real transport streams after UI submission")
+    const liveRow = page
+      .locator("[data-chat-message-id]")
+      .filter({ hasText: "LIVE_SEQUENCE_" })
+      .first()
+    const liveStartLabel = (await liveRow.locator("time").innerText()).trim()
+    assert.match(liveStartLabel, /^开始于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
+    const liveMessageId = await liveRow.getAttribute("data-chat-message-id")
+    assert(liveMessageId)
+    const submittedUserRow = page.locator('[data-message-role="user"]').filter({
+      hasText: "Start navigation regression stream"
+    })
+    assert.match(
+      (await submittedUserRow.locator("time").innerText()).trim(),
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/
+    )
+    pass("real UI submission and streaming replies both show a full date")
 
     const iterations = Math.max(10, Number(process.env.CHAT_NAVIGATION_ITERATIONS) || 10)
     for (let iteration = 0; iteration < iterations; iteration += 1) {
@@ -415,6 +454,8 @@ async function main(): Promise<void> {
       `cached switch median must stay below 1s: ${JSON.stringify(timings)}`
     )
     pass("twenty cached switches remain responsive while tokens continue")
+    await expectMessageTime(page, liveMessageId, liveStartLabel)
+    pass("assistant start time remains stable through streaming and twenty cached switches")
     await clickThread(titles.cached)
     await search(page, "ANCHOR_TARGET")
     await expectVisibleMatch(page, "ANCHOR_TARGET", "cached-79")
@@ -480,9 +521,14 @@ async function main(): Promise<void> {
     await expectVisibleMatch(page, "HISTORICAL_TARGET", "history-5")
     await page.screenshot({ path: join(artifacts, "durable-history.png") })
     pass("durable search loads an absent historical page through IPC and Worker")
+    await search(page, "Fixture history 0.")
+    await expectVisibleMatch(page, "Fixture history 0.", "history-0")
+    await expectMessageTime(page, "history-0", "开始于 2025-12-31 23:59")
+    pass("assistant date survives durable history search through IPC and hydration Worker")
     await search(page, "USER_BODY_TARGET")
     await expectVisibleMatch(page, "USER_BODY_TARGET", "history-319")
     pass("collapsed user message expands before highlighting")
+    await expectMessageTime(page, "history-319", "2026-01-01 00:05")
     const userRow = page.locator('[data-chat-message-id="history-319"]')
     await userRow.hover()
     await userRow.getByRole("button", { name: "编辑后重新发送", exact: true }).click()
@@ -542,6 +588,8 @@ async function main(): Promise<void> {
     })
     await expectVisibleMatch(page, "COMPLETED_MIDDLE_TARGET", completedMessageId)
     pass("stream completion preserves the bounded search context and active match")
+    await expectMessageTime(page, completedMessageId, liveStartLabel)
+    pass("stream completion preserves the original assistant start time")
     assert.deepEqual(pageErrors, [], "no renderer errors")
     assert.equal(Object.keys(threadIds).length, 4)
     console.log(JSON.stringify({ timings, emitted, checks }, null, 2))

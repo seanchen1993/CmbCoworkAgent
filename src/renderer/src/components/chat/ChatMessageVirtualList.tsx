@@ -7,6 +7,7 @@ import {
   type VirtuosoHandle
 } from "react-virtuoso"
 import type { HookLogBucket } from "@/lib/thread-context"
+import { getAssistantStartTime } from "@/lib/message-bubble-timing"
 import {
   areMessageRenderFieldsEqual,
   areMessageToolRenderInputsEqual
@@ -258,6 +259,8 @@ function areChatMessageRowPropsEqual(
 ): boolean {
   return (
     areMessageRenderFieldsEqual(previous.message, next.message) &&
+    (previous.message === next.message ||
+      getAssistantStartTime(previous.message) === getAssistantStartTime(next.message)) &&
     (previous.previousMessage?.role ?? null) === (next.previousMessage?.role ?? null) &&
     previous.isLastMessage === next.isLastMessage &&
     previous.hasUserAfterHead === next.hasUserAfterHead &&
