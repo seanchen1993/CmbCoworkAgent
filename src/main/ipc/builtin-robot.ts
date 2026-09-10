@@ -6,7 +6,8 @@ import type {
   BuiltinRobotStatus
 } from "../types"
 import { builtinRobotManager } from "../services/im/manager"
-import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
+import { cancelActiveAgentRun, hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
+import { pendingNotificationScheduler } from "../agent/pending-notification-scheduler"
 import { getLocalThreadRunLease } from "../agent/thread-run-lease"
 import { mirrorStandardTurnStreamToRenderer } from "../agent/renderer-stream-mirror"
 import {
@@ -163,13 +164,28 @@ export function registerBuiltinRobotHandlers(ipcMain: IpcMain): void {
   })
   ipcMain.handle("builtinRobot:cancelThread", (_event, threadId: unknown): boolean => {
     if (typeof threadId !== "string" || !threadId.trim()) return false
-    const cancelled = builtinRobotManager.abortThreadFromDesktop(threadId)
+    // Stop for a run the page can see but does not own. That used to mean "a
+    // Zhaohu turn" and nothing else, so this asked IM's queue and stopped there.
+    // The main-process summary scheduler now runs on the same managed transport
+    // and looks identical to the page — but it is not in that queue, so Stop
+    // returned false, the renderer ignored it, and the turn ran on. Dispatch on
+    // the lease, which is what actually records who owns the run.
+    let cancelled = builtinRobotManager.abortThreadFromDesktop(threadId)
+    let source: "im" | "desktop" | "none" = cancelled ? "im" : "none"
+    const lease = getLocalThreadRunLease(threadId)
+    if (!cancelled && lease?.owner === "desktop") {
+      cancelled = cancelActiveAgentRun(threadId)
+      if (cancelled) source = "desktop"
+    }
+    // Stop has to actually stop: without this the summary the user just
+    // cancelled starts again the moment its own lease is released.
+    if (cancelled) pendingNotificationScheduler.suppressAfterStop(threadId)
     // A stale spinner may outlive its run. Only clear it when no source owns
     // this thread; never manufacture idle while a real run is cleaning up.
-    if (!cancelled && !getLocalThreadRunLease(threadId) && !hasActiveTopLevelAgentRun(threadId)) {
+    if (!cancelled && !lease && !hasActiveTopLevelAgentRun(threadId)) {
       mirrorStandardTurnStreamToRenderer(threadId, { type: "done" })
     }
-    console.info("[IM] Desktop cancellation requested", { threadId, cancelled })
+    console.info("[IM] Desktop cancellation requested", { threadId, cancelled, source })
     return cancelled
   })
   ipcMain.handle("builtinRobot:cleanupLegacy", (_event, input: unknown): BuiltinRobotStatus => {

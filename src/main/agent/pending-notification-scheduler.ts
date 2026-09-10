@@ -56,9 +56,22 @@ const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
 
 const MAX_SUMMARY_ATTEMPTS = 3
 const RETRY_AFTER_FAILURE_MS = 2_000
+/** Clears the hold before a wake reads it, rather than racing the same millisecond. */
+const WAKE_AFTER_SUPPRESSION_MS = 50
 
-/** Terminal codes that mean a decision was made, not that something went wrong. */
-const NON_RETRYABLE_TERMINAL_CODES = new Set(["hook_halt", "failure_fuse", "prompt_blocked"])
+/**
+ * Terminal codes that mean a decision was made, not that something went wrong.
+ *
+ * `cancelled` is this scheduler's own: the run body does not classify an abort,
+ * so it arrives as plain `unknown` and was being retried two seconds later —
+ * against a thread the user had just pressed Stop on.
+ */
+const NON_RETRYABLE_TERMINAL_CODES = new Set([
+  "cancelled",
+  "hook_halt",
+  "failure_fuse",
+  "prompt_blocked"
+])
 
 export type PendingNotificationSkipReason =
   | "no-pending-notification"
@@ -222,9 +235,21 @@ export class PendingNotificationScheduler {
     }
   }
 
-  /** A hold that ends on its own clock needs its own wake; a lease is not coming. */
+  /**
+   * A hold that ends on its own clock needs its own wake; a lease is not coming.
+   *
+   * One wake per thread, never earlier than the stop hold. A retry scheduled
+   * two seconds out used to replace the fifteen-second hold expiry, then find
+   * itself still suppressed and schedule nothing — so the hold ended with
+   * nothing left to notice, and the summary was dropped rather than delayed.
+   */
   private scheduleWake(threadId: string, delayMs: number, options: { retry?: boolean } = {}): void {
     this.cancelWake(threadId)
+    const suppressedUntil = this.suppressedUntil.get(threadId)
+    const effectiveDelayMs =
+      suppressedUntil === undefined
+        ? delayMs
+        : Math.max(delayMs, suppressedUntil - Date.now() + WAKE_AFTER_SUPPRESSION_MS)
     this.wakeTimers.set(
       threadId,
       this.dependencies.setTimer(() => {
@@ -235,7 +260,7 @@ export class PendingNotificationScheduler {
             reason: error instanceof Error ? error.message : String(error)
           })
         })
-      }, delayMs)
+      }, effectiveDelayMs)
     )
   }
 
@@ -380,6 +405,7 @@ export class PendingNotificationScheduler {
     notificationRunId: string
   ): Promise<AgentRunTerminal> {
     let terminal: AgentRunTerminal | undefined
+    let cancelled = false
     const handle = await this.dependencies.startRun(request, this.dependencies.getDelivery(), {
       source: "desktop",
       // The lease is released here rather than by the run body, and the summary
@@ -393,11 +419,18 @@ export class PendingNotificationScheduler {
         managedExternally: true
       },
       backgroundNotificationOwner: "desktop",
+      // An abort does not classify itself, so it reaches the terminal contract
+      // as plain `unknown` — indistinguishable from a run that ended without
+      // saying why, and retried as one. This is the difference.
+      onRunCancelled: () => {
+        cancelled = true
+      },
       onRunTerminated: (reported) => {
         terminal = reported
       }
     })
     await handle.completion
+    if (cancelled) return { outcome: "error", code: "cancelled" }
     // The body's own finally reports `unknown` for anything it did not
     // classify, so an absent terminal means the contract was not met at all.
     // Not treated as success: a summary that silently did nothing is exactly

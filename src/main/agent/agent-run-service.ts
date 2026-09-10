@@ -156,6 +156,8 @@ type AgentRunImplementation = (
 
 type ActiveAgentRunInspector = (threadId: string) => boolean
 
+type ActiveAgentRunCanceller = (threadId: string) => boolean
+
 type AgentGoalControlImplementation = (
   request: AgentGoalControlRequest,
   delivery: AgentRunDelivery,
@@ -172,6 +174,7 @@ type AgentGoalControlImplementation = (
 let agentRunImplementation: AgentRunImplementation | null = null
 let agentGoalControlImplementation: AgentGoalControlImplementation | null = null
 let activeAgentRunInspector: ActiveAgentRunInspector = () => false
+let activeAgentRunCanceller: ActiveAgentRunCanceller = () => false
 
 export function registerAgentRunImplementation(implementation: AgentRunImplementation): void {
   agentRunImplementation = implementation
@@ -189,6 +192,25 @@ export function registerActiveAgentRunInspector(inspector: ActiveAgentRunInspect
 
 export function hasActiveTopLevelAgentRun(threadId: string): boolean {
   return activeAgentRunInspector(threadId)
+}
+
+export function registerActiveAgentRunCanceller(canceller: ActiveAgentRunCanceller): void {
+  activeAgentRunCanceller = canceller
+}
+
+/**
+ * Aborts the local run on this thread, whatever transport it is streaming to.
+ *
+ * The renderer can see a background run without owning its stream — the
+ * main-process summary scheduler runs on the managed transport, so the page
+ * shows it the same way it shows a Zhaohu turn. Stop then went to IM's queue,
+ * which does not know this run, and quietly did nothing. Cancelling has to be
+ * dispatched on who actually owns the run, and that answer lives here.
+ *
+ * Returns whether a run was actually aborted.
+ */
+export function cancelActiveAgentRun(threadId: string): boolean {
+  return activeAgentRunCanceller(threadId)
 }
 
 export function createBrowserWindowAgentRunDelivery(window: BrowserWindow): AgentRunDelivery {

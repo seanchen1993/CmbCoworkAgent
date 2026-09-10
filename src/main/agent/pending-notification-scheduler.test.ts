@@ -99,7 +99,7 @@ function pendingRuns(...runs: PersistedWorkflowRun[]) {
 interface Harness {
   scheduler: PendingNotificationScheduler
   startRun: ReturnType<typeof vi.fn>
-  timers: { run: () => void; pending: () => number }
+  timers: { run: () => void; pending: () => number; delays: () => number[] }
 }
 
 function createHarness(options: {
@@ -112,16 +112,22 @@ function createHarness(options: {
    * because that is exactly what the real body does with a model error.
    */
   terminal?: AgentRunTerminal
+  /** The run was aborted. The body reports this separately from its terminal. */
+  cancelled?: boolean
 }): Harness {
   const runBody = options.runBody ?? (async () => undefined)
   const startRun = vi.fn(
     async (_request: unknown, _delivery: unknown, context: AgentRunExecutionContext) => {
       await runBody()
+      if (options.cancelled) context.onRunCancelled?.()
       context.onRunTerminated?.(options.terminal ?? { outcome: "success", code: "normal" })
       return { completion: Promise.resolve() } as never
     }
   )
-  const queued: (() => void)[] = []
+  // Honours clearTimer, so "one wake per thread" is observable here. A fake that
+  // only ever appends made a replaced wake look like an extra pending one.
+  const queued = new Map<number, { callback: () => void; delayMs: number }>()
+  let nextTimerId = 1
   const scheduler = new PendingNotificationScheduler({
     getThread: (() =>
       ({
@@ -132,11 +138,14 @@ function createHarness(options: {
     getDelivery: (() => ({}) as never) as never,
     createRunId: () => "fixed",
     isCoordinatorModeForcedByEnvironment: () => options.environmentForcesCoordinator === true,
-    setTimer: ((callback: () => void) => {
-      queued.push(callback)
-      return queued.length as never
+    setTimer: ((callback: () => void, delayMs: number) => {
+      const id = nextTimerId++
+      queued.set(id, { callback, delayMs })
+      return id as never
     }) as never,
-    clearTimer: (() => undefined) as never,
+    clearTimer: ((id: number) => {
+      queued.delete(id)
+    }) as never,
     log: () => undefined
   })
   return {
@@ -144,10 +153,12 @@ function createHarness(options: {
     startRun,
     timers: {
       run: () => {
-        const due = queued.splice(0, queued.length)
-        for (const callback of due) callback()
+        const due = [...queued.values()]
+        queued.clear()
+        for (const timer of due) timer.callback()
       },
-      pending: () => queued.length
+      pending: () => queued.size,
+      delays: () => [...queued.values()].map((timer) => timer.delayMs)
     }
   }
 }
@@ -377,6 +388,42 @@ describe("pending notification scheduler", () => {
     expect((await scheduler.check(THREAD)).started).toBe(false)
     expect(startRun).toHaveBeenCalledTimes(1)
     expect(timers.pending()).toBe(1)
+  })
+
+  it("does not retry a summary that was aborted", async () => {
+    coordinatorOwnedBy("desktop")
+    // An abort does not classify itself, so it reaches the terminal contract as
+    // plain `unknown` — indistinguishable from a run that ended without saying
+    // why, and retried two seconds later against a thread somebody had just
+    // pressed Stop on.
+    const { scheduler, startRun, timers } = createHarness({
+      agentMode: "coordinator",
+      cancelled: true,
+      terminal: { outcome: "unknown", code: "unknown" }
+    })
+
+    expect((await scheduler.check(THREAD)).started).toBe(false)
+    expect(startRun).toHaveBeenCalledTimes(1)
+    expect(timers.pending()).toBe(0)
+  })
+
+  it("never wakes a retry inside the hold a stop just set", async () => {
+    coordinatorOwnedBy("desktop")
+    // A genuine failure landing at the same moment as a stop. There is one wake
+    // per thread, so a two-second retry replaced the fifteen-second hold, found
+    // itself still suppressed, and scheduled nothing — the hold then expired
+    // with nothing left to notice it and the summary was dropped, not delayed.
+    const { scheduler, timers } = createHarness({
+      agentMode: "coordinator",
+      terminal: { outcome: "error", code: "provider_error" }
+    })
+
+    const started = scheduler.check(THREAD)
+    scheduler.suppressAfterStop(THREAD)
+    await started
+
+    expect(timers.pending()).toBe(1)
+    expect(timers.delays()[0]).toBeGreaterThan(14_000)
   })
 
   it("does not retry a summary a hook deliberately halted", async () => {

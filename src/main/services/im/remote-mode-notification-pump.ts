@@ -589,9 +589,13 @@ export class ImRemoteModeNotificationPump {
     runId: string,
     signal: AbortSignal
   ): Promise<boolean> {
+    // Scoped like the recovery scan above, and for the same reason: the claim is
+    // where a run actually changes hands. Taking whichever was newest let this
+    // transport report a desktop-started run into Zhaohu.
     const workflow = await this.dependencies.workflow.claimPendingNotificationAsync(
       decision.workspacePath,
-      notice.threadId
+      notice.threadId,
+      { owner: "managed" }
     )
     if (!workflow) {
       return Boolean(this.dependencies.workflow.activeRunId(notice.threadId))
@@ -642,10 +646,13 @@ export class ImRemoteModeNotificationPump {
         workflow.startedAt
       )
       if (!delivered && !recovered) return false
+      // "Is there another one for me": an unfiltered answer kept this transport
+      // awake draining the desktop's backlog one run at a time.
       return Boolean(
         await this.dependencies.workflow.findPendingNotificationAsync(
           decision.workspacePath,
-          notice.threadId
+          notice.threadId,
+          { owner: "managed" }
         )
       )
     } finally {

@@ -694,6 +694,33 @@ async function testRendererSendsAgentMode(): Promise<void> {
     /drainNotifications\(notice\.threadId, \{ owner: "managed" \}\)/,
     "the Zhaohu pump takes only its own results off the queue, not the desktop's"
   )
+  assertMatches(
+    notificationPump,
+    /claimPendingNotificationAsync\(\s*decision\.workspacePath,\s*notice\.threadId,\s*\{ owner: "managed" \}\s*\)/,
+    "the Zhaohu pump claims only a workflow run its own transport started"
+  )
+  assertMatches(
+    notificationPump,
+    /findPendingNotificationAsync\(\s*decision\.workspacePath,\s*notice\.threadId,\s*\{ owner: "managed" \}\s*\)/,
+    "and asks whether there is another one for itself, not for the desktop"
+  )
+
+  const builtinRobotIpc = await readProjectFile("src/main/ipc/builtin-robot.ts")
+  assertIncludes(
+    builtinRobotIpc,
+    "cancelActiveAgentRun(threadId)",
+    "stop reaches a desktop-owned background run instead of stopping at IM's queue"
+  )
+  assertMatches(
+    builtinRobotIpc,
+    /if \(!cancelled && lease\?\.owner === "desktop"\)/,
+    "cancellation is dispatched on the lease that records who owns the run"
+  )
+  assertIncludes(
+    builtinRobotIpc,
+    "pendingNotificationScheduler.suppressAfterStop(threadId)",
+    "a cancelled summary does not start again the moment its own lease is released"
+  )
 
   const remoteRunner = await readProjectFile("src/main/services/im/remote-runner.ts")
   assertIncludes(

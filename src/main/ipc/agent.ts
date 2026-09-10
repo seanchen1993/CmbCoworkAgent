@@ -425,6 +425,7 @@ import { emitAppAttention } from "../app-attention-events"
 import { finishTraceInBackground } from "../agent/trace/collector"
 import {
   createBrowserWindowAgentRunDelivery,
+  registerActiveAgentRunCanceller,
   registerActiveAgentRunInspector,
   registerAgentGoalControlImplementation,
   registerAgentRunImplementation,
@@ -5982,6 +5983,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   // Handle agent invocation with streaming. The transport-neutral run body is
   // registered here; the IPC listener below is only an adapter into this path.
   registerActiveAgentRunInspector(hasActiveAgentRun)
+  // Same abort the Stop button's ordinary path takes; exposed so a caller that
+  // only knows "this thread has a background run" can reach it without owning
+  // the stream. See cancelActiveAgentRun.
+  registerActiveAgentRunCanceller((threadId) => {
+    const controller = activeRuns.get(threadId)
+    if (!controller) return false
+    LocalSandbox.cancelBackgroundTasks(threadId)
+    const activeRunToken = turnStates.get(threadId)?.runToken
+    if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
+    controller.abort()
+    handleAutoModeAgentCancelled(threadId)
+    return true
+  })
   registerAgentGoalControlImplementation(executeAgentGoalControl)
 
   registerAgentRunImplementation((request, delivery, incomingRunExecutionContext) => {
