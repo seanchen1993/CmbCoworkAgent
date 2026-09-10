@@ -13,7 +13,7 @@ import {
 } from "react"
 
 /* eslint-disable react-refresh/only-export-components */
-import { useStream } from "@langchain/langgraph-sdk/react"
+import { useElectronStream } from "./use-electron-stream"
 import { ElectronIPCTransport, type StreamFallbackIndexBaselines } from "./electron-transport"
 import {
   fallbackIndexBaselinesFromMessages,
@@ -69,7 +69,6 @@ import type {
   QueuedMessage
 } from "@/types"
 import { isThreadDeletionPending, isThreadRetired, useAppStore } from "@/lib/store"
-import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 import {
@@ -831,7 +830,7 @@ type CmbMemoryDebugWindow = Window & {
 }
 
 // Stream instance type
-type StreamInstance = ReturnType<typeof useStream<DeepAgent>>
+type StreamInstance = ReturnType<typeof useElectronStream>
 
 // Stream data that we want to be reactive
 interface StreamData {
@@ -1639,10 +1638,9 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
     onErrorRef.current = onError
   }, [onError])
 
-  const stream = useStream<DeepAgent>({
+  const stream = useElectronStream({
     transport,
     threadId,
-    messagesKey: "messages",
     onCustomEvent: (data) => {
       onCustomEventRef.current(threadId, data as CustomEventData)
     },

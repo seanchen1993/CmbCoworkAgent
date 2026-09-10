@@ -237,7 +237,7 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   assertSourceOrder(
     threadContext,
     "seededTransport.seedSubagentTranscriptBaseline",
-    "const stream = useStream<DeepAgent>",
+    "const stream = useElectronStream(",
     "thread stream holder seeds the baseline before subscribing to live events"
   )
   assertIncludes(
