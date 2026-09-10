@@ -13,6 +13,7 @@ import {
   MAX_COORDINATOR_PRUNED_SNAPSHOTS_IN_MEMORY,
   MAX_COORDINATOR_WORKERS_IN_MEMORY,
   deleteCoordinatorWorkerArtifacts,
+  onCoordinatorNotificationEnqueued,
   type CoordinatorWorkerRunResult,
   type CoordinatorWorkerRunInput
 } from "../src/main/agent/coordinator-worker-manager.ts"
@@ -6628,6 +6629,40 @@ async function testCancelledWorkerSuppressAutoRunPersistsAcrossRestore(): Promis
   })
 }
 
+async function testAQueuedNotificationWakesTheMainProcess(): Promise<void> {
+  await withTempDir("coordinator-worker-manager", async (workspace) => {
+    const threadId = "thread-notification-wake"
+    const manager = new CoordinatorWorkerManager()
+    const woken: string[] = []
+    const unsubscribe = onCoordinatorNotificationEnqueued((parentThreadId) =>
+      woken.push(parentThreadId)
+    )
+    try {
+      // A worker's other two routes out both need somebody watching: the
+      // window-bound update binding needs an open page, and the run-scoped one
+      // needs the turn that launched the worker to still be running — which is
+      // exactly what a background worker outlives. Without this the result
+      // raised tray attention and then waited for the next hydrate.
+      const started = await manager.startWorkerAndPersist({
+        parentThreadId: threadId,
+        workspacePath: workspace,
+        role: "implementer",
+        description: "Finishes while nobody is looking",
+        prompt: "work",
+        runner: async () => ({ summary: "done" })
+      })
+      await manager.waitForTerminalPersistence(threadId, [started.worker_id])
+
+      assert(
+        woken.includes(threadId),
+        "queueing a worker result must wake the main process, not only an open window"
+      )
+    } finally {
+      unsubscribe()
+    }
+  })
+}
+
 async function testWorkerNotificationOwnerPersistsAcrossRestore(): Promise<void> {
   await withTempDir("coordinator-worker-manager", async (workspace) => {
     const threadId = "thread-notification-owner"
@@ -7992,6 +8027,8 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker cancel all preserves completed notifications")
   await testCancelledWorkerSuppressAutoRunPersistsAcrossRestore()
   console.log("PASS coordinator worker cancelled auto-run suppression restore")
+  await testAQueuedNotificationWakesTheMainProcess()
+  console.log("PASS coordinator worker notification wakes the main process")
   await testWorkerNotificationOwnerPersistsAcrossRestore()
   console.log("PASS coordinator worker notification owner restore")
   await testCancelledWorkerDismissesNotificationAfterTerminalPersist()

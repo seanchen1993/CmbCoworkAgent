@@ -665,6 +665,25 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "onLocalThreadRunLeaseReleased(",
     "a summary deferred for a busy thread waits on the lease that blocked it"
   )
+  // Both kinds of completion used to be relayed by whichever renderer heard
+  // about them, and with no open window that is nobody — so a task that
+  // finished while the app sat in the tray waited for the next hydrate.
+  assertIncludes(
+    notificationScheduler,
+    "onWorkflowNotificationBroadcast(",
+    "a finished workflow wakes the scheduler without needing a window to relay it"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "onCoordinatorNotificationEnqueued(",
+    "and so does a finished coordinator worker"
+  )
+  assertSourceOrder(
+    notificationScheduler,
+    "onCoordinatorNotificationEnqueued(",
+    "this.unsubscribeCoordinatorNotification?.()",
+    "and every subscription start() takes is given back by stop()"
+  )
   assertIncludes(
     notificationScheduler,
     'hasAutoRunnableNotifications(threadId, { owner: "desktop" })',

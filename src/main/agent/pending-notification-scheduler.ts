@@ -16,7 +16,10 @@ import {
   onLocalThreadRunLeaseReleased,
   releaseLocalThreadRunLease
 } from "./thread-run-lease"
-import { coordinatorWorkerManager } from "./coordinator-worker-manager"
+import {
+  coordinatorWorkerManager,
+  onCoordinatorNotificationEnqueued
+} from "./coordinator-worker-manager"
 import { onWorkflowNotificationBroadcast, workflowRunManager } from "./workflow/run-manager"
 
 /**
@@ -131,6 +134,7 @@ export class PendingNotificationScheduler {
   private readonly failedAttempts = new Map<string, number>()
   private unsubscribeLeaseReleased: (() => void) | null = null
   private unsubscribeWorkflowNotification: (() => void) | null = null
+  private unsubscribeCoordinatorNotification: (() => void) | null = null
 
   constructor(overrides: Partial<SchedulerDependencies> = {}) {
     this.dependencies = { ...defaultDependencies, ...overrides }
@@ -143,9 +147,9 @@ export class PendingNotificationScheduler {
    * for the lease that blocked it, which is the only event that can change the
    * answer. Polling would race the same way the two schedulers did.
    *
-   * A completed workflow is the other one. It used to be acted on by whichever
-   * renderer received the broadcast, and a broadcast to no open window reaches
-   * nobody — so a run that finished with the app closed to the tray waited for
+   * A finished background task is the other one, for both kinds. Each used to be
+   * acted on by whichever renderer heard about it, and with no open window that
+   * is nobody — so a task that completed while the app sat in the tray waited for
    * the next hydrate rather than being summarised when it finished.
    */
   start(): void {
@@ -157,6 +161,9 @@ export class PendingNotificationScheduler {
     this.unsubscribeWorkflowNotification = onWorkflowNotificationBroadcast((threadId) => {
       this.requestCheck(threadId)
     })
+    this.unsubscribeCoordinatorNotification = onCoordinatorNotificationEnqueued((threadId) => {
+      this.requestCheck(threadId)
+    })
   }
 
   stop(): void {
@@ -164,6 +171,8 @@ export class PendingNotificationScheduler {
     this.unsubscribeLeaseReleased = null
     this.unsubscribeWorkflowNotification?.()
     this.unsubscribeWorkflowNotification = null
+    this.unsubscribeCoordinatorNotification?.()
+    this.unsubscribeCoordinatorNotification = null
     for (const timer of this.wakeTimers.values()) this.dependencies.clearTimer(timer)
     this.wakeTimers.clear()
     this.waitingForIdle.clear()

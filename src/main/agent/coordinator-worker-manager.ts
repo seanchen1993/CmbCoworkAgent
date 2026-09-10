@@ -198,6 +198,41 @@ interface TerminalPersistFailureMetadata {
   persistedResultPath?: string
 }
 
+/**
+ * Main-process listeners for "a worker result has just been queued".
+ *
+ * The other two routes out of here both need somebody watching: the window-bound
+ * update binding needs an open page, and the run-scoped one needs the turn that
+ * launched the worker to still be running — which it usually is not, since that
+ * is what makes the result detached. So a worker that finished while the app sat
+ * in the tray raised tray attention and then waited for the next hydrate instead
+ * of being summarised when it finished.
+ *
+ * Fired for every queued notification, cancelled ones included: whether a result
+ * is still owed a summary is the scheduler's question, and it already has one
+ * answer for it.
+ */
+const coordinatorNotificationListeners = new Set<(parentThreadId: string) => void>()
+
+export function onCoordinatorNotificationEnqueued(
+  listener: (parentThreadId: string) => void
+): () => void {
+  coordinatorNotificationListeners.add(listener)
+  return () => {
+    coordinatorNotificationListeners.delete(listener)
+  }
+}
+
+function notifyCoordinatorNotificationEnqueued(parentThreadId: string): void {
+  for (const listener of coordinatorNotificationListeners) {
+    try {
+      listener(parentThreadId)
+    } catch (error) {
+      console.warn("[CoordinatorWorker] Notification listener failed:", error)
+    }
+  }
+}
+
 interface CoordinatorWorkerManagerOptions {
   onTerminalNotification?: (worker: CoordinatorWorkerSnapshot) => void
   restoreIndexStore?: CoordinatorWorkerRestoreIndexStore
@@ -3757,6 +3792,7 @@ export class CoordinatorWorkerManager {
       notifications.push(notification)
       this.notificationsByParent.set(record.parentThreadId, notifications)
       this.touchParentCache(record.parentThreadId)
+      notifyCoordinatorNotificationEnqueued(record.parentThreadId)
       this.onTerminalNotification?.(toSnapshot(record))
       return notification
     })().finally(() => {
@@ -4169,6 +4205,20 @@ export class CoordinatorWorkerManager {
   }
 }
 
+/**
+ * Main-process listeners for "a worker result has just been queued".
+ *
+ * The other two routes out of here both need somebody watching: the window-bound
+ * update binding needs an open page, and the run-scoped one needs the turn that
+ * launched the worker to still be running — which it usually is not, since that
+ * is what makes the result detached. So a worker that finished while the app sat
+ * in the tray raised tray attention and then waited for the next hydrate instead
+ * of being summarised when it finished.
+ *
+ * Fired for every queued notification, cancelled ones included: whether a result
+ * is still owed a summary is the scheduler's question, and it already has one
+ * answer for it.
+ */
 export const coordinatorWorkerManager = new CoordinatorWorkerManager({
   onTerminalNotification: (worker) => {
     if (worker.status !== "completed" && worker.status !== "failed") return
