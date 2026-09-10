@@ -8,6 +8,7 @@ import type {
 } from "./protocol"
 import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
+import { normalizeTranscriptReasoning } from "../../shared/transcript-reasoning"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   isVisibleGoalUserEventMessage
@@ -38,6 +39,7 @@ interface ThreadMessageRow {
   provider_occurrence: number | null
   role: Message["role"]
   content_json: string
+  reasoning: string | null
   tool_calls_json: string | null
   tool_call_id: string | null
   name: string | null
@@ -345,6 +347,7 @@ function rowToMessage(
         : {}),
       role: row.role,
       content,
+      ...(row.reasoning ? { reasoning: normalizeTranscriptReasoning(row.reasoning) } : {}),
       ...(toolCalls ? { tool_calls: toolCalls } : {}),
       ...(row.tool_call_id ? { tool_call_id: row.tool_call_id } : {}),
       ...(row.name ? { name: row.name } : {}),
@@ -414,13 +417,15 @@ function projectMessageToByteBudget(
 
   const summarizedToolCalls = summarizeOversizedToolCalls(message.tool_calls)
   const previewSource = boundedMessagePreviewText(message.content)
+  const reasoningSource = message.reasoning ?? ""
   const base: Message = {
     ...message,
     content: OVERSIZED_MESSAGE_MARKER,
+    reasoning: reasoningSource ? OVERSIZED_MESSAGE_MARKER : undefined,
     ...(summarizedToolCalls ? { tool_calls: summarizedToolCalls } : { tool_calls: undefined })
   }
   let low = 0
-  let high = previewSource.length
+  let high = Math.max(previewSource.length, reasoningSource.length)
   let projected = base
   let projectedBytes = jsonBytes(projected)
   while (low <= high) {
@@ -428,7 +433,12 @@ function projectMessageToByteBudget(
     const middle = safeSliceEnd(previewSource, rawMiddle)
     const candidate: Message = {
       ...base,
-      content: `${previewSource.slice(0, middle)}${OVERSIZED_MESSAGE_MARKER}`
+      content: `${previewSource.slice(0, middle)}${OVERSIZED_MESSAGE_MARKER}`,
+      ...(reasoningSource
+        ? {
+            reasoning: `${reasoningSource.slice(0, safeSliceEnd(reasoningSource, rawMiddle))}${OVERSIZED_MESSAGE_MARKER}`
+          }
+        : {})
     }
     const candidateBytes = jsonBytes(candidate)
     if (candidateBytes <= byteBudget) {
@@ -552,6 +562,7 @@ function readCandidates(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
          FROM thread_messages AS m
          LEFT JOIN thread_message_fragment_states AS fragments
@@ -568,6 +579,7 @@ function readCandidates(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
          FROM thread_messages AS m
          LEFT JOIN thread_message_fragment_states AS fragments
@@ -584,6 +596,7 @@ function readCandidates(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
          FROM thread_messages AS m
          LEFT JOIN thread_message_fragment_states AS fragments
@@ -599,6 +612,7 @@ function readCandidates(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
          FROM thread_messages AS m
          LEFT JOIN thread_message_fragment_states AS fragments

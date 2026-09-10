@@ -77,6 +77,7 @@ function createHydrationDatabase(): { database: DatabaseSync; path: string } {
       provider_occurrence INTEGER,
       role TEXT NOT NULL,
       content_json TEXT NOT NULL,
+      reasoning TEXT,
       tool_calls_json TEXT,
       tool_call_id TEXT,
       name TEXT,
