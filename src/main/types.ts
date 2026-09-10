@@ -1,4 +1,5 @@
 import type { HookConfig } from "./hooks/types"
+import type { TranscriptReasoningUpdate } from "../shared/transcript-reasoning"
 import type { ImChannelId } from "../shared/im-gateway-contract"
 import type {
   ForkableCheckpoint as SharedForkableCheckpoint,
@@ -236,6 +237,9 @@ export interface Message {
   start_at?: Date
   end_at?: Date
 }
+
+/** Internal write payload; readers always receive a complete reasoning snapshot. */
+export interface ThreadMessageWrite extends Message, TranscriptReasoningUpdate {}
 
 export interface ThreadMessagesPageOptions {
   /**
