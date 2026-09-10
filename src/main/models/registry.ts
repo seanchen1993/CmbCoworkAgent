@@ -27,6 +27,8 @@ import {
 } from "../storage"
 import { fetchLatestJson } from "../updater/checker"
 import { resolveUpdateSource } from "../updater/channel-config"
+import { calculateSummarizationTriggerTokens } from "../../shared/model-token-budget"
+import { getHiddenEndpoint } from "../security/hidden-endpoints"
 
 export type ModelSource = "builtin" | "custom"
 export type BuiltinModelOrigin = "remote" | "fallback"
@@ -55,7 +57,7 @@ const FALLBACK_CATALOG: RemoteModelCatalogItem[] = [
   {
     id: "minimax-m2p5-229b-w8a8",
     name: "MiniMax M2.5",
-    baseUrl: "http://open-llm.uat.cmbchina.cn/llm/minimax-m2p5-229b-w8a8/v1",
+    baseUrl: getHiddenEndpoint("modelMinimax"),
     model: "minimax-m2p5-229b-w8a8",
     tier: "premium"
   }
@@ -165,11 +167,13 @@ function normalizeDefinition(
   const enableThinkingEffort =
     enableThinking && optionalBoolean(item.enableThinkingEffort, preset.enableThinkingEffort)
   const interleavedThinking =
-    enableThinking && optionalBoolean(item.interleavedThinking, preset.interleavedThinking)
+    enableThinking &&
+    /minimax/i.test(model) &&
+    optionalBoolean(item.interleavedThinking, preset.interleavedThinking)
   const apiKey =
     typeof item.apiKey === "string" && item.apiKey.trim() ? item.apiKey.trim() : undefined
 
-  return {
+  const definition: BuiltinModelDefinition = {
     id,
     name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : model,
     baseUrl: requireUrl(item.baseUrl),
@@ -202,11 +206,18 @@ function normalizeDefinition(
     enableThinking,
     enableThinkingEffort,
     interleavedThinking,
-    thinkingEffort: item.thinkingEffort === "max" ? "max" : preset.thinkingEffort,
+    thinkingEffort:
+      item.thinkingEffort === "low" ||
+      item.thinkingEffort === "high" ||
+      item.thinkingEffort === "max"
+        ? item.thinkingEffort
+        : preset.thinkingEffort,
     tier: item.tier === "economy" ? "economy" : item.tier === "premium" ? "premium" : preset.tier,
     source: "builtin",
     origin
   }
+  calculateSummarizationTriggerTokens(definition.maxTokens!, definition.maxOutputTokens!)
+  return definition
 }
 
 function normalizeCatalog(catalog: unknown): BuiltinModelDefinition[] | null {
@@ -242,7 +253,7 @@ function normalizeOverride(
 ): BuiltinModelOverride {
   if (!override) return {}
   const enableThinking = optionalBoolean(override.enableThinking, base.enableThinking ?? false)
-  return {
+  const normalized: BuiltinModelOverride = {
     ...(typeof override.name === "string" && override.name.trim()
       ? { name: override.name.trim() }
       : {}),
@@ -276,11 +287,19 @@ function normalizeOverride(
       optionalBoolean(override.enableThinkingEffort, base.enableThinkingEffort ?? false),
     interleavedThinking:
       enableThinking &&
+      /minimax/i.test(base.model) &&
       optionalBoolean(override.interleavedThinking, base.interleavedThinking ?? false),
-    thinkingEffort: override.thinkingEffort === "max" ? "max" : base.thinkingEffort,
+    thinkingEffort:
+      override.thinkingEffort === "low" ||
+      override.thinkingEffort === "high" ||
+      override.thinkingEffort === "max"
+        ? override.thinkingEffort
+        : base.thinkingEffort,
     tier:
       override.tier === "economy" ? "economy" : override.tier === "premium" ? "premium" : base.tier
   }
+  calculateSummarizationTriggerTokens(normalized.maxTokens!, normalized.maxOutputTokens!)
+  return normalized
 }
 
 export function getBuiltinModelConfigs(): ResolvedModelConfig[] {

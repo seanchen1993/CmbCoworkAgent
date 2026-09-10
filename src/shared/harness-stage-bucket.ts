@@ -1,11 +1,12 @@
 /**
  * Stage × Skill attribution buckets for project-mode work (conversations + code).
  *
- * Two orthogonal per-turn signals decide whether work was "plugin-driven":
- *  - Stage axis  — `harnessNodeStatus`, the workflow stage status at turn time.
+ * Two orthogonal event signals decide whether work was "plugin-driven":
+ *  - Stage axis  — `harnessNodeStatus`, captured at conversation start for trace
+ *    events and immediately before the mutation for code generation events.
  *    Recorded as a stable default label (see DEFAULT_NODE_STATUS_LABELS in
  *    src/main/harness-board/service.ts), so we match on the label string here.
- *  - Skill axis  — whether the event/turn carries a plugin Skill attribution
+ *  - Skill axis  — whether the event carries a plugin Skill attribution
  *    (`usedSkills`). Skill attribution is sticky per thread, so a conversation
  *    that never invoked a Skill carries none.
  *
@@ -38,7 +39,7 @@ export function isHarnessDevStageNodeName(value: string | null | undefined): boo
 }
 
 /**
- * Classify one turn's / code event's (stage status, skill-presence) into a bucket.
+ * Classify one conversation/code event's (stage status, skill-presence) into a bucket.
  *  - 进行中 + 有 Skill 归因 → plugin_constrained（阶段进行中且实际调用插件）
  *  - 进行中 + 无 Skill 归因 → vibecoding（阶段开着但绕过插件，本质是自由产出）
  *  - 已完成（不论 Skill）   → vibecoding（流程完成后的自由产出）

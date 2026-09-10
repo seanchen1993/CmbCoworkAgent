@@ -7,7 +7,6 @@ import {
   Bot,
   Webhook,
   Terminal,
-  Command,
   type LucideIcon
 } from "lucide-react"
 import type {
@@ -22,10 +21,9 @@ const CARD_ICON: Record<string, LucideIcon> = {
   lsp: Code,
   optimizer: Sparkles,
   evolvedUsage: GitBranch,
-  chatx: Bot,
+  im: Bot,
   hooks: Webhook,
-  programmatic: Terminal,
-  claudeCode: Command
+  programmatic: Terminal
 }
 
 const CARD_ICON_COLOR: Record<string, string> = {
@@ -34,10 +32,9 @@ const CARD_ICON_COLOR: Record<string, string> = {
   lsp: "bg-blue-500",
   optimizer: "bg-amber-500",
   evolvedUsage: "bg-teal-500",
-  chatx: "bg-sky-500",
+  im: "bg-sky-500",
   hooks: "bg-indigo-500",
-  programmatic: "bg-emerald-500",
-  claudeCode: "bg-stone-800"
+  programmatic: "bg-emerald-500"
 }
 
 const TONE_CLASS: Record<AdvancedFeatureTone, string> = {

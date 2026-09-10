@@ -1,5 +1,5 @@
 export type ModelTier = "premium" | "economy"
-export type ModelThinkingEffort = "high" | "max"
+export type ModelThinkingEffort = "low" | "high" | "max"
 
 /**
  * Optional model catalog embedded in the remote update manifest.

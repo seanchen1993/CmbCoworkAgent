@@ -2,10 +2,38 @@ import type { Message } from "../types"
 
 export function normalizeVisibleReasoningText(reasoning: string | undefined): string {
   if (!reasoning) return ""
+  const firstCode = reasoning.charCodeAt(0)
+  const lastCode = reasoning.charCodeAt(reasoning.length - 1)
+  const startsOrEndsWithWhitespace =
+    firstCode <= 32 || lastCode <= 32 || firstCode === 160 || lastCode === 160
+  const markerProbe = `${reasoning.slice(0, 32)}${reasoning.slice(-32)}`.toLocaleLowerCase()
+  if (
+    !startsOrEndsWithWhitespace &&
+    !markerProbe.includes("<think") &&
+    !markerProbe.includes("</think>")
+  ) {
+    // Ordinary provider reasoning is already a standalone, trimmed string.
+    // Returning it directly avoids two regex passes + trim over the complete
+    // cumulative reasoning snapshot for every token.
+    return reasoning
+  }
   return reasoning
     .replace(/^\s*<think>\s*/i, "")
     .replace(/\s*<\/think>\s*$/i, "")
     .trim()
+}
+
+export function hasVisibleReasoningText(reasoning: string | undefined): boolean {
+  if (!reasoning) return false
+  const firstCode = reasoning.charCodeAt(0)
+  const lastCode = reasoning.charCodeAt(reasoning.length - 1)
+  if (
+    (firstCode > 32 && firstCode !== 160 && reasoning[0] !== "<") ||
+    (lastCode > 32 && lastCode !== 160 && reasoning.at(-1) !== ">")
+  ) {
+    return true
+  }
+  return normalizeVisibleReasoningText(reasoning).length > 0
 }
 
 export function messageVisibleReasoningLength(
@@ -14,25 +42,44 @@ export function messageVisibleReasoningLength(
   return normalizeVisibleReasoningText(message?.reasoning).length
 }
 
-function getAssistantOrUserVisibleText(content: Message["content"]): string {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-  return content
-    .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
-    .filter(Boolean)
-    .join("\n")
+interface ReasoningAutoCollapseState {
+  isStreaming: boolean
+  reasoningText: string
+  hasVisibleAssistantContent: boolean
+  hasToolCalls: boolean
 }
 
-function getSystemVisibleText(content: Message["content"]): string {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-  return content
-    .map((block) => {
-      if (block.type === "text") return block.text ?? ""
-      return typeof block.content === "string" ? block.content : ""
-    })
-    .filter(Boolean)
-    .join("\n")
+export function shouldAutoCollapseReasoning({
+  isStreaming,
+  reasoningText,
+  hasVisibleAssistantContent,
+  hasToolCalls
+}: ReasoningAutoCollapseState): boolean {
+  return (
+    isStreaming &&
+    reasoningText.length > 0 &&
+    (hasVisibleAssistantContent || hasToolCalls)
+  )
+}
+
+function hasNonWhitespace(value: string | undefined): boolean {
+  return typeof value === "string" && /\S/.test(value)
+}
+
+function hasAssistantOrUserVisibleText(content: Message["content"]): boolean {
+  if (typeof content === "string") return hasNonWhitespace(content)
+  if (!Array.isArray(content)) return false
+  return content.some((block) => block.type === "text" && hasNonWhitespace(block.text))
+}
+
+function hasSystemVisibleText(content: Message["content"]): boolean {
+  if (typeof content === "string") return hasNonWhitespace(content)
+  if (!Array.isArray(content)) return false
+  return content.some((block) =>
+    block.type === "text"
+      ? hasNonWhitespace(block.text)
+      : hasNonWhitespace(typeof block.content === "string" ? block.content : undefined)
+  )
 }
 
 // Keep this aligned with MessageBubble's actual render branches. Tool results
@@ -41,15 +88,13 @@ export function messageRendersNothing(message: Message): boolean {
   if (message.role === "tool") return true
   if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return false
 
-  const visibleText =
+  const hasVisibleText =
     message.role === "system"
-      ? getSystemVisibleText(message.content)
-      : getAssistantOrUserVisibleText(message.content)
-  if (visibleText.trim().length > 0) return false
+      ? hasSystemVisibleText(message.content)
+      : hasAssistantOrUserVisibleText(message.content)
+  if (hasVisibleText) return false
 
-  return (
-    message.role !== "assistant" || normalizeVisibleReasoningText(message.reasoning).length === 0
-  )
+  return message.role !== "assistant" || !hasVisibleReasoningText(message.reasoning)
 }
 
 export function messageHasVisibleRow(

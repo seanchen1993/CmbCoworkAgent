@@ -8,7 +8,12 @@ import {
 } from "./collector"
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
 import type { TraceChatMessage, TraceContext, TraceOutcome, TraceTokenUsage } from "./types"
+import { normalizeTraceTokenUsage } from "./token-usage"
 import { nowIsoLocal } from "../../util/local-time"
+import {
+  HOOK_AGENT_OWNER_METADATA_KEY,
+  getHookAgentIdFromRequest
+} from "../../hooks/execution-context"
 import { extractVisibleReasoning, truncateReasoningForTrace } from "../../../shared/model-reasoning"
 
 /**
@@ -16,7 +21,7 @@ import { extractVisibleReasoning, truncateReasoningForTrace } from "../../../sha
  * The renderer and stream converter intentionally mirror this literal because
  * they cannot import main-process runtime code.
  */
-export const SOLO_TASK_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
+export const SOLO_TASK_OWNER_METADATA_KEY = HOOK_AGENT_OWNER_METADATA_KEY
 
 const MAX_TRACE_CONTENT = 2000
 const MODEL_INPUT_WINDOW = 12
@@ -136,35 +141,9 @@ function normalizeMessage(message: unknown): TraceChatMessage {
   }
 }
 
-function normalizeTokenUsage(value: unknown): TraceTokenUsage | undefined {
-  const usage = asRecord(value)
-  if (!usage) return undefined
-  const finiteNumber = (candidate: unknown): number | undefined =>
-    typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined
-  const inputTokens = finiteNumber(usage.input_tokens ?? usage.inputTokens)
-  const outputTokens = finiteNumber(usage.output_tokens ?? usage.outputTokens)
-  const totalTokens = finiteNumber(usage.total_tokens ?? usage.totalTokens)
-  const cacheReadTokens = finiteNumber(
-    usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens
-  )
-  const cacheCreationTokens = finiteNumber(
-    usage.cache_creation_input_tokens ?? usage.cacheCreationInputTokens ?? usage.cacheCreationTokens
-  )
-  if (
-    inputTokens === undefined &&
-    outputTokens === undefined &&
-    totalTokens === undefined &&
-    cacheReadTokens === undefined &&
-    cacheCreationTokens === undefined
-  ) {
-    return undefined
-  }
-  return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
-}
-
 function responseTokenUsage(response: AnyRecord): TraceTokenUsage | undefined {
   const responseMetadata = asRecord(response.response_metadata)
-  return normalizeTokenUsage(
+  return normalizeTraceTokenUsage(
     response.usage_metadata ?? responseMetadata?.token_usage ?? responseMetadata?.usage
   )
 }
@@ -185,22 +164,6 @@ function responseToolCalls(response: AnyRecord): Array<{
       args: asRecord(call.args) ?? {}
     }
   })
-}
-
-function requestOwnerId(request: unknown): string | undefined {
-  const record = asRecord(request)
-  const runtime = asRecord(record?.runtime)
-  const candidates = [
-    asRecord(runtime?.configurable)?.[SOLO_TASK_OWNER_METADATA_KEY],
-    asRecord(asRecord(runtime?.config)?.configurable)?.[SOLO_TASK_OWNER_METADATA_KEY],
-    asRecord(record?.configurable)?.[SOLO_TASK_OWNER_METADATA_KEY],
-    asRecord(record?.metadata)?.[SOLO_TASK_OWNER_METADATA_KEY],
-    asRecord(runtime?.metadata)?.[SOLO_TASK_OWNER_METADATA_KEY]
-  ]
-  const ownerId = candidates.find(
-    (candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0
-  )
-  return ownerId?.trim()
 }
 
 function safeChildThreadId(parentThreadId: string, ownerId: string): string {
@@ -322,6 +285,28 @@ export class SoloTaskTraceManager {
     return Boolean(ownerId && this.observedOwnerIds.has(ownerId))
   }
 
+  /**
+   * Resolve the active child trace for a task-owned tool call. Task subagents
+   * share the parent's filesystem backend, so read_file uses this lookup to
+   * attribute successful constraint reads to the child rather than the parent.
+   */
+  getTraceContextForOwner(ownerId: string | undefined): TraceContext | undefined {
+    const normalizedOwnerId = ownerId?.trim()
+    if (!normalizedOwnerId) return undefined
+    const entry = this.active.get(normalizedOwnerId)
+    if (!entry) return undefined
+    try {
+      const context = entry.tracer.getTraceContext()
+      return {
+        ...context,
+        ...(context.harnessFeature ? { harnessFeature: { ...context.harnessFeature } } : {})
+      }
+    } catch (error) {
+      console.warn("[SoloTask] trace context lookup failed; using parent trace fallback:", error)
+      return undefined
+    }
+  }
+
   finishTask(ownerId: string, outcome: TraceOutcome, resultOrError?: unknown): void {
     try {
       if (this.finishedOwnerIds.has(ownerId)) return
@@ -382,7 +367,7 @@ export class SoloTaskTraceManager {
   }
 
   private beforeModel(state: unknown, runtime: unknown): void {
-    const ownerId = requestOwnerId({ runtime })
+    const ownerId = getHookAgentIdFromRequest({ runtime })
     if (!ownerId) return
     const entry = this.active.get(ownerId)
     if (!entry) return
@@ -396,7 +381,7 @@ export class SoloTaskTraceManager {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async wrapModelCall(request: any, handler: any): Promise<any> {
-    const ownerId = requestOwnerId(request)
+    const ownerId = getHookAgentIdFromRequest(request)
     if (!ownerId) return handler(request)
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)
@@ -484,7 +469,7 @@ export class SoloTaskTraceManager {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async wrapToolCall(request: any, handler: any): Promise<any> {
-    const ownerId = requestOwnerId(request)
+    const ownerId = getHookAgentIdFromRequest(request)
     if (!ownerId) return handler(request)
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)

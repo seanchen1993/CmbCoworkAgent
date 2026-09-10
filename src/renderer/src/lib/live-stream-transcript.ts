@@ -1,6 +1,9 @@
 import type { Message } from "@/types"
 import { mergeCheckpointAuthorityTranscriptMessages } from "../../../shared/checkpoint-transcript"
-import { preserveAssistantReasoningByRoleCollisionIdentity } from "../../../shared/message-role-collision"
+import {
+  getMessageProviderOccurrenceIdentity,
+  preserveAssistantReasoningByRoleCollisionIdentity
+} from "../../../shared/message-role-collision"
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
 import { isVisibleCheckpointTranscriptMessage, sameGoalCommandMessage } from "./goal-transcript"
 import {
@@ -62,6 +65,32 @@ export function shouldSkipLiveStreamAccumulatorMessage(
   const storeMessage = liveStreamMessageToStoreMessage(streamMessage)
   if (isInternalGoalPromptMessage(storeMessage)) return false
   return !isVisibleCheckpointTranscriptMessage(storeMessage)
+}
+
+export interface DurableTranscriptRequirementIndex {
+  messageIds: ReadonlySet<string>
+  messageIdentities: ReadonlySet<string>
+  satisfied: boolean
+}
+
+/** A bounded durable page is usable only after it contains every row whose
+ * just-flushed live bridge is waiting for persistence. */
+export function indexDurableTranscriptRequirements(
+  persistedMessages: readonly Message[],
+  requiredMessageIds: readonly string[],
+  requiredMessageIdentities: readonly string[]
+): DurableTranscriptRequirementIndex {
+  const messageIds = new Set(persistedMessages.map((message) => message.id))
+  const messageIdentities = new Set(
+    persistedMessages.map(getMessageProviderOccurrenceIdentity)
+  )
+  return {
+    messageIds,
+    messageIdentities,
+    satisfied:
+      requiredMessageIds.every((messageId) => messageIds.has(messageId)) &&
+      requiredMessageIdentities.every((identity) => messageIdentities.has(identity))
+  }
 }
 
 /** Merge a full DB-ordinal snapshot with local-only/live records without letting

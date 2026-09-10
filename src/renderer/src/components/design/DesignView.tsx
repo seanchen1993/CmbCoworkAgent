@@ -3684,7 +3684,7 @@ export function DesignView(): React.JSX.Element {
   // This avoids the webUtils.getPathForFile reliability issue.
   const handleDocAttach = useCallback(async () => {
     const result = await window.api.file.select()
-    if (result.canceled || result.filePaths.length === 0) return
+    if (result.canceled || result.files.length === 0) return
 
     setAttachmentLoading(true)
     try {
@@ -3693,7 +3693,7 @@ export function DesignView(): React.JSX.Element {
       let remaining = DESIGN_MAX_TOTAL_CHARS - currentChars
       let count = currentFiles.length
 
-      for (const filePath of result.filePaths) {
+      for (const file of result.files) {
         if (count >= DESIGN_MAX_ATTACHMENTS) {
           showToast(`最多只能添加 ${DESIGN_MAX_ATTACHMENTS} 个附件`)
           break
@@ -3703,7 +3703,11 @@ export function DesignView(): React.JSX.Element {
           break
         }
         try {
-          const res = await window.api.file.parse(filePath, remaining)
+          const res = await window.api.file.parseSelected({
+            filePath: file.filePath,
+            grant: file.grant,
+            maxLength: remaining
+          })
           if (res.success && res.attachment) {
             if (!res.attachment.content.trim()) {
               showToast(`"${res.attachment.filename}" 内容为空`)
@@ -3719,7 +3723,7 @@ export function DesignView(): React.JSX.Element {
             showToast(res.error ?? "文件解析失败")
           }
         } catch (err) {
-          showToast(`解析失败：${err instanceof Error ? err.message : filePath}`)
+          showToast(`解析失败：${err instanceof Error ? err.message : file.filePath}`)
         }
       }
     } finally {

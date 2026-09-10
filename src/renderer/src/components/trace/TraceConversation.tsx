@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Bot, ChevronDown, ChevronRight, Route, User, Wrench } from "lucide-react"
+import { Bot, ChevronDown, ChevronRight, Info, Route, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import {
@@ -8,7 +8,13 @@ import {
 } from "../../../../shared/internal-notification-turn"
 import { summarizeThreadProjectNodes } from "./trace-project-node-summary"
 
-type TraceRole = "user" | "assistant" | "tool" | "subagent"
+/**
+ * "notice" is the collector speaking, not the agent: it stands in for a run of
+ * turns whose content the byte budget could not record. Kept out of "assistant"
+ * so summaries and last-reply lookups never mistake it for something the model
+ * said.
+ */
+type TraceRole = "user" | "assistant" | "tool" | "subagent" | "notice"
 
 interface TraceConversationNode {
   id?: string
@@ -21,6 +27,7 @@ interface TraceConversationNode {
   startedAt?: string
   endedAt?: string
   metadata?: Record<string, unknown>
+  truncated?: boolean
 }
 
 interface TraceConversationToolCall {
@@ -28,6 +35,7 @@ interface TraceConversationToolCall {
   args?: unknown
   result?: unknown
   durationMs?: number
+  truncated?: boolean
 }
 
 interface TraceConversationModelCall {
@@ -37,6 +45,7 @@ interface TraceConversationModelCall {
     reasoning?: unknown
   }
   toolCalls?: TraceConversationToolCall[]
+  truncated?: boolean
 }
 
 interface TraceConversationStep {
@@ -47,6 +56,8 @@ interface TraceConversationStep {
 
 export interface TraceConversationSource {
   traceId?: string
+  /** 会话列表的摘要预览行：`_raw` 刻意没取，所以没有任何对话数据。 */
+  rawPending?: boolean
   userMessage?: string
   triggerSource?: string
   startedAt?: string
@@ -114,6 +125,12 @@ interface TraceConversationToolInfo {
   output?: unknown
   durationMs?: number
   status?: string
+  /**
+   * The collector kept this call's name but not its payload, because the byte
+   * budget was spent. Without saying so the panel reads as a tool invoked with
+   * no arguments that returned nothing.
+   */
+  truncated?: boolean
 }
 
 interface TraceConversationSubagentRun {
@@ -356,6 +373,7 @@ function extractTimedToolGroups(trace: TraceConversationSource): TimedToolGroup[
       group.occurredAt = validEventTime(group.occurredAt, occurredAt)
       group.tools.push({
         name: node.name ?? "unknown",
+        ...(node.truncated ? { truncated: true } : {}),
         input: node.input,
         output: resultNode?.output,
         durationMs: nodeDurationMs(node),
@@ -370,6 +388,7 @@ function extractTimedToolGroups(trace: TraceConversationSource): TimedToolGroup[
     const tools = (step.toolCalls ?? []).map(
       (tool): TraceConversationToolInfo => ({
         name: tool.name ?? "unknown",
+        ...(tool.truncated ? { truncated: true } : {}),
         input: tool.args,
         output: tool.result,
         durationMs: tool.durationMs
@@ -385,6 +404,7 @@ function extractTimedToolGroups(trace: TraceConversationSource): TimedToolGroup[
     const tools = (call.toolCalls ?? []).map(
       (tool): TraceConversationToolInfo => ({
         name: tool.name ?? "unknown",
+        ...(tool.truncated ? { truncated: true } : {}),
         input: tool.args,
         output: tool.result,
         durationMs: tool.durationMs
@@ -532,13 +552,44 @@ function buildTraceTimeline(trace: TraceConversationSource, traceOrder: number):
   }
 
   if (nodeAssistantCandidates.length > 0) {
-    for (const node of nodeAssistantCandidates) {
-      addAssistant(
-        textFromUnknown(node.output),
-        textFromUnknown(node.metadata?.reasoning),
-        validEventTime(node.endedAt, node.startedAt, trace.endedAt, trace.startedAt)
+    // A run of calls whose replies the byte budget could not afford collapses
+    // into one line. Without it the conversation simply skips them, and a long
+    // turn reads as if it stopped early rather than as one that was recorded in
+    // part — the operations dashboard shows exactly this view, built from nodes
+    // alone, so there is nothing else there to hint at the gap.
+    let elided = 0
+    let elidedAt: string | undefined
+    const flushElided = (): void => {
+      if (elided === 0) return
+      add(
+        {
+          role: "notice",
+          label: responseLabel(trace),
+          content: `其间 ${elided} 次模型调用的回复因单条 Trace 体积上限未记录`
+        },
+        elidedAt
       )
+      elided = 0
+      elidedAt = undefined
     }
+    for (const node of nodeAssistantCandidates) {
+      const content = textFromUnknown(node.output)
+      const reasoning = textFromUnknown(node.metadata?.reasoning)
+      const occurredAt = validEventTime(
+        node.endedAt,
+        node.startedAt,
+        trace.endedAt,
+        trace.startedAt
+      )
+      if (!isUsefulAssistantText(content) && !reasoning) {
+        elided += 1
+        elidedAt ??= occurredAt
+        continue
+      }
+      flushElided()
+      addAssistant(content, reasoning, occurredAt)
+    }
+    flushElided()
   } else if ((trace.modelCalls ?? []).length > 0) {
     for (const call of trace.modelCalls ?? []) {
       addAssistant(
@@ -557,14 +608,21 @@ function buildTraceTimeline(trace: TraceConversationSource, traceOrder: number):
     }
   }
 
-  if (assistantCount === 0 && trace.outcome === "error") {
-    addAssistant(
-      trace.errorMessage?.trim() || "本次运行失败，trace 中没有记录最终回复。",
-      "",
-      trace.endedAt
-    )
-  } else if (assistantCount === 0 && trace.outcome === "cancelled") {
-    addAssistant("本次运行被取消，trace 中没有记录最终回复。", "", trace.endedAt)
+  // 「没有助手消息」有两种成因，只有一种能下结论：
+  //   - trace 真的没记录最终回复 → 按 outcome 说明原因；
+  //   - 这是列表的摘要预览行（rawPending），完整对话还在懒加载 → 什么都不知道。
+  // 对后者套用 outcome 文案会编造出「本次运行被取消，trace 中没有记录最终回复」
+  // 这种与事实相反的结论（加载完成后同一条 trace 明明有完整对话）。
+  if (assistantCount === 0 && !trace.rawPending) {
+    if (trace.outcome === "error") {
+      addAssistant(
+        trace.errorMessage?.trim() || "本次运行失败，trace 中没有记录最终回复。",
+        "",
+        trace.endedAt
+      )
+    } else if (trace.outcome === "cancelled") {
+      addAssistant("本次运行被取消，trace 中没有记录最终回复。", "", trace.endedAt)
+    }
   }
 
   const toolGroups = extractTimedToolGroups(trace)
@@ -681,6 +739,7 @@ export function buildThreadConversation(
 function roleIcon(role: TraceRole): React.JSX.Element {
   if (role === "user") return <User className="size-3.5" />
   if (role === "tool") return <Wrench className="size-3.5" />
+  if (role === "notice") return <Info className="size-3.5" />
   return <Bot className="size-3.5" />
 }
 
@@ -805,8 +864,16 @@ function ToolCallDetails({
                   </span>
                 ) : null}
               </div>
-              <ExpandableValue label="输入" value={tool.input} />
-              <ExpandableValue label="输出" value={tool.output} />
+              {tool.truncated && tool.input === undefined && tool.output === undefined ? (
+                <p className="text-[11px] text-muted-foreground">
+                  参数与结果因单条 Trace 体积上限未记录
+                </p>
+              ) : (
+                <>
+                  <ExpandableValue label="输入" value={tool.input} />
+                  <ExpandableValue label="输出" value={tool.output} />
+                </>
+              )}
             </div>
           ))}
         </div>
@@ -1064,11 +1131,23 @@ export function TraceConversation({
   )
 }
 
+/**
+ * 整个 thread 还全是「摘要预览行」（`_raw` 刻意没取，完整对话在懒加载）。
+ *
+ * 这种状态下时间线里只有用户提问、一条回复都没有，顶部还会写「已聚合 N 条
+ * trace」，读起来像内容就这么多。所以这里不渲染半张脸的时间线，直接给占位。
+ * 混合状态（部分已加载）不算——那说明数据已经在陆续到位了。
+ */
+export function isThreadAwaitingFullLoad(traces: readonly TraceConversationSource[]): boolean {
+  return traces.length > 0 && traces.every((trace) => trace.rawPending === true)
+}
+
 export function TraceThreadConversation({
   traces,
   className,
   title = "Thread 对话还原",
   loading = false,
+  loadFailed = false,
   fillAvailableHeight = false,
   selectedTraceId
 }: {
@@ -1076,12 +1155,20 @@ export function TraceThreadConversation({
   className?: string
   title?: string
   loading?: boolean
+  /** 完整会话加载失败。用来把「还没到」和「拿不到了」分开——否则首帧（effect 还
+   * 没把 loading 置起来）会闪一下「尚未加载」。 */
+  loadFailed?: boolean
   /** Let the message list consume its parent's remaining height instead of using the compact 360px cap. */
   fillAvailableHeight?: boolean
   /** When set, the matching trace's messages are highlighted and scrolled into view. */
   selectedTraceId?: string | null
 }): React.JSX.Element {
   const conversation = useMemo(() => buildThreadConversation(traces), [traces])
+  // 会话列表给的是摘要预览行（不含 `_raw`），完整对话由 dashboard:threadTraces
+  // 懒加载后覆盖。全部还是预览时，时间线里只有用户提问、一条回复都没有——那不是
+  // 「还原出来的会话」，是半张脸，而且顶部还会写着「已聚合 N 条 trace」，读起来
+  // 像是内容就这么多。这种中间态直接显示加载占位，等完整数据到位再一次渲染。
+  const awaitingFullThread = isThreadAwaitingFullLoad(traces)
   const subagentCount = useMemo(() => traces.filter(isSubagentTrace).length, [traces])
   const projectNodeSummary = useMemo(() => summarizeThreadProjectNodes(traces), [traces])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -1099,7 +1186,7 @@ export function TraceThreadConversation({
     if (target) target.scrollIntoView({ behavior: "smooth", block: "center" })
   }, [selectedTraceId, conversation.messages.length])
 
-  if (conversation.messages.length === 0) {
+  if (awaitingFullThread || conversation.messages.length === 0) {
     return (
       <section
         className={cn(
@@ -1107,7 +1194,13 @@ export function TraceThreadConversation({
           className
         )}
       >
-        {loading ? "正在加载完整会话…" : "thread 中暂无可还原的对话内容"}
+        {awaitingFullThread
+          ? loadFailed
+            ? "完整对话加载失败"
+            : "正在加载完整会话…"
+          : loading
+            ? "正在加载完整会话…"
+            : "thread 中暂无可还原的对话内容"}
       </section>
     )
   }

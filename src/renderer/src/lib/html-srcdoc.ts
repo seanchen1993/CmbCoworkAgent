@@ -1,8 +1,19 @@
-export interface InlineHtmlSiblingAssetsOptions {
+export interface StaticHtmlPreviewDocumentOptions {
   html: string
   htmlPath?: string
   readTextFile?: (resolvedPath: string) => Promise<string | null>
+}
+
+/** Compatibility adapter for design previews. The static builder preserves the
+ * sibling-asset behavior while applying the UAT preview safety policy. */
+export interface InlineHtmlSiblingAssetsOptions extends StaticHtmlPreviewDocumentOptions {
   readDataUrlFile?: (resolvedPath: string) => Promise<string | null>
+}
+
+export async function inlineHtmlSiblingAssets(
+  options: InlineHtmlSiblingAssetsOptions
+): Promise<string> {
+  return buildStaticHtmlPreviewDocument(options)
 }
 
 /**
@@ -108,27 +119,27 @@ function hasProtocol(value: string): boolean {
 }
 
 /**
- * 判断一个资源引用是否满足“HTML 所在目录下的相对资源”条件。
+ * 判断一个资源引用是否满足“同级相对路径”条件。
  * 允许示例：
  * - `a.css`
  * - `./app.js`
- * - `assets/app.js`
  *
  * 不允许示例：
  * - `/assets/a.css`（根路径）
  * - `../a.css`（上级目录）
+ * - `dir/a.css`（子目录）
  * - `https://...`、`//...`（协议路径）
  * - `#anchor`（锚点）
  *
  * 设计目的：
- * - 严格收敛读取范围到 HTML 所在目录及其子目录，降低越界读取风险。
- * - 覆盖技能生成 `index.html + assets/*.js` 的多文件预览场景。
+ * - 严格收敛读取范围到 HTML 所在目录，降低越界读取风险。
+ * - 符合“仅内联同级依赖”的产品约束，避免过度解析路径规则。
  *
  * @param value 资源引用字符串
- * @returns 是否为可内联的本地相对资源路径
+ * @returns 是否为可内联的同级相对路径
  */
-function isLocalRelativeAssetPath(value: string): boolean {
-  // 只内联 HTML 所在目录下的相对依赖：例如 ./a.css、a.js、assets/app.js。
+function isSameLevelRelativePath(value: string): boolean {
+  // 只内联“同级相对路径”依赖：例如 ./a.css 或 a.js
   // 主动跳过绝对路径、协议路径、锚点、上级目录，避免越界读取与意外行为。
   const normalized = normalizeSlashes(stripQueryAndHash(value.trim()))
   if (!normalized) return false
@@ -140,29 +151,25 @@ function isLocalRelativeAssetPath(value: string): boolean {
   if (!withoutDotPrefix) return false
   if (withoutDotPrefix.startsWith("../")) return false
 
-  const decoded = normalizeSlashes(safeDecodeUri(withoutDotPrefix))
-  if (!decoded || decoded.startsWith("/") || decoded.startsWith("../")) return false
-
-  const segments = decoded.split("/")
-  return segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+  return !withoutDotPrefix.includes("/")
 }
 
 /**
- * 将 HTML 文件路径与依赖引用拼出本地相对依赖的绝对（或工作区内规范）路径。
+ * 将 HTML 文件路径与依赖引用拼出“同级依赖”的绝对（或工作区内规范）路径。
  * 处理流程：
- * 1. 先校验依赖是否为本地相对资源路径，不符合则直接返回 `null`。
+ * 1. 先校验依赖是否为同级相对路径，不符合则直接返回 `null`。
  * 2. 提取 HTML 所在目录。
  * 3. 将目录与依赖文件名拼接。
  *
  * 注意：
- * - 该函数不会处理 `../`、根路径、远程 URL 等越界路径；这些在前置校验中已被拒绝。
+ * - 该函数不会处理 `../`、子目录、远程 URL 等复杂路径；这些在前置校验中已被拒绝。
  *
  * @param htmlPath 当前 HTML 文件路径
  * @param dependencyPath HTML 中引用的 `href/src`
  * @returns 可读取的依赖路径；若不满足规则则返回 `null`
  */
-function resolveLocalAssetPath(htmlPath: string, dependencyPath: string): string | null {
-  if (!isLocalRelativeAssetPath(dependencyPath)) return null
+function resolveSiblingPath(htmlPath: string, dependencyPath: string): string | null {
+  if (!isSameLevelRelativePath(dependencyPath)) return null
 
   const normalizedHtmlPath = normalizeSlashes(
     stripQueryAndHash(normalizeHtmlPathInput(htmlPath))
@@ -171,161 +178,17 @@ function resolveLocalAssetPath(htmlPath: string, dependencyPath: string): string
     /^\.\/+/,
     ""
   )
-  if (!normalizedDependencyPath) return null
+  if (!normalizedDependencyPath || normalizedDependencyPath.includes("/")) return null
 
   // 再做一次“解码后校验”，防止 `%2F`、`%5C` 等编码在解码后引入路径层级。
   const decodedDependencyPath = normalizeSlashes(safeDecodeUri(normalizedDependencyPath))
-  if (!isLocalRelativeAssetPath(decodedDependencyPath)) return null
+  if (!decodedDependencyPath || decodedDependencyPath.includes("/")) return null
 
   const slashIndex = normalizedHtmlPath.lastIndexOf("/")
   if (slashIndex < 0) return decodedDependencyPath
   const directoryPath = normalizedHtmlPath.slice(0, slashIndex)
 
   return `${directoryPath}/${decodedDependencyPath}`
-}
-
-/**
- * 转义内联脚本中的 `</script>` 片段，防止浏览器提前闭合 script 标签。
- * 典型场景：
- * - JS 字符串里出现 `</script>`（如模板字符串、HTML 片段）会破坏 DOM 结构。
- *
- * @param content JS 源码文本
- * @returns 适合放入 `<script>` 标签文本节点的安全内容
- */
-function escapeInlineScriptContent(content: string): string {
-  return content.replace(/<\/script/gi, "<\\/script")
-}
-
-/**
- * Replace async string ranges without letting earlier replacements shift later
- * match offsets.
- */
-function applyStringReplacements(
-  input: string,
-  replacements: Array<{ start: number; end: number; value: string }>
-): string {
-  if (replacements.length === 0) return input
-  const sorted = [...replacements].sort((left, right) => right.start - left.start)
-  return sorted.reduce((current, replacement) => {
-    return `${current.slice(0, replacement.start)}${replacement.value}${current.slice(replacement.end)}`
-  }, input)
-}
-
-function cssUrlQuote(value: string): string {
-  return value.includes('"') ? `'${value.replace(/'/g, "\\'")}'` : `"${value}"`
-}
-
-async function inlineCssAssetUrls(
-  css: string,
-  cssBasePath: string,
-  readDataUrlWithCache: (resolvedPath: string) => Promise<string | null>
-): Promise<string> {
-  const replacements: Array<{ start: number; end: number; value: string }> = []
-  const urlPattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^"')]*?))\s*\)/gi
-
-  for (const match of css.matchAll(urlPattern)) {
-    if (match.index === undefined) continue
-    const rawValue = (match[1] ?? match[2] ?? match[3] ?? "").trim()
-    if (!rawValue) continue
-
-    const resolvedPath = resolveLocalAssetPath(cssBasePath, rawValue)
-    if (!resolvedPath) continue
-
-    const dataUrl = await readDataUrlWithCache(resolvedPath)
-    if (!dataUrl) continue
-
-    replacements.push({
-      start: match.index,
-      end: match.index + match[0].length,
-      value: `url(${cssUrlQuote(dataUrl)})`,
-    })
-  }
-
-  return applyStringReplacements(css, replacements)
-}
-
-function jsStringQuote(quote: string, value: string): string {
-  const safe = value.replace(/\\/g, "\\\\")
-  return quote === "'" ? `'${safe.replace(/'/g, "\\'")}'` : `"${safe.replace(/"/g, '\\"')}"`
-}
-
-async function inlineFetchLiteralUrls(
-  js: string,
-  jsBasePath: string,
-  readDataUrlWithCache: (resolvedPath: string) => Promise<string | null>
-): Promise<string> {
-  const replacements: Array<{ start: number; end: number; value: string }> = []
-  const fetchPattern = /\bfetch\s*\(\s*(["'])([^"']+)\1/g
-
-  for (const match of js.matchAll(fetchPattern)) {
-    if (match.index === undefined) continue
-    const quote = match[1]
-    const rawValue = match[2]?.trim()
-    if (!rawValue) continue
-
-    const resolvedPath = resolveLocalAssetPath(jsBasePath, rawValue)
-    if (!resolvedPath) continue
-
-    const dataUrl = await readDataUrlWithCache(resolvedPath)
-    if (!dataUrl) continue
-
-    const urlStart = match.index + match[0].lastIndexOf(quote)
-    const urlEnd = urlStart + quote.length + match[2].length + quote.length
-    replacements.push({
-      start: urlStart,
-      end: urlEnd,
-      value: jsStringQuote(quote, dataUrl),
-    })
-  }
-
-  return applyStringReplacements(js, replacements)
-}
-
-function splitSrcset(value: string): string[] {
-  const parts: string[] = []
-  let current = ""
-  let parenDepth = 0
-
-  for (let index = 0; index < value.length; index++) {
-    const char = value[index]
-    if (char === "(") parenDepth += 1
-    if (char === ")" && parenDepth > 0) parenDepth -= 1
-
-    if (char === "," && parenDepth === 0 && !current.trimStart().toLowerCase().startsWith("data:")) {
-      parts.push(current.trim())
-      current = ""
-      continue
-    }
-    current += char
-  }
-
-  if (current.trim()) parts.push(current.trim())
-  return parts
-}
-
-async function inlineSrcsetUrls(
-  value: string,
-  htmlPath: string,
-  readDataUrlWithCache: (resolvedPath: string) => Promise<string | null>
-): Promise<string> {
-  const parts = splitSrcset(value)
-  if (parts.length === 0) return value
-
-  const inlined = await Promise.all(parts.map(async (part) => {
-    const match = part.match(/^(\S+)([\s\S]*)$/)
-    const rawUrl = match?.[1]?.trim()
-    if (!rawUrl) return part
-
-    const resolvedPath = resolveLocalAssetPath(htmlPath, rawUrl)
-    if (!resolvedPath) return part
-
-    const dataUrl = await readDataUrlWithCache(resolvedPath)
-    if (!dataUrl) return part
-
-    return `${dataUrl}${match?.[2] ?? ""}`
-  }))
-
-  return inlined.join(", ")
 }
 
 /**
@@ -345,46 +208,91 @@ function serializeDocument(doc: Document): string {
   return `${doctype}\n${htmlElement.outerHTML}`
 }
 
+function escapeInlineStyleContent(content: string): string {
+  // `style` is an HTML raw-text element. Escape a closing tag before serializing so CSS cannot
+  // become markup only when the final srcDoc is parsed for a second time.
+  return content.replace(/<\/style/gi, "\\3C /style")
+}
+
+const STATIC_HTML_PREVIEW_CSP = [
+  "default-src 'none'",
+  "script-src 'none'",
+  "style-src 'unsafe-inline'",
+  "img-src data: blob:",
+  "font-src data: blob:",
+  "media-src data: blob:",
+  "connect-src 'none'",
+  "frame-src 'none'",
+  "object-src 'none'",
+  "worker-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'"
+].join("; ")
+
+function hardenStaticHtmlDocument(doc: Document): void {
+  doc
+    .querySelectorAll(
+      "script, iframe, frame, fencedframe, object, embed, portal, webview, applet, base, link[href]"
+    )
+    .forEach((element) => element.remove())
+  for (const meta of Array.from(doc.querySelectorAll<HTMLMetaElement>("meta[http-equiv]"))) {
+    const directive = meta.getAttribute("http-equiv")?.trim().toLowerCase()
+    if (directive === "refresh" || directive === "content-security-policy") meta.remove()
+  }
+  for (const element of Array.from(doc.querySelectorAll<HTMLElement>("*"))) {
+    for (const attribute of Array.from(element.attributes)) {
+      if (/^on/i.test(attribute.name)) element.removeAttribute(attribute.name)
+    }
+  }
+  doc.querySelectorAll("a, area").forEach((element) => {
+    element.removeAttribute("href")
+    element.removeAttribute("xlink:href")
+    element.removeAttribute("ping")
+  })
+  doc
+    .querySelectorAll("form[action], button[formaction], input[formaction]")
+    .forEach((element) => {
+      element.removeAttribute("action")
+      element.removeAttribute("formaction")
+    })
+  doc.querySelectorAll("[autoplay]").forEach((element) => element.removeAttribute("autoplay"))
+
+  const policy = doc.createElement("meta")
+  policy.setAttribute("http-equiv", "Content-Security-Policy")
+  policy.setAttribute("content", STATIC_HTML_PREVIEW_CSP)
+  doc.head.prepend(policy)
+}
+
 /**
- * 将 HTML 中“本地相对 css/js 依赖”内联成 `style/script`，返回可直接渲染的 srcDoc。
+ * 为工作目录文件标签构建静态 HTML 预览文档。
  *
  * 目标：
- * - 在 Electron 预览中彻底绕开 `file://` 外链限制。
- * - 仍然保持 HTML 主体结构不变，尽可能只替换依赖标签本身。
+ * - 同级 CSS 通过受控文件读取内联，保留页面 UI 样式。
+ * - 不执行脚本，也不允许网络、导航、表单、嵌套页面或插件内容。
+ * - 永远返回已加固文档，调用方不得先把原始 HTML 放进 iframe。
  *
  * 行为约束：
- * - 仅处理 HTML 所在目录下的相对路径依赖（由 `isLocalRelativeAssetPath` 定义）。
+ * - 仅处理同级相对 CSS（由 `isSameLevelRelativePath` 定义）。
  * - 读取失败时静默跳过该依赖，不中断整体预览。
- * - 通过缓存避免同一依赖重复读取，降低 IPC/磁盘开销。
+ * - 所有 script 和其他主动内容都会在序列化前移除。
  *
  * @param options.html 原始 HTML 内容
  * @param options.htmlPath 当前 HTML 文件路径（用于解析同级依赖）
  * @param options.readTextFile 由调用方注入的读文件能力（通常来自 preload API）
- * @returns 内联后的 HTML；若缺少必要上下文则返回原始 HTML
+ * @returns 可安全放入受限 iframe.srcDoc 的静态 HTML
  */
-export async function inlineHtmlSiblingAssets({
+export async function buildStaticHtmlPreviewDocument({
   html,
   htmlPath,
-  readTextFile,
-  readDataUrlFile
-}: InlineHtmlSiblingAssetsOptions): Promise<string> {
-  if (!htmlPath || (!readTextFile && !readDataUrlFile)) return html
-
+  readTextFile
+}: StaticHtmlPreviewDocumentOptions): Promise<string> {
   const parser = new DOMParser()
   const doc = parser.parseFromString(html, "text/html")
+
+  // Only same-directory stylesheets may be loaded through the bounded workspace reader.
   const stylesheetLinks = Array.from(
     doc.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"][href]')
   )
-  const scriptTags = Array.from(doc.querySelectorAll<HTMLScriptElement>("script[src]"))
-  const inlineScriptTags = Array.from(doc.querySelectorAll<HTMLScriptElement>("script:not([src])"))
-  const styleTags = Array.from(doc.querySelectorAll<HTMLStyleElement>("style"))
-  const styledElements = Array.from(doc.querySelectorAll<HTMLElement>("[style]"))
-  const srcElements = Array.from(
-    doc.querySelectorAll<HTMLElement>("img[src], source[src], video[src], audio[src], track[src], input[src]")
-  )
-  const posterElements = Array.from(doc.querySelectorAll<HTMLElement>("video[poster]"))
-  const srcsetElements = Array.from(doc.querySelectorAll<HTMLElement>("img[srcset], source[srcset]"))
-  const svgImageElements = Array.from(doc.querySelectorAll<SVGElement>("image[href], image[xlink\\:href]"))
 
   const readCache = new Map<string, Promise<string | null>>()
   /**
@@ -395,7 +303,6 @@ export async function inlineHtmlSiblingAssets({
    */
   const readWithCache = (resolvedPath: string): Promise<string | null> => {
     if (!readTextFile) return Promise.resolve(null)
-    // 同一个依赖可能被多次引用，做一次缓存避免重复 IPC/磁盘读取。
     const cached = readCache.get(resolvedPath)
     if (cached) return cached
     const request = readTextFile(resolvedPath).catch(() => null)
@@ -403,101 +310,36 @@ export async function inlineHtmlSiblingAssets({
     return request
   }
 
-  const dataUrlCache = new Map<string, Promise<string | null>>()
-  const readDataUrlWithCache = (resolvedPath: string): Promise<string | null> => {
-    if (!readDataUrlFile) return Promise.resolve(null)
-    const cached = dataUrlCache.get(resolvedPath)
-    if (cached) return cached
-    const request = readDataUrlFile(resolvedPath).catch(() => null)
-    dataUrlCache.set(resolvedPath, request)
-    return request
+  if (htmlPath && readTextFile) {
+    await Promise.all(
+      stylesheetLinks.map(async (link) => {
+        const href = link.getAttribute("href")
+        if (!href) return
+
+        const resolvedPath = resolveSiblingPath(htmlPath, href)
+        if (!resolvedPath) return
+
+        const cssContent = await readWithCache(resolvedPath)
+        if (cssContent == null) return
+
+        const styleTag = doc.createElement("style")
+        styleTag.setAttribute("data-inline-from", href)
+        styleTag.textContent = escapeInlineStyleContent(cssContent)
+        link.replaceWith(styleTag)
+      })
+    )
   }
 
-  await Promise.all([
-    ...stylesheetLinks.map(async (link) => {
-      const href = link.getAttribute("href")
-      if (!href || !readTextFile) return
-
-      const resolvedPath = resolveLocalAssetPath(htmlPath, href)
-      if (!resolvedPath) return
-
-      const cssContent = await readWithCache(resolvedPath)
-      if (cssContent == null) return
-
-      const styleTag = doc.createElement("style")
-      styleTag.setAttribute("data-inline-from", href)
-      styleTag.textContent = await inlineCssAssetUrls(cssContent, resolvedPath, readDataUrlWithCache)
-      link.replaceWith(styleTag)
-    }),
-    ...scriptTags.map(async (script) => {
-      const src = script.getAttribute("src")
-      if (!src || !readTextFile) return
-
-      const resolvedPath = resolveLocalAssetPath(htmlPath, src)
-      if (!resolvedPath) return
-
-      const jsContent = await readWithCache(resolvedPath)
-      if (jsContent == null) return
-
-      const inlineScript = doc.createElement("script")
-      const type = script.getAttribute("type")
-      if (type) inlineScript.setAttribute("type", type)
-      if (script.hasAttribute("nomodule")) inlineScript.setAttribute("nomodule", "")
-      inlineScript.setAttribute("data-inline-from", src)
-      // 防止脚本内容中的 </script> 提前截断标签。
-      const patchedJs = await inlineFetchLiteralUrls(jsContent, resolvedPath, readDataUrlWithCache)
-      inlineScript.textContent = escapeInlineScriptContent(patchedJs)
-      script.replaceWith(inlineScript)
-    }),
-    ...styleTags.map(async (style) => {
-      const cssContent = style.textContent ?? ""
-      if (!cssContent.trim()) return
-      style.textContent = await inlineCssAssetUrls(cssContent, htmlPath, readDataUrlWithCache)
-    }),
-    ...styledElements.map(async (element) => {
-      const styleValue = element.getAttribute("style")
-      if (!styleValue) return
-      element.setAttribute("style", await inlineCssAssetUrls(styleValue, htmlPath, readDataUrlWithCache))
-    }),
-    ...srcElements.map(async (element) => {
-      const src = element.getAttribute("src")
-      if (!src) return
-      const resolvedPath = resolveLocalAssetPath(htmlPath, src)
-      if (!resolvedPath) return
-      const dataUrl = await readDataUrlWithCache(resolvedPath)
-      if (dataUrl) element.setAttribute("src", dataUrl)
-    }),
-    ...posterElements.map(async (element) => {
-      const poster = element.getAttribute("poster")
-      if (!poster) return
-      const resolvedPath = resolveLocalAssetPath(htmlPath, poster)
-      if (!resolvedPath) return
-      const dataUrl = await readDataUrlWithCache(resolvedPath)
-      if (dataUrl) element.setAttribute("poster", dataUrl)
-    }),
-    ...srcsetElements.map(async (element) => {
-      const srcset = element.getAttribute("srcset")
-      if (!srcset) return
-      element.setAttribute("srcset", await inlineSrcsetUrls(srcset, htmlPath, readDataUrlWithCache))
-    }),
-    ...svgImageElements.map(async (element) => {
-      for (const attr of ["href", "xlink:href"]) {
-        const href = element.getAttribute(attr)
-        if (!href) continue
-        const resolvedPath = resolveLocalAssetPath(htmlPath, href)
-        if (!resolvedPath) continue
-        const dataUrl = await readDataUrlWithCache(resolvedPath)
-        if (dataUrl) element.setAttribute(attr, dataUrl)
-      }
-    }),
-    ...inlineScriptTags.map(async (script) => {
-      const jsContent = script.textContent ?? ""
-      if (!jsContent.trim()) return
-      script.textContent = escapeInlineScriptContent(
-        await inlineFetchLiteralUrls(jsContent, htmlPath, readDataUrlWithCache)
-      )
-    }),
-  ])
-
-  return serializeDocument(doc)
+  // Reparse until serialization is stable. This closes mutation-XSS gaps where markup only
+  // appears after a sanitized DOM is serialized and parsed again by iframe.srcDoc.
+  let currentDocument = doc
+  let previous = ""
+  for (let pass = 0; pass < 4; pass += 1) {
+    hardenStaticHtmlDocument(currentDocument)
+    const serialized = serializeDocument(currentDocument)
+    if (serialized === previous) return serialized
+    previous = serialized
+    currentDocument = parser.parseFromString(serialized, "text/html")
+  }
+  throw new Error("Static HTML preview did not reach a safe serialization fixed point")
 }

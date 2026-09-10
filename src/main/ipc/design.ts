@@ -3498,7 +3498,7 @@ export function registerDesignHandlers(): void {
           threadId: runtimeThreadId,
           workspacePath,
           modelId,
-          systemPromptOverride: DESIGN_SYSTEM_PROMPT,
+          extraSystemPrompt: DESIGN_SYSTEM_PROMPT,
           noSchedulerTool: true,
           noSkillEvolutionTool: true,
           enableAgentsPrompt: false,

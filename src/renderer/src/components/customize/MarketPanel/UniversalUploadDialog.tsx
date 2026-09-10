@@ -1101,7 +1101,7 @@ export function UniversalUploadDialog({
               description="先选择要上传的文件。更新时也可以只修改表单信息。"
             >
               {resourceType === "plugin" && PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL ? (
-                <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+                <div className="rounded-md border border-status-info/25 bg-status-info/10 px-3 py-2 text-sm text-status-info">
                   <span>首次上传插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
                   <a
                     href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
@@ -1367,14 +1367,14 @@ export function UniversalUploadDialog({
                           {!versionFromSkillFile ? " 当前显示的是默认版本。" : ""}
                         </p>
                         {versionFromSkillFile && !versionFoundInSkillFrontmatter ? (
-                          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
-                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                          <div className="flex items-start gap-2 rounded-xl border border-status-warning/25 bg-status-warning/10 px-3 py-2 text-status-warning">
+                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-status-warning-foreground" />
                             <p className="leading-5">
                               当前没有从{" "}
-                              <code className="rounded bg-amber-100 px-1">md / SKILL.md</code>{" "}
-                              里找到 <code className="rounded bg-amber-100 px-1">version</code>
+                              <code className="rounded bg-status-warning/15 px-1">md / SKILL.md</code>{" "}
+                              里找到 <code className="rounded bg-status-warning/15 px-1">version</code>
                               ，所以展示的是默认版本{" "}
-                              <code className="rounded bg-amber-100 px-1">
+                              <code className="rounded bg-status-warning/15 px-1">
                                 {DEFAULT_MARKET_VERSION}
                               </code>
                               。
@@ -1403,14 +1403,14 @@ export function UniversalUploadDialog({
                           </p>
                         )}
                         {!versionFromPluginFile && file ? (
-                          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
-                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                          <div className="flex items-start gap-2 rounded-xl border border-status-warning/25 bg-status-warning/10 px-3 py-2 text-status-warning">
+                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-status-warning-foreground" />
                             <p className="leading-5">
                               当前没有从{" "}
-                              <code className="rounded bg-amber-100 px-1">plugin.json</code>{" "}
-                              里找到 <code className="rounded bg-amber-100 px-1">version</code>
+                              <code className="rounded bg-status-warning/15 px-1">plugin.json</code>{" "}
+                              里找到 <code className="rounded bg-status-warning/15 px-1">version</code>
                               ，当前先按{" "}
-                              <code className="rounded bg-amber-100 px-1">
+                              <code className="rounded bg-status-warning/15 px-1">
                                 {DEFAULT_PLUGIN_VERSION}
                               </code>{" "}
                               回填，你也可以手动修改。
@@ -1445,9 +1445,9 @@ export function UniversalUploadDialog({
                 <div className="space-y-4">
                   <div className="flex items-center justify-between gap-3">
                     <div className="space-y-1">
-                      <h4 className="text-sm font-medium text-foreground">灰度用户 User IDs</h4>
+                      <h4 className="text-sm font-medium text-foreground">灰度用户</h4>
                       <p className="text-xs leading-5 text-muted-foreground">
-                        选填。填写后仅这些用户可在市场列表看到该资源；留空则默认所有用户可见。
+                        留空则所有用户可见。填入 2345，则所有 ID 包含 2345 的用户均可查看。
                       </p>
                     </div>
                     <Button
@@ -1472,7 +1472,7 @@ export function UniversalUploadDialog({
                         <div key={`gray-user-${index}`} className="flex items-center gap-2">
                           <Input
                             value={userIdValue}
-                            placeholder="输入 SAP ID 或用户标识"
+                            placeholder="输入用户 ID，如 2345"
                             onChange={(e) => updateGrayUserId(index, e.target.value)}
                             onBlur={normalizeGrayUserIdsState}
                             disabled={uploading}
@@ -1500,7 +1500,7 @@ export function UniversalUploadDialog({
                     <div className="space-y-1">
                       <h4 className="text-sm font-medium text-foreground">灰度组织</h4>
                       <p className="text-xs leading-5 text-muted-foreground">
-                        选填。填写后仅 pathName 包含这些组织的用户可在市场列表看到该资源；留空则默认所有用户可见。
+                        留空则所有用户可见。填入 研发中心，则所有组织路径包含 研发中心 的用户均可查看。
                       </p>
                     </div>
                     <Button
@@ -1525,7 +1525,7 @@ export function UniversalUploadDialog({
                         <div key={`gray-org-${index}`} className="flex items-center gap-2">
                           <Input
                             value={orgValue}
-                            placeholder="输入组织名称"
+                            placeholder="输入组织名，如 研发中心"
                             onChange={(e) => updateGrayOrg(index, e.target.value)}
                             onBlur={normalizeGrayOrgsState}
                             disabled={uploading}

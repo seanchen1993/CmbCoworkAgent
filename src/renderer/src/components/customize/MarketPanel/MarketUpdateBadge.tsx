@@ -129,7 +129,7 @@ export function UpdateVersionTooltip({
         <TooltipContent
           side="top"
           align="center"
-          className="max-w-[260px] border-[#78d7cb] bg-[#f4fffc] px-3 py-2 text-[#0f766e] shadow-[rgba(15,118,110,0.16)_0px_8px_24px]"
+          className="max-w-[260px] border-status-nominal/30 bg-background-elevated px-3 py-2 text-status-nominal shadow-lg"
         >
           <div className="space-y-0.5">
             <p className="text-[12px] font-medium">{typeLabel}有新版本</p>

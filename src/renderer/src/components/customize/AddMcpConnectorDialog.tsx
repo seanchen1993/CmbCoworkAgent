@@ -745,7 +745,7 @@ export function AddMcpConnectorDialog(props: {
                             <p className="min-w-0 truncate font-medium">{connector.name}</p>
                             <div className="flex shrink-0 items-center gap-1.5">
                               {connector.conflict && (
-                                <span className="rounded-sm border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-700">
+                                <span className="rounded-sm border border-status-warning/30 bg-status-warning/10 px-1.5 py-0.5 text-[11px] text-status-warning-foreground">
                                   {connector.conflict === "existing" ? "同名" : "重复"}
                                 </span>
                               )}

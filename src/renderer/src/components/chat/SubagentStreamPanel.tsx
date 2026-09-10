@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, Sparkles } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
-import { useThreadState, useThreadStream } from "@/lib/thread-context"
+import { useThreadStateSelector, useThreadStream } from "@/lib/thread-context"
 import { useAppStore } from "@/lib/store"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import {
@@ -14,15 +14,21 @@ import {
 import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
 import {
   getSubagentTranscriptsFromThreadValues,
-  mergePaginatedSubagentTranscript,
   mergeSubagentTranscriptPages,
   reconcileTranscriptToolCallsWithResults,
   SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY
 } from "@/lib/subagent-transcripts"
+import { createSubagentPanelTranscriptProjector } from "@/lib/subagent-panel-transcript"
+import {
+  buildStreamPanelMessageWindow,
+  shiftStreamPanelMessageWindowEnd
+} from "@/lib/stream-panel-message-window"
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
 
 type DeferredBlobField = "content" | "reasoning" | "tool_calls"
+
+const EMPTY_SUBAGENT_PANEL_MESSAGES: readonly Message[] = []
 
 function deferredBlobFieldLabel(field: DeferredBlobField): string {
   if (field === "content") return "正文"
@@ -47,13 +53,39 @@ export function SubagentStreamPanel({
 }): React.JSX.Element {
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
   const closeSubagentFocusView = useAppStore((state) => state.closeSubagentFocusView)
+  const requestOpenRightPanelAgents = useAppStore((state) => state.requestOpenRightPanelAgents)
   const focusedThreadId = subagentFocusView?.threadId ?? "__subagent_focus_none__"
-  const focusedSubagentKey = `${focusedThreadId}\u0000${subagentFocusView?.subagentId ?? "none"}`
-  const threadState = useThreadState(subagentFocusView?.threadId ?? null)
+  const focusedParentThreadId = subagentFocusView?.threadId ?? null
+  const focusedSubagentId = subagentFocusView?.subagentId
+  const focusedSubagentKey = `${focusedThreadId}\u0000${focusedSubagentId ?? "none"}`
+  const baselineMessages =
+    useThreadStateSelector(focusedParentThreadId, (state) =>
+      focusedSubagentId
+        ? (state.subagentTranscripts[focusedSubagentId] ?? EMPTY_SUBAGENT_PANEL_MESSAGES)
+        : EMPTY_SUBAGENT_PANEL_MESSAGES
+    ) ?? EMPTY_SUBAGENT_PANEL_MESSAGES
+  const baselineContentVersion =
+    useThreadStateSelector(focusedParentThreadId, (state) =>
+      focusedSubagentId
+        ? (state.subagentTranscriptContentVersions[focusedSubagentId] ?? 0)
+        : 0
+    ) ?? 0
+  const subagents = useThreadStateSelector(focusedParentThreadId, (state) => state.subagents) ?? []
+  const scheduledTaskLoading =
+    useThreadStateSelector(focusedParentThreadId, (state) => state.scheduledTaskLoading) ?? false
   const focusedStream = useThreadStream(focusedThreadId)
   const scrollRef = useRef<HTMLDivElement>(null)
   const isAtBottomRef = useRef(true)
+  const pendingWindowAnchorRef = useRef<{ messageId: string; viewportTop: number } | null>(null)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
+  const [messageWindowSelection, setMessageWindowSelection] = useState<{
+    focusKey: string
+    end: number | null
+  }>({ focusKey: "", end: null })
+  const messageWindowEnd =
+    messageWindowSelection.focusKey === focusedSubagentKey
+      ? messageWindowSelection.end
+      : null
   const [exportingDeferredKey, setExportingDeferredKey] = useState<string | null>(null)
   const [deferredExportStatus, setDeferredExportStatus] = useState<string | null>(null)
   const [hydratedTranscript, setHydratedTranscript] = useState<{
@@ -70,17 +102,12 @@ export function SubagentStreamPanel({
     nextBefore?: number
     total: number
   } | null>(null)
-  const baselineMessages = useMemo(() => {
-    if (!subagentFocusView) return []
-    return threadState?.subagentTranscripts[subagentFocusView.subagentId] ?? []
-  }, [subagentFocusView, threadState?.subagentTranscripts])
-  const focusedSubagentId = subagentFocusView?.subagentId
-
   useEffect(() => {
     if (!focusedSubagentId || focusedThreadId === "__subagent_focus_none__") return
     const focus = { threadId: focusedThreadId, subagentId: focusedSubagentId }
     let cancelled = false
     setLoadingEarlier(false)
+    pendingWindowAnchorRef.current = null
     setExportingDeferredKey(null)
     setDeferredExportStatus(null)
     void window.api.threads
@@ -113,10 +140,11 @@ export function SubagentStreamPanel({
     }
   }, [focusedSubagentId, focusedThreadId])
 
-  const currentSubagent = threadState?.subagents.find(
-    (subagent) => subagent.id === subagentFocusView?.subagentId
+  const currentSubagent = useMemo(
+    () => subagents.find((subagent) => subagent.id === focusedSubagentId),
+    [focusedSubagentId, subagents]
   )
-  const parentIsRunning = focusedStream.isLoading || threadState?.scheduledTaskLoading === true
+  const parentIsRunning = focusedStream.isLoading || scheduledTaskLoading
   const effectiveStatus =
     currentSubagent?.status ??
     (parentIsRunning
@@ -125,24 +153,33 @@ export function SubagentStreamPanel({
         ? "cancelled"
         : subagentFocusView?.status)
   const isRunning = effectiveStatus === "running" && parentIsRunning
-  const rawMessages = useMemo(() => {
-    if (hydratedTranscript?.focusKey !== focusedSubagentKey) return baselineMessages
-    return mergePaginatedSubagentTranscript(hydratedTranscript.messages, baselineMessages)
-  }, [baselineMessages, focusedSubagentKey, hydratedTranscript])
+  const [projectTranscript] = useState(createSubagentPanelTranscriptProjector)
+  const persistedPage =
+    hydratedTranscript?.focusKey === focusedSubagentKey
+      ? hydratedTranscript.messages
+      : EMPTY_SUBAGENT_PANEL_MESSAGES
+  const transcriptProjection = useMemo(
+    () => projectTranscript(persistedPage, baselineMessages, isRunning, baselineContentVersion),
+    [baselineContentVersion, baselineMessages, isRunning, persistedPage, projectTranscript]
+  )
+  const fullMessages = transcriptProjection.messages
   const hiddenMessageCount = useMemo(() => {
     if (hydratedTranscript?.focusKey !== focusedSubagentKey) return 0
     const pageIds = new Set(hydratedTranscript.messages.map((message) => message.id))
-    const pinnedPromptCount = baselineMessages.filter(
-      (message) =>
-        message.role === "user" &&
-        (message.id.startsWith("subagent-prompt-") || !!message.subagent_tool_call_id) &&
-        !pageIds.has(message.id)
-    ).length
+    let pinnedPromptCount = 0
+    for (const promptId of transcriptProjection.openingPromptIds) {
+      if (!pageIds.has(promptId)) pinnedPromptCount += 1
+    }
     return Math.max(0, (hydratedTranscript.nextBefore ?? 0) - pinnedPromptCount)
-  }, [baselineMessages, focusedSubagentKey, hydratedTranscript])
+  }, [focusedSubagentKey, hydratedTranscript, transcriptProjection.structureVersion])
+  const messageWindow = useMemo(
+    () => buildStreamPanelMessageWindow(fullMessages, messageWindowEnd),
+    [fullMessages, messageWindowEnd, transcriptProjection.contentVersion]
+  )
+  const isTailWindow = messageWindow.end >= fullMessages.length
   const messages = useMemo(
-    () => reconcileTranscriptToolCallsWithResults(rawMessages),
-    [rawMessages]
+    () => reconcileTranscriptToolCallsWithResults(messageWindow.messages),
+    [messageWindow.messages]
   )
   const loadEarlier = useCallback(async (): Promise<void> => {
     if (
@@ -253,7 +290,9 @@ export function SubagentStreamPanel({
   }, [messages])
   const hasUserAfterHeadByIndex = useMemo(() => {
     const result = new Array<boolean>(messages.length)
-    let hasUserAfterHead = false
+    // An older local page has later conversation outside the DOM window. Treat
+    // that boundary conservatively as a later turn without scanning the suffix.
+    let hasUserAfterHead = messageWindow.end < fullMessages.length
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       result[index] = hasUserAfterHead
       if (!messageRendersNothing(messages[index]) && messages[index].role === "user") {
@@ -261,7 +300,7 @@ export function SubagentStreamPanel({
       }
     }
     return result
-  }, [messages])
+  }, [fullMessages.length, messageWindow.end, messages])
   const visibleMessageLayout = useMemo(
     () => buildVisibleMessageLayout(messages, (message) => !messageRendersNothing(message)),
     [messages]
@@ -273,6 +312,57 @@ export function SubagentStreamPanel({
     if (root.matches("[data-radix-scroll-area-viewport]")) return root
     return root.querySelector("[data-radix-scroll-area-viewport]") as HTMLDivElement | null
   }, [])
+
+  const shiftMessageWindow = useCallback(
+    (direction: "older" | "newer"): void => {
+      const viewport = getScrollViewport()
+      if (viewport) {
+        const rows = Array.from(
+          viewport.querySelectorAll<HTMLElement>("[data-subagent-stream-message-id]")
+        )
+        const anchor = direction === "older" ? rows[0] : rows.at(-1)
+        if (anchor?.dataset.subagentStreamMessageId) {
+          pendingWindowAnchorRef.current = {
+            messageId: anchor.dataset.subagentStreamMessageId,
+            viewportTop: anchor.getBoundingClientRect().top
+          }
+        }
+      }
+      isAtBottomRef.current = false
+      setMessageWindowSelection({
+        focusKey: focusedSubagentKey,
+        end: shiftStreamPanelMessageWindowEnd(
+          messageWindow.end,
+          fullMessages.length,
+          direction
+        )
+      })
+    },
+    [focusedSubagentKey, fullMessages.length, getScrollViewport, messageWindow.end]
+  )
+
+  const showLatestMessageWindow = useCallback((): void => {
+    pendingWindowAnchorRef.current = null
+    setMessageWindowSelection({ focusKey: focusedSubagentKey, end: null })
+    isAtBottomRef.current = true
+    void window.requestAnimationFrame(() => {
+      const viewport = getScrollViewport()
+      if (viewport) viewport.scrollTop = viewport.scrollHeight
+    })
+  }, [focusedSubagentKey, getScrollViewport])
+
+  useLayoutEffect(() => {
+    const pendingAnchor = pendingWindowAnchorRef.current
+    if (!pendingAnchor) return
+    const viewport = getScrollViewport()
+    if (!viewport) return
+    const target = Array.from(
+      viewport.querySelectorAll<HTMLElement>("[data-subagent-stream-message-id]")
+    ).find((row) => row.dataset.subagentStreamMessageId === pendingAnchor.messageId)
+    pendingWindowAnchorRef.current = null
+    if (!target) return
+    viewport.scrollTop += target.getBoundingClientRect().top - pendingAnchor.viewportTop
+  }, [getScrollViewport, messageWindow.end, messageWindow.start])
 
   const scrollToBottom = useCallback(() => {
     const scroll = () => {
@@ -302,13 +392,15 @@ export function SubagentStreamPanel({
     if (!viewport) return
 
     const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    isAtBottomRef.current = bottomDistance < 50
-  }, [getScrollViewport])
+    isAtBottomRef.current = isTailWindow && bottomDistance < 50
+  }, [getScrollViewport, isTailWindow])
 
   const scrollSignature = useMemo(() => {
     const lastMessage = messages[visibleMessageLayout.lastVisibleMessageIndex]
     return [
-      messages.length,
+      fullMessages.length,
+      messageWindow.start,
+      messageWindow.end,
       lastMessage?.id ?? "",
       lastMessage?.role ?? "",
       messageContentLength(lastMessage?.content),
@@ -317,7 +409,15 @@ export function SubagentStreamPanel({
       toolResults.size,
       isRunning ? "running" : "idle"
     ].join(":")
-  }, [isRunning, messages, toolResults.size, visibleMessageLayout.lastVisibleMessageIndex])
+  }, [
+    fullMessages.length,
+    isRunning,
+    messageWindow.end,
+    messageWindow.start,
+    messages,
+    toolResults.size,
+    visibleMessageLayout.lastVisibleMessageIndex
+  ])
 
   useEffect(() => {
     isAtBottomRef.current = true
@@ -364,19 +464,20 @@ export function SubagentStreamPanel({
     <div className="flex h-full min-w-0 flex-col overflow-hidden bg-grid-subtle">
       <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border/70 bg-background/85 px-2.5 backdrop-blur">
         <div className="flex min-w-0 items-center gap-2">
-          {showCloseButton ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              type="button"
-              onClick={() => closeSubagentFocusView()}
-              className="h-7 w-9 p-0"
-              title="返回"
-              aria-label="返回"
-            >
-              <ArrowLeft className="size-6" strokeWidth={1} />
-            </Button>
-          ) : null}
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            onClick={() => {
+              requestOpenRightPanelAgents(subagentFocusView.threadId)
+              closeSubagentFocusView()
+            }}
+            className="h-7 w-9 p-0"
+            title="返回"
+            aria-label="返回"
+          >
+            <ArrowLeft className="size-6" strokeWidth={1} />
+          </Button>
           <Sparkles className="size-3.5 shrink-0 text-sky-500" />
           <div className="min-w-0 truncate text-sm font-semibold text-foreground">
             子代理完整记录
@@ -390,7 +491,7 @@ export function SubagentStreamPanel({
             "shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-none",
             isRunning
               ? "border-blue-300/60 bg-blue-500/10 text-blue-700 dark:text-blue-300"
-              : "border-stone-300/80 bg-stone-100/70 text-stone-700 dark:border-stone-700 dark:bg-stone-900/45 dark:text-stone-300"
+              : "border-border bg-background-interactive/70 text-muted-foreground"
           )}
         >
           {isRunning ? "实时运行中" : "历史快照"}
@@ -452,7 +553,45 @@ export function SubagentStreamPanel({
                   )}
                 </div>
               )}
-            {messages.length === 0 && (
+            {(messageWindow.start > 0 || messageWindow.end < fullMessages.length) && (
+              <div className="flex flex-wrap items-center justify-center gap-2 rounded-lg border border-border/60 bg-background/75 px-2 py-1.5 text-[11px] text-muted-foreground">
+                <span>
+                  当前显示 {messageWindow.start + 1}–{messageWindow.end} / {fullMessages.length}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  type="button"
+                  className="h-7 px-2 text-xs"
+                  disabled={messageWindow.start === 0}
+                  onClick={() => shiftMessageWindow("older")}
+                >
+                  前一页
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  type="button"
+                  className="h-7 px-2 text-xs"
+                  disabled={messageWindow.end >= fullMessages.length}
+                  onClick={() => shiftMessageWindow("newer")}
+                >
+                  后一页
+                </Button>
+                {messageWindow.end < fullMessages.length && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    type="button"
+                    className="h-7 px-2 text-xs"
+                    onClick={showLatestMessageWindow}
+                  >
+                    最新
+                  </Button>
+                )}
+              </div>
+            )}
+            {fullMessages.length === 0 && (
               <div className="rounded-xl border border-dashed border-border/70 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
                 暂无可展示的子代理消息。新的子代理运行过程会实时显示在这里。
               </div>
@@ -463,19 +602,22 @@ export function SubagentStreamPanel({
               const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
 
               return (
-                <MessageBubble
-                  key={message.id}
-                  message={message}
-                  previousMessage={previousMessage}
-                  isStreaming={isRunning && isLastMessage}
-                  showAssistantMeta={showAssistantMetaByIndex[index] ?? true}
-                  toolResults={toolResults}
-                  threadId={subagentFocusView.threadId}
-                  isLoading={isRunning}
-                  hasUserAfterHead={hasUserAfterHeadByIndex[index] ?? false}
-                  assistantDurationMs={assistantDurationMsById.get(message.id)}
-                  userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-                />
+                <div key={message.id} data-subagent-stream-message-id={message.id}>
+                  <MessageBubble
+                    message={message}
+                    previousMessage={previousMessage}
+                    isStreaming={
+                      isRunning && messageWindow.end >= fullMessages.length && isLastMessage
+                    }
+                    showAssistantMeta={showAssistantMetaByIndex[index] ?? true}
+                    toolResults={toolResults}
+                    threadId={subagentFocusView.threadId}
+                    isLoading={isRunning}
+                    hasUserAfterHead={hasUserAfterHeadByIndex[index] ?? false}
+                    assistantDurationMs={assistantDurationMsById.get(message.id)}
+                    userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
+                  />
+                </div>
               )
             })}
             {isRunning && (

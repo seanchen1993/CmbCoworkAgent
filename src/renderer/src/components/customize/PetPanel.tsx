@@ -3,6 +3,7 @@ import { Check, ImageIcon, Loader2, PawPrint, RefreshCw, Trash2, Upload } from "
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { cn } from "@/lib/utils"
 
 type PetSource = "builtin" | "custom"
@@ -465,9 +466,9 @@ export function PetPanel(): React.JSX.Element {
               )}
               aria-hidden="true"
             >
-              <span
+              <ToggleThumb
                 className={cn(
-                  "inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                  "inline-block size-4",
                   settings.enabled ? "translate-x-4" : "translate-x-0"
                 )}
               />

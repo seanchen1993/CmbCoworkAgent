@@ -122,7 +122,7 @@ export function buildWorkflowNotificationMessage(
   } else {
     lines.push(`<error>${escapeAndCap(run.error ?? "unknown error", 2_000)}</error>`)
     lines.push(
-      `<resume>For a TRANSIENT failure, call the workflow tool with {"resumeFromRunId": "${escapeXml(run.runId)}"} alone — the saved script reloads and completed agents replay from the journal. For a SCRIPT BUG, re-send the corrected script: a changed script (or changed args) discards the journal and re-runs from scratch, so it does NOT replay completed agents — do not keep resuming the same buggy script.</resume>`
+      `<resume>For a TRANSIENT failure, call the workflow tool with {"resumeFromRunId": "${escapeXml(run.runId)}"} alone — the saved script reloads and completed non-isolated agents replay from the journal. Isolated worktree agents are not journaled: they run again in fresh worktrees, while any previously retained worktrees remain available for review. For a SCRIPT BUG, re-send the corrected script: a changed script (or changed args) discards the journal and re-runs from scratch, so it does NOT replay completed agents — do not keep resuming the same buggy script.</resume>`
     )
   }
   // Surface WHICH agents failed (label + reason) so the model/user can diagnose a

@@ -21,6 +21,7 @@ Options:
   --help                       Show this help.
 
 The script only prints aggregate metrics and never prints trace message contents.
+Encrypted production traces are counted and skipped; use app APIs to decrypt them.
 `
 }
 
@@ -213,7 +214,8 @@ function detectContentKinds(text, options) {
 
 function countRegexMatches(text, pattern) {
   let count = 0
-  for (const _match of text.matchAll(pattern)) count += 1
+  const matches = text.matchAll(pattern)
+  while (!matches.next().done) count += 1
   return count
 }
 
@@ -356,11 +358,22 @@ function analyzeTrace(trace, result, options) {
   }
 }
 
+function isEncryptedTraceEnvelope(value) {
+  return (
+    value &&
+    typeof value === "object" &&
+    value.format === "cmbcowork.trace" &&
+    value.version === 1 &&
+    value.algorithm === "aes-256-gcm"
+  )
+}
+
 function createResult(root, files) {
   return {
     traceRoot: root,
     files,
     traces: 0,
+    encryptedTracesSkipped: 0,
     parseErrors: 0,
     modelCalls: 0,
     callsWithUsage: 0,
@@ -400,6 +413,7 @@ function finalizeResult(result, top) {
     traceRoot: result.traceRoot,
     files: result.files,
     traces: result.traces,
+    encryptedTracesSkipped: result.encryptedTracesSkipped,
     parseErrors: result.parseErrors,
     modelCalls: result.modelCalls,
     callsWithUsage: result.callsWithUsage,
@@ -490,6 +504,7 @@ function renderMarkdown(summary) {
       [
         ["Files", summary.files],
         ["Traces", summary.traces],
+        ["Encrypted traces skipped", summary.encryptedTracesSkipped],
         ["Parse errors", summary.parseErrors],
         ["Model calls", summary.modelCalls],
         ["Model calls with usage", summary.callsWithUsage],
@@ -586,6 +601,7 @@ function renderMarkdown(summary) {
   lines.push("- Log-like pct > 20% suggests an execute/task_output log compressor spike may be worthwhile.")
   lines.push("- Many large result refs suggest improving reversible retrieval/search UX may be worthwhile.")
   lines.push("- Percentages are char-based estimates. Provider token usage is reported separately when traces contain usage metadata.")
+  lines.push("- Encrypted traces require the app's trace APIs and are intentionally skipped by this standalone script.")
 
   return lines.join("\n")
 }
@@ -610,7 +626,12 @@ function main() {
     for (const line of content.split(/\r?\n/)) {
       if (!line.trim()) continue
       try {
-        analyzeTrace(JSON.parse(line), result, detectorOptions)
+        const parsed = JSON.parse(line)
+        if (isEncryptedTraceEnvelope(parsed)) {
+          result.encryptedTracesSkipped += 1
+          continue
+        }
+        analyzeTrace(parsed, result, detectorOptions)
       } catch {
         result.parseErrors += 1
       }

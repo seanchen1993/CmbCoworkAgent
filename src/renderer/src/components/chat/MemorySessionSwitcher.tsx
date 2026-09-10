@@ -25,7 +25,7 @@ function isSessionMemoryEnabled(metadata: unknown): boolean {
 function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProps): JSX.Element {
   const currentThreadId = useAppStore((state) => state.currentThreadId)
   const threads = useAppStore((state) => state.threads)
-  const updateThread = useAppStore((state) => state.updateThread)
+  const patchThreadMetadata = useAppStore((state) => state.patchThreadMetadata)
   const [open, setOpen] = useState(false)
   const [globalEnabled, setGlobalEnabled] = useState(false)
   const [projectModeMemoryEnabled, setProjectModeMemoryEnabled] = useState(false)
@@ -51,6 +51,14 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
       : effectiveEnabled
         ? "记忆开"
         : "记忆关"
+  const triggerValue =
+    pending || loadingGlobal
+      ? "加载中"
+      : pausedByGlobal
+        ? "暂停"
+        : effectiveEnabled
+          ? "开启"
+          : "关闭"
   const triggerTone = pausedByGlobal
     ? "text-amber-600 hover:bg-amber-500/10 dark:text-amber-300"
     : effectiveEnabled
@@ -106,13 +114,7 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
           if (mountedRef.current) setGlobalEnabled(true)
         }
 
-        const latestThread = await window.api.threads.get(currentThreadId)
-        const metadata = {
-          ...(currentThread?.metadata ?? {}),
-          ...(latestThread?.metadata ?? {}),
-          memoryEnabled: enabled
-        }
-        await updateThread(currentThreadId, { metadata })
+        await patchThreadMetadata(currentThreadId, { set: { memoryEnabled: enabled } })
         if (!mountedRef.current) return
         setOpen(false)
         toast.success(enabled ? "当前会话记忆已开启，将在下一次对话中生效" : "当前会话记忆已关闭")
@@ -124,11 +126,10 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
       }
     },
     [
-      currentThread?.metadata,
       currentThreadId,
       globalEnabled,
       pending,
-      updateThread
+      patchThreadMetadata
     ]
   )
 
@@ -150,7 +151,8 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
               <Brain className="size-3.5" />
             )}
           </span>
-          <span className="font-medium">{triggerLabel}</span>
+          <span className="font-medium text-foreground">记忆</span>
+          <span className="ml-auto text-[11px] font-medium">{triggerValue}</span>
           <ChevronDown className="size-3 opacity-70" />
         </Button>
       </PopoverTrigger>

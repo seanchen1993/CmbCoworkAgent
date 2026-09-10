@@ -1,8 +1,10 @@
-import React, { useEffect, useMemo, useRef } from "react"
+import React, { useCallback, useEffect, useMemo, useRef } from "react"
 import { Flag, Package2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { normalizeSkillId } from "@/lib/skill-ids"
 import type { SkillMetadata } from "@/types"
+import { BuiltinBrowserCommandItem } from "@/features/builtin-browser/BuiltinBrowserCommandItem"
+import { isBuiltinBrowserSlashCommand } from "@/features/builtin-browser/builtin-browser"
 import type { PopoverMode, SlashCommandItem } from "./useSlashCommands"
 import {
   computeDuplicateSkillNames,
@@ -48,7 +50,10 @@ export function SlashCommandPopover({
   onSelectSkill,
   skillsLoading = false
 }: Props): React.ReactElement | null {
-  const selectedRef = useRef<HTMLButtonElement | null>(null)
+  const selectedRef = useRef<HTMLElement | null>(null)
+  const setSelectedRef = useCallback((node: HTMLElement | null): void => {
+    selectedRef.current = node
+  }, [])
   // Depending only on the discriminator + selectedIdx (not the whole `mode`)
   // avoids re-scrolling on every filter keystroke.
   const modeKind = mode.kind
@@ -80,98 +85,109 @@ export function SlashCommandPopover({
         "max-h-80 overflow-y-auto"
       )}
     >
-      {commandCount > 0 && (
-        <>
-          <div className="px-4 pt-3 pb-1 text-xs text-muted-foreground/70">功能</div>
+        {commandCount > 0 && (
+          <>
+            <div className="px-4 pt-3 pb-1 text-xs text-muted-foreground/70">功能</div>
+            <div className="py-1">
+              {mode.commands.map((command, idx) => {
+                const isSelected = idx === selectedIdx
+                if (isBuiltinBrowserSlashCommand(command)) {
+                  return (
+                    <BuiltinBrowserCommandItem
+                      key={command.id}
+                      ref={isSelected ? setSelectedRef : null}
+                      command={command}
+                      selected={isSelected}
+                      onHover={() => onHoverIdx(idx)}
+                      onSelect={() => onSelectCommand(command)}
+                    />
+                  )
+                } else {
+                  return (
+                    <button
+                      key={command.id}
+                      ref={isSelected ? setSelectedRef : null}
+                      type="button"
+                      role="option"
+                      aria-selected={isSelected}
+                      onMouseEnter={() => onHoverIdx(idx)}
+                      onClick={() => onSelectCommand(command)}
+                      className={cn(
+                        "w-full text-left px-4 py-2 flex items-center gap-3 transition-colors",
+                        isSelected ? "bg-muted" : "hover:bg-muted/60"
+                      )}
+                    >
+                      <Flag className="size-4 text-muted-foreground shrink-0" />
+                      <span className="text-sm font-medium text-foreground shrink-0">
+                        {command.title}
+                      </span>
+                      <span className="text-sm text-muted-foreground truncate flex-1">
+                        {command.description}
+                      </span>
+                      <span className="text-xs text-muted-foreground/60 shrink-0">
+                        {command.usage ?? command.command}
+                      </span>
+                    </button>
+                  )
+                }
+              })}
+            </div>
+          </>
+        )}
+
+        {shouldShowSkillsSection && (
+          <div className="px-4 pt-3 pb-1 text-xs text-muted-foreground/70">技能</div>
+        )}
+        {shouldShowSkillsSection && mode.skills.length === 0 ? (
+          <div className="px-4 py-4 text-sm text-muted-foreground">
+            {skillsLoading ? "加载中…" : "没有匹配的命令或技能"}
+          </div>
+        ) : mode.skills.length > 0 ? (
           <div className="py-1">
-            {mode.commands.map((command, idx) => {
-              const isSelected = idx === selectedIdx
+            {mode.skills.map((s, idx) => {
+              const itemIdx = commandCount + idx
+              const isSelected = itemIdx === selectedIdx
+              const isDuplicate = duplicateNames.has(normalizeSkillId(s.name))
+              const subline = isDuplicate ? getDisambiguationLabel(s) : null
+              const isPluginSkill = Boolean(s.pluginName || s.pluginId)
               return (
                 <button
-                  key={command.id}
-                  ref={isSelected ? selectedRef : null}
+                  key={s.path}
+                  ref={isSelected ? setSelectedRef : null}
                   type="button"
                   role="option"
                   aria-selected={isSelected}
-                  onMouseEnter={() => onHoverIdx(idx)}
-                  onClick={() => onSelectCommand(command)}
+                  onMouseEnter={() => onHoverIdx(itemIdx)}
+                  onClick={() => onSelectSkill(s)}
                   className={cn(
-                    "w-full text-left px-4 py-2 flex items-center gap-3 transition-colors",
+                    "w-full text-left px-4 py-2 flex items-start gap-3 transition-colors",
                     isSelected ? "bg-muted" : "hover:bg-muted/60"
                   )}
                 >
-                  <Flag className="size-4 text-muted-foreground shrink-0" />
-                  <span className="text-sm font-medium text-foreground shrink-0">
-                    {command.title}
-                  </span>
-                  <span className="text-sm text-muted-foreground truncate flex-1">
-                    {command.description}
-                  </span>
-                  <span className="text-xs text-muted-foreground/60 shrink-0">
-                    {command.usage ?? command.command}
-                  </span>
+                  <Package2 className="size-4 text-muted-foreground shrink-0 mt-0.5" />
+                  <div className="min-w-0 flex-1 flex flex-col">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="text-sm font-medium text-foreground shrink-0">{s.name}</span>
+                      <span className="text-sm text-muted-foreground truncate flex-1">
+                        {s.description}
+                      </span>
+                      {isPluginSkill && <PluginBadge />}
+                      <SourceBadge skill={s} />
+                    </div>
+                    {subline && (
+                      <span
+                        className="text-xs text-muted-foreground/70 truncate mt-0.5"
+                        title={subline}
+                      >
+                        {subline}
+                      </span>
+                    )}
+                  </div>
                 </button>
               )
             })}
           </div>
-        </>
-      )}
-
-      {shouldShowSkillsSection && (
-        <div className="px-4 pt-3 pb-1 text-xs text-muted-foreground/70">技能</div>
-      )}
-      {shouldShowSkillsSection && mode.skills.length === 0 ? (
-        <div className="px-4 py-4 text-sm text-muted-foreground">
-          {skillsLoading ? "加载中…" : "没有匹配的命令或技能"}
-        </div>
-      ) : mode.skills.length > 0 ? (
-        <div className="py-1">
-          {mode.skills.map((s, idx) => {
-            const itemIdx = commandCount + idx
-            const isSelected = itemIdx === selectedIdx
-            const isDuplicate = duplicateNames.has(normalizeSkillId(s.name))
-            const subline = isDuplicate ? getDisambiguationLabel(s) : null
-            const isPluginSkill = Boolean(s.pluginName || s.pluginId)
-            return (
-              <button
-                key={s.path}
-                ref={isSelected ? selectedRef : null}
-                type="button"
-                role="option"
-                aria-selected={isSelected}
-                onMouseEnter={() => onHoverIdx(itemIdx)}
-                onClick={() => onSelectSkill(s)}
-                className={cn(
-                  "w-full text-left px-4 py-2 flex items-start gap-3 transition-colors",
-                  isSelected ? "bg-muted" : "hover:bg-muted/60"
-                )}
-              >
-                <Package2 className="size-4 text-muted-foreground shrink-0 mt-0.5" />
-                <div className="min-w-0 flex-1 flex flex-col">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="text-sm font-medium text-foreground shrink-0">
-                      {s.name}
-                    </span>
-                    <span className="text-sm text-muted-foreground truncate flex-1">
-                      {s.description}
-                    </span>
-                    {isPluginSkill && <PluginBadge />}
-                    <SourceBadge skill={s} />
-                  </div>
-                  {subline && (
-                    <span
-                      className="text-xs text-muted-foreground/70 truncate mt-0.5"
-                      title={subline}
-                    >
-                      {subline}
-                    </span>
-                  )}
-                </div>
-              </button>
-            )
-          })}
-        </div>
-      ) : null}
+        ) : null}
     </div>
   )
 }

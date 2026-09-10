@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatx.cmb.local/contracts/remote-im-event-v1.schema.json",
+  "title": "RemoteImEventV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "platformMessageId",
+    "principalId",
+    "conversationKey",
+    "conversationSeq",
+    "message",
+    "occurredAt",
+    "lease"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "eventId": { "type": "string", "minLength": 1 },
+    "platformMessageId": { "type": "string", "minLength": 1 },
+    "principalId": { "type": "string", "minLength": 1 },
+    "conversationKey": { "type": "string", "minLength": 1 },
+    "conversationSeq": { "type": "integer", "minimum": 1 },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "text" },
+        "text": { "type": "string", "minLength": 1 }
+      }
+    },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "expiresAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "redelivered": { "type": "boolean" }
+  }
+}

@@ -1,7 +1,13 @@
 import { getHookLoggingConfig } from "../storage"
+import {
+  redactAndTruncateSensitiveText,
+  redactLogValue,
+  redactSensitiveText
+} from "../log-redaction"
 import { persistHookExecutionRecord } from "./persistence"
 import type { ScopeSkipReason } from "./scope"
-import type { HookConfig, HookEvent, HookResult } from "./types"
+import type { HookConfig, HookEvent, HookResult, HookType } from "./types"
+import type { HookLoggingConfig } from "../types"
 
 const MAX_STDOUT_PREVIEW_CHARS = 4_000
 const MAX_STDERR_PREVIEW_CHARS = 8_000
@@ -10,12 +16,16 @@ const MAX_ADDITIONAL_CONTEXT_PREVIEW_CHARS = 4_000
 // since diagnostic mode also writes the untruncated record to jsonl this
 // preview just needs to be wide enough to be useful at a glance.
 const MAX_STDIN_PREVIEW_CHARS = 32_000
+const MAX_DIAGNOSTIC_STDIN_CHARS = 64 * 1024
 const USER_CONTEXT_SECRET_KEYS = new Set(["yst_id_token"])
 
 function truncatePreview(text: string | undefined, maxChars: number): string {
   if (!text) return ""
-  if (text.length <= maxChars) return text
-  return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`
+  return redactAndTruncateSensitiveText(
+    text,
+    maxChars,
+    (omittedChars) => `\n...[truncated ${omittedChars} chars]`
+  )
 }
 
 function maybePreview(text: string | undefined, maxChars: number, preview: boolean): string {
@@ -25,6 +35,13 @@ function maybePreview(text: string | undefined, maxChars: number, preview: boole
 
 function redactHookStdinPayload(text: string | undefined): string | undefined {
   if (!text) return text
+  if (text.length > MAX_DIAGNOSTIC_STDIN_CHARS) {
+    return redactAndTruncateSensitiveText(
+      text,
+      MAX_DIAGNOSTIC_STDIN_CHARS,
+      (omittedChars) => `\n...[truncated ${omittedChars} chars]`
+    )
+  }
   try {
     const parsed = JSON.parse(text) as unknown
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return text
@@ -39,10 +56,7 @@ function redactHookStdinPayload(text: string | undefined): string | undefined {
     }
     return JSON.stringify({ ...payload, user_context: userContext })
   } catch {
-    return text.replace(
-      /("(?:yst_id_token|[^"]*token[^"]*)"\s*:\s*")[^"]*(")/gi,
-      "$1[redacted]$2"
-    )
+    return redactSensitiveText(text)
   }
 }
 
@@ -61,7 +75,7 @@ export interface HookExecutedEnvelope {
   /** "executed" = ran; "skipped" = matched event but scope-filtered out (diagnostic only). */
   kind: "executed" | "skipped"
   event: HookEvent
-  hookType: "command" | "prompt"
+  hookType: HookType
   /** Concise display label (command preview or prompt preview). */
   label: string
   /** Full command text — present when diagnostic mode is on. */
@@ -111,10 +125,15 @@ export type ScopedHook = HookConfig & {
 }
 
 function buildLabel(hook: HookConfig, diagnostic: boolean): string {
-  const text = hook.type === "prompt" ? (hook.prompt ?? "") : (hook.command ?? "")
+  const text =
+    hook.type === "prompt"
+      ? (hook.prompt ?? "")
+      : hook.type === "http"
+        ? (hook.url ?? "")
+        : (hook.command ?? "")
   // In diagnostic mode the modal shows the full command separately; for the
   // chip-list label we still want something readable, so cap to 120 chars.
-  return diagnostic ? text.slice(0, 120) : text.slice(0, 60)
+  return redactAndTruncateSensitiveText(text, diagnostic ? 120 : 60, "…")
 }
 
 function buildExecutedEnvelope(
@@ -124,7 +143,7 @@ function buildExecutedEnvelope(
   diagnostic: boolean,
   options: { preview: boolean; turnId?: string }
 ): HookExecutedEnvelope {
-  const hookType = (hook.type ?? "command") as "command" | "prompt"
+  const hookType = hook.type ?? "command"
   const envelope: HookExecutedEnvelope = {
     type: "hook_executed",
     kind: "executed",
@@ -143,7 +162,11 @@ function buildExecutedEnvelope(
     stopReason: result.stopReason,
     decision: result.decision,
     reason: result.reason,
-    stdout: maybePreview(result.stdout, MAX_STDOUT_PREVIEW_CHARS, options.preview),
+    stdout: maybePreview(
+      result.rawStdout ?? result.stdout,
+      MAX_STDOUT_PREVIEW_CHARS,
+      options.preview
+    ),
     stderr: maybePreview(result.stderr, MAX_STDERR_PREVIEW_CHARS, options.preview),
     additionalContext: maybePreview(
       result.additionalContext,
@@ -159,7 +182,8 @@ function buildExecutedEnvelope(
     parentThreadId: hook.parentThreadId
   }
   if (diagnostic) {
-    envelope.command = hook.type === "prompt" ? hook.prompt : hook.command
+    envelope.command =
+      hook.type === "prompt" ? hook.prompt : hook.type === "http" ? hook.url : hook.command
     envelope.hookSourcePath = hook.hookSourcePath
     // Prefer the cwd the runner actually used (set on `result.cwd` in
     // diagnostic mode); fall back to hook.hookSourceRoot so log records
@@ -182,14 +206,15 @@ function buildSkippedEnvelope(
   reason: ScopeSkipReason,
   turnId?: string
 ): HookExecutedEnvelope {
-  const hookType = (hook.type ?? "command") as "command" | "prompt"
+  const hookType = hook.type ?? "command"
   return {
     type: "hook_executed",
     kind: "skipped",
     event,
     hookType,
     label: buildLabel(hook, true),
-    command: hook.type === "prompt" ? hook.prompt : hook.command,
+    command:
+      hook.type === "prompt" ? hook.prompt : hook.type === "http" ? hook.url : hook.command,
     toolSuffix: hook.matcher && hook.matcher !== "*" ? `/${hook.matcher}` : "",
     pluginId: hook.pluginId,
     pluginName: hook.pluginName,
@@ -214,11 +239,24 @@ export function buildHookResultRecord(
   turnId?: string
 ): HookExecutedEnvelope | null {
   const cfg = getHookLoggingConfig()
-  if (!cfg.enabled) return null
-  return buildExecutedEnvelope(event, hook as ScopedHook, result, cfg.diagnostic, {
-    preview: true,
-    turnId
-  })
+  return buildHookResultRecordForConfig(event, hook, result, cfg, turnId)
+}
+
+/** Pure record builder for callers/tests that already have a logging config snapshot. */
+export function buildHookResultRecordForConfig(
+  event: HookEvent,
+  hook: HookConfig,
+  result: HookResult,
+  config: Pick<HookLoggingConfig, "enabled" | "diagnostic">,
+  turnId?: string
+): HookExecutedEnvelope | null {
+  if (!config.enabled) return null
+  return redactLogValue(
+    buildExecutedEnvelope(event, hook as ScopedHook, result, config.diagnostic, {
+      preview: true,
+      turnId
+    })
+  ) as HookExecutedEnvelope
 }
 
 function buildPersistedHookResultRecord(
@@ -229,10 +267,12 @@ function buildPersistedHookResultRecord(
 ): HookExecutedEnvelope | null {
   const cfg = getHookLoggingConfig()
   if (!cfg.enabled) return null
-  return buildExecutedEnvelope(event, hook as ScopedHook, result, cfg.diagnostic, {
-    preview: false,
-    turnId
-  })
+  return redactLogValue(
+    buildExecutedEnvelope(event, hook as ScopedHook, result, cfg.diagnostic, {
+      preview: false,
+      turnId
+    })
+  ) as HookExecutedEnvelope
 }
 
 export function buildHookSkippedRecord(
@@ -244,7 +284,7 @@ export function buildHookSkippedRecord(
   const cfg = getHookLoggingConfig()
   // Skipped rows are diagnostic-only — too noisy to show by default.
   if (!cfg.enabled || !cfg.diagnostic) return null
-  return buildSkippedEnvelope(event, hook, reason, turnId)
+  return redactLogValue(buildSkippedEnvelope(event, hook, reason, turnId)) as HookExecutedEnvelope
 }
 
 export function persistHookRecordOnce(envelope: HookExecutedEnvelope): void {

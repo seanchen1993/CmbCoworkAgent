@@ -1,12 +1,22 @@
-import { promises as fsp, readFileSync, statSync } from "fs"
-import { dirname, isAbsolute } from "path"
+import { promises as fsp } from "fs"
+import { dirname, isAbsolute, resolve } from "path"
 import fastGlob from "fast-glob"
+import {
+  openStableFileHandle,
+  readStableFileHandleBounded,
+  StableBoundedReadError,
+  type StableFileHandle
+} from "../../services/stable-file-handle"
 import { runWorkflowScriptInSandbox } from "./sandbox"
 import { validateWorkflowScript, MAX_WORKFLOW_SCRIPT_BYTES } from "./script"
 import { sha256Hex, type WorkflowRunStore } from "./run-store"
 import { resolveExistingWorkspacePath, resolveWorkspaceWritePath } from "./paths"
 import { assertSupportedJsonSchema } from "./json-schema"
-import { loadAgentProfiles, resolveProfileFromList } from "../agent-registry"
+import {
+  loadAgentProfilesAsync,
+  resolveProfileFromList,
+  type AgentProfile
+} from "../agent-registry"
 import {
   WORKFLOW_LOG_MAX_CHARS,
   WORKFLOW_MAX_AGENT_INVOCATIONS,
@@ -63,6 +73,9 @@ export interface WorkflowEngineOptions {
   emit: WorkflowProgressEmitter
   signal: AbortSignal
   maxConcurrency?: number
+  /** Immutable profile snapshot approved for this run. Direct engine callers
+   * may omit it; the engine then loads one asynchronously exactly once. */
+  agentProfiles?: readonly AgentProfile[]
   /** Resolves `workflow({ scriptPath })` to a child script source inside the workspace. */
   workspacePath: string
   /** True while a subagent of this run is blocked on a pending user approval. The
@@ -111,7 +124,6 @@ interface SharedRuntime {
   agentsCached: number
   agentsFailed: number
   outputTokens: number
-  depth: number
   callSeq: number
 }
 
@@ -132,6 +144,7 @@ export async function runWorkflowEngine(
 ): Promise<WorkflowEngineResult> {
   const startedAt = Date.now()
   const runId = options.runStore.state.runId
+  const agentProfiles = options.agentProfiles ?? (await loadAgentProfilesAsync(options.workspacePath))
   // Per-run limiter (NARROWable via maxConcurrency) composed UNDER the global
   // ceiling: a run is bounded by min(its own cap, the process-wide cap), and
   // concurrent runs can't collectively exceed the global cap. Order matters —
@@ -150,7 +163,6 @@ export async function runWorkflowEngine(
     agentsCached: 0,
     agentsFailed: 0,
     outputTokens: 0,
-    depth: 0,
     callSeq: 0
   }
   // Content-based replay (official semantics): index the journal by call-identity
@@ -160,7 +172,8 @@ export async function runWorkflowEngine(
   // run's real latency and the resumed run's instant cache) at 100% cache-hit.
   // The same hash appearing N times → N entries consumed in arrival order (their
   // results are interchangeable, being the same input).
-  const resumed = options.runStore.state.journal.length > 0
+  const resumed =
+    options.runStore.state.resumed === true || options.runStore.state.journal.length > 0
   const availableByHash = new Map<string, WorkflowJournalEntry[]>()
   for (const entry of options.runStore.state.journal) {
     const bucket = availableByHash.get(entry.hash)
@@ -330,8 +343,8 @@ export async function runWorkflowEngine(
   runtimeDeadlineTimer.unref?.()
 
   const drainPendingAgents = async (): Promise<void> => {
-    // A script may fire agent() calls without awaiting them; their results are
-    // already journaled as they land, but finalize must not race their events.
+    // A script may fire agent() calls without awaiting them; finalize must not
+    // race their events.
     // Loop with a FRESH snapshot each round, and only conclude after one full
     // macrotask of quiescence — a settling agent's .then chain registers its
     // follow-up agent() marker in a microtask that can otherwise slip past a
@@ -364,10 +377,12 @@ export async function runWorkflowEngine(
       name: options.parsed.meta.name,
       description: options.parsed.meta.description,
       phases: (options.parsed.meta.phases ?? []).map((phase) => phase.title),
-      resumed
+      resumed,
+      worktrees: options.runStore.state.worktrees
     })
     const globals = buildWorkflowGlobals({
       ...options,
+      agentProfiles,
       emit: emitWithHeartbeat,
       signal: lifetime.signal,
       shared,
@@ -469,7 +484,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
   // re-read .cmbcoworkagent/agents/ on every agent() call. A run therefore sees a
   // stable registry, consistent with the journal/hash contract (mid-run edits to
   // an agent file take effect on the next run, like editing the script would).
-  const registryProfiles = loadAgentProfiles(context.workspacePath)
+  const registryProfiles = context.agentProfiles ?? []
   // Shared resolution (exact, then case-insensitive for built-in NAMES even when
   // user-overridden) so a lowercase `explore` keeps working after an Explore.md
   // override — and identical to the Solo path's resolveAgentProfile.
@@ -693,6 +708,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         `opts.isolation "${request.ignoredIsolation}" is not supported here — running in the shared workspace (file writes are serialized across the run)`
       )
     }
+    const isolated = request.options.isolation === "worktree"
     // Reserve the slot and the resume key synchronously (no await in between),
     // so a parallel() fan-out cannot overshoot the agent cap or race callSeq.
     shared.agentCount += 1
@@ -737,7 +753,11 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
               disallowedTools: [...agentProfile.disallowedTools].sort(),
               shellAccess: agentProfile.shellAccess
             }
-          : null
+          : null,
+        // Preserve the pre-worktree hash for ordinary agents so existing journals
+        // still replay after an upgrade. An explicitly isolated call gets a
+        // distinct identity and can never consume a shared-workspace entry.
+        ...(request.options.isolation ? { isolation: request.options.isolation } : {})
       })
     )
 
@@ -832,7 +852,8 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           signal,
           roleSystemPrompt: agentProfile?.systemPrompt,
           disallowedTools: agentProfile?.disallowedTools,
-          shellAccess: agentProfile?.shellAccess
+          shellAccess: agentProfile?.shellAccess,
+          isolation: request.options.isolation
         })
         throwIfAborted()
 
@@ -855,7 +876,16 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         const structuredOversized =
           structuredSafe !== undefined &&
           (structuredSerialization?.json?.length ?? 0) > WORKFLOW_RESULT_MAX_CHARS
-        if (structuredOversized) {
+        if (isolated) {
+          // An isolated agent's real deliverable is its owned checkout, not only
+          // its text. Replaying it would require revalidating the persisted
+          // checkout/branch/manifest as one unit. Keep resume simple and honest:
+          // rerun the call in a fresh worktree; the previous deliverable remains
+          // independently visible for explicit Merge or Discard.
+          log(
+            `${label}: isolated (worktree) agents are not journaled — a resume re-runs this call in a fresh worktree`
+          )
+        } else if (structuredOversized) {
           log(
             `${label}: structured result too large to journal — only this call re-runs on resume (content-based matching; other agents still replay from cache)`
           )
@@ -900,7 +930,14 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         // path matches the cached-replay path (which returns toJsonSafe too) and
         // never hands a host-realm object to a caller that bypasses the sandbox
         // bridge (e.g. a direct unit test).
-        return request.options.schema ? structuredSafe : text
+        const hasSchema = request.options.schema !== undefined
+        const value = hasSchema ? structuredSafe : text
+        // Worktree ownership is intentionally an out-of-band host concern. Keep
+        // agent()'s business result identical whether the child ran shared or in
+        // an isolated checkout: schema calls return the exact validated object;
+        // non-schema calls return their final text. The run ledger and UI retain
+        // branch/path/status for review and integration.
+        return value
       } catch (error) {
         if (signal.aborted || isWorkflowAbortError(error)) throw new WorkflowAbortError()
         if (isWorkflowFatalError(error)) throw error
@@ -1010,10 +1047,13 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
 
   const workflowFn = async (nameOrRef: unknown, childArgs?: unknown): Promise<unknown> => {
     if (signal.aborted) return parkForever()
-    if (context.childName || shared.depth >= 1) {
+    // Nesting is a property of THIS call's context, not of the whole parent run.
+    // A run may legitimately start several sibling child workflows via parallel();
+    // a shared counter would misclassify the second sibling as a child of the first.
+    if (context.childName) {
       throw new WorkflowFatalError("workflow() cannot be called from within a child workflow")
     }
-    const { source, name } = loadChildWorkflowSource(context.workspacePath, nameOrRef)
+    const { source, name } = await loadChildWorkflowSource(context.workspacePath, nameOrRef)
     let parsedChild: ParsedWorkflowScript
     try {
       parsedChild = validateWorkflowScript(source)
@@ -1022,30 +1062,25 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         `child workflow "${name}" is invalid: ${describeWorkflowError(error)}`
       )
     }
-    shared.depth += 1
     log(`running child workflow ${parsedChild.meta.name}`)
-    try {
-      const childGlobals = buildWorkflowGlobals({
-        ...context,
-        parsed: parsedChild,
-        args: childArgs,
-        childName: parsedChild.meta.name,
-        // Key the journal on the child SCRIPT content, so two different child files
-        // with the same meta.name can't cross-hit each other's cache (#5).
-        childCacheKey: sha256Hex(source)
+    const childGlobals = buildWorkflowGlobals({
+      ...context,
+      parsed: parsedChild,
+      args: childArgs,
+      childName: parsedChild.meta.name,
+      // Key the journal on the child SCRIPT content, so two different child files
+      // with the same meta.name can't cross-hit each other's journal cache.
+      childCacheKey: sha256Hex(source)
+    })
+    // A child workflow's return value is consumed by the parent script; its
+    // value is already vm-serialized plain JSON (no hostile getters survive).
+    return (
+      await runWorkflowScriptInSandbox({
+        body: parsedChild.body,
+        globals: childGlobals,
+        signal
       })
-      // A child workflow's return value is consumed by the parent script; its
-      // value is already vm-serialized plain JSON (no hostile getters survive).
-      return (
-        await runWorkflowScriptInSandbox({
-          body: parsedChild.body,
-          globals: childGlobals,
-          signal
-        })
-      ).value
-    } finally {
-      shared.depth -= 1
-    }
+    ).value
   }
 
   // Guest file IO (read/write/glob/exists), workspace-jailed. Lets the script
@@ -1271,6 +1306,8 @@ function normalizeAgentArgs(
   prompt: string
   options: WorkflowAgentOptions
   agentType?: string
+  /** Legacy unsupported values remain a warning-only no-op. Only the explicit
+   * `worktree` value opts into the new execution mode. */
   ignoredIsolation?: string
 } {
   if (typeof prompt !== "string" || !prompt.trim()) {
@@ -1332,17 +1369,19 @@ function normalizeAgentArgs(
     // garbage structured output through.
     assertSupportedJsonSchema(options.schema)
   }
-  // worktree/remote isolation isn't supported here (subagents already run in
-  // their own session, and file writes are serialized across the run). Rather
-  // than throw — which would crash a whole script just because a mid-tier model
-  // pulled `isolation: 'worktree'` from training — warn and ignore. agentType is
-  // stricter because a miss there could drop an intended permissions boundary.
+  // Keep the old warning-only behavior for values the workflow engine has never
+  // implemented. This change adds exactly one opt-in value (`worktree`); turning
+  // old model-generated or hand-authored values into hard failures would change
+  // existing workflows rather than add a feature.
   const ignoredIsolation =
-    typeof candidate.isolation === "string" && candidate.isolation.trim()
-      ? candidate.isolation.trim()
-      : candidate.isolation !== undefined
-        ? "(unsupported)"
-        : undefined
+    candidate.isolation !== undefined && candidate.isolation !== "worktree"
+      ? typeof candidate.isolation === "string" && candidate.isolation.trim()
+        ? candidate.isolation.trim()
+        : "(unsupported)"
+      : undefined
+  if (candidate.isolation === "worktree") {
+    options.isolation = "worktree"
+  }
   return { prompt, options, agentType, ignoredIsolation }
 }
 
@@ -1365,10 +1404,10 @@ function recordAgentState(
   runStore.upsertAgent(record)
 }
 
-function loadChildWorkflowSource(
+async function loadChildWorkflowSource(
   workspacePath: string,
   nameOrRef: unknown
-): { source: string; name: string } {
+): Promise<{ source: string; name: string }> {
   // Only { scriptPath } is supported. (A by-name registry would need a save
   // mechanism that doesn't exist here, so accepting `name` would be a dead path
   // that always 404s and just confuses the model.)
@@ -1381,35 +1420,66 @@ function loadChildWorkflowSource(
   if (!scriptPath) {
     throw new TypeError('workflow() expects { scriptPath: "…" }')
   }
-  // Realpath-based containment check (blocks symlink escapes too).
-  const resolved = resolveExistingWorkspacePath(
-    workspacePath,
-    scriptPath,
-    `workflow "${scriptPath}"`
-  )
-  // Cap the size BEFORE reading the whole file synchronously — a script could
-  // point at a huge workspace file and stall/OOM the main process otherwise
-  // (mirrors the top-level scriptPath guard in tool.ts).
+  const requestedPath = resolve(workspacePath, scriptPath)
+  let opened: StableFileHandle
   try {
-    const st = statSync(resolved)
-    // Regular-file guard: a FIFO/socket/device would make the synchronous
-    // readFileSync below block the main process (a FIFO read parks for a writer).
-    if (!st.isFile()) {
-      throw new WorkflowScriptError(`workflow "${scriptPath}" is not a regular file`)
-    }
-    if (st.size > MAX_WORKFLOW_SCRIPT_BYTES) {
-      throw new WorkflowScriptError(
-        `workflow "${scriptPath}" is too large (${st.size} bytes > ${MAX_WORKFLOW_SCRIPT_BYTES} limit)`
+    // Resolve containment and acquire the read capability together. The helper
+    // uses O_NONBLOCK for special files, verifies a regular inode, and checks
+    // that the pathname still names that inode before returning. Every byte
+    // below is then read through this handle, so a pathname replacement cannot
+    // redirect execution to a different file after authorization.
+    opened = await openStableFileHandle(workspacePath, requestedPath)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : ""
+    if (/outside the trusted root/i.test(reason)) {
+      throw new WorkflowFatalError(
+        `workflow "${scriptPath}" must stay inside the workspace (got "${scriptPath}")`
       )
     }
-  } catch (error) {
-    if (error instanceof WorkflowScriptError) throw error
-    throw new WorkflowScriptError(`workflow "${scriptPath}" could not be read at ${resolved}`)
+    if (reason === "Cannot preview a directory" || /not a regular file/i.test(reason)) {
+      throw new WorkflowScriptError(`workflow "${scriptPath}" is not a regular file`)
+    }
+    throw new WorkflowScriptError(`workflow "${scriptPath}" not found at ${requestedPath}`)
   }
+
   try {
-    return { source: readFileSync(resolved, "utf-8"), name: scriptPath }
-  } catch {
-    throw new WorkflowScriptError(`workflow "${scriptPath}" not found at ${resolved}`)
+    return {
+      source: await readBoundedChildWorkflowScript(opened, scriptPath),
+      name: scriptPath
+    }
+  } catch (error) {
+    if (error instanceof WorkflowScriptError || error instanceof WorkflowFatalError) throw error
+    throw new WorkflowScriptError(`workflow "${scriptPath}" could not be read at ${requestedPath}`)
+  } finally {
+    await opened.handle.close().catch(() => undefined)
+  }
+}
+
+/** Map shared bounded-reader failures onto child-workflow error messages. */
+async function readBoundedChildWorkflowScript(
+  opened: StableFileHandle,
+  scriptPath: string
+): Promise<string> {
+  try {
+    return (await readStableFileHandleBounded(opened, MAX_WORKFLOW_SCRIPT_BYTES)).toString(
+      "utf8"
+    )
+  } catch (error) {
+    if (error instanceof StableBoundedReadError) {
+      if (error.failure === "initial-too-large") {
+        throw new WorkflowScriptError(
+          `workflow "${scriptPath}" is too large ` +
+            `(${error.observedSize} bytes > ${MAX_WORKFLOW_SCRIPT_BYTES} limit)`
+        )
+      }
+      if (error.failure === "grew-too-large") {
+        throw new WorkflowScriptError(
+          `workflow "${scriptPath}" is too large (exceeds ${MAX_WORKFLOW_SCRIPT_BYTES} limit)`
+        )
+      }
+      throw new WorkflowScriptError(`workflow "${scriptPath}" changed while it was being read`)
+    }
+    throw error
   }
 }
 

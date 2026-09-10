@@ -44,7 +44,10 @@ EnsoAI-main/
 .github/
 output/
 .playwright-cli/
+.playwright-mcp/
 git.md
 
 chrome-extension/
-.playwright-mcp/
+chrome-extension.zip
+
+playwright-main/

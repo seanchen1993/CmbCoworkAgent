@@ -163,13 +163,13 @@ describe("builtin model registry", () => {
         models: [
           {
             id: "minimax-m2p5-229b-w8a8",
-            baseUrl: "http://open-llm.uat.cmbchina.cn/llm/minimax-m2p5-229b-w8a8/v1",
+            baseUrl: "https://llm.example.test/minimax/v1",
             model: "minimax-m2p5-229b-w8a8"
           },
           {
             id: "deepseek-v4-flash-284b-a13b-w8a8",
             baseUrl:
-              "http://open-llm.uat.cmbchina.cn/llm/deepseek-v4-flash-284b-a13b-w8a8/v1",
+              "https://llm.example.test/deepseek/v1",
             model: "deepseek-v4-flash-284b-a13b-w8a8"
           }
         ]
@@ -329,6 +329,17 @@ describe("builtin model registry", () => {
         enableThinking: "false" as unknown as boolean
       })
     ).toThrow("true 或 false")
+  })
+
+  it("rejects builtin overrides whose output budget prevents compaction", async () => {
+    await refreshBuiltinModelCatalog(true)
+
+    expect(() =>
+      updateBuiltinModelOverride("minimax-m2p5-229b-w8a8", {
+        maxTokens: 32_000,
+        maxOutputTokens: 28_000
+      })
+    ).toThrow("compaction trigger 3000 must exceed retained context 3200")
   })
 
   it("keeps the last good remote catalog when a refresh is malformed", async () => {

@@ -36,6 +36,7 @@ import { marketApi, type MarketItem } from "@/api/market"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
@@ -2393,8 +2394,8 @@ export function EvolutionPanel(): React.JSX.Element {
                 onlineSkillEvolutionEnabled ? "bg-violet-500" : "bg-muted-foreground/30"
               )}
             >
-              <span className={cn(
-                "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
+              <ToggleThumb className={cn(
+                "inline-block size-3.5",
                 onlineSkillEvolutionEnabled ? "translate-x-4" : "translate-x-0.5"
               )} />
             </button>
