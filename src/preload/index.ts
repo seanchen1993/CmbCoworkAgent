@@ -1771,6 +1771,7 @@ const api = {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -1798,6 +1799,7 @@ const api = {
         changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
+        skippedDirs?: string[]
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         hasPushableCommit: boolean
@@ -1868,6 +1870,7 @@ const api = {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
@@ -1890,6 +1893,7 @@ const api = {
         changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
+        skippedDirs?: string[]
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         suggestedCommitMessage?: string
@@ -1934,6 +1938,29 @@ const api = {
           additions: number
           deletions: number
         }
+        error?: string
+      }>
+    },
+    addGitignoreEntry: (
+      threadId: string,
+      targetPath: string,
+      kind: "file" | "directory",
+      options?: { worktreePath?: string }
+    ): Promise<{
+      success: boolean
+      entry?: string
+      alreadyExists?: boolean
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:addGitignoreEntry", {
+        threadId,
+        targetPath,
+        kind,
+        options
+      }) as Promise<{
+        success: boolean
+        entry?: string
+        alreadyExists?: boolean
         error?: string
       }>
     },

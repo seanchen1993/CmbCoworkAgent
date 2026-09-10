@@ -1,22 +1,16 @@
 import { BrowserWindow, type IpcMain } from "electron"
 import { randomUUID } from "crypto"
-import { execFile } from "child_process"
-import { lstat, mkdir, readFile, rename, writeFile, rm, stat } from "fs/promises"
+import { execFile, spawn } from "child_process"
+import { appendFile, lstat, mkdir, readFile, rename, writeFile, rm, stat } from "fs/promises"
 import * as path from "path"
 import { promisify } from "util"
 import { getThreadCore } from "../db"
-import {
-  mutateLatestThreadMetadata,
-  parseThreadMetadata
-} from "../services/thread-metadata"
+import { mutateLatestThreadMetadata, parseThreadMetadata } from "../services/thread-metadata"
 import { getOpenworkDir } from "../storage"
 import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
 import { resolveGitOperationPath } from "../services/git-repository-discovery"
 import type { GitCommitHistoryRecord } from "../../shared/git-commit-history"
-import {
-  captureThreadIncarnation,
-  matchesThreadIncarnation
-} from "../services/thread-incarnation"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 
 const execFileAsync = promisify(execFile)
 const GIT_COMMIT_HISTORY_LIMIT_PER_PROJECT = 80
@@ -27,6 +21,7 @@ const GIT_PANEL_REJECT_PATHSPEC_CHUNK_MAX_CHARS = 24_000
 const GIT_PANEL_REJECT_PATHSPEC_CHUNK_MAX_COUNT = 100
 const GIT_PANEL_REJECT_FS_CONCURRENCY = 8
 const GIT_RESTORE_MIN_VERSION = { major: 2, minor: 23 }
+const SKIPPED_DIR_SCAN_TIMEOUT_MS = 5_000
 
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
@@ -47,6 +42,7 @@ interface GitPanelChangedFile {
 }
 
 interface ExecFileError extends Error {
+  code?: number | string
   stderr?: string | Buffer
   stdout?: string | Buffer
 }
@@ -90,6 +86,132 @@ function normalizeGitRelativePath(input: string): string {
     .replace(/^\.\/+/, "")
     .replace(/^\/+/, "")
     .replace(/\/+$/, "")
+}
+
+function normalizeGitignoreEntry(input: string, kind: "file" | "directory"): string {
+  const normalized = normalizeGitRelativePath(input)
+  if (!normalized) throw new Error("请选择要忽略的文件或文件夹")
+  if (normalized.includes("\0") || normalized.includes("\n") || normalized.includes("\r")) {
+    throw new Error("忽略路径包含非法字符")
+  }
+  if (normalized === "." || normalized === ".." || normalized.startsWith("../")) {
+    throw new Error("忽略路径不能指向仓库外")
+  }
+  const safePath = path.posix.normalize(normalized)
+  if (!safePath || safePath === "." || safePath === ".." || safePath.startsWith("../")) {
+    throw new Error("忽略路径不能指向仓库外")
+  }
+  return kind === "directory" ? `${safePath.replace(/\/+$/, "")}/` : safePath
+}
+
+export async function collectSkippedUntrackedGitPanelDirs(
+  worktreePath: string,
+  dirs: readonly string[],
+  options?: { silent?: boolean }
+): Promise<string[]> {
+  const candidates = await Promise.all(
+    dirs.map(async (dir) => {
+      const normalizedDir = normalizeGitRelativePath(dir)
+      if (!normalizedDir) return null
+      try {
+        const stats = await stat(path.join(worktreePath, normalizedDir))
+        return stats.isDirectory() ? normalizedDir : null
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null
+        throw error
+      }
+    })
+  )
+  const candidateDirs = candidates.filter((dir): dir is string => Boolean(dir))
+  if (candidateDirs.length === 0) return []
+
+  return collectSkippedUntrackedGitPanelDirsFromGit(worktreePath, candidateDirs, {
+    silent: Boolean(options?.silent)
+  })
+}
+
+async function collectSkippedUntrackedGitPanelDirsFromGit(
+  worktreePath: string,
+  candidateDirs: readonly string[],
+  options?: { silent?: boolean }
+): Promise<string[]> {
+  const args = [
+    "-C",
+    worktreePath,
+    "-c",
+    "core.quotepath=false",
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "--full-name",
+    "-z",
+    "--",
+    ...candidateDirs.map((dir) => `${dir}/`)
+  ]
+  const command = formatGitCommand(worktreePath, args.slice(2))
+  if (!options?.silent) console.log(`[GitPanel][exec] ${command}`)
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let remainder = ""
+    const stderrChunks: Buffer[] = []
+    const skipped = new Set<string>()
+    const orderedDirs = [...candidateDirs].sort((a, b) => b.length - a.length)
+    const child = spawn("git", args, {
+      env: GIT_BASE_ENV,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...GIT_SPAWN_OPTIONS
+    })
+
+    const finish = (error: Error | null): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      if (error) {
+        reject(error)
+        return
+      }
+      if (!options?.silent) console.log(`[GitPanel][exec][ok] ${command}`)
+      resolve(candidateDirs.filter((dir) => skipped.has(dir)))
+    }
+
+    const recordPath = (rawPath: string): void => {
+      const normalizedPath = normalizeGitRelativePath(rawPath)
+      if (!normalizedPath) return
+      const matched = orderedDirs.find(
+        (dir) => normalizedPath === dir || normalizedPath.startsWith(`${dir}/`)
+      )
+      if (matched) skipped.add(matched)
+    }
+
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL")
+      finish(new Error(`git skipped-dir scan timed out after ${SKIPPED_DIR_SCAN_TIMEOUT_MS}ms`))
+    }, SKIPPED_DIR_SCAN_TIMEOUT_MS)
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      remainder += chunk.toString("utf8")
+      const parts = remainder.split("\0")
+      remainder = parts.pop() ?? ""
+      for (const part of parts) recordPath(part)
+    })
+    child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk))
+    child.on("error", (error) => finish(error))
+    child.on("close", (code) => {
+      if (remainder) recordPath(remainder)
+      if (code === 0) {
+        finish(null)
+        return
+      }
+      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim()
+      const error = new Error(
+        stderr || `git skipped-dir scan exited with code ${code ?? "unknown"}`
+      ) as ExecFileError
+      error.code = code ?? undefined
+      error.stderr = stderr
+      finish(error)
+    })
+  })
 }
 
 function toPosixRelative(input: string): string {
@@ -146,7 +268,10 @@ function toWorktreeRelativePath(worktreePath: string, rawPath: string): string[]
   return Array.from(result).filter(Boolean)
 }
 
-function worktreeBasenamePrefixedPathToRelativePath(worktreePath: string, rawPath: string): string | null {
+function worktreeBasenamePrefixedPathToRelativePath(
+  worktreePath: string,
+  rawPath: string
+): string | null {
   const normalized = normalizeGitRelativePath(rawPath)
   if (!normalized || isAbsoluteLikePath(rawPath)) return null
 
@@ -231,9 +356,16 @@ function explicitPathToWorktreeRelativePath(
   return directCandidate ?? workspaceRelativeCandidate ?? basenamePrefixedCandidate
 }
 
-function getBasenameFallbackPath(worktreePath: string, rawPath: string, primaryPath: string): string | null {
+function getBasenameFallbackPath(
+  worktreePath: string,
+  rawPath: string,
+  primaryPath: string
+): string | null {
   const fallbackPath = worktreeBasenamePrefixedPathToRelativePath(worktreePath, rawPath)
-  if (!fallbackPath || normalizeGitRelativePath(fallbackPath) === normalizeGitRelativePath(primaryPath)) {
+  if (
+    !fallbackPath ||
+    normalizeGitRelativePath(fallbackPath) === normalizeGitRelativePath(primaryPath)
+  ) {
     return null
   }
   return fallbackPath
@@ -279,8 +411,9 @@ function isMetadataPathInTargetSet(
   rawPath: string,
   targetPathSet: Set<string>
 ): boolean {
-  return metadataPathToWorktreeRelativePaths(workspacePath, worktreePath, rawPath)
-    .some((relPath) => targetPathSet.has(normalizeGitRelativePath(relPath)))
+  return metadataPathToWorktreeRelativePaths(workspacePath, worktreePath, rawPath).some((relPath) =>
+    targetPathSet.has(normalizeGitRelativePath(relPath))
+  )
 }
 
 function cleanupRejectedFileMetadata(
@@ -292,9 +425,7 @@ function cleanupRejectedFileMetadata(
   const targetPathSet = new Set(targetPaths.map(normalizeGitRelativePath).filter(Boolean))
   if (targetPathSet.size === 0) return
 
-  const rawModifiedFiles = Array.isArray(metadata.llmModifiedFiles)
-    ? metadata.llmModifiedFiles
-    : []
+  const rawModifiedFiles = Array.isArray(metadata.llmModifiedFiles) ? metadata.llmModifiedFiles : []
   metadata.llmModifiedFiles = rawModifiedFiles.filter(
     (item) =>
       typeof item === "string" &&
@@ -331,16 +462,18 @@ function cleanupRejectedFileMetadata(
 function getExecErrorText(error: unknown): string {
   if (!(error instanceof Error)) return String(error || "")
   const execError = error as ExecFileError
-  const stderr = typeof execError.stderr === "string"
-    ? execError.stderr
-    : execError.stderr
-      ? execError.stderr.toString("utf-8")
-      : ""
-  const stdout = typeof execError.stdout === "string"
-    ? execError.stdout
-    : execError.stdout
-      ? execError.stdout.toString("utf-8")
-      : ""
+  const stderr =
+    typeof execError.stderr === "string"
+      ? execError.stderr
+      : execError.stderr
+        ? execError.stderr.toString("utf-8")
+        : ""
+  const stdout =
+    typeof execError.stdout === "string"
+      ? execError.stdout
+      : execError.stdout
+        ? execError.stdout.toString("utf-8")
+        : ""
   return [stderr, stdout, execError.message].filter(Boolean).join("\n").trim()
 }
 
@@ -485,7 +618,7 @@ function getGitPanelFileStatus(status: string): GitPanelFileStatus {
 }
 
 function decodeGitQuotedPath(rawPath: string): string {
-  const quoted = rawPath.startsWith("\"") && rawPath.endsWith("\"")
+  const quoted = rawPath.startsWith('"') && rawPath.endsWith('"')
   if (!quoted) return rawPath
   const source = rawPath.slice(1, -1)
   const bytes: number[] = []
@@ -503,7 +636,7 @@ function decodeGitQuotedPath(rawPath: string): string {
       break
     }
     const next = source[++i]
-    if (next === "\\" || next === "\"") {
+    if (next === "\\" || next === '"') {
       bytes.push(next.charCodeAt(0))
       continue
     }
@@ -521,13 +654,7 @@ function decodeGitQuotedPath(rawPath: string): string {
       continue
     }
 
-    const escaped = next === "n"
-      ? "\n"
-      : next === "r"
-        ? "\r"
-        : next === "t"
-          ? "\t"
-          : next
+    const escaped = next === "n" ? "\n" : next === "r" ? "\r" : next === "t" ? "\t" : next
     const chunk = Buffer.from(escaped, "utf8")
     for (const byte of chunk) bytes.push(byte)
   }
@@ -576,11 +703,13 @@ function parsePorcelainPathEntries(output: string): GitPanelChangedFile[] {
         rawPath = parts[parts.length - 1] || rawPath
       }
       rawPath = decodeGitQuotedPath(rawPath)
-      return [{
-        path: normalizeGitRelativePath(rawPath),
-        previousPath: previousPath ? normalizeGitRelativePath(previousPath) : undefined,
-        status: getGitPanelFileStatus(status)
-      }]
+      return [
+        {
+          path: normalizeGitRelativePath(rawPath),
+          previousPath: previousPath ? normalizeGitRelativePath(previousPath) : undefined,
+          status: getGitPanelFileStatus(status)
+        }
+      ]
     })
 }
 
@@ -617,10 +746,7 @@ function createPathspecNoMatchError(operation: string, paths: string[], cause: u
   const omitted = paths.length > 8 ? ` 等 ${paths.length} 个路径` : ""
   const detail = getExecErrorText(cause)
   return new Error(
-    [
-      `Git ${operation} 路径不匹配：${sample}${omitted}`,
-      detail
-    ].filter(Boolean).join("\n")
+    [`Git ${operation} 路径不匹配：${sample}${omitted}`, detail].filter(Boolean).join("\n")
   )
 }
 
@@ -649,18 +775,17 @@ async function checkoutPathsFromHead(
   if (options?.skipNormalize) {
     executablePaths = normalizeGitPathspecList(paths)
   } else {
-    if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化开始")
+    if (options?.threadId)
+      logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化开始")
     executablePaths = await normalizeExecutablePathspecs(worktreePath, paths)
-    if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化完成")
+    if (options?.threadId)
+      logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化完成")
   }
   if (executablePaths.length === 0) return
   if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback 执行开始")
-  await runGitWithChunkedLiteralPathspecs(
-    worktreePath,
-    ["checkout", "HEAD"],
-    executablePaths,
-    { silent: true }
-  )
+  await runGitWithChunkedLiteralPathspecs(worktreePath, ["checkout", "HEAD"], executablePaths, {
+    silent: true
+  })
   if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback 执行完成")
 }
 
@@ -684,11 +809,10 @@ async function runStatusPorcelainForPathspecs(
   try {
     for (const chunk of chunkGitPathspecs(baseArgs, paths)) {
       outputs.push(
-        await runGit(
-          worktreePath,
-          [...baseArgs, "--", ...chunk],
-          { silent: true, timeoutMs: 15_000 }
-        )
+        await runGit(worktreePath, [...baseArgs, "--", ...chunk], {
+          silent: true,
+          timeoutMs: 15_000
+        })
       )
     }
   } catch {
@@ -703,11 +827,10 @@ async function runStatusPorcelainForPathspecs(
     outputs.length = 0
     for (const chunk of chunkGitPathspecs(fallbackArgs, paths)) {
       outputs.push(
-        await runGit(
-          worktreePath,
-          [...fallbackArgs, "--", ...chunk],
-          { silent: true, timeoutMs: 15_000 }
-        )
+        await runGit(worktreePath, [...fallbackArgs, "--", ...chunk], {
+          silent: true,
+          timeoutMs: 15_000
+        })
       )
     }
   }
@@ -729,8 +852,7 @@ function changedEntryMatchesPathspec(entry: GitPanelChangedFile, pathspec: strin
     .filter(Boolean)
   return entryPaths.some(
     (entryPath) =>
-      entryPath === normalizedPathspec ||
-      entryPath.startsWith(`${normalizedPathspec}/`)
+      entryPath === normalizedPathspec || entryPath.startsWith(`${normalizedPathspec}/`)
   )
 }
 
@@ -779,7 +901,10 @@ async function isKnownWorktreePath(worktreePath: string, relPath: string): Promi
   }
 }
 
-async function getKnownWorktreePaths(worktreePath: string, relPaths: string[]): Promise<Set<string>> {
+async function getKnownWorktreePaths(
+  worktreePath: string,
+  relPaths: string[]
+): Promise<Set<string>> {
   const normalizedPaths = normalizeGitPathspecList(relPaths)
   const knownPaths = new Set<string>()
   const missingPaths: string[] = []
@@ -821,7 +946,10 @@ async function getKnownWorktreePaths(worktreePath: string, relPaths: string[]): 
   return knownPaths
 }
 
-async function normalizeExecutablePathspecs(worktreePath: string, pathspecs: string[]): Promise<string[]> {
+async function normalizeExecutablePathspecs(
+  worktreePath: string,
+  pathspecs: string[]
+): Promise<string[]> {
   const normalizedPathspecs = normalizeGitPathspecList(pathspecs)
   const result: string[] = []
   const fallbackPathsByPathspec = new Map<string, string>()
@@ -836,21 +964,17 @@ async function normalizeExecutablePathspecs(worktreePath: string, pathspecs: str
     }
   }
 
-  const knownPaths = fallbackPathsByPathspec.size > 0
-    ? await getKnownWorktreePaths(worktreePath, [
-        ...normalizedPathspecs,
-        ...fallbackPathsByPathspec.values()
-      ])
-    : null
+  const knownPaths =
+    fallbackPathsByPathspec.size > 0
+      ? await getKnownWorktreePaths(worktreePath, [
+          ...normalizedPathspecs,
+          ...fallbackPathsByPathspec.values()
+        ])
+      : null
 
   for (const pathspec of normalizedPathspecs) {
     const fallbackPath = fallbackPathsByPathspec.get(pathspec)
-    if (
-      fallbackPath &&
-      knownPaths &&
-      !knownPaths.has(pathspec) &&
-      knownPaths.has(fallbackPath)
-    ) {
+    if (fallbackPath && knownPaths && !knownPaths.has(pathspec) && knownPaths.has(fallbackPath)) {
       result.push(fallbackPath)
       continue
     }
@@ -930,12 +1054,9 @@ async function resetPathsFromIndex(
     ? normalizeGitPathspecList(targetPaths)
     : await normalizeExecutablePathspecs(worktreePath, targetPaths)
   if (paths.length === 0) return
-  await runGitWithChunkedLiteralPathspecs(
-    worktreePath,
-    ["reset", "HEAD"],
-    paths,
-    { silent: true }
-  ).catch(() => {})
+  await runGitWithChunkedLiteralPathspecs(worktreePath, ["reset", "HEAD"], paths, {
+    silent: true
+  }).catch(() => {})
 }
 
 async function runWithConcurrency<T>(
@@ -966,12 +1087,9 @@ async function cleanUntrackedPaths(
     : await normalizeExecutablePathspecs(worktreePath, targetPaths)
   if (paths.length === 0) return
   let gitCleanError: unknown = null
-  await runGitWithChunkedLiteralPathspecs(
-    worktreePath,
-    ["clean", "-f"],
-    paths,
-    { silent: true }
-  ).catch((error) => {
+  await runGitWithChunkedLiteralPathspecs(worktreePath, ["clean", "-f"], paths, {
+    silent: true
+  }).catch((error) => {
     if (isPathspecNoMatchError(error)) return
     gitCleanError = error
   })
@@ -987,9 +1105,13 @@ async function cleanUntrackedPaths(
   }
 
   try {
-    await runWithConcurrency(remainingPaths, GIT_PANEL_REJECT_FS_CONCURRENCY, async (targetPath) => {
-      await rm(path.join(worktreePath, targetPath), { force: true, recursive: true })
-    })
+    await runWithConcurrency(
+      remainingPaths,
+      GIT_PANEL_REJECT_FS_CONCURRENCY,
+      async (targetPath) => {
+        await rm(path.join(worktreePath, targetPath), { force: true, recursive: true })
+      }
+    )
   } catch (error) {
     throw gitCleanError || error
   }
@@ -1092,15 +1214,11 @@ function getGitMetadataIdentity(metadata: Record<string, unknown>): GitMetadataI
     workspacePath: typeof metadata.workspacePath === "string" ? metadata.workspacePath : null,
     gitRoot: typeof metadata.gitRoot === "string" ? metadata.gitRoot : null,
     isWorktree: metadata.isWorktree === true,
-    worktreeBranch:
-      typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
+    worktreeBranch: typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
   }
 }
 
-function gitMetadataIdentityEquals(
-  left: GitMetadataIdentity,
-  right: GitMetadataIdentity
-): boolean {
+function gitMetadataIdentityEquals(left: GitMetadataIdentity, right: GitMetadataIdentity): boolean {
   return (
     left.workspacePath === right.workspacePath &&
     left.gitRoot === right.gitRoot &&
@@ -1162,7 +1280,11 @@ async function rejectWorktreePaths(params: {
   const explicitSelections = hasExplicitSelection
     ? (filePaths || [])
         .map((rawPath) => {
-          const primaryPath = explicitPathToWorktreeRelativePath(workspacePath, worktreePath, rawPath)
+          const primaryPath = explicitPathToWorktreeRelativePath(
+            workspacePath,
+            worktreePath,
+            rawPath
+          )
           if (!primaryPath) return null
           return {
             rawPath,
@@ -1170,11 +1292,15 @@ async function rejectWorktreePaths(params: {
             basenameFallbackPath: getBasenameFallbackPath(worktreePath, rawPath, primaryPath)
           }
         })
-        .filter((entry): entry is {
-          rawPath: string
-          primaryPath: string
-          basenameFallbackPath: string | null
-        } => Boolean(entry))
+        .filter(
+          (
+            entry
+          ): entry is {
+            rawPath: string
+            primaryPath: string
+            basenameFallbackPath: string | null
+          } => Boolean(entry)
+        )
     : []
   let targetPaths = hasExplicitSelection
     ? Array.from(new Set(explicitSelections.map((entry) => entry.primaryPath)))
@@ -1198,7 +1324,9 @@ async function rejectWorktreePaths(params: {
     const basenameFallbackPaths: string[] = []
     for (const selection of explicitSelections) {
       if (!selection.basenameFallbackPath) continue
-      if (changedEntries.some((entry) => changedEntryMatchesPathspec(entry, selection.primaryPath))) {
+      if (
+        changedEntries.some((entry) => changedEntryMatchesPathspec(entry, selection.primaryPath))
+      ) {
         continue
       }
       if (await isKnownWorktreePath(worktreePath, selection.primaryPath)) {
@@ -1262,16 +1390,16 @@ async function rejectWorktreePaths(params: {
   )
 
   const touchedTargets = plan.touchedTargets.length > 0 ? plan.touchedTargets : targetPaths
-  const convertedTouchedTargets = path.resolve(gitRoot) === path.resolve(worktreePath)
-    ? touchedTargets
-    : touchedTargets
-        .map((targetPath) =>
-          gitRootRelativePathToWorktreeRelativePath(gitRoot, worktreePath, targetPath)
-        )
-        .filter((targetPath): targetPath is string => Boolean(targetPath))
-  const metadataTouchedTargets = convertedTouchedTargets.length > 0
-    ? convertedTouchedTargets
-    : touchedTargets
+  const convertedTouchedTargets =
+    path.resolve(gitRoot) === path.resolve(worktreePath)
+      ? touchedTargets
+      : touchedTargets
+          .map((targetPath) =>
+            gitRootRelativePathToWorktreeRelativePath(gitRoot, worktreePath, targetPath)
+          )
+          .filter((targetPath): targetPath is string => Boolean(targetPath))
+  const metadataTouchedTargets =
+    convertedTouchedTargets.length > 0 ? convertedTouchedTargets : touchedTargets
   const latestThread = getThreadCore(threadId)
   const latestMetadata = parseThreadMetadata(latestThread?.metadata)
   const latestGitMetadataIdentity = getGitMetadataIdentity(latestMetadata)
@@ -1421,12 +1549,14 @@ function parseGitPanelCommitMessage(fullMessage: string): {
   commitType: string
   commitMessage: string
 } | null {
-  const match = fullMessage.match(/^(.+?)\s+#comment\s+([a-zA-Z][\w-]*):([\s\S]*?)\s+#CMBDevClaw\s*$/)
+  const match = fullMessage.match(/^(.+?)\s+#comment\s+([\s\S]*?)\s+#CMBDevClaw\s*$/)
   if (!match) return null
+  const subject = match[2].trim()
+  const typedSubject = subject.match(/^([a-zA-Z][\w-]*):([\s\S]*)$/)
   return {
     cardNumber: match[1].trim(),
-    commitType: match[2].trim(),
-    commitMessage: match[3].trim()
+    commitType: typedSubject ? typedSubject[1].trim() : "",
+    commitMessage: (typedSubject ? typedSubject[2] : subject).trim()
   }
 }
 
@@ -1464,10 +1594,13 @@ function recordGitCommitHistoryAsync(
     const parsed = parseGitPanelCommitMessage(params.fullMessage)
     const cardNumber = trimCommitHistoryText(parsed?.cardNumber, 200)
     const commitType = trimCommitHistoryText(parsed?.commitType, 80)
-    const commitMessage = trimCommitHistoryText(parsed?.commitMessage, MAX_COMMIT_HISTORY_TEXT_CHARS)
+    const commitMessage = trimCommitHistoryText(
+      parsed?.commitMessage,
+      MAX_COMMIT_HISTORY_TEXT_CHARS
+    )
     const fullMessage = trimCommitHistoryText(params.fullMessage)
 
-    if (!cardNumber || !commitType || !commitMessage || !fullMessage) {
+    if (!cardNumber || !commitMessage || !fullMessage) {
       return null
     }
 
@@ -1501,6 +1634,86 @@ function recordGitCommitHistoryAsync(
 
 export function registerGitPanelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
+    "workspace:addGitignoreEntry",
+    async (
+      _event,
+      {
+        threadId,
+        targetPath,
+        kind,
+        options
+      }: {
+        threadId: string
+        targetPath: string
+        kind: "file" | "directory"
+        options?: { worktreePath?: string }
+      }
+    ) => {
+      try {
+        const { workspacePath } = await getThreadWorkspaceContext(threadId)
+        if (!workspacePath) {
+          return { success: false, error: "未配置工作区" }
+        }
+        const target = await resolveGitOperationPath(workspacePath, options?.worktreePath)
+        if ("error" in target) {
+          return { success: false, error: target.error }
+        }
+
+        const entry = normalizeGitignoreEntry(targetPath, kind)
+        const gitignorePath = path.join(target.worktreePath, ".gitignore")
+        let existing = ""
+        try {
+          existing = await readFile(gitignorePath, "utf8")
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code
+          if (code !== "ENOENT") throw error
+        }
+
+        const existingEntries = existing
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+        const alreadyExists = existingEntries.includes(entry)
+        if (!alreadyExists) {
+          const prefix = existing.length === 0 || existing.endsWith("\n") ? "" : "\n"
+          await appendFile(gitignorePath, `${prefix}${entry}\n`, "utf8")
+        }
+
+        await runGit(
+          target.worktreePath,
+          ["--literal-pathspecs", "rm", "-r", "--cached", "--ignore-unmatch", "--", entry],
+          { silent: true, timeoutMs: 20_000 }
+        )
+
+        notifyWorkspaceFilesChanged(threadId, target.worktreePath)
+        if (workspacePath !== target.worktreePath) {
+          notifyWorkspaceFilesChanged(threadId, workspacePath)
+        }
+
+        if (alreadyExists) {
+          logGitStep(threadId, "ignore", `规则已存在：${entry}`)
+          return {
+            success: true,
+            entry,
+            alreadyExists: true
+          }
+        }
+
+        logGitStep(threadId, "ignore", `已加入 .gitignore：${entry}`)
+        return {
+          success: true,
+          entry,
+          alreadyExists: false
+        }
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : "写入 .gitignore 失败"
+        logGitStep(threadId, "ignore", `失败：${detail}`)
+        return { success: false, error: detail }
+      }
+    }
+  )
+
+  ipcMain.handle(
     "workspace:rejectWorktreeChanges",
     async (
       _event,
@@ -1531,7 +1744,11 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
     "workspace:rejectWorktreeFile",
     async (
       _event,
-      { threadId, filePath, options }: { threadId: string; filePath: string; options?: { worktreePath?: string } }
+      {
+        threadId,
+        filePath,
+        options
+      }: { threadId: string; filePath: string; options?: { worktreePath?: string } }
     ) => {
       try {
         logGitStep(threadId, "reject_file", `开始回退文件：${filePath}`)

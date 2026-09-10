@@ -1467,6 +1467,7 @@ interface CustomAPI {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -1522,6 +1523,7 @@ interface CustomAPI {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
@@ -1545,6 +1547,17 @@ interface CustomAPI {
         additions: number
         deletions: number
       }
+      error?: string
+    }>
+    addGitignoreEntry: (
+      threadId: string,
+      targetPath: string,
+      kind: "file" | "directory",
+      options?: { worktreePath?: string }
+    ) => Promise<{
+      success: boolean
+      entry?: string
+      alreadyExists?: boolean
       error?: string
     }>
     getGitChangedFilesSummary: (threadId: string) => Promise<{
