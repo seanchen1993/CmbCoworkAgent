@@ -1684,6 +1684,7 @@ export function ChatContainer({
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
   const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
   const readOnly = Boolean(resolvedReadOnlyReason)
+  const isRequirementMode = surface === "requirement-session"
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
@@ -5245,7 +5246,10 @@ export function ChatContainer({
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
-    async (content: string, options: { id?: string } = {}): Promise<Message> => {
+    async (
+      content: string,
+      options: { id?: string; contextLabel?: "requirement-workbench" } = {}
+    ): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
         id: options.id ?? crypto.randomUUID(),

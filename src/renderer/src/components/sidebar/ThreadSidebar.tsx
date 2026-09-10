@@ -10,8 +10,6 @@ import {
   AlertCircle,
   Briefcase,
   LayoutDashboard,
-  Workflow,
-  Palette,
   BarChart3,
   ChevronDown,
   ChevronRight,
@@ -29,7 +27,6 @@ import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import {
@@ -49,7 +46,6 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
-import { useFeatureGate } from "@/lib/feature-gates"
 import {
   cleanupDeletedThreadIfResident,
   deleteThreadGroupSequentially,
@@ -63,7 +59,6 @@ import {
 } from "@/lib/thread-group-selection"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
-import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -84,8 +79,6 @@ const DEFAULT_VISIBLE_THREADS = 5
 const VISIBLE_THREADS_STEP = 10
 const DEFAULT_VISIBLE_PROJECTS = 60
 const VISIBLE_PROJECTS_STEP = 60
-type SidebarTab = "chat" | "project" | "design"
-
 interface ThreadProject {
   key: string
   name: string
@@ -509,15 +502,10 @@ export function ThreadSidebar(): React.JSX.Element {
     loadMoreThreads,
     touchThreadSummaries,
     mainView,
-    previousThreadId,
     pendingEvolution,
     setShowCustomizeView,
-    showDesignView,
-    setShowDesignView,
     showKanbanView,
     setShowKanbanView,
-    showHarnessBoardView,
-    setShowHarnessBoardView,
     showDashboardView,
     setShowDashboardView,
     dashboardAllowed
@@ -537,15 +525,10 @@ export function ThreadSidebar(): React.JSX.Element {
       loadMoreThreads: state.loadMoreThreads,
       touchThreadSummaries: state.touchThreadSummaries,
       mainView: state.mainView,
-      previousThreadId: state.previousThreadId,
       pendingEvolution: state.pendingEvolution,
       setShowCustomizeView: state.setShowCustomizeView,
-      showDesignView: state.showDesignView,
-      setShowDesignView: state.setShowDesignView,
       showKanbanView: state.showKanbanView,
       setShowKanbanView: state.setShowKanbanView,
-      showHarnessBoardView: state.showHarnessBoardView,
-      setShowHarnessBoardView: state.setShowHarnessBoardView,
       showDashboardView: state.showDashboardView,
       setShowDashboardView: state.setShowDashboardView,
       dashboardAllowed: state.dashboardAllowed
@@ -616,72 +599,6 @@ export function ThreadSidebar(): React.JSX.Element {
   const streamLoadingStatesRef = useRef(allStreamLoadingStates)
   threadStateSummariesRef.current = threadStateSummaries
   streamLoadingStatesRef.current = allStreamLoadingStates
-  const activeSidebarTab: SidebarTab =
-    mainView === "design" || showDesignView
-      ? "design"
-      : showHarnessBoardView || mainView === "harness"
-        ? "project"
-        : "chat"
-  const {
-    enabled: projectModeEnabled,
-    loading: projectModeLoading,
-    refresh: refreshProjectModeGate
-  } = useFeatureGate(FEATURE_GATES.projectMode)
-  const projectModeForceRefreshRef = useRef<Promise<unknown> | null>(null)
-
-  const handleSelectChatTab = useCallback(async (): Promise<void> => {
-    if (mainView === "design" || showDesignView) {
-      setShowDesignView(false)
-      return
-    }
-    if (mainView === "harness" || showHarnessBoardView) {
-      const previousThread = previousThreadId
-        ? threads.find((thread) => thread.thread_id === previousThreadId)
-        : null
-      if (previousThread && !isHarnessProjectModeThread(previousThread)) {
-        setShowHarnessBoardView(false)
-        return
-      }
-
-      const firstThread = threads.find((thread) => !isHarnessProjectModeThread(thread))
-      if (firstThread) {
-        await selectThread(firstThread.thread_id)
-        return
-      }
-
-      setShowHarnessBoardView(false)
-    }
-  }, [
-    mainView,
-    previousThreadId,
-    selectThread,
-    setShowDesignView,
-    setShowHarnessBoardView,
-    showDesignView,
-    showHarnessBoardView,
-    threads
-  ])
-
-  const handleSelectDesignTab = useCallback((): void => {
-    if (mainView !== "design" && !showDesignView) setShowDesignView(true)
-  }, [mainView, setShowDesignView, showDesignView])
-
-  const handleSelectProjectTab = useCallback(async (): Promise<void> => {
-    if (projectModeEnabled) {
-      setShowHarnessBoardView(true)
-      return
-    }
-
-    toast.info("敬请期待")
-    if (!projectModeForceRefreshRef.current) {
-      const refreshPromise = refreshProjectModeGate({ refresh: true }).finally(() => {
-        if (projectModeForceRefreshRef.current === refreshPromise) {
-          projectModeForceRefreshRef.current = null
-        }
-      })
-      projectModeForceRefreshRef.current = refreshPromise
-    }
-  }, [projectModeEnabled, refreshProjectModeGate, setShowHarnessBoardView])
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
@@ -1237,159 +1154,85 @@ export function ThreadSidebar(): React.JSX.Element {
         className="p-1 space-y-1.5"
         style={{ paddingTop: "calc(8px + var(--sidebar-safe-padding, 0px))" }}
       >
-        <div
-          role="tablist"
-          aria-label="侧边栏模式"
-          className="mb-2 grid h-8 grid-cols-3 rounded bg-sidebar-accent p-1"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full justify-start gap-2 text-sm font-semibold"
+          onClick={handleNewThread}
         >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSidebarTab === "chat"}
+          <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+            <Plus className="size-3" />
+          </div>
+          <span className="text-muted-foreground">新任务</span>
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "w-full justify-start gap-2 text-sm font-semibold",
+            mainView === "customize" && "bg-muted"
+          )}
+          onClick={() => {
+            setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)
+          }}
+        >
+          <div
             className={cn(
-              "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              activeSidebarTab === "chat"
-                ? "shadow border border-border/70 bg-background text-foreground"
-                : "text-muted-foreground hover:text-foreground"
+              "flex size-5 items-center justify-center rounded-full ring-1 transition-colors",
+              mainView === "customize"
+                ? "bg-amber-500/20 ring-amber-500/25 text-amber-700 dark:bg-amber-400/20 dark:ring-amber-400/30 dark:text-amber-200"
+                : "bg-amber-500/12 ring-amber-500/20 text-amber-700 dark:bg-amber-400/15 dark:ring-amber-400/20 dark:text-amber-300"
             )}
-            onClick={() => void handleSelectChatTab()}
           >
-            <MessageSquare className="size-3 shrink-0" />
-            <span className="min-w-0 truncate">对话模式</span>
-          </button>
-          <TooltipProvider delayDuration={120}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeSidebarTab === "project"}
-                  aria-disabled={!projectModeEnabled}
-                  className={cn(
-                    "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    projectModeEnabled
-                      ? activeSidebarTab === "project"
-                        ? "shadow border border-border/70 bg-background text-foreground"
-                        : "text-muted-foreground hover:text-foreground"
-                      : "cursor-not-allowed text-muted-foreground/50 opacity-60 hover:text-muted-foreground/60",
-                    projectModeLoading && !projectModeEnabled && "opacity-55"
-                  )}
-                  onClick={() => void handleSelectProjectTab()}
-                >
-                  <Workflow className="size-3 shrink-0" />
-                  <span className="min-w-0 truncate">项目模式</span>
-                </button>
-              </TooltipTrigger>
-              {!projectModeEnabled && (
-                <TooltipContent side="bottom" sideOffset={6}>
-                  敬请期待
-                </TooltipContent>
-              )}
-            </Tooltip>
-          </TooltipProvider>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSidebarTab === "design"}
+            <Briefcase className="size-3" />
+          </div>
+          <span
             className={cn(
-              "flex min-w-0 items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              activeSidebarTab === "design"
-                ? "shadow border border-border/70 bg-background text-foreground"
-                : "text-muted-foreground hover:text-foreground"
+              "flex-1 text-left",
+              mainView === "customize" ? "text-foreground" : "text-muted-foreground"
             )}
-            onClick={handleSelectDesignTab}
           >
-            <Palette className="size-3 shrink-0" />
-            <span className="min-w-0 truncate">设计模式</span>
-          </button>
-        </div>
-
-        {activeSidebarTab === "chat" ? (
-          <>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="w-full justify-start gap-2 text-sm font-semibold"
-              onClick={handleNewThread}
-            >
-              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                <Plus className="size-3" />
-              </div>
-              <span className="text-muted-foreground">新任务</span>
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                "w-full justify-start gap-2 text-sm font-semibold",
-                mainView === "customize" && "bg-muted"
-              )}
-              onClick={() => {
-                setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)
-              }}
-            >
-              <div
-                className={cn(
-                  "flex size-5 items-center justify-center rounded-full ring-1 transition-colors",
-                  mainView === "customize"
-                    ? "bg-amber-500/20 ring-amber-500/25 text-amber-700 dark:bg-amber-400/20 dark:ring-amber-400/30 dark:text-amber-200"
-                    : "bg-amber-500/12 ring-amber-500/20 text-amber-700 dark:bg-amber-400/15 dark:ring-amber-400/20 dark:text-amber-300"
-                )}
-              >
-                <Briefcase className="size-3" />
-              </div>
-              <span
-                className={cn(
-                  "flex-1 text-left",
-                  mainView === "customize" ? "text-foreground" : "text-muted-foreground"
-                )}
-              >
-                自定义
-              </span>
-              {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                "w-full justify-start gap-2 text-sm font-semibold",
-                showKanbanView && "bg-muted"
-              )}
-              onClick={() => {
-                setShowKanbanView(!showKanbanView)
-              }}
-            >
-              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                <LayoutDashboard className="size-3" />
-              </div>
-              <span className="text-muted-foreground">看板视图</span>
-            </Button>
-            {dashboardAllowed && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className={cn(
-                  "w-full justify-start gap-2 text-sm font-semibold",
-                  showDashboardView && "bg-muted"
-                )}
-                onClick={() => {
-                  setShowDashboardView(!showDashboardView)
-                }}
-              >
-                <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                  <BarChart3 className="size-3" />
-                </div>
-                <span className="text-muted-foreground">运营面板</span>
-              </Button>
+            自定义
+          </span>
+          {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "w-full justify-start gap-2 text-sm font-semibold",
+            showKanbanView && "bg-muted"
+          )}
+          onClick={() => {
+            setShowKanbanView(!showKanbanView)
+          }}
+        >
+          <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+            <LayoutDashboard className="size-3" />
+          </div>
+          <span className="text-muted-foreground">看板视图</span>
+        </Button>
+        {dashboardAllowed && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              "w-full justify-start gap-2 text-sm font-semibold",
+              showDashboardView && "bg-muted"
             )}
-          </>
-        ) : null}
+            onClick={() => {
+              setShowDashboardView(!showDashboardView)
+            }}
+          >
+            <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+              <BarChart3 className="size-3" />
+            </div>
+            <span className="text-muted-foreground">运营面板</span>
+          </Button>
+        )}
       </div>
 
-      {activeSidebarTab === "project" ? (
-        <div id="harness-sidebar-portal" className="flex min-h-0 flex-1 flex-col" />
-      ) : activeSidebarTab === "chat" ? (
-        <>
+      <>
           <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
             <span className="min-w-0 flex-1 truncate">工作区 {threadProjects.length}</span>
             <IconPopoverButton
@@ -1743,10 +1586,7 @@ export function ThreadSidebar(): React.JSX.Element {
               )}
             </div>
           </ScrollArea>
-        </>
-      ) : (
-        <div className="min-h-0 flex-1" />
-      )}
+      </>
 
       <div className="px-3 py-2.5 flex items-center justify-center gap-1.5 select-none">
         <CmbDevClawLogo className="size-5 shrink-0 object-contain" />

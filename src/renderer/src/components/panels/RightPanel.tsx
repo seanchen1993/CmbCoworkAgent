@@ -3360,12 +3360,18 @@ type TreeNode = WorkspaceFileTreeNode
 // panel does not rebuild/sort a 50k-file tree.
 const fileTreeCache = new WeakMap<FileInfo[], TreeNode[]>()
 
-function FileTree({
+export function FileTree({
   files,
-  threadId
+  threadId,
+  selectedPath,
+  onFileSelect,
+  initialExpandedPaths = []
 }: {
   files: FileInfo[]
   threadId: string | null
+  selectedPath?: string | null
+  onFileSelect?: (path: string) => void
+  initialExpandedPaths?: string[]
 }): React.JSX.Element {
   const openFile = useThreadActions(threadId)?.openFile
   const workspacePath = useThreadStateSelector(threadId, (state) => state.workspacePath) ?? ""
@@ -3376,7 +3382,7 @@ function FileTree({
   } | null>(null)
   const tree =
     projectedTree ?? (fallbackProjection?.files === files ? fallbackProjection.tree : null)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initialExpandedPaths))
 
   useEffect(() => {
     if (projectedTree) return
@@ -3420,6 +3426,8 @@ function FileTree({
         expanded={expanded}
         onToggle={toggleExpand}
         openFile={openFile}
+        selectedPath={selectedPath}
+        onFileSelect={onFileSelect}
         workspacePath={workspacePath}
       />
     </div>
@@ -3434,6 +3442,8 @@ function FileTreeNodeList({
   expanded,
   onToggle,
   openFile,
+  selectedPath,
+  onFileSelect,
   workspacePath
 }: {
   nodes: TreeNode[]
@@ -3441,6 +3451,8 @@ function FileTreeNodeList({
   expanded: Set<string>
   onToggle: (path: string) => void
   openFile?: (path: string, name: string) => void
+  selectedPath?: string | null
+  onFileSelect?: (path: string) => void
   workspacePath: string
 }): React.JSX.Element {
   const nodesPageKey = `${nodes.length}:${nodes[0]?.path ?? ""}:${nodes.at(-1)?.path ?? ""}`
@@ -3461,6 +3473,8 @@ function FileTreeNodeList({
           expanded={expanded}
           onToggle={onToggle}
           openFile={openFile}
+          selectedPath={selectedPath}
+          onFileSelect={onFileSelect}
           workspacePath={workspacePath}
         />
       ))}
@@ -3506,6 +3520,8 @@ const FileTreeNode = memo(
     expanded,
     onToggle,
     openFile,
+    selectedPath,
+    onFileSelect,
     workspacePath
   }: {
     node: TreeNode
@@ -3513,6 +3529,8 @@ const FileTreeNode = memo(
     expanded: Set<string>
     onToggle: (path: string) => void
     openFile?: (path: string, name: string) => void
+    selectedPath?: string | null
+    onFileSelect?: (path: string) => void
     workspacePath: string
   }): React.JSX.Element {
     useSyncExternalStore(
@@ -3593,6 +3611,8 @@ const FileTreeNode = memo(
             expanded={expanded}
             onToggle={onToggle}
             openFile={openFile}
+            selectedPath={selectedPath}
+            onFileSelect={onFileSelect}
             workspacePath={workspacePath}
           />
         )}

@@ -1093,6 +1093,7 @@ function RequirementConversationSession({
                         <ResourcePreview
                           key={`${selectedPrdFile.path}:${prdPreviewReloadToken}`}
                           filePath={selectedPrdFile.path.replace(/^\/+/, "")}
+                          workspacePathKind="relative"
                           workspacePath={threadState?.workspacePath ?? requirement.requirementPath}
                           threadId={threadId}
                           reloadToken={prdPreviewReloadToken}

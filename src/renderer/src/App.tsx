@@ -18,10 +18,13 @@ import {
   Globe2,
   GripVertical,
   Loader2,
+  MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
-  PanelRightOpen
+  PanelRightOpen,
+  Palette,
+  Workflow
 } from "lucide-react"
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
@@ -253,6 +256,7 @@ function App(): React.JSX.Element {
     setRightModule,
     setBrowserCdpConfig,
     setPendingEvolution,
+    setMainView,
     workerFocusView,
     subagentFocusView,
     workflowAgentFocusView,
@@ -282,6 +286,7 @@ function App(): React.JSX.Element {
       setRightModule: state.setRightModule,
       setBrowserCdpConfig: state.setBrowserCdpConfig,
       setPendingEvolution: state.setPendingEvolution,
+      setMainView: state.setMainView,
       workerFocusView: state.workerFocusView,
       subagentFocusView: state.subagentFocusView,
       workflowAgentFocusView: state.workflowAgentFocusView,
@@ -369,6 +374,20 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
+  const projectModeEnabled = true
+  const [activeModeTab, setActiveModeTab] = useState<"design" | "requirements">("design")
+  const selectDesignProjectMode = useCallback(() => {
+    if (!projectModeEnabled) return
+    setMainView("harness")
+  }, [projectModeEnabled, setMainView])
+  const selectDesignHistory = useCallback(() => {
+    setActiveModeTab("design")
+    setMainView("design")
+  }, [setMainView])
+  const selectRequirementHistory = useCallback(() => {
+    setActiveModeTab("requirements")
+    setMainView("design")
+  }, [setMainView])
 
   // Keep the route consumed by the expensive center/right surfaces atomic. A
   // task click updates the lightweight sidebar immediately, while React may
@@ -1389,9 +1408,6 @@ function App(): React.JSX.Element {
 
           {renderedMainView === "design" && (
             <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
-              {!sidebarCollapsed && (
-                <AnimatedThreadSidebar hidden={false} width={leftWidth} onResize={handleLeftResize} />
-              )}
               <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
                 <Suspense
                   fallback={
@@ -1400,7 +1416,11 @@ function App(): React.JSX.Element {
                     </div>
                   }
                 >
-                  <DesignView />
+                  {activeModeTab === "requirements" ? (
+                    <RequirementEntryView />
+                  ) : (
+                    <DesignModeEntryView />
+                  )}
                 </Suspense>
               </main>
             </div>
@@ -1442,11 +1462,15 @@ function App(): React.JSX.Element {
               className="relative flex flex-1 overflow-hidden bg-grid-subtle"
             >
               {!sidebarCollapsed && !isHarnessAgentFocusActive && (
-                <AnimatedThreadSidebar
-                  hidden={browserFullscreen}
-                  width={leftWidth}
-                  onResize={handleLeftResize}
-                />
+                <>
+                  <div
+                    id="harness-sidebar-portal"
+                    data-app-route-control
+                    style={{ width: leftWidth }}
+                    className={browserFullscreen ? "hidden" : "relative z-[60] shrink-0"}
+                  />
+                  {!browserFullscreen && <ResizeHandle onDrag={handleLeftResize} />}
+                </>
               )}
               <main
                 key="harness-main"
