@@ -1027,6 +1027,12 @@ const api = {
     hydrate: (threadId: string): Promise<unknown> => {
       return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
     },
+    /** Asks the main process to consider a pending summary; it decides and runs it. */
+    requestPendingNotification: (threadId: string): Promise<void> => {
+      return ipcRenderer.invoke("workflow:request-pending-notification", {
+        threadId
+      }) as Promise<void>
+    },
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void): (() => void) => {
       // Durable per-thread channel for background workflow runs. Unlike the
       // run stream, this survives past the launching turn so progress and the

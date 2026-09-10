@@ -36,6 +36,7 @@ if (process.platform === "linux") {
 import { join } from "path"
 import { pathToFileURL } from "url"
 import { existsSync, rmSync } from "fs"
+import { pendingNotificationScheduler } from "./agent/pending-notification-scheduler"
 import {
   writeMainLog,
   writeRendererLog,
@@ -1452,6 +1453,10 @@ if (browserNativeMessagingHostLaunch) {
     // subscribes to for background runs, so an open session renders it live and
     // a closed one simply misses nothing.
     builtinRobotManager.setAgentRunDeliveryResolver(() => createManagedTransportAgentRunDelivery())
+    // Wakes summaries deferred while their thread was busy. Without it one
+    // parked behind a foreground turn waits for the next hydrate rather than
+    // for the moment the thread actually goes idle.
+    pendingNotificationScheduler.start()
     setAppAttentionHandler(requestAppAttention)
     await initializeAppTray({
       getMainWindow: () => mainWindow,

@@ -491,7 +491,27 @@ export interface PersistedWorkflowRun {
    * fresh run's journal also grows as agents execute.
    */
   resumed?: boolean
+  /**
+   * Which side owns the completion summary for THIS run.
+   *
+   * Bound to the run, not to the thread: the same conversation can be driven
+   * from the desktop one turn and from Zhaohu the next, so "is this thread
+   * connected to IM" answers the wrong question. Recorded at launch from the
+   * run body that started it and persisted, so a renderer that reopens the
+   * thread days later reaches the same conclusion.
+   *
+   * Absent on runs persisted before this field existed; those are treated as
+   * desktop-owned, which is what they were.
+   */
+  notificationOwner?: WorkflowNotificationOwner
 }
+
+/**
+ * "desktop" — a renderer drove the run and submits the summary turn itself.
+ * "managed" — a run body owns the whole lifecycle (Zhaohu, scheduler); it
+ * produces the summary and the desktop only mirrors the result.
+ */
+export type WorkflowNotificationOwner = "desktop" | "managed"
 
 /**
  * Resume arg/journal policy (pure, unit-tested). Lives here (no electron deps) so

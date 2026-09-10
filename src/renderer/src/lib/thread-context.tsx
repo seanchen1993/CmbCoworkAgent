@@ -33,7 +33,6 @@ import {
   isExplicitNormalModeMetadata,
   isWorkflowModeMetadata
 } from "./coordinator-mode-helpers"
-import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "./message-display-helpers"
 import {
   applyWorkflowProgressEvent,
   type WorkflowProgressEventView,
@@ -1667,10 +1666,7 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
         }
       })
       .catch((error: unknown) => {
-        onErrorRef.current(
-          threadId,
-          error instanceof Error ? error : new Error(String(error))
-        )
+        onErrorRef.current(threadId, error instanceof Error ? error : new Error(String(error)))
       })
   }, [managedAutoSendRun, stream, threadId])
 
@@ -3682,65 +3678,25 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
    * <task-notification> and the model reports the outcome. Mirrors the
    * coordinator notification scheduler (retry while the thread is busy).
    */
+  /**
+   * Hands a possible workflow summary to the main process and stops there.
+   *
+   * This used to submit the turn itself, deciding from what the page could see —
+   * a stream that looked idle. A run driven from Zhaohu is invisible to that
+   * test, so the same completion was summarised twice and the second submission
+   * lost the run lease and surfaced as an agent error. The page has no way to
+   * ask the right question, so it no longer asks: the scheduler owns the claim,
+   * the ownership check and the lease, and this thread's live mirror shows the
+   * turn either way.
+   *
+   * Deliberately without a retry or a busy check. Both belonged to a caller that
+   * ran the turn; a deferred notification now waits on the lease that blocked
+   * it, which is the only event that can change the answer.
+   */
   const scheduleWorkflowNotificationTurn = useCallback((threadId: string) => {
-    if (workflowNotificationTimersRef.current[threadId] !== undefined) return
-    workflowNotificationTimersRef.current[threadId] = window.setTimeout(async () => {
-      delete workflowNotificationTimersRef.current[threadId]
-      try {
-        const thread = useAppStore.getState().threads.find((t) => t.thread_id === threadId)
-        if (!isWorkflowModeMetadata(thread?.metadata)) {
-          delete workflowNotificationAttemptsRef.current[threadId]
-          delete workflowNotificationRetryOnIdleRef.current[threadId]
-          return
-        }
-        const retryLater = (): void => {
-          const attempts = (workflowNotificationAttemptsRef.current[threadId] ?? 0) + 1
-          workflowNotificationAttemptsRef.current[threadId] = attempts
-          if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
-            scheduleWorkflowNotificationTurn(threadId)
-          } else {
-            delete workflowNotificationAttemptsRef.current[threadId]
-          }
-        }
-        const streamData = streamDataRef.current[threadId]
-        if (!streamData?.stream || streamData.isLoading) {
-          // Busy/foreground turn in progress — defer. Flag retry-on-idle so the
-          // turn-completion effect reschedules us even if the bounded retry budget
-          // runs out first (a turn longer than the budget would otherwise strand
-          // the notification until the next hydrate). Mirrors the coordinator path.
-          workflowNotificationRetryOnIdleRef.current[threadId] = true
-          retryLater()
-          return
-        }
-        const threadState = threadStatesRef.current[threadId] ?? createDefaultThreadState()
-        await streamData.stream.submit(
-          { messages: [{ type: "human", content: WORKFLOW_NOTIFICATION_TURN_PROMPT }] },
-          {
-            config: {
-              configurable: {
-                thread_id: threadId,
-                model_id: threadState.currentModel || undefined,
-                agent_mode: "workflow"
-              }
-            }
-          }
-        )
-        delete workflowNotificationAttemptsRef.current[threadId]
-        delete workflowNotificationRetryOnIdleRef.current[threadId]
-      } catch (error) {
-        console.warn("[ThreadContext] Failed to auto-run workflow notification turn:", error)
-        const attempts = (workflowNotificationAttemptsRef.current[threadId] ?? 0) + 1
-        workflowNotificationAttemptsRef.current[threadId] = attempts
-        if (attempts <= COORDINATOR_NOTIFICATION_MAX_RETRIES) {
-          scheduleWorkflowNotificationTurn(threadId)
-        } else {
-          // Reset at the limit (mirrors retryLater) so a stale count can't
-          // pre-suppress a future notification turn for this thread — a later
-          // renotify/hydrate then gets a fresh retry budget.
-          delete workflowNotificationAttemptsRef.current[threadId]
-        }
-      }
-    }, COORDINATOR_NOTIFICATION_RETRY_MS)
+    void window.api.workflows.requestPendingNotification(threadId).catch((error) => {
+      console.warn("[ThreadContext] Failed to request the workflow summary turn:", error)
+    })
   }, [])
 
   const suppressCoordinatorNotificationAutoRun = useCallback(
@@ -3779,12 +3735,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             coordinatorNotificationRetryOnIdleRef.current[threadId])
         ) {
           scheduleCoordinatorNotificationTurn(threadId)
-        }
-        // Workflow: a completion notification deferred while this turn was busy
-        // retries now that the thread is idle — so a turn longer than the retry
-        // budget can't strand it until the next hydrate.
-        if (workflowNotificationRetryOnIdleRef.current[threadId]) {
-          scheduleWorkflowNotificationTurn(threadId)
         }
       }
     }
@@ -6751,12 +6701,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // closes) still reach the hook-log buckets.
   const coordinatorWorkerHookListenerCleanups = useRef<Record<string, () => void>>({})
   const workflowEventsListenerCleanups = useRef<Record<string, () => void>>({})
-  const workflowNotificationTimersRef = useRef<Record<string, number>>({})
-  const workflowNotificationAttemptsRef = useRef<Record<string, number>>({})
-  // Set when a workflow notification is deferred because the thread is busy, so
-  // the turn-completion effect reschedules it even after the 1s×N retry budget is
-  // spent (a long foreground turn would otherwise strand it until the next hydrate).
-  const workflowNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})
   // Track approval listeners per thread (registered globally, not per-component)
   const approvalListenerCleanups = useRef<Record<string, Array<() => void>>>({})
   // Track queued-message-injection listeners per thread.
@@ -7696,13 +7640,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.warn("[ThreadProvider] Failed to unbind coordinator worker updates:", error)
       })
       releaseThreadListeners(threadId)
-      const workflowNotificationTimer = workflowNotificationTimersRef.current[threadId]
-      if (workflowNotificationTimer !== undefined) {
-        window.clearTimeout(workflowNotificationTimer)
-        delete workflowNotificationTimersRef.current[threadId]
-      }
-      delete workflowNotificationAttemptsRef.current[threadId]
-      delete workflowNotificationRetryOnIdleRef.current[threadId]
       // Cancel any queued workflow_progress RAF and drop the buffer entry. Without
       // this, a frame still queued when the thread is deleted fires flush →
       // updateThreadState(threadId, ...), which resurrects the deleted thread
@@ -7874,8 +7811,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (subagentTranscriptHydrationRetryTimersRef.current[threadId] !== undefined) return false
       if (threadHistoryHydrationRetryTimersRef.current[threadId] !== undefined) return false
       if (subagentTranscriptPersistChainsRef.current[threadId]) return false
-      if (workflowNotificationTimersRef.current[threadId] !== undefined) return false
-      if (workflowNotificationRetryOnIdleRef.current[threadId]) return false
       if (coordinatorNotificationTimersRef.current[threadId] !== undefined) return false
       if (coordinatorNotificationRetryOnIdleRef.current[threadId]) return false
       if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return false
@@ -7933,8 +7868,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete subagentTranscriptUrgentIdsRef.current[threadId]
       delete subagentTranscriptPersistRetryCountRef.current[threadId]
       subagentTranscriptPersistRecoveryRequestsRef.current.delete(threadId)
-      delete workflowNotificationAttemptsRef.current[threadId]
-      delete workflowNotificationRetryOnIdleRef.current[threadId]
       delete coordinatorNotificationAttemptsRef.current[threadId]
       delete coordinatorNotificationRetryOnIdleRef.current[threadId]
       delete previousLoadingStatesRef.current[threadId]

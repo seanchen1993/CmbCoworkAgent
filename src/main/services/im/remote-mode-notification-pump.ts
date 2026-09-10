@@ -291,6 +291,20 @@ export class ImRemoteModeNotificationPump {
                 target.snapshot.workspacePath,
                 target.snapshot.threadId
               )
+          // A pending notification is only ours if the run that produced it was
+          // started from here. This loop walks threads that are *connected* to
+          // Zhaohu, which is a different question: the same conversation can be
+          // driven from the desktop, and after a restart that desktop run's
+          // summary would otherwise be taken over and answered into Zhaohu.
+          if (pendingRun && (pendingRun.notificationOwner ?? "desktop") !== "managed") {
+            console.log("[IM] Pending workflow notification left to the desktop", {
+              threadId: target.snapshot.threadId,
+              runId: pendingRun.runId,
+              owner: pendingRun.notificationOwner ?? "desktop",
+              reason: "run_not_started_from_im"
+            })
+            continue
+          }
           if (activeRunId || pendingRun) {
             this.schedule({
               ...base,

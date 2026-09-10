@@ -1,4 +1,5 @@
 import { ipcMain, type IpcMain } from "electron"
+import { pendingNotificationScheduler } from "../agent/pending-notification-scheduler"
 import { setWorkflowAgentStreamInterest, workflowRunManager } from "../agent/workflow/run-manager"
 import {
   hasUndeliveredWorkflowRunAsync,
@@ -13,7 +14,8 @@ import {
 import type { WorkflowRunListPage } from "../agent/workflow/run-store"
 import type {
   PersistedWorkflowRun,
-  WorkflowWorktreeRecord
+  WorkflowWorktreeRecord,
+  WorkflowNotificationOwner
 } from "../agent/workflow/types"
 import {
   diffWorkflowWorktree,
@@ -54,6 +56,12 @@ export interface WorkflowHydrateResult {
   latestRun: PersistedWorkflowRun | null
   activeRunId: string | null
   hasPendingNotification: boolean
+  /**
+   * Who owes the summary for that pending notification. Reopening a thread must
+   * reach the same conclusion as the live broadcast did, or a renderer that was
+   * closed when a Zhaohu run finished would summarise it a second time.
+   */
+  pendingNotificationOwner?: WorkflowNotificationOwner
 }
 
 /**
@@ -268,11 +276,7 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
     "workflow:list-runs",
     async (
       _event,
-      {
-        threadId,
-        cursor,
-        limit
-      }: { threadId: string; cursor?: string | null; limit?: number }
+      { threadId, cursor, limit }: { threadId: string; cursor?: string | null; limit?: number }
     ): Promise<WorkflowRunListPage> => {
       const workspacePath = resolveWorkspacePath(threadId)
       if (!workspacePath) return { runs: [], nextCursor: null }
@@ -505,12 +509,30 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
     }
   )
 
+  /**
+   * The renderer's only say in the follow-up summary: it reports that a
+   * notification may be pending and stops there. Whether one runs, and who runs
+   * it, is decided here from the run's recorded owner — the page cannot see
+   * that a Zhaohu run body is already producing the same summary.
+   */
+  ipc.handle(
+    "workflow:request-pending-notification",
+    async (_event, { threadId }: { threadId: string }): Promise<void> => {
+      pendingNotificationScheduler.requestCheck(threadId)
+    }
+  )
+
   ipc.handle(
     "workflow:hydrate",
     async (_event, { threadId }: { threadId: string }): Promise<WorkflowHydrateResult> => {
       const workspacePath = resolveWorkspacePath(threadId)
       if (!workspacePath) {
-        return { latestRun: null, activeRunId: null, hasPendingNotification: false }
+        return {
+          latestRun: null,
+          activeRunId: null,
+          hasPendingNotification: false,
+          pendingNotificationOwner: "desktop"
+        }
       }
       const activeRunId = workflowRunManager.activeRunId(threadId) ?? null
       const overlays = workflowRunManager.listFlushFailedRuns(threadId).map(toRunSummary)
@@ -548,20 +570,21 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
       // deliverable/in-flight semantics instead (hasDeliverablePendingNotification).
       const mightHavePendingNotification =
         overlays.some(
-          (summary) =>
-            summary.status !== "running" && summary.notificationDelivered !== true
+          (summary) => summary.status !== "running" && summary.notificationDelivered !== true
         ) || (await hasUndeliveredWorkflowRunAsync(workspacePath, threadId))
       // Preserve the manager's exact in-flight/flush-failure semantics, but only
       // invoke its async point-read when the compact index proves a pending
       // candidate can exist. The normal all-delivered hydrate path stays async/O(1).
-      const hasPendingNotification =
-        mightHavePendingNotification &&
-        (await workflowRunManager.findPendingNotificationAsync(workspacePath, threadId)) !== null
+      const pendingRun = mightHavePendingNotification
+        ? await workflowRunManager.findPendingNotificationAsync(workspacePath, threadId)
+        : null
+      const hasPendingNotification = pendingRun !== null
       latestRun = await reconcileWorktreeRecordsForRenderer(workspacePath, threadId, latestRun)
       return {
         latestRun: stripJournalForRenderer(latestRun),
         activeRunId,
-        hasPendingNotification
+        hasPendingNotification,
+        pendingNotificationOwner: pendingRun?.notificationOwner ?? "desktop"
       }
     }
   )

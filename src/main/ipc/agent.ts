@@ -1042,11 +1042,40 @@ function sendDesktopForeignOwnerBusy(
   safeSendToWindow(window, channel, { type: "done" })
 }
 
+/**
+ * Ends an automatic follow-up turn that another source is already running.
+ *
+ * An auto-notification is the app talking to itself: nobody asked for it, and a
+ * duplicate is expected whenever two schedulers observe the same completion. It
+ * closes the stream with no error, because the busy notice is written for a
+ * person who just acted — showing it for a turn they never requested reports a
+ * fault on a conversation they only had open.
+ *
+ * The lease is still respected: this yields, it never preempts.
+ */
+function yieldInternalNotificationForForeignOwner(
+  window: BrowserWindow,
+  channel: string,
+  threadId: string,
+  lease: LocalThreadRunLease,
+  kind: "coordinator" | "workflow"
+): void {
+  console.log("[Agent] Internal notification yielded to another source:", {
+    threadId,
+    kind,
+    owner: lease.owner,
+    runId: lease.runId,
+    reason: "thread_run_owned_by_another_source"
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+}
+
 function rejectDesktopRunForForeignOwner(
   threadId: string,
   window: BrowserWindow,
   channel: string,
-  context: AgentRunExecutionContext = { source: "desktop" }
+  context: AgentRunExecutionContext = { source: "desktop" },
+  internalNotificationKind?: "coordinator" | "workflow"
 ): boolean {
   const lease = getLocalThreadRunLease(threadId)
   if (!lease) return false
@@ -1056,6 +1085,16 @@ function rejectDesktopRunForForeignOwner(
     return false
   }
   if (!managedLease && lease.owner === "desktop") return false
+  if (internalNotificationKind) {
+    yieldInternalNotificationForForeignOwner(
+      window,
+      channel,
+      threadId,
+      lease,
+      internalNotificationKind
+    )
+    return true
+  }
   sendDesktopForeignOwnerBusy(window, channel, lease)
   return true
 }
@@ -6015,7 +6054,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       ) {
         return
       }
-      if (rejectDesktopRunForForeignOwner(threadId, window, channel, runExecutionContext)) return
+      if (
+        rejectDesktopRunForForeignOwner(
+          threadId,
+          window,
+          channel,
+          runExecutionContext,
+          isTrustedCoordinatorNotificationInvoke
+            ? "coordinator"
+            : isWorkflowNotificationInvoke
+              ? "workflow"
+              : undefined
+        )
+      ) {
+        return
+      }
       let modelInputMessage = message
       let routingMessage = message
       let rootUserPrompt = message
@@ -8110,6 +8163,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,
               onWorkflowLaunched,
+              // Bound to the run, not the thread: the same conversation can be
+              // driven from the desktop one turn and from Zhaohu the next, so
+              // "is this thread connected to IM" answers the wrong question.
+              // managedExternally is the same discriminator the lease uses for
+              // "who owns this run's lifecycle".
+              workflowNotificationOwner: runExecutionContext.localRunLease?.managedExternally
+                ? "managed"
+                : "desktop",
               onTurnCompletionRecovery: sendTurnCompletionNotice
             }),
             harnessContext: harnessAgentContext,

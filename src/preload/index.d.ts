@@ -1093,6 +1093,7 @@ interface CustomAPI {
       agentIndex: number
     ) => Promise<unknown[] | null>
     hydrate: (threadId: string) => Promise<unknown>
+    requestPendingNotification: (threadId: string) => Promise<void>
     /** Durable per-thread channel; survives past the launching turn. Returns unsubscribe. */
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void) => () => void
     /** Display-only live subagent tool-stream (keyed by parent threadId; payload carries

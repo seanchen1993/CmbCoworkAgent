@@ -341,7 +341,8 @@ import {
 } from "./workflow/subagent"
 import {
   isWorkflowSubagentThreadOf,
-  type WorkflowWorktreeIsolationBoundary
+  type WorkflowWorktreeIsolationBoundary,
+  type WorkflowNotificationOwner
 } from "./workflow/types"
 import {
   createTraceCollectorSafely,
@@ -857,8 +858,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
         ? [
             {
               messageId: context.anchorMessage.id,
-              providerSourceId:
-                context.anchorMessage.providerSourceId ?? context.anchorMessage.id,
+              providerSourceId: context.anchorMessage.providerSourceId ?? context.anchorMessage.id,
               role: context.anchorMessage.role,
               providerOccurrence: context.anchorMessage.providerOccurrence
             }
@@ -1491,10 +1491,10 @@ export function createScopedMcpCapabilityService(
       const tabsTool =
         tool.toolName === "browser_tabs"
           ? tool
-          : snapshot.tools.find(
+          : (snapshot.tools.find(
               (candidate) =>
                 candidate.providerKey === tool.providerKey && candidate.toolName === "browser_tabs"
-            ) ?? null
+            ) ?? null)
 
       await autoSelectPlaywrightInAppBrowserTab({
         tool,
@@ -4372,6 +4372,8 @@ export interface CreateAgentRuntimeOptions {
   managedExecution?: boolean
   /** Turn-local observer invoked only after a Dynamic Workflow launch succeeds. */
   onWorkflowLaunched?: (runId: string) => void
+  /** Recorded on any workflow this turn launches; see WorkflowNotificationOwner. */
+  workflowNotificationOwner?: WorkflowNotificationOwner
   /** Immutable checkout/git boundary for a dynamic-workflow worktree agent.
    * Its workspaceRoot moves only the agent's file view; workspacePath remains
    * the host identity for hooks, thread data, memory and the agent registry. */
@@ -4612,6 +4614,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
     onWorkflowLaunched,
+    workflowNotificationOwner,
     hookTurnId,
     actionStationarityTurnId = hookTurnId,
     onHookSkippedFactory,
@@ -5506,6 +5509,7 @@ The workspace root is: ${fileRoot}`
         workspacePath,
         modelId,
         onLaunched: onWorkflowLaunched,
+        notificationOwner: workflowNotificationOwner,
         // Run-before approval gate (aligns with Claude Code's "Review dynamic
         // workflow before running"): the model writing a workflow can fan out
         // many file-editing subagents and spend real tokens, so the user
