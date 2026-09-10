@@ -42,6 +42,10 @@ import {
   type RequirementPrdManifest,
   type RequirementRecord
 } from "./requirement-data"
+import {
+  enableRequirementSessionExperts,
+  getRequirementSessionCapabilities
+} from "./requirement-session-capabilities"
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
@@ -369,7 +373,8 @@ function RequirementConversationSession({
         }
       },
       onCreateConversation: async (item) => {
-        await window.api.expertAgents.setEnabled("analyst", true)
+        const capabilities = getRequirementSessionCapabilities()
+        await enableRequirementSessionExperts(capabilities.allowedExperts)
         const conversationNumber = String(item.threadIds.length + 1).padStart(3, "0")
         const thread = await createThread(
           {
@@ -379,8 +384,8 @@ function RequirementConversationSession({
             requirementSystem: item.system,
             requirementSourceType: item.sourceType,
             requirementSourceName: item.sourceName,
-            allowedSkills: ["requirement-to-prd"],
-            allowedExperts: ["analyst"],
+            allowedSkills: capabilities.allowedSkills,
+            allowedExperts: capabilities.allowedExperts,
             workspacePath: item.requirementPath
           },
           { preserveView: true }

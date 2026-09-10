@@ -29,62 +29,80 @@ import {
   normalizeMarketVersion
 } from "../customize/MarketPanel/MarketUpdateBadge"
 import { fromPersistedRequirement, type RequirementRecord } from "./requirement-data"
+import {
+  enableRequirementSessionExperts,
+  getRequirementSessionCapabilities,
+  REQUIREMENT_BOUND_EXPERTS,
+  REQUIREMENT_BOUND_SKILLS,
+  type RequirementSessionCapabilities
+} from "./requirement-session-capabilities"
 import type { DesignSystemInfo } from "../design/types"
 
 type UploadSource = "file" | "text" | "link"
-const REQUIRED_PRD_SKILL_NAME = "requirement-to-prd"
 
-async function ensureRequirementToPrdSkill(): Promise<void> {
+async function ensureRequirementSkills(): Promise<void> {
+  const boundSkills = REQUIREMENT_BOUND_SKILLS.map((skill) => ({
+    ...skill,
+    normalizedName: skill.id.trim().toLowerCase()
+  }))
   const [installedSkills, marketResponse] = await Promise.all([
     window.api.skills.list(),
     marketApi.getSkills()
   ])
-  const existingSkill = installedSkills.find(
-    (skill) => skill.name.trim().toLowerCase() === REQUIRED_PRD_SKILL_NAME
-  )
 
   if (!marketResponse.success || !marketResponse.data) {
-    if (existingSkill) return
+    const missingSkill = boundSkills.find(
+      (boundSkill) =>
+        !installedSkills.some(
+          (installedSkill) => installedSkill.name.trim().toLowerCase() === boundSkill.normalizedName
+        )
+    )
+    if (!missingSkill) return
     throw new Error(marketResponse.error || "无法读取公共市场技能")
   }
 
-  const marketSkill = marketResponse.data.find(
-    (item) => item.name.trim().toLowerCase() === REQUIRED_PRD_SKILL_NAME
-  )
-  if (!marketSkill) {
-    if (existingSkill) return
-    throw new Error(`公共市场未找到技能「${REQUIRED_PRD_SKILL_NAME}」`)
-  }
-
-  const recordedVersion = marketInstalledVersionStorage.getVersion(REQUIRED_PRD_SKILL_NAME, "skill")
-  const installedVersion = normalizeMarketVersion(existingSkill?.version || recordedVersion)
-  const marketVersion = normalizeMarketVersion(marketSkill.version)
-  const needsInstall =
-    !existingSkill ||
-    !installedVersion ||
-    (Boolean(marketVersion) && isMarketVersionDifferent(installedVersion, marketVersion))
-
-  if (!needsInstall) return
-
-  if (existingSkill) {
-    const deleteResult = await window.api.skills.delete(existingSkill.path)
-    if (!deleteResult.success) {
-      throw new Error(deleteResult.error || `删除旧版技能「${REQUIRED_PRD_SKILL_NAME}」失败`)
+  for (const boundSkill of boundSkills) {
+    const existingSkill = installedSkills.find(
+      (skill) => skill.name.trim().toLowerCase() === boundSkill.normalizedName
+    )
+    const marketSkill = marketResponse.data.find(
+      (item) => item.name.trim().toLowerCase() === boundSkill.normalizedName
+    )
+    if (!marketSkill) {
+      if (existingSkill) continue
+      throw new Error(`公共市场未找到技能「${boundSkill.id}」`)
     }
-  }
 
-  const installResult = await marketApi.downloadItem(
-    REQUIRED_PRD_SKILL_NAME,
-    "skill",
-    false,
-    marketSkill.featured === "精品",
-    marketSkill,
-    { allowNestedNameDuplicates: true }
-  )
-  if (!installResult.success) {
-    throw new Error(installResult.error || `安装技能「${REQUIRED_PRD_SKILL_NAME}」失败`)
+    const recordedVersion = marketInstalledVersionStorage.getVersion(boundSkill.id, "skill")
+    const installedVersion = normalizeMarketVersion(existingSkill?.version || recordedVersion)
+    const marketVersion = normalizeMarketVersion(marketSkill.version)
+    const needsInstall =
+      !existingSkill ||
+      !installedVersion ||
+      (Boolean(marketVersion) && isMarketVersionDifferent(installedVersion, marketVersion))
+
+    if (!needsInstall) continue
+
+    if (existingSkill) {
+      const deleteResult = await window.api.skills.delete(existingSkill.path)
+      if (!deleteResult.success) {
+        throw new Error(deleteResult.error || `删除旧版技能「${boundSkill.id}」失败`)
+      }
+    }
+
+    const installResult = await marketApi.downloadItem(
+      boundSkill.id,
+      "skill",
+      false,
+      marketSkill.featured === "精品",
+      marketSkill,
+      { allowNestedNameDuplicates: true }
+    )
+    if (!installResult.success) {
+      throw new Error(installResult.error || `安装技能「${boundSkill.id}」失败`)
+    }
+    marketInstalledVersionStorage.setVersion(boundSkill.id, "skill", marketSkill.version)
   }
-  marketInstalledVersionStorage.setVersion(REQUIRED_PRD_SKILL_NAME, "skill", marketSkill.version)
 }
 
 function getRequirementTitleFromFileName(fileName: string): string {
@@ -113,7 +131,7 @@ export function NewRequirementDialog({
   system: DesignSystemInfo
   onStartConversation: (
     requirement: RequirementRecord,
-    options?: { autoGeneratePrd?: boolean }
+    options?: { autoGeneratePrd?: boolean } & Partial<RequirementSessionCapabilities>
   ) => void | Promise<void>
 }): React.JSX.Element {
   const [source, setSource] = useState<UploadSource>("file")
@@ -188,7 +206,11 @@ export function NewRequirementDialog({
     setSaving(true)
     try {
       setPreparingSkill(true)
-      await ensureRequirementToPrdSkill()
+      const capabilities = getRequirementSessionCapabilities()
+      await Promise.all([
+        ensureRequirementSkills(),
+        enableRequirementSessionExperts(capabilities.allowedExperts)
+      ])
       setPreparingSkill(false)
       const sourcePayload =
         source === "file"
@@ -226,7 +248,7 @@ export function NewRequirementDialog({
       // Text requirements use the prompt to begin discovery from the user's
       // initial description.
       // conversation; uploaded/link sources additionally point to `source/`.
-      await onStartConversation(requirement, { autoGeneratePrd: true })
+      await onStartConversation(requirement, { autoGeneratePrd: true, ...capabilities })
     } catch (error) {
       setPreparingSkill(false)
       toast.error(error instanceof Error ? error.message : "保存需求草稿失败")
@@ -450,25 +472,45 @@ export function NewRequirementDialog({
               <div className="mb-3 flex items-center gap-2">
                 <BadgeCheck className="size-4 text-primary" />
                 <h3 className="text-sm font-semibold text-foreground">已绑定专家</h3>
+                <span className="text-[12px] font-normal text-muted-foreground">自动启用</span>
               </div>
-              <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground">
-                <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  <BadgeCheck className="size-3.5" />
-                </span>
-                需求分析师
-              </div>
+              {REQUIREMENT_BOUND_EXPERTS.map((expert) => {
+                const Icon = expert.icon
+                return (
+                  <div
+                    key={expert.id}
+                    className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground"
+                  >
+                    <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+                      <Icon className="size-3.5" />
+                    </span>
+                    {expert.label}
+                  </div>
+                )
+              })}
             </section>
             <section className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
               <div className="mb-3 flex items-center gap-2">
                 <Sparkles className="size-4 text-primary" />
                 <h3 className="text-sm font-semibold text-foreground">已绑定技能</h3>
-              </div>
-              <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground">
-                <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  <FileText className="size-3.5" />
+                <span className="text-[12px] font-normal text-muted-foreground">
+                  自动安装或更新
                 </span>
-                需求文档3.0标准化
               </div>
+              {REQUIREMENT_BOUND_SKILLS.map((skill) => {
+                const Icon = skill.icon
+                return (
+                  <div
+                    key={skill.id}
+                    className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground"
+                  >
+                    <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+                      <Icon className="size-3.5" />
+                    </span>
+                    {skill.label}
+                  </div>
+                )
+              })}
             </section>
           </div>
         </div>
@@ -491,7 +533,7 @@ export function NewRequirementDialog({
           <Button type="button" onClick={() => void handleConfirm()} disabled={saving}>
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}
             {preparingSkill
-              ? "正在检查 PRD 技能..."
+              ? "正在准备专家和技能..."
               : source === "file"
                 ? "上传并开始沟通"
                 : source === "link"

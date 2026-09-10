@@ -11,6 +11,11 @@ import {
   sortRequirementsByUpdatedAt,
   type RequirementRecord
 } from "./requirement-data"
+import {
+  enableRequirementSessionExperts,
+  getRequirementSessionCapabilities,
+  type RequirementSessionCapabilities
+} from "./requirement-session-capabilities"
 import { getSelectedRequirementSystem, useRequirementStore } from "./requirement-store"
 import type { DesignSystemInfo } from "../design/types"
 import { useAppStore } from "@/lib/store"
@@ -118,7 +123,8 @@ export function RequirementEntryView(): React.JSX.Element {
   }, [])
 
   const ensureRequirementThread = async (
-    requirement: RequirementRecord
+    requirement: RequirementRecord,
+    capabilities: RequirementSessionCapabilities = getRequirementSessionCapabilities()
   ): Promise<{ requirement: RequirementRecord; threadId: string }> => {
     const threadIds = getRequirementThreadIds(requirement)
     for (const threadId of threadIds) {
@@ -128,7 +134,7 @@ export function RequirementEntryView(): React.JSX.Element {
       }
     }
 
-    await window.api.expertAgents.setEnabled("analyst", true)
+    await enableRequirementSessionExperts(capabilities.allowedExperts)
     const thread = await createThread(
       {
         title: `PRD 沟通 · ${requirement.title}`,
@@ -137,8 +143,8 @@ export function RequirementEntryView(): React.JSX.Element {
         requirementSystem: requirement.system,
         requirementSourceType: requirement.sourceType,
         requirementSourceName: requirement.sourceName,
-        allowedSkills: ["requirement-to-prd"],
-        allowedExperts: ["analyst"],
+        allowedSkills: capabilities.allowedSkills,
+        allowedExperts: capabilities.allowedExperts,
         ...(requirement.requirementPath ? { workspacePath: requirement.requirementPath } : {})
       },
       { preserveView: true }
@@ -289,7 +295,13 @@ export function RequirementEntryView(): React.JSX.Element {
           system={selectedSystem}
           onOpenChange={setRequirementDialogOpen}
           onStartConversation={async (requirement, options) => {
-            const ensured = await ensureRequirementThread(requirement)
+            const capabilities = {
+              allowedSkills:
+                options?.allowedSkills ?? getRequirementSessionCapabilities().allowedSkills,
+              allowedExperts:
+                options?.allowedExperts ?? getRequirementSessionCapabilities().allowedExperts
+            }
+            const ensured = await ensureRequirementThread(requirement, capabilities)
             const nextRequirement = ensured.requirement
             const nextThreadId = ensured.threadId
             if (nextThreadId) await selectThread(nextThreadId, { preserveView: true })
