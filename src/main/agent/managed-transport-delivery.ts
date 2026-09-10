@@ -15,6 +15,18 @@ import { StreamConverter, type SchedulerRendererEvent } from "./stream-converter
  */
 export const MANAGED_TRANSPORT_WINDOW_ID = -1
 
+/**
+ * Whether this run's window is the shim rather than a real desktop window.
+ *
+ * Ask this, not `source === "desktop"`, before doing anything to the window
+ * itself. Those used to mean the same thing because only a renderer's own
+ * invoke carried a window; the main-process summary scheduler broke that — it is
+ * a desktop-owned run by every other measure, and it has no window at all.
+ */
+export function isManagedTransportWindow(window: { id: number }): boolean {
+  return window.id === MANAGED_TRANSPORT_WINDOW_ID
+}
+
 const AGENT_STREAM_PREFIX = "agent:stream:"
 /**
  * Ambient sub-channel for a coordinator's internal summary turn.

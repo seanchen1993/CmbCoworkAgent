@@ -433,6 +433,7 @@ import {
   type AgentRunDelivery,
   type AgentRunExecutionContext
 } from "../agent/agent-run-service"
+import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
 
 function withHarnessStageInvalidation(
   callback: HookResultCallback,
@@ -6736,8 +6737,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           flushPendingStreamTranscriptMessages(threadId, runToken)
           abortController.abort()
         }
+        // Asks whether there is a window to watch, not who owns the run. Those
+        // used to be the same question — only a renderer's invoke was "desktop"
+        // and it always brought a real window. The main-process summary
+        // scheduler is a desktop-owned run with no window at all, and this
+        // subscription reached straight past the shim into BrowserWindow.once.
         const removeWindowClosedSubscription =
-          runExecutionContext.source === "desktop"
+          runExecutionContext.source === "desktop" && !isManagedTransportWindow(window)
             ? subscribeWindowClosed(window, onWindowClosed)
             : () => undefined
         physicalStreamRunSetupGuard.addCleanup(() => {
@@ -9496,7 +9502,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 snapshot: autoCommit.snapshot,
                 window,
                 channel,
-                canPromptModal: runExecutionContext.source === "desktop"
+                // Same two questions as the window-close subscription above:
+                // a desktop-owned run is not necessarily one with a window to
+                // hang a modal on.
+                canPromptModal:
+                  runExecutionContext.source === "desktop" && !isManagedTransportWindow(window)
               })
               await markLatestForkBoundaryBestEffort({
                 threadId,

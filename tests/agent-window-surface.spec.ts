@@ -91,9 +91,14 @@ function testOnlyDesktopRunsCanOpenAModal(): void {
     agent.includes("canPromptModal ? { confirm:"),
     "the auto-commit confirmation modal must stay behind the canPromptModal gate"
   )
+  // "Desktop-owned" is not the same as "has a window": the main-process summary
+  // scheduler is desktop-owned and carries the shim, so the source test alone
+  // parented a modal to something that is not a BrowserWindow.
   assert(
-    agent.includes('canPromptModal: runExecutionContext.source === "desktop"'),
-    "the run body must only allow a modal for desktop-owned runs"
+    /canPromptModal:\s*\n?\s*runExecutionContext\.source === "desktop" && !isManagedTransportWindow\(window\)/.test(
+      agent
+    ),
+    "the run body must only allow a modal for a desktop-owned run that has a real window"
   )
 }
 

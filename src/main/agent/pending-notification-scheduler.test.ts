@@ -467,6 +467,36 @@ describe("pending notification scheduler", () => {
     expect(timers.pending()).toBe(0)
   })
 
+  it("does not let its own released lease reset the failure budget", async () => {
+    coordinatorOwnedBy("desktop")
+    // The lease this reacts to most often is the scheduler's own, released by
+    // the summary that just failed. Counting that as a fresh reason to try
+    // cleared the budget on every pass, so a summary that could not succeed was
+    // retried without end — each attempt flashing the thread's loading state on
+    // and off, which is what a broken summary looked like on screen.
+    const { scheduler, startRun, timers } = createHarness({
+      agentMode: "coordinator",
+      terminal: { outcome: "error", code: "provider_error" },
+      runBody: async () => {
+        // Something asks while the summary holds the lease, so the thread is
+        // parked for the idle wake — the state that turned a bounded retry into
+        // a loop.
+        await scheduler.check(THREAD)
+      }
+    })
+    scheduler.start()
+    try {
+      await scheduler.check(THREAD)
+      for (let pass = 0; pass < 8; pass += 1) {
+        timers.run()
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      expect(startRun.mock.calls.length).toBeLessThanOrEqual(3)
+    } finally {
+      scheduler.stop()
+    }
+  })
+
   it("stops retrying a summary that keeps failing, and tries again when asked afresh", async () => {
     coordinatorOwnedBy("desktop")
     const { scheduler, startRun, timers } = createHarness({
@@ -490,7 +520,20 @@ describe("pending notification scheduler", () => {
     expect(timers.pending()).toBe(0)
     expect(startRun).toHaveBeenCalledTimes(3)
 
-    // A fresh reason to try is not part of that budget.
+    // A fresh ask does not lift it. It used to, and that is precisely why the
+    // budget bounded nothing: something asks on almost every failed pass — a
+    // lease going idle, a second result arriving — so the count was cleared
+    // about as often as it was raised.
+    expect(await scheduler.check(THREAD)).toEqual({
+      started: false,
+      reason: "summary-attempts-exhausted"
+    })
+    expect(startRun).toHaveBeenCalledTimes(3)
+
+    // The cooldown lifts it, so a run of bad luck cannot disable a thread's
+    // summaries for the life of the process. The notification stayed queued
+    // throughout, so this attempt still finds it.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 120_000)
     await scheduler.check(THREAD)
     expect(startRun).toHaveBeenCalledTimes(4)
   })

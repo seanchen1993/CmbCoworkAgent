@@ -59,6 +59,8 @@ const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
 
 const MAX_SUMMARY_ATTEMPTS = 3
 const RETRY_AFTER_FAILURE_MS = 2_000
+/** How long a spent budget keeps refusing, so it bounds without latching. */
+const BUDGET_COOLDOWN_MS = 60_000
 /** Clears the hold before a wake reads it, rather than racing the same millisecond. */
 const WAKE_AFTER_SUPPRESSION_MS = 50
 
@@ -82,6 +84,7 @@ export type PendingNotificationSkipReason =
   | "not-a-background-mode"
   | "thread-busy"
   | "suppressed-after-stop"
+  | "summary-attempts-exhausted"
 
 export interface PendingNotificationOutcome {
   started: boolean
@@ -132,6 +135,8 @@ export class PendingNotificationScheduler {
   private readonly wakeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Consecutive failed summary attempts, per thread; see MAX_SUMMARY_ATTEMPTS. */
   private readonly failedAttempts = new Map<string, number>()
+  /** Threads whose budget is spent, and when it comes back; see isBudgetSpent. */
+  private readonly budgetSpentUntil = new Map<string, number>()
   private unsubscribeLeaseReleased: (() => void) | null = null
   private unsubscribeWorkflowNotification: (() => void) | null = null
   private unsubscribeCoordinatorNotification: (() => void) | null = null
@@ -156,7 +161,13 @@ export class PendingNotificationScheduler {
     if (this.unsubscribeLeaseReleased) return
     this.unsubscribeLeaseReleased = onLocalThreadRunLeaseReleased((lease) => {
       if (!this.waitingForIdle.delete(lease.threadId)) return
-      void this.check(lease.threadId)
+      // `retry`, because a lease going idle is not evidence of new work — and
+      // the lease this most often reacts to is the scheduler's own, released by
+      // the summary that just failed. Treating that as a fresh reason cleared
+      // the failure budget on every pass, so a summary that could not succeed
+      // was retried without end, each attempt flashing the thread's loading
+      // state on and off.
+      void this.check(lease.threadId, { retry: true })
     })
     this.unsubscribeWorkflowNotification = onWorkflowNotificationBroadcast((threadId) => {
       this.requestCheck(threadId)
@@ -180,6 +191,7 @@ export class PendingNotificationScheduler {
     this.recheckRequested.clear()
     this.suppressedUntil.clear()
     this.failedAttempts.clear()
+    this.budgetSpentUntil.clear()
   }
 
   /**
@@ -229,7 +241,12 @@ export class PendingNotificationScheduler {
     threadId: string,
     options: { retry?: boolean } = {}
   ): Promise<PendingNotificationOutcome> {
-    if (!options.retry) this.failedAttempts.delete(threadId)
+    // Deliberately not cleared here. Any ask used to reset the budget on entry,
+    // including one that arrives while a failing summary still holds the lease —
+    // so the budget never actually bounded anything. It is cleared where the
+    // work it counts is settled instead: a delivered summary, or nothing left to
+    // deliver.
+    void options
     if (this.checking.has(threadId)) {
       this.recheckRequested.add(threadId)
       return { started: false, reason: "thread-busy" }
@@ -302,15 +319,43 @@ export class PendingNotificationScheduler {
     const attempts = (this.failedAttempts.get(threadId) ?? 0) + 1
     this.failedAttempts.set(threadId, attempts)
     if (attempts >= MAX_SUMMARY_ATTEMPTS) {
+      // Spent, and the cooldown is what makes that mean something. Not
+      // scheduling another wake is not enough on its own: anything else that
+      // asks — a lease going idle, a second result arriving — would start
+      // another turn, and a summary that cannot succeed would run again on every
+      // one of them.
+      this.budgetSpentUntil.set(threadId, Date.now() + BUDGET_COOLDOWN_MS)
       this.dependencies.log("giving up on the summary turn for now", {
         threadId,
         kind,
         attempts,
+        cooldownMs: BUDGET_COOLDOWN_MS,
         reason: "summary-attempts-exhausted"
       })
       return
     }
     this.scheduleWake(threadId, RETRY_AFTER_FAILURE_MS, { retry: true })
+  }
+
+  /** Clears the failure budget once the work it was counting is settled. */
+  private clearFailureBudget(threadId: string): void {
+    this.failedAttempts.delete(threadId)
+    this.budgetSpentUntil.delete(threadId)
+  }
+
+  /**
+   * Whether the failure budget is currently blocking a turn.
+   *
+   * Expires rather than latching: a run of bad luck must not disable a thread's
+   * summaries for the life of the process, and the notification stays queued
+   * throughout, so the next attempt after the cooldown still finds it.
+   */
+  private isBudgetSpent(threadId: string): boolean {
+    const spentUntil = this.budgetSpentUntil.get(threadId)
+    if (spentUntil === undefined) return false
+    if (spentUntil > Date.now()) return true
+    this.clearFailureBudget(threadId)
+    return false
   }
 
   /**
@@ -393,7 +438,7 @@ export class PendingNotificationScheduler {
     terminal: AgentRunTerminal
   ): PendingNotificationOutcome {
     if (terminal.outcome === "success") {
-      this.failedAttempts.delete(threadId)
+      this.clearFailureBudget(threadId)
       return { started: true }
     }
     this.dependencies.log("summary turn did not deliver", {
@@ -405,7 +450,7 @@ export class PendingNotificationScheduler {
       retryable: this.isRetryable(terminal)
     })
     if (this.isRetryable(terminal)) this.noteFailure(threadId, kind)
-    else this.failedAttempts.delete(threadId)
+    else this.clearFailureBudget(threadId)
     return { started: false, reason: "thread-busy" }
   }
 
@@ -495,6 +540,9 @@ export class PendingNotificationScheduler {
         return { started: false, reason: "suppressed-after-stop" }
       }
       this.suppressedUntil.delete(threadId)
+    }
+    if (this.isBudgetSpent(threadId)) {
+      return { started: false, reason: "summary-attempts-exhausted" }
     }
     const thread = this.dependencies.getThread(threadId)
     if (!thread) return { started: false, reason: "thread-missing" }
