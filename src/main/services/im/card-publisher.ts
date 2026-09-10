@@ -103,7 +103,12 @@ export class ImCardPublisher {
       assertRemoteImCardSendV1(card)
       const result = await this.dependencies.gateway.sendCard(card)
       if (result.state !== "accepted") {
-        this.dependencies.interactions.release(interaction.interactionId)
+        // Kept when the outcome is unknown. The card may have been delivered,
+        // and forgetting it here is what turns a later press into "这张卡片对应的
+        // 请求已经结束" for a gate that is still open and has no timeout.
+        if (!result.resultUnknown) {
+          this.dependencies.interactions.release(interaction.interactionId)
+        }
         this.dependencies.warn(
           `Zhaohu interaction card was not accepted (${result.reasonCode ?? "unknown"}); the short code remains the answer path.`
         )

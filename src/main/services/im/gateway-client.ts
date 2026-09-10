@@ -27,6 +27,14 @@ export interface ImReplySubmissionResult {
 export interface ImCardSubmissionResult {
   state: "accepted" | "rejected"
   reasonCode?: GatewayReasonCodeV1 | string
+  /**
+   * The frame was already on the wire when this failed, so the card may well
+   * have been stored and delivered. Treating that as "not published" makes the
+   * desktop forget a card the reader can still see and press — and a press on a
+   * forgotten card is answered "this request has ended", which for a gate that
+   * never times out is both false and final.
+   */
+  resultUnknown?: boolean
 }
 
 /**

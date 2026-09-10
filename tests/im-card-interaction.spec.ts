@@ -279,9 +279,15 @@ async function testASecondClickFindsTheCodeAlreadySpent(): Promise<void> {
       .map((row) => row.content)
       .join("\n")
     assert.ok(replies.length > 0, "the second click still gets an answer")
+    // Either refusal is correct: the short code is spent, or the interaction was
+    // released with it. What must never appear is a second applied decision.
     assert.ok(
-      replies.includes("已使用") || replies.includes("已经结束"),
+      replies.includes("已使用") || replies.includes("失效"),
       `the second click is refused, got: ${replies}`
+    )
+    assert.ok(
+      !replies.includes("已从招乎"),
+      `the second click must not decide again, got: ${replies}`
     )
     console.log("PASS testASecondClickFindsTheCodeAlreadySpent")
   } finally {
@@ -360,7 +366,15 @@ async function testAClickOnAForgottenCardIsExplainedNotSwallowed(): Promise<void
       .filter((row) => row.deliveryId === "card-receipt:receipt-old")
       .map((row) => row.content)
       .join("\n")
-    assert.ok(replies.includes("已经结束"), `the stale click is explained, got: ${replies}`)
+    // The desktop cannot see whether the request is still waiting — only that it
+    // no longer tracks this card — so the answer must not claim the gate ended,
+    // and must point at the short code that can still answer it.
+    assert.ok(replies.includes("失效"), `the stale click is explained, got: ${replies}`)
+    assert.ok(replies.includes("短码"), `the stale click keeps a way out, got: ${replies}`)
+    assert.ok(
+      !replies.includes("已经结束"),
+      `an approval never times out; the desktop must not declare it over, got: ${replies}`
+    )
     assert.deepEqual(context.gateway.acknowledged, ["receipt-old"])
     console.log("PASS testAClickOnAForgottenCardIsExplainedNotSwallowed")
   } finally {
@@ -590,14 +604,16 @@ async function testAnUpdateDuringTheSendStillLands(): Promise<void> {
 }
 
 /**
- * The gateway stores APPROVAL/USER_INPUT and the contract carries
- * approval/user_input, and a receipt that fails validation is dropped without
- * being acknowledged — so it is redelivered forever while the gate it belongs
- * to stays open. A casing mismatch on a rendering hint is therefore fatal to
- * every legitimate click, which is exactly how it escaped review once.
+ * `kind` only chooses the wording on a closing card, but a receipt that fails
+ * validation is dropped without being acknowledged — so it is redelivered
+ * forever while its gate stays open. That is what made a casing mismatch on a
+ * rendering hint fatal to every legitimate click.
  *
- * These assert the storage spellings directly rather than the wire ones, so the
- * test fails if either side is normalized away.
+ * So the rule under test is that no value of `kind` can cost the click: the two
+ * wire spellings are honoured, anything else is ignored. This cannot detect the
+ * gateway drifting to another casing — that is a cross-repository fact and lives
+ * in the gateway's own tools/check_card_kind_casing.py — it only guarantees the
+ * drift stays survivable.
  */
 function testAnUnknownKindNeverCostsTheClick(): void {
   const base = {
@@ -610,13 +626,13 @@ function testAnUnknownKindNeverCostsTheClick(): void {
     feedback: [],
     occurredAt: new Date().toISOString()
   }
-  for (const stored of ["APPROVAL", "USER_INPUT", "something-new"]) {
-    const receipt = { ...base, kind: stored }
+  for (const unknown of ["APPROVAL", "USER_INPUT", "something-new", ""]) {
+    const receipt = { ...base, kind: unknown }
     assertRemoteImCardReceiptV1(receipt)
     assert.equal(
       (receipt as { kind?: string }).kind,
       undefined,
-      "an unrecognised kind must be dropped, not carried through as itself"
+      "an unrecognised kind must be dropped, never allowed to reject the click"
     )
   }
   for (const wire of ["approval", "user_input"]) {

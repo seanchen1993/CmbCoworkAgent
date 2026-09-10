@@ -119,7 +119,11 @@ export class ImCardReceiptRouter {
           buildExpiredCard(receipt.kind ?? "approval", "已结束的会话")
         )
       }
-      return "这张卡片对应的请求已经结束，操作没有生效。"
+      // Says what the desktop actually knows. It cannot see whether the request
+      // is still waiting — only that this card is no longer one it tracks — and
+      // an approval never times out, so telling a reader it has ended can stop
+      // them answering a gate that is still open.
+      return "这张卡片已经失效，操作没有生效。如果任务仍在等待，请用消息里的短码回复。"
     }
 
     const { interaction, suffix } = resolved

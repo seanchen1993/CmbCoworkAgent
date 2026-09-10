@@ -335,7 +335,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         resolve(result)
       }
       const timer = setTimeout(
-        () => settle({ state: "rejected", reasonCode: "GATEWAY_CARD_TIMEOUT" }),
+        () =>
+          settle({ state: "rejected", reasonCode: "GATEWAY_CARD_TIMEOUT", resultUnknown: true }),
         COMMAND_TIMEOUT_MS
       )
       this.cardCommands.set(commandId, {
@@ -345,9 +346,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         },
         reject: (error) => {
           clearTimeout(timer)
+          // Reached through rejectPending on a dropped connection: the command
+          // was already sent, so the outcome is unknown rather than negative.
           settle({
             state: "rejected",
-            reasonCode: (error as ImGatewayCommandError).reasonCode ?? "GATEWAY_CARD_FAILED"
+            reasonCode: (error as ImGatewayCommandError).reasonCode ?? "GATEWAY_CARD_FAILED",
+            resultUnknown: true
           })
         },
         timer
