@@ -1,7 +1,7 @@
 import { HumanMessage } from "@langchain/core/messages"
 import { tool } from "@langchain/core/tools"
 import { createAgent } from "langchain"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { z } from "zod"
 import {
   InterleavedThinkingChatOpenAICompletions,
@@ -20,6 +20,10 @@ import {
   serializeStreamData
 } from "./stream-data-serialization"
 import { createStreamMessageSideEffectBuffer } from "./stream-message-side-effect-buffer"
+import { StreamAssistantText } from "./stream-assistant-text"
+import { StopHookContextCollector } from "./stop-hook-context"
+
+vi.mock("../storage", () => ({ getEnabledPluginSkillSourceMetadata: () => [] }))
 
 // Only HTTP is replaced. LangChain's SSE parser, model chunks, actual graph,
 // tool execution and completion middleware feed the production serializer.
@@ -112,6 +116,14 @@ describe("provider stream through the agent harness", () => {
       const values = createSerializedValuesMessageAccumulator()
       const effects = createStreamMessageSideEffectBuffer()
       const streamedText: string[] = []
+      const assistantText = new StreamAssistantText()
+      const stop = new StopHookContextCollector()
+      const drainEffects = () => {
+        for (const payload of effects.drain()) {
+          assistantText.processMessage(payload)
+          stop.processStreamChunk("messages", payload)
+        }
+      }
       let lastFinalText = ""
       let valueFrames = 0
       try {
@@ -127,13 +139,14 @@ describe("provider stream through the agent harness", () => {
           const projected = serialize(mode, data)
           expect(JSON.stringify(data)).toBe(before)
           if (mode === "messages") {
+            effects.push(projected.data)
             const [message] = projected.data as [{ id: string[]; kwargs: { content: string } }]
             if (message.id.at(-1)?.startsWith("AIMessage")) {
-              effects.push(projected.data)
               if (typeof message.kwargs.content === "string")
                 streamedText.push(message.kwargs.content)
             }
           } else if (mode === "values") {
+            drainEffects()
             const actual = values.update(projected)
             const oracle = serializeStreamData(mode, data)
             expect(actual).toEqual({
@@ -142,6 +155,7 @@ describe("provider stream through the agent harness", () => {
             })
             const final = actual.messages.at(-1) as { kwargs?: { content?: string } }
             lastFinalText = final?.kwargs?.content ?? ""
+            stop.processStreamChunk("values", { messages: actual.messages })
             valueFrames += 1
           }
         }
@@ -152,9 +166,8 @@ describe("provider stream through the agent harness", () => {
         )
         expect(JSON.stringify(requests[2].messages)).toContain("CMB_TURN_COMPLETION_GATE_V1")
         expect(streamedText.join("")).toBe("哈哈，你好。")
-        const bufferedText = (effects.drain() as Array<[{ kwargs: { content: string } }]>)
-          .map(([msg]) => msg.kwargs.content)
-          .join("")
+        drainEffects()
+        const bufferedText = assistantText.text
         expect(bufferedText).toBe("哈哈，你好。")
         expect(
           getCurrentTurnAssistantResponse({
@@ -163,6 +176,8 @@ describe("provider stream through the agent harness", () => {
           })
         ).toBe("哈哈，你好。")
         expect(lastFinalText).toBe("哈哈，你好。")
+        expect(stop.snapshot().assistantResponse).toBe("哈哈，你好。")
+        expect(stop.snapshot().toolCalls).toEqual(["echo"])
         expect(valueFrames).toBeGreaterThan(3)
         // A successful final answer refunds the recovery budget for the next subturn.
         expect(readTurnCompletionGateReport(threadId, runToken)).toMatchObject({

@@ -2013,6 +2013,22 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
 
     return events.map((event) => {
+      if (
+        event.event === "custom" &&
+        event.data &&
+        typeof event.data === "object" &&
+        "type" in event.data &&
+        event.data.type === "coordinator_ai_snapshot_message" &&
+        "assistantMessage" in event.data
+      ) {
+        const message = event.data.assistantMessage as RoleCollisionMessage | undefined
+        if (message?.type !== "ai" || typeof message.id !== "string") return event
+        const normalizedMessage = normalizeMessages([message])[0]
+        return normalizedMessage === message
+          ? event
+          : { ...event, data: { ...event.data, assistantMessage: normalizedMessage } }
+      }
+
       if (event.event === "messages" && Array.isArray(event.data)) {
         const [message, metadata] = event.data as [RoleCollisionMessage, unknown]
         if (!message || typeof message !== "object" || typeof message.id !== "string") {

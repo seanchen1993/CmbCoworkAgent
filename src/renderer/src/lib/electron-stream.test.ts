@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest"
 import type { Message } from "@langchain/langgraph-sdk"
 import type { UseStreamTransport } from "@langchain/langgraph-sdk/react"
 import { createElectronStream } from "./electron-stream"
+import { ElectronIPCTransport } from "./electron-transport"
+import { createStreamDataSerializer } from "../../../main/ipc/stream-data-serialization"
 import {
   createLiveStreamCumulativeFrameProjector,
   createLiveStreamMessageIdNormalizer,
@@ -52,6 +54,121 @@ async function run(events: Event[]) {
 }
 
 describe("Electron stream snapshot regression", () => {
+  it("normalizes a real transport rewrite before replacing a colliding tool tuple", async () => {
+    const serialize = createStreamDataSerializer()
+    const transport = new ElectronIPCTransport() as unknown as {
+      convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
+    }
+    const events: Event[] = []
+    for (const [type, content] of [
+      ["ToolMessage", "result"],
+      ["AIMessageChunk", "draft"],
+      ["AIMessage", "rewrite"],
+      ["AIMessageChunk", " tail"],
+      ["ToolMessage", "updated result"]
+    ]) {
+      const serialized = serialize("messages", [
+        {
+          id: ["langchain_core", "messages", type],
+          kwargs: {
+            id: "shared",
+            content,
+            ...(type === "ToolMessage" ? { tool_call_id: "call" } : {})
+          }
+        },
+        { langgraph_node: "agent" }
+      ])
+      events.push(
+        ...transport.convertToSDKEvents(
+          { type: "stream", mode: "messages", data: serialized.data },
+          "test",
+          "normal"
+        )
+      )
+    }
+    const { stream } = await run(events)
+    expect(stream.messages).toHaveLength(2)
+    expect(stream.messages[0]).toMatchObject({ id: "shared", type: "tool", tool_call_id: "call" })
+    expect(stream.messages[1]).toMatchObject({ type: "ai", content: "rewrite tail" })
+  })
+
+  it.each([false, true])(
+    "does not replace another role's tuple in a partial frame: %s",
+    async (partial) => {
+      const { stream } = await run([
+        chunk(tool("shared")),
+        ...(partial ? [values([])] : []),
+        {
+          event: "custom",
+          data: {
+            type: "coordinator_ai_snapshot_message",
+            assistantMessage: ai("shared", "malformed rewrite")
+          }
+        },
+        chunk(tool("shared"))
+      ])
+      expect(stream.messages).toHaveLength(1)
+      expect(stream.messages[0]).toMatchObject({ type: "tool", tool_call_id: "call-shared" })
+    }
+  )
+
+  it("completes real transport tool arguments across a text rewrite with empty tool_calls", async () => {
+    const serialize = createStreamDataSerializer()
+    const transport = new ElectronIPCTransport() as unknown as {
+      convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
+    }
+    const events: Event[] = []
+    for (const [type, kwargs] of [
+      [
+        "AIMessageChunk",
+        {
+          id: "a",
+          content: "draft",
+          tool_call_chunks: [{ id: "call", name: "echo", index: 0, args: '{"value":"' }]
+        }
+      ],
+      ["AIMessage", { id: "a", content: "rewrite" }],
+      [
+        "AIMessageChunk",
+        {
+          id: "a",
+          content: " tail",
+          tool_call_chunks: [{ index: 0, args: 'haha"}' }]
+        }
+      ],
+      ["ToolMessage", { id: "result", tool_call_id: "call", content: "done" }]
+    ]) {
+      const serialized = serialize("messages", [
+        { id: ["langchain_core", "messages", type], kwargs },
+        { langgraph_node: "agent" }
+      ])
+      events.push(
+        ...transport.convertToSDKEvents(
+          { type: "stream", mode: "messages", data: serialized.data },
+          "test",
+          "normal"
+        )
+      )
+    }
+    expect(events).toContainEqual({
+      event: "custom",
+      data: {
+        type: "coordinator_ai_snapshot_message",
+        assistantMessage: { id: "a", type: "ai", content: "rewrite", tool_calls: [] }
+      }
+    })
+    const { stream } = await run(events)
+    expect(stream.messages[0]).toMatchObject({
+      content: "rewrite tail",
+      tool_calls: [{ id: "call", name: "echo", args: { value: "haha" } }]
+    })
+    expect(stream.messages[1]).toMatchObject({
+      type: "tool",
+      tool_call_id: "call",
+      content: "done"
+    })
+  })
+
   it("replaces the SDK chunk seed after an authoritative rewrite and keeps later deltas", async () => {
     const { stream, frames } = await run([
       chunk(tool("stable")),

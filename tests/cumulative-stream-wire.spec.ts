@@ -310,8 +310,8 @@ function testBackgroundAndFocusedWorkerProjection(): void {
     messageChunkModes: cumulativeChunkModes
   })
   const converter = new StreamConverter("cumulative-background")
-  const deltas: string[] = []
-  const reasoningDeltas: string[] = []
+  let backgroundContent = ""
+  let backgroundReasoning = ""
   let cumulative = ""
   let cumulativeReasoning = ""
   let cumulativeToolArgs = ""
@@ -337,16 +337,21 @@ function testBackgroundAndFocusedWorkerProjection(): void {
       })
     )
     for (const event of converter.processChunk("messages", serialized.data)) {
+      if (event.type === "custom" && event.data.type === "coordinator_ai_snapshot_message") {
+        const snapshot = event.data.assistantMessage as { content?: string; reasoning?: string }
+        if (snapshot.content !== undefined) backgroundContent = snapshot.content
+        if (snapshot.reasoning !== undefined) backgroundReasoning = snapshot.reasoning
+      }
       if (event.type !== "message-delta") continue
-      deltas.push(event.content)
-      if (event.reasoning) reasoningDeltas.push(event.reasoning)
+      backgroundContent += event.content
+      if (event.reasoning) backgroundReasoning += event.reasoning
       const calls = Array.isArray(event.toolCalls) ? event.toolCalls : []
       backgroundToolValue = (calls[0] as { args?: { payload?: unknown } } | undefined)?.args
         ?.payload
     }
   }
-  assert.equal(deltas.join(""), cumulative)
-  assert.equal(reasoningDeltas.join(""), cumulativeReasoning)
+  assert.equal(backgroundContent, cumulative)
+  assert.equal(backgroundReasoning, cumulativeReasoning)
   assert.equal(backgroundToolValue, "z".repeat(cumulativeToolArgs.length - 14))
 
   const workerThreadId = "wire-thread__worker__focused"

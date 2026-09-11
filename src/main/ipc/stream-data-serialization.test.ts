@@ -379,9 +379,10 @@ describe("stream data serialization", () => {
       toolArgDeltas.push(message.kwargs.tool_call_chunks[0].args)
       expect(message.kwargs).not.toHaveProperty("tool_calls")
       expect(message.kwargs).not.toHaveProperty("invalid_tool_calls")
-      expect(metadata[STREAM_MESSAGE_CONTENT_MODE_KEY]).toBe("delta")
-      expect(metadata[STREAM_MESSAGE_REASONING_MODE_KEY]).toBe("delta")
-      expect(message.kwargs.tool_call_chunks[0][STREAM_TOOL_CALL_ARGS_MODE_KEY]).toBe("delta")
+      const expectedMode = frame === 0 ? "snapshot" : "delta"
+      expect(metadata[STREAM_MESSAGE_CONTENT_MODE_KEY]).toBe(expectedMode)
+      expect(metadata[STREAM_MESSAGE_REASONING_MODE_KEY]).toBe(expectedMode)
+      expect(message.kwargs.tool_call_chunks[0][STREAM_TOOL_CALL_ARGS_MODE_KEY]).toBe(expectedMode)
     }
 
     expect(contentDeltas.join("")).toBe(cumulativeContent)

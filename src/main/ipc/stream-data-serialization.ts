@@ -62,6 +62,7 @@ interface StreamMessageShape {
 
 interface StreamTextProjectionState {
   text: string
+  snapshotEpoch: number
 }
 
 interface ActiveStreamMessageProjection {
@@ -100,7 +101,9 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function createStreamTextProjectionState(): StreamTextProjectionState {
-  return { text: "" }
+  // A fresh serializer does not know the consumer's existing message. Preserve
+  // the first authoritative snapshot, including an explicit empty replacement.
+  return { text: "", snapshotEpoch: -1 }
 }
 
 function createActiveStreamMessageProjection(
@@ -143,9 +146,19 @@ function projectCompleteTextSnapshot(
 function projectStreamText(
   state: StreamTextProjectionState,
   incoming: string,
-  inputMode: StreamMessageWireMode
+  inputMode: StreamMessageWireMode,
+  snapshotEpoch: number
 ): ProjectedStreamText {
-  if (inputMode === "snapshot") return projectCompleteTextSnapshot(state, incoming)
+  if (inputMode === "snapshot") {
+    if (state.snapshotEpoch !== snapshotEpoch) {
+      // Values may have replaced the consumer's baseline. Deltas since then
+      // cannot reconstruct it, so the next snapshot must establish it in full.
+      state.text = incoming
+      state.snapshotEpoch = snapshotEpoch
+      return { value: incoming, mode: "snapshot", comparedCharacters: 0 }
+    }
+    return projectCompleteTextSnapshot(state, incoming)
+  }
   state.text += incoming
   return { value: incoming, mode: "delta", comparedCharacters: 0 }
 }
@@ -391,7 +404,8 @@ function projectStreamDataForSerialization(
 function projectMessageChunkForSerialization(
   data: unknown,
   scopes: Map<string, StreamMessageProjectionScope>,
-  options: StreamDataSerializerOptions
+  options: StreamDataSerializerOptions,
+  snapshotEpoch: number
 ): unknown {
   if (!Array.isArray(data) || data.length === 0) return data
   const sourceMessage = asRecord(data[0])
@@ -480,7 +494,12 @@ function projectMessageChunkForSerialization(
     typeof kwargs.content === "string" &&
     (kwargs.content.length > 0 || contentInputMode === "snapshot")
   ) {
-    const projected = projectStreamText(active.content, kwargs.content, contentInputMode)
+    const projected = projectStreamText(
+      active.content,
+      kwargs.content,
+      contentInputMode,
+      snapshotEpoch
+    )
     projectedKwargs.content = projected.value
     setMetadataMode(STREAM_MESSAGE_CONTENT_MODE_KEY, projected.mode)
     observe("content", kwargs.content, projected)
@@ -488,7 +507,12 @@ function projectMessageChunkForSerialization(
 
   const reasoningField = reasoningStringField(kwargs)
   if (reasoningField && (reasoningField.value.length > 0 || reasoningInputMode === "snapshot")) {
-    const projected = projectStreamText(active.reasoning, reasoningField.value, reasoningInputMode)
+    const projected = projectStreamText(
+      active.reasoning,
+      reasoningField.value,
+      reasoningInputMode,
+      snapshotEpoch
+    )
     if (reasoningField.owner === kwargs) {
       projectedKwargs[reasoningField.key] = projected.value
     } else {
@@ -524,7 +548,7 @@ function projectMessageChunkForSerialization(
         : (readStreamMessageWireMode(chunk[STREAM_TOOL_CALL_ARGS_MODE_KEY]) ??
           options.messageChunkModes?.tool_args ??
           "delta")
-      const projected = projectStreamText(state, chunk.args, inputMode)
+      const projected = projectStreamText(state, chunk.args, inputMode, snapshotEpoch)
       observe("tool_args", chunk.args, projected)
       return {
         ...chunk,
@@ -580,12 +604,18 @@ export function createStreamDataSerializer(
   options: StreamDataSerializerOptions = {}
 ): StreamDataSerializer {
   let previous: StreamSerializationSnapshot | undefined
+  let messageSnapshotEpoch = 0
   const messageProjectionScopes = new Map<string, StreamMessageProjectionScope>()
 
   return (mode, data) => {
     if (mode === "messages" && options.projectMessageChunks !== false) {
       return serializeProjectedStreamData(
-        projectMessageChunkForSerialization(data, messageProjectionScopes, options),
+        projectMessageChunkForSerialization(
+          data,
+          messageProjectionScopes,
+          options,
+          messageSnapshotEpoch
+        ),
         0,
         "full"
       )
@@ -631,6 +661,9 @@ export function createStreamDataSerializer(
     // Advance only after successful serialization. A throwing getter/toJSON
     // must not poison provenance for the following frame.
     previous = createStreamSerializationSnapshot(messages, currentTurnBoundary)
+    // Do not scan/rebuild values text. Invalidate each field lazily; an empty
+    // messages array is authoritative too, whereas metadata-only values are not.
+    messageSnapshotEpoch += 1
     return serialized
   }
 }

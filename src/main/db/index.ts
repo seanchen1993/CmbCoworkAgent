@@ -30,6 +30,7 @@ import {
   getMessageProviderOccurrence,
   getMessageProviderSourceId,
   getMessageRoleCollisionSourceId,
+  mergeIncrementalMessageContent,
   normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
 import {
@@ -50,7 +51,7 @@ import type {
   ThreadMessagesPage,
   ThreadMessagesPageOptions
 } from "../types"
-import { mergeSubagentTranscriptManifestMessages } from "../services/subagent-transcript-content-store"
+import { getSubagentTextSnapshotFields, mergeSubagentTextSnapshots, mergeSubagentTranscriptManifestMessages } from "../services/subagent-transcript-content-store"
 import {
   isSubagentTranscriptBlobRef,
   SUBAGENT_TRANSCRIPT_STARTUP_BUCKET_LIMIT
@@ -428,8 +429,11 @@ function mergeNormalizedThreadMessages(
   const incomingCreatedAt = normalizeTimestamp(incoming.created_at)
   const existingContentPriority = existing.content_priority ?? 0
   const incomingContentPriority = incoming.content_priority ?? 0
+  const retainStreamContent = existing.content_mode === "snapshot" &&
+    incoming.content_mode === undefined
   const hasAuthoritativeIncomingContent =
-    incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
+    !retainStreamContent && incomingContentPriority > 0 &&
+    incomingContentPriority >= existingContentPriority
   const createdAt =
     existingCreatedAt !== null && incomingCreatedAt !== null
       ? new Date(Math.min(existingCreatedAt, incomingCreatedAt))
@@ -438,19 +442,31 @@ function mergeNormalizedThreadMessages(
   return {
     ...existing,
     ...incoming,
+    ...(retainStreamContent ? { content_priority: existing.content_priority } : {}),
+    ...(existing.content_mode === "snapshot" && incoming.content_mode === "delta"
+      ? { content_mode: "snapshot" as const }
+      : {}),
     recovery_integrity: mergeTranscriptRecoveryIntegrity(
       existing.recovery_integrity,
       incoming.recovery_integrity
     ),
-    ...mergeTranscriptReasoningUpdates(existing, incoming),
-    content: hasAuthoritativeIncomingContent
-      ? normalizeMessageContent(incoming.content)
-      : existingContentPriority > incomingContentPriority
-        ? normalizeMessageContent(existing.content)
-        : mergeMessageContent(existing.content, incoming.content),
+    ...mergeTranscriptReasoningUpdates(existing,
+      existing.reasoning_mode === "snapshot" && incoming.reasoning_mode === undefined
+        ? {} : incoming),
+    content:
+      retainStreamContent
+        ? existing.content
+        : hasAuthoritativeIncomingContent ||
+      (incoming.content_mode === "snapshot" && incomingContentPriority >= existingContentPriority)
+        ? normalizeMessageContent(incoming.content)
+        : existingContentPriority > incomingContentPriority
+          ? normalizeMessageContent(existing.content)
+          : incoming.content_mode === "delta"
+            ? mergeIncrementalMessageContent(existing.content, incoming.content) as Message["content"]
+            : mergeMessageContent(existing.content, incoming.content),
     tool_calls: mergeToolCalls(existing.tool_calls, incoming.tool_calls, {
       incomingAuthoritative: hasAuthoritativeIncomingContent,
-      preferExisting: existingContentPriority > incomingContentPriority
+      preferExisting: retainStreamContent || existingContentPriority > incomingContentPriority
     }),
     tool_call_id: incoming.tool_call_id ?? existing.tool_call_id,
     name: incoming.name ?? existing.name,
@@ -540,6 +556,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
       status TEXT,
       is_error INTEGER,
       content_priority INTEGER,
+      stream_authority INTEGER NOT NULL DEFAULT 0,
       recovery_integrity INTEGER,
       goal_id TEXT,
       active_window_id TEXT,
@@ -867,6 +884,10 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   if (!hasThreadMessageContentPriority) {
     db.run("ALTER TABLE thread_messages ADD COLUMN content_priority INTEGER")
   }
+  if (!threadMessageColumns.some((row) => row[1] === "stream_authority")) {
+    // Independent field authority survives stale renderer echoes and restarts.
+    db.run("ALTER TABLE thread_messages ADD COLUMN stream_authority INTEGER NOT NULL DEFAULT 0")
+  }
   const hasThreadMessageProviderSourceId = threadMessageColumns.some(
     (row) => row[1] === "provider_source_id"
   )
@@ -971,6 +992,7 @@ interface ThreadMessageRow {
   status: string | null
   is_error: number | null
   content_priority: number | null
+  stream_authority: number
   recovery_integrity: number | null
   goal_id: string | null
   active_window_id: string | null
@@ -1034,14 +1056,17 @@ function normalizeThreadMessageInput(
       isLosslessTranscriptPayload(message.content, message.tool_calls)
         ? "verified"
         : "unverified",
-    ...(reasoning
+    ...(reasoning !== undefined || (message.reasoning_mode === "snapshot" && message.reasoning === "")
       ? {
-          reasoning,
+          reasoning: reasoning ?? "",
           reasoning_mode: message.reasoning_mode
         }
-       : {}),
+      : {}),
     ...(Array.isArray(message.tool_calls)
       ? { tool_calls: clampToolCalls(message.tool_calls) }
+      : {}),
+    ...(message.content_mode === "snapshot" || message.content_mode === "delta"
+      ? { content_mode: message.content_mode }
       : {}),
     ...(typeof message.tool_call_id === "string" && message.tool_call_id
       ? { tool_call_id: message.tool_call_id }
@@ -1236,6 +1261,31 @@ function threadMessageRowToMessage(row: ThreadMessageRow, appendedText = ""): Me
     ...(startAt ? { start_at: startAt } : {}),
     ...(endAt ? { end_at: endAt } : {})
   }
+}
+
+/** Carry durable stream corrections through an internal fork/import merge. */
+export function applyThreadMessageStreamAuthority(
+  sourceThreadId: string,
+  messages: readonly Message[]
+): ThreadMessageWrite[] {
+  const database = getDb()
+  const ids = messages.map((message) => message.id)
+  const rows = getThreadMessageRows(database, sourceThreadId, ids)
+  const fragments = getThreadMessageTextFragments(database, sourceThreadId, ids)
+  return messages.map((message) => {
+    const row = rows.get(message.id)
+    if (!row || row.role !== message.role || !row.stream_authority) return message
+    const stored = threadMessageRowToMessage(row, fragments.get(message.id))
+    return {
+      ...message,
+      ...((row.stream_authority & 1) !== 0
+        ? { content: stored.content, content_mode: "snapshot" as const }
+        : {}),
+      ...((row.stream_authority & 2) !== 0
+        ? { reasoning: stored.reasoning ?? "", reasoning_mode: "snapshot" as const }
+        : {})
+    }
+  })
 }
 
 function getThreadMessageRows(
@@ -2385,8 +2435,9 @@ function preserveSubagentManifestJournalFields(
   states: ReadonlyMap<ThreadSubagentTextField, ThreadSubagentTextFragmentStateRow>
 ): boolean {
   for (const [field, state] of states) {
+    if (getSubagentTextSnapshotFields(incoming).includes(field)) continue
     const ref = existing[`${field}_ref`]
-    const incomingRef = incoming[`${field}_ref`]
+    const incomingRef = incoming[`${field}_ref`] ?? (incoming[field] === undefined ? ref : undefined)
     if (
       !isSubagentTranscriptBlobRef(ref, field) ||
       ref.sha256 !== state.base_ref_sha256 ||
@@ -2467,6 +2518,14 @@ function getThreadSubagentTextJournal(
  * accumulated transcript. Returns undefined at every structural/identity
  * boundary so the caller can compact an authoritative full snapshot instead.
  */
+function deleteSubagentSnapshotJournals(database: NativeSqliteAdapter, threadId: string, subagentId: string, messageId: string, incoming: Record<string, unknown>): void {
+  for (const field of getSubagentTextSnapshotFields(incoming)) {
+    for (const table of ["thread_subagent_text_fragments", "thread_subagent_text_fragment_states"]) {
+      database.run(`DELETE FROM ${table} WHERE thread_id = ? AND subagent_id = ? AND message_id = ? AND field = ?`, [threadId, subagentId, messageId, field])
+    }
+  }
+}
+
 export function appendThreadSubagentManifestTextDeltas(
   threadId: string,
   subagentId: string,
@@ -2489,7 +2548,7 @@ export function appendThreadSubagentManifestTextDeltas(
     const delta = parseThreadSubagentTextDelta(rawDeltas[field])
     return delta ? [{ field, delta }] : []
   })
-  if (deltas.length === 0) return undefined
+  if (deltas.length === 0 || deltas.some(({ field }) => getSubagentTextSnapshotFields(incoming).includes(field))) return undefined
 
   const messageId = incoming.id.trim()
   if (!messageId) return undefined
@@ -2502,7 +2561,7 @@ export function appendThreadSubagentManifestTextDeltas(
     return undefined
   }
 
-  const next: Record<string, unknown> = { ...existing, ...incoming, id: messageId }
+  const next: Record<string, unknown> = { ...mergeSubagentTextSnapshots(existing, incoming), id: messageId }
   delete next.subagent_text_deltas
   const existingStates = new Map<ThreadSubagentTextField, ThreadSubagentTextFragmentStateRow>()
   for (const field of ["content", "reasoning"] as const) {
@@ -2521,6 +2580,7 @@ export function appendThreadSubagentManifestTextDeltas(
   const now = Date.now()
   database.run("BEGIN")
   try {
+    deleteSubagentSnapshotJournals(database, threadId, subagentId, messageId, incoming)
     for (const { field, delta } of deltas) {
       const ref = existing[`${field}_ref`]
       const existingLength = Number(existing[`${field}_full_length`])
@@ -2683,13 +2743,14 @@ export function patchThreadSubagentManifestPreservingTextJournal(
   }
   if (states.size === 0) return undefined
 
-  const next: Record<string, unknown> = { ...existing, ...incoming, id: messageId }
+  const next: Record<string, unknown> = { ...mergeSubagentTextSnapshots(existing, incoming), id: messageId }
   if (!preserveSubagentManifestJournalFields(existing, incoming, next, states)) {
     return undefined
   }
   const now = Date.now()
   database.run("BEGIN")
   try {
+    deleteSubagentSnapshotJournals(database, threadId, subagentId, messageId, incoming)
     database.run(
       `UPDATE thread_subagent_messages
        SET manifest_json = ?, updated_at = ?
@@ -3834,6 +3895,82 @@ export interface ThreadMessageIdentityContextSelector {
   providerOccurrence?: number
 }
 
+/** Highest provider occurrences strictly before a known user boundary.
+ * Select only identity columns: a long current turn must not evict its history
+ * baseline, and resolving identities must never load historical message bodies.
+ */
+export function getThreadMessageProviderOccurrencesBeforeUser(
+  threadId: string,
+  userMessageId: string,
+  providerSourceIds: readonly string[]
+): Array<{ provider_source_id: string; role: Message["role"]; provider_occurrence: number }> | undefined {
+  const database = getDb()
+  const boundary = database.prepare(
+    "SELECT ordinal FROM thread_messages WHERE thread_id = ? AND message_id = ? AND role = 'user'"
+  )
+  let ordinal: number
+  try {
+    boundary.bind([threadId, userMessageId])
+    if (!boundary.step()) return undefined
+    ordinal = Number(boundary.getAsObject().ordinal)
+  } finally {
+    boundary.free()
+  }
+  const results = new Map<string, { provider_source_id: string; role: Message["role"]; provider_occurrence: number }>()
+  const remember = (source: string, role: Message["role"], occurrence: number): void => {
+    if (!Number.isInteger(occurrence) || occurrence < 1) return
+    const key = JSON.stringify([source, role])
+    const existing = results.get(key)
+    if (!existing || occurrence > existing.provider_occurrence) {
+      results.set(key, { provider_source_id: source, role, provider_occurrence: occurrence })
+    }
+  }
+  const providers = [...new Set(providerSourceIds.map((id) => id.trim()).filter(Boolean))]
+  for (let offset = 0; offset < providers.length; offset += 250) {
+    const batch = providers.slice(offset, offset + 250)
+    const placeholders = batch.map(() => "?").join(", ")
+    const stmt = database.prepare(
+      `SELECT provider_source_id, role, MAX(COALESCE(provider_occurrence, 1)) AS occurrence
+       FROM thread_messages
+       WHERE thread_id = ? AND provider_source_id IN (${placeholders}) AND ordinal < ?
+       GROUP BY provider_source_id, role
+       UNION ALL
+       SELECT message_id AS provider_source_id, role, 1 AS occurrence
+       FROM thread_messages
+       WHERE thread_id = ? AND message_id IN (${placeholders}) AND ordinal < ?
+         AND provider_source_id IS NULL`
+    )
+    try {
+      stmt.bind([threadId, ...batch, ordinal, threadId, ...batch, ordinal])
+      while (stmt.step()) {
+        const row = stmt.getAsObject()
+        remember(String(row.provider_source_id), row.role as Message["role"], Number(row.occurrence))
+      }
+    } finally {
+      stmt.free()
+    }
+  }
+  // Pre-provider-column databases can still contain our encoded duplicate IDs.
+  // PK prefix ranges keep those legacy lookups bounded to each requested identity.
+  for (const source of providers) {
+    for (const role of ["assistant", "tool", "user", "system"] as const) {
+      const prefix = buildMessageSameRoleDuplicateId(source, role, 2).slice(0, -1)
+      const stmt = database.prepare(
+        `SELECT MAX(CAST(SUBSTR(message_id, ?) AS INTEGER)) AS occurrence
+         FROM thread_messages WHERE thread_id = ? AND role = ? AND ordinal < ?
+           AND provider_source_id IS NULL AND message_id >= ? AND message_id < ?`
+      )
+      try {
+        stmt.bind([Array.from(prefix).length + 1, threadId, role, ordinal, prefix, `${prefix}\uffff`])
+        if (stmt.step()) remember(source, role, Number(stmt.getAsObject().occurrence))
+      } finally {
+        stmt.free()
+      }
+    }
+  }
+  return [...results.values()]
+}
+
 /**
  * Return the bounded transcript context needed to resolve a current-run steering
  * anchor/provider occurrence. Besides a small durable tail, this fetches only
@@ -4612,10 +4749,15 @@ export function upsertThreadMessages(
         typeof normalized.content_priority === "number" && normalized.content_priority > 0
           ? normalized.content_priority
           : 0
-      const hasAuthoritativeIncomingContent =
+      const existingAuthority = existing?.stream_authority ?? 0
+      const retainStreamContent = (existingAuthority & 1) !== 0 &&
+        normalized.content_mode === undefined
+      const hasAuthoritativeIncomingContent = !retainStreamContent &&
         incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
+      const retainStreamReasoning = (existingAuthority & 2) !== 0 &&
+        normalized.reasoning_mode === undefined
       let existingContent: Message["content"] = ""
-      if (existing && !hasAuthoritativeIncomingContent) {
+      if (existing && (!hasAuthoritativeIncomingContent || retainStreamContent)) {
         const storedContent = parseMessageContent(existing.content_json)
         const appendedText =
           typeof storedContent === "string"
@@ -4631,17 +4773,23 @@ export function upsertThreadMessages(
       const existingToolCalls = existing ? parseToolCalls(existing.tool_calls_json) : undefined
       const nextContent = normalizeMessageContent(
         existing
-          ? hasAuthoritativeIncomingContent
+          ? retainStreamContent
+            ? existingContent
+            : hasAuthoritativeIncomingContent ||
+            (normalized.content_mode === "snapshot" &&
+              incomingContentPriority >= existingContentPriority)
             ? normalized.content
             : existingContentPriority > incomingContentPriority
               ? existingContent
-              : mergeMessageContent(existingContent, normalized.content)
+              : normalized.content_mode === "delta"
+                ? mergeIncrementalMessageContent(existingContent, normalized.content)
+                : mergeMessageContent(existingContent, normalized.content)
           : normalized.content
       )
       const nextToolCalls = existing
         ? mergeToolCalls(existingToolCalls, normalized.tool_calls, {
             incomingAuthoritative: hasAuthoritativeIncomingContent,
-            preferExisting: existingContentPriority > incomingContentPriority
+            preferExisting: retainStreamContent || existingContentPriority > incomingContentPriority
           })
         : clampToolCalls(normalized.tool_calls)
       const nextRecoveryIntegrity =
@@ -4650,11 +4798,18 @@ export function upsertThreadMessages(
         isLosslessTranscriptPayload(nextContent, nextToolCalls)
           ? 1
           : 0
-      const nextContentPriority = Math.max(existingContentPriority, incomingContentPriority)
+      const nextContentPriority = retainStreamContent
+        ? existingContentPriority
+        : Math.max(existingContentPriority, incomingContentPriority)
       const contentJson = safeJsonStringify(nextContent)
       const reasoning =
-        mergeTranscriptReasoningUpdates({ reasoning: existing?.reasoning ?? undefined }, normalized)
-          .reasoning ?? null
+        retainStreamReasoning
+          ? existing?.reasoning ?? null
+          : mergeTranscriptReasoningUpdates({ reasoning: existing?.reasoning ?? undefined }, normalized)
+              .reasoning ?? null
+      const streamAuthority = existingAuthority |
+        (normalized.content_mode === "snapshot" && incomingContentPriority >= existingContentPriority ? 1 : 0) |
+        (normalized.reasoning_mode === "snapshot" && typeof normalized.reasoning === "string" ? 2 : 0)
       const toolCallsJson = Array.isArray(nextToolCalls) ? safeJsonStringify(nextToolCalls) : null
       const toolCallId = normalized.tool_call_id ?? existing?.tool_call_id ?? null
       const name = normalized.name ?? existing?.name ?? null
@@ -4689,7 +4844,7 @@ export function upsertThreadMessages(
           `UPDATE thread_messages
            SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, reasoning = ?, tool_calls_json = ?, tool_call_id = ?,
                name = ?, status = ?, is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?,
-               created_at = ?, start_at = ?, end_at = ?, recovery_integrity = ?
+               created_at = ?, start_at = ?, end_at = ?, recovery_integrity = ?, stream_authority = ?
            WHERE thread_id = ? AND message_id = ?`,
           [
             providerSourceId,
@@ -4709,6 +4864,7 @@ export function upsertThreadMessages(
             nextStartAt,
             nextEndAt,
             nextRecoveryIntegrity,
+            streamAuthority,
             threadId,
             normalized.id
           ]
@@ -4729,8 +4885,8 @@ export function upsertThreadMessages(
           `INSERT INTO thread_messages (
              thread_id, message_id, provider_source_id, provider_occurrence, role, content_json, reasoning, tool_calls_json, tool_call_id,
              name, status, is_error, content_priority, goal_id, active_window_id, created_at, start_at, end_at,
-             ordinal, recovery_integrity
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ordinal, recovery_integrity, stream_authority
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             threadId,
             normalized.id,
@@ -4751,7 +4907,8 @@ export function upsertThreadMessages(
             nextStartAt,
             nextEndAt,
             ordinal,
-            nextRecoveryIntegrity
+            nextRecoveryIntegrity,
+            streamAuthority
           ]
         )
       }
@@ -5124,7 +5281,13 @@ export function replaceThreadMessageId(
           ? target.content_priority
           : 0
       const mergedContentPriority = Math.max(sourceContentPriority, targetContentPriority)
-      const mergedContent = mergeAliasedMessageContent(
+      const sourceAuthority = source.stream_authority ?? 0
+      const targetAuthority = target.stream_authority ?? 0
+      const mergedContent = (targetAuthority & 1) !== 0 && targetContentPriority >= sourceContentPriority
+        ? targetContent
+        : (sourceAuthority & 1) !== 0 && sourceContentPriority >= targetContentPriority
+          ? sourceContent
+          : mergeAliasedMessageContent(
         sourceContent,
         targetContent,
         sourceContentPriority,
@@ -5159,14 +5322,18 @@ export function replaceThreadMessageId(
         `UPDATE thread_messages
          SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, reasoning = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
              is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
-             end_at = ?, ordinal = ?, recovery_integrity = ?
+             end_at = ?, ordinal = ?, recovery_integrity = ?, stream_authority = ?
          WHERE thread_id = ? AND message_id = ?`,
         [
           mergedProviderSourceId,
           mergedProviderOccurrence,
           target.role ?? source.role,
           safeJsonStringify(mergedContent),
-          mergeTranscriptReasoningUpdates(
+          (targetAuthority & 2) !== 0
+            ? target.reasoning
+            : (sourceAuthority & 2) !== 0
+              ? source.reasoning
+              : mergeTranscriptReasoningUpdates(
             { reasoning: source.reasoning ?? undefined },
             { reasoning: target.reasoning ?? undefined }
           ).reasoning ?? null,
@@ -5190,6 +5357,7 @@ export function replaceThreadMessageId(
           isLosslessTranscriptPayload(mergedContent, mergedToolCalls)
             ? 1
             : 0,
+          sourceAuthority | targetAuthority,
           threadId,
           toId
         ]

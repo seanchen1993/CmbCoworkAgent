@@ -70,6 +70,232 @@ function projectForDisplay(message: Message) {
 }
 
 describe("durable thread reasoning", () => {
+  it("rejects a stale UI priority bump after a native clear and accepts the next native final", () => {
+    const threadId = "stale-ui-priority-thread"
+    db.createThread(threadId)
+    const old = {
+      id: "a",
+      role: "assistant" as const,
+      content: "old",
+      created_at: new Date(1),
+      tool_calls: [{ id: "call", name: "echo", args: { value: "trusted" } }]
+    }
+    db.upsertThreadMessages(threadId, [old])
+    db.upsertThreadMessages(threadId, [{ ...old, content: "", content_mode: "snapshot" }])
+    db.upsertThreadMessages(threadId, [{ ...old, content_priority: 1, tool_calls: [] }])
+    expect(db.getThreadMessages(threadId)[0]).toMatchObject({
+      content: "",
+      tool_calls: old.tool_calls
+    })
+    expect(db.getThreadMessages(threadId)[0].content_priority).toBeUndefined()
+    db.upsertThreadMessages(threadId, [
+      { ...old, content: "native final", content_mode: "snapshot" }
+    ])
+    expect(db.getThreadMessages(threadId)[0].content).toBe("native final")
+    db.upsertThreadMessages(threadId, [
+      { ...old, id: "batch", content: "", content_mode: "snapshot" },
+      { ...old, id: "batch", content_priority: 1, tool_calls: [] }
+    ])
+    expect(db.getThreadMessages(threadId)[1]).toMatchObject({
+      content: "",
+      tool_calls: old.tool_calls
+    })
+    expect(db.getThreadMessages(threadId)[1].content_priority).toBeUndefined()
+  })
+
+  it("keeps explicit clears across stale echoes, trusted deltas and database reopen", async () => {
+    const threadId = "durable-clear-authority-thread"
+    db.createThread(threadId)
+    const old = {
+      id: "a",
+      role: "assistant" as const,
+      content: "old draft",
+      reasoning: "old reasoning",
+      created_at: new Date(1)
+    }
+    db.upsertThreadMessages(threadId, [old])
+    db.upsertThreadMessages(threadId, [
+      { ...old, content: "", content_mode: "snapshot", reasoning: "", reasoning_mode: "snapshot" }
+    ])
+    db.upsertThreadMessages(threadId, [old])
+    expect(db.getThreadMessages(threadId)[0]).toMatchObject({ content: "" })
+    expect(db.getThreadMessages(threadId)[0].reasoning).toBeUndefined()
+    db.upsertThreadMessages(threadId, [
+      { ...old, content: "new", content_mode: "delta", reasoning: "new", reasoning_mode: "delta" }
+    ])
+    await db.closeDatabase()
+    await db.initializeDatabase()
+    db.upsertThreadMessages(threadId, [old])
+    expect(db.getThreadMessages(threadId)[0]).toMatchObject({ content: "new", reasoning: "new" })
+  })
+
+  it("retains authority when a replacement and deltas coalesce in one upsert", () => {
+    const threadId = "coalesced-content-authority-thread"
+    db.createThread(threadId)
+    const old = {
+      id: "a",
+      role: "assistant" as const,
+      content: "old draft",
+      created_at: new Date(1)
+    }
+    db.upsertThreadMessages(threadId, [old])
+    db.upsertThreadMessages(threadId, [
+      { ...old, content: "", content_mode: "snapshot" },
+      { ...old, content: "ha", content_mode: "delta" },
+      { ...old, content: "ha", content_mode: "delta" }
+    ])
+    db.upsertThreadMessages(threadId, [old])
+    expect(db.getThreadMessages(threadId)[0].content).toBe("haha")
+  })
+
+  it("applies explicit reasoning replacements but preserves unmarked partial history", () => {
+    const threadId = "reasoning-authority-thread"
+    db.createThread(threadId)
+    const message = {
+      id: "a",
+      role: "assistant" as const,
+      content: "answer",
+      created_at: new Date(1)
+    }
+    db.upsertThreadMessages(threadId, [{ ...message, reasoning: "long reasoning tail" }])
+    db.upsertThreadMessages(threadId, [{ ...message, reasoning: "long" }])
+    expect(db.getThreadMessages(threadId)[0].reasoning).toBe("long reasoning tail")
+    db.upsertThreadMessages(threadId, [
+      { ...message, reasoning: "long", reasoning_mode: "snapshot" }
+    ])
+    expect(db.getThreadMessages(threadId)[0].reasoning).toBe("long")
+    db.upsertThreadMessages(threadId, [message])
+    expect(db.getThreadMessages(threadId)[0].reasoning).toBe("long")
+    db.upsertThreadMessages(threadId, [{ ...message, reasoning: "", reasoning_mode: "snapshot" }])
+    expect(db.getThreadMessages(threadId)[0].reasoning).toBeUndefined()
+  })
+
+  it("preserves independent authority when aliases merge and threads are copied", () => {
+    const source = "authority-alias-source"
+    const target = "authority-copy-target"
+    db.createThread(source)
+    db.createThread(target)
+    const old = {
+      id: "canonical",
+      role: "assistant" as const,
+      content: "old",
+      reasoning: "old",
+      created_at: new Date(1)
+    }
+    db.upsertThreadMessages(source, [old])
+    db.upsertThreadMessages(source, [
+      {
+        ...old,
+        id: "temporary",
+        content: "",
+        reasoning: "",
+        content_mode: "snapshot",
+        reasoning_mode: "snapshot"
+      }
+    ])
+    expect(db.replaceThreadMessageId(source, "temporary", "canonical", "assistant")).toBe(true)
+    db.upsertThreadMessages(source, [old])
+    expect(db.getThreadMessages(source)[0].content).toBe("")
+    expect(db.getThreadMessages(source)[0].reasoning).toBeUndefined()
+    db.upsertThreadMessages(target, db.applyThreadMessageStreamAuthority(source, [old]))
+    db.upsertThreadMessages(target, [old])
+    expect(db.getThreadMessages(target)[0].content).toBe("")
+    expect(db.getThreadMessages(target)[0].reasoning).toBeUndefined()
+    expect(db.getThreadMessages(target)[0]).not.toHaveProperty("stream_authority")
+  })
+
+  it("does not let reasoning authority freeze normal content updates or grant tool authority", () => {
+    const threadId = "reasoning-only-authority-thread"
+    db.createThread(threadId)
+    const old = {
+      id: "a",
+      role: "assistant" as const,
+      content: "first",
+      reasoning: "old",
+      created_at: new Date(1),
+      tool_calls: [{ id: "call", name: "echo", args: {} }]
+    }
+    db.upsertThreadMessages(threadId, [old])
+    db.upsertThreadMessages(threadId, [{ ...old, reasoning: "", reasoning_mode: "snapshot" }])
+    db.upsertThreadMessages(threadId, [{ ...old, content: "first final" }])
+    expect(db.getThreadMessages(threadId)[0]).toMatchObject({
+      content: "first final",
+      tool_calls: old.tool_calls
+    })
+    expect(db.getThreadMessages(threadId)[0].reasoning).toBeUndefined()
+  })
+
+  it("carries empty stream snapshots through the queue into SQLite", () => {
+    const threadId = "empty-stream-snapshot-thread"
+    db.createThread(threadId)
+    const message = {
+      id: "a",
+      role: "assistant" as const,
+      content: "draft",
+      created_at: new Date(1)
+    }
+    db.upsertThreadMessages(threadId, [message])
+    const result = resolveStreamTranscriptFlush({
+      queuedMessages: [
+        { ...message, content: "", streamContentMode: "snapshot", streamToolCallChunks: [] }
+      ],
+      loadBaselineMessages: () => db.getThreadMessages(threadId)
+    })
+    db.upsertThreadMessages(threadId, result.messages)
+    expect(db.getThreadMessages(threadId)[0].content).toBe("")
+  })
+
+  it("preserves content priority and tool calls during content-only replacements", () => {
+    const threadId = "stream-snapshot-priority-thread"
+    db.createThread(threadId)
+    const message = {
+      id: "a",
+      role: "assistant" as const,
+      content: "answer",
+      created_at: new Date(1)
+    }
+    const toolCalls = [{ id: "call", name: "lookup", args: {} }]
+    db.upsertThreadMessages(threadId, [{ ...message, tool_calls: toolCalls, content_priority: 2 }])
+    db.upsertThreadMessages(threadId, [{ ...message, content: "", content_mode: "snapshot" }])
+    expect(db.getThreadMessages(threadId)[0]).toMatchObject({
+      content: "answer",
+      tool_calls: toolCalls
+    })
+    db.upsertThreadMessages(threadId, [
+      {
+        ...message,
+        content: "",
+        content_mode: "snapshot",
+        content_priority: 2,
+        tool_calls: toolCalls
+      }
+    ])
+    expect(db.getThreadMessages(threadId)[0].content).toBe("")
+    const plain = { ...message, id: "plain" }
+    db.upsertThreadMessages(threadId, [{ ...plain, tool_calls: toolCalls }])
+    db.upsertThreadMessages(threadId, [{ ...plain, content: "", content_mode: "snapshot" }])
+    expect(db.getThreadMessages(threadId)[1]).toMatchObject({ content: "", tool_calls: toolCalls })
+    expect(db.getThreadMessages(threadId)[1]).not.toHaveProperty("content_mode")
+  })
+
+  it("retains snapshot authority across coalesced reasoning updates", () => {
+    const threadId = "coalesced-reasoning-authority-thread"
+    db.createThread(threadId)
+    const message = {
+      id: "a",
+      role: "assistant" as const,
+      content: "answer",
+      created_at: new Date(1)
+    }
+    db.upsertThreadMessages(threadId, [{ ...message, reasoning: "long reasoning tail" }])
+    db.upsertThreadMessages(threadId, [
+      { ...message, reasoning: "", reasoning_mode: "snapshot" },
+      { ...message, reasoning: "new", reasoning_mode: "delta" }
+    ])
+    expect(db.getThreadMessages(threadId)[0].reasoning).toBe("new")
+    expect(db.getThreadMessages(threadId)[0]).not.toHaveProperty("reasoning_mode")
+  })
+
   it("preserves reasoning and recovery integrity when writes coalesce", () => {
     const threadId = "reasoning-integrity-thread"
     db.createThread(threadId)
@@ -383,7 +609,11 @@ describe("durable thread reasoning", () => {
         .values[0][0]
     )
     const legacy = new DatabaseSync(oldPath)
-    legacy.exec(currentSchema.replace("      reasoning TEXT,\n", ""))
+    legacy.exec(
+      currentSchema
+        .replace("      reasoning TEXT,\n", "")
+        .replace("      stream_authority INTEGER NOT NULL DEFAULT 0,\n", "")
+    )
     expect(
       legacy
         .prepare("PRAGMA table_info(thread_messages)")

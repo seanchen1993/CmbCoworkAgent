@@ -21,6 +21,9 @@ interface FixtureWindow {
     threads: {
       create(metadata: Record<string, unknown>): Promise<{ thread_id?: string; id?: string }>
       appendMessages(id: string, messages: Array<Record<string, unknown>>): Promise<unknown>
+      getMessagesPage(id: string, options: { limit: number }): Promise<{
+        messages: Array<{ id: string; content: unknown; reasoning?: string }>
+      }>
     }
     workspace: { set(id: string, workspace: string): Promise<unknown> }
   }
@@ -279,11 +282,119 @@ async function main() {
     results.push(
       "production serializer preserves repeated deltas, interior snapshot corrections and subsequent growth in React"
     )
+    const collisionSerializer = createStreamDataSerializer()
+    const collisionFrames: Array<[string, Record<string, unknown>]> = [
+      [
+        "AIMessageChunk",
+        {
+          id: "collision-request",
+          content: "",
+          tool_calls: [
+            { id: "collision-call", name: "read_file", args: { path: "collision-proof.txt" } }
+          ]
+        }
+      ],
+      [
+        "ToolMessage",
+        {
+          id: "collision-shared",
+          tool_call_id: "collision-call",
+          name: "read_file",
+          content: "碰撞工具原始结果"
+        }
+      ],
+      ["AIMessageChunk", { id: "collision-shared", content: "碰撞助手旧草稿" }],
+      ["AIMessage", { id: "collision-shared", content: "碰撞助手更正正文" }],
+      ["AIMessageChunk", { id: "collision-shared", content: "及后续分片" }],
+      [
+        "ToolMessage",
+        {
+          id: "collision-shared",
+          tool_call_id: "collision-call",
+          name: "read_file",
+          content: "碰撞工具更新结果"
+        }
+      ]
+    ]
+    for (const [kind, kwargs] of collisionFrames) {
+      await send({
+        type: "stream",
+        mode: "messages",
+        ...collisionSerializer("messages", [serialized(kind, kwargs), { langgraph_node: "agent" }])
+      })
+    }
+    await until(
+      async () => (await page.locator("body").innerText()).includes("碰撞助手更正正文及后续分片"),
+      "same-provider-ID assistant rewrite and continuation"
+    )
+    const toolHeader = page.getByRole("button").filter({ hasText: "collision-proof.txt" }).first()
+    await toolHeader.click()
+    await until(
+      async () => (await page.locator("body").innerText()).includes("碰撞工具更新结果"),
+      "same-provider-ID tool result remains in its tool card"
+    )
+    assert.equal((await page.locator("body").innerText()).includes("碰撞助手旧草稿"), false)
+    assert.deepEqual(errors, [])
+    results.push(
+      "same provider ID preserves tool card, assistant rewrite and continuation in React"
+    )
+    const completionMessage = serialized("AIMessage", {
+      id: "completion-visible",
+      content: "完成交接后正文必须保留。",
+      additional_kwargs: { reasoning_content: "完成交接后思考过程必须保留。" }
+    })
+    await chunk("AIMessageChunk", {
+      id: "completion-visible",
+      content: "完成交接后正文必须保留。",
+      additional_kwargs: { reasoning_content: "完成交接后思考过程必须保留。" }
+    })
+    // A short final values frame followed by metadata-only values must retain
+    // both final fields when the live layer hands off to durable history.
+    await send({ type: "stream", mode: "values", data: { messages: [completionMessage] } })
+    await send({ type: "stream", mode: "values", data: { todos: [] } })
+    const assertCompletionVisible = async () => {
+      await until(
+        async () => (await page.locator("body").innerText()).includes("完成交接后正文必须保留。"),
+        "completed answer remains visible"
+      )
+      const reasoningButtons = page.getByRole("button", { name: "思考", exact: true })
+      for (const button of await reasoningButtons.all()) {
+        if ((await button.getAttribute("aria-expanded")) !== "true") await button.click()
+      }
+      await until(
+        async () =>
+          (await page.locator("body").innerText()).includes("完成交接后思考过程必须保留。"),
+        "completed reasoning remains visible"
+      )
+    }
+    await assertCompletionVisible()
     await page.screenshot({ path: join(artifacts, "stream-fixed.png") })
     const metrics = await app.evaluate(({ app }) =>
       app.getAppMetrics().map((m) => ({ type: m.type, cpu: m.cpu, memory: m.memory }))
     )
     await send({ type: "done" })
+    await assertCompletionVisible()
+    await until(
+      () =>
+        page.evaluate(async (threadId) => {
+          const page = await (window as unknown as FixtureWindow).api.threads.getMessagesPage(
+            threadId,
+            { limit: 500 }
+          )
+          return page.messages.some(
+            (message) =>
+              message.content === "完成交接后正文必须保留。" &&
+              message.reasoning === "完成交接后思考过程必须保留。"
+          )
+        }, ids[0]),
+      "completion handoff persists both fields"
+    )
+    await page.getByText(titles[1], { exact: true }).first().click()
+    await page.getByText(titles[0], { exact: true }).first().click()
+    await assertCompletionVisible()
+    assert.deepEqual(errors, [])
+    results.push("answer and reasoning survive done, durable writeback and history navigation")
+    await page.screenshot({ path: join(artifacts, "completion-visible.png") })
 
     // Remove the entire renderer UI to verify the real main-process timeout
     // fallback, then crash its process to verify the immediate native path.

@@ -76,8 +76,12 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
   }
 
   replaceAssistantContent(frame: Message[], snapshot: AssistantSnapshot): Message[] {
+    // The transport owns canonical IDs. A malformed snapshot must never replace
+    // another role's tuple, even when that message is absent from a partial frame.
+    if (frame.some((message) => message.id === snapshot.id && message.type !== "ai")) return frame
     const index = frame.findIndex((message) => message.id === snapshot.id && message.type === "ai")
     const tuple = super.get(snapshot.id)
+    if (tuple?.chunk && tuple.chunk.getType() !== "ai") return frame
     const merged = {
       ...(index >= 0 ? frame[index] : undefined),
       // An ordinary values frame may have omitted this message. Its buffered

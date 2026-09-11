@@ -214,7 +214,7 @@ import {
 } from "./live-stream-transcript"
 import {
   applyPersistedSubagentTranscriptRefs,
-  appendSubagentLiveTextProjection,
+  projectSchedulerSubagentMessage,
   getSubagentTranscriptsFromThreadValues,
   mergeSubagentTranscripts,
   rebasePendingSubagentTranscriptRows,
@@ -6955,43 +6955,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             accumulatedReasoning: ""
           })
           if (subagentId) {
-            const startsSubagentMessage = id !== tracker.currentMsgId
-            if (startsSubagentMessage) {
-              tracker.currentMsgId = id
-              tracker.subagentContentProjection = undefined
-              tracker.subagentReasoningProjection = undefined
-            }
-            const contentProjection = appendSubagentLiveTextProjection(
-              tracker.subagentContentProjection,
-              content
-            )
-            tracker.subagentContentProjection = contentProjection
-            const reasoningProjection = reasoning
-              ? appendSubagentLiveTextProjection(tracker.subagentReasoningProjection, reasoning)
-              : tracker.subagentReasoningProjection
-            tracker.subagentReasoningProjection = reasoningProjection
-            const now = new Date()
             appendSubagentTranscriptMessages(threadId, subagentId, [
-              {
-                id,
-                role: "assistant" as const,
-                content: contentProjection.content,
-                content_is_projection: true,
-                content_full_length: contentProjection.totalLength,
-                content_stream_delta: content,
-                ...(startsSubagentMessage && { content_pending_delta: content }),
-                ...(reasoningProjection && {
-                  reasoning: reasoningProjection.content,
-                  reasoning_is_projection: true,
-                  reasoning_full_length: reasoningProjection.totalLength,
-                  ...(reasoning && {
-                    reasoning_stream_delta: reasoning,
-                    ...(startsSubagentMessage && { reasoning_pending_delta: reasoning })
-                  })
-                }),
-                ...(toolCalls?.length && { tool_calls: toolCalls }),
-                created_at: now
-              }
+              projectSchedulerSubagentMessage(tracker, {
+                id, content,
+                ...(typeof event.reasoning === "string" ? { reasoning: event.reasoning } : {}),
+                contentMode: event.contentMode === "snapshot" ? "snapshot" : "delta",
+                reasoningMode: event.reasoningMode === "snapshot" ? "snapshot" : "delta",
+                toolCalls
+              })
             ])
             break
           }

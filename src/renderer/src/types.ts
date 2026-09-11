@@ -309,6 +309,8 @@ export interface Message {
   content_persisted_length?: number
   content_pending_delta?: string
   content_stream_delta?: string
+  /** Renderer-only full replacement awaiting persistence acknowledgement. */
+  content_stream_snapshot?: boolean
   // Internal transcript aliases used to collapse a provisional subagent
   // assistant row into its stable task-completion row across reloads/replays.
   replaced_message_ids?: string[]
@@ -334,6 +336,7 @@ export interface Message {
   reasoning_persisted_length?: number
   reasoning_pending_delta?: string
   reasoning_stream_delta?: string
+  reasoning_stream_snapshot?: boolean
   tool_calls?: ToolCall[]
   tool_calls_ref?: SubagentTranscriptBlobRef
   // For tool messages - links result to its tool call

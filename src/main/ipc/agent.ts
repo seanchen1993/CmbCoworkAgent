@@ -1,12 +1,24 @@
 import { IpcMain, BrowserWindow, dialog } from "electron"
+import {
+  StopHookContextCollector,
+  STOP_HOOK_REVISION_PROMPT_PREFIX,
+  type SerializedHookMessage
+} from "./stop-hook-context"
+import { persistedMessageFromStreamPayload, streamPayloadContentMode } from "./stream-transcript-payload"
+import {
+  selectStreamTranscriptValueSnapshots,
+  rememberSelectedStreamTranscriptValueSnapshots,
+  getSelectedStreamTranscriptValueSnapshots,
+  getStreamTranscriptValueLocalOccurrence
+} from "./stream-transcript-values"
 import { nowIsoLocal } from "../util/local-time"
+import { StreamAssistantText } from "./stream-assistant-text"
 import { AsyncKeyedLock } from "./async-keyed-lock"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import {
   createSerializedValuesMessageAccumulator,
   createStreamDataSerializer,
-  sanitizeStreamDataForRenderer,
-  serializedMessageClassName
+  sanitizeStreamDataForRenderer
 } from "./stream-data-serialization"
 import {
   classifyPhysicalStreamRunFailure,
@@ -67,6 +79,7 @@ import {
   flushStrict,
   getThreadCore,
   getThreadMessageIdentityContext,
+  getThreadMessageProviderOccurrencesBeforeUser,
   getThreadMessagesByIds,
   getThread,
   updateThread,
@@ -145,29 +158,19 @@ import {
   type ContextCompactionLifecycleEvent
 } from "../../shared/context-compaction-events"
 import {
-  extractVisibleReasoning,
   isTraceReasoningTruncated,
-  mergeStreamingReasoning,
   truncateReasoningForTrace
 } from "../../shared/model-reasoning"
 import {
   getMessageProviderOccurrence,
   getMessageProviderSourceId,
-  getMessageProviderTupleFromMetadata,
   MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
 } from "../../shared/message-role-collision"
 import {
   accumulateStreamToolCallChunks,
-  streamToolCallContentModeFromMessageMode,
-  type StreamToolCallAccumulatorState,
-  type StreamToolCallChunk
+  type StreamToolCallAccumulatorState
 } from "../../shared/stream-tool-call-chunks"
-import {
-  readStreamMessageWireMode,
-  STREAM_MESSAGE_CONTENT_MODE_KEY,
-  STREAM_TOOL_CALL_ARGS_MODE_KEY
-} from "../../shared/stream-message-wire-mode"
 import {
   resolveStreamTranscriptFlush,
   readStreamTranscriptReasoning,
@@ -312,10 +315,7 @@ import {
 import { formatSkillUseBlock, parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
 import type { SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
 import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
-import {
-  runCompletionHooksWithRevision,
-  type StopHookContext
-} from "../agent/skill-lifecycle/completion-hooks"
+import { runCompletionHooksWithRevision } from "../agent/skill-lifecycle/completion-hooks"
 import {
   discardAgentAutoCommitTracking,
   maybeAutoCommitAfterAgentRun,
@@ -444,7 +444,6 @@ function withHarnessStageInvalidation(
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
-const MAX_STOP_CONTEXT_TEXT_CHARS = 40_000
 const MAX_POST_RUN_ASSISTANT_TEXT_CHARS = 60_000
 const MAX_PENDING_MEMORY_TURNS = 12
 const MAX_PENDING_MEMORY_CHARACTERS = 80_000
@@ -477,7 +476,6 @@ function formatTurnCompletionRecoveryNotice(input: {
     : `模型未给出有效结果（${input.detail}），已请求模型重新作答（${input.attempt}/${input.maxAttempts}）。`
 }
 
-const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 const SYSTEM_PROMPT_PREVIEW_IDS_ENV = "VITE_SYSTEM_PROMPT_PREVIEW_YST_IDS"
 const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
   import.meta.env?.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED
@@ -3416,25 +3414,6 @@ async function beginAutoCommitTracking(
   }
 }
 
-interface SerializedHookMessage {
-  id?: string[]
-  content?: unknown
-  additional_kwargs?: Record<string, unknown>
-  kwargs?: {
-    id?: string
-    type?: string
-    content?: unknown
-    name?: string
-    tool_call_id?: string
-    additional_kwargs?: Record<string, unknown>
-    tool_calls?: Array<{
-      id?: string
-      name?: string
-      args?: Record<string, unknown>
-    }>
-  }
-}
-
 interface SerializedValuesSideEffectMessage extends SerializedHookMessage {
   kwargs?: SerializedHookMessage["kwargs"] & {
     usage_metadata?: unknown
@@ -3447,21 +3426,6 @@ interface SerializedValuesSideEffectMessage extends SerializedHookMessage {
     status?: string
     is_error?: boolean
   }
-}
-
-function isCoordinatorInternalNotificationMessage(
-  message: SerializedHookMessage | undefined
-): boolean {
-  const additionalKwargs = message?.additional_kwargs ?? message?.kwargs?.additional_kwargs
-  return additionalKwargs?.[COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY] === true
-}
-
-function getCoordinatorVisibleUserMessage(
-  message: SerializedHookMessage | undefined
-): string | undefined {
-  const additionalKwargs = message?.additional_kwargs ?? message?.kwargs?.additional_kwargs
-  const visible = additionalKwargs?.[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]
-  return typeof visible === "string" && visible.trim() ? visible : undefined
 }
 
 function extractSerializedValuesMessages(payload: unknown): unknown[] {
@@ -3507,53 +3471,6 @@ function isCoordinatorWorkerStreamChunk(mode: string, payload: unknown, threadId
   return false
 }
 
-function extractPersistedMessageContent(content: unknown): Message["content"] {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-  const blocks = content.filter((block) => {
-    if (!block || typeof block !== "object" || Array.isArray(block)) return false
-    const type = (block as { type?: unknown }).type
-    return type === "text" || type === "image" || type === "tool_use" || type === "tool_result"
-  })
-  return blocks.length > 0 ? (blocks as Message["content"]) : ""
-}
-
-function getSerializedMessageRole(msgChunk: unknown): Message["role"] | null {
-  if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
-  const record = msgChunk as { id?: unknown; type?: unknown; kwargs?: Record<string, unknown> }
-  const kwargs = asPlainRecord(record.kwargs) ?? {}
-  const className = serializedMessageClassName(msgChunk)
-  const type = kwargs.type ?? record.type
-
-  if (className.includes("HumanMessage") || type === "human" || type === "user") return "user"
-  if (className.includes("ToolMessage") || type === "tool") return "tool"
-  if (className.includes("SystemMessage") || type === "system") return "system"
-  if (className.includes("AIMessage") || type === "ai" || type === "assistant") {
-    return "assistant"
-  }
-  return null
-}
-
-function serializedMessageId(msgChunk: unknown): string | null {
-  if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
-  const record = msgChunk as { id?: unknown; kwargs?: Record<string, unknown> }
-  const kwargs = asPlainRecord(record.kwargs) ?? {}
-  if (typeof kwargs.id === "string" && kwargs.id.trim()) return kwargs.id.trim()
-  if (typeof record.id === "string" && record.id.trim()) return record.id.trim()
-  return null
-}
-
-function streamPayloadContentMode(
-  payload: unknown
-): QueuedStreamTranscriptMessage["streamContentMode"] {
-  if (!Array.isArray(payload)) return "delta"
-  const metadata = asPlainRecord(payload[1])
-  const wireMode = readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY])
-  if (wireMode) return wireMode
-  const className = serializedMessageClassName(payload[0])
-  return className && !className.endsWith("Chunk") ? "snapshot" : "delta"
-}
-
 function setSerializedMessageIdentity(
   payload: unknown,
   identity: { stableId: string; providerSourceId: string; providerOccurrence: number }
@@ -3597,74 +3514,6 @@ function shouldSkipMainTranscriptStreamPayload(
   // flush, so the main process intentionally stays conservative here.
   if (checkpointNs.includes("tools:")) return true
   return false
-}
-
-function persistedMessageFromStreamPayload(payload: unknown): QueuedStreamTranscriptMessage | null {
-  if (!Array.isArray(payload)) return null
-  const [msgChunk] = payload
-  if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
-  const role = getSerializedMessageRole(msgChunk)
-  if (!role || role === "user") return null
-  const id = serializedMessageId(msgChunk)
-  if (!id) return null
-
-  const record = msgChunk as { content?: unknown; kwargs?: Record<string, unknown> }
-  const kwargs = asPlainRecord(record.kwargs) ?? {}
-  const content = extractPersistedMessageContent(kwargs.content ?? record.content)
-  const toolCalls = Array.isArray(kwargs.tool_calls)
-    ? (kwargs.tool_calls as Message["tool_calls"])
-    : undefined
-  const streamContentMode = streamPayloadContentMode(payload)
-  const reasoningUpdate =
-    role === "assistant" ? readStreamTranscriptReasoning(payload, streamContentMode) : {}
-  const streamToolCallContentMode = streamToolCallContentModeFromMessageMode(streamContentMode)
-  const streamToolCallChunks: StreamToolCallChunk[] = Array.isArray(kwargs.tool_call_chunks)
-    ? kwargs.tool_call_chunks.flatMap((value) => {
-        const chunk = asPlainRecord(value)
-        if (!chunk) return []
-        const id = typeof chunk.id === "string" && chunk.id ? chunk.id : undefined
-        const name = typeof chunk.name === "string" && chunk.name ? chunk.name : undefined
-        const args = typeof chunk.args === "string" ? chunk.args : undefined
-        const index = typeof chunk.index === "number" ? chunk.index : undefined
-        if (!id && !name && args === undefined && index === undefined) return []
-        const wireMode = readStreamMessageWireMode(chunk[STREAM_TOOL_CALL_ARGS_MODE_KEY])
-        return [{ id, name, args, index, contentMode: wireMode ?? streamToolCallContentMode }]
-      })
-    : []
-  if (
-    role !== "tool" &&
-    !reasoningUpdate.reasoning &&
-    (typeof content === "string" ? content.length === 0 : content.length === 0) &&
-    (!toolCalls || toolCalls.length === 0) &&
-    streamToolCallChunks.length === 0
-  ) {
-    return null
-  }
-
-  const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : undefined
-  const name = typeof kwargs.name === "string" ? kwargs.name : undefined
-  const status = typeof kwargs.status === "string" ? kwargs.status : undefined
-  const additionalKwargs = asPlainRecord(kwargs.additional_kwargs)
-  const providerTuple = getMessageProviderTupleFromMetadata(additionalKwargs)
-  const isError =
-    kwargs.is_error === true || additionalKwargs?.is_error === true || status === "error"
-
-  const message: QueuedStreamTranscriptMessage = {
-    id,
-    ...providerTuple,
-    role,
-    content,
-    ...reasoningUpdate,
-    ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-    ...(role === "tool" && toolCallId ? { tool_call_id: toolCallId } : {}),
-    ...(role === "tool" && name ? { name } : {}),
-    ...(role === "tool" && status ? { status } : {}),
-    ...(role === "tool" && isError ? { is_error: true } : {}),
-    created_at: new Date(),
-    streamContentMode,
-    streamToolCallChunks
-  }
-  return message
 }
 
 const STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS = 250
@@ -4076,7 +3925,8 @@ function persistAndForwardPhysicalRunStreamChunk(
   mode: string,
   payload: unknown,
   valuesMessageIndexOffset = 0,
-  valuesSnapshotKind: "full" | "append" | "tail" = "full"
+  valuesSnapshotKind: "full" | "append" | "tail" = "full",
+  completeValuesMessages?: readonly unknown[]
 ): string | null {
   // This fence deliberately sits immediately beside persistence and renderer
   // forwarding. A provider callback may resume after any earlier await even
@@ -4086,6 +3936,31 @@ function persistAndForwardPhysicalRunStreamChunk(
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
   const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
+  if (mode === "values") {
+    // Graph values are the ordered authority for final fields. Persist them at
+    // the active-run fence so delayed renderer echoes cannot restore old text,
+    // and values-only finals do not depend on an unmarked renderer writeback.
+    const snapshots = selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
+      completeMessages: completeValuesMessages,
+      loadBaselineMessages: (selectors) =>
+        getThreadMessageIdentityContext(
+          threadId,
+          selectors.map((message) => ({
+            messageId: message.id,
+            providerSourceId: getMessageProviderSourceId(message),
+            providerOccurrence: getMessageProviderOccurrence(message),
+            role: message.role as Message["role"]
+          }))
+        ),
+      loadPreviousTurnOccurrences: (userMessageId, sourceIds) =>
+        getThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, sourceIds)
+    })
+    rememberSelectedStreamTranscriptValueSnapshots(payload, snapshots)
+    for (const snapshot of snapshots) {
+      persistStreamTranscriptChunk(threadId, runToken, "messages", snapshot, { deferFlush: true })
+    }
+    flushPendingStreamTranscriptMessages(threadId, runToken)
+  }
   safeSendToWindow(window, channel, {
     type: "stream",
     mode,
@@ -4123,12 +3998,6 @@ function persistVisibleUserTranscriptMessage(
     console.warn("[Agent] Failed to persist user transcript message:", error)
     return false
   }
-}
-
-function trimStopContextText(text: string): string {
-  const trimmed = text.trim()
-  if (trimmed.length <= MAX_STOP_CONTEXT_TEXT_CHARS) return trimmed
-  return `${trimmed.slice(0, MAX_STOP_CONTEXT_TEXT_CHARS)}\n...(truncated)`
 }
 
 function trimPostRunAssistantText(text: string): string {
@@ -4323,188 +4192,6 @@ function runCoalescedMemoryMaintenance(
 ): void {
   if (!batch) return
   memoryMaintenanceCoalescer.enqueue(scopeKey, batch, mergeMemoryMaintenanceBatches, operation)
-}
-
-function extractStopContextText(raw: unknown): string {
-  if (typeof raw === "string") return raw
-  if (!Array.isArray(raw)) return ""
-  return raw
-    .map((block) => {
-      if (typeof block === "string") return block
-      if (!block || typeof block !== "object") return ""
-      const item = block as { type?: string; text?: string; content?: string }
-      if (typeof item.text === "string") return item.text
-      if (typeof item.content === "string") return item.content
-      return ""
-    })
-    .filter(Boolean)
-    .join("")
-}
-
-function isStopHookRevisionPrompt(text: string): boolean {
-  return text.trimStart().startsWith(STOP_HOOK_REVISION_PROMPT_PREFIX)
-}
-
-function stopContextRole(
-  className: string,
-  kwargs: SerializedHookMessage["kwargs"]
-): "user" | "assistant" | "tool" | "system" | "unknown" {
-  if (className.includes("Human")) return "user"
-  if (className.includes("AI")) return "assistant"
-  if (className.includes("Tool")) return "tool"
-  if (className.includes("System")) return "system"
-  if (kwargs?.type === "human") return "user"
-  if (kwargs?.type === "ai") return "assistant"
-  if (kwargs?.type === "tool") return "tool"
-  if (kwargs?.type === "system") return "system"
-  return "unknown"
-}
-
-class StopHookContextCollector {
-  private userMessage?: string
-  private assistantText = ""
-  private latestFinalAssistantResponse = ""
-  private readonly countedAiMessageIds = new Set<string>()
-  private readonly toolCallCounter = new ToolCallCounter()
-  private readonly skillUsageDetector = new SkillUsageDetector()
-
-  constructor(userMessage?: string) {
-    if (userMessage) this.userMessage = userMessage
-  }
-
-  processStreamChunk(mode: string, payload: unknown): void {
-    try {
-      if (mode === "messages") {
-        this.processMessagePayload(payload)
-        return
-      }
-      if (mode === "values") {
-        this.processValuesPayload(payload)
-      }
-    } catch (error) {
-      console.warn("[Hooks] Failed to collect Stop hook context:", error)
-    }
-  }
-
-  snapshot(overrides: StopHookContext = {}): StopHookContext {
-    const context: StopHookContext = {}
-    const userMessage = overrides.userMessage ?? this.userMessage
-    const assistantResponse =
-      overrides.assistantResponse ??
-      (this.latestFinalAssistantResponse || this.assistantText.trim())
-    const toolCalls =
-      overrides.toolCalls && overrides.toolCalls.length > 0
-        ? overrides.toolCalls
-        : this.toolCallCounter.getNames()
-    const usedSkills =
-      overrides.usedSkills && overrides.usedSkills.length > 0
-        ? overrides.usedSkills
-        : this.skillUsageDetector.getUsedSkillNames()
-
-    if (userMessage) context.userMessage = trimStopContextText(userMessage)
-    if (assistantResponse) context.assistantResponse = trimStopContextText(assistantResponse)
-    if (toolCalls.length > 0) context.toolCalls = toolCalls
-    if (usedSkills.length > 0) context.usedSkills = usedSkills
-    return context
-  }
-
-  private processMessagePayload(payload: unknown): void {
-    const [msgChunk] = payload as [SerializedHookMessage]
-    if (!msgChunk) return
-    if (isCoordinatorInternalNotificationMessage(msgChunk)) return
-    const kwargs = msgChunk.kwargs || {}
-    const classId = Array.isArray(msgChunk.id) ? msgChunk.id : []
-    const className = classId[classId.length - 1] || ""
-    const role = stopContextRole(className, kwargs)
-    const visibleUserMessage = getCoordinatorVisibleUserMessage(msgChunk)
-    const text = visibleUserMessage ?? extractStopContextText(kwargs.content ?? msgChunk.content)
-
-    if (role === "user" && text.trim() && !isStopHookRevisionPrompt(text)) {
-      this.userMessage = text.trim()
-    }
-    if (role === "assistant") {
-      if (text && this.assistantText.length <= MAX_STOP_CONTEXT_TEXT_CHARS) {
-        const remaining = MAX_STOP_CONTEXT_TEXT_CHARS + 1 - this.assistantText.length
-        this.assistantText += text.slice(0, remaining)
-      }
-      this.observeToolCalls(kwargs.tool_calls, kwargs.id ?? "")
-    }
-  }
-
-  private processValuesPayload(payload: unknown): void {
-    const state = payload as {
-      skillsMetadata?: Array<{ name?: string; path?: string }>
-      messages?: SerializedHookMessage[]
-    }
-    if (Array.isArray(state.skillsMetadata) && state.skillsMetadata.length > 0) {
-      this.skillUsageDetector.onSkillsMetadata(state.skillsMetadata)
-    }
-    if (!Array.isArray(state.messages)) return
-
-    let lastUserIndex = -1
-    for (let i = state.messages.length - 1; i >= 0; i--) {
-      const msg = state.messages[i]
-      if (isCoordinatorInternalNotificationMessage(msg)) {
-        lastUserIndex = i
-        break
-      }
-      const kwargs = msg?.kwargs || {}
-      const classId = Array.isArray(msg?.id) ? msg.id : []
-      const className = classId[classId.length - 1] || ""
-      if (stopContextRole(className, kwargs) !== "user") continue
-      const visibleUserMessage = getCoordinatorVisibleUserMessage(msg)
-      const text = (
-        visibleUserMessage ?? extractStopContextText(kwargs.content ?? msg.content)
-      ).trim()
-      if (text && !isStopHookRevisionPrompt(text)) {
-        this.userMessage = text
-        lastUserIndex = i
-        break
-      }
-    }
-
-    const finalResponses: string[] = []
-    const startIndex = lastUserIndex >= 0 ? lastUserIndex + 1 : 0
-    for (let i = startIndex; i < state.messages.length; i++) {
-      const msg = state.messages[i]
-      const kwargs = msg?.kwargs || {}
-      const classId = Array.isArray(msg?.id) ? msg.id : []
-      const className = classId[classId.length - 1] || ""
-      const role = stopContextRole(className, kwargs)
-      if (role !== "assistant") continue
-
-      const aiMessageId = typeof kwargs.id === "string" ? kwargs.id : ""
-      this.observeToolCalls(kwargs.tool_calls, aiMessageId)
-      if (Array.isArray(kwargs.tool_calls) && kwargs.tool_calls.length > 0) continue
-
-      const text = extractStopContextText(kwargs.content ?? msg.content).trim()
-      if (text) finalResponses.push(text)
-    }
-
-    if (finalResponses.length > 0) {
-      this.latestFinalAssistantResponse = finalResponses[finalResponses.length - 1]
-    }
-  }
-
-  private observeToolCalls(
-    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> | undefined,
-    aiMessageId: string
-  ): void {
-    if (!Array.isArray(toolCalls) || toolCalls.length === 0) return
-    if (aiMessageId && this.countedAiMessageIds.has(aiMessageId)) return
-    if (aiMessageId) this.countedAiMessageIds.add(aiMessageId)
-
-    for (let index = 0; index < toolCalls.length; index++) {
-      const toolCall = toolCalls[index]
-      this.toolCallCounter.register(toolCall, aiMessageId, index)
-      if (toolCall.name !== "read_file") continue
-      const readPathRaw =
-        (typeof toolCall.args?.path === "string" && toolCall.args.path) ||
-        (typeof toolCall.args?.file_path === "string" && toolCall.args.file_path) ||
-        ""
-      if (readPathRaw) this.skillUsageDetector.onReadFilePath(readPathRaw)
-    }
-  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -6481,7 +6168,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
         const skillUsageDetector = new SkillUsageDetector()
         const toolCallCounter = new ToolCallCounter()
-        let assistantText = ""
+        const assistantText = new StreamAssistantText()
+        const currentTurnAssistantText = new StreamAssistantText()
         const fileWritePaths: string[] = []
         let drainedCoordinatorNotifications: CoordinatorTurnNotification[] = []
         let coordinatorNotificationsConsumed = false
@@ -6758,7 +6446,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         ): SkillProposalWindowContext => {
           appendSkillProposalWindowTurn(threadId, {
             userMessage: message,
-            assistantText,
+            assistantText: assistantText.text,
             toolCallNames: toolCallCounter.getNames(),
             toolCallCount: toolCallCounter.getCount(),
             status,
@@ -7976,7 +7664,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             mode: string,
             payload: unknown,
             valuesMessageIndexOffset: number,
-            valuesSnapshotKind: "full" | "append" | "tail"
+            valuesSnapshotKind: "full" | "append" | "tail",
+            completeValuesMessages?: readonly unknown[]
           ): string | null => {
             return persistAndForwardPhysicalRunStreamChunk(
               window,
@@ -7987,7 +7676,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               mode,
               payload,
               valuesMessageIndexOffset,
-              valuesSnapshotKind
+              valuesSnapshotKind,
+              completeValuesMessages
             )
           }
 
@@ -8026,11 +7716,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const isCapturedSoloTaskMessage =
                 isAI && soloTaskTraceManager?.hasCapturedTask(soloTaskOwnerId) === true
 
+              const textUpdated = assistantText.processMessage(payload)
+              currentTurnAssistantText.processMessage(payload)
+              if (textUpdated) lastFinalText = undefined
               if (!isAI) return
 
               const rawContent = kwargs.content ?? msgChunk.content
               const visibleText = extractTextBlocks(rawContent)
-              if (visibleText) assistantText += visibleText
 
               // Tool-call extraction — deduped by message ID.
               const toolCalls = kwargs.tool_calls as
@@ -8042,16 +7734,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 | undefined
               const msgId = (kwargs.id as string) || ""
               const premergedReasoning = getPremergedStreamSideEffectReasoning(payload)
-              const streamedReasoning = extractVisibleReasoning(kwargs, MAX_TRACE_CONTENT + 1)
+              const reasoningUpdate = readStreamTranscriptReasoning(
+                payload as unknown[], streamPayloadContentMode(payload), MAX_TRACE_CONTENT + 1
+              )
               if (msgId && premergedReasoning !== undefined) {
                 _reasoningByAiMessageId.set(msgId, premergedReasoning)
-              } else if (msgId && streamedReasoning) {
+              } else if (msgId && reasoningUpdate.reasoning !== undefined) {
                 const existingReasoning = _reasoningByAiMessageId.get(msgId) ?? ""
-                const reasoning = className.includes("AIMessageChunk")
-                  ? isTraceReasoningTruncated(existingReasoning)
+                const reasoning = reasoningUpdate.reasoning_mode === "snapshot"
+                  ? reasoningUpdate.reasoning
+                  : isTraceReasoningTruncated(existingReasoning)
                     ? existingReasoning
-                    : mergeStreamingReasoning(existingReasoning, streamedReasoning)
-                  : streamedReasoning
+                    : existingReasoning + reasoningUpdate.reasoning
                 _reasoningByAiMessageId.set(
                   msgId,
                   truncateReasoningForTrace(reasoning, MAX_TRACE_CONTENT)
@@ -8107,9 +7801,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             valuesSnapshotKind: "full" | "append" | "tail" = "full"
           ): void => {
             try {
-              const state = payload as {
-                skillsMetadata?: Array<{ name?: string; path?: string }>
-                messages?: SerializedValuesSideEffectMessage[]
+              const state = {
+                ...(payload as {
+                  skillsMetadata?: Array<{ name?: string; path?: string }>
+                  messages?: SerializedValuesSideEffectMessage[]
+                })
               }
               const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
               if (skillsMetadata.length > 0) {
@@ -8123,8 +7819,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const messagesForSideEffects =
                 valuesSnapshotKind === "full"
                   ? incomingMessages
-                  : [...valuesSideEffectTail, ...incomingMessages]
+                  : valuesSnapshotKind === "tail"
+                    ? [...valuesSideEffectTail.slice(0, -1), ...incomingMessages]
+                    : [...valuesSideEffectTail, ...incomingMessages]
               state.messages = messagesForSideEffects
+              const normalizedValueSnapshots =
+                getSelectedStreamTranscriptValueSnapshots(payload) ??
+                selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
+                  completeMessages: messagesForSideEffects
+                })
+              for (const tuple of normalizedValueSnapshots) {
+                const snapshot = tuple[0] as SerializedValuesSideEffectMessage
+                const className = Array.isArray(snapshot.id) ? snapshot.id.at(-1) ?? "" : ""
+                if (!className.includes("AI") && snapshot.kwargs?.type !== "ai") continue
+                const localOccurrence = getStreamTranscriptValueLocalOccurrence(tuple)
+                assistantText.applySnapshot(snapshot, undefined, localOccurrence)
+                currentTurnAssistantText.applySnapshot(snapshot, undefined, localOccurrence)
+              }
 
               const turnPromptCandidates = [
                 currentTurnUserMessageForEvidence,
@@ -8281,20 +7992,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
               }
 
-              const finalMsgs = state.messages.slice(valuesStartIndex).filter((m) => {
-                const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
-                const kw = m.kwargs || {}
-                const isAiMessage = cn.includes("AI") || kw.type === "ai"
-                return (
-                  isAiMessage &&
-                  (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
-                )
-              })
+              const finalMsgs = normalizedValueSnapshots
+                .map((tuple) => tuple[0] as SerializedValuesSideEffectMessage)
+                .filter((m) => {
+                  const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
+                  const kw = m.kwargs || {}
+                  return cn.includes("AI") || kw.type === "ai"
+                })
               const last = finalMsgs[finalMsgs.length - 1]
               if (last) {
                 const kw = last.kwargs || {}
                 const text = extractTextBlocks(kw.content).trim()
-                if (text) lastFinalText = text
+                if (Array.isArray(kw.tool_calls) && kw.tool_calls.length > 0) {
+                  lastFinalText = undefined
+                } else if (typeof kw.content === "string" || Array.isArray(kw.content)) {
+                  lastFinalText = text
+                }
               }
 
               if (valuesSnapshotKind === "full") {
@@ -8326,12 +8039,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
           }
 
-          let lastFinalText = ""
-          let currentTurnAssistantStart = 0
+          let lastFinalText: string | undefined
           const getCurrentAssistantResponse = (): string =>
             getCurrentTurnAssistantResponse({
-              assistantText,
-              currentTurnAssistantStart,
+              assistantText: currentTurnAssistantText.text,
+              currentTurnAssistantStart: 0,
               lastFinalText
             })
 
@@ -8416,7 +8128,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   mode,
                   serialized,
                   valuesMessageIndexOffset,
-                  valuesSnapshotKind
+                  valuesSnapshotKind,
+                  mode === "values" ? latestValuesSnapshot.messages : undefined
                 )
                 if (messageId) inFlightStreamMessageIds.add(messageId)
                 if (mode === "messages") {
@@ -8993,10 +8706,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
               modelInputMessage = goalContinuationInput
               currentTurnUserMessageForEvidence = goalContinuationInput
-              currentTurnAssistantStart = assistantText.length
+              currentTurnAssistantText.reset()
+              assistantText.beginSegment()
               currentTurnToolCallStart = toolCallCounter.getCount()
               currentTurnEvidenceStart = goalEvidenceBuffer.getCount()
-              lastFinalText = ""
+              lastFinalText = undefined
               sendGoalNotice(outcome.notice)
               const continued = await consumeGoalContinuationWithFailover(
                 goalContinuationInput,
@@ -9138,7 +8852,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 key: `agent:${threadId}:${turnState.turnId}`
               })
             }
-            const postRunAssistantText = trimPostRunAssistantText(assistantText)
+            const postRunAssistantText = trimPostRunAssistantText(assistantText.text)
             if (invokeFinalOutcome === "success") {
               notifyIfBackground(
                 "✅ 任务完成",
@@ -10806,7 +10520,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   mode,
                   serialized,
                   valuesMessageIndexOffset,
-                  valuesSnapshotKind
+                  valuesSnapshotKind,
+                  mode === "values" ? latestValuesSnapshot.messages : undefined
                 )
                 if (messageId) resumeInFlightMessageIds.add(messageId)
                 if (mode === "messages") {
@@ -11943,7 +11658,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   mode,
                   serialized,
                   valuesMessageIndexOffset,
-                  valuesSnapshotKind
+                  valuesSnapshotKind,
+                  mode === "values" ? latestValuesSnapshot.messages : undefined
                 )
                 if (messageId) intInFlightMessageIds.add(messageId)
                 if (mode === "messages") {

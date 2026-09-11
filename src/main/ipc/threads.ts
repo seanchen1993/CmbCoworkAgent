@@ -36,6 +36,7 @@ import {
   mergeThreadValues as dbMergeThreadValues,
   replaceThreadMessageId,
   upsertThreadMessages,
+  applyThreadMessageStreamAuthority,
   deleteThread as dbDeleteThread,
   type ThreadRow
 } from "../db"
@@ -611,7 +612,11 @@ async function copyForkedThreadMessages(input: {
     if (messages.length > 0) {
       // Batches are inserted in visible order, so no target-lifetime baseline
       // is needed to preserve ordering between batches.
-      upsertThreadMessages(input.targetThreadId, messages, { preserveExistingOrder: true })
+      upsertThreadMessages(
+        input.targetThreadId,
+        applyThreadMessageStreamAuthority(input.sourceThreadId, messages),
+        { preserveExistingOrder: true }
+      )
     }
     await yieldForkColdPath()
   }
@@ -3378,7 +3383,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
                   isSubagentTranscriptBlobRef(incomingRecord?.content_ref, "content") ||
                   isSubagentTranscriptBlobRef(incomingRecord?.reasoning_ref, "reasoning")
                 const preserveTextJournal =
-                  hasTextDelta || (hasDurableTextJournal && carriesProjectedTextRef)
+                  hasTextDelta || (hasDurableTextJournal && (carriesProjectedTextRef || Array.isArray(incomingRecord?.subagent_text_snapshots)))
                 if (preserveTextJournal) {
                   const previousReferenceHashKey = getThreadSubagentManifestBlobReferenceHashes(
                     threadId,

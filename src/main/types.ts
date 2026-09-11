@@ -241,7 +241,10 @@ export interface Message {
 }
 
 /** Internal write payload; readers always receive a complete reasoning snapshot. */
-export interface ThreadMessageWrite extends Message, TranscriptReasoningUpdate {}
+export interface ThreadMessageWrite extends Message, TranscriptReasoningUpdate {
+  /** Write-only authority for content; does not replace tool calls or priority. */
+  content_mode?: "delta" | "snapshot"
+}
 
 export interface ThreadMessagesPageOptions {
   /**
