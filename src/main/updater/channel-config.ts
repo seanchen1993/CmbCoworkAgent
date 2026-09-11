@@ -1,3 +1,4 @@
+import { updaterLog } from "./logger"
 import { existsSync, readFileSync } from "fs"
 import { join } from "path"
 import { getOpenworkDir } from "../storage"
@@ -65,7 +66,7 @@ export function resolveUpdateSourceFromConfig(
   if (raw.enabled !== true) return fallback
 
   if (raw.channel !== "selftest") {
-    console.warn('[Updater] Ignoring update-channel.json: channel must be "selftest"')
+    updaterLog.warn('[Updater] Ignoring update-channel.json: channel must be "selftest"')
     return fallback
   }
 
@@ -73,22 +74,22 @@ export function resolveUpdateSourceFromConfig(
   if (expiresAt) {
     const expiresAtTime = Date.parse(expiresAt)
     if (Number.isNaN(expiresAtTime)) {
-      console.warn("[Updater] Ignoring selftest update source: expiresAt is invalid")
+      updaterLog.warn("[Updater] Ignoring selftest update source: expiresAt is invalid")
       return fallback
     }
     if (expiresAtTime <= (options.now ?? new Date()).getTime()) {
-      console.warn("[Updater] Ignoring selftest update source: config has expired")
+      updaterLog.warn("[Updater] Ignoring selftest update source: config has expired")
       return fallback
     }
   } else {
-    console.warn(
+    updaterLog.warn(
       "[Updater] Selftest update source has no expiresAt; remember to disable it after testing"
     )
   }
 
   const manifestFile = readStringField(raw, "manifestFile") ?? DEFAULT_SELFTEST_MANIFEST_FILE
   if (!isSafeSelfTestManifestFile(manifestFile)) {
-    console.warn(
+    updaterLog.warn(
       `[Updater] Ignoring selftest update source: manifestFile must be a non-production cmbdevclaw-latest*.json file`
     )
     return fallback
@@ -99,7 +100,7 @@ export function resolveUpdateSourceFromConfig(
   if (configuredBaseUrl) {
     const normalizedBaseUrl = normalizeBaseUrl(configuredBaseUrl)
     if (!isValidHttpBaseUrl(normalizedBaseUrl)) {
-      console.warn("[Updater] Ignoring selftest update source: baseUrl must be http(s)")
+      updaterLog.warn("[Updater] Ignoring selftest update source: baseUrl must be http(s)")
       return fallback
     }
     baseUrl = normalizedBaseUrl
@@ -123,7 +124,7 @@ export function resolveUpdateSource(defaultBaseUrl: string): UpdateSourceInfo {
     const raw = readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "")
     return resolveUpdateSourceFromConfig(JSON.parse(raw), defaultBaseUrl, { configPath })
   } catch (err) {
-    console.warn(
+    updaterLog.warn(
       "[Updater] Failed to read update-channel.json, using production update source:",
       err
     )

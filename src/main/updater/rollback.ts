@@ -1,3 +1,5 @@
+import { bashLoggingHeader } from "./script-logging"
+import { updaterLog } from "./logger"
 import { app } from "electron"
 import { existsSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs"
 import { basename, dirname, join, resolve } from "path"
@@ -68,9 +70,9 @@ function markFullRollbackAttempting(markerPath: string): void {
       unlinkSync(attemptPath)
     }
     renameSync(markerPath, attemptPath)
-    console.log("[Updater] Marked full rollback as attempting:", attemptPath)
+    updaterLog.log("[Updater] Marked full rollback as attempting:", attemptPath)
   } catch (e) {
-    console.warn("[Updater] Failed to mark full rollback as attempting:", e)
+    updaterLog.warn("[Updater] Failed to mark full rollback as attempting:", e)
   }
 }
 
@@ -86,10 +88,10 @@ function shouldRetainForRollbackAttempt(attemptPath: string): boolean {
     }
 
     unlinkSync(attemptPath)
-    console.warn("[Updater] Removed stale full rollback attempt marker:", attemptPath)
+    updaterLog.warn("[Updater] Removed stale full rollback attempt marker:", attemptPath)
     return false
   } catch (e) {
-    console.warn("[Updater] Failed to inspect full rollback attempt marker; retaining backup:", e)
+    updaterLog.warn("[Updater] Failed to inspect full rollback attempt marker; retaining backup:", e)
     return true
   }
 }
@@ -114,7 +116,7 @@ function shouldDiscardStaleFullBackupCleanupState(state: FullBackupCleanupState)
   }
 
   removeFullBackupCleanupState()
-  console.warn("[Updater] Removed stale full backup cleanup state after TTL:", {
+  updaterLog.warn("[Updater] Removed stale full backup cleanup state after TTL:", {
     toVersion: state.toVersion,
     state: state.state,
     ageMs
@@ -138,13 +140,22 @@ export interface StartupCheckResult {
 
 export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
   const markerPath = getMarkerPath()
+  updaterLog.log("[Updater] Startup self-check:", {
+    currentVersion: app.getVersion(),
+    exePath: getExePath(),
+    resourcesPath: process.resourcesPath,
+    markerPath,
+    markerExists: existsSync(markerPath),
+    fullBackupExists: existsSync(getFullBackupDir()),
+    asarBackupExists: existsSync(getBackupPath())
+  })
 
   if (!existsSync(markerPath)) {
     cleanupStaleFullBackup()
     return {} // Not a post-update boot, nothing to do
   }
 
-  console.log("[Updater] Post-update boot detected, running self-check...")
+  updaterLog.log("[Updater] Post-update boot detected, running self-check...")
 
   let marker: UpdateMarker
   try {
@@ -152,8 +163,8 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
     // and JSON.parse rejects it.
     const raw = readFileSync(markerPath, "utf-8").replace(/^\uFEFF/, "")
     marker = JSON.parse(raw)
-  } catch {
-    console.warn("[Updater] Failed to parse update-marker.json, removing it")
+  } catch (err) {
+    updaterLog.warn("[Updater] Failed to parse update-marker.json, removing it:", err)
     unlinkSync(markerPath)
     return {}
   }
@@ -161,10 +172,21 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
   const currentVersion = app.getVersion()
 
   const legacyIntermediateCandidate = isLegacyIntermediateFullCandidate(marker, currentVersion)
+  updaterLog.log("[Updater] Startup version comparison:", {
+    currentVersion,
+    fromVersion: marker.fromVersion,
+    expectedVersion: marker.toVersion,
+    releaseVersion: marker.releaseVersion,
+    channel: marker.channel,
+    minVersion: marker.minVersion,
+    updateType: marker.updateType ?? "asar",
+    legacyIntermediateCandidate,
+    versionMatches: currentVersion === marker.toVersion
+  })
 
   if (currentVersion === marker.toVersion) {
     const installedVersion = marker.toVersion
-    console.log(
+    updaterLog.log(
       `[Updater] Self-check passed: version ${currentVersion} matches expected ${marker.toVersion}`
     )
     unlinkSync(markerPath)
@@ -182,7 +204,7 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
           channel: marker.channel,
           minVersion: marker.minVersion
         })
-        console.log(
+        updaterLog.log(
           `[Updater] Persisted ${marker.channel} update chain: ` +
             `${installedVersion} -> ${marker.releaseVersion}`
         )
@@ -209,7 +231,7 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
     // Old installers wrote the final release into toVersion and did not record
     // minVersion. Keep the installed app and its rollback backup, but defer the
     // success decision until checker.ts can validate the live manifest floor.
-    console.warn(
+    updaterLog.warn(
       `[Updater] Legacy full bootstrap awaits manifest validation: ` +
         `installed ${currentVersion}, target ${marker.toVersion}`
     )
@@ -217,14 +239,14 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
   }
 
   // Version mismatch - the update didn't take effect, auto-rollback
-  console.error(
+  updaterLog.error(
     `[Updater] Version mismatch! Current: ${currentVersion}, expected: ${marker.toVersion}. Auto-rolling back...`
   )
 
   if (marker.updateType === "full") {
     const fullBackupDir = getFullBackupDir()
     if (!existsSync(fullBackupDir)) {
-      console.error("[Updater] No full backup found at", fullBackupDir, "- cannot rollback")
+      updaterLog.error("[Updater] No full backup found at", fullBackupDir, "- cannot rollback")
       unlinkSync(markerPath)
       return {}
     }
@@ -237,7 +259,7 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
 
   const backupPath = getBackupPath()
   if (!existsSync(backupPath)) {
-    console.error("[Updater] No backup found at", backupPath, "- cannot rollback")
+    updaterLog.error("[Updater] No backup found at", backupPath, "- cannot rollback")
     unlinkSync(markerPath)
     return {}
   }
@@ -285,16 +307,16 @@ function cleanupStaleFullBackup(): void {
   }
 
   if (shouldRetainForRollbackAttempt(getRollbackAttemptMarkerPath())) {
-    console.log("[Updater] Retaining full backup because a rollback attempt marker exists:", fullBackupDir)
+    updaterLog.log("[Updater] Retaining full backup because a rollback attempt marker exists:", fullBackupDir)
     return
   }
 
   const cleanupState = readFullBackupCleanupState()
   if (cleanupState && cleanupState.state !== "ready") {
     if (shouldDiscardStaleFullBackupCleanupState(cleanupState)) {
-      console.log("[Updater] Full backup cleanup state expired; allowing backup cleanup:", fullBackupDir)
+      updaterLog.log("[Updater] Full backup cleanup state expired; allowing backup cleanup:", fullBackupDir)
     } else {
-      console.log("[Updater] Retaining full backup until app is marked ready:", fullBackupDir)
+      updaterLog.log("[Updater] Retaining full backup until app is marked ready:", fullBackupDir)
       return
     }
   }
@@ -347,7 +369,7 @@ function holdFullBackupCleanup(marker: UpdateMarker): void {
     state: "hold",
     createdAt: new Date().toISOString()
   })
-  console.log("[Updater] Full update verified; retaining full backup until app is marked ready")
+  updaterLog.log("[Updater] Full update verified; retaining full backup until app is marked ready")
 }
 
 export function markFullBackupCleanupReady(startupResult: StartupCheckResult): void {
@@ -367,7 +389,7 @@ export function markFullBackupCleanupReady(startupResult: StartupCheckResult): v
     state: "ready",
     readyAt: new Date().toISOString()
   })
-  console.log("[Updater] Full backup cleanup marked ready for next startup")
+  updaterLog.log("[Updater] Full backup cleanup marked ready for next startup")
 
   scheduleInSessionFullBackupCleanup()
 }
@@ -383,7 +405,7 @@ function scheduleInSessionFullBackupCleanup(): void {
   if (inSessionCleanupScheduled) return
   inSessionCleanupScheduled = true
 
-  console.log(
+  updaterLog.log(
     `[Updater] Scheduling in-session full backup cleanup in ${FULL_BACKUP_INSESSION_CLEANUP_DELAY_MS / 1000}s`
   )
   inSessionCleanupTimer = setTimeout(() => {
@@ -398,23 +420,23 @@ function runInSessionFullBackupCleanup(): void {
   const fullBackupDir = getFullBackupDir()
 
   if (!existsSync(fullBackupDir)) {
-    console.log("[Updater] In-session cleanup: backup already gone, clearing state")
+    updaterLog.log("[Updater] In-session cleanup: backup already gone, clearing state")
     removeFullBackupCleanupState()
     return
   }
 
   if (shouldRetainForRollbackAttempt(getRollbackAttemptMarkerPath())) {
-    console.log("[Updater] In-session cleanup: rollback attempt marker present, skipping")
+    updaterLog.log("[Updater] In-session cleanup: rollback attempt marker present, skipping")
     return
   }
 
   const state = readFullBackupCleanupState()
   if (!state || state.state !== "ready") {
-    console.log("[Updater] In-session cleanup: state not ready, skipping")
+    updaterLog.log("[Updater] In-session cleanup: state not ready, skipping")
     return
   }
 
-  console.log("[Updater] In-session cleanup: dispatching backup cleanup script")
+  updaterLog.log("[Updater] In-session cleanup: dispatching backup cleanup script")
   cleanupBackupPaths({
     appDir,
     asarBackup: getBackupPath(),
@@ -432,7 +454,7 @@ function cleanupBackupPaths(args: {
   const { appDir, asarBackup, fullBackupDir, includeAsarBackup } = args
 
   if (!isExpectedFullBackupDir(appDir, fullBackupDir)) {
-    console.warn("[Updater] Refusing to clean unexpected full backup path:", fullBackupDir)
+    updaterLog.warn("[Updater] Refusing to clean unexpected full backup path:", fullBackupDir)
     return
   }
 
@@ -472,10 +494,10 @@ function removePathNow(path: string, recursive: boolean, label: string): boolean
       maxRetries: 10,
       retryDelay: 500
     })
-    console.log(`[Updater] Cleaned up ${label}:`, path)
+    updaterLog.log(`[Updater] Cleaned up ${label}:`, path)
     return true
   } catch (e) {
-    console.warn(`[Updater] Failed to clean up ${label}:`, e)
+    updaterLog.warn(`[Updater] Failed to clean up ${label}:`, e)
     return false
   }
 }
@@ -793,7 +815,9 @@ if (Test-Path -LiteralPath $cleanupStatePath) {
   Remove-Item -LiteralPath $cleanupStatePath -Force -ErrorAction SilentlyContinue
 }
 
-Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal
+Write-UpdateStage ("Restart requested: {0}" -f $exePath)
+$restarted = Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal -PassThru -ErrorAction Stop
+Write-UpdateStage ("Restart spawned: pid={0}; startup self-check pending" -f $restarted.Id)
 exit 0
 `
 }
@@ -821,7 +845,7 @@ FAILED_DIR="$APP_DIR.failed"
 EXE_FILE="$(basename "$EXE")"
 LOG_FILE="\${UPDATE_LOG:-/tmp/cmbdevclaw-full-rollback.log}"
 
-exec > "$LOG_FILE" 2>&1
+${bashLoggingHeader()}
 
 n=0
 while pgrep -x "$PROC_NAME" > /dev/null 2>&1 && [ $n -lt 30 ]; do
@@ -860,7 +884,9 @@ rm -rf "$FAILED_DIR"
 rm -f "$MARKER"
 rm -f "$ROLLBACK_ATTEMPT_MARKER"
 rm -f "$CLEANUP_STATE"
+update_stage "Restart requested: $EXE"
 nohup "$EXE" --no-sandbox > /dev/null 2>&1 &
+update_stage "Restart spawned: pid=$!; startup self-check pending"
 `
 }
 
@@ -880,9 +906,9 @@ function scheduleWindowsBackupCleanup(
     const ps1Path = join(getUpdatesDir(), "cleanup-backups.ps1")
     writePowerShellScript(ps1Path, ps1Content)
     launchDetachedPowerShellScript(ps1Path)
-    console.log("[Updater] Scheduled backup cleanup script:", ps1Path)
+    updaterLog.log("[Updater] Scheduled backup cleanup script:", ps1Path)
   } catch (e) {
-    console.warn("[Updater] Failed to schedule backup cleanup:", e)
+    updaterLog.warn("[Updater] Failed to schedule backup cleanup:", e)
   }
 }
 
@@ -905,7 +931,7 @@ FULL_BACKUP_DIR=${toBashString(fullBackupDir)}
 PROC_NAME=${toBashString(exeBaseName)}
 LOG_FILE=${toBashString(logPath)}
 
-exec >> "$LOG_FILE" 2>&1
+${bashLoggingHeader()}
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*"; }
@@ -1013,9 +1039,9 @@ function scheduleLinuxBackupCleanup(
     const shPath = join(getUpdatesDir(), "cleanup-backups.sh")
     writeBashScript(shPath, shContent)
     launchDetachedBashScript(shPath)
-    console.log("[Updater] Scheduled Linux backup cleanup script:", shPath)
+    updaterLog.log("[Updater] Scheduled Linux backup cleanup script:", shPath)
   } catch (e) {
-    console.warn("[Updater] Failed to schedule Linux backup cleanup:", e)
+    updaterLog.warn("[Updater] Failed to schedule Linux backup cleanup:", e)
   }
 }
 
@@ -1027,13 +1053,13 @@ function executeFullRollback(fullBackupDir: string): void {
     const ps1Content = generateFullRollbackPs1(fullBackupDir)
     const ps1Path = join(getUpdatesDir(), "full-rollback.ps1")
     writePowerShellScript(ps1Path, ps1Content)
-    console.log("[Updater] Generated full-rollback.ps1, executing...")
+    updaterLog.log("[Updater] Generated full-rollback.ps1, executing...")
     launchDetachedPowerShellScript(ps1Path)
   } else {
     const shContent = generateFullRollbackSh(fullBackupDir)
     const shPath = join(getUpdatesDir(), "full-rollback.sh")
     writeBashScript(shPath, shContent)
-    console.log("[Updater] Generated full-rollback.sh, executing...")
+    updaterLog.log("[Updater] Generated full-rollback.sh, executing...")
     launchDetachedBashScript(shPath)
   }
 
@@ -1045,13 +1071,13 @@ function executeRollback(backupAsarPath: string): void {
     const ps1Content = generateRollbackPs1(backupAsarPath)
     const ps1Path = join(getUpdatesDir(), "rollback.ps1")
     writePowerShellScript(ps1Path, ps1Content)
-    console.log("[Updater] Generated rollback.ps1, executing...")
+    updaterLog.log("[Updater] Generated rollback.ps1, executing...")
     launchDetachedPowerShellScript(ps1Path)
   } else {
     const shContent = generateRollbackSh(backupAsarPath)
     const shPath = join(getUpdatesDir(), "rollback.sh")
     writeBashScript(shPath, shContent)
-    console.log("[Updater] Generated rollback.sh, executing...")
+    updaterLog.log("[Updater] Generated rollback.sh, executing...")
     launchDetachedBashScript(shPath)
   }
 
@@ -1068,32 +1094,32 @@ export async function rollbackToPrevious(baseUrl: string): Promise<void> {
   const fullBackupDir = getFullBackupDir()
 
   if (hasFullBackup() && fullBackupBelongsToCurrentVersionOrUnknown()) {
-    console.log("[Updater] Rolling back using local full backup:", fullBackupDir)
+    updaterLog.log("[Updater] Rolling back using local full backup:", fullBackupDir)
     executeFullRollback(fullBackupDir)
     return
   }
 
   if (existsSync(backupPath)) {
-    console.log("[Updater] Rolling back using local backup:", backupPath)
+    updaterLog.log("[Updater] Rolling back using local backup:", backupPath)
     executeRollback(backupPath)
     return
   }
 
   if (hasFullBackup()) {
-    console.log("[Updater] Rolling back using local full backup:", fullBackupDir)
+    updaterLog.log("[Updater] Rolling back using local full backup:", fullBackupDir)
     executeFullRollback(fullBackupDir)
     return
   }
 
   // No local backup - try to download from server
-  console.log("[Updater] No local backup, checking server for rollback version...")
+  updaterLog.log("[Updater] No local backup, checking server for rollback version...")
   const latest = await fetchLatestJson(baseUrl)
 
   if (!latest.rollback) {
     throw new Error("服务器未提供回退版本信息")
   }
 
-  console.log(`[Updater] Downloading rollback version ${latest.rollback.version}...`)
+  updaterLog.log(`[Updater] Downloading rollback version ${latest.rollback.version}...`)
   const downloadedPath = await downloadUpdate(
     baseUrl,
     latest.rollback.file,

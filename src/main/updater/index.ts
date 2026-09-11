@@ -1,3 +1,4 @@
+import { updaterLog } from "./logger"
 import { ipcMain, BrowserWindow } from "electron"
 import { unlinkSync } from "fs"
 import { checkForUpdate, type UpdateCheckResult } from "./checker"
@@ -25,7 +26,7 @@ let lastErrorMessage: string | null = null
 function getUpdateServerUrl(): string {
   const url = (import.meta.env.VITE_UPDATE_SERVER_URL as string) || ""
   if (!url) {
-    console.warn("[Updater] VITE_UPDATE_SERVER_URL is not configured")
+    updaterLog.warn("[Updater] VITE_UPDATE_SERVER_URL is not configured")
   }
   return url
 }
@@ -40,7 +41,7 @@ function getUpdateSourcePayload(source: UpdateSourceInfo | null): UpdateSourceIn
 
 function logUpdateSourceIfNeeded(source: UpdateSourceInfo): void {
   if (!isSelfTestUpdateSource(source)) return
-  console.warn(
+  updaterLog.warn(
     `[Updater] SELFTEST update source enabled: manifest=${source.manifestFile}` +
       ` baseUrl=${source.baseUrl || "(not configured)"}` +
       (source.expiresAt ? ` expiresAt=${source.expiresAt}` : "")
@@ -70,7 +71,7 @@ async function performDownload(silent: boolean): Promise<void> {
   updateStatus = "downloading"
   lastDownloadProgress = null
   lastErrorMessage = null
-  console.log(
+  updaterLog.log(
     `[Updater] ${silent ? "Background" : "Manual"} download starting: ${lastCheckResult.downloadFile}`
   )
 
@@ -88,7 +89,7 @@ async function performDownload(silent: boolean): Promise<void> {
     updateStatus = "downloaded"
     lastDownloadProgress = null
     lastErrorMessage = null
-    console.log("[Updater] Download complete:", downloadedFilePath)
+    updaterLog.log("[Updater] Download complete:", downloadedFilePath)
     broadcast("update:downloaded", {
       version: lastCheckResult.version,
       targetVersion: lastCheckResult.targetVersion,
@@ -103,7 +104,7 @@ async function performDownload(silent: boolean): Promise<void> {
     lastDownloadProgress = null
     const message = err instanceof Error ? err.message : "Download failed"
     lastErrorMessage = message
-    console.error("[Updater] Download failed:", message)
+    updaterLog.error("[Updater] Download failed:", err)
     broadcast("update:error", { message, silent })
   }
 }
@@ -114,6 +115,11 @@ async function performDownload(silent: boolean): Promise<void> {
 async function performCheck(manual: boolean): Promise<UpdateCheckResult | null> {
   const source = getActiveUpdateSource()
   lastUpdateSource = source
+  updaterLog.log("[Updater] Update source:", {
+    sourceChannel: source.channel,
+    manifestFile: source.manifestFile,
+    manual
+  })
   if (!source.baseUrl) {
     if (manual) throw new Error("更新服务器地址未配置")
     return null
@@ -136,20 +142,20 @@ async function performCheck(manual: boolean): Promise<UpdateCheckResult | null> 
         autoDownloading: !manual,
         source: getUpdateSourcePayload(source)
       })
-      console.log(`[Updater] Update available: v${result.version} (${result.updateType})`)
+      updaterLog.log(`[Updater] Update available: v${result.version} (${result.updateType})`)
 
       if (!manual) {
         // Auto-check: silently download in background, notify when ready
         performDownload(true)
       }
     } else if (manual) {
-      console.log("[Updater] Already up to date")
+      updaterLog.log("[Updater] Already up to date")
     }
 
     return result
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error"
-    console.error("[Updater] Check failed:", message)
+    updaterLog.error("[Updater] Check failed:", err)
     if (manual) {
       broadcast("update:error", { message: `检查更新失败: ${message}` })
     }
@@ -228,20 +234,25 @@ export function registerUpdaterHandlers(): void {
     // Network failure here is NOT a reason to block install: the user may simply
     // be offline. We only abort when the server clearly disagrees.
     if (lastCheckResult.channel === "staging") {
+      updaterLog.log("[Updater] Staging install re-validation started:", {
+        packageVersion: lastCheckResult.version,
+        targetVersion: lastCheckResult.targetVersion,
+        downloadFile: lastCheckResult.downloadFile
+      })
       const source = lastUpdateSource ?? getActiveUpdateSource()
       if (source.baseUrl) {
         let recheck: UpdateCheckResult | null | undefined
         try {
           recheck = await checkForUpdate(source.baseUrl, { manifestFile: source.manifestFile })
         } catch (err) {
-          console.warn("[Updater] Staging re-validation network error, proceeding:", err)
+          updaterLog.warn("[Updater] Staging re-validation network error, proceeding:", err)
           recheck = undefined
         }
         if (recheck !== undefined) {
           const expected = lastCheckResult
           const stillValid = isSameStagingPayload(expected, recheck)
           if (!stillValid) {
-            console.warn(
+            updaterLog.warn(
               `[Updater] Staging re-validation failed: ` +
                 `expected v${expected.version} sha=${expected.downloadSha256.slice(0, 8)}, ` +
                 `got ${recheck ? `${recheck.channel} v${recheck.version} sha=${recheck.downloadSha256.slice(0, 8)} (${recheck.grayReason})` : "null"}`
@@ -259,6 +270,7 @@ export function registerUpdaterHandlers(): void {
             broadcast("update:error", { message: lastErrorMessage })
             throw new Error(lastErrorMessage)
           }
+          updaterLog.log("[Updater] Staging install re-validation passed")
         }
       }
     }
@@ -266,6 +278,16 @@ export function registerUpdaterHandlers(): void {
     notifyAlways("正在安装更新", `正在安装 v${lastCheckResult.version}，完成后应用将自动重启`)
 
     try {
+      updaterLog.log("[Updater] Install requested:", {
+        channel: lastCheckResult.channel,
+        sourceChannel: lastUpdateSource?.channel,
+        manifestFile: lastUpdateSource?.manifestFile,
+        packageVersion: lastCheckResult.version,
+        targetVersion: lastCheckResult.targetVersion,
+        minVersion: lastCheckResult.minVersion,
+        updateType: lastCheckResult.updateType,
+        downloadedFilePath
+      })
       if (lastCheckResult.updateType === "asar") {
         installAsarUpdate(downloadedFilePath, lastCheckResult.version)
       } else {
@@ -278,6 +300,7 @@ export function registerUpdaterHandlers(): void {
         )
       }
     } catch (err) {
+      updaterLog.error("[Updater] Install failed:", err)
       const message = err instanceof Error ? err.message : "安装失败"
       updateStatus = "error"
       lastErrorMessage = message
@@ -329,7 +352,7 @@ export function registerUpdaterHandlers(): void {
     }
   })
 
-  console.log("[Updater] IPC handlers registered")
+  updaterLog.log("[Updater] IPC handlers registered")
 }
 
 /**
@@ -342,7 +365,7 @@ export function startUpdateChecker(): void {
     initialCheckTimer = null
     performCheck(false)
   }, 5000)
-  console.log("[Updater] Startup update check scheduled in 5s")
+  updaterLog.log("[Updater] Startup update check scheduled in 5s")
 }
 
 /**

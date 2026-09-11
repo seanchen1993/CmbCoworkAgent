@@ -1,3 +1,4 @@
+import { updaterLog } from "./logger"
 import { createWriteStream, mkdirSync, unlinkSync, createReadStream, statSync } from "fs"
 import { createHash } from "crypto"
 import { createGunzip } from "zlib"
@@ -41,6 +42,7 @@ function downloadFile(
     const client = urlStr.startsWith("https") ? https : http
 
     const req = client.request(urlStr, { method: "POST", timeout: 300000 }, (res) => {
+      updaterLog.log("[Updater] Download response:", { fileName, statusCode: res.statusCode })
       if (res.statusCode !== 200) {
         reject(new Error(`HTTP ${res.statusCode} downloading file`))
         res.resume()
@@ -130,7 +132,7 @@ async function sha256File(filePath: string): Promise<string> {
  * @param onProgress - Optional progress callback
  * @returns Path to the final downloaded (and decompressed) file
  */
-export async function downloadUpdate(
+async function downloadAndVerifyUpdate(
   baseUrl: string,
   fileName: string,
   expectedSha256: string,
@@ -147,10 +149,11 @@ export async function downloadUpdate(
   try { unlinkSync(downloadPath) } catch { /* file may not exist */ }
   if (isGz) { try { unlinkSync(finalPath) } catch { /* file may not exist */ } }
 
-  console.log(`[Updater] Downloading ${baseUrl}/download?file=${fileName}`)
+  updaterLog.log(`[Updater] Downloading ${baseUrl}/download?file=${fileName}`)
   await downloadFile(baseUrl, fileName, downloadPath, expectedSize, onProgress)
 
   const downloadedSize = statSync(downloadPath).size
+  updaterLog.log("[Updater] Download saved:", { downloadPath, downloadedSize, expectedSize })
   onProgress?.({
     percent: 100,
     transferred: downloadedSize,
@@ -159,13 +162,13 @@ export async function downloadUpdate(
     phase: "verifying",
     message: "正在校验下载文件..."
   })
-  console.log("[Updater] Verifying SHA256...")
+  updaterLog.log("[Updater] Verifying SHA256...")
   const actualHash = await sha256File(downloadPath)
   if (actualHash !== expectedSha256) {
     try { unlinkSync(downloadPath) } catch { /* ignore */ }
     throw new Error(`文件校验失败\n期望: ${expectedSha256}\n实际: ${actualHash}`)
   }
-  console.log("[Updater] SHA256 verified OK")
+  updaterLog.log("[Updater] SHA256 verified OK")
 
   if (isGz) {
     const gzSize = statSync(downloadPath).size
@@ -177,14 +180,35 @@ export async function downloadUpdate(
       phase: "extracting",
       message: "正在解压更新文件..."
     })
-    console.log("[Updater] Decompressing... gz size:", gzSize)
+    updaterLog.log("[Updater] Decompressing... gz size:", gzSize)
     await pipeline(createReadStream(downloadPath), createGunzip(), createWriteStream(finalPath))
     const asarSize = statSync(finalPath).size
-    console.log("[Updater] Decompressed to", finalPath, "asar size:", asarSize)
+    updaterLog.log("[Updater] Decompressed to", finalPath, "asar size:", asarSize)
     try { unlinkSync(downloadPath) } catch { /* ignore */ }
   }
 
   return finalPath
+}
+
+export async function downloadUpdate(
+  baseUrl: string,
+  fileName: string,
+  expectedSha256: string,
+  expectedSize: number,
+  onProgress?: (p: DownloadProgress) => void
+): Promise<string> {
+  try {
+    return await downloadAndVerifyUpdate(
+      baseUrl,
+      fileName,
+      expectedSha256,
+      expectedSize,
+      onProgress
+    )
+  } catch (err) {
+    updaterLog.error("[Updater] Download/verification/extraction failed:", { fileName }, err)
+    throw err
+  }
 }
 
 /**
