@@ -277,3 +277,200 @@ export function assertRemoteImReplyV1(value: unknown): asserts value is RemoteIm
     )
   }
 }
+
+/**
+ * Zhaohu custom-card interaction (V1).
+ *
+ * A card is an *enhancement* over the text + short-code channel, never a
+ * replacement: an approval or question is always published as text first, and
+ * a card that fails to render or send leaves that text as the working answer
+ * path. Nothing here may become the only way to answer a gate.
+ *
+ * The card body is the platform's own component array. The gateway forwards it
+ * verbatim, so the desktop owns every rendering decision and a new component
+ * never needs a gateway release.
+ */
+export const IM_CARD_MAX_CONTENT_CHARACTERS = 15_000
+export const IM_CARD_MAX_COMPONENTS = 30
+
+/** Interaction kinds the desktop can express as a card. */
+export type ImCardInteractionKind = "approval" | "user_input"
+
+export interface RemoteImCardSendV1 {
+  schemaVersion: typeof IM_GATEWAY_SCHEMA_VERSION
+  interactionId: string
+  conversationKey: string
+  idempotencyKey: string
+  /**
+   * Bearer capability echoed back by the platform on every click. It is the
+   * only thing tying a click to its request, so it must be unguessable — never
+   * derived from a thread id, a request id or a counter.
+   */
+  tag: string
+  kind: ImCardInteractionKind
+  content: ReadonlyArray<Record<string, unknown>>
+}
+
+export interface RemoteImCardUpdateV1 {
+  schemaVersion: typeof IM_GATEWAY_SCHEMA_VERSION
+  interactionId: string
+  /**
+   * Monotonic per interaction. update-custom-card has no idempotency header and
+   * no ordering guarantee, so a late update carrying a lower version must be
+   * dropped rather than allowed to overwrite the newer terminal state.
+   *
+   * Omitted only when closing a card the desktop no longer tracks — after a
+   * restart, or once the interaction has been released. There is no live writer
+   * to race in that case, and the desktop cannot know the stored version, so the
+   * gateway assigns the next one. A live update must always claim its version.
+   */
+  cardVersion?: number
+  content: ReadonlyArray<Record<string, unknown>>
+}
+
+export interface RemoteImCardReceiptV1 {
+  schemaVersion: typeof IM_GATEWAY_SCHEMA_VERSION
+  receiptId: string
+  /**
+   * A click whose tag the gateway could not resolve carries neither of these.
+   * That is a real and deliverable shape — the reader still pressed a button
+   * and still deserves an answer — so both are optional rather than a payload
+   * the desktop is entitled to reject.
+   */
+  interactionId?: string
+  conversationKey?: string
+  /** The card's kind, so a stale card is closed with its own wording. */
+  kind?: ImCardInteractionKind
+  tag: string
+  principalId: string
+  /** Empty for a plain operate button; populated by an interactive form. */
+  feedback: ReadonlyArray<{ key: string; value: string }>
+  occurredAt: string
+}
+
+function requireComponentArray(
+  value: unknown,
+  path: string
+): ReadonlyArray<Record<string, unknown>> {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new ImGatewayContractError("INVALID_PAYLOAD", `${path} must be a non-empty array`)
+  }
+  if (value.length > IM_CARD_MAX_COMPONENTS) {
+    throw new ImGatewayContractError(
+      "INVALID_PAYLOAD",
+      `${path} exceeds ${IM_CARD_MAX_COMPONENTS} components`
+    )
+  }
+  const components = value.map((component, index) => requireRecord(component, `${path}[${index}]`))
+  for (const [index, component] of components.entries()) {
+    requireNonEmptyString(component.type, `${path}[${index}].type`)
+  }
+  if (unicodeCharacterLength(JSON.stringify(components)) > IM_CARD_MAX_CONTENT_CHARACTERS) {
+    throw new ImGatewayContractError(
+      "INVALID_PAYLOAD",
+      `${path} exceeds ${IM_CARD_MAX_CONTENT_CHARACTERS} Unicode characters`
+    )
+  }
+  return components
+}
+
+const CARD_INTERACTION_KINDS = new Set<ImCardInteractionKind>(["approval", "user_input"])
+
+export function assertRemoteImCardSendV1(value: unknown): asserts value is RemoteImCardSendV1 {
+  const card = requireRecord(value, "card")
+  assertExactKeys(
+    card,
+    [
+      "schemaVersion",
+      "interactionId",
+      "conversationKey",
+      "idempotencyKey",
+      "tag",
+      "kind",
+      "content"
+    ],
+    [],
+    "card"
+  )
+  assertSchemaVersion(card.schemaVersion)
+  requireNonEmptyString(card.interactionId, "card.interactionId")
+  requireNonEmptyString(card.conversationKey, "card.conversationKey")
+  requireNonEmptyString(card.idempotencyKey, "card.idempotencyKey")
+  const tag = requireNonEmptyString(card.tag, "card.tag")
+  if (!/^[A-Za-z0-9_-]{16,128}$/u.test(tag)) {
+    throw new ImGatewayContractError(
+      "INVALID_PAYLOAD",
+      "card.tag must be 16-128 url-safe characters"
+    )
+  }
+  if (
+    typeof card.kind !== "string" ||
+    !CARD_INTERACTION_KINDS.has(card.kind as ImCardInteractionKind)
+  ) {
+    throw new ImGatewayContractError("INVALID_PAYLOAD", "card.kind is not supported")
+  }
+  requireComponentArray(card.content, "card.content")
+}
+
+export function assertRemoteImCardUpdateV1(value: unknown): asserts value is RemoteImCardUpdateV1 {
+  const card = requireRecord(value, "card")
+  assertExactKeys(card, ["schemaVersion", "interactionId", "content"], ["cardVersion"], "card")
+  assertSchemaVersion(card.schemaVersion)
+  requireNonEmptyString(card.interactionId, "card.interactionId")
+  if (card.cardVersion !== undefined && card.cardVersion !== null) {
+    requirePositiveInteger(card.cardVersion, "card.cardVersion")
+  }
+  requireComponentArray(card.content, "card.content")
+}
+
+export function assertRemoteImCardReceiptV1(
+  value: unknown
+): asserts value is RemoteImCardReceiptV1 {
+  const receipt = requireRecord(value, "receipt")
+  assertExactKeys(
+    receipt,
+    ["schemaVersion", "receiptId", "tag", "principalId", "feedback", "occurredAt"],
+    ["interactionId", "conversationKey", "kind"],
+    "receipt"
+  )
+  assertSchemaVersion(receipt.schemaVersion)
+  requireNonEmptyString(receipt.receiptId, "receipt.receiptId")
+  requireNonEmptyString(receipt.tag, "receipt.tag")
+  requireNonEmptyString(receipt.principalId, "receipt.principalId")
+  requireIsoInstant(receipt.occurredAt, "receipt.occurredAt")
+  // Jackson serializes an absent value as an explicit null rather than omitting
+  // the key, so null has to mean the same thing as missing here. Treating the
+  // two differently is what let a routine unresolved click close the socket.
+  if (receipt.interactionId !== undefined && receipt.interactionId !== null) {
+    requireNonEmptyString(receipt.interactionId, "receipt.interactionId")
+  }
+  if (receipt.conversationKey !== undefined && receipt.conversationKey !== null) {
+    requireNonEmptyString(receipt.conversationKey, "receipt.conversationKey")
+  }
+  // Deliberately not rejected when unrecognised. `kind` only chooses the wording
+  // of a closing card, and refusing the whole receipt over it discards a real
+  // button press: the click is never applied, never answered, and never
+  // acknowledged, so the gateway redelivers it for as long as it exists.
+  if (receipt.kind !== undefined && receipt.kind !== null) {
+    if (typeof receipt.kind !== "string") {
+      throw new ImGatewayContractError("INVALID_PAYLOAD", "receipt.kind must be a string")
+    }
+    if (!CARD_INTERACTION_KINDS.has(receipt.kind as ImCardInteractionKind)) {
+      delete (receipt as Record<string, unknown>).kind
+    }
+  }
+  if (!Array.isArray(receipt.feedback)) {
+    throw new ImGatewayContractError("INVALID_PAYLOAD", "receipt.feedback must be an array")
+  }
+  for (const [index, entry] of receipt.feedback.entries()) {
+    const field = requireRecord(entry, `receipt.feedback[${index}]`)
+    assertExactKeys(field, ["key", "value"], [], `receipt.feedback[${index}]`)
+    requireNonEmptyString(field.key, `receipt.feedback[${index}].key`)
+    if (typeof field.value !== "string") {
+      throw new ImGatewayContractError(
+        "INVALID_PAYLOAD",
+        `receipt.feedback[${index}].value must be a string`
+      )
+    }
+  }
+}

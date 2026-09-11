@@ -1,0 +1,206 @@
+import type { RemoteImCardReceiptV1 } from "../../../shared/im-gateway-contract"
+import { buildExpiredCard } from "./card-builder"
+import { imCardPublisher, type ImCardPublisher } from "./card-publisher"
+import { imEventStore, type ImEventStore } from "./event-store"
+import { imRemoteApprovalService, type ImRemoteApprovalService } from "./remote-approval-service"
+import {
+  imRemoteUserInputService,
+  type ImRemoteUserInputService
+} from "./remote-user-input-service"
+import type { ImReplyClient } from "./reply-client"
+import { buildImProactiveReplies } from "./reply-segmentation"
+
+/**
+ * Turns a Zhaohu card click into the same decision a typed command would make.
+ *
+ * Two properties matter more than anything else here:
+ *
+ * 1. A click is never trusted on its own. The tag identifies the card, but the
+ *    principal and conversation carried by the receipt must match the ones the
+ *    card was published to before anything is applied. The webhook that
+ *    produced this receipt is authenticated by source IP alone, so the tag is
+ *    the capability and this check is the authorization.
+ * 2. The reader always gets an answer. A click on a card whose request ended —
+ *    days later, from deep in the history — resolves to a plain explanation and
+ *    a closed card, never to silence.
+ */
+
+type ReplyDrainer = Pick<ImReplyClient, "sendPending">
+
+/** Enough to cover any plausible burst of redeliveries, and bounded. */
+const MAX_REMEMBERED_RECEIPTS = 512
+
+interface CardReceiptDependencies {
+  cards: ImCardPublisher
+  approvals: Pick<ImRemoteApprovalService, "resolveCardClick">
+  userInput: Pick<ImRemoteUserInputService, "resolveCardAnswers">
+  events: Pick<ImEventStore, "enqueueProactiveReplies">
+  warn: (message: string, error?: unknown) => void
+}
+
+export class ImCardReceiptRouter {
+  private readonly dependencies: CardReceiptDependencies
+  private replyDrainer: ReplyDrainer | null = null
+  /**
+   * A platform retry must not apply the same click twice.
+   *
+   * Bounded: this grows for the life of the process, and an unbounded set of
+   * receipt ids is a slow leak in a desktop app that stays open for weeks. The
+   * oldest entries are the safest to forget — the gateway stops redelivering
+   * once a receipt is acknowledged, so an id this old is not coming back.
+   */
+  private readonly appliedReceipts = new Map<string, string>()
+  /** Two frames for one receipt can arrive together; apply them in order. */
+  private handling: Promise<void> = Promise.resolve()
+
+  constructor(overrides: Partial<CardReceiptDependencies> = {}) {
+    this.dependencies = {
+      cards: overrides.cards ?? imCardPublisher,
+      approvals: overrides.approvals ?? imRemoteApprovalService,
+      userInput: overrides.userInput ?? imRemoteUserInputService,
+      events: overrides.events ?? imEventStore,
+      warn: overrides.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
+    }
+  }
+
+  registerReplyDrainer(replyDrainer: ReplyDrainer): () => void {
+    this.replyDrainer = replyDrainer
+    return () => {
+      if (this.replyDrainer === replyDrainer) this.replyDrainer = null
+    }
+  }
+
+  async handle(receipt: RemoteImCardReceiptV1): Promise<void> {
+    // Serialized: `handle` is driven straight from the socket's message event,
+    // so two deliveries of one receipt can both clear the seen-check before
+    // either records itself, and apply the same click twice.
+    const next = this.handling.catch(() => undefined).then(() => this.handleOne(receipt))
+    this.handling = next.then(
+      () => undefined,
+      () => undefined
+    )
+    return next
+  }
+
+  private async handleOne(receipt: RemoteImCardReceiptV1): Promise<void> {
+    // The decision and its answer are acknowledged separately. Applying a click
+    // twice would decide twice; failing to tell the reader anything leaves them
+    // staring at a card that did nothing. So a redelivery re-sends the answer
+    // this receipt already earned, and never re-applies it.
+    let message = this.appliedReceipts.get(receipt.receiptId)
+    if (message === undefined) {
+      try {
+        message = await this.apply(receipt)
+      } catch (error) {
+        this.dependencies.warn("Zhaohu card receipt could not be applied.", error)
+        message = "处理这次点击时出错了，请回到桌面确认，或使用消息里的短码。"
+      }
+      this.appliedReceipts.set(receipt.receiptId, message)
+      if (this.appliedReceipts.size > MAX_REMEMBERED_RECEIPTS) {
+        const oldest = this.appliedReceipts.keys().next()
+        if (!oldest.done) this.appliedReceipts.delete(oldest.value)
+      }
+    }
+
+    // Only acknowledged once the answer is durably queued. Acknowledging a
+    // reply that never persisted stops the gateway redelivering, and the press
+    // then looks to the reader like it did nothing at all.
+    if (!(await this.reply(receipt, message))) return
+    await this.dependencies.cards.acknowledgeReceipt(receipt.receiptId)
+  }
+
+  private async apply(receipt: RemoteImCardReceiptV1): Promise<string> {
+    const resolved = this.dependencies.cards.interactions.resolveTag(receipt.tag)
+    if (!resolved) {
+      // The card outlived its request: the desktop restarted, or the run ended
+      // long ago. Close the card so the button stops looking live.
+      //
+      // Closed through `closeForgotten`, not `resolve`: reaching here means the
+      // tag is unknown, which means the interaction has already been released,
+      // and `resolve` cannot claim a version for a card it no longer tracks —
+      // it would return false without ever reaching the gateway.
+      if (receipt.interactionId) {
+        this.dependencies.cards.closeForgotten(
+          receipt.interactionId,
+          buildExpiredCard(receipt.kind ?? "approval", "已结束的会话")
+        )
+      }
+      // Says what the desktop actually knows. It cannot see whether the request
+      // is still waiting — only that this card is no longer one it tracks — and
+      // an approval never times out, so telling a reader it has ended can stop
+      // them answering a gate that is still open.
+      return "这张卡片已经失效，操作没有生效。如果任务仍在等待，请用消息里的短码回复。"
+    }
+
+    const { interaction, suffix } = resolved
+    // `!= null` on purpose: the validator accepts an explicit null, and treating
+    // it as a value here would refuse the click as an owner mismatch — the same
+    // null-versus-absent asymmetry that made an unresolved receipt fatal, just
+    // moved one layer in.
+    if (
+      interaction.principalId !== receipt.principalId ||
+      (receipt.conversationKey != null && interaction.conversationKey !== receipt.conversationKey)
+    ) {
+      this.dependencies.warn(
+        `Zhaohu card receipt did not match its interaction owner: interactionId=${interaction.interactionId}`
+      )
+      return "这张卡片不属于当前招乎会话，操作没有生效。"
+    }
+
+    if (interaction.kind === "approval") {
+      if (suffix !== "approve" && suffix !== "reject") {
+        return "无法识别这次点击的审批决定，请使用消息里的短码。"
+      }
+      return this.dependencies.approvals.resolveCardClick({
+        interactionId: interaction.interactionId,
+        requestRef: interaction.requestRef,
+        decision: suffix,
+        principalId: receipt.principalId,
+        conversationKey: interaction.conversationKey
+      })
+    }
+
+    return this.dependencies.userInput.resolveCardAnswers({
+      requestId: interaction.requestRef,
+      principalId: receipt.principalId,
+      conversationKey: interaction.conversationKey,
+      feedback: receipt.feedback
+    })
+  }
+
+  /** True once the answer is durably queued, or when there is nowhere to send it. */
+  private async reply(receipt: RemoteImCardReceiptV1, message: string): Promise<boolean> {
+    // A click the gateway could not place has no route of its own. It still gets
+    // acknowledged by the caller, so it will not be redelivered forever; there is
+    // simply nowhere to send the explanation.
+    const conversationKey = receipt.conversationKey
+    if (!conversationKey) {
+      // Nothing to redeliver into, so hold the gateway to nothing: acknowledge
+      // and stop, rather than churning a receipt that can never be answered.
+      this.dependencies.warn(
+        `Zhaohu card receipt has no conversation to answer: receiptId=${receipt.receiptId}`
+      )
+      return true
+    }
+    try {
+      await this.dependencies.events.enqueueProactiveReplies(
+        buildImProactiveReplies({
+          deliveryId: `card-receipt:${receipt.receiptId}`,
+          conversationKey,
+          text: message
+        })
+      )
+    } catch (error) {
+      this.dependencies.warn("Zhaohu card receipt reply could not be queued.", error)
+      return false
+    }
+    const drainer = this.replyDrainer
+    if (!drainer) return true
+    void drainer.sendPending().catch((error) => {
+      this.dependencies.warn("Zhaohu card receipt reply remains queued.", error)
+    })
+    return true
+  }
+}
+
+export const imCardReceiptRouter = new ImCardReceiptRouter()

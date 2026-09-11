@@ -10,8 +10,20 @@ function readableLabel(value: string | null | undefined, fallback: string): stri
     : `${points.slice(0, MAX_CONTEXT_LABEL_CHARACTERS - 1).join("")}…`
 }
 
+/**
+ * Marks a reply whose target is not the currently bound one. Exported so
+ * callers can react to it without re-deriving the comparison or matching on
+ * prose.
+ *
+ * States the condition rather than a history: the only test is "this reply's
+ * target is not the bound target", and nothing checks that anyone switched. A
+ * scheduled inbox reminder finishing while its owner is bound elsewhere hits
+ * this too, and the earlier wording told them about a switch they never made.
+ */
+export const SWITCHED_TARGET_MARK = "（非当前绑定会话）"
+
 function withSwitchNotice(prefix: string, switched: boolean): string {
-  return `${prefix}${switched ? "（切换前任务）" : ""}`
+  return `${prefix}${switched ? SWITCHED_TARGET_MARK : ""}`
 }
 
 export function imInboxReplyPrefix(switched = false): string {

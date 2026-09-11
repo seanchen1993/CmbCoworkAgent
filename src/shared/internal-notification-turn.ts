@@ -205,3 +205,20 @@ export function classifyInternalNotificationTurn(input: {
   }
   return null
 }
+
+/**
+ * Who owes the follow-up summary for a background task, recorded when the task
+ * is launched rather than read off the thread later.
+ *
+ * "desktop" — the main-process scheduler runs the summary turn; a desktop with
+ * the thread open watches it through the ordinary mirror.
+ * "managed" — the transport that started the run owns the whole lifecycle
+ * (Zhaohu), produces the summary itself and delivers it back over its own
+ * channel.
+ *
+ * Bound to the launching run, not to the thread: the same conversation can be
+ * driven from the desktop one turn and from Zhaohu the next, so "is this thread
+ * reachable from IM" answers a different question and gets it wrong after a
+ * restart.
+ */
+export type BackgroundNotificationOwner = "desktop" | "managed"

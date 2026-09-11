@@ -18,10 +18,7 @@ import { ImInboxService } from "../src/main/services/im/inbox-service"
 import { ImIngressSequencer } from "../src/main/services/im/ingress-sequencer"
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
 import { ImReplyClient } from "../src/main/services/im/reply-client"
-import {
-  ImRemoteAccessError,
-  ImRemoteAccessService
-} from "../src/main/services/im/remote-access-service"
+import { ImRemoteAccessService } from "../src/main/services/im/remote-access-service"
 import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
 import { eventShortCode } from "../src/main/services/im/reply-segmentation"
 import {
@@ -110,6 +107,32 @@ async function createContext() {
     threads.set(threadId, row)
     return row
   }
+  // Stands in for createThreadService. It records the metadata it is handed,
+  // because the thing that matters here is whether the IM path names a mode at
+  // all: naming one suppresses the Feature-config inheritance that
+  // thread-service applies (its hasOwnProperty guard), and this path used to
+  // name "normal" unconditionally.
+  const createdThreadMetadata: Array<Record<string, unknown>> = []
+  const makeThreadService = async (
+    metadata?: Record<string, unknown>
+  ): Promise<{ thread_id: string; metadata?: Record<string, unknown> }> => {
+    createdThreadMetadata.push({ ...(metadata ?? {}) })
+    const threadId = `generated-thread-${createdThreadMetadata.length}`
+    // The real path resolves the Feature's mode when the caller named none.
+    const resolved = {
+      ...(metadata ?? {}),
+      // Mirrors thread-service: a named mode wins, else the Feature's config,
+      // else normal + subagents — which is what the four words call Multi.
+      ...(metadata && "agentMode" in metadata
+        ? {}
+        : featureConfiguredAgentMode
+          ? { agentMode: featureConfiguredAgentMode }
+          : { agentMode: "normal", subagentsEnabled: true })
+    }
+    makeThread(threadId, resolved)
+    return { thread_id: threadId, metadata: resolved }
+  }
+  let featureConfiguredAgentMode: string | null = "workflow"
   const updateLocalThread = (
     threadId: string,
     patch: Partial<Omit<ThreadRow, "thread_id" | "created_at">>
@@ -158,7 +181,7 @@ async function createContext() {
     getRunDetail: () => ({ sessions: [] }) as never,
     buildFeatureContext: () => ({ featureId: "feature-pay" }) as never,
     getThread: (threadId) => threads.get(threadId) ?? null,
-    createThread: makeThread as never,
+    createThread: makeThreadService as never,
     createId: () => `generated-${++id}`
   })
   const inbox = new ImInboxService({
@@ -190,6 +213,10 @@ async function createContext() {
     hasPendingUserInput: () => false
   })
   return {
+    createdThreadMetadata,
+    setFeatureConfiguredAgentMode: (mode: string | null) => {
+      featureConfiguredAgentMode = mode
+    },
     root,
     database,
     clock,
@@ -214,6 +241,176 @@ function selectionIndexContaining(list: string, marker: string): number {
   return Number(match[1])
 }
 
+async function testSwitchBackByTheNameTheReplyAlreadyShows(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+    await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex}`)!
+    })
+    const created = context.conversations.getActiveTarget("conversation-1")
+    assert.equal(created?.kind, "thread")
+    if (created?.kind !== "thread") throw new Error("thread target expected")
+
+    // Move away, the way a person does when a second task starts.
+    await router.handle({ ...commandInput, command: parseImCommand("/收件箱")! })
+    assert.equal(context.conversations.getActiveTarget("conversation-1")?.kind, "inbox")
+
+    // The name is the one the reply prefix prints; no number, nothing to look up.
+    const switched = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/切换 ${created.title}`)!
+    })
+    assert(switched.includes("已切换到"), switched)
+    assert.equal(
+      context.conversations.getActiveTarget("conversation-1")?.targetId,
+      created.targetId
+    )
+
+    // Case and spacing are forgiven, because people retype rather than copy.
+    await router.handle({ ...commandInput, command: parseImCommand("/收件箱")! })
+    const relaxed = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/切换   ${created.title.toUpperCase()}`)!
+    })
+    assert(relaxed.includes("已切换到"), relaxed)
+
+    const unknown = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/切换 不存在的会话")!
+    })
+    assert(unknown.includes("没有找到可切换的会话"), unknown)
+    assert(unknown.includes("/会话"), "a dead end must say where to look next")
+
+    // A Feature would CREATE a session; "switch" must never mean "start new".
+    const feature = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/切换 支付平台")!
+    })
+    assert(feature.includes("是特性，不是会话"), feature)
+    assert(feature.includes("/绑定"), feature)
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testBindModeOnlyAppliesWhereASessionIsCreated(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+    // The list is what a person reads immediately before typing /绑定, so the
+    // mode has to be offered here and not only under /帮助.
+    assert(sessions.includes(`/绑定 <编号> Solo / Multi / Team / Workflow`), sessions)
+
+    // The Feature's own words, so a person picks the shape of the work rather
+    // than translating between three vocabularies.
+    const bad = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex} agent_team`)!
+    })
+    assert(bad.includes("模式无效"), bad)
+    assert(bad.includes("Solo / Multi / Team / Workflow"), bad)
+    assert.equal(context.createdThreadMetadata.length, 0, "an invalid mode must create nothing")
+
+    // Team is the word; coordinator is what the thread becomes.
+    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const team = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex} Team`)!
+    })
+    assert.equal(context.createdThreadMetadata.at(-1)?.agentMode, "coordinator")
+    assert(team.includes("Team 会话"), team)
+
+    // Solo and Multi are the same mode and differ only in subagents. Naming
+    // just the mode would let Solo become Multi, because thread-service turns
+    // subagents on whenever nobody said otherwise — so both fields travel.
+    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const solo = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex} SOLO`)!
+    })
+    assert.equal(context.createdThreadMetadata.at(-1)?.agentMode, "normal")
+    assert.equal(context.createdThreadMetadata.at(-1)?.subagentsEnabled, false)
+    assert(solo.includes("Solo 会话"), solo)
+
+    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const multi = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex} multi`)!
+    })
+    assert.equal(context.createdThreadMetadata.at(-1)?.subagentsEnabled, true)
+    assert(multi.includes("Multi 会话"), multi)
+
+    // A Feature that configures nothing: no word, no config, and the shared
+    // path's own fallback is what the four words call Multi.
+    context.setFeatureConfiguredAgentMode(null)
+    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const unconfigured = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex}`)!
+    })
+    assert(
+      !("agentMode" in context.createdThreadMetadata.at(-1)!),
+      "an unqualified /绑定 must still leave the mode to the Feature"
+    )
+    assert(unconfigured.includes("Multi 会话"), unconfigured)
+
+    // An existing session is a different operation: its checkpoints and any
+    // running turn were produced under the mode it already has.
+    const listWithSession = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    const sessionIndex = selectionIndexContaining(listWithSession, "（项目会话）")
+    const created = context.createdThreadMetadata.length
+    const refused = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${sessionIndex} workflow`)!
+    })
+    assert(refused.includes("模式只能在特性下新建会话时指定"), refused)
+    assert.equal(context.createdThreadMetadata.length, created, "a refusal must create nothing")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<void> {
   const context = await createContext()
   const router = new ImCommandRouter({
@@ -223,7 +420,8 @@ async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<v
     access: context.access,
     selections: context.selections,
     getCurrentEventId: () => null,
-    abortCurrent: () => false
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
   })
   const commandInput = {
     conversationKey: "conversation-1",
@@ -255,7 +453,18 @@ async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<v
       ...commandInput,
       command: parseImCommand("/绑定 1")!
     })
-    assert(bound.includes("新建会话并切换"))
+    assert(bound.includes("会话并切换"))
+    // No mode word: the IM path must not name one, because naming one is what
+    // stops the Feature's own configuration from applying. This used to send
+    // "normal" unconditionally, so a workflow Feature produced an ordinary
+    // session from Zhaohu and a workflow one on the desktop.
+    assert(
+      !("agentMode" in context.createdThreadMetadata[0]),
+      "an unqualified /绑定 must leave the mode to the Feature"
+    )
+    // And the reply says what the session actually became, since nothing else
+    // in Zhaohu shows a session's mode.
+    assert(bound.includes("Workflow"), `the reply must name the mode: ${bound}`)
     const firstTarget = context.conversations.getActiveTarget("conversation-1")
     assert.equal(firstTarget?.kind, "thread")
     if (firstTarget?.kind !== "thread") throw new Error("thread target expected")
@@ -288,7 +497,7 @@ async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<v
       ...commandInput,
       command: parseImCommand(`/绑定 ${createIndex}`)!
     })
-    assert(secondBound.includes("新建会话并切换"))
+    assert(secondBound.includes("会话并切换"))
     const secondTarget = context.conversations.getActiveTarget("conversation-1")
     assert.equal(secondTarget?.kind, "thread")
     if (secondTarget?.kind !== "thread") throw new Error("second thread target expected")
@@ -655,28 +864,33 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
       transientlyBusyAccess.validateThreadForCompletionDelivery("desktop-thread")
     assert.equal(deliveryTarget.thread.thread_id, "desktop-thread")
     assert.equal(deliveryTarget.workspacePath, await realpath(context.root))
-    assert.throws(
-      () => transientlyBusyAccess.validateThreadForRemoteAccess("desktop-thread"),
-      (error) => error instanceof ImRemoteAccessError && error.code === "REMOTE_THREAD_UNSUPPORTED"
+    assert.equal(
+      transientlyBusyAccess.validateThreadForRemoteAccess("desktop-thread").thread.thread_id,
+      "desktop-thread",
+      "grant structure must not depend on transient Goal/worker/workflow/HITL state"
     )
 
-    context.updateLocalThread("desktop-thread", {
-      metadata: JSON.stringify({ ...originalMetadata, agentMode: "coordinator" })
-    })
-    assert.equal(
-      context.access.validateThreadForCompletionDelivery("desktop-thread").thread.thread_id,
-      "desktop-thread"
-    )
-    assert.throws(
-      () => context.access.validateThreadForRemoteAccess("desktop-thread"),
-      (error) => error instanceof ImRemoteAccessError && error.code === "REMOTE_THREAD_UNSUPPORTED"
-    )
-    const unsupported = await guard.evaluate(event)
-    assert.equal(unsupported.allowed, false)
-    assert.equal(
-      unsupported.allowed ? null : unsupported.reasonCode,
-      "REMOTE_AGENT_MODE_UNSUPPORTED"
-    )
+    for (const { label, ...executionProfile } of [
+      { label: "Solo", agentMode: "normal", subagentsEnabled: false },
+      { label: "Multi", agentMode: "normal", subagentsEnabled: true },
+      { label: "Team", agentMode: "coordinator" },
+      { label: "Workflow", agentMode: "workflow" }
+    ]) {
+      context.updateLocalThread("desktop-thread", {
+        metadata: JSON.stringify({ ...originalMetadata, ...executionProfile })
+      })
+      assert.equal(
+        context.access.validateThreadForCompletionDelivery("desktop-thread").thread.thread_id,
+        "desktop-thread"
+      )
+      assert.equal(
+        context.access.validateThreadForRemoteAccess("desktop-thread").thread.thread_id,
+        "desktop-thread",
+        `${label} mode is a supported execution snapshot for a granted Thread`
+      )
+      const supported = await guard.evaluate(event)
+      assert.equal(supported.allowed, true, `${label} should be remotely executable`)
+    }
 
     context.updateLocalThread("desktop-thread", { metadata: JSON.stringify(originalMetadata) })
     await context.grants.revokeThreadGrant("desktop-thread")
@@ -873,6 +1087,8 @@ async function testExplicitRetryCreatesNewEventWithOriginalSnapshot(): Promise<v
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
+  ["testSwitchBackByTheNameTheReplyAlreadyShows", testSwitchBackByTheNameTheReplyAlreadyShows],
+  ["testBindModeOnlyAppliesWhereASessionIsCreated", testBindModeOnlyAppliesWhereASessionIsCreated],
   [
     "testFeatureCreateGrantCreatesIndependentThreadGrants",
     testFeatureCreateGrantCreatesIndependentThreadGrants

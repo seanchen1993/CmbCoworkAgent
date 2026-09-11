@@ -9,6 +9,8 @@ import { ImCommandRouter, parseImCommand } from "../src/main/services/im/command
 import { ImConversationStateStore } from "../src/main/services/im/conversation-state"
 import { ImEventStore } from "../src/main/services/im/event-store"
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
+import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
+import { ImCardPublisher } from "../src/main/services/im/card-publisher"
 import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
 import { ImRemoteUserInputService } from "../src/main/services/im/remote-user-input-service"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
@@ -20,11 +22,12 @@ const ROUTE = {
 
 function userInputRequest(input: {
   requestId: string
+  threadId?: string
   questions?: UserInputRequest["questions"]
 }): UserInputRequest {
   return {
     requestId: input.requestId,
-    threadId: "thread-1",
+    threadId: input.threadId ?? "thread-1",
     createdAt: "2026-08-03T08:00:00.000Z",
     questions: input.questions ?? [
       {
@@ -49,7 +52,13 @@ async function waitFor(check: () => boolean, label: string): Promise<void> {
   throw new Error(`Timed out waiting for ${label}`)
 }
 
-async function createContext(options: { enabled?: boolean } = {}) {
+async function createContext(
+  options: {
+    enabled?: boolean
+    agentMode?: "normal" | "coordinator" | "workflow"
+    threadIds?: string[]
+  } = {}
+) {
   const root = await mkdtemp(join(tmpdir(), "cmb-im-user-input-"))
   const SQL = await initSqlJs()
   const database = new SQL.Database()
@@ -62,21 +71,27 @@ async function createContext(options: { enabled?: boolean } = {}) {
     now: () => clock.now
   }
   const conversations = new ImConversationStateStore(persistence)
-  const grants = new ImRemoteGrantStore(persistence, () => "grant-thread-1")
+  let grantSequence = 0
+  const grants = new ImRemoteGrantStore(persistence, () => `grant-thread-${++grantSequence}`)
   const events = new ImEventStore(persistence)
   await conversations.ensureConversation(ROUTE)
-  await grants.enableThreadGrant({ route: ROUTE, threadId: "thread-1", title: "桌面会话" })
-
-  const thread: ThreadRow = {
-    thread_id: "thread-1",
-    created_at: clock.now,
-    updated_at: clock.now,
-    title: "桌面会话",
-    status: "idle",
-    thread_values: null,
-    metadata: JSON.stringify({ workspacePath: root, agentMode: "normal" })
+  const threadIds = options.threadIds ?? ["thread-1"]
+  const threads = new Map<string, ThreadRow>()
+  for (const [index, threadId] of threadIds.entries()) {
+    const title = index === 0 ? "桌面会话" : `桌面会话 ${index + 1}`
+    await grants.enableThreadGrant({ route: ROUTE, threadId, title })
+    threads.set(threadId, {
+      thread_id: threadId,
+      created_at: clock.now,
+      updated_at: clock.now,
+      title,
+      status: "idle",
+      thread_values: null,
+      metadata: JSON.stringify({ workspacePath: root, agentMode: options.agentMode ?? "normal" })
+    })
   }
-  let pending: UserInputRequest | null = null
+
+  const pending = new Map<string, UserInputRequest>()
   let pendingListener: ((request: Readonly<UserInputRequest>) => void) | null = null
   let removedListener: ((requestId: string, threadId: string) => void) | null = null
   const responses: UserInputResponse[] = []
@@ -86,26 +101,52 @@ async function createContext(options: { enabled?: boolean } = {}) {
   let sendPendingCount = 0
   const generatedCodes = ["A1B2C3", "D4E5F6", "012ABC", "789DEF"]
 
+  const cardUpdates: Array<{ interactionId: string; content: unknown[] }> = []
+  const cardInteractions = new ImCardInteractionStore(
+    (() => {
+      let sequence = 0
+      return () => `interaction-${++sequence}`
+    })(),
+    () => clock.now
+  )
+  const cards = new ImCardPublisher({
+    interactions: cardInteractions,
+    createIdempotencyKey: () => `card-idem-${cardUpdates.length}`,
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async () => ({ state: "accepted" }) as const,
+      updateCard: async (update) => {
+        cardUpdates.push({ interactionId: update.interactionId, content: [...update.content] })
+        return { state: "accepted" } as const
+      },
+      acknowledgeCardReceipt: async () => undefined
+    } as never,
+    warn: (_message, error) => warnings.push(error)
+  })
+
   const service = new ImRemoteUserInputService({
+    cards,
     conversations,
     access: { getThreadGrant: (threadId) => grants.getThreadGrant(threadId) },
     grants,
     events,
-    getThread: (threadId) => (threadId === thread.thread_id ? thread : null),
+    getThread: (threadId) => threads.get(threadId) ?? null,
     getSettings: () => ({
       enabled: options.enabled !== false,
       gatewayUrl: null,
       remoteAccess: "inbox-only",
-      remoteApprovalEnabled: false,
-      waitingDesktopTtlMinutes: 10
+      remoteApprovalEnabled: false
     }),
-    getPendingForThread: (threadId) => (pending?.threadId === threadId ? pending : null),
+    getPendingForThread: (threadId) => pending.get(threadId) ?? null,
     submitResponse: (response, submitOptions) => {
-      if (!pending || pending.requestId !== response.requestId) return false
+      const entry = [...pending.entries()].find(
+        ([, request]) => request.requestId === response.requestId
+      )
+      if (!entry) return false
       responses.push(response)
       responseOptions.push(submitOptions)
-      const removed = pending
-      pending = null
+      const [threadId, removed] = entry
+      pending.delete(threadId)
       removedListener?.(removed.requestId, removed.threadId)
       return true
     },
@@ -142,7 +183,7 @@ async function createContext(options: { enabled?: boolean } = {}) {
   }
 
   function emit(request: UserInputRequest): void {
-    pending = request
+    pending.set(request.threadId, request)
     pendingListener?.(request)
   }
 
@@ -165,10 +206,12 @@ async function createContext(options: { enabled?: boolean } = {}) {
     emit,
     publish,
     sendPendingCount: () => sendPendingCount,
-    removePending: () => {
-      if (!pending) return
-      const removed = pending
-      pending = null
+    cardUpdates,
+    cardInteractions,
+    removePending: (threadId = "thread-1") => {
+      const removed = pending.get(threadId)
+      if (!removed) return
+      pending.delete(threadId)
       removedListener?.(removed.requestId, removed.threadId)
     }
   }
@@ -231,7 +274,7 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     ])
     assert.equal(
       await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
-      "输入短码不存在、已过期或已使用。"
+      "输入短码不存在、已使用，或该问题已不在等待中。"
     )
   } finally {
     context.service.dispose()
@@ -265,7 +308,7 @@ async function testMultipleQuestionsRotateCodeAndAcceptCustomText(): Promise<voi
     assert(next.includes("/回答 D4E5F6 <编号>"))
     assert.equal(
       await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
-      "输入短码不存在、已过期或已使用。"
+      "输入短码不存在、已使用，或该问题已不在等待中。"
     )
     assert.equal(
       await context.service.resolveAnswer({
@@ -288,25 +331,31 @@ async function testMultipleQuestionsRotateCodeAndAcceptCustomText(): Promise<voi
   }
 }
 
-async function testExpiryDesktopRaceAndExplicitCommand(): Promise<void> {
+async function testLongWaitDesktopRaceAndExplicitCommand(): Promise<void> {
   const context = await createContext()
   try {
-    const expired = userInputRequest({ requestId: "request-expired" })
-    await context.publish(expired)
-    context.clock.now += 10 * 60_000 + 1
+    // A code carries no deadline. The run waiting on this question is not
+    // cancelled by elapsed time either, so a code that expired on its own
+    // would leave that run waiting with nothing able to answer it — and send
+    // the person holding the question on their phone back to the desktop,
+    // which is the thing answering from Zhaohu exists to avoid.
+    const lingering = userInputRequest({ requestId: "request-lingering" })
+    await context.publish(lingering)
+    context.clock.now += 6 * 60 * 60_000
     assert.equal(
       await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
-      "输入短码不存在、已过期或已使用。"
+      "已从招乎提交回答，任务将继续执行。"
     )
-    assert.equal(context.responses.length, 0)
+    assert.equal(context.responses.length, 1, "hours later the code must still answer")
 
-    context.removePending()
+    // What still ends a code is its question no longer pending — answered on
+    // the desktop, or the run cancelled.
     const desktopRace = userInputRequest({ requestId: "request-desktop-race" })
     await context.publish(desktopRace)
     context.removePending()
     assert.equal(
       await context.service.resolveAnswer({ argument: "D4E5F6 1", ...ROUTE }),
-      "输入短码不存在、已过期或已使用。"
+      "输入短码不存在、已使用，或该问题已不在等待中。"
     )
 
     assert.equal(parseImCommand("回答 012ABC 1"), null)
@@ -353,11 +402,101 @@ async function testDisabledRobotDoesNotPublish(): Promise<void> {
   }
 }
 
+async function testAdvancedModesCanPublishAndResolve(): Promise<void> {
+  for (const agentMode of ["coordinator", "workflow"] as const) {
+    const context = await createContext({ agentMode })
+    try {
+      const request = userInputRequest({ requestId: `request-${agentMode}` })
+      await context.publish(request)
+      assert.equal(
+        await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+        "已从招乎提交回答，任务将继续执行。"
+      )
+      assert.equal(context.responses.length, 1)
+    } finally {
+      context.service.dispose()
+      context.database.close()
+      await rm(context.root, { recursive: true, force: true })
+    }
+  }
+}
+
+async function testConcurrentThreadsUseIndependentCodes(): Promise<void> {
+  const threadIds = ["thread-1", "thread-2", "thread-3"]
+  const context = await createContext({ threadIds })
+  try {
+    const requests = threadIds.map((threadId, index) =>
+      userInputRequest({ requestId: `request-concurrent-${index + 1}`, threadId })
+    )
+    await Promise.all(requests.map((request) => context.publish(request)))
+
+    const codes = requests.map(
+      (request) =>
+        context.deliveryText(request.requestId).match(/\/回答 ([A-F0-9]{6}) <编号>/u)?.[1]
+    )
+    assert.deepEqual(codes, ["A1B2C3", "D4E5F6", "012ABC"])
+
+    for (const code of codes) {
+      assert(code)
+      assert.equal(
+        await context.service.resolveAnswer({ argument: `${code} 1`, ...ROUTE }),
+        "已从招乎提交回答，任务将继续执行。"
+      )
+    }
+    assert.deepEqual(
+      context.responses.map((response) => response.requestId),
+      requests.map((request) => request.requestId)
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * submitUserInputResponse removes the pending request while still on the stack,
+ * and that removal reaches removeSession before submitResponse has returned. The
+ * card must still end on the answer the reader gave: closing it as "已在桌面处理"
+ * would tell them the desktop handled something they answered from Zhaohu.
+ */
+async function testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = userInputRequest({ requestId: "request-card-outcome" })
+    await context.publish(request)
+    await waitFor(
+      () => context.cardInteractions.findByRequestRef(request.requestId) !== undefined,
+      "question card"
+    )
+
+    const reply = await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE })
+    assert(reply.includes("已从招乎提交回答"), reply)
+    await waitFor(() => context.cardUpdates.length > 0, "terminal card")
+
+    assert.equal(context.cardUpdates.length, 1, "the card must be closed exactly once")
+    const rendered = JSON.stringify(context.cardUpdates[0]!.content)
+    assert(rendered.includes("已回答"), rendered)
+    assert(
+      !rendered.includes("已在桌面处理"),
+      "a Zhaohu answer must not be credited to the desktop"
+    )
+    assert(rendered.includes("CSV"), "the terminal card must show what was answered")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function main(): Promise<void> {
   await testPromptAndSingleUseOptionAnswer()
   await testMultipleQuestionsRotateCodeAndAcceptCustomText()
-  await testExpiryDesktopRaceAndExplicitCommand()
+  await testLongWaitDesktopRaceAndExplicitCommand()
   await testDisabledRobotDoesNotPublish()
+  await testAdvancedModesCanPublishAndResolve()
+  await testConcurrentThreadsUseIndependentCodes()
+  await testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled()
   console.log("IM remote user-input tests passed")
 }
 

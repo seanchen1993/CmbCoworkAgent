@@ -1,3 +1,4 @@
+import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
@@ -1027,6 +1028,19 @@ const api = {
     hydrate: (threadId: string): Promise<unknown> => {
       return ipcRenderer.invoke("workflow:hydrate", { threadId }) as Promise<unknown>
     },
+    /** Holds off the automatic summary after the user presses Stop. */
+    suppressPendingNotification: (threadId: string, suppressed = true): Promise<void> => {
+      return ipcRenderer.invoke("agent:suppress-pending-notification", {
+        threadId,
+        suppressed
+      }) as Promise<void>
+    },
+    /** Asks the main process to consider a pending summary; it decides and runs it. */
+    requestPendingNotification: (threadId: string): Promise<void> => {
+      return ipcRenderer.invoke("agent:request-pending-notification", {
+        threadId
+      }) as Promise<void>
+    },
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void): (() => void) => {
       // Durable per-thread channel for background workflow runs. Unlike the
       // run stream, this survives past the launching turn so progress and the
@@ -1176,6 +1190,11 @@ const api = {
       role?: Message["role"]
     ): Promise<{ replaced: boolean }> => {
       return ipcRenderer.invoke("threads:replaceMessageId", { threadId, fromId, toId, role })
+    },
+    exportSubagentSession: (
+      target: SubagentExportTarget
+    ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> => {
+      return ipcRenderer.invoke("threads:exportSession", target.threadId, target)
     },
     exportSession: (
       threadId: string
@@ -1778,6 +1797,7 @@ const api = {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -1805,6 +1825,7 @@ const api = {
         changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
+        skippedDirs?: string[]
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         hasPushableCommit: boolean
@@ -1875,6 +1896,7 @@ const api = {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
@@ -1897,6 +1919,7 @@ const api = {
         changedFiles?: string[]
         changedFilesTotal?: number
         omittedFileCount?: number
+        skippedDirs?: string[]
         totals: { additions: number; deletions: number; fileCount: number }
         hasPendingDiff: boolean
         suggestedCommitMessage?: string
@@ -1941,6 +1964,29 @@ const api = {
           additions: number
           deletions: number
         }
+        error?: string
+      }>
+    },
+    addGitignoreEntry: (
+      threadId: string,
+      targetPath: string,
+      kind: "file" | "directory",
+      options?: { worktreePath?: string }
+    ): Promise<{
+      success: boolean
+      entry?: string
+      alreadyExists?: boolean
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:addGitignoreEntry", {
+        threadId,
+        targetPath,
+        kind,
+        options
+      }) as Promise<{
+        success: boolean
+        entry?: string
+        alreadyExists?: boolean
         error?: string
       }>
     },
@@ -2840,6 +2886,8 @@ const api = {
     }
   },
   builtinRobot: {
+    cancelThread: (threadId: string): Promise<boolean> =>
+      ipcRenderer.invoke("builtinRobot:cancelThread", threadId),
     getStatus: (): Promise<BuiltinRobotStatus> =>
       ipcRenderer.invoke("builtinRobot:getStatus") as Promise<BuiltinRobotStatus>,
     getRemoteAccess: (): Promise<BuiltinRobotRemoteAccessOverview> =>

@@ -88,6 +88,7 @@ async function main(): Promise<void> {
   let confirmedProactiveRoute: string | null = null
   let mismatchNextPermit = false
   let missingRobotHelloCount = 0
+  const cardFrames: string[] = []
   let defaultRouteExtensionHelloCount = 0
   server.on("connection", (connected, request) => {
     socket = connected
@@ -170,6 +171,44 @@ async function main(): Promise<void> {
               leaseId: "renewed-lease",
               expiresAt: new Date(Date.now() + 60_000).toISOString()
             }
+          })
+        )
+      } else if (envelope.type === "CARD_SEND" && connectionAuthorization === "Bearer card-token") {
+        cardFrames.push("CARD_SEND")
+        const commandId = envelope.commandId
+        // Held open so an update can be issued while the send is in flight.
+        setTimeout(() => {
+          connected.send(
+            JSON.stringify({
+              schemaVersion: 1,
+              type: "CARD_ACCEPTED",
+              commandId,
+              sentAt: new Date().toISOString(),
+              payload: { interactionId: "interaction-1", state: "ACCEPTED" }
+            })
+          )
+        }, 150)
+      } else if (envelope.type === "CARD_UPDATE") {
+        cardFrames.push("CARD_UPDATE")
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "CARD_ACCEPTED",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: { interactionId: "interaction-1", state: "ACCEPTED" }
+          })
+        )
+      } else if (envelope.type === "CARD_SEND") {
+        // A gateway built before cards fails WsMessageType.valueOf and answers
+        // with an unknown-type rejection rather than CARD_ACCEPTED.
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "ERROR",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: { reasonCode: "INVALID_PAYLOAD", message: "Unknown message type" }
           })
         )
       } else if (envelope.type === "REMOTE_REPLY") {
@@ -495,6 +534,75 @@ async function main(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 1_200))
   assert.equal(missingRobotHelloCount, 1, "gateway configuration errors must not reconnect-loop")
   missingRobotClient.stop()
+
+  // UAT runs a gateway that predates cards. A card must degrade there without
+  // stalling: the approval it decorates has already been published as text with
+  // a working short code, and waiting out a 15s command timeout for every
+  // notification would be a regression the old path never had.
+  const legacyGatewayClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  legacyGatewayClient.start()
+  await waitFor(() => legacyGatewayClient.isAuthenticated(), "legacy gateway session")
+  const startedAt = Date.now()
+  const cardResult = await legacyGatewayClient.sendCard({
+    schemaVersion: 1,
+    interactionId: "interaction-legacy",
+    conversationKey: "conversation-1",
+    idempotencyKey: "idem-legacy",
+    tag: "L".repeat(32),
+    kind: "approval",
+    content: [{ type: "title", content: "需要批准" }]
+  })
+  assert.equal(cardResult.state, "rejected")
+  assert.equal(cardResult.reasonCode, "INVALID_PAYLOAD")
+  assert(
+    Date.now() - startedAt < 3_000,
+    "an old gateway must reject a card immediately, not through the command timeout"
+  )
+  legacyGatewayClient.stop()
+
+  // A gate can be decided on the desktop while its card is still being sent.
+  // The update used to be refused as a command already in flight and dropped
+  // with nothing left to retry, leaving a decided request showing live buttons.
+  const overlappingClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "card-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  overlappingClient.start()
+  await waitFor(() => overlappingClient.isAuthenticated(), "card session")
+  const sending = overlappingClient.sendCard({
+    schemaVersion: 1,
+    interactionId: "interaction-1",
+    conversationKey: "conversation-1",
+    idempotencyKey: "idem-card-1",
+    tag: "O".repeat(32),
+    kind: "approval",
+    content: [{ type: "title", content: "需要批准" }]
+  })
+  const updating = overlappingClient.updateCard({
+    schemaVersion: 1,
+    interactionId: "interaction-1",
+    cardVersion: 2,
+    content: [{ type: "title", content: "已在桌面处理" }]
+  })
+  assert.deepEqual(await sending, { state: "accepted" })
+  assert.deepEqual(
+    await updating,
+    { state: "accepted" },
+    "an update issued during the send must be queued behind it, not refused"
+  )
+  assert.deepEqual(
+    cardFrames,
+    ["CARD_SEND", "CARD_UPDATE"],
+    "the update must reach the gateway, and only after the send"
+  )
+  overlappingClient.stop()
 
   await new Promise<void>((resolve) => server.close(() => resolve()))
   console.log("im-gateway-ws-client.spec.ts passed")

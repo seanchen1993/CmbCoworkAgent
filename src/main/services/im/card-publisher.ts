@@ -1,0 +1,282 @@
+import type {
+  ImCardInteractionKind,
+  RemoteImCardSendV1,
+  RemoteImCardUpdateV1
+} from "../../../shared/im-gateway-contract"
+import {
+  assertRemoteImCardSendV1,
+  assertRemoteImCardUpdateV1
+} from "../../../shared/im-gateway-contract"
+import type { CardComponent } from "./card-builder"
+import {
+  imCardInteractionStore,
+  type ImCardInteraction,
+  type ImCardInteractionStore
+} from "./card-interaction-store"
+import { getThread } from "../../db"
+import { trackEvent } from "../event-reporter"
+import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
+
+/**
+ * A card is an outbound message too, counted alongside the text ones.
+ *
+ * Kept as its own kind rather than folded into "push": a card asks the reader
+ * for something, and how much of the robot's outbound traffic is interactive
+ * rather than prose is the part worth being able to see.
+ *
+ * `cardKind` is recorded although the card on the board shows approvals and
+ * questions as one figure. Splitting them later is then a dashboard change
+ * rather than an instrumentation change with a hole in the history where the
+ * split did not exist yet.
+ */
+function reportCardDelivered(
+  cardKind: ImCardInteractionKind,
+  outcome: "sent" | "unknown" | "failed"
+): void {
+  trackEvent("im.message.delivered", "im", {
+    direction: "outbound",
+    kind: "card",
+    cardKind,
+    outcome
+  })
+}
+
+/**
+ * Publishes interaction cards, and never lets one fail loudly.
+ *
+ * Every caller has already queued the durable text notice with its short code
+ * before reaching here. A card that cannot be built, sent or updated therefore
+ * costs the reader a nicer affordance and nothing else — so this module reports
+ * failure by returning null and logging, never by throwing into a gate's
+ * publication path where it could strand a run that waits forever.
+ */
+
+type CardWarn = (message: string, error?: unknown) => void
+
+interface CardPublisherDependencies {
+  gateway: ImGatewayClientPort
+  interactions: ImCardInteractionStore
+  isThreadLive: (threadId: string) => boolean
+  createIdempotencyKey: () => string
+  warn: CardWarn
+}
+
+export class ImCardPublisher {
+  private readonly dependencies: CardPublisherDependencies
+  /** Terminal cards whose send was never confirmed, awaiting a live gateway. */
+  private readonly pendingClosures = new Map<
+    string,
+    { cardVersion: number; content: CardComponent[] }
+  >()
+
+  constructor(overrides: Partial<CardPublisherDependencies> = {}) {
+    this.dependencies = {
+      gateway: overrides.gateway ?? unavailableImGatewayClient,
+      interactions: overrides.interactions ?? imCardInteractionStore,
+      isThreadLive: overrides.isThreadLive ?? ((threadId) => Boolean(getThread(threadId))),
+      createIdempotencyKey:
+        overrides.createIdempotencyKey ??
+        (() => `card:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`),
+      warn: overrides.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
+    }
+  }
+
+  setGateway(gateway: ImGatewayClientPort): void {
+    this.dependencies.gateway = gateway
+  }
+
+  get interactions(): ImCardInteractionStore {
+    return this.dependencies.interactions
+  }
+
+  /**
+   * Registers and sends one card. Returns the interaction when the gateway
+   * accepted it, so the caller can later update it; null means the reader is
+   * working from the text notice alone, which is always a valid outcome.
+   */
+  async publish(input: {
+    kind: ImCardInteractionKind
+    threadId: string
+    principalId: string
+    conversationKey: string
+    requestRef: string
+    targetLabel: string
+    build: (tag: string) => CardComponent[]
+  }): Promise<ImCardInteraction | null> {
+    if (!this.dependencies.gateway.isAuthenticated()) return null
+    // Retention is the thread's, so collect cards whose thread is gone before
+    // adding another. Doing it here keeps the store self-maintaining rather than
+    // depending on a timer nobody would notice had stopped.
+    try {
+      this.dependencies.interactions.pruneThreads(this.dependencies.isThreadLive)
+    } catch (error) {
+      this.dependencies.warn("Zhaohu card retention sweep failed.", error)
+    }
+    // Not awaited, and only after registering: `publish` must put the interaction
+    // in the store before its first await, or a terminal update racing the send
+    // finds nothing to address and the card's real outcome is lost.
+    void this.retryPendingClosures()
+    const interaction = this.dependencies.interactions.register({
+      kind: input.kind,
+      threadId: input.threadId,
+      principalId: input.principalId,
+      conversationKey: input.conversationKey,
+      requestRef: input.requestRef,
+      targetLabel: input.targetLabel
+    })
+    try {
+      const card: RemoteImCardSendV1 = {
+        schemaVersion: 1,
+        interactionId: interaction.interactionId,
+        conversationKey: input.conversationKey,
+        idempotencyKey: this.dependencies.createIdempotencyKey(),
+        tag: interaction.tag,
+        kind: input.kind,
+        content: input.build(interaction.tag)
+      }
+      assertRemoteImCardSendV1(card)
+      const result = await this.dependencies.gateway.sendCard(card)
+      if (result.state !== "accepted") {
+        // Kept when the outcome is unknown. The card may have been delivered,
+        // and forgetting it here is what turns a later press into "这张卡片对应的
+        // 请求已经结束" for a gate that is still open and has no timeout.
+        if (!result.resultUnknown) {
+          this.dependencies.interactions.release(interaction.interactionId)
+        }
+        this.dependencies.warn(
+          `Zhaohu interaction card was not accepted (${result.reasonCode ?? "unknown"}); the short code remains the answer path.`
+        )
+        // Reported with the same outcomes the text path uses, so a card that the
+        // gateway may have delivered is not filed as a failure.
+        reportCardDelivered(input.kind, result.resultUnknown ? "unknown" : "failed")
+        return null
+      }
+      reportCardDelivered(input.kind, "sent")
+      return interaction
+    } catch (error) {
+      this.dependencies.interactions.release(interaction.interactionId)
+      this.dependencies.warn("Zhaohu interaction card could not be published.", error)
+      reportCardDelivered(input.kind, "failed")
+      return null
+    }
+  }
+
+  /**
+   * Replaces a live card with its terminal form.
+   *
+   * `update-custom-card` carries no idempotency key and no ordering guarantee,
+   * so the version claimed here is what lets the gateway drop an update that
+   * lost a race — a click and a desktop resolution can land at the same moment
+   * and the card must end on the one that actually decided the request.
+   */
+  async resolve(interactionId: string, content: CardComponent[]): Promise<boolean> {
+    const cardVersion = this.dependencies.interactions.nextCardVersion(interactionId)
+    if (cardVersion === null) return false
+    return this.sendTerminalUpdate(interactionId, cardVersion, content)
+  }
+
+  /**
+   * Sends one terminal card, and keeps it if the outcome is unknown.
+   *
+   * The interaction is released before the send — a second writer must not be
+   * able to claim a higher version and land the wrong wording — so nothing else
+   * remembers this update. Without the pending record, a timeout or a dropped
+   * connection lost the card's real outcome for good: it would keep showing live
+   * buttons for a decided request, and the next press could only mark it dead.
+   */
+  private async sendTerminalUpdate(
+    interactionId: string,
+    cardVersion: number,
+    content: CardComponent[]
+  ): Promise<boolean> {
+    // Released before the await, not after it. Two paths can close the same
+    // card almost at once — a click deciding it and the desktop noticing the
+    // request is gone — and releasing later leaves a window where the second
+    // one claims a higher version and lands the wrong terminal wording.
+    this.dependencies.interactions.release(interactionId)
+    try {
+      const update: RemoteImCardUpdateV1 = {
+        schemaVersion: 1,
+        interactionId,
+        cardVersion,
+        content
+      }
+      assertRemoteImCardUpdateV1(update)
+      const result = await this.dependencies.gateway.updateCard(update)
+      if (result.state !== "accepted") {
+        if (result.resultUnknown) {
+          this.pendingClosures.set(interactionId, { cardVersion, content })
+        }
+        this.dependencies.warn(
+          `Zhaohu interaction card was not updated (${result.reasonCode ?? "unknown"}); it still shows as pending.`
+        )
+        return false
+      }
+      this.pendingClosures.delete(interactionId)
+      return true
+    } catch (error) {
+      this.pendingClosures.set(interactionId, { cardVersion, content })
+      this.dependencies.warn("Zhaohu interaction card could not be updated.", error)
+      return false
+    }
+  }
+
+  /**
+   * Re-sends terminal cards whose outcome was never confirmed. Called when the
+   * gateway comes back, and opportunistically before publishing another card.
+   */
+  async retryPendingClosures(): Promise<void> {
+    if (this.pendingClosures.size === 0) return
+    if (!this.dependencies.gateway.isAuthenticated()) return
+    for (const [interactionId, pending] of [...this.pendingClosures]) {
+      this.pendingClosures.delete(interactionId)
+      await this.sendTerminalUpdate(interactionId, pending.cardVersion, pending.content)
+    }
+  }
+
+  /**
+   * Closes a card this desktop no longer tracks.
+   *
+   * `resolve` cannot do this: it opens by claiming the next version from the
+   * in-memory store, and a forgotten interaction is not in it, so the call
+   * returns false before reaching the gateway. That made the whole
+   * close-a-stale-card path unreachable — exactly the path that stops a decided
+   * request from showing live buttons forever.
+   *
+   * No version is sent. The desktop cannot know the stored one, and nothing
+   * else is writing to a card it has forgotten, so the gateway assigns it.
+   */
+  closeForgotten(interactionId: string, content: CardComponent[]): void {
+    void (async () => {
+      try {
+        const update: RemoteImCardUpdateV1 = { schemaVersion: 1, interactionId, content }
+        assertRemoteImCardUpdateV1(update)
+        const result = await this.dependencies.gateway.updateCard(update)
+        if (result.state !== "accepted") {
+          this.dependencies.warn(
+            `Zhaohu stale card was not closed (${result.reasonCode ?? "unknown"}); its buttons still look live.`
+          )
+        }
+      } catch (error) {
+        this.dependencies.warn("Zhaohu stale card could not be closed.", error)
+      }
+    })()
+  }
+
+  /** Fire-and-forget variant for paths that must not await platform latency. */
+  resolveDetached(interactionId: string, content: CardComponent[]): void {
+    void this.resolve(interactionId, content).catch((error) => {
+      this.dependencies.warn("Zhaohu interaction card resolution failed.", error)
+    })
+  }
+
+  async acknowledgeReceipt(receiptId: string): Promise<void> {
+    try {
+      await this.dependencies.gateway.acknowledgeCardReceipt(receiptId)
+    } catch (error) {
+      this.dependencies.warn("Zhaohu card receipt acknowledgement failed.", error)
+    }
+  }
+}
+
+export const imCardPublisher = new ImCardPublisher()

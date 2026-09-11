@@ -305,10 +305,14 @@ function getSystemNoticePresentation(text: string): {
   }
 }
 
-function GoalNoticeBody({ text }: { text: string }): React.JSX.Element {
+function GoalNoticeBody({ text, threadId }: { text: string; threadId?: string }): React.JSX.Element {
   const parsed = parseGoalNoticeText(text)
   if (!parsed) {
-    return <StreamingMarkdown isStreaming={false}>{text}</StreamingMarkdown>
+    return (
+      <StreamingMarkdown isStreaming={false} threadId={threadId}>
+        {text}
+      </StreamingMarkdown>
+    )
   }
 
   return (
@@ -578,7 +582,7 @@ function MessageBubbleImpl({
               data-chat-search-text
               className="liquid-glass-notice__body min-w-0 text-[15px] leading-7 [&_p]:my-0 [&_strong]:font-semibold"
             >
-              <GoalNoticeBody text={notice.text} />
+              <GoalNoticeBody text={notice.text} threadId={threadId} />
             </div>
           </div>
         </div>
@@ -673,9 +677,15 @@ function MessageBubbleImpl({
           </div>
         )
       }
-      return <StreamingMarkdown isStreaming={isStreaming}
-        searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
-      >{displayContent}</StreamingMarkdown>
+      return (
+        <StreamingMarkdown
+          isStreaming={isStreaming}
+          threadId={threadId}
+          searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
+        >
+          {displayContent}
+        </StreamingMarkdown>
+      )
     }
 
     // Handle content blocks
@@ -704,8 +714,13 @@ function MessageBubbleImpl({
             )
           }
           return (
-            <StreamingMarkdown key={index} isStreaming={isStreaming} searchBlockIndex={index}
-              searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}>
+            <StreamingMarkdown
+              key={index}
+              isStreaming={isStreaming}
+              threadId={threadId}
+              searchBlockIndex={index}
+              searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}
+            >
               {displayText}
             </StreamingMarkdown>
           )
@@ -942,7 +957,7 @@ function MessageBubbleImpl({
                 data-chat-search-ignore
                 className="mt-2 rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-sm text-muted-foreground"
               >
-                <StreamingMarkdown isStreaming={Boolean(isStreaming)}>
+                <StreamingMarkdown isStreaming={Boolean(isStreaming)} threadId={threadId}>
                   {reasoningText}
                 </StreamingMarkdown>
               </div>

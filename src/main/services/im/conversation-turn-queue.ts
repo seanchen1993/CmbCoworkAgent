@@ -103,6 +103,12 @@ export class ImConversationTurnQueue {
     )
   }
 
+  abortThreadFromDesktop(threadId: string): boolean {
+    const current = this.currentRuns.get(threadId)
+    if (!current) return false
+    return this.abortCurrentImEvent(current.conversationKey, current.eventId, threadId)
+  }
+
   hasActiveRuns(): boolean {
     return this.currentRuns.size > 0
   }

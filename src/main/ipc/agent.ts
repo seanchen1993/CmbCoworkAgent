@@ -11,6 +11,7 @@ import {
   getSelectedStreamTranscriptValueSnapshots,
   getStreamTranscriptValueLocalOccurrence
 } from "./stream-transcript-values"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { nowIsoLocal } from "../util/local-time"
 import { StreamAssistantText } from "./stream-assistant-text"
 import { AsyncKeyedLock } from "./async-keyed-lock"
@@ -43,6 +44,11 @@ import {
 } from "../agent/post-run-memory-maintenance"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+// The renderer composer emits this richer variant (description, when_to_use,
+// allowed_tools); skill-lifecycle/marker has a name+path-only twin under the
+// same tag. Match the composer so a remote turn persists what a desktop turn
+// would have.
+import { formatSkillUseBlock as formatComposerSkillUseBlock } from "../../shared/skill-use-block"
 import { resolveThreadOutputStyle, type AgentOutputStyle } from "../../shared/agent-output-style"
 import {
   areForcedCoordinatorRequestsAllowed,
@@ -267,7 +273,8 @@ import {
 } from "../agent/workflow/notification"
 import {
   COORDINATOR_NOTIFICATION_PROMPT_PREFIX,
-  INTERNAL_NOTIFICATION_TRIGGER_SOURCE
+  INTERNAL_NOTIFICATION_TRIGGER_SOURCE,
+  type BackgroundNotificationOwner
 } from "../../shared/internal-notification-turn"
 import {
   coordinatorWorkerManager,
@@ -328,12 +335,11 @@ import {
   buildGoalStartPrompt,
   displayGoalObjective,
   displayGoalPausedReason,
-  GoalManager,
   isGoalBoundaryStillCurrent,
   validateGoalText
 } from "../agent/goals/goal-manager"
 import { buildGoalContinuationPromptFromHookContexts } from "../agent/goals/internal-prompt"
-import { SqlGoalStore } from "../agent/goals/goal-store"
+import { goalManager, goalStore } from "../agent/goals/runtime"
 import {
   extractGoalTransportAttachmentNames,
   extractGoalTransportPayload,
@@ -419,11 +425,15 @@ import { emitAppAttention } from "../app-attention-events"
 import { finishTraceInBackground } from "../agent/trace/collector"
 import {
   createBrowserWindowAgentRunDelivery,
+  registerActiveAgentRunCanceller,
   registerActiveAgentRunInspector,
+  registerAgentGoalControlImplementation,
   registerAgentRunImplementation,
   startAgentRun,
-  type AgentRunDelivery
+  type AgentRunDelivery,
+  type AgentRunExecutionContext
 } from "../agent/agent-run-service"
+import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
 
 function withHarnessStageInvalidation(
   callback: HookResultCallback,
@@ -522,8 +532,7 @@ function releaseWorkflowNotification(runId: string, runToken: string): boolean {
 const streamChannelByRunController = new WeakMap<AbortController, string>()
 
 let agentTaskShutdownStarted = false
-const goalStore = new SqlGoalStore()
-const goalManager = new GoalManager(goalStore)
+const agentRunExecutionContextStorage = new AsyncLocalStorage<AgentRunExecutionContext>()
 // Deferred-delivery background evidence (see GoalBackgroundEvidenceStash): a
 // notification turn that delivers result A but defers (B still pending) parks
 // A's evidence here so the eventual evaluation sees every delivered batch, not
@@ -1034,13 +1043,59 @@ function sendDesktopForeignOwnerBusy(
   safeSendToWindow(window, channel, { type: "done" })
 }
 
+/**
+ * Ends an automatic follow-up turn that another source is already running.
+ *
+ * An auto-notification is the app talking to itself: nobody asked for it, and a
+ * duplicate is expected whenever two schedulers observe the same completion. It
+ * closes the stream with no error, because the busy notice is written for a
+ * person who just acted — showing it for a turn they never requested reports a
+ * fault on a conversation they only had open.
+ *
+ * The lease is still respected: this yields, it never preempts.
+ */
+function yieldInternalNotificationForForeignOwner(
+  window: BrowserWindow,
+  channel: string,
+  threadId: string,
+  lease: LocalThreadRunLease,
+  kind: "coordinator" | "workflow"
+): void {
+  console.log("[Agent] Internal notification yielded to another source:", {
+    threadId,
+    kind,
+    owner: lease.owner,
+    runId: lease.runId,
+    reason: "thread_run_owned_by_another_source"
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+}
+
 function rejectDesktopRunForForeignOwner(
   threadId: string,
   window: BrowserWindow,
-  channel: string
+  channel: string,
+  context: AgentRunExecutionContext = { source: "desktop" },
+  internalNotificationKind?: "coordinator" | "workflow"
 ): boolean {
   const lease = getLocalThreadRunLease(threadId)
-  if (!lease || lease.owner === "desktop") return false
+  if (!lease) return false
+  if (context.allowForeignOwnerGoalControl) return false
+  const managedLease = context.localRunLease
+  if (managedLease && lease.owner === managedLease.owner && lease.runId === managedLease.runId) {
+    return false
+  }
+  if (!managedLease && lease.owner === "desktop") return false
+  if (internalNotificationKind) {
+    yieldInternalNotificationForForeignOwner(
+      window,
+      channel,
+      threadId,
+      lease,
+      internalNotificationKind
+    )
+    return true
+  }
   sendDesktopForeignOwnerBusy(window, channel, lease)
   return true
 }
@@ -1073,6 +1128,22 @@ function claimDesktopThreadRunLease(threadId: string, runId: string): LocalThrea
     runId,
     ...(current?.owner === "desktop" ? { handoffFromRunId: current.runId } : {})
   })
+}
+
+function claimAgentThreadRunLease(
+  threadId: string,
+  runId: string,
+  context: AgentRunExecutionContext = { source: "desktop" }
+): LocalThreadRunLeaseClaim {
+  const managedLease = context.localRunLease
+  if (managedLease) {
+    return claimLocalThreadRunLease({
+      threadId,
+      owner: managedLease.owner,
+      runId: managedLease.runId
+    })
+  }
+  return claimDesktopThreadRunLease(threadId, runId)
 }
 
 export function isActiveAgentRunAborting(threadId: string): boolean {
@@ -1321,6 +1392,11 @@ function emitGoalNotice(
     console.warn("[Goal] failed to persist goal notice:", error)
   }
   const payload = { message, goalId, activeWindowId, eventId, createdAt }
+  try {
+    agentRunExecutionContextStorage.getStore()?.onGoalNotice?.(payload)
+  } catch (error) {
+    console.warn("[Goal] managed transport notice callback failed:", error)
+  }
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
     window.webContents.send(channel, {
       type: "custom",
@@ -1460,6 +1536,51 @@ function handleGoalNonStartingControlCommand(params: {
   }
 
   return { handled: false, terminatedCurrentRun: false }
+}
+
+async function executeAgentGoalControl(
+  request: { threadId: string; message: string },
+  delivery: AgentRunDelivery,
+  context: AgentRunExecutionContext
+): Promise<GoalControlResult> {
+  const { threadId, message } = request
+  return agentRunExecutionContextStorage.run(context, () =>
+    withThreadRunMutationLock(threadId, async () => {
+      // Possibly a managed transport's shim; see AgentRunDelivery.window.
+      const window = delivery.window
+      const activeController = activeRuns.get(threadId)
+      const channel = activeController
+        ? (streamChannelByRunController.get(activeController) ?? `agent:stream:${threadId}`)
+        : `agent:stream:${threadId}`
+      // Choose the active request channel under the same lock used by run
+      // replacement. A terminating goal command must abort and complete the
+      // same physical request, never a predecessor or queued successor.
+      lastFetchErrorByChannel.delete(channel)
+      lastFailoverByChannel.delete(channel)
+      const goalCommand = parseGoalSlashCommand(message)
+      const result = handleGoalNonStartingControlCommand({
+        threadId,
+        command: goalCommand,
+        originalMessage: message,
+        window,
+        channel,
+        sendDone: false,
+        sendDoneForTerminatingControl: true
+      })
+      if (!result.handled) {
+        return {
+          ...result,
+          notice: emitGoalNotice(
+            window,
+            channel,
+            threadId,
+            "该 /goal 命令需要在当前运行结束后发送。"
+          )
+        }
+      }
+      return result
+    })
+  )
 }
 
 function pauseActiveGoalAfterBoundary(
@@ -1761,6 +1882,8 @@ interface PhysicalAgentRunSettlementOptions {
   disposeTurnState: () => void
   criticalBeforeReleasePhases?: readonly RunSettlementPhase[]
   beforeNotificationPhases?: readonly RunSettlementPhase[]
+  runOwner?: LocalThreadRunLease["owner"]
+  releaseRunLease?: boolean
 }
 
 async function settlePhysicalAgentRun({
@@ -1776,7 +1899,9 @@ async function settlePhysicalAgentRun({
   turnStateShouldDispose,
   disposeTurnState,
   criticalBeforeReleasePhases = [],
-  beforeNotificationPhases = []
+  beforeNotificationPhases = [],
+  runOwner = "desktop",
+  releaseRunLease = true
 }: PhysicalAgentRunSettlementOptions): Promise<void> {
   let transcriptFlushSucceeded = false
   let notificationSettlement = Promise.resolve()
@@ -1849,8 +1974,7 @@ async function settlePhysicalAgentRun({
       },
       {
         name: "dispose-turn-state",
-        shouldRun: () =>
-          turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken),
+        shouldRun: () => turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken),
         run: disposeTurnState
       },
       {
@@ -1860,7 +1984,8 @@ async function settlePhysicalAgentRun({
       },
       {
         name: "release-local-thread-run-lease",
-        run: () => releaseLocalThreadRunLease(threadId, "desktop", runToken)
+        shouldRun: () => releaseRunLease,
+        run: () => releaseLocalThreadRunLease(threadId, runOwner, runToken)
       }
     ],
     resolveSettlement,
@@ -2300,6 +2425,16 @@ function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
   return segments.join("；")
 }
 
+/**
+ * Every renderer send in this file funnels through here. That is why a managed
+ * transport can get away with a four-member window shim (see
+ * AgentRunDelivery.window): `webContents.send` is the only sending member this
+ * file ever touches.
+ *
+ * If you need a new renderer message, route it through here or through
+ * AgentRunDelivery.send. Reaching for another BrowserWindow member instead
+ * compiles fine and then throws on the IM path.
+ */
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
   if (window.isDestroyed() || window.webContents.isDestroyed()) return
   try {
@@ -2944,8 +3079,18 @@ function getActiveOrPersistedCoordinatorNotificationSelectedSkills(
   return parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
 }
 
+/**
+ * @param owner restricts the drain to results this surface owes a summary for.
+ * Passed only by an automatic summary turn: two of those can be pending on one
+ * thread at once, and whichever won the run lease used to consume both — so a
+ * Zhaohu result was reported into a desktop turn its reader never sees. A turn
+ * the user started takes everything, deliberately: the person is looking at the
+ * thread, and it is also the only path that can surface a managed result whose
+ * conversation is no longer connected.
+ */
 async function prepareQueuedCoordinatorNotificationsForPrompt(
   threadId: string,
+  owner: BackgroundNotificationOwner | undefined,
   onDeferred?: () => void
 ): Promise<{
   queuedNotifications: CoordinatorTurnNotification[]
@@ -2953,7 +3098,7 @@ async function prepareQueuedCoordinatorNotificationsForPrompt(
   notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined>
 }> {
   const queuedNotifications = toCoordinatorTurnNotifications(
-    coordinatorWorkerManager.drainNotifications(threadId)
+    coordinatorWorkerManager.drainNotifications(threadId, { owner })
   )
   try {
     const { promptNotifications, deferredNotifications } =
@@ -3228,6 +3373,15 @@ function sendAutoCommitResult(
   })
 }
 
+/**
+ * The one place in this file that needs a REAL BrowserWindow: Electron
+ * validates the parent window of a modal and rejects a managed transport's
+ * shim. Callers must gate this on a desktop-owned run (canPromptModal); a
+ * managed run declines auto-commit instead of prompting nobody.
+ *
+ * Any new Electron dialog here needs the same gate —
+ * tests/agent-window-surface.spec.ts fails on an ungated one.
+ */
 async function confirmAutoCommit(
   window: BrowserWindow,
   result: AgentAutoCommitResult
@@ -3251,7 +3405,8 @@ async function finalizeAutoCommit({
   userPrompt,
   snapshot,
   window,
-  channel
+  channel,
+  canPromptModal
 }: {
   threadId: string
   workspacePath: string | undefined
@@ -3259,6 +3414,13 @@ async function finalizeAutoCommit({
   snapshot: AgentGitSnapshot | null
   window: BrowserWindow
   channel: string
+  /**
+   * Only a real desktop window can host `dialog.showMessageBox`. A headless
+   * delivery (IM and other managed transports) has no window to parent a modal
+   * to, so "ask" mode declines instead of prompting — the run must not block on
+   * a dialog nobody can see.
+   */
+  canPromptModal: boolean
 }): Promise<void> {
   // Skip auto-commit while a background workflow is ACTIVE on this WORKSPACE: it
   // writes to the tree asynchronously, so a dirty-diff commit here could sweep its
@@ -3339,7 +3501,7 @@ async function finalizeAutoCommit({
       workspacePath,
       userPrompt,
       snapshot,
-      confirm: (preview) => confirmAutoCommit(window, preview)
+      ...(canPromptModal ? { confirm: (preview) => confirmAutoCommit(window, preview) } : {})
     })
     // Telemetry: the existing `git.commit.created` (triggeredBy=agent-auto) only
     // fires on success. Emit an attempt event so skip / user-cancel / fail are also
@@ -3553,37 +3715,91 @@ function messageContentToText(content: Message["content"]): string {
     .join("\n")
 }
 
-function scheduleDesktopTurnCompletion(threadId: string, runToken: string, cursor: number): void {
+function prepareFinalAssistantCandidate(
+  threadId: string,
+  runToken: string,
+  cursor: number
+): StreamAssistantCandidate | undefined {
   let candidate: StreamAssistantCandidate | undefined
   try {
     flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
     const latest = latestStreamAssistantCandidate.get(threadId)
-    if (!latest || latest.revision <= cursor) return
+    if (!latest || latest.revision <= cursor) return undefined
     candidate = { ...latest }
   } catch (error) {
-    console.warn("[IM] Failed to prepare desktop completion observation:", error)
-    return
+    console.warn("[Agent] Failed to prepare final assistant observation:", error)
+    return undefined
   }
+  return candidate
+}
+
+async function readFinalAssistantCandidate(
+  threadId: string,
+  candidate: StreamAssistantCandidate
+): Promise<{ messageId: string; finalText: string } | null> {
+  await flushStrict()
+  const message = getThreadMessagesByIds(threadId, [candidate.messageId])[0]
+  if (!message || message.role !== "assistant" || message.tool_calls?.length) return null
+  const finalText = messageContentToText(message.content).trim()
+  return finalText ? { messageId: message.id, finalText } : null
+}
+
+function scheduleDesktopTurnCompletion(threadId: string, runToken: string, cursor: number): void {
+  const candidate = prepareFinalAssistantCandidate(threadId, runToken, cursor)
+  if (!candidate) return
 
   void (async () => {
     try {
       // The delivery id is derived only after the final assistant row is on
       // disk. This side task never feeds failure back into agent:invoke.
-      await flushStrict()
-      const message = getThreadMessagesByIds(threadId, [candidate!.messageId])[0]
-      if (!message || message.role !== "assistant" || message.tool_calls?.length) return
-      const finalText = messageContentToText(message.content).trim()
-      if (!finalText) return
+      const result = await readFinalAssistantCandidate(threadId, candidate)
+      if (!result) return
       await imDesktopCompletionObserver.observe({
         source: "desktop",
         threadId,
-        finalAssistantMessageId: message.id,
-        finalText
+        finalAssistantMessageId: result.messageId,
+        finalText: result.finalText
       })
     } catch (error) {
       console.warn("[IM] Desktop completion observation failed without affecting the turn:", error)
     }
   })()
+}
+
+async function deliverManagedAgentRunCompletion(
+  context: AgentRunExecutionContext,
+  threadId: string,
+  runToken: string,
+  cursor: number
+): Promise<void> {
+  const callback = context.onFinalAssistant
+  if (!callback) {
+    scheduleDesktopTurnCompletion(threadId, runToken, cursor)
+    return
+  }
+  const candidate = prepareFinalAssistantCandidate(threadId, runToken, cursor)
+  if (!candidate) return
+  const result = await readFinalAssistantCandidate(threadId, candidate)
+  if (result) await callback(result)
+}
+
+function notifyManagedAgentRunCancelled(context: AgentRunExecutionContext): void {
+  try {
+    context.onRunCancelled?.()
+  } catch (error) {
+    console.warn("[Agent] Managed run cancellation callback failed:", error)
+  }
+}
+
+function notifyManagedDetachedResult(
+  context: AgentRunExecutionContext,
+  signal: { kind: "coordinator" | "workflow"; threadId: string; runId?: string }
+): void {
+  try {
+    context.onDetachedResultAvailable?.(signal)
+  } catch (error) {
+    console.warn("[Agent] Managed detached-result callback failed:", error)
+  }
 }
 
 const streamTranscriptToolCallAccumulators = new Map<
@@ -5442,50 +5658,52 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "agent:goal-control",
     async (event, { threadId, message }: { threadId: string; message: string }) => {
-      return withThreadRunMutationLock(threadId, async () => {
-        const window = BrowserWindow.fromWebContents(event.sender)
-        const activeController = activeRuns.get(threadId)
-        const channel = activeController
-          ? (streamChannelByRunController.get(activeController) ?? `agent:stream:${threadId}`)
-          : `agent:stream:${threadId}`
-        // Choose the active request channel under the same lock used by run
-        // replacement. A terminating goal command must abort and complete the
-        // same physical request, never a predecessor or queued successor.
-        lastFetchErrorByChannel.delete(channel)
-        lastFailoverByChannel.delete(channel)
-        const goalCommand = parseGoalSlashCommand(message)
-        const result = handleGoalNonStartingControlCommand({
-          threadId,
-          command: goalCommand,
-          originalMessage: message,
-          window,
-          channel,
-          sendDone: false,
-          sendDoneForTerminatingControl: true
-        })
-        if (!result.handled) {
-          return {
-            ...result,
-            notice: emitGoalNotice(
-              window,
-              channel,
-              threadId,
-              "该 /goal 命令需要在当前运行结束后发送。"
-            )
-          }
-        }
-        return result
-      })
+      const window = BrowserWindow.fromWebContents(event.sender)
+      if (!window) throw new Error("Agent goal control window is unavailable")
+      return executeAgentGoalControl(
+        { threadId, message },
+        createBrowserWindowAgentRunDelivery(window),
+        { source: "desktop" }
+      )
     }
   )
 
   // Handle agent invocation with streaming. The transport-neutral run body is
   // registered here; the IPC listener below is only an adapter into this path.
   registerActiveAgentRunInspector(hasActiveAgentRun)
+  // Same abort the Stop button's ordinary path takes; exposed so a caller that
+  // only knows "this thread has a background run" can reach it without owning
+  // the stream. See cancelActiveAgentRun.
+  registerActiveAgentRunCanceller((threadId) => {
+    const controller = activeRuns.get(threadId)
+    if (!controller) return false
+    LocalSandbox.cancelBackgroundTasks(threadId)
+    const activeRunToken = turnStates.get(threadId)?.runToken
+    if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
+    controller.abort()
+    handleAutoModeAgentCancelled(threadId)
+    return true
+  })
+  registerAgentGoalControlImplementation(executeAgentGoalControl)
 
-  registerAgentRunImplementation(
-    async (
-      {
+  registerAgentRunImplementation((request, delivery, incomingRunExecutionContext) => {
+    // onRunTerminated is contracted to fire exactly once per run, and this body
+    // returns from dozens of places — Goal command handling alone has a dozen
+    // early returns before the main try block. Deduplicating and defaulting
+    // around the whole implementation is the only placement that actually
+    // holds: a managed caller has no stream to fall back on, so an unreported
+    // run reaches it as an unexplained "no reply".
+    let terminalReported = false
+    const runExecutionContext: AgentRunExecutionContext = {
+      ...incomingRunExecutionContext,
+      onRunTerminated: (terminal) => {
+        if (terminalReported) return
+        terminalReported = true
+        incomingRunExecutionContext.onRunTerminated?.(terminal)
+      }
+    }
+    return agentRunExecutionContextStorage.run(runExecutionContext, async () => {
+      const {
         threadId,
         message,
         modelId,
@@ -5494,9 +5712,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         agentMode: requestedAgentMode,
         managedExecution,
         coordinatorInternalNotification
-      }: AgentInvokeParams,
-      delivery
-    ) => {
+      }: AgentInvokeParams = request
       // Freeze a mode/workspace snapshot from the durable thread BEFORE anything
       // can patch it: workflow-notification detection and forced-coordinator
       // gating must see the state the request was prepared against, not a later
@@ -5512,6 +5728,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       )
       const initialInvokeWorkspacePath = initialInvokeParsedMetadata.workspacePath
       const baseChannel = `agent:stream:${threadId}`
+      // May be a managed transport's shim rather than a real window — only
+      // id / isDestroyed / webContents.send / webContents.isDestroyed exist on
+      // it. See AgentRunDelivery.window before using anything else.
       const window = delivery.window
 
       console.log("[Agent] Received invoke request:", {
@@ -5542,8 +5761,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         : baseChannel
       const channel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
       if (rejectAgentStartDuringShutdown(window, channel)) return
-      if (rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)) return
-      if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
+      if (
+        runExecutionContext.source === "desktop" &&
+        rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)
+      ) {
+        return
+      }
+      if (
+        rejectDesktopRunForForeignOwner(
+          threadId,
+          window,
+          channel,
+          runExecutionContext,
+          isTrustedCoordinatorNotificationInvoke
+            ? "coordinator"
+            : isWorkflowNotificationInvoke
+              ? "workflow"
+              : undefined
+        )
+      ) {
+        return
+      }
       let modelInputMessage = message
       let routingMessage = message
       let rootUserPrompt = message
@@ -5579,17 +5817,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               channel,
               sendDone: true
             })
-            if (controlResult.handled) return
+            if (controlResult.handled) {
+              runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
+              return
+            }
 
             if (goalCommand.type === "resume") {
               const currentGoal = goalManager.get(threadId)
               if (currentGoal?.status === "active" && activeRuns.has(threadId)) {
                 emitGoalNotice(window, channel, threadId, "Goal 正在进行中，无需 resume。")
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
               if (!currentGoal) {
                 emitGoalNotice(window, channel, threadId, "没有可继续的 goal。")
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5600,6 +5843,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 已完成，不能 resume。清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5610,6 +5854,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5641,6 +5886,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 状态已变化，请重新发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5660,6 +5906,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 状态已变化，请重新发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5670,6 +5917,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 已完成，不能 resume。清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5680,6 +5928,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5696,6 +5945,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   goal ? `Goal 当前状态：${goal.status}。` : "没有可继续的 goal。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5725,6 +5975,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后再设置新的 goal。暂停请发送 /goal pause，清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5758,6 +6009,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 状态已变化，请重新发送 /goal <目标>。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5768,6 +6020,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后再设置新的 goal。暂停请发送 /goal pause，清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5835,7 +6088,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           normalSubagentsEnabled: initialInvokeMetadata.subagentsEnabled !== false,
           threadIncarnation: captureThreadIncarnation(initialInvokeThread)
         }
-        const nextInvokeRunToken = uuid()
+        const nextInvokeRunToken = runExecutionContext.localRunLease?.runId ?? uuid()
         const replacement = await withThreadRunMutationLock(threadId, () =>
           withActiveRunReplacementLock(threadId, async () => {
             if (rejectAgentStartDuringShutdown(window, channel)) {
@@ -5865,7 +6118,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               closePhysicalStreamRunBeforeSetupPublication(window, channel, error)
               return { prePublicationFailure: true as const }
             }
-            const leaseClaim = claimDesktopThreadRunLease(threadId, nextInvokeRunToken)
+            const leaseClaim = runExecutionContext.localRunLease
+              ? claimAgentThreadRunLease(threadId, nextInvokeRunToken, runExecutionContext)
+              : claimDesktopThreadRunLease(threadId, nextInvokeRunToken)
             if (!leaseClaim.acquired) {
               return { leaseConflict: leaseClaim.conflict }
             }
@@ -5890,7 +6145,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             predecessorSettlement = await waitForReplacedRunToSettle(threadId)
             if (rejectAgentStartDuringShutdown(window, channel)) {
               clearCurrentRunMessageQueue(threadId, nextInvokeRunToken)
-              releaseLocalThreadRunLease(threadId, "desktop", nextInvokeRunToken)
+              if (!runExecutionContext.localRunLease?.managedExternally) {
+                releaseLocalThreadRunLease(
+                  threadId,
+                  runExecutionContext.localRunLease?.owner ?? "desktop",
+                  nextInvokeRunToken
+                )
+              }
               return { startRejectedDuringShutdown: true as const }
             }
 
@@ -5961,6 +6222,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           activeRunSettledPromise,
           resolveActiveRunSettled
         } = replacement
+        const externalSignal = runExecutionContext.signal
+        const abortFromExternalSignal = (): void => {
+          if (!abortController.signal.aborted) abortController.abort(externalSignal?.reason)
+        }
+        if (externalSignal?.aborted) {
+          abortFromExternalSignal()
+        } else {
+          externalSignal?.addEventListener("abort", abortFromExternalSignal, { once: true })
+        }
+        const removeExternalAbortSubscription = (): void => {
+          externalSignal?.removeEventListener("abort", abortFromExternalSignal)
+        }
         const physicalStreamRunSetupGuard = createPhysicalStreamRunSetupGuard({
           isActive: () => isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
           ownsLease: () => ownsPhysicalStreamRunLease(threadId, runToken, abortController),
@@ -5979,11 +6252,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         })
         pendingPhysicalStreamRunSetupGuard = physicalStreamRunSetupGuard
+        physicalStreamRunSetupGuard.addCleanup(removeExternalAbortSubscription)
         physicalStreamRunSetupGuard.addCleanup((_wasActive, wasOwner) => {
           if (!wasOwner) return
           revokeSandboxAclsForRun(runToken)
           discardAgentAutoCommitTracking(threadId)
-          releaseLocalThreadRunLease(threadId, "desktop", runToken)
+          if (!runExecutionContext.localRunLease?.managedExternally) {
+            releaseLocalThreadRunLease(
+              threadId,
+              runExecutionContext.localRunLease?.owner ?? "desktop",
+              runToken
+            )
+          }
           if (shouldDisposeTurnState(threadId, runToken)) {
             disposeTurnRuntimeState(threadId, turnState)
           }
@@ -6018,6 +6298,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const durableRuntimeTail = durableRuntimeTailSetup.value
         let userTranscriptMessagePersisted = false
         let visibleTranscriptUserMessage = message
+        // A managed transport resolves its skill out of band (trustedExplicitSkill)
+        // and hands us prose whose own markers were already neutralized, so the
+        // transcript would carry no record that a skill was chosen at all — the
+        // desktop draws its chip from a block inside the message text, which the
+        // renderer composer appends before submitting.
+        //
+        // Append the same block here so both paths render identically. Order is
+        // load-bearing twice over: the parser only accepts a block at the very
+        // end (anything after it is treated as prose), and appending ours after
+        // the neutralized text is what keeps a remote sender from forging one —
+        // theirs is defanged upstream, and only this one is ever added.
+        if (runExecutionContext.trustedExplicitSkill) {
+          visibleTranscriptUserMessage = [
+            visibleTranscriptUserMessage.trimEnd(),
+            formatComposerSkillUseBlock(runExecutionContext.trustedExplicitSkill)
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+        }
         let prefixedCoordinatorModeCommitted = false
 
         // A coordinator prefix is both a mode transition request and the first
@@ -6125,7 +6424,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           flushPendingStreamTranscriptMessages(threadId, runToken)
           abortController.abort()
         }
-        const removeWindowClosedSubscription = subscribeWindowClosed(window, onWindowClosed)
+        // Asks whether there is a window to watch, not who owns the run. Those
+        // used to be the same question — only a renderer's invoke was "desktop"
+        // and it always brought a real window. The main-process summary
+        // scheduler is a desktop-owned run with no window at all, and this
+        // subscription reached straight past the shim into BrowserWindow.once.
+        const removeWindowClosedSubscription =
+          runExecutionContext.source === "desktop" && !isManagedTransportWindow(window)
+            ? subscribeWindowClosed(window, onWindowClosed)
+            : () => undefined
         physicalStreamRunSetupGuard.addCleanup(() => {
           removeWindowClosedSubscription()
         })
@@ -6309,6 +6616,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           suppressNotificationAutoRun?: boolean
           stream?: { mode: "messages" | "values"; data: unknown }
         }): void => {
+          // Ahead of the active-run gate, deliberately. A background worker
+          // normally finishes *after* the turn that launched it — that is what
+          // makes its result detached — so gating this told the transport only
+          // in the rare case where it had no need to be told. Nothing else
+          // wakes that transport for a worker result, and once the desktop
+          // scheduler started correctly leaving managed results alone, a Team
+          // worker started from Zhaohu was summarised by nobody at all.
+          if (event.notification && event.suppressNotificationAutoRun !== true) {
+            notifyManagedDetachedResult(runExecutionContext, {
+              kind: "coordinator",
+              threadId
+            })
+          }
           if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
           if (event.stream) {
             sendCoordinatorWorkerStream(
@@ -6320,13 +6640,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             return
           }
+          const managedByExternalTransport =
+            runExecutionContext.source === "im" &&
+            Boolean(runExecutionContext.onDetachedResultAvailable)
+          const suppressNotificationAutoRun = managedByExternalTransport
+            ? true
+            : event.suppressNotificationAutoRun
           if (event.workers) {
             sendCoordinatorWorkers(
               window,
               channel,
               event.workers,
               event.notification,
-              event.suppressNotificationAutoRun
+              suppressNotificationAutoRun
             )
           } else {
             sendCoordinatorWorkerDelta(
@@ -6334,7 +6660,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               channel,
               event.worker,
               event.notification,
-              event.suppressNotificationAutoRun
+              suppressNotificationAutoRun
             )
           }
         }
@@ -6475,17 +6801,44 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // High-water mark of input tokens — hoisted for catch/finally access
         let highWaterInputTokens = 0
         let autoModeTerminal: AutoModeTerminal | undefined
+        // Recorded on every background task this turn launches — a workflow or a
+        // coordinator worker — so the answer survives to a restart, when the run
+        // that made it is gone, and it is also what an automatic summary drains
+        // by. Explicit when the caller had to tell it apart from the lease; the
+        // lease's answer otherwise.
+        const backgroundNotificationOwner: BackgroundNotificationOwner =
+          runExecutionContext.backgroundNotificationOwner ??
+          (runExecutionContext.localRunLease?.managedExternally ? "managed" : "desktop")
         const workflowLaunchedRunIds = new Set<string>()
         const onWorkflowLaunched = (runId: string): void => {
           const normalized = runId.trim()
-          if (normalized) workflowLaunchedRunIds.add(normalized)
+          if (!normalized) return
+          workflowLaunchedRunIds.add(normalized)
+          notifyManagedDetachedResult(runExecutionContext, {
+            kind: "workflow",
+            threadId,
+            runId: normalized
+          })
         }
         const markAutoModeTerminal = (
           outcome: AgentTurnEndEvent["outcome"],
           code: AutoModeTerminalCode,
-          terminalMessage?: string
+          terminalMessage?: string,
+          terminalError?: unknown
         ): void => {
           autoModeTerminal = createAutoModeTerminal(outcome, code, terminalMessage)
+          // Failures are reported to the renderer and then swallowed, so this
+          // run resolves normally either way. A managed transport has no stream
+          // to read: without this it can only infer failure from "no final
+          // text", collapsing a retryable provider blip and a hook halt into
+          // one generic error. The original error travels along so the caller
+          // keeps its own retry policy.
+          runExecutionContext.onRunTerminated?.({
+            outcome,
+            code,
+            ...(terminalMessage ? { message: terminalMessage } : {}),
+            ...(terminalError !== undefined ? { error: terminalError } : {})
+          })
         }
         // Actual model used after failover — hoisted for catch/finally routing feedback
         let usedModelId: string | undefined
@@ -6568,6 +6921,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.log("[Agent] Thread metadata:", metadata)
 
           const workspacePath = parsedThreadMetadata.workspacePath
+          // A managed transport authorized this run against a target — its
+          // workspace, grant, feature binding and delivery context — and then
+          // did async work before it started. The thread may have been
+          // repointed or rebound since. Only the caller knows what it
+          // authorized, so it re-checks; this file has no concept of a grant.
+          const authorizationRefusal = runExecutionContext.verifyResolvedThread?.({
+            workspacePath,
+            metadata
+          })
+          if (authorizationRefusal) throw new Error(authorizationRefusal)
           sessionWorkspacePath = workspacePath ?? undefined
           const harnessAgentContext = await getHarnessAgentContext(metadata, {
             workspacePath,
@@ -6635,9 +6998,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
           if (matchesWorkflowNotificationPrompt && parsedThreadMetadata.agentMode === "workflow") {
+            // Scoped to this turn's owner. The trigger only ever arrives from an
+            // automatic summary, and two of those can be pending on one thread:
+            // claiming whatever was newest let a desktop turn report a run owed
+            // to Zhaohu, whose reader then never heard about it.
             const pendingWorkflowRun = await workflowRunManager.claimPendingNotificationAsync(
               workspacePath,
-              threadId
+              threadId,
+              { owner: backgroundNotificationOwner }
             )
             if (!pendingWorkflowRun) {
               console.log("[Workflow] Ignoring stale workflow notification trigger", { threadId })
@@ -6749,6 +7117,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             prepareStandardUserPrompt({
               rawMessage,
               initialModelInput,
+              trustedExplicitSkill: runExecutionContext.trustedExplicitSkill,
+              allowExplicitSkillFromMessage:
+                runExecutionContext.source === "desktop" ||
+                runExecutionContext.allowTrustedTransportSkillMarker === true,
               threadId,
               workspacePath,
               turnState,
@@ -6774,6 +7146,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             throwIfInvokeAborted()
             if (!preparedPrompt.accepted) {
               if (preparedPrompt.blockedBy === "explicit_skill") {
+                // Distinct from a completion (Stop) hook halt: this input never
+                // reached the model, and IM tells the user so.
+                runExecutionContext.onRunTerminated?.({
+                  outcome: "error",
+                  code: "prompt_blocked",
+                  message: preparedPrompt.reason
+                })
+                markAutoModeTerminal("error", "hook_halt", preparedPrompt.reason)
                 pauseActiveGoalForRuntimeStop(preparedPrompt.reason)
                 safeSendToWindow(window, channel, {
                   type: "error",
@@ -6782,6 +7162,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 finishTraceInBackground(tracer, "error", preparedPrompt.reason, "Agent")
                 turnStateShouldDispose = true
               } else if (preparedPrompt.blockedBy === "user_prompt_submit") {
+                runExecutionContext.onRunTerminated?.({
+                  outcome: "error",
+                  code: "prompt_blocked",
+                  message: "UserPromptSubmit hook stopped the turn"
+                })
+                markAutoModeTerminal(
+                  "error",
+                  "hook_halt",
+                  "UserPromptSubmit hook stopped the turn"
+                )
                 pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped the turn.")
                 sendHookBlocked(
                   "UserPromptSubmit",
@@ -6934,12 +7324,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 error: errorMessage
               })
               sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
-              finishTraceInBackground(
-                tracer,
-                "error",
-                "COORDINATOR_NORMAL_MODE_BLOCKED",
-                "Agent"
-              )
+              finishTraceInBackground(tracer, "error", "COORDINATOR_NORMAL_MODE_BLOCKED", "Agent")
               return
             }
           }
@@ -7119,12 +7504,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 error: buildNormalModeGuardMessage(blockedNormalModeGuardState)
               })
               sendCoordinatorWorkers(window, channel, blockedNormalModeGuardState.workers)
-              finishTraceInBackground(
-                tracer,
-                "error",
-                "COORDINATOR_NORMAL_MODE_BLOCKED",
-                "Agent"
-              )
+              finishTraceInBackground(tracer, "error", "COORDINATOR_NORMAL_MODE_BLOCKED", "Agent")
               return
             }
           }
@@ -7166,12 +7546,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 error: errorMessage
               })
               sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
-              finishTraceInBackground(
-                tracer,
-                "error",
-                "COORDINATOR_NORMAL_MODE_BLOCKED",
-                "Agent"
-              )
+              finishTraceInBackground(tracer, "error", "COORDINATOR_NORMAL_MODE_BLOCKED", "Agent")
               return
             }
           }
@@ -7246,13 +7621,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               queuedNotifications: notifications,
               promptNotifications,
               notificationSelectedSkills
-            } = await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
-              if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
-              safeSendToWindow(window, channel, {
-                type: "custom",
-                data: { type: "coordinator_notification_deferred" }
-              })
-            })
+            } = await prepareQueuedCoordinatorNotificationsForPrompt(
+              threadId,
+              isCoordinatorNotificationTurn ? backgroundNotificationOwner : undefined,
+              () => {
+                if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
+                safeSendToWindow(window, channel, {
+                  type: "custom",
+                  data: { type: "coordinator_notification_deferred" }
+                })
+              }
+            )
             throwIfInvokeAborted()
             drainedCoordinatorNotifications = promptNotifications
             coordinatorNotificationsConsumed = promptNotifications.length === 0
@@ -7468,6 +7847,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
+            // Centralized product budget (agent-runtime-limits). Hardcoding it
+            // here made one logical turn's budget depend on which entry point
+            // resumed it, and left the IM path below the limit it used to get.
             recursionLimit: getAgentGraphRecursionLimit()
           }
 
@@ -7478,8 +7860,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           lastFailoverByChannel.set(channel, failoverAttempts)
           const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
           const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({
-            source: "desktop",
-            runLease: { owner: "desktop", runId: runToken },
+            source: runExecutionContext.source,
+            runLease: {
+              owner: runExecutionContext.localRunLease?.owner ?? "desktop",
+              runId: runToken
+            },
             baseOptions: () => ({
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
@@ -7492,6 +7877,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
+              allowDeferredUserInputRenderer: runExecutionContext.source === "im",
+              interactionWaitHooks:
+                runExecutionContext.source === "im"
+                  ? runExecutionContext.interactionWaitHooks
+                  : undefined,
+              extraSystemPrompt: runExecutionContext.extraSystemPrompt,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
               disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
@@ -7515,9 +7906,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,
               onWorkflowLaunched,
+              backgroundNotificationOwner,
               onTurnCompletionRecovery: sendTurnCompletionNotice
             }),
-            harnessContext: harnessAgentContext
+            harnessContext: harnessAgentContext,
+            remotePolicy: runExecutionContext.remotePolicy
           })
           usedModelId = effectiveModelId
           const isFirstAttempt = true
@@ -8822,7 +9215,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   : rootUserPrompt,
                 snapshot: autoCommit.snapshot,
                 window,
-                channel
+                channel,
+                // Same two questions as the window-close subscription above:
+                // a desktop-owned run is not necessarily one with a window to
+                // hang a modal on.
+                canPromptModal:
+                  runExecutionContext.source === "desktop" && !isManagedTransportWindow(window)
               })
               await markLatestForkBoundaryBestEffort({
                 threadId,
@@ -8833,8 +9231,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             throwIfInvokeAborted()
-            if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
-              scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            if (invokeFinalOutcome === "success") {
+              // Team/Workflow notification turns are normally claimed by the
+              // main-process IM pump. If the renderer won that durable claim first,
+              // observe its final assistant row as a fallback so an authorized IM
+              // route still receives the detached result. The observer is a no-op
+              // for threads without an active remote grant.
+              await deliverManagedAgentRunCompletion(
+                runExecutionContext,
+                threadId,
+                runToken,
+                desktopCompletionCursor
+              )
             }
             turnStateShouldDispose = true
             if (!autoModeTerminal) {
@@ -9013,8 +9421,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                           isPathInsideAnyDirectory(filePath, memoryDirectoryPaths, workspacePath)
                         )
                     )
-                    const directMemoryTurnCount =
-                      memoryBatch.turns.length - turnsToSummarize.length
+                    const directMemoryTurnCount = memoryBatch.turns.length - turnsToSummarize.length
 
                     const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
                       const memRoutingResult = await resolveModel({
@@ -9151,6 +9558,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               console.warn("[Agent] Failed to schedule memory maintenance:", error)
             }
           } else {
+            notifyManagedAgentRunCancelled(runExecutionContext)
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
             finishTraceInBackground(tracer, "cancelled", undefined, "Agent")
@@ -9201,7 +9609,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "hook_halt", error.reason)
+            markAutoModeTerminal("error", "hook_halt", error.reason, error)
             return
           }
           const actionStationarityHalt = getActionStationarityHaltError(error)
@@ -9231,7 +9639,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "failure_fuse", actionStationarityHalt.decision.reason)
+            markAutoModeTerminal("error", "failure_fuse", actionStationarityHalt.decision.reason, error)
             return
           }
           const failureFuseHalt = getFailureFuseHaltError(error)
@@ -9241,12 +9649,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             pauseActiveGoalForRuntimeStop(failureFuseHalt.decision.reason)
             sendFailureFuseHalt(window, channel, failureFuseHalt)
             syncUsedSkillsContext()
-            finishTraceInBackground(
-              tracer,
-              "cancelled",
-              failureFuseHalt.decision.reason,
-              "Agent"
-            )
+            finishTraceInBackground(tracer, "cancelled", failureFuseHalt.decision.reason, "Agent")
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -9258,7 +9661,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "failure_fuse", failureFuseHalt.decision.reason)
+            markAutoModeTerminal("error", "failure_fuse", failureFuseHalt.decision.reason, error)
             return
           }
           // Ignore abort-related errors (expected when stream is cancelled)
@@ -9357,9 +9760,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
               })
             }
-            markAutoModeTerminal("error", "provider_error", errMsg)
+            markAutoModeTerminal("error", "provider_error", errMsg, error)
             turnStateShouldDispose = true
           } else {
+            notifyManagedAgentRunCancelled(runExecutionContext)
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
             finishTraceInBackground(tracer, "cancelled", undefined, "Agent")
@@ -9405,6 +9809,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             controller: abortController,
             settledPromise: activeRunSettledPromise,
             resolveSettlement: resolveActiveRunSettled,
+            runOwner: runExecutionContext.localRunLease?.owner ?? "desktop",
+            releaseRunLease: !runExecutionContext.localRunLease?.managedExternally,
             criticalBeforeReleasePhases: [
               {
                 name: "settle-managed-workflow-handoff",
@@ -9458,9 +9864,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     const contextModelId =
                       usedModelId ?? invokeRoutingResult?.resolvedModelId ?? modelId
                     const maxTokens = (
-                      contextModelId
-                        ? getModelConfigByRef(contextModelId)
-                        : getDefaultModelConfig()
+                      contextModelId ? getModelConfigByRef(contextModelId) : getDefaultModelConfig()
                     )?.maxTokens
                     if (
                       highWaterInputTokens > 0 &&
@@ -9516,7 +9920,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   )
               }
             ],
-            removeWindowListener: removeWindowClosedSubscription,
+            removeWindowListener: () => {
+              removeWindowClosedSubscription()
+              removeExternalAbortSubscription()
+            },
             settleNotifications: () => settleDrainedCoordinatorNotifications("restore"),
             cleanupNotificationSkills: () => {
               if (!clearCoordinatorNotificationSelectedSkillsOnExit) return
@@ -9560,8 +9967,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard?.abandon()
         pendingPhysicalStreamRunSetupGuard = undefined
       }
-    }
-  )
+    }).finally(() => {
+      // Nothing classified this run: an early return, or a throw before the
+      // main body ever started. Reporting `unknown` lets a managed caller tell
+      // "ended without a reply" from "never reported".
+      runExecutionContext.onRunTerminated?.({ outcome: "unknown", code: "unknown" })
+    })
+  })
 
   // Transport adapter for renderer-originated agent invocations.
   ipcMain.on("agent:invoke", (event, request: AgentInvokeParams) => {
@@ -10295,6 +10707,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
+            // Centralized product budget (agent-runtime-limits). Hardcoding it
+            // here made one logical turn's budget depend on which entry point
+            // resumed it, and left the IM path below the limit it used to get.
             recursionLimit: getAgentGraphRecursionLimit()
           }
 
@@ -10698,7 +11113,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
                 snapshot: autoCommit.snapshot,
                 window,
-                channel
+                channel,
+                // resume / interrupt are desktop-only IPC entries: the window here
+                // always comes from BrowserWindow.fromWebContents(event.sender).
+                canPromptModal: true
               })
               await markLatestForkBoundaryBestEffort({
                 threadId,
@@ -11829,7 +12247,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
                 snapshot: autoCommit.snapshot,
                 window,
-                channel
+                channel,
+                // resume / interrupt are desktop-only IPC entries: the window here
+                // always comes from BrowserWindow.fromWebContents(event.sender).
+                canPromptModal: true
               })
               await markLatestForkBoundaryBestEffort({
                 threadId,

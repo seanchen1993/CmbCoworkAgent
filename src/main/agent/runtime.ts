@@ -37,6 +37,10 @@ import {
   type TurnCompletionRecoveryCallback
 } from "./turn-completion-integrity"
 import { getProjectThreadDataDirectory } from "./context-history-path"
+import {
+  withSubagentSessionCapture,
+  subagentSessionCallbacks
+} from "../services/subagent-session-capture"
 import { withRawApiCallCapture } from "../services/llm-api-request-capture"
 import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
 
@@ -343,6 +347,8 @@ import {
   isWorkflowSubagentThreadOf,
   type WorkflowWorktreeIsolationBoundary
 } from "./workflow/types"
+import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
+import { isPlausibleToolName } from "../../shared/tool-name"
 import {
   createTraceCollectorSafely,
   finishTraceInBackground,
@@ -857,8 +863,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
         ? [
             {
               messageId: context.anchorMessage.id,
-              providerSourceId:
-                context.anchorMessage.providerSourceId ?? context.anchorMessage.id,
+              providerSourceId: context.anchorMessage.providerSourceId ?? context.anchorMessage.id,
               role: context.anchorMessage.role,
               providerOccurrence: context.anchorMessage.providerOccurrence
             }
@@ -1491,10 +1496,10 @@ export function createScopedMcpCapabilityService(
       const tabsTool =
         tool.toolName === "browser_tabs"
           ? tool
-          : snapshot.tools.find(
+          : (snapshot.tools.find(
               (candidate) =>
                 candidate.providerKey === tool.providerKey && candidate.toolName === "browser_tabs"
-            ) ?? null
+            ) ?? null)
 
       await autoSelectPlaywrightInAppBrowserTab({
         tool,
@@ -1979,7 +1984,8 @@ function taskInvocationOwnerId(config: { toolCall?: { id?: unknown }; toolCallId
  */
 export function wrapTaskToolWithOwnerMetadata(
   taskTool: DynamicStructuredTool,
-  soloTaskTraceManager?: SoloTaskTraceManager
+  soloTaskTraceManager?: SoloTaskTraceManager,
+  captureThreadId?: string
 ): DynamicStructuredTool {
   return tool(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2023,7 +2029,18 @@ export function wrapTaskToolWithOwnerMetadata(
       try {
         // Pass the ToolCall as input so the original re-derives config.toolCall.id
         // and preserves its Command/task-ToolMessage contract.
-        const result = await taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+        const invoke = () =>
+          taskTool.invoke(config?.toolCall ?? input, {
+            ...patchedConfig,
+            callbacks: subagentSessionCallbacks(patchedConfig.callbacks)
+          })
+        const result = await (captureThreadId && ownerId
+          ? withSubagentSessionCapture(
+              { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
+              typeof taskInput.description === "string" ? taskInput.description : "子代理",
+              invoke
+            )
+          : taskTool.invoke(config?.toolCall ?? input, patchedConfig))
         const sanitizedResult = stripTaskSubagentSummarizationState(result)
         if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", sanitizedResult)
         return sanitizedResult
@@ -2053,12 +2070,15 @@ export function wrapTaskToolWithOwnerMetadata(
  */
 function stampSubagentOwnerMetadata<T>(
   middleware: T,
-  soloTaskTraceManager?: SoloTaskTraceManager
+  soloTaskTraceManager?: SoloTaskTraceManager,
+  captureThreadId?: string
 ): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
     mw.tools = mw.tools.map((t) =>
-      t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager) : t
+      t?.name === "task"
+        ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager, captureThreadId)
+        : t
     )
   }
   return middleware
@@ -2944,7 +2964,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 generalPurposeAgent: false,
                 systemPrompt: taskSystemPrompt
               } as Parameters<typeof createSubAgentMiddleware>[0]),
-              soloTaskTraceManager
+              soloTaskTraceManager,
+              threadId
             )
           ]
         : []),
@@ -3852,7 +3873,8 @@ export interface ModelRetryHooks {
  */
 function createRetryingFetch(
   hooks?: ModelRetryHooks,
-  maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS
+  maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
+  capture?: { threadId?: string }
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
@@ -3902,7 +3924,9 @@ function createRetryingFetch(
         const requestedStream =
           typeof init?.body === "string" && init.body.includes('"stream":true')
         const attemptStartedAt = Date.now()
-        const res = await fetch(input, { ...init, signal: attemptCtrl.signal })
+        // Observe only attempts submitted to fetch, after cancellation checks.
+        const sendFetch = capture ? withRawApiCallCapture(fetch, capture.threadId) : fetch
+        const res = await sendFetch(input, { ...init, signal: attemptCtrl.signal })
 
         // IMPORTANT: do not cancel the per-attempt timeout yet for streaming
         // responses — we want the timeout to cover only the time up to the
@@ -4235,14 +4259,12 @@ export function getModelInstance(
   // return empty content, so keep thinking exclusive to normal agent calls.
   const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
-  const retryingFetch =
-    retryHooks || maxRetryAttempts !== undefined
-      ? createRetryingFetch(retryHooks, maxRetryAttempts)
-      : defaultRetryingFetch
   const modelFetch =
-    purpose === "agent" && captureThreadId
-      ? withRawApiCallCapture(retryingFetch, captureThreadId)
-      : retryingFetch
+    purpose === "agent"
+      ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId })
+      : retryHooks || maxRetryAttempts !== undefined
+        ? createRetryingFetch(retryHooks, maxRetryAttempts)
+        : defaultRetryingFetch
 
   const baseFields = {
     model: resolvedModel,
@@ -4372,6 +4394,9 @@ export interface CreateAgentRuntimeOptions {
   managedExecution?: boolean
   /** Turn-local observer invoked only after a Dynamic Workflow launch succeeds. */
   onWorkflowLaunched?: (runId: string) => void
+  /** Recorded on any background task this turn launches — a workflow run or a
+   * coordinator worker. See BackgroundNotificationOwner. */
+  backgroundNotificationOwner?: BackgroundNotificationOwner
   /** Immutable checkout/git boundary for a dynamic-workflow worktree agent.
    * Its workspaceRoot moves only the agent's file view; workspacePath remains
    * the host identity for hooks, thread data, memory and the agent registry. */
@@ -4612,6 +4637,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
     onWorkflowLaunched,
+    backgroundNotificationOwner,
     hookTurnId,
     actionStationarityTurnId = hookTurnId,
     onHookSkippedFactory,
@@ -5506,6 +5532,7 @@ The workspace root is: ${fileRoot}`
         workspacePath,
         modelId,
         onLaunched: onWorkflowLaunched,
+        notificationOwner: backgroundNotificationOwner,
         // Run-before approval gate (aligns with Claude Code's "Review dynamic
         // workflow before running"): the model writing a workflow can fan out
         // many file-editing subagents and spend real tokens, so the user
@@ -5900,6 +5927,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     const seenWorkerToolCallKeys = new Set<string>()
     const workerToolNames = new Set<string>()
     let workerToolCallCount = 0
+    let workerMalformedToolCalls = 0
     const workerSkillUsageDetector = new SkillUsageDetector()
     let workerTracer: TraceCollector | undefined
     let workerTraceTerminalRecorded = false
@@ -6058,8 +6086,14 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             (event) => {
               if (event.type === "tool_call") {
                 workerToolCallCount += 1
-                if (event.toolName) {
+                // The call still counts; only the name is refused. A name that
+                // could not be a tool name is a tool call the model malformed,
+                // and recording it put model text into the usage ranking as if
+                // it were a tool. See isPlausibleToolName.
+                if (isPlausibleToolName(event.toolName)) {
                   workerToolNames.add(event.toolName)
+                } else if (event.toolName) {
+                  workerMalformedToolCalls += 1
                 }
               }
               workerInput.onProgress(event)
@@ -6362,6 +6396,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             tokenUsage,
             toolNames: Array.from(workerToolNames),
             toolCallCount: workerToolCallCount,
+            ...(workerMalformedToolCalls > 0
+              ? { malformedToolCalls: workerMalformedToolCalls }
+              : {}),
             ...(workerReasoning ? { reasoning: workerReasoning } : {})
           }
         })
@@ -6390,7 +6427,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
               metadata: {
                 tokenUsage,
                 toolNames: Array.from(workerToolNames),
-                toolCallCount: workerToolCallCount
+                toolCallCount: workerToolCallCount,
+                ...(workerMalformedToolCalls > 0
+                  ? { malformedToolCalls: workerMalformedToolCalls }
+                  : {})
               }
             })
             workerTraceTerminalRecorded = true
@@ -6437,6 +6477,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, input.selectedSkill),
             selectedSkill: input.selectedSkill,
             runner: coordinatorWorkerRunner,
+            notificationOwner: backgroundNotificationOwner,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           }),
@@ -6460,6 +6501,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             prompt: injectSelectedSkillIntoWorkerPrompt(input.prompt, selectedSkill),
             selectedSkill,
             runner: coordinatorWorkerRunner,
+            // A worker continued from a different surface than the one that
+            // started it changes hands: the summary is owed to whoever is
+            // driving now, not to whoever launched the first turn.
+            notificationOwner: backgroundNotificationOwner,
             onUpdate: emitCoordinatorWorkerEvent,
             onUpdateKey: `runtime:${threadId}`
           })

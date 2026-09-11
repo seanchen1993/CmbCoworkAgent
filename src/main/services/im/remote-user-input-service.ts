@@ -16,6 +16,13 @@ import {
   subscribeRemovedUserInput
 } from "../user-input"
 import {
+  buildAnsweredCard,
+  buildQuestionCard,
+  QUESTION_OTHER_SUFFIX,
+  type QuestionCardQuestion
+} from "./card-builder"
+import { imCardPublisher, type ImCardPublisher } from "./card-publisher"
+import {
   imConversationStateStore,
   type ImConversationStateStore,
   type ImTargetSnapshot
@@ -36,7 +43,6 @@ import {
 import { buildImProactiveReplies } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
 
-const DEFAULT_REMOTE_USER_INPUT_TTL_MINUTES = 10
 const REMOTE_USER_INPUT_MAX_CUSTOM_CHARACTERS = 4_000
 
 interface RemoteUserInputRoute {
@@ -52,8 +58,15 @@ interface RemoteUserInputSession {
   code: string
   questionIndex: number
   answers: Record<string, UserInputAnswer>
-  expiresAt: number
-  ttlMinutes: number
+  /**
+   * The outcome this session is about to publish on its card.
+   *
+   * submitUserInputResponse removes the pending request synchronously, and that
+   * removal calls removeSession before submitResponse has even returned. Without
+   * this the answer the reader just gave would close their card as "已在桌面处理"
+   * — crediting the desktop for something they did from Zhaohu.
+   */
+  pendingCardOutcome?: string
 }
 
 export interface ImRemoteUserInputAnswerNotice {
@@ -71,6 +84,7 @@ interface RemoteUserInputDependencies {
   grants: ImRemoteGrantStore
   events: Pick<ImEventStore, "enqueueProactiveReplies" | "getEvent" | "markOutboxFailed">
   interactionRoutes: Pick<ImRemoteInteractionRouteRegistry, "get">
+  cards: ImCardPublisher
   getThread: typeof getThread
   getSettings: typeof getBuiltinRobotSettings
   getPendingForThread: typeof getPendingUserInputForThread
@@ -95,12 +109,6 @@ function canonicalDirectory(path: string): string | null {
   }
 }
 
-function ttlMinutesFromSettings(value: number): number {
-  return Number.isSafeInteger(value) && value >= 1 && value <= 60
-    ? value
-    : DEFAULT_REMOTE_USER_INPUT_TTL_MINUTES
-}
-
 function renderQuestion(session: RemoteUserInputSession): string {
   const question = session.request.questions[session.questionIndex]
   if (!question) throw new Error("remote user-input question index is invalid")
@@ -118,7 +126,7 @@ function renderQuestion(session: RemoteUserInputSession): string {
     "",
     `回复 /回答 ${session.code} <编号>`,
     `如以上选项都不合适：/回答 ${session.code} 其他 <你的回答>`,
-    `短码 ${session.ttlMinutes} 分钟内有效；普通文本不会被当作回答。`
+    `短码在本轮等待期间一直有效；普通文本不会被当作回答。`
   ].join("\n")
 }
 
@@ -182,6 +190,7 @@ export class ImRemoteUserInputService {
       grants: dependencies.grants ?? imRemoteGrantStore,
       events: dependencies.events ?? imEventStore,
       interactionRoutes: dependencies.interactionRoutes ?? imRemoteInteractionRouteRegistry,
+      cards: dependencies.cards ?? imCardPublisher,
       getThread: dependencies.getThread ?? getThread,
       getSettings: dependencies.getSettings ?? getBuiltinRobotSettings,
       getPendingForThread: dependencies.getPendingForThread ?? getPendingUserInputForThread,
@@ -230,13 +239,13 @@ export class ImRemoteUserInputService {
   }): Promise<string> {
     const settings = this.dependencies.getSettings()
     if (!settings.enabled) return "本设备的内置机器人已断开。"
-    this.pruneExpiredSessions()
+    this.pruneResolvedSessions()
 
     const parsed = input.argument.trim().match(/^([A-Fa-f0-9]{6})\s+([\s\S]+)$/u)
     if (!parsed) return "用法：/回答 <6位输入短码> <编号>，或 /回答 <短码> 其他 <内容>。"
     const code = parsed[1].toUpperCase()
     const session = this.codes.get(code)
-    if (!session) return "输入短码不存在、已过期或已使用。"
+    if (!session) return "输入短码不存在、已使用，或该问题已不在等待中。"
     if (
       session.route.principalId !== input.principalId ||
       session.route.conversationKey !== input.conversationKey
@@ -269,19 +278,33 @@ export class ImRemoteUserInputService {
       return [`已记录第 ${session.questionIndex} 题。`, "", renderQuestion(session)].join("\n")
     }
 
+    return this.finalizeSession(session)
+  }
+
+  /**
+   * Submits a fully answered session. Shared by the short-code path and the
+   * card form so a card can never reach the runtime through weaker checks than
+   * a typed answer.
+   */
+  private finalizeSession(session: RemoteUserInputSession): string {
     const response: UserInputResponse = {
       requestId: session.request.requestId,
       answers: { ...session.answers },
       submittedAt: new Date(this.dependencies.now()).toISOString()
     }
+    // Claimed before the call, not after: submitResponse closes the card through
+    // its synchronous removal listener while still on the stack below.
+    session.pendingCardOutcome = "已回答"
     const submitted = this.dependencies.submitResponse(response, {
       notifyRenderer: true,
       reason: "已从招乎完成补充输入。"
     })
     if (!submitted) {
+      session.pendingCardOutcome = undefined
       this.removeSession(session.request.requestId)
       return "这项补充输入已在桌面处理或不再有效。"
     }
+    this.resolveCardFor(session, "已回答")
 
     const notice: ImRemoteUserInputAnswerNotice = {
       requestId: session.request.requestId,
@@ -298,6 +321,95 @@ export class ImRemoteUserInputService {
     return "已从招乎提交回答，任务将继续执行。"
   }
 
+  private resolveCardFor(session: RemoteUserInputSession, outcome: string): void {
+    const interaction = this.dependencies.cards.interactions.findByRequestRef(
+      session.request.requestId
+    )
+    if (!interaction) return
+    this.dependencies.cards.resolveDetached(
+      interaction.interactionId,
+      buildAnsweredCard({
+        targetLabel: interaction.targetLabel,
+        outcome,
+        answers: session.request.questions.flatMap((question) => {
+          const answer = session.answers[question.id]
+          if (!answer) return []
+          return [
+            {
+              header: question.header,
+              answer: answer.type === "option" ? answer.label : answer.text
+            }
+          ]
+        })
+      })
+    )
+  }
+
+  /**
+   * Applies a whole card form at once.
+   *
+   * Questions already answered by short code are ignored rather than
+   * overwritten: the form was rendered before those answers landed, so its
+   * values for them are stale by construction, and the recorded answer is the
+   * one the reader actually gave.
+   */
+  async resolveCardAnswers(input: {
+    requestId: string
+    principalId: string
+    conversationKey: string
+    feedback: ReadonlyArray<{ key: string; value: string }>
+  }): Promise<string> {
+    // The typed path checks this first; a card must not become a way around a
+    // switch the operator turned off.
+    if (!this.dependencies.getSettings().enabled) {
+      return "招乎远程回答未开启，请回到桌面处理。"
+    }
+    const session = this.sessions.get(input.requestId)
+    if (!session) return "这项补充输入不存在、已提交，或已不在等待中。"
+    if (
+      session.route.principalId !== input.principalId ||
+      session.route.conversationKey !== input.conversationKey
+    ) {
+      return "该表单不属于当前招乎会话。"
+    }
+    const pending = this.dependencies.getPendingForThread(session.route.threadId)
+    if (!pending || pending.requestId !== session.request.requestId) {
+      this.removeSession(session.request.requestId)
+      return "这项补充输入已在桌面处理或不再有效。"
+    }
+
+    const submitted = new Map(input.feedback.map((entry) => [entry.key, entry.value]))
+    const staged: Record<string, UserInputAnswer> = {}
+    const missing: string[] = []
+    for (const [index, question] of session.request.questions.entries()) {
+      if (index < session.questionIndex) continue
+      const key = ImRemoteUserInputService.questionKey(index)
+      const custom = submitted.get(`${key}${QUESTION_OTHER_SUFFIX}`)?.trim() ?? ""
+      const selected = submitted.get(key)?.trim() ?? ""
+      // Free text wins: someone who filled it in meant none of the options.
+      const raw = custom ? `其他 ${custom}` : selected ? String(Number(selected) + 1) : ""
+      if (!raw) {
+        missing.push(`${index + 1}. ${question.header}`)
+        continue
+      }
+      const resolved = answerFor(question, raw)
+      if ("message" in resolved) {
+        return `第 ${index + 1} 题（${question.header}）：${resolved.message}`
+      }
+      staged[question.id] = resolved.answer
+    }
+    if (missing.length > 0) {
+      return ["还有问题没有作答：", ...missing].join("\n")
+    }
+
+    // Consume the live code before submitting, so a short-code answer racing
+    // this form cannot record a second answer for the same question.
+    if (this.codes.get(session.code) === session) this.codes.delete(session.code)
+    Object.assign(session.answers, staged)
+    session.questionIndex = session.request.questions.length
+    return this.finalizeSession(session)
+  }
+
   private async handlePending(request: Readonly<UserInputRequest>): Promise<void> {
     const settings = this.dependencies.getSettings()
     if (!settings.enabled || request.questions.length === 0) return
@@ -310,15 +422,12 @@ export class ImRemoteUserInputService {
       return
     }
     if (this.sessions.has(request.requestId)) return
-    const ttlMinutes = ttlMinutesFromSettings(settings.waitingDesktopTtlMinutes)
     const session: RemoteUserInputSession = {
       request,
       route,
       code: this.uniqueCode(),
       questionIndex: 0,
-      answers: {},
-      expiresAt: this.dependencies.now() + ttlMinutes * 60_000,
-      ttlMinutes
+      answers: {}
     }
     this.sessions.set(request.requestId, session)
     this.codes.set(session.code, session)
@@ -349,6 +458,60 @@ export class ImRemoteUserInputService {
       this.removeSession(request.requestId)
       throw error
     }
+    // Outside the block above for the same reason as the approval path: that
+    // catch drops the session and its short code, which the reader already has.
+    try {
+      await this.publishCard(session)
+    } catch (error) {
+      this.dependencies.warn("Remote user-input card could not be published.", error)
+    }
+  }
+
+  /** feedbackKey must be unique within one card; the index supplies that. */
+  private static questionKey(index: number): string {
+    return `q${index}`
+  }
+
+  private cardQuestions(session: RemoteUserInputSession): QuestionCardQuestion[] {
+    return session.request.questions.map((question, index) => {
+      const recorded = session.answers[question.id]
+      return {
+        key: ImRemoteUserInputService.questionKey(index),
+        header: question.header,
+        question: question.question,
+        options: question.options.map((option) => ({
+          label: option.label,
+          description: option.description
+        })),
+        answered: index < session.questionIndex,
+        answeredLabel:
+          recorded?.type === "option"
+            ? recorded.label
+            : recorded?.type === "other"
+              ? recorded.text
+              : undefined
+      }
+    })
+  }
+
+  private async publishCard(session: RemoteUserInputSession): Promise<void> {
+    await this.dependencies.cards.publish({
+      kind: "user_input",
+      threadId: session.route.threadId,
+      principalId: session.route.principalId,
+      conversationKey: session.route.conversationKey,
+      // Addressed by request rather than by code: the short code rotates as the
+      // reader answers question by question, so it cannot identify the card.
+      requestRef: session.request.requestId,
+      targetLabel: session.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
+      build: (tag) =>
+        buildQuestionCard({
+          targetLabel: session.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
+          questions: this.cardQuestions(session),
+          tag,
+          fallbackCommand: `/回答 ${session.code} <编号>`
+        })
+    })
   }
 
   private resolveRoute(threadId: string): RemoteUserInputRoute | null {
@@ -356,8 +519,6 @@ export class ImRemoteUserInputService {
     if (!thread) return null
     const parsed = parseStandardThreadMetadata(thread.metadata)
     if (!parsed.workspacePath || !canonicalDirectory(parsed.workspacePath)) return null
-    if (parsed.agentMode !== "normal") return null
-
     const registered = this.dependencies.interactionRoutes.get(threadId)
     if (registered) {
       const event = this.dependencies.events.getEvent(registered.eventId)
@@ -488,7 +649,7 @@ export class ImRemoteUserInputService {
   }
 
   private uniqueCode(excludedCode?: string): string {
-    this.pruneExpiredSessions()
+    this.pruneResolvedSessions()
     for (let attempt = 0; attempt < 32; attempt += 1) {
       const code = this.dependencies.createCode().trim().toUpperCase()
       if (/^[A-F0-9]{6}$/u.test(code) && code !== excludedCode && !this.codes.has(code)) {
@@ -498,21 +659,35 @@ export class ImRemoteUserInputService {
     throw new Error("unable to allocate a unique remote user-input code")
   }
 
-  private pruneExpiredSessions(): void {
-    const now = this.dependencies.now()
+  /**
+   * Drops sessions whose question is no longer pending, so no code outlives
+   * the request it answers.
+   *
+   * There is deliberately no clock here. The run waiting on this question is
+   * not cancelled by elapsed time either (see remote-runner onWaitStart), so a
+   * code that expired on its own would leave that run waiting with no way to
+   * answer it — the one outcome worse than waiting.
+   */
+  private pruneResolvedSessions(): void {
     for (const [requestId, session] of this.sessions) {
       const pending = this.dependencies.getPendingForThread(session.route.threadId)
-      if (session.expiresAt <= now || !pending || pending.requestId !== session.request.requestId) {
+      if (!pending || pending.requestId !== session.request.requestId) {
         this.removeSession(requestId)
       }
     }
   }
 
+  /**
+   * The desktop answered, or the run was cancelled. The form in Zhaohu is still
+   * showing a live submit button, so it has to be closed here too — otherwise
+   * the next person to scroll back submits into a request that ended long ago.
+   */
   private removeSession(requestId: string): void {
     const session = this.sessions.get(requestId)
     if (!session) return
     this.sessions.delete(requestId)
     if (this.codes.get(session.code) === session) this.codes.delete(session.code)
+    this.resolveCardFor(session, session.pendingCardOutcome ?? "已在桌面处理")
   }
 
   private drainReplies(): void {

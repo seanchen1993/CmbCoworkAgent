@@ -14,6 +14,7 @@ import { BoundedWorkerAdmission } from "../services/bounded-worker-admission"
 import type { CoordinatorSelectedSkill } from "./coordinator-mode"
 import { emitAppAttention } from "../app-attention-events"
 import { getWorkflowRunWallClockMs } from "./workflow/types"
+import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
 
 export type CoordinatorWorkerRole = "implementer" | "verifier"
 export type CoordinatorWorkerStatus = "running" | "completed" | "failed" | "cancelled"
@@ -111,6 +112,12 @@ export interface CoordinatorWorkerSnapshot {
   last_event: string
   notification_acknowledged?: boolean
   suppress_notification_auto_run?: boolean
+  /**
+   * Who owes the summary turn for this worker's result. Absent on workers
+   * persisted before this field existed; those read as "desktop", which is what
+   * every worker was until a transport could own one.
+   */
+  notification_owner?: BackgroundNotificationOwner
   selected_skill?: CoordinatorSelectedSkill
   notification_raw_text?: string
   notification_message?: string
@@ -172,6 +179,7 @@ interface CoordinatorWorkerRecord {
   lastProgressUpdateAt?: number
   runVersion: number
   suppressNotificationAutoRun?: boolean
+  notificationOwner?: BackgroundNotificationOwner
   dismissNotificationOnTerminalPersist?: boolean
   notificationMessage?: string
 }
@@ -188,6 +196,41 @@ interface WorkerRestoreOptions {
 
 interface TerminalPersistFailureMetadata {
   persistedResultPath?: string
+}
+
+/**
+ * Main-process listeners for "a worker result has just been queued".
+ *
+ * The other two routes out of here both need somebody watching: the window-bound
+ * update binding needs an open page, and the run-scoped one needs the turn that
+ * launched the worker to still be running — which it usually is not, since that
+ * is what makes the result detached. So a worker that finished while the app sat
+ * in the tray raised tray attention and then waited for the next hydrate instead
+ * of being summarised when it finished.
+ *
+ * Fired for every queued notification, cancelled ones included: whether a result
+ * is still owed a summary is the scheduler's question, and it already has one
+ * answer for it.
+ */
+const coordinatorNotificationListeners = new Set<(parentThreadId: string) => void>()
+
+export function onCoordinatorNotificationEnqueued(
+  listener: (parentThreadId: string) => void
+): () => void {
+  coordinatorNotificationListeners.add(listener)
+  return () => {
+    coordinatorNotificationListeners.delete(listener)
+  }
+}
+
+function notifyCoordinatorNotificationEnqueued(parentThreadId: string): void {
+  for (const listener of coordinatorNotificationListeners) {
+    try {
+      listener(parentThreadId)
+    } catch (error) {
+      console.warn("[CoordinatorWorker] Notification listener failed:", error)
+    }
+  }
 }
 
 interface CoordinatorWorkerManagerOptions {
@@ -251,6 +294,8 @@ interface StartWorkerOptions {
   prompt: string
   selectedSkill?: CoordinatorSelectedSkill
   runner: CoordinatorWorkerRunner
+  /** Defaults to "desktop"; see CoordinatorWorkerSnapshot.notification_owner. */
+  notificationOwner?: BackgroundNotificationOwner
   parentSignal?: AbortSignal
   onUpdate?: CoordinatorWorkerUpdateCallback
   onUpdateKey?: string
@@ -265,6 +310,7 @@ interface ContinueWorkerOptions {
   ownedFiles?: string[]
   selectedSkill?: CoordinatorSelectedSkill
   runner: CoordinatorWorkerRunner
+  notificationOwner?: BackgroundNotificationOwner
   parentSignal?: AbortSignal
   onUpdate?: CoordinatorWorkerUpdateCallback
   onUpdateKey?: string
@@ -1245,6 +1291,7 @@ function toSnapshot(record: CoordinatorWorkerRecord): CoordinatorWorkerSnapshot 
     last_event: record.lastEvent,
     notification_acknowledged: record.notificationAcknowledged,
     suppress_notification_auto_run: record.suppressNotificationAutoRun,
+    notification_owner: record.notificationOwner,
     selected_skill: record.selectedSkill
   }
 }
@@ -1415,6 +1462,7 @@ export class CoordinatorWorkerManager {
       lastActivityAt: timestamp,
       toolCallCount: 0,
       lastEvent: "Worker started.",
+      notificationOwner: options.notificationOwner ?? "desktop",
       runVersion: 0
     }
     this.setUpdateCallback(record, options.onUpdate, options.onUpdateKey)
@@ -1529,6 +1577,7 @@ export class CoordinatorWorkerManager {
       : "Worker continued with a new instruction."
     record.notificationEnqueued = false
     record.notificationMessage = undefined
+    record.notificationOwner = options.notificationOwner ?? "desktop"
     this.removeQueuedNotificationsForWorker(record.parentThreadId, {
       workerId: record.workerId
     })
@@ -1879,12 +1928,55 @@ export class CoordinatorWorkerManager {
     return this.readWorkers(parentThreadId)
   }
 
-  drainNotifications(parentThreadId: string): string[] {
+  /**
+   * Takes queued notifications off the thread so a turn can report them.
+   *
+   * `owner` takes only the ones launched from that surface and leaves the rest
+   * queued. Without it, whichever side won the run lease drained both — so a
+   * Zhaohu result could be consumed by a desktop summary and never reach the
+   * reader who asked for it. Checking ownership at the entry to a turn is not
+   * enough; it has to hold where the notifications actually leave the queue.
+   */
+  drainNotifications(
+    parentThreadId: string,
+    options: { owner?: BackgroundNotificationOwner } = {}
+  ): string[] {
     const normalized = normalizeThreadId(parentThreadId)
     const notifications = this.notificationsByParent.get(normalized) ?? []
-    this.notificationsByParent.delete(normalized)
+    const taken: string[] = []
+    const left: string[] = []
+    for (const notification of notifications) {
+      if (
+        options.owner === undefined ||
+        this.notificationOwner(normalized, notification) === options.owner
+      ) {
+        taken.push(notification)
+      } else {
+        left.push(notification)
+      }
+    }
+    if (left.length > 0) this.notificationsByParent.set(normalized, left)
+    else this.notificationsByParent.delete(normalized)
     this.touchParentCache(normalized)
-    return [...notifications]
+    return taken
+  }
+
+  /**
+   * Which surface owes this queued notification a summary.
+   *
+   * A notification whose worker id no longer resolves to a record reads as the
+   * desktop's, which is where an orphaned result should surface rather than
+   * disappearing into a transport that never launched it.
+   */
+  private notificationOwner(
+    normalizedParentThreadId: string,
+    notification: string
+  ): BackgroundNotificationOwner {
+    const workerId = this.extractNotificationWorkerId(notification)
+    if (!workerId) return "desktop"
+    const record = this.getParentMap(normalizedParentThreadId)?.get(workerId)
+    if (!record) return "desktop"
+    return record.notificationOwner ?? "desktop"
   }
 
   peekNotifications(parentThreadId: string): string[] {
@@ -1892,20 +1984,48 @@ export class CoordinatorWorkerManager {
     return [...(this.notificationsByParent.get(normalized) ?? [])]
   }
 
-  hasNotifications(parentThreadId: string): boolean {
+  /**
+   * Whether anything is queued for this thread, suppressed or not.
+   *
+   * `owner` narrows it to one surface. Asking unscoped is how a transport
+   * decided it still had work after draining its own share: the other side's
+   * results were still queued, so it kept taking the run lease and retrying
+   * against a queue it was never going to consume.
+   */
+  hasNotifications(
+    parentThreadId: string,
+    options: { owner?: BackgroundNotificationOwner } = {}
+  ): boolean {
     const normalized = normalizeThreadId(parentThreadId)
-    return (this.notificationsByParent.get(normalized)?.length ?? 0) > 0
+    const notifications = this.notificationsByParent.get(normalized) ?? []
+    if (options.owner === undefined) return notifications.length > 0
+    return notifications.some(
+      (notification) => this.notificationOwner(normalized, notification) === options.owner
+    )
   }
 
-  hasAutoRunnableNotifications(parentThreadId: string): boolean {
+  /**
+   * Whether a queued notification is still waiting for somebody to summarise it.
+   *
+   * `owner` narrows that to the surface the worker was launched from. The
+   * desktop scheduler and the Zhaohu pump both walk the same threads, and
+   * without this both would answer yes for the same result and race for the run
+   * lease — the loser surfacing as an agent error on a conversation the user had
+   * only left open. A worker whose id no longer resolves to a record is counted
+   * for the desktop, which is where an orphaned result should surface.
+   */
+  hasAutoRunnableNotifications(
+    parentThreadId: string,
+    options: { owner?: BackgroundNotificationOwner } = {}
+  ): boolean {
     const normalized = normalizeThreadId(parentThreadId)
     const notifications = this.notificationsByParent.get(normalized) ?? []
     return notifications.some((notification) => {
       const workerId = this.extractNotificationWorkerId(notification)
-      if (!workerId) return true
-      const record = this.getParentMap(normalized)?.get(workerId)
-      if (!record) return true
-      return record.suppressNotificationAutoRun !== true
+      const record = workerId ? this.getParentMap(normalized)?.get(workerId) : undefined
+      if (record?.suppressNotificationAutoRun === true) return false
+      if (options.owner === undefined) return true
+      return this.notificationOwner(normalized, notification) === options.owner
     })
   }
 
@@ -3054,6 +3174,11 @@ export class CoordinatorWorkerManager {
           ? terminalStatus(status)
           : false
     const suppressNotificationAutoRun = snapshot.suppress_notification_auto_run === true
+    // Absent means desktop: workers persisted before this field existed were all
+    // summarised by the desktop, and after an upgrade one that was in fact
+    // Zhaohu-driven is summarised on the desktop once instead of being lost.
+    const notificationOwner: BackgroundNotificationOwner =
+      snapshot.notification_owner === "managed" ? "managed" : "desktop"
 
     if (
       !workerId ||
@@ -3119,6 +3244,7 @@ export class CoordinatorWorkerManager {
       notificationEnqueued: terminalStatus(status) && notificationAcknowledged,
       notificationAcknowledged,
       suppressNotificationAutoRun,
+      notificationOwner,
       runVersion: 0
     }
     record.notificationMessage = this.validatePersistedNotificationMessage(
@@ -3666,6 +3792,7 @@ export class CoordinatorWorkerManager {
       notifications.push(notification)
       this.notificationsByParent.set(record.parentThreadId, notifications)
       this.touchParentCache(record.parentThreadId)
+      notifyCoordinatorNotificationEnqueued(record.parentThreadId)
       this.onTerminalNotification?.(toSnapshot(record))
       return notification
     })().finally(() => {
@@ -4078,6 +4205,20 @@ export class CoordinatorWorkerManager {
   }
 }
 
+/**
+ * Main-process listeners for "a worker result has just been queued".
+ *
+ * The other two routes out of here both need somebody watching: the window-bound
+ * update binding needs an open page, and the run-scoped one needs the turn that
+ * launched the worker to still be running — which it usually is not, since that
+ * is what makes the result detached. So a worker that finished while the app sat
+ * in the tray raised tray attention and then waited for the next hydrate instead
+ * of being summarised when it finished.
+ *
+ * Fired for every queued notification, cancelled ones included: whether a result
+ * is still owed a summary is the scheduler's question, and it already has one
+ * answer for it.
+ */
 export const coordinatorWorkerManager = new CoordinatorWorkerManager({
   onTerminalNotification: (worker) => {
     if (worker.status !== "completed" && worker.status !== "failed") return

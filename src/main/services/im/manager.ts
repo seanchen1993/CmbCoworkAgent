@@ -1,3 +1,4 @@
+import type { AgentRunDelivery } from "../../agent/agent-run-service"
 import {
   deleteLegacyChatXRobotCredentials,
   getBuiltinRobotSettings,
@@ -15,6 +16,8 @@ import type {
 } from "../../types"
 import { notifyRemoteThreadChanged } from "../../agent/renderer-stream-mirror"
 import { refreshEnterpriseLogin } from "../enterprise-login-refresh"
+import { imCardPublisher } from "./card-publisher"
+import { imCardReceiptRouter } from "./card-receipt-router"
 import { imConversationStateStore } from "./conversation-state"
 import { imEventStore } from "./event-store"
 import { ImGatewayWsClient, type ImGatewayWsStatus } from "./gateway-ws-client"
@@ -96,6 +99,11 @@ export class BuiltinRobotManager {
   private activeIdentityToken: string | null = null
   private confirmedRoute: ImGrantRouteIdentity | null = null
   private routeReconciliation: Promise<void> = Promise.resolve()
+  private getAgentRunDelivery: () => AgentRunDelivery | null = () => null
+
+  setAgentRunDeliveryResolver(resolver: () => AgentRunDelivery | null): void {
+    this.getAgentRunDelivery = resolver
+  }
 
   start(appVersion?: string): Promise<void> {
     if (appVersion?.trim()) this.appVersion = appVersion.trim()
@@ -147,11 +155,7 @@ export class BuiltinRobotManager {
       const settings = saveBuiltinRobotSettings(normalizedUpdates)
       if (!settings.enabled) {
         await this.stopNow()
-      } else if (
-        !previous.enabled ||
-        previous.gatewayUrl !== settings.gatewayUrl ||
-        previous.waitingDesktopTtlMinutes !== settings.waitingDesktopTtlMinutes
-      ) {
+      } else if (!previous.enabled || previous.gatewayUrl !== settings.gatewayUrl) {
         await this.stopNow()
         await this.startNow()
       } else if (!this.service) {
@@ -165,6 +169,10 @@ export class BuiltinRobotManager {
 
   hasActiveRuns(): boolean {
     return this.service?.hasActiveRuns() === true
+  }
+
+  abortThreadFromDesktop(threadId: string): boolean {
+    return this.service?.abortThreadFromDesktop(threadId) ?? false
   }
 
   subscribe(listener: StatusListener): () => void {
@@ -400,7 +408,14 @@ export class BuiltinRobotManager {
         if (eventId && this.service) await this.service.handleLeaseRevoked(eventId, reasonCode)
         this.emitStatus()
       },
+      onCardReceipt: async (receipt) => {
+        await imCardReceiptRouter.handle(receipt)
+      },
       onRoutesSynchronized: async (routes, principalId, defaultConversationKey) => {
+        // The session is authoritative again, so re-send any terminal card whose
+        // outcome was never confirmed. Left unsent, a decided request keeps live
+        // buttons and the next press can only mark the card dead.
+        void imCardPublisher.retryPendingClosures()
         const activeRoutes = routes.filter(
           (route) => route.principalId === principalId && route.state === "active"
         )
@@ -455,8 +470,12 @@ export class BuiltinRobotManager {
       }
     })
     const service = new ImUnifiedBotService(client, {
-      waitingDesktopTtlMs: settings.waitingDesktopTtlMinutes * 60_000
+      getAgentRunDelivery: this.getAgentRunDelivery
     })
+    // Cards travel outside the durable reply outbox: they are an enhancement
+    // over a notice that is already queued, so they follow the live transport
+    // and are simply skipped while it is down.
+    imCardPublisher.setGateway(client)
     this.client = client
     this.service = service
     this.activeIdentityToken = identity.token

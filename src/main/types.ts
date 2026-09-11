@@ -673,7 +673,6 @@ export interface BuiltinRobotSettings {
   gatewayUrl: string | null
   remoteAccess: "inbox-only" | "inbox-and-features"
   remoteApprovalEnabled: boolean
-  waitingDesktopTtlMinutes: number
 }
 
 export type BuiltinRobotConnectionState = "connecting" | "online" | "offline" | "error"

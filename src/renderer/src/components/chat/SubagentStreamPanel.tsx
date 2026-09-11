@@ -1,3 +1,4 @@
+import { SubagentSessionExportButton } from "./SubagentSessionExportButton"
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, Sparkles } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
@@ -488,6 +489,13 @@ export function SubagentStreamPanel(): React.JSX.Element {
             </span>
           </div>
         </div>
+        <SubagentSessionExportButton
+          target={{
+            kind: "multi",
+            threadId: subagentFocusView.threadId,
+            subagentId: subagentFocusView.subagentId
+          }}
+        />
         <span
           className={cn(
             "shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-none",

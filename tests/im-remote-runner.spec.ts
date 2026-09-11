@@ -1,4 +1,6 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
+import { join, resolve } from "node:path"
 import initSqlJs from "sql.js"
 import type {
   RemoteImAckV1,
@@ -145,7 +147,10 @@ class TestGateway implements ImGatewayClientPort {
     this.acknowledgements.push(ack)
   }
 
+  permitAcquisitions = 0
+
   async acquireExecutionPermit(event: { leaseId: string }): Promise<ImExecutionPermitResult> {
+    this.permitAcquisitions += 1
     return {
       status: "granted",
       leaseId: event.leaseId,
@@ -351,6 +356,16 @@ async function runForeignOwnerReleaseWakeScenario(
     await queue.notify(queued.conversationKey)
     assert.equal(context.events.getEvent(queued.eventId)?.state, "queued")
     assert.equal(executions, 0)
+    // A permit cannot be handed back and nothing renews one before the run
+    // starts, so a Thread that is already busy must not spend one. It used to:
+    // the permit was acquired first and then abandoned when the claim failed,
+    // and it had expired by the time the desktop released the Thread minutes
+    // later — leaving the retry to ask for a permit while carrying a dead one.
+    assert.equal(
+      gateway.permitAcquisitions,
+      0,
+      "a busy Thread must not consume an execution permit it cannot use"
+    )
 
     assert(releaseLocalThreadRunLease(target.threadId, owner, foreignRunId))
     await waitFor(
@@ -359,6 +374,9 @@ async function runForeignOwnerReleaseWakeScenario(
     )
 
     assert.equal(executions, 1)
+    // And the run that finally happens uses a permit acquired for it, not one
+    // taken minutes earlier on an attempt that never ran.
+    assert.equal(gateway.permitAcquisitions, 1)
     assert.equal(gateway.replies.at(-1)?.message.content, `【远程收件箱】\n${owner} released`)
   } finally {
     await queue.stop()
@@ -491,53 +509,131 @@ async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promi
     )
     assert.equal(context.events.getEvent(queued.eventId)?.state, "completed")
     assert(gateway.replies.at(-1)?.message.content.includes("审批后完成"))
-    assert(gateway.replies.at(-1)?.message.content.includes("切换前任务"))
+    assert(gateway.replies.at(-1)?.message.content.includes("非当前绑定会话"))
   } finally {
     context.database.close()
   }
 }
 
-async function testFeatureDesktopWaitTimeoutCancelsOnlyEvent(): Promise<void> {
-  const context = await createContext()
-  const gateway = new TestGateway()
-  const runner = new ImRemoteRunner({
-    gateway,
-    eventStore: context.events,
-    conversationState: context.conversations,
-    capabilityGuard: featureCapabilityGuard(context),
-    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
-    setThreadLifecycle: async () => undefined,
-    createRunId: () => "run-feature-timeout",
-    waitingDesktopTtlMs: 5,
-    executeTurn: async ({ interactionWaitHooks, signal }) => {
-      assert(interactionWaitHooks)
-      await interactionWaitHooks.onWaitStart({
-        id: "input-1",
-        kind: "user_input",
-        threadId: featureTarget.threadId
-      })
-      return new Promise<string>((_resolve, reject) => {
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true })
-      })
+function testTheLastReplyOfADetachedTurnShowsTheWayBack(): void {
+  // The mark says the target is not the bound one; on its own it does not say
+  // under this message goes wherever the person is bound now, not to the
+  // session that produced it. The way back must be in the message, and it must
+  // be the name already printed there — /会话 numbering expires in five
+  // minutes, so a number would be stale by the time anyone read it.
+  const runner = readFileSync(
+    join(resolve(__dirname, ".."), "src/main/services/im/remote-runner.ts"),
+    "utf8"
+  )
+  const terminal = runner.slice(
+    runner.indexOf("private terminalPrefixForEvent("),
+    runner.indexOf("private targetPrefixForEvent(")
+  )
+  assert(terminal.length > 0, "the terminal prefix must still be composed here")
+  assert(terminal.includes("/切换 "), "the terminal prefix must name the way back")
+  assert(
+    !/\/绑定\s*<?\d/u.test(terminal),
+    "a number here would point at a selection context that has expired"
+  )
+
+  // Mid-turn notices keep the plain prefix: the turn is not over, and those
+  // messages are already long.
+  const waitNotice = runner.slice(
+    runner.indexOf("onWaitStart: async (interaction) => {"),
+    runner.indexOf("onWaitEnd: async (interaction) => {")
+  )
+  assert(
+    waitNotice.includes("prefix: this.targetPrefixForEvent(") &&
+      !waitNotice.includes("prefix: this.terminalPrefixForEvent("),
+    "a waiting notice must not carry the switch-back line"
+  )
+
+  // Every terminal reply does carry it; buildImEventReplies is only used for
+  // those, so none may fall back to the plain prefix.
+  assert(
+    !/buildImEventReplies\(\{[^}]*targetPrefixForEvent/su.test(runner),
+    "a terminal reply that kept the plain prefix would silently lose the way back"
+  )
+}
+
+function testEnteringAWaitArmsNoTimer(): void {
+  // The behavioural test below can only prove that a wait survives the seconds
+  // it is willing to sit there. It cannot prove the absence of a deadline —
+  // and a reintroduced one would be minutes long, so it would sail past.
+  //
+  // This reads the only place a wait deadline could live. onWaitStart is where
+  // both kinds of wait are set up; if no timer is created there, none exists.
+  const runner = readFileSync(
+    join(resolve(__dirname, ".."), "src/main/services/im/remote-runner.ts"),
+    "utf8"
+  )
+  const waitSetup = runner.slice(
+    runner.indexOf("onWaitStart: async (interaction) => {"),
+    runner.indexOf("onWaitEnd: async (interaction) => {")
+  )
+  assert(waitSetup.length > 0, "onWaitStart/onWaitEnd must still bracket the wait setup")
+  assert(
+    !waitSetup.includes("setTimeout("),
+    "entering a desktop wait must arm no timer: a question or approval sent to Zhaohu waits " +
+      "as long as the desktop would, and cancelling the run also kills the short code the " +
+      "person was sent"
+  )
+}
+
+async function testNoDesktopWaitIsCancelledByAClock(): Promise<void> {
+  // Neither kind of wait has a deadline, and both are checked here because the
+  // two used to differ and the reason they must not is the same.
+  //
+  // The desktop sets no answer deadline: an approval is never auto-rejected
+  // (APPROVAL_TIMEOUT_MS is null), and a question only expires when the model
+  // or a Harness project asks for it per request. Arriving over IM is not a
+  // reason to be stricter — the person is on a phone, away from the desk,
+  // exactly when a deadline they cannot meet does the most damage: the run is
+  // cancelled and the short code they were sent dies with it.
+  for (const kind of ["approval", "user_input"] as const) {
+    const context = await createContext()
+    const gateway = new TestGateway()
+    const runner = new ImRemoteRunner({
+      gateway,
+      eventStore: context.events,
+      conversationState: context.conversations,
+      capabilityGuard: featureCapabilityGuard(context),
+      replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+      setThreadLifecycle: async () => undefined,
+      createRunId: () => `run-feature-${kind}-wait`,
+      executeTurn: async ({ event, interactionWaitHooks, signal }) => {
+        assert(interactionWaitHooks)
+        await interactionWaitHooks.onWaitStart({
+          id: `wait-${kind}`,
+          kind,
+          threadId: featureTarget.threadId
+        })
+        const notice = gateway.replies.at(-1)?.message.content ?? ""
+        assert(
+          !/\d+\s*分钟/u.test(notice),
+          `a ${kind} notice must not promise a window nothing enforces: ${notice}`
+        )
+        await new Promise((resolve) => setTimeout(resolve, 80))
+        assert(!signal.aborted, `a ${kind} wait must not be aborted by elapsed time`)
+        assert.equal(context.events.getEvent(event.eventId)?.state, "waiting_desktop")
+        await interactionWaitHooks.onWaitEnd({
+          id: `wait-${kind}`,
+          kind,
+          threadId: featureTarget.threadId
+        })
+        return "等到回应后完成"
+      }
+    })
+    try {
+      const queued = await queueFeatureEvent(context, 1)
+      assert.equal(await runner.invoke(queued, new AbortController().signal), "completed")
+      const terminal = context.events.getEvent(queued.eventId)
+      assert.equal(terminal?.state, "completed")
+      assert.notEqual(terminal?.reasonCode, "REMOTE_INTERACTION_TIMEOUT")
+      assert(gateway.replies.at(-1)?.message.content.includes("等到回应后完成"))
+    } finally {
+      context.database.close()
     }
-  })
-  try {
-    const queued = await queueFeatureEvent(context, 1)
-    assert.equal(await runner.invoke(queued, new AbortController().signal), "cancelled")
-    const terminal = context.events.getEvent(queued.eventId)
-    assert.equal(terminal?.state, "cancelled")
-    assert.equal(terminal?.reasonCode, "REMOTE_INTERACTION_TIMEOUT")
-    assert.equal(
-      context.conversations
-        .listTargets("conversation-1")
-        .find(({ snapshot }) => snapshot.targetId === featureTarget.targetId)?.state,
-      "active",
-      "waiting timeout must not revoke the Feature binding"
-    )
-    assert(gateway.replies.at(-1)?.message.content.includes("会话授权保持不变"))
-    assert.equal(gateway.acknowledgements.at(-1)?.type, "cancelled")
-  } finally {
-    context.database.close()
   }
 }
 
@@ -616,7 +712,12 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     "testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume",
     testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume
   ],
-  ["testFeatureDesktopWaitTimeoutCancelsOnlyEvent", testFeatureDesktopWaitTimeoutCancelsOnlyEvent],
+  [
+    "testTheLastReplyOfADetachedTurnShowsTheWayBack",
+    testTheLastReplyOfADetachedTurnShowsTheWayBack
+  ],
+  ["testEnteringAWaitArmsNoTimer", testEnteringAWaitArmsNoTimer],
+  ["testNoDesktopWaitIsCancelledByAClock", testNoDesktopWaitIsCancelledByAClock],
   [
     "testInboxPolicyKeepsSchedulerButCutsRemoteRisks",
     testInboxPolicyKeepsSchedulerButCutsRemoteRisks

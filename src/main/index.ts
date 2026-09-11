@@ -36,6 +36,7 @@ if (process.platform === "linux") {
 import { join } from "path"
 import { pathToFileURL } from "url"
 import { existsSync, rmSync } from "fs"
+import { pendingNotificationScheduler } from "./agent/pending-notification-scheduler"
 import {
   writeMainLog,
   writeRendererLog,
@@ -461,6 +462,7 @@ import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
 import { builtinRobotManager } from "./services/im/manager"
+import { createManagedTransportAgentRunDelivery } from "./agent/managed-transport-delivery"
 import {
   configurePetWindow,
   createPetWindow,
@@ -742,6 +744,9 @@ function createWindow(): void {
     console.warn("[Main] BrowserWindow became unresponsive")
   })
 
+  /** One recovery per window: see the render-process-gone handler below. */
+  let rendererRecovered = false
+
   mainWindow.on("responsive", () => {
     mainWindowUnresponsive = false
     console.info("[Main] BrowserWindow recovered responsiveness")
@@ -820,6 +825,26 @@ function createWindow(): void {
     if (hadClosePrompt && mainWindow) requestNativeWindowCloseChoice(mainWindow)
     disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
+
+    // Reload once. A dead renderer leaves the window blank with no way back,
+    // and the process is gone so nothing in it can offer one. `reason` is the
+    // part worth keeping: "oom" and "crashed" look identical on screen and
+    // point at completely different causes.
+    //
+    // Once, not always: a fault that recurs on load would otherwise reload
+    // forever, and each cycle costs the log line that identifies it. A window
+    // that has already been recovered stays blank until the user restarts.
+    if (rendererRecovered) {
+      console.error(
+        `[Main] Renderer process gone again (${details.reason}); not reloading a second time`
+      )
+      return
+    }
+    rendererRecovered = true
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      console.warn(`[Main] Reloading the renderer after ${details.reason}`)
+      mainWindow.webContents.reload()
+    }
   })
 
   mainWindow.webContents.on("did-finish-load", () => {
@@ -1452,6 +1477,16 @@ if (browserNativeMessagingHostLaunch) {
 
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
+    // An IM turn must not depend on someone having the desktop open, and must
+    // not be tied to whichever window happened to be focused when it arrived.
+    // The managed delivery broadcasts on the thread-scoped channel the renderer
+    // subscribes to for background runs, so an open session renders it live and
+    // a closed one simply misses nothing.
+    builtinRobotManager.setAgentRunDeliveryResolver(() => createManagedTransportAgentRunDelivery())
+    // Wakes summaries deferred while their thread was busy. Without it one
+    // parked behind a foreground turn waits for the next hydrate rather than
+    // for the moment the thread actually goes idle.
+    pendingNotificationScheduler.start()
     setAppAttentionHandler(requestAppAttention)
     await initializeAppTray({
       getMainWindow: () => mainWindow,

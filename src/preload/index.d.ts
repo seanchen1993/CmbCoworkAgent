@@ -1,3 +1,4 @@
+import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
   WorkflowWorktreeAction,
@@ -1093,6 +1094,8 @@ interface CustomAPI {
       agentIndex: number
     ) => Promise<unknown[] | null>
     hydrate: (threadId: string) => Promise<unknown>
+    requestPendingNotification: (threadId: string) => Promise<void>
+    suppressPendingNotification: (threadId: string, suppressed?: boolean) => Promise<void>
     /** Durable per-thread channel; survives past the launching turn. Returns unsubscribe. */
     onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void) => () => void
     /** Display-only live subagent tool-stream (keyed by parent threadId; payload carries
@@ -1154,6 +1157,9 @@ interface CustomAPI {
       toId: string,
       role?: Message["role"]
     ) => Promise<{ replaced: boolean }>
+    exportSubagentSession: (
+      target: SubagentExportTarget
+    ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportSession: (
       threadId: string
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
@@ -1472,6 +1478,7 @@ interface CustomAPI {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -1527,6 +1534,7 @@ interface CustomAPI {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
@@ -1550,6 +1558,17 @@ interface CustomAPI {
         additions: number
         deletions: number
       }
+      error?: string
+    }>
+    addGitignoreEntry: (
+      threadId: string,
+      targetPath: string,
+      kind: "file" | "directory",
+      options?: { worktreePath?: string }
+    ) => Promise<{
+      success: boolean
+      entry?: string
+      alreadyExists?: boolean
       error?: string
     }>
     getGitChangedFilesSummary: (threadId: string) => Promise<{
@@ -2100,6 +2119,7 @@ interface CustomAPI {
     ) => () => void
   }
   builtinRobot: {
+    cancelThread: (threadId: string) => Promise<boolean>
     getStatus: () => Promise<BuiltinRobotStatus>
     getRemoteAccess: () => Promise<BuiltinRobotRemoteAccessOverview>
     setThreadRemoteAccess: (

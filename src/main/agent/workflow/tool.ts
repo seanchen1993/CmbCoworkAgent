@@ -14,11 +14,7 @@ import {
 } from "../../services/stable-file-handle"
 import { isPathInside } from "./paths"
 import { WORKFLOW_TOOL_DESCRIPTION } from "./prompts"
-import {
-  loadAgentProfiles,
-  loadAgentProfilesAsync,
-  type AgentProfile
-} from "../agent-registry"
+import { loadAgentProfiles, loadAgentProfilesAsync, type AgentProfile } from "../agent-registry"
 import { workflowRunManager } from "./run-manager"
 import {
   clearAllAgentToolStreams,
@@ -37,7 +33,8 @@ import {
   WorkflowFatalError,
   WorkflowScriptError,
   type ParsedWorkflowScript,
-  type PersistedWorkflowRun
+  type PersistedWorkflowRun,
+  type WorkflowNotificationOwner
 } from "./types"
 
 /**
@@ -110,6 +107,12 @@ export interface CreateWorkflowToolOptions {
   /** Async-loaded registry snapshot supplied by production runtime creation so
    * building the tool never scans home/workspace directories synchronously. */
   agentProfiles?: AgentProfile[]
+  /**
+   * Which side summarises a run launched here. The tool cannot work this out —
+   * only the run body knows whether a renderer is driving it — so it is passed
+   * down and recorded on the run at launch.
+   */
+  notificationOwner?: WorkflowNotificationOwner
 }
 
 /**
@@ -250,11 +253,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // carrying the pre-approval snapshot forward would resurrect a terminal
       // worktree as ready/recoverable in the new run.json and live panel.
       const recoveredResumeRun = resume.run
-        ? await workflowRunManager.getFlushFailedRunForResume(
-            workspacePath,
-            threadId,
-            runId
-          )
+        ? await workflowRunManager.getFlushFailedRunForResume(workspacePath, threadId, runId)
         : undefined
       const latestResumeRun = resume.run
         ? recoveredResumeRun?.threadId === threadId
@@ -288,7 +287,8 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
         resumeNote: effectiveResumeNote,
         agentProfiles: executionProfiles,
         subagentDeps,
-        runExclusiveFileWrite: options.runExclusiveFileWrite
+        runExclusiveFileWrite: options.runExclusiveFileWrite,
+        notificationOwner: options.notificationOwner ?? "desktop"
       })
       try {
         options.onLaunched?.(launch.runId)
@@ -580,9 +580,7 @@ async function openTopLevelWorkflowScript(
  * workflow tool's stable, user-facing scriptPath error vocabulary. */
 async function readBoundedWorkflowScript(opened: StableFileHandle): Promise<string> {
   try {
-    return (await readStableFileHandleBounded(opened, MAX_WORKFLOW_SCRIPT_BYTES)).toString(
-      "utf8"
-    )
+    return (await readStableFileHandleBounded(opened, MAX_WORKFLOW_SCRIPT_BYTES)).toString("utf8")
   } catch (error) {
     if (error instanceof StableBoundedReadError) {
       if (error.failure === "initial-too-large" || error.failure === "grew-too-large") {
