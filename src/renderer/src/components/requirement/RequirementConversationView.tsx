@@ -8,6 +8,9 @@ import {
   Eye,
   KeyRound,
   Loader2,
+  PanelRightClose,
+  PanelRightOpen,
+  RotateCcw,
   Send
 } from "lucide-react"
 import { toast } from "sonner"
@@ -236,6 +239,10 @@ function RequirementConversationSession({
   const continuationMessageThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
   const manifestRequestRef = useRef(0)
+  // The selected conversation renders its own validated manifest snapshot, so
+  // "刷新状态" (which syncs the requirement record) must also re-read that file to
+  // flip the PRD tabs without switching the conversation away and back.
+  const reloadRequirementManifestRef = useRef<(() => void) | null>(null)
   const publishRequestQueuedRef = useRef(false)
   // A requirement can own multiple conversations. Do not render a requirement-level PRD
   // cache before the selected conversation's manifest has been read and validated.
@@ -255,6 +262,8 @@ function RequirementConversationSession({
   const [tokenDraft, setTokenDraft] = useState("")
   const [tokenSaving, setTokenSaving] = useState(false)
   const [hasStoredToken, setHasStoredToken] = useState(false)
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
+  const [statusRefreshing, setStatusRefreshing] = useState(false)
   const focusExpertProcess = useCallback((): boolean => {
     if (!threadId || subagents.length === 0) return false
     const isAnalyst = (item: (typeof subagents)[number]): boolean => {
@@ -400,6 +409,58 @@ function RequirementConversationSession({
     [onRequirementUpdated, onSelectRequirement, requirement.system, threadId]
   )
 
+  const refreshRequirementStatus = useCallback(
+    async (item: RequirementRecord): Promise<boolean> => {
+      const manifestThreadId = item.threadIds[0]
+      if (!manifestThreadId) return false
+      const readResult = await readRequirementWorkspaceTextFile(
+        manifestThreadId,
+        "/prd/prd-manifest.json",
+        "requirement-status"
+      )
+      if (!readResult.success || readResult.content === undefined) {
+        if (readResult.notFound) return false
+        throw new Error(readResult.error || "未找到 prd-manifest.json")
+      }
+      let manifest: unknown
+      try {
+        manifest = JSON.parse(readResult.content)
+      } catch {
+        throw new Error("prd-manifest.json 格式无效")
+      }
+      const syncResult = await window.api.requirements.syncManifest({
+        reqId: item.id,
+        manifest
+      })
+      if (!syncResult.success || !syncResult.requirement) {
+        throw new Error(syncResult.error || "同步 prd-manifest.json 失败")
+      }
+      onRequirementUpdated(fromPersistedRequirement(syncResult.requirement, item.system))
+      // The list status comes from the requirement record, but the open
+      // conversation renders its own manifest snapshot. Re-read it here so the
+      // PRD tabs (生成中/生成完成) update immediately instead of only after a
+      // conversation switch.
+      if (item.id === requirement.id) reloadRequirementManifestRef.current?.()
+      return true
+    },
+    [onRequirementUpdated, requirement.id]
+  )
+
+  // Same effect as the sidebar's "刷新状态": re-read and re-sync prd-manifest.json.
+  const handleRefreshStatus = useCallback(async (): Promise<void> => {
+    if (statusRefreshing) return
+    setStatusRefreshing(true)
+    try {
+      if (await refreshRequirementStatus(requirement)) {
+        toast.success("需求状态已刷新")
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "刷新需求状态失败")
+    } finally {
+      setStatusRefreshing(false)
+    }
+  }, [refreshRequirementStatus, requirement, statusRefreshing])
+
   const requirementSidebarMode = useMemo<RequirementSidebarMode>(
     () => ({
       requirements,
@@ -458,34 +519,7 @@ function RequirementConversationSession({
           throw new Error(result.error || "重命名需求失败")
         onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
       },
-      onRefreshRequirementStatus: async (item) => {
-        const manifestThreadId = item.threadIds[0]
-        if (!manifestThreadId) return false
-        const readResult = await readRequirementWorkspaceTextFile(
-          manifestThreadId,
-          "/prd/prd-manifest.json",
-          "requirement-status"
-        )
-        if (!readResult.success || readResult.content === undefined) {
-          if (readResult.notFound) return false
-          throw new Error(readResult.error || "未找到 prd-manifest.json")
-        }
-        let manifest: unknown
-        try {
-          manifest = JSON.parse(readResult.content)
-        } catch {
-          throw new Error("prd-manifest.json 格式无效")
-        }
-        const syncResult = await window.api.requirements.syncManifest({
-          reqId: item.id,
-          manifest
-        })
-        if (!syncResult.success || !syncResult.requirement) {
-          throw new Error(syncResult.error || "同步 prd-manifest.json 失败")
-        }
-        onRequirementUpdated(fromPersistedRequirement(syncResult.requirement, item.system))
-        return true
-      },
+      onRefreshRequirementStatus: refreshRequirementStatus,
       onNewRequirement: onNew,
       onBackToHistory: onBack
     }),
@@ -499,6 +533,7 @@ function RequirementConversationSession({
       onNew,
       onRequirementUpdated,
       onSelectRequirement,
+      refreshRequirementStatus,
       requirements,
       threadId,
       requirement.id,
@@ -615,6 +650,8 @@ function RequirementConversationSession({
         if (isCurrentRequest()) setManifestLoading(false)
       }
     }, [onRequirementUpdated, requirement.id, requirement.system, threadId])
+
+  reloadRequirementManifestRef.current = loadRequirementSpaceManifest
 
   useEffect(() => {
     if (!threadId) return
@@ -907,7 +944,16 @@ function RequirementConversationSession({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
       <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden bg-background">
-        <div className="grid h-full min-h-0 min-w-[1242px] grid-cols-[minmax(240px,0.5fr)_minmax(380px,1fr)_minmax(620px,1.5fr)] gap-x-[0.5px]">
+        <div
+          className={cn(
+            "grid h-full min-h-0 gap-x-[0.5px]",
+            // The requirement list column is a fixed width so collapsing the right
+            // panel keeps the list (and chat) from being stretched.
+            rightPanelCollapsed
+              ? "min-w-[620px] grid-cols-[240px_minmax(380px,1fr)]"
+              : "min-w-[1242px] grid-cols-[240px_minmax(380px,1fr)_minmax(560px,1.3fr)]"
+          )}
+        >
           <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden">
             <RequirementThreadSidebar mode={requirementSidebarMode} />
           </aside>
@@ -923,6 +969,25 @@ function RequirementConversationSession({
                   需求工作台
                 </span>
               </div>
+              {rightPanelCollapsed ? (
+                <TooltipProvider delayDuration={180}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => setRightPanelCollapsed(false)}
+                        className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground"
+                        aria-label="展开右侧面板"
+                      >
+                        <PanelRightOpen className="size-3.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="text-xs">
+                      展开右侧面板
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : null}
             </div>
             {threadId ? (
               <ChatContainer key={threadId} threadId={threadId} surface="requirement-session" />
@@ -936,7 +1001,12 @@ function RequirementConversationSession({
             )}
           </main>
 
-          <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-white">
+          <aside
+            className={cn(
+              "flex min-h-0 min-w-0 flex-col overflow-hidden bg-white",
+              rightPanelCollapsed && "hidden"
+            )}
+          >
             {requirement.workspaceMissing ? (
               <div
                 role="alert"
@@ -975,7 +1045,7 @@ function RequirementConversationSession({
               }}
               className="flex min-h-0 flex-1 flex-col"
             >
-              <div className="shrink-0 border-b border-border/80 bg-[#fffdf9] px-3">
+              <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/80 bg-[#fffdf9] px-3">
                 <TabsList className="h-9 rounded-none bg-transparent p-0">
                   <TabsTrigger
                     value="expert-process"
@@ -1074,6 +1144,45 @@ function RequirementConversationSession({
                     </Tooltip>
                   </TooltipProvider>
                 </TabsList>
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <TooltipProvider delayDuration={180}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => void handleRefreshStatus()}
+                          disabled={statusRefreshing}
+                          className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors enabled:hover:bg-background-interactive enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                          aria-label="刷新状态"
+                        >
+                          <RotateCcw
+                            className={cn("size-3.5", statusRefreshing && "animate-spin")}
+                          />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="text-xs">
+                        刷新状态
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                  <TooltipProvider delayDuration={180}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => setRightPanelCollapsed(true)}
+                          className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground"
+                          aria-label="收起右侧面板"
+                        >
+                          <PanelRightClose className="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="text-xs">
+                        收起右侧面板
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
               </div>
 
               <TabsContent value="expert-process" className="m-0 min-h-0 flex-1 overflow-hidden">

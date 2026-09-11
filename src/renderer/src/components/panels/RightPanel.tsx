@@ -1412,15 +1412,35 @@ export function RightPanel({
     }
   }, [activeResourcePreviewRequest, currentThreadId, moduleMode])
 
+  // The watcher reports every write in the workspace. Refreshing the preview on
+  // any of them remounts FileViewer ("Loading file...") for unrelated edits and,
+  // during an active turn, thrashes the preview until it freezes. Only refresh
+  // when the file the preview is actually showing changed.
+  const previewWorkspaceFilePath = useMemo(() => {
+    if (!previewPathForCurrentThread) return null
+    const resolved = resolveResourcePreviewPaths(
+      previewPathForCurrentThread,
+      workspacePath ?? null,
+      window.electron.process.platform,
+      previewWorkspacePathKind
+    )
+    return resolved.inWorkspace ? resolved.workspaceFilePath.toLowerCase() : null
+  }, [previewPathForCurrentThread, previewWorkspacePathKind, workspacePath])
+
   useEffect(() => {
-    if (!currentThreadId) return
+    if (!currentThreadId || !previewWorkspaceFilePath) return
     const cleanup = window.api.workspace.onFilesChanged((data) => {
-      if (data.threadIds.includes(currentThreadId) && previewPathForCurrentThread) {
-        setPreviewReloadToken((v) => v + 1)
-      }
+      if (!data.threadIds.includes(currentThreadId)) return
+      const update = data.update
+      if (!update || update.kind !== "patch") return
+      const changed = [...update.upserts.map((entry) => entry.path), ...update.deletes].some(
+        (changedPath) => changedPath.toLowerCase() === previewWorkspaceFilePath
+      )
+      if (!changed) return
+      setPreviewReloadToken((v) => v + 1)
     })
     return cleanup
-  }, [currentThreadId, previewPathForCurrentThread])
+  }, [currentThreadId, previewWorkspaceFilePath])
 
   useEffect(() => {
     const request = activeResourcePreviewRequest
