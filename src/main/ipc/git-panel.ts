@@ -1681,7 +1681,7 @@ export function registerGitPanelHandlers(ipcMain: IpcMain): void {
 
         await runGit(
           target.worktreePath,
-          ["--literal-pathspecs", "rm", "-r", "--cached", "--ignore-unmatch", "--", entry],
+          ["--literal-pathspecs", "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--", entry],
           { silent: true, timeoutMs: 20_000 }
         )
 

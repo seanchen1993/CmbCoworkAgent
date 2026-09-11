@@ -159,7 +159,7 @@ function getPathParentDir(filePath?: string): string {
 }
 
 function canShowGitignoreAction(filePath: string, status?: GitPanelFileStatus): boolean {
-  if (status === "deleted") return false
+  if (status !== "added" && status !== "untracked") return false
   const fileName = normalizePanelPath(filePath).split("/").pop()
   return fileName !== ".gitignore"
 }
@@ -1548,14 +1548,16 @@ export function GitPanelView({
                   showToast(message, "error")
                 }}
               />
-              <IconPopoverButton
-                icon={<FolderOpen className="size-3" />}
-                popoverContent="打开文件夹"
-                aria-label="打开文件夹"
-                align="end"
-                stopPropagation
-                onClick={() => onOpenFileFolder?.(file.path)}
-              />
+              {file.status !== "deleted" && (
+                <IconPopoverButton
+                  icon={<FolderOpen className="size-3" />}
+                  popoverContent="打开文件夹"
+                  aria-label="打开文件夹"
+                  align="end"
+                  stopPropagation
+                  onClick={() => onOpenFileFolder?.(file.path)}
+                />
+              )}
               {showGitignoreAction && (
                 <IconPopoverButton
                   icon={
