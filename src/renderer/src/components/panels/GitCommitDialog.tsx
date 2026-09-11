@@ -26,6 +26,8 @@ const COMMIT_TYPES = [
 
 export type CommitType = (typeof COMMIT_TYPES)[number]["value"]
 
+const NO_COMMIT_TYPE_VALUE = "__no_commit_type__"
+
 export interface GitCommitRepositoryOption {
   path: string
   displayPath: string
@@ -82,17 +84,22 @@ export function GitCommitDialog({
   onSubmit
 }: GitCommitDialogProps): React.JSX.Element {
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | undefined>(undefined)
+  const [submitAttempted, setSubmitAttempted] = useState(false)
   const cardValue = cardNumber.trim()
   const messageValue = commitMessage.trim()
-  const finalMessagePreview = cardValue
-    ? `${cardValue} #comment ${commitType}:${messageValue || "<message>"} #CMBDevClaw`
-    : ""
+  const commitSubject = commitType
+    ? `${commitType}:${messageValue || "<message>"}`
+    : messageValue || "<message>"
+  const finalMessagePreview = cardValue ? `${cardValue} #comment ${commitSubject} #CMBDevClaw` : ""
   const noSelectedFiles = fileCount <= 0
-  const cardMissing = !noSelectedFiles && !cardValue
-  const commitTypeMissing = !noSelectedFiles && !commitType
-  const messageMissing = !noSelectedFiles && !messageValue
+  const cardInvalid = !noSelectedFiles && !cardValue
+  const messageInvalid = !noSelectedFiles && !messageValue
+  const cardMissing = submitAttempted && cardInvalid
+  const messageMissing = submitAttempted && messageInvalid
   const repositoryRequired = repositories.length > 1
-  const repositoryMissing = repositoryRequired && !repositoryPath
+  const repositoryInvalid = repositoryRequired && !repositoryPath
+  const repositoryMissing = submitAttempted && repositoryInvalid
+  const commitBlocked = repositoryInvalid || cardInvalid || messageInvalid || noSelectedFiles
   const historySelectValue =
     selectedHistoryId && commitHistory.some((record) => record.id === selectedHistoryId)
       ? selectedHistoryId
@@ -103,6 +110,7 @@ export function GitCommitDialog({
 
     const timer = window.setTimeout(() => {
       setSelectedHistoryId(undefined)
+      setSubmitAttempted(false)
     }, 0)
 
     return () => {
@@ -142,8 +150,7 @@ export function GitCommitDialog({
                   id="git-commit-repository"
                   className={cn(
                     "w-full bg-background",
-                    repositoryMissing &&
-                      "border-destructive/50 focus-visible:ring-destructive/40"
+                    repositoryMissing && "border-destructive/50 focus-visible:ring-destructive/40"
                   )}
                 >
                   <SelectValue placeholder="选择本次 Commit 的目标仓库" />
@@ -212,9 +219,13 @@ export function GitCommitDialog({
                 <SelectTrigger id="git-commit-history" className="w-full">
                   <SelectValue placeholder="选择历史 commit" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="w-[var(--radix-select-trigger-width)] max-w-[min(32rem,calc(100vw-2rem))]">
                   {commitHistory.map((record) => (
-                    <SelectItem key={record.id} value={record.id}>
+                    <SelectItem
+                      key={record.id}
+                      value={record.id}
+                      className="whitespace-normal break-words pr-8"
+                    >
                       {record.fullMessage}
                     </SelectItem>
                   ))}
@@ -253,29 +264,19 @@ export function GitCommitDialog({
               <label htmlFor="git-commit-type" className="font-medium text-foreground">
                 提交类型
               </label>
-              <span
-                className={cn(
-                  "text-[11px]",
-                  commitTypeMissing ? "text-destructive" : "text-muted-foreground"
-                )}
-              >
-                必填
-              </span>
+              <span className="text-[11px] text-muted-foreground">可选</span>
             </div>
             <Select
-              value={commitType}
-              onValueChange={(value) => onCommitTypeChange(value as CommitType)}
+              value={commitType || NO_COMMIT_TYPE_VALUE}
+              onValueChange={(value) => {
+                onCommitTypeChange(value === NO_COMMIT_TYPE_VALUE ? "" : (value as CommitType))
+              }}
             >
-              <SelectTrigger
-                id="git-commit-type"
-                className={cn(
-                  "w-full",
-                  commitTypeMissing && "border-destructive/50 focus-visible:ring-destructive/40"
-                )}
-              >
+              <SelectTrigger id="git-commit-type" className="w-full">
                 <SelectValue placeholder="选择提交类型" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value={NO_COMMIT_TYPE_VALUE}>不填写</SelectItem>
                 {COMMIT_TYPES.map((type) => (
                   <SelectItem key={type.value} value={type.value}>
                     {type.label}
@@ -337,15 +338,12 @@ export function GitCommitDialog({
             id="git-commit-button"
             type="button"
             className="w-full h-9"
-            disabled={
-              running ||
-              repositoryMissing ||
-              cardMissing ||
-              commitTypeMissing ||
-              messageMissing ||
-              noSelectedFiles
-            }
-            onClick={onSubmit}
+            disabled={running || noSelectedFiles}
+            onClick={() => {
+              setSubmitAttempted(true)
+              if (commitBlocked) return
+              onSubmit()
+            }}
           >
             {running ? (
               <>

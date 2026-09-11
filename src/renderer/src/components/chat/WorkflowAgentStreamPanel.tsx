@@ -1,3 +1,4 @@
+import { SubagentSessionExportButton } from "./SubagentSessionExportButton"
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, Sparkles } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
@@ -475,6 +476,14 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
             </span>
           </div>
         </div>
+        <SubagentSessionExportButton
+          target={{
+            kind: "workflow",
+            threadId: workflowAgentFocusView.threadId,
+            runId: workflowAgentFocusView.runId,
+            agentIndex: workflowAgentFocusView.agentIndex
+          }}
+        />
         <span
           className={cn(
             "shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-none",

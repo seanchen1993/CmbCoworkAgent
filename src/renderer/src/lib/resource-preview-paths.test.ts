@@ -124,6 +124,36 @@ describe("resource preview paths", () => {
     })
   })
 
+  it.each([
+    ["../secret.html", "C:\\repo", "win32", "C:/secret.html"],
+    ["src/../../secret.html", "/workspace", "linux", "/secret.html"],
+    ["C:\\repo\\..\\secret.html", "C:\\repo", "win32", "C:/secret.html"],
+    ["/workspace/../secret.html", "/workspace", "linux", "/secret.html"]
+  ] as const)(
+    "keeps dot-segment escape %s outside the workspace boundary",
+    (filePath, workspacePath, platform, expectedFullPath) => {
+      const resolved = resolveResourcePreviewPaths(filePath, workspacePath, platform)
+      expect(resolved).toMatchObject({
+        fullPath: expectedFullPath,
+        inWorkspace: false
+      })
+      expect(selectResourcePreviewFileSource(resolved, false)).toEqual({
+        filePath: expectedFullPath,
+        externalFullPath: expectedFullPath
+      })
+    }
+  )
+
+  it("normalizes harmless dot segments before deriving the workspace path", () => {
+    expect(
+      resolveResourcePreviewPaths("C:\\repo\\src\\..\\index.ts", "C:\\repo", "win32")
+    ).toMatchObject({
+      fullPath: "C:/repo/index.ts",
+      workspaceFilePath: "/index.ts",
+      inWorkspace: true
+    })
+  })
+
   it.each(["C:\\repo\\src\\index.ts", "\\\\server\\share\\repo\\src\\index.ts"])(
     "keeps the drive/UNC candidate %s absolute while metadata hydrates",
     (filePath) => {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { projectVisibleChatSearchContent } from "./chat-search-visible-content"
+import {
+  MAX_EXPANDED_CHAT_SEARCH_TEXT_CHARS,
+  projectVisibleChatSearchContent,
+  projectVisibleChatSearchContentWithMetadata
+} from "./chat-search-visible-content"
 
 describe("visible chat search content projection", () => {
   it("projects only visible block text without structural object keys", () => {
@@ -70,5 +74,35 @@ describe("visible chat search content projection", () => {
     expect(projected).toContain("head-token")
     expect(projected).toContain("tail-token")
     expect(projected).not.toContain("middle-token")
+  })
+
+  it("includes folded completed content when navigation can expand it", () => {
+    const content = `${"x".repeat(20_000)}\n\n**middle-token**\n\n${"y".repeat(80_000)}`
+    const projected = projectVisibleChatSearchContentWithMetadata("assistant", content, {
+      includeFoldedContent: true
+    })
+    expect(projected.text).toContain("middle-token")
+    expect(projected.text).not.toContain("**")
+    expect(projected.truncated).toBe(false)
+    expect(projectVisibleChatSearchContent("assistant", content)).not.toContain("middle-token")
+    expect(
+      projectVisibleChatSearchContent(
+        "assistant",
+        [{ type: "text", text: content }, { type: "tool_result", content: "hidden-result" }],
+        { includeFoldedContent: true }
+      )
+    ).toContain("middle-token")
+  })
+
+  it("keeps expanded search projection bounded before parsing Markdown", () => {
+    const projected = projectVisibleChatSearchContentWithMetadata(
+      "assistant",
+      `**visible** ${"x".repeat(MAX_EXPANDED_CHAT_SEARCH_TEXT_CHARS)}outside-budget`,
+      { includeFoldedContent: true }
+    )
+    expect(projected.text.length).toBeLessThanOrEqual(MAX_EXPANDED_CHAT_SEARCH_TEXT_CHARS)
+    expect(projected.text).toContain("visible")
+    expect(projected.text).toContain("outside-budget") // The visible tail keeps its budget.
+    expect(projected.truncated).toBe(true)
   })
 })

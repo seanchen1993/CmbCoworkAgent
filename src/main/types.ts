@@ -1,4 +1,5 @@
 import type { HookConfig } from "./hooks/types"
+import type { TranscriptReasoningUpdate } from "../shared/transcript-reasoning"
 import type { ImChannelId } from "../shared/im-gateway-contract"
 import type {
   ForkableCheckpoint as SharedForkableCheckpoint,
@@ -224,6 +225,8 @@ export interface Message {
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number
+  /** Storage provenance; legacy or lossy previews must not become checkpoint authority. */
+  recovery_integrity?: "verified" | "unverified"
   reasoning?: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
@@ -236,6 +239,9 @@ export interface Message {
   start_at?: Date
   end_at?: Date
 }
+
+/** Internal write payload; readers always receive a complete reasoning snapshot. */
+export interface ThreadMessageWrite extends Message, TranscriptReasoningUpdate {}
 
 export interface ThreadMessagesPageOptions {
   /**
@@ -362,8 +368,12 @@ export interface ThreadMessagesPage {
    * conversation can be trusted; `complete` makes the durable table authoritative.
    */
   legacyCheckpointMigrationStatus?: "migrating" | "complete" | null
+  /** Older completed imports may still need the worker's one-time timing backfill. */
+  legacyMessageTimesPending?: boolean
   /** Durable rows represented by bounded previews because their payload exceeded the page budget. */
   truncatedMessageIds?: string[]
+  /** Present only on recovery reads, after checking every returned row's storage provenance. */
+  recoveryIntegrity?: "verified" | "unverified"
 }
 
 export interface ThreadLegacyCheckpointMigrationStats {
@@ -392,6 +402,7 @@ export interface ThreadMessageSearchOptions {
 }
 
 export interface ThreadMessageSearchMatch {
+  locations?: import("../shared/chat-search-types").ChatSearchLocation[]
   messageId: string
   ordinal: number
   role: Message["role"]

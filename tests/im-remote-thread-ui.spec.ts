@@ -168,9 +168,10 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   )
   assert(featureSetter.includes("requireGrantPrincipal()"))
   assert(!featureSetter.includes("requireGrantRoute()"))
-  assert(harnessBoard.includes("Feature 远程新建会话"))
+  assert(harnessBoard.includes("接入招乎"))
+  assert(harnessBoard.includes("从招乎发起新会话"))
   assert(harnessBoard.includes("window.api.builtinRobot.setFeatureRemoteAccess"))
-  assert(harnessBoard.includes("const principalAvailable = remoteAccess?.principalAvailable"))
+  assert(harnessBoard.includes("disabled={busy || (!enabled && !featureImManagementAvailable)}"))
   assert(harnessBoard.includes("关闭后，下方已经接入的会话仍由各自的会话开关管理"))
 }
 

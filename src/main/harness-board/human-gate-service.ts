@@ -3,6 +3,7 @@ import { BrowserWindow } from "electron"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
 import { HookHaltError } from "../hooks/halt"
 import { trackEvent } from "../services/event-reporter"
+import { imHumanGateService } from "../services/im/human-gate-service"
 import type {
   HarnessHumanGateChangedEvent,
   HarnessHumanGateDecisionInput,
@@ -90,7 +91,7 @@ function recordHumanGateEvent(
   } catch (error) {
     console.warn(`[HumanGate] Failed to record ${type}:`, error)
   }
-  if (includeManagedRun && gate.sourceManagedRunId) {
+  if (includeManagedRun && gate.sourceManagedRunId && type === "human_gate_requested") {
     const record = managedRunStore.getRun({
       projectId: gate.projectId,
       featureId: gate.featureId,
@@ -99,12 +100,11 @@ function recordHumanGateEvent(
     if (!record.snapshot || record.corrupt) return
     try {
       managedRunStore.appendEvent(record.snapshot, {
-        type,
+        type: "human_gate_invoked",
         scope: "stage",
-        source: "human_gate",
         nodeId: record.snapshot.decisionBaseline?.nodeId,
-        threadId: gate.sourceThreadId,
-        reasonCode,
+        sourceThreadId: gate.sourceThreadId,
+        gateId: gate.gateId,
         summary: reasonCode ?? gate.message
       })
     } catch (error) {
@@ -160,20 +160,29 @@ export async function requestHumanGate(input: HumanGateRequestInput): Promise<Hu
   let active!: ActiveGate
   await featureLocks.withKey(key, async () => {
     const existing =
-      activeGates.get(key) ?? (await getHarnessFeatureBinding(input.projectId, input.featureId))?.humanGate
+      activeGates.get(key) ??
+      (await getHarnessFeatureBinding(input.projectId, input.featureId))?.humanGate
     if (existing) {
       const conflictGate = "gate" in existing ? existing.gate : existing
-      recordHumanGateEvent(
-        "human_gate_conflict",
-        {
-          ...conflictGate,
-          sourceThreadId: input.threadId,
-          sourceManagedRunId: findManagedRunId(input.projectId, input.featureId, input.threadId),
-          hookId: input.hookId,
-          message
-        },
-        "human_gate_conflict"
-      )
+      const conflict = {
+        ...conflictGate,
+        gateId: `hg_${randomUUID().replace(/-/gu, "")}`,
+        sourceThreadId: input.threadId,
+        sourceManagedRunId: findManagedRunId(input.projectId, input.featureId, input.threadId),
+        hookId: input.hookId,
+        message
+      }
+      recordHumanGateEvent("human_gate_conflict", conflict, "human_gate_conflict")
+      if (conflict.sourceManagedRunId) {
+        const { failManagedRunForHumanGateConflict } = await import("./auto-mode-controller")
+        await failManagedRunForHumanGateConflict({
+          gateId: conflict.gateId,
+          projectId: conflict.projectId,
+          featureId: conflict.featureId,
+          runId: conflict.sourceManagedRunId,
+          threadId: conflict.sourceThreadId
+        })
+      }
       throw halt(HUMAN_GATE_CONFLICT_MESSAGE)
     }
 
@@ -203,11 +212,15 @@ export async function requestHumanGate(input: HumanGateRequestInput): Promise<Hu
     activeGates.set(key, active)
     recordHumanGateEvent("human_gate_requested", gate)
     publishHumanGateChanged(gate, gate)
+    await imHumanGateService.publish(gate).catch((error) => {
+      console.warn("[HumanGate] Failed to publish IM decision request:", error)
+    })
 
     const onAbort = (): void => {
       void rejectHumanGate(
         { projectId: gate.projectId, featureId: gate.featureId, gateId: gate.gateId },
-        "human_gate_rejected"
+        "human_gate_rejected",
+        "system"
       ).catch((error) => console.warn("[HumanGate] Failed to reject aborted Gate:", error))
     }
     input.abortSignal?.addEventListener("abort", onAbort, { once: true })
@@ -224,24 +237,51 @@ export async function requestHumanGate(input: HumanGateRequestInput): Promise<Hu
   }
 }
 
-export async function approveHumanGate(input: HarnessHumanGateDecisionInput): Promise<boolean> {
+export async function approveHumanGate(
+  input: HarnessHumanGateDecisionInput,
+  channel: "desktop" | "im" = "desktop"
+): Promise<boolean> {
   const key = featureKey(input.projectId, input.featureId)
-  return featureLocks.withKey(key, async () => {
+  let approvedGate: HarnessHumanGateSnapshot | undefined
+  let approvedActive: ActiveGate | undefined
+  const result = await featureLocks.withKey(key, async () => {
     const active = activeGates.get(key)
     const persisted = (await getHarnessFeatureBinding(input.projectId, input.featureId))?.humanGate
     if (!active || active.state !== "pending" || persisted?.gateId !== input.gateId) return false
     active.state = "approved"
+    approvedGate = active.gate
+    approvedActive = active
     recordHumanGateEvent("human_gate_approved", active.gate)
     await setHarnessHumanGate(input.projectId, input.featureId, undefined)
     publishHumanGateChanged(active.gate)
-    active.resolve("approve")
+    imHumanGateService.removeGate(active.gate.gateId)
     return true
   })
+  try {
+    if (result && approvedGate?.sourceManagedRunId) {
+      const { recordManagedHumanGateDecision } = await import("./auto-mode-controller")
+      await recordManagedHumanGateDecision({
+        gateId: approvedGate.gateId,
+        projectId: approvedGate.projectId,
+        featureId: approvedGate.featureId,
+        runId: approvedGate.sourceManagedRunId,
+        threadId: approvedGate.sourceThreadId,
+        decision: "approve",
+        channel
+      })
+    }
+  } catch (error) {
+    console.error("[HumanGate] Failed to record approved ManagedRun decision:", error)
+  } finally {
+    approvedActive?.resolve("approve")
+  }
+  return result
 }
 
 export async function rejectHumanGate(
   input: HarnessHumanGateDecisionInput,
-  reasonCode: "human_gate_rejected" | "app_closed_during_human_gate" = "human_gate_rejected"
+  reasonCode: "human_gate_rejected" | "app_closed_during_human_gate" = "human_gate_rejected",
+  channel: "desktop" | "im" | "system" = "desktop"
 ): Promise<boolean> {
   const key = featureKey(input.projectId, input.featureId)
   let rejectedGate: HarnessHumanGateSnapshot | undefined
@@ -255,22 +295,22 @@ export async function rejectHumanGate(
     recordHumanGateEvent("human_gate_rejected", persisted, reasonCode, false)
     await setHarnessHumanGate(input.projectId, input.featureId, undefined)
     activeGates.delete(key)
+    imHumanGateService.removeGate(persisted.gateId)
     publishHumanGateChanged(persisted)
     return true
   })
   try {
     if (result && rejectedGate?.sourceManagedRunId) {
-      const { cancelManagedRunForHumanGate } = await import("./auto-mode-controller")
-      await cancelManagedRunForHumanGate({
+      const { recordManagedHumanGateDecision } = await import("./auto-mode-controller")
+      await recordManagedHumanGateDecision({
+        gateId: rejectedGate.gateId,
         projectId: rejectedGate.projectId,
         featureId: rejectedGate.featureId,
         runId: rejectedGate.sourceManagedRunId,
         threadId: rejectedGate.sourceThreadId,
-        reasonCode,
-        summary:
-          reasonCode === "app_closed_during_human_gate"
-            ? "应用在 Human Gate 等待期间关闭，托管运行已取消"
-            : "Human Gate 未通过，托管运行已取消"
+        decision: "reject",
+        channel,
+        reasonCode
       })
     }
   } catch (error) {
@@ -293,8 +333,17 @@ export function listPendingHumanGateRuntimeThreadIds(): string[] {
     .map((active) => active.runtimeThreadId)
 }
 
+export function hasPendingHumanGateForThread(threadId: string): boolean {
+  return [...activeGates.values()].some(
+    (active) =>
+      active.state === "pending" &&
+      (active.gate.sourceThreadId === threadId || active.runtimeThreadId === threadId)
+  )
+}
+
 export async function recoverHumanGatesAtStartup(): Promise<void> {
+  imHumanGateService.clear()
   for (const gate of await listHarnessHumanGates()) {
-    await rejectHumanGate(gate, "app_closed_during_human_gate")
+    await rejectHumanGate(gate, "app_closed_during_human_gate", "system")
   }
 }

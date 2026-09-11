@@ -1,15 +1,26 @@
-import { coordinatorTranscriptContentToText } from "./internal-notification-turn"
 import { isGoalClearAlias } from "./goal-slash"
 import { projectMarkdownVisibleText } from "./markdown-visible-text"
 import { buildStreamingMarkdownPreview } from "./streaming-markdown-preview"
 import { projectGoalNoticeVisibleText } from "./goal-notice-presentation"
+import { SKILL_USE_TAG_NAME } from "./skill-use-block"
+import { createChatSearchPlan } from "./chat-search-plan"
+import {
+  BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
+  BUILTIN_BROWSER_PROMPT_PREFIX
+} from "./user-input-transport"
 
-const SKILL_OPEN = "<CMBDEVCLAW-SKILL-USE-V1>"
-const SKILL_CLOSE = "</CMBDEVCLAW-SKILL-USE-V1>"
-const BROWSER_PREFIX =
+const SKILL_OPEN = `<${SKILL_USE_TAG_NAME}>`
+const SKILL_CLOSE = `</${SKILL_USE_TAG_NAME}>`
+const BROWSER_PREFIX = BUILTIN_BROWSER_PROMPT_PREFIX
+const BROWSER_NO_SCREENSHOT_PREFIX = BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX
+const LEGACY_BROWSER_PREFIX =
   "使用内置浏览器 browser_*工具。仅当当前模型支持图片识别/视觉输入时，才允许调用截图工具；否则不要调用截图工具，改用 DOM 快照、文本、locator、evaluate 等非视觉方式："
-const LEGACY_BROWSER_PREFIX = "使用内置浏览器 browser_*工具："
-const LEGACY_BROWSER_NO_SCREENSHOT_PREFIX = "使用内置浏览器 browser_*工具（不允许使用截图功能）："
+
+export const MAX_EXPANDED_CHAT_SEARCH_TEXT_CHARS = 256 * 1024
+interface ChatSearchProjectionOptions {
+  /** Includes bounded folded fragments, exposed using a search context rather than full rendering. */
+  includeFoldedContent?: boolean
+}
 
 function projectSystemNoticeSearchText(text: string): string {
   const clean = text.replace(/^●\s*/, "").replace(/^(?:✓|Ⅱ)\s*/, "")
@@ -51,9 +62,9 @@ function parseUserTransportText(content: string): {
   }
 
   let browserSelected = false
-  if (visibleText.startsWith(LEGACY_BROWSER_NO_SCREENSHOT_PREFIX)) {
+  if (visibleText.startsWith(BROWSER_NO_SCREENSHOT_PREFIX)) {
     browserSelected = true
-    visibleText = visibleText.slice(LEGACY_BROWSER_NO_SCREENSHOT_PREFIX.length)
+    visibleText = visibleText.slice(BROWSER_NO_SCREENSHOT_PREFIX.length)
   } else if (visibleText.startsWith(BROWSER_PREFIX)) {
     browserSelected = true
     visibleText = visibleText.slice(BROWSER_PREFIX.length)
@@ -106,17 +117,29 @@ function projectGoalUserText(content: string): string | null {
     .join("\n")
 }
 
-/** Text actually mounted inside a message's `data-chat-search-text` content region. */
-export function projectVisibleChatSearchContent(role: string, content: unknown): string {
-  return projectVisibleChatSearchContentWithMetadata(role, content).text
+/** Text mounted in a message's search region, or exposed there by expanding completed content. */
+export function projectVisibleChatSearchContent(
+  role: string,
+  content: unknown,
+  options: ChatSearchProjectionOptions = {}
+): string {
+  return projectVisibleChatSearchContentWithMetadata(role, content, options).text
 }
 
 export function projectVisibleChatSearchContentWithMetadata(
   role: string,
-  content: unknown
+  content: unknown,
+  options: ChatSearchProjectionOptions = {}
 ): { text: string; truncated: boolean } {
+  if (options.includeFoldedContent) {
+    const plan = createChatSearchPlan(role, content)
+    return {
+      text: plan.segments.map((segment) => projectChatSearchFragment(role, segment.raw)).join("\n"),
+      truncated: plan.truncated
+    }
+  }
   if (!Array.isArray(content)) {
-    const text = coordinatorTranscriptContentToText(content)
+    const text = typeof content === "string" ? content : ""
     if (role === "system") return { text: projectSystemNoticeSearchText(text), truncated: false }
     if (role !== "user") {
       const bounded = buildStreamingMarkdownPreview(text)
@@ -139,7 +162,7 @@ export function projectVisibleChatSearchContentWithMetadata(
       })
   if (role !== "user") {
     const projectedBlocks = blocks.map((block) =>
-      projectVisibleChatSearchContentWithMetadata(role, block)
+      projectVisibleChatSearchContentWithMetadata(role, block, options)
     )
     return {
       text: projectedBlocks.map((block) => block.text).join("\n"),
@@ -151,4 +174,19 @@ export function projectVisibleChatSearchContentWithMetadata(
   const goalText = projectGoalUserText(visibleText)
   if (goalText) return { text: goalText, truncated: false }
   return { text: visibleText, truncated: false }
+}
+
+/** A source fragment has already passed the message-wide admission budget. */
+export function projectChatSearchFragment(role: string, text: string): string {
+  if (role === "system") return projectSystemNoticeSearchText(text)
+  if (role === "user") {
+    const visible = parseUserTransportText(text).visibleText
+    return projectGoalUserText(visible) ?? visible
+  }
+  return projectMarkdownVisibleText(text)
+}
+
+export function projectChatSearchUserBlocks(blocks: readonly string[]): string {
+  const visible = blocks.map((block) => parseUserTransportText(block).visibleText).join("\n")
+  return projectGoalUserText(visible) ?? visible
 }

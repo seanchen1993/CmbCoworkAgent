@@ -1,4 +1,6 @@
 import { DatabaseSync } from "node:sqlite"
+import { decodeTranscriptRecoveryIntegrity } from "../../shared/transcript-recovery-integrity"
+import { hasPendingLegacyMessageTimes } from "../checkpointer/legacy-message-times"
 import type { ContentBlock, Message, ToolCall } from "../types"
 import type {
   ThreadMessageHydrationWorkerStats,
@@ -6,6 +8,7 @@ import type {
 } from "./protocol"
 import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
+import { normalizeTranscriptReasoning } from "../../shared/transcript-reasoning"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   isVisibleGoalUserEventMessage
@@ -36,12 +39,14 @@ interface ThreadMessageRow {
   provider_occurrence: number | null
   role: Message["role"]
   content_json: string
+  reasoning: string | null
   tool_calls_json: string | null
   tool_call_id: string | null
   name: string | null
   status: string | null
   is_error: number | null
   content_priority: number | null
+  recovery_integrity?: number | null
   goal_id: string | null
   active_window_id: string | null
   created_at: number
@@ -335,12 +340,14 @@ function rowToMessage(
     message: {
       id: row.message_id,
       ordinal: row.ordinal,
+      recovery_integrity: decodeTranscriptRecoveryIntegrity(row.recovery_integrity),
       ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
       ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
         ? { provider_occurrence: row.provider_occurrence }
         : {}),
       role: row.role,
       content,
+      ...(row.reasoning ? { reasoning: normalizeTranscriptReasoning(row.reasoning) } : {}),
       ...(toolCalls ? { tool_calls: toolCalls } : {}),
       ...(row.tool_call_id ? { tool_call_id: row.tool_call_id } : {}),
       ...(row.name ? { name: row.name } : {}),
@@ -410,13 +417,15 @@ function projectMessageToByteBudget(
 
   const summarizedToolCalls = summarizeOversizedToolCalls(message.tool_calls)
   const previewSource = boundedMessagePreviewText(message.content)
+  const reasoningSource = message.reasoning ?? ""
   const base: Message = {
     ...message,
     content: OVERSIZED_MESSAGE_MARKER,
+    reasoning: reasoningSource ? OVERSIZED_MESSAGE_MARKER : undefined,
     ...(summarizedToolCalls ? { tool_calls: summarizedToolCalls } : { tool_calls: undefined })
   }
   let low = 0
-  let high = previewSource.length
+  let high = Math.max(previewSource.length, reasoningSource.length)
   let projected = base
   let projectedBytes = jsonBytes(projected)
   while (low <= high) {
@@ -424,7 +433,12 @@ function projectMessageToByteBudget(
     const middle = safeSliceEnd(previewSource, rawMiddle)
     const candidate: Message = {
       ...base,
-      content: `${previewSource.slice(0, middle)}${OVERSIZED_MESSAGE_MARKER}`
+      content: `${previewSource.slice(0, middle)}${OVERSIZED_MESSAGE_MARKER}`,
+      ...(reasoningSource
+        ? {
+            reasoning: `${reasoningSource.slice(0, safeSliceEnd(reasoningSource, rawMiddle))}${OVERSIZED_MESSAGE_MARKER}`
+          }
+        : {})
     }
     const candidateBytes = jsonBytes(candidate)
     if (candidateBytes <= byteBudget) {
@@ -548,6 +562,7 @@ function readCandidates(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
          FROM thread_messages AS m
          LEFT JOIN thread_message_fragment_states AS fragments
@@ -564,6 +579,7 @@ function readCandidates(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
          FROM thread_messages AS m
          LEFT JOIN thread_message_fragment_states AS fragments
@@ -580,6 +596,7 @@ function readCandidates(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
          FROM thread_messages AS m
          LEFT JOIN thread_message_fragment_states AS fragments
@@ -595,6 +612,7 @@ function readCandidates(
                   WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
                   ELSE length(CAST(m.content_json AS BLOB))
                 END +
+                length(CAST(COALESCE(m.reasoning, '') AS BLOB)) +
                 length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
          FROM thread_messages AS m
          LEFT JOIN thread_message_fragment_states AS fragments
@@ -878,6 +896,13 @@ export function readThreadMessagesPage(
     const legacyCheckpointMigrationStatus = request.options.includeVisibleMessagePresence
       ? (legacyCheckpointMigration?.status ?? null)
       : undefined
+    const legacyMessageTimesPending =
+      legacyCheckpointMigration?.status === "complete" &&
+      hasPendingLegacyMessageTimes(
+        database,
+        request.threadId,
+        legacyCheckpointMigration.checkpointId
+      )
     const candidates = readCandidates(
       database,
       request,
@@ -925,10 +950,10 @@ export function readThreadMessagesPage(
       page: {
         messages: isForwardPage ? orderedMessages : orderedMessages.reverse(),
         beforeOrdinal: !isForwardPage && hasMore && oldest ? oldest.ordinal : null,
-        beforeMessageId:
-          !isForwardPage && hasMore && oldest ? oldest.message_id : null,
+        beforeMessageId: !isForwardPage && hasMore && oldest ? oldest.message_id : null,
         hasMore,
         total,
+        ...(legacyMessageTimesPending ? { legacyMessageTimesPending: true } : {}),
         ...(hasVisibleMessages !== undefined ? { hasVisibleMessages } : {}),
         ...(legacyCheckpointMigrationStatus !== undefined
           ? { legacyCheckpointMigrationStatus }
@@ -936,7 +961,16 @@ export function readThreadMessagesPage(
         ...(isForwardPage
           ? { verifiedAnchorMessageId: request.options.anchorMessageId?.trim() }
           : {}),
-        ...(truncatedMessageIds.length > 0 ? { truncatedMessageIds } : {})
+        ...(truncatedMessageIds.length > 0 ? { truncatedMessageIds } : {}),
+        ...(request.options.recoveryCheckpointId
+          ? {
+              recoveryIntegrity:
+                truncatedMessageIds.length === 0 &&
+                orderedMessages.every((message) => message.recovery_integrity === "verified")
+                  ? ("verified" as const)
+                  : ("unverified" as const)
+            }
+          : {})
       },
       stats: {
         durationMs: performance.now() - startedAt,

@@ -506,11 +506,21 @@ function TraceCard({
           </span>
         )}
       </div>
-      <p className="line-clamp-3 text-xs leading-5 text-foreground/80">
+      <p
+        className={cn(
+          "line-clamp-3 text-xs leading-5",
+          conversation.userText ? "text-foreground/80" : "text-muted-foreground/60"
+        )}
+      >
         {conversation.userText ||
           (conversation.internalNotificationKind
             ? internalNotificationPreview(conversation.internalNotificationKind)
-            : "无用户输入记录")}
+            : // 预览行没有 `_raw`：子 Agent / workflow trace 的输入正文存在 raw 的根
+              // 节点里，索引字段 userMessage 是空的。此时断言「无用户输入记录」是
+              // 拿缺失的数据下结论——它跟「这条 trace 真的没有用户输入」是两回事。
+              trace.rawPending
+              ? "选中该会话后显示完整内容"
+              : "无用户输入记录")}
       </p>
       {conversation.assistantText && (
         <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
@@ -1068,6 +1078,7 @@ export function TraceExplorer({
             traces={selectedThreadGroup.traces}
             className={fullscreen ? "min-h-0 flex-1" : undefined}
             loading={threadLoading}
+            loadFailed={threadLoadFailed}
             fillAvailableHeight={fullscreen}
             selectedTraceId={selectedTrace.traceId}
           />

@@ -139,11 +139,19 @@ describe("agent runtime settings integration", () => {
       "src/main/services/im/remote-runner.ts",
       "src/main/services/heartbeat.ts",
       "src/main/services/scheduler.ts"
-    ].map(readRepositoryFile)
+    ]
 
-    for (const source of runtimeOwners) {
-      expect(source).toContain("recursionLimit: getAgentGraphRecursionLimit()")
-      expect(source).not.toMatch(/recursionLimit:\s*(?:2000|2_000)/)
+    for (const path of runtimeOwners) {
+      const sites = (readRepositoryFile(path).match(/recursionLimit:[^\r\n]*/g) ?? []).map((site) =>
+        site.trim().replace(/,$/, "")
+      )
+      expect(sites.length, `${path}: 找不到 recursionLimit 调用点`).toBeGreaterThan(0)
+      // 逐个调用点断言，而不是「文件里存在一处 getter」。agent.ts 有 invoke /
+      // resume / interrupt 三处，40faca27 合并时前两处被带回硬编码 1000、第三处
+      // 仍是 getter，旧写法的 toContain 照样通过；只禁 2000 字面量也拦不住 1000。
+      for (const site of sites) {
+        expect(site, path).toBe("recursionLimit: getAgentGraphRecursionLimit()")
+      }
     }
   })
 })

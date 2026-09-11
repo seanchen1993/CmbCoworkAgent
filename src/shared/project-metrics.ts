@@ -59,6 +59,17 @@ export interface ProjectMetricSummaryData {
   truncated: boolean
 }
 
+export type ProjectMetricTrendDateField = "createDate" | "endDate"
+
+export interface ProjectMetricTrendFilters extends Omit<ProjectMetricFilters, "range"> {
+  dateField?: ProjectMetricTrendDateField
+}
+
+export interface ProjectMetricTrendData {
+  months: Array<{ month: string; groups: ProjectMetricSummaryGroup[] }>
+  truncated: boolean
+}
+
 export interface ProjectMetricProjectItem {
   prjCode: string
   prjName: string

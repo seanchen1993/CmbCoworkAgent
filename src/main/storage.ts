@@ -1651,7 +1651,7 @@ export const MAX_TOP_P = 1
 export const DEFAULT_TOP_K = 40
 export const MIN_TOP_K = 0
 export const MAX_TOP_K = 1_000
-export type ThinkingEffort = "high" | "max"
+export type ThinkingEffort = "low" | "high" | "max"
 export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
 
 export interface CustomModelPublicConfig {
@@ -1781,7 +1781,7 @@ function normalizeTopK(value: unknown): number {
 }
 
 function normalizeThinkingEffort(value: unknown): ThinkingEffort {
-  return value === "max" ? "max" : DEFAULT_THINKING_EFFORT
+  return value === "low" || value === "high" || value === "max" ? value : DEFAULT_THINKING_EFFORT
 }
 
 function defaultInterleavedThinkingForModel(model: string): boolean {
@@ -1793,7 +1793,7 @@ function resolveInterleavedThinkingSetting(
   value: unknown,
   enableThinking: unknown
 ): boolean {
-  if (enableThinking !== true) return false
+  if (enableThinking !== true || !defaultInterleavedThinkingForModel(model)) return false
   return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
 }
 

@@ -279,6 +279,10 @@ export class BuiltinRobotManager {
     }
   }
 
+  assertFeatureImManagementAvailable(): void {
+    this.requireGrantPrincipal()
+  }
+
   setThreadRemoteAccess(
     threadId: string,
     enabled: boolean

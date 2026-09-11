@@ -28,8 +28,55 @@ function isWindowsAbsolutePath(filePath: string): boolean {
   )
 }
 
+function normalizeLexicalPath(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/")
+  let root = ""
+  let remainder = normalized
+  let absolute = false
+  const extendedUncRoot = normalized.match(/^(\/\/\?\/UNC\/[^/]+\/[^/]+)(?:\/|$)/i)
+  const uncRoot = extendedUncRoot ? null : normalized.match(/^(\/\/[^/]+\/[^/]+)(?:\/|$)/)
+  const driveRoot = normalized.match(/^([a-zA-Z]:)\//)
+
+  if (extendedUncRoot) {
+    root = extendedUncRoot[1]
+    remainder = normalized.slice(extendedUncRoot[0].length)
+    absolute = true
+  } else if (uncRoot) {
+    root = uncRoot[1]
+    remainder = normalized.slice(uncRoot[0].length)
+    absolute = true
+  } else if (driveRoot) {
+    root = `${driveRoot[1]}/`
+    remainder = normalized.slice(driveRoot[0].length)
+    absolute = true
+  } else if (normalized.startsWith("/")) {
+    root = "/"
+    remainder = normalized.replace(/^\/+/, "")
+    absolute = true
+  }
+
+  const segments: string[] = []
+  for (const segment of remainder.split("/")) {
+    if (!segment || segment === ".") continue
+    if (segment === "..") {
+      if (segments.length > 0 && segments[segments.length - 1] !== "..") {
+        segments.pop()
+      } else if (!absolute) {
+        segments.push(segment)
+      }
+      continue
+    }
+    segments.push(segment)
+  }
+
+  const suffix = segments.join("/")
+  if (!root) return suffix
+  if (root.endsWith("/")) return `${root}${suffix}`
+  return suffix ? `${root}/${suffix}` : root
+}
+
 function trimWorkspaceTrailingSeparators(workspacePath: string): string {
-  const normalized = workspacePath.replace(/\\/g, "/")
+  const normalized = normalizeLexicalPath(workspacePath)
   if (normalized === "/" || /^[a-zA-Z]:\/$/.test(normalized)) return normalized
   return normalized.replace(/\/+$/, "")
 }
@@ -68,7 +115,8 @@ export function resolveResourcePreviewPaths(
   platform: NodeJS.Platform = "linux",
   requestedPathKind?: WorkspaceFilePreviewWorkspacePathKind
 ): ResolvedResourcePreviewPaths {
-  const input = filePath.trim().replace(/\\/g, "/")
+  const rawInput = filePath.trim().replace(/\\/g, "/")
+  const input = normalizeLexicalPath(rawInput)
   const workspacePathKind = requestedPathKind ?? inferWorkspacePreviewPathKind(filePath, platform)
   const inputIsAbsolute = inferWorkspacePreviewPathKind(filePath, platform) === "absolute"
   if (!workspacePath) {
@@ -90,7 +138,7 @@ export function resolveResourcePreviewPaths(
     (workspacePathKind === "auto" && !absoluteCandidateIsInWorkspace)
   const workspaceSeparator = workspace.endsWith("/") ? "" : "/"
   const fullPath = resolveAgainstWorkspace
-    ? `${workspace}${workspaceSeparator}${input.replace(/^\/+/, "")}`
+    ? normalizeLexicalPath(`${workspace}${workspaceSeparator}${rawInput.replace(/^\/+/, "")}`)
     : input
   const inWorkspace = isPathWithinWorkspace(fullPath, workspace)
 

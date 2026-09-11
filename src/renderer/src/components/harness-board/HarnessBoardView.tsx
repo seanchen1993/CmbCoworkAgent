@@ -1177,31 +1177,29 @@ function StatusPill({
   tooltip?: string | null
   onClick?: () => void
 }): React.JSX.Element {
-  const pill = (
-    onClick ? (
-      <button
-        type="button"
-        className={cn(
-          "inline-flex h-6 max-w-full items-center rounded border px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          statusTone(status),
-          "cursor-pointer hover:bg-status-info/20"
-        )}
-        title={status.label}
-        onClick={onClick}
-      >
-        <span className="truncate">{status.label}</span>
-      </button>
-    ) : (
-      <span
-        className={cn(
-          "inline-flex h-6 max-w-full items-center rounded border px-2 text-[11px] font-medium",
-          statusTone(status)
-        )}
-        title={status.label}
-      >
-        <span className="truncate">{status.label}</span>
-      </span>
-    )
+  const pill = onClick ? (
+    <button
+      type="button"
+      className={cn(
+        "inline-flex h-6 max-w-full items-center rounded border px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        statusTone(status),
+        "cursor-pointer hover:bg-status-info/20"
+      )}
+      title={status.label}
+      onClick={onClick}
+    >
+      <span className="truncate">{status.label}</span>
+    </button>
+  ) : (
+    <span
+      className={cn(
+        "inline-flex h-6 max-w-full items-center rounded border px-2 text-[11px] font-medium",
+        statusTone(status)
+      )}
+      title={status.label}
+    >
+      <span className="truncate">{status.label}</span>
+    </span>
   )
 
   if (!tooltip) return pill
@@ -4352,9 +4350,7 @@ function FeatureCard({
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           {managedRunStatus && <StatusPill status={managedRunStatus} />}
           <StatusPill status={run.overallStatus} />
-          {run.humanGate && (
-            <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
-          )}
+          {run.humanGate && <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />}
         </div>
       </div>
       <ProgressBar progressIndex={progressIndex} totalNodes={totalNodes} />
@@ -6187,13 +6183,24 @@ function ProjectSessionPage({
 function RemoteFeatureAccessPanel({
   projectId,
   featureSlug,
+  featureImManagementEnabled,
+  featureImManagementAvailable,
+  featureImUnavailableReason,
+  updatingFeatureImManagement,
+  projectInteractionDisabled,
+  onFeatureImManagementChange,
   onOpenThread
 }: {
   projectId: string
   featureSlug: string
+  featureImManagementEnabled: boolean
+  featureImManagementAvailable: boolean
+  featureImUnavailableReason: string | null
+  updatingFeatureImManagement: boolean
+  projectInteractionDisabled: boolean
+  onFeatureImManagementChange: (enabled: boolean) => void
   onOpenThread: (threadId: string) => void
 }): React.JSX.Element {
-  const [status, setStatus] = useState<BuiltinRobotStatus | null>(null)
   const [remoteAccess, setRemoteAccess] = useState<BuiltinRobotRemoteAccessOverview | null>(null)
   const [busy, setBusy] = useState(false)
   const threads = useAppStore((state) => state.threads)
@@ -6210,19 +6217,15 @@ function RemoteFeatureAccessPanel({
           if (active) setRemoteAccess(null)
         })
     }
-    void Promise.all([
-      window.api.builtinRobot.getStatus(),
-      window.api.builtinRobot.getRemoteAccess()
-    ])
-      .then(([nextStatus, nextAccess]) => {
+    void window.api.builtinRobot
+      .getRemoteAccess()
+      .then((nextAccess) => {
         if (!active) return
-        setStatus(nextStatus)
         setRemoteAccess(nextAccess)
       })
       .catch(() => undefined)
-    const unsubscribe = window.api.builtinRobot.onStatus((next) => {
+    const unsubscribe = window.api.builtinRobot.onStatus(() => {
       if (!active) return
-      setStatus(next)
       refreshRemoteAccess()
     })
     return () => {
@@ -6235,7 +6238,6 @@ function RemoteFeatureAccessPanel({
     (grant) => grant.projectId === projectId && grant.featureSlug === featureSlug
   )
   const enabled = featureGrant?.state === "active"
-  const principalAvailable = remoteAccess?.principalAvailable === true
   const relatedSessions =
     remoteAccess?.threadGrants.filter((grant) => {
       if (grant.state !== "active") return false
@@ -6247,18 +6249,15 @@ function RemoteFeatureAccessPanel({
       const binding = harnessFeature as Record<string, unknown>
       return binding.projectId === projectId && binding.slug === featureSlug
     }) ?? []
-  const availabilityText = !status
-    ? "正在读取远程访问状态…"
-    : !status.settings.enabled
-      ? "内置统一机器人未启用"
-      : !principalAvailable
-        ? (remoteAccess?.principalReason ?? "登录验证尚未完成")
-        : enabled
-          ? "已允许从招乎在此 Feature 下新建会话"
-          : "尚未开放从招乎新建会话"
+  const remoteCreationText = enabled
+    ? "已允许从招乎在此 Feature 下新建会话"
+    : "尚未开放从招乎新建会话"
+  const featureImAvailabilityText = featureImManagementAvailable
+    ? "招乎已连接并完成登录验证"
+    : (featureImUnavailableReason ?? "招乎当前不可用")
 
   const toggleFeatureCreation = async (nextEnabled: boolean): Promise<void> => {
-    if (busy || (!nextEnabled && !enabled) || (nextEnabled && !principalAvailable)) return
+    if (busy || (!nextEnabled && !enabled) || (nextEnabled && !featureImManagementAvailable)) return
     setBusy(true)
     try {
       const next = await window.api.builtinRobot.setFeatureRemoteAccess(
@@ -6282,31 +6281,78 @@ function RemoteFeatureAccessPanel({
       <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border px-3 py-3">
         <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
           <Bot className="size-4 shrink-0 text-muted-foreground" />
-          <span className="truncate">Feature 远程新建会话</span>
+          <span className="truncate">接入招乎</span>
         </div>
-        <Switch
-          aria-label="允许从招乎在此 Feature 下新建会话"
-          checked={enabled}
-          disabled={busy || (!enabled && !principalAvailable)}
-          onCheckedChange={(checked) => void toggleFeatureCreation(checked)}
-        />
-      </div>
-      <div className="space-y-3 p-3">
-        <div className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">
+        <div
+          className="flex min-w-0 items-center gap-1.5 text-[11px] font-normal text-muted-foreground"
+          title={featureImAvailabilityText}
+        >
           <span
             className={cn(
-              "mt-1.5 size-2 shrink-0 rounded-full",
-              enabled ? "bg-emerald-500" : "bg-amber-500"
+              "size-2 shrink-0 rounded-full",
+              featureImManagementAvailable ? "bg-emerald-500" : "bg-amber-500"
             )}
           />
-          <span>{availabilityText}</span>
+          <span className="truncate">{featureImAvailabilityText}</span>
         </div>
+      </div>
+      <div className="space-y-3 p-3">
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-1.5 text-sm font-semibold">
+            <span className="truncate">通过招乎管理特性</span>
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label="查看通过招乎管理特性的说明"
+                  >
+                    <Info className="size-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
+                  创建的新会话将自动接入招乎，托管模式决策和需要人工审批推进的阶段也可经由招乎审批。
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+          <Switch
+            aria-label="通过招乎管理特性"
+            checked={featureImManagementEnabled}
+            disabled={
+              updatingFeatureImManagement ||
+              projectInteractionDisabled ||
+              (!featureImManagementEnabled && !featureImManagementAvailable)
+            }
+            onCheckedChange={onFeatureImManagementChange}
+          />
+        </div>
+        <p className="text-xs leading-5 text-muted-foreground">
+          {featureImManagementEnabled
+            ? "后续创建的特性顶层会话将自动接入招乎"
+            : "关闭只影响后续会话，不撤销已有会话授权"}
+        </p>
+      </div>
+      <div className="space-y-3 border-t border-border p-3">
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+            <span className="truncate">从招乎发起新会话</span>
+          </div>
+          <Switch
+            aria-label="允许从招乎在此 Feature 下新建会话"
+            checked={enabled}
+            disabled={busy || (!enabled && !featureImManagementAvailable)}
+            onCheckedChange={(checked) => void toggleFeatureCreation(checked)}
+          />
+        </div>
+        <p className="text-xs leading-5 text-muted-foreground">{remoteCreationText}</p>
         {relatedSessions.length === 0 ? (
           <p className="rounded border border-dashed px-2.5 py-3 text-xs text-muted-foreground">
             当前没有已接入的会话。打开上方开关后，可在招乎通过 /会话 选择此 Feature 并新建会话。
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className="max-h-72 space-y-2 overflow-y-auto">
             {relatedSessions.map((grant) => (
               <div key={grant.grantId} className="rounded border px-2.5 py-2">
                 <div className="flex items-center justify-between gap-2 text-xs">
@@ -6405,15 +6451,16 @@ function FeatureDetailPage({
         featureCurrentNodeStatus
       )
     : 0
-  const featureProgressPercent = progressPercentFromValues(featureProgressIndex, featureProgressTotal)
-  const featureOverallStatus =
-    detail?.run.overallStatus ?? selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
+  const featureProgressPercent = progressPercentFromValues(
+    featureProgressIndex,
+    featureProgressTotal
+  )
+  const featureOverallStatus = detail?.run.overallStatus ??
+    selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
   const managedRun = detail?.run.managedRun
   const managedRunIsRunning = managedRun?.status === "running"
   const managedRunSessionThreadId = managedRun?.currentSession?.threadId
-  const managedRunStatus = managedRun
-    ? managedRunStatusToHarnessStatus(managedRun.status)
-    : null
+  const managedRunStatus = managedRun ? managedRunStatusToHarnessStatus(managedRun.status) : null
   const nodeGroups = useMemo(() => groupStageNodes(detail?.run.nodes ?? []), [detail])
   const selectedGroup =
     nodeGroups.length > 0
@@ -6441,7 +6488,10 @@ function FeatureDetailPage({
   const threads = useAppStore((s) => s.threads)
   const allThreadStates = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
-  const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
+  const threadsById = useMemo(
+    () => new Map(threads.map((thread) => [thread.thread_id, thread])),
+    [threads]
+  )
   const managedSessionTitles = useMemo(
     () =>
       new Map(
@@ -6455,11 +6505,14 @@ function FeatureDetailPage({
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
   const [skippingNodeId, setSkippingNodeId] = useState<string | null>(null)
   const [updatingManagedRun, setUpdatingManagedRun] = useState(false)
-  const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<
-    "approve" | "reject" | null
-  >(null)
+  const [updatingFeatureImManagement, setUpdatingFeatureImManagement] = useState(false)
+  const [featureImRobotStatus, setFeatureImRobotStatus] = useState<BuiltinRobotStatus | null>(null)
+  const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
+    null
+  )
   const [managedRunDialogOpen, setManagedRunDialogOpen] = useState(false)
   const [managedRunWorkspacePath, setManagedRunWorkspacePath] = useState("")
+  const [managedRunImEnabled, setManagedRunImEnabled] = useState(true)
   const [openingManagedRunDialog, setOpeningManagedRunDialog] = useState(false)
   const [pickingManagedRunWorkspace, setPickingManagedRunWorkspace] = useState(false)
   const managedRunActionInFlightRef = useRef(false)
@@ -6471,6 +6524,38 @@ function FeatureDetailPage({
     isViewingSession && activeSessionThreadId ? "session" : "feature"
   )
   const projectInteractionDisabled = Boolean(unbound || projectDeleted)
+  const featureImManagementAvailable =
+    featureImRobotStatus?.settings.enabled === true &&
+    featureImRobotStatus.connectionState === "online" &&
+    featureImRobotStatus.identityState === "verified"
+  const featureImUnavailableReason = !featureImRobotStatus
+    ? "正在读取招乎连接状态…"
+    : !featureImRobotStatus.settings.enabled
+      ? "内置统一机器人未启用"
+      : featureImRobotStatus.connectionState !== "online"
+        ? "统一机器人尚未连接"
+        : featureImRobotStatus.identityState !== "verified"
+          ? (featureImRobotStatus.lastError ?? "登录验证尚未完成")
+          : null
+
+  useEffect(() => {
+    let active = true
+    void window.api.builtinRobot
+      .getStatus()
+      .then((status) => {
+        if (active) setFeatureImRobotStatus(status)
+      })
+      .catch(() => {
+        if (active) setFeatureImRobotStatus(null)
+      })
+    const unsubscribe = window.api.builtinRobot.onStatus((status) => {
+      if (active) setFeatureImRobotStatus(status)
+    })
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [])
 
   useEffect(() => {
     if (!detail) {
@@ -6592,6 +6677,38 @@ function FeatureDetailPage({
     threadsById
   ])
 
+  const handleFeatureImManagementChange = useCallback(
+    async (enabled: boolean): Promise<void> => {
+      if (!detail || updatingFeatureImManagement) return
+      setUpdatingFeatureImManagement(true)
+      try {
+        if (enabled) {
+          const status = await window.api.builtinRobot.getStatus()
+          setFeatureImRobotStatus(status)
+          if (
+            !status.settings.enabled ||
+            status.connectionState !== "online" ||
+            status.identityState !== "verified"
+          ) {
+            throw new Error(status.lastError || "统一机器人尚未连接或登录验证尚未完成")
+          }
+        }
+        await window.api.harnessBoard.setFeatureImManagement({
+          projectId: detail.project.projectId,
+          featureId: detail.run.slug,
+          enabled
+        })
+        await onRefresh()
+        toast.success(enabled ? "后续特性会话将接入招乎" : "后续会话将不再发送消息到招乎")
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+      } finally {
+        setUpdatingFeatureImManagement(false)
+      }
+    },
+    [detail, onRefresh, updatingFeatureImManagement]
+  )
+
   const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
     if (pickingManagedRunWorkspace) return
     setPickingManagedRunWorkspace(true)
@@ -6604,7 +6721,8 @@ function FeatureDetailPage({
   }, [pickingManagedRunWorkspace])
 
   const handleOpenManagedRunDialog = useCallback(async (): Promise<void> => {
-    if (!detail || updatingManagedRun || openingManagedRunDialog || projectInteractionDisabled) return
+    if (!detail || updatingManagedRun || openingManagedRunDialog || projectInteractionDisabled)
+      return
     setOpeningManagedRunDialog(true)
     try {
       await window.api.harnessBoard.validateManagedRunStart({
@@ -6619,6 +6737,7 @@ function FeatureDetailPage({
       const configuredWorkspacePath = normalizeWorkspacePath(detail.project.sessionWorkspacePath)
       const defaultWorkspacePath = latestSessionWorkspacePath ?? configuredWorkspacePath
       setManagedRunWorkspacePath(defaultWorkspacePath ?? "")
+      setManagedRunImEnabled(featureImManagementAvailable)
       setManagedRunDialogOpen(true)
     } catch (error) {
       toast.error(cleanIpcError(error))
@@ -6628,6 +6747,7 @@ function FeatureDetailPage({
   }, [
     allThreadStates,
     detail,
+    featureImManagementAvailable,
     openingManagedRunDialog,
     projectInteractionDisabled,
     threadsById,
@@ -6635,7 +6755,11 @@ function FeatureDetailPage({
   ])
 
   const handleManagedRunChange = useCallback(
-    async (shouldStart: boolean, workspacePath?: string): Promise<boolean> => {
+    async (
+      shouldStart: boolean,
+      workspacePath?: string,
+      enableImManagement = true
+    ): Promise<boolean> => {
       if (
         !detail ||
         updatingManagedRun ||
@@ -6653,6 +6777,11 @@ function FeatureDetailPage({
         if (shouldStart) {
           const confirmedWorkspacePath = normalizeWorkspacePath(workspacePath)
           if (!confirmedWorkspacePath) throw new Error("请选择本次托管使用的会话工作区")
+          await window.api.harnessBoard.setFeatureImManagement({
+            projectId: detail.project.projectId,
+            featureId: detail.run.slug,
+            enabled: enableImManagement
+          })
           const startedRun = await window.api.harnessBoard.startManagedRun({
             projectId: detail.project.projectId,
             featureId: detail.run.slug,
@@ -6693,17 +6822,20 @@ function FeatureDetailPage({
   )
 
   const handleConfirmManagedRun = useCallback(async (): Promise<void> => {
-    const started = await handleManagedRunChange(true, managedRunWorkspacePath)
+    const started = await handleManagedRunChange(true, managedRunWorkspacePath, managedRunImEnabled)
     if (started) setManagedRunDialogOpen(false)
-  }, [handleManagedRunChange, managedRunWorkspacePath])
+  }, [handleManagedRunChange, managedRunImEnabled, managedRunWorkspacePath])
 
-  const handleContextReminderSessionCreated = useCallback((threadId: string): void => {
-    if (!threadId) return
-    setSelectedSessionState({ detailKey, threadId })
-    onActiveSessionChange?.(threadId)
-    setActiveDetailTab("session")
-    onSessionViewChange?.(true)
-  }, [detailKey, onActiveSessionChange, onSessionViewChange])
+  const handleContextReminderSessionCreated = useCallback(
+    (threadId: string): void => {
+      if (!threadId) return
+      setSelectedSessionState({ detailKey, threadId })
+      onActiveSessionChange?.(threadId)
+      setActiveDetailTab("session")
+      onSessionViewChange?.(true)
+    },
+    [detailKey, onActiveSessionChange, onSessionViewChange]
+  )
 
   const handleHumanGateDecision = useCallback(
     async (decision: "approve" | "reject"): Promise<void> => {
@@ -6731,14 +6863,18 @@ function FeatureDetailPage({
     [detail, humanGateDecisionBusy, onRefresh]
   )
 
-  const canSkipNode = useCallback((node: HarnessRunNode | null): boolean => Boolean(
-    detail &&
-    node &&
-    detail.run.skipNodeAvailable &&
-    !projectInteractionDisabled &&
-    node.id === detail.run.currentNodeId &&
-    node.status.uiKind !== "done"
-  ), [detail, projectInteractionDisabled])
+  const canSkipNode = useCallback(
+    (node: HarnessRunNode | null): boolean =>
+      Boolean(
+        detail &&
+        node &&
+        detail.run.skipNodeAvailable &&
+        !projectInteractionDisabled &&
+        node.id === detail.run.currentNodeId &&
+        node.status.uiKind !== "done"
+      ),
+    [detail, projectInteractionDisabled]
+  )
 
   const handleSkipNode = useCallback(
     async (node: HarnessRunNode): Promise<void> => {
@@ -6990,9 +7126,7 @@ function FeatureDetailPage({
                     className={cn(
                       harnessDetailSecondaryButtonClassName,
                       "w-[160px]",
-                      managedRunIsRunning
-                        ? "text-status-critical"
-                        : "text-status-info"
+                      managedRunIsRunning ? "text-status-critical" : "text-status-info"
                     )}
                     onClick={() => {
                       if (managedRunIsRunning) {
@@ -7164,7 +7298,9 @@ function FeatureDetailPage({
                 </div>
               </section>
             )}
-            <section className={cn(harnessSurfaceClassName, "isolate relative mb-4 overflow-hidden p-4")}>
+            <section
+              className={cn(harnessSurfaceClassName, "isolate relative mb-4 overflow-hidden p-4")}
+            >
               <video
                 aria-hidden="true"
                 autoPlay
@@ -7271,6 +7407,14 @@ function FeatureDetailPage({
                 <RemoteFeatureAccessPanel
                   projectId={detail.project.projectId}
                   featureSlug={detail.run.slug}
+                  featureImManagementEnabled={detail.run.imManagementEnabled === true}
+                  featureImManagementAvailable={featureImManagementAvailable}
+                  featureImUnavailableReason={featureImUnavailableReason}
+                  updatingFeatureImManagement={updatingFeatureImManagement}
+                  projectInteractionDisabled={projectInteractionDisabled}
+                  onFeatureImManagementChange={(checked) =>
+                    void handleFeatureImManagementChange(checked)
+                  }
                   onOpenThread={handleHookSessionSelect}
                 />
                 <section className={cn(harnessSurfaceClassName, "p-3")}>
@@ -7396,6 +7540,24 @@ function FeatureDetailPage({
                 )}
                 选择文件夹
               </Button>
+            </div>
+            <div className="mt-2 flex items-start justify-between gap-4 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
+              <div>
+                <div className="text-sm font-medium">通过招乎管理托管运行</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {featureImUnavailableReason
+                    ? featureImUnavailableReason
+                    : "确认后同步更新“通过招乎管理特性”开关"}
+                </div>
+              </div>
+              <Switch
+                aria-label="通过招乎管理托管运行"
+                checked={managedRunImEnabled}
+                disabled={
+                  updatingManagedRun || (!managedRunImEnabled && !featureImManagementAvailable)
+                }
+                onCheckedChange={setManagedRunImEnabled}
+              />
             </div>
           </div>
           <DialogFooter>
@@ -7554,10 +7716,38 @@ function ProjectFeatureSidebar({
 
     const scrollIntent = scrollIntentRef.current
     if (scrollIntent === "top") {
-      viewport.scrollTop = 0
-      scrollTopRef.current = 0
+      const targetProjectId = isViewingSession
+        ? null
+        : (selectedFeature?.projectId ?? selectedProjectId)
+      const targetProject = groups.find((group) => group.project.projectId === targetProjectId)
+      const targetSlug = selectedFeature?.slug
+      const targetFeature = targetProject?.featureGroups.find((group) => group.slug === targetSlug)
+      if (
+        targetProject &&
+        (collapsedKeys.has(targetProject.key) ||
+          (targetFeature && collapsedKeys.has(targetFeature.key)))
+      ) {
+        return
+      }
+      const targetKey = targetFeature?.key ?? targetProject?.key
+      const target = Array.from(
+        viewport.querySelectorAll<HTMLElement>("[data-sidebar-group-key]")
+      ).find((element) => element.dataset.sidebarGroupKey === targetKey)
+      if (target) {
+        const viewportRect = viewport.getBoundingClientRect()
+        const targetRect = target.getBoundingClientRect()
+        if (targetRect.top < viewportRect.top) {
+          viewport.scrollTop += targetRect.top - viewportRect.top
+        } else if (targetRect.bottom > viewportRect.bottom) {
+          viewport.scrollTop += targetRect.bottom - viewportRect.bottom
+        }
+      } else if (!targetProjectId) {
+        viewport.scrollTop = 0
+      }
+      scrollTopRef.current = viewport.scrollTop
+      preserveScrollUntilRef.current = 0
       pendingScrollRestoreRef.current = null
-      scrollIntentRef.current = null
+      if (target || !targetProjectId) scrollIntentRef.current = null
     } else if (scrollIntent === "preserve") {
       const targetScrollTop = pendingScrollRestoreRef.current ?? scrollTopRef.current
       if (targetScrollTop > 0) {
@@ -7765,6 +7955,7 @@ function ProjectFeatureSidebar({
                   </div>
                 )}
                 <div
+                  data-sidebar-group-key={group.key}
                   className={cn(
                     "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
                     projectSelected
@@ -7813,7 +8004,9 @@ function ProjectFeatureSidebar({
                           </span>
                         )
                       )}
-                      {hasUnreadSession && <span className="size-2 rounded-full bg-status-info shrink-0" />}
+                      {hasUnreadSession && (
+                        <span className="size-2 rounded-full bg-status-info shrink-0" />
+                      )}
                     </div>
                   </div>
                   <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
@@ -7912,6 +8105,7 @@ function ProjectFeatureSidebar({
                       return (
                         <div key={featureGroup.key} className="space-y-1">
                           <div
+                            data-sidebar-group-key={featureGroup.key}
                             className={cn(
                               "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
                               featureSelected
@@ -7941,7 +8135,9 @@ function ProjectFeatureSidebar({
                             >
                               {featureGroup.title}
                             </span>
-                            {hasUnreadFeatureSession && <span className="size-2 rounded-full bg-status-info shrink-0" />}
+                            {hasUnreadFeatureSession && (
+                              <span className="size-2 rounded-full bg-status-info shrink-0" />
+                            )}
                             <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
                               <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                                 {featureGroup.sessions.length}
@@ -9292,10 +9488,7 @@ export function HarnessBoardView({
   }, [loadProjectDetail])
 
   const patchCachedProjectRuns = useCallback(
-    (
-      projectId: string,
-      patchRun: (run: HarnessFeatureSummary) => HarnessFeatureSummary
-    ): void => {
+    (projectId: string, patchRun: (run: HarnessFeatureSummary) => HarnessFeatureSummary): void => {
       const projectDetail = detailsByProjectIdRef.current[projectId]
       if (!projectDetail) return
       let changed = false
@@ -10696,15 +10889,7 @@ export function HarnessBoardView({
 
   const projectSidebarGroups = useMemo<ProjectSessionProjectGroup[]>(() => {
     const groups: ProjectSessionProjectGroup[] = []
-    // Group pinning is reserved for project/feature detail pages. Session selection
-    // should only highlight/open the thread; otherwise read-only clicks and focus
-    // reloads can look like project/feature activity and unexpectedly reorder groups.
-    const pinnedFeature = selectedFeature && !isViewingSession ? selectedFeature : null
-    const pinnedProjectId = pinnedFeature
-      ? pinnedFeature.projectId
-      : selectedProjectId && !selectedFeature && !selectedProjectSession && !isViewingSession
-        ? selectedProjectId
-        : null
+    // Detail and session selection must not change the sidebar group order.
     const knownProjectIds = new Set(sidebarProjects.map((project) => project.projectId))
     const featureOrderByProject = new Map<string, Map<string, number>>()
     for (const [projectId, detail] of Object.entries(detailsByProjectId)) {
@@ -10731,12 +10916,6 @@ export function HarnessBoardView({
           ...(deleted ? { deleted: true } : {})
         }))
         .sort((a, b) => {
-          const aPinned =
-            pinnedFeature?.projectId === project.projectId && pinnedFeature.slug === a.slug
-          const bPinned =
-            pinnedFeature?.projectId === project.projectId && pinnedFeature.slug === b.slug
-          if (aPinned !== bPinned) return aPinned ? -1 : 1
-
           // Keep feature group order independent from session updated_at. Message sends
           // should move the active session inside its group, not promote the whole feature.
           const order = featureOrderByProject.get(project.projectId)
@@ -10757,8 +10936,7 @@ export function HarnessBoardView({
       const projectSessions = getProjectLevelSessions(harnessSessionIndex, project.projectId)
       if (sessionsBySlug.size === 0 && projectSessions.length === 0) continue
 
-      const section: ProjectFeatureSessionGroupSection =
-        pinnedProjectId && project.projectId === pinnedProjectId ? "current" : "other"
+      const section: ProjectFeatureSessionGroupSection = "other"
 
       groups.push({
         key: `project:${project.projectId}`,
@@ -10792,8 +10970,7 @@ export function HarnessBoardView({
         projectId,
         readThreadHarnessProjectName(firstProjectSessionThread ?? firstFeatureThread)
       )
-      const section: ProjectFeatureSessionGroupSection =
-        pinnedProjectId && projectId === pinnedProjectId ? "current" : "other"
+      const section: ProjectFeatureSessionGroupSection = "other"
 
       groups.push({
         key: `deleted-project:${projectId}`,
@@ -10805,30 +10982,17 @@ export function HarnessBoardView({
       })
     }
 
-    if (!pinnedProjectId) return groups
-
     return groups
-      .map((group, index) => {
-        const priority = group.section === "current" ? 0 : group.section === "project" ? 1 : 2
-        return { group, index, priority }
-      })
-      .sort((a, b) => a.priority - b.priority || a.index - b.index)
-      .map(({ group }) => group)
   }, [
     detailsByProjectId,
     harnessSessionIndex,
-    isViewingSession,
     resolvedSidebarProjectIds,
     sidebarProjects,
-    selectedFeature,
-    selectedProjectId,
-    selectedProjectSession,
     threadsById
   ])
 
-  // Automatic sidebar folding follows the same rule as group pinning: only
-  // project/feature detail pages move the user's sidebar focus. Opening a
-  // session should highlight the thread without collapsing unrelated groups.
+  // Detail navigation expands its target without folding unrelated projects.
+  // Session selection preserves the user's sidebar expansion state.
   const autoCollapseFeature = selectedFeature && !isViewingSession ? selectedFeature : null
   const autoCollapseProjectId = autoCollapseFeature
     ? autoCollapseFeature.projectId
@@ -10836,31 +11000,28 @@ export function HarnessBoardView({
       ? selectedProjectId
       : null
 
+  const expandedDetailKeyRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!autoCollapseProjectId) return
+    if (!autoCollapseProjectId) {
+      expandedDetailKeyRef.current = null
+      return
+    }
+    const targetSlug = autoCollapseFeature?.slug
+    const detailKey = JSON.stringify([autoCollapseProjectId, targetSlug])
+    if (expandedDetailKeyRef.current === detailKey) return
+    const targetGroup = projectSidebarGroups.find(
+      (group) => group.project.projectId === autoCollapseProjectId
+    )
+    if (!targetGroup) return
+    const targetFeature = targetGroup.featureGroups.find((group) => group.slug === targetSlug)
+    if (targetSlug && !targetFeature) return
+    expandedDetailKeyRef.current = detailKey
 
     setCollapsedFeatureKeys((current) => {
       const next = new Set(current)
-      let changed = false
-
-      for (const group of projectSidebarGroups) {
-        const isCurrentProject = group.project.projectId === autoCollapseProjectId
-        const currentFeatureGroup = autoCollapseFeature
-          ? group.featureGroups.find(
-              (featureGroup) => featureGroup.slug === autoCollapseFeature.slug
-            )
-          : null
-
-        if (isCurrentProject) {
-          if (next.delete(group.key)) changed = true
-          if (currentFeatureGroup && next.delete(currentFeatureGroup.key)) changed = true
-        } else if (!isCurrentProject && !next.has(group.key)) {
-          next.add(group.key)
-          changed = true
-        }
-      }
-
-      return changed ? next : current
+      const projectChanged = next.delete(targetGroup.key)
+      const featureChanged = targetFeature ? next.delete(targetFeature.key) : false
+      return projectChanged || featureChanged ? next : current
     })
   }, [
     autoCollapseFeature?.projectId,

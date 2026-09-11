@@ -189,9 +189,6 @@ import {
   type SelectedAttachmentFileGrant
 } from "../../../../shared/file-attachment"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
-import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
-import { projectVisibleChatSearchContent } from "../../../../shared/chat-search-visible-content"
-import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
 import { resolveChatSearchContiguousTailStart } from "@/lib/chat-search-gap-boundary"
 import { createMessageIdIndexLookup, type MessageIdIndexLookup } from "@/lib/lazy-message-id-index"
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
@@ -245,21 +242,21 @@ import { ContextCompactionCard } from "./ContextCompactionCard"
 import { HookLogModal } from "./HookLogViews"
 import {
   shouldHydrateDurableSearchMatch,
+  boundChatSearchCorpus,
+  chatSearchDocumentUnits,
   type ChatSearchCorpus,
   type ChatSearchDocument
 } from "@/lib/chat-search-matches"
 import { createChatMessageProjector } from "@/lib/chat-message-projection"
+import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
+import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../../../shared/chat-search-plan"
+import { areChatSearchPlansEqual, type ChatSearchReveal } from "../../../../shared/chat-search-types"
 import { getChatThreadProjectionRuntime } from "@/lib/chat-thread-projection-cache"
 import {
   chatScrollTailMessageIdentity,
   classifyChatScrollTailChange,
   shouldMarkChatTailContentGrowth
 } from "@/lib/chat-scroll-tail-change"
-import {
-  buildBoundedChatSearchText,
-  CHAT_SEARCH_DOCUMENT_TEXT_LIMIT
-} from "@/lib/bounded-chat-search-text"
-import { buildStreamingMarkdownPreview } from "@/lib/streaming-markdown-schedule"
 import { loadWorkspaceFilesDeduped, resumeWorkspaceFilesDeduped } from "@/lib/workspace-file-load"
 import {
   createChatScrollState,
@@ -1731,6 +1728,19 @@ export function ChatContainer({
   const durableMessageWindowGenerationRef = useRef(0)
   const chatViewMountedRef = useRef(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [searchReveal, setSearchReveal] = useState<ChatSearchReveal | null>(null)
+  const searchIndexerRef = useRef<ReturnType<typeof createChatSearchIndexer> | null>(null)
+  const searchLocalCorpus = useCallback((corpus: ChatSearchCorpus, query: string) => {
+    searchIndexerRef.current ??= createChatSearchIndexer()
+    return searchIndexerRef.current.search(corpus, query)
+  }, [])
+  const cancelLocalSearch = useCallback(() => searchIndexerRef.current?.cancel(), [])
+  useEffect(() => {
+    if (searchOpen) return
+    searchIndexerRef.current?.dispose()
+    searchIndexerRef.current = null
+  }, [searchOpen])
+  useEffect(() => () => searchIndexerRef.current?.dispose(), [threadId])
   const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
@@ -3352,15 +3362,6 @@ export function ChatContainer({
     liveDisplayProjection
   )
   const displayMessages = displayMessageProjection.messages
-  const streamingSearchMessageIdRef = useRef<string | null>(null)
-  streamingSearchMessageIdRef.current = isLoading
-    ? (displayMessages.findLast((message) =>
-        messageHasVisibleRow(
-          message,
-          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
-        )
-      )?.id ?? null)
-    : null
   const displayMessagesContentVersion = displayMessageProjection.contentVersion
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
   const chatScrollQuestionStructureRevision =
@@ -3565,57 +3566,24 @@ export function ChatContainer({
       const hasHookLogChip = Boolean(hookLogBucket?.entries.length)
       if (!messageHasVisibleRow(message, hasHookLogChip)) return null
 
-      // Reasoning and Hook details are folded into controls/modals and have no highlightable text
-      // in the transcript row. Search only content that reveal can actually expose in this row.
-      let displayContent =
-        message.role === "user" && typeof message.content === "string"
-          ? cleanUserAttachmentContentForDisplay(message.content)
-          : message.content
+      // Semantic cleanup runs in the worker only after whole-block admission. Splitting a
+      // think/attachment wrapper before stripping it could expose hidden transport content.
       const hasVisibleReasoning =
         message.role === "assistant" && Boolean(normalizeVisibleReasoningText(message.reasoning))
-      if (hasVisibleReasoning) {
-        if (typeof displayContent === "string") {
-          displayContent = stripThinkBlocksForDisplay(displayContent)
-        } else if (Array.isArray(displayContent)) {
-          displayContent = displayContent.map((block) =>
-            block.type === "text" && block.text
-              ? { ...block, text: stripThinkBlocksForDisplay(block.text) }
-              : block
-          )
-        }
-      }
-      let visibleContent: string
-      if (
-        message.role === "assistant" &&
-        message.id === streamingSearchMessageIdRef.current &&
-        (typeof displayContent === "string" || Array.isArray(displayContent))
-      ) {
-        const textBlocks =
-          typeof displayContent === "string"
-            ? [displayContent]
-            : displayContent.flatMap((block) =>
-                block.type === "text" && block.text ? [block.text] : []
-              )
-        visibleContent = textBlocks
-          .flatMap((block) => {
-            const preview = buildStreamingMarkdownPreview(block)
-            return [preview.head, preview.tail].filter(Boolean)
-          })
-          .map((part) => projectVisibleChatSearchContent(message.role, part))
-          .join("\n")
-      } else {
-        visibleContent = projectVisibleChatSearchContent(message.role, displayContent)
-      }
-      const parts: unknown[] = [visibleContent]
-      for (const toolCall of message.tool_calls ?? []) {
-        parts.push(getCollapsedToolCallSummary(toolCall))
-      }
-      const text = buildBoundedChatSearchText(parts)
+      const plan = createChatSearchPlan(message.role, message.content, {
+        stripThink: hasVisibleReasoning
+      })
+      appendChatSearchToolSummaries(plan, message.tool_calls ?? [])
+      // Keep the source slices only; joining them would allocate a second corpus on the UI thread.
+      const textUnits = plan.segments.reduce((sum, segment) => sum + segment.raw.length + 1, 0)
       return {
         messageId: message.id,
-        text,
-        truncated: text.length >= CHAT_SEARCH_DOCUMENT_TEXT_LIMIT,
-        durableAuthoritative: hasVisibleReasoning,
+        text: "",
+        textUnits,
+        plan,
+        truncated: plan.truncated,
+        // A resident projection owns this row, even if partial. Counts cannot supplement a gap.
+        durableAuthoritative: true,
         sortIndex
       }
     },
@@ -3635,6 +3603,7 @@ export function ChatContainer({
     documentIndexById: Map<string, number>
   } | null>(null)
   const dynamicSearchDocumentsRef = useRef<{
+    truncated: boolean
     liveStructureVersion: number
     liveContentVersion: number
     displayIndexById: ReadonlyMap<string, number>
@@ -3642,214 +3611,315 @@ export function ChatContainer({
     documents: ChatSearchDocument[]
     documentIndexById: Map<string, number>
   } | null>(null)
-  const getSearchCorpus = useCallback((): ChatSearchCorpus => {
-    let cached = stableSearchDocumentsRef.current
-    let stableDocuments = cached?.documents
-    const stableIdentityMatches =
-      cached &&
-      cached.baseline === threadDisplayBaseline &&
-      cached.rawMessages === threadMessages &&
-      cached.indexById === displayMessageProjection.indexById &&
-      cached.buildDocument === buildSearchDocument &&
-      cached.gapBeforeMessageId === (historyWindowGap?.beforeMessageId ?? null)
-    if (cached && stableIdentityMatches && cached.contentVersion !== messagesContentVersion) {
-      let requiresRebuild = false
-      let textUnits = cached.textUnits
-      const nextDocuments = [...cached.documents]
-      for (const changedMessage of displayMessageProjection.changedMessages) {
-        const cachedDocumentIndex = cached.documentIndexById.get(changedMessage.id)
-        const baselineIndex = cached.baselineIndexLookup.findFirstIndex(changedMessage.id)
-        const belongsToCachedWindow =
-          baselineIndex >= cached.startIndex && baselineIndex < threadDisplayBaseline.length
-        if (cachedDocumentIndex === undefined) {
-          if (
-            belongsToCachedWindow &&
-            buildSearchDocument(
-              changedMessage,
-              displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
-            )
-          ) {
+  const getSearchCorpus = useCallback(
+    async (signal?: AbortSignal): Promise<ChatSearchCorpus> => {
+      let batchStart = performance.now()
+      const yieldIfNeeded = async (): Promise<void> => {
+        signal?.throwIfAborted()
+        if (performance.now() - batchStart < 4) return
+        await new Promise<void>((resolve) => setTimeout(resolve, 0))
+        signal?.throwIfAborted()
+        batchStart = performance.now()
+      }
+      let cached = stableSearchDocumentsRef.current
+      let stableDocuments = cached?.documents
+      const stableIdentityMatches =
+        cached &&
+        cached.baseline === threadDisplayBaseline &&
+        cached.rawMessages === threadMessages &&
+        cached.indexById === displayMessageProjection.indexById &&
+        cached.buildDocument === buildSearchDocument &&
+        cached.gapBeforeMessageId === (historyWindowGap?.beforeMessageId ?? null)
+      if (cached && stableIdentityMatches && cached.contentVersion !== messagesContentVersion) {
+        let requiresRebuild = false
+        let textUnits = cached.textUnits
+        const nextDocuments = [...cached.documents]
+        for (const changedMessage of displayMessageProjection.changedMessages) {
+          await yieldIfNeeded()
+          const cachedDocumentIndex = cached.documentIndexById.get(changedMessage.id)
+          const baselineIndex = cached.baselineIndexLookup.findFirstIndex(changedMessage.id)
+          const belongsToCachedWindow =
+            baselineIndex >= cached.startIndex && baselineIndex < threadDisplayBaseline.length
+          if (cachedDocumentIndex === undefined) {
+            if (
+              belongsToCachedWindow &&
+              buildSearchDocument(
+                changedMessage,
+                displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
+              )
+            ) {
+              requiresRebuild = true
+              break
+            }
+            continue
+          }
+          const nextDocument = buildSearchDocument(
+            changedMessage,
+            displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
+          )
+          if (!nextDocument) {
             requiresRebuild = true
             break
           }
-          continue
+          textUnits +=
+            chatSearchDocumentUnits(nextDocument) -
+            chatSearchDocumentUnits(nextDocuments[cachedDocumentIndex])
+          nextDocuments[cachedDocumentIndex] = nextDocument
         }
-        const nextDocument = buildSearchDocument(
-          changedMessage,
-          displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
-        )
-        if (!nextDocument) {
-          requiresRebuild = true
-          break
+        if (requiresRebuild) {
+          stableSearchDocumentsRef.current = null
+          cached = null
+        } else {
+          while (nextDocuments.length > 1 && textUnits > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) {
+            const removed = nextDocuments.shift()
+            if (removed) textUnits -= chatSearchDocumentUnits(removed)
+          }
+          cached.documents = nextDocuments
+          cached.documentIndexById = new Map(
+            nextDocuments.map((document, index) => [document.messageId, index] as const)
+          )
+          cached.textUnits = textUnits
+          cached.contentVersion = messagesContentVersion
+          stableDocuments = nextDocuments
         }
-        textUnits += nextDocument.text.length - nextDocuments[cachedDocumentIndex].text.length
-        nextDocuments[cachedDocumentIndex] = nextDocument
       }
-      if (requiresRebuild) {
-        stableSearchDocumentsRef.current = null
-        cached = null
-      } else {
-        while (nextDocuments.length > 1 && textUnits > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) {
-          textUnits -= nextDocuments.shift()?.text.length ?? 0
-        }
-        cached.documents = nextDocuments
-        cached.documentIndexById = new Map(
-          nextDocuments.map((document, index) => [document.messageId, index] as const)
-        )
-        cached.textUnits = textUnits
-        cached.contentVersion = messagesContentVersion
-        stableDocuments = nextDocuments
-      }
-    }
-    if (
-      !cached ||
-      cached.baseline !== threadDisplayBaseline ||
-      cached.rawMessages !== threadMessages ||
-      cached.indexById !== displayMessageProjection.indexById ||
-      cached.buildDocument !== buildSearchDocument ||
-      cached.gapBeforeMessageId !== (historyWindowGap?.beforeMessageId ?? null)
-    ) {
-      // The durable search API covers the complete persisted transcript. Keep the renderer-side
-      // corpus bounded to the already-visible recent page so opening search after paging through a
-      // very long task cannot synchronously stringify and index the entire hydrated history.
-      const documents: ChatSearchDocument[] = []
-      let textUnits = 0
-      // A resident gap makes the in-memory array non-contiguous. Index only the latest side of
-      // that gap locally; durable results provide the omitted prefix in database order. Otherwise
-      // merging "old resident prefix + durable gap + latest tail" could advertise a false order.
-      const contiguousTailStartIndex = resolveChatSearchContiguousTailStart(
-        threadMessages,
-        threadDisplayBaseline,
-        historyWindowGap?.beforeMessageId ?? null
-      )
-      const startIndex = Math.max(
-        contiguousTailStartIndex,
-        threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT
-      )
-      for (
-        let messageIndex = threadDisplayBaseline.length - 1;
-        messageIndex >= startIndex;
-        messageIndex -= 1
+      if (
+        !cached ||
+        cached.baseline !== threadDisplayBaseline ||
+        cached.rawMessages !== threadMessages ||
+        cached.indexById !== displayMessageProjection.indexById ||
+        cached.buildDocument !== buildSearchDocument ||
+        cached.gapBeforeMessageId !== (historyWindowGap?.beforeMessageId ?? null)
       ) {
-        const message = threadDisplayBaseline[messageIndex]
-        const sortIndex = displayMessageProjection.indexById.get(message.id)
-        if (sortIndex === undefined) continue
-        const document = buildSearchDocument(message, sortIndex)
-        if (!document) continue
-        if (
-          documents.length > 0 &&
-          textUnits + document.text.length > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        // The durable search API covers the complete persisted transcript. Keep the renderer-side
+        // corpus bounded to the already-visible recent page so opening search after paging through a
+        // very long task cannot synchronously stringify and index the entire hydrated history.
+        const documents: ChatSearchDocument[] = []
+        let textUnits = 0
+        // A resident gap makes the in-memory array non-contiguous. Index only the latest side of
+        // that gap locally; durable results provide the omitted prefix in database order. Otherwise
+        // merging "old resident prefix + durable gap + latest tail" could advertise a false order.
+        const contiguousTailStartIndex = resolveChatSearchContiguousTailStart(
+          threadMessages,
+          threadDisplayBaseline,
+          historyWindowGap?.beforeMessageId ?? null
+        )
+        const startIndex = Math.max(
+          contiguousTailStartIndex,
+          threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT
+        )
+        for (
+          let messageIndex = threadDisplayBaseline.length - 1;
+          messageIndex >= startIndex;
+          messageIndex -= 1
         ) {
-          break
+          await yieldIfNeeded()
+          const message = threadDisplayBaseline[messageIndex]
+          const sortIndex = displayMessageProjection.indexById.get(message.id)
+          if (sortIndex === undefined) continue
+          const document = buildSearchDocument(message, sortIndex)
+          if (!document) continue
+          if (
+            documents.length > 0 &&
+            textUnits + chatSearchDocumentUnits(document) > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+          ) {
+            break
+          }
+          documents.push(document)
+          textUnits += chatSearchDocumentUnits(document)
+          if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
         }
-        documents.push(document)
-        textUnits += document.text.length
-        if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
+        stableDocuments = documents.sort(
+          (left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0)
+        )
+        stableSearchDocumentsRef.current = {
+          baseline: threadDisplayBaseline,
+          baselineIndexLookup: createMessageIdIndexLookup(threadDisplayBaseline),
+          rawMessages: threadMessages,
+          indexById: displayMessageProjection.indexById,
+          buildDocument: buildSearchDocument,
+          gapBeforeMessageId: historyWindowGap?.beforeMessageId ?? null,
+          contentVersion: messagesContentVersion,
+          startIndex,
+          textUnits,
+          documents: stableDocuments,
+          documentIndexById: new Map(
+            stableDocuments.map((document, index) => [document.messageId, index] as const)
+          )
+        }
       }
-      stableDocuments = documents.sort(
-        (left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0)
-      )
-      stableSearchDocumentsRef.current = {
-        baseline: threadDisplayBaseline,
-        baselineIndexLookup: createMessageIdIndexLookup(threadDisplayBaseline),
-        rawMessages: threadMessages,
-        indexById: displayMessageProjection.indexById,
-        buildDocument: buildSearchDocument,
-        gapBeforeMessageId: historyWindowGap?.beforeMessageId ?? null,
-        contentVersion: messagesContentVersion,
-        startIndex,
-        textUnits,
-        documents: stableDocuments,
-        documentIndexById: new Map(
-          stableDocuments.map((document, index) => [document.messageId, index] as const)
+      let dynamicCache = dynamicSearchDocumentsRef.current
+      const rebuildDynamicDocuments = async (): Promise<typeof dynamicCache> => {
+        const documents: ChatSearchDocument[] = []
+        let textUnits = 0
+        const startIndex = Math.max(0, liveDisplayMessages.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+        let truncated = startIndex > 0
+        for (
+          let liveIndex = liveDisplayMessages.length - 1;
+          liveIndex >= startIndex;
+          liveIndex -= 1
+        ) {
+          await yieldIfNeeded()
+          const liveMessage = liveDisplayMessages[liveIndex]
+          const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+          if (sortIndex === undefined) continue
+          const message = displayMessages[sortIndex]
+          const document = message ? buildSearchDocument(message, sortIndex) : null
+          if (!document) continue
+          if (
+            documents.length > 0 &&
+            textUnits + chatSearchDocumentUnits(document) > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+          ) {
+            truncated = true
+            break
+          }
+          documents.push(document)
+          textUnits += chatSearchDocumentUnits(document)
+          if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) {
+            truncated ||= liveIndex > startIndex
+            break
+          }
+        }
+        documents.sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
+        dynamicCache = {
+          truncated,
+          liveStructureVersion: liveDisplayProjection.structureVersion,
+          liveContentVersion: liveDisplayProjection.contentVersion,
+          displayIndexById: displayMessageProjection.indexById,
+          buildDocument: buildSearchDocument,
+          documents,
+          documentIndexById: new Map(
+            documents.map((document, index) => [document.messageId, index])
+          )
+        }
+        dynamicSearchDocumentsRef.current = dynamicCache
+        return dynamicCache
+      }
+      if (
+        !dynamicCache ||
+        dynamicCache.liveStructureVersion !== liveDisplayProjection.structureVersion ||
+        dynamicCache.displayIndexById !== displayMessageProjection.indexById ||
+        dynamicCache.buildDocument !== buildSearchDocument
+      ) {
+        dynamicCache = await rebuildDynamicDocuments()
+      } else if (dynamicCache.liveContentVersion !== liveDisplayProjection.contentVersion) {
+        let requiresRebuild = false
+        dynamicCache = { ...dynamicCache, documents: [...dynamicCache.documents] }
+        for (const liveMessage of liveDisplayProjection.changedMessages) {
+          await yieldIfNeeded()
+          const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+          if (sortIndex === undefined) {
+            requiresRebuild = true
+            break
+          }
+          const message = displayMessages[sortIndex]
+          const document = message ? buildSearchDocument(message, sortIndex) : null
+          const documentIndex = dynamicCache.documentIndexById.get(liveMessage.id)
+          if (!document || documentIndex === undefined) {
+            requiresRebuild = true
+            break
+          }
+          dynamicCache.documents[documentIndex] = document
+        }
+        if (
+          requiresRebuild ||
+          dynamicCache.documents.reduce((sum, doc) => sum + chatSearchDocumentUnits(doc), 0) >
+            CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          dynamicCache = await rebuildDynamicDocuments()
+        } else {
+          dynamicCache.liveContentVersion = liveDisplayProjection.contentVersion
+          dynamicSearchDocumentsRef.current = dynamicCache
+        }
+      }
+      const corpus = boundChatSearchCorpus({
+        truncated: dynamicCache?.truncated,
+        stableDocuments: stableDocuments ?? [],
+        dynamicDocuments: dynamicCache?.documents ?? [],
+        dynamicMessageIds: liveDisplayProjection.messageIds
+      })
+      // Release excluded raw plans in the UI caches too, not only in the worker's projection cache.
+      const stableCache = stableSearchDocumentsRef.current
+      if (stableCache && stableCache.documents.length !== corpus.stableDocuments.length) {
+        stableCache.documents = [...corpus.stableDocuments]
+        stableCache.textUnits = stableCache.documents.reduce(
+          (sum, doc) => sum + chatSearchDocumentUnits(doc),
+          0
+        )
+        stableCache.documentIndexById = new Map(
+          stableCache.documents.map((doc, index) => [doc.messageId, index])
         )
       }
-    }
-    let dynamicCache = dynamicSearchDocumentsRef.current
-    const rebuildDynamicDocuments = (): typeof dynamicCache => {
-      const documents: ChatSearchDocument[] = []
-      let textUnits = 0
-      const startIndex = Math.max(0, liveDisplayMessages.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
-      for (
-        let liveIndex = liveDisplayMessages.length - 1;
-        liveIndex >= startIndex;
-        liveIndex -= 1
-      ) {
-        const liveMessage = liveDisplayMessages[liveIndex]
-        const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
-        if (sortIndex === undefined) continue
-        const message = displayMessages[sortIndex]
-        const document = message ? buildSearchDocument(message, sortIndex) : null
-        if (!document) continue
-        if (
-          documents.length > 0 &&
-          textUnits + document.text.length > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
-        ) {
-          break
-        }
-        documents.push(document)
-        textUnits += document.text.length
-        if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
+      if (dynamicCache && dynamicCache.documents.length !== corpus.dynamicDocuments.length) {
+        dynamicCache.documents = [...corpus.dynamicDocuments]
+        dynamicCache.documentIndexById = new Map(
+          dynamicCache.documents.map((doc, index) => [doc.messageId, index])
+        )
+        dynamicCache.truncated = true
       }
-      documents.sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
-      dynamicCache = {
-        liveStructureVersion: liveDisplayProjection.structureVersion,
-        liveContentVersion: liveDisplayProjection.contentVersion,
-        displayIndexById: displayMessageProjection.indexById,
-        buildDocument: buildSearchDocument,
-        documents,
-        documentIndexById: new Map(documents.map((document, index) => [document.messageId, index]))
-      }
-      dynamicSearchDocumentsRef.current = dynamicCache
-      return dynamicCache
-    }
-    if (
-      !dynamicCache ||
-      dynamicCache.liveStructureVersion !== liveDisplayProjection.structureVersion ||
-      dynamicCache.displayIndexById !== displayMessageProjection.indexById ||
-      dynamicCache.buildDocument !== buildSearchDocument
-    ) {
-      dynamicCache = rebuildDynamicDocuments()
-    } else if (dynamicCache.liveContentVersion !== liveDisplayProjection.contentVersion) {
-      let requiresRebuild = false
-      for (const liveMessage of liveDisplayProjection.changedMessages) {
-        const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
-        if (sortIndex === undefined) {
-          requiresRebuild = true
-          break
-        }
-        const message = displayMessages[sortIndex]
-        const document = message ? buildSearchDocument(message, sortIndex) : null
-        const documentIndex = dynamicCache.documentIndexById.get(liveMessage.id)
-        if (!document || documentIndex === undefined) {
-          requiresRebuild = true
-          break
-        }
-        dynamicCache.documents[documentIndex] = document
-      }
-      if (requiresRebuild) {
-        dynamicCache = rebuildDynamicDocuments()
-      } else {
-        dynamicCache.liveContentVersion = liveDisplayProjection.contentVersion
-      }
-    }
-    return {
-      stableDocuments: stableDocuments ?? [],
-      dynamicDocuments: dynamicCache?.documents ?? [],
-      dynamicMessageIds: liveDisplayProjection.messageIds
-    }
-  }, [
-    buildSearchDocument,
-    displayMessageProjection.indexById,
+      return corpus
+    },
+    [
+      buildSearchDocument,
+      displayMessageProjection.indexById,
+      displayMessages,
+      displayMessagesContentVersion,
+      liveDisplayProjection,
+      liveDisplayMessages,
+      historyWindowGap,
+      messagesContentVersion,
+      threadMessages,
+      threadDisplayBaseline
+    ]
+  )
+  const searchValidationInputsRef = useRef({
     displayMessages,
-    displayMessagesContentVersion,
-    liveDisplayProjection,
-    liveDisplayMessages,
-    historyWindowGap,
-    messagesContentVersion,
-    threadMessages,
-    threadDisplayBaseline
-  ])
+    indexes: displayMessageProjection.indexById,
+    buildSearchDocument
+  })
+  useLayoutEffect(() => {
+    searchValidationInputsRef.current = {
+      displayMessages,
+      indexes: displayMessageProjection.indexById,
+      buildSearchDocument
+    }
+  }, [displayMessages, displayMessageProjection.indexById, buildSearchDocument])
+  const validateSearchLocation = useCallback(
+    async (reveal: ChatSearchReveal, signal: AbortSignal) => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        signal.throwIfAborted()
+        const inputs = searchValidationInputsRef.current
+        const index = inputs.indexes.get(reveal.messageId)
+        const message = index === undefined ? undefined : inputs.displayMessages[index]
+        if (!message || index === undefined) return false
+        let doc = inputs.buildSearchDocument(message, index)
+        if (!doc?.plan) return false
+        for (const cache of [dynamicSearchDocumentsRef.current, stableSearchDocumentsRef.current]) {
+          const cachedIndex = cache?.documentIndexById.get(reveal.messageId)
+          const cached = cachedIndex === undefined ? undefined : cache?.documents[cachedIndex]
+          if (cached && areChatSearchPlansEqual(cached.plan, doc.plan)) {
+            doc = cached
+            break
+          }
+        }
+        searchIndexerRef.current ??= createChatSearchIndexer()
+        const valid = await searchIndexerRef.current.validate(doc, reveal.location, signal)
+        const current = searchValidationInputsRef.current
+        const currentIndex = current.indexes.get(reveal.messageId)
+        const latest =
+          currentIndex === undefined ? undefined : current.displayMessages[currentIndex]
+        if (
+          latest?.content === message.content &&
+          latest?.reasoning === message.reasoning &&
+          latest?.tool_calls === message.tool_calls
+        )
+          return valid
+      }
+      return false
+    },
+    []
+  )
+
   const setPendingDurableRevealMessageId = useCallback(
     (messageId: string | null): void => {
       pendingDurableSearchRevealIdRef.current = messageId
@@ -7490,12 +7560,20 @@ export function ChatContainer({
         <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground">
           <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-status-warning border-t-transparent" />
           <div className="min-w-0 flex-1">
-            <span>
-              模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
-              {modelRetry.maxRetries}
-              {modelRetry.delayMs > 0 && <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>}
-              …
-            </span>
+            {modelRetry.retryKind === "completion_gate" ? (
+              // 门禁那边的 reason 已经是一句完整的话（含 n/m），不要再套一层「模型暂时不可用」：
+              // 这一类重试不是模型不可用，是模型答了但答得不成立。
+              <span>{modelRetry.reason}</span>
+            ) : (
+              <span>
+                模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
+                {modelRetry.maxRetries}
+                {modelRetry.delayMs > 0 && (
+                  <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
+                )}
+                …
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -7566,7 +7644,11 @@ export function ChatContainer({
   )
 
   return (
-    <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
+    <div
+      ref={chatRootRef}
+      data-chat-thread-id={threadId}
+      className="relative flex flex-1 flex-col min-h-0 overflow-hidden"
+    >
       {remoteThreadInfo && !dismissedRemoteTipThreadIds.has(threadId) ? (
         <div className="flex shrink-0 items-start gap-2 border-b border-status-info/20 bg-status-info/5 px-4 py-2 text-xs">
           <Info className="mt-0.5 size-3.5 shrink-0 text-status-info" />
@@ -7605,6 +7687,10 @@ export function ChatContainer({
       ) : null}
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
+        validateSearchLocation={validateSearchLocation}
+        onCancelLocalSearch={cancelLocalSearch}
+        searchLocalCorpus={searchLocalCorpus}
+        onRevealSearchContext={setSearchReveal}
         open={searchOpen}
         onClose={closeSearch}
         getViewport={getViewport}
@@ -7817,6 +7903,7 @@ export function ChatContainer({
                     />
                   )}
                   <ChatMessageVirtualList
+                    searchReveal={searchOpen ? searchReveal : null}
                     messages={displayMessages}
                     visibleMessageIndexes={visibleMessageIndexes}
                     lastUserMessageIndex={lastUserMessageIndex}

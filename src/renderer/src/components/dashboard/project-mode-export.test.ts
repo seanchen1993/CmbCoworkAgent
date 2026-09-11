@@ -63,7 +63,7 @@ describe("project-mode Excel export", () => {
     expect(row).toHaveLength(PROJECT_MODE_PROJECT_EXPORT_HEADER.length)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("特性数")]).toBe(5)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("主 Agent 主动会话数")]).toBe(12)
-    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("DEV阶段会话数")]).toBe(7)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("DEV阶段轮次数")]).toBe(7)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("DEV关联特性数")]).toBe(3)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("系统约束有效读取次数")]).toBe(9)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("运行时 Hook 触发次数")]).toBe(13)

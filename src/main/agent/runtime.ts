@@ -37,6 +37,10 @@ import {
   type TurnCompletionRecoveryCallback
 } from "./turn-completion-integrity"
 import { getProjectThreadDataDirectory } from "./context-history-path"
+import {
+  withSubagentSessionCapture,
+  subagentSessionCallbacks
+} from "../services/subagent-session-capture"
 import { withRawApiCallCapture } from "../services/llm-api-request-capture"
 import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
 
@@ -250,8 +254,10 @@ import {
   invokeMcpToolWithPlaywrightInAppBrowserSupport
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
+  DeepSeekChatOpenAICompletions,
   InterleavedThinkingChatOpenAICompletions,
-  ReasoningDisplayChatOpenAICompletions
+  ReasoningDisplayChatOpenAICompletions,
+  ToolCallAwareChatOpenAICompletions
 } from "./interleaved-thinking-completions"
 import {
   createMalformedToolCallGuardMiddleware,
@@ -1977,7 +1983,8 @@ function taskInvocationOwnerId(config: { toolCall?: { id?: unknown }; toolCallId
  */
 export function wrapTaskToolWithOwnerMetadata(
   taskTool: DynamicStructuredTool,
-  soloTaskTraceManager?: SoloTaskTraceManager
+  soloTaskTraceManager?: SoloTaskTraceManager,
+  captureThreadId?: string
 ): DynamicStructuredTool {
   return tool(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2021,7 +2028,18 @@ export function wrapTaskToolWithOwnerMetadata(
       try {
         // Pass the ToolCall as input so the original re-derives config.toolCall.id
         // and preserves its Command/task-ToolMessage contract.
-        const result = await taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+        const invoke = () =>
+          taskTool.invoke(config?.toolCall ?? input, {
+            ...patchedConfig,
+            callbacks: subagentSessionCallbacks(patchedConfig.callbacks)
+          })
+        const result = await (captureThreadId && ownerId
+          ? withSubagentSessionCapture(
+              { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
+              typeof taskInput.description === "string" ? taskInput.description : "子代理",
+              invoke
+            )
+          : taskTool.invoke(config?.toolCall ?? input, patchedConfig))
         const sanitizedResult = stripTaskSubagentSummarizationState(result)
         if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", sanitizedResult)
         return sanitizedResult
@@ -2051,12 +2069,15 @@ export function wrapTaskToolWithOwnerMetadata(
  */
 function stampSubagentOwnerMetadata<T>(
   middleware: T,
-  soloTaskTraceManager?: SoloTaskTraceManager
+  soloTaskTraceManager?: SoloTaskTraceManager,
+  captureThreadId?: string
 ): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
     mw.tools = mw.tools.map((t) =>
-      t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager) : t
+      t?.name === "task"
+        ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager, captureThreadId)
+        : t
     )
   }
   return middleware
@@ -2942,7 +2963,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 generalPurposeAgent: false,
                 systemPrompt: taskSystemPrompt
               } as Parameters<typeof createSubAgentMiddleware>[0]),
-              soloTaskTraceManager
+              soloTaskTraceManager,
+              threadId
             )
           ]
         : []),
@@ -3850,7 +3872,8 @@ export interface ModelRetryHooks {
  */
 function createRetryingFetch(
   hooks?: ModelRetryHooks,
-  maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS
+  maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
+  capture?: { threadId?: string }
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
@@ -3900,7 +3923,9 @@ function createRetryingFetch(
         const requestedStream =
           typeof init?.body === "string" && init.body.includes('"stream":true')
         const attemptStartedAt = Date.now()
-        const res = await fetch(input, { ...init, signal: attemptCtrl.signal })
+        // Observe only attempts submitted to fetch, after cancellation checks.
+        const sendFetch = capture ? withRawApiCallCapture(fetch, capture.threadId) : fetch
+        const res = await sendFetch(input, { ...init, signal: attemptCtrl.signal })
 
         // IMPORTANT: do not cancel the per-attempt timeout yet for streaming
         // responses — we want the timeout to cover only the time up to the
@@ -4200,7 +4225,7 @@ export function getModelInstance(
     interleavedThinking?: boolean
     enableThinking?: boolean
     enableThinkingEffort?: boolean
-    thinkingEffort?: "high" | "max"
+    thinkingEffort?: "low" | "high" | "max"
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
@@ -4227,19 +4252,18 @@ export function getModelInstance(
   const topK = customConfig.topK ?? DEFAULT_TOP_K
   const thinkingEffort = customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT
   const thinkingConfigured = customConfig.enableThinking === true
+  const isDeepSeek = /deepseek/i.test(resolvedModel)
   // Compaction needs a final-text handoff, not a reasoning trace. Allowing a
   // thinking model here can spend the entire output budget on reasoning and
   // return empty content, so keep thinking exclusive to normal agent calls.
   const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
-  const retryingFetch =
-    retryHooks || maxRetryAttempts !== undefined
-      ? createRetryingFetch(retryHooks, maxRetryAttempts)
-      : defaultRetryingFetch
   const modelFetch =
-    purpose === "agent" && captureThreadId
-      ? withRawApiCallCapture(retryingFetch, captureThreadId)
-      : retryingFetch
+    purpose === "agent"
+      ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId })
+      : retryHooks || maxRetryAttempts !== undefined
+        ? createRetryingFetch(retryHooks, maxRetryAttempts)
+        : defaultRetryingFetch
 
   const baseFields = {
     model: resolvedModel,
@@ -4261,7 +4285,14 @@ export function getModelInstance(
         enable_thinking: enableThinking,
         ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})
       },
-      ...(enableThinking ? { thinking: { type: "enabled" } } : {})
+      ...(isDeepSeek
+        ? {
+            thinking: { type: enableThinking ? "enabled" : "disabled" },
+            ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})
+          }
+        : {
+            ...(enableThinking ? { thinking: { type: "enabled" } } : {})
+          })
     },
     configuration: {
       baseURL: customConfig.baseUrl,
@@ -4270,7 +4301,12 @@ export function getModelInstance(
   }
 
   let model: ChatOpenAI
-  if (enableThinking && customConfig.interleavedThinking) {
+  if (enableThinking && isDeepSeek) {
+    model = new ChatOpenAI({
+      ...baseFields,
+      completions: new DeepSeekChatOpenAICompletions(baseFields)
+    } as never)
+  } else if (enableThinking && /minimax/i.test(resolvedModel) && customConfig.interleavedThinking) {
     model = new ChatOpenAI({
       ...baseFields,
       completions: new InterleavedThinkingChatOpenAICompletions(baseFields, {
@@ -4291,7 +4327,10 @@ export function getModelInstance(
       completions: new ChatOpenAICompletions(baseFields)
     } as never)
   } else {
-    model = new ChatOpenAI(baseFields)
+    model = new ChatOpenAI({
+      ...baseFields,
+      completions: new ToolCallAwareChatOpenAICompletions(baseFields)
+    } as never)
   }
 
   return purpose === "context-compaction" ? configureLocalCompactionTokenEstimation(model) : model

@@ -20,6 +20,7 @@ import {
   OwnedClaimFence,
   SingleFlightBatchCoalescer,
   TimedOutPredecessorFence,
+  canUseBoundedCheckpointRecovery,
   isPathInsideAnyDirectory,
   runSettlementPhases,
   type RunSettlementPhase
@@ -169,6 +170,7 @@ import {
 } from "../../shared/stream-message-wire-mode"
 import {
   resolveStreamTranscriptFlush,
+  readStreamTranscriptReasoning,
   type QueuedStreamTranscriptMessage,
   type StreamTranscriptAssistantIdentity
 } from "./stream-transcript-flush"
@@ -3613,6 +3615,8 @@ function persistedMessageFromStreamPayload(payload: unknown): QueuedStreamTransc
     ? (kwargs.tool_calls as Message["tool_calls"])
     : undefined
   const streamContentMode = streamPayloadContentMode(payload)
+  const reasoningUpdate =
+    role === "assistant" ? readStreamTranscriptReasoning(payload, streamContentMode) : {}
   const streamToolCallContentMode = streamToolCallContentModeFromMessageMode(streamContentMode)
   const streamToolCallChunks: StreamToolCallChunk[] = Array.isArray(kwargs.tool_call_chunks)
     ? kwargs.tool_call_chunks.flatMap((value) => {
@@ -3629,6 +3633,7 @@ function persistedMessageFromStreamPayload(payload: unknown): QueuedStreamTransc
     : []
   if (
     role !== "tool" &&
+    !reasoningUpdate.reasoning &&
     (typeof content === "string" ? content.length === 0 : content.length === 0) &&
     (!toolCalls || toolCalls.length === 0) &&
     streamToolCallChunks.length === 0
@@ -3649,6 +3654,7 @@ function persistedMessageFromStreamPayload(payload: unknown): QueuedStreamTransc
     ...providerTuple,
     role,
     content,
+    ...reasoningUpdate,
     ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
     ...(role === "tool" && toolCallId ? { tool_call_id: toolCallId } : {}),
     ...(role === "tool" && name ? { name } : {}),
@@ -4675,10 +4681,40 @@ function notifyStreamDisconnectRetry(
     type: "custom",
     data: {
       type: "model_retry",
+      retryKind: "transport",
       attempt,
       maxRetries: STREAM_DISCONNECT_MAX_RETRIES,
       reason,
       delayMs: streamDisconnectRetryDelay(attempt)
+    }
+  })
+}
+
+/**
+ * 门禁续跑复用传输层重试的横幅。
+ *
+ * 对用户来说「模型被重试」和「模型被要求重答」是同一件事——这一轮多花了一次
+ * 模型调用、屏幕上会多出一段回答——不该一个是 2.2 秒的 toast、一个是常驻横幅。
+ * 两者的差别只在文案，由 retryKind 区分。
+ *
+ * 没有 delayMs：门禁不等待，判定完立刻跳回模型。横幅的存活区间因此是「门禁做出
+ * 判定」到「重答的第一个 token 到达」，由 renderer 既有的清除路径负责收尾
+ * （真实 assistant token 到达 / isLoading 转 false / 出错），无需额外的 clear 事件。
+ */
+function notifyTurnCompletionRetry(
+  window: BrowserWindow,
+  channel: string,
+  input: { kind: "defect" | "todo"; detail: string; attempt: number; maxAttempts: number }
+): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "model_retry",
+      retryKind: "completion_gate",
+      attempt: input.attempt,
+      maxRetries: input.maxAttempts,
+      reason: formatTurnCompletionRecoveryNotice(input),
+      delayMs: 0
     }
   })
 }
@@ -6155,11 +6191,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             // reclaim the replacement's queue after one of its setup awaits.
             setCurrentRunMessageQueueOwner(threadId, nextInvokeRunToken)
             const existingController = activeRuns.get(threadId)
+            let predecessorSettlement: "settled" | "timed_out" = "settled"
             if (existingController) {
               console.log("[Agent] Aborting existing stream for thread:", threadId)
               existingController.abort()
-              await waitForReplacedRunToSettle(threadId)
             }
+            // The controller is released before the settlement promise during
+            // terminal cleanup. Always consult that promise so the narrow
+            // controller-gone/settlement-pending window cannot authorize an
+            // index repair while predecessor persistence is still running.
+            predecessorSettlement = await waitForReplacedRunToSettle(threadId)
             if (rejectAgentStartDuringShutdown(window, channel)) {
               clearCurrentRunMessageQueue(threadId, nextInvokeRunToken)
               releaseLocalThreadRunLease(threadId, "desktop", nextInvokeRunToken)
@@ -6190,6 +6231,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortController: nextAbortController,
               turnState: nextTurnState,
               runToken: nextRunToken,
+              allowBoundedCheckpointRecovery: canUseBoundedCheckpointRecovery(
+                predecessorSettlement,
+                timedOutPredecessorFence.hasPending(threadId)
+              ),
               activeRunSettledPromise: nextActiveRunSettledPromise,
               resolveActiveRunSettled: nextResolveActiveRunSettled
             }
@@ -6225,6 +6270,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           abortController,
           turnState,
           runToken,
+          allowBoundedCheckpointRecovery,
           activeRunSettledPromise,
           resolveActiveRunSettled
         } = replacement
@@ -6270,7 +6316,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           guard: physicalStreamRunSetupGuard,
           operation: async () => {
             const tail = await getDurableRuntimeTail(threadId, {
-              excludeMessages: userMessageId ? [{ id: userMessageId, role: "user" }] : []
+              excludeMessages: userMessageId ? [{ id: userMessageId, role: "user" }] : [],
+              allowBoundedCheckpointRecovery
             })
             if (tail.persistedMessages.length > 0 && tail.checkpointHasInterrupt) {
               throw new Error(
@@ -6483,7 +6530,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           attempt: number
           maxAttempts: number
         }): void => {
-          sendHookNotice(formatTurnCompletionRecoveryNotice(input))
+          if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
+          notifyTurnCompletionRetry(window, channel, input)
         }
 
         let latestSerializedValuesMessagesForGoalFlush: unknown[] = []
@@ -7732,7 +7780,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
-            recursionLimit: 1000
+            recursionLimit: getAgentGraphRecursionLimit()
           }
 
           // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
@@ -10533,7 +10581,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
-            recursionLimit: 1000
+            recursionLimit: getAgentGraphRecursionLimit()
           }
 
           // Resume from checkpoint by streaming with Command containing the decision
@@ -10562,8 +10610,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             baseOptions: () => ({
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
-              onTurnCompletionRecovery: (input) =>
-                sendHookNotice(formatTurnCompletionRecoveryNotice(input)),
+              onTurnCompletionRecovery: (input) => {
+                if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
+                notifyTurnCompletionRetry(window, channel, input)
+              },
               workspacePath,
               coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
               coordinatorSelectedSkill: resumeCoordinatorSelectedSkill,
@@ -11704,8 +11754,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
-              onTurnCompletionRecovery: (input) =>
-                sendHookNotice(formatTurnCompletionRecoveryNotice(input)),
+              onTurnCompletionRecovery: (input) => {
+                if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
+                notifyTurnCompletionRetry(window, channel, input)
+              },
               workspacePath,
               coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
               coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,

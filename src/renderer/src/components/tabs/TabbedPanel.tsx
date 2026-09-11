@@ -3,6 +3,7 @@ import { useThreadActions, useThreadStateSelector } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
 import { ChatContainer, type ChatSurface } from "@/components/chat/ChatContainer"
 import { ArrowLeft, Loader2 } from "lucide-react"
+import { workspaceFilePreviewModeForPath } from "@/lib/file-preview-mode"
 
 const FileViewer = lazy(() => import("./FileViewer").then((m) => ({ default: m.FileViewer })))
 
@@ -45,6 +46,9 @@ export function TabbedPanel({
   // Determine what to render based on active tab
   const isAgentTab = activeTab === "agent"
   const activeFile = openFiles.find((f) => f.path === activeTab)
+  const activeFilePreviewMode = activeFile
+    ? workspaceFilePreviewModeForPath(activeFile.path)
+    : undefined
 
   return (
     <div className="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden">
@@ -77,7 +81,7 @@ export function TabbedPanel({
                 返回对话
               </button>
             </div>
-            {/* Use key to force remount when file changes, ensuring fresh state */}
+            {/* Remount for both file and task changes so same-named files never share preview state. */}
             <Suspense
               fallback={
                 <div className="flex flex-1 items-center justify-center text-muted-foreground">
@@ -87,10 +91,14 @@ export function TabbedPanel({
               }
             >
               <FileViewer
-                key={activeFile.path}
+                key={JSON.stringify([threadId, activeFile.path])}
                 filePath={activeFile.path}
                 threadId={threadId}
                 workspacePathKind="relative"
+                previewMode={activeFilePreviewMode}
+                htmlPreviewPolicy={
+                  activeFilePreviewMode === "preview" ? "workspace-static" : undefined
+                }
                 requestLane="active-file-tab"
               />
             </Suspense>

@@ -1,3 +1,4 @@
+import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
   WorkflowWorktreeAction,
@@ -101,6 +102,9 @@ import type {
   HarnessFeatureCreateResult,
   HarnessFeatureDeployUnitBinding,
   HarnessFeatureDeployUnitUpdateInput,
+  HarnessFeatureImManagementUpdateInput,
+  HarnessFeatureThreadGrantInput,
+  HarnessFeatureThreadGrantResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -137,7 +141,9 @@ import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
   ProjectMetricProjectsData,
-  ProjectMetricSummaryData
+  ProjectMetricSummaryData,
+  ProjectMetricTrendData,
+  ProjectMetricTrendFilters
 } from "../shared/project-metrics"
 import type {
   FeatureGateCheckOptions,
@@ -1149,6 +1155,9 @@ interface CustomAPI {
       toId: string,
       role?: Message["role"]
     ) => Promise<{ replaced: boolean }>
+    exportSubagentSession: (
+      target: SubagentExportTarget
+    ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportSession: (
       threadId: string
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
@@ -1255,7 +1264,7 @@ interface CustomAPI {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
       }>
     >
@@ -1273,7 +1282,7 @@ interface CustomAPI {
       interleavedThinking?: boolean
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
       tier?: "premium" | "economy"
     } | null>
     getBuiltinConfigs: () => Promise<
@@ -1294,7 +1303,7 @@ interface CustomAPI {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
         lockedFields: Array<"baseUrl" | "model" | "apiKey">
       }>
@@ -1311,7 +1320,7 @@ interface CustomAPI {
         interleavedThinking?: boolean
         enableThinking?: boolean
         enableThinkingEffort?: boolean
-        thinkingEffort?: "high" | "max"
+        thinkingEffort?: "low" | "high" | "max"
         tier?: "premium" | "economy"
       }
     ) => Promise<void>
@@ -1331,7 +1340,7 @@ interface CustomAPI {
       interleavedThinking?: boolean
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<void>
     // Backward-compatible alias, prefer upsertCustomConfig in new code.
@@ -1349,7 +1358,7 @@ interface CustomAPI {
       interleavedThinking?: boolean
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
     upsertUserInfo: (config: UserInfoConfig) => Promise<{ id: string }>
@@ -1366,7 +1375,7 @@ interface CustomAPI {
       topK?: number
       enableThinking?: boolean
       enableThinkingEffort?: boolean
-      thinkingEffort?: "high" | "max"
+      thinkingEffort?: "low" | "high" | "max"
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   ide: {
@@ -1467,6 +1476,7 @@ interface CustomAPI {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       hasPushableCommit: boolean
@@ -1522,6 +1532,7 @@ interface CustomAPI {
       changedFiles?: string[]
       changedFilesTotal?: number
       omittedFileCount?: number
+      skippedDirs?: string[]
       totals: { additions: number; deletions: number; fileCount: number }
       hasPendingDiff: boolean
       suggestedCommitMessage?: string
@@ -1545,6 +1556,17 @@ interface CustomAPI {
         additions: number
         deletions: number
       }
+      error?: string
+    }>
+    addGitignoreEntry: (
+      threadId: string,
+      targetPath: string,
+      kind: "file" | "directory",
+      options?: { worktreePath?: string }
+    ) => Promise<{
+      success: boolean
+      entry?: string
+      alreadyExists?: boolean
       error?: string
     }>
     getGitChangedFilesSummary: (threadId: string) => Promise<{
@@ -2590,6 +2612,9 @@ interface CustomAPI {
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>
+    projectMetricTrend: (
+      filters: ProjectMetricTrendFilters
+    ) => Promise<{ success: boolean; data?: ProjectMetricTrendData; error?: string }>
     projectMetricProjects: (
       filters: ProjectMetricFilters,
       options?: ProjectMetricListOptions
@@ -2885,6 +2910,12 @@ interface CustomAPI {
     updateFeatureDeployUnits: (
       input: HarnessFeatureDeployUnitUpdateInput
     ) => Promise<HarnessFeatureDeployUnitBinding>
+    setFeatureImManagement: (
+      input: HarnessFeatureImManagementUpdateInput
+    ) => Promise<HarnessFeatureDeployUnitBinding>
+    ensureFeatureThreadImGrant: (
+      input: HarnessFeatureThreadGrantInput
+    ) => Promise<HarnessFeatureThreadGrantResult>
     validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
     stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
