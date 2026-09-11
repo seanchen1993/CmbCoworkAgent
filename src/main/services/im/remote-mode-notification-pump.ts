@@ -224,6 +224,8 @@ export class ImRemoteModeNotificationPump {
     string,
     { controller: AbortController; threadId: string }
   >()
+  /** Routes the user stopped, so the abort is not mistaken for a failure. */
+  private readonly cancelledKeys = new Set<string>()
   private readonly unregisterLeaseListener: () => void
   private stopped = false
 
@@ -326,7 +328,12 @@ export class ImRemoteModeNotificationPump {
     this.stopped = true
     for (const timer of this.timers.values()) clearTimeout(timer)
     this.timers.clear()
-    for (const { controller } of this.abortControllers.values()) {
+    // Marked, not cleared. A shutdown is a cancellation too, and the delivery
+    // loop reads this after its own abort has settled — clearing the set here
+    // meant an in-flight catch found nothing and logged a stopped run as a
+    // delivery failure.
+    for (const [key, { controller }] of this.abortControllers) {
+      this.cancelledKeys.add(key)
       controller.abort(new DOMException("IM notification pump stopped", "AbortError"))
     }
     this.abortControllers.clear()
@@ -355,8 +362,13 @@ export class ImRemoteModeNotificationPump {
       }
       cancelled = true
     }
-    for (const entry of this.abortControllers.values()) {
+    for (const [key, entry] of this.abortControllers) {
       if (entry.threadId !== threadId) continue
+      // Remembered before aborting: the abort lands as a thrown AbortError in
+      // the delivery loop, which treats anything thrown as a transient failure
+      // and re-queues it a second later — so Stop stopped the run and then
+      // started it again.
+      this.cancelledKeys.add(key)
       entry.controller.abort(new DOMException("Stopped from the desktop", "AbortError"))
       cancelled = true
     }
@@ -387,15 +399,31 @@ export class ImRemoteModeNotificationPump {
       if (!retry) this.retryAttempts.delete(key)
     } catch (error) {
       retry = true
-      console.error("[IM] Detached mode result delivery failed", {
-        kind: notice.kind,
-        conversationKey: notice.conversationKey,
-        targetId: notice.targetSnapshot.targetId,
-        threadId: notice.targetSnapshot.threadId,
-        reason: error instanceof Error ? error.message : String(error)
-      })
+      // A stop reaches here as a thrown AbortError, which is indistinguishable
+      // from a transport failure by its shape alone. Logging it as a delivery
+      // failure reads as a fault the user caused on purpose.
+      if (!this.cancelledKeys.has(key)) {
+        console.error("[IM] Detached mode result delivery failed", {
+          kind: notice.kind,
+          conversationKey: notice.conversationKey,
+          targetId: notice.targetSnapshot.targetId,
+          threadId: notice.targetSnapshot.threadId,
+          reason: error instanceof Error ? error.message : String(error)
+        })
+      }
     } finally {
       this.active.delete(key)
+    }
+
+    // Stop has to actually stop. Applied here rather than in the catch because a
+    // turn can absorb its own abort and return normally, and either way the
+    // notice must not be re-queued against a thread the user just stopped. The
+    // result is not lost: the coordinator's notifications were restored and the
+    // workflow's in-flight mark cleared on the way out, so a reopened thread or
+    // a restart finds it again.
+    if (this.cancelledKeys.delete(key)) {
+      retry = false
+      this.retryAttempts.delete(key)
     }
 
     if (this.stopped) return

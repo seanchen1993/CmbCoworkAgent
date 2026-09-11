@@ -440,6 +440,56 @@ async function testStopReachesASummaryThisPumpIsRunning(): Promise<void> {
   }
 }
 
+/**
+ * Stop has to mean stopped, not paused for a second.
+ *
+ * The abort reaches the delivery loop as a thrown error, and that loop treats
+ * anything thrown as a transient failure worth retrying — so the run the user
+ * stopped came back on the retry timer about a second later. The test above
+ * ends at the abort, which is why this was invisible: the defect is entirely in
+ * what happens afterwards.
+ */
+async function testAStoppedSummaryIsNotRetried(): Promise<void> {
+  let runs = 0
+  const pump = new ImRemoteModeNotificationPump({
+    conversations: conversations() as never,
+    capabilityGuard: { evaluate: async () => allowed("coordinator") } as never,
+    getThread: () => thread("coordinator"),
+    coordinator: {
+      restoreWorkersForThread: async () => [],
+      hasNotifications: () => true,
+      hasAutoRunnableNotifications: () => true,
+      drainNotifications: () => ["<task-notification><task-id>w1</task-id></task-notification>"],
+      getWorkerSelectedSkill: async () => undefined,
+      restoreNotifications: () => undefined,
+      restoreNotificationMessages: async () => undefined,
+      acknowledgeNotificationMessages: async () => undefined
+    } as never,
+    workflow: {} as never,
+    executeTurn: async (input) =>
+      await new Promise<string>((resolve, reject) => {
+        runs += 1
+        input.signal.addEventListener("abort", () => reject(new Error("aborted")))
+      }),
+    goalRuns: {} as never,
+    events: { enqueueProactiveReplies: async () => [] },
+    replyClient: { sendPending: async () => ({ sent: 0, unknown: 0, failed: 0, deferred: 0 }) },
+    createRunId: () => "run-stopped-once",
+    hasActiveGoal: () => false
+  })
+  try {
+    pump.schedule(notice("coordinator"))
+    await waitFor(() => runs === 1, "the summary never started")
+    assert.equal(pump.cancelThread(target.threadId), true, "stop should own this run")
+
+    // Past the first retry delay, which is where it used to come back.
+    await new Promise((resolve) => setTimeout(resolve, 1_400))
+    assert.equal(runs, 1, `a stopped summary must not run again, but it ran ${runs} times`)
+  } finally {
+    pump.stop()
+  }
+}
+
 async function main(): Promise<void> {
   await testCoordinatorResultIsFoldedAndAcknowledged()
   console.log("PASS testCoordinatorResultIsFoldedAndAcknowledged")
@@ -451,6 +501,8 @@ async function main(): Promise<void> {
   console.log("PASS testActiveGoalLeavesDesktopCoordinatorResultsAlone")
   await testActiveGoalLeavesDesktopWorkflowRunsAlone()
   console.log("PASS testActiveGoalLeavesDesktopWorkflowRunsAlone")
+  await testAStoppedSummaryIsNotRetried()
+  console.log("PASS testAStoppedSummaryIsNotRetried")
   await testStopReachesASummaryThisPumpIsRunning()
   console.log("PASS testStopReachesASummaryThisPumpIsRunning")
   console.log("im-remote-mode-notification.spec.ts passed")
