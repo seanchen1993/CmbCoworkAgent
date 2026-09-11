@@ -91,3 +91,24 @@ checkpoint 清理首次被沙箱拒绝访问默认用户目录，
 执行：使用 Node 22，运行 `npm run test:scheduler:e2e`；专项回归可运行
 `npx vitest run scheduler scheduled-transcript stream-transcript thread-message stream-converter`。
 日志、数据库和输出目录为本地验证产物，不纳入提交。
+
+## UAT 合并后验证
+
+将 `origin/UAT` 的 `29863325` 合并至本地修复分支，合并提交 `aa21e8b0`，无冲突。
+此次集成保留本地既有更新器诊断提交 `acadacc4` 和定时任务修复 `90317468`。
+定时任务核心修复文件与三名子 agent 检视时一致。
+
+- 调度器、消息、数据库、更新器和 UAT 新增 trace 测试：35 文件、320 项全部通过。
+- IM 卡片交互、技能标记、更新器推送三个独立回归套件全部通过。
+- 合并后全量 Vitest：379 文件，2823 通过、22 失败、5 跳过。22 个失败名称
+  与合并前已确认的基线完全相同，未发现新增失败；对照见
+  `tmp/uat-merge-test-comparison.json`。
+- Node/Web 类型检查与合并后生产构建通过。
+- 新构建的定时任务、流式快照、实际运行时/工具/Goal/取消三套 Electron E2E 全部通过。
+- 扩大 ESLint 范围至双方变更的 30 个 TypeScript 文件后，存在 3 条既有错误：
+  TraceConversation 的 Fast Refresh 导出限制，以及 IM 卡片测试的两个未使用参数。
+  对应文件与 `origin/UAT` 内容完全一致，未由本次修复或合并引入。
+
+合并验证日志以 `tmp/uat-merge-` 为前缀；Electron 产物见对应 E2E 日志及
+`output/uat-merge-validation/`。本节记录的是合并后重新执行的验证，不复用合并前的
+E2E 结果冒充本次执行。
