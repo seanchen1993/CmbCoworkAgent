@@ -102,7 +102,7 @@ describe("SqlJsSaver schema setup concurrency", () => {
         checkpoint_ts: "checkpoint-1",
         fork_boundary_marker: 1
       })
-      expect(Number(migration.count)).toBe(1)
+      expect(Number(migration.count)).toBe(2)
     } finally {
       await Promise.allSettled([first.close(), second.close()])
     }

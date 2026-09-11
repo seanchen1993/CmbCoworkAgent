@@ -70,6 +70,27 @@ function projectForDisplay(message: Message) {
 }
 
 describe("durable thread reasoning", () => {
+  it("preserves reasoning and recovery integrity when writes coalesce", () => {
+    const threadId = "reasoning-integrity-thread"
+    db.createThread(threadId)
+    db.upsertThreadMessages(threadId, [
+      { id: "plain", role: "assistant", content: "完整回答", created_at: new Date(1) },
+      { id: "thinking", role: "assistant", content: "回答", created_at: new Date(2) },
+      {
+        id: "thinking",
+        role: "assistant",
+        content: "回答",
+        reasoning: "保留思考内容",
+        recovery_integrity: "unverified",
+        created_at: new Date(2)
+      }
+    ])
+    expect(db.getThreadMessages(threadId)).toMatchObject([
+      { id: "plain", recovery_integrity: "verified" },
+      { id: "thinking", reasoning: "保留思考内容", recovery_integrity: "unverified" }
+    ])
+  })
+
   it("persists provider reasoning snapshots independently of content delta mode", () => {
     const threadId = "provider-reasoning-thread"
     db.createThread(threadId)
@@ -181,7 +202,7 @@ describe("durable thread reasoning", () => {
     ])
     expect(db.replaceThreadMessageId(threadId, "temporary", "canonical", "assistant")).toBe(true)
     expect(db.getThreadMessages(threadId)).toMatchObject([
-      { id: "canonical", reasoning: "完整思考" }
+      { id: "canonical", reasoning: "完整思考", recovery_integrity: "unverified" }
     ])
   })
 
@@ -249,6 +270,7 @@ describe("durable thread reasoning", () => {
     expect(durable.map((message) => message.reasoning)).toEqual(
       fixtures.map((message) => message.reasoning)
     )
+    expect(durable.every((message) => message.recovery_integrity === "unverified")).toBe(true)
   })
 
   it("must preserve reasoning in the actual worker page reader after database reopen", async () => {

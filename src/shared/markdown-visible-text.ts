@@ -52,6 +52,24 @@ export function projectMarkdownVisibleText(markdown: string): string {
   let output = ""
   let index = 0
   const activePairs = new Set<string>()
+  const lastPair = new Map(["**", "__", "~~"].map((pair) => [pair, source.lastIndexOf(pair)]))
+  let nextLabelEnd = source.indexOf("]")
+  let parentheses: Map<number, number> | undefined
+  const closingParenthesis = (opening: number): number => {
+    if (!parentheses) {
+      parentheses = new Map()
+      const stack: number[] = []
+      for (let cursor = 0; cursor < source.length; cursor += 1) {
+        if (source[cursor] === "\\") cursor += 1
+        else if (source[cursor] === "(") stack.push(cursor)
+        else if (source[cursor] === ")") {
+          const start = stack.pop()
+          if (start !== undefined) parentheses.set(start, cursor)
+        }
+      }
+    }
+    return parentheses.get(opening) ?? -1
+  }
   let activeFence: "```" | "~~~" | null = null
   while (index < source.length) {
     if (activeFence) {
@@ -87,11 +105,16 @@ export function projectMarkdownVisibleText(markdown: string): string {
         index = close + ticks
         continue
       }
+      // An unmatched delimiter run is literal; do not rescan every suffix of that run.
+      output += delimiter
+      index += ticks
+      continue
     }
     const image = source[index] === "!" && source[index + 1] === "["
     if (source[index] === "[" || image) {
       const labelStart = index + (image ? 2 : 1)
-      const labelEnd = source.indexOf("]", labelStart)
+      if (nextLabelEnd >= 0 && nextLabelEnd < labelStart) nextLabelEnd = source.indexOf("]", labelStart)
+      const labelEnd = nextLabelEnd
       if (labelEnd >= 0) {
         const destinationStart = labelEnd + 1
         const reference = source[destinationStart] === "["
@@ -100,15 +123,7 @@ export function projectMarkdownVisibleText(markdown: string): string {
           if (reference) {
             close = source.indexOf("]", destinationStart + 1)
           } else {
-            let depth = 1
-            for (let cursor = destinationStart + 1; cursor < source.length; cursor += 1) {
-              if (source[cursor] === "\\") cursor += 1
-              else if (source[cursor] === "(") depth += 1
-              else if (source[cursor] === ")" && --depth === 0) {
-                close = cursor
-                break
-              }
-            }
+            close = closingParenthesis(destinationStart)
           }
           if (close >= 0) {
             if (!image) output += projectMarkdownVisibleText(source.slice(labelStart, labelEnd))
@@ -139,7 +154,7 @@ export function projectMarkdownVisibleText(markdown: string): string {
         pair !== "__" ||
         !/[\p{L}\p{N}]/u.test(source[index - 1] ?? "") &&
           /[\p{L}\p{N}]/u.test(source[index + 2] ?? "")
-      if (underscoreCanOpen && source.indexOf(pair, index + 2) >= 0) {
+      if (underscoreCanOpen && (lastPair.get(pair) ?? -1) >= index + 2) {
         activePairs.add(pair)
         index += 2
         continue

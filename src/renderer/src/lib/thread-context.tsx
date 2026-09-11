@@ -123,6 +123,7 @@ import {
   type LiveStreamMessageTimeMap,
   type TimedLiveStreamMessageProjector
 } from "./live-stream-messages"
+import { hasModelRetryProgress, liveAssistantContentWatermark } from "./model-retry-indicator"
 import {
   getMessageProviderTupleFromMetadata,
   getMessageProviderOccurrenceIdentity,
@@ -470,6 +471,19 @@ export interface ModelRetryState {
   reason: string
   delayMs: number
   startedAt: Date
+  /**
+   * 举横幅那一刻 live 助手内容的字符数。模型重新产出、总量涨过这个水位就撤横幅。
+   *
+   * 门禁续跑没有「重试成功」这个可发事件的时刻（它不等待，判定完立刻跳回模型），
+   * 所以拿不到传输层那条 model_retry_clear 的待遇，只能靠这个水位自己退场。
+   * 见 model-retry-indicator.ts。
+   *
+   * null = 尚未锚定。model_retry 是传输层直接回调，可能早于 React 把最新流数据交给
+   * handleStreamUpdate，此刻去读 streamDataRef 会拿到偏小的值——水位偏低的后果是
+   * 存量内容立刻越线、横幅闪一下就没，等于这个提示白做。所以改成由
+   * handleStreamUpdate 在下一次拿到真实数据时锚定：宁可晚清也不能不显示。
+   */
+  contentWatermark: number | null
 }
 
 /** One failover attempt shown in the error detail card. */
@@ -2978,10 +2992,29 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (!data.isLoading) delete rendererOnlyMessageIdAliasesRef.current[threadId]
       setThreadLoadingState(threadId, data.isLoading)
       notifyStreamSubscribers(threadId)
+      // 模型重新产出可见内容 → 撤掉重试横幅，不必等整轮结束。
+      // 门禁续跑没有 model_retry_clear 可收（主进程那边没有「重试成功」这个时刻），
+      // 只有这条和下面 isLoading 的兜底；少了它横幅会在一段正常流动的回答旁边空转
+      // 到本轮结束。只在横幅挂着时才去算水位，平时零开销。
+      const pendingRetry = threadStatesRef.current[threadId]?.modelRetry
+      if (pendingRetry) {
+        if (pendingRetry.contentWatermark === null) {
+          // 第一次拿到真实流数据，把水位锚在这里。这一帧的内容都是重试之前的。
+          const anchored = liveAssistantContentWatermark(liveMessages)
+          updateThreadState(threadId, (prev) =>
+            prev.modelRetry
+              ? { modelRetry: { ...prev.modelRetry, contentWatermark: anchored } }
+              : {}
+          )
+        } else if (hasModelRetryProgress(pendingRetry.contentWatermark, liveMessages)) {
+          updateThreadState(threadId, () => ({ modelRetry: null }))
+        }
+      }
       // Fallback clear: drop the retry indicator when the stream stops (isLoading=false).
-      // The primary clear path is the explicit model_retry_clear custom event sent by
-      // the main process when a retry succeeds. This fallback covers error paths and
-      // any edge case where model_retry_clear was not sent.
+      // Transport retries clear on the explicit model_retry_clear custom event the main
+      // process sends when resume() succeeds; completion-gate retries clear on the
+      // watermark check above. This fallback covers error paths and the case where the
+      // retried turn never produces visible content at all.
       if (!data.isLoading) {
         finalizeRunningSubagentsForStoppedStream(threadId)
         clearRunningContextCompactionForStoppedStream(threadId)
@@ -4400,7 +4433,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 maxRetries: data.maxRetries!,
                 reason: data.reason ?? "",
                 delayMs: data.delayMs ?? 0,
-                startedAt: new Date()
+                startedAt: new Date(),
+                contentWatermark: null
               }
             }))
           }

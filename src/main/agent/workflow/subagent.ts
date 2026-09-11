@@ -1,3 +1,7 @@
+import {
+  withSubagentSessionCapture,
+  subagentSessionCallbacks
+} from "../../services/subagent-session-capture"
 import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { NodeInterrupt } from "@langchain/langgraph"
@@ -190,6 +194,22 @@ function structuredOutputFailureError(message: string): Error {
 }
 
 export async function runWorkflowSubagent(
+  deps: WorkflowSubagentDeps,
+  request: RunWorkflowSubagentRequest
+): Promise<WorkflowSubagentResult> {
+  return withSubagentSessionCapture(
+    {
+      kind: "workflow",
+      threadId: deps.parentThreadId,
+      runId: request.runId,
+      agentIndex: request.agentIndex
+    },
+    request.label,
+    () => runWorkflowSubagentAttempts(deps, request)
+  )
+}
+
+async function runWorkflowSubagentAttempts(
   deps: WorkflowSubagentDeps,
   request: RunWorkflowSubagentRequest
 ): Promise<WorkflowSubagentResult> {
@@ -427,7 +447,7 @@ async function runOnce(
 
     const streamConfig = {
       configurable: { thread_id: threadId },
-      callbacks: [],
+      callbacks: subagentSessionCallbacks([]),
       signal: controller.signal,
       // "messages" is subscribed for its side effect, not for display: it attaches
       // LangGraph's StreamMessagesHandler (lc_prefer_streaming), which switches the

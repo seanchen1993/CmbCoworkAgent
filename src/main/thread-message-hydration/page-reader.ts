@@ -1,4 +1,6 @@
 import { DatabaseSync } from "node:sqlite"
+import { decodeTranscriptRecoveryIntegrity } from "../../shared/transcript-recovery-integrity"
+import { hasPendingLegacyMessageTimes } from "../checkpointer/legacy-message-times"
 import type { ContentBlock, Message, ToolCall } from "../types"
 import type {
   ThreadMessageHydrationWorkerStats,
@@ -44,6 +46,7 @@ interface ThreadMessageRow {
   status: string | null
   is_error: number | null
   content_priority: number | null
+  recovery_integrity?: number | null
   goal_id: string | null
   active_window_id: string | null
   created_at: number
@@ -337,6 +340,7 @@ function rowToMessage(
     message: {
       id: row.message_id,
       ordinal: row.ordinal,
+      recovery_integrity: decodeTranscriptRecoveryIntegrity(row.recovery_integrity),
       ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
       ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
         ? { provider_occurrence: row.provider_occurrence }
@@ -892,6 +896,13 @@ export function readThreadMessagesPage(
     const legacyCheckpointMigrationStatus = request.options.includeVisibleMessagePresence
       ? (legacyCheckpointMigration?.status ?? null)
       : undefined
+    const legacyMessageTimesPending =
+      legacyCheckpointMigration?.status === "complete" &&
+      hasPendingLegacyMessageTimes(
+        database,
+        request.threadId,
+        legacyCheckpointMigration.checkpointId
+      )
     const candidates = readCandidates(
       database,
       request,
@@ -939,10 +950,10 @@ export function readThreadMessagesPage(
       page: {
         messages: isForwardPage ? orderedMessages : orderedMessages.reverse(),
         beforeOrdinal: !isForwardPage && hasMore && oldest ? oldest.ordinal : null,
-        beforeMessageId:
-          !isForwardPage && hasMore && oldest ? oldest.message_id : null,
+        beforeMessageId: !isForwardPage && hasMore && oldest ? oldest.message_id : null,
         hasMore,
         total,
+        ...(legacyMessageTimesPending ? { legacyMessageTimesPending: true } : {}),
         ...(hasVisibleMessages !== undefined ? { hasVisibleMessages } : {}),
         ...(legacyCheckpointMigrationStatus !== undefined
           ? { legacyCheckpointMigrationStatus }
@@ -950,7 +961,16 @@ export function readThreadMessagesPage(
         ...(isForwardPage
           ? { verifiedAnchorMessageId: request.options.anchorMessageId?.trim() }
           : {}),
-        ...(truncatedMessageIds.length > 0 ? { truncatedMessageIds } : {})
+        ...(truncatedMessageIds.length > 0 ? { truncatedMessageIds } : {}),
+        ...(request.options.recoveryCheckpointId
+          ? {
+              recoveryIntegrity:
+                truncatedMessageIds.length === 0 &&
+                orderedMessages.every((message) => message.recovery_integrity === "verified")
+                  ? ("verified" as const)
+                  : ("unverified" as const)
+            }
+          : {})
       },
       stats: {
         durationMs: performance.now() - startedAt,
