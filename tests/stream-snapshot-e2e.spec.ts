@@ -10,6 +10,7 @@ import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
 import type { WebContents, MessageBoxOptions } from "electron"
 import { createStreamDataSerializer } from "../src/main/ipc/stream-data-serialization"
+import { createManagedTransportAgentRunDelivery } from "../src/main/agent/managed-transport-delivery"
 
 interface MainFixture {
   fixtureWindowId: number
@@ -32,7 +33,10 @@ interface FixtureWindow {
 const root = resolve(import.meta.dirname, "..")
 const require = createRequire(import.meta.url)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-stream-snapshot-e2e-"))
-const artifacts = join(root, "output/stream-white-screen/e2e")
+const artifacts = resolve(
+  root,
+  process.env.STREAM_SNAPSHOT_ARTIFACT_DIR || "output/stream-white-screen/e2e"
+)
 mkdirSync(artifacts, { recursive: true })
 
 async function until(check: () => Promise<boolean>, label: string, timeout = 30_000) {
@@ -396,6 +400,89 @@ async function main() {
     results.push("answer and reasoning survive done, durable writeback and history navigation")
     await page.screenshot({ path: join(artifacts, "completion-visible.png") })
 
+    const mirrored: Array<{ threadId: string; event: unknown }> = []
+    const managedDelivery = createManagedTransportAgentRunDelivery({
+      mirror: (threadId, event) => {
+        mirrored.push({ threadId, event })
+      },
+      broadcast: () => {
+        throw new Error("Ambient summaries must use the standing stream")
+      }
+    })
+    const managedSerializer = createStreamDataSerializer()
+    const managedSend = async (payload: unknown) => {
+      managedDelivery.send(`agent:stream:${ids[0]}:coordinator-internal`, payload)
+      for (const item of mirrored.splice(0)) {
+        await app!.evaluate(({ BrowserWindow }, { threadId, event }) => {
+          BrowserWindow.fromId(
+            (globalThis as unknown as MainFixture).fixtureWindowId
+          )!.webContents.send(`scheduler:stream:${threadId}`, event)
+        }, item)
+        await page.evaluate(
+          () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))
+        )
+      }
+    }
+    const managedMessage = async (kind: string, kwargs: Record<string, unknown>) => {
+      await managedSend({
+        type: "stream",
+        mode: "messages",
+        ...managedSerializer("messages", [serialized(kind, kwargs), {}])
+      })
+    }
+    await managedMessage("AIMessageChunk", {
+      id: "managed-call",
+      content: "",
+      tool_calls: [{ id: "managed-tool", name: "read_file", args: { path: "managed-proof.txt" } }]
+    })
+    await managedMessage("ToolMessage", {
+      id: "managed-result",
+      tool_call_id: "managed-tool",
+      name: "read_file",
+      content: "后台工具结果"
+    })
+    await managedMessage("AIMessageChunk", {
+      id: "managed-answer",
+      content: "后台旧草稿",
+      additional_kwargs: { reasoning_content: "后台旧思考" }
+    })
+    await managedMessage("AIMessage", {
+      id: "managed-answer",
+      content: "后台更正正文",
+      additional_kwargs: { reasoning_content: "后台更正思考" }
+    })
+    await managedMessage("AIMessageChunk", {
+      id: "managed-answer",
+      content: "及工具后续写。",
+      additional_kwargs: { reasoning_content: "及继续思考。" }
+    })
+    for (let index = 0; index < 2; index += 1) {
+      await managedMessage("AIMessageChunk", {
+        id: "managed-answer",
+        content: "重复",
+        additional_kwargs: { reasoning_content: "重复" }
+      })
+    }
+    await until(
+      async () =>
+        (await page.locator("body").innerText()).includes("后台更正正文及工具后续写。重复重复"),
+      "managed summary shows corrected text and subsequent deltas"
+    )
+    assert.equal((await page.locator("body").innerText()).includes("后台旧草稿"), false)
+    for (const button of await page.getByRole("button", { name: "思考", exact: true }).all()) {
+      if ((await button.getAttribute("aria-expanded")) !== "true") await button.click()
+    }
+    await until(
+      async () =>
+        (await page.locator("body").innerText()).includes("后台更正思考及继续思考。重复重复"),
+      "managed reasoning rebases with the snapshot"
+    )
+    await managedSend({ type: "done" })
+    assert.deepEqual(errors, [])
+    results.push(
+      "UAT ambient summary delivery renders tool follow-up, snapshot corrections and subsequent text/reasoning in React"
+    )
+
     // Remove the entire renderer UI to verify the real main-process timeout
     // fallback, then crash its process to verify the immediate native path.
     await app.evaluate(async ({ BrowserWindow, dialog }) => {
@@ -414,6 +501,65 @@ async function main() {
       20_000
     )
     results.push("blank renderer close prompt falls back to native dialog")
+    // Playwright Fetch interception can stall file navigation after a renderer
+    // crash. Keep HTTP blocked in Electron while removing that CDP interference.
+    await app.evaluate(({ BrowserWindow }) => {
+      const w = BrowserWindow.fromId((globalThis as unknown as MainFixture).fixtureWindowId)!
+      w.webContents.session.webRequest.onBeforeRequest(
+        { urls: ["http://*/*", "https://*/*"] },
+        (_details, callback) => callback({ cancel: true })
+      )
+    })
+    await app.context().unrouteAll()
+    // UAT recovers the first renderer process crash once. Exercise that policy
+    // before checking that a second crash still allows a native close prompt.
+    await app.evaluate(async ({ app, BrowserWindow }) => {
+      const w = BrowserWindow.fromId((globalThis as unknown as MainFixture).fixtureWindowId)!
+      await w.loadFile(`${app.getAppPath()}/out/renderer/index.html`)
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Renderer did not recover")), 15_000)
+        w.webContents.once("did-finish-load", () => {
+          clearTimeout(timeout)
+          resolve()
+        })
+        w.webContents.forcefullyCrashRenderer()
+      })
+    })
+    // Playwright retains the old Page's crashed flag after Electron recovers
+    // the process. Verify the recovered DOM through the surviving webContents,
+    // without issuing a second/manual reload that would mask recovery failure.
+    await until(
+      () =>
+        app!.evaluate(({ BrowserWindow }, title) => {
+          const w = BrowserWindow.fromId((globalThis as unknown as MainFixture).fixtureWindowId)!
+          return w.webContents.executeJavaScript(`(() => {
+            const label = [...document.querySelectorAll("*")].find(element =>
+              element.children.length === 0 && element.textContent === ${JSON.stringify(title)}
+            )
+            if (!label) return false
+            label.click()
+            return true
+          })()`)
+        }, titles[0]),
+      "recovered thread is selectable"
+    )
+    await until(
+      () =>
+        app!.evaluate(({ BrowserWindow }) => {
+          const w = BrowserWindow.fromId((globalThis as unknown as MainFixture).fixtureWindowId)!
+          return w.webContents.executeJavaScript(`(() => {
+            for (const button of document.querySelectorAll("button")) {
+              if (button.textContent.trim() === "思考" && button.getAttribute("aria-expanded") !== "true") {
+                button.click()
+              }
+            }
+            return document.body.innerText.includes("完成交接后正文必须保留。") &&
+              document.body.innerText.includes("完成交接后思考过程必须保留。")
+          })()`)
+        }),
+      "recovered DOM restores saved answer and reasoning"
+    )
+    results.push("first renderer crash reloads once and restores saved answer and reasoning")
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.fromId(
         (globalThis as unknown as MainFixture).fixtureWindowId

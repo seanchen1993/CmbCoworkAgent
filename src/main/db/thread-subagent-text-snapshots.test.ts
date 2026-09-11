@@ -11,9 +11,21 @@ vi.mock("../storage", () => ({
 }))
 import * as db from "./index"
 import {
-  compactSubagentTranscriptManifests as compact,
-  hydrateSubagentTranscriptManifests as hydrate
+  compactSubagentTranscriptManifests,
+  hydrateSubagentTranscriptManifests
 } from "../services/subagent-transcript-content-store"
+async function compact(input: Record<string, unknown>) {
+  const result = await compactSubagentTranscriptManifests(input)
+  expect(Array.isArray(result.manifests.worker)).toBe(true)
+  return { ...result, manifests: result.manifests as { worker: Record<string, unknown>[] } }
+}
+
+async function hydrate(input: Record<string, unknown>) {
+  const result = await hydrateSubagentTranscriptManifests(input)
+  expect(Array.isArray(result.worker)).toBe(true)
+  return result as { worker: Record<string, unknown>[] }
+}
+
 let directory = ""
 beforeAll(async () => {
   directory = mkdtempSync(join(tmpdir(), "snapshot-db-"))
@@ -215,4 +227,3 @@ it("replaces a sidecar snapshot while preserving an omitted field without journa
   })
   expect(page.messages[0]).not.toHaveProperty("content_ref")
 })
-

@@ -124,6 +124,10 @@ import {
 } from "./live-stream-messages"
 import { hasModelRetryProgress, liveAssistantContentWatermark } from "./model-retry-indicator"
 import {
+  applySchedulerAssistantSnapshot,
+  mergeSchedulerReasoning
+} from "./scheduler-assistant-snapshot"
+import {
   getMessageProviderTupleFromMetadata,
   getMessageProviderOccurrenceIdentity,
   getMessageProviderSourceId,
@@ -6685,9 +6689,42 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       switch (event.type) {
         // Reuse handleCustomEvent for workspace / subagents / token_usage / interrupt
-        case "custom":
+        case "custom": {
+          const data = event.data as CustomEventData
+          if (data?.type === "coordinator_ai_snapshot_message") {
+            const tracker = (schedulerStreamingRef.current[threadId] ||= {
+              currentMsgId: null,
+              accumulatedContent: "",
+              accumulatedReasoning: ""
+            })
+            updateThreadState(threadId, (state) => {
+              const message = applySchedulerAssistantSnapshot(
+                tracker,
+                state.messages,
+                data.assistantMessage
+              )
+              if (!message) return {}
+              const index = state.messages.findIndex(
+                (candidate) => candidate.id === message.id && candidate.role === "assistant"
+              )
+              const messages = [...state.messages]
+              if (index >= 0) messages[index] = message
+              else messages.push(message)
+              tracker.assistantLocation = {
+                messages,
+                index: index >= 0 ? index : messages.length - 1,
+                tail: message
+              }
+              return {
+                messages,
+                toolCallStates: upsertToolCallStatesFromMessages(state.toolCallStates, [message])
+              }
+            })
+            break
+          }
           handleCustomEvent(threadId, event.data as CustomEventData)
           break
+        }
 
         // Projected values snapshot for the current turn only. Unlike the
         // legacy full-messages event, this must never replace durable history.
@@ -6817,9 +6854,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           } else {
             tracker.accumulatedContent += content
             if (reasoning) {
-              tracker.accumulatedReasoning = reasoning.startsWith(tracker.accumulatedReasoning)
-                ? reasoning
-                : `${tracker.accumulatedReasoning}${reasoning}`
+              tracker.accumulatedReasoning = mergeSchedulerReasoning(
+                tracker.accumulatedReasoning,
+                reasoning,
+                event.reasoningMode
+              )
             }
           }
           const finalContent = tracker.accumulatedContent

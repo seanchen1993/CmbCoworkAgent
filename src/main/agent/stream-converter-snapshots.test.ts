@@ -10,26 +10,158 @@ import {
 import type { Message } from "../../renderer/src/types"
 
 describe("scheduled subagent snapshots", () => {
+  it("bootstraps a content-only snapshot without clearing hydrated reasoning", () => {
+    const tracker: Parameters<typeof projectSchedulerSubagentMessage>[0] = { currentMsgId: null }
+    const initial: Message = {
+      id: "a",
+      role: "assistant",
+      content: "old",
+      reasoning: "keep",
+      created_at: new Date()
+    }
+    const current = upsertTranscriptMessages(
+      [initial],
+      [
+        projectSchedulerSubagentMessage(tracker, {
+          id: "a",
+          content: "new",
+          contentMode: "snapshot"
+        })
+      ]
+    )
+    expect((serializeSubagentTranscripts({ task: current }).task as unknown[])[0]).toMatchObject({
+      content: "new",
+      reasoning: "keep",
+      subagent_text_snapshots: ["content"]
+    })
+  })
+  it("keeps the other field journal through a snapshot retry and acknowledgement", () => {
+    const tracker: Parameters<typeof projectSchedulerSubagentMessage>[0] = { currentMsgId: null }
+    const initial = projectSchedulerSubagentMessage(tracker, {
+      id: "a",
+      content: "body",
+      reasoning: "think",
+      contentMode: "snapshot",
+      reasoningMode: "snapshot"
+    })
+    const refs = {
+      id: "a",
+      content_ref: { v: 1, kind: "content", sha256: "c".repeat(64), bytes: 4 },
+      content_full_length: 4,
+      reasoning_ref: { v: 1, kind: "reasoning", sha256: "r".repeat(64), bytes: 5 },
+      reasoning_full_length: 5
+    }
+    const acknowledged = applyPersistedSubagentTranscriptRefs(
+      { task: [initial] },
+      { task: [initial] },
+      { task: [refs] }
+    ).task
+    const delta = upsertTranscriptMessages(acknowledged, [
+      projectSchedulerSubagentMessage(tracker, { id: "a", content: "!", contentMode: "delta" })
+    ])
+    const snapshot = upsertTranscriptMessages(delta, [
+      projectSchedulerSubagentMessage(tracker, {
+        id: "a",
+        content: "",
+        reasoning: "",
+        reasoningMode: "snapshot"
+      })
+    ])
+    const retry = upsertTranscriptMessages(delta, snapshot, { completeSnapshot: true })
+    const stored = (
+      serializeSubagentTranscripts({ task: retry }).task as Array<Record<string, unknown>>
+    )[0]
+    expect(stored).toMatchObject({
+      content_ref: refs.content_ref,
+      reasoning: "",
+      subagent_text_snapshots: ["reasoning"],
+      subagent_text_deltas: { content: { baseLength: 4, targetLength: 5, delta: "!" } }
+    })
+    expect(stored).not.toHaveProperty("reasoning_ref")
+    const sent = [...retry]
+    const newer = upsertTranscriptMessages(retry, [
+      projectSchedulerSubagentMessage(tracker, {
+        id: "a",
+        content: "!",
+        reasoning: "x",
+        contentMode: "delta",
+        reasoningMode: "delta"
+      })
+    ])
+    const ack = applyPersistedSubagentTranscriptRefs(
+      { task: newer },
+      { task: sent },
+      {
+        task: [
+          {
+            ...refs,
+            content_full_length: 5,
+            reasoning_full_length: 0,
+            reasoning_ref: { ...refs.reasoning_ref, sha256: "e".repeat(64), bytes: 0 }
+          }
+        ]
+      }
+    ).task
+    expect(ack[0]).toMatchObject({
+      content: "body!!",
+      reasoning: "x",
+      content_pending_delta: "!",
+      reasoning_pending_delta: "x"
+    })
+    const next = (
+      serializeSubagentTranscripts({ task: ack }).task as Array<Record<string, unknown>>
+    )[0]
+    expect(next).not.toHaveProperty("subagent_text_snapshots")
+    expect(next).toMatchObject({
+      subagent_text_deltas: {
+        content: { baseLength: 5, delta: "!" },
+        reasoning: { baseLength: 0, delta: "x" }
+      }
+    })
+  })
   it("preserves hydrated and pending content when only reasoning changes", () => {
     for (const pending of [false, true]) {
       const tracker: Parameters<typeof projectSchedulerSubagentMessage>[0] = { currentMsgId: null }
       const initial: Message = pending
-        ? projectSchedulerSubagentMessage(tracker, { id: "a", content: "keep", contentMode: "snapshot" })
+        ? projectSchedulerSubagentMessage(tracker, {
+            id: "a",
+            content: "keep",
+            contentMode: "snapshot"
+          })
         : { id: "a", role: "assistant", content: "keep", created_at: new Date() }
-      const update = projectSchedulerSubagentMessage(tracker, { id: "a", content: "", reasoning: "new", reasoningMode: "snapshot" })
+      const update = projectSchedulerSubagentMessage(tracker, {
+        id: "a",
+        content: "",
+        reasoning: "new",
+        reasoningMode: "snapshot"
+      })
       expect(update.content_stream_delta).toBeUndefined()
       const current = upsertTranscriptMessages([initial], [update])
       expect(current[0].content).toBe("keep")
-      const stored = (serializeSubagentTranscripts({ task: current }).task as Array<Record<string, unknown>>)[0]
+      const stored = (
+        serializeSubagentTranscripts({ task: current }).task as Array<Record<string, unknown>>
+      )[0]
       expect(stored).toMatchObject({ content: "keep", reasoning: "new" })
     }
   })
   it("preserves pending reasoning when a content-only replacement omits reasoning", () => {
     const tracker: Parameters<typeof projectSchedulerSubagentMessage>[0] = { currentMsgId: null }
-    const initial = projectSchedulerSubagentMessage(tracker, { id: "a", content: "old", reasoning: "keep", contentMode: "snapshot", reasoningMode: "snapshot" })
-    const replacement = projectSchedulerSubagentMessage(tracker, { id: "a", content: "new", contentMode: "snapshot" })
+    const initial = projectSchedulerSubagentMessage(tracker, {
+      id: "a",
+      content: "old",
+      reasoning: "keep",
+      contentMode: "snapshot",
+      reasoningMode: "snapshot"
+    })
+    const replacement = projectSchedulerSubagentMessage(tracker, {
+      id: "a",
+      content: "new",
+      contentMode: "snapshot"
+    })
     const current = upsertTranscriptMessages([initial], [replacement])
-    const stored = (serializeSubagentTranscripts({ task: current }).task as Array<Record<string, unknown>>)[0]
+    const stored = (
+      serializeSubagentTranscripts({ task: current }).task as Array<Record<string, unknown>>
+    )[0]
     expect(stored).toMatchObject({ content: "new", reasoning: "keep" })
   })
   it("keeps a replacement through FIFO retry coalescing and resumes suffix writes after its ack", () => {

@@ -51,7 +51,11 @@ import type {
   ThreadMessagesPage,
   ThreadMessagesPageOptions
 } from "../types"
-import { getSubagentTextSnapshotFields, mergeSubagentTextSnapshots, mergeSubagentTranscriptManifestMessages } from "../services/subagent-transcript-content-store"
+import {
+  getSubagentTextSnapshotFields,
+  mergeSubagentTextSnapshots,
+  mergeSubagentTranscriptManifestMessages
+} from "../services/subagent-transcript-content-store"
 import {
   isSubagentTranscriptBlobRef,
   SUBAGENT_TRANSCRIPT_STARTUP_BUCKET_LIMIT
@@ -2437,7 +2441,8 @@ function preserveSubagentManifestJournalFields(
   for (const [field, state] of states) {
     if (getSubagentTextSnapshotFields(incoming).includes(field)) continue
     const ref = existing[`${field}_ref`]
-    const incomingRef = incoming[`${field}_ref`] ?? (incoming[field] === undefined ? ref : undefined)
+    const incomingRef =
+      incoming[`${field}_ref`] ?? (incoming[field] === undefined ? ref : undefined)
     if (
       !isSubagentTranscriptBlobRef(ref, field) ||
       ref.sha256 !== state.base_ref_sha256 ||
@@ -2518,10 +2523,22 @@ function getThreadSubagentTextJournal(
  * accumulated transcript. Returns undefined at every structural/identity
  * boundary so the caller can compact an authoritative full snapshot instead.
  */
-function deleteSubagentSnapshotJournals(database: NativeSqliteAdapter, threadId: string, subagentId: string, messageId: string, incoming: Record<string, unknown>): void {
+function deleteSubagentSnapshotJournals(
+  database: NativeSqliteAdapter,
+  threadId: string,
+  subagentId: string,
+  messageId: string,
+  incoming: Record<string, unknown>
+): void {
   for (const field of getSubagentTextSnapshotFields(incoming)) {
-    for (const table of ["thread_subagent_text_fragments", "thread_subagent_text_fragment_states"]) {
-      database.run(`DELETE FROM ${table} WHERE thread_id = ? AND subagent_id = ? AND message_id = ? AND field = ?`, [threadId, subagentId, messageId, field])
+    for (const table of [
+      "thread_subagent_text_fragments",
+      "thread_subagent_text_fragment_states"
+    ]) {
+      database.run(
+        `DELETE FROM ${table} WHERE thread_id = ? AND subagent_id = ? AND message_id = ? AND field = ?`,
+        [threadId, subagentId, messageId, field]
+      )
     }
   }
 }
@@ -2548,7 +2565,11 @@ export function appendThreadSubagentManifestTextDeltas(
     const delta = parseThreadSubagentTextDelta(rawDeltas[field])
     return delta ? [{ field, delta }] : []
   })
-  if (deltas.length === 0 || deltas.some(({ field }) => getSubagentTextSnapshotFields(incoming).includes(field))) return undefined
+  if (
+    deltas.length === 0 ||
+    deltas.some(({ field }) => getSubagentTextSnapshotFields(incoming).includes(field))
+  )
+    return undefined
 
   const messageId = incoming.id.trim()
   if (!messageId) return undefined
@@ -2561,7 +2582,10 @@ export function appendThreadSubagentManifestTextDeltas(
     return undefined
   }
 
-  const next: Record<string, unknown> = { ...mergeSubagentTextSnapshots(existing, incoming), id: messageId }
+  const next: Record<string, unknown> = {
+    ...mergeSubagentTextSnapshots(existing, incoming),
+    id: messageId
+  }
   delete next.subagent_text_deltas
   const existingStates = new Map<ThreadSubagentTextField, ThreadSubagentTextFragmentStateRow>()
   for (const field of ["content", "reasoning"] as const) {
@@ -2743,7 +2767,10 @@ export function patchThreadSubagentManifestPreservingTextJournal(
   }
   if (states.size === 0) return undefined
 
-  const next: Record<string, unknown> = { ...mergeSubagentTextSnapshots(existing, incoming), id: messageId }
+  const next: Record<string, unknown> = {
+    ...mergeSubagentTextSnapshots(existing, incoming),
+    id: messageId
+  }
   if (!preserveSubagentManifestJournalFields(existing, incoming, next, states)) {
     return undefined
   }

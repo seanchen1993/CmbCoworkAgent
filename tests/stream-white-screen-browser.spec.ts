@@ -64,7 +64,7 @@ async function main() {
       await page.evaluate(
         () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))
       )
-      assert.equal(await page.getByText("页面出现异常", { exact: true }).count(), 0)
+      assert.equal(await page.getByRole("heading", { name: "界面渲染失败", exact: true }).count(), 0)
     }
     await render("read_file", { path: "sample.ts" }, "file contents\n".repeat(500))
     assert.ok((await page.locator("body").innerText()).includes("sample.ts"))
@@ -78,7 +78,7 @@ async function main() {
     assert.equal(await page.getByText("工具渲染失败（grep）", { exact: true }).count(), 0)
     results.push("valid tool rendering recovers on next mount")
     await page.evaluate(() => (window as unknown as FixtureWindow).whiteScreenFixture.failApp())
-    await page.getByText("页面出现异常", { exact: true }).waitFor()
+    await page.getByRole("heading", { name: "界面渲染失败", exact: true }).waitFor()
     await page.waitForFunction(() =>
       (window as unknown as FixtureWindow).whiteScreenFixture.close()
     )

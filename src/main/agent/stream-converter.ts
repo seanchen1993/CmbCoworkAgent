@@ -491,10 +491,12 @@ export class StreamConverter {
           ...(deltaReasoning || (subagentId && reasoningSnapshot)
             ? { reasoning: deltaReasoning }
             : {}),
-          ...(subagentId && contentWireMode && contentPresent
+          ...(contentWireMode && contentPresent && (subagentId || !contentSnapshot)
             ? { contentMode: contentWireMode }
             : {}),
-          ...(subagentId && reasoningWireMode && reasoningUpdate.reasoning !== undefined
+          ...(reasoningWireMode &&
+          reasoningUpdate.reasoning !== undefined &&
+          (subagentId || !reasoningSnapshot)
             ? { reasoningMode: reasoningWireMode }
             : {}),
           ...(toolCalls.length ? { toolCalls } : {}),

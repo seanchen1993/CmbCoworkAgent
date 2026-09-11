@@ -3407,7 +3407,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
                   isSubagentTranscriptBlobRef(incomingRecord?.content_ref, "content") ||
                   isSubagentTranscriptBlobRef(incomingRecord?.reasoning_ref, "reasoning")
                 const preserveTextJournal =
-                  hasTextDelta || (hasDurableTextJournal && (carriesProjectedTextRef || Array.isArray(incomingRecord?.subagent_text_snapshots)))
+                  hasTextDelta ||
+                  (hasDurableTextJournal &&
+                    (carriesProjectedTextRef ||
+                      Array.isArray(incomingRecord?.subagent_text_snapshots)))
                 if (preserveTextJournal) {
                   const previousReferenceHashKey = getThreadSubagentManifestBlobReferenceHashes(
                     threadId,

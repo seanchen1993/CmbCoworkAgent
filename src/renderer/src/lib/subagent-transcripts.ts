@@ -194,7 +194,9 @@ export function restoreSubagentsFromTranscripts(
     const lastMessage = messages[messages.length - 1]
     const subagentType = prompt?.subagent_type || "general-purpose"
     const promptContent = typeof prompt?.content === "string" ? prompt.content : ""
-    const scopedExecutionMatch = /^(.*)::(?:execution-\d+|invocation-[a-z0-9-]+)$/.exec(subagentId)
+    const scopedExecutionMatch = /^(.*)::(?:execution-\d+|invocation-[a-z0-9-]+)$/.exec(
+      subagentId
+    )
     const cardToolCallId = scopedExecutionMatch?.[1] ?? subagentId
     const isFailed = final?.is_error === true || final?.status === "error"
     const isCancelled = final?.status === "cancelled"
@@ -482,10 +484,16 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
             (incomingContentPriority > 0
               ? incomingHasContent
               : incomingContentLength >= existingContentLength)))))
-  const existingReasoningRef = isSubagentTranscriptBlobRef(existing.reasoning_ref, "reasoning")
+  const existingReasoningRef = isSubagentTranscriptBlobRef(
+    existing.reasoning_ref,
+    "reasoning"
+  )
     ? existing.reasoning_ref
     : undefined
-  const incomingReasoningRef = isSubagentTranscriptBlobRef(incoming.reasoning_ref, "reasoning")
+  const incomingReasoningRef = isSubagentTranscriptBlobRef(
+    incoming.reasoning_ref,
+    "reasoning"
+  )
     ? incoming.reasoning_ref
     : undefined
   const reasoningRefChanged =
@@ -502,10 +510,10 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
     (incoming.reasoning_stream_snapshot === true ||
       trustedIncomingReasoningDelta ||
       !(
-        incoming.reasoning_is_projection === true &&
-        existing.reasoning_is_projection !== true &&
-        !reasoningRefChanged &&
-        !tightensToError
+      incoming.reasoning_is_projection === true &&
+      existing.reasoning_is_projection !== true &&
+      !reasoningRefChanged &&
+      !tightensToError
       ))
   const nextContentPendingDelta =
     typeof incoming.content_pending_delta === "string"
@@ -523,10 +531,16 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
         : shouldUseIncomingReasoning
           ? undefined
           : existing.reasoning_pending_delta
-  const existingToolCallsRef = isSubagentTranscriptBlobRef(existing.tool_calls_ref, "tool_calls")
+  const existingToolCallsRef = isSubagentTranscriptBlobRef(
+    existing.tool_calls_ref,
+    "tool_calls"
+  )
     ? existing.tool_calls_ref
     : undefined
-  const incomingToolCallsRef = isSubagentTranscriptBlobRef(incoming.tool_calls_ref, "tool_calls")
+  const incomingToolCallsRef = isSubagentTranscriptBlobRef(
+    incoming.tool_calls_ref,
+    "tool_calls"
+  )
     ? incoming.tool_calls_ref
     : undefined
   const toolCallsRefChanged =
@@ -573,7 +587,9 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
         ? incoming.content_persisted_length
         : (incoming.content_persisted_length ?? existing.content_persisted_length),
     content_pending_delta: nextContentPendingDelta,
-    content_stream_delta: trustedIncomingContentDelta ? incoming.content_stream_delta : undefined,
+    content_stream_delta: trustedIncomingContentDelta
+      ? incoming.content_stream_delta
+      : undefined,
     subagent_content_fingerprint: shouldUseIncomingContent
       ? incoming.subagent_content_fingerprint
       : existing.subagent_content_fingerprint,
@@ -608,26 +624,26 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
       ? existing.replaced_message_ids
       : tightensToError
         ? incoming.replaced_message_ids
-        : mergeTranscriptReplacementAliases(
-            existing.replaced_message_ids,
-            incoming.replaced_message_ids
-          ),
+      : mergeTranscriptReplacementAliases(
+          existing.replaced_message_ids,
+          incoming.replaced_message_ids
+        ),
     replaced_message_id_prefixes: preservesExistingError
       ? existing.replaced_message_id_prefixes
       : tightensToError
         ? incoming.replaced_message_id_prefixes
-        : mergeTranscriptReplacementAliases(
-            existing.replaced_message_id_prefixes,
-            incoming.replaced_message_id_prefixes
-          ),
+      : mergeTranscriptReplacementAliases(
+          existing.replaced_message_id_prefixes,
+          incoming.replaced_message_id_prefixes
+        ),
     compatible_replaced_message_id_prefixes: preservesExistingError
       ? existing.compatible_replaced_message_id_prefixes
       : tightensToError
         ? incoming.compatible_replaced_message_id_prefixes
-        : mergeTranscriptReplacementAliases(
-            existing.compatible_replaced_message_id_prefixes,
-            incoming.compatible_replaced_message_id_prefixes
-          ),
+      : mergeTranscriptReplacementAliases(
+          existing.compatible_replaced_message_id_prefixes,
+          incoming.compatible_replaced_message_id_prefixes
+        ),
     tool_calls: shouldUseIncomingToolCalls
       ? incoming.tool_calls === undefined
         ? undefined
@@ -636,7 +652,9 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
             incoming.tool_calls
           )
       : existing.tool_calls,
-    tool_calls_ref: shouldUseIncomingToolCalls ? incoming.tool_calls_ref : existing.tool_calls_ref,
+    tool_calls_ref: shouldUseIncomingToolCalls
+      ? incoming.tool_calls_ref
+      : existing.tool_calls_ref,
     status: preservesExistingError ? existing.status : (incoming.status ?? existing.status),
     is_error: preservesExistingError ? true : (incoming.is_error ?? existing.is_error),
     subagent_startup_projection: retainsStartupProjection ? true : undefined,
@@ -646,7 +664,10 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
 }
 
 /** Concatenate contiguous persisted pages without letting duplicate ids reorder rows. */
-export function mergeSubagentTranscriptPages(earlier: Message[], later: Message[]): Message[] {
+export function mergeSubagentTranscriptPages(
+  earlier: Message[],
+  later: Message[]
+): Message[] {
   // These are contiguous persisted ranges, not a sparse baseline + snapshot.
   // Canonicalize the concatenated source order once so cross-page collisions
   // and replacement aliases produce the same order as a one-shot hydration.
@@ -761,7 +782,12 @@ export function selectSubagentTranscriptPersistFollowUp(input: {
   timerScheduled: boolean
   hasUrgent: boolean
 }): SubagentTranscriptPersistFollowUp {
-  if (input.attemptFailed || !input.hasPending || !input.canPersist || input.timerScheduled) {
+  if (
+    input.attemptFailed ||
+    !input.hasPending ||
+    !input.canPersist ||
+    input.timerScheduled
+  ) {
     return "none"
   }
   return input.hasUrgent ? "immediate" : "debounced"
@@ -879,9 +905,10 @@ function canonicalizeTranscriptMessages(
       ...message,
       id: canonicalId,
       ...(isReplacementSource && {
-        replaced_message_ids: mergeTranscriptReplacementAliases(message.replaced_message_ids, [
-          message.id
-        ])
+        replaced_message_ids: mergeTranscriptReplacementAliases(
+          message.replaced_message_ids,
+          [message.id]
+        )
       })
     }
     return { message: normalized, canonicalId, index, isReplacementSource }
@@ -926,7 +953,8 @@ function canonicalizeTranscriptMessages(
   output.push(...replacementGroups.values())
   return output
     .sort(
-      (left, right) => left.anchorIndex - right.anchorIndex || left.firstIndex - right.firstIndex
+      (left, right) =>
+        left.anchorIndex - right.anchorIndex || left.firstIndex - right.firstIndex
     )
     .map((entry) => entry.message)
 }
@@ -1021,7 +1049,9 @@ function prepareTranscriptReplacements(
     const finalMessage = entry.message
     if (!canReplaceTranscriptAssistant(finalMessage)) continue
     const replacementId = readReplacementString(entry.original.replaces_message_id)
-    const replacementPrefix = readReplacementString(entry.original.replaces_message_id_prefix)
+    const replacementPrefix = readReplacementString(
+      entry.original.replaces_message_id_prefix
+    )
     const compatibleOnly = entry.original.replacement_mode === "compatible"
     const finalPriority = finalMessage.content_priority ?? 0
     const candidates = allMessages.filter(
@@ -1038,7 +1068,8 @@ function prepareTranscriptReplacements(
         ? candidates.findLast((message) => message.id.startsWith(replacementPrefix))
         : undefined)
     const canUseCandidate =
-      !!candidate && (!compatibleOnly || replacementContentsAreCompatible(candidate, finalMessage))
+      !!candidate &&
+      (!compatibleOnly || replacementContentsAreCompatible(candidate, finalMessage))
 
     if (
       replacementId &&
@@ -1386,7 +1417,11 @@ function tryUpsertTranscriptTailContentUpdate(
   const existingRecord = existing as unknown as Record<string, unknown>
   const incomingRecord = candidate as unknown as Record<string, unknown>
   for (const key of Object.keys(incomingRecord)) {
-    if (TRANSCRIPT_TAIL_CONTENT_FIELDS.has(key) || key === "tool_calls" || key === "status") {
+    if (
+      TRANSCRIPT_TAIL_CONTENT_FIELDS.has(key) ||
+      key === "tool_calls" ||
+      key === "status"
+    ) {
       continue
     }
     if (!Object.is(existingRecord[key], incomingRecord[key])) return undefined
@@ -1545,7 +1580,9 @@ function revivePersistedSubagentMessage(value: unknown): Message | null {
   const replacedMessageIds = Array.isArray(value.replaced_message_ids)
     ? mergeTranscriptReplacementAliases(
         undefined,
-        value.replaced_message_ids.filter((alias): alias is string => typeof alias === "string")
+        value.replaced_message_ids.filter(
+          (alias): alias is string => typeof alias === "string"
+        )
       )
     : undefined
   const replacedMessageIdPrefixes = Array.isArray(value.replaced_message_id_prefixes)
@@ -1729,7 +1766,10 @@ function serializeSubagentMessage(message: Message): Record<string, unknown> {
       serialized.content = []
     }
     serialized.content_is_projection = true
-    if (contentPendingDelta && contentPersistedLength !== undefined) {
+    if (
+      contentPendingDelta &&
+      contentPersistedLength !== undefined
+    ) {
       textDeltas.content = {
         v: 1,
         baseRefSha256: contentRef.sha256,
@@ -1787,8 +1827,14 @@ function serializeSubagentMessage(message: Message): Record<string, unknown> {
     delete serialized.tool_calls
   }
   if (requiresLiveTextBootstrap) {
-    serialized.content = contentPendingDelta
-    serialized.reasoning = reasoningPendingDelta
+    // A single-field update may bootstrap a hydrated message. Missing pending
+    // text is not an instruction to clear the other field.
+    if (typeof message.content_pending_delta === "string") {
+      serialized.content = contentPendingDelta
+    }
+    if (typeof message.reasoning_pending_delta === "string") {
+      serialized.reasoning = reasoningPendingDelta
+    }
     delete serialized.content_ref
     delete serialized.content_is_projection
     delete serialized.content_full_length
@@ -1857,7 +1903,10 @@ export function applyPersistedSubagentTranscriptRefs(
     const reasoningRef = isSubagentTranscriptBlobRef(persisted.reasoning_ref, "reasoning")
       ? persisted.reasoning_ref
       : undefined
-    const toolCallsRef = isSubagentTranscriptBlobRef(persisted.tool_calls_ref, "tool_calls")
+    const toolCallsRef = isSubagentTranscriptBlobRef(
+      persisted.tool_calls_ref,
+      "tool_calls"
+    )
       ? persisted.tool_calls_ref
       : undefined
     const persistedContentLength =
@@ -1984,7 +2033,9 @@ export function applyPersistedSubagentTranscriptRefs(
     if (liveIndex && liveIndex.length === currentMessages.length) {
       const persistedById = new Map(
         rawPersistedMessages.flatMap((value) =>
-          isRecord(value) && typeof value.id === "string" ? [[value.id, value] as const] : []
+          isRecord(value) && typeof value.id === "string"
+            ? [[value.id, value] as const]
+            : []
         )
       )
       for (const sentMessage of sentMessages) {
