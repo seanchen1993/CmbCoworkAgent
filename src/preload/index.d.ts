@@ -1219,6 +1219,9 @@ interface CustomAPI {
       }>
     }>
     generateTitle: (message: string) => Promise<string>
+    onApiFeatureCreated: (
+      callback: (payload: { threadId: string; nextAction: unknown }) => void
+    ) => () => void
     onThreadsChanged: (callback: () => void) => () => void
     onApiSubmitMessage: (
       callback: (payload: { threadId: string; message: string }) => void
@@ -2856,6 +2859,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: LocalGenAdoptionLines[]; error?: string }>
   }
   harnessBoard: {
+    onApiProjectChanged: (callback: (payload: { projectId: string }) => void) => () => void
     catalogPage: (input: HarnessBoardCatalogPageInput) => Promise<HarnessBoardCatalogPageResult>
     cancelCatalogRequests: (
       scope?: "board" | "board-registry" | "board-sidebar" | "board-settings" | "chat-binding"

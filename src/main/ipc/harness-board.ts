@@ -1,3 +1,4 @@
+import { createProject, updateProject, createFeature } from "../harness-board/mutations"
 import {
   BrowserWindow,
   shell,
@@ -10,8 +11,6 @@ import path from "node:path"
 import {
   archiveHarnessProject,
   cancelHarnessDetailRequestScope,
-  createHarnessFeature,
-  createHarnessProject,
   buildHarnessFeatureDialogTips,
   getHarnessDynamicWorkflowConfig,
   deleteHarnessProject,
@@ -29,7 +28,6 @@ import {
   skipHarnessRunNode,
   syncHarnessProjectConstraints,
   updateHarnessFeatureDeployUnits,
-  updateHarnessProjectMetadata,
   resolveHarnessRunDetailCurrentStage
 } from "../harness-board/service"
 import {
@@ -403,11 +401,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:createProject",
     async (_event, input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> => {
-      const created = await createHarnessProject(input)
-      // 立即补一次快照上报，避免新建项目要等下一轮 20 分钟定时扫描才出现在运营面板。
-      // 尽力而为：内部已 try/catch，不抛错、不阻断创建结果返回。
-      void reportProjectSnapshotNow(created.projectId)
-      return created
+      return createProject(input)
     }
   )
 
@@ -480,10 +474,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:createFeature",
     async (_event, input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> => {
-      const result = await createHarnessFeature(input)
-      // 新建 feature 后立即补一次该项目的快照上报，让面板尽快反映新特性，无需等定时扫描。
-      void reportProjectSnapshotNow(result.projectId)
-      return result
+      return createFeature(input)
     }
   )
 
@@ -569,11 +560,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       _event,
       payload: { projectId: string; input: HarnessProjectMetadataUpdateInput }
     ): Promise<HarnessProjectMetadata> => {
-      const updated = await updateHarnessProjectMetadata(payload.projectId, payload.input)
-      // 编辑元数据（如 projectFromLean 切换）后立即补一次快照上报，否则改动要等下一轮
-      // 20 分钟定时扫描才刷到运营面板。尽力而为：内部已 try/catch，不抛错、不阻断返回。
-      void reportProjectSnapshotNow(payload.projectId)
-      return updated
+      return updateProject(payload.projectId, payload.input)
     }
   )
 

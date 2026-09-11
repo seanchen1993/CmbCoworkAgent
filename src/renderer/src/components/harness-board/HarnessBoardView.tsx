@@ -1,4 +1,9 @@
 import {
+  defaultWorkflowTemplateId,
+  requiredWorkflowNodeIds,
+  resolveHarnessSessionWorkspace
+} from "../../../../shared/harness-feature-defaults"
+import {
   Fragment,
   startTransition,
   useCallback,
@@ -923,29 +928,18 @@ async function getLatestSessionWorkspacePath(
   threadsById: Map<string, Thread>,
   threadStates: ThreadWorkspaceStateMap
 ): Promise<string | null> {
-  const sortedSessions = [...sessions].sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
-
-  // First pass: check all sync sources (thread state + metadata) before making any IPC calls.
-  for (const session of sortedSessions) {
-    const statePath = normalizeWorkspacePath(threadStates[session.threadId]?.workspacePath)
-    if (statePath) return statePath
-
-    const metadataPath = getThreadWorkspacePath(threadsById.get(session.threadId))
-    if (metadataPath) return metadataPath
-  }
-
-  // Second pass: fall back to a single persisted workspace lookup for the latest session.
-  const latest = sortedSessions[0]
-  if (latest) {
-    try {
-      const persistedPath = normalizeWorkspacePath(await window.api.workspace.get(latest.threadId))
-      if (persistedPath) return persistedPath
-    } catch {
-      // Persisted workspace lookup is unavailable — return null.
-    }
-  }
-
-  return null
+  return resolveHarnessSessionWorkspace(
+    null,
+    sessions.map((session) => ({
+      threadId: session.threadId,
+      lastActiveAt: session.lastActiveAt,
+      workspacePaths: [
+        threadStates[session.threadId]?.workspacePath,
+        getThreadWorkspacePath(threadsById.get(session.threadId))
+      ]
+    })),
+    (threadId) => window.api.workspace.get(threadId)
+  )
 }
 
 interface CreateHarnessSessionParams {
@@ -3340,10 +3334,6 @@ interface DynamicWorkflowNodeGroup {
   nodes: HarnessDynamicWorkflowNode[]
 }
 
-function defaultWorkflowTemplateId(config: HarnessDynamicWorkflowConfig | null): string {
-  return config?.templates[0]?.id ?? ""
-}
-
 function isCustomWorkflowTemplate(
   template: HarnessDynamicWorkflowTemplate | null | undefined
 ): boolean {
@@ -3355,14 +3345,6 @@ function selectedWorkflowTemplate(
   templateId: string
 ): HarnessDynamicWorkflowTemplate | null {
   return config?.templates.find((template) => template.id === templateId) ?? null
-}
-
-function requiredWorkflowNodeIds(
-  config: HarnessDynamicWorkflowConfig | null,
-  templateId: string
-): Set<string> {
-  const template = selectedWorkflowTemplate(config, templateId)
-  return new Set(template && isCustomWorkflowTemplate(template) ? template.requiredNodes : [])
 }
 
 function ensureRequiredWorkflowNodes(
@@ -9601,6 +9583,21 @@ export function HarnessBoardView({
         .catch(() => undefined)
     }
   }, [selectedFeature, selectedFeatureProjectDetail])
+
+  useEffect(
+    () =>
+      window.api.harnessBoard.onApiProjectChanged(({ projectId }) => {
+        invalidateHarnessProjectDetails([projectId])
+        setDetailsByProjectId((current) => {
+          const next = { ...current }
+          delete next[projectId]
+          return next
+        })
+        void loadProjects({ force: true })
+        void loadProjectDetail(projectId, { showLoading: false, reportError: false })
+      }),
+    [loadProjects, loadProjectDetail]
+  )
 
   useEffect(() => {
     return window.api.harnessBoard.onWatchRefsChanged((event) => {

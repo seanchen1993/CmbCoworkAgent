@@ -47,14 +47,8 @@ export async function createHarnessFeatureThread({
     setPendingHarnessNextAction(thread.thread_id, resolvedNextAction)
   }
 
-  const grant = await window.api.harnessBoard.ensureFeatureThreadImGrant({
-    projectId,
-    featureId: slug,
-    threadId: thread.thread_id
-  })
-  if (grant.required && !grant.granted) {
-    toast.error(grant.error || "会话已创建，但未能接入招乎")
-  }
+  const warnings = (thread as Thread & { warnings?: string[] }).warnings
+  if (warnings?.length) toast.warning(warnings.join("\n"))
 
   return thread
 }

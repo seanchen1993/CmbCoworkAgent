@@ -77,7 +77,10 @@ CMB_API_TOKEN=your-secret CMB_API_PORT=9000 npm run start
 | Method | Path | 说明 | 鉴权 |
 |---|---|---|---|
 | GET | `/healthz` | 健康检查 | 否 |
-| POST | `/v1/threads` | 创建会话 | 是 |
+| POST | `/v1/threads` | 创建普通或特性会话，项目模式见 §13 | 是 |
+| POST | `/v1/projects` | 新建项目 | 是 |
+| PUT | `/v1/projects/:projectId` | 部分更新项目 | 是 |
+| POST | `/v1/projects/:projectId/features` | 新建特性 | 是 |
 | GET | `/v1/threads/:id` | 查询会话 | 是 |
 | GET | `/v1/threads/:id/messages` | 查询历史消息 | 是 |
 | POST | `/v1/threads/:id/messages` | 发送消息(SSE 流式回复) | 是 |
@@ -100,7 +103,7 @@ CMB_API_TOKEN=your-secret CMB_API_PORT=9000 npm run start
 
 ### 5.2 POST /v1/threads — 创建会话
 
-**请求体**(所有字段可选,也可放进 `metadata` 对象)
+**普通会话请求体**(原有字段可选,也可放进 `metadata` 对象)。`threadType` 省略或为 `normal` 时创建普通会话；`threadType: "feature"` 的参数限制与默认值见 §13。
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -409,3 +412,123 @@ curl -s $BASE/v1/threads/$TID/messages
 ---
 
 如对接中遇到与本文不符的行为,请附上:请求 URL/body、返回内容、以及主进程日志里 `[ApiGateway]` / `[Agent]` 相关行。
+
+
+## 13. 项目模式 HTTP 接口与设计决策
+
+项目模式复用 UI/IPC 的项目服务、插件命令和会话持久化，不建立独立数据模型。时间格式沿用现有项目 metadata 和 Thread 序列化，不迁移历史数据。
+
+| Method | Path | 成功结果 |
+|---|---|---|
+| POST | `/v1/projects` | 201，完整项目对象，包含 `projectId` |
+| PUT | `/v1/projects/:projectId` | 200，更新后的完整项目对象 |
+| POST | `/v1/projects/:projectId/features` | 201，`{projectId, featureId}` |
+| POST | `/v1/threads` | 201，原有 Thread 对象，可附带 `warnings` |
+
+### 13.1 新建和编辑项目
+
+创建请求示例（所有路径均属于运行 App 的机器）：
+
+```json
+{
+  "harness-adapter": { "name": "已安装的插件名称" },
+  "name": "支付平台改造",
+  "projectCode": "PAY202609",
+  "projectFromLean": false,
+  "projectDir": "payment-upgrade",
+  "description": "支付平台功能升级",
+  "systemId": "PAY",
+  "systemName": "支付平台",
+  "workspacePath": "/Users/me/projects",
+  "sessionWorkspacePath": "/Users/me/repos/payment"
+}
+```
+
+除 `sessionWorkspacePath` 外，上述字段必填。仅接受适配器 `name`，按去除首尾空格后的名称精确匹配已安装插件，校验 board 配置及兼容性，服务端生成完整 id/name/version/type 快照。未安装报错，同名多候选报错，不自动安装或选择版本。
+
+编辑使用 `PUT /v1/projects/:projectId`，按部分更新处理，只需提交要修改的字段：
+
+```json
+{
+  "name": "支付平台改造-已编辑",
+  "description": "更新后的项目描述"
+}
+```
+
+| 编辑字段 | 类型 | 不传时 |
+|---|---|---|
+| `name` | string | 保留原值 |
+| `description` | string | 保留原值 |
+| `projectCode` | string | 保留原值 |
+| `projectFromLean` | boolean | 保留原值；显式 false 正常更新 |
+| `systemId` | string | 保留原值 |
+| `systemName` | string | 保留原值 |
+| `sessionWorkspacePath` | string | 保留原值；显式空字符串表示清除 |
+| `harness-adapter` | `{ "name": "插件名称" }` | 使用原适配器绑定；传入时按名称解析 |
+
+所有编辑字段均可选，显式 null 不表示保留或清除，而是参数错误。空对象不修改业务字段，仍遵循现有更新服务更新时间和快照上报的行为。项目存放目录由服务端从原 metadata 读取，不属于编辑入参；传入不可编辑字段返回 400。编辑仅更新现有元数据，不移动目录或重新初始化项目。
+
+### 13.2 新建特性
+
+```json
+{ "feature": "支付重试" }
+```
+
+可选 `selectedDeployUnits` 沿用 IPC 的发布单元映射结构及校验；未传时采用 UI 默认选择（当前为空）。不修改全局发布单元配置。调用方不传 `workflowTemplate`、`workflowNodes`、`workflowConfig`，服务端复用 UI 默认模板及必选节点规则。注入来源按 UI 的插件能力判定规则生成。
+
+返回 `{ "projectId": "项目UUID", "featureId": "支付重试" }`。`featureId` 对应内部 slug，按 `(projectId, featureId)` 联合定位；不新增 UUID，不自动创建会话。
+
+### 13.3 扩展已有会话接口
+
+```json
+{
+  "threadType": "feature",
+  "projectId": "项目UUID",
+  "featureId": "支付重试",
+  "workspacePath": "/Users/me/repos/payment",
+  "title": "支付重试方案讨论"
+}
+```
+
+- `threadType` 支持 `normal`、`feature`；省略按普通会话处理。
+- feature 请求必须提供两个 ID，校验存在及归属，禁止出现整个 `metadata` 字段（包括空对象/null）。内部 harnessFeature 由服务端生成，与 UI 数据结构一致；threadType 不持久化。
+- 保留 `title`、`model`、`agentMode`、`yolo`、`sandbox`；显式参数优先，feature 缺省采用 UI/插件规则，后续 HTTP 发消息沿用这些设置。
+- 目录优先级：显式有效绝对目录 `workspacePath` → 项目 sessionWorkspacePath → UI 规则下该特性历史会话目录 → null。显式非法路径报错，不静默回退。
+- 共用创建服务按现有条件执行 session_context_inject，应用插件初始模式和 requestUserInput 策略，完成招乎授权。运行消息时仍走现有上下文构建流程。
+- 核心创建失败返回错误；会话已保存但注入降级或授权失败，返回 201 和 thread_id，附加字符串数组 warnings；warnings 不写入 metadata。
+- 创建后刷新列表，不抢占页面；消息发送沿用既有 HTTP 导航。下一步仅复用预填机制，不自动发送。
+- 后续继续使用 `/v1/threads/:id/messages`（SSE/历史）和 `/cancel`。
+
+### 13.4 实施与验证
+
+依次完成：共用默认规则及创建入口、HTTP 参数和错误映射、UI 变更通知、运行设置对齐。仅运行修改文件 lint、类型检查及已有相关测试，不运行生产构建，不新增或改写单元测试。验证业务字段、初始化副作用和持久化结构；ID、时间等生成值不要求逐字相同。
+
+### 13.5 错误与部分成功
+
+项目模式错误响应为 `{ "error": "错误码", "message": "具体说明" }`。
+
+| HTTP | error | 含义 |
+|---|---|---|
+| 400 | invalid_json / invalid_request | JSON 或字段类型、必填项错误 |
+| 400 | invalid_thread_type / metadata_not_allowed | 会话类型无效或特性请求传入 metadata |
+| 400 | feature_requires_thread_type | 普通请求携带特性绑定，应使用 feature 类型 |
+| 400 | invalid_workspace_path | 显式会话工作目录不是有效绝对目录 |
+| 404 | project_not_found / feature_not_found | 目标项目或项目下特性不存在 |
+| 404 | adapter_not_installed | 本机未安装指定名称的适配器 |
+| 409 | adapter_name_ambiguous / resource_conflict | 同名适配器或项目/特性重复 |
+| 422 | adapter_unavailable | 插件项目模式配置不可用或不兼容 |
+| 500 | internal_error | 插件命令、存储等核心操作失败 |
+
+部分成功示例（省略其余 Thread 字段）：
+
+```json
+{
+  "thread_id": "会话UUID",
+  "status": "idle",
+  "warnings": ["会话已创建，但未能接入招乎"]
+}
+```
+
+收到上述 201 时保留 thread_id，不要因 warning 重复创建会话。warnings 仅属于创建响应，不保存在项目或会话 metadata 中。
+
+特性会话未指定 YOLO/沙箱时继承 UI 全局设置；普通会话保留原 HTTP 默认值。`sandbox: false` 禁用 Windows 沙箱，`sandbox: true` 保留本机已配置的沙箱模式，与原接口一致，不修改全局设置。

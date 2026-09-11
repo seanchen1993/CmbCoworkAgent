@@ -1,3 +1,4 @@
+import { notifyRenderer } from "../renderer-notifications"
 /**
  * Bridge between the HTTP API gateway and the in-process agent runtime.
  *
@@ -24,15 +25,6 @@ import { getThread, getThreadMessages } from "../db"
 import type { Thread } from "../types"
 
 let hiddenCarrier: BrowserWindow | null = null
-
-/** Broadcast a channel (with optional payload) to every renderer. */
-function notifyRenderer(channel: string, payload?: unknown): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
-      win.webContents.send(channel, payload)
-    }
-  }
-}
 
 /** A live app window that hosts the renderer (not the hidden carrier), or null. */
 function findRendererWindow(): BrowserWindow | null {
@@ -93,12 +85,13 @@ function applyThreadRunOverrides(threadId: string): void {
   } catch {
     meta = {}
   }
-  const yolo = typeof meta.yolo === "boolean" ? meta.yolo : false
+  const isFeature = !!meta.harnessFeature
+  const yolo = typeof meta.yolo === "boolean" ? meta.yolo : isFeature ? undefined : false
   setThreadYoloOverride(threadId, yolo)
 
   const isWindows = process.platform === "win32"
   const sandboxDisabled =
-    meta.sandbox === true ? false : meta.sandbox === false ? true : isWindows
+    meta.sandbox === true ? false : meta.sandbox === false ? true : isFeature ? false : isWindows
   setThreadSandboxDisabled(threadId, sandboxDisabled)
 }
 

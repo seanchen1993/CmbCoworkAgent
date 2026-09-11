@@ -673,6 +673,14 @@ async function resolveHarnessAdapter(
   return pluginToHarnessAdapterSnapshot(plugin, configSnapshot)
 }
 
+/** Resolve the public API name to the same installed snapshot used by IPC. */
+export async function resolveHarnessAdapterByName(name: string): Promise<HarnessAdapterSnapshot> {
+  const matches = getPlugins().filter((plugin) => plugin.name.trim() === name.trim())
+  if (matches.length === 0) throw new Error("adapter_not_installed")
+  if (matches.length !== 1) throw new Error("adapter_name_ambiguous")
+  return resolveHarnessAdapter(pluginAdapterId(matches[0]), "plugin")
+}
+
 async function resolveHarnessAdapterSnapshot(
   adapter: HarnessAdapterSnapshot
 ): Promise<HarnessAdapterSnapshot> {

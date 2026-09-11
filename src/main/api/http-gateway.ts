@@ -1,3 +1,12 @@
+import {
+  ApiInputError,
+  requireObject,
+  apiCreateProject,
+  apiUpdateProject,
+  apiCreateFeature,
+  apiCreateFeatureThread,
+  apiProjectError
+} from "./project-bridge"
 /**
  * Remote HTTP API gateway for the agent.
  *
@@ -99,7 +108,7 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString("utf-8")))
       } catch {
-        reject(new Error("Invalid JSON body"))
+        reject(new ApiInputError(400, "invalid_json", "Invalid JSON body"))
       }
     })
     req.on("error", reject)
@@ -210,10 +219,59 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
     return
   }
 
+  const projectMatch = path.match(/^\/v1\/projects\/([^/]+)(\/features)?$/)
+  if (
+    (method === "POST" && path === "/v1/projects") ||
+    (projectMatch &&
+      ((method === "PUT" && !projectMatch[2]) || (method === "POST" && projectMatch[2])))
+  ) {
+    try {
+      const body = requireObject(await readJsonBody(req))
+      const projectId = projectMatch ? decodeURIComponent(projectMatch[1]) : undefined
+      const result = !projectId
+        ? await apiCreateProject(body)
+        : method === "PUT"
+          ? await apiUpdateProject(projectId, body)
+          : await apiCreateFeature(projectId, body)
+      sendJson(res, method === "PUT" ? 200 : 201, result)
+    } catch (error) {
+      const failure = apiProjectError(error)
+      sendJson(res, failure.status, { error: failure.error, message: failure.message })
+    }
+    return
+  }
+
   // POST /v1/threads — accepts explicit workspacePath / model / agentMode / title
   // (and/or a nested `metadata` object). agentMode ∈ normal|coordinator|workflow.
   if (method === "POST" && path === "/v1/threads") {
-    const body = (await readJsonBody(req).catch(() => null)) as {
+    let input: Record<string, unknown>
+    try {
+      input = requireObject((await readJsonBody(req)) ?? {})
+      const threadType = input.threadType === undefined ? "normal" : input.threadType
+      if (threadType !== "normal" && threadType !== "feature")
+        throw new ApiInputError(400, "invalid_thread_type")
+      if (threadType === "feature") {
+        if ("metadata" in input) throw new ApiInputError(400, "metadata_not_allowed")
+        sendJson(res, 201, await apiCreateFeatureThread(input))
+        return
+      }
+      if (
+        "projectId" in input ||
+        "featureId" in input ||
+        (input.metadata && typeof input.metadata === "object" && "harnessFeature" in input.metadata)
+      ) {
+        throw new ApiInputError(
+          400,
+          "feature_requires_thread_type",
+          "特性绑定必须通过 threadType=feature 和顶层 ID 指定"
+        )
+      }
+    } catch (error) {
+      const failure = apiProjectError(error)
+      sendJson(res, failure.status, { error: failure.error, message: failure.message })
+      return
+    }
+    const body = input as {
       metadata?: Record<string, unknown>
       workspacePath?: unknown
       model?: unknown
@@ -221,16 +279,16 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
       title?: unknown
       yolo?: unknown
       sandbox?: unknown
-    } | null
-    const metadata: Record<string, unknown> = { ...(body?.metadata ?? {}) }
-    if (typeof body?.workspacePath === "string") metadata.workspacePath = body.workspacePath
-    if (typeof body?.model === "string") metadata.model = body.model
-    if (typeof body?.agentMode === "string") metadata.agentMode = body.agentMode
-    if (typeof body?.title === "string") metadata.title = body.title
+    }
+    const metadata: Record<string, unknown> = { ...(body.metadata ?? {}) }
+    if (typeof body.workspacePath === "string") metadata.workspacePath = body.workspacePath
+    if (typeof body.model === "string") metadata.model = body.model
+    if (typeof body.agentMode === "string") metadata.agentMode = body.agentMode
+    if (typeof body.title === "string") metadata.title = body.title
     // yolo: auto-approve all tools (default OFF → approvals surface in the app).
-    if (typeof body?.yolo === "boolean") metadata.yolo = body.yolo
+    if (typeof body.yolo === "boolean") metadata.yolo = body.yolo
     // sandbox: keep the (Windows) sandbox on. Default: OFF on Windows.
-    if (typeof body?.sandbox === "boolean") metadata.sandbox = body.sandbox
+    if (typeof body.sandbox === "boolean") metadata.sandbox = body.sandbox
     const thread = await apiCreateThread(metadata)
     sendJson(res, 201, thread)
     return

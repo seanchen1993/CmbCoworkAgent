@@ -1,3 +1,4 @@
+import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import {
   useCallback,
   useDeferredValue,
@@ -983,6 +984,14 @@ function App(): React.JSX.Element {
       setPendingEvolution(true)
     })
   }, [setPendingEvolution])
+
+  useEffect(
+    () =>
+      window.api.threads.onApiFeatureCreated(({ threadId, nextAction }) => {
+        setPendingHarnessNextAction(threadId, nextAction)
+      }),
+    []
+  )
 
   // Reload thread list when main process signals a change (e.g. scheduled task created a thread).
   // Only update the list without auto-selecting (which would navigate away from customize view).

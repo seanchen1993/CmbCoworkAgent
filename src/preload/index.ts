@@ -1303,6 +1303,16 @@ const api = {
     generateTitle: (message: string): Promise<string> => {
       return ipcRenderer.invoke("threads:generateTitle", message)
     },
+    onApiFeatureCreated: (
+      callback: (payload: { threadId: string; nextAction: unknown }) => void
+    ): (() => void) => {
+      const handler = (_event: unknown, payload: { threadId: string; nextAction: unknown }): void =>
+        callback(payload)
+      ipcRenderer.on("threads:apiFeatureCreated", handler)
+      return () => {
+        ipcRenderer.removeListener("threads:apiFeatureCreated", handler)
+      }
+    },
     onThreadsChanged: (callback: () => void): (() => void) => {
       const handler = (): void => {
         callback()
@@ -4266,6 +4276,13 @@ const api = {
       ipcRenderer.invoke("adoption:commitLines", commitSha, genEventIds)
   },
   harnessBoard: {
+    onApiProjectChanged: (callback: (payload: { projectId: string }) => void): (() => void) => {
+      const handler = (_event: unknown, payload: { projectId: string }): void => callback(payload)
+      ipcRenderer.on("harnessBoard:apiChanged", handler)
+      return () => {
+        ipcRenderer.removeListener("harnessBoard:apiChanged", handler)
+      }
+    },
     catalogPage: (input: HarnessBoardCatalogPageInput): Promise<HarnessBoardCatalogPageResult> =>
       ipcRenderer.invoke(
         "harnessBoard:catalogPage",

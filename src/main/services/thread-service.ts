@@ -1,3 +1,4 @@
+import { materializeHarnessFeatureThreadGrant } from "./im/feature-thread-grant"
 import Store from "electron-store"
 import { v4 as uuid } from "uuid"
 import { createThread as dbCreateThread } from "../db"
@@ -16,7 +17,11 @@ const settingsStore = new Store({
   cwd: getOpenworkDir()
 })
 
-export async function createThreadService(metadata?: Record<string, unknown>): Promise<Thread> {
+export async function createThreadService(
+  metadata?: Record<string, unknown>,
+  options: { grantFeatureAccess?: boolean } = {}
+): Promise<Thread & { warnings?: string[] }> {
+  const warnings: string[] = []
   const threadId = uuid()
   const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
   const harnessFeatureMetadata =
@@ -53,6 +58,8 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
       workspacePath,
       requestUserInputConfigSource: "plugin"
     })
+    if (harnessContext?.sessionContextInjectWarning)
+      warnings.push(harnessContext.sessionContextInjectWarning)
     if (harnessFeatureMetadata && harnessContext?.agentConfig?.toolConfig?.requestUserInput) {
       nextMetadata.harnessFeature = {
         ...harnessFeatureMetadata,
@@ -61,6 +68,8 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
     }
   } catch (error) {
     console.warn("[Threads] Failed to resolve Harness request_user_input policy:", error)
+    if (harnessFeatureMetadata)
+      warnings.push(error instanceof Error ? error.message : String(error))
   }
 
   if (!Object.prototype.hasOwnProperty.call(nextMetadata, "agentMode")) {
@@ -99,7 +108,21 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
   nextMetadata.title = title
 
   const thread = dbCreateThread(threadId, nextMetadata)
+  if (harnessFeatureMetadata && options.grantFeatureAccess) {
+    try {
+      const grant = await materializeHarnessFeatureThreadGrant({
+        projectId: String(harnessFeatureMetadata.projectId),
+        featureId: String(harnessFeatureMetadata.slug),
+        threadId
+      })
+      if (grant.required && !grant.granted)
+        warnings.push(grant.error || "会话已创建，但未能接入招乎")
+    } catch (error) {
+      warnings.push(error instanceof Error ? error.message : String(error))
+    }
+  }
   return {
+    ...(warnings.length ? { warnings } : {}),
     thread_id: thread.thread_id,
     created_at: new Date(thread.created_at),
     updated_at: new Date(thread.updated_at),

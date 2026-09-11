@@ -1340,10 +1340,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {
     const thread = await window.api.threads.create(metadata)
+    const directoryThread = { ...thread } as Thread & { warnings?: string[] }
+    delete directoryThread.warnings
     markThreadDirectoryMutation(thread.thread_id)
     set((state) => ({
       threads: adoptThreadDirectorySnapshot([
-        thread,
+        directoryThread,
         ...state.threads.filter((item) => item.thread_id !== thread.thread_id)
       ]),
       currentThreadId: thread.thread_id,

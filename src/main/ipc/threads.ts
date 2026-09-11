@@ -3012,7 +3012,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   // Create a new thread
   ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>) => {
-    return createThreadService(metadata)
+    return createThreadService(metadata, { grantFeatureAccess: true })
   })
 
   ipcMain.handle("threads:fork", async (_event, params: ThreadForkParams) => {
