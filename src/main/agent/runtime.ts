@@ -344,6 +344,7 @@ import {
   type WorkflowWorktreeIsolationBoundary
 } from "./workflow/types"
 import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
+import { isPlausibleToolName } from "../../shared/tool-name"
 import {
   createTraceCollectorSafely,
   finishTraceInBackground,
@@ -5905,6 +5906,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     const seenWorkerToolCallKeys = new Set<string>()
     const workerToolNames = new Set<string>()
     let workerToolCallCount = 0
+    let workerMalformedToolCalls = 0
     const workerSkillUsageDetector = new SkillUsageDetector()
     let workerTracer: TraceCollector | undefined
     let workerTraceTerminalRecorded = false
@@ -6063,8 +6065,14 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             (event) => {
               if (event.type === "tool_call") {
                 workerToolCallCount += 1
-                if (event.toolName) {
+                // The call still counts; only the name is refused. A name that
+                // could not be a tool name is a tool call the model malformed,
+                // and recording it put model text into the usage ranking as if
+                // it were a tool. See isPlausibleToolName.
+                if (isPlausibleToolName(event.toolName)) {
                   workerToolNames.add(event.toolName)
+                } else if (event.toolName) {
+                  workerMalformedToolCalls += 1
                 }
               }
               workerInput.onProgress(event)
@@ -6367,6 +6375,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             tokenUsage,
             toolNames: Array.from(workerToolNames),
             toolCallCount: workerToolCallCount,
+            ...(workerMalformedToolCalls > 0
+              ? { malformedToolCalls: workerMalformedToolCalls }
+              : {}),
             ...(workerReasoning ? { reasoning: workerReasoning } : {})
           }
         })
@@ -6395,7 +6406,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
               metadata: {
                 tokenUsage,
                 toolNames: Array.from(workerToolNames),
-                toolCallCount: workerToolCallCount
+                toolCallCount: workerToolCallCount,
+                ...(workerMalformedToolCalls > 0
+                  ? { malformedToolCalls: workerMalformedToolCalls }
+                  : {})
               }
             })
             workerTraceTerminalRecorded = true
