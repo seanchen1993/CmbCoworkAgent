@@ -628,7 +628,7 @@ export const marketApi = {
     downloadToLocal = false,
     _isFeatured = false,
     item?: MarketItem,
-    options?: { signal?: AbortSignal; maxBytes?: number }
+    options?: { signal?: AbortSignal; maxBytes?: number; allowNestedNameDuplicates?: boolean }
   ): Promise<DownloadResponse> {
     void _isFeatured
     console.log(`Downloading ${type} item: ${name}`)

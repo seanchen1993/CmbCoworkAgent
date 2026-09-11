@@ -45,7 +45,7 @@ export function useBrowserViewLifecycle({
       !isAgentFocusActive &&
       ((mainView === "thread" && Boolean(currentThreadId)) ||
         (mainView === "harness" && Boolean(harnessSessionThreadId)))) ||
-    (overlayModule === "browser" && Boolean(overlayThreadId))
+    overlayModule === "browser"
 
   const hideBrowserSession = useCallback((reason: string) => {
     console.info(`${BROWSER_APP_LOG_PREFIX} Hiding Browser session ${BROWSER_SESSION_ID} because ${reason}.`)

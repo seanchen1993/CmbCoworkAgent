@@ -5,6 +5,7 @@ import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLife
 import { useAppStore } from "@/lib/store"
 import {
   onOpenResourcePanelOverlay,
+  type ResourcePanelInlinePreview,
   type ResourcePanelOverlayMode
 } from "@/lib/resource-panel-overlay-events"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
@@ -30,8 +31,12 @@ export function ResourcePanelOverlay({
     Boolean(renderedPanelThreadId)
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<ResourcePanelOverlayMode>("preview")
+  const [browserUrl, setBrowserUrl] = useState<string | null>(null)
+  const [inlinePreview, setInlinePreview] = useState<ResourcePanelInlinePreview | null>(null)
   const handlePreviewRequest = useCallback((): void => {
     setMode("preview")
+    setBrowserUrl(null)
+    setInlinePreview(null)
     setOpen(true)
   }, [])
   const { request: previewRequest, clear: clearPreviewRequest } = useResourcePreviewRequest(
@@ -47,19 +52,29 @@ export function ResourcePanelOverlay({
   }, [clearPreviewRequest])
 
   const selectMode = useCallback(
-    (nextMode: ResourcePanelOverlayMode) => {
+    (
+      nextMode: ResourcePanelOverlayMode,
+      options?: { browserUrl?: string; inlinePreview?: ResourcePanelInlinePreview }
+    ) => {
       if (standardRightPanelMounted) {
         setRightModule(nextMode)
         return
       }
       setMode(nextMode)
+      setBrowserUrl(options?.browserUrl ?? null)
+      setInlinePreview(options?.inlinePreview ?? null)
       setOpen(true)
     },
     [setRightModule, standardRightPanelMounted]
   )
 
   useEffect(() => {
-    return onOpenResourcePanelOverlay(selectMode)
+    return onOpenResourcePanelOverlay((detail) =>
+      selectMode(detail.mode, {
+        browserUrl: detail.browserUrl,
+        inlinePreview: detail.inlinePreview
+      })
+    )
   }, [selectMode])
 
   const handleBrowserPanelRequest = useCallback(() => {
@@ -77,7 +92,10 @@ export function ResourcePanelOverlay({
     onRequestBrowserPanel: handleBrowserPanelRequest
   })
 
-  if (!overlayThreadId || standardRightPanelMounted) return null
+  // The overlay is the panel surface for non-thread views (e.g. the design
+  // creation page). It must stay available even when no task thread is active,
+  // so it only defers to the mounted standard right panel.
+  if (standardRightPanelMounted) return null
 
   return (
     <OverlayDrawer
@@ -89,6 +107,8 @@ export function ResourcePanelOverlay({
         threadId={overlayThreadId}
         moduleMode={mode}
         showSystemConstraints={renderedMainView === "harness"}
+        browserInitialUrl={mode === "browser" ? browserUrl : null}
+        inlinePreview={mode === "preview" ? inlinePreview : null}
         resourcePreviewRequest={mode === "preview" || mode === "browser" ? previewRequest : null}
         onResourcePreviewRequestHandled={clearPreviewRequest}
         listenForResourcePreview={false}

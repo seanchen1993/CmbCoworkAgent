@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ClipboardList, Loader2 } from "lucide-react"
+import { ClipboardList } from "lucide-react"
 import { toast } from "sonner"
 import { NewRequirementDialog } from "./NewRequirementDialog"
 import { RequirementConversationView } from "./RequirementConversationView"

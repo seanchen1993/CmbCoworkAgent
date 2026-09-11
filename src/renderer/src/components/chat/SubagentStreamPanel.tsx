@@ -464,20 +464,22 @@ export function SubagentStreamPanel({
     <div className="flex h-full min-w-0 flex-col overflow-hidden bg-grid-subtle">
       <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border/70 bg-background/85 px-2.5 backdrop-blur">
         <div className="flex min-w-0 items-center gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            type="button"
-            onClick={() => {
-              requestOpenRightPanelAgents(subagentFocusView.threadId)
-              closeSubagentFocusView()
-            }}
-            className="h-7 w-9 p-0"
-            title="返回"
-            aria-label="返回"
-          >
-            <ArrowLeft className="size-6" strokeWidth={1} />
-          </Button>
+          {showCloseButton ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              type="button"
+              onClick={() => {
+                requestOpenRightPanelAgents(subagentFocusView.threadId)
+                closeSubagentFocusView()
+              }}
+              className="h-7 w-9 p-0"
+              title="返回"
+              aria-label="返回"
+            >
+              <ArrowLeft className="size-6" strokeWidth={1} />
+            </Button>
+          ) : null}
           <Sparkles className="size-3.5 shrink-0 text-sky-500" />
           <div className="min-w-0 truncate text-sm font-semibold text-foreground">
             子代理完整记录

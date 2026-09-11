@@ -86,6 +86,8 @@ import {
   type OpenResourcePreviewDetail
 } from "@/lib/resource-preview-events"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
+import type { ResourcePanelInlinePreview } from "@/lib/resource-panel-overlay-events"
+import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
@@ -353,6 +355,9 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 interface RightPanelProps {
   threadId?: string | null
   moduleMode: "work" | "preview" | "git" | "browser"
+  previewOnly?: boolean
+  browserInitialUrl?: string | null
+  inlinePreview?: ResourcePanelInlinePreview | null
   showSystemConstraints?: boolean
   resourcePreviewRequest?: OpenResourcePreviewDetail | null
   onResourcePreviewRequestHandled?: () => void
@@ -526,6 +531,8 @@ export function RightPanel({
   threadId,
   moduleMode,
   previewOnly = false,
+  browserInitialUrl = null,
+  inlinePreview = null,
   showSystemConstraints = false,
   resourcePreviewRequest = null,
   onResourcePreviewRequestHandled,
@@ -2069,13 +2076,44 @@ export function RightPanel({
             <BrowserPanel
               threadId={currentThreadId ?? null}
               workspacePath={workspacePath ?? null}
+              initialUrl={browserInitialUrl}
               onFullscreenChange={onBrowserFullscreenChange}
             />
           </Suspense>
         </div>
       )}
 
-      {moduleMode === "preview" && (
+      {moduleMode === "preview" && inlinePreview && (
+        <div className="flex min-h-0 flex-1 flex-col rounded-2xl bg-background-elevated">
+          <div className="flex min-h-0 flex-1 flex-col bg-background-elevated">
+            <div className="flex h-9 shrink-0 items-center border-b border-border/70 px-3">
+              <span
+                className="truncate text-xs font-semibold text-foreground"
+                title={inlinePreview.title}
+              >
+                {inlinePreview.title}
+              </span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {inlinePreview.error ? (
+                <p className="p-4 text-xs text-destructive">{inlinePreview.error}</p>
+              ) : inlinePreview.content ? (
+                <MarkdownPreview
+                  content={inlinePreview.content}
+                  showHeader={false}
+                  showModeToggle={false}
+                  whiteBackground
+                  className="text-foreground"
+                />
+              ) : (
+                <p className="p-4 text-xs text-muted-foreground">暂无需求文档内容</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {moduleMode === "preview" && !inlinePreview && (
         <div className="flex min-h-0 flex-1 flex-col rounded-2xl bg-background-elevated">
           <div
             data-testid="resource-preview-surface"

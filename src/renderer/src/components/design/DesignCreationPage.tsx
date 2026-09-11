@@ -14,8 +14,8 @@ import {
   X
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
+import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import type {
   DesignCreationRequest,
   DesignCreationSelection,
@@ -38,6 +38,7 @@ type TemplateOption = {
   name: string
   description: string
   html: string
+  previewPath: string
 }
 
 const TEMPLATE_PAGE_SIZE = 4
@@ -201,8 +202,6 @@ export function DesignCreationPage({
   const [templatesLoading, setTemplatesLoading] = useState(true)
   const [templatesError, setTemplatesError] = useState<string | null>(null)
   const [selectedTemplateId, setSelectedTemplateId] = useState("")
-  const [previewedTemplateId, setPreviewedTemplateId] = useState<string | null>(null)
-  const [templatePreviewHeights, setTemplatePreviewHeights] = useState<Record<string, number>>({})
   const [templatePage, setTemplatePage] = useState(0)
   const [uploadedTemplate, setUploadedTemplate] = useState<UploadedFile | null>(null)
   const [templateUploading, setTemplateUploading] = useState(false)
@@ -241,7 +240,8 @@ export function DesignCreationPage({
           id: item.path,
           name: item.name,
           description: item.description,
-          html: item.previewHtml
+          html: item.previewHtml,
+          previewPath: item.previewPath
         }))
         setTemplates(nextTemplates)
         setSelectedTemplateId(nextTemplates[0]?.id ?? "")
@@ -323,8 +323,8 @@ export function DesignCreationPage({
     setRequirementUploading(true)
     try {
       const picked = await window.api.file.select()
-      if (picked.canceled || picked.filePaths.length === 0) return
-      const filePath = picked.filePaths[0]
+      if (picked.canceled || picked.files.length === 0) return
+      const filePath = picked.files[0].filePath
       setUploadedRequirement({ name: getPathName(filePath), path: filePath })
     } finally {
       setRequirementUploading(false)
@@ -435,18 +435,6 @@ export function DesignCreationPage({
     templatePage * TEMPLATE_PAGE_SIZE,
     (templatePage + 1) * TEMPLATE_PAGE_SIZE
   )
-  const handleTemplatePreviewLoad = (templateId: string, frame: HTMLIFrameElement): void => {
-    const documentHeight = Math.max(
-      frame.contentDocument?.documentElement.scrollHeight ?? 0,
-      frame.contentDocument?.body?.scrollHeight ?? 0,
-      900
-    )
-    setTemplatePreviewHeights((heights) =>
-      heights[templateId] === documentHeight
-        ? heights
-        : { ...heights, [templateId]: documentHeight }
-    )
-  }
   const orderedDesignSystems = [...designSystems].sort(compareDesignSystemsForDisplay)
   const designSystemGroups = Array.from(
     orderedDesignSystems.reduce((groups, system) => {
@@ -789,94 +777,53 @@ export function DesignCreationPage({
                         {visibleTemplates.map((template) => {
                           const active = template.id === selectedTemplateId
                           return (
-                            <Popover
-                              key={template.id}
-                              open={previewedTemplateId === template.id}
-                              onOpenChange={(open) =>
-                                setPreviewedTemplateId(open ? template.id : null)
-                              }
-                            >
-                              <div className="relative">
-                                <button
-                                  type="button"
-                                  aria-pressed={active}
-                                  onClick={() => setSelectedTemplateId(template.id)}
-                                  className={cn(
-                                    "cursor-pointer overflow-hidden rounded-lg border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                    active
-                                      ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
-                                      : "border-border bg-background hover:border-border-emphasis"
-                                  )}
-                                >
-                                  <span className="block h-50 overflow-hidden bg-white">
-                                    <iframe
-                                      title={`${template.name}模板预览`}
-                                      srcDoc={template.html}
-                                      sandbox=""
-                                      tabIndex={-1}
-                                      className="pointer-events-none block h-[62.5rem] w-[500%] origin-top-left scale-[0.2] border-0 bg-white"
-                                    />
-                                  </span>
-                                  <span className="flex gap-2 border-t border-border px-3 py-2.5">
-                                    <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
-                                    <span className="min-w-0">
-                                      <span className="block text-xs font-semibold text-foreground">
-                                        {template.name}
-                                      </span>
-                                      <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
-                                        {template.description}
-                                      </span>
+                            <div key={template.id} className="relative">
+                              <button
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => setSelectedTemplateId(template.id)}
+                                className={cn(
+                                  "cursor-pointer overflow-hidden rounded-lg border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                  active
+                                    ? "border-primary bg-primary/5 shadow-[0_0_0_2px_rgba(196,149,106,0.12)]"
+                                    : "border-border bg-background hover:border-border-emphasis"
+                                )}
+                              >
+                                <span className="block h-50 overflow-hidden bg-white">
+                                  <iframe
+                                    title={`${template.name}模板预览`}
+                                    srcDoc={template.html}
+                                    sandbox=""
+                                    tabIndex={-1}
+                                    className="pointer-events-none block h-[62.5rem] w-[500%] origin-top-left scale-[0.2] border-0 bg-white"
+                                  />
+                                </span>
+                                <span className="flex gap-2 border-t border-border px-3 py-2.5">
+                                  <FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                                  <span className="min-w-0">
+                                    <span className="block text-xs font-semibold text-foreground">
+                                      {template.name}
+                                    </span>
+                                    <span className="mt-0.5 block h-8 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                                      {template.description}
                                     </span>
                                   </span>
-                                </button>
-                                <PopoverTrigger asChild>
-                                  <button
-                                    type="button"
-                                    aria-label={`预览 ${template.name} 模板`}
-                                    title="预览模板"
-                                    className="absolute right-2 top-2 inline-flex size-7 items-center justify-center rounded-md border border-border bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                  >
-                                    <Eye className="size-3.5" />
-                                  </button>
-                                </PopoverTrigger>
-                              </div>
-                              <PopoverContent
-                                side="right"
-                                align="start"
-                                sideOffset={12}
-                                className="mb-6 w-[min(70vw,42rem)] p-2"
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                aria-label={`预览 ${template.name} 模板`}
+                                title="在内置浏览器中预览模板"
+                                onClick={() =>
+                                  openResourcePanelOverlay("browser", {
+                                    browserUrl: template.previewPath
+                                  })
+                                }
+                                className="absolute right-2 top-2 inline-flex size-7 items-center justify-center rounded-md border border-border bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               >
-                                <div className="mb-2 flex items-center justify-between gap-2 px-1">
-                                  <span className="truncate text-xs font-semibold text-foreground">
-                                    {template.name}
-                                  </span>
-                                  <span className="text-[10px] text-muted-foreground">
-                                    HTML 预览
-                                  </span>
-                                </div>
-                                <div className="h-[min(72vh,36rem)] overflow-y-auto overflow-x-hidden rounded border border-border bg-white">
-                                  <div
-                                    className="relative w-full"
-                                    style={{
-                                      height: `${(templatePreviewHeights[template.id] ?? 900) * 0.64}px`
-                                    }}
-                                  >
-                                    <iframe
-                                      title={`${template.name}大图预览`}
-                                      srcDoc={template.html}
-                                      sandbox="allow-same-origin"
-                                      onLoad={(event) =>
-                                        handleTemplatePreviewLoad(template.id, event.currentTarget)
-                                      }
-                                      style={{
-                                        height: `${templatePreviewHeights[template.id] ?? 900}px`
-                                      }}
-                                      className="pointer-events-none absolute left-0 top-0 block w-[156.25%] origin-top-left scale-[0.64] border-0 bg-white"
-                                    />
-                                  </div>
-                                </div>
-                              </PopoverContent>
-                            </Popover>
+                                <Eye className="size-3.5" />
+                              </button>
+                            </div>
                           )
                         })}
                       </div>

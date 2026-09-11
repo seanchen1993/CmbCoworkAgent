@@ -33,8 +33,10 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
+import { assembleBoundedTextPreview } from "@/lib/text-preview-pages"
 import { useThreadState, useThreadStream } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
+import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import {
   fromPersistedRequirement,
   isRequirementGenerated,
@@ -125,6 +127,45 @@ function isRequirementPrdGenerationCompleted(
 ): boolean {
   const status = manifest?.prd.status.trim().toLowerCase()
   return status === "generated" || status === "published"
+}
+
+const REQUIREMENT_WORKSPACE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024
+const REQUIREMENT_WORKSPACE_PREVIEW_MAX_PAGES = 64
+
+// The raw workspace read channel was replaced by the bounded, cancellable preview
+// API. Requirements still need whole-file text (prd-manifest.json), so page through
+// the preview until the file is complete or the safety budget is exhausted.
+async function readRequirementWorkspaceTextFile(
+  threadId: string,
+  filePath: string,
+  lanePrefix: string
+): Promise<{ success: boolean; content?: string; notFound?: boolean; error?: string }> {
+  const requestToken = globalThis.crypto.randomUUID()
+  const lane = `${lanePrefix}:${threadId}:${requestToken}`
+  const readPage = (offset: number): Promise<WorkspaceFilePreviewReadResult> =>
+    window.api.workspace.readFilePreview({
+      source: { threadId, filePath },
+      offset,
+      lane,
+      requestToken
+    })
+
+  const first = await readPage(0)
+  if (!first.success) {
+    return { success: false, error: first.error, notFound: first.errorCode === "not-found" }
+  }
+  const assembled = await assembleBoundedTextPreview(
+    first,
+    async (offset) => {
+      const page = await readPage(offset)
+      return page.success ? page : null
+    },
+    {
+      maxBytes: REQUIREMENT_WORKSPACE_PREVIEW_MAX_BYTES,
+      maxPages: REQUIREMENT_WORKSPACE_PREVIEW_MAX_PAGES
+    }
+  )
+  return { success: true, content: assembled.content }
 }
 
 function buildRequirementMarkdown(requirement: RequirementRecord, sourcePreview: string): string {
@@ -420,12 +461,13 @@ function RequirementConversationSession({
       onRefreshRequirementStatus: async (item) => {
         const manifestThreadId = item.threadIds[0]
         if (!manifestThreadId) return false
-        const readResult = await window.api.workspace.readFile(
+        const readResult = await readRequirementWorkspaceTextFile(
           manifestThreadId,
-          "/prd/prd-manifest.json"
+          "/prd/prd-manifest.json",
+          "requirement-status"
         )
         if (!readResult.success || readResult.content === undefined) {
-          if (readResult.error?.includes("ENOENT")) return false
+          if (readResult.notFound) return false
           throw new Error(readResult.error || "未找到 prd-manifest.json")
         }
         let manifest: unknown
@@ -518,8 +560,12 @@ function RequirementConversationSession({
         })
         if (!beginResult.success) throw new Error(beginResult.error || "开始读取需求空间数据失败")
 
-        const result = await window.api.workspace.readFile(threadId, "/prd/prd-manifest.json")
-        if (!result.success && !result.error?.includes("ENOENT")) {
+        const result = await readRequirementWorkspaceTextFile(
+          threadId,
+          "/prd/prd-manifest.json",
+          "requirement-manifest"
+        )
+        if (!result.success && !result.notFound) {
           throw new Error(result.error || "读取 prd-manifest.json 失败")
         }
 
@@ -701,8 +747,14 @@ function RequirementConversationSession({
       const targetPath = normalizePrdFilePath(filePath)
       let previewPath = manifestPath
       try {
-        const result = await window.api.workspace.readFile(threadId, targetPath)
-        if (result.success && result.content !== undefined) previewPath = targetPath
+        const probeToken = globalThis.crypto.randomUUID()
+        const result = await window.api.workspace.readFilePreview({
+          source: { threadId, filePath: targetPath },
+          offset: 0,
+          lane: `requirement-prd-file:${threadId}:${probeToken}`,
+          requestToken: probeToken
+        })
+        if (result.success) previewPath = targetPath
       } catch {
         // Fall back to the manifest, which was successfully read for this tab.
       }
