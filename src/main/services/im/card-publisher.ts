@@ -14,7 +14,32 @@ import {
   type ImCardInteractionStore
 } from "./card-interaction-store"
 import { getThread } from "../../db"
+import { trackEvent } from "../event-reporter"
 import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
+
+/**
+ * A card is an outbound message too, counted alongside the text ones.
+ *
+ * Kept as its own kind rather than folded into "push": a card asks the reader
+ * for something, and how much of the robot's outbound traffic is interactive
+ * rather than prose is the part worth being able to see.
+ *
+ * `cardKind` is recorded although the card on the board shows approvals and
+ * questions as one figure. Splitting them later is then a dashboard change
+ * rather than an instrumentation change with a hole in the history where the
+ * split did not exist yet.
+ */
+function reportCardDelivered(
+  cardKind: ImCardInteractionKind,
+  outcome: "sent" | "unknown" | "failed"
+): void {
+  trackEvent("im.message.delivered", "im", {
+    direction: "outbound",
+    kind: "card",
+    cardKind,
+    outcome
+  })
+}
 
 /**
  * Publishes interaction cards, and never lets one fail loudly.
@@ -121,12 +146,17 @@ export class ImCardPublisher {
         this.dependencies.warn(
           `Zhaohu interaction card was not accepted (${result.reasonCode ?? "unknown"}); the short code remains the answer path.`
         )
+        // Reported with the same outcomes the text path uses, so a card that the
+        // gateway may have delivered is not filed as a failure.
+        reportCardDelivered(input.kind, result.resultUnknown ? "unknown" : "failed")
         return null
       }
+      reportCardDelivered(input.kind, "sent")
       return interaction
     } catch (error) {
       this.dependencies.interactions.release(interaction.interactionId)
       this.dependencies.warn("Zhaohu interaction card could not be published.", error)
+      reportCardDelivered(input.kind, "failed")
       return null
     }
   }

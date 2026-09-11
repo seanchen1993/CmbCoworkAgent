@@ -20,6 +20,7 @@ import {
 } from "../src/main/services/im/reply-segmentation"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
 import { ImReplyClient } from "../src/main/services/im/reply-client"
+import { getEventReporter, setEventReporter } from "../src/main/services/event-reporter"
 import type { ImGatewayClientPort } from "../src/main/services/im/gateway-client"
 import type { ImEventStore, ImReplyOutboxRecord } from "../src/main/services/im/event-store"
 
@@ -286,7 +287,84 @@ async function testSegmentDeliveryStopsBehindUnconfirmedPredecessor(): Promise<v
   assert.deepEqual(submitted, [0, 0, 1])
 }
 
+/**
+ * The dashboard counts outbound messages from here, and two things about that
+ * are easy to get wrong: a retry is the same message coming back, and "who the
+ * message is for" is already recorded on the envelope.
+ */
+async function testOutboundDeliveryIsCountedOncePerMessage(): Promise<void> {
+  const reported: Record<string, unknown>[] = []
+  const previousReporter = getEventReporter()
+  setEventReporter({
+    report: async (event) => {
+      if (event.eventName === "im.message.delivered") reported.push({ ...event.properties })
+      return { ok: true } as never
+    }
+  })
+  try {
+    const outcomes: Array<"accepted" | "retryable"> = ["retryable", "retryable", "accepted"]
+    const record: ImReplyOutboxRecord = {
+      outboxId: "outbox-count",
+      deliveryId: "delivery-count",
+      // A reply to an inbound event. A proactive push is inserted with a null
+      // event id, which is what the instrumentation reads to tell them apart.
+      eventId: "event-1",
+      conversationKey: "conversation/private/value",
+      idempotencyKey: "idem-count",
+      segmentIndex: 0,
+      segmentCount: 1,
+      content: "done",
+      state: "pending",
+      platformReplyId: null,
+      attemptCount: 0,
+      nextAttemptAt: null,
+      reasonCode: null,
+      createdAt: 1,
+      updatedAt: 1
+    }
+    const gateway = {
+      submitReply: async () => {
+        const next = outcomes.shift()
+        if (next === "accepted") return { state: "accepted" as const, platformReplyId: "p-1" }
+        throw Object.assign(new Error("transient"), { reasonCode: "GATEWAY_UNAVAILABLE" })
+      }
+    } as ImGatewayClientPort
+    const eventStore = {
+      listOutbox: () => (record.state === "pending" ? [record] : []),
+      markOutboxSending: async () => {
+        record.state = "sending"
+        record.attemptCount += 1
+        return record
+      },
+      markOutboxSent: async () => {
+        record.state = "sent"
+        return record
+      },
+      rescheduleOutbox: async () => {
+        record.state = "pending"
+        return record
+      }
+    } as unknown as ImEventStore
+
+    const client = new ImReplyClient(gateway, eventStore, () => 0)
+    await client.sendPending()
+    await client.sendPending()
+    await client.sendPending()
+
+    assert.equal(record.attemptCount, 3, "the message really was submitted three times")
+    assert.deepEqual(
+      reported,
+      [{ direction: "outbound", kind: "reply", outcome: "sent" }],
+      "one message must be counted once — the two retries are the same message coming " +
+        `back, not three messages sent; got ${JSON.stringify(reported)}`
+    )
+  } finally {
+    setEventReporter(previousReporter)
+  }
+}
+
 const tests: Array<[string, () => void | Promise<void>]> = [
+  ["testOutboundDeliveryIsCountedOncePerMessage", testOutboundDeliveryIsCountedOncePerMessage],
   ["testManagedInboxCreationAndReuse", testManagedInboxCreationAndReuse],
   ["testReplySegmentationAndStableEnvelope", testReplySegmentationAndStableEnvelope],
   ["testConcurrentOutboxDrainUsesSingleSender", testConcurrentOutboxDrainUsesSingleSender],
