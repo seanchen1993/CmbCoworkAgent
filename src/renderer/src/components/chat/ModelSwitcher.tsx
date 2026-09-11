@@ -1,4 +1,4 @@
-import { useState, useEffect, memo, useMemo, useSyncExternalStore } from "react"
+import { useState, useEffect, memo, useMemo, useRef, useSyncExternalStore } from "react"
 import { useShallow } from "zustand/react/shallow"
 import { ChevronDown, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -65,6 +65,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
   const threadActions = useThreadActions(threadId)
   const restoreCurrentModel = threadActions?.restoreCurrentModel
   const setCurrentModel = threadActions?.setCurrentModel
+  const appliedHydratedModelRef = useRef<{ threadId: string; modelId: string } | null>(null)
 
   useEffect(() => {
     void loadModels()
@@ -99,12 +100,16 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
   const effectiveCurrentModel = currentModel || hydratedModel.modelId || ""
 
   useEffect(() => {
-    if (hydratedModel.modelId && hydratedModel.modelId !== currentModel) {
+    if (!hydratedModel.modelId) return
+    const applied = appliedHydratedModelRef.current
+    if (applied?.threadId === threadId && applied.modelId === hydratedModel.modelId) return
+    appliedHydratedModelRef.current = { threadId, modelId: hydratedModel.modelId }
+    if (hydratedModel.modelId !== currentModel) {
       // Hydration only restores the model used by the current view. Persisting here
       // would turn a read-only session open into an updated_at change.
       restoreCurrentModel?.(hydratedModel.modelId)
     }
-  }, [currentModel, hydratedModel.modelId, restoreCurrentModel])
+  }, [currentModel, hydratedModel.modelId, restoreCurrentModel, threadId])
 
   useEffect(() => {
     if (!routingModeLoaded || models.length === 0) return
