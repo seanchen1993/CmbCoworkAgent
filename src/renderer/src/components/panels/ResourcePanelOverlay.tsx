@@ -30,17 +30,10 @@ export function ResourcePanelOverlay({
     Boolean(renderedPanelThreadId)
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<ResourcePanelOverlayMode>("preview")
-  const handlePreviewRequest = useCallback(
-    (request: { filePath: string; externalPreviewGrant?: string }): void => {
-      setMode(
-        /\.html?$/i.test(request.filePath) && !request.externalPreviewGrant
-          ? "browser"
-          : "preview"
-      )
-      setOpen(true)
-    },
-    []
-  )
+  const handlePreviewRequest = useCallback((): void => {
+    setMode("preview")
+    setOpen(true)
+  }, [])
   const { request: previewRequest, clear: clearPreviewRequest } = useResourcePreviewRequest(
     activeThreadId,
     !standardRightPanelMounted,
@@ -100,7 +93,6 @@ export function ResourcePanelOverlay({
         onResourcePreviewRequestHandled={clearPreviewRequest}
         listenForResourcePreview={false}
         onRequestPreviewMode={() => setMode("preview")}
-        onRequestBrowserMode={() => setMode("browser")}
         onRequestWorkMode={close}
       />
     </OverlayDrawer>

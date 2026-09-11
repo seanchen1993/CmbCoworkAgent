@@ -1005,6 +1005,9 @@ describe("SqlJsSaver checkpoint message integrity", () => {
 
     const legacyDatabase = new DatabaseSync(path)
     legacyDatabase.exec("ALTER TABLE checkpoint_message_snapshots DROP COLUMN generation")
+    legacyDatabase.exec(
+      "DELETE FROM checkpoint_schema_migrations WHERE migration_id = 'checkpoint-message-generation-v1'"
+    )
     legacyDatabase.close()
 
     const saver = new SqlJsSaver(path)

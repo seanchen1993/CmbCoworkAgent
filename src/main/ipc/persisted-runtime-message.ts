@@ -31,7 +31,7 @@ export function isRuntimeVisiblePersistedMessage(message: Message): boolean {
 
 /** Convert one durable transcript row back to the LangChain message used by the graph. */
 export function persistedMessageToRuntimeMessage(message: Message): BaseMessage | null {
-  const content = stringifyPersistedMessageContent(message.content)
+  const content = message.content as BaseMessage["content"]
   if (message.role === "user") {
     return new HumanMessage({ id: message.id, content })
   }

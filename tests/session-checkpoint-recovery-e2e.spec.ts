@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url"
 import type { BaseMessage } from "@langchain/core/messages"
 import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import { _electron as electron, type ElectronApplication, type Page } from "playwright"
+import { seedCheckpointReportE2e, type CheckpointReportE2e } from "./support/checkpoint-report-e2e"
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const require = createRequire(import.meta.url)
@@ -47,6 +48,7 @@ const TARGET_ERROR_TEXT = "本地会话消息索引不完整，自动恢复失�
 const HISTORY_MESSAGE_COUNT = 1_002
 const RECOVERED_TAIL_COUNT = 1_000
 const DEFAULT_ITERATIONS = 1
+const FAILURE_SCREENSHOT_PATH = join(tmpdir(), "cmb-checkpoint-e2e-debug.png")
 const execFileAsync = promisify(execFile)
 
 interface WindowWithApi {
@@ -508,7 +510,10 @@ function sendCompletion(response: ServerResponse, requestNumber: number, reply: 
   )
 }
 
-async function startModelServer(fixtures: RecoveryFixture[]): Promise<ModelServerHandle> {
+async function startModelServer(
+  fixtures: RecoveryFixture[],
+  reports?: CheckpointReportE2e
+): Promise<ModelServerHandle> {
   const requests: ModelRequestRecord[] = []
   const errors: string[] = []
   const server: Server = createServer((request, response) => {
@@ -528,6 +533,11 @@ async function startModelServer(fixtures: RecoveryFixture[]): Promise<ModelServe
       }
 
       const body = await readRequestBody(request)
+      const reportReply = reports?.replyForRequest(body)
+      if (reportReply !== undefined) {
+        sendCompletion(response, requests.length + 1, reportReply)
+        return
+      }
       const texts = requestMessageTexts(body)
       const fixture = fixtures.find(
         (candidate) =>
@@ -696,6 +706,9 @@ async function exerciseFixture(
   await page.getByText(`${fixture.historyPrefix}1001`, { exact: true }).last().waitFor({
     timeout: 30_000
   })
+  // UAT paints the page before ancillary hydration mounts the stream holder.
+  // Let that initial render settle; the immediate second send below has no delay.
+  await page.waitForTimeout(1_000)
   const threadOpenMs = Date.now() - openedAt
   await assertNoVisibleRecoveryError(page, `第 ${fixture.index + 1} 组打开长会话后`)
 
@@ -1148,6 +1161,7 @@ async function main(): Promise<void> {
   const timings: TimingResult[] = []
   let fixtures: RecoveryFixture[] = []
   let mainDatabasePath = ""
+  let reportE2e: CheckpointReportE2e | undefined
   let modelServer: ModelServerHandle | undefined
   let app: ElectronApplication | undefined
   let page: Page | undefined
@@ -1209,11 +1223,13 @@ async function main(): Promise<void> {
     log(`隔离测试目录: ${testRoot}`)
     log(`重复轮数: ${iterations}`)
 
+    process.env.CMB_COWORK_AGENT_HOME = openworkHome
+    reportE2e = await seedCheckpointReportE2e(workspace, MODEL_REF)
     const seeded = await seedRecoveryFixtures(openworkHome, workspace, iterations)
     throwIfInterrupted()
     fixtures = seeded.fixtures
     mainDatabasePath = seeded.mainDatabasePath
-    modelServer = await startModelServer(fixtures)
+    modelServer = await startModelServer(fixtures, reportE2e)
     throwIfInterrupted()
 
     const launchStartedAt = Date.now()
@@ -1263,8 +1279,12 @@ async function main(): Promise<void> {
       (entry) => entry.includes(TARGET_ERROR_CODE) || entry.includes(TARGET_ERROR_TEXT)
     )
     assert(recoveryLogFailures.length === 0, "Electron 主进程和 renderer 日志均未再出现目标错误")
+    // Negative report cases deliberately produce the recovery error, after the ordinary-flow check.
+    await reportE2e.exercise(page, sendMessageThroughUi, waitForComposerReady)
+    assert(modelServer.errors.length === 0, "专项 E2E 模型服务无异常")
   } catch (error) {
     if (page && !page.isClosed()) {
+      await page.screenshot({ path: FAILURE_SCREENSHOT_PATH }).catch(() => {})
       const bodyText = await page
         .locator("body")
         .innerText()
@@ -1301,6 +1321,7 @@ async function main(): Promise<void> {
   if (!runError && teardownErrors.length === 0) {
     try {
       await assertDurableMessagesAndCheckpoints(fixtures, mainDatabasePath)
+      await reportE2e?.verifyAfterClose()
       assert(
         timings.every(
           (timing) =>

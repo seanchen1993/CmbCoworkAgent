@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 
 const fileViewer = readFileSync(new URL("./FileViewer.tsx", import.meta.url), "utf8")
 const tabbedPanel = readFileSync(new URL("./TabbedPanel.tsx", import.meta.url), "utf8")
+const previewMode = readFileSync(new URL("../../lib/file-preview-mode.ts", import.meta.url), "utf8")
 const codeViewer = readFileSync(new URL("./CodeViewer.tsx", import.meta.url), "utf8")
 const rendererStyles = readFileSync(new URL("../../index.css", import.meta.url), "utf8")
 const highlightWorker = readFileSync(new URL("./code-highlight-worker.ts", import.meta.url), "utf8")
@@ -42,6 +43,8 @@ const trustedToolPreview = readFileSync(
   "utf8"
 )
 const messageBubble = readFileSync(new URL("../chat/MessageBubble.tsx", import.meta.url), "utf8")
+const htmlPreview = readFileSync(new URL("../chat/previews/HtmlPreview.tsx", import.meta.url), "utf8")
+const htmlSrcDoc = readFileSync(new URL("../../lib/html-srcdoc.ts", import.meta.url), "utf8")
 const agentRuntime = readFileSync(
   new URL("../../../../main/agent/runtime.ts", import.meta.url),
   "utf8"
@@ -64,13 +67,24 @@ describe("persisted active file preview isolation", () => {
     expect(fileViewer).toContain("大文件按页预览")
   })
 
-  it("does not use whole-file or base64 IPC for the file or Markdown dependencies", () => {
+  it("remounts the active viewer when either the task or file path changes", () => {
+    const activeViewer = tabbedPanel.match(/<FileViewer\b[\s\S]*?\/>/)?.[0]
+
+    expect(activeViewer).toBeDefined()
+    expect(activeViewer).toMatch(
+      /key=\{JSON\.stringify\(\[\s*threadId,\s*activeFile\.path\s*\]\)\}/
+    )
+  })
+
+  it("uses bounded IPC for files, HTML stylesheets, and Markdown dependencies", () => {
     expect(fileViewer).not.toContain("readBinaryFile(")
     expect(fileViewer).not.toContain("readExternalBinaryFile(")
     expect(fileViewer).not.toContain("base64Content")
     expect(fileViewer).toContain("openMediaPreview")
     expect(fileViewer).toContain("readFilePreview")
+    expect(fileViewer).toContain("MAX_HTML_DEPENDENCY_REQUESTS")
     expect(fileViewer).toContain("MAX_HTML_DEPENDENCY_BYTES")
+    expect(fileViewer).toContain("readHtmlDependencyFile")
     expect(fileViewer).toContain("MAX_MARKDOWN_IMAGE_SOURCE_BYTES")
   })
 
@@ -84,11 +98,54 @@ describe("persisted active file preview isolation", () => {
   it("assembles bounded web-source pages and soft-wraps compact minified source", () => {
     expect(fileViewer).toContain("assembleBoundedTextPreview")
     expect(fileViewer).toContain("WEB_SOURCE_PREVIEW_MAX_BYTES")
-    expect(fileViewer).toContain("htmlLike && !textPage?.truncated")
+    expect(fileViewer).toContain("textPreviewKind")
     expect(codeViewer).toContain("shouldSoftWrapCodePreview")
     expect(codeViewer).toContain("shiki-content-soft-wrap")
     expect(rendererStyles).toContain(".shiki-content-soft-wrap pre")
     expect(rendererStyles).toContain(".shiki-content.shiki-content-soft-wrap .line")
+  })
+
+  it("renders workspace-tab HTML as static UI while resource previews stay source-only", () => {
+    expect(tabbedPanel).toContain("workspaceFilePreviewModeForPath(activeFile.path)")
+    expect(tabbedPanel).toContain("previewMode={activeFilePreviewMode}")
+    expect(tabbedPanel).toContain('activeFilePreviewMode === "preview" ? "workspace-static"')
+    expect(fileViewer).toContain('htmlPreviewPolicy === "workspace-static"')
+    expect(fileViewer).toContain("!externalFullPath")
+    expect(fileViewer).toContain('workspacePathKind === "relative"')
+    expect(fileViewer).toContain('previewKind === "html"')
+    expect(fileViewer).toContain("<HtmlPreview")
+    expect(previewMode).toContain('return "html"')
+    expect(previewMode).toContain('input.previewMode === "preview"')
+    expect(rightPanel).toContain("resourcePreviewModeForPath(filePath)")
+    expect(rightPanel).not.toContain("htmlPreviewPolicy=")
+    expect(rightPanel).not.toContain("onRequestBrowserMode")
+    expect(rightPanel).not.toContain("browserPreviewUrl")
+    expect(resourcePanelOverlay).not.toContain('setMode("browser")')
+    expect(htmlPreview).toContain("buildStaticHtmlPreviewDocument")
+    expect(htmlPreview).toContain('sandbox=""')
+    expect(htmlPreview).not.toContain('setSrcDocContent(content)')
+    expect(htmlPreview).not.toContain("allow-scripts")
+    expect(htmlPreview).not.toContain("allow-same-origin")
+    expect(htmlSrcDoc).toContain('"default-src \'none\'"')
+    expect(htmlSrcDoc).toContain("script, iframe, frame, fencedframe, object, embed")
+    expect(htmlSrcDoc).toContain('content.replace(/<\\/style/gi, "\\\\3C /style")')
+    expect(htmlSrcDoc).toContain("serialization fixed point")
+    expect(htmlSrcDoc).not.toContain("scriptTags")
+  })
+
+  it("lets the file viewer own scrolling inside the available right-panel height", () => {
+    expect(rightPanel).not.toContain("PREVIEW_MAX_HEIGHT")
+    expect(rightPanel).not.toContain('height: "100vh"')
+    expect(rightPanel).toContain('data-testid="resource-preview-surface"')
+    expect(rightPanel).toContain('data-testid="resource-preview"')
+    expect(rightPanel).toContain('data-testid="resource-preview-content"')
+    expect(rightPanel).toContain(
+      'className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background"'
+    )
+    expect(rightPanel).not.toContain(
+      "overflow-y-auto overflow-x-hidden right-panel-scroll bg-background flex-1 min-h-0"
+    )
+    expect(rightPanel).toContain("{onFullscreenChange ? (")
   })
 
   it("requires a trusted-source grant instead of exposing renderer path-to-token minting", () => {
@@ -115,7 +172,12 @@ describe("persisted active file preview isolation", () => {
     expect(rightPanel).toContain("isCurrentOpenResourcePreviewIntent(")
     expect(resourcePreviewRequestHook).toContain("isCurrentOpenResourcePreviewIntent(")
     expect(resourcePreviewRequestHook).toContain("beginOpenResourcePreviewIntent(previousThreadId)")
-    expect(resourcePanelOverlay).toContain("!request.externalPreviewGrant")
+    expect(resourcePanelOverlay).toContain('setMode("preview")')
+    expect(rightPanel).toContain("const canRevealInFolder = resolved.inWorkspace")
+    expect(rightPanel).toContain("if (!resolved.inWorkspace)")
+    expect(rightPanel).toContain("if (!canRevealInFolder)")
+    expect(rightPanel).toContain("disabled={!canRevealInFolder}")
+    expect(rightPanel).toContain('data-testid="resource-preview-reveal"')
     expect(agentRuntime).toContain("createTrustedToolFilePreviewContextMiddleware(threadId)")
     expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "read")')
     expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "write")')

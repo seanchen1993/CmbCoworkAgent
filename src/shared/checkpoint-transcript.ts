@@ -60,6 +60,7 @@ export interface CheckpointAuthorityTranscriptMessage {
   provider_occurrence?: number
   role?: string
   content?: unknown
+  reasoning?: string
   tool_calls?: unknown[]
   tool_call_id?: string
   name?: string
@@ -243,8 +244,10 @@ export function mergeCheckpointAuthorityTranscriptMessage<
   if (base.role && incoming.role && base.role !== incoming.role) return base
 
   const checkpointClearsToolCallContent = isCheckpointEmptyAssistantToolCallMessage(base)
+  const reasoning = base.reasoning || incoming.reasoning
   return {
     ...base,
+    ...(reasoning ? { reasoning } : {}),
     content: checkpointClearsToolCallContent
       ? base.content
       : mergeCheckpointAuthorityContent(base.content, incoming.content),

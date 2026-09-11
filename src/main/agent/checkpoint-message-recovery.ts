@@ -34,6 +34,9 @@ export async function recoverMainCheckpointMessages(
   // source yet, even when the rows copied so far fit into one page.
   if (page.legacyCheckpointMigrationStatus === "migrating") return null
   if ((page.truncatedMessageIds?.length ?? 0) > 0) return null
+  // Old rows predate loss tracking. Counts and a second bounded read cannot
+  // establish that their original content or tool arguments survived storage.
+  if (page.recoveryIntegrity !== "verified") return null
   const seenMessageIds = new Set<string>()
   const messages = page.messages
     .filter(isRuntimeVisiblePersistedMessage)

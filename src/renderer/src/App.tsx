@@ -1306,7 +1306,6 @@ function App(): React.JSX.Element {
                       moduleMode={rightModule}
                       onRequestPreviewMode={selectPreviewModule}
                       onRequestWorkMode={selectWorkModule}
-                      onRequestBrowserMode={selectBrowserModule}
                       onPreviewFullscreenChange={setPreviewFullscreen}
                       onBrowserFullscreenChange={setBrowserFullscreen}
                     />
@@ -1417,7 +1416,6 @@ function App(): React.JSX.Element {
                         showSystemConstraints={renderedMainView === "harness"}
                         onRequestPreviewMode={selectPreviewModule}
                         onRequestWorkMode={selectWorkModule}
-                        onRequestBrowserMode={selectBrowserModule}
                         onPreviewFullscreenChange={setPreviewFullscreen}
                         onBrowserFullscreenChange={setBrowserFullscreen}
                       />

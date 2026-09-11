@@ -1,4 +1,15 @@
-import type { Message } from "../types"
+import type { Message, ThreadMessageWrite } from "../types"
+import {
+  mergeTranscriptReasoningUpdates,
+  TRANSCRIPT_REASONING_MAX_CHARS,
+  type TranscriptReasoningUpdate
+} from "../../shared/transcript-reasoning"
+import { extractVisibleReasoning } from "../../shared/model-reasoning"
+import {
+  readStreamMessageWireMode,
+  STREAM_MESSAGE_REASONING_MODE_KEY,
+  type StreamMessageWireMode
+} from "../../shared/stream-message-wire-mode"
 import {
   getMessageProviderOccurrence,
   getMessageProviderSourceId,
@@ -11,9 +22,23 @@ import {
   type StreamToolCallChunk
 } from "../../shared/stream-tool-call-chunks"
 
-export interface QueuedStreamTranscriptMessage extends Message {
+export interface QueuedStreamTranscriptMessage extends ThreadMessageWrite {
   streamContentMode: "delta" | "snapshot"
   streamToolCallChunks: StreamToolCallChunk[]
+}
+
+export function readStreamTranscriptReasoning(
+  payload: readonly unknown[],
+  fallbackMode: StreamMessageWireMode
+): TranscriptReasoningUpdate {
+  const reasoning = extractVisibleReasoning(payload[0], TRANSCRIPT_REASONING_MAX_CHARS)
+  if (!reasoning) return {}
+  const metadata = payload[1] as Record<string, unknown> | null | undefined
+  return {
+    reasoning,
+    reasoning_mode:
+      readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]) ?? fallbackMode
+  }
 }
 
 /**
@@ -69,6 +94,7 @@ function mergeQueuedStreamMessage(
   return {
     ...base,
     ...incoming,
+    ...mergeTranscriptReasoningUpdates(base, incoming),
     content: mergeQueuedStreamContent(base.content, incoming.content, incoming.streamContentMode),
     tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
     streamToolCallChunks,

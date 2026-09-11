@@ -2,6 +2,21 @@ import { describe, expect, it } from "vitest"
 import { projectMarkdownVisibleText } from "./markdown-visible-text"
 
 describe("Markdown visible search projection", () => {
+  it("keeps unmatched delimiter runs literal without repeatedly scanning their suffixes", () => {
+    const text = `prefix ${"`".repeat(64_000)}`
+    const started = performance.now()
+    expect(projectMarkdownVisibleText(text) === text).toBe(true)
+    expect(performance.now() - started).toBeLessThan(1500)
+    expect(projectMarkdownVisibleText("prefix ``abc`")).toBe("prefix ``abc`")
+  })
+
+  it("bounds scans for repeated unfinished link destinations", () => {
+    const text = `${"[x](".repeat(16_000)}end)`
+    const started = performance.now()
+    const projected = projectMarkdownVisibleText(text)
+    expect(projected).toContain("[x](")
+    expect(performance.now() - started).toBeLessThan(1500)
+  })
   it("keeps link labels but excludes link and image destinations", () => {
     const text = projectMarkdownVisibleText(
       "[visible label](https://hidden.example/path_(secret)) ![alt](hidden-image.png)"

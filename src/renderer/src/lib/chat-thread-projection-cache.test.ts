@@ -83,6 +83,29 @@ describe("chat thread projection cache", () => {
     expect(getChatThreadProjectionRuntime("thread-0")).not.toBe(oldest)
   })
 
+  it("reuses full timestamp labels without rescanning unchanged history", () => {
+    const runtime = getChatThreadProjectionRuntime("timestamp-history")
+    let forbidReads = false
+    const messages = new Proxy(
+      Array.from({ length: 20_000 }, (_, index) =>
+        message(`message-${index}`, index % 5 === 0 ? "user" : "assistant")
+      ),
+      {
+        get(target, property, receiver) {
+          if (forbidReads) throw new Error("unchanged history was read to format timestamps")
+          return Reflect.get(target, property, receiver)
+        }
+      }
+    )
+    const first = runtime.projectTimingMeta(messages, 1)
+    expect(first.userSendTimeLabelById.size).toBe(4_000)
+    forbidReads = true
+    expect(runtime.projectTimingMeta(messages, 1)).toBe(first)
+    expect(getChatThreadProjectionRuntime("timestamp-history").projectTimingMeta(messages, 1)).toBe(
+      first
+    )
+  })
+
   it("drops message-bearing projections immediately when a thread is deleted", () => {
     const deleted = getChatThreadProjectionRuntime("deleted-thread")
     clearChatThreadProjectionRuntime("deleted-thread")

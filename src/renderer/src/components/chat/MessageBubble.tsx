@@ -45,6 +45,7 @@ import {
 } from "@/lib/coordinator-worker-tool-args"
 import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
+import { formatMessageTimeLabel, getAssistantStartTime } from "@/lib/message-bubble-timing"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
 import { isImRemoteControlTranscriptMessageId } from "../../../../shared/im-remote-transcript"
@@ -361,6 +362,7 @@ interface ToolResultInfo {
 }
 
 interface MessageBubbleProps {
+  searchLocation?: import("../../../../shared/chat-search-types").ChatSearchLocation
   message: Message
   previousMessage?: Message | null
   isStreaming?: boolean
@@ -406,7 +408,8 @@ function MessageBubbleImpl({
   isLoading,
   hasUserAfterHead = false,
   assistantDurationMs,
-  userSendTimeLabel = null
+  userSendTimeLabel = null,
+  searchLocation
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -509,6 +512,12 @@ function MessageBubbleImpl({
     !isUser &&
     !isSystem &&
     (!previousMessage || previousMessage.role === "user" || previousMessage.role === "system")
+
+  const assistantStartTime = shouldShowMessageHead ? getAssistantStartTime(message) : null
+  const assistantStartTimeLabel = useMemo(
+    () => (assistantStartTime === null ? null : formatMessageTimeLabel(assistantStartTime)),
+    [assistantStartTime]
+  )
 
   const duration = useMemo(() => {
     if (!shouldShowMessageHead || typeof assistantDurationMs !== "number") return 0
@@ -658,11 +667,15 @@ function MessageBubbleImpl({
               <SkillChip label={skillContent.skillName} compact className="mr-2" />
             )}
             {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-            <span data-chat-search-text>{browserContent.visibleText}</span>
+            <span data-chat-search-text data-chat-search-block-index={0}
+              data-chat-search-source-start={0} data-chat-search-source-end={displayContent.length}
+            >{browserContent.visibleText}</span>
           </div>
         )
       }
-      return <StreamingMarkdown isStreaming={isStreaming}>{displayContent}</StreamingMarkdown>
+      return <StreamingMarkdown isStreaming={isStreaming}
+        searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
+      >{displayContent}</StreamingMarkdown>
     }
 
     // Handle content blocks
@@ -684,12 +697,15 @@ function MessageBubbleImpl({
                   <SkillChip label={skillContent.skillName} compact className="mr-2" />
                 )}
                 {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-                <span data-chat-search-text>{browserContent.visibleText}</span>
+                <span data-chat-search-text data-chat-search-block-index={index}
+                  data-chat-search-source-start={0} data-chat-search-source-end={displayText.length}
+                >{browserContent.visibleText}</span>
               </div>
             )
           }
           return (
-            <StreamingMarkdown key={index} isStreaming={isStreaming}>
+            <StreamingMarkdown key={index} isStreaming={isStreaming} searchBlockIndex={index}
+              searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}>
               {displayText}
             </StreamingMarkdown>
           )
@@ -835,44 +851,52 @@ function MessageBubbleImpl({
               </button>
             )}
           </div>
-          <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <div className="flex max-w-full flex-wrap items-center justify-end gap-1">
             {userSendTimeLabel && (
-              <span className="px-1 text-xs text-muted-foreground/70">{userSendTimeLabel}</span>
+              <time
+                dateTime={userSendTimeLabel}
+                className="order-last px-1 text-xs whitespace-nowrap tabular-nums text-muted-foreground"
+                title="发送时间（本地时间）"
+              >
+                {userSendTimeLabel}
+              </time>
             )}
-            <button
-              type="button"
-              onClick={handleCopyMessage}
-              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-              title="复制消息"
-              aria-label="复制消息"
-            >
-              {copySuccess ? (
-                <Check className="size-3 text-status-nominal" />
-              ) : (
-                <Copy className="size-3" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => onEditUserMessage?.(message)}
-              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-              title="编辑后重新发送"
-              aria-label="编辑后重新发送"
-            >
-              <PencilLine className="size-3" />
-            </button>
-            {canSetGoalFromMessage && (
+            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
               <button
                 type="button"
-                onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
-                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                title="设为 Goal"
-                aria-label="设为 Goal"
+                onClick={handleCopyMessage}
+                className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                title="复制消息"
+                aria-label="复制消息"
               >
-                <Flag className="size-3" />
-                <span className="text-[11px]">设为目标</span>
+                {copySuccess ? (
+                  <Check className="size-3 text-status-nominal" />
+                ) : (
+                  <Copy className="size-3" />
+                )}
               </button>
-            )}
+              <button
+                type="button"
+                onClick={() => onEditUserMessage?.(message)}
+                className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                title="编辑后重新发送"
+                aria-label="编辑后重新发送"
+              >
+                <PencilLine className="size-3" />
+              </button>
+              {canSetGoalFromMessage && (
+                <button
+                  type="button"
+                  onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                  title="设为 Goal"
+                  aria-label="设为 Goal"
+                >
+                  <Flag className="size-3" />
+                  <span className="text-[11px]">设为目标</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -882,9 +906,18 @@ function MessageBubbleImpl({
   return (
     <div className="group overflow-hidden space-y-1.5">
       {shouldShowMessageHead && (
-        <div className="flex items-center gap-2 mb-4">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-4">
           <CmbDevClawLogo className="size-5 shrink-0 object-contain" />
           <span className="text-xs font-medium text-muted-foreground">CMBDevClaw</span>
+          {assistantStartTimeLabel && (
+            <time
+              dateTime={assistantStartTimeLabel}
+              className="text-xs whitespace-nowrap tabular-nums text-muted-foreground"
+              title="回复开始时间（本地时间）"
+            >
+              开始于 {assistantStartTimeLabel}
+            </time>
+          )}
           {!shouldHideDuration && <DurationShow durationMs={duration} text="耗时" />}
         </div>
       )}
@@ -1154,7 +1187,6 @@ function MessageBubbleImpl({
         )}
         {shouldShowAssistantActions && (
           <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
-            {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
             <button
               type="button"
               onClick={handleCopyMessage}
@@ -1251,6 +1283,8 @@ function areMessageBubblePropsEqual(
 ): boolean {
   return (
     areMessageRenderFieldsEqual(previous.message, next.message) &&
+    (previous.message === next.message ||
+      getAssistantStartTime(previous.message) === getAssistantStartTime(next.message)) &&
     (previous.previousMessage?.role ?? null) === (next.previousMessage?.role ?? null) &&
     previous.isStreaming === next.isStreaming &&
     previous.showAssistantMeta === next.showAssistantMeta &&
@@ -1266,6 +1300,7 @@ function areMessageBubblePropsEqual(
     previous.hasUserAfterHead === next.hasUserAfterHead &&
     previous.assistantDurationMs === next.assistantDurationMs &&
     previous.userSendTimeLabel === next.userSendTimeLabel &&
+    previous.searchLocation === next.searchLocation &&
     areMessageToolRenderInputsEqual(previous.message, previous, next)
   )
 }

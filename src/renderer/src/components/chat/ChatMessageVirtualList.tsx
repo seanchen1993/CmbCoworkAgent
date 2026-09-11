@@ -7,6 +7,7 @@ import {
   type VirtuosoHandle
 } from "react-virtuoso"
 import type { HookLogBucket } from "@/lib/thread-context"
+import { getAssistantStartTime } from "@/lib/message-bubble-timing"
 import {
   areMessageRenderFieldsEqual,
   areMessageToolRenderInputsEqual
@@ -14,6 +15,8 @@ import {
 import type { HITLRequest, Message, ToolCallState } from "@/types"
 import { HookLogChip } from "./HookLogViews"
 import { MessageBubble } from "./MessageBubble"
+import { ChatSearchContext } from "./ChatSearchContext"
+import type { ChatSearchLocation, ChatSearchReveal } from "../../../../shared/chat-search-types"
 import type {
   ChatScrollVirtualRangeRef,
   ChatScrollVirtualRangeSnapshot
@@ -89,6 +92,7 @@ export function resolveChatScrollVirtualRangeSnapshot(
 }
 
 export interface ChatMessageVirtualListProps {
+  searchReveal?: ChatSearchReveal | null
   messages: Message[]
   visibleMessageIndexes: readonly number[]
   lastUserMessageIndex: number
@@ -136,6 +140,7 @@ export interface ChatMessageVirtualListProps {
 }
 
 interface ChatMessageRowProps {
+  searchLocation?: ChatSearchLocation
   message: Message
   previousMessage: Message | null
   isLastMessage: boolean
@@ -184,7 +189,8 @@ function ChatMessageRowImpl({
   onOpenHookLogBucket,
   threadId,
   assistantDurationMs,
-  userSendTimeLabel
+  userSendTimeLabel,
+  searchLocation
 }: ChatMessageRowProps): React.JSX.Element {
   const navigatorRef = useMemo(
     () => setMessageRef(message.id, message.role),
@@ -214,6 +220,8 @@ function ChatMessageRowImpl({
       data-message-role={message.role}
     >
       <MessageBubble
+        searchLocation={message.role === "assistant" && searchLocation?.kind === "body"
+          ? searchLocation : undefined}
         message={message}
         previousMessage={previousMessage}
         isStreaming={isLastMessage && isLoading}
@@ -234,6 +242,8 @@ function ChatMessageRowImpl({
         assistantDurationMs={assistantDurationMs}
         userSendTimeLabel={userSendTimeLabel}
       />
+      {(message.role !== "assistant" || searchLocation?.kind !== "body") &&
+        <ChatSearchContext location={searchLocation} />}
       {hookLogBucket && hookLogBucket.entries.length > 0 && (
         <div className="mt-1 ml-12">
           <HookLogChip bucket={hookLogBucket} onClick={handleOpenHookLogBucket} />
@@ -249,6 +259,8 @@ function areChatMessageRowPropsEqual(
 ): boolean {
   return (
     areMessageRenderFieldsEqual(previous.message, next.message) &&
+    (previous.message === next.message ||
+      getAssistantStartTime(previous.message) === getAssistantStartTime(next.message)) &&
     (previous.previousMessage?.role ?? null) === (next.previousMessage?.role ?? null) &&
     previous.isLastMessage === next.isLastMessage &&
     previous.hasUserAfterHead === next.hasUserAfterHead &&
@@ -268,6 +280,7 @@ function areChatMessageRowPropsEqual(
     previous.threadId === next.threadId &&
     previous.assistantDurationMs === next.assistantDurationMs &&
     previous.userSendTimeLabel === next.userSendTimeLabel &&
+    previous.searchLocation === next.searchLocation &&
     areMessageToolRenderInputsEqual(previous.message, previous, next)
   )
 }
@@ -349,6 +362,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   threadId,
   assistantDurationMsById,
   userSendTimeLabelById,
+  searchReveal,
   customScrollParent,
   virtuosoRef,
   navigatorVirtualRangeRef,
@@ -446,6 +460,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
             </div>
           ) : null}
           <ChatMessageRow
+            searchLocation={searchReveal?.messageId === message.id ? searchReveal.location : undefined}
             message={message}
             previousMessage={previousMessage}
             isLastMessage={visibleIndex === visibleMessageIndexes.length - 1}
@@ -503,6 +518,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       toolCallStates,
       toolResults,
       userSendTimeLabelById,
+      searchReveal,
       visibleMessageIndexes
     ]
   )
@@ -587,19 +603,12 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   }, [customScrollParent, onContentHeightChanged, shouldVirtualize])
 
   if (!shouldVirtualize || !customScrollParent) {
-    const canRenderPlainRows =
-      !shouldVirtualize || visibleMessageIndexes.length <= CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD
+    // The scroll parent arrives in the container's first layout effect. Mounting rows here
+    // would parse every Markdown bubble before paint, then remount them inside Virtuoso.
+    // Keep the initial commit cheap for cached threads as well as cold history loads.
     return (
       <VirtuosoMessageListWrapper>
         {historyHeader}
-        {canRenderPlainRows &&
-          visibleMessageIndexes.map((messageIndex, visibleIndex) => (
-            <React.Fragment
-              key={`${messages[messageIndex]?.role ?? "message"}:${messages[messageIndex]?.id ?? messageIndex}`}
-            >
-              {renderMessage(visibleIndex, messageIndex)}
-            </React.Fragment>
-          ))}
         {footerContent}
       </VirtuosoMessageListWrapper>
     )
