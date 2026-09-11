@@ -954,6 +954,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
 
 async function testMainResolvesAndPersistsMode(): Promise<void> {
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
+  const stopContext = await readProjectFile("src/main/ipc/stop-hook-context.ts")
   const prefixCommitHelper = await readProjectFile(
     "src/main/services/initial-coordinator-prefix-commit.ts"
   )
@@ -1714,12 +1715,12 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "agent IPC persists a trusted marker on internal coordinator notification HumanMessages"
   )
   assertIncludes(
-    agentIpc,
+    stopContext,
     "isCoordinatorInternalNotificationMessage(msgChunk)",
     "agent Stop hook context ignores trusted internal coordinator notification messages"
   )
   assertIncludes(
-    agentIpc,
+    stopContext,
     "lastUserIndex = i\n        break",
     "agent Stop hook values context treats internal coordinator notification messages as the current-turn boundary"
   )
@@ -2031,7 +2032,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "agent IPC persists hook-augmented prompts with the safe visible user message"
   )
   assertIncludes(
-    agentIpc,
+    stopContext,
     "getCoordinatorVisibleUserMessage(msg)",
     "agent IPC uses visible user message metadata when collecting Stop hook context"
   )

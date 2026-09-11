@@ -2,6 +2,7 @@ import {
   STREAM_MESSAGE_CONTENT_MODE_KEY,
   STREAM_MESSAGE_REASONING_MODE_KEY,
   STREAM_TOOL_CALL_ARGS_MODE_KEY,
+  readStreamMessageWireMode,
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
 
@@ -25,6 +26,11 @@ export interface StreamMessageProjectionObservation {
 
 export interface StreamDataSerializerOptions {
   projectMessageChunks?: boolean
+  /** Standard LangChain chunks are deltas. Nonstandard cumulative producers
+   * must declare each field's protocol, or annotate it in the event metadata. */
+  messageChunkModes?: Partial<
+    Record<StreamMessageProjectionObservation["field"], StreamMessageWireMode>
+  >
   onMessageProjection?: (observation: StreamMessageProjectionObservation) => void
 }
 
@@ -41,7 +47,7 @@ export interface SerializedValuesMessageAccumulator {
 interface StreamSerializationSnapshot {
   messageCount: number
   currentTurnBoundary: number
-  sentinels: Array<{ index: number; message: unknown }>
+  messageReferences: unknown[]
   tailMessage: unknown
   tail: StreamMessageShape | null
 }
@@ -55,10 +61,8 @@ interface StreamMessageShape {
 }
 
 interface StreamTextProjectionState {
-  mode: "empty" | "unknown" | "delta" | "snapshot"
-  fragments: string[]
-  fragmentLength: number
-  snapshot: string
+  text: string
+  snapshotEpoch: number
 }
 
 interface ActiveStreamMessageProjection {
@@ -89,8 +93,6 @@ const REASONING_TEXT_KEYS = [
   "delta"
 ] as const
 const MAX_MESSAGE_PROJECTION_SCOPES = 128
-const PREFIX_SAMPLE_WIDTH = 16
-const PREFIX_SAMPLE_COUNT = 5
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -99,12 +101,9 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function createStreamTextProjectionState(): StreamTextProjectionState {
-  return {
-    mode: "empty",
-    fragments: [],
-    fragmentLength: 0,
-    snapshot: ""
-  }
+  // A fresh serializer does not know the consumer's existing message. Preserve
+  // the first authoritative snapshot, including an explicit empty replacement.
+  return { text: "", snapshotEpoch: -1 }
 }
 
 function createActiveStreamMessageProjection(
@@ -119,41 +118,11 @@ function createActiveStreamMessageProjection(
   }
 }
 
-function materializeProjectedText(state: StreamTextProjectionState): string {
-  if (state.mode === "snapshot") return state.snapshot
-  if (state.fragments.length <= 1) return state.fragments[0] ?? ""
-  return state.fragments.join("")
-}
-
-function sampledPrefixMatches(previous: string, incoming: string): {
-  matches: boolean
-  comparedCharacters: number
-} {
-  if (incoming.length < previous.length) return { matches: false, comparedCharacters: 0 }
-  if (previous.length === 0) return { matches: true, comparedCharacters: 0 }
-
-  const maxStart = Math.max(0, previous.length - PREFIX_SAMPLE_WIDTH)
-  const starts = new Set<number>([0, maxStart])
-  for (let sample = 1; sample < PREFIX_SAMPLE_COUNT - 1; sample += 1) {
-    starts.add(Math.min(maxStart, Math.floor((maxStart * sample) / (PREFIX_SAMPLE_COUNT - 1))))
-  }
-
-  let comparedCharacters = 0
-  for (const start of starts) {
-    const end = Math.min(previous.length, start + PREFIX_SAMPLE_WIDTH)
-    comparedCharacters += end - start
-    if (previous.slice(start, end) !== incoming.slice(start, end)) {
-      return { matches: false, comparedCharacters }
-    }
-  }
-  return { matches: true, comparedCharacters }
-}
-
 function projectCompleteTextSnapshot(
   state: StreamTextProjectionState,
   incoming: string
 ): ProjectedStreamText {
-  const previous = materializeProjectedText(state)
+  const previous = state.text
   const comparedCharacters = Math.min(previous.length, incoming.length)
   let projected: ProjectedStreamText
   if (incoming.length >= previous.length && incoming.startsWith(previous)) {
@@ -165,71 +134,33 @@ function projectCompleteTextSnapshot(
   } else {
     projected = { value: incoming, mode: "snapshot", comparedCharacters }
   }
-  state.mode = "snapshot"
-  state.snapshot = incoming
-  state.fragments = []
-  state.fragmentLength = 0
+  state.text = incoming
   return projected
 }
 
 /**
- * Detect cumulative provider frames once, then validate only bounded prefix
- * sentinels. Every newly appended character is serialized exactly once; a
- * rollback or detected rewrite remains an explicit replacement snapshot.
+ * Respect the producer's protocol: repeated/prefix-overlapping deltas are valid.
+ * Snapshot prefixes require exact comparison; sampling can silently lose a
+ * rewrite. Only changed content crosses IPC, but snapshot comparison is O(N).
  */
 function projectStreamText(
   state: StreamTextProjectionState,
   incoming: string,
-  completeSnapshot: boolean
+  inputMode: StreamMessageWireMode,
+  snapshotEpoch: number
 ): ProjectedStreamText {
-  if (completeSnapshot) return projectCompleteTextSnapshot(state, incoming)
-
-  if (state.mode === "empty") {
-    state.mode = "unknown"
-    state.fragments.push(incoming)
-    state.fragmentLength = incoming.length
-    return { value: incoming, mode: "delta", comparedCharacters: 0 }
-  }
-
-  if (state.mode === "unknown") {
-    const first = state.fragments[0] ?? ""
-    const comparedCharacters = Math.min(first.length, incoming.length)
-    if (incoming.length >= first.length && incoming.startsWith(first)) {
-      state.mode = "snapshot"
-      state.snapshot = incoming
-      state.fragments = []
-      state.fragmentLength = 0
-      return {
-        value: incoming.slice(first.length),
-        mode: "delta",
-        comparedCharacters
-      }
+  if (inputMode === "snapshot") {
+    if (state.snapshotEpoch !== snapshotEpoch) {
+      // Values may have replaced the consumer's baseline. Deltas since then
+      // cannot reconstruct it, so the next snapshot must establish it in full.
+      state.text = incoming
+      state.snapshotEpoch = snapshotEpoch
+      return { value: incoming, mode: "snapshot", comparedCharacters: 0 }
     }
-    state.mode = "delta"
-    state.fragments.push(incoming)
-    state.fragmentLength += incoming.length
-    return { value: incoming, mode: "delta", comparedCharacters }
+    return projectCompleteTextSnapshot(state, incoming)
   }
-
-  if (state.mode === "delta") {
-    state.fragments.push(incoming)
-    state.fragmentLength += incoming.length
-    return { value: incoming, mode: "delta", comparedCharacters: 0 }
-  }
-
-  const prefix = sampledPrefixMatches(state.snapshot, incoming)
-  if (prefix.matches) {
-    const value = incoming.slice(state.snapshot.length)
-    state.snapshot = incoming
-    return { value, mode: "delta", comparedCharacters: prefix.comparedCharacters }
-  }
-
-  state.snapshot = incoming
-  return {
-    value: incoming,
-    mode: "snapshot",
-    comparedCharacters: prefix.comparedCharacters
-  }
+  state.text += incoming
+  return { value: incoming, mode: "delta", comparedCharacters: 0 }
 }
 
 function streamMessageProjectionScopeKey(metadata: unknown): string {
@@ -247,9 +178,9 @@ function streamMessageProjectionScopeKey(metadata: unknown): string {
   return `${checkpointNamespace}\u0000${owner}`
 }
 
-function reasoningStringField(kwargs: Record<string, unknown>):
-  | { owner: Record<string, unknown>; key: string; value: string }
-  | undefined {
+function reasoningStringField(
+  kwargs: Record<string, unknown>
+): { owner: Record<string, unknown>; key: string; value: string } | undefined {
   for (const key of REASONING_TEXT_KEYS) {
     if (typeof kwargs[key] === "string") return { owner: kwargs, key, value: kwargs[key] }
   }
@@ -305,7 +236,7 @@ function messageRole(message: unknown): string {
     serializedMessageClassName(message) ||
     (typeof record?._getType === "function" ? String(record._getType.call(message)) : "") ||
     (message && typeof message === "object"
-      ? (message as { constructor?: { name?: string } }).constructor?.name ?? ""
+      ? ((message as { constructor?: { name?: string } }).constructor?.name ?? "")
       : "")
   if (type === "tool" || className.toLowerCase().includes("tool")) return "tool"
   if (type === "system" || className.toLowerCase().includes("system")) return "system"
@@ -336,11 +267,7 @@ function streamMessageShape(message: unknown): StreamMessageShape | null {
   if (!record || !values) return null
   const rawId = values.id ?? record.id
   const id =
-    typeof rawId === "string"
-      ? rawId
-      : Array.isArray(rawId)
-        ? rawId.map(String).join("/")
-        : ""
+    typeof rawId === "string" ? rawId : Array.isArray(rawId) ? rawId.map(String).join("/") : ""
   const content = messageStringContent(message)
   const reasoning = messageReasoning(message)
   if (!id || content === null || reasoning === null) return null
@@ -361,7 +288,7 @@ function hasUnsafeIncrementalBoundary(message: unknown): boolean {
   const className =
     serializedMessageClassName(message) ||
     (message && typeof message === "object"
-      ? (message as { constructor?: { name?: string } }).constructor?.name ?? ""
+      ? ((message as { constructor?: { name?: string } }).constructor?.name ?? "")
       : "")
   return className.toLowerCase().includes("remove") || values.id === "__remove_all__"
 }
@@ -371,32 +298,12 @@ function createStreamSerializationSnapshot(
   currentTurnBoundary: number
 ): StreamSerializationSnapshot {
   const lastIndex = messages.length - 1
-  const prefixLastIndex = lastIndex - 1
-  const candidateIndexes = new Set<number>()
-  if (prefixLastIndex >= currentTurnBoundary) {
-    // Validate a bounded but broad set of structural-sharing sentinels. The
-    // LangGraph message reducer returns a new array while retaining unchanged
-    // message objects, so ordinary append/tail updates stay O(1). Boundaries,
-    // evenly-spaced samples, and the recent suffix make reorder/replay/removal
-    // snapshots conservatively fall back to a complete current-turn snapshot.
-    candidateIndexes.add(currentTurnBoundary)
-    for (let sample = 1; sample <= 8; sample += 1) {
-      candidateIndexes.add(
-        currentTurnBoundary +
-          Math.floor(((prefixLastIndex - currentTurnBoundary) * sample) / 8)
-      )
-    }
-    for (let index = Math.max(currentTurnBoundary, prefixLastIndex - 15); index <= prefixLastIndex; index += 1) {
-      candidateIndexes.add(index)
-    }
-  }
-  const sentinels = Array.from(candidateIndexes)
-    .filter((index) => index >= currentTurnBoundary && index < lastIndex)
-    .map((index) => ({ index, message: messages[index] }))
   return {
     messageCount: messages.length,
     currentTurnBoundary,
-    sentinels,
+    // Copy slots, not message bodies, so even in-place array replacements are
+    // detected. LangGraph's reducer keeps unchanged message objects immutable.
+    messageReferences: messages.slice(currentTurnBoundary),
     tailMessage: lastIndex >= currentTurnBoundary ? messages[lastIndex] : undefined,
     tail: lastIndex >= currentTurnBoundary ? streamMessageShape(messages[lastIndex]) : null
   }
@@ -408,15 +315,15 @@ function hasStableStreamPrefix(
   prefixLength: number
 ): boolean {
   if (prefixLength < previous.currentTurnBoundary || messages.length < prefixLength) return false
-  return previous.sentinels.every(
-    ({ index, message }) => index >= prefixLength || messages[index] === message
-  )
+  for (let index = previous.currentTurnBoundary; index < prefixLength; index += 1) {
+    if (messages[index] !== previous.messageReferences[index - previous.currentTurnBoundary]) {
+      return false
+    }
+  }
+  return true
 }
 
-function canSerializeTailOnly(
-  previous: StreamSerializationSnapshot,
-  messages: unknown[]
-): boolean {
+function canSerializeTailOnly(previous: StreamSerializationSnapshot, messages: unknown[]): boolean {
   if (
     messages.length !== previous.messageCount ||
     messages.length <= previous.currentTurnBoundary ||
@@ -427,13 +334,13 @@ function canSerializeTailOnly(
   const tail = streamMessageShape(messages.at(-1))
   return Boolean(
     tail &&
-      previous.tail &&
-      tail.role === "assistant" &&
-      !tail.hasToolCalls &&
-      tail.id === previous.tail.id &&
-      tail.role === previous.tail.role &&
-      tail.content.startsWith(previous.tail.content) &&
-      tail.reasoning.startsWith(previous.tail.reasoning)
+    previous.tail &&
+    tail.role === "assistant" &&
+    !tail.hasToolCalls &&
+    tail.id === previous.tail.id &&
+    tail.role === previous.tail.role &&
+    tail.content.startsWith(previous.tail.content) &&
+    tail.reasoning.startsWith(previous.tail.reasoning)
   )
 }
 
@@ -449,7 +356,8 @@ function canSerializeAppendedSuffix(
     return false
   }
   for (let index = previous.messageCount; index < messages.length; index += 1) {
-    if (isHumanMessage(messages[index]) || hasUnsafeIncrementalBoundary(messages[index])) return false
+    if (isHumanMessage(messages[index]) || hasUnsafeIncrementalBoundary(messages[index]))
+      return false
   }
   return true
 }
@@ -496,7 +404,8 @@ function projectStreamDataForSerialization(
 function projectMessageChunkForSerialization(
   data: unknown,
   scopes: Map<string, StreamMessageProjectionScope>,
-  options: StreamDataSerializerOptions
+  options: StreamDataSerializerOptions,
+  snapshotEpoch: number
 ): unknown {
   if (!Array.isArray(data) || data.length === 0) return data
   const sourceMessage = asRecord(data[0])
@@ -548,6 +457,16 @@ function projectMessageChunkForSerialization(
   projectedMessage.kwargs = projectedKwargs
   const tuple = [projectedMessage, ...data.slice(1)]
   const rawMetadata = asRecord(data[1])
+  const contentInputMode = completeSnapshot
+    ? "snapshot"
+    : (readStreamMessageWireMode(rawMetadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY]) ??
+      options.messageChunkModes?.content ??
+      "delta")
+  const reasoningInputMode = completeSnapshot
+    ? "snapshot"
+    : (readStreamMessageWireMode(rawMetadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]) ??
+      options.messageChunkModes?.reasoning ??
+      "delta")
   let projectedMetadata: Record<string, unknown> | undefined
   const setMetadataMode = (key: string, mode: StreamMessageWireMode): void => {
     if (!projectedMetadata) {
@@ -571,16 +490,29 @@ function projectMessageChunkForSerialization(
     })
   }
 
-  if (typeof kwargs.content === "string" && (kwargs.content.length > 0 || completeSnapshot)) {
-    const projected = projectStreamText(active.content, kwargs.content, completeSnapshot)
+  if (
+    typeof kwargs.content === "string" &&
+    (kwargs.content.length > 0 || contentInputMode === "snapshot")
+  ) {
+    const projected = projectStreamText(
+      active.content,
+      kwargs.content,
+      contentInputMode,
+      snapshotEpoch
+    )
     projectedKwargs.content = projected.value
     setMetadataMode(STREAM_MESSAGE_CONTENT_MODE_KEY, projected.mode)
     observe("content", kwargs.content, projected)
   }
 
   const reasoningField = reasoningStringField(kwargs)
-  if (reasoningField && (reasoningField.value.length > 0 || completeSnapshot)) {
-    const projected = projectStreamText(active.reasoning, reasoningField.value, completeSnapshot)
+  if (reasoningField && (reasoningField.value.length > 0 || reasoningInputMode === "snapshot")) {
+    const projected = projectStreamText(
+      active.reasoning,
+      reasoningField.value,
+      reasoningInputMode,
+      snapshotEpoch
+    )
     if (reasoningField.owner === kwargs) {
       projectedKwargs[reasoningField.key] = projected.value
     } else {
@@ -611,7 +543,12 @@ function projectMessageChunkForSerialization(
         state = createStreamTextProjectionState()
         active.toolArgsById.set(resolvedId, state)
       }
-      const projected = projectStreamText(state, chunk.args, completeSnapshot)
+      const inputMode = completeSnapshot
+        ? "snapshot"
+        : (readStreamMessageWireMode(chunk[STREAM_TOOL_CALL_ARGS_MODE_KEY]) ??
+          options.messageChunkModes?.tool_args ??
+          "delta")
+      const projected = projectStreamText(state, chunk.args, inputMode, snapshotEpoch)
       observe("tool_args", chunk.args, projected)
       return {
         ...chunk,
@@ -667,12 +604,18 @@ export function createStreamDataSerializer(
   options: StreamDataSerializerOptions = {}
 ): StreamDataSerializer {
   let previous: StreamSerializationSnapshot | undefined
+  let messageSnapshotEpoch = 0
   const messageProjectionScopes = new Map<string, StreamMessageProjectionScope>()
 
   return (mode, data) => {
     if (mode === "messages" && options.projectMessageChunks !== false) {
       return serializeProjectedStreamData(
-        projectMessageChunkForSerialization(data, messageProjectionScopes, options),
+        projectMessageChunkForSerialization(
+          data,
+          messageProjectionScopes,
+          options,
+          messageSnapshotEpoch
+        ),
         0,
         "full"
       )
@@ -718,6 +661,9 @@ export function createStreamDataSerializer(
     // Advance only after successful serialization. A throwing getter/toJSON
     // must not poison provenance for the following frame.
     previous = createStreamSerializationSnapshot(messages, currentTurnBoundary)
+    // Do not scan/rebuild values text. Invalidate each field lazily; an empty
+    // messages array is authoritative too, whereas metadata-only values are not.
+    messageSnapshotEpoch += 1
     return serialized
   }
 }

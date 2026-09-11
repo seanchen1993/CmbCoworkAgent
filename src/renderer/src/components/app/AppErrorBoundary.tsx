@@ -63,14 +63,14 @@ export class AppErrorBoundary extends React.Component<Props, State> {
   render(): React.ReactNode {
     if (this.state.errorMessage === null) return this.props.children
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-background p-8">
+      <div role="alert" className="flex h-screen w-screen items-center justify-center bg-background p-8">
         <div className="max-w-2xl space-y-4">
           <div className="flex items-center gap-2 text-destructive">
             <AlertCircle className="h-5 w-5 shrink-0" />
             <h1 className="text-base font-medium">界面渲染失败</h1>
           </div>
           <p className="text-sm text-muted-foreground">
-            这次失败已记录到 renderer.log。重新加载可以恢复界面，本地数据不受影响。
+            这次失败已记录到 renderer.log。你可以重新加载界面；任务可能仍在后台运行。
           </p>
           <pre className="max-h-40 overflow-auto rounded bg-muted p-3 text-xs">
             {this.state.errorMessage}
@@ -89,6 +89,13 @@ export class AppErrorBoundary extends React.Component<Props, State> {
             className="rounded bg-primary px-4 py-2 text-sm text-primary-foreground"
           >
             重新加载
+          </button>
+          <button
+            type="button"
+            onClick={() => window.close()}
+            className="ml-3 rounded border px-4 py-2 text-sm"
+          >
+            关闭窗口
           </button>
         </div>
       </div>

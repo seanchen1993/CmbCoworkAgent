@@ -63,6 +63,7 @@ const runSettlementFence = read("src/main/agent/run-settlement-fence.ts")
 const localSandbox = read("src/main/agent/local-sandbox.ts")
 const agentIpc = read("src/main/ipc/agent.ts")
 const streamTranscriptFlush = read("src/main/ipc/stream-transcript-flush.ts")
+const streamTranscriptPayload = read("src/main/ipc/stream-transcript-payload.ts")
 const threadsIpc = read("src/main/ipc/threads.ts")
 const preload = read("src/preload/index.ts")
 const threadContext = read("src/renderer/src/lib/thread-context.tsx")
@@ -1153,14 +1154,17 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "main transcript coalescing uses block-aware delta merging"
   )
   const physicalForwardStart = agentIpc.indexOf("function persistAndForwardPhysicalRunStreamChunk(")
-  const physicalForwardBody = agentIpc.slice(physicalForwardStart, physicalForwardStart + 1800)
+  const physicalForwardBody = agentIpc.slice(
+    physicalForwardStart,
+    agentIpc.indexOf("function persistVisibleUserTranscriptMessage(", physicalForwardStart)
+  )
   assertIncludes(
     physicalForwardBody,
     "persistStreamTranscriptChunk(threadId, runToken, mode, payload)",
     "physical token streams arm the bounded 250ms transcript flush window"
   )
   assertNotIncludes(
-    physicalForwardBody,
+    physicalForwardBody.slice(0, physicalForwardBody.indexOf('if (mode === "values")')),
     "deferFlush: true",
     "long model outputs must not retain every token delta until the terminal values event"
   )
@@ -1201,12 +1205,12 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "main transcript persistence retains split tool-call arguments across debounce flushes"
   )
   assertIncludes(
-    agentIpc,
-    "streamToolCallContentModeFromMessageMode(streamContentMode)",
+    streamTranscriptPayload,
+    "streamToolCallContentModeFromMessageMode(wireContentMode)",
     "main persistence does not misclassify provider tool args from the message class"
   )
   assertIncludes(
-    agentIpc,
+    streamTranscriptPayload,
     "streamToolCallChunks.length === 0",
     "a continuation containing only tool-call chunks is retained"
   )

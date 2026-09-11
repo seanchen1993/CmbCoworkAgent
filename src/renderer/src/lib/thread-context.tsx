@@ -13,7 +13,7 @@ import {
 } from "react"
 
 /* eslint-disable react-refresh/only-export-components */
-import { useStream } from "@langchain/langgraph-sdk/react"
+import { useElectronStream } from "./use-electron-stream"
 import { ElectronIPCTransport, type StreamFallbackIndexBaselines } from "./electron-transport"
 import {
   fallbackIndexBaselinesFromMessages,
@@ -64,7 +64,6 @@ import type {
   QueuedMessage
 } from "@/types"
 import { isThreadDeletionPending, isThreadRetired, useAppStore } from "@/lib/store"
-import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 import {
@@ -124,6 +123,10 @@ import {
   type TimedLiveStreamMessageProjector
 } from "./live-stream-messages"
 import { hasModelRetryProgress, liveAssistantContentWatermark } from "./model-retry-indicator"
+import {
+  applySchedulerAssistantSnapshot,
+  mergeSchedulerReasoning
+} from "./scheduler-assistant-snapshot"
 import {
   getMessageProviderTupleFromMetadata,
   getMessageProviderOccurrenceIdentity,
@@ -211,7 +214,7 @@ import {
 } from "./live-stream-transcript"
 import {
   applyPersistedSubagentTranscriptRefs,
-  appendSubagentLiveTextProjection,
+  projectSchedulerSubagentMessage,
   getSubagentTranscriptsFromThreadValues,
   mergeSubagentTranscripts,
   rebasePendingSubagentTranscriptRows,
@@ -840,7 +843,7 @@ type CmbMemoryDebugWindow = Window & {
 }
 
 // Stream instance type
-type StreamInstance = ReturnType<typeof useStream<DeepAgent>>
+type StreamInstance = ReturnType<typeof useElectronStream>
 
 // Stream data that we want to be reactive
 interface StreamData {
@@ -1640,10 +1643,9 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
     onErrorRef.current = onError
   }, [onError])
 
-  const stream = useStream<DeepAgent>({
+  const stream = useElectronStream({
     transport,
     threadId,
-    messagesKey: "messages",
     onCustomEvent: (data) => {
       onCustomEventRef.current(threadId, data as CustomEventData)
     },
@@ -6687,9 +6689,42 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       switch (event.type) {
         // Reuse handleCustomEvent for workspace / subagents / token_usage / interrupt
-        case "custom":
+        case "custom": {
+          const data = event.data as CustomEventData
+          if (data?.type === "coordinator_ai_snapshot_message") {
+            const tracker = (schedulerStreamingRef.current[threadId] ||= {
+              currentMsgId: null,
+              accumulatedContent: "",
+              accumulatedReasoning: ""
+            })
+            updateThreadState(threadId, (state) => {
+              const message = applySchedulerAssistantSnapshot(
+                tracker,
+                state.messages,
+                data.assistantMessage
+              )
+              if (!message) return {}
+              const index = state.messages.findIndex(
+                (candidate) => candidate.id === message.id && candidate.role === "assistant"
+              )
+              const messages = [...state.messages]
+              if (index >= 0) messages[index] = message
+              else messages.push(message)
+              tracker.assistantLocation = {
+                messages,
+                index: index >= 0 ? index : messages.length - 1,
+                tail: message
+              }
+              return {
+                messages,
+                toolCallStates: upsertToolCallStatesFromMessages(state.toolCallStates, [message])
+              }
+            })
+            break
+          }
           handleCustomEvent(threadId, event.data as CustomEventData)
           break
+        }
 
         // Projected values snapshot for the current turn only. Unlike the
         // legacy full-messages event, this must never replace durable history.
@@ -6801,43 +6836,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             accumulatedReasoning: ""
           })
           if (subagentId) {
-            const startsSubagentMessage = id !== tracker.currentMsgId
-            if (startsSubagentMessage) {
-              tracker.currentMsgId = id
-              tracker.subagentContentProjection = undefined
-              tracker.subagentReasoningProjection = undefined
-            }
-            const contentProjection = appendSubagentLiveTextProjection(
-              tracker.subagentContentProjection,
-              content
-            )
-            tracker.subagentContentProjection = contentProjection
-            const reasoningProjection = reasoning
-              ? appendSubagentLiveTextProjection(tracker.subagentReasoningProjection, reasoning)
-              : tracker.subagentReasoningProjection
-            tracker.subagentReasoningProjection = reasoningProjection
-            const now = new Date()
             appendSubagentTranscriptMessages(threadId, subagentId, [
-              {
-                id,
-                role: "assistant" as const,
-                content: contentProjection.content,
-                content_is_projection: true,
-                content_full_length: contentProjection.totalLength,
-                content_stream_delta: content,
-                ...(startsSubagentMessage && { content_pending_delta: content }),
-                ...(reasoningProjection && {
-                  reasoning: reasoningProjection.content,
-                  reasoning_is_projection: true,
-                  reasoning_full_length: reasoningProjection.totalLength,
-                  ...(reasoning && {
-                    reasoning_stream_delta: reasoning,
-                    ...(startsSubagentMessage && { reasoning_pending_delta: reasoning })
-                  })
-                }),
-                ...(toolCalls?.length && { tool_calls: toolCalls }),
-                created_at: now
-              }
+              projectSchedulerSubagentMessage(
+                tracker,
+                {
+                  id,
+                  content,
+                  ...(typeof event.reasoning === "string" ? { reasoning: event.reasoning } : {}),
+                  contentMode: event.contentMode === "snapshot" ? "snapshot" : "delta",
+                  reasoningMode: event.reasoningMode === "snapshot" ? "snapshot" : "delta",
+                  toolCalls
+                },
+                subagentTranscriptsRef.current[threadId]?.[subagentId]
+              )
             ])
             break
           }
@@ -6848,9 +6859,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           } else {
             tracker.accumulatedContent += content
             if (reasoning) {
-              tracker.accumulatedReasoning = reasoning.startsWith(tracker.accumulatedReasoning)
-                ? reasoning
-                : `${tracker.accumulatedReasoning}${reasoning}`
+              tracker.accumulatedReasoning = mergeSchedulerReasoning(
+                tracker.accumulatedReasoning,
+                reasoning,
+                event.reasoningMode
+              )
             }
           }
           const finalContent = tracker.accumulatedContent
