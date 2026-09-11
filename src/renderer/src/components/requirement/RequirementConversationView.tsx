@@ -1255,7 +1255,6 @@ function RequirementConversationSession({
                     <div className="min-h-0 flex-1 p-2">
                       {selectedPrdFile && threadId ? (
                         <ResourcePreview
-                          key={`${selectedPrdFile.path}:${prdPreviewReloadToken}`}
                           filePath={selectedPrdFile.path.replace(/^\/+/, "")}
                           workspacePathKind="relative"
                           workspacePath={threadState?.workspacePath ?? requirement.requirementPath}
