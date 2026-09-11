@@ -11,8 +11,8 @@ assert.equal(
 )
 assert.equal(source.match(/\.drain\(\)/g)?.length, 3)
 assert.match(source, /getPremergedStreamSideEffectReasoning\(payload\)/)
-assert.match(source, /private assistantText = ""/)
-assert.match(source, /MAX_STOP_CONTEXT_TEXT_CHARS \+ 1 - this\.assistantText\.length/)
+assert.match(source, /assistantText\.processMessage\(payload\)/)
+assert.match(source, /currentTurnAssistantText\.reset\(\)/)
 assert.doesNotMatch(source, /assistantChunks/)
 
 console.log("stream side-effect plumbing tests passed")

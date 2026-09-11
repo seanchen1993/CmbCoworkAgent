@@ -1,8 +1,8 @@
 import "./lib/console-gate"
 import ReactDOM from "react-dom/client"
 import App from "./App"
-import { AppErrorBoundary } from "./components/app/AppErrorBoundary"
 import { CloseToTrayDialog } from "./components/app/CloseToTrayDialog"
+import { AppErrorBoundary } from "./components/app/AppErrorBoundary"
 import { initializeThemePreference } from "./lib/theme-preference"
 import "./index.css"
 
@@ -10,9 +10,11 @@ initializeThemePreference()
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   // <React.StrictMode>
-  <AppErrorBoundary>
-    <App />
+  <>
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
     <CloseToTrayDialog />
-  </AppErrorBoundary>
+  </>
   // </React.StrictMode>
 )

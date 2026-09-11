@@ -29,15 +29,46 @@ export interface QueuedStreamTranscriptMessage extends ThreadMessageWrite {
 
 export function readStreamTranscriptReasoning(
   payload: readonly unknown[],
-  fallbackMode: StreamMessageWireMode
+  fallbackMode: StreamMessageWireMode,
+  maxChars = TRANSCRIPT_REASONING_MAX_CHARS
 ): TranscriptReasoningUpdate {
-  const reasoning = extractVisibleReasoning(payload[0], TRANSCRIPT_REASONING_MAX_CHARS)
-  if (!reasoning) return {}
+  const reasoning = extractVisibleReasoning(payload[0], maxChars)
   const metadata = payload[1] as Record<string, unknown> | null | undefined
+  const mode =
+    readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]) ?? fallbackMode
+  if (!reasoning) {
+    const record = (value: unknown): Record<string, unknown> | undefined =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : undefined
+    const root = record(payload[0])
+    const kwargs = record(root?.kwargs)
+    const sources = [
+      root,
+      kwargs,
+      record(root?.additional_kwargs),
+      record(kwargs?.additional_kwargs)
+    ]
+    const hasExplicitEmpty = sources.some(
+      (source) =>
+        source &&
+        [
+          "reasoning",
+          "reasoning_content",
+          "reasoning_text",
+          "reasoning_details",
+          "summary",
+          "details",
+          "delta"
+        ].some(
+          (key) => source[key] === "" || (Array.isArray(source[key]) && source[key].length === 0)
+        )
+    )
+    if (mode !== "snapshot" || !hasExplicitEmpty) return {}
+  }
   return {
     reasoning,
-    reasoning_mode:
-      readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]) ?? fallbackMode
+    reasoning_mode: mode
   }
 }
 
@@ -56,7 +87,7 @@ export interface StreamTranscriptAssistantIdentity {
 }
 
 export interface ResolvedStreamTranscriptFlush {
-  messages: Message[]
+  messages: ThreadMessageWrite[]
   preserveExistingOrder: boolean
   /**
    * The batch is a trusted content-only delta for the cached assistant row.
@@ -76,9 +107,9 @@ function mergeQueuedStreamContent(
   incoming: Message["content"],
   incomingMode: QueuedStreamTranscriptMessage["streamContentMode"]
 ): Message["content"] {
+  if (incomingMode === "snapshot") return incoming
   if (!hasUsefulQueuedContent(incoming)) return existing
   if (!hasUsefulQueuedContent(existing)) return incoming
-  if (incomingMode === "snapshot") return incoming
   return mergeIncrementalMessageContent(existing, incoming) as Message["content"]
 }
 
@@ -86,17 +117,35 @@ function mergeQueuedStreamMessage(
   base: QueuedStreamTranscriptMessage,
   incoming: QueuedStreamTranscriptMessage
 ): QueuedStreamTranscriptMessage {
-  const streamToolCallChunks = [...base.streamToolCallChunks, ...incoming.streamToolCallChunks]
+  const streamToolCallChunks =
+    incoming.tool_calls_mode === "snapshot"
+      ? []
+      : [...base.streamToolCallChunks, ...incoming.streamToolCallChunks]
   const toolCalls = mergeStreamToolCallChunks(
-    [...(base.tool_calls ?? []), ...(incoming.tool_calls ?? [])],
+    incoming.tool_calls_mode === "snapshot"
+      ? (incoming.tool_calls ?? [])
+      : [...(base.tool_calls ?? []), ...(incoming.tool_calls ?? [])],
     streamToolCallChunks
   )
   return {
     ...base,
     ...incoming,
+    ...(base.tool_calls_mode === "snapshot" || incoming.tool_calls_mode === "snapshot"
+      ? { tool_calls_mode: "snapshot" as const }
+      : {}),
+    ...(incoming.streamContentMode === "snapshot" ||
+    base.streamContentMode === "snapshot" ||
+    base.content_mode === "snapshot"
+      ? { content_mode: "snapshot" as const }
+      : {}),
     ...mergeTranscriptReasoningUpdates(base, incoming),
     content: mergeQueuedStreamContent(base.content, incoming.content, incoming.streamContentMode),
-    tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+    tool_calls:
+      toolCalls.length > 0 ||
+      base.tool_calls_mode === "snapshot" ||
+      incoming.tool_calls_mode === "snapshot"
+        ? toolCalls
+        : undefined,
     streamToolCallChunks,
     tool_call_id: incoming.tool_call_id ?? base.tool_call_id,
     name: incoming.name ?? base.name,
@@ -121,7 +170,7 @@ function normalizeQueuedStreamMessages(
 
 function coalesceNormalizedStreamMessages(
   normalizedMessages: readonly QueuedStreamTranscriptMessage[]
-): Message[] {
+): ThreadMessageWrite[] {
   const byId = new Map<string, QueuedStreamTranscriptMessage>()
   for (const message of normalizedMessages) {
     const existing = byId.get(message.id)
@@ -129,16 +178,18 @@ function coalesceNormalizedStreamMessages(
   }
   return [...byId.values()].map((queuedMessage) => {
     const message = { ...queuedMessage } as Partial<QueuedStreamTranscriptMessage>
+    if (queuedMessage.streamContentMode === "snapshot") message.content_mode = "snapshot"
+    else if (!message.content_mode) message.content_mode = "delta"
     delete message.streamContentMode
     delete message.streamToolCallChunks
-    return message as Message
+    return message as ThreadMessageWrite
   })
 }
 
 export function coalesceQueuedStreamMessages(
   baselineMessages: readonly Message[],
   messages: readonly QueuedStreamTranscriptMessage[]
-): Message[] {
+): ThreadMessageWrite[] {
   return coalesceNormalizedStreamMessages(normalizeQueuedStreamMessages(baselineMessages, messages))
 }
 
@@ -163,6 +214,7 @@ function contentContainsToolBoundary(content: Message["content"]): boolean {
 function isOrdinaryAssistantChunk(message: QueuedStreamTranscriptMessage): boolean {
   return (
     message.role === "assistant" &&
+    message.tool_calls_mode !== "snapshot" &&
     !message.tool_call_id &&
     (!message.tool_calls || message.tool_calls.length === 0) &&
     message.streamToolCallChunks.length === 0 &&

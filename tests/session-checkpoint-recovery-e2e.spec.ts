@@ -17,7 +17,7 @@
 import { randomUUID } from "node:crypto"
 import { execFile, type ChildProcess } from "node:child_process"
 import { once } from "node:events"
-import { existsSync, mkdirSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { rm as rmAsync } from "node:fs/promises"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { createRequire } from "node:module"
@@ -31,6 +31,8 @@ import type { BaseMessage } from "@langchain/core/messages"
 import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import { _electron as electron, type ElectronApplication, type Page } from "playwright"
 import { seedCheckpointReportE2e, type CheckpointReportE2e } from "./support/checkpoint-report-e2e"
+
+import { exerciseStreamPersistenceE2e } from "./support/stream-persistence-e2e"
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const require = createRequire(import.meta.url)
@@ -1275,6 +1277,21 @@ async function main(): Promise<void> {
 
     assert(modelServer.errors.length === 0, "本地模型服务及并发 SQLite 核验无异常")
     assertModelRequests(fixtures, modelServer.requests)
+    const persistenceChecks = await exerciseStreamPersistenceE2e(
+      page,
+      fixtures[0],
+      mainDatabasePath
+    )
+    for (const check of persistenceChecks) log(`PASS ${check}`)
+    const artifactDirectory = process.env.CMB_SESSION_RECOVERY_E2E_ARTIFACT_DIR
+    if (artifactDirectory) {
+      mkdirSync(artifactDirectory, { recursive: true })
+      writeFileSync(
+        join(artifactDirectory, "persistence-results.json"),
+        JSON.stringify({ persistenceChecks, timings }, null, 2)
+      )
+      await page.screenshot({ path: join(artifactDirectory, "reloaded-history.png") })
+    }
     const recoveryLogFailures = capturedLogs.filter(
       (entry) => entry.includes(TARGET_ERROR_CODE) || entry.includes(TARGET_ERROR_TEXT)
     )
@@ -1282,6 +1299,37 @@ async function main(): Promise<void> {
     // Negative report cases deliberately produce the recovery error, after the ordinary-flow check.
     await reportE2e.exercise(page, sendMessageThroughUi, waitForComposerReady)
     assert(modelServer.errors.length === 0, "专项 E2E 模型服务无异常")
+    await closeElectronOnce()
+    app = undefined
+    appClosePromise = undefined
+    app = await electron.launch({
+      executablePath: ELECTRON_LAUNCHER,
+      args: [MAIN_ENTRY, `--user-data-dir=${electronUserData}`],
+      cwd: PROJECT_ROOT,
+      env: createElectronEnvironment(isolatedPaths),
+      timeout: 60_000
+    })
+    page = await waitForAppPage(app)
+    const expandHistory = page.getByRole("button", { name: /展开显示/ }).first()
+    await expandHistory.waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined)
+    if (await expandHistory.isVisible()) await expandHistory.click()
+    await page.getByText(fixtures[0].title, { exact: true }).first().click()
+    await page
+      .getByText(fixtures[0].secondReply, { exact: true })
+      .last()
+      .waitFor({ timeout: 30_000 })
+    assert(
+      (await page.getByText("STALE_RENDERER_ECHO", { exact: true }).count()) === 0,
+      "完整 Electron 重启后恢复原生持久化正文，无旧 renderer echo"
+    )
+    persistenceChecks.push("full Electron restart restores the durable native final")
+    if (artifactDirectory) {
+      writeFileSync(
+        join(artifactDirectory, "persistence-results.json"),
+        JSON.stringify({ persistenceChecks, timings }, null, 2)
+      )
+      await page.screenshot({ path: join(artifactDirectory, "restarted-history.png") })
+    }
   } catch (error) {
     if (page && !page.isClosed()) {
       await page.screenshot({ path: FAILURE_SCREENSHOT_PATH }).catch(() => {})

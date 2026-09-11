@@ -122,15 +122,16 @@ export class ImManagedBizRetryService {
       `当前阶段：${input.stageName}`,
       `节点状态：${input.nodeStatus}`,
       `上下文占用：${contextText}`,
-      "",
-      "最近一条大模型返回消息：",
-      assistantTail || "（无可展示内容）",
-      "",
-      nextActionText,
+      "可选操作:",
       "",
       `/托管停止 ${code}`,
       `/托管继续当前会话 ${code} <输入消息，不填默认继续当前任务>`,
-      `/托管开启新会话 ${code}`
+      `/托管开启新会话 ${code}`,
+      "",
+      nextActionText,
+      "",
+      "最近一条大模型返回消息：",
+      assistantTail || "（无可展示内容）"
     ].join("\n")
     try {
       await imEventStore.enqueueProactiveReplies(

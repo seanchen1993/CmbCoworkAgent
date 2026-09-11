@@ -1,0 +1,1576 @@
+[
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessageChunk"
+        ],
+        "kwargs": {
+          "content": "checking-1",
+          "tool_call_chunks": [
+            {
+              "name": "read_file",
+              "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+              "id": "call-local-741-1",
+              "index": 0,
+              "type": "tool_call_chunk",
+              "cmb_stream_tool_call_args_mode": "delta"
+            }
+          ],
+          "additional_kwargs": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "id": "call-local-741-1",
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                }
+              }
+            ]
+          },
+          "id": "provider-reused-741",
+          "response_metadata": {
+            "model_provider": "openai",
+            "usage": {}
+          }
+        }
+      },
+      {
+        "langgraph_node": "model_request",
+        "langgraph_checkpoint_ns": "model_request:0",
+        "cmb_stream_message_content_mode": "delta"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessageChunk"
+        ],
+        "kwargs": {
+          "content": "",
+          "tool_call_chunks": [],
+          "additional_kwargs": {},
+          "id": "provider-reused-741",
+          "response_metadata": {
+            "model_provider": "openai",
+            "usage": {}
+          },
+          "tool_calls": [],
+          "invalid_tool_calls": []
+        }
+      },
+      {
+        "langgraph_node": "model_request",
+        "langgraph_checkpoint_ns": "model_request:0"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "append",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-1",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-1",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-1",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-1",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-1",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-1",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-1",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-1",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-1",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-1",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-1",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-1",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-1",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-1",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-1",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-1",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "ToolMessage"
+        ],
+        "kwargs": {
+          "status": "success",
+          "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+          "tool_call_id": "call-local-741-1",
+          "name": "read_file",
+          "metadata": {
+            "versions": {
+              "@langchain/core": "1.1.36"
+            }
+          },
+          "additional_kwargs": {},
+          "response_metadata": {},
+          "id": "tool-result-1"
+        }
+      },
+      {
+        "langgraph_node": "tools",
+        "langgraph_checkpoint_ns": "tools:1"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "append",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-1",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-1",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-1",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-1",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessageChunk"
+        ],
+        "kwargs": {
+          "content": "checking-2",
+          "tool_call_chunks": [
+            {
+              "name": "read_file",
+              "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+              "id": "call-local-741-2",
+              "index": 0,
+              "type": "tool_call_chunk",
+              "cmb_stream_tool_call_args_mode": "delta"
+            }
+          ],
+          "additional_kwargs": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "id": "call-local-741-2",
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                }
+              }
+            ]
+          },
+          "id": "provider-reused-741",
+          "response_metadata": {
+            "model_provider": "openai",
+            "usage": {}
+          }
+        }
+      },
+      {
+        "langgraph_node": "model_request",
+        "langgraph_checkpoint_ns": "model_request:2",
+        "cmb_stream_message_content_mode": "delta"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessageChunk"
+        ],
+        "kwargs": {
+          "content": "",
+          "tool_call_chunks": [],
+          "additional_kwargs": {},
+          "id": "provider-reused-741",
+          "response_metadata": {
+            "model_provider": "openai",
+            "usage": {}
+          },
+          "tool_calls": [],
+          "invalid_tool_calls": []
+        }
+      },
+      {
+        "langgraph_node": "model_request",
+        "langgraph_checkpoint_ns": "model_request:2"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-2",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-2",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-2",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-2",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-2",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-2",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-2",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-2",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-2",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-2",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-2",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-2",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-2",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-2",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-2",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-2",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "ToolMessage"
+        ],
+        "kwargs": {
+          "status": "success",
+          "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+          "tool_call_id": "call-local-741-2",
+          "name": "read_file",
+          "metadata": {
+            "versions": {
+              "@langchain/core": "1.1.36"
+            }
+          },
+          "additional_kwargs": {},
+          "response_metadata": {},
+          "id": "tool-result-2"
+        }
+      },
+      {
+        "langgraph_node": "tools",
+        "langgraph_checkpoint_ns": "tools:3"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "append",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-2",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 3
+            },
+            "response_metadata": {},
+            "id": "tool-result-2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "checking-2",
+            "additional_kwargs": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call-local-741-2",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file_path\":\"/workspace/evidence.txt\"}"
+                  }
+                }
+              ],
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [
+              {
+                "name": "read_file",
+                "args": "{\"file_path\":\"/workspace/evidence.txt\"}",
+                "id": "call-local-741-2",
+                "index": 0,
+                "type": "tool_call_chunk"
+              }
+            ],
+            "tool_calls": [
+              {
+                "name": "read_file",
+                "args": {
+                  "file_path": "/workspace/evidence.txt"
+                },
+                "id": "call-local-741-2",
+                "type": "tool_call"
+              }
+            ],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-2",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 3
+            },
+            "response_metadata": {},
+            "id": "tool-result-2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessageChunk"
+        ],
+        "kwargs": {
+          "content": "ha",
+          "tool_call_chunks": [],
+          "additional_kwargs": {},
+          "id": "provider-reused-741",
+          "response_metadata": {
+            "model_provider": "openai",
+            "usage": {}
+          },
+          "tool_calls": [],
+          "invalid_tool_calls": []
+        }
+      },
+      {
+        "langgraph_node": "model_request",
+        "langgraph_checkpoint_ns": "model_request:4",
+        "cmb_stream_message_content_mode": "delta"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessageChunk"
+        ],
+        "kwargs": {
+          "content": "ha",
+          "tool_call_chunks": [],
+          "additional_kwargs": {},
+          "id": "provider-reused-741",
+          "response_metadata": {
+            "model_provider": "openai",
+            "usage": {}
+          },
+          "tool_calls": [],
+          "invalid_tool_calls": []
+        }
+      },
+      {
+        "langgraph_node": "model_request",
+        "langgraph_checkpoint_ns": "model_request:4",
+        "cmb_stream_message_content_mode": "delta"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessageChunk"
+        ],
+        "kwargs": {
+          "content": "ha",
+          "tool_call_chunks": [],
+          "additional_kwargs": {},
+          "id": "provider-reused-741",
+          "response_metadata": {
+            "model_provider": "openai",
+            "usage": {}
+          },
+          "tool_calls": [],
+          "invalid_tool_calls": []
+        }
+      },
+      {
+        "langgraph_node": "model_request",
+        "langgraph_checkpoint_ns": "model_request:4",
+        "cmb_stream_message_content_mode": "delta"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessageChunk"
+        ],
+        "kwargs": {
+          "content": " done",
+          "tool_call_chunks": [],
+          "additional_kwargs": {},
+          "id": "provider-reused-741",
+          "response_metadata": {
+            "model_provider": "openai",
+            "usage": {}
+          },
+          "tool_calls": [],
+          "invalid_tool_calls": []
+        }
+      },
+      {
+        "langgraph_node": "model_request",
+        "langgraph_checkpoint_ns": "model_request:4",
+        "cmb_stream_message_content_mode": "delta"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "messages",
+    "data": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain_core",
+          "messages",
+          "AIMessageChunk"
+        ],
+        "kwargs": {
+          "content": "",
+          "tool_call_chunks": [],
+          "additional_kwargs": {},
+          "id": "provider-reused-741",
+          "response_metadata": {
+            "model_provider": "openai",
+            "usage": {}
+          },
+          "tool_calls": [],
+          "invalid_tool_calls": []
+        }
+      },
+      {
+        "langgraph_node": "model_request",
+        "langgraph_checkpoint_ns": "model_request:4"
+      }
+    ]
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "hahaha done",
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [],
+            "tool_calls": [],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-2",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 3
+            },
+            "response_metadata": {},
+            "id": "tool-result-2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "hahaha done",
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [],
+            "tool_calls": [],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-2",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 3
+            },
+            "response_metadata": {},
+            "id": "tool-result-2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "hahaha done",
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [],
+            "tool_calls": [],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-2",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 3
+            },
+            "response_metadata": {},
+            "id": "tool-result-2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "stream",
+    "mode": "values",
+    "valuesSnapshotKind": "full",
+    "data": {
+      "messages": [
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "AIMessageChunk"
+          ],
+          "kwargs": {
+            "content": "hahaha done",
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 1
+            },
+            "response_metadata": {
+              "model_provider": "openai",
+              "usage": {}
+            },
+            "tool_call_chunks": [],
+            "tool_calls": [],
+            "id": "provider-reused-741",
+            "invalid_tool_calls": [],
+            "name": "model"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-1",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 2
+            },
+            "response_metadata": {},
+            "id": "tool-result-1"
+          }
+        },
+        {
+          "lc": 1,
+          "type": "constructor",
+          "id": [
+            "langchain_core",
+            "messages",
+            "ToolMessage"
+          ],
+          "kwargs": {
+            "status": "success",
+            "content": "     1\tLOCAL_TOOL_EVIDENCE_741",
+            "tool_call_id": "call-local-741-2",
+            "name": "read_file",
+            "metadata": {
+              "versions": {
+                "@langchain/core": "1.1.36"
+              }
+            },
+            "additional_kwargs": {
+              "cmb_worker_snapshot_index": 3
+            },
+            "response_metadata": {},
+            "id": "tool-result-2"
+          }
+        }
+      ]
+    }
+  }
+]

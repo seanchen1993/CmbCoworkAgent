@@ -1,10 +1,15 @@
 // Relative (not "@/") so this module stays importable from unit tests that
 // don't resolve the "@/" path alias for runtime values.
-import { BUILTIN_BROWSER_PROMPT_PREFIX } from "../../../../shared/user-input-transport"
+import {
+  BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
+  BUILTIN_BROWSER_PROMPT_PREFIX
+} from "../../../../shared/user-input-transport"
 
-export { BUILTIN_BROWSER_PROMPT_PREFIX }
+export { BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX, BUILTIN_BROWSER_PROMPT_PREFIX }
 
 export const BUILTIN_BROWSER_COMMAND_ID = "builtin-browser"
+const LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX =
+  "使用内置浏览器 browser_*工具。仅当当前模型支持图片识别/视觉输入时，才允许调用截图工具；否则不要调用截图工具，改用 DOM 快照、文本、locator、evaluate 等非视觉方式："
 export const BUILTIN_BROWSER_SCREENSHOT_DISABLED_PROMPT = "（不允许使用截图功能）"
 
 let builtinBrowserScreenshotEnabled = false
@@ -30,7 +35,7 @@ export function getBuiltinBrowserPromptPrefix(
 ): string {
   return screenshotEnabled
     ? BUILTIN_BROWSER_PROMPT_PREFIX
-    : `${BUILTIN_BROWSER_PROMPT_PREFIX.slice(0, -1)}${BUILTIN_BROWSER_SCREENSHOT_DISABLED_PROMPT}：`
+    : BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX
 }
 
 export const BUILTIN_BROWSER_COMMAND = {
@@ -58,10 +63,15 @@ export function parseBuiltinBrowserPrompt(input: string): {
   visibleText: string
   browserSelected: boolean
 } {
-  const screenshotDisabledPrefix = getBuiltinBrowserPromptPrefix(false)
-  if (input.startsWith(screenshotDisabledPrefix)) {
+  if (input.startsWith(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
     return {
-      visibleText: input.slice(screenshotDisabledPrefix.length),
+      visibleText: input.slice(BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length),
+      browserSelected: true
+    }
+  }
+  if (input.startsWith(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX)) {
+    return {
+      visibleText: input.slice(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX.length),
       browserSelected: true
     }
   }

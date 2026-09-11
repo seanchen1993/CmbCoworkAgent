@@ -164,10 +164,11 @@ export function getCurrentTurnAssistantResponse(input: {
   lastFinalText?: string
 }): string {
   // Prefer the current turn's final values snapshot when available: it may replace
-  // an incomplete streaming draft. The caller must scope lastFinalText to messages
+  // an incomplete streaming draft, including an explicit clear. Undefined means
+  // no authoritative final was received. The caller must scope it to messages
   // after the current turn's user prompt so previous-turn answers cannot leak in.
   const finalSnapshot = stripThinkBlocks(input.lastFinalText ?? "").trim()
-  if (finalSnapshot) return finalSnapshot
+  if (input.lastFinalText !== undefined) return finalSnapshot
 
   const start = Math.max(0, Math.min(input.currentTurnAssistantStart, input.assistantText.length))
   return stripThinkBlocks(input.assistantText.slice(start)).trim()

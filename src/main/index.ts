@@ -57,6 +57,7 @@ import {
 } from "./main-log-forwarding"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
+import { createNativeClosePrompt } from "./native-close-prompt"
 import {
   clearAppAttention,
   disposeAppTray,
@@ -105,8 +106,10 @@ const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursi
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
 const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
+const nativeClosePrompt = createNativeClosePrompt()
 const mainLogForwardingGate = createMainLogForwardingGate()
 let mainWindow: BrowserWindow | null = null
+let mainWindowUnresponsive = false
 const trustedMainRendererUrl = resolveTrustedRendererUrl(
   app.isPackaged
     ? pathToFileURL(join(__dirname, "../renderer/index.html")).href
@@ -503,7 +506,6 @@ function disposeBrowserServiceForMainWindow(reason: string): void {
   disposeBuiltinBrowserForMainWindowEvent({
     browserService,
     isAppQuitting: isAppQuitting(),
-    logPrefix: MAIN_BROWSER_LOG_PREFIX,
     reason
   })
 }
@@ -645,8 +647,27 @@ function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBeha
   return savedBehavior
 }
 
+function requestNativeWindowCloseChoice(window: BrowserWindow): void {
+  clearCloseToTrayPromptState()
+  void nativeClosePrompt
+    .request({
+      isAvailable: () => !window.isDestroyed() && mainWindow === window && !isAppQuitting(),
+      hasActiveRuns: hasActiveForegroundRuns,
+      hasTray: isAppTrayAvailable,
+      show: (options) => dialog.showMessageBox(window, options),
+      minimize: () => hideMainWindowToTray(window),
+      quit: () => app.quit()
+    })
+    .catch((error) => console.error("[Main] Native close prompt failed:", error))
+}
+
 function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
-  if (window.isDestroyed() || window.webContents.isDestroyed()) return
+  if (window.isDestroyed()) return
+  if (nativeClosePrompt.isOpen) return
+  if (window.webContents.isDestroyed() || window.webContents.isCrashed() || mainWindowUnresponsive) {
+    requestNativeWindowCloseChoice(window)
+    return
+  }
   if (closeToTrayPromptOpen) {
     window.focus()
     return
@@ -670,6 +691,7 @@ function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayProm
         mainWindow.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
       }
       clearCloseToTrayPromptState()
+      requestNativeWindowCloseChoice(window)
     }
   }, CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS)
   window.focus()
@@ -685,6 +707,7 @@ function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayProm
 }
 
 function createWindow(): void {
+  mainWindowUnresponsive = false
   const devWindowIcon = process.platform === "win32" && isDev ? getDevWindowsIconPath() : undefined
 
   mainWindow = new BrowserWindow({
@@ -715,6 +738,7 @@ function createWindow(): void {
   mainWindow.on("blur", showPendingAppAttention)
 
   mainWindow.on("unresponsive", () => {
+    mainWindowUnresponsive = true
     mainLogForwardingGate.disableForLifecycle()
     console.warn("[Main] BrowserWindow became unresponsive")
   })
@@ -723,6 +747,7 @@ function createWindow(): void {
   let rendererRecovered = false
 
   mainWindow.on("responsive", () => {
+    mainWindowUnresponsive = false
     console.info("[Main] BrowserWindow recovered responsiveness")
   })
 
@@ -788,12 +813,15 @@ function createWindow(): void {
 
   mainWindow.webContents.on("did-start-loading", () => {
     mainLogForwardingGate.disableForLifecycle()
+    nativeClosePrompt.cancel()
     clearCloseToTrayPromptState()
   })
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     mainLogForwardingGate.disableForLifecycle()
+    const hadClosePrompt = closeToTrayPromptOpen
     clearCloseToTrayPromptState()
+    if (hadClosePrompt && mainWindow) requestNativeWindowCloseChoice(mainWindow)
     disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
 
@@ -872,6 +900,7 @@ function createWindow(): void {
   })
 
   mainWindow.on("closed", () => {
+    nativeClosePrompt.cancel()
     mainLogForwardingGate.disableForLifecycle()
     console.warn("[Main] Main window closed", {
       platform: process.platform,
@@ -1595,10 +1624,7 @@ if (browserNativeMessagingHostLaunch) {
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)
-    const disposeBuiltinBrowserAfterAppCleanup = beginBuiltinBrowserAppQuitCleanup(
-      browserService,
-      MAIN_BROWSER_LOG_PREFIX
-    )
+    const disposeBuiltinBrowserAfterAppCleanup = beginBuiltinBrowserAppQuitCleanup(browserService)
     browserService = null
     disposeAllTerminals()
     LocalSandbox.killAll()

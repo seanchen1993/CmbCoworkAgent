@@ -1,4 +1,4 @@
-import { dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
+import { type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { getBrowserCdpConfig } from "../storage"
 import type {
   BrowserCookieBridgeErrorCode,
@@ -34,11 +34,13 @@ const BROWSER_COOKIE_BRIDGE_ERROR_CODES = new Set<BrowserCookieBridgeErrorCode>(
   "export_failed"
 ])
 const BROWSER_COOKIE_BRIDGE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserCookieBridge]`
+const AUTO_IMPORT_EXPORT_TIMEOUT_MS = 5_000
 
 let cookieBridgeServer: BrowserCookieBridgeServerInstance | null = null
 let browserProfileImportActiveForSession = false
 let browserProfileImportRuntimeEnabled = false
 let browserProfileImportRuntimeStartPromise: Promise<void> | null = null
+let browserProfileAutoImportAttempted = false
 
 function profileImportFailure(
   error: string,
@@ -79,6 +81,36 @@ function sanitizeProfileImportError(error: unknown): string {
     /(cookie|token|session|authorization|password)=([^;\s]+)/gi,
     "$1=[redacted]"
   )
+}
+
+function describeBrowserProfileImportResult(result: BrowserProfileImportResult): string {
+  const attempt = result.success ? "succeeded" : "failed"
+  const method = result.importMethod ?? "unknown"
+  const code = result.errorCode ? ` code=${result.errorCode}` : ""
+  const warning = result.warning ? ` warning=${result.warning}` : ""
+  const error = result.error ? ` error=${result.error}` : ""
+  return `${attempt} method=${method} importedCookies=${result.importedCookies} skippedCookies=${result.skippedCookies}${code}${warning}${error}`
+}
+
+function logBrowserProfileImportResult(
+  browserService: BrowserService,
+  result: BrowserProfileImportResult,
+  options: BrowserProfileImportOptions
+): void {
+  const mode = options.autoImport ? "auto" : "manual"
+  const message = `Cookie import ${mode} ${describeBrowserProfileImportResult(result)}`
+  if (result.success && !result.warning) {
+    console.info(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} ${message}`)
+  } else if (result.success) {
+    console.warn(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} ${message}`)
+  } else {
+    console.warn(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} ${message}`)
+  }
+  browserService.appendConsoleEntry({
+    level: result.success && !result.warning ? "info" : "warn",
+    message,
+    sourceId: "BrowserCookieImport"
+  })
 }
 
 function mergeSkippedWebsites(
@@ -123,9 +155,9 @@ async function ensureChromeNativeHostRegistration() {
 }
 
 async function readChromeProfileImportData(options: BrowserProfileImportOptions) {
-  const { readBrowserProfileImportData } =
-    await import("../browser/chrome/browser-profile-importer")
-  return readBrowserProfileImportData(options)
+  const { getBrowserProfileImportWorkerClient } =
+    await import("../browser/chrome/browser-profile-import-worker-client")
+  return getBrowserProfileImportWorkerClient().readProfile(options)
 }
 
 async function sanitizeChromeExtensionCookieExport(cookies: CmbChromeCookie[]) {
@@ -151,18 +183,10 @@ async function startBrowserProfileImportRuntime(): Promise<void> {
   if (browserProfileImportRuntimeStartPromise) return browserProfileImportRuntimeStartPromise
 
   browserProfileImportRuntimeStartPromise = (async () => {
-    console.log(
-      `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} starting browser profile import runtime, enabled=${browserProfileImportActiveForSession}`
-    )
     const server = await getCookieBridgeServer()
     await server.start()
-    console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} cookie bridge server started`)
     try {
-      const registration = await ensureChromeNativeHostRegistration()
-      console.log(
-        `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} native host registration result`,
-        registration
-      )
+      await ensureChromeNativeHostRegistration()
     } catch (error) {
       console.warn(
         `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} registration failed: ${error instanceof Error ? error.message : String(error)}`
@@ -182,8 +206,8 @@ async function startBrowserProfileImportRuntime(): Promise<void> {
 }
 
 async function importWindowsCookieData(
-  window: BrowserWindow,
-  browserService: BrowserService
+  browserService: BrowserService,
+  exportTimeoutMs?: number
 ): Promise<BrowserProfileImportResult> {
   let registration: Awaited<ReturnType<typeof ensureChromeNativeHostRegistration>>
   try {
@@ -205,23 +229,9 @@ async function importWindowsCookieData(
     }
   }
 
-  const confirmation = await dialog.showMessageBox(window, {
-    type: "question",
-    title: "导入 Chrome Cookie",
-    message: "从当前 Chrome Profile 导入全部网站 Cookie？",
-    detail:
-      "Cookie 将由 CmbCoworkAgent Chrome 扩展读取，不会读取 Chrome 的 Cookies 文件。请确认你已在扩展中授予网站访问权限。",
-    buttons: ["取消", "导入"],
-    defaultId: 1,
-    cancelId: 0
-  })
-  if (confirmation.response !== 1) {
-    return { ...extensionImportFailure("用户取消导入", undefined), cancelled: true }
-  }
-
   try {
     const server = await getCookieBridgeServer()
-    const exported = await server.exportCookies()
+    const exported = await server.exportCookies(exportTimeoutMs)
     const imported = await sanitizeChromeExtensionCookieExport(exported.cookies)
     const counts = await browserService.importProfileData(imported.data)
     const skippedCookies = exported.skippedCookies + imported.skippedCookies + counts.skippedCookies
@@ -258,9 +268,6 @@ export function stopBrowserProfileImportRuntime(): void {
 function initializeBrowserProfileImportRuntimeForSession(): void {
   const startupConfig = getBrowserCdpConfig()
   browserProfileImportActiveForSession = startupConfig.profileImportEnabled === true
-  console.log(
-    `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} registerBrowserProfileImportHandlers, profileImportEnabled=${startupConfig.profileImportEnabled}, activeForSession=${browserProfileImportActiveForSession}`
-  )
   if (browserProfileImportActiveForSession) {
     void startBrowserProfileImportRuntime().catch((error) => {
       console.warn(
@@ -287,8 +294,20 @@ async function importBrowserProfileData(
     return profileImportFailure("浏览器数据导入功能在当前会话未生效，请保存配置后重启应用", options)
   }
 
+  if (options.autoImport) {
+    if (browserProfileAutoImportAttempted) {
+      return extensionImportFailure("本次会话已完成自动导入尝试", "import_in_progress")
+    }
+    browserProfileAutoImportAttempted = true
+  }
+
   if (process.platform === "win32") {
-    return importWindowsCookieData(window, browserService)
+    const result = await importWindowsCookieData(
+      browserService,
+      options.autoImport ? AUTO_IMPORT_EXPORT_TIMEOUT_MS : undefined
+    )
+    logBrowserProfileImportResult(browserService, result, options)
+    return result
   }
 
   try {
@@ -300,7 +319,7 @@ async function importBrowserProfileData(
     const counts = await browserService.importProfileData(imported.data)
     const skippedCookies = counts.skippedCookies + imported.skippedCookies
     const skippedWebsites = mergeSkippedWebsites(imported.skippedWebsites, counts.skippedWebsites)
-    return {
+    const result: BrowserProfileImportResult = {
       success: true,
       sourceBrowser: "chrome",
       importMethod: "profile",
@@ -317,8 +336,12 @@ async function importBrowserProfileData(
             ? "部分 Cookie 因加密、分区或格式限制被跳过"
             : undefined
     }
+    logBrowserProfileImportResult(browserService, result, options)
+    return result
   } catch (error) {
-    return profileImportFailure(sanitizeProfileImportError(error), options)
+    const result = profileImportFailure(sanitizeProfileImportError(error), options)
+    logBrowserProfileImportResult(browserService, result, options)
+    return result
   }
 }
 
