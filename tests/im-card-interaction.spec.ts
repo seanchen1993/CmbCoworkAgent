@@ -439,6 +439,61 @@ function testTheQuestionFormMirrorsTheTextEscapeHatch(): void {
   console.log("PASS testTheQuestionFormMirrorsTheTextEscapeHatch")
 }
 
+/**
+ * A refused submit must leave the form usable.
+ *
+ * The desktop rejects a submit for things the client cannot check — a blank
+ * question, a request already answered from the desktop, remote answering
+ * switched off — and answers with a message, not by replacing the card. Under
+ * `multiSubmit`'s default of 单次 that first refusal spends the form, so the
+ * reader who most needs it is the one who loses it.
+ *
+ * The component id is pinned alongside it because it is not retrofittable:
+ * partUpdate is the only way to change a live form (`update-custom-card` does
+ * not whitelist `interactive`) and it addresses components by an id the card
+ * had to carry when it was sent.
+ */
+function testARefusedSubmitLeavesTheFormUsable(): void {
+  const content = buildQuestionCard({
+    targetLabel: "快捷支付",
+    questions: [
+      {
+        key: "q0",
+        header: "分支",
+        question: "合到哪个分支？",
+        options: [{ label: "main" }, { label: "release" }]
+      }
+    ],
+    tag: "d".repeat(32),
+    fallbackCommand: "/回答 A1B2C3 <编号>"
+  })
+  const interactive = content.find((component) => component.type === "interactive")
+  assert.ok(interactive, "the form renders an interactive component")
+  assert.equal(
+    interactive.multiSubmit,
+    1,
+    "the form must accept more than one submit — the desktop can refuse the first"
+  )
+  assert.ok(
+    typeof interactive.id === "string" && interactive.id.length > 0,
+    "the form must carry a component id, the only handle partUpdate can address"
+  )
+
+  // iOS reads fixLine and ignores minLine/maxLine; every other client does the
+  // reverse. Sending one set only makes the box single-line on half the fleet.
+  const controls = interactive.inputControlArray as Array<Record<string, unknown>>
+  const other = controls.find((control) => String(control.feedbackKey).endsWith("__other"))
+  assert.ok(other, "the free-text control is still there")
+  for (const field of ["minLine", "maxLine", "fixLine"]) {
+    const value = other[field]
+    assert.ok(
+      typeof value === "number" && value >= 1 && value <= 10,
+      `${field} must be a line count within the platform's 1-10 range, got ${String(value)}`
+    )
+  }
+  console.log("PASS testARefusedSubmitLeavesTheFormUsable")
+}
+
 function testEveryBuiltCardSatisfiesTheContract(): void {
   const approval = buildApprovalCard({
     targetLabel: "快捷支付",
@@ -457,6 +512,60 @@ function testEveryBuiltCardSatisfiesTheContract(): void {
     kind: "approval",
     content: approval
   })
+
+  // The question card too, and specifically after gaining `id`, `multiSubmit`
+  // and the line hints: every one of those is a field the validator had never
+  // seen on a card before.
+  const sendQuestions = (questions: Parameters<typeof buildQuestionCard>[0]["questions"]): void => {
+    assertRemoteImCardSendV1({
+      schemaVersion: 1,
+      interactionId: "interaction-2",
+      conversationKey: ROUTE.conversationKey,
+      idempotencyKey: "idem-2",
+      tag: "e".repeat(32),
+      kind: "user_input",
+      content: buildQuestionCard({
+        targetLabel: "快捷支付",
+        questions,
+        tag: "e".repeat(32),
+        fallbackCommand: "/回答 A1B2C3 <编号>"
+      })
+    })
+  }
+  sendQuestions([
+    {
+      key: "q0",
+      header: "分支",
+      question: "合到哪个分支？",
+      options: [
+        { label: "main", description: "直接进主干，改动小且已验证时用" },
+        { label: "release", description: "走发布分支，需要回归测试" }
+      ]
+    }
+  ])
+
+  // Zhaohu 6.22 shows 30 controls, and the tool caps questions at 10 — two per
+  // question, so the count is never the binding limit. Size is: 10 questions
+  // with five fully-described options each is past the 15000-character cap.
+  // That must fail here, in the builder's own validator, because `publish`
+  // catches it and the reader keeps the text notice; a card that only the
+  // gateway refuses costs a round trip to reach the same place.
+  assert.throws(
+    () =>
+      sendQuestions(
+        Array.from({ length: 10 }, (_unused, index) => ({
+          key: `q${index}`,
+          header: "题".repeat(12),
+          question: "问".repeat(500),
+          options: Array.from({ length: 5 }, (_ignored, option) => ({
+            label: "选".repeat(80),
+            description: "述".repeat(240)
+          }))
+        }))
+      ),
+    /15000/u,
+    "the largest form the question tool can ask for must be refused locally, not sent"
+  )
   console.log("PASS testEveryBuiltCardSatisfiesTheContract")
 }
 
@@ -839,6 +948,7 @@ async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<vo
 async function main(): Promise<void> {
   testEveryBuiltCardSatisfiesTheContract()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
+  testARefusedSubmitLeavesTheFormUsable()
   await testTheCardCarriesTheSameGateAsTheShortCode()
   await testASecondClickFindsTheCodeAlreadySpent()
   await testAClickFromAnotherPrincipalIsRefused()

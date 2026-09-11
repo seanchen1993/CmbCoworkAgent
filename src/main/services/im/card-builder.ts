@@ -189,6 +189,47 @@ export interface QuestionCardInput {
 const LIST_SELECT_CUSTOM_OPTIONS = 1
 
 /**
+ * multiSubmit: 0-单次（默认） 1-不限次数。
+ *
+ * Unlimited on purpose. The desktop refuses a submit for reasons the client
+ * cannot see — a question left blank, the request already answered from the
+ * desktop, remote answering switched off — and it says so in a message rather
+ * than by replacing the card. Under the default the form is spent by that
+ * first attempt, so the one reader who most needs it, the one who missed a
+ * question, would be left with a dead form and only the short code.
+ *
+ * Safe once a submit succeeds, too: the session is gone by then, so a second
+ * press is told the request is no longer waiting, and the form has already
+ * been replaced by its answered card.
+ *
+ * 备注写的是「PC客户端支持」。A mobile client that ignores this keeps the form
+ * single-use, which is what we have today — the short code stays printed under
+ * every card either way.
+ */
+const MULTI_SUBMIT_UNLIMITED = 1
+
+/**
+ * The form's component id.
+ *
+ * `update-custom-card` does not whitelist `interactive`, so partUpdate is the
+ * only way a live form can ever be changed in place, and it addresses
+ * components by this id. An id cannot be added to a card that was already
+ * sent, so it goes on every form now rather than on the first one that needs
+ * it. Fixed rather than derived: ids need only be unique within one message,
+ * and a question card carries exactly one form.
+ */
+const QUESTION_FORM_COMPONENT_ID = "question-form"
+
+/**
+ * The free-text box holds prose, so it opens taller than one line. Both sets
+ * are sent because they are exclusive by platform: iOS reads only fixLine,
+ * everything else only minLine/maxLine. Range is 1-10.
+ */
+const OTHER_INPUT_MIN_LINE = 2
+const OTHER_INPUT_MAX_LINE = 6
+const OTHER_INPUT_FIX_LINE = 3
+
+/**
  * The free-text control mirrors the text channel's `其他 <回答>` escape: every
  * question there accepts one, so a form without it would be strictly weaker
  * than the short code it is meant to replace.
@@ -230,20 +271,28 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
         value: String(index)
       }))
     })
+    // The client caps this box at 1000 characters, where the typed
+    // `其他 <回答>` path accepts 4000. An answer longer than the box holds
+    // belongs in a message, and the short code under the card still takes it.
     controls.push({
       subType: "inputBox",
       title: `${question.header} · 其他`,
       promptText: "以上选项都不合适时填写",
       feedbackKey: `${question.key}${QUESTION_OTHER_SUFFIX}`,
-      required: false
+      required: false,
+      minLine: OTHER_INPUT_MIN_LINE,
+      maxLine: OTHER_INPUT_MAX_LINE,
+      fixLine: OTHER_INPUT_FIX_LINE
     })
   }
 
   if (controls.length > 0) {
     components.push({
       type: "interactive",
+      id: QUESTION_FORM_COMPONENT_ID,
       inputControlArray: controls,
       submitStatus: 0,
+      multiSubmit: MULTI_SUBMIT_UNLIMITED,
       submitButton: {
         submitText: "提交",
         actionLink: cardReceiptActionLink(input.tag)
