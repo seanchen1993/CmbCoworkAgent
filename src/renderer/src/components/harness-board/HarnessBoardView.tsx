@@ -6715,6 +6715,8 @@ function FeatureDetailPage({
     try {
       const workspacePath = normalizeWorkspacePath(await window.api.workspace.select())
       if (workspacePath) setManagedRunWorkspacePath(workspacePath)
+    } catch (error) {
+      toast.error(cleanIpcError(error))
     } finally {
       setPickingManagedRunWorkspace(false)
     }
@@ -6738,6 +6740,7 @@ function FeatureDetailPage({
       const defaultWorkspacePath = latestSessionWorkspacePath ?? configuredWorkspacePath
       setManagedRunWorkspacePath(defaultWorkspacePath ?? "")
       setManagedRunImEnabled(featureImManagementAvailable)
+      setPickingManagedRunWorkspace(false)
       setManagedRunDialogOpen(true)
     } catch (error) {
       toast.error(cleanIpcError(error))
@@ -7496,7 +7499,10 @@ function FeatureDetailPage({
           if (!updatingManagedRun) setManagedRunDialogOpen(open)
         }}
       >
-        <DialogContent className={harnessDialogContentClassName}>
+        <DialogContent
+          className={harnessDialogContentClassName}
+          onPointerDownOutside={preventHarnessDialogOutsideClose}
+        >
           <DialogHeader>
             <DialogTitle>开启托管运行</DialogTitle>
           </DialogHeader>
@@ -7572,7 +7578,9 @@ function FeatureDetailPage({
             <Button
               type="button"
               onClick={() => void handleConfirmManagedRun()}
-              disabled={!managedRunWorkspacePath.trim() || updatingManagedRun}
+              disabled={
+                !managedRunWorkspacePath.trim() || updatingManagedRun || pickingManagedRunWorkspace
+              }
             >
               {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
               确认并开启托管
