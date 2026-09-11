@@ -2272,6 +2272,7 @@ export function ChatContainer({
     setError,
     clearError,
     clearHookInterruption,
+    restoreCurrentModel,
     setContextReminder,
     setDraftInput: setInput,
     setHarnessNextActionDialogTips,
