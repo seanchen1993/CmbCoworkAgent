@@ -3820,6 +3820,14 @@ function hydrateStreamTranscriptToolCalls(
 ): void {
   if (message.role !== "assistant") return
   const runKey = pendingStreamTranscriptKey(threadId, runToken)
+  if (message.tool_calls_mode === "snapshot") {
+    // Values already contain complete tool arguments. Do not seed the next
+    // model invocation's chunk accumulator with a completed cycle's tools.
+    const previous = streamTranscriptToolCallAccumulators.get(runKey)
+    previous?.delete(message.id)
+    if (message.provider_source_id) previous?.delete(message.provider_source_id)
+    return
+  }
   let byMessageId = streamTranscriptToolCallAccumulators.get(runKey)
   if (!byMessageId) {
     byMessageId = new Map()

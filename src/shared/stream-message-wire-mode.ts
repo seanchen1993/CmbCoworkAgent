@@ -9,6 +9,8 @@ export type StreamMessageWireMode = "delta" | "snapshot"
  */
 export const STREAM_MESSAGE_CONTENT_MODE_KEY = "cmb_stream_message_content_mode"
 export const STREAM_MESSAGE_REASONING_MODE_KEY = "cmb_stream_message_reasoning_mode"
+/** Complete values snapshots replace the tool list, including an explicit empty list. */
+export const STREAM_MESSAGE_TOOL_CALLS_MODE_KEY = "cmb_stream_message_tool_calls_mode"
 
 /** Tool-call chunks carry their mode beside `args` so each interleaved call can differ. */
 export const STREAM_TOOL_CALL_ARGS_MODE_KEY = "cmb_stream_tool_call_args_mode"

@@ -22,7 +22,10 @@ interface FixtureWindow {
     threads: {
       create(metadata: Record<string, unknown>): Promise<{ thread_id?: string; id?: string }>
       appendMessages(id: string, messages: Array<Record<string, unknown>>): Promise<unknown>
-      getMessagesPage(id: string, options: { limit: number }): Promise<{
+      getMessagesPage(
+        id: string,
+        options: { limit: number }
+      ): Promise<{
         messages: Array<{ id: string; content: unknown; reasoning?: string }>
       }>
     }
@@ -217,6 +220,8 @@ async function main() {
     const chunks = Math.max(20, Number(process.env.STREAM_SNAPSHOT_CHUNKS) || 20)
     const delayMs = Math.max(0, Number(process.env.STREAM_SNAPSHOT_DELAY_MS) || 0)
     let toolLoops = 0
+    const navigationDurations: number[] = []
+    const streamStartedAt = performance.now()
     for (let n = 0; n < chunks; n += 1) {
       if (n > 0 && n % 25 === 5) {
         const callId = `fixture-call-${n}`
@@ -233,9 +238,13 @@ async function main() {
         })
         toolLoops += 1
       }
+      const navigationStartedAt = performance.now()
       if (n % 5 === 0) await page.getByText(titles[1], { exact: true }).first().click()
       await chunk("AIMessageChunk", { id: "sparse-3", content: `片段${n}。` })
-      if (n % 5 === 0) await page.getByText(titles[0], { exact: true }).first().click()
+      if (n % 5 === 0) {
+        await page.getByText(titles[0], { exact: true }).first().click()
+        navigationDurations.push(performance.now() - navigationStartedAt)
+      }
       if (delayMs) await new Promise((done) => setTimeout(done, delayMs))
     }
     await until(
@@ -243,6 +252,16 @@ async function main() {
       "continued stream after navigation"
     )
     assert.deepEqual(errors, [])
+    const sortedNavigation = [...navigationDurations].sort((left, right) => left - right)
+    const responsiveness = {
+      chunks,
+      toolLoops,
+      historyRoundTrips: navigationDurations.length,
+      streamElapsedMs: performance.now() - streamStartedAt,
+      navigationP95Ms: sortedNavigation[Math.ceil(sortedNavigation.length * 0.95) - 1],
+      navigationMaxMs: sortedNavigation.at(-1)
+    }
+    writeFileSync(join(artifacts, "responsiveness.json"), JSON.stringify(responsiveness, null, 2))
     results.push(
       `${chunks} chunks, ${toolLoops} tool loops and ${Math.ceil(chunks / 5)} history-thread round trips remain responsive`
     )
@@ -285,6 +304,66 @@ async function main() {
     assert.deepEqual(errors, [])
     results.push(
       "production serializer preserves repeated deltas, interior snapshot corrections and subsequent growth in React"
+    )
+    const independentSerializer = createStreamDataSerializer()
+    const independentMessage = async (kind: string, fields: Record<string, unknown>) => {
+      await send({
+        type: "stream",
+        mode: "messages",
+        ...independentSerializer("messages", [
+          serialized(kind, { id: "independent-fields", ...fields }),
+          { langgraph_node: "agent" }
+        ])
+      })
+      for (const button of await page.getByRole("button", { name: "思考", exact: true }).all()) {
+        if ((await button.getAttribute("aria-expanded")) !== "true") await button.click()
+      }
+    }
+    await independentMessage("AIMessageChunk", {
+      content: "独立正文旧草稿",
+      additional_kwargs: { reasoning_content: "独立思考旧草稿" }
+    })
+    await independentMessage("AIMessage", {
+      additional_kwargs: { reasoning_content: "独立思考更正" }
+    })
+    await until(async () => {
+      const body = await page.locator("body").innerText()
+      return (
+        body.includes("独立正文旧草稿") &&
+        body.includes("独立思考更正") &&
+        !body.includes("独立思考旧草稿")
+      )
+    }, "reasoning-only snapshot preserves existing body")
+    await independentMessage("AIMessage", { content: "" })
+    await until(async () => {
+      const body = await page.locator("body").innerText()
+      return !body.includes("独立正文旧草稿") && body.includes("独立思考更正")
+    }, "explicit empty body preserves reasoning")
+    await independentMessage("AIMessage", {
+      content: "独立正文恢复",
+      additional_kwargs: { reasoning_content: "" }
+    })
+    await until(async () => {
+      const body = await page.locator("body").innerText()
+      return body.includes("独立正文恢复") && !body.includes("独立思考更正")
+    }, "explicit empty reasoning preserves body")
+    for (let index = 0; index < 2; index += 1) {
+      await independentMessage("AIMessageChunk", {
+        content: "重复",
+        additional_kwargs: { reasoning_content: "独立思考重复" }
+      })
+    }
+    await until(async () => {
+      const body = await page.locator("body").innerText()
+      return (
+        body.includes("独立正文恢复重复重复") &&
+        body.includes("独立思考重复独立思考重复") &&
+        !body.includes("独立思考更正")
+      )
+    }, "independent cleared fields accept repeated subsequent deltas")
+    assert.deepEqual(errors, [])
+    results.push(
+      "foreground snapshots preserve missing fields, independently clear text/reasoning and accept repeated deltas"
     )
     const collisionSerializer = createStreamDataSerializer()
     const collisionFrames: Array<[string, Record<string, unknown>]> = [
@@ -361,15 +440,22 @@ async function main() {
         async () => (await page.locator("body").innerText()).includes("完成交接后正文必须保留。"),
         "completed answer remains visible"
       )
-      const reasoningButtons = page.getByRole("button", { name: "思考", exact: true })
-      for (const button of await reasoningButtons.all()) {
-        if ((await button.getAttribute("aria-expanded")) !== "true") await button.click()
-      }
-      await until(
-        async () =>
-          (await page.locator("body").innerText()).includes("完成交接后思考过程必须保留。"),
-        "completed reasoning remains visible"
-      )
+      // Done can replace the live row with its durable counterpart after the
+      // body is already visible. Re-locate that row's disclosure after a remount
+      // instead of assuming the live row's expanded state survives the handoff.
+      await until(async () => {
+        const row = page
+          .locator("[data-chat-message-row]")
+          .filter({ hasText: "完成交接后正文必须保留。" })
+          .last()
+        const disclosure = row.getByRole("button", { name: "思考", exact: true })
+        if (
+          (await disclosure.count()) &&
+          (await disclosure.getAttribute("aria-expanded")) !== "true"
+        )
+          await disclosure.click()
+        return (await row.innerText()).includes("完成交接后思考过程必须保留。")
+      }, "completed reasoning remains visible")
     }
     await assertCompletionVisible()
     await page.screenshot({ path: join(artifacts, "stream-fixed.png") })
@@ -585,9 +671,30 @@ async function main() {
     results.push("crashed renderer immediately offers native close; cancel preserves window")
     writeFileSync(
       join(artifacts, "result.json"),
-      JSON.stringify({ results, errors, metrics, isolated, packaged: Boolean(packaged) }, null, 2)
+      JSON.stringify(
+        { results, errors, metrics, responsiveness, isolated, packaged: Boolean(packaged) },
+        null,
+        2
+      )
     )
     console.log(JSON.stringify({ results, errors, artifacts }))
+  } catch (error) {
+    if (app) {
+      const failedPage = await app.firstWindow().catch(() => undefined)
+      if (failedPage) {
+        await failedPage.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})
+        const body = await failedPage
+          .locator("body")
+          .innerText()
+          .catch(() => "unavailable")
+        writeFileSync(join(artifacts, "failure-ui.txt"), body)
+      }
+    }
+    writeFileSync(
+      join(artifacts, "failure.json"),
+      JSON.stringify({ error: String(error), results, errors, isolated }, null, 2)
+    )
+    throw error
   } finally {
     if (app) await app.close()
   }

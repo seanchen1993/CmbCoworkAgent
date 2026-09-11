@@ -4,7 +4,8 @@ import {
 } from "./stream-transcript-payload"
 import {
   STREAM_MESSAGE_CONTENT_MODE_KEY,
-  STREAM_MESSAGE_REASONING_MODE_KEY
+  STREAM_MESSAGE_REASONING_MODE_KEY,
+  STREAM_MESSAGE_TOOL_CALLS_MODE_KEY
 } from "../../shared/stream-message-wire-mode"
 import {
   getMessageProviderOccurrence,
@@ -146,6 +147,19 @@ export function selectStreamTranscriptValueSnapshots(
     }
   }
   const counts = new Map(offsets)
+  const turnBaseline = new Map<string, Message[]>()
+  for (const message of baseline) {
+    const key = sourceKey(message)
+    if ((getMessageProviderOccurrence(message) ?? 1) <= (offsets.get(key) ?? 0)) continue
+    const candidates = turnBaseline.get(key) ?? []
+    candidates.push(message)
+    turnBaseline.set(key, candidates)
+  }
+  const frameCounts = new Map<string, number>()
+  for (const entry of entries) {
+    const key = sourceKey(entry.identity)
+    frameCounts.set(key, (frameCounts.get(key) ?? 0) + 1)
+  }
   const localCounts = new Map<string, number>()
   const localPositions: number[] = []
   const declared = entries.map((entry) => {
@@ -154,7 +168,46 @@ export function selectStreamTranscriptValueSnapshots(
     const localOccurrence = (localCounts.get(key) ?? 0) + 1
     localCounts.set(key, localOccurrence)
     localPositions.push(localOccurrence)
-    const occurrence = getMessageProviderOccurrence(message) ?? (counts.get(key) ?? 0) + 1
+    let occurrence = getMessageProviderOccurrence(message)
+    if (occurrence === undefined && message.role === "assistant" && frameCounts.get(key) === 1) {
+      const candidates = turnBaseline.get(key) ?? []
+      if (candidates.length > 0) {
+        // LangGraph's ID reducer replaces an earlier array slot when a provider
+        // reuses its response ID. That slot's position is no longer a cycle ID.
+        // Tool ownership still addresses earlier corrections exactly; a final
+        // without tools belongs to the trailing streamed assistant, not slot 1.
+        const raw = record(entry.message)
+        const kwargs = record(raw?.kwargs) ?? raw
+        const calls = Array.isArray(kwargs?.tool_calls) ? kwargs.tool_calls : []
+        const callIds = calls.flatMap((call) => {
+          const id = record(call)?.id
+          return typeof id === "string" ? [id] : []
+        })
+        const owners = callIds.length
+          ? candidates.filter((candidate) =>
+              callIds.every((id) => candidate.tool_calls?.some((call) => call.id === id))
+            )
+          : candidates.slice(-1).filter((candidate) => !candidate.tool_calls?.length)
+        if (owners.length === 1) {
+          occurrence = getMessageProviderOccurrence(owners[0]) ?? 1
+          localPositions[localPositions.length - 1] = occurrence - (offsets.get(key) ?? 0)
+        } else if (owners.length === 0 && Array.isArray(kwargs?.tool_calls)) {
+          const latest = candidates.at(-1)!
+          const latestIndex = baseline.indexOf(latest)
+          const crossedOwnedResult = baseline.some(
+            (candidate, index) =>
+              index > latestIndex &&
+              candidate.role === "tool" &&
+              latest.tool_calls?.some((call) => call.id === candidate.tool_call_id)
+          )
+          if (crossedOwnedResult) {
+            occurrence = (getMessageProviderOccurrence(latest) ?? 1) + 1
+            localPositions[localPositions.length - 1] = occurrence - (offsets.get(key) ?? 0)
+          }
+        }
+      }
+    }
+    occurrence ??= (counts.get(key) ?? 0) + 1
     counts.set(key, Math.max(counts.get(key) ?? 0, occurrence))
     return {
       ...message,
@@ -195,7 +248,10 @@ export function selectStreamTranscriptValueSnapshots(
       },
       {
         [STREAM_MESSAGE_CONTENT_MODE_KEY]: "snapshot",
-        [STREAM_MESSAGE_REASONING_MODE_KEY]: "snapshot"
+        [STREAM_MESSAGE_REASONING_MODE_KEY]: "snapshot",
+        ...(Array.isArray(kwargs.tool_calls)
+          ? { [STREAM_MESSAGE_TOOL_CALLS_MODE_KEY]: "snapshot" }
+          : {})
       }
     ]
     if (persistedMessageFromStreamPayload(tuple)) {

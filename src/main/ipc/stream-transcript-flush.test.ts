@@ -333,3 +333,50 @@ describe("stream transcript flush identity cache", () => {
     expect(terminalSnapshot.messages[0].content).toBe(completeText)
   })
 })
+it("keeps a tool clear authoritative when text-only deltas follow in the same flush", () => {
+  const result = resolveStreamTranscriptFlush({
+    queuedMessages: [
+      queuedMessage({
+        id: "same",
+        role: "assistant",
+        content: "",
+        tool_calls: [],
+        tool_calls_mode: "snapshot"
+      }),
+      queuedMessage({ id: "same", role: "assistant", content: " tail" })
+    ],
+    loadBaselineMessages: () => []
+  })
+  expect(result.messages).toHaveLength(1)
+  expect(result.messages[0]).toMatchObject({
+    tool_calls: [],
+    tool_calls_mode: "snapshot",
+    content: " tail"
+  })
+})
+it("continues trusted tool updates after a snapshot while preserving authority", () => {
+  const result = resolveStreamTranscriptFlush({
+    queuedMessages: [
+      queuedMessage({
+        id: "same",
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "c", name: "echo", args: { value: 1 } }],
+        tool_calls_mode: "snapshot"
+      }),
+      queuedMessage({
+        id: "same",
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "c", name: "echo", args: { value: 2 } }],
+        tool_calls_mode: "delta"
+      }),
+      queuedMessage({ id: "same", role: "assistant", content: "tail" })
+    ],
+    loadBaselineMessages: () => []
+  })
+  expect(result.messages[0]).toMatchObject({
+    tool_calls_mode: "snapshot",
+    tool_calls: [{ id: "c", args: { value: 2 } }]
+  })
+})

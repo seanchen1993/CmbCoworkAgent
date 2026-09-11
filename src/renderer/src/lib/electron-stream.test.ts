@@ -4,9 +4,11 @@ import type { UseStreamTransport } from "@langchain/langgraph-sdk/react"
 import { createElectronStream } from "./electron-stream"
 import { ElectronIPCTransport } from "./electron-transport"
 import { createStreamDataSerializer } from "../../../main/ipc/stream-data-serialization"
+import recordedProviderStream from "../../../../tests/fixtures/reused-provider-live-stream.json"
 import {
   createLiveStreamCumulativeFrameProjector,
   createLiveStreamMessageIdNormalizer,
+  createLiveStreamMessageMerger,
   applyLiveStreamMessageIdAliases,
   type LiveStreamMessage
 } from "./live-stream-messages"
@@ -54,6 +56,93 @@ async function run(events: Event[]) {
 }
 
 describe("Electron stream snapshot regression", () => {
+  it("keeps each actual runtime provider-ID cycle live before done", async () => {
+    const transport = new ElectronIPCTransport() as unknown as {
+      convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
+    }
+    const events: Event[] = []
+    for (const packet of recordedProviderStream)
+      events.push(...transport.convertToSDKEvents(packet, "test", "normal"))
+    const { frames } = await run(events)
+    const merger = createLiveStreamMessageMerger()
+    const live = frames.reduce((messages, frame) => {
+      const next = merger(messages, frame as LiveStreamMessage[])
+      const assistants = next.filter((message) => message.type === "ai")
+      const stage = assistants.some((message) => message.content === "hahaha done")
+        ? 3
+        : assistants.some((message) => message.content === "checking-2")
+          ? 2
+          : 1
+      if (stage >= 2) {
+        expect(assistants.slice(0, stage - 1).map((message) => message.content)).toEqual(
+          ["checking-1", "checking-2"].slice(0, stage - 1)
+        )
+        for (const [index, assistant] of assistants.slice(0, stage - 1).entries()) {
+          expect(assistant.tool_calls?.map((call) => call.id)).toEqual([
+            `call-local-741-${index + 1}`
+          ])
+          expect(assistant.tool_calls?.[0].args).toEqual({ file_path: "/workspace/evidence.txt" })
+        }
+      }
+      return next
+    }, [] as LiveStreamMessage[])
+    const assistants = live.filter((message) => message.type === "ai")
+    expect(assistants.map((message) => message.content)).toEqual([
+      "checking-1",
+      "checking-2",
+      "hahaha done"
+    ])
+    for (const [index, assistant] of assistants.entries()) {
+      expect(assistant.tool_calls?.map((call) => call.id) ?? []).toEqual(
+        index < 2 ? [`call-local-741-${index + 1}`] : []
+      )
+      if (index < 2)
+        expect(assistant.tool_calls?.[0].args).toEqual({ file_path: "/workspace/evidence.txt" })
+    }
+  })
+  it("prefers explicit occurrences over execution scopes and resets scope state on retry", async () => {
+    const transport = new ElectronIPCTransport() as unknown as {
+      convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
+      resetMainStreamAttempt(ids: string[]): void
+    }
+    const packet = recordedProviderStream.find((packet) => packet.mode === "messages")!
+    const emit = (content: string, scope: string, occurrence?: number) => {
+      const input = structuredClone(packet) as unknown as {
+        data: [
+          {
+            kwargs: {
+              content: string
+              tool_calls: unknown[]
+              tool_call_chunks: unknown[]
+              additional_kwargs: Record<string, unknown>
+            }
+          },
+          { langgraph_checkpoint_ns: string }
+        ]
+      }
+      input.data[0].kwargs.content = content
+      input.data[0].kwargs.tool_calls = []
+      input.data[0].kwargs.tool_call_chunks = []
+      input.data[0].kwargs.additional_kwargs = occurrence
+        ? {
+            cmb_internal_provider_source_id: "provider-reused-741",
+            cmb_internal_provider_occurrence: occurrence
+          }
+        : {}
+      input.data[1].langgraph_checkpoint_ns = scope
+      return transport.convertToSDKEvents(input, "test", "normal")
+    }
+    const { stream } = await run([
+      ...emit("one", "model_request:first", 1),
+      ...emit(" two", "model_request:first", 2),
+      ...emit(" tail", "model_request:second", 2)
+    ])
+    expect(stream.messages.map((message) => message.content)).toEqual(["one", " two tail"])
+    transport.resetMainStreamAttempt(stream.messages.map((message) => message.id!))
+    const retried = await run(emit("retry", "model_request:first"))
+    expect(retried.stream.messages).toHaveLength(1)
+    expect(retried.stream.messages[0].content).toBe("retry")
+  })
   it("normalizes a real transport rewrite before replacing a colliding tool tuple", async () => {
     const serialize = createStreamDataSerializer()
     const transport = new ElectronIPCTransport() as unknown as {

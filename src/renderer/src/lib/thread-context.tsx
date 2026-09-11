@@ -6837,13 +6837,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           })
           if (subagentId) {
             appendSubagentTranscriptMessages(threadId, subagentId, [
-              projectSchedulerSubagentMessage(tracker, {
-                id, content,
-                ...(typeof event.reasoning === "string" ? { reasoning: event.reasoning } : {}),
-                contentMode: event.contentMode === "snapshot" ? "snapshot" : "delta",
-                reasoningMode: event.reasoningMode === "snapshot" ? "snapshot" : "delta",
-                toolCalls
-              })
+              projectSchedulerSubagentMessage(
+                tracker,
+                {
+                  id,
+                  content,
+                  ...(typeof event.reasoning === "string" ? { reasoning: event.reasoning } : {}),
+                  contentMode: event.contentMode === "snapshot" ? "snapshot" : "delta",
+                  reasoningMode: event.reasoningMode === "snapshot" ? "snapshot" : "delta",
+                  toolCalls
+                },
+                subagentTranscriptsRef.current[threadId]?.[subagentId]
+              )
             ])
             break
           }

@@ -58,6 +58,12 @@ export function projectSchedulerSubagentMessage(
     currentMsgId: string | null
     subagentContentProjection?: SubagentLiveTextProjection
     subagentReasoningProjection?: SubagentLiveTextProjection
+    subagentMessageIdentity?: {
+      rawId: string
+      identity: Pick<Message, "id" | "role" | "provider_source_id" | "provider_occurrence">
+      toolCallIds: Set<string>
+      checkedToolTail?: Message
+    }
   },
   event: {
     id: string
@@ -66,13 +72,59 @@ export function projectSchedulerSubagentMessage(
     contentMode?: "delta" | "snapshot"
     reasoningMode?: "delta" | "snapshot"
     toolCalls?: Message["tool_calls"]
-  }
+  },
+  baseline?: Message[]
 ): Message {
-  const startsMessage = tracker.currentMsgId !== event.id
+  const previousIdentity = tracker.subagentMessageIdentity
+  const tail = baseline?.at(-1)
+  if (previousIdentity && tail?.role === "tool" && previousIdentity.checkedToolTail !== tail) {
+    // History/values may supply completed tool arguments after the live text
+    // event. Refresh from that row once at the result boundary, never per token.
+    previousIdentity.checkedToolTail = tail
+    const index = baseline && liveTranscriptIndexes.get(baseline)
+    const position = index?.length === baseline?.length
+      ? index?.indexById.get(previousIdentity.identity.id)
+      : undefined
+    const owner = position !== undefined
+      ? baseline?.[position]
+      : baseline?.findLast(message => message.id === previousIdentity.identity.id && message.role === "assistant")
+    for (const call of owner?.tool_calls ?? []) previousIdentity.toolCallIds.add(call.id)
+  }
+  // Only a result owned by this assistant ends its occurrence. A late result
+  // from an earlier cycle must not split the currently streaming assistant.
+  const crossesOwnToolBoundary =
+    tail?.role === "tool" &&
+    !!tail.tool_call_id &&
+    previousIdentity?.toolCallIds.has(tail.tool_call_id) === true
+  const incomingToolIds = event.toolCalls?.map((call) => call.id)
+  const replaysCurrentTools =
+    !!incomingToolIds?.length &&
+    incomingToolIds.every((id) => previousIdentity?.toolCallIds.has(id))
+  // Normal tokens and exact call replays retain an O(1) identity lookup.
+  const canReuseIdentity =
+    previousIdentity?.rawId === event.id &&
+    (!crossesOwnToolBoundary || replaysCurrentTools)
+  const identity: Pick<Message, "id" | "role" | "provider_source_id" | "provider_occurrence"> = baseline
+    ? canReuseIdentity
+      ? previousIdentity.identity
+      : normalizeAppendedMessageIds(baseline, [{ id: event.id, role: "assistant" as const }], {
+          splitAssistantAfterTool: true
+        })[0]
+    : { id: event.id, role: "assistant" }
+  const startsMessage = tracker.currentMsgId !== identity.id
   if (startsMessage) {
-    tracker.currentMsgId = event.id
+    tracker.currentMsgId = identity.id
     tracker.subagentContentProjection = undefined
     tracker.subagentReasoningProjection = undefined
+  }
+  const toolCallIds =
+    startsMessage || !previousIdentity ? new Set<string>() : previousIdentity.toolCallIds
+  for (const id of incomingToolIds ?? []) toolCallIds.add(id)
+  tracker.subagentMessageIdentity = {
+    rawId: event.id,
+    identity,
+    toolCallIds,
+    ...(canReuseIdentity && { checkedToolTail: previousIdentity?.checkedToolTail })
   }
   const contentSnapshot = event.contentMode === "snapshot"
   const reasoningSnapshot = event.reasoningMode === "snapshot" && event.reasoning !== undefined
@@ -93,7 +145,7 @@ export function projectSchedulerSubagentMessage(
       : tracker.subagentReasoningProjection
   tracker.subagentReasoningProjection = reasoning
   return {
-    id: event.id,
+    ...identity,
     role: "assistant",
     content: content?.content ?? "",
     ...(content && {

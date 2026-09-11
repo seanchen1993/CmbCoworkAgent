@@ -117,14 +117,22 @@ function mergeQueuedStreamMessage(
   base: QueuedStreamTranscriptMessage,
   incoming: QueuedStreamTranscriptMessage
 ): QueuedStreamTranscriptMessage {
-  const streamToolCallChunks = [...base.streamToolCallChunks, ...incoming.streamToolCallChunks]
+  const streamToolCallChunks =
+    incoming.tool_calls_mode === "snapshot"
+      ? []
+      : [...base.streamToolCallChunks, ...incoming.streamToolCallChunks]
   const toolCalls = mergeStreamToolCallChunks(
-    [...(base.tool_calls ?? []), ...(incoming.tool_calls ?? [])],
+    incoming.tool_calls_mode === "snapshot"
+      ? (incoming.tool_calls ?? [])
+      : [...(base.tool_calls ?? []), ...(incoming.tool_calls ?? [])],
     streamToolCallChunks
   )
   return {
     ...base,
     ...incoming,
+    ...(base.tool_calls_mode === "snapshot" || incoming.tool_calls_mode === "snapshot"
+      ? { tool_calls_mode: "snapshot" as const }
+      : {}),
     ...(incoming.streamContentMode === "snapshot" ||
     base.streamContentMode === "snapshot" ||
     base.content_mode === "snapshot"
@@ -132,7 +140,12 @@ function mergeQueuedStreamMessage(
       : {}),
     ...mergeTranscriptReasoningUpdates(base, incoming),
     content: mergeQueuedStreamContent(base.content, incoming.content, incoming.streamContentMode),
-    tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+    tool_calls:
+      toolCalls.length > 0 ||
+      base.tool_calls_mode === "snapshot" ||
+      incoming.tool_calls_mode === "snapshot"
+        ? toolCalls
+        : undefined,
     streamToolCallChunks,
     tool_call_id: incoming.tool_call_id ?? base.tool_call_id,
     name: incoming.name ?? base.name,
@@ -201,6 +214,7 @@ function contentContainsToolBoundary(content: Message["content"]): boolean {
 function isOrdinaryAssistantChunk(message: QueuedStreamTranscriptMessage): boolean {
   return (
     message.role === "assistant" &&
+    message.tool_calls_mode !== "snapshot" &&
     !message.tool_call_id &&
     (!message.tool_calls || message.tool_calls.length === 0) &&
     message.streamToolCallChunks.length === 0 &&

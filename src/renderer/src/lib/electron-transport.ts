@@ -744,6 +744,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private mainAssistantMessageIdAliases: Map<string, string> = new Map()
   private mainAssistantMessageIdByIndex: Map<number, string> = new Map()
   private mainAssistantIndexByObservedId: Map<string, number> = new Map()
+  private mainAssistantIndexByStreamScope = new Map<string, number>()
+  private mainAssistantScopedObservedIds = new Set<string>()
   private streamedMainAssistantIndexes: Set<number> = new Set()
   private mainAssistantProviderIdentityByIndex: Map<number, MainAssistantProviderIdentity> =
     new Map()
@@ -848,6 +850,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.mainAssistantMessageIdAliases.clear()
     this.mainAssistantMessageIdByIndex.clear()
     this.mainAssistantIndexByObservedId.clear()
+    this.mainAssistantIndexByStreamScope.clear()
+    this.mainAssistantScopedObservedIds.clear()
     this.streamedMainAssistantIndexes.clear()
     this.mainAssistantProviderIdentityByIndex.clear()
     this.mainAssistantIndexByProviderIdentity.clear()
@@ -2934,6 +2938,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private resetMainStreamAttempt(messageIds: string[]): void {
+    this.mainAssistantIndexByStreamScope.clear()
+    this.mainAssistantScopedObservedIds.clear()
     this.pendingIdlessCompletedAssistantRoute = undefined
     const discardedMessageIds = new Set([...messageIds, ...this.inFlightMainMessageIds])
     this.inFlightMainMessageIds.clear()
@@ -3352,6 +3358,30 @@ export class ElectronIPCTransport implements UseStreamTransport {
           let content = this.extractContent(kwargs.content)
           const reasoning = extractVisibleReasoning(kwargs)
           const observedProviderMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
+          // A provider can reuse its ID after tools while values replaces the old graph slot.
+          // The model execution namespace distinguishes those cycles without scanning history.
+          const explicitProviderTuple = !isCoordinatorMode
+            ? getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
+            : undefined
+          const explicitMessageIndex = explicitProviderTuple
+            ? this.mainAssistantIndexByProviderIdentity.get(
+                this.mainAssistantProviderIdentityKey(
+                  explicitProviderTuple.provider_source_id!,
+                  explicitProviderTuple.provider_occurrence!
+                )
+              ) ?? this.nextMessageFallbackIndex("ai")
+            : undefined
+          const streamScopeKey =
+            !isCoordinatorMode && observedProviderMessageId && checkpointNs
+              ? JSON.stringify([observedProviderMessageId, checkpointNs])
+              : undefined
+          const scopedMessageIndex = streamScopeKey
+            ? this.mainAssistantIndexByStreamScope.get(streamScopeKey)
+            : undefined
+          const startsNewScopedOccurrence =
+            !!streamScopeKey &&
+            scopedMessageIndex === undefined &&
+            this.mainAssistantScopedObservedIds.has(observedProviderMessageId!)
           const idlessCompletedResolution =
             !isCoordinatorMode
               ? this.routePendingIdlessCompletedAssistant(
@@ -3362,6 +3392,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
           if (idlessCompletedResolution?.buffer) return events
           content = idlessCompletedResolution?.content ?? content
           const observedMessageIndex =
+            explicitMessageIndex ??
+            scopedMessageIndex ??
+            (startsNewScopedOccurrence ? this.nextMessageFallbackIndex("ai") : undefined) ??
             idlessCompletedResolution?.messageIndex ??
             (!isCoordinatorMode && observedProviderMessageId
               ? this.mainAssistantIndexByObservedId.get(observedProviderMessageId)
@@ -3399,6 +3432,23 @@ export class ElectronIPCTransport implements UseStreamTransport {
             !isCoordinatorMode && observedProviderMessageId
               ? this.resolveMainAssistantMessageIdAlias(observedProviderMessageId)
               : observedProviderMessageId
+          if (streamScopeKey && observedProviderMessageId) {
+            this.mainAssistantIndexByStreamScope.set(streamScopeKey, messageIndex)
+            this.mainAssistantScopedObservedIds.add(observedProviderMessageId)
+            pruneMapToLimit(this.mainAssistantIndexByStreamScope, MAX_TRACKED_EMITTED_MESSAGES)
+            pruneSetToLimit(this.mainAssistantScopedObservedIds, MAX_TRACKED_EMITTED_MESSAGES)
+            const sourceId = getMessageProviderSourceId({
+              id: observedProviderMessageId,
+              role: "assistant"
+            })
+            if (!this.mainAssistantHighestProviderOccurrence.has(sourceId)) {
+              this.rememberMainAssistantProviderIdentity(messageIndex, {
+                providerSourceId: sourceId,
+                providerOccurrence:
+                  getMessageProviderOccurrence({ id: observedProviderMessageId, role: "assistant" }) ?? 1
+              })
+            }
+          }
           const providerIdentity = !isCoordinatorMode
             ? this.resolveMainAssistantProviderIdentity(
                 messageIndex,

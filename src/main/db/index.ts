@@ -435,6 +435,7 @@ function mergeNormalizedThreadMessages(
   const incomingContentPriority = incoming.content_priority ?? 0
   const retainStreamContent = existing.content_mode === "snapshot" &&
     incoming.content_mode === undefined
+  const retainStreamTools = existing.tool_calls_mode === "snapshot" && incoming.tool_calls_mode === undefined
   const hasAuthoritativeIncomingContent =
     !retainStreamContent && incomingContentPriority > 0 &&
     incomingContentPriority >= existingContentPriority
@@ -469,8 +470,8 @@ function mergeNormalizedThreadMessages(
             ? mergeIncrementalMessageContent(existing.content, incoming.content) as Message["content"]
             : mergeMessageContent(existing.content, incoming.content),
     tool_calls: mergeToolCalls(existing.tool_calls, incoming.tool_calls, {
-      incomingAuthoritative: hasAuthoritativeIncomingContent,
-      preferExisting: retainStreamContent || existingContentPriority > incomingContentPriority
+      incomingAuthoritative: hasAuthoritativeIncomingContent || incoming.tool_calls_mode === "snapshot",
+      preferExisting: retainStreamTools || (retainStreamContent && incoming.tool_calls_mode === undefined) || existingContentPriority > incomingContentPriority
     }),
     tool_call_id: incoming.tool_call_id ?? existing.tool_call_id,
     name: incoming.name ?? existing.name,
@@ -1072,6 +1073,9 @@ function normalizeThreadMessageInput(
     ...(message.content_mode === "snapshot" || message.content_mode === "delta"
       ? { content_mode: message.content_mode }
       : {}),
+    ...((message.tool_calls_mode === "snapshot" || message.tool_calls_mode === "delta") && Array.isArray(message.tool_calls)
+      ? { tool_calls_mode: message.tool_calls_mode }
+      : {}),
     ...(typeof message.tool_call_id === "string" && message.tool_call_id
       ? { tool_call_id: message.tool_call_id }
       : {}),
@@ -1287,6 +1291,9 @@ export function applyThreadMessageStreamAuthority(
         : {}),
       ...((row.stream_authority & 2) !== 0
         ? { reasoning: stored.reasoning ?? "", reasoning_mode: "snapshot" as const }
+        : {}),
+      ...((row.stream_authority & 4) !== 0
+        ? { tool_calls: stored.tool_calls ?? [], tool_calls_mode: "snapshot" as const }
         : {})
     }
   })
@@ -4777,6 +4784,7 @@ export function upsertThreadMessages(
           ? normalized.content_priority
           : 0
       const existingAuthority = existing?.stream_authority ?? 0
+      const retainStreamTools = (existingAuthority & 4) !== 0 && normalized.tool_calls_mode === undefined
       const retainStreamContent = (existingAuthority & 1) !== 0 &&
         normalized.content_mode === undefined
       const hasAuthoritativeIncomingContent = !retainStreamContent &&
@@ -4815,8 +4823,8 @@ export function upsertThreadMessages(
       )
       const nextToolCalls = existing
         ? mergeToolCalls(existingToolCalls, normalized.tool_calls, {
-            incomingAuthoritative: hasAuthoritativeIncomingContent,
-            preferExisting: retainStreamContent || existingContentPriority > incomingContentPriority
+            incomingAuthoritative: hasAuthoritativeIncomingContent || normalized.tool_calls_mode === "snapshot",
+            preferExisting: retainStreamTools || (retainStreamContent && normalized.tool_calls_mode === undefined) || existingContentPriority > incomingContentPriority
           })
         : clampToolCalls(normalized.tool_calls)
       const nextRecoveryIntegrity =
@@ -4836,7 +4844,8 @@ export function upsertThreadMessages(
               .reasoning ?? null
       const streamAuthority = existingAuthority |
         (normalized.content_mode === "snapshot" && incomingContentPriority >= existingContentPriority ? 1 : 0) |
-        (normalized.reasoning_mode === "snapshot" && typeof normalized.reasoning === "string" ? 2 : 0)
+        (normalized.reasoning_mode === "snapshot" && typeof normalized.reasoning === "string" ? 2 : 0) |
+        (normalized.tool_calls_mode === "snapshot" && incomingContentPriority >= existingContentPriority ? 4 : 0)
       const toolCallsJson = Array.isArray(nextToolCalls) ? safeJsonStringify(nextToolCalls) : null
       const toolCallId = normalized.tool_call_id ?? existing?.tool_call_id ?? null
       const name = normalized.name ?? existing?.name ?? null
@@ -5320,7 +5329,11 @@ export function replaceThreadMessageId(
         sourceContentPriority,
         targetContentPriority
       )
-      const mergedToolCalls = mergeAliasedToolCalls(
+      const mergedToolCalls = (targetAuthority & 4) !== 0 && targetContentPriority >= sourceContentPriority
+        ? targetToolCalls
+        : (sourceAuthority & 4) !== 0 && sourceContentPriority >= targetContentPriority
+          ? sourceToolCalls
+          : mergeAliasedToolCalls(
         sourceToolCalls,
         targetToolCalls,
         sourceContentPriority,

@@ -12,6 +12,7 @@ import {
 import {
   readStreamMessageWireMode,
   STREAM_MESSAGE_CONTENT_MODE_KEY,
+  STREAM_MESSAGE_TOOL_CALLS_MODE_KEY,
   STREAM_TOOL_CALL_ARGS_MODE_KEY
 } from "../../shared/stream-message-wire-mode"
 
@@ -85,6 +86,9 @@ export function persistedMessageFromStreamPayload(
   const toolCalls = Array.isArray(kwargs.tool_calls)
     ? (kwargs.tool_calls as Message["tool_calls"])
     : undefined
+  const completeToolCalls =
+    toolCalls !== undefined &&
+    asPlainRecord(payload[1])?.[STREAM_MESSAGE_TOOL_CALLS_MODE_KEY] === "snapshot"
   const contentPresent =
     typeof (kwargs.content ?? record.content) === "string" ||
     Array.isArray(kwargs.content ?? record.content)
@@ -111,6 +115,7 @@ export function persistedMessageFromStreamPayload(
     !reasoningUpdate.reasoning &&
     (typeof content === "string" ? content.length === 0 : content.length === 0) &&
     (!toolCalls || toolCalls.length === 0) &&
+    !completeToolCalls &&
     streamToolCallChunks.length === 0 &&
     streamContentMode !== "snapshot" &&
     reasoningUpdate.reasoning_mode !== "snapshot"
@@ -132,7 +137,12 @@ export function persistedMessageFromStreamPayload(
     role,
     content,
     ...reasoningUpdate,
-    ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    ...(toolCalls && (toolCalls.length > 0 || completeToolCalls) ? { tool_calls: toolCalls } : {}),
+    ...(completeToolCalls
+      ? { tool_calls_mode: "snapshot" as const }
+      : toolCalls?.length || streamToolCallChunks.length
+        ? { tool_calls_mode: "delta" as const }
+        : {}),
     ...(role === "tool" && toolCallId ? { tool_call_id: toolCallId } : {}),
     ...(role === "tool" && name ? { name } : {}),
     ...(role === "tool" && status ? { status } : {}),

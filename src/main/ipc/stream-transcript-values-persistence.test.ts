@@ -223,3 +223,168 @@ it("routes changed append/tail fields onto prior streamed identities across a us
   expect(stored.at(-1)).toMatchObject({ provider_source_id: "same", provider_occurrence: 9 })
   expect(stored.at(-1)?.tool_calls ?? []).toEqual([])
 })
+it.each([false, true])(
+  "aligns reducer-collapsed values without rewriting old cycles (streamed: %s)",
+  (streamed) => {
+    const threadId = `collapsed-runtime-values-${streamed}`
+    db.createThread(threadId)
+    const serialize = createStreamDataSerializer()
+    const accumulator = createSerializedValuesMessageAccumulator()
+    const persist = (tuples: unknown[]) => {
+      const queued = tuples.map(persistedMessageFromStreamPayload).filter((value) => value !== null)
+      const resolved = resolveStreamTranscriptFlush({
+        queuedMessages: queued,
+        loadBaselineMessages: () => db.getThreadMessages(threadId)
+      })
+      db.upsertThreadMessages(threadId, resolved.messages, { preserveExistingOrder: true })
+    }
+    const values = (messages: unknown[]) => {
+      const frame = serialize("values", { messages })
+      const complete = accumulator.update(frame).messages
+      persist(
+        selectStreamTranscriptValueSnapshots(frame.data, frame.valuesSnapshotKind, {
+          completeMessages: complete,
+          loadBaselineMessages: () => db.getThreadMessages(threadId)
+        })
+      )
+    }
+    const tools: ToolMessage[] = []
+    for (const cycle of [1, 2]) {
+      const ai = new AIMessage({
+        id: "same",
+        content: `checking-${cycle}`,
+        tool_calls: [{ id: `c${cycle}`, name: "read_file", args: { file_path: "fixture.txt" } }]
+      })
+      if (streamed) persist([serialize("messages", [ai, { checkpoint_ns: `model:${cycle}` }]).data])
+      values([ai, ...tools])
+      const tool = new ToolMessage({
+        id: `t${cycle}`,
+        tool_call_id: `c${cycle}`,
+        content: `result-${cycle}`
+      })
+      tools.push(tool)
+      if (streamed) persist([serialize("messages", [tool, {}]).data])
+      values([ai, ...tools])
+    }
+    const final = new AIMessage({ id: "same", content: "hahaha done" })
+    if (streamed) persist([serialize("messages", [final, { checkpoint_ns: "model:3" }]).data])
+    values([final, ...tools])
+    const assistants = db
+      .getThreadMessages(threadId)
+      .filter((message) => message.role === "assistant")
+    expect(assistants.map((message) => message.content)).toEqual([
+      "checking-1",
+      "checking-2",
+      "hahaha done"
+    ])
+    expect(assistants.map((message) => message.tool_calls?.map((call) => call.id) ?? [])).toEqual([
+      ["c1"],
+      ["c2"],
+      []
+    ])
+    // An explicit earlier tool owner remains addressable for a complete correction.
+    values([
+      new AIMessage({
+        id: "same",
+        content: "corrected first",
+        tool_calls: [{ id: "c1", name: "read_file", args: { file_path: "fixture.txt" } }]
+      }),
+      ...tools
+    ])
+    expect(
+      db
+        .getThreadMessages(threadId)
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.content)
+    ).toEqual(["corrected first", "checking-2", "hahaha done"])
+  }
+)
+it("clears complete values tool calls without clearing tools on metadata-only updates", () => {
+  const threadId = "values-explicit-tool-clear"
+  db.createThread(threadId)
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "same",
+      role: "assistant",
+      content: "draft",
+      tool_calls: [{ id: "obsolete", name: "echo", args: {} }],
+      created_at: new Date()
+    }
+  ])
+  const values = (kwargs: Record<string, unknown>) => {
+    const tuples = selectStreamTranscriptValueSnapshots(
+      { messages: [{ id: ["AIMessage"], kwargs: { id: "same", ...kwargs } }] },
+      "full",
+      { loadBaselineMessages: () => db.getThreadMessages(threadId) }
+    )
+    const queued = tuples.map(persistedMessageFromStreamPayload).filter((value) => value !== null)
+    const resolved = resolveStreamTranscriptFlush({
+      queuedMessages: queued,
+      loadBaselineMessages: () => db.getThreadMessages(threadId)
+    })
+    db.upsertThreadMessages(threadId, resolved.messages, { preserveExistingOrder: true })
+  }
+  values({ content: "draft correction" })
+  expect(db.getThreadMessages(threadId)[0].tool_calls?.map((call) => call.id)).toEqual(["obsolete"])
+  values({ tool_calls: [] })
+  expect(db.getThreadMessages(threadId)[0].tool_calls ?? []).toEqual([])
+})
+it("keeps tool-only authority across stale echoes, native deltas and fork copies", () => {
+  const threadId = "tool-field-authority"
+  db.createThread(threadId)
+  const old = {
+    id: "a",
+    role: "assistant" as const,
+    content: "body",
+    reasoning: "thought",
+    tool_calls: [{ id: "c", name: "echo", args: { value: "old" } }],
+    created_at: new Date()
+  }
+  db.upsertThreadMessages(threadId, [old])
+  db.upsertThreadMessages(threadId, [
+    { ...old, content: "", content_mode: "delta", tool_calls: [], tool_calls_mode: "snapshot" }
+  ])
+  db.upsertThreadMessages(threadId, [old])
+  expect(db.getThreadMessages(threadId)[0]).toMatchObject({
+    content: "body",
+    reasoning: "thought",
+    tool_calls: []
+  })
+  const copiedId = "tool-field-authority-copy"
+  db.createThread(copiedId)
+  db.upsertThreadMessages(copiedId, db.applyThreadMessageStreamAuthority(threadId, [old]))
+  db.upsertThreadMessages(copiedId, [old])
+  expect(db.getThreadMessages(copiedId)[0].tool_calls ?? []).toEqual([])
+  db.upsertThreadMessages(threadId, [
+    {
+      ...old,
+      content: " tail",
+      content_mode: "delta",
+      tool_calls_mode: "delta",
+      tool_calls: [{ id: "c", name: "echo", args: { value: "new" } }]
+    }
+  ])
+  db.upsertThreadMessages(threadId, [old])
+  expect(db.getThreadMessages(threadId)[0].tool_calls?.[0].args).toEqual({ value: "new" })
+})
+it("honors tool snapshot priority while refusing unmarked stale tool echoes", () => {
+  const id = "tool-snapshot-priority"
+  db.createThread(id)
+  const row = {
+    id: "a",
+    role: "assistant" as const,
+    content: "body",
+    tool_calls: [{ id: "c", name: "echo", args: {} }],
+    created_at: new Date()
+  }
+  db.upsertThreadMessages(id, [{ ...row, content_priority: 5, tool_calls_mode: "snapshot" }])
+  db.upsertThreadMessages(id, [
+    { ...row, content_priority: 2, tool_calls: [], tool_calls_mode: "snapshot" }
+  ])
+  expect(db.getThreadMessages(id)[0].tool_calls?.map((call) => call.id)).toEqual(["c"])
+  db.upsertThreadMessages(id, [
+    { ...row, content_priority: 6, tool_calls: [], tool_calls_mode: "snapshot" }
+  ])
+  db.upsertThreadMessages(id, [{ ...row, content_priority: 99 }])
+  expect(db.getThreadMessages(id)[0].tool_calls ?? []).toEqual([])
+})
