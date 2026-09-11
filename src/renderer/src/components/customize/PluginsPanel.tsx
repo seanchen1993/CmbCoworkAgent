@@ -29,6 +29,8 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { revalidatePluginCatalog } from "@/lib/app-catalog-cache"
+import { SKILL_PLUGIN_CATALOG_RENDER_BATCH } from "@/lib/skill-plugin-catalog"
 import type { PluginMetadata, PluginManifest } from "@/types"
 import { marketApi, type MarketItem } from "../../api/market"
 import {
@@ -340,13 +342,13 @@ function UploadPluginDialog(props: {
           </DialogDescription>
         </DialogHeader>
         {PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL && (
-          <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+          <div className="mt-4 rounded-md border border-status-info/25 bg-status-info/10 px-3 py-2 text-sm text-status-info">
             <span>需要创建插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
             <a
               href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
               target="_blank"
               rel="noreferrer"
-              className="ml-1 inline-flex items-center gap-1 font-medium text-blue-700 underline-offset-2 hover:underline"
+              className="ml-1 inline-flex items-center gap-1 font-medium text-primary underline-offset-2 hover:underline"
             >
               下载插件模板
               <ExternalLink className="size-3.5" />
@@ -432,6 +434,9 @@ export function PluginsPanel(): React.JSX.Element {
   )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
+  const [visiblePluginLimit, setVisiblePluginLimit] = useState(
+    SKILL_PLUGIN_CATALOG_RENDER_BATCH
+  )
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const loggedPluginSelectionRef = useRef<string | null>(null)
   const originMigrationDoneRef = useRef(false)
@@ -456,11 +461,16 @@ export function PluginsPanel(): React.JSX.Element {
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value)
     clearTimeout(debounceTimer.current)
-    debounceTimer.current = setTimeout(() => setDebouncedQuery(value), 200)
+    debounceTimer.current = setTimeout(() => {
+      setDebouncedQuery(value)
+      setVisiblePluginLimit(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+    }, 200)
   }, [])
 
-  const refreshPlugins = useCallback(() => {
-    window.api.plugins.list().then(setPlugins).catch(console.error)
+  const refreshPlugins = useCallback(async (): Promise<PluginMetadata[]> => {
+    const snapshot = await revalidatePluginCatalog(useAppStore.getState().pluginVersion)
+    setPlugins(snapshot.plugins)
+    return snapshot.plugins
   }, [])
 
   const loadMarketPlugins = useCallback(async () => {
@@ -493,11 +503,9 @@ export function PluginsPanel(): React.JSX.Element {
         markLocalUploadedPluginNameInStorage(pluginName)
         setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
       }
-      window.api.plugins
-        .list()
+      bumpPluginVersion()
+      void refreshPlugins()
         .then((list) => {
-          setPlugins(list)
-          bumpPluginVersion()
           if (selectedPlugin) {
             const updated = list.find(
               (p) => p.id === selectedPlugin.id || p.name === selectedPlugin.name
@@ -519,7 +527,7 @@ export function PluginsPanel(): React.JSX.Element {
         })
         .catch(console.error)
     },
-    [bumpPluginVersion, selectedPlugin, shouldHidePluginDetails]
+    [bumpPluginVersion, refreshPlugins, selectedPlugin, shouldHidePluginDetails]
   )
 
   const shouldHideSelectedPluginDetails = shouldHidePluginDetails(selectedPlugin)
@@ -531,7 +539,7 @@ export function PluginsPanel(): React.JSX.Element {
   }, [fileEditorOpen, selectedPlugin, shouldHideSelectedPluginDetails])
 
   useEffect(() => {
-    refreshPlugins()
+    void refreshPlugins().catch(console.error)
   }, [refreshPlugins])
 
   useEffect(() => {
@@ -569,7 +577,8 @@ export function PluginsPanel(): React.JSX.Element {
         const result = await window.api.plugins.setOriginsBatch(updates)
         if (result?.success) {
           originMigrationDoneRef.current = true
-          refreshPlugins()
+          bumpPluginVersion()
+          void refreshPlugins().catch(console.error)
         }
       } catch (error) {
         console.warn("[PluginsPanel] Failed to backfill plugin origin:", error)
@@ -584,7 +593,8 @@ export function PluginsPanel(): React.JSX.Element {
     marketPluginsLoaded,
     plugins,
     refreshPlugins,
-    uploadedPluginNames
+    uploadedPluginNames,
+    bumpPluginVersion
   ])
 
   const loadDetail = useCallback(
@@ -655,8 +665,8 @@ export function PluginsPanel(): React.JSX.Element {
       try {
         const newEnabled = !plugin.enabled
         await window.api.plugins.setEnabled(plugin.id, newEnabled)
-        refreshPlugins()
         bumpPluginVersion()
+        void refreshPlugins().catch(console.error)
         if (selectedPlugin?.id === plugin.id) {
           setSelectedPlugin((prev) => (prev ? { ...prev, enabled: newEnabled } : prev))
         }
@@ -701,8 +711,8 @@ export function PluginsPanel(): React.JSX.Element {
           setSelectedPlugin(null)
           setDetail(null)
         }
-        refreshPlugins()
         bumpPluginVersion()
+        void refreshPlugins().catch(console.error)
       } else {
         setErrorMsg(res.error || "卸载失败")
       }
@@ -727,6 +737,7 @@ export function PluginsPanel(): React.JSX.Element {
         type: "plugin",
         name: plugin.name,
         description: plugin.description,
+        version: plugin.version,
         category: marketPluginMap[key]?.category,
         chineseName: marketPluginMap[key]?.chinese_name,
         guidance: marketPluginMap[key]?.guidance,
@@ -763,6 +774,8 @@ export function PluginsPanel(): React.JSX.Element {
       (p) => p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q)
     )
   }, [plugins, debouncedQuery])
+
+  const visiblePlugins = filteredPlugins.slice(0, visiblePluginLimit)
 
   return (
     <>
@@ -828,10 +841,13 @@ export function PluginsPanel(): React.JSX.Element {
                 )}
               </div>
             ) : (
-              filteredPlugins.map((plugin) => {
-                const isMarketPlugin = Boolean(resolvePluginMarketInfo(plugin, marketPluginMap))
-                return (
-                  <button
+              <>
+                {visiblePlugins.map((plugin) => {
+                  const isMarketPlugin = Boolean(
+                    resolvePluginMarketInfo(plugin, marketPluginMap)
+                  )
+                  return (
+                    <button
                     key={plugin.id}
                     className={cn(
                       "w-full text-left rounded-md border border-border/70 p-2.5 transition-colors",
@@ -896,9 +912,24 @@ export function PluginsPanel(): React.JSX.Element {
                         </span>
                       )}
                     </div>
-                  </button>
-                )
-              })
+                    </button>
+                  )
+                })}
+                {visiblePlugins.length < filteredPlugins.length && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full text-xs"
+                    onClick={() =>
+                      setVisiblePluginLimit(
+                        (limit) => limit + SKILL_PLUGIN_CATALOG_RENDER_BATCH
+                      )
+                    }
+                  >
+                    加载更多（剩余 {filteredPlugins.length - visiblePlugins.length}）
+                  </Button>
+                )}
+              </>
             )}
           </div>
         </ScrollArea>

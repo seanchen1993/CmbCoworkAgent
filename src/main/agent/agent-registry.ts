@@ -1,8 +1,8 @@
 /**
  * Shared agent-type registry.
  *
- * One open registry of agent "profiles" that all three execution modes draw from:
- *  - Solo Agent (normal): each profile becomes a deepagents SubAgent the main
+ * One open registry of agent "profiles" shared by the supported execution paths:
+ *  - Multi and Workflow: each profile becomes a deepagents SubAgent the main
  *    agent's task tool can spawn by name (subagent_type).
  *  - Dynamic Workflows: a script's `agent(prompt, { agentType })` resolves a
  *    profile here, then maps it onto the leaf createAgentRuntime.
@@ -17,11 +17,21 @@
  * `tools`/`disallowedTools` frontmatter (CC tool names are auto-mapped) or the
  * coarse `workload` shortcut.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "fs"
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs"
+import {
+  opendir,
+  realpath as realpathAsync
+} from "fs/promises"
 import { homedir } from "os"
-import { join } from "path"
+import { basename, dirname, extname, isAbsolute, join } from "path"
 import { parseYamlFrontmatter } from "../utils/skill-identifiers"
 import type { ExpertAgentAccess } from "../../shared/expert-agent-types"
+import type { HarnessProjectModeSubagentConfig } from "../../shared/harness-board-types"
+import {
+  openStableFileHandle,
+  readStableFileHandleBounded,
+  StableBoundedReadError
+} from "../services/stable-file-handle"
 import { LIBRARY_AGENT_PROFILES } from "./library"
 
 /** execute/shell policy for an agent. none = no shell at all; read_only = only
@@ -46,8 +56,8 @@ export interface AgentProfile {
   shellAccess: AgentShellAccess
 }
 
-/** The fs/exec tools an allowlist/denylist can govern in this project. Mirrors
- * the set deepagents' filesystem middleware provides plus our task_output. */
+/** The built-in tools an allowlist/denylist can govern in this project. Mirrors
+ * the tools provided by deepagents' filesystem/todo middleware plus task_output. */
 const KNOWN_TOOLS = [
   "read_file",
   "write_file",
@@ -56,11 +66,12 @@ const KNOWN_TOOLS = [
   "ls",
   "glob",
   "grep",
-  "task_output"
+  "task_output",
+  "write_todos"
 ] as const
 
 /** Claude Code tool name → this project's tool name. Names absent here (e.g.
- * NotebookEdit, Agent, ExitPlanMode, WebFetch, WebSearch) have no Solo/workflow
+ * NotebookEdit, Agent, ExitPlanMode, WebFetch, WebSearch) have no task/workflow
  * subagent equivalent and are ignored when seen in a user's frontmatter. */
 const CC_TOOL_ALIASES: Record<string, string> = {
   read: "read_file",
@@ -81,10 +92,10 @@ export const WRITE_TOOL_NAMES = ["write_file", "edit_file"] as const
  * Normalize a profile `model:` value to a custom-model lookup key by dropping the
  * internal `custom:` scheme prefix when present. A profile may write either
  * `model: foo` or `model: custom:foo`; both must resolve the SAME config. The
- * Solo task-subagent path and the workflow agentType path must agree here —
+ * Inline task-subagent path and the workflow agentType path must agree here —
  * otherwise `model: custom:foo` works under a workflow but silently inherits the
- * main model for a Solo subagent (the workflow path prepends `custom:` then the
- * runtime slices it; the Solo path looks up directly, so it needs this strip).
+ * main model for a task subagent (the workflow path prepends `custom:` then the
+ * runtime slices it; the task path looks up directly, so it needs this strip).
  */
 export function stripCustomModelPrefix(model: string): string {
   return model.startsWith("custom:") ? model.slice("custom:".length) : model
@@ -434,8 +445,8 @@ End with exactly this line (parsed by caller): \`VERDICT: PASS\` or \`VERDICT: F
 - **PARTIAL**: what was verified, what could not be and why (missing tool/env), what the implementer should know.`
 
 /** Built-in profiles mirroring Claude Code's Explore / Plan / verification.
- * general-purpose is intentionally absent: Solo keeps its own general-purpose
- * subagent, and a no-agentType workflow agent() already runs the default agent.
+ * general-purpose is intentionally absent: the inline task runtime supplies its
+ * own general-purpose subagent, and a no-agentType workflow agent() runs the default agent.
  * Naming follows CC (capital Explore/Plan, lowercase verification). */
 export const BUILT_IN_AGENT_PROFILES: readonly AgentProfile[] = [
   {
@@ -518,6 +529,38 @@ function warnUnrecognizedToolNames(
  * anything past this is skipped so an oversized file can't bloat registry load,
  * memory, or the prompt/fingerprint we inject downstream. */
 const MAX_AGENT_FILE_BYTES = 256 * 1024
+const MAX_USER_AGENT_FILES_PER_SOURCE = 256
+const MAX_USER_AGENT_DIRECTORY_ENTRIES_PER_SOURCE = 4096
+
+function parseAgentContent(
+  filePath: string,
+  fallbackName: string,
+  content: string
+): AgentProfile | null {
+  const fm = parseYamlFrontmatter(content)
+  // Match the loader's frontmatter fields CASE-INSENSITIVELY: a `Workload:` /
+  // `Tools:` / `ShellAccess:` typo must not silently fall through to the
+  // permissive default (full shell, empty denylist) — that would quietly WIDEN a
+  // user agent the author meant to restrict. (warnUnknownAgentFields keeps the
+  // original fm so it can report a truly-unknown field by its real casing.)
+  const fmLower: Record<string, string> = {}
+  for (const [k, v] of Object.entries(fm)) fmLower[k.toLowerCase()] = v
+  const body = content.replace(/^---[\s\S]*?\n---\s*\n?/, "").trim()
+  const name = (fmLower.name || fallbackName).trim()
+  if (!name) return null
+  warnUnknownAgentFields(filePath, name, fm)
+  warnUnrecognizedToolNames(filePath, name, fmLower)
+  const policy = deriveToolPolicy(fmLower)
+  return {
+    name,
+    description: fmLower.description?.trim() || `User-defined agent "${name}".`,
+    systemPrompt: body || `You are the "${name}" agent.`,
+    model: fmLower.model?.trim() || undefined,
+    source: "user",
+    disallowedTools: policy.disallowedTools,
+    shellAccess: policy.shellAccess
+  }
+}
 
 /** Parse one `.cmbcoworkagent/agents/<name>.md` file into a profile. Returns null
  * on any problem so one bad file can't break the whole registry. */
@@ -531,32 +574,43 @@ function parseAgentFile(filePath: string, fallbackName: string): AgentProfile | 
       return null
     }
     const content = readFileSync(filePath, "utf-8")
-    const fm = parseYamlFrontmatter(content)
-    // Match the loader's frontmatter fields CASE-INSENSITIVELY: a `Workload:` /
-    // `Tools:` / `ShellAccess:` typo must not silently fall through to the
-    // permissive default (full shell, empty denylist) — that would quietly WIDEN a
-    // user agent the author meant to restrict. (warnUnknownAgentFields keeps the
-    // original fm so it can report a truly-unknown field by its real casing.)
-    const fmLower: Record<string, string> = {}
-    for (const [k, v] of Object.entries(fm)) fmLower[k.toLowerCase()] = v
-    const body = content.replace(/^---[\s\S]*?\n---\s*\n?/, "").trim()
-    const name = (fmLower.name || fallbackName).trim()
-    if (!name) return null
-    warnUnknownAgentFields(filePath, name, fm)
-    warnUnrecognizedToolNames(filePath, name, fmLower)
-    const policy = deriveToolPolicy(fmLower)
-    return {
-      name,
-      description: fmLower.description?.trim() || `User-defined agent "${name}".`,
-      systemPrompt: body || `You are the "${name}" agent.`,
-      model: fmLower.model?.trim() || undefined,
-      source: "user",
-      disallowedTools: policy.disallowedTools,
-      shellAccess: policy.shellAccess
-    }
+    return parseAgentContent(filePath, fallbackName, content)
   } catch (error) {
     console.warn(`[AgentRegistry] Failed to parse agent file ${filePath}:`, error)
     return null
+  }
+}
+
+async function parseAgentFileAsync(
+  filePath: string,
+  fallbackName: string
+): Promise<AgentProfile | null> {
+  let opened: Awaited<ReturnType<typeof openStableFileHandle>> | undefined
+  try {
+    opened = await openStableFileHandle(dirname(filePath), filePath)
+    const content = (
+      await readStableFileHandleBounded(opened, MAX_AGENT_FILE_BYTES)
+    ).toString("utf-8")
+    return parseAgentContent(filePath, fallbackName, content)
+  } catch (error) {
+    if (error instanceof StableBoundedReadError) {
+      if (error.failure === "initial-too-large") {
+        console.warn(
+          `[AgentRegistry] Agent file ${filePath} is ${error.observedSize} bytes (> ${MAX_AGENT_FILE_BYTES}); skipped to bound load cost and injected prompt size.`
+        )
+        return null
+      }
+      if (error.failure === "grew-too-large") {
+        console.warn(
+          `[AgentRegistry] Agent file ${filePath} grew beyond ${MAX_AGENT_FILE_BYTES} bytes while being read; skipped.`
+        )
+        return null
+      }
+    }
+    console.warn(`[AgentRegistry] Failed to parse agent file ${filePath}:`, error)
+    return null
+  } finally {
+    await opened?.handle.close().catch(() => undefined)
   }
 }
 
@@ -577,6 +631,137 @@ function loadUserAgents(dir: string): AgentProfile[] {
     }
   } catch (error) {
     console.warn(`[AgentRegistry] Failed to read agents dir ${dir}:`, error)
+  }
+  return out
+}
+
+async function loadUserAgentsAsync(dir: string): Promise<AgentProfile[]> {
+  const entries: string[] = []
+  let matchingEntries = 0
+  let directoryEntries = 0
+  let directoryOverflow = false
+  let directory: Awaited<ReturnType<typeof opendir>> | undefined
+  try {
+    directory = await opendir(dir)
+    for await (const entry of directory) {
+      directoryEntries += 1
+      if (directoryEntries > MAX_USER_AGENT_DIRECTORY_ENTRIES_PER_SOURCE) {
+        directoryOverflow = true
+        break
+      }
+      if (entry.name.endsWith(".md")) {
+        matchingEntries += 1
+        // Preserve the previous deterministic "sorted first 256" contract
+        // without materializing an unbounded readdir array. The retained set is
+        // always bounded; a later lexically-smaller name replaces the maximum.
+        entries.push(entry.name)
+        entries.sort()
+        if (entries.length > MAX_USER_AGENT_FILES_PER_SOURCE) entries.pop()
+      }
+      if (directoryEntries % 128 === 0) {
+        await new Promise<void>((resolveYield) => setImmediate(resolveYield))
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn(`[AgentRegistry] Failed to read agents dir ${dir}:`, error)
+    }
+    return []
+  } finally {
+    await directory?.close().catch(() => undefined)
+  }
+  if (directoryOverflow) {
+    console.warn(
+      `[AgentRegistry] Agents dir ${dir} exceeds ${MAX_USER_AGENT_DIRECTORY_ENTRIES_PER_SOURCE} entries; skipped to bound discovery cost.`
+    )
+    return []
+  }
+  if (matchingEntries > MAX_USER_AGENT_FILES_PER_SOURCE) {
+    console.warn(
+      `[AgentRegistry] Agents dir ${dir} contains ${matchingEntries} Markdown files; loading the first ${MAX_USER_AGENT_FILES_PER_SOURCE} by name.`
+    )
+  }
+  const out: AgentProfile[] = []
+  for (const entry of entries) {
+    const profile = await parseAgentFileAsync(
+      join(dir, entry),
+      entry.slice(0, -".md".length)
+    )
+    if (profile) out.push(profile)
+    await new Promise<void>((resolveYield) => setImmediate(resolveYield))
+  }
+  return out
+}
+
+/** Load user-format agent Markdown files explicitly selected by a project-mode
+ * plugin. The parser and permission derivation are shared with global/workspace
+ * user agents; this wrapper only adds direct-file validation and deduplication. */
+function loadExplicitUserAgentFiles(filePaths: readonly string[]): AgentProfile[] {
+  const out: AgentProfile[] = []
+  const seenPaths = new Set<string>()
+  for (const configuredPath of filePaths) {
+    if (!isAbsolute(configuredPath)) {
+      console.warn(
+        `[AgentRegistry] Project-mode custom subagent path must be absolute; skipped: ${configuredPath}`
+      )
+      continue
+    }
+    try {
+      const filePath = realpathSync(configuredPath)
+      if (seenPaths.has(filePath)) continue
+      seenPaths.add(filePath)
+      if (extname(filePath).toLowerCase() !== ".md" || !statSync(filePath).isFile()) {
+        console.warn(
+          `[AgentRegistry] Project-mode custom subagent path is not a Markdown file; skipped: ${configuredPath}`
+        )
+        continue
+      }
+      const profile = parseAgentFile(filePath, basename(filePath, extname(filePath)))
+      if (profile) out.push(profile)
+    } catch (error) {
+      console.warn(
+        `[AgentRegistry] Failed to load project-mode custom subagent file ${configuredPath}:`,
+        error
+      )
+    }
+  }
+  return out
+}
+
+async function loadExplicitUserAgentFilesAsync(
+  filePaths: readonly string[]
+): Promise<AgentProfile[]> {
+  const out: AgentProfile[] = []
+  const seenPaths = new Set<string>()
+  for (const configuredPath of filePaths.slice(0, MAX_USER_AGENT_FILES_PER_SOURCE)) {
+    if (!isAbsolute(configuredPath)) {
+      console.warn(
+        `[AgentRegistry] Project-mode custom subagent path must be absolute; skipped: ${configuredPath}`
+      )
+      continue
+    }
+    try {
+      const filePath = await realpathAsync(configuredPath)
+      if (seenPaths.has(filePath)) continue
+      seenPaths.add(filePath)
+      if (extname(filePath).toLowerCase() !== ".md") {
+        console.warn(
+          `[AgentRegistry] Project-mode custom subagent path is not a Markdown file; skipped: ${configuredPath}`
+        )
+        continue
+      }
+      const profile = await parseAgentFileAsync(
+        filePath,
+        basename(filePath, extname(filePath))
+      )
+      if (profile) out.push(profile)
+    } catch (error) {
+      console.warn(
+        `[AgentRegistry] Failed to load project-mode custom subagent file ${configuredPath}:`,
+        error
+      )
+    }
+    await new Promise<void>((resolveYield) => setImmediate(resolveYield))
   }
   return out
 }
@@ -646,7 +831,27 @@ function loadEnabledLibraryProfiles(): AgentProfile[] {
 const BUILT_IN_NAME_BY_LOWER = new Map(
   BUILT_IN_AGENT_PROFILES.map((p) => [p.name.toLowerCase(), p.name] as const)
 )
-export function loadAgentProfiles(workspacePath?: string): AgentProfile[] {
+const GENERAL_PURPOSE_SUBAGENT_NAME = "general-purpose"
+const BUNDLED_AGENT_NAMES = new Set([
+  GENERAL_PURPOSE_SUBAGENT_NAME,
+  ...BUILT_IN_AGENT_PROFILES.map((profile) => profile.name),
+  ...LIBRARY_AGENT_PROFILES.map((profile) => profile.name)
+])
+const BUNDLED_AGENT_NAMES_LOWER = new Set(
+  [...BUNDLED_AGENT_NAMES].map((name) => name.toLowerCase())
+)
+const warnedUnknownDisabledBuiltinSubagents = new Set<string>()
+
+export function isGeneralPurposeSubagentEnabled(
+  subagentConfig?: HarnessProjectModeSubagentConfig
+): boolean {
+  return !subagentConfig?.disabledBuiltinSubagents.includes(GENERAL_PURPOSE_SUBAGENT_NAME)
+}
+
+export function loadAgentProfiles(
+  workspacePath?: string,
+  subagentConfig?: HarnessProjectModeSubagentConfig
+): AgentProfile[] {
   const byName = new Map<string, AgentProfile>()
   const put = (p: AgentProfile): void => {
     // Built-in logical name → canonical key (collapse all casings/layers, last
@@ -654,11 +859,102 @@ export function loadAgentProfiles(workspacePath?: string): AgentProfile[] {
     const key = BUILT_IN_NAME_BY_LOWER.get(p.name.toLowerCase()) ?? p.name
     byName.set(key, p)
   }
-  for (const p of BUILT_IN_AGENT_PROFILES) put(p)
-  for (const p of loadEnabledLibraryProfiles()) put(p)
-  for (const p of loadUserAgents(join(homedir(), ".cmbcoworkagent", "agents"))) put(p)
-  if (workspacePath) {
-    for (const p of loadUserAgents(join(workspacePath, ".cmbcoworkagent", "agents"))) put(p)
+
+  if (subagentConfig) {
+    const disabled = new Set(subagentConfig.disabledBuiltinSubagents)
+    for (const name of disabled) {
+      if (BUNDLED_AGENT_NAMES.has(name) || warnedUnknownDisabledBuiltinSubagents.has(name)) continue
+      warnedUnknownDisabledBuiltinSubagents.add(name)
+      console.warn(`[AgentRegistry] Unknown disabledBuiltinSubagents entry "${name}" was ignored.`)
+    }
+    for (const p of BUILT_IN_AGENT_PROFILES) {
+      if (!disabled.has(p.name)) put(p)
+    }
+    for (const p of LIBRARY_AGENT_PROFILES) {
+      if (!disabled.has(p.name)) put(p)
+    }
+    for (const p of loadExplicitUserAgentFiles(subagentConfig.customSubagentFiles)) {
+      if (BUNDLED_AGENT_NAMES_LOWER.has(p.name.toLowerCase())) {
+        console.warn(
+          `[AgentRegistry] Project-mode custom subagent "${p.name}" collides with a bundled subagent name and was skipped.`
+        )
+        continue
+      }
+      if (byName.has(p.name)) {
+        console.warn(
+          `[AgentRegistry] Duplicate project-mode custom subagent name "${p.name}" was skipped.`
+        )
+        continue
+      }
+      put(p)
+    }
+  } else {
+    for (const p of BUILT_IN_AGENT_PROFILES) put(p)
+    for (const p of loadEnabledLibraryProfiles()) put(p)
+    for (const p of loadUserAgents(join(homedir(), ".cmbcoworkagent", "agents"))) put(p)
+    if (workspacePath) {
+      for (const p of loadUserAgents(join(workspacePath, ".cmbcoworkagent", "agents"))) put(p)
+    }
+  }
+  return [...byName.values()]
+}
+
+/** Main-process-safe registry loader. Directory/file I/O is asynchronous, each
+ * source has a hard file-count/size bound, and parsing yields between files so
+ * creating a runtime cannot monopolize Electron during a mode/thread switch. */
+export async function loadAgentProfilesAsync(
+  workspacePath?: string,
+  subagentConfig?: HarnessProjectModeSubagentConfig
+): Promise<AgentProfile[]> {
+  const byName = new Map<string, AgentProfile>()
+  const put = (profile: AgentProfile): void => {
+    const key = BUILT_IN_NAME_BY_LOWER.get(profile.name.toLowerCase()) ?? profile.name
+    byName.set(key, profile)
+  }
+
+  if (subagentConfig) {
+    const disabled = new Set(subagentConfig.disabledBuiltinSubagents)
+    for (const name of disabled) {
+      if (BUNDLED_AGENT_NAMES.has(name) || warnedUnknownDisabledBuiltinSubagents.has(name)) continue
+      warnedUnknownDisabledBuiltinSubagents.add(name)
+      console.warn(`[AgentRegistry] Unknown disabledBuiltinSubagents entry "${name}" was ignored.`)
+    }
+    for (const profile of BUILT_IN_AGENT_PROFILES) {
+      if (!disabled.has(profile.name)) put(profile)
+    }
+    for (const profile of LIBRARY_AGENT_PROFILES) {
+      if (!disabled.has(profile.name)) put(profile)
+    }
+    for (const profile of await loadExplicitUserAgentFilesAsync(
+      subagentConfig.customSubagentFiles
+    )) {
+      if (BUNDLED_AGENT_NAMES_LOWER.has(profile.name.toLowerCase())) {
+        console.warn(
+          `[AgentRegistry] Project-mode custom subagent "${profile.name}" collides with a bundled subagent name and was skipped.`
+        )
+        continue
+      }
+      if (byName.has(profile.name)) {
+        console.warn(
+          `[AgentRegistry] Duplicate project-mode custom subagent name "${profile.name}" was skipped.`
+        )
+        continue
+      }
+      put(profile)
+    }
+  } else {
+    for (const profile of BUILT_IN_AGENT_PROFILES) put(profile)
+    for (const profile of loadEnabledLibraryProfiles()) put(profile)
+    for (const profile of await loadUserAgentsAsync(join(homedir(), ".cmbcoworkagent", "agents"))) {
+      put(profile)
+    }
+    if (workspacePath) {
+      for (const profile of await loadUserAgentsAsync(
+        join(workspacePath, ".cmbcoworkagent", "agents")
+      )) {
+        put(profile)
+      }
+    }
   }
   return [...byName.values()]
 }
@@ -693,9 +989,9 @@ export function resolveAgentProfile(name: string, workspacePath?: string): Agent
 }
 
 /**
- * Strip a blocked tool's "- <tool>: …" documentation line — and, when
- * shellAccess is "none", the deepagents "## Execute Tool" section — from an
- * injected filesystem/system prompt.
+ * Strip a blocked tool's "- <tool>: …" documentation line, the deepagents
+ * "## Execute Tool" section when shellAccess is "none", and LangChain's
+ * write_todos guidance when that middleware-provided tool is blocked.
  *
  * deepagents' filesystem middleware advertises tool usage in the SYSTEM PROMPT,
  * not only through the model's tool list, so hiding a tool from request.tools is
@@ -704,7 +1000,7 @@ export function resolveAgentProfile(name: string, workspacePath?: string): Agent
  * parity.
  *
  * The injected prompt comes in several shapes here: workflow leaves pass a plain
- * string (filesystemSystemPrompt), while the Solo guard's wrapModelCall passes
+ * string (filesystemSystemPrompt), while the task guard's wrapModelCall passes
  * LangChain's `request.systemMessage` — a SystemMessage OBJECT whose `.content`
  * is EITHER a string OR a content-block array (`[{type:"text", text:"…"}, …]`,
  * which LangChain's normalizeSystemPrompt / SystemMessage.concat() produce when
@@ -725,6 +1021,23 @@ export function stripBlockedToolDocs(systemMessage: unknown, blocked: Iterable<s
     // section), since it can still run provably read-only commands.
     if (blockedSet.has("execute")) {
       out = out.replace(/\n## Execute Tool[\s\S]*?(?=\n## |\n### |$)/g, "")
+    }
+    if (blockedSet.has("write_todos")) {
+      // todoListMiddleware appends this guidance before the registry guard runs.
+      // Match its exact start/end markers instead of a broad Markdown-section
+      // regex: the prompt contains another `##` heading internally, and deleting
+      // until the next heading could either leave half the guidance behind or
+      // consume an unrelated prompt appended by a later middleware.
+      const startMarker = "\n## `write_todos`\n"
+      const endMarker =
+        "\n- Don't be afraid to revise the To-Do list as you go. New information may reveal new tasks that need to be done, or old tasks that are irrelevant."
+      let start = out.indexOf(startMarker)
+      while (start !== -1) {
+        const end = out.indexOf(endMarker, start + startMarker.length)
+        if (end === -1) break
+        out = out.slice(0, start) + out.slice(end + endMarker.length)
+        start = out.indexOf(startMarker, start)
+      }
     }
     return out
   }

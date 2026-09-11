@@ -9,6 +9,7 @@ import {
 } from "../../storage"
 import { getModelConfigs } from "../../models/registry"
 import type { GoalJudgeDecision, GoalLedger, ThreadGoal } from "./types"
+import { samplingFields } from "../../models/sampling-params"
 
 const GOAL_EVALUATOR_CONTEXT_RATIO = 0.25
 const GOAL_EVALUATOR_MIN_BUDGET_TOKENS = 1_000
@@ -588,7 +589,9 @@ export async function evaluateGoalWithModel(
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: Math.min(config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, 1200),
-    temperature: Math.min(config.temperature ?? DEFAULT_TEMPERATURE, 0.1),
+    ...samplingFields(config.model, {
+      temperature: Math.min(config.temperature ?? DEFAULT_TEMPERATURE, 0.1)
+    }),
     maxRetries: 0,
     // 与主链路 buildCustomChatOpenAI 对齐:显式关闭 thinking,不把开关留给
     // 网关默认值。裁决输出是 ≤1200 token 的 JSON,思维链只会拖慢到撞总时长闸门。

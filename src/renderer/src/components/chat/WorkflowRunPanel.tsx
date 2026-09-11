@@ -21,6 +21,7 @@ import {
   type WorkflowRunView
 } from "@/lib/workflow-run-view"
 import { WorkflowRunsDialog } from "./WorkflowRunsDialog"
+import { WorkflowWorktreeList } from "./WorkflowWorktreeList"
 
 /**
  * Live observability panel for a dynamic workflow run — the desktop
@@ -366,7 +367,7 @@ function WorkflowRunPanelImpl({ threadId, run }: WorkflowRunPanelProps): JSX.Ele
             onClick={handleCancel}
             disabled={cancelling}
             className="inline-flex shrink-0 items-center gap-1 rounded-md border border-red-200 bg-red-50 px-1.5 py-1 text-[10px] text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300"
-            title="中止后台工作流(已完成的子代理结果保留在 journal,可续跑)"
+            title="中止后台工作流（普通子代理可从 journal 回放；worktree 子代理续跑时会新建 worktree）"
           >
             <Square className="size-3" />
             {cancelling ? "取消中…" : "取消"}
@@ -385,6 +386,20 @@ function WorkflowRunPanelImpl({ threadId, run }: WorkflowRunPanelProps): JSX.Ele
         <div className="flex items-start gap-1.5 border-b border-amber-200/60 bg-amber-50/60 px-3 py-1.5 text-[11px] leading-5 text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
           <AlertTriangle className="mt-0.5 size-3 shrink-0" />
           <span className="min-w-0 break-words">{run.warning}</span>
+        </div>
+      )}
+
+      {run.worktrees.length > 0 && (
+        <div className="space-y-1 border-b border-violet-200/60 p-2 dark:border-violet-500/20">
+          <div className="px-0.5 text-[10px] font-medium text-muted-foreground">
+            Worktree 交付物 ({run.worktrees.length})
+          </div>
+          <WorkflowWorktreeList
+            threadId={threadId}
+            runId={run.runId}
+            worktrees={run.worktrees}
+            manageAllowed={run.status !== "running"}
+          />
         </div>
       )}
 

@@ -14,6 +14,7 @@ import {
   extractCoordinatorSelectedSkill,
   getAgentModeFromMetadata,
   injectSelectedSkillIntoWorkerPrompt,
+  resolveCurrentAgentModeRequest,
   resolveCoordinatorModeRequest
 } from "../src/main/agent/coordinator-mode.ts"
 
@@ -85,6 +86,18 @@ async function testModeDetection(): Promise<void> {
     getAgentModeFromMetadata({ agentMode: "normal", coordinatorMode: true }) === "normal",
     "explicit normal metadata should override legacy coordinatorMode"
   )
+  assert(
+    resolveCurrentAgentModeRequest("workflow", "workflow") === "workflow",
+    "a current renderer mode hint should remain usable"
+  )
+  assert(
+    resolveCurrentAgentModeRequest("normal", "coordinator") === undefined,
+    "a stale renderer mode hint must not overwrite the authoritative mode"
+  )
+  assert(
+    resolveCurrentAgentModeRequest("invalid", "normal") === undefined,
+    "an invalid renderer mode hint must be ignored"
+  )
 
   const prefixed = resolveCoordinatorModeRequest("[coordinator] build a todo app", {})
   assert(prefixed.enabled === true, "message prefix should enable coordinator")
@@ -93,7 +106,17 @@ async function testModeDetection(): Promise<void> {
 
   const hashPrefixed = resolveCoordinatorModeRequest("  #coordinator: add auth", {})
   assert(hashPrefixed.enabled === true, "#coordinator prefix should enable coordinator")
+  assert(hashPrefixed.shouldPersist === true, "#coordinator prefix should request persistence")
   assert(hashPrefixed.message === "add auth", "#coordinator prefix should be stripped")
+
+  const blockedPrefix = resolveCoordinatorModeRequest("#coordinator add auth", {}, {
+    allowForcedRequests: false
+  })
+  assert(blockedPrefix.enabled === false, "a disabled forced request should stay in normal mode")
+  assert(
+    blockedPrefix.message === "#coordinator add auth",
+    "a disabled coordinator prefix should remain ordinary user text"
+  )
 
   const metadata = resolveCoordinatorModeRequest("build a todo app", {
     agentMode: "coordinator"
@@ -134,6 +157,22 @@ async function testModeDetection(): Promise<void> {
   assert(
     envBeatsMetadata.source === "environment",
     "env var should be treated as a forced coordinator source before metadata"
+  )
+  const blockedEnvironment = resolveCoordinatorModeRequest("build a todo app", {}, {
+    allowForcedRequests: false
+  })
+  assert(
+    blockedEnvironment.enabled === false,
+    "project policy should suppress environment-forced coordinator mode"
+  )
+  const persistedCoordinatorUnderPolicy = resolveCoordinatorModeRequest(
+    "build a todo app",
+    { agentMode: "coordinator" },
+    { allowForcedRequests: false }
+  )
+  assert(
+    persistedCoordinatorUnderPolicy.source === "metadata",
+    "project policy should preserve an explicitly persisted plugin mode"
   )
 
   if (oldCoordinatorEnv === undefined) delete process.env.CMB_COORDINATOR_MODE

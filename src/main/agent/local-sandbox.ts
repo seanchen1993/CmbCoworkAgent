@@ -4,9 +4,10 @@
  * Extends FilesystemBackend with command execution capability.
  * Commands run in the workspace directory with configurable timeout and output limits.
  *
- * Security note: This has NO built-in safeguards except for the human-in-the-loop
- * middleware provided by the agent framework. All command approval should be
- * handled via HITL configuration.
+ * Security note: ordinary runtimes rely on the human-in-the-loop middleware and
+ * configured OS sandbox. Dynamic-workflow linked worktrees always install their
+ * file-root and Git guard; an available OS sandbox is additional defense in depth,
+ * not a prerequisite for using the independent checkout.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks"
@@ -46,10 +47,15 @@ import type { ToolOrchestrator } from "./tool-orchestrator"
 import {
   assessCommandSafety,
   classifyCommandConcurrency,
+  containsGitAddCommand,
+  getWorktreeShellIsolationViolation,
   isGitCommitCommand,
   isGitPushCommand,
-  isReadOnlyShellCommand
+  isReadOnlyShellCommand,
+  type CommandShellSyntax
 } from "./exec-policy"
+import { WORKFLOW_RUN_ID_PATTERN, type WorkflowWorktreeIsolationBoundary } from "./workflow/types"
+import type { TraceContext } from "./trace/types"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import {
   areElevatedRootsPreparedAsync,
@@ -85,18 +91,52 @@ import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecy
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
+import { withoutGitRepositoryOverrides } from "../services/git-environment"
 import { isMemoryStoragePath } from "../memory/paths"
 import {
+  isCodeFile,
   recordGen as recordAdoptionGen,
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
+import {
+  openStableWritableFileHandle,
+  type StableWritableFileHandle
+} from "../services/stable-file-handle"
+import {
+  getHarnessStageAttributionForCodeGeneration,
+  markHarnessStageAttributionDirty,
+  type HarnessStageAttribution
+} from "../services/harness-stage-attribution"
+import { recordSystemConstraintRead } from "../services/system-constraint-read-reporter"
+import { recordTrustedToolFilePreviewSource } from "../services/trusted-tool-file-preview"
+import { resolvePluginSystemConstraintPath } from "./plugin-system-constraint"
 import {
   READ_FILE_DEFAULT_LIMIT,
   READ_FILE_MAX_LIMIT,
   trimReadFileOutputLines
 } from "./read-file-output"
+import { resolveWindowsBackgroundJobControllerPath } from "./windows-background-job-controller-path"
 
 const execFileP = promisify(execFile)
+
+// DeepAgents keeps these helpers private even though LocalSandbox must wrap
+// them to preserve its virtual-path and ripgrep behavior. Keep the compatibility
+// cast isolated and structurally typed instead of spreading `any` through the
+// security-sensitive path code.
+interface FilesystemBackendRuntimeInternals {
+  resolvePath: (key: string) => string
+  ripgrepSearch?: (
+    pattern: string,
+    basePath: string,
+    includeGlob: string | null
+  ) => Promise<Record<string, Array<[number, string]>> | null>
+}
+
+function getFilesystemBackendInternals(
+  backend: FilesystemBackend
+): FilesystemBackendRuntimeInternals {
+  return backend as unknown as FilesystemBackendRuntimeInternals
+}
 
 async function pathExists(filePath: string): Promise<boolean> {
   try {
@@ -161,6 +201,12 @@ export interface LocalSandboxReadFileOptions {
   // especially for long-line continuation chunks and output-line budget edges.
   // Any lookahead content is trimmed before returning output or running PostToolUse hooks.
   includeLookahead?: boolean
+  /**
+   * Dynamic task-subagent trace ownership for this read. Ordinary task
+   * subagents share their parent's LocalSandbox, so the per-tool context must
+   * override the sandbox's fixed parent trace identity.
+   */
+  traceContext?: TraceContext
 }
 
 interface FormattedReadLineState {
@@ -258,11 +304,34 @@ function tomlBasicString(value: string): string {
   return `"${value
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
-    .replace(/\u0008/g, "\\b")
+    .replaceAll(String.fromCharCode(8), "\\b")
     .replace(/\t/g, "\\t")
     .replace(/\n/g, "\\n")
     .replace(/\f/g, "\\f")
     .replace(/\r/g, "\\r")}"`
+}
+
+const WORKTREE_INTERNAL_EXCLUDES_FILE_NAME = ".cmb-internal-excludes"
+const WORKTREE_INTERNAL_EXCLUDES_ENV = "CMB_WORKTREE_GIT_EXCLUDES_FILE"
+
+function gitConfigEnvironmentPreamble(
+  shellBase: string,
+  entries: ReadonlyArray<readonly [string, string]>
+): string {
+  const variables: Array<readonly [string, string]> = [
+    ["GIT_CONFIG_COUNT", String(entries.length)],
+    ...entries.flatMap(([key, value], index) => [
+      [`GIT_CONFIG_KEY_${index}`, key] as const,
+      [`GIT_CONFIG_VALUE_${index}`, value] as const
+    ])
+  ]
+  if (shellBase === "cmd") {
+    return variables.map(([key, value]) => `set "${key}=${cmdSetLiteral(value)}"`).join(" & ")
+  }
+  if (shellBase === "pwsh" || shellBase === "powershell") {
+    return variables.map(([key, value]) => `$env:${key}=${powershellSingleQuote(value)}`).join("; ")
+  }
+  return ""
 }
 
 /**
@@ -271,6 +340,8 @@ function tomlBasicString(value: string): string {
 export interface LocalSandboxOptions {
   /** Root directory for file operations and command execution (default: process.cwd()) */
   rootDir?: string
+  /** Dynamic-workflow checkout identity and best-effort Git/path guards. */
+  worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /** Enable virtual path mode where "/" maps to rootDir (default: false) */
   virtualMode?: boolean
   /** Maximum file size in MB for file operations (default: 10) */
@@ -296,14 +367,45 @@ export interface LocalSandboxOptions {
   onHookResult?: HookResultCallback
   /** Optional callback invoked when repeated tool failures should be shown to the user. */
   onFailureFuseNotice?: FailureFuseNoticeCallback
+  /** Project-mode Feature approval requested by a synchronous PreToolUse Hook. */
+  requestHumanGate?: (input: {
+    projectId: string
+    featureId: string
+    threadId: string
+    runtimeThreadId: string
+    hookId: string
+    hookPluginId?: string
+    harnessPluginId?: string
+    message: string
+    abortSignal?: AbortSignal
+  }) => Promise<{ release: () => void }>
+  /** Parent conversation where a worker/subagent Gate must be displayed. */
+  humanGateThreadId?: string
   /** Renderer user message id that owns this chat turn, used to group hook logs. */
   hookTurnId?: string
   /** AbortSignal for cancelling running child processes when the user aborts.
    *  When signalled, any in-flight execute() will kill its child process immediately
    *  (SIGTERM → 200ms → SIGKILL), matching OpenCode/Codex abort behaviour. */
   abortSignal?: AbortSignal
-  /** Unique run/thread identifier used for ACL ref-counting across concurrent runs. */
+  /** Logical thread/run owner used for background-task cancellation and hook/session identity. */
   runId?: string
+  /** Physical run owner used only for Windows ACL ref-counting and cleanup. */
+  aclOwnerId?: string
+  /** Absolute app-managed directory backing DeepAgents' logical /large_tool_results path. */
+  largeToolResultsDir?: string
+  /**
+   * Exact app-managed directory containing workflow scripts issued for this
+   * thread. Existing `<runId>.workflow.js` files remain editable through the
+   * normal tool approval/Hook path even when Windows readonly or worktree guards
+   * reject arbitrary paths outside the workspace.
+   */
+  workflowScriptsDir?: string
+  /**
+   * App-managed roots for automatic artifacts such as compaction history. Writes
+   * through the dedicated internal API are constrained to these roots and do
+   * not participate in user tool approval or Hook lifecycles.
+   */
+  internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
@@ -316,6 +418,8 @@ export interface LocalSandboxOptions {
   pluginOutputDir?: string
   /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
   systemId?: string
+  /** Optional subagent identifier exposed to hooks as AGENT_ID. */
+  agentId?: string
   /** Optional harness plugin root exposed to child processes as PLUGIN_ROOT. */
   pluginRoot?: string
   /** Optional harness plugin identifier exposed to child processes as PLUGIN_ID. */
@@ -336,6 +440,10 @@ export interface LocalSandboxOptions {
   harnessNodeName?: string
   /** Optional current harness workflow node/stage status exposed as HARNESS_NODE_STATUS. */
   harnessNodeStatus?: string
+  /** Trace identity used to aggregate project-mode system-constraint reads. */
+  traceId?: string
+  rootTraceId?: string
+  rootThreadId?: string
   /** Optional harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Optional harness project directory exposed to child processes as PROJECT_DIR. */
@@ -345,10 +453,14 @@ export interface LocalSandboxOptions {
 interface ExecuteRawOptions {
   background?: boolean
   cwd?: string
+  /** Background teardown waits for residual descendants before releasing ownership. */
+  waitForProcessTree?: boolean
+  /** Internal background lifecycle hook: receives the process-tree termination promise. */
+  onTermination?: (termination: Promise<void>) => void
   /**
-   * Live partial-output callback. Invoked per stdout/stderr chunk while the
-   * command is running so background tasks can expose progress before they
-   * complete. The final authoritative output still uses encoding detection.
+   * Live partial-output callback. Invoked with safely decoded stdout/stderr
+   * text while the command is running so background tasks can expose progress
+   * before they complete.
    */
   onData?: (text: string) => void
 }
@@ -360,6 +472,115 @@ interface ExecuteRawOptions {
  * timeout so it does NOT trigger the sandbox-escape retry path.
  */
 type LocalExecuteResponse = ExecuteResponse & { capReached?: boolean }
+
+type Utf8Inspection =
+  | { kind: "ascii" | "valid" | "invalid" }
+  | { kind: "incomplete"; sequenceStart: number; hasNonAsciiPrefix: boolean }
+
+/**
+ * Validate UTF-8 without treating a split trailing sequence as malformed. The
+ * sequence start lets the streaming decoder emit an arbitrarily long ASCII
+ * prefix immediately while retaining at most the final three bytes.
+ */
+function inspectUtf8(input: Buffer): Utf8Inspection {
+  let hasNonAscii = false
+  for (let index = 0; index < input.length; index += 1) {
+    const first = input[index]
+    if (first <= 0x7f) continue
+
+    let continuationBytes = 0
+    let secondMin = 0x80
+    let secondMax = 0xbf
+    if (first >= 0xc2 && first <= 0xdf) {
+      continuationBytes = 1
+    } else if (first >= 0xe0 && first <= 0xef) {
+      continuationBytes = 2
+      if (first === 0xe0) secondMin = 0xa0
+      if (first === 0xed) secondMax = 0x9f
+    } else if (first >= 0xf0 && first <= 0xf4) {
+      continuationBytes = 3
+      if (first === 0xf0) secondMin = 0x90
+      if (first === 0xf4) secondMax = 0x8f
+    } else {
+      return { kind: "invalid" }
+    }
+
+    const available = input.length - index - 1
+    const bytesToCheck = Math.min(available, continuationBytes)
+    for (let offset = 1; offset <= bytesToCheck; offset += 1) {
+      const continuation = input[index + offset]
+      const min = offset === 1 ? secondMin : 0x80
+      const max = offset === 1 ? secondMax : 0xbf
+      if (continuation < min || continuation > max) return { kind: "invalid" }
+    }
+    if (available < continuationBytes) {
+      return {
+        kind: "incomplete",
+        sequenceStart: index,
+        hasNonAsciiPrefix: hasNonAscii
+      }
+    }
+
+    hasNonAscii = true
+    index += continuationBytes
+  }
+  return { kind: hasNonAscii ? "valid" : "ascii" }
+}
+
+/**
+ * UTF-8-first incremental shell-output decoder. It defers only an incomplete
+ * trailing character, then falls back to the detected Windows code page only
+ * after the bytes prove they are not UTF-8.
+ */
+class SafeShellOutputDecoder {
+  private pending: Buffer = Buffer.alloc(0)
+  private decoder: ReturnType<typeof iconv.getDecoder> | null = null
+  private ended = false
+
+  constructor(private readonly detectLegacyEncoding: (input: Buffer) => string) {}
+
+  write(chunk: Buffer): string {
+    if (this.ended || chunk.length === 0) return ""
+    if (this.decoder) return this.decoder.write(chunk)
+
+    this.pending = this.pending.length > 0 ? Buffer.concat([this.pending, chunk]) : chunk
+    const inspection = inspectUtf8(this.pending)
+    if (inspection.kind === "ascii") {
+      const text = this.pending.toString("ascii")
+      this.pending = Buffer.alloc(0)
+      return text
+    }
+    if (inspection.kind === "incomplete" && !inspection.hasNonAsciiPrefix) {
+      const text = this.pending.subarray(0, inspection.sequenceStart).toString("ascii")
+      this.pending = this.pending.subarray(inspection.sequenceStart)
+      return text
+    }
+
+    const encoding =
+      inspection.kind === "invalid" ? this.detectLegacyEncoding(this.pending) : "utf-8"
+    this.decoder = iconv.getDecoder(encoding)
+    const buffered = this.pending
+    this.pending = Buffer.alloc(0)
+    return this.decoder.write(buffered)
+  }
+
+  end(): string {
+    if (this.ended) return ""
+    this.ended = true
+    if (this.decoder) return this.decoder.end() ?? ""
+    if (this.pending.length === 0) return ""
+
+    const inspection = inspectUtf8(this.pending)
+    const encoding =
+      inspection.kind === "ascii" || inspection.kind === "valid"
+        ? "utf-8"
+        : this.detectLegacyEncoding(this.pending)
+    this.decoder = iconv.getDecoder(encoding)
+    const buffered = this.pending
+    this.pending = Buffer.alloc(0)
+    return this.decoder.write(buffered) + (this.decoder.end() ?? "")
+  }
+}
 
 type WindowsSandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
@@ -419,23 +640,37 @@ interface WorkspaceSwitchPreparationResult {
  */
 export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
 
+/**
+ * Marks a write issued by the public write_file tool. DeepAgents spills large
+ * tool results through the same backend method, so this distinguishes that
+ * automatic bookkeeping path from a model-requested write to the reserved
+ * logical /large_tool_results directory.
+ */
+export const agentFileWriteContext = new AsyncLocalStorage<boolean>()
+
 export class LocalSandbox
   extends FilesystemBackend
   implements SandboxBackendProtocol, SkillHookContextProvider
 {
   /** Unique identifier for this sandbox instance */
   readonly id: string
-  /** Run/thread identifier for ACL ref-counting (falls back to this.id). */
+  /** Logical run/thread identifier for background-task cancellation and hooks. */
   readonly runId: string
+  /** Physical ACL owner; distinct from logical runId during foreground replacement. */
+  readonly aclOwnerId: string
 
   private readonly timeout: number
   private readonly maxOutputBytes: number
   private readonly env: Record<string, string>
   private readonly workingDir: string
+  private readonly worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   private readonly windowsSandbox: WindowsSandboxMode
   private readonly pluginOutputDir?: string
   private readonly pluginRoot?: string
+  private readonly pluginId?: string
+  private readonly pluginName?: string
   private readonly systemId?: string
+  private readonly agentId?: string
   private readonly pluginWorkspace?: string
   private readonly featureId?: string
   private readonly harnessProjectId?: string
@@ -443,6 +678,9 @@ export class LocalSandbox
   private readonly harnessAdapterVersion?: string
   private readonly harnessNodeName?: string
   private readonly harnessNodeStatus?: string
+  private readonly traceId?: string
+  private readonly rootTraceId?: string
+  private readonly rootThreadId?: string
   private readonly projectCode?: string
   private readonly projectDir?: string
   private readonly codexExePath: string
@@ -451,7 +689,15 @@ export class LocalSandbox
   private readonly _hookScope?: HookScopeController
   private readonly _onHookResult?: HookResultCallback
   private readonly _onFailureFuseNotice?: FailureFuseNoticeCallback
+  private readonly _requestHumanGate?: LocalSandboxOptions["requestHumanGate"]
+  private readonly _humanGateThreadId: string
   private readonly _hookTurnId?: string
+  /** Physical directory backing DeepAgents' logical /large_tool_results files. */
+  private readonly _largeToolResultsDir: string
+  /** Thread-scoped directory containing host-issued editable workflow scripts. */
+  private readonly _workflowScriptsDir?: string
+  /** Canonical app-owned roots accepted by the internal artifact writer. */
+  private readonly _internalArtifactRoots: readonly string[]
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
   private readonly _sandboxCacheRootPromise: Promise<string>
@@ -633,6 +879,7 @@ export class LocalSandbox
     const name =
       path.win32
         .basename(canonicalWorkingDir)
+        // eslint-disable-next-line no-control-regex -- Windows forbids this exact control range.
         .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
         .slice(0, 40) || "workspace"
     return path.win32.join(LocalSandbox.buildSandboxCacheBase(env), `${name}-${hash}`)
@@ -1280,10 +1527,16 @@ export class LocalSandbox
     //     repo is owned by the host user, which trips git's "dubious ownership" check on every
     //     command. Trusting all paths inside the sandbox shell is safe — Codex's sandbox token
     //     already restricts what the user can read/write at the OS level.
-    const gitSslCmd =
-      'set "GIT_CONFIG_COUNT=2" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl" & set "GIT_CONFIG_KEY_1=safe.directory" & set "GIT_CONFIG_VALUE_1=*"'
-    const gitSslPs =
-      "$env:GIT_CONFIG_COUNT='2'; $env:GIT_CONFIG_KEY_0='http.sslBackend'; $env:GIT_CONFIG_VALUE_0='openssl'; $env:GIT_CONFIG_KEY_1='safe.directory'; $env:GIT_CONFIG_VALUE_1='*'"
+    const gitConfigEntries: Array<readonly [string, string]> = [
+      ["http.sslBackend", "openssl"],
+      ["safe.directory", "*"]
+    ]
+    const worktreeExcludesFile = hostEnv?.[WORKTREE_INTERNAL_EXCLUDES_ENV]
+    if (worktreeExcludesFile) {
+      gitConfigEntries.push(["core.excludesFile", worktreeExcludesFile])
+    }
+    const gitSslCmd = gitConfigEnvironmentPreamble("cmd", gitConfigEntries)
+    const gitSslPs = gitConfigEnvironmentPreamble("powershell", gitConfigEntries)
 
     // The elevated sandbox runs as CodexSandboxOnline whose registry PATH only has System32.
     // codex.exe's CreateProcessAsUser loads that minimal PATH — the main-process PATH (with
@@ -1705,12 +1958,33 @@ export class LocalSandbox
 
     this.id = `local-sandbox-${randomUUID().slice(0, 8)}`
     this.runId = options.runId ?? this.id
+    this.aclOwnerId = options.aclOwnerId ?? this.runId
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
-    const baseEnv = options.env ?? ({ ...process.env } as Record<string, string>)
+    const inheritedEnv = options.env ?? ({ ...process.env } as Record<string, string>)
+    const baseEnv = options.worktreeIsolation
+      ? withoutGitRepositoryOverrides(inheritedEnv)
+      : inheritedEnv
+    if (options.worktreeIsolation) {
+      // Keep read-only Git inspection from refreshing the linked index, while
+      // native add/commit still take the mandatory locks they need. The private
+      // excludes file hides only untracked Cmb runtime support; Git continues to
+      // stage already-tracked `.cmbdevclaw` files normally.
+      const internalExcludesFile = path.join(
+        path.dirname(options.worktreeIsolation.worktreeRoot),
+        WORKTREE_INTERNAL_EXCLUDES_FILE_NAME
+      )
+      baseEnv.GIT_OPTIONAL_LOCKS = "0"
+      baseEnv.GIT_TERMINAL_PROMPT = "0"
+      baseEnv.GIT_CONFIG_COUNT = "1"
+      baseEnv.GIT_CONFIG_KEY_0 = "core.excludesFile"
+      baseEnv.GIT_CONFIG_VALUE_0 = internalExcludesFile
+      baseEnv[WORKTREE_INTERNAL_EXCLUDES_ENV] = internalExcludesFile
+    }
     baseEnv.SESSION_ID = this.runId
     const systemId = options.systemId?.trim()
     if (systemId) baseEnv.SYSTEM_ID = systemId
+    const agentId = options.agentId?.trim()
     const pluginRoot = options.pluginRoot?.trim()
     if (pluginRoot) baseEnv.PLUGIN_ROOT = pluginRoot
     const pluginId = options.pluginId?.trim()
@@ -1742,11 +2016,30 @@ export class LocalSandbox
       baseEnv.LC_ALL ??= "C.UTF-8"
     }
     this.env = baseEnv
-    this.workingDir = options.rootDir ?? process.cwd()
+    // A worktree boundary is canonicalized from Git's registry. Make it the
+    // execution root too: a caller may still pass the same checkout through a
+    // symlinked `rootDir`, but mixing that lexical alias with the canonical
+    // boundary would falsely reject the default cwd as outside the worktree.
+    this.workingDir = options.worktreeIsolation?.workspaceRoot ?? options.rootDir ?? process.cwd()
+    this.worktreeIsolation = options.worktreeIsolation
+      ? Object.freeze({ ...options.worktreeIsolation })
+      : undefined
+    this._largeToolResultsDir = options.largeToolResultsDir
+      ? path.resolve(options.largeToolResultsDir)
+      : path.join(this.workingDir, ".cmbdevclaw", "large_tool_results")
+    this._workflowScriptsDir = options.workflowScriptsDir
+      ? path.resolve(options.workflowScriptsDir)
+      : undefined
+    this._internalArtifactRoots = (options.internalArtifactRoots ?? [this._largeToolResultsDir])
+      .map((root) => path.resolve(root))
+      .filter((root, index, roots) => roots.indexOf(root) === index)
     this.windowsSandbox = options.windowsSandbox ?? "none"
     this.pluginOutputDir = options.pluginOutputDir
     this.pluginRoot = pluginRoot || undefined
+    this.pluginId = pluginId || undefined
+    this.pluginName = pluginName || undefined
     this.systemId = systemId || undefined
+    this.agentId = agentId || undefined
     this.pluginWorkspace = pluginWorkspace || undefined
     this.featureId = featureId || undefined
     this.harnessProjectId = harnessProjectId || undefined
@@ -1754,6 +2047,9 @@ export class LocalSandbox
     this.harnessAdapterVersion = harnessAdapterVersion || undefined
     this.harnessNodeName = harnessNodeName || undefined
     this.harnessNodeStatus = harnessNodeStatus || undefined
+    this.traceId = options.traceId?.trim() || undefined
+    this.rootTraceId = options.rootTraceId?.trim() || undefined
+    this.rootThreadId = options.rootThreadId?.trim() || undefined
     this.projectCode = projectCode || undefined
     this.projectDir = projectDir || undefined
     this.codexExePath = options.codexExePath ?? "codex"
@@ -1763,6 +2059,8 @@ export class LocalSandbox
     this._hookScope = options.hookScope
     this._onHookResult = options.onHookResult
     this._onFailureFuseNotice = options.onFailureFuseNotice
+    this._requestHumanGate = options.requestHumanGate
+    this._humanGateThreadId = options.humanGateThreadId?.trim() || this.runId
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
@@ -1787,22 +2085,17 @@ export class LocalSandbox
     LocalSandbox.prewarmForWorkspace(this.workingDir, this.windowsSandbox, baseEnv)
 
     // Redirect deepagents' virtual eviction paths (e.g. /large_tool_results/)
-    // to workspace-local dirs, since virtualMode=false treats "/" as absolute
+    // to app-managed storage, since virtualMode=false treats "/" as absolute
     // and writing to system root fails on macOS (SIP) and Windows (permissions).
     // MUST run before caching _resolvePath below, so the cache captures the patched version.
     this.patchResolvePath()
 
-    // Cache parent's private fields once to avoid scattered (this as any) casts
-    this._resolvePath = ((this as any).resolvePath as (key: string) => string).bind(this)
-    this._virtualMode = ((this as any).virtualMode as boolean) ?? false
-    this._cwd = ((this as any).cwd as string) ?? this.workingDir
-    this._maxFileSizeBytes = ((this as any).maxFileSizeBytes as number) ?? 10 * 1024 * 1024
-    if ((this as any).virtualMode === undefined) {
-      console.warn("[LocalSandbox] parent virtualMode not found, defaulting to false")
-    }
-    if ((this as any).cwd === undefined) {
-      console.warn("[LocalSandbox] parent cwd not found, falling back to workingDir")
-    }
+    // Cache the upstream wrapper once; protected options are mirrored from the
+    // same constructor input so this code does not depend on private fields.
+    this._resolvePath = getFilesystemBackendInternals(this).resolvePath.bind(this)
+    this._virtualMode = this.virtualMode
+    this._cwd = this.cwd
+    this._maxFileSizeBytes = (options.maxFileSizeMb ?? 10) * 1024 * 1024
   }
 
   /**
@@ -1813,7 +2106,10 @@ export class LocalSandbox
     filePath: string,
     realpathCache: Map<string, string | null> = new Map()
   ): boolean {
-    if (this.windowsSandbox !== "elevated") return false
+    // Preserve the pre-worktree fast path for every ordinary runtime. Only an
+    // isolated checkout needs the additional `.git` pointer check when the
+    // Windows elevated sandbox is disabled.
+    if (!this.worktreeIsolation && this.windowsSandbox !== "elevated") return false
     const candidates = new Set<string>([filePath])
     try {
       const resolved = this._resolvePath(filePath)
@@ -1824,7 +2120,16 @@ export class LocalSandbox
       const realInput = this.realpathDeepestExistingCached(filePath, realpathCache)
       if (realInput) candidates.add(realInput)
     }
-    return Array.from(candidates).some((candidate) => isSensitivePath(candidate))
+    if (this.worktreeIsolation) {
+      const gitPointer = normalizeDirKey(path.join(this.worktreeIsolation.worktreeRoot, ".git"))
+      if (Array.from(candidates).some((candidate) => normalizeDirKey(candidate) === gitPointer)) {
+        return true
+      }
+    }
+    return (
+      this.windowsSandbox === "elevated" &&
+      Array.from(candidates).some((candidate) => isSensitivePath(candidate))
+    )
   }
 
   private isSensitiveSandboxPath(
@@ -2321,7 +2626,15 @@ export class LocalSandbox
 
   private resolveExecutionCwd(cwd?: string): string {
     const trimmed = cwd?.trim()
-    return trimmed ? path.resolve(this.workingDir, trimmed) : this.workingDir
+    const resolved = trimmed ? path.resolve(this.workingDir, trimmed) : this.workingDir
+    // Git resolves the isolated boundary to a canonical path. Normalize an
+    // explicitly supplied alias of that same checkout before both the lexical
+    // cwd validation and the worktree Git guard see it; otherwise `/var` vs
+    // `/private/var` (or a user symlink) is rejected despite naming the same
+    // directory. This is intentionally worktree-only so ordinary execute cwd
+    // display/behavior remains unchanged.
+    if (!this.worktreeIsolation) return resolved
+    return this.realpathDeepestExistingCached(resolved, new Map()) ?? resolved
   }
 
   private static normalizeDirBoundaryKey(dir: string): string {
@@ -2373,6 +2686,16 @@ export class LocalSandbox
         : `Invalid cwd: '${cwd}' resolves outside enabled skill '${skillMatch.name}'.`
     }
     return `Invalid cwd: '${cwd}' is outside the workspace and is not a known enabled skill directory.`
+  }
+
+  /** Worktree agents keep the normal execute-from-enabled-skill contract. The
+   * path has already passed validateExecutionCwd's lexical + realpath checks;
+   * exposing only that matched root lets the Git guard continue inspecting the
+   * command without treating the skill directory as the assigned checkout. */
+  private worktreeAdditionalExecutionRoots(cwd: string): string[] {
+    if (!this.worktreeIsolation || LocalSandbox.isPathInsideDir(cwd, this.workingDir)) return []
+    const skillMatch = this._skillLifecycleRegistry?.resolveRead(cwd, cwd)
+    return skillMatch ? [skillMatch.rootDir] : []
   }
 
   /** Toggle direct git submit command blocking when git_workflow is available. */
@@ -2452,6 +2775,69 @@ export class LocalSandbox
     return `Memory storage is managed by the background summarizer. Direct ${action} to '${filePath}' is blocked; use the Memory panel or let the conversation summary persist it.`
   }
 
+  private markHarnessStageAttributionDirty(): void {
+    markHarnessStageAttributionDirty(this.harnessProjectId, this.featureId)
+  }
+
+  private async captureHarnessStageForCodeGeneration(
+    filePath: string
+  ): Promise<HarnessStageAttribution | undefined> {
+    if (!this.harnessProjectId || !this.featureId || !isCodeFile(filePath)) return undefined
+    return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId)
+  }
+
+  private async recordPluginSystemConstraintRead(
+    resolvedPath: string,
+    traceContext?: TraceContext
+  ): Promise<void> {
+    const traceId = traceContext?.traceId?.trim() || this.traceId
+    const rootTraceId = traceContext?.rootTraceId?.trim() || this.rootTraceId
+    const rootThreadId = traceContext?.rootThreadId?.trim() || this.rootThreadId
+    const threadId = traceContext?.threadId?.trim() || this.runId
+    const agentId = traceContext?.subagentRunId?.trim() || this.agentId
+    const harnessProjectId =
+      traceContext?.harnessFeature?.projectId?.trim() || this.harnessProjectId
+    const harnessFeatureSlug = traceContext?.harnessFeature?.slug?.trim() || this.featureId
+    const harnessNodeName = traceContext?.harnessFeature?.nodeName?.trim() || this.harnessNodeName
+    const harnessNodeStatus =
+      traceContext?.harnessFeature?.nodeStatus?.trim() || this.harnessNodeStatus
+
+    if (!this.pluginRoot || !traceId || !harnessProjectId || !harnessFeatureSlug) {
+      return
+    }
+
+    try {
+      const constraintFile = await resolvePluginSystemConstraintPath(this.pluginRoot, resolvedPath)
+      if (!constraintFile) return
+      recordSystemConstraintRead({
+        traceId,
+        rootTraceId,
+        rootThreadId,
+        threadId,
+        agentId,
+        harnessProjectId,
+        harnessFeatureSlug,
+        // Match the existing dashboard attribution contract: one stage snapshot
+        // per turn/trace, rather than running an adapter inspection on every read.
+        harnessNodeName,
+        harnessNodeStatus,
+        pluginId: this.pluginId,
+        pluginName: this.pluginName,
+        harnessAdapterName: this.harnessAdapterName,
+        harnessAdapterVersion: this.harnessAdapterVersion,
+        constraintFile
+      })
+    } catch (error) {
+      console.warn("[SystemConstraintRead] Failed to record read telemetry:", error)
+    }
+  }
+
+  private commandMayMutateHarnessState(command: string, cwd: string): boolean {
+    const windowsShell =
+      process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
+    return !isReadOnlyShellCommand(command, cwd, windowsShell)
+  }
+
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
     const hookContext: HookContext = {
       ...context,
@@ -2459,6 +2845,7 @@ export class LocalSandbox
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
       ...(this.systemId && !context.systemId ? { systemId: this.systemId } : {}),
+      ...(this.agentId && !context.agentId ? { agentId: this.agentId } : {}),
       ...(this.pluginWorkspace && !context.pluginWorkspace
         ? { pluginWorkspace: this.pluginWorkspace }
         : {}),
@@ -2480,11 +2867,29 @@ export class LocalSandbox
         : {}),
       ...(this.projectCode && !context.projectCode ? { projectCode: this.projectCode } : {}),
       ...(this.projectDir && !context.projectDir ? { projectDir: this.projectDir } : {}),
+      ...(this.worktreeIsolation
+        ? {
+            workspaceHookCwd: this.workingDir,
+            forceSyncWorkspaceHooks: true
+          }
+        : {}),
       turnId: context.turnId ?? this._hookTurnId
     }
 
     const hooks = this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
+    const hasHarnessOwnedHook = hooks.some(
+      (hook) =>
+        hook.hookSourceType === "plugin" ||
+        hook.hookSourceType === "skill" ||
+        Boolean(hook.pluginRoot)
+    )
+    if (hasHarnessOwnedHook && (result || (event !== "PreToolUse" && hooks.length > 0))) {
+      // Plugin lifecycle hooks may advance the workflow without going through
+      // LocalSandbox.execute(). Invalidation is cheap; the next code mutation
+      // performs the actual adapter refresh.
+      this.markHarnessStageAttributionDirty()
+    }
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -2659,25 +3064,41 @@ export class LocalSandbox
   }
 
   private patchResolvePath(): void {
-    if (typeof (this as any).resolvePath !== "function") {
+    const backend = getFilesystemBackendInternals(this)
+    if (typeof backend.resolvePath !== "function") {
       console.warn(
         "[LocalSandbox] resolvePath not found on FilesystemBackend — skipping path patch"
       )
       return
     }
-    const original = (this as any).resolvePath.bind(this)
+    const original = backend.resolvePath.bind(this)
     const workingDir = this.workingDir
-    const redirects: Record<string, string> = {
-      "/large_tool_results/": ".cmbdevclaw/large_tool_results"
-    }
-    ;(this as any).resolvePath = (key: string): string => {
-      for (const [prefix, localDir] of Object.entries(redirects)) {
-        if (key.startsWith(prefix)) {
-          const redirected = path.join(workingDir, localDir, key.slice(prefix.length))
-          console.log("[LocalSandbox] Redirecting path:", key, "→", redirected)
-          key = redirected
-          break
+    backend.resolvePath = (key: string): string => {
+      const prefix = "/large_tool_results/"
+      if (key.startsWith(prefix)) {
+        const suffix = key.slice(prefix.length)
+        const managedCandidate = path.resolve(this._largeToolResultsDir, suffix)
+        const managedRelative = path.relative(this._largeToolResultsDir, managedCandidate)
+        if (
+          !managedRelative ||
+          managedRelative.startsWith("..") ||
+          path.isAbsolute(managedRelative)
+        ) {
+          throw new Error(`Invalid large tool result path outside managed storage: ${key}`)
         }
+        const managedPath = managedCandidate
+        const legacyPath = path.join(
+          workingDir,
+          ".cmbdevclaw",
+          "large_tool_results",
+          path.basename(managedRelative)
+        )
+        const redirected =
+          managedPath !== legacyPath && !existsSync(managedPath) && existsSync(legacyPath)
+            ? legacyPath
+            : managedPath
+        console.log("[LocalSandbox] Redirecting path:", key, "→", redirected)
+        key = redirected
       }
       return original(key)
     }
@@ -2774,13 +3195,7 @@ export class LocalSandbox
 
     // Call parent's private ripgrepSearch directly to distinguish
     // "rg found nothing" ({}) from "rg unavailable" (null)
-    const ripgrepSearch = (this as any).ripgrepSearch as
-      | ((
-          p: string,
-          b: string,
-          g: string | null
-        ) => Promise<Record<string, Array<[number, string]>> | null>)
-      | undefined
+    const ripgrepSearch = getFilesystemBackendInternals(this).ripgrepSearch
 
     const t0 = Date.now()
     let rgResult: Record<string, Array<[number, string]>> | null | undefined
@@ -3755,6 +4170,7 @@ export class LocalSandbox
       await this.recordReadTime(resolvedPath)
 
       if (!hasNonWhitespace) {
+        recordTrustedToolFilePreviewSource(resolvedPath, "read")
         return await this.applyPostToolUseHookToText(
           "read_file",
           LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
@@ -3769,6 +4185,8 @@ export class LocalSandbox
           `Error: Line offset ${effectiveOffset} exceeds file length (${totalLines} lines)`
         )
       }
+
+      recordTrustedToolFilePreviewSource(resolvedPath, "read")
 
       const total = totalLines
       const hasMore = effectiveOffset + effectiveLimit < total
@@ -3831,11 +4249,15 @@ export class LocalSandbox
 
       const hookVisibleResult =
         options.includeLookahead === true ? trimReadFileOutputLines(result, effectiveLimit) : result
-      return await this.applyPostToolUseHookToText(
+      const finalResult = await this.applyPostToolUseHookToText(
         "read_file",
         LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
         hookVisibleResult
       )
+      if (formattedLines.length > 0) {
+        await this.recordPluginSystemConstraintRead(resolvedPath, options.traceContext)
+      }
+      return finalResult
     } catch (e: unknown) {
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
@@ -3933,28 +4355,42 @@ export class LocalSandbox
    * Different file paths run in parallel; same path is FIFO-queued.
    */
   private async withFileLock<T>(resolvedPath: string, fn: () => Promise<T>): Promise<T> {
-    const prev = this._fileLocks.get(resolvedPath) ?? Promise.resolve()
+    const lockKey = this.fileIdentityKey(resolvedPath)
+    const prev = this._fileLocks.get(lockKey) ?? Promise.resolve()
     let release: () => void = () => {}
     const gate = new Promise<void>((r) => {
       release = r
     })
     const tail = prev.then(() => gate)
-    this._fileLocks.set(resolvedPath, tail)
+    this._fileLocks.set(lockKey, tail)
     try {
       await prev
       return await fn()
     } finally {
       release()
-      if (this._fileLocks.get(resolvedPath) === tail) {
-        this._fileLocks.delete(resolvedPath)
+      if (this._fileLocks.get(lockKey) === tail) {
+        this._fileLocks.delete(lockKey)
       }
+    }
+  }
+
+  private fileIdentityKey(resolvedPath: string): string {
+    const absolutePath = path.resolve(resolvedPath)
+    return process.platform === "win32" ? normalizeDirKey(absolutePath) : absolutePath
+  }
+
+  private async existingFileIdentityKey(resolvedPath: string): Promise<string> {
+    try {
+      return this.fileIdentityKey(await fs.realpath(resolvedPath))
+    } catch {
+      return this.fileIdentityKey(resolvedPath)
     }
   }
 
   /** Record the file's mtime after a successful read or write. */
   private async recordReadTime(resolvedPath: string): Promise<void> {
     const stat = await fs.stat(resolvedPath)
-    this._fileReadTimes.set(resolvedPath, stat.mtimeMs)
+    this._fileReadTimes.set(await this.existingFileIdentityKey(resolvedPath), stat.mtimeMs)
   }
 
   /**
@@ -3962,7 +4398,7 @@ export class LocalSandbox
    * Compares file mtime against the recorded mtime — same clock source, no drift.
    */
   private async assertNotModifiedSinceRead(resolvedPath: string): Promise<void> {
-    const recordedMtime = this._fileReadTimes.get(resolvedPath)
+    const recordedMtime = this._fileReadTimes.get(await this.existingFileIdentityKey(resolvedPath))
     if (recordedMtime === undefined) return // first edit without a prior read() — allow it
     const stat = await fs.stat(resolvedPath)
     // 50ms tolerance for filesystem timestamp granularity (NTFS async flush, HFS+ 1s resolution)
@@ -3996,6 +4432,57 @@ export class LocalSandbox
     }
   }
 
+  private isManagedWorkflowScriptCapability(capability: StableWritableFileHandle): boolean {
+    const suffix = ".workflow.js"
+    const fileName = path.basename(capability.filePath)
+    const runId = fileName.endsWith(suffix) ? fileName.slice(0, -suffix.length) : ""
+    return (
+      WORKFLOW_RUN_ID_PATTERN.test(runId) &&
+      this.fileIdentityKey(path.dirname(capability.filePath)) ===
+        this.fileIdentityKey(capability.rootPath)
+    )
+  }
+
+  private async assertNotModifiedSinceStableRead(
+    capability: StableWritableFileHandle
+  ): Promise<void> {
+    const recordedMtime = this._fileReadTimes.get(this.fileIdentityKey(capability.filePath))
+    if (recordedMtime === undefined) return
+    const stat = await capability.handle.stat()
+    if (stat.mtimeMs > recordedMtime + 50) {
+      throw new Error(
+        `File has been modified externally since last read. Please read the file again before editing.`
+      )
+    }
+  }
+
+  private async recordStableReadTime(capability: StableWritableFileHandle): Promise<void> {
+    const stat = await capability.handle.stat()
+    this._fileReadTimes.set(this.fileIdentityKey(capability.filePath), stat.mtimeMs)
+  }
+
+  private async writeStableFileHandleEncoded(
+    capability: StableWritableFileHandle,
+    content: string,
+    encoding: string
+  ): Promise<void> {
+    const encoded = iconv.encode(content, encoding)
+    await capability.assertPathIdentity()
+    await capability.handle.truncate(0)
+    let offset = 0
+    while (offset < encoded.length) {
+      const { bytesWritten } = await capability.handle.write(
+        encoded,
+        offset,
+        encoded.length - offset,
+        offset
+      )
+      if (bytesWritten <= 0) throw new Error("Unable to write managed workflow script")
+      offset += bytesWritten
+    }
+    await capability.assertPathIdentity()
+  }
+
   /**
    * Check if a file write should be blocked by the sandbox.
    * - readonly + non-admin: block all writes
@@ -4008,6 +4495,7 @@ export class LocalSandbox
   private async isWriteBlocked(filePath: string): Promise<boolean> {
     if (this.windowsSandbox !== "readonly") return false
     if (!(await LocalSandbox.getElevationState())) return true
+    if (await this.resolveEditableWorkflowScriptPath(filePath)) return false
     // Admin readonly: restrict to working directory only (matches disk-write-cwd)
     try {
       const resolved = path.resolve(this.workingDir, filePath)
@@ -4032,6 +4520,70 @@ export class LocalSandbox
     }
   }
 
+  /** File tools execute in the Electron process, outside the child-process OS
+   * sandbox. Resolve the existing target (or its parent for a create) so a
+   * symlinked directory cannot turn a workspace-relative write into a write to
+   * the source checkout or another worktree. Uncertainty fails closed. */
+  private async isWorktreeFileWriteBlocked(filePath: string): Promise<boolean> {
+    if (!this.worktreeIsolation) return false
+    if (await this.resolveEditableWorkflowScriptPath(filePath)) return false
+    try {
+      const resolved = this._resolvePath(filePath)
+      if (path.resolve(resolved) === path.join(this.worktreeIsolation.worktreeRoot, ".git")) {
+        return true
+      }
+      let realTarget: string
+      try {
+        const stat = await fs.lstat(resolved)
+        if (stat.isSymbolicLink()) return true
+        realTarget = await fs.realpath(resolved)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true
+        const deepest = this.realpathDeepestExistingCached(resolved, new Map())
+        if (!deepest) return true
+        realTarget = deepest
+      }
+      const relative = path.relative(this.worktreeIsolation.workspaceRoot, realTarget)
+      return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * Recognize only an existing, regular, direct-child workflow script from the
+   * directory the host derived for this thread. Requiring the file to pre-exist
+   * prevents the exception from becoming a general app-data write capability;
+   * canonical parent and no-symlink checks prevent traversal or link escapes.
+   */
+  private async resolveEditableWorkflowScriptPath(filePath: string): Promise<string | null> {
+    if (!this._workflowScriptsDir) return null
+    let resolved: string
+    try {
+      resolved = this._resolvePath(filePath)
+    } catch {
+      return null
+    }
+
+    try {
+      const entry = await fs.lstat(resolved)
+      if (!entry.isFile() || entry.isSymbolicLink()) return null
+      const [realRoot, realFile] = await Promise.all([
+        fs.realpath(this._workflowScriptsDir),
+        fs.realpath(resolved)
+      ])
+      const suffix = ".workflow.js"
+      const realFileName = path.basename(realFile)
+      const runId = realFileName.endsWith(suffix) ? realFileName.slice(0, -suffix.length) : ""
+      if (!WORKFLOW_RUN_ID_PATTERN.test(runId)) return null
+      return this.fileIdentityKey(path.dirname(realFile)) === this.fileIdentityKey(realRoot)
+        ? realFile
+        : null
+    } catch {
+      return null
+    }
+  }
+
   /** Build a readonly-sandbox block error message for the given file and action verb. */
   private async readonlyBlockedError(filePath: string, action: string): Promise<string> {
     return (await LocalSandbox.getElevationState())
@@ -4039,15 +4591,132 @@ export class LocalSandbox
       : `只读沙箱模式下禁止${action}文件 '${filePath}'。如需${action}请以管理员身份运行或切换沙箱模式。`
   }
 
+  private resolveInternalArtifactPath(filePath: string): string | null {
+    let resolvedPath: string
+    try {
+      resolvedPath = this._resolvePath(filePath)
+    } catch {
+      return null
+    }
+
+    return this._internalArtifactRoots.some((root) => {
+      const relative = path.relative(root, resolvedPath)
+      return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative)
+    })
+      ? resolvedPath
+      : null
+  }
+
+  private async validateInternalArtifactPath(filePath: string): Promise<string | null> {
+    const resolvedPath = this.resolveInternalArtifactPath(filePath)
+    if (!resolvedPath) return null
+
+    const root = this._internalArtifactRoots.find((candidate) => {
+      const relative = path.relative(candidate, resolvedPath)
+      return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative)
+    })
+    if (!root) return null
+
+    try {
+      await fs.mkdir(path.dirname(resolvedPath), { recursive: true })
+      const [realRoot, realParent] = await Promise.all([
+        fs.realpath(root),
+        fs.realpath(path.dirname(resolvedPath))
+      ])
+      const parentRelative = path.relative(realRoot, realParent)
+      if (parentRelative.startsWith("..") || path.isAbsolute(parentRelative)) return null
+
+      try {
+        if ((await fs.lstat(resolvedPath)).isSymbolicLink()) return null
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null
+      }
+      return resolvedPath
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Write an app-managed artifact without presenting it as a user-requested
+   * write_file operation. The caller cannot escape the explicitly configured
+   * artifact roots, and these writes deliberately skip tool approvals, Hooks,
+   * mutation tracking, and read-only workspace policy.
+   */
+  async writeInternalArtifact(
+    filePath: string,
+    content: string,
+    options: { createOnly?: boolean } = {}
+  ): Promise<WriteResult> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return { error: `Invalid internal artifact path: ${filePath}` }
+
+    return this.withFileLock(resolvedPath, async () => {
+      if (this.isAborted) return { error: "文件写入已取消。" }
+      try {
+        await fs.writeFile(resolvedPath, content, {
+          encoding: "utf8",
+          flag: options.createOnly ? "wx" : "w"
+        })
+        return {}
+      } catch (error) {
+        if (options.createOnly && (error as NodeJS.ErrnoException).code === "EEXIST") {
+          return {
+            error: `Cannot write to ${filePath} because it already exists. Read and then make an edit, or write to a new path.`
+          }
+        }
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    })
+  }
+
+  /** Check an app-managed artifact without reading its contents into memory. */
+  async internalArtifactExists(filePath: string): Promise<boolean> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return false
+
+    try {
+      return (await fs.stat(resolvedPath)).isFile()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+      return false
+    }
+  }
+
+  /** Append to an app-managed artifact under the same path and symlink checks. */
+  async appendInternalArtifact(filePath: string, content: string): Promise<WriteResult> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return { error: `Invalid internal artifact path: ${filePath}` }
+
+    return this.withFileLock(resolvedPath, async () => {
+      if (this.isAborted) return { error: "文件写入已取消。" }
+      try {
+        await fs.appendFile(resolvedPath, content, "utf8")
+        return {}
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    })
+  }
+
   /**
    * Override write to enforce readonly sandbox restrictions.
    */
   async write(filePath: string, content: string): Promise<WriteResult> {
+    // DeepAgents' automatic result eviction writes to this reserved logical
+    // path after the public tool call completes. A model-issued write_file is
+    // marked by the runtime and continues through the regular approval flow.
+    if (filePath.startsWith("/large_tool_results/") && !agentFileWriteContext.getStore()) {
+      return this.writeInternalArtifact(filePath, content, { createOnly: true })
+    }
     if (this.isBlockedBySandbox(filePath)) {
       return { error: `Access denied — '${filePath}' is restricted by sandbox policy.` }
     }
     if (this.isMemoryStorageWritePath(filePath)) {
       return { error: this.memoryStorageWriteError(filePath, "write") }
+    }
+    if (await this.isWorktreeFileWriteBlocked(filePath)) {
+      return { error: `Access denied — '${filePath}' resolves outside the isolated workspace.` }
     }
     if (await this.isWriteBlocked(filePath)) {
       return { error: await this.readonlyBlockedError(filePath, "写入") }
@@ -4083,6 +4752,11 @@ export class LocalSandbox
     if (this.isMemoryStorageWritePath(effectiveFilePath)) {
       return { error: this.memoryStorageWriteError(effectiveFilePath, "write") }
     }
+    if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+      return {
+        error: `Access denied — '${effectiveFilePath}' resolves outside the isolated workspace.`
+      }
+    }
     if (await this.isWriteBlocked(effectiveFilePath)) {
       return { error: await this.readonlyBlockedError(effectiveFilePath, "写入") }
     }
@@ -4107,18 +4781,28 @@ export class LocalSandbox
     // file ⇒ prior content is empty and deletedLineCount = 0. We skip the
     // old pre-read entirely (it was wasted I/O on success and would also
     // bypass isCodeFile / size guards on failure).
+    let harnessStage: HarnessStageAttribution | undefined
     const result = await this.withFileLock(resolvedPath, async () => {
       if (this.isAborted) {
         return { error: "文件写入已取消。" }
       }
-      const r = await super.write(effectiveFilePath, effectiveContent)
-      if (!r.error) {
-        await this.recordReadTime(resolvedPath)
+      if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+        return {
+          error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+        }
       }
+      harnessStage = await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
+      if (this.isAborted) {
+        return { error: "文件写入已取消。" }
+      }
+      const r = await super.write(effectiveFilePath, effectiveContent)
+      if (!r.error) await this.recordReadTime(resolvedPath)
       return r
     })
     if (!result.error) {
+      recordTrustedToolFilePreviewSource(resolvedPath, "write")
       this._onFileMutation?.(effectiveFilePath, "write")
+      if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
       // Adoption tracking (side-effect only, never throws)
       try {
         recordAdoptionGen({
@@ -4129,7 +4813,8 @@ export class LocalSandbox
           workspacePath: this.workingDir,
           // write_file only succeeds when creating a new file (see above) —
           // no prior lines could have been deleted.
-          deletedLineCount: 0
+          deletedLineCount: 0,
+          ...(harnessStage ? { harnessStage } : {})
         })
       } catch {
         // tracker must not affect tool result
@@ -4146,6 +4831,7 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
+      this.markHarnessStageAttributionDirty()
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
@@ -4156,49 +4842,75 @@ export class LocalSandbox
    * Override uploadFiles to enforce readonly sandbox restrictions on each file.
    */
   async uploadFiles(files: [string, Uint8Array][]): Promise<FileUploadResponse[]> {
-    // Check for both sandbox-sensitive and readonly-blocked files
-    const indexed = await Promise.all(
-      files.map(async ([filePath, content], i) => ({
-        filePath,
-        content,
-        i,
-        sandboxBlocked: this.isBlockedBySandbox(filePath),
-        memoryBlocked: this.isMemoryStorageWritePath(filePath),
-        writeBlocked: await this.isWriteBlocked(filePath)
-      }))
-    )
-    const allowed = indexed.filter((e) => !e.sandboxBlocked && !e.memoryBlocked && !e.writeBlocked)
-
-    if (allowed.length === files.length) {
-      const results = await super.uploadFiles(files)
-      results.forEach((result, index) => {
-        if (!result.error) this._onFileMutation?.(files[index][0], "upload")
-      })
+    const denied: FileOperationError = "permission_denied"
+    if (!this.worktreeIsolation) {
+      const indexed = await Promise.all(
+        files.map(async ([filePath, content], i) => ({
+          filePath,
+          content,
+          i,
+          sandboxBlocked: this.isBlockedBySandbox(filePath),
+          memoryBlocked: this.isMemoryStorageWritePath(filePath),
+          writeBlocked: await this.isWriteBlocked(filePath)
+        }))
+      )
+      const allowed = indexed.filter(
+        (entry) => !entry.sandboxBlocked && !entry.memoryBlocked && !entry.writeBlocked
+      )
+      const allowedResults =
+        allowed.length > 0
+          ? await super.uploadFiles(
+              allowed.map((entry) => [entry.filePath, entry.content] as [string, Uint8Array])
+            )
+          : []
+      const results: FileUploadResponse[] = new Array(files.length)
+      let allowedIndex = 0
+      for (const entry of indexed) {
+        if (entry.sandboxBlocked || entry.memoryBlocked || entry.writeBlocked) {
+          results[entry.i] = { path: entry.filePath, error: denied }
+        } else {
+          const response = allowedResults[allowedIndex++]
+          results[entry.i] = response
+          if (!response.error) this._onFileMutation?.(entry.filePath, "upload")
+        }
+      }
       return results
     }
-
-    // Batch-delegate all allowed files in one call
-    const allowedResults =
-      allowed.length > 0
-        ? await super.uploadFiles(
-            allowed.map((e) => [e.filePath, e.content] as [string, Uint8Array])
-          )
-        : []
-
-    // Merge results back in original order
-    const results: FileUploadResponse[] = new Array(files.length)
-    const denied: FileOperationError = "permission_denied"
-    let ai = 0
-    for (const entry of indexed) {
-      if (entry.sandboxBlocked || entry.memoryBlocked || entry.writeBlocked) {
-        results[entry.i] = { path: entry.filePath, error: denied }
-      } else {
-        const result = allowedResults[ai++]
-        results[entry.i] = result
-        if (!result.error) this._onFileMutation?.(entry.filePath, "upload")
-      }
-    }
-    return results
+    return Promise.all(
+      files.map(async ([filePath, content]) => {
+        if (
+          this.isBlockedBySandbox(filePath) ||
+          this.isMemoryStorageWritePath(filePath) ||
+          (await this.isWorktreeFileWriteBlocked(filePath)) ||
+          (await this.isWriteBlocked(filePath))
+        ) {
+          return { path: filePath, error: denied }
+        }
+        let resolvedPath: string
+        try {
+          resolvedPath = this._resolvePath(filePath)
+        } catch {
+          return { path: filePath, error: denied }
+        }
+        return this.withFileLock(resolvedPath, async () => {
+          // The batch precheck can be separated from the actual write by other
+          // uploads. Revalidate under the same per-file lock immediately before
+          // delegating so a swapped symlink parent is treated like write/edit.
+          if (
+            this.isBlockedBySandbox(filePath) ||
+            this.isMemoryStorageWritePath(filePath) ||
+            (await this.isWorktreeFileWriteBlocked(filePath)) ||
+            (await this.isWriteBlocked(filePath))
+          ) {
+            return { path: filePath, error: denied }
+          }
+          const [result] = await super.uploadFiles([[filePath, content]])
+          const response = result ?? { path: filePath, error: denied }
+          if (!response.error) this._onFileMutation?.(filePath, "upload")
+          return response
+        })
+      })
+    )
   }
 
   /**
@@ -4221,6 +4933,9 @@ export class LocalSandbox
     }
     if (this.isMemoryStorageWritePath(filePath)) {
       return { error: this.memoryStorageWriteError(filePath, "edit") }
+    }
+    if (await this.isWorktreeFileWriteBlocked(filePath)) {
+      return { error: `Access denied — '${filePath}' resolves outside the isolated workspace.` }
     }
     if (await this.isWriteBlocked(filePath)) {
       return { error: await this.readonlyBlockedError(filePath, "编辑") }
@@ -4263,6 +4978,11 @@ export class LocalSandbox
     if (this.isMemoryStorageWritePath(effectiveFilePath)) {
       return { error: this.memoryStorageWriteError(effectiveFilePath, "edit") }
     }
+    if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+      return {
+        error: `Access denied — '${effectiveFilePath}' resolves outside the isolated workspace.`
+      }
+    }
     if (await this.isWriteBlocked(effectiveFilePath)) {
       return { error: await this.readonlyBlockedError(effectiveFilePath, "编辑") }
     }
@@ -4281,61 +5001,141 @@ export class LocalSandbox
       return { error: "文件编辑已取消。" }
     }
     try {
-      const resolvedPath = this._resolvePath(effectiveFilePath)
+      const lexicalResolvedPath = this._resolvePath(effectiveFilePath)
+      const managedWorkflowScriptPath =
+        await this.resolveEditableWorkflowScriptPath(effectiveFilePath)
+      const resolvedPath = managedWorkflowScriptPath ?? lexicalResolvedPath
+      const hasStableManagedWorkflowScriptIdentity = async (): Promise<boolean> => {
+        const currentPath = await this.resolveEditableWorkflowScriptPath(effectiveFilePath)
+        return currentPath === null
+      }
+      let harnessStage: HarnessStageAttribution | undefined
+      const managedWorkflowScriptEdit = managedWorkflowScriptPath !== null
       const result = await this.withFileLock(resolvedPath, async () => {
         if (this.isAborted) {
           return { error: "文件编辑已取消。" }
         }
-        const { buffer } = await this.readFileBuffer(effectiveFilePath)
-        const ext = path.extname(resolvedPath).toLowerCase()
-        const encoding = this.detectEncoding(buffer, ext)
-        const content = iconv.decode(buffer, encoding)
-
-        // Check file hasn't been modified externally since last read
-        await this.assertNotModifiedSinceRead(resolvedPath)
-
-        let expectedContent: string
-        let occurrences: number
-
-        if (content === "" && effectiveOldString === "") {
-          expectedContent = effectiveNewString
-          occurrences = 0
-        } else {
-          const r = replace(content, effectiveOldString, effectiveNewString, effectiveReplaceAll)
-          expectedContent = r.newContent
-          occurrences = r.occurrences
+        if (
+          (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) ||
+          (await this.isWriteBlocked(effectiveFilePath))
+        ) {
+          return {
+            error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+          }
         }
-
-        if (this.isAborted) {
-          return { error: "文件编辑已取消。" }
+        if (!managedWorkflowScriptEdit && !(await hasStableManagedWorkflowScriptIdentity())) {
+          return {
+            error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+          }
         }
-        await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
-        await this.recordReadTime(resolvedPath)
-        return { path: effectiveFilePath, filesUpdate: null, occurrences }
+        let managedCapability: StableWritableFileHandle | null = null
+        try {
+          if (managedWorkflowScriptEdit) {
+            if (!this._workflowScriptsDir) {
+              return {
+                error: `Access denied — '${effectiveFilePath}' is not an editable workflow script.`
+              }
+            }
+            managedCapability = await openStableWritableFileHandle(
+              this._workflowScriptsDir,
+              lexicalResolvedPath
+            )
+            if (!this.isManagedWorkflowScriptCapability(managedCapability)) {
+              return {
+                error: `Access denied — '${effectiveFilePath}' is not an editable workflow script.`
+              }
+            }
+          }
+
+          harnessStage = managedWorkflowScriptEdit
+            ? undefined
+            : await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
+          if (this.isAborted) {
+            return { error: "文件编辑已取消。" }
+          }
+          const buffer = managedCapability
+            ? await LocalSandbox.readFileHandleBuffer(managedCapability.handle, effectiveFilePath)
+            : (await this.readResolvedFileBuffer(resolvedPath, effectiveFilePath)).buffer
+          const ext = path.extname(managedCapability?.filePath ?? resolvedPath).toLowerCase()
+          const encoding = this.detectEncoding(buffer, ext)
+          const content = iconv.decode(buffer, encoding)
+
+          // Check file hasn't been modified externally since last read.
+          if (managedCapability) {
+            await this.assertNotModifiedSinceStableRead(managedCapability)
+          } else {
+            await this.assertNotModifiedSinceRead(resolvedPath)
+          }
+
+          let expectedContent: string
+          let occurrences: number
+
+          if (content === "" && effectiveOldString === "") {
+            expectedContent = effectiveNewString
+            occurrences = 0
+          } else {
+            const r = replace(content, effectiveOldString, effectiveNewString, effectiveReplaceAll)
+            expectedContent = r.newContent
+            occurrences = r.occurrences
+          }
+
+          if (this.isAborted) {
+            return { error: "文件编辑已取消。" }
+          }
+          if (
+            (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) ||
+            (await this.isWriteBlocked(effectiveFilePath))
+          ) {
+            return {
+              error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+            }
+          }
+          if (!managedWorkflowScriptEdit && !(await hasStableManagedWorkflowScriptIdentity())) {
+            return {
+              error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+            }
+          }
+          if (managedCapability) {
+            await this.writeStableFileHandleEncoded(managedCapability, expectedContent, encoding)
+            await this.recordStableReadTime(managedCapability)
+          } else {
+            await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
+            await this.recordReadTime(resolvedPath)
+          }
+          return { path: effectiveFilePath, filesUpdate: null, occurrences }
+        } finally {
+          await managedCapability?.handle.close().catch(() => undefined)
+        }
       })
       if (!result.error) {
-        this._onFileMutation?.(effectiveFilePath, "edit")
-        // Adoption tracking (side-effect only, never throws).
-        // Only successful edits should be counted as generated code adoption.
-        try {
-          recordAdoptionGen({
-            threadId: this.runId,
-            tool: "edit_file",
-            filePath: effectiveFilePath,
-            // For edits, the local generated fragment is new_string; the tracker
-            // expands its line hashes by occurrences for replaceAll.
-            generatedContent: effectiveNewString,
-            workspacePath: this.workingDir,
-            // Pass the edit fragments only — no full-file references. Tracker
-            // derives deletedLineCount in a microtask via
-            // max(0, countNonBlankLines(oldString) - countNonBlankLines(newString)) * occurrences,
-            // avoiding any full-file scan or retention of editor buffers.
-            oldString: effectiveOldString,
-            newString: effectiveNewString,
-            occurrences: result.occurrences
-          })
-        } catch {
-          // tracker must not affect tool result
+        recordTrustedToolFilePreviewSource(resolvedPath, "edit")
+        // The host-issued workflow script is orchestration state, not a project
+        // deliverable: keep normal approval/Hooks, but do not enqueue it for Git
+        // auto-commit, Harness attribution, or generated-code adoption.
+        if (!managedWorkflowScriptEdit) {
+          this._onFileMutation?.(effectiveFilePath, "edit")
+          if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
+          // Adoption tracking (side-effect only, never throws).
+          // Only successful edits should be counted as generated code adoption.
+          try {
+            recordAdoptionGen({
+              threadId: this.runId,
+              tool: "edit_file",
+              filePath: effectiveFilePath,
+              // For edits, the local generated fragment is new_string; the tracker
+              // expands its line hashes by occurrences for replaceAll.
+              generatedContent: effectiveNewString,
+              workspacePath: this.workingDir,
+              // Pass the edit fragment only — no full-file references. The tracker
+              // compares oldString with generatedContent as line multisets, so
+              // replacements count as old-only lines even when line totals match.
+              oldString: effectiveOldString,
+              occurrences: result.occurrences,
+              ...(harnessStage ? { harnessStage } : {})
+            })
+          } catch {
+            // tracker must not affect tool result
+          }
         }
       }
       // PostToolUse hook
@@ -4354,6 +5154,7 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
+        this.markHarnessStageAttributionDirty()
         if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
@@ -4388,38 +5189,100 @@ export class LocalSandbox
    */
   private static readonly ENCODING_DETECT_HEAD_BYTES = 8 * 1024
 
+  /**
+   * jschardet can return no candidate for very short CP936 output (for example
+   * two Chinese characters). Use the Windows locale only for that ambiguous,
+   * already-proven-non-UTF-8 case; other locales keep the existing UTF-8
+   * fallback instead of guessing a foreign code page.
+   */
+  private static readonly WINDOWS_LOCALE_FALLBACK_ENCODING = (() => {
+    try {
+      const locale = Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase()
+      if (!locale.startsWith("zh")) return "utf-8"
+      return locale.includes("hant") || /^zh-(?:tw|hk|mo)(?:-|$)/.test(locale) ? "big5" : "gb18030"
+    } catch {
+      return "utf-8"
+    }
+  })()
+
   private detectCmdEncoding(buf: Buffer): string {
     if (buf.length === 0) return "utf-8"
     const sample =
       buf.length > LocalSandbox.ENCODING_DETECT_HEAD_BYTES
         ? buf.subarray(0, LocalSandbox.ENCODING_DETECT_HEAD_BYTES)
         : buf
+    // Valid UTF-8 is authoritative. This prevents locale/chardet guesses from
+    // corrupting UTF-8 output on Chinese and non-Chinese Windows installations.
+    if (LocalSandbox.isValidUtf8(sample)) return "utf-8"
+
+    // Short CP936 text is frequently misidentified with high confidence as a
+    // Cyrillic or Western encoding (for example, one Chinese character). Once
+    // UTF-8 is ruled out, the active Chinese Windows code page is authoritative.
+    if (LocalSandbox.WINDOWS_LOCALE_FALLBACK_ENCODING !== "utf-8") {
+      return LocalSandbox.WINDOWS_LOCALE_FALLBACK_ENCODING
+    }
+
     const detected = chardet.detect(sample)
-    if (!detected) return "utf-8"
+    if (!detected) return LocalSandbox.WINDOWS_LOCALE_FALLBACK_ENCODING
     const enc = typeof detected === "string" ? detected : detected.encoding
     const confidence = typeof detected === "object" ? detected.confidence : 1
     if (!enc || enc.toLowerCase() === "ascii" || !iconv.encodingExists(enc)) {
-      return "utf-8"
+      return LocalSandbox.WINDOWS_LOCALE_FALLBACK_ENCODING
     }
     if (confidence >= LocalSandbox.CHARDET_CONFIDENCE_THRESHOLD) {
       return enc
     }
-    // Low confidence but buffer contains invalid UTF-8 — definitely not UTF-8,
-    // trust jschardet's best guess (typically GBK/GB2312 on Chinese Windows)
-    if (!LocalSandbox.isValidUtf8(sample)) {
-      return enc
-    }
-    return "utf-8"
+    // Preserve the previous behavior for non-Chinese locales: once the bytes
+    // are known not to be UTF-8, accept chardet's available legacy candidate.
+    return enc
   }
 
-  /**
-   * Pick the buffer to feed encoding detection. Prefer stdout (more representative of
-   * the program's text output), fall back to stderr. Avoid the third Buffer.concat
-   * the previous implementation paid for on every command — only stdoutBuf and stderrBuf
-   * are already-allocated slices we can reuse directly.
-   */
-  private static encodingDetectionBuffer(stdoutBuf: Buffer, stderrBuf: Buffer): Buffer {
-    return stdoutBuf.length > 0 ? stdoutBuf : stderrBuf
+  private createShellOutputDecoder(isWindows: boolean): SafeShellOutputDecoder {
+    return new SafeShellOutputDecoder((input) =>
+      isWindows ? this.detectCmdEncoding(input) : "utf-8"
+    )
+  }
+
+  private decodeShellOutputChunks(chunks: Buffer[], isWindows: boolean): string {
+    const decoder = this.createShellOutputDecoder(isWindows)
+    const decoded: string[] = []
+    for (const chunk of chunks) {
+      const text = decoder.write(chunk)
+      if (text) decoded.push(text)
+    }
+    const tail = decoder.end()
+    if (tail) decoded.push(tail)
+    return decoded.join("")
+  }
+
+  private emitLiveOutput(
+    decoder: SafeShellOutputDecoder | null,
+    chunk: Buffer,
+    onData: ((text: string) => void) | undefined
+  ): void {
+    if (!decoder || !onData) return
+    try {
+      const text = decoder.write(chunk)
+      if (text) onData(text)
+    } catch {
+      /* never let the live preview interfere with command resolution */
+    }
+  }
+
+  private endLiveOutput(
+    decoders: Array<SafeShellOutputDecoder | null>,
+    onData: ((text: string) => void) | undefined
+  ): void {
+    if (!onData) return
+    for (const decoder of decoders) {
+      if (!decoder) continue
+      try {
+        const tail = decoder.end()
+        if (tail) onData(tail)
+      } catch {
+        /* never let the live preview interfere with command resolution */
+      }
+    }
   }
 
   /** Quick check whether a buffer is valid UTF-8. */
@@ -4827,6 +5690,22 @@ export class LocalSandbox
     }
   }
 
+  private static async resolveCommandShellSyntax(
+    sandboxMode: WindowsSandboxMode
+  ): Promise<CommandShellSyntax> {
+    if (process.platform !== "win32") return "posix"
+    const shell =
+      sandboxMode === "none"
+        ? await LocalSandbox.resolveShell()
+        : (await LocalSandbox.resolveWindowsSandboxShell()).shell
+    const shellBase = path
+      .basename(shell)
+      .replace(/\.exe$/i, "")
+      .toLowerCase()
+    if (["bash", "sh", "zsh", "fish"].includes(shellBase)) return "posix"
+    return ["pwsh", "powershell"].includes(shellBase) ? "powershell" : "cmd"
+  }
+
   /** Asynchronous `which` — locate an executable on PATH without blocking the main process. */
   private static async which(name: string): Promise<string | null> {
     const isWindows = process.platform === "win32"
@@ -4849,17 +5728,105 @@ export class LocalSandbox
 
   /** Track all active child processes for cleanup on app quit. */
   private static readonly activeProcesses = new Set<ChildProcess>()
+  private static readonly activeProcessTerminations = new WeakMap<
+    ChildProcess,
+    { promise: Promise<void>; waitForProcessTree: boolean }
+  >()
+  private static applicationShutdownStarted = false
+
+  /** Close the background-start race before the main process takes shutdown snapshots. */
+  static beginApplicationShutdown(): void {
+    LocalSandbox.applicationShutdownStarted = true
+  }
 
   static hasActiveProcesses(): boolean {
     return LocalSandbox.activeProcesses.size > 0
   }
 
-  /** Kill all active child processes. Call from app 'will-quit' hook. */
-  static killAll(): void {
-    for (const proc of LocalSandbox.activeProcesses) {
-      void LocalSandbox.killTree(proc, () => false)
+  /** Include detached ownership records before spawn and during process-tree settlement. */
+  static hasActiveExecutionTasks(): boolean {
+    if (
+      LocalSandbox.activeProcesses.size > 0 ||
+      LocalSandbox.pendingBackgroundTaskStarts.size > 0
+    ) {
+      return true
     }
-    LocalSandbox.activeProcesses.clear()
+    for (const task of LocalSandbox.backgroundTasks.values()) {
+      if (!task.settled) return true
+    }
+    return false
+  }
+
+  private static terminateProcessTree(
+    proc: ChildProcess,
+    exited: () => boolean,
+    waitForProcessTree = false
+  ): Promise<void> {
+    const requireProcessTree = waitForProcessTree || LocalSandbox.applicationShutdownStarted
+    const previous = LocalSandbox.activeProcessTerminations.get(proc)
+    if (previous?.waitForProcessTree || (previous && !requireProcessTree)) {
+      return previous.promise
+    }
+
+    // If a normal timeout already started a leader-only kill, upgrade it after
+    // that attempt settles so application shutdown still fences descendants.
+    const terminationAttempt = previous
+      ? previous.promise
+          .catch(() => undefined)
+          .then(() => LocalSandbox.killTree(proc, exited, true))
+      : LocalSandbox.killTree(proc, exited, requireProcessTree)
+    const promise = terminationAttempt.finally(() => {
+      if (LocalSandbox.activeProcessTerminations.get(proc)?.promise === promise) {
+        LocalSandbox.activeProcessTerminations.delete(proc)
+      }
+    })
+    LocalSandbox.activeProcessTerminations.set(proc, {
+      promise,
+      waitForProcessTree: requireProcessTree
+    })
+    return promise
+  }
+
+  private static async waitForPromisesWithin(
+    promises: Promise<unknown>[],
+    timeoutMs: number
+  ): Promise<boolean> {
+    if (promises.length === 0) return true
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<false>((resolve) => {
+      timeoutId = setTimeout(() => resolve(false), Math.max(0, timeoutMs))
+    })
+    try {
+      return await Promise.race([Promise.allSettled(promises).then(() => true as const), timeout])
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId)
+    }
+  }
+
+  /** Kill active child process trees and wait for their physical termination, bounded. */
+  static async killAllAndWait(timeoutMs = 5_000): Promise<boolean> {
+    LocalSandbox.beginApplicationShutdown()
+    const terminations = Array.from(LocalSandbox.activeProcesses, (proc) =>
+      LocalSandbox.terminateProcessTree(
+        proc,
+        () => proc.exitCode !== null || proc.signalCode !== null,
+        true
+      )
+    )
+    const settled = await LocalSandbox.waitForPromisesWithin(terminations, timeoutMs)
+    if (!settled) {
+      console.warn(
+        `[LocalSandbox] Timed out waiting for ${terminations.length} process tree(s) during shutdown`
+      )
+    }
+    return settled
+  }
+
+  /** Best-effort final fallback for callers that cannot await (for example will-quit). */
+  static killAll(): void {
+    void LocalSandbox.killAllAndWait().catch((error) => {
+      console.warn("[LocalSandbox] Failed to terminate process trees during shutdown:", error)
+    })
   }
 
   // Use SID *S-1-1-0 instead of "Everyone" to avoid locale issues on non-English Windows.
@@ -4927,12 +5894,37 @@ export class LocalSandbox
 
   /** Directories that currently have the Everyone ACE granted, with reference count.
    *  Key = normalized dir path, value = number of active runs using that grant.
-   *  ACL is only revoked when the count drops to 0. */
+   *  When the count drops to 0, normal cleanup makes a best-effort revoke attempt
+   *  and logs any timeout or failure. */
   private static readonly _grantedAclRefCount = new Map<string, number>()
   /** Per-run tracking: which dirs each runId has granted (for correct decrement on cleanup). */
   private static readonly _runAclDirs = new Map<string, Set<string>>()
+  /** Original filesystem paths keyed by normalized ACL key, retained for OS revoke commands. */
+  private static readonly _runAclDirectoryPaths = new Map<string, Map<string, string>>()
+  /** Serializes OS-level grant/revoke mutations per directory. */
+  private static readonly _aclOsOperationTails = new Map<string, Promise<void>>()
   /** Directories that should never be revoked (e.g. TEMP — public dir, safe to leave open). */
   private static readonly _permanentAclDirs = new Set<string>()
+
+  private static queueAclOsOperation(key: string, operation: () => Promise<void>): Promise<void> {
+    const previous = LocalSandbox._aclOsOperationTails.get(key) ?? Promise.resolve()
+    const task = previous.catch(() => {}).then(operation)
+    LocalSandbox._aclOsOperationTails.set(key, task)
+    void task
+      .finally(() => {
+        if (LocalSandbox._aclOsOperationTails.get(key) === task) {
+          LocalSandbox._aclOsOperationTails.delete(key)
+        }
+      })
+      .catch(() => {
+        // The caller observes task; this branch only observes the cleanup chain.
+      })
+    return task
+  }
+
+  private static waitForAclOsOperation(key: string): Promise<void> {
+    return (LocalSandbox._aclOsOperationTails.get(key) ?? Promise.resolve()).catch(() => {})
+  }
 
   /** Grant Everyone access on a sandbox path (for WRITE_RESTRICTED tokens). Returns when done.
    *  @param runId — identifies the agent run requesting the grant (for ref-counting). */
@@ -4944,68 +5936,80 @@ export class LocalSandbox
       runDirs = new Set()
       LocalSandbox._runAclDirs.set(runId, runDirs)
     }
+    let runDirectoryPaths = LocalSandbox._runAclDirectoryPaths.get(runId)
+    if (!runDirectoryPaths) {
+      runDirectoryPaths = new Map()
+      LocalSandbox._runAclDirectoryPaths.set(runId, runDirectoryPaths)
+    }
     // Only increment ref count once per (run, dir) pair — the same run may
     // call grantSandboxWriteAcl multiple times for the same workingDir.
     if (!runDirs.has(key)) {
       runDirs.add(key)
+      runDirectoryPaths.set(key, dir)
       const prevCount = LocalSandbox._grantedAclRefCount.get(key) ?? 0
       LocalSandbox._grantedAclRefCount.set(key, prevCount + 1)
-      // If already granted by another run, skip the icacls call.
+      // If another owner registered first, its OS grant may still be running.
+      // The restricted command must not start until that shared grant settles.
       if (prevCount > 0) {
-        return
+        return LocalSandbox.waitForAclOsOperation(key)
       }
     } else {
-      // Same run already granted this dir — skip entirely.
-      return
+      // Concurrent commands in the same physical run share the grant too.
+      return LocalSandbox.waitForAclOsOperation(key)
     }
-    let isDirectory = true
-    try {
-      isDirectory = (await fs.stat(dir)).isDirectory()
-    } catch {
-      isDirectory = true
-    }
-    // (OI)(CI) = inherit to files & subdirs so the restricted token can
-    // read/write/delete at any depth. Uses async spawn to avoid blocking
-    // the event loop on large repos (NTFS propagates inherited ACEs to
-    // all existing descendants, which can take tens of seconds).
-    return new Promise<void>((resolve) => {
-      const grant = isDirectory
-        ? `${LocalSandbox.EVERYONE_SID}:(OI)(CI)(M)`
-        : `${LocalSandbox.EVERYONE_SID}:RX`
-      const proc = spawn("icacls", [dir, "/grant", grant], {
-        stdio: "ignore",
-        windowsHide: true
-      })
-      const timeoutId = setTimeout(() => {
-        console.warn(
-          `[LocalSandbox] icacls grant timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`
-        )
-        try {
-          proc.kill()
-        } catch {
-          /* already exited */
-        }
-        resolve()
-      }, LocalSandbox.ICACLS_TIMEOUT_MS)
-      proc.on("exit", (code) => {
-        clearTimeout(timeoutId)
-        if (code !== 0) {
-          console.warn(`[LocalSandbox] icacls grant exited ${code} on ${dir}`)
-        }
-        resolve()
-      })
-      proc.on("error", (err) => {
-        clearTimeout(timeoutId)
-        console.warn(`[LocalSandbox] icacls grant error on ${dir}:`, err.message)
-        resolve()
+    return LocalSandbox.queueAclOsOperation(key, async () => {
+      let isDirectory = true
+      try {
+        isDirectory = (await fs.stat(dir)).isDirectory()
+      } catch {
+        isDirectory = true
+      }
+      // (OI)(CI) = inherit to files & subdirs so the restricted token can
+      // read/write/delete at any depth. Uses async spawn to avoid blocking
+      // the event loop on large repos (NTFS propagates inherited ACEs to
+      // all existing descendants, which can take tens of seconds).
+      await new Promise<void>((resolve) => {
+        const grant = isDirectory
+          ? `${LocalSandbox.EVERYONE_SID}:(OI)(CI)(M)`
+          : `${LocalSandbox.EVERYONE_SID}:RX`
+        const proc = spawn("icacls", [dir, "/grant", grant], {
+          stdio: "ignore",
+          windowsHide: true
+        })
+        const timeoutId = setTimeout(() => {
+          console.warn(
+            `[LocalSandbox] icacls grant timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`
+          )
+          try {
+            proc.kill()
+          } catch {
+            /* already exited */
+          }
+          resolve()
+        }, LocalSandbox.ICACLS_TIMEOUT_MS)
+        proc.on("exit", (code) => {
+          clearTimeout(timeoutId)
+          if (code !== 0) {
+            console.warn(`[LocalSandbox] icacls grant exited ${code} on ${dir}`)
+          }
+          resolve()
+        })
+        proc.on("error", (err) => {
+          clearTimeout(timeoutId)
+          console.warn(`[LocalSandbox] icacls grant error on ${dir}:`, err.message)
+          resolve()
+        })
       })
     })
   }
 
-  /** Remove the Everyone ACE added by grantSandboxWriteAcl. Only actually calls
-   *  icacls when the ref count drops to 0 (no other runs using this dir). */
-  private static revokeSandboxWriteAcl(dir: string): Promise<void> {
-    const key = normalizeDirKey(dir)
+  /** Best-effort removal of the Everyone ACE added by grantSandboxWriteAcl.
+   *  Only calls icacls when the ref count drops to 0 (no other runs use this
+   *  directory); timeout or failure is logged without blocking run cleanup. */
+  private static revokeSandboxWriteAcl(key: string, directoryPath: string): Promise<void> {
+    // Callers pass the canonical key stored in _runAclDirs. Normalizing that
+    // value again is not idempotent on non-Windows test hosts because its
+    // backslashes are treated as literal path characters by path.resolve().
     const count = LocalSandbox._grantedAclRefCount.get(key) ?? 0
     // Nothing to revoke if we never granted (or already revoked).
     if (count <= 0) {
@@ -5017,56 +6021,66 @@ export class LocalSandbox
       LocalSandbox._grantedAclRefCount.set(key, count - 1)
       return Promise.resolve()
     }
-    // count === 1 → last user, actually revoke
+    // count === 1 → last user, attempt the best-effort revoke
     LocalSandbox._grantedAclRefCount.delete(key)
-    return new Promise<void>((resolve) => {
-      const proc = spawn("icacls", [dir, "/remove:g", LocalSandbox.EVERYONE_SID], {
-        stdio: "ignore",
-        windowsHide: true
-      })
-      const timeoutId = setTimeout(() => {
-        console.warn(
-          `[LocalSandbox] icacls revoke timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`
-        )
-        try {
-          proc.kill()
-        } catch {
-          /* already exited */
-        }
-        resolve()
-      }, LocalSandbox.ICACLS_TIMEOUT_MS)
-      proc.on("exit", (code) => {
-        clearTimeout(timeoutId)
-        if (code !== 0) console.warn(`[LocalSandbox] icacls revoke exited ${code} on ${dir}`)
-        resolve()
-      })
-      proc.on("error", (err) => {
-        clearTimeout(timeoutId)
-        console.warn(`[LocalSandbox] icacls revoke error on ${dir}:`, err.message)
-        resolve()
-      })
-    })
+    return LocalSandbox.queueAclOsOperation(
+      key,
+      () =>
+        new Promise<void>((resolve) => {
+          const proc = spawn("icacls", [directoryPath, "/remove:g", LocalSandbox.EVERYONE_SID], {
+            stdio: "ignore",
+            windowsHide: true
+          })
+          const timeoutId = setTimeout(() => {
+            console.warn(
+              `[LocalSandbox] icacls revoke timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${directoryPath}, killing`
+            )
+            try {
+              proc.kill()
+            } catch {
+              /* already exited */
+            }
+            resolve()
+          }, LocalSandbox.ICACLS_TIMEOUT_MS)
+          proc.on("exit", (code) => {
+            clearTimeout(timeoutId)
+            if (code !== 0)
+              console.warn(`[LocalSandbox] icacls revoke exited ${code} on ${directoryPath}`)
+            resolve()
+          })
+          proc.on("error", (err) => {
+            clearTimeout(timeoutId)
+            console.warn(`[LocalSandbox] icacls revoke error on ${directoryPath}:`, err.message)
+            resolve()
+          })
+        })
+    )
   }
 
   /**
-   * Release ACL grants for a specific run. Decrements ref counts and only
-   * actually revokes the ACL when no other runs are using the directory.
+   * Release ACL ownership for a specific run. Decrements ref counts and makes
+   * a best-effort revoke attempt when no other runs are using the directory.
    * @param runId — the agent run that is ending.
    */
   static async revokeGrantedAclsForRun(runId: string): Promise<void> {
     const runDirs = LocalSandbox._runAclDirs.get(runId)
     if (!runDirs || runDirs.size === 0) {
       LocalSandbox._runAclDirs.delete(runId)
+      LocalSandbox._runAclDirectoryPaths.delete(runId)
       return
     }
-    const dirsToRevoke = [...runDirs].filter((key) => !LocalSandbox._permanentAclDirs.has(key))
+    const runDirectoryPaths = LocalSandbox._runAclDirectoryPaths.get(runId)
+    const dirsToRevoke = [...runDirs]
+      .filter((key) => !LocalSandbox._permanentAclDirs.has(key))
+      .map((key) => ({ key, directoryPath: runDirectoryPaths?.get(key) ?? key }))
     LocalSandbox._runAclDirs.delete(runId)
+    LocalSandbox._runAclDirectoryPaths.delete(runId)
     if (dirsToRevoke.length === 0) return
     console.log(
       `[LocalSandbox] revokeGrantedAclsForRun(${runId}): releasing ${dirsToRevoke.length} dirs`
     )
     await mapLimit(dirsToRevoke, LocalSandbox.ACL_OPERATION_CONCURRENCY, (dir) =>
-      LocalSandbox.revokeSandboxWriteAcl(dir)
+      LocalSandbox.revokeSandboxWriteAcl(dir.key, dir.directoryPath)
     )
   }
 
@@ -5472,15 +6486,23 @@ export class LocalSandbox
    * Windows: taskkill /T /F (tree kill), awaits completion.
    * Unix: SIGTERM the process group, escalate to SIGKILL after 200ms.
    */
-  private static async killTree(proc: ChildProcess, exited: () => boolean): Promise<void> {
+  private static async killTree(
+    proc: ChildProcess,
+    exited: () => boolean,
+    waitForProcessTree = false
+  ): Promise<void> {
     const pid = proc.pid
-    if (!pid || exited()) {
+    if (!pid || (!waitForProcessTree && exited())) {
       console.log(`[LocalSandbox] killTree: skip (pid=${pid}, exited=${exited()})`)
       return
     }
     console.log(`[LocalSandbox] killTree: killing pid=${pid}, platform=${process.platform}`)
 
     if (process.platform === "win32") {
+      // During application shutdown the shell leader may have emitted `exit`
+      // while descendants still own inherited handles. Keep the `/T` attempt
+      // when the caller explicitly requested a process-tree fence.
+      if (exited() && !waitForProcessTree) return
       await new Promise<void>((res) => {
         const killer = spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
           stdio: "ignore",
@@ -5492,6 +6514,16 @@ export class LocalSandbox
       return
     }
 
+    if (waitForProcessTree) {
+      // A worktree shell can exit successfully after launching a redirected
+      // child. Probe its process group so checkout teardown waits only when a
+      // descendant really remains. Ordinary commands keep their legacy timing.
+      try {
+        process.kill(-pid, 0)
+      } catch {
+        if (exited()) return
+      }
+    }
     try {
       console.log(`[LocalSandbox] killTree: SIGTERM → pid=${pid}`)
       process.kill(-pid, "SIGTERM")
@@ -5503,7 +6535,21 @@ export class LocalSandbox
       }
     }
     await new Promise<void>((res) => setTimeout(res, LocalSandbox.SIGKILL_TIMEOUT_MS))
-    if (!exited()) {
+    if (waitForProcessTree) {
+      // Leader exit is not proof that a redirected descendant has stopped.
+      try {
+        process.kill(-pid, "SIGKILL")
+        console.log(`[LocalSandbox] killTree: SIGKILL → process group ${pid}`)
+      } catch {
+        if (!exited()) {
+          try {
+            proc.kill("SIGKILL")
+          } catch {
+            /* already exited */
+          }
+        }
+      }
+    } else if (!exited()) {
       console.log(
         `[LocalSandbox] killTree: SIGKILL → pid=${pid} (not exited after ${LocalSandbox.SIGKILL_TIMEOUT_MS}ms)`
       )
@@ -5561,6 +6607,8 @@ export class LocalSandbox
       cwd: string
       startedAt: number
       completed: boolean
+      /** True only after executeRaw and any observed process-tree termination settle. */
+      settled: boolean
       outputChunks: string[]
       /** Live partial-output buffer, populated via onData while !completed. */
       partialOutput: string
@@ -5570,8 +6618,84 @@ export class LocalSandbox
       lastOutputAt: number
       abortController: AbortController
       result?: LocalExecuteResponse
+      /** Lifecycle fence: resolves after execution and any observed termination settle. */
+      completion?: Promise<void>
+      /** Physical process-tree termination reported by executeRaw after a kill. */
+      termination?: Promise<void>
     }
   >()
+  private static readonly pendingBackgroundTaskStarts = new Set<{
+    abortController: AbortController
+    settled: Promise<void>
+  }>()
+
+  private static beginBackgroundTaskStart(): {
+    abortController: AbortController
+    finish: () => void
+  } | null {
+    if (LocalSandbox.applicationShutdownStarted) return null
+
+    const abortController = new AbortController()
+    let resolveSettled!: () => void
+    const pending = {
+      abortController,
+      settled: new Promise<void>((resolve) => {
+        resolveSettled = resolve
+      })
+    }
+    LocalSandbox.pendingBackgroundTaskStarts.add(pending)
+
+    let finished = false
+    return {
+      abortController,
+      finish: () => {
+        if (finished) return
+        finished = true
+        LocalSandbox.pendingBackgroundTaskStarts.delete(pending)
+        resolveSettled()
+      }
+    }
+  }
+
+  private static backgroundStartCancelledMessage(): string {
+    return "Background task was not started because the application is shutting down."
+  }
+
+  private async requestHumanGateForExecute(
+    result: HookResult | null
+  ): Promise<{ release: () => void } | undefined> {
+    if (result?.decision !== "human_gate") return undefined
+    const fallbackReason = "decision=human_gate 仅支持当前项目绑定插件的 PreToolUse(execute) Hook"
+    if (
+      !this._requestHumanGate ||
+      !this.harnessProjectId ||
+      !this.featureId ||
+      !result.decisionSource?.hookId
+    ) {
+      throwIfHookHalt(
+        "PreToolUse",
+        {
+          ...result,
+          blocked: true,
+          continue: false,
+          stopReason: fallbackReason
+        },
+        fallbackReason
+      )
+      return undefined
+    }
+    return this._requestHumanGate({
+      projectId: this.harnessProjectId,
+      featureId: this.featureId,
+      threadId: this._humanGateThreadId,
+      runtimeThreadId: this.runId,
+      hookId: result.decisionSource.hookId,
+      hookPluginId: result.decisionSource.pluginId,
+      harnessPluginId: this.pluginId,
+      message: result.systemMessage ?? "",
+      abortSignal: this.abortSignal
+    })
+  }
 
   /**
    * Execute a command in the background — returns immediately with the task-output prompt.
@@ -5579,12 +6703,56 @@ export class LocalSandbox
    * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
   async executeBackground(command: string, cwd?: string): Promise<string> {
+    const pendingStart = LocalSandbox.beginBackgroundTaskStart()
+    if (!pendingStart) return LocalSandbox.backgroundStartCancelledMessage()
+    try {
+      return await this.executeBackgroundAfterStart(command, cwd, pendingStart.abortController)
+    } finally {
+      pendingStart.finish()
+    }
+  }
+
+  private async executeBackgroundAfterStart(
+    command: string,
+    cwd: string | undefined,
+    taskAbortController: AbortController
+  ): Promise<string> {
     const requestedCwd = this.resolveExecutionCwd(cwd)
-    const toolArgs = { command, run_in_background: true, cwd: requestedCwd }
+    const toolArgs = { command, run_in_background: true as const, cwd: requestedCwd }
     const preResult = await this.runPreToolUseHookForTool("execute", toolArgs)
+    if (taskAbortController.signal.aborted) {
+      return LocalSandbox.backgroundStartCancelledMessage()
+    }
     if (preResult?.blocked || preResult?.decision === "block") {
       return `[Hook blocked] ${preResult.stdout || preResult.reason || "execute was blocked by a hook"}`
     }
+    const humanGateLease = await this.requestHumanGateForExecute(preResult)
+    let leaseTransferred = false
+    try {
+      return await this.executeBackgroundAfterPreToolUse(
+        command,
+        requestedCwd,
+        toolArgs,
+        preResult,
+        taskAbortController,
+        (completion) => {
+          leaseTransferred = true
+          void completion.finally(humanGateLease?.release)
+        }
+      )
+    } finally {
+      if (!leaseTransferred) humanGateLease?.release()
+    }
+  }
+
+  private async executeBackgroundAfterPreToolUse(
+    command: string,
+    requestedCwd: string,
+    toolArgs: { command: string; run_in_background: true; cwd: string },
+    preResult: HookResult | null,
+    taskAbortController: AbortController,
+    transferHumanGateLease: (completion: Promise<void>) => void
+  ): Promise<string> {
     const updatedArgs = LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
     const effectiveCommand =
       typeof updatedArgs.command === "string" && updatedArgs.command.trim()
@@ -5598,10 +6766,27 @@ export class LocalSandbox
     if (cwdError) {
       return `Error: ${cwdError}`
     }
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
+    if (taskAbortController.signal.aborted) {
+      return LocalSandbox.backgroundStartCancelledMessage()
+    }
+    const worktreeViolation = this.worktreeIsolation
+      ? getWorktreeShellIsolationViolation(
+          effectiveCommand,
+          effectiveCwd,
+          this.worktreeIsolation,
+          this.worktreeAdditionalExecutionRoots(effectiveCwd),
+          shellSyntax
+        )
+      : null
+    if (worktreeViolation) return `Command forbidden: ${worktreeViolation}`
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
-      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      nativeGitWorktree: Boolean(this.worktreeIsolation),
+      shellSyntax
     })
     if (safety.level === "forbidden") {
       return `Command forbidden: ${safety.reason}`
@@ -5626,24 +6811,46 @@ export class LocalSandbox
       return "execute blocked: this is a read-only agent — reading sensitive credential directories (~/.ssh, ~/.aws, ~/.kube, ~/.gnupg, …) is not allowed."
     }
 
-    // git commit / git push must go through the foreground orchestrator path (task-card
-    // dialog for commit; workspace:pushWorktree for push). Backgrounding them would skip
-    // that and re-introduce the sandbox credential-prompt timeout, so run synchronously
-    // through the orchestrator and return the outcome.
+    // Preserve the pre-worktree behavior for ordinary commit/push commands. They
+    // predate worktree isolation and may open an interactive task-card flow; this
+    // feature must not silently change their return shape.
     if (
       this.orchestrator &&
-      (isGitCommitCommand(effectiveCommand) || isGitPushCommand(effectiveCommand))
+      !this.worktreeIsolation &&
+      (isGitCommitCommand(effectiveCommand, shellSyntax) ||
+        isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
       const result = await this.orchestrator.execute(
         effectiveCommand,
         effectiveCwd,
-        this.windowsSandbox
+        this.windowsSandbox,
+        shellSyntax,
+        outsideShellSyntax
       )
+      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+        this.markHarnessStageAttributionDirty()
+      }
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
 
+    // Worktree Git mutations are deliberately foreground-only. Native Git may
+    // update the linked index/branch immediately before the agent settles; keeping
+    // those transitions attached to the tool call prevents lifecycle inspection
+    // from racing a detached add/commit/push. Long builds/tests remain background-capable.
+    if (
+      this.worktreeIsolation &&
+      (containsGitAddCommand(effectiveCommand) || isGitCommitCommand(effectiveCommand))
+    ) {
+      return "Command forbidden: isolated worktree Git staging and commits must run in the foreground; retry without run_in_background"
+    }
+    if (this.worktreeIsolation && isGitPushCommand(effectiveCommand)) {
+      return "Command forbidden: isolated worktree pushes must run in the foreground for explicit approval"
+    }
+
+    if (taskAbortController.signal.aborted) {
+      return LocalSandbox.backgroundStartCancelledMessage()
+    }
     const taskId = randomUUID().slice(0, 8)
-    const taskAbortController = new AbortController()
     const task = {
       id: taskId,
       threadId: this.runId,
@@ -5651,19 +6858,25 @@ export class LocalSandbox
       cwd: effectiveCwd,
       startedAt: Date.now(),
       completed: false as boolean,
+      settled: false,
       outputChunks: [] as string[],
       partialOutput: "",
       partialTruncated: false,
       lastOutputAt: Date.now(),
       abortController: taskAbortController,
-      result: undefined as LocalExecuteResponse | undefined
+      result: undefined as LocalExecuteResponse | undefined,
+      completion: undefined as Promise<void> | undefined,
+      termination: undefined as Promise<void> | undefined
     }
     LocalSandbox.backgroundTasks.set(taskId, task)
+    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+      this.markHarnessStageAttributionDirty()
+    }
 
     // Fire and forget — don't await. Uses extended timeout for background execution.
     // Background tasks use their own AbortController (not the conversation's abortSignal)
     // so they survive conversation switches but can still be cancelled explicitly.
-    this.executeRaw(
+    const completion = this.executeRaw(
       effectiveCommand,
       undefined,
       LocalSandbox.BACKGROUND_ABSOLUTE_MAX_MS,
@@ -5688,6 +6901,16 @@ export class LocalSandbox
           } else {
             task.partialOutput += text
           }
+        },
+        // Cancellation/timeout must settle the whole process tree before any
+        // thread-owned data can be deleted, regardless of worktree isolation.
+        waitForProcessTree: true,
+        // Capture the physical kill/descendant-drain promise for every background
+        // task, not only worktree-isolated ones. `completed` may become true as
+        // soon as cancellation publishes an exit-130 result, while the process
+        // tree is still unwinding.
+        onTermination: (termination: Promise<void>) => {
+          task.termination = termination
         }
       }
     )
@@ -5705,7 +6928,8 @@ export class LocalSandbox
                 effectiveCommand,
                 effectiveCwd,
                 this.windowsSandbox,
-                rawResult
+                rawResult,
+                outsideShellSyntax
               )
               .catch((err) => {
                 console.warn(
@@ -5717,25 +6941,22 @@ export class LocalSandbox
           : rawResult
         if (task.completed) return
         task.result = result
+        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+          this.markHarnessStageAttributionDirty()
+        }
         // Append final output to chunks for completeness
         if (result.output) task.outputChunks.push(result.output)
         task.completed = true
         console.log(
           `[LocalSandbox] background task ${taskId} completed: exitCode=${result.exitCode}`
         )
-        // Auto-cleanup completed tasks after 10 minutes to prevent memory leaks.
-        // The agent has plenty of time to poll for the result before it expires.
-        setTimeout(
-          () => {
-            LocalSandbox.backgroundTasks.delete(taskId)
-            console.log(`[LocalSandbox] background task ${taskId} expired, cleaned up`)
-          },
-          10 * 60 * 1000
-        )
       })
       .catch((err) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
         if (task.completed) return
+        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+          this.markHarnessStageAttributionDirty()
+        }
         task.result = {
           output: `Error: ${err instanceof Error ? err.message : String(err)}`,
           exitCode: 1,
@@ -5743,13 +6964,31 @@ export class LocalSandbox
         }
         task.completed = true
         console.log(`[LocalSandbox] background task ${taskId} errored: ${err}`)
-        setTimeout(
+      })
+      .finally(async () => {
+        // executeRaw can resolve before a platform-specific process-tree kill
+        // promise settles. Keep destructive-operation guards closed until both
+        // ownership signals have reached a terminal state.
+        await task.termination?.catch(() => undefined)
+        task.settled = true
+
+        // Keep the result available for task_output, but never expire the only
+        // ownership record before the command is deletion-safe. Checking object
+        // identity also prevents a rare reused task id from deleting its successor.
+        const expiryTimer = setTimeout(
           () => {
+            if (LocalSandbox.backgroundTasks.get(taskId) !== task) return
             LocalSandbox.backgroundTasks.delete(taskId)
+            console.log(`[LocalSandbox] background task ${taskId} expired, cleaned up`)
           },
           10 * 60 * 1000
         )
+        expiryTimer.unref?.()
       })
+    transferHumanGateLease(completion)
+    // Always retain completion. Ordinary (non-worktree) background commands
+    // also need a deletion-safe ownership fence after cancellation.
+    task.completion = completion
 
     const startedMessage = `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
     try {
@@ -5819,10 +7058,56 @@ export class LocalSandbox
    * Called when the user explicitly stops the current conversation.
    */
   static cancelBackgroundTasks(threadId: string): void {
+    LocalSandbox.cancelBackgroundTasksForThread(threadId)
+  }
+
+  /**
+   * Read-only ownership check for detached commands that outlive their foreground
+   * agent turn. A completed result may already be visible through task_output while
+   * its physical process tree is still settling, so only `settled` makes it idle.
+   */
+  static hasActiveBackgroundTasks(threadId: string): boolean {
+    for (const task of LocalSandbox.backgroundTasks.values()) {
+      if (task.threadId === threadId && !task.settled) return true
+    }
+    return false
+  }
+
+  /** Workflow worktree teardown must not inspect/delete a checkout while one of
+   * its background commands is still unwinding. Ordinary callers may keep using
+   * the void wrapper above; lifecycle cleanup awaits this stronger variant. */
+  static async cancelBackgroundTasksAndWait(threadId: string): Promise<void> {
+    const completions = LocalSandbox.cancelBackgroundTasksForThread(threadId)
+    await Promise.allSettled(completions)
+  }
+
+  /** Prevent late background starts, cancel every detached task, and wait bounded. */
+  static async cancelAllBackgroundTasksAndWait(timeoutMs = 5_000): Promise<boolean> {
+    LocalSandbox.beginApplicationShutdown()
+    const pendingStarts = Array.from(LocalSandbox.pendingBackgroundTaskStarts)
+    for (const pending of pendingStarts) {
+      pending.abortController.abort()
+    }
+    const completions = LocalSandbox.cancelBackgroundTasksForThread()
+    const settled = await LocalSandbox.waitForPromisesWithin(
+      [...pendingStarts.map((pending) => pending.settled), ...completions],
+      timeoutMs
+    )
+    if (!settled) {
+      console.warn(
+        `[LocalSandbox] Timed out waiting for ${pendingStarts.length} pending start(s) and detached task cleanup during shutdown`
+      )
+    }
+    return settled
+  }
+
+  private static cancelBackgroundTasksForThread(threadId?: string): Promise<void>[] {
+    const completions: Promise<void>[] = []
     for (const [taskId, task] of LocalSandbox.backgroundTasks) {
-      if (task.threadId === threadId && !task.completed) {
+      if (threadId !== undefined && task.threadId !== threadId) continue
+      if (!task.completed) {
         console.log(
-          `[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${threadId}`
+          `[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${task.threadId}`
         )
         task.abortController.abort()
         // Mark as completed immediately to prevent zombie entries if the
@@ -5833,16 +7118,11 @@ export class LocalSandbox
           exitCode: 130,
           truncated: false
         }
-        // Schedule cleanup (mirrors the auto-cleanup in the normal completion path).
-        setTimeout(
-          () => {
-            LocalSandbox.backgroundTasks.delete(taskId)
-            console.log(`[LocalSandbox] cancelled background task ${taskId} expired, cleaned up`)
-          },
-          10 * 60 * 1000
-        )
       }
+      if (task.termination) completions.push(task.termination)
+      if (task.completion) completions.push(task.completion)
     }
+    return completions
   }
 
   async execute(command: string, cwd?: string): Promise<ExecuteResponse> {
@@ -5869,6 +7149,20 @@ export class LocalSandbox
         truncated: false
       }
     }
+    const humanGateLease = await this.requestHumanGateForExecute(preResult)
+    try {
+      return await this.executeAfterPreToolUse(command, requestedCwd, requestedArgs, preResult)
+    } finally {
+      humanGateLease?.release()
+    }
+  }
+
+  private async executeAfterPreToolUse(
+    command: string,
+    requestedCwd: string,
+    requestedArgs: { command: string; cwd: string },
+    preResult: HookResult | null
+  ): Promise<ExecuteResponse> {
     const updatedArgs = LocalSandbox.mergeUpdatedInput(requestedArgs, preResult?.updatedInput)
     const effectiveCommand =
       typeof updatedArgs.command === "string" && updatedArgs.command.trim()
@@ -5886,12 +7180,32 @@ export class LocalSandbox
         truncated: false
       }
     }
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const worktreeViolation = this.worktreeIsolation
+      ? getWorktreeShellIsolationViolation(
+          effectiveCommand,
+          effectiveCwd,
+          this.worktreeIsolation,
+          this.worktreeAdditionalExecutionRoots(effectiveCwd),
+          shellSyntax
+        )
+      : null
+    if (worktreeViolation) {
+      return {
+        output: `Command forbidden: ${worktreeViolation}`,
+        exitCode: 1,
+        truncated: false
+      }
+    }
 
     // Always check forbidden commands, even without orchestrator (YOLO mode safety net)
+    const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
-      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      nativeGitWorktree: Boolean(this.worktreeIsolation),
+      shellSyntax
     })
     if (safety.level === "forbidden") {
       console.log(`[LocalSandbox] execute: FORBIDDEN — ${safety.reason}`)
@@ -5940,8 +7254,13 @@ export class LocalSandbox
       const result = await this.orchestrator.execute(
         effectiveCommand,
         effectiveCwd,
-        this.windowsSandbox
+        this.windowsSandbox,
+        shellSyntax,
+        outsideShellSyntax
       )
+      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+        this.markHarnessStageAttributionDirty()
+      }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
       recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
@@ -5958,6 +7277,9 @@ export class LocalSandbox
     const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
       cwd: effectiveCwd
     })
+    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+      this.markHarnessStageAttributionDirty()
+    }
     recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
@@ -6102,7 +7424,22 @@ export class LocalSandbox
           `[HarnessMode][LocalSandbox] project plugin hook sandbox bypass check: allowed=${shouldBypassSandboxForProjectPluginHook} mode=${effectiveSandboxMode} pluginRoot="${this.pluginRoot}"`
         )
       }
-      if (shouldBypassSandboxForProjectPluginHook) {
+      if (shouldBypassSandboxForProjectPluginHook && !this.worktreeIsolation) {
+        const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
+        const outsideSafety = assessCommandSafety(command, effectiveCwd, {
+          shellSyntax: outsideShellSyntax
+        })
+        if (
+          outsideSafety.level === "forbidden" ||
+          isGitCommitCommand(command, outsideShellSyntax) ||
+          isGitPushCommand(command, outsideShellSyntax)
+        ) {
+          return {
+            output: `Command forbidden after project-hook shell change: ${outsideSafety.reason || "Git submit commands must use the orchestrated workflow"}`,
+            exitCode: 1,
+            truncated: false
+          }
+        }
         return this.executeRawUnserialized(
           command,
           "none",
@@ -6197,7 +7534,28 @@ export class LocalSandbox
       }
     }
 
-    if (process.platform !== "win32" || effectiveSandboxMode === "none" || backgroundExecution) {
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(effectiveSandboxMode)
+    const worktreeViolation = this.worktreeIsolation
+      ? getWorktreeShellIsolationViolation(
+          command,
+          effectiveCwd,
+          this.worktreeIsolation,
+          this.worktreeAdditionalExecutionRoots(effectiveCwd),
+          shellSyntax
+        )
+      : null
+    if (worktreeViolation) {
+      return {
+        output: `Command forbidden: ${worktreeViolation}`,
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    if (
+      process.platform !== "win32" ||
+      effectiveSandboxMode === "none" ||
+      (backgroundExecution && !this.worktreeIsolation)
+    ) {
       return this.executeRawUnserialized(
         command,
         sandboxModeOverride,
@@ -6304,6 +7662,25 @@ export class LocalSandbox
       effectiveMode,
       sandboxCacheRoots
     )
+    const runScopedWritableRootKeys = new Set<string>()
+    if (
+      this.worktreeIsolation &&
+      (effectiveMode === "elevated" || effectiveMode === "unelevated")
+    ) {
+      // Linked-worktree Git writes index/object/ref administration under the
+      // repository commonDir, outside the checkout directory. Native add/commit
+      // therefore require that shared Git metadata directory to be writable by
+      // the trusted agent process. This is not a Git-only OS permission or a hard
+      // security boundary; the source working tree itself is still not added to
+      // the OS sandbox's writable roots.
+      const commonDir = path.win32.normalize(this.worktreeIsolation.commonDir)
+      executionPlan.writableRoots.push(commonDir)
+      // Unlike app-owned package caches, a user's shared Git directory should not
+      // retain an Everyone:Modify ACE after this workflow agent exits. Run-level
+      // reference counting keeps concurrent agents working; the final owner
+      // normally triggers a best-effort revoke, with failures logged.
+      runScopedWritableRootKeys.add(normalizeDirKey(commonDir))
+    }
     executionPlan.writableRoots = Array.from(
       new Set(executionPlan.writableRoots.map((dir) => path.win32.normalize(dir)))
     )
@@ -6392,11 +7769,23 @@ export class LocalSandbox
     // SEC_E_NO_CREDENTIALS even for public HTTPS repos. OpenSSL does not use the Windows
     // Security API and works correctly under restricted tokens.
     // GIT_CONFIG_COUNT/KEY/VALUE injects git config for this invocation only (git ≥ 2.31).
+    const sandboxGitConfigEntries: Array<readonly [string, string]> = [
+      ["http.sslBackend", "openssl"],
+      ["safe.directory", "*"]
+    ]
+    const worktreeExcludesFile = this.env[WORKTREE_INTERNAL_EXCLUDES_ENV]
+    if (worktreeExcludesFile) {
+      sandboxGitConfigEntries.push(["core.excludesFile", worktreeExcludesFile])
+    }
+    const sandboxGitConfigPreamble = gitConfigEnvironmentPreamble(
+      shellBase,
+      sandboxGitConfigEntries
+    )
     const clearProxyPreamble =
       !isElevatedSandbox && effectiveMode !== "none"
         ? shellBase === "cmd"
-          ? 'set "HTTP_PROXY=" & set "HTTPS_PROXY=" & set "ALL_PROXY=" & set "GIT_HTTP_PROXY=" & set "GIT_HTTPS_PROXY=" & set "GIT_SSH_COMMAND=" & set "GIT_ALLOW_PROTOCOLS=" & set "PIP_NO_INDEX=" & set "NPM_CONFIG_OFFLINE=" & set "CARGO_NET_OFFLINE=" & set "SBX_NONET_ACTIVE=" & set "GIT_CONFIG_COUNT=2" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl" & set "GIT_CONFIG_KEY_1=safe.directory" & set "GIT_CONFIG_VALUE_1=*"'
-          : "$env:HTTP_PROXY=$null; $env:HTTPS_PROXY=$null; $env:ALL_PROXY=$null; $env:GIT_HTTP_PROXY=$null; $env:GIT_HTTPS_PROXY=$null; $env:GIT_SSH_COMMAND=$null; $env:GIT_ALLOW_PROTOCOLS=$null; $env:PIP_NO_INDEX=$null; $env:NPM_CONFIG_OFFLINE=$null; $env:CARGO_NET_OFFLINE=$null; $env:SBX_NONET_ACTIVE=$null; $env:GIT_CONFIG_COUNT='2'; $env:GIT_CONFIG_KEY_0='http.sslBackend'; $env:GIT_CONFIG_VALUE_0='openssl'; $env:GIT_CONFIG_KEY_1='safe.directory'; $env:GIT_CONFIG_VALUE_1='*'"
+          ? `set "HTTP_PROXY=" & set "HTTPS_PROXY=" & set "ALL_PROXY=" & set "GIT_HTTP_PROXY=" & set "GIT_HTTPS_PROXY=" & set "GIT_SSH_COMMAND=" & set "GIT_ALLOW_PROTOCOLS=" & set "PIP_NO_INDEX=" & set "NPM_CONFIG_OFFLINE=" & set "CARGO_NET_OFFLINE=" & set "SBX_NONET_ACTIVE=" & ${sandboxGitConfigPreamble}`
+          : `$env:HTTP_PROXY=$null; $env:HTTPS_PROXY=$null; $env:ALL_PROXY=$null; $env:GIT_HTTP_PROXY=$null; $env:GIT_HTTPS_PROXY=$null; $env:GIT_SSH_COMMAND=$null; $env:GIT_ALLOW_PROTOCOLS=$null; $env:PIP_NO_INDEX=$null; $env:NPM_CONFIG_OFFLINE=$null; $env:CARGO_NET_OFFLINE=$null; $env:SBX_NONET_ACTIVE=$null; ${sandboxGitConfigPreamble}`
         : ""
     // Unelevated sandbox: set shared tool env vars to the persistent writable cache root.
     const unelevatedJvmPreamble =
@@ -6429,7 +7818,6 @@ export class LocalSandbox
       executionCwd,
       sandboxWorkspaceRoot
     )
-
     const isReadonly = effectiveMode === "readonly"
     const elevated = isReadonly ? await LocalSandbox.getElevationState() : false
 
@@ -6526,11 +7914,13 @@ export class LocalSandbox
         new Set([...sandboxCacheDirs, ...executionPlan.writableRoots])
       )) {
         const cacheKey = normalizeDirKey(cachePath)
-        let permanentAcl = true
-        try {
-          permanentAcl = (await fs.stat(cachePath)).isDirectory()
-        } catch {
-          permanentAcl = true
+        let permanentAcl = !runScopedWritableRootKeys.has(cacheKey)
+        if (permanentAcl) {
+          try {
+            permanentAcl = (await fs.stat(cachePath)).isDirectory()
+          } catch {
+            permanentAcl = true
+          }
         }
         if (!permanentAcl || !LocalSandbox._permanentAclDirs.has(cacheKey)) {
           aclDirs.push(cachePath)
@@ -6541,7 +7931,7 @@ export class LocalSandbox
       }
       const aclGrantStart = Date.now()
       await mapLimit(aclDirs, LocalSandbox.ACL_OPERATION_CONCURRENCY, (dir) =>
-        LocalSandbox.grantSandboxWriteAcl(dir, this.runId)
+        LocalSandbox.grantSandboxWriteAcl(dir, this.aclOwnerId)
       )
       console.log(
         `[LocalSandbox] ACL grant took ${Date.now() - aclGrantStart}ms for ${aclDirs.length} dirs`
@@ -6567,6 +7957,8 @@ export class LocalSandbox
         let timedOut = false
         let aborted = false
         let drainTimerId: ReturnType<typeof setTimeout> | null = null
+        const stdoutLiveDecoder = options?.onData ? this.createShellOutputDecoder(true) : null
+        const stderrLiveDecoder = options?.onData ? this.createShellOutputDecoder(true) : null
 
         if (effectiveAbortSignal?.aborted) {
           resolve(LocalSandbox.createAbortedExecuteResponse())
@@ -6591,9 +7983,14 @@ export class LocalSandbox
           )
         }
         LocalSandbox.activeProcesses.add(proc)
-
+        let termination: Promise<void> | undefined
         const killProc = (): void => {
-          void LocalSandbox.killTree(proc, () => exited)
+          termination ??= LocalSandbox.terminateProcessTree(
+            proc,
+            () => exited,
+            options?.waitForProcessTree === true
+          )
+          options?.onTermination?.(termination)
         }
 
         const cmdTimeout = timeoutMs ?? this.timeout
@@ -6638,13 +8035,7 @@ export class LocalSandbox
             stdoutChunks.push(chunk)
             totalBytes += chunk.length
           }
-          // Live preview: per-chunk utf8 decode is acceptable here; the final
-          // authoritative output still uses detectCmdEncoding below.
-          try {
-            options?.onData?.(chunk.toString("utf8"))
-          } catch {
-            /* never let the live preview interfere with resolution */
-          }
+          this.emitLiveOutput(stdoutLiveDecoder, chunk, options?.onData)
         })
 
         proc.stderr?.on("data", (chunk: Buffer) => {
@@ -6658,11 +8049,7 @@ export class LocalSandbox
             stderrChunks.push(chunk)
             totalBytes += chunk.length
           }
-          try {
-            options?.onData?.(chunk.toString("utf8"))
-          } catch {
-            /* never let the live preview interfere with resolution */
-          }
+          this.emitLiveOutput(stderrLiveDecoder, chunk, options?.onData)
         })
 
         const collectAndResolve = (code: number | null, signal: string | null): void => {
@@ -6687,17 +8074,14 @@ export class LocalSandbox
             if (effectiveAbortSignal)
               effectiveAbortSignal.removeEventListener("abort", abortHandler)
 
-            const stdoutBuf = Buffer.concat(stdoutChunks)
-            const stderrBuf = Buffer.concat(stderrChunks)
-            const enc = this.detectCmdEncoding(
-              LocalSandbox.encodingDetectionBuffer(stdoutBuf, stderrBuf)
-            )
+            this.endLiveOutput([stdoutLiveDecoder, stderrLiveDecoder], options?.onData)
+            const stdoutText = this.decodeShellOutputChunks(stdoutChunks, true)
+            const stderrText = this.decodeShellOutputChunks(stderrChunks, true)
 
             let output = ""
-            if (stdoutBuf.length > 0) output += iconv.decode(stdoutBuf, enc)
-            if (stderrBuf.length > 0) {
-              const errText = iconv
-                .decode(stderrBuf, enc)
+            if (stdoutText.length > 0) output += stdoutText
+            if (stderrText.length > 0) {
+              const errText = stderrText
                 .split("\n")
                 .filter((line) => line.length > 0)
                 .map((line) => `[stderr] ${line}`)
@@ -6780,6 +8164,7 @@ export class LocalSandbox
           if (drainTimerId) clearTimeout(drainTimerId)
           if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
           if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
+          this.endLiveOutput([stdoutLiveDecoder, stderrLiveDecoder], options?.onData)
 
           const errno = err as NodeJS.ErrnoException
           if (errno.code === "EPERM" && attempt <= LocalSandbox.SPAWN_RETRY_COUNT) {
@@ -6927,24 +8312,40 @@ export class LocalSandbox
         ? LocalSandbox.buildInteractiveGitEnv(this.env)
         : this.env
 
-      const proc = isBashOnWin
-        ? spawn(shell, [], {
+      const useWindowsBackgroundJob = isWindows && options?.background === true
+      const windowsBackgroundShellKind = isBashOnWin
+        ? "stdin"
+        : ["powershell", "pwsh"].includes(shellBase)
+          ? "powershell"
+          : shellBase === "cmd"
+            ? "cmd"
+            : "stdin"
+      const proc = useWindowsBackgroundJob
+        ? spawn(resolveWindowsBackgroundJobControllerPath(), [shell, windowsBackgroundShellKind], {
             cwd: effectiveCwd,
             env: spawnEnv,
             stdio: ["pipe", "pipe", "pipe"],
             detached: false,
             windowsHide: !allowInteractiveGitAuth
           })
-        : spawn(command, {
-            shell,
-            cwd: effectiveCwd,
-            env: spawnEnv,
-            stdio: ["ignore", "pipe", "pipe"],
-            detached: !isWindows,
-            windowsHide: !allowInteractiveGitAuth
-          })
+        : isBashOnWin
+          ? spawn(shell, [], {
+              cwd: effectiveCwd,
+              env: spawnEnv,
+              stdio: ["pipe", "pipe", "pipe"],
+              detached: false,
+              windowsHide: !allowInteractiveGitAuth
+            })
+          : spawn(command, {
+              shell,
+              cwd: effectiveCwd,
+              env: spawnEnv,
+              stdio: ["ignore", "pipe", "pipe"],
+              detached: !isWindows,
+              windowsHide: !allowInteractiveGitAuth
+            })
 
-      if (isBashOnWin && proc.stdin) {
+      if ((isBashOnWin || useWindowsBackgroundJob) && proc.stdin) {
         proc.stdin.on("error", () => {
           /* swallow: proc 'error'/'close' handles it */
         })
@@ -6965,9 +8366,17 @@ export class LocalSandbox
       let aborted = false
       /** After kill, if close doesn't fire within 2s, force-resolve (like Codex IO_DRAIN_TIMEOUT). */
       let drainTimerId: ReturnType<typeof setTimeout> | null = null
+      const stdoutLiveDecoder = options?.onData ? this.createShellOutputDecoder(isWindows) : null
+      const stderrLiveDecoder = options?.onData ? this.createShellOutputDecoder(isWindows) : null
 
+      let termination: Promise<void> | undefined
       const killProc = (): void => {
-        void LocalSandbox.killTree(proc, () => exited)
+        termination ??= LocalSandbox.terminateProcessTree(
+          proc,
+          () => exited,
+          options?.waitForProcessTree === true
+        )
+        options?.onTermination?.(termination)
       }
 
       const cmdTimeout = timeoutMs ?? this.timeout
@@ -7002,13 +8411,7 @@ export class LocalSandbox
             `[LocalSandbox] first data at +${firstDataAt - onceStartMs}ms pid=${proc.pid}`
           )
         }
-        // Live preview before the byte-cap short-circuit: per-chunk utf8 decode
-        // is acceptable; the final authoritative output uses encoding detection.
-        try {
-          options?.onData?.(chunk.toString("utf8"))
-        } catch {
-          /* never let the live preview interfere with resolution */
-        }
+        this.emitLiveOutput(stdoutLiveDecoder, chunk, options?.onData)
         if (byteCapReached) return
         stdoutChunks.push(chunk)
         totalBytes += chunk.length
@@ -7022,11 +8425,7 @@ export class LocalSandbox
             `[LocalSandbox] first data at +${firstDataAt - onceStartMs}ms pid=${proc.pid}`
           )
         }
-        try {
-          options?.onData?.(chunk.toString("utf8"))
-        } catch {
-          /* never let the live preview interfere with resolution */
-        }
+        this.emitLiveOutput(stderrLiveDecoder, chunk, options?.onData)
         if (byteCapReached) return
         stderrChunks.push(chunk)
         totalBytes += chunk.length
@@ -7052,24 +8451,13 @@ export class LocalSandbox
           if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
           if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
 
-          const stdoutBuf = Buffer.concat(stdoutChunks)
-          const stderrBuf = Buffer.concat(stderrChunks)
-
-          // On Windows, Git Bash via pipe may convert UTF-8 to the system code
-          // page (e.g. GBK/CP936) despite LANG=C.UTF-8, because MSYS2's
-          // character conversion layer uses the Windows ANSI code page for
-          // non-pty file descriptors. Detect the actual encoding from the
-          // output buffer so CJK characters are decoded correctly.
-          const enc = isWindows
-            ? this.detectCmdEncoding(LocalSandbox.encodingDetectionBuffer(stdoutBuf, stderrBuf))
-            : "utf-8"
+          this.endLiveOutput([stdoutLiveDecoder, stderrLiveDecoder], options?.onData)
+          const stdoutText = this.decodeShellOutputChunks(stdoutChunks, isWindows)
+          const stderrText = this.decodeShellOutputChunks(stderrChunks, isWindows)
 
           let output = ""
-          if (stdoutBuf.length > 0) {
-            output += iconv.decode(stdoutBuf, enc)
-          }
-          if (stderrBuf.length > 0) {
-            const stderrText = iconv.decode(stderrBuf, enc)
+          if (stdoutText.length > 0) output += stdoutText
+          if (stderrText.length > 0) {
             const prefixed = stderrText
               .split("\n")
               .filter((line) => line.length > 0)
@@ -7111,7 +8499,7 @@ export class LocalSandbox
             resolve({ output, exitCode: signal ? null : code, truncated })
           }
         } catch (err) {
-          // Encoding detection or iconv.decode can throw on unusual binary output.
+          // Encoding detection or incremental decoding can throw on unusual binary output.
           // Ensure the promise always resolves — a stuck promise means the UI hangs on RUNNING forever.
           console.error(`[LocalSandbox] collectAndResolve error: pid=${proc.pid}`, err)
           resolved = true
@@ -7148,6 +8536,17 @@ export class LocalSandbox
           `[LocalSandbox] event=close pid=${proc.pid} code=${code} signal=${signal} at +${Date.now() - onceStartMs}ms resolved=${resolved}`
         )
         exited = true
+        if (
+          options?.background === true &&
+          this.worktreeIsolation &&
+          !aborted &&
+          !timedOut &&
+          !isWindows
+        ) {
+          killProc()
+          void termination?.finally(() => collectAndResolve(code, signal as string | null))
+          return
+        }
         collectAndResolve(code, signal as string | null)
       })
 
@@ -7163,6 +8562,7 @@ export class LocalSandbox
         if (drainTimerId) clearTimeout(drainTimerId)
         if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
         if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
+        this.endLiveOutput([stdoutLiveDecoder, stderrLiveDecoder], options?.onData)
         resolve({
           output: `Error: Failed to execute command: ${err.message}`,
           exitCode: 1,

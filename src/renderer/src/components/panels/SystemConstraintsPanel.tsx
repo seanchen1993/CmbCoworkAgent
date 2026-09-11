@@ -172,7 +172,7 @@ export function SystemConstraintsPanel({
     void openSystemConstraintPath(path)
   }, [])
 
-  if (!state || total === 0) {
+  if (!state || (total === 0 && !promptPreview)) {
     return (
       <div className="flex flex-col items-center justify-center px-4 py-8 text-center text-sm text-muted-foreground">
         <FileText className="mb-2 size-8 opacity-50" />
@@ -225,6 +225,11 @@ export function SystemConstraintsPanel({
       )}
 
       <div className="space-y-3">
+        {groupedItems.length === 0 && (
+          <div className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-muted-foreground">
+            本次会话没有 AGENTS.md 加载明细
+          </div>
+        )}
         {groupedItems.map(([deployUnitId, items]) => (
           <div key={deployUnitId} className="rounded-lg border border-border/70 bg-background/80">
             <div className="border-b border-border/60 px-3 py-2 font-mono text-[11px] font-semibold text-foreground/80">

@@ -12,6 +12,8 @@ export interface GoalNoticeEvent {
   active_window_id?: string | null
   message: string
   created_at: Date | string | number
+  transcript_ordinal?: number | null
+  transcript_message_id?: string | null
 }
 
 function toTime(value: Date | string | number | null | undefined): number | null {

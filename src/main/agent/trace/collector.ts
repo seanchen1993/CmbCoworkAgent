@@ -14,24 +14,21 @@
  *   await tracer.finish("success")
  */
 
+import { createHash } from "crypto"
 import { join } from "path"
 import { homedir } from "os"
-import {
-  mkdirSync,
-  appendFileSync,
-  readdirSync,
-  readFileSync,
-  existsSync,
-  unlinkSync,
-  rmdirSync,
-  writeFileSync,
-  statSync
-} from "fs"
+import { lstat, opendir, readFile, rename, rmdir, unlink, writeFile } from "fs/promises"
 import { v4 as uuid } from "uuid"
 import type {
   AgentTrace,
+  TraceContext,
+  TraceExecutionMode,
+  TraceHarnessFeatureContext,
+  TraceKind,
+  TraceObservabilityContext,
   TraceSkillEvalExtension,
   TraceStep,
+  TraceChatMessage,
   TraceToolCall,
   TraceModelCall,
   TraceNode,
@@ -41,8 +38,10 @@ import type {
   ITraceReporter,
   RoutingTrace
 } from "./types"
-import { NoopTraceReporter } from "./types"
-import { app } from "electron"
+import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
+import { hasSuspectedTechnicalDetailSupplement } from "./technical-detail-supplement"
+import { summarizeTraceCacheTokens } from "./token-usage"
+import { app, safeStorage } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
@@ -60,9 +59,28 @@ import {
   parsePluginSkillSourceRef,
   type PluginSkillSourceRef
 } from "../../utils/skill-source"
-import { setAdoptionContext, clearAdoptionContext } from "../../services/adoption-tracker"
+import {
+  setAdoptionContext,
+  clearAdoptionContext,
+  patchAdoptionContextForTrace
+} from "../../services/adoption-tracker"
+import { flushSystemConstraintReadSummaries } from "../../services/system-constraint-read-reporter"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
 import { buildSkillEvalTraceExtension } from "../skill-eval/documents"
+import {
+  getTraceLocalStorage,
+  type TraceKeyProtector,
+  type TraceStorageInitializationResult
+} from "./local-storage"
+import { TraceContentInterner, rehydrateTraceContent } from "./content-refs"
+import { TraceTailContentBuffer, tailKeys } from "./tail-buffer"
+import {
+  TRACE_COLLECTION_MAX_BYTES,
+  TRACE_PERSISTED_MAX_BYTES,
+  TraceCollectionBudget,
+  clampText,
+  truncateKeepingEnds
+} from "./bounds"
 import {
   appendSkillEvalWindowTurn,
   getSkillEvalWindowAssistantText,
@@ -74,6 +92,7 @@ import {
 // ─────────────────────────────────────────────────────────
 
 let _reporter: ITraceReporter = new NoopTraceReporter()
+const pendingTraceReports = new Set<Promise<void>>()
 
 /** Replace the global reporter (call at app startup for remote upload). */
 export function setTraceReporter(reporter: ITraceReporter): void {
@@ -82,6 +101,61 @@ export function setTraceReporter(reporter: ITraceReporter): void {
 
 export function getTraceReporter(): ITraceReporter {
   return _reporter
+}
+
+function reportTraceInBackground(trace: AgentTrace): void {
+  const reporter = _reporter
+  const reportTask = Promise.resolve()
+    // Rehydrate before sanitising. Deduplication exists to protect the
+    // collection budget and the local file; the cloud copy is bounded by the
+    // sanitiser's own limits instead. And the sanitiser's oversized path
+    // rebuilds model calls and nodes field by field, which would drop the
+    // pointers while keeping the emptied values — the upload would arrive with
+    // blank args and blank text wherever a value had been shared.
+    .then(() => reporter.report(sanitizeTraceForCloudUpload(rehydrateTraceContent(trace))))
+    .catch((error) => {
+      console.warn("[Tracer] Reporter.report() threw:", error)
+    })
+  pendingTraceReports.add(reportTask)
+  void reportTask.finally(() => {
+    pendingTraceReports.delete(reportTask)
+  })
+}
+
+export function hasPendingTraceReports(): boolean {
+  return pendingTraceReports.size > 0
+}
+
+/** Wait for reports already scheduled by completed traces, bounded for app shutdown. */
+export async function flushPendingTraceReports(timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+
+  while (pendingTraceReports.size > 0) {
+    const remainingMs = deadline - Date.now()
+    if (remainingMs <= 0) {
+      console.warn(
+        `[Tracer] Timed out waiting for ${pendingTraceReports.size} pending trace report(s)`
+      )
+      return false
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const completed = await Promise.race([
+      Promise.allSettled(Array.from(pendingTraceReports)).then(() => true as const),
+      new Promise<false>((resolve) => {
+        timeoutId = setTimeout(() => resolve(false), remainingMs)
+      })
+    ])
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+    if (!completed) {
+      console.warn(
+        `[Tracer] Timed out waiting for ${pendingTraceReports.size} pending trace report(s)`
+      )
+      return false
+    }
+  }
+
+  return true
 }
 
 // ─────────────────────────────────────────────────────────
@@ -101,38 +175,156 @@ function getThreadTracesDir(threadId: string): string {
 }
 
 const MAX_TRACES_PER_THREAD = 50
+const TRACE_WRITE_QUEUE_MAX_ITEMS = 16
+const TRACE_WRITE_QUEUE_MAX_BYTES = 8 * 1024 * 1024
+const TRACE_PRUNE_MAX_ENTRIES = 4_096
+const TRACE_IO_YIELD_INTERVAL = 128
+let traceStorageDisabledLogged = false
 
-function writeTraceFile(trace: AgentTrace): void {
+interface QueuedTraceWrite {
+  trace: AgentTrace
+  estimatedBytes: number
+}
+
+const traceWriteQueue: QueuedTraceWrite[] = []
+let traceWriteQueueBytes = 0
+let traceWriteQueueRunning = false
+let droppedTraceWrites = 0
+const traceWriteQueueWaiters: Array<() => void> = []
+
+function yieldTraceIo(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve))
+}
+
+function traceLocalStorage() {
+  return getTraceLocalStorage(getTracesRootDir(), safeStorage as TraceKeyProtector | undefined)
+}
+
+function notifyTraceWriteQueueIdle(): void {
+  if (traceWriteQueueRunning || traceWriteQueue.length > 0) return
+  for (const resolve of traceWriteQueueWaiters.splice(0)) resolve()
+}
+
+async function drainTraceWriteQueue(): Promise<void> {
+  if (traceWriteQueueRunning) return
+  traceWriteQueueRunning = true
   try {
-    const dir = getThreadTracesDir(trace.threadId)
-    mkdirSync(dir, { recursive: true })
-    const filePath = join(dir, `${trace.traceId}.jsonl`)
-    appendFileSync(filePath, JSON.stringify(trace) + "\n", "utf-8")
-    console.log(`[Tracer] Written trace ${trace.traceId} to ${filePath}`)
-    // Prune oldest traces if over the per-thread limit.
-    pruneOldTraces(trace.threadId)
-  } catch (e) {
-    console.warn("[Tracer] Failed to write trace file:", e)
+    while (traceWriteQueue.length > 0) {
+      const queued = traceWriteQueue.shift()
+      if (!queued) continue
+      await yieldTraceIo()
+      try {
+        const serialized = JSON.stringify(queued.trace)
+        if (Buffer.byteLength(serialized, "utf8") > TRACE_PERSISTED_MAX_BYTES) {
+          droppedTraceWrites += 1
+          continue
+        }
+        const storage = traceLocalStorage()
+        const filePath = join(
+          getThreadTracesDir(queued.trace.threadId),
+          `${queued.trace.traceId}.jsonl`
+        )
+        const written = await storage.appendJsonLine(filePath, serialized)
+        if (!written) {
+          if (!traceStorageDisabledLogged) {
+            traceStorageDisabledLogged = true
+            console.warn("[Tracer] Local trace persistence is disabled or over its byte budget")
+          }
+          continue
+        }
+        await pruneOldTraces(queued.trace.threadId)
+      } catch (error) {
+        droppedTraceWrites += 1
+        if (!traceStorageDisabledLogged) {
+          traceStorageDisabledLogged = true
+          console.warn(
+            `[Tracer] Trace was not persisted: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          )
+        }
+      } finally {
+        traceWriteQueueBytes = Math.max(0, traceWriteQueueBytes - queued.estimatedBytes)
+      }
+    }
+  } finally {
+    traceWriteQueueRunning = false
+    notifyTraceWriteQueueIdle()
   }
 }
 
+function writeTraceFile(trace: AgentTrace): boolean {
+  const estimatedBytes = TRACE_COLLECTION_MAX_BYTES
+  const queuedItems = traceWriteQueue.length + (traceWriteQueueRunning ? 1 : 0)
+  if (
+    queuedItems >= TRACE_WRITE_QUEUE_MAX_ITEMS ||
+    traceWriteQueueBytes + estimatedBytes > TRACE_WRITE_QUEUE_MAX_BYTES
+  ) {
+    droppedTraceWrites += 1
+    return false
+  }
+  traceWriteQueue.push({ trace, estimatedBytes })
+  traceWriteQueueBytes += estimatedBytes
+  void drainTraceWriteQueue()
+  return true
+}
+
+export function getTraceWriteQueueDiagnostics(): {
+  queuedItems: number
+  queuedBytes: number
+  droppedItems: number
+  maxItems: number
+  maxBytes: number
+} {
+  return {
+    queuedItems: traceWriteQueue.length + (traceWriteQueueRunning ? 1 : 0),
+    queuedBytes: traceWriteQueueBytes,
+    droppedItems: droppedTraceWrites,
+    maxItems: TRACE_WRITE_QUEUE_MAX_ITEMS,
+    maxBytes: TRACE_WRITE_QUEUE_MAX_BYTES
+  }
+}
+
+export async function flushTraceWriteQueue(): Promise<void> {
+  if (!traceWriteQueueRunning && traceWriteQueue.length === 0) return
+  await new Promise<void>((resolve) => traceWriteQueueWaiters.push(resolve))
+}
+
+export function parseStoredTraceLine(line: string): AgentTrace {
+  const plaintext = traceLocalStorage().decodeStoredLine(line)
+  return normalizeTrace(JSON.parse(plaintext) as AgentTrace)
+}
+
+/** Initialize encrypted trace storage and migrate legacy plaintext JSONL files. */
+export function initializeTraceStorageSecurity(): Promise<TraceStorageInitializationResult> {
+  return traceLocalStorage().initialize()
+}
+
 /** Delete the oldest trace files in a thread directory, keeping at most MAX_TRACES_PER_THREAD. */
-function pruneOldTraces(threadId: string): void {
+async function pruneOldTraces(threadId: string): Promise<void> {
   try {
     const dir = getThreadTracesDir(threadId)
-    if (!existsSync(dir)) return
-
-    const files = readdirSync(dir)
-      .filter((f) => f.endsWith(".jsonl"))
-      .map((name) => {
-        const filePath = join(dir, name)
-        try {
-          return { name, filePath, mtimeMs: statSync(filePath).mtimeMs }
-        } catch {
-          return null
-        }
-      })
-      .filter((e): e is { name: string; filePath: string; mtimeMs: number } => e !== null)
+    const files: Array<{ name: string; filePath: string; mtimeMs: number }> = []
+    let directory
+    try {
+      directory = await opendir(dir)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return
+      throw error
+    }
+    let scanned = 0
+    for await (const entry of directory) {
+      scanned += 1
+      if (scanned > TRACE_PRUNE_MAX_ENTRIES) break
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue
+      const filePath = join(dir, entry.name)
+      try {
+        files.push({ name: entry.name, filePath, mtimeMs: (await lstat(filePath)).mtimeMs })
+      } catch {
+        // File disappeared between directory enumeration and stat.
+      }
+      if (scanned % TRACE_IO_YIELD_INTERVAL === 0) await yieldTraceIo()
+    }
 
     if (files.length <= MAX_TRACES_PER_THREAD) return
 
@@ -142,8 +334,9 @@ function pruneOldTraces(threadId: string): void {
 
     for (const entry of toDelete) {
       try {
-        unlinkSync(entry.filePath)
-        console.log(`[Tracer] Pruned old trace: ${entry.name} (thread ${threadId})`)
+        await traceLocalStorage().runFileOperation(entry.filePath, async () => {
+          await unlink(entry.filePath)
+        })
       } catch (e) {
         console.warn(`[Tracer] Failed to prune trace ${entry.name}:`, e)
       }
@@ -156,6 +349,12 @@ function pruneOldTraces(threadId: string): void {
 function normalizeTrace(parsed: AgentTrace): AgentTrace {
   return {
     ...parsed,
+    observabilitySchemaVersion:
+      parsed.observabilitySchemaVersion ?? TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind: parsed.traceKind ?? "root",
+    executionMode: parsed.executionMode ?? "normal",
+    rootTraceId: parsed.rootTraceId ?? parsed.traceId,
+    rootThreadId: parsed.rootThreadId ?? parsed.threadId,
     usedSkills: Array.isArray(parsed.usedSkills) ? parsed.usedSkills : [],
     evolvedSkills: Array.isArray(parsed.evolvedSkills) ? parsed.evolvedSkills : [],
     triggerSource: parsed.triggerSource ?? "chat"
@@ -204,22 +403,287 @@ function buildSkillAuthorByRawName(
   return result
 }
 
+/** Whether a recorded tool input carries anything beyond "no arguments yet". */
+function hasToolNodeInput(input: unknown): boolean {
+  if (input === undefined || input === null) return false
+  if (typeof input === "object" && !Array.isArray(input)) {
+    return Object.keys(input as Record<string, unknown>).length > 0
+  }
+  if (Array.isArray(input)) return input.length > 0
+  if (typeof input === "string") return input.trim().length > 0
+  return true
+}
+
 // ─────────────────────────────────────────────────────────
 // TraceCollector class
 // ─────────────────────────────────────────────────────────
 
+export interface TraceCollectorOptions extends Partial<TraceObservabilityContext> {
+  traceId?: string
+  triggerSource?: TraceTriggerSource
+  harnessFeature?: TraceHarnessFeatureContext
+  includeSkillEval?: boolean
+}
+
+function compactUndefined<T extends Record<string, unknown>>(record: T): T {
+  for (const key of Object.keys(record)) {
+    if (record[key] === undefined) delete record[key]
+  }
+  return record
+}
+
+function buildObservabilityContext(
+  traceId: string,
+  threadId: string,
+  options: TraceCollectorOptions
+): TraceObservabilityContext {
+  const traceKind: TraceKind = options.traceKind ?? "root"
+  const executionMode: TraceExecutionMode = options.executionMode ?? "normal"
+  const rootTraceId = options.rootTraceId ?? traceId
+  const rootThreadId = options.rootThreadId ?? threadId
+  const subagentThreadId =
+    options.subagentThreadId ?? (traceKind === "subagent" ? threadId : undefined)
+  return compactUndefined({
+    observabilitySchemaVersion: TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind,
+    executionMode,
+    rootTraceId,
+    rootThreadId,
+    parentTraceId: options.parentTraceId,
+    parentThreadId: options.parentThreadId,
+    parentSpanId: options.parentSpanId,
+    linkType: options.linkType,
+    subagentKind: options.subagentKind,
+    subagentRunId: options.subagentRunId,
+    subagentThreadId,
+    handoffAction: options.handoffAction,
+    handoffSourceAgent: options.handoffSourceAgent,
+    handoffTargetAgent: options.handoffTargetAgent,
+    coordinatorWorkerId: options.coordinatorWorkerId,
+    coordinatorWorkerTurn: options.coordinatorWorkerTurn,
+    coordinatorWorkerRole: options.coordinatorWorkerRole,
+    coordinatorWorkerWorkload: options.coordinatorWorkerWorkload,
+    workflowRunId: options.workflowRunId,
+    workflowAgentIndex: options.workflowAgentIndex,
+    workflowPhase: options.workflowPhase,
+    workflowAgentLabel: options.workflowAgentLabel
+  }) as TraceObservabilityContext
+}
+
+const TRACE_MAX_STEPS = 128
+const TRACE_MAX_TOOL_CALLS = 512
+const TRACE_MAX_TOOL_CALLS_PER_STEP = 64
+const TRACE_MAX_MODEL_CALLS = 64
+/**
+ * Past TRACE_MAX_MODEL_CALLS a call still gets a skeleton — timing and
+ * tokenUsage — so per-call token usage survives a long turn instead of
+ * stopping at 64.
+ *
+ * A skeleton costs ~410 bytes, not the ~120 its own fields suggest, because
+ * TraceModelCall requires inputMessages, outputMessage and toolCalls to be
+ * present even when empty. 512 of them is ~209KB, which puts a maxed-out trace
+ * at ~883KB against the 1MB where the write queue drops it whole — a 12%
+ * margin, deliberately spent to keep per-call usage available for long turns.
+ *
+ * If this ever needs to cover more than 512 calls, do not raise it: a compact
+ * top-level series of [startedAtMs, input, output] costs ~30 bytes a call, so
+ * a thousand calls fit in 30KB instead of the 209KB these skeletons spend.
+ */
+const TRACE_MAX_MODEL_CALL_SKELETONS = 512
+const TRACE_MAX_MODEL_MESSAGES = 64
+const TRACE_MAX_NODES = 512
+/**
+ * Slots held back for the end of the turn, out of TRACE_MAX_NODES rather than
+ * on top of it — the node count, and so the trace's size, is unchanged.
+ *
+ * At roughly three nodes a turn the old cap stopped the tree around turn 170,
+ * and the conversation view reads assistant replies off llm nodes, so
+ * everything after that was invisible no matter how much byte budget was left.
+ * Nodes past the head now go into a ring that keeps the most recent, and
+ * finish() appends them.
+ */
+const TRACE_MAX_NODE_TAIL = 128
+const TRACE_MAX_HEAD_NODES = TRACE_MAX_NODES - TRACE_MAX_NODE_TAIL
+const TRACE_MAX_SKILLS = 128
+/** Restored tail content shares one limit so the three copies intern as one. */
+const RESTORED_TAIL_MAX_CHARS = 16 * 1024
+
+function boundTraceToolCall(call: TraceToolCall, budget: TraceCollectionBudget): TraceToolCall {
+  // Take the name first: args can drain the budget, and a nameless (or
+  // placeholder-named) tool call corrupts per-tool analytics.
+  const name = budget.takeText(String(call.name ?? "unknown"), 512)
+  const args = budget.takeValue(call.args, 32 * 1024)
+  return {
+    name: name || "unknown",
+    args:
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {},
+    ...(typeof call.result === "string"
+      ? { result: budget.takeText(call.result, 16 * 1024, true) }
+      : {}),
+    ...(typeof call.durationMs === "number" && Number.isFinite(call.durationMs)
+      ? { durationMs: Math.max(0, Math.min(call.durationMs, 24 * 60 * 60 * 1000)) }
+      : {})
+  }
+}
+
+/**
+ * Content-addressed id for one chat message. Two messages with the same role,
+ * text and tool linkage are the same message as far as a trace reader is
+ * concerned, so they collapse to one stored copy.
+ */
+function chatMessageId(message: TraceChatMessage): string {
+  return createHash("sha1")
+    .update(
+      [
+        message.role,
+        message.content ?? "",
+        message.reasoning ?? "",
+        message.name ?? "",
+        message.toolCallId ?? ""
+      ].join("\u0000")
+    )
+    .digest("hex")
+    .slice(0, 16)
+}
+
+/** True for the LLM input windows recorded by beginLlmNode / recordModelCall. */
+function isChatMessageArray(value: unknown): value is TraceChatMessage[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        item !== null &&
+        typeof item === "object" &&
+        typeof (item as TraceChatMessage).role === "string"
+    )
+  )
+}
+
+const COUNTABLE_NODE_METADATA_KEYS = [
+  "toolCallId",
+  "messageId",
+  "toolCallCount",
+  "toolNames",
+  "index"
+] as const
+
+function pickCountableMetadata(
+  metadata: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!metadata) return undefined
+  const picked: Record<string, unknown> = {}
+  for (const key of COUNTABLE_NODE_METADATA_KEYS) {
+    if (metadata[key] !== undefined) picked[key] = metadata[key]
+  }
+  return Object.keys(picked).length > 0 ? picked : undefined
+}
+
+function boundTraceChatMessage(
+  message: TraceChatMessage,
+  budget: TraceCollectionBudget
+): TraceChatMessage {
+  const allowedRoles = new Set(["system", "user", "assistant", "tool", "unknown"])
+  const role = allowedRoles.has(message.role) ? message.role : "unknown"
+  return {
+    role,
+    ...(typeof message.mid === "string" ? { mid: message.mid } : {}),
+    ...(typeof message.ref === "string" ? { ref: message.ref } : {}),
+    content: budget.takeText(String(message.content ?? ""), 16 * 1024, true),
+    ...(typeof message.reasoning === "string"
+      ? { reasoning: budget.takeText(message.reasoning, 8 * 1024, true) }
+      : {}),
+    ...(typeof message.name === "string" ? { name: budget.takeText(message.name, 512) } : {}),
+    ...(typeof message.toolCallId === "string"
+      ? { toolCallId: budget.takeText(message.toolCallId, 512) }
+      : {})
+  }
+}
+
+/**
+ * Skill name lists are top-level analytic dimensions, not tool/model payloads:
+ * they stay out of the collection budget so a heavy conversation cannot blank
+ * or truncate the very skill names the dashboard groups on. The item cap still
+ * bounds the field.
+ */
+function boundStringList(values: readonly string[], maxItems = TRACE_MAX_SKILLS): string[] {
+  return values.slice(0, maxItems).map((value) => clampText(String(value), 1024))
+}
+
+function boundSkillEvalExtension(
+  skillEval: TraceSkillEvalExtension | undefined,
+  budget: TraceCollectionBudget
+): TraceSkillEvalExtension | undefined {
+  if (!skillEval || !budget.canAdd(16 * 1024)) return undefined
+  const boundList = (values: readonly string[], maxItems = 64): string[] =>
+    values.slice(0, maxItems).map((value) => budget.takeText(String(value), 2048))
+  const boundChecks = (
+    checks: TraceSkillEvalExtension["records"][number]["checks"]
+  ): TraceSkillEvalExtension["records"][number]["checks"] =>
+    checks.slice(0, 64).map((check) => {
+      const detail = budget.takeValue(check.detail, 4 * 1024)
+      return {
+        ...check,
+        name: budget.takeText(check.name, 512),
+        label: budget.takeText(check.label, 1024),
+        ...(detail && typeof detail === "object" && !Array.isArray(detail)
+          ? { detail: detail as Record<string, unknown> }
+          : {})
+      }
+    })
+
+  return {
+    schemaVersion: budget.takeText(skillEval.schemaVersion, 128),
+    evalRulesVersion: budget.takeText(skillEval.evalRulesVersion, 128),
+    evaluatedAt: budget.takeText(skillEval.evaluatedAt, 64),
+    records: skillEval.records.slice(0, 8).map((record) => {
+      const bounded = { ...record }
+      const mutableBounded = bounded as unknown as Record<string, unknown>
+      for (const [key, value] of Object.entries(bounded)) {
+        if (typeof value === "string") {
+          mutableBounded[key] = budget.takeText(value, 4096)
+        }
+      }
+      return {
+        ...bounded,
+        contextTraceIds: boundList(record.contextTraceIds, 20),
+        skillEvalTraceIds: boundList(record.skillEvalTraceIds, 20),
+        failedProcessChecks: boundList(record.failedProcessChecks),
+        failedOutcomeChecks: boundList(record.failedOutcomeChecks),
+        failedResultChecks: boundList(record.failedResultChecks),
+        warningTags: record.warningTags.slice(0, 64),
+        checks: boundChecks(record.checks),
+        outcomeChecks: boundChecks(record.outcomeChecks),
+        resultChecks: boundChecks(record.resultChecks),
+        warnings: boundList(record.warnings),
+        outcomeWarnings: boundList(record.outcomeWarnings),
+        resultWarnings: boundList(record.resultWarnings),
+        resultIssues: boundList(record.resultIssues),
+        artifacts: record.artifacts.slice(0, 64).map((artifact) => ({
+          ...artifact,
+          label: budget.takeText(artifact.label, 2048)
+        }))
+      }
+    })
+  }
+}
+
 export class TraceCollector {
+  private readonly collectionBudget = new TraceCollectionBudget()
   private readonly traceId: string
   private readonly threadId: string
   private readonly startedAt: string
   private readonly userMessage: string
+  private readonly suspectedTechnicalDetailSupplement: boolean
   private modelId: string
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
   private readonly triggerSource: TraceTriggerSource
-  private readonly harnessFeature:
-    | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
-    | undefined
+  private readonly harnessFeature: TraceHarnessFeatureContext | undefined
+  private readonly harnessAdapterPromise: ReturnType<typeof getHarnessProjectAdapterSnapshot>
+  private observability: TraceObservabilityContext
+  private readonly includeSkillEval: boolean
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
@@ -228,31 +692,86 @@ export class TraceCollector {
   private modelCalls: TraceModelCall[] = []
   private nodes: TraceNode[] = []
   private nodeIndexById = new Map<string, number>()
+
+  /**
+   * Nodes recorded after the head filled up, most recent kept. Insertion-ordered
+   * so eviction is "delete the first key"; keyed by id so getNode still finds
+   * them while the turn is running and endLlmNode can still set their output.
+   */
+  private readonly tailNodes = new Map<string, TraceNode>()
   private llmNodeByMessageId = new Map<string, string>()
   private toolNodeByCallId = new Map<string, string>()
   private readonly rootNodeId: string
   private terminalNodeAdded = false
+  private finishPromise: Promise<AgentTrace> | undefined
+
+  /**
+   * Ids of chat messages whose content is already stored somewhere in this
+   * trace. Shared by beginLlmNode and recordModelCall, so the second recording
+   * of the same window collapses to refs.
+   */
+  private readonly storedChatMessageIds = new Set<string>()
+
+  /**
+   * Assigns the canonical copy of every repeated value in this trace. Recorders
+   * run steps-first, so the literal lands on the flattest structure and the
+   * later copies keep only an id.
+   */
+  private readonly contentInterner = new TraceContentInterner()
+
+  /**
+   * Content the budget could not afford, held so the end of the turn can be
+   * written back at finish(). Sized from the reserve the budget held back, so
+   * the trace does not grow — the spend just stops being entirely front-loaded.
+   */
+  private readonly tailContent = new TraceTailContentBuffer(this.collectionBudget.tailReserveBytes)
 
   /** The step currently being built (between beginStep / endStep). */
   private currentStepIndex = 0
   private currentStepStartedAt: string = nowIsoLocal()
   private currentToolCalls: TraceToolCall[] = []
+  private recordedToolCallCount = 0
+
+  /**
+   * Counted as work arrives, independent of every array. The arrays stop at
+   * their TRACE_MAX_* caps; the turn does not, and these totals are what the
+   * operations dashboard aggregates.
+   */
+  private observedToolCallCount = 0
+  private observedModelCallCount = 0
+  private observedInputTokens = 0
+  private observedOutputTokens = 0
+  private observedTotalTokens = 0
 
   constructor(
     threadId: string,
     userMessage: string,
     modelId: string,
-    options: {
-      triggerSource?: TraceTriggerSource
-      harnessFeature?: { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
-    } = {}
+    options: TraceCollectorOptions = {}
   ) {
-    this.traceId = uuid()
-    this.threadId = threadId
-    this.userMessage = userMessage
-    this.modelId = modelId
+    this.traceId = clampText(options.traceId ?? uuid(), 256)
+    this.threadId = clampText(threadId, 256)
+    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage)
+    this.userMessage = clampText(userMessage, 64 * 1024)
+    this.modelId = clampText(modelId, 1024)
     this.triggerSource = options.triggerSource ?? "chat"
     this.harnessFeature = options.harnessFeature
+      ? {
+          projectId: clampText(options.harnessFeature.projectId, 1024),
+          slug: clampText(options.harnessFeature.slug, 1024),
+          ...(options.harnessFeature.nodeName
+            ? { nodeName: clampText(options.harnessFeature.nodeName, 1024) }
+            : {}),
+          ...(options.harnessFeature.nodeStatus
+            ? { nodeStatus: clampText(options.harnessFeature.nodeStatus, 256) }
+            : {})
+        }
+      : undefined
+    this.harnessAdapterPromise = this.harnessFeature
+      ? getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId).catch(() => null)
+      : Promise.resolve(null)
+    this.observability = buildObservabilityContext(this.traceId, this.threadId, options)
+    this.includeSkillEval = options.includeSkillEval ?? this.observability.traceKind === "root"
     this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
@@ -262,8 +781,9 @@ export class TraceCollector {
       name: "Agent Trace",
       status: "running",
       startedAt: this.startedAt,
-      input: { userMessage },
+      input: { userMessage: this.userMessage },
       metadata: {
+        ...this.observability,
         traceId: this.traceId,
         threadId: this.threadId,
         modelId: this.modelId,
@@ -274,43 +794,88 @@ export class TraceCollector {
     // conversations also carry their harness project / adapter so emitted
     // code_gen/code_adopt events can be sliced by project / plugin directly.
     try {
-      let harnessAdapter: { name?: string; version?: string } = {}
-      if (this.harnessFeature) {
-        try {
-          const adapter = getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId)
-          if (adapter) harnessAdapter = { name: adapter.name, version: adapter.version }
-        } catch {
-          // best-effort: leave adapter fields absent on resolution failure
-        }
-      }
+      // setAdoptionContext intentionally merges incremental updates. A new
+      // trace is a new ownership epoch, though, so reset the prior turn first;
+      // otherwise a background-finishing child could leave stale Skill/model/
+      // project fields for a fast continuation on the same thread.
+      clearAdoptionContext(this.threadId)
       setAdoptionContext(this.threadId, {
         traceId: this.traceId,
         modelId: this.modelId,
+        ...this.observability,
         ...(this.harnessFeature
           ? {
               harnessProjectId: this.harnessFeature.projectId,
               harnessFeatureSlug: this.harnessFeature.slug,
               harnessNodeName: this.harnessFeature.nodeName,
               harnessNodeStatus: this.harnessFeature.nodeStatus,
-              harnessAdapterName: harnessAdapter.name,
-              harnessAdapterVersion: harnessAdapter.version
+              harnessAdapterName: undefined,
+              harnessAdapterVersion: undefined
             }
           : {})
       })
+      if (this.harnessFeature) {
+        void this.harnessAdapterPromise.then((adapter) => {
+          if (!adapter) return
+          patchAdoptionContextForTrace(this.threadId, this.traceId, {
+            harnessAdapterName: String(adapter.name).slice(0, 1024),
+            harnessAdapterVersion: String(adapter.version).slice(0, 1024)
+          })
+        })
+      }
     } catch {
       // never block trace setup
     }
   }
 
-  /** Update the modelId (can be resolved after construction). */
-  setModelId(id: string): void {
-    this.modelId = id
+  getTraceId(): string {
+    return this.traceId
+  }
+
+  getTraceContext(): TraceContext {
+    return {
+      traceId: this.traceId,
+      threadId: this.threadId,
+      rootNodeId: this.rootNodeId,
+      ...this.observability,
+      ...(this.harnessFeature ? { harnessFeature: { ...this.harnessFeature } } : {})
+    }
+  }
+
+  setObservabilityContext(patch: Partial<TraceObservabilityContext>): void {
+    // Observability is trace linkage (root/parent/subagent/workflow ids), all
+    // first-party and short. It must not be budgeted: a drained budget makes
+    // takeValue return the placeholder *string*, which then spreads into this
+    // object character by character and corrupts both the trace tree and the
+    // adoption context.
+    this.observability = compactUndefined({
+      ...this.observability,
+      ...patch
+    }) as TraceObservabilityContext
     const root = this.getNode(this.rootNodeId)
     if (root) {
-      root.metadata = { ...(root.metadata ?? {}), modelId: id }
+      root.metadata = { ...(root.metadata ?? {}), ...this.observability }
     }
     try {
-      setAdoptionContext(this.threadId, { modelId: id })
+      setAdoptionContext(this.threadId, this.observability)
+    } catch {
+      // ignore
+    }
+  }
+
+  setExecutionMode(mode: TraceExecutionMode): void {
+    this.setObservabilityContext({ executionMode: mode })
+  }
+
+  /** Update the modelId (can be resolved after construction). */
+  setModelId(id: string): void {
+    this.modelId = clampText(id, 1024)
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      root.metadata = { ...(root.metadata ?? {}), modelId: this.modelId }
+    }
+    try {
+      setAdoptionContext(this.threadId, { modelId: this.modelId })
     } catch {
       // ignore
     }
@@ -318,13 +883,13 @@ export class TraceCollector {
 
   /** Set the human-readable model name (e.g. "minmax") for display in trace UI. */
   setModelName(name: string): void {
-    this.modelName = name
+    this.modelName = clampText(name, 1024)
     const root = this.getNode(this.rootNodeId)
     if (root) {
-      root.metadata = { ...(root.metadata ?? {}), modelName: name }
+      root.metadata = { ...(root.metadata ?? {}), modelName: this.modelName }
     }
     try {
-      setAdoptionContext(this.threadId, { modelName: name })
+      setAdoptionContext(this.threadId, { modelName: this.modelName })
     } catch {
       // ignore
     }
@@ -336,10 +901,10 @@ export class TraceCollector {
    */
   setRoutingTrace(rt: RoutingTrace): void {
     try {
-      this.routingTrace = rt
+      this.routingTrace = this.collectionBudget.takeValue(rt, 64 * 1024) as RoutingTrace
       const root = this.getNode(this.rootNodeId)
       if (root) {
-        root.metadata = { ...(root.metadata ?? {}), routingTrace: rt }
+        root.metadata = { ...(root.metadata ?? {}), routingTrace: this.routingTrace }
       }
     } catch (e) {
       console.warn("[Tracer] setRoutingTrace failed:", e)
@@ -358,16 +923,16 @@ export class TraceCollector {
    * and risks bypassing the sticky attribution if ever called on its own.
    */
   setUsedSkills(skills: string[]): void {
-    this.usedSkills = [...skills]
+    this.usedSkills = boundStringList(skills)
     const root = this.getNode(this.rootNodeId)
     if (root) {
-      root.metadata = { ...(root.metadata ?? {}), usedSkills: [...skills] }
+      root.metadata = { ...(root.metadata ?? {}), usedSkills: [...this.usedSkills] }
     }
   }
 
   /** Set source markers keyed by the same skill identifier used in usedSkills. */
   setSkillSource(skillSource: string[]): void {
-    this.skillSource = normalizeSkillSourceRefs(skillSource)
+    this.skillSource = normalizeSkillSourceRefs(boundStringList(skillSource))
     const root = this.getNode(this.rootNodeId)
     if (root) {
       const metadata = { ...(root.metadata ?? {}) }
@@ -380,10 +945,10 @@ export class TraceCollector {
 
   /** Set which used skills came from cloud trace evolution. */
   setEvolvedSkills(skills: string[]): void {
-    this.evolvedSkills = [...skills]
+    this.evolvedSkills = boundStringList(skills)
     const root = this.getNode(this.rootNodeId)
     if (root) {
-      root.metadata = { ...(root.metadata ?? {}), evolvedSkills: [...skills] }
+      root.metadata = { ...(root.metadata ?? {}), evolvedSkills: [...this.evolvedSkills] }
     }
   }
 
@@ -403,12 +968,268 @@ export class TraceCollector {
 
   /** Record a tool call within the current step. */
   recordToolCall(call: TraceToolCall): void {
-    this.currentToolCalls.push(call)
+    this.observedToolCallCount += 1
+    // The count caps are hard: past them the array itself must stop growing.
+    if (
+      this.recordedToolCallCount >= TRACE_MAX_TOOL_CALLS ||
+      this.currentToolCalls.length >= TRACE_MAX_TOOL_CALLS_PER_STEP
+    ) {
+      return
+    }
+    // A spent byte budget is not a reason to forget the call happened. Keep the
+    // name and drop the payload: totalToolCalls is counted off this array and
+    // tool names are a queried dimension, so dropping the entry would understate
+    // exactly the longest turns.
+    if (!this.collectionBudget.canAdd(256)) {
+      // Only if the step will exist to receive it — past TRACE_MAX_STEPS the
+      // reserve would be spent on a destination finish() cannot find.
+      if (this.steps.length < TRACE_MAX_STEPS) {
+        this.tailContent.remember(
+          tailKeys.stepToolArgs(this.currentStepIndex, this.currentToolCalls.length),
+          call.args
+        )
+      }
+      this.currentToolCalls.push({
+        name: clampText(String(call.name ?? "unknown"), 128),
+        args: {},
+        ...(typeof call.durationMs === "number" && Number.isFinite(call.durationMs)
+          ? { durationMs: Math.max(0, Math.min(call.durationMs, 24 * 60 * 60 * 1000)) }
+          : {}),
+        truncated: true
+      })
+      this.recordedToolCallCount += 1
+      return
+    }
+    this.currentToolCalls.push(
+      this.internToolCallArgs(boundTraceToolCall(call, this.collectionBudget))
+    )
+    this.recordedToolCallCount += 1
+  }
+
+  /**
+   * Write the reserved tail back over the skeletons it belongs to. Runs once,
+   * at finish, because only then is it known which entries were last.
+   */
+  private restoreTailContent(): void {
+    if (this.tailContent.count === 0) return
+    // One limit for every restored field. The three positions hold the same
+    // text, and interning only collapses them if the strings are identical —
+    // restoring at each field's own limit would write three different strings
+    // and put back three copies of the tail instead of one.
+    const restore = (value: unknown): string | undefined =>
+      typeof value === "string" && value
+        ? truncateKeepingEnds(value, RESTORED_TAIL_MAX_CHARS)
+        : undefined
+
+    for (const step of this.steps) {
+      const text = restore(this.tailContent.take(tailKeys.stepText(step.index)))
+      if (text !== undefined) {
+        // Steps are the canonical home for assistant text, so this copy keeps
+        // the bytes and the model call and node below point at it.
+        const claim = this.contentInterner.claim(text)
+        step.assistantText = text
+        if (claim && "mid" in claim) step.assistantTextMid = claim.mid
+        delete step.truncated
+      }
+      step.toolCalls.forEach((call, toolIndex) => {
+        const args = this.tailContent.take(tailKeys.stepToolArgs(step.index, toolIndex))
+        if (!args || typeof args !== "object" || Array.isArray(args)) return
+        const claim = this.contentInterner.claim(args)
+        const next: TraceToolCall = { ...call, args: args as Record<string, unknown> }
+        delete next.truncated
+        if (claim && "mid" in claim) next.argsMid = claim.mid
+        step.toolCalls[toolIndex] = next
+      })
+    }
+
+    this.modelCalls.forEach((call, index) => {
+      const text = restore(this.tailContent.take(tailKeys.modelCallContent(index)))
+      if (text === undefined) return
+      const claim = this.contentInterner.claim(text)
+      call.outputMessage =
+        claim && "ref" in claim
+          ? { ...call.outputMessage, content: "", contentRef: claim.ref }
+          : {
+              ...call.outputMessage,
+              content: text,
+              ...(claim ? { contentMid: claim.mid } : {})
+            }
+      delete call.truncated
+    })
+
+    for (const node of this.nodes) {
+      const text = restore(this.tailContent.take(tailKeys.nodeOutput(node.id)))
+      if (text === undefined) continue
+      const claim = this.contentInterner.claim(text)
+      if (claim && "ref" in claim) {
+        node.output = undefined
+        node.outputRef = claim.ref
+      } else {
+        node.output = text
+        delete node.outputRef
+      }
+      delete node.truncated
+    }
+  }
+
+  private getTotalToolCalls(): number {
+    const stepToolCalls = this.steps.reduce((sum, step) => sum + step.toolCalls.length, 0)
+    const nodeToolCalls = this.nodes.filter((node) => node.type === "tool").length
+    const metadataToolCalls = this.nodes.reduce((sum, node) => {
+      const toolNames = node.metadata?.toolNames
+      if (!Array.isArray(toolNames)) return sum
+      return (
+        sum + toolNames.filter((name) => typeof name === "string" && name.trim().length > 0).length
+      )
+    }, 0)
+    const metadataToolCallCounts = this.nodes.reduce((sum, node) => {
+      const count = node.metadata?.toolCallCount
+      if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) return sum
+      return sum + Math.floor(count)
+    }, 0)
+    return Math.max(
+      this.observedToolCallCount,
+      stepToolCalls,
+      nodeToolCalls,
+      metadataToolCalls,
+      metadataToolCallCounts
+    )
+  }
+
+  /**
+   * Claim a value for whichever recorder got there first. The winner keeps the
+   * bytes and stamps the id; everyone after it keeps only the id. Values too
+   * small to pay for a ref are left alone.
+   */
+  private internValue(value: unknown): { mid: string } | { ref: string } | undefined {
+    return this.contentInterner.claim(value)
+  }
+
+  /** Tool args: canonical on the step, ids on the model call and the tool node. */
+  private internToolCallArgs(call: TraceToolCall): TraceToolCall {
+    const claim = this.internValue(call.args)
+    if (!claim) return call
+    return "mid" in claim
+      ? { ...call, argsMid: claim.mid }
+      : { ...call, args: {}, argsRef: claim.ref }
+  }
+
+  /**
+   * The output message repeats the step's assistant text and, once the llm node
+   * copies it, the reasoning too. Keep whichever copy arrived first.
+   */
+  private internMessageText(message: TraceChatMessage): TraceChatMessage {
+    let output = message
+    const contentClaim = this.internValue(output.content)
+    if (contentClaim) {
+      output =
+        "mid" in contentClaim
+          ? { ...output, contentMid: contentClaim.mid }
+          : { ...output, content: "", contentRef: contentClaim.ref }
+    }
+    if (typeof output.reasoning === "string") {
+      const reasoningClaim = this.internValue(output.reasoning)
+      if (reasoningClaim) {
+        if ("mid" in reasoningClaim) {
+          output = { ...output, reasoningMid: reasoningClaim.mid }
+        } else {
+          const rest = { ...output }
+          delete rest.reasoning
+          output = { ...rest, reasoningRef: reasoningClaim.ref }
+        }
+      }
+    }
+    return output
+  }
+
+  /**
+   * Node input/output/metadata values, which are untyped and often duplicates.
+   * Returns the id to store in a sibling `*Ref` field when the value is a
+   * repeat, or undefined when this copy is the one keeping the bytes.
+   */
+  private internNodeValue(value: unknown): string | undefined {
+    const claim = this.internValue(value)
+    if (!claim || "mid" in claim) return undefined
+    return claim.ref
+  }
+
+  /**
+   * Replace every message already stored in this trace with a ref to the stored
+   * copy. The window slides one call at a time and each call records it twice,
+   * so without this the same text lands in the trace roughly nine times and
+   * crowds out everything recorded later.
+   */
+  private dedupeChatMessages(messages: readonly TraceChatMessage[]): TraceChatMessage[] {
+    return messages.map((message) => {
+      const mid = chatMessageId(message)
+      if (this.storedChatMessageIds.has(mid)) {
+        return { role: message.role, content: "", ref: mid }
+      }
+      this.storedChatMessageIds.add(mid)
+      return { ...message, mid }
+    })
   }
 
   /** Record one LLM run (input context + output message). */
   recordModelCall(call: TraceModelCall): void {
-    this.modelCalls.push(call)
+    this.observedModelCallCount += 1
+    const usage = call.tokenUsage
+    if (usage) {
+      const input = usage.inputTokens ?? 0
+      const output = usage.outputTokens ?? 0
+      this.observedInputTokens += input
+      this.observedOutputTokens += output
+      this.observedTotalTokens += usage.totalTokens ?? input + output
+    }
+    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALL_SKELETONS) return
+    // Token totals are summed off this array by the dashboard, and per-call
+    // usage is worth keeping on its own. Neither a spent budget nor the
+    // full-entry cap should cost the entry: they cost its messages.
+    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512)) {
+      // Only when this turn has an llm node. The conversation view reads
+      // assistant text off nodes first, so once nodes hit their cap the same
+      // text on a model call is not displayable — remembering it anyway would
+      // spend the reserve evicting node content that is.
+      if (typeof call.messageId === "string" && this.llmNodeByMessageId.has(call.messageId)) {
+        this.tailContent.remember(
+          tailKeys.modelCallContent(this.modelCalls.length),
+          call.outputMessage?.content
+        )
+      }
+      this.modelCalls.push({
+        ...(typeof call.messageId === "string"
+          ? { messageId: clampText(call.messageId, 128) }
+          : {}),
+        startedAt: clampText(call.startedAt, 64),
+        inputMessages: [],
+        outputMessage: { role: "assistant", content: "" },
+        toolCalls: [],
+        ...(call.tokenUsage ? { tokenUsage: call.tokenUsage } : {}),
+        truncated: true
+      })
+      return
+    }
+    const inputMessages = this.dedupeChatMessages(
+      call.inputMessages.slice(0, TRACE_MAX_MODEL_MESSAGES)
+    ).map((message) => boundTraceChatMessage(message, this.collectionBudget))
+    const toolCalls = call.toolCalls
+      .slice(0, TRACE_MAX_TOOL_CALLS_PER_STEP)
+      .map((toolCall) =>
+        this.internToolCallArgs(boundTraceToolCall(toolCall, this.collectionBudget))
+      )
+    const tokenUsage = this.collectionBudget.takeValue(call.tokenUsage, 1024)
+    this.modelCalls.push({
+      ...(typeof call.messageId === "string" ? { messageId: clampText(call.messageId, 512) } : {}),
+      startedAt: clampText(call.startedAt, 64),
+      inputMessages,
+      outputMessage: this.internMessageText(
+        boundTraceChatMessage(call.outputMessage, this.collectionBudget)
+      ),
+      toolCalls,
+      ...(tokenUsage && typeof tokenUsage === "object"
+        ? { tokenUsage: tokenUsage as TraceModelCall["tokenUsage"] }
+        : {})
+    })
   }
 
   beginLlmNode(params?: {
@@ -425,20 +1246,27 @@ export class TraceCollector {
     }
 
     const id = `llm:${uuid()}`
-    this.pushNode({
+    const rawMetadata = this.collectionBudget.takeValue(params?.metadata, 32 * 1024)
+    const metadata =
+      rawMetadata && typeof rawMetadata === "object" && !Array.isArray(rawMetadata)
+        ? (rawMetadata as Record<string, unknown>)
+        : {}
+    const stored = this.pushNode({
       id,
       type: "llm",
       parentId: this.rootNodeId,
       name: params?.name ?? "LLM Call",
       status: "running",
       startedAt: params?.startedAt ?? nowIsoLocal(),
-      input: params?.input,
+      input: isChatMessageArray(params?.input)
+        ? this.dedupeChatMessages(params.input)
+        : params?.input,
       metadata: {
-        ...(params?.metadata ?? {}),
+        ...metadata,
         ...(messageId ? { messageId } : {})
       }
     })
-    if (messageId) this.llmNodeByMessageId.set(messageId, id)
+    if (messageId && stored) this.llmNodeByMessageId.set(messageId, id)
     return id
   }
 
@@ -453,7 +1281,10 @@ export class TraceCollector {
   }): string {
     if (params.toolCallId) {
       const existing = this.toolNodeByCallId.get(params.toolCallId)
-      if (existing) return existing
+      if (existing) {
+        this.completeToolNode(existing, params)
+        return existing
+      }
     }
 
     const byMessage = params.llmMessageId
@@ -461,8 +1292,13 @@ export class TraceCollector {
       : undefined
     const parentId = params.parentId ?? byMessage ?? this.rootNodeId
     const id = `tool:${uuid()}`
+    const rawMetadata = this.collectionBudget.takeValue(params.metadata, 32 * 1024)
+    const metadata =
+      rawMetadata && typeof rawMetadata === "object" && !Array.isArray(rawMetadata)
+        ? (rawMetadata as Record<string, unknown>)
+        : {}
 
-    this.pushNode({
+    const stored = this.pushNode({
       id,
       type: "tool",
       parentId,
@@ -471,13 +1307,40 @@ export class TraceCollector {
       startedAt: params.startedAt ?? nowIsoLocal(),
       input: params.input,
       metadata: {
-        ...(params.metadata ?? {}),
+        ...metadata,
         ...(params.toolCallId ? { toolCallId: params.toolCallId } : {})
       }
     })
 
-    if (params.toolCallId) this.toolNodeByCallId.set(params.toolCallId, id)
+    if (params.toolCallId && stored) this.toolNodeByCallId.set(params.toolCallId, id)
     return id
+  }
+
+  /**
+   * A tool call first seen mid-stream carries `args: {}` because its arguments
+   * are still arriving, and the first observation is the one that wins the
+   * node. Let a later, complete observation of the same call fill in what the
+   * first one could not — otherwise the trace shows every tool with an empty
+   * input.
+   */
+  private completeToolNode(nodeId: string, params: { name: string; input?: unknown }): void {
+    const node = this.getNode(nodeId)
+    if (!node) return
+    if ((!node.name || node.name === "unknown") && params.name && params.name !== "unknown") {
+      node.name = clampText(params.name, 512)
+    }
+    // A node that already carries an input — inline or interned — is complete.
+    if (node.inputRef || hasToolNodeInput(node.input)) return
+    if (!hasToolNodeInput(params.input)) return
+    const bounded = this.collectionBudget.takeValue(params.input, 32 * 1024)
+    if (bounded === undefined) return
+    const ref = this.internNodeValue(bounded)
+    if (ref) {
+      node.inputRef = ref
+      delete node.input
+      return
+    }
+    node.input = bounded
   }
 
   addToolResultNode(params: {
@@ -530,8 +1393,33 @@ export class TraceCollector {
 
     node.status = params.status ?? "success"
     node.endedAt = params.endedAt ?? nowIsoLocal()
-    if (params.output !== undefined) node.output = params.output
-    if (params.metadata) node.metadata = { ...(node.metadata ?? {}), ...params.metadata }
+    if (params.output !== undefined) {
+      if (!this.collectionBudget.canAdd(64)) {
+        // The conversation view reads assistant replies off llm nodes first, so
+        // this is the copy that decides whether the end of a turn is readable.
+        this.tailContent.remember(tailKeys.nodeOutput(targetId), params.output)
+      }
+      const bounded = this.collectionBudget.takeValue(params.output, 32 * 1024)
+      const ref = this.internNodeValue(bounded)
+      if (ref) {
+        node.output = undefined
+        node.outputRef = ref
+      } else {
+        node.output = bounded
+      }
+    }
+    if (params.metadata) {
+      const metadata = this.collectionBudget.takeValue(params.metadata, 32 * 1024)
+      if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+        const interned: Record<string, unknown> = {}
+        for (const [key, value] of Object.entries(metadata as Record<string, unknown>)) {
+          const ref = this.internNodeValue(value)
+          if (ref) interned[`${key}Ref`] = ref
+          else interned[key] = value
+        }
+        node.metadata = { ...(node.metadata ?? {}), ...interned }
+      }
+    }
   }
 
   addTerminalNode(params: {
@@ -572,10 +1460,34 @@ export class TraceCollector {
    * @param assistantText - The assistant's text reasoning for this step.
    */
   endStep(assistantText: string): void {
+    if (this.steps.length >= TRACE_MAX_STEPS) {
+      this.currentToolCalls = []
+      return
+    }
+    // Keep the step (and the tool calls already attached to it) even with no
+    // budget left for its text — the step count and its tool calls are what
+    // totalToolCalls is derived from.
+    if (!this.collectionBudget.canAdd(128)) {
+      const index = this.currentStepIndex++
+      this.tailContent.remember(tailKeys.stepText(index), assistantText)
+      this.steps.push({
+        index,
+        startedAt: this.currentStepStartedAt,
+        assistantText: "",
+        toolCalls: [...this.currentToolCalls],
+        truncated: true
+      })
+      this.currentToolCalls = []
+      return
+    }
+    const boundedText = this.collectionBudget.takeText(assistantText, 32 * 1024, true)
+    const textClaim = this.internValue(boundedText)
     const step: TraceStep = {
       index: this.currentStepIndex++,
       startedAt: this.currentStepStartedAt,
-      assistantText,
+      // Steps are canonical for assistant text, so this is always the literal.
+      assistantText: boundedText,
+      ...(textClaim && "mid" in textClaim ? { assistantTextMid: textClaim.mid } : {}),
       toolCalls: [...this.currentToolCalls]
     }
     this.steps.push(step)
@@ -586,10 +1498,18 @@ export class TraceCollector {
    * Finalize the trace, write to disk, and (optionally) report remotely.
    * Safe to call multiple times — only the first call takes effect.
    */
-  async finish(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
+  finish(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
+    // Finishing touches several non-idempotent side channels (skill-eval
+    // windows, local persistence, cloud reporting, and adoption cleanup). Keep
+    // the documented first-call-wins contract even when two teardown paths race.
+    this.finishPromise ??= this.finishOnce(outcome, errorMessage)
+    return this.finishPromise
+  }
+
+  private async finishOnce(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
     const endedAt = nowIsoLocal()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
-    const totalToolCalls = this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0)
+    const totalToolCalls = this.getTotalToolCalls()
 
     // Resolve skill versions and merge into "name-version" format
     let skillAuthorByRawName: Record<string, string | undefined> = {}
@@ -619,11 +1539,13 @@ export class TraceCollector {
         if (collectAuthors) {
           skillAuthorByRawName = buildSkillAuthorByRawName(resolved, allSkills)
         }
-        return resolved
+        return boundStringList(resolved)
       } catch (e) {
         console.warn("[Tracer] Failed to resolve skill versions:", e)
-        return Array.from(
-          new Set(skills.map((skill) => ensureVersionedSkillIdentifier(skill)).filter(Boolean))
+        return boundStringList(
+          Array.from(
+            new Set(skills.map((skill) => ensureVersionedSkillIdentifier(skill)).filter(Boolean))
+          )
         )
       }
     }
@@ -651,8 +1573,12 @@ export class TraceCollector {
     })
     const evolvedSkillsWithVersions = await resolveSkillVersions(this.evolvedSkills)
 
+    this.mergeTailNodes()
+    this.restoreTailContent()
+
     const userInfo = getUserInfo()
-    const upperOrgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
+    const boundedPathName = userInfo?.pathName ? clampText(userInfo.pathName, 4096) : undefined
+    const upperOrgLevels = deriveUpperOrgLevelsFromPath(boundedPathName)
 
     // Project-mode traces also record the bound adapter plugin's version, so
     // operations analytics can attribute a project conversation to a plugin
@@ -664,12 +1590,12 @@ export class TraceCollector {
     } = {}
     if (this.harnessFeature) {
       try {
-        const adapter = getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId)
+        const adapter = await this.harnessAdapterPromise
         if (adapter) {
           harnessAdapterFields = {
-            harnessAdapterId: adapter.id,
-            harnessAdapterName: adapter.name,
-            harnessAdapterVersion: adapter.version
+            harnessAdapterId: clampText(adapter.id, 1024),
+            harnessAdapterName: clampText(adapter.name, 1024),
+            harnessAdapterVersion: clampText(adapter.version, 1024)
           }
         }
       } catch (e) {
@@ -677,41 +1603,63 @@ export class TraceCollector {
       }
     }
 
+    const boundedErrorMessage = errorMessage ? clampText(errorMessage, 16 * 1024) : undefined
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
+      ...this.observability,
       startedAt: this.startedAt,
       endedAt,
       durationMs,
       userMessage: this.userMessage,
+      suspectedTechnicalDetailSupplement: this.suspectedTechnicalDetailSupplement,
       modelId: this.modelId,
       ...(this.modelName ? { modelName: this.modelName } : {}),
-      userIp: getLocalIP(),
-      userName: userInfo?.userName,
-      sapId: userInfo?.sapId,
-      ystId: userInfo?.ystId,
-      originOrgId: userInfo?.originOrgId,
-      orgName: userInfo?.orgName,
-      pathName: userInfo?.pathName,
-      pathId: userInfo?.originPathId,
-      upperOrgLv0: upperOrgLevels.upperOrgLv0,
-      upperOrgLv1: upperOrgLevels.upperOrgLv1,
-      upperOrgLv2: upperOrgLevels.upperOrgLv2,
-      upperOrgLv3: upperOrgLevels.upperOrgLv3,
+      // Identity and org fields come from getUserInfo(), not from tools or
+      // models, so they are deliberately outside the collection budget: a
+      // long conversation must never be able to rename its own author.
+      userIp: clampText(getLocalIP(), 256),
+      userName: userInfo?.userName ? clampText(userInfo.userName, 1024) : undefined,
+      sapId: userInfo?.sapId ? clampText(userInfo.sapId, 256) : undefined,
+      ystId: userInfo?.ystId ? clampText(userInfo.ystId, 256) : undefined,
+      originOrgId: userInfo?.originOrgId ? clampText(userInfo.originOrgId, 1024) : undefined,
+      orgName: userInfo?.orgName ? clampText(userInfo.orgName, 2048) : undefined,
+      pathName: boundedPathName,
+      pathId: userInfo?.originPathId ? clampText(userInfo.originPathId, 1024) : undefined,
+      upperOrgLv0: upperOrgLevels.upperOrgLv0
+        ? clampText(upperOrgLevels.upperOrgLv0, 1024)
+        : undefined,
+      upperOrgLv1: upperOrgLevels.upperOrgLv1
+        ? clampText(upperOrgLevels.upperOrgLv1, 1024)
+        : undefined,
+      upperOrgLv2: upperOrgLevels.upperOrgLv2
+        ? clampText(upperOrgLevels.upperOrgLv2, 1024)
+        : undefined,
+      upperOrgLv3: upperOrgLevels.upperOrgLv3
+        ? clampText(upperOrgLevels.upperOrgLv3, 1024)
+        : undefined,
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
+      // Flattened for dashboard aggregation — `sum` cannot reach into the
+      // per-call array above.
+      ...summarizeTraceCacheTokens(this.modelCalls),
+      // Counted as the turn ran, so these stay right past TRACE_MAX_MODEL_CALLS.
+      totalInputTokens: this.observedInputTokens,
+      totalOutputTokens: this.observedOutputTokens,
+      totalTokens: this.observedTotalTokens,
+      totalModelCalls: this.observedModelCallCount,
       nodes: this.finalizeNodes(
         outcome,
         endedAt,
         usedSkillsWithVersions,
         skillSource,
         evolvedSkillsWithVersions,
-        errorMessage
+        boundedErrorMessage
       ),
       totalToolCalls,
       outcome,
-      ...(errorMessage ? { errorMessage } : {}),
+      ...(boundedErrorMessage ? { errorMessage: boundedErrorMessage } : {}),
       usedSkills: usedSkillsWithVersions,
       ...(skillSource.length > 0 ? { skillSource } : {}),
       evolvedSkills: evolvedSkillsWithVersions,
@@ -732,48 +1680,57 @@ export class TraceCollector {
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
     }
     let skillEval: TraceSkillEvalExtension | undefined
-    try {
-      const windowTurn = appendSkillEvalWindowTurn({
-        traceId: trace.traceId,
-        threadId: trace.threadId,
-        startedAt: trace.startedAt,
-        endedAt: trace.endedAt,
-        usedSkills: usedSkillsWithVersions,
-        userMessage: trace.userMessage,
-        assistantText: getSkillEvalWindowAssistantText(trace),
-        outcome: trace.outcome
-      })
-      const evalRawSkillNames = windowTurn.evalSkillNames
-      const windowContextByRawName = getSkillEvalWindowContextByRawName(
-        trace.threadId,
-        evalRawSkillNames
-      )
-      skillEval = buildSkillEvalTraceExtension(trace, {
-        skillAuthorByRawName,
-        windowContextByRawName,
-        evalRawSkillNames
-      })
-    } catch (e) {
-      console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+    if (this.includeSkillEval) {
+      try {
+        const windowTurn = appendSkillEvalWindowTurn({
+          traceId: trace.traceId,
+          threadId: trace.threadId,
+          startedAt: trace.startedAt,
+          endedAt: trace.endedAt,
+          usedSkills: usedSkillsWithVersions,
+          userMessage: trace.userMessage,
+          assistantText: getSkillEvalWindowAssistantText(trace),
+          outcome: trace.outcome
+        })
+        const evalRawSkillNames = windowTurn.evalSkillNames
+        const windowContextByRawName = getSkillEvalWindowContextByRawName(
+          trace.threadId,
+          evalRawSkillNames
+        )
+        skillEval = buildSkillEvalTraceExtension(trace, {
+          skillAuthorByRawName,
+          windowContextByRawName,
+          evalRawSkillNames
+        })
+      } catch (e) {
+        console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+      }
     }
-    const traceWithEval: AgentTrace = skillEval ? { ...trace, skillEval } : trace
+    const boundedSkillEval = boundSkillEvalExtension(skillEval, this.collectionBudget)
+    const traceWithEval: AgentTrace = boundedSkillEval
+      ? { ...trace, skillEval: boundedSkillEval }
+      : trace
 
-    writeTraceFile(traceWithEval)
-
-    // Fire-and-forget: trace upload is a side-channel operation and must
-    // never block the main agent flow. Errors are logged and swallowed.
-    void Promise.resolve()
-      .then(() => _reporter.report(sanitizeTraceForCloudUpload(traceWithEval)))
-      .catch((e) => {
-        console.warn("[Tracer] Reporter.report() threw:", e)
-      })
-
-    // Clear adoption context — subsequent write_file calls on this thread
-    // will no longer carry this trace's attribution.
     try {
-      clearAdoptionContext(this.threadId)
-    } catch {
-      // ignore
+      try {
+        flushSystemConstraintReadSummaries(this.traceId, outcome)
+      } catch (error) {
+        console.warn("[Tracer] Failed to flush system-constraint read telemetry:", error)
+      }
+      writeTraceFile(traceWithEval)
+
+      // Keep reporting off the main run path, but track it so graceful app
+      // shutdown can wait for already-scheduled uploads within a hard bound.
+      reportTraceInBackground(traceWithEval)
+    } finally {
+      // A child trace may finish in the background after a continuation has
+      // installed a newer context on the same worker thread. Only clear the
+      // context still owned by this trace, even when persistence fails.
+      try {
+        clearAdoptionContext(this.threadId, this.traceId)
+      } catch {
+        // ignore
+      }
     }
 
     return traceWithEval
@@ -847,11 +1804,12 @@ export class TraceCollector {
       root.output = {
         outcome,
         totalSteps: this.steps.length,
-        totalToolCalls: this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0),
+        totalToolCalls: this.getTotalToolCalls(),
         ...(errorMessage ? { errorMessage } : {})
       }
       root.metadata = {
         ...(root.metadata ?? {}),
+        ...this.observability,
         usedSkills: [...resolvedUsedSkills],
         ...(resolvedSkillSource.length > 0 ? { skillSource: [...resolvedSkillSource] } : {}),
         evolvedSkills: [...resolvedEvolvedSkills],
@@ -862,15 +1820,113 @@ export class TraceCollector {
     return this.nodes
   }
 
-  private pushNode(node: TraceNode): void {
-    const index = this.nodes.push(node) - 1
-    this.nodeIndexById.set(node.id, index)
+  /**
+   * Structural and countable metadata only: the tool/result pairing key, the
+   * llm message id, and the per-node tool counts getTotalToolCalls reads.
+   */
+  private pushNode(node: TraceNode): boolean {
+    if (this.nodes.length >= TRACE_MAX_NODES) return false
+    // Structure is what makes the tree readable and countable; only the payload
+    // is negotiable. With no budget left, keep the node and drop input/output.
+    if (!this.collectionBudget.canAdd(256)) {
+      const skeleton: TraceNode = {
+        ...node,
+        id: clampText(node.id, 512),
+        parentId: node.parentId ? clampText(node.parentId, 512) : null,
+        ...(node.name ? { name: clampText(node.name, 512) } : {}),
+        startedAt: clampText(node.startedAt, 64),
+        ...(node.endedAt ? { endedAt: clampText(node.endedAt, 64) } : {}),
+        input: undefined,
+        output: undefined,
+        // Payload goes, but these keys are how the tree pairs a tool with its
+        // result and how getTotalToolCalls counts — dropping them would undo
+        // the very thing the skeleton exists to preserve.
+        metadata: pickCountableMetadata(node.metadata),
+        truncated: true
+      }
+      return this.storeNode(skeleton)
+    }
+    const metadata = this.collectionBudget.takeValue(node.metadata, 32 * 1024)
+    const rawInput =
+      node.input !== undefined && !isChatMessageArray(node.input)
+        ? this.collectionBudget.takeValue(node.input, 32 * 1024)
+        : undefined
+    const boundedInputRef = rawInput !== undefined ? this.internNodeValue(rawInput) : undefined
+    const boundedInput = boundedInputRef ? undefined : rawInput
+    const boundedNode: TraceNode = {
+      ...node,
+      // Structure (ids, parent links, timestamps) stays out of the budget:
+      // nodeIndexById and the parentId chain are keyed on these, so a budget
+      // that could blank them would silently flatten the trace tree.
+      id: clampText(node.id, 512),
+      parentId: node.parentId ? clampText(node.parentId, 512) : null,
+      ...(node.name ? { name: clampText(node.name, 512) } : {}),
+      startedAt: clampText(node.startedAt, 64),
+      ...(node.endedAt ? { endedAt: clampText(node.endedAt, 64) } : {}),
+      // Everything passes through the byte budget — a node input has no
+      // exemption, and letting chat-message arrays skip it put the whole llm
+      // input window outside the 480KB pool.
+      //
+      // Interning comes after bounding, never before: ids are content
+      // addresses, so one taken from the pre-truncation value would match
+      // nothing. Chat-message arrays are bounded but not interned, because
+      // their messages already carry per-message refs.
+      ...(node.input !== undefined
+        ? {
+            input: isChatMessageArray(node.input)
+              ? this.collectionBudget.takeValue(node.input, 32 * 1024)
+              : boundedInput
+          }
+        : {}),
+      ...(boundedInputRef ? { inputRef: boundedInputRef } : {}),
+      ...(node.output !== undefined
+        ? { output: this.collectionBudget.takeValue(node.output, 32 * 1024) }
+        : {}),
+      ...(metadata && typeof metadata === "object" && !Array.isArray(metadata)
+        ? { metadata: metadata as Record<string, unknown> }
+        : {})
+    }
+    return this.storeNode(boundedNode)
+  }
+
+  /** Head first, then the tail ring once the head is full. */
+  private storeNode(node: TraceNode): boolean {
+    if (this.nodes.length < TRACE_MAX_HEAD_NODES) {
+      const index = this.nodes.push(node) - 1
+      this.nodeIndexById.set(node.id, index)
+      return true
+    }
+    if (this.tailNodes.size >= TRACE_MAX_NODE_TAIL && !this.tailNodes.has(node.id)) {
+      const oldest = this.tailNodes.keys().next().value
+      if (typeof oldest === "string") this.tailNodes.delete(oldest)
+    }
+    this.tailNodes.set(node.id, node)
+    return true
+  }
+
+  /**
+   * Fold the tail into the node list. A tail node whose parent was evicted is
+   * re-parented to the root: a broken link would drop its whole subtree from
+   * the rendered tree, and the root is the one parent that always exists.
+   */
+  private mergeTailNodes(): void {
+    if (this.tailNodes.size === 0) return
+    for (const node of this.tailNodes.values()) {
+      const index = this.nodes.push(node) - 1
+      this.nodeIndexById.set(node.id, index)
+    }
+    this.tailNodes.clear()
+    for (const node of this.nodes) {
+      if (node.parentId && !this.nodeIndexById.has(node.parentId)) {
+        node.parentId = this.rootNodeId
+      }
+    }
   }
 
   private getNode(id: string): TraceNode | undefined {
     const idx = this.nodeIndexById.get(id)
-    if (idx === undefined) return undefined
-    return this.nodes[idx]
+    if (idx !== undefined) return this.nodes[idx]
+    return this.tailNodes.get(id)
   }
 
   private endNode(id: string, status: TraceNodeStatus): void {
@@ -881,169 +1937,353 @@ export class TraceCollector {
   }
 }
 
+/** Construct optional child-run telemetry behind a hard failure boundary. */
+export function createTraceCollectorSafely(
+  threadId: string,
+  userMessage: string,
+  modelId: string,
+  options: TraceCollectorOptions = {},
+  scope = "Tracer"
+): TraceCollector | undefined {
+  try {
+    return new TraceCollector(threadId, userMessage, modelId, options)
+  } catch (error) {
+    console.warn(`[${scope}] trace creation failed; continuing without telemetry:`, error)
+    return undefined
+  }
+}
+
+/** Run a synchronous trace mutation without allowing telemetry to affect the run. */
+export function runTraceSideEffect(scope: string, effect: () => void): void {
+  try {
+    effect()
+  } catch (error) {
+    console.warn(`[${scope}] trace update failed; continuing without this telemetry:`, error)
+  }
+}
+
+/** Complete and persist a child trace without delaying the worker/workflow result. */
+export function finishTraceInBackground(
+  tracer: TraceCollector,
+  outcome: TraceOutcome,
+  errorMessage?: string,
+  scope = "Tracer",
+  beforeFinish?: () => void
+): void {
+  // Defer the whole finish call, not just its returned promise. Async functions
+  // execute synchronously until their first await, so calling finish inline
+  // would still add telemetry work to the child-run completion path.
+  setImmediate(() => {
+    if (beforeFinish) {
+      runTraceSideEffect(`${scope} pre-finish`, beforeFinish)
+    }
+    try {
+      void tracer.finish(outcome, errorMessage).catch((error) => {
+        console.warn(`[${scope}] background trace finish failed:`, error)
+      })
+    } catch (error) {
+      console.warn(`[${scope}] background trace finish failed:`, error)
+    }
+  })
+}
+
 // ─────────────────────────────────────────────────────────
 // Trace reading utilities (used by optimizer)
 // ─────────────────────────────────────────────────────────
 
-/** List all threadIds that have trace files. */
-export function listTracedThreads(): string[] {
-  const tracesDir = getTracesRootDir()
-  if (!existsSync(tracesDir)) return []
+const TRACE_READ_MAX_DIRECTORY_ENTRIES = 4_096
+const TRACE_READ_MAX_THREADS = 1_024
+const TRACE_READ_MAX_FILES = 4_096
+const TRACE_READ_MAX_FILE_BYTES = 2 * 1024 * 1024
+const TRACE_READ_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+const TRACE_READ_MAX_RESULTS = 512
+const TRACE_DELETE_MAX_IDS = 256
+
+interface TraceReadBudget {
+  entries: number
+  files: number
+  bytes: number
+}
+
+function createTraceReadBudget(): TraceReadBudget {
+  return { entries: 0, files: 0, bytes: 0 }
+}
+
+function isSafeTraceSegment(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 256 &&
+    value !== "." &&
+    value !== ".." &&
+    !value.includes("/") &&
+    !value.includes("\\") &&
+    !value.includes("\0")
+  )
+}
+
+async function pathIsFile(filePath: string): Promise<boolean> {
   try {
-    return readdirSync(tracesDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
+    return (await lstat(filePath)).isFile()
   } catch {
-    return []
+    return false
   }
 }
 
-/** Read all traces for a given thread, sorted by startedAt ascending. */
-export function readThreadTraces(threadId: string): AgentTrace[] {
-  const dir = getThreadTracesDir(threadId)
-  if (!existsSync(dir)) return []
+/** List threadIds without ever materializing an unbounded directory. */
+export async function listTracedThreads(): Promise<string[]> {
+  const threads: string[] = []
+  let directory
   try {
-    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"))
+    directory = await opendir(getTracesRootDir())
+  } catch {
+    return threads
+  }
+  let scanned = 0
+  for await (const entry of directory) {
+    scanned += 1
+    if (scanned > TRACE_READ_MAX_DIRECTORY_ENTRIES || threads.length >= TRACE_READ_MAX_THREADS)
+      break
+    if (entry.isDirectory() && isSafeTraceSegment(entry.name)) threads.push(entry.name)
+    if (scanned % TRACE_IO_YIELD_INTERVAL === 0) await yieldTraceIo()
+  }
+  return threads
+}
+
+async function listThreadTraceFiles(threadId: string, budget: TraceReadBudget): Promise<string[]> {
+  if (!isSafeTraceSegment(threadId)) return []
+  const files: string[] = []
+  let directory
+  try {
+    directory = await opendir(getThreadTracesDir(threadId))
+  } catch {
+    return files
+  }
+  for await (const entry of directory) {
+    budget.entries += 1
+    if (
+      budget.entries > TRACE_READ_MAX_DIRECTORY_ENTRIES ||
+      budget.files + files.length >= TRACE_READ_MAX_FILES
+    ) {
+      break
+    }
+    if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      files.push(join(getThreadTracesDir(threadId), entry.name))
+    }
+    if (budget.entries % TRACE_IO_YIELD_INTERVAL === 0) await yieldTraceIo()
+  }
+  budget.files += files.length
+  return files
+}
+
+async function readTraceFileBounded(
+  filePath: string,
+  budget: TraceReadBudget,
+  maxResults: number
+): Promise<AgentTrace[]> {
+  try {
+    const fileStat = await lstat(filePath)
+    if (
+      !fileStat.isFile() ||
+      fileStat.size > TRACE_READ_MAX_FILE_BYTES ||
+      budget.bytes + fileStat.size > TRACE_READ_MAX_TOTAL_BYTES
+    ) {
+      return []
+    }
+    budget.bytes += fileStat.size
+    const raw = await readFile(filePath, "utf8")
     const traces: AgentTrace[] = []
-    for (const file of files) {
-      const raw = readFileSync(join(dir, file), "utf-8")
-      for (const line of raw.trim().split("\n")) {
-        if (!line.trim()) continue
-        try {
-          traces.push(normalizeTrace(JSON.parse(line) as AgentTrace))
-        } catch {
-          /* skip malformed lines */
-        }
+    let cursor = 0
+    let lineCount = 0
+    while (cursor <= raw.length && traces.length < maxResults && lineCount < 256) {
+      const newline = raw.indexOf("\n", cursor)
+      const end = newline < 0 ? raw.length : newline
+      const line = raw.slice(cursor, end).replace(/\r$/, "")
+      cursor = newline < 0 ? raw.length + 1 : newline + 1
+      lineCount += 1
+      if (!line.trim()) continue
+      try {
+        // Storage keeps one copy of each repeated value; every reader gets the
+        // whole thing back, so no caller has to know refs exist.
+        traces.push(rehydrateTraceContent(parseStoredTraceLine(line)))
+      } catch {
+        // Skip malformed or undecryptable trace lines.
       }
+      if (lineCount % TRACE_IO_YIELD_INTERVAL === 0) await yieldTraceIo()
     }
-    return traces.sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    return traces
   } catch {
     return []
   }
 }
 
-/** Read one trace by ID across all threads. */
-export function readTraceById(traceId: string): AgentTrace | null {
-  const location = findTraceLocation(traceId)
-  if (!location) return null
-  try {
-    const raw = readFileSync(location.filePath, "utf-8")
-    for (const line of raw.trim().split("\n")) {
-      if (!line.trim()) continue
-      const parsed = normalizeTrace(JSON.parse(line) as AgentTrace)
-      if (parsed.traceId === traceId) return parsed
+async function readThreadTracesBounded(
+  threadId: string,
+  budget: TraceReadBudget,
+  maxResults: number
+): Promise<AgentTrace[]> {
+  const files = await listThreadTraceFiles(threadId, budget)
+  const traces: AgentTrace[] = []
+  for (const filePath of files) {
+    if (traces.length >= maxResults || budget.bytes >= TRACE_READ_MAX_TOTAL_BYTES) break
+    traces.push(...(await readTraceFileBounded(filePath, budget, maxResults - traces.length)))
+    await yieldTraceIo()
+  }
+  return traces
+}
+
+/** Read a bounded trace window for one thread, sorted oldest first. */
+export async function readThreadTraces(threadId: string): Promise<AgentTrace[]> {
+  if (!isSafeTraceSegment(threadId)) return []
+  const traces = await readThreadTracesBounded(
+    threadId,
+    createTraceReadBudget(),
+    TRACE_READ_MAX_RESULTS
+  )
+  return traces.sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+}
+
+async function findTraceLocation(
+  traceId: string,
+  budget: TraceReadBudget
+): Promise<{ threadId: string; filePath: string } | null> {
+  if (!isSafeTraceSegment(traceId)) return null
+  for (const threadId of await listTracedThreads()) {
+    const directPath = join(getThreadTracesDir(threadId), `${traceId}.jsonl`)
+    if (await pathIsFile(directPath)) return { threadId, filePath: directPath }
+    for (const filePath of await listThreadTraceFiles(threadId, budget)) {
+      const traces = await readTraceFileBounded(filePath, budget, 256)
+      if (traces.some((trace) => trace.traceId === traceId)) return { threadId, filePath }
+      if (budget.files >= TRACE_READ_MAX_FILES || budget.bytes >= TRACE_READ_MAX_TOTAL_BYTES) {
+        return null
+      }
     }
-  } catch {
-    return null
   }
   return null
 }
 
-/** Read the N most recent traces across all threads. */
-export function readRecentTraces(limit = 20): AgentTrace[] {
-  const threads = listTracedThreads()
-  const all: AgentTrace[] = []
-  for (const t of threads) {
-    all.push(...readThreadTraces(t))
-  }
-  return all.sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit)
+/** Read one trace by ID across a bounded number of thread/files. */
+export async function readTraceById(traceId: string): Promise<AgentTrace | null> {
+  return (await readTracesByIds([traceId]))[0] ?? null
 }
 
-function findTraceLocation(traceId: string): { threadId: string; filePath: string } | null {
-  for (const threadId of listTracedThreads()) {
-    const dir = getThreadTracesDir(threadId)
-    const directPath = join(dir, `${traceId}.jsonl`)
-    if (existsSync(directPath)) {
-      return { threadId, filePath: directPath }
-    }
-    try {
-      const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"))
-      for (const file of files) {
-        const filePath = join(dir, file)
-        const raw = readFileSync(filePath, "utf-8")
-        const lines = raw.split("\n").filter((line) => line.trim().length > 0)
-        for (const line of lines) {
-          try {
-            const parsed = normalizeTrace(JSON.parse(line) as AgentTrace)
-            if (parsed.traceId === traceId) return { threadId, filePath }
-          } catch {
-            // skip malformed lines
-          }
+/** Resolve selected traces with one shared scan/byte budget. */
+export async function readTracesByIds(traceIds: readonly string[]): Promise<AgentTrace[]> {
+  const requested = new Set(
+    [...new Set(traceIds)].filter(isSafeTraceSegment).slice(0, TRACE_DELETE_MAX_IDS)
+  )
+  if (requested.size === 0) return []
+  const found = new Map<string, AgentTrace>()
+  const budget = createTraceReadBudget()
+  for (const threadId of await listTracedThreads()) {
+    for (const filePath of await listThreadTraceFiles(threadId, budget)) {
+      const traces = await readTraceFileBounded(filePath, budget, 256)
+      for (const trace of traces) {
+        if (requested.has(trace.traceId) && !found.has(trace.traceId)) {
+          found.set(trace.traceId, trace)
         }
       }
-    } catch {
-      // ignore this thread and continue
+      if (
+        found.size === requested.size ||
+        budget.files >= TRACE_READ_MAX_FILES ||
+        budget.bytes >= TRACE_READ_MAX_TOTAL_BYTES
+      ) {
+        return traceIds.flatMap((traceId) => {
+          const trace = found.get(traceId)
+          return trace ? [trace] : []
+        })
+      }
     }
   }
-  return null
+  return traceIds.flatMap((traceId) => {
+    const trace = found.get(traceId)
+    return trace ? [trace] : []
+  })
 }
 
-export function deleteTraceById(traceId: string): {
+/** Read a bounded recent window across all trace threads. */
+export async function readRecentTraces(limit = 20): Promise<AgentTrace[]> {
+  const boundedLimit = Math.max(0, Math.min(Math.floor(limit), TRACE_READ_MAX_RESULTS))
+  if (boundedLimit === 0) return []
+  const budget = createTraceReadBudget()
+  const all: AgentTrace[] = []
+  for (const threadId of await listTracedThreads()) {
+    if (budget.files >= TRACE_READ_MAX_FILES || budget.bytes >= TRACE_READ_MAX_TOTAL_BYTES) break
+    all.push(
+      ...(await readThreadTracesBounded(threadId, budget, TRACE_READ_MAX_RESULTS - all.length))
+    )
+    if (all.length >= TRACE_READ_MAX_RESULTS) break
+  }
+  return all.sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, boundedLimit)
+}
+
+export async function deleteTraceById(traceId: string): Promise<{
   success: boolean
   threadId?: string
   error?: string
-} {
-  const location = findTraceLocation(traceId)
+}> {
+  const location = await findTraceLocation(traceId, createTraceReadBudget())
   if (!location) return { success: true }
   try {
-    const raw = readFileSync(location.filePath, "utf-8")
-    const lines = raw.split("\n")
-    const keptLines: string[] = []
-    let removed = false
-
-    for (const line of lines) {
-      if (!line.trim()) continue
-      try {
-        const parsed = normalizeTrace(JSON.parse(line) as AgentTrace)
-        if (parsed.traceId === traceId) {
-          removed = true
-          continue
-        }
-      } catch {
-        // Keep malformed lines to avoid destructive data loss.
+    await traceLocalStorage().runFileOperation(location.filePath, async () => {
+      const fileStat = await lstat(location.filePath)
+      if (!fileStat.isFile() || fileStat.size > TRACE_READ_MAX_FILE_BYTES) {
+        throw new Error("Trace file exceeds the safe deletion budget")
       }
-      keptLines.push(line)
-    }
-
-    if (!removed) return { success: true, threadId: location.threadId }
-
-    if (keptLines.length === 0) {
-      unlinkSync(location.filePath)
-    } else {
-      writeFileSync(location.filePath, `${keptLines.join("\n")}\n`, "utf-8")
-    }
-
-    const threadDir = getThreadTracesDir(location.threadId)
-    if (existsSync(threadDir) && readdirSync(threadDir).length === 0) {
-      rmdirSync(threadDir)
-    }
+      const raw = await readFile(location.filePath, "utf8")
+      const keptLines: string[] = []
+      let removed = false
+      let lineCount = 0
+      for (const line of raw.split(/\r?\n/)) {
+        if (!line.trim()) continue
+        lineCount += 1
+        if (lineCount > 256) throw new Error("Trace file contains too many records")
+        try {
+          if (parseStoredTraceLine(line).traceId === traceId) {
+            removed = true
+            continue
+          }
+        } catch {
+          // Keep malformed lines to avoid destructive data loss.
+        }
+        keptLines.push(line)
+      }
+      if (!removed) return
+      if (keptLines.length === 0) {
+        await unlink(location.filePath)
+        return
+      }
+      const tempPath = `${location.filePath}.delete-${process.pid}-${uuid()}`
+      try {
+        await writeFile(tempPath, `${keptLines.join("\n")}\n`, { encoding: "utf8", mode: 0o600 })
+        await rename(tempPath, location.filePath)
+      } finally {
+        await unlink(tempPath).catch(() => undefined)
+      }
+    })
+    await rmdir(getThreadTracesDir(location.threadId)).catch(() => undefined)
     return { success: true, threadId: location.threadId }
-  } catch (e) {
+  } catch (error) {
     return {
       success: false,
       threadId: location.threadId,
-      error: e instanceof Error ? e.message : String(e)
+      error: error instanceof Error ? error.message : String(error)
     }
   }
 }
 
-export function deleteTraces(traceIds: string[]): {
+export async function deleteTraces(traceIds: string[]): Promise<{
   deletedIds: string[]
   failed: Array<{ traceId: string; error: string }>
-} {
+}> {
   const deletedIds: string[] = []
   const failed: Array<{ traceId: string; error: string }> = []
-  const uniqueIds = [...new Set(traceIds)]
-
+  const uniqueIds = [...new Set(traceIds)].slice(0, TRACE_DELETE_MAX_IDS)
   for (const traceId of uniqueIds) {
-    const result = deleteTraceById(traceId)
-    if (result.success) {
-      deletedIds.push(traceId)
-    } else {
-      failed.push({ traceId, error: result.error ?? "Unknown error" })
-    }
+    const result = await deleteTraceById(traceId)
+    if (result.success) deletedIds.push(traceId)
+    else failed.push({ traceId, error: result.error ?? "Unknown error" })
+    await yieldTraceIo()
   }
-
   return { deletedIds, failed }
 }
 

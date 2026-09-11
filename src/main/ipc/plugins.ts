@@ -37,6 +37,10 @@ import {
   normalizePluginRelativePath,
   readPluginManifest
 } from "../plugins/manifest"
+import {
+  normalizePluginVersion,
+  resolvePluginInstallVersion
+} from "../../shared/plugin-version"
 
 interface ParsedPlugin {
   manifest: PluginManifest | null
@@ -50,21 +54,7 @@ interface ParsedPlugin {
 }
 
 const GENERATED_PLUGIN_MANIFEST_REL_PATH = ".codex-plugin/plugin.json"
-
-export function normalizePluginVersion(version?: string | null): string | undefined {
-  const trimmed = String(version || "").trim()
-  if (!trimmed) return undefined
-  return trimmed.replace(/^v(?=\d)/i, "")
-}
-
-export function resolvePluginInstallVersion(
-  manifestVersion?: string | null,
-  overrideVersion?: string | null
-): string {
-  return (
-    normalizePluginVersion(overrideVersion) ?? normalizePluginVersion(manifestVersion) ?? "1.0.0"
-  )
-}
+export { normalizePluginVersion, resolvePluginInstallVersion } from "../../shared/plugin-version"
 
 async function readJsonObjectFile(filePath: string): Promise<Record<string, unknown> | null> {
   try {

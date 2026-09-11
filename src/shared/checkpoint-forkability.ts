@@ -138,7 +138,9 @@ export function isForkableCheckpointForMessage(tuple: CheckpointTuple, messageId
   const marker = getForkBoundaryMarker(tuple)
   const markerLastVisibleMessageId = marker?.lastVisibleMessageId
   return (
-    typeof markerLastVisibleMessageId !== "string" || markerLastVisibleMessageId === targetMessageId
+    typeof markerLastVisibleMessageId !== "string" ||
+    markerLastVisibleMessageId === targetMessageId ||
+    markerLastVisibleMessageId === status.message?.id
   )
 }
 
@@ -321,20 +323,22 @@ export function buildVisibleForkableCheckpointList(
           oldestForkBoundaryMarkerIndex >= 0 &&
           index > oldestForkBoundaryMarkerIndex))
     const initialTranscript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
-    const lastVisibleMessageId = initialTranscript.visibleMessageIds.at(-1)
-    if (!lastVisibleMessageId) {
+    const lastVisibleMessage = initialTranscript.visibleMessages.at(-1)
+    const lastVisibleMessageId = lastVisibleMessage?.renderId ?? lastVisibleMessage?.id
+    const lastVisibleRawMessageId = lastVisibleMessage?.id
+    if (!lastVisibleMessageId || !lastVisibleRawMessageId) {
       continue
     }
 
     const messageTarget = describeCheckpointMessageForkTarget(tuple.checkpoint, lastVisibleMessageId)
     if (!messageTarget.isForkableMessageBoundary) {
       const markerLastVisibleMessageId = marker?.lastVisibleMessageId
-      const lastVisibleMessage = initialTranscript.visibleMessages.at(-1)
       const canForkInterruptedCheckpointTail =
         isUserInterruptedForkBoundary(marker) &&
         lastVisibleMessage?.role === "tool" &&
         (typeof markerLastVisibleMessageId !== "string" ||
-          markerLastVisibleMessageId === lastVisibleMessageId)
+          markerLastVisibleMessageId === lastVisibleMessageId ||
+          markerLastVisibleMessageId === lastVisibleRawMessageId)
       if (canForkInterruptedCheckpointTail) {
         const summary = buildForkableCheckpointSummary(tuple, {
           ...options,
@@ -355,7 +359,8 @@ export function buildVisibleForkableCheckpointList(
     const markerLastVisibleMessageId = marker?.lastVisibleMessageId
     if (
       typeof markerLastVisibleMessageId === "string" &&
-      markerLastVisibleMessageId !== lastVisibleMessageId
+      markerLastVisibleMessageId !== lastVisibleMessageId &&
+      markerLastVisibleMessageId !== lastVisibleRawMessageId
     ) {
       continue
     }

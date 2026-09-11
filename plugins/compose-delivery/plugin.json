@@ -1,0 +1,15 @@
+{
+  "name": "Compose Delivery",
+  "version": "1.0.5",
+  "description": "Autonomous end-to-end software delivery with exploration, design, TDD implementation, verification, review, reporting, and merge.",
+  "useScenario": "Use for non-trivial feature, bugfix, refactor, or review-feedback delivery that needs high quality without a heavyweight manual pipeline.",
+  "license": "MIT",
+  "keywords": [
+    "delivery",
+    "dynamic-workflow",
+    "tdd",
+    "verification",
+    "review"
+  ],
+  "skills": "skills"
+}

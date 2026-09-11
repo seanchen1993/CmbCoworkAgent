@@ -16,6 +16,10 @@ type IconPopoverButtonProps = Omit<
   align?: PopoverContentProps["align"]
   sideOffset?: PopoverContentProps["sideOffset"]
   stopPropagation?: boolean
+  openOnHover?: boolean
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  closeOnClick?: boolean
 }
 
 function IconPopoverButton({
@@ -27,6 +31,10 @@ function IconPopoverButton({
   align = "center",
   sideOffset = 6,
   stopPropagation = false,
+  openOnHover = true,
+  open: controlledOpen,
+  onOpenChange,
+  closeOnClick = true,
   className,
   type = "button",
   tabIndex,
@@ -38,8 +46,17 @@ function IconPopoverButton({
   onBlur,
   ...props
 }: IconPopoverButtonProps): React.JSX.Element {
-  const [open, setOpen] = React.useState(false)
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false)
   const closeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const open = controlledOpen ?? uncontrolledOpen
+
+  const setOpen = React.useCallback(
+    (nextOpen: boolean) => {
+      if (controlledOpen === undefined) setUncontrolledOpen(nextOpen)
+      onOpenChange?.(nextOpen)
+    },
+    [controlledOpen, onOpenChange]
+  )
 
   const clearCloseTimer = React.useCallback(() => {
     if (!closeTimerRef.current) return
@@ -50,7 +67,7 @@ function IconPopoverButton({
   const showPopover = React.useCallback(() => {
     clearCloseTimer()
     setOpen(true)
-  }, [clearCloseTimer])
+  }, [clearCloseTimer, setOpen])
 
   const hidePopover = React.useCallback(() => {
     clearCloseTimer()
@@ -58,21 +75,21 @@ function IconPopoverButton({
       setOpen(false)
       closeTimerRef.current = null
     }, 80)
-  }, [clearCloseTimer])
+  }, [clearCloseTimer, setOpen])
 
   React.useEffect(() => clearCloseTimer, [clearCloseTimer])
 
   const handleClick = React.useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       if (stopPropagation) event.stopPropagation()
-      setOpen(false)
+      if (closeOnClick) setOpen(false)
       if (disabled) {
         event.preventDefault()
         return
       }
       onClick?.(event)
     },
-    [disabled, onClick, stopPropagation]
+    [closeOnClick, disabled, onClick, setOpen, stopPropagation]
   )
 
   const handleKeyDown = React.useCallback(
@@ -99,19 +116,19 @@ function IconPopoverButton({
           onClick={handleClick}
           onKeyDown={handleKeyDown}
           onPointerEnter={(event) => {
-            showPopover()
+            if (openOnHover) showPopover()
             onPointerEnter?.(event)
           }}
           onPointerLeave={(event) => {
-            hidePopover()
+            if (openOnHover) hidePopover()
             onPointerLeave?.(event)
           }}
           onFocus={(event) => {
-            showPopover()
+            if (openOnHover) showPopover()
             onFocus?.(event)
           }}
           onBlur={(event) => {
-            hidePopover()
+            if (openOnHover) hidePopover()
             onBlur?.(event)
           }}
           className={cn(
@@ -131,8 +148,8 @@ function IconPopoverButton({
         className={cn("w-auto max-w-48 px-2.5 py-1.5 text-xs", popoverClassName)}
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
-        onPointerEnter={showPopover}
-        onPointerLeave={hidePopover}
+        onPointerEnter={openOnHover ? showPopover : undefined}
+        onPointerLeave={openOnHover ? hidePopover : undefined}
         onClick={(event) => {
           if (stopPropagation) event.stopPropagation()
         }}

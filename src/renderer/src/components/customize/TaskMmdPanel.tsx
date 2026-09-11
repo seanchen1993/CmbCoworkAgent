@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
 import {
   Download,
   FileText,
@@ -20,6 +20,8 @@ import {
   SelectValue
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+import { DEFAULT_THEME_ID, getThemeDefinition } from "@/lib/theme-registry"
+import { getThemePreference, subscribeThemePreference } from "@/lib/theme-preference"
 import type { Thread } from "@/types"
 
 type TaskMmdSettings = Awaited<ReturnType<typeof window.api.taskMmd.getSettings>>
@@ -316,6 +318,12 @@ function EntryRow({ entry }: { entry: TaskMmdEntry }): React.JSX.Element {
 }
 
 export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): React.JSX.Element {
+  const themePreference = useSyncExternalStore(
+    subscribeThemePreference,
+    getThemePreference,
+    () => DEFAULT_THEME_ID
+  )
+  const themePalette = getThemeDefinition(themePreference).palette
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
     currentThreadId ?? threads[0]?.thread_id ?? null
   )
@@ -495,12 +503,12 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
           theme: "base",
           themeVariables: {
             fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
-            primaryColor: "#eef6ff",
-            primaryBorderColor: "#5b8def",
-            primaryTextColor: "#172033",
-            lineColor: "#7a8496",
-            secondaryColor: "#f5f7fb",
-            tertiaryColor: "#fff7ed"
+            primaryColor: themePalette.backgroundInteractive,
+            primaryBorderColor: themePalette.primary,
+            primaryTextColor: themePalette.foreground,
+            lineColor: themePalette.mutedForeground,
+            secondaryColor: themePalette.backgroundElevated,
+            tertiaryColor: themePalette.muted
           },
           flowchart: {
             htmlLabels: true,
@@ -526,7 +534,7 @@ export function TaskMmdPanel({ currentThreadId, threads }: TaskMmdPanelProps): R
     return () => {
       cancelled = true
     }
-  }, [renderId, snapshot?.mmd])
+  }, [renderId, snapshot?.mmd, themePalette])
 
   useEffect(() => {
     forceHideGraphTooltip()

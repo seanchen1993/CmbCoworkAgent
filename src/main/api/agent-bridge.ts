@@ -16,8 +16,9 @@
 
 import { BrowserWindow } from "electron"
 import { v4 as uuid } from "uuid"
-import { createThreadCore } from "../ipc/threads"
-import { invokeAgentForApi, abortAgentRunForApi } from "../ipc/agent"
+import { createThreadService } from "../services/thread-service"
+import { abortAgentRunForApi } from "../ipc/agent"
+import { createBrowserWindowAgentRunDelivery, startAgentRun } from "../agent/agent-run-service"
 import { setThreadYoloOverride, setThreadSandboxDisabled } from "../agent/api-run-flags"
 import { getThread, getThreadMessages } from "../db"
 import type { Thread } from "../types"
@@ -69,8 +70,8 @@ export function disposeApiCarrierWindow(): void {
  * Create an API-driven thread. Marks it force-yolo (all tool approvals bypassed)
  * and nudges the UI to refresh its thread list so the new thread appears.
  */
-export function apiCreateThread(metadata?: Record<string, unknown>): Thread {
-  const thread = createThreadCore(metadata)
+export async function apiCreateThread(metadata?: Record<string, unknown>): Promise<Thread> {
+  const thread = await createThreadService(metadata)
   // yolo/sandbox overrides are applied from metadata at run time (applyThreadRunOverrides).
   notifyRenderer("threads:changed")
   return thread
@@ -165,12 +166,13 @@ export async function runApiAgentTurn(
   // No app window (tray/headless): fall back to an in-process run so the SSE
   // client still gets the full stream, just with no UI to render into.
   const window = await ensureCarrierWindow()
-  await invokeAgentForApi(window, {
+  const run = await startAgentRun({
     threadId,
     message,
     modelId,
     userMessageId: uuid()
-  })
+  }, createBrowserWindowAgentRunDelivery(window))
+  await run.completion
 }
 
 /** Abort a thread's active run. Returns true if a run was aborted. */

@@ -6,6 +6,22 @@
  * the need for a second parsing layer on the client.
  */
 import type { Subagent } from "../types"
+import { extractVisibleReasoning, mergeStreamingReasoning } from "../../shared/model-reasoning"
+import { buildSubagentTaskInvocationIdentity } from "../../shared/subagent-invocation-identity"
+import { getMessageProviderTupleFromMetadata } from "../../shared/message-role-collision"
+import {
+  buildSubagentFinalSignature,
+  fingerprintSubagentTranscriptContent as fingerprintTranscriptContent,
+  projectSubagentDescription
+} from "../../shared/subagent-transcript-storage"
+import {
+  readStreamMessageWireMode,
+  STREAM_MESSAGE_CONTENT_MODE_KEY,
+  STREAM_MESSAGE_REASONING_MODE_KEY,
+  STREAM_TOOL_CALL_ARGS_MODE_KEY,
+  type StreamMessageWireMode
+} from "../../shared/stream-message-wire-mode"
+import { mergeStreamToolCallArgs } from "../../shared/stream-tool-call-chunks"
 
 // ---------------------------------------------------------------------------
 // Standardised event types broadcast from scheduler → renderer
@@ -48,7 +64,35 @@ export type SchedulerEvent =
         name?: string
       }>
     }
+  | {
+      type: "turn-messages"
+      messages: Array<{
+        id: string
+        role: "user" | "assistant" | "tool" | "system"
+        content: string
+        reasoning?: string
+        tool_calls?: unknown[]
+        tool_call_id?: string
+        name?: string
+      }>
+    }
   | { type: "todos"; todos: Array<{ id?: string; content?: string; status?: string }> }
+
+export interface StreamConverterChunkOptions {
+  /** Absolute index of projected values.messages[0] in the original checkpoint array. */
+  valuesMessageIndexOffset?: number
+  /** A projected current-turn snapshot must be merged, never treated as authoritative history. */
+  valuesSnapshotScope?: "full" | "turn"
+  /** Whether values.messages is a complete turn snapshot or an incremental suffix. */
+  valuesSnapshotKind?: "full" | "append" | "tail"
+}
+
+export type SchedulerLifecycleEvent =
+  | { type: "started" }
+  | { type: "done" }
+  | { type: "error"; error: string }
+
+export type SchedulerRendererEvent = SchedulerEvent | SchedulerLifecycleEvent
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -76,12 +120,91 @@ interface ToolCallChunkLike {
   name?: string
   args?: string
   index?: number
+  [STREAM_TOOL_CALL_ARGS_MODE_KEY]?: StreamMessageWireMode
 }
 
 interface AccumulatedToolCall {
   id: string
   name: string
   args: string
+  parsedArgs?: Record<string, unknown>
+  jsonDepth: number
+  jsonInString: boolean
+  jsonEscaped: boolean
+  jsonStarted: boolean
+  jsonComplete: boolean
+  jsonInvalid: boolean
+}
+
+function createAccumulatedToolCall(id: string, name: string): AccumulatedToolCall {
+  return {
+    id,
+    name,
+    args: "",
+    jsonDepth: 0,
+    jsonInString: false,
+    jsonEscaped: false,
+    jsonStarted: false,
+    jsonComplete: false,
+    jsonInvalid: false
+  }
+}
+
+function scanAccumulatedToolCallJson(call: AccumulatedToolCall, fragment: string): void {
+  for (const character of fragment) {
+    if (call.jsonInvalid) return
+    if (call.jsonComplete) {
+      if (!/\s/.test(character)) call.jsonInvalid = true
+      continue
+    }
+    if (!call.jsonStarted) {
+      if (/\s/.test(character)) continue
+      if (character !== "{" && character !== "[") {
+        call.jsonInvalid = true
+        continue
+      }
+      call.jsonStarted = true
+      call.jsonDepth = 1
+      continue
+    }
+    if (call.jsonInString) {
+      if (call.jsonEscaped) call.jsonEscaped = false
+      else if (character === "\\") call.jsonEscaped = true
+      else if (character === '"') call.jsonInString = false
+      continue
+    }
+    if (character === '"') call.jsonInString = true
+    else if (character === "{" || character === "[") call.jsonDepth += 1
+    else if (character === "}" || character === "]") {
+      call.jsonDepth -= 1
+      if (call.jsonDepth < 0) call.jsonInvalid = true
+      else if (call.jsonDepth === 0) call.jsonComplete = true
+    }
+  }
+}
+
+function resetAccumulatedToolCallArgs(call: AccumulatedToolCall, snapshot: string): void {
+  call.args = snapshot
+  call.parsedArgs = undefined
+  call.jsonDepth = 0
+  call.jsonInString = false
+  call.jsonEscaped = false
+  call.jsonStarted = false
+  call.jsonComplete = false
+  call.jsonInvalid = false
+  scanAccumulatedToolCallJson(call, snapshot)
+}
+
+function parseCompletedAccumulatedToolCall(call: AccumulatedToolCall): void {
+  if (call.parsedArgs || !call.jsonComplete || call.jsonInvalid) return
+  try {
+    const parsed = JSON.parse(call.args)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      call.parsedArgs = parsed as Record<string, unknown>
+    }
+  } catch {
+    // Balanced structure is only a cheap parse gate.
+  }
 }
 
 function getUsageMetadata(kwargs: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -109,63 +232,40 @@ function extractContent(raw: unknown): string {
   return ""
 }
 
-function extractReasoningText(reasoning: unknown): string {
-  if (typeof reasoning === "string") return reasoning
-  if (Array.isArray(reasoning)) return reasoning.map(extractReasoningText).filter(Boolean).join("")
-  if (reasoning && typeof reasoning === "object") {
-    const record = reasoning as Record<string, unknown>
-    if (typeof record.text === "string") return record.text
-    if (typeof record.reasoning === "string") return record.reasoning
-    if (typeof record.reasoning_content === "string") return record.reasoning_content
-    if (typeof record.reasoning_text === "string") return record.reasoning_text
-    if (typeof record.content === "string") return record.content
-    if (typeof record.summary === "string") return record.summary
-    if (typeof record.delta === "string") return record.delta
-    if (Array.isArray(record.parts)) {
-      return record.parts.map(extractReasoningText).filter(Boolean).join("")
-    }
-    if (Array.isArray(record.reasoning_details)) {
-      return record.reasoning_details.map(extractReasoningText).filter(Boolean).join("")
-    }
-    if (Array.isArray(record.summary)) {
-      return record.summary.map(extractReasoningText).filter(Boolean).join("")
-    }
-    if (Array.isArray(record.details)) {
-      return record.details.map(extractReasoningText).filter(Boolean).join("")
-    }
-  }
-  return ""
-}
-
-function extractReasoningFromKwargs(kwargs: Record<string, unknown>): string {
-  const additionalKwargs =
-    kwargs.additional_kwargs && typeof kwargs.additional_kwargs === "object"
-      ? (kwargs.additional_kwargs as Record<string, unknown>)
-      : undefined
-  return extractReasoningText(
-    kwargs.reasoning ??
-      kwargs.reasoning_content ??
-      kwargs.reasoning_text ??
-      kwargs.reasoning_details ??
-      kwargs.summary ??
-      kwargs.details ??
-      kwargs.delta ??
-      additionalKwargs?.reasoning ??
-      additionalKwargs?.reasoning_content ??
-      additionalKwargs?.reasoning_text ??
-      additionalKwargs?.reasoning_details ??
-      additionalKwargs?.summary ??
-      additionalKwargs?.details ??
-      additionalKwargs?.delta
-  )
-}
-
 function isToolMessageError(kwargs: Record<string, unknown>): boolean {
   return (
     kwargs.status === "error" ||
     kwargs.is_error === true ||
     (kwargs.additional_kwargs as Record<string, unknown> | undefined)?.is_error === true
   )
+}
+
+function convertValuesMessages(
+  messages: readonly SerializedMsg[],
+  messageIndexOffset: number
+): Extract<SchedulerEvent, { type: "turn-messages" }>["messages"] {
+  return messages.map((message, index) => {
+    const kwargs = (message.kwargs || {}) as Record<string, unknown>
+    const className = getClassName(message)
+
+    let role: "user" | "assistant" | "tool" | "system" = "assistant"
+    if (className.includes("Human")) role = "user"
+    else if (className.includes("Tool")) role = "tool"
+    else if (className.includes("System")) role = "system"
+
+    const reasoning = role === "assistant" ? extractVisibleReasoning(kwargs) : ""
+    return {
+      id: (kwargs.id as string) || `msg-${messageIndexOffset + index}`,
+      role,
+      content: extractContent(kwargs.content ?? message.content),
+      ...(reasoning ? { reasoning } : {}),
+      tool_calls: kwargs.tool_calls as unknown[] | undefined,
+      ...(role === "tool" && kwargs.tool_call_id
+        ? { tool_call_id: kwargs.tool_call_id as string }
+        : {}),
+      ...(role === "tool" && kwargs.name ? { name: kwargs.name as string } : {})
+    }
+  })
 }
 
 const SUBAGENT_NAME_MAP: Record<string, string> = {
@@ -208,6 +308,34 @@ const SUBAGENT_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
 
 export class StreamConverter {
   private activeSubagents = new Map<string, Subagent>()
+  private runningSubagentIds = new Set<string>()
+  private mappedSubagentExecutionIds = new Set<string>()
+  private subagentSnapshotVersion = 0
+  // Canonical checkpoint identity survives repeated values snapshots; live
+  // message identity is occurrence-scoped so provider ID reuse starts a new run.
+  private subagentExecutionIdByInvocation = new Map<string, string>()
+  private liveSubagentExecutionIdByInvocation = new Map<string, string>()
+  private liveSubagentExecutionIdsByToolCallId = new Map<string, string[]>()
+  private liveSubagentInvocationByParentTask = new Map<
+    string,
+    { occurrence: number; invocationScope: string; executionId?: string }
+  >()
+  private currentSubagentExecutionIdByToolCallId = new Map<string, string>()
+  private subagentTaskResultExecutionIdByIdentity = new Map<string, string>()
+  private subagentPromptSignatureByExecutionId = new Map<string, string>()
+  private subagentFinalSignatureByExecutionId = new Map<string, string>()
+  private subagentLatestAssistantByExecutionId = new Map<
+    string,
+    { messageId: string; content: string }
+  >()
+  // Values snapshots use absolute message indexes so an append-only suffix can
+  // retain the same provider occurrence semantics as a complete turn scan.
+  private valuesParentOccurrenceCounts = new Map<string, number>()
+  private valuesParentOccurrenceByMessageIndex = new Map<
+    number,
+    { parentMessageId?: string; parentOccurrence: number }
+  >()
+  private valuesIdlessParentOccurrence = 0
   private subagentSpawnCounter = 0
   private taskUuidToSubagentId = new Map<string, string>()
   // Owning subagent id for the chunk currently being processed (backend-stamped).
@@ -220,14 +348,23 @@ export class StreamConverter {
   // Message id (kwargs.id) of the chunk currently being processed.
   private currentChunkMessageId?: string
 
+  constructor(
+    private readonly runScope: string = crypto.randomUUID(),
+    private readonly valuesTurnUserMessageId?: string
+  ) {}
+
   /** Convert one raw LangGraph `[mode, data]` chunk into ≥0 standardised events. */
-  processChunk(mode: string, data: unknown): SchedulerEvent[] {
+  processChunk(
+    mode: string,
+    data: unknown,
+    options: StreamConverterChunkOptions = {}
+  ): SchedulerEvent[] {
     // Owner hint and message id are scoped to a single chunk; clear so they
     // never leak across chunks.
     this.currentSubagentOwnerHint = undefined
     this.currentChunkMessageId = undefined
     if (mode === "messages") return this.processMessages(data)
-    if (mode === "values") return this.processValues(data)
+    if (mode === "values") return this.processValues(data, options)
     return []
   }
 
@@ -237,12 +374,16 @@ export class StreamConverter {
     const events: SchedulerEvent[] = []
     const [msgChunk, metadata] = data as [
       SerializedMsg,
-      | {
-          langgraph_checkpoint_ns?: string
-          checkpoint_ns?: string
-          [SUBAGENT_OWNER_METADATA_KEY]?: string
-        }
-      | undefined
+      (
+        | {
+            langgraph_checkpoint_ns?: string
+            checkpoint_ns?: string
+            [SUBAGENT_OWNER_METADATA_KEY]?: string
+            [STREAM_MESSAGE_CONTENT_MODE_KEY]?: StreamMessageWireMode
+            [STREAM_MESSAGE_REASONING_MODE_KEY]?: StreamMessageWireMode
+          }
+        | undefined
+      )
     ]
     if (!msgChunk) return events
 
@@ -254,8 +395,12 @@ export class StreamConverter {
     // attributes the chunk exactly, with no ns/spawn-order heuristic. Scoped to
     // this chunk.
     const ownerHint = metadata?.[SUBAGENT_OWNER_METADATA_KEY]
+    const ownerExecutionId = ownerHint
+      ? (this.currentSubagentExecutionIdByToolCallId.get(ownerHint) ??
+        (this.activeSubagents.has(ownerHint) ? ownerHint : undefined))
+      : undefined
     this.currentSubagentOwnerHint =
-      ownerHint && this.activeSubagents.has(ownerHint) ? ownerHint : undefined
+      ownerExecutionId && this.activeSubagents.has(ownerExecutionId) ? ownerExecutionId : undefined
     // Scope tool-call-chunk stitching to this message so interleaved concurrent
     // subagent streams (all using index 0) never cross-contaminate.
     this.currentChunkMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
@@ -267,7 +412,18 @@ export class StreamConverter {
     // message list. If we cannot attribute the message to a running subagent we
     // fall back to the OLD behaviour (drop) so unowned interior never leaks.
     const ns = metadata?.langgraph_checkpoint_ns || metadata?.checkpoint_ns
-    const isInterior = !!this.currentSubagentOwnerHint || (!!ns && ns.includes("tools:"))
+    const messageToolCallId =
+      className.includes("Tool") && typeof kwargs.tool_call_id === "string"
+        ? kwargs.tool_call_id
+        : undefined
+    const isKnownParentTaskResult =
+      !!messageToolCallId &&
+      !ownerHint &&
+      this.currentSubagentExecutionIdByToolCallId.has(messageToolCallId) &&
+      (kwargs.name === "task" ||
+        (typeof kwargs.name !== "string" && !(ns && ns.includes("tools:"))))
+    const isInterior =
+      !!this.currentSubagentOwnerHint || (!!ns && ns.includes("tools:") && !isKnownParentTaskResult)
     let subagentId: string | undefined
     if (isInterior) {
       subagentId = this.resolveSubagentId(ns)
@@ -276,7 +432,11 @@ export class StreamConverter {
 
     if (className.includes("AI")) {
       const content = extractContent(kwargs.content ?? msgChunk.content)
-      const reasoning = extractReasoningFromKwargs(kwargs)
+      const reasoning = extractVisibleReasoning(kwargs)
+      const contentWireMode = readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY])
+      const reasoningWireMode = readStreamMessageWireMode(
+        metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]
+      )
       const msgId = kwargs.id as string | undefined
       if (!msgId) return events
 
@@ -284,39 +444,84 @@ export class StreamConverter {
         kwargs.tool_calls,
         kwargs.tool_call_chunks
       )
-      if (content || reasoning || toolCalls.length) {
+      const hasSnapshotUpdate = contentWireMode === "snapshot" || reasoningWireMode === "snapshot"
+      if (hasSnapshotUpdate && !subagentId) {
+        events.push({
+          type: "custom",
+          data: {
+            type: "coordinator_ai_snapshot_message",
+            assistantMessage: {
+              id: msgId,
+              type: "ai",
+              ...(contentWireMode === "snapshot" ? { content } : {}),
+              ...(reasoningWireMode === "snapshot" ? { reasoning } : {})
+            }
+          }
+        })
+      }
+      const deltaContent = contentWireMode === "snapshot" ? "" : content
+      const deltaReasoning = reasoningWireMode === "snapshot" ? "" : reasoning
+      if (deltaContent || deltaReasoning || toolCalls.length) {
         events.push({
           type: "message-delta",
           id: msgId,
-          content: content || "",
-          ...(reasoning ? { reasoning } : {}),
+          content: deltaContent,
+          ...(deltaReasoning ? { reasoning: deltaReasoning } : {}),
           ...(toolCalls.length ? { toolCalls } : {}),
           ...(subagentId ? { subagentId } : {})
         })
       }
 
       if (subagentId) {
+        if (content) {
+          const previousAssistant = this.subagentLatestAssistantByExecutionId.get(subagentId)
+          this.subagentLatestAssistantByExecutionId.set(subagentId, {
+            messageId: msgId,
+            content:
+              previousAssistant?.messageId === msgId
+                ? mergeStreamingReasoning(previousAssistant.content, content)
+                : content
+          })
+        }
         // Interior AI message: treat task tool_calls as activity only (do NOT
         // register nested subagents — avoids recursion noise). Refresh the card
         // status with the latest interior tool name + heartbeat.
         const sa = this.activeSubagents.get(subagentId)
         if (sa) {
+          const previousTool = sa.currentTool
           const latestToolName = toolCalls
             .map((tc) => tc.name)
             .filter((name): name is string => typeof name === "string")
             .pop()
           if (latestToolName) sa.currentTool = latestToolName
           sa.lastActivityAt = new Date().toISOString()
-          events.push(this.subagentCustomEvent())
+          if (latestToolName && latestToolName !== previousTool) {
+            events.push(
+              this.subagentPatchEvent(subagentId, {
+                currentTool: latestToolName,
+                lastActivityAt: sa.lastActivityAt
+              })
+            )
+          }
         }
       } else {
         // Main-flow only: detect new subagents and emit token usage. Neither of
         // these must ever be driven by interior messages (AC-A6, no recursion).
         if (toolCalls.length) {
-          for (const tc of toolCalls) {
-            if (tc.name === "task" && tc.id && !this.activeSubagents.has(tc.id)) {
-              this.registerSubagent(tc.id, tc.args || {})
-              events.push(this.subagentCustomEvent())
+          for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
+            const tc = toolCalls[toolCallIndex]
+            if (tc.name === "task" && tc.id) {
+              const registration = this.registerSubagent(tc.id, tc.args || {}, msgId)
+              if (registration.created || registration.updated) {
+                events.push(this.subagentCustomEvent())
+              }
+              const promptEvent = this.createSubagentPromptEvent(
+                registration.executionId,
+                tc.id,
+                tc.args || {},
+                msgId
+              )
+              if (promptEvent) events.push(promptEvent)
             }
           }
         }
@@ -364,15 +569,32 @@ export class StreamConverter {
         const sa = this.activeSubagents.get(subagentId)
         if (sa) {
           sa.lastActivityAt = new Date().toISOString()
-          events.push(this.subagentCustomEvent())
         }
-      } else if (kwargs.tool_call_id && this.activeSubagents.has(kwargs.tool_call_id as string)) {
+      } else if (kwargs.tool_call_id) {
         // Main-flow subagent completion.
-        const sa = this.activeSubagents.get(kwargs.tool_call_id as string)
-        if (sa && sa.status === "running") {
-          sa.status = isToolMessageError(kwargs) ? "failed" : "completed"
-          sa.completedAt = new Date()
-          events.push(this.subagentCustomEvent())
+        const rawToolCallId = kwargs.tool_call_id as string
+        const resultMessageId = typeof kwargs.id === "string" ? kwargs.id : msgId
+        const isError = isToolMessageError(kwargs)
+        const status = typeof kwargs.status === "string" ? kwargs.status : undefined
+        const resultIdentity = this.buildSubagentTaskResultIdentity(
+          rawToolCallId,
+          resultMessageId,
+          content,
+          status,
+          isError
+        )
+        const mappedExecutionId = this.subagentTaskResultExecutionIdByIdentity.get(resultIdentity)
+        const executionId =
+          (mappedExecutionId && this.activeSubagents.has(mappedExecutionId)
+            ? mappedExecutionId
+            : undefined) ?? this.currentSubagentExecutionIdByToolCallId.get(rawToolCallId)
+        if (executionId) {
+          this.subagentTaskResultExecutionIdByIdentity.set(resultIdentity, executionId)
+        }
+        if (executionId) {
+          events.push(
+            ...this.processSubagentTaskResult(executionId, content, status, isError, true)
+          )
         }
       }
     }
@@ -389,34 +611,44 @@ export class StreamConverter {
    *       by spawn order; cache for all subsequent chunks with the same task UUID.
    */
   private resolveSubagentId(ns?: string): string | undefined {
-    // tier (0): deterministic backend-stamped owner for this chunk.
-    if (this.currentSubagentOwnerHint) return this.currentSubagentOwnerHint
+    const taskUuid = ns ? extractTaskUuid(ns) : undefined
+    const cached = taskUuid ? this.taskUuidToSubagentId.get(taskUuid) : undefined
+    // A UUID pinned before a raw task-ID reuse is stronger than the backend's
+    // raw owner hint, which necessarily points at only the latest execution.
+    if (cached && this.activeSubagents.has(cached)) return cached
 
-    const running = Array.from(this.activeSubagents.values()).filter(
-      (sa) => sa.status === "running"
-    )
-    if (running.length === 0) return undefined
+    // tier (0): deterministic backend-stamped owner for this chunk. Pin its
+    // checkpoint UUID on first sight so late chunks survive raw-ID reuse.
+    if (this.currentSubagentOwnerHint) {
+      if (taskUuid) this.taskUuidToSubagentId.set(taskUuid, this.currentSubagentOwnerHint)
+      return this.currentSubagentOwnerHint
+    }
+
+    if (this.runningSubagentIds.size === 0) return undefined
 
     // tier (a): ns embeds the toolCallId literally (legacy/direct format)
     if (ns) {
-      for (const sa of running) {
+      for (const executionId of this.runningSubagentIds) {
+        const sa = this.activeSubagents.get(executionId)
+        if (!sa) continue
         if (sa.toolCallId && ns.includes(sa.toolCallId)) return sa.id
       }
     }
 
     // tier (b): sole running subagent — unambiguous
-    if (running.length === 1) return running[0].id
+    if (this.runningSubagentIds.size === 1) {
+      return this.runningSubagentIds.values().next().value as string
+    }
 
     // tier (c): extract the stable task UUID from the ns ("tools:{uuid}|...")
     // and assign it to the earliest unattributed running subagent on first encounter.
-    const taskUuid = ns ? extractTaskUuid(ns) : undefined
     if (taskUuid) {
-      const cached = this.taskUuidToSubagentId.get(taskUuid)
-      if (cached) return cached
-
       const attributed = new Set(this.taskUuidToSubagentId.values())
-      const unattributed = running
-        .filter((sa) => !attributed.has(sa.id))
+      const unattributed = Array.from(this.runningSubagentIds)
+        .flatMap((executionId) => {
+          const subagent = this.activeSubagents.get(executionId)
+          return subagent && !attributed.has(executionId) ? [subagent] : []
+        })
         .sort((a, b) => (a.spawnIndex ?? 0) - (b.spawnIndex ?? 0))
       if (unattributed.length > 0) {
         this.taskUuidToSubagentId.set(taskUuid, unattributed[0].id)
@@ -427,16 +659,161 @@ export class StreamConverter {
     return undefined
   }
 
+  private resetValuesParentOccurrences(): void {
+    this.valuesParentOccurrenceCounts.clear()
+    this.valuesParentOccurrenceByMessageIndex.clear()
+    this.valuesIdlessParentOccurrence = 0
+  }
+
+  private resolveValuesParentOccurrence(
+    message: SerializedMsg,
+    absoluteMessageIndex: number
+  ): { parentMessageId?: string; parentOccurrence: number } {
+    const kwargs = (message.kwargs || {}) as Record<string, unknown>
+    const parentMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
+    const existing = this.valuesParentOccurrenceByMessageIndex.get(absoluteMessageIndex)
+    if (existing && existing.parentMessageId === parentMessageId) return existing
+
+    const additionalKwargs =
+      kwargs.additional_kwargs &&
+      typeof kwargs.additional_kwargs === "object" &&
+      !Array.isArray(kwargs.additional_kwargs)
+        ? (kwargs.additional_kwargs as Record<string, unknown>)
+        : undefined
+    const providerOccurrence =
+      getMessageProviderTupleFromMetadata(additionalKwargs)?.provider_occurrence
+    let parentOccurrence: number
+    if (providerOccurrence) {
+      parentOccurrence = providerOccurrence
+      if (parentMessageId) {
+        this.valuesParentOccurrenceCounts.set(
+          parentMessageId,
+          Math.max(this.valuesParentOccurrenceCounts.get(parentMessageId) ?? 0, parentOccurrence)
+        )
+      }
+    } else if (parentMessageId) {
+      parentOccurrence = (this.valuesParentOccurrenceCounts.get(parentMessageId) ?? 0) + 1
+      this.valuesParentOccurrenceCounts.set(parentMessageId, parentOccurrence)
+    } else {
+      this.valuesIdlessParentOccurrence += 1
+      parentOccurrence = this.valuesIdlessParentOccurrence
+    }
+    const resolved = { parentMessageId, parentOccurrence }
+    this.valuesParentOccurrenceByMessageIndex.set(absoluteMessageIndex, resolved)
+    return resolved
+  }
+
+  private adoptLiveSubagentExecution(toolCallId: string, persistedInvocationScope: string): void {
+    const invocationKey = JSON.stringify([toolCallId, persistedInvocationScope])
+    if (this.subagentExecutionIdByInvocation.has(invocationKey)) return
+    const liveExecutionId = (this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? [])
+      .filter((executionId) => !this.mappedSubagentExecutionIds.has(executionId))
+      .at(-1)
+    if (liveExecutionId) {
+      this.subagentExecutionIdByInvocation.set(invocationKey, liveExecutionId)
+      this.mappedSubagentExecutionIds.add(liveExecutionId)
+    }
+  }
+
+  private processIncrementalValuesMessages(
+    messages: readonly SerializedMsg[],
+    messageIndexOffset: number
+  ): SchedulerEvent[] {
+    const events: SchedulerEvent[] = []
+    let subagentStateChanged = false
+
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+      const message = messages[messageIndex]
+      const kwargs = (message.kwargs || {}) as Record<string, unknown>
+      const className = getClassName(message)
+      const absoluteMessageIndex = messageIndexOffset + messageIndex
+
+      if (className.includes("AI") && Array.isArray(kwargs.tool_calls)) {
+        const toolCalls = kwargs.tool_calls as ToolCallLike[]
+        const { parentMessageId, parentOccurrence } = this.resolveValuesParentOccurrence(
+          message,
+          absoluteMessageIndex
+        )
+        for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
+          const toolCall = toolCalls[toolCallIndex]
+          if (toolCall.name !== "task" || !toolCall.id) continue
+          const persistedInvocationScope = buildSubagentTaskInvocationIdentity({
+            parentMessageId,
+            parentOccurrence,
+            parentContent: kwargs.content ?? message.content,
+            parentToolCalls: toolCalls,
+            taskToolCallId: toolCall.id,
+            taskToolCallIndex: toolCallIndex,
+            taskArgs: toolCall.args
+          })
+          this.adoptLiveSubagentExecution(toolCall.id, persistedInvocationScope)
+          const registration = this.registerSubagent(
+            toolCall.id,
+            toolCall.args || {},
+            parentMessageId || `values-message-${absoluteMessageIndex}`,
+            persistedInvocationScope
+          )
+          subagentStateChanged ||= registration.created || registration.updated
+          const promptEvent = this.createSubagentPromptEvent(
+            registration.executionId,
+            toolCall.id,
+            toolCall.args || {},
+            persistedInvocationScope
+          )
+          if (promptEvent) events.push(promptEvent)
+        }
+      }
+
+      if (className.includes("Tool") && typeof kwargs.tool_call_id === "string") {
+        const rawToolCallId = kwargs.tool_call_id
+        const content = extractContent(kwargs.content ?? message.content)
+        const resultMessageId =
+          (typeof kwargs.id === "string" && kwargs.id) || `values-tool-${absoluteMessageIndex}`
+        const isError = isToolMessageError(kwargs)
+        const status = typeof kwargs.status === "string" ? kwargs.status : undefined
+        const resultIdentity = this.buildSubagentTaskResultIdentity(
+          rawToolCallId,
+          resultMessageId,
+          content,
+          status,
+          isError
+        )
+        const mappedExecutionId = this.subagentTaskResultExecutionIdByIdentity.get(resultIdentity)
+        const executionId =
+          (mappedExecutionId && this.activeSubagents.has(mappedExecutionId)
+            ? mappedExecutionId
+            : undefined) ?? this.currentSubagentExecutionIdByToolCallId.get(rawToolCallId)
+        if (executionId) {
+          this.subagentTaskResultExecutionIdByIdentity.set(resultIdentity, executionId)
+          const resultEvents = this.processSubagentTaskResult(
+            executionId,
+            content,
+            status,
+            isError,
+            false
+          )
+          subagentStateChanged ||= resultEvents.length > 0
+          events.push(...resultEvents)
+        }
+      }
+    }
+
+    if (subagentStateChanged && this.activeSubagents.size > 0) {
+      events.push(this.subagentCustomEvent())
+    }
+    return events
+  }
+
   // -- values mode ----------------------------------------------------------
 
-  private processValues(data: unknown): SchedulerEvent[] {
+  private processValues(data: unknown, options: StreamConverterChunkOptions): SchedulerEvent[] {
     const events: SchedulerEvent[] = []
+    const subagentSnapshotVersionBefore = this.subagentSnapshotVersion
+    const messageIndexOffset = Math.max(0, options.valuesMessageIndexOffset ?? 0)
     const state = data as {
       messages?: SerializedMsg[]
       todos?: Array<{ id?: string; content?: string; status?: string }>
-      files?:
-        | Record<string, unknown>
-        | Array<{ path: string; is_dir?: boolean; size?: number }>
+      files?: Record<string, unknown> | Array<{ path: string; is_dir?: boolean; size?: number }>
       workspacePath?: string
       __interrupt__?: Array<{
         value?: {
@@ -450,60 +827,195 @@ export class StreamConverter {
       }>
     }
 
-    // Scan messages for subagent state, then convert
-    if (state?.messages && Array.isArray(state.messages)) {
-      for (const msg of state.messages) {
+    // Incremental values frames are guaranteed by the run-scoped serializer
+    // not to cross a task/subagent boundary. Convert only the supplied suffix;
+    // the renderer merges these messages by stable ID into its durable turn.
+    if (
+      state?.messages &&
+      Array.isArray(state.messages) &&
+      options.valuesSnapshotKind !== undefined &&
+      options.valuesSnapshotKind !== "full"
+    ) {
+      events.push(...this.processIncrementalValuesMessages(state.messages, messageIndexOffset))
+      const converted = convertValuesMessages(state.messages, messageIndexOffset)
+      if (converted.length > 0) {
+        events.push({
+          type: options.valuesSnapshotScope === "turn" ? "turn-messages" : "full-messages",
+          messages: converted
+        })
+      }
+    }
+
+    // A complete snapshot performs the conservative subagent reconciliation.
+    if (
+      state?.messages &&
+      Array.isArray(state.messages) &&
+      (options.valuesSnapshotKind === undefined || options.valuesSnapshotKind === "full")
+    ) {
+      this.resetValuesParentOccurrences()
+      let subagentScanStartIndex = 0
+      if (this.valuesTurnUserMessageId) {
+        const currentTurnUserIndex = state.messages.findLastIndex((message) => {
+          const kwargs = (message.kwargs || {}) as Record<string, unknown>
+          return (
+            getClassName(message).includes("Human") && kwargs.id === this.valuesTurnUserMessageId
+          )
+        })
+        // A ChatX converter is scoped to one inbound turn. If its user marker
+        // is not present yet, do not reinterpret older checkpoint tasks as new
+        // work for the current turn.
+        subagentScanStartIndex =
+          currentTurnUserIndex >= 0 ? currentTurnUserIndex + 1 : state.messages.length
+      }
+      const snapshotExecutionIdByToolCallId = new Map<string, string>()
+      const persistedInvocationScopeByLocation = new Map<string, string>()
+      const persistedInvocationScopesByToolCallId = new Map<string, string[]>()
+      for (let messageIndex = 0; messageIndex < state.messages.length; messageIndex += 1) {
+        const message = state.messages[messageIndex]
+        const kwargs = (message.kwargs || {}) as Record<string, unknown>
+        if (!getClassName(message).includes("AI")) continue
+        const parentMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
+        const { parentOccurrence } = this.resolveValuesParentOccurrence(
+          message,
+          messageIndexOffset + messageIndex
+        )
+        if (messageIndex < subagentScanStartIndex || !Array.isArray(kwargs.tool_calls)) continue
+        const toolCalls = kwargs.tool_calls as ToolCallLike[]
+        for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
+          const toolCall = toolCalls[toolCallIndex]
+          if (toolCall.name !== "task" || !toolCall.id) continue
+          const persistedInvocationScope = buildSubagentTaskInvocationIdentity({
+            parentMessageId,
+            parentOccurrence,
+            parentContent: kwargs.content ?? message.content,
+            parentToolCalls: toolCalls,
+            taskToolCallId: toolCall.id,
+            taskToolCallIndex: toolCallIndex,
+            taskArgs: toolCall.args
+          })
+          persistedInvocationScopeByLocation.set(
+            `${messageIndex}:${toolCallIndex}`,
+            persistedInvocationScope
+          )
+          const scopes = persistedInvocationScopesByToolCallId.get(toolCall.id) ?? []
+          scopes.push(persistedInvocationScope)
+          persistedInvocationScopesByToolCallId.set(toolCall.id, scopes)
+        }
+      }
+      for (const [toolCallId, persistedScopes] of persistedInvocationScopesByToolCallId) {
+        const liveExecutionIds = (
+          this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? []
+        ).filter((executionId) => !this.mappedSubagentExecutionIds.has(executionId))
+        const adoptionCount = Math.min(liveExecutionIds.length, persistedScopes.length)
+        const executionsToAdopt = liveExecutionIds.slice(-adoptionCount)
+        const scopesToAdopt = persistedScopes.slice(-adoptionCount)
+        for (let index = 0; index < adoptionCount; index += 1) {
+          const invocationKey = JSON.stringify([toolCallId, scopesToAdopt[index]])
+          if (
+            this.subagentExecutionIdByInvocation.get(invocationKey) !== executionsToAdopt[index]
+          ) {
+            this.subagentExecutionIdByInvocation.set(invocationKey, executionsToAdopt[index])
+            this.subagentSnapshotVersion += 1
+          }
+          this.mappedSubagentExecutionIds.add(executionsToAdopt[index])
+        }
+      }
+
+      for (
+        let messageIndex = subagentScanStartIndex;
+        messageIndex < state.messages.length;
+        messageIndex += 1
+      ) {
+        const msg = state.messages[messageIndex]
         const kw = (msg.kwargs || {}) as Record<string, unknown>
         const cn = getClassName(msg)
 
         if (cn.includes("AI") && kw.tool_calls) {
-          for (const tc of kw.tool_calls as Array<{
+          const parentMessageId = typeof kw.id === "string" ? kw.id : undefined
+          const toolCalls = kw.tool_calls as Array<{
             id?: string
             name?: string
             args?: Record<string, unknown>
-          }>) {
-            if (tc.name === "task" && tc.id && !this.activeSubagents.has(tc.id)) {
-              this.registerSubagent(tc.id, tc.args || {})
+          }>
+          for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
+            const tc = toolCalls[toolCallIndex]
+            if (tc.name === "task" && tc.id) {
+              const persistedInvocationScope =
+                persistedInvocationScopeByLocation.get(`${messageIndex}:${toolCallIndex}`) ??
+                buildSubagentTaskInvocationIdentity({
+                  parentMessageId,
+                  parentOccurrence: 1,
+                  parentContent: kw.content ?? msg.content,
+                  parentToolCalls: toolCalls,
+                  taskToolCallId: tc.id,
+                  taskToolCallIndex: toolCallIndex,
+                  taskArgs: tc.args
+                })
+              const registration = this.registerSubagent(
+                tc.id,
+                tc.args || {},
+                (typeof kw.id === "string" && kw.id) ||
+                  `values-message-${messageIndexOffset + messageIndex}`,
+                persistedInvocationScope
+              )
+              const executionId = this.currentSubagentExecutionIdByToolCallId.get(tc.id)
+              if (executionId) snapshotExecutionIdByToolCallId.set(tc.id, executionId)
+              const promptEvent = this.createSubagentPromptEvent(
+                registration.executionId,
+                tc.id,
+                tc.args || {},
+                persistedInvocationScope
+              )
+              if (promptEvent) events.push(promptEvent)
             }
           }
         }
 
-        if (cn.includes("Tool") && kw.tool_call_id && this.activeSubagents.has(kw.tool_call_id as string)) {
-          const sa = this.activeSubagents.get(kw.tool_call_id as string)
-          if (sa && sa.status === "running") {
-            sa.status = isToolMessageError(kw) ? "failed" : "completed"
-            sa.completedAt = new Date()
+        if (cn.includes("Tool") && kw.tool_call_id) {
+          const rawToolCallId = kw.tool_call_id as string
+          const content = extractContent(kw.content ?? msg.content)
+          const resultMessageId =
+            (typeof kw.id === "string" && kw.id) ||
+            `values-tool-${messageIndexOffset + messageIndex}`
+          const isError = isToolMessageError(kw)
+          const status = typeof kw.status === "string" ? kw.status : undefined
+          const resultIdentity = this.buildSubagentTaskResultIdentity(
+            rawToolCallId,
+            resultMessageId,
+            content,
+            status,
+            isError
+          )
+          const mappedExecutionId = this.subagentTaskResultExecutionIdByIdentity.get(resultIdentity)
+          const executionId =
+            snapshotExecutionIdByToolCallId.get(rawToolCallId) ??
+            (mappedExecutionId && this.activeSubagents.has(mappedExecutionId)
+              ? mappedExecutionId
+              : undefined) ??
+            this.currentSubagentExecutionIdByToolCallId.get(rawToolCallId)
+          if (executionId) {
+            this.subagentTaskResultExecutionIdByIdentity.set(resultIdentity, executionId)
+            events.push(
+              ...this.processSubagentTaskResult(executionId, content, status, isError, false)
+            )
           }
         }
       }
 
-      if (this.activeSubagents.size > 0) {
+      if (
+        this.activeSubagents.size > 0 &&
+        this.subagentSnapshotVersion !== subagentSnapshotVersionBefore
+      ) {
         events.push(this.subagentCustomEvent())
       }
 
       // Convert messages to our format
-      const converted = state.messages.map((msg, index) => {
-        const kw = (msg.kwargs || {}) as Record<string, unknown>
-        const cn = getClassName(msg)
+      const converted = convertValuesMessages(state.messages, messageIndexOffset)
 
-        let role: "user" | "assistant" | "tool" | "system" = "assistant"
-        if (cn.includes("Human")) role = "user"
-        else if (cn.includes("Tool")) role = "tool"
-        else if (cn.includes("System")) role = "system"
-
-        const reasoning = role === "assistant" ? extractReasoningFromKwargs(kw) : ""
-        return {
-          id: (kw.id as string) || `msg-${index}`,
-          role,
-          content: extractContent(kw.content ?? msg.content),
-          ...(reasoning ? { reasoning } : {}),
-          tool_calls: kw.tool_calls as unknown[] | undefined,
-          ...(role === "tool" && kw.tool_call_id ? { tool_call_id: kw.tool_call_id as string } : {}),
-          ...(role === "tool" && kw.name ? { name: kw.name as string } : {})
-        }
+      events.push({
+        type: options.valuesSnapshotScope === "turn" ? "turn-messages" : "full-messages",
+        messages: converted
       })
-
-      events.push({ type: "full-messages", messages: converted })
     }
 
     // Todos
@@ -621,9 +1133,7 @@ export class StreamConverter {
   private resolveToolCallChunkId(chunk: ToolCallChunkLike): string | undefined {
     const msgId = this.currentChunkMessageId
     const key =
-      msgId !== undefined && typeof chunk.index === "number"
-        ? `${msgId}:${chunk.index}`
-        : undefined
+      msgId !== undefined && typeof chunk.index === "number" ? `${msgId}:${chunk.index}` : undefined
     if (chunk.id) {
       if (key) this.toolCallChunkIndexToId.set(key, chunk.id)
       return chunk.id
@@ -637,14 +1147,8 @@ export class StreamConverter {
   ): { id: string; name: string; args: Record<string, unknown> } | null {
     if (!toolCallId) return null
     const accumulated = this.accumulatedToolCalls.get(toolCallId)
-    if (!accumulated || !accumulated.name || !accumulated.args) return null
-    try {
-      const args = JSON.parse(accumulated.args)
-      if (!args || typeof args !== "object" || Array.isArray(args)) return null
-      return { id: accumulated.id, name: accumulated.name, args: args as Record<string, unknown> }
-    } catch {
-      return null
-    }
+    if (!accumulated?.name || !accumulated.parsedArgs) return null
+    return { id: accumulated.id, name: accumulated.name, args: accumulated.parsedArgs }
   }
 
   private accumulateToolCallChunks(chunks: ToolCallChunkLike[]): void {
@@ -656,66 +1160,360 @@ export class StreamConverter {
 
       let accumulated = this.accumulatedToolCalls.get(id)
       if (!accumulated) {
-        accumulated = { id, name: chunk.name || "", args: "" }
+        accumulated = createAccumulatedToolCall(id, chunk.name || "")
         this.accumulatedToolCalls.set(id, accumulated)
       }
 
       if (chunk.name) accumulated.name = chunk.name
-      if (chunk.args) {
-        accumulated.args = this.mergeToolCallChunkArgs(accumulated.args, chunk.args)
+      const wireMode = readStreamMessageWireMode(chunk[STREAM_TOOL_CALL_ARGS_MODE_KEY])
+      if (typeof chunk.args === "string" && (chunk.args.length > 0 || wireMode === "snapshot")) {
+        if (wireMode === "snapshot") {
+          resetAccumulatedToolCallArgs(accumulated, chunk.args)
+        } else {
+          const previousArgs = accumulated.args
+          const mergedArgs = mergeStreamToolCallArgs(previousArgs, chunk.args, wireMode ?? "auto")
+          if (mergedArgs !== previousArgs) {
+            const fragment =
+              wireMode !== "delta" &&
+              previousArgs.length > 0 &&
+              chunk.args.length > previousArgs.length &&
+              chunk.args.startsWith(previousArgs)
+                ? chunk.args.slice(previousArgs.length)
+                : chunk.args
+            accumulated.args = mergedArgs
+            scanAccumulatedToolCallJson(accumulated, fragment)
+          }
+        }
+        parseCompletedAccumulatedToolCall(accumulated)
       }
     }
   }
 
-  /**
-   * Merge a streamed tool-call args chunk into the accumulated args string.
-   *   - cumulative snapshot (strictly longer + extends as prefix) → replace;
-   *   - delta fragment → append verbatim, including legitimately repeated
-   *     fragments (e.g. the two quotes of an empty-string value) that an
-   *     equality guard would otherwise drop and corrupt the JSON.
-   */
-  private mergeToolCallChunkArgs(accumulated: string, chunk: string): string {
-    if (accumulated && chunk.length > accumulated.length && chunk.startsWith(accumulated)) {
-      return chunk
+  private resolveLiveSubagentInvocationScope(
+    toolCallId: string,
+    parentMessageId: string
+  ): { key: string; invocationScope: string } {
+    const parentTaskKey = JSON.stringify([parentMessageId, toolCallId])
+    const previous = this.liveSubagentInvocationByParentTask.get(parentTaskKey)
+    const previousSubagent = previous?.executionId
+      ? this.activeSubagents.get(previous.executionId)
+      : undefined
+    const startsNewOccurrence =
+      !previous ||
+      (previousSubagent !== undefined &&
+        previousSubagent.status !== "pending" &&
+        previousSubagent.status !== "running")
+    if (startsNewOccurrence) {
+      const occurrence = (previous?.occurrence ?? 0) + 1
+      const invocationScope = buildSubagentTaskInvocationIdentity({
+        parentMessageId: `${this.runScope}:${parentMessageId}`,
+        parentOccurrence: occurrence,
+        parentContent: null,
+        parentToolCalls: [],
+        taskToolCallId: toolCallId,
+        taskToolCallIndex: 0,
+        taskArgs: null
+      })
+      this.liveSubagentInvocationByParentTask.set(parentTaskKey, {
+        occurrence,
+        invocationScope
+      })
     }
-    if (chunk === accumulated) return accumulated
-    return this.appendToolCallChunkArgs(accumulated, chunk)
+    const current = this.liveSubagentInvocationByParentTask.get(parentTaskKey)!
+    return {
+      key: JSON.stringify([toolCallId, current.invocationScope]),
+      invocationScope: current.invocationScope
+    }
   }
 
-  private appendToolCallChunkArgs(existing: string, nextChunk: string): string {
-    if (!existing) return nextChunk
-    if (!nextChunk) return existing
+  private buildSubagentExecutionId(toolCallId: string, invocationScope: string): string {
+    const scopedIdentity = buildSubagentTaskInvocationIdentity({
+      parentMessageId: `${this.runScope}:${invocationScope}`,
+      parentOccurrence: 0,
+      parentContent: null,
+      parentToolCalls: [],
+      taskToolCallId: toolCallId,
+      taskToolCallIndex: 0,
+      taskArgs: null
+    })
+    return `${toolCallId}::invocation-${scopedIdentity}`
+  }
 
-    const maxOverlap = Math.min(existing.length, nextChunk.length) - 1
-    for (let overlap = maxOverlap; overlap >= 2; overlap -= 1) {
-      if (existing.slice(-overlap) === nextChunk.slice(0, overlap)) {
-        const remainder = nextChunk.slice(overlap)
-        if (/^["},\]:]/.test(remainder)) continue
-        return `${existing}${nextChunk.slice(overlap)}`
+  private registerSubagent(
+    toolCallId: string,
+    args: Record<string, unknown>,
+    parentMessageId: string,
+    persistedInvocationScope?: string
+  ): { executionId: string; created: boolean; updated: boolean } {
+    // Args are deliberately excluded from live identity: providers commonly
+    // emit the same task first with `{}` and hydrate them in a later chunk.
+    const liveInvocation = persistedInvocationScope
+      ? undefined
+      : this.resolveLiveSubagentInvocationScope(toolCallId, parentMessageId)
+    const effectiveInvocationScope = liveInvocation?.invocationScope ?? persistedInvocationScope!
+    const invocationKey =
+      liveInvocation?.key ?? JSON.stringify([toolCallId, effectiveInvocationScope])
+    const invocationMap = persistedInvocationScope
+      ? this.subagentExecutionIdByInvocation
+      : this.liveSubagentExecutionIdByInvocation
+    const observedLive = !persistedInvocationScope || this.valuesTurnUserMessageId !== undefined
+    let executionId = invocationMap.get(invocationKey)
+    if (!executionId) {
+      executionId = this.buildSubagentExecutionId(toolCallId, effectiveInvocationScope)
+      invocationMap.set(invocationKey, executionId)
+      if (persistedInvocationScope) this.mappedSubagentExecutionIds.add(executionId)
+      if (liveInvocation) {
+        const parentTaskKey = JSON.stringify([parentMessageId, toolCallId])
+        const liveState = this.liveSubagentInvocationByParentTask.get(parentTaskKey)
+        if (liveState) liveState.executionId = executionId
+        const liveExecutions = this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? []
+        if (!liveExecutions.includes(executionId)) liveExecutions.push(executionId)
+        this.liveSubagentExecutionIdsByToolCallId.set(toolCallId, liveExecutions)
       }
     }
-
-    return `${existing}${nextChunk}`
-  }
-
-  private registerSubagent(toolCallId: string, args: Record<string, unknown>): void {
+    this.currentSubagentExecutionIdByToolCallId.set(toolCallId, executionId)
+    const existing = this.activeSubagents.get(executionId)
+    if (existing) {
+      let updated = false
+      if (observedLive && existing.observedLive !== true) {
+        existing.observedLive = true
+        updated = true
+      }
+      const hydratedSubagentType =
+        typeof args.subagent_type === "string" && args.subagent_type
+          ? args.subagent_type
+          : undefined
+      const hydratedDescription =
+        (typeof args.description === "string" && args.description) ||
+        (typeof args.prompt === "string" && args.prompt) ||
+        undefined
+      if (hydratedSubagentType) {
+        updated ||=
+          existing.subagentType !== hydratedSubagentType ||
+          existing.name !== formatSubagentName(hydratedSubagentType)
+        existing.subagentType = hydratedSubagentType
+        existing.name = formatSubagentName(hydratedSubagentType)
+      }
+      const boundedDescription = hydratedDescription
+        ? projectSubagentDescription(hydratedDescription)
+        : undefined
+      if (boundedDescription && existing.description !== boundedDescription) {
+        existing.description = boundedDescription
+        updated = true
+      }
+      if (updated) this.subagentSnapshotVersion += 1
+      return { executionId, created: false, updated }
+    }
     const subType = (args.subagent_type as string) || "general-purpose"
-    this.activeSubagents.set(toolCallId, {
-      id: toolCallId,
+    this.activeSubagents.set(executionId, {
+      id: executionId,
       toolCallId,
       name: formatSubagentName(subType),
-      description: (args.description as string) || (args.prompt as string) || "",
+      description: projectSubagentDescription(
+        (args.description as string) || (args.prompt as string) || ""
+      ),
       status: "running",
       startedAt: new Date(),
       subagentType: subType,
-      spawnIndex: this.subagentSpawnCounter++
+      spawnIndex: this.subagentSpawnCounter++,
+      ...(observedLive && { observedLive: true })
     })
+    this.runningSubagentIds.add(executionId)
+    this.subagentSnapshotVersion += 1
+    return { executionId, created: true, updated: false }
+  }
+
+  private createSubagentPromptEvent(
+    executionId: string,
+    rawToolCallId: string,
+    args: Record<string, unknown>,
+    invocationScope: string
+  ): SchedulerEvent | null {
+    const prompt =
+      (typeof args.prompt === "string" && args.prompt.trim() && args.prompt) ||
+      (typeof args.description === "string" && args.description.trim() && args.description) ||
+      ""
+    if (!prompt) return null
+    const registeredSubagent = this.activeSubagents.get(executionId)
+    const promptSignature = JSON.stringify([
+      rawToolCallId,
+      prompt,
+      invocationScope,
+      registeredSubagent?.name ?? "",
+      registeredSubagent?.description ?? "",
+      registeredSubagent?.subagentType ?? ""
+    ])
+    if (this.subagentPromptSignatureByExecutionId.get(executionId) === promptSignature) {
+      return null
+    }
+    this.subagentPromptSignatureByExecutionId.set(executionId, promptSignature)
+    return {
+      type: "custom",
+      data: {
+        type: "subagent_transcript_message",
+        subagentId: executionId,
+        subagentMessage: {
+          id: `subagent-prompt-${executionId}`,
+          role: "user",
+          content: prompt,
+          subagent_tool_call_id: rawToolCallId,
+          subagent_invocation_scope: invocationScope,
+          subagent_prompt_fingerprint: this.fingerprintSubagentTranscriptContent(prompt),
+          ...(registeredSubagent?.name && { subagent_name: registeredSubagent.name }),
+          ...(registeredSubagent?.description && {
+            subagent_description: registeredSubagent.description
+          }),
+          ...(registeredSubagent?.subagentType && {
+            subagent_type: registeredSubagent.subagentType
+          }),
+          content_priority: 1,
+          created_at: new Date()
+        }
+      }
+    }
+  }
+
+  private fingerprintSubagentTranscriptContent(content: string): string {
+    return fingerprintTranscriptContent(content)
+  }
+
+  private isCompatibleSubagentFinalContent(candidate: string, finalContent: string): boolean {
+    const candidateText = candidate.trim()
+    const finalText = finalContent.trim()
+    if (!candidateText || !finalText) return false
+    return (
+      candidateText === finalText ||
+      finalText.startsWith(candidateText) ||
+      candidateText.startsWith(finalText)
+    )
+  }
+
+  private createSubagentFinalEvent(
+    executionId: string,
+    content: string,
+    status: string | undefined,
+    isError: boolean
+  ): SchedulerEvent | null {
+    const candidate = this.subagentLatestAssistantByExecutionId.get(executionId)
+    const inputHasVisibleContent = /\S/.test(content)
+    const finalContent = inputHasVisibleContent
+      ? content
+      : isError
+        ? ""
+        : (candidate?.content ?? "")
+    const candidateIsCompatible =
+      !!candidate && this.isCompatibleSubagentFinalContent(candidate.content, finalContent)
+    const replacedMessageId =
+      candidate && (!isError || candidateIsCompatible) ? candidate.messageId : undefined
+    const contentFingerprint = this.fingerprintSubagentTranscriptContent(finalContent)
+    const reasoningFingerprint = this.fingerprintSubagentTranscriptContent("")
+    const signature = buildSubagentFinalSignature({
+      isError,
+      status,
+      contentFingerprint,
+      reasoningFingerprint
+    })
+    const contentSignatureKey = `content:${executionId}`
+    const replacementSignatureKey = replacedMessageId
+      ? `replacement:${executionId}:${replacedMessageId}`
+      : undefined
+    const contentIsKnown =
+      this.subagentFinalSignatureByExecutionId.get(contentSignatureKey) === signature
+    const replacementIsKnown =
+      !replacementSignatureKey ||
+      this.subagentFinalSignatureByExecutionId.get(replacementSignatureKey) === signature
+    if (contentIsKnown && replacementIsKnown) return null
+    this.subagentFinalSignatureByExecutionId.set(contentSignatureKey, signature)
+    if (replacementSignatureKey) {
+      this.subagentFinalSignatureByExecutionId.set(replacementSignatureKey, signature)
+    }
+    return {
+      type: "custom",
+      data: {
+        type: "subagent_transcript_message",
+        subagentId: executionId,
+        subagentMessage: {
+          id: `subagent-final-${executionId}`,
+          role: "assistant",
+          content: finalContent,
+          subagent_content_fingerprint: contentFingerprint,
+          subagent_reasoning_fingerprint: reasoningFingerprint,
+          content_priority: 1,
+          content_is_projection: false,
+          content_full_length: finalContent.length,
+          ...(replacedMessageId && { replaces_message_id: replacedMessageId }),
+          ...(status && { status }),
+          ...(isError && { is_error: true }),
+          created_at: new Date()
+        }
+      }
+    }
+  }
+
+  private processSubagentTaskResult(
+    executionId: string,
+    content: string,
+    status: string | undefined,
+    isError: boolean,
+    emitSubagentEvent: boolean
+  ): SchedulerEvent[] {
+    const events: SchedulerEvent[] = []
+    const subagent = this.activeSubagents.get(executionId)
+    const ignoresStaleSuccess = subagent?.status === "failed" && !isError
+    if (!ignoresStaleSuccess) {
+      const finalEvent = this.createSubagentFinalEvent(executionId, content, status, isError)
+      if (finalEvent) events.push(finalEvent)
+    }
+    if (!subagent) return events
+
+    const previousStatus = subagent.status
+    const nextStatus = isError
+      ? "failed"
+      : previousStatus === "failed" || previousStatus === "completed"
+        ? previousStatus
+        : "completed"
+    const completedAtWasMissing = !subagent.completedAt
+    subagent.status = nextStatus
+    if (completedAtWasMissing) subagent.completedAt = new Date()
+    const stateChanged = previousStatus !== nextStatus || completedAtWasMissing
+    this.runningSubagentIds.delete(executionId)
+    if (stateChanged) this.subagentSnapshotVersion += 1
+    if (emitSubagentEvent && stateChanged) {
+      events.push(this.subagentCustomEvent())
+    }
+    return events
+  }
+
+  private buildSubagentTaskResultIdentity(
+    taskToolCallId: string,
+    resultMessageId: string,
+    content: string,
+    status: string | undefined,
+    isError: boolean
+  ): string {
+    return JSON.stringify([
+      taskToolCallId,
+      resultMessageId,
+      isError ? "error" : "success",
+      status ?? "",
+      this.fingerprintSubagentTranscriptContent(content)
+    ])
   }
 
   private subagentCustomEvent(): SchedulerEvent {
     return {
       type: "custom",
       data: { type: "subagents", subagents: Array.from(this.activeSubagents.values()) }
+    }
+  }
+
+  private subagentPatchEvent(
+    executionId: string,
+    patch: Pick<Subagent, "currentTool" | "lastActivityAt">
+  ): SchedulerEvent {
+    return {
+      type: "custom",
+      data: { type: "subagent_delta", subagentId: executionId, subagentPatch: patch }
     }
   }
 }

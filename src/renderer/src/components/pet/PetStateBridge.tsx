@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useAppStore } from "@/lib/store"
 import { useAllStreamLoadingStates, useThreadState } from "@/lib/thread-context"
 
@@ -6,7 +6,32 @@ type PetState = "idle" | "busy" | "waiting" | "done" | "error" | "crying" | "pro
 
 // 只负责把 renderer 中可观察到的任务状态桥接给主进程宠物窗口。
 // 宠物绘制、拖拽、hover、点击等桌面交互都在主进程独立 BrowserWindow 中处理。
-export function PetStateBridge(): null {
+export function PetStateBridge(): React.JSX.Element | null {
+  const [enabled, setEnabled] = useState(false)
+
+  useEffect(() => {
+    let disposed = false
+    let receivedSettingsEvent = false
+    const unsubscribe = window.api.pet.onSettingsChanged((settings) => {
+      receivedSettingsEvent = true
+      setEnabled(settings.enabled)
+    })
+    void window.api.pet
+      .getSettings()
+      .then((settings) => {
+        if (!disposed && !receivedSettingsEvent) setEnabled(settings.enabled)
+      })
+      .catch((error) => console.warn("[Pets] Failed to load pet settings:", error))
+    return () => {
+      disposed = true
+      unsubscribe()
+    }
+  }, [])
+
+  return enabled ? <EnabledPetStateBridge /> : null
+}
+
+function EnabledPetStateBridge(): null {
   const currentThreadId = useAppStore((state) => state.currentThreadId)
   const loadingStates = useAllStreamLoadingStates()
   const currentThreadState = useThreadState(currentThreadId)

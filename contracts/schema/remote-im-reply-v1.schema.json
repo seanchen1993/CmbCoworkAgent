@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatx.cmb.local/contracts/remote-im-reply-v1.schema.json",
+  "title": "RemoteImReplyV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "deliveryId",
+    "conversationKey",
+    "idempotencyKey",
+    "segment",
+    "message"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "deliveryId": { "type": "string", "minLength": 1 },
+    "eventId": { "type": "string", "minLength": 1 },
+    "conversationKey": { "type": "string", "minLength": 1 },
+    "idempotencyKey": { "type": "string", "minLength": 1 },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "count"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "count": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "content"],
+      "properties": {
+        "type": { "const": "text" },
+        "content": { "type": "string", "minLength": 1, "maxLength": 2800 }
+      }
+    }
+  }
+}

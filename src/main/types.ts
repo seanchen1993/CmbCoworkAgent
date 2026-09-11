@@ -1,4 +1,6 @@
 import type { HookConfig } from "./hooks/types"
+import type { TranscriptReasoningUpdate } from "../shared/transcript-reasoning"
+import type { ImChannelId } from "../shared/im-gateway-contract"
 import type {
   ForkableCheckpoint as SharedForkableCheckpoint,
   ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
@@ -29,9 +31,12 @@ export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 // Agent IPC
 export interface AgentInvokeParams {
   threadId: string
+  streamRequestId?: string
   message: string
   modelId?: string
   agentMode?: "normal" | "coordinator" | "workflow"
+  /** One-run ManagedRun launch authorization; bridges currentSession persistence startup races. */
+  managedExecution?: boolean
   coordinatorInternalNotification?: boolean
   /** Renderer user message id for the turn, used to group hook log events. */
   userMessageId?: string
@@ -39,6 +44,7 @@ export interface AgentInvokeParams {
 
 export interface AgentResumeParams {
   threadId: string
+  streamRequestId?: string
   command: {
     resume?: {
       decision?: string
@@ -52,6 +58,7 @@ export interface AgentResumeParams {
 
 export interface AgentInterruptParams {
   threadId: string
+  streamRequestId?: string
   decision: HITLDecision
 }
 
@@ -64,6 +71,16 @@ export interface AgentCancelParams {
 export interface ThreadUpdateParams {
   threadId: string
   updates: Partial<Thread>
+}
+
+export interface ThreadMetadataPatch {
+  set?: Record<string, unknown>
+  remove?: string[]
+}
+
+export interface ThreadMetadataPatchParams {
+  threadId: string
+  patch: ThreadMetadataPatch
 }
 
 export interface ThreadValuesMergeParams {
@@ -85,6 +102,7 @@ export interface WorkspaceSetParams {
 
 export interface WorkspaceLoadParams {
   threadId: string
+  workspacePath?: string
 }
 
 export interface WorkspaceFileParams {
@@ -155,6 +173,33 @@ export interface Subagent {
   lastActivityAt?: string
   /** Registration order (0-based). Used to match LangGraph checkpoint_ns index (e.g. "tools:0"). */
   spawnIndex?: number
+  /** True only after this execution was observed in the current live stream. */
+  observedLive?: boolean
+  /** Renderer-only provenance for a prompt row restored without a stable final. */
+  restoredFromPromptOnly?: boolean
+}
+
+export interface SubagentTranscriptPage {
+  messages: unknown[]
+  deferredHydration: boolean
+  deferredExport?: {
+    messageIndex: number
+    expectedMessageId: string
+    fields: SubagentTranscriptBlobField[]
+  }
+  end: number
+  start: number
+  nextBefore?: number
+  total: number
+}
+
+export type SubagentTranscriptBlobField = "content" | "reasoning" | "tool_calls"
+
+export interface SubagentTranscriptBlobExportResult {
+  success: boolean
+  canceled?: boolean
+  filePath?: string
+  error?: string
 }
 
 // Stream events from agent
@@ -173,9 +218,15 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Durable transcript order. Present on messages read from thread_messages pages. */
+  ordinal?: number
+  provider_source_id?: string
+  provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number
+  /** Storage provenance; legacy or lossy previews must not become checkpoint authority. */
+  recovery_integrity?: "verified" | "unverified"
   reasoning?: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
@@ -187,6 +238,196 @@ export interface Message {
   created_at: Date
   start_at?: Date
   end_at?: Date
+}
+
+/** Internal write payload; readers always receive a complete reasoning snapshot. */
+export interface ThreadMessageWrite extends Message, TranscriptReasoningUpdate {}
+
+export interface ThreadMessagesPageOptions {
+  /**
+   * Cursor returned by the previous page. `beforeOrdinal` and
+   * `beforeMessageId` must be supplied together so duplicate legacy ordinals
+   * cannot make pagination skip or repeat messages.
+   */
+  beforeOrdinal?: number
+  beforeMessageId?: string
+  /**
+   * Read a backward window that is guaranteed to contain this exact durable
+   * message. This is mutually exclusive with every other page cursor and is
+   * used for virtualized search reveals where repeated ordinals make a guessed
+   * 500-row page unsafe.
+   */
+  targetMessageId?: string
+  /**
+   * Read forward from this exact durable message (inclusive). This is mutually
+   * exclusive with the backward compound cursor and is used to close a released
+   * renderer window without guessing ordinals.
+   */
+  anchorMessageId?: string
+  limit?: number
+  /**
+   * Optional response budget. Values above the process-wide 4 MiB ceiling are
+   * clamped. An individually oversized message is returned as an explicit
+   * bounded preview so the cursor advances without breaking the IPC budget.
+   */
+  byteBudget?: number
+  /**
+   * Foreground hydration is latest-wins per renderer. Starting a newer request
+   * cancels the previous foreground page without affecting history pagination.
+   */
+  requestScope?: "foreground-hydration"
+  /**
+   * Ask the off-main-thread reader to resolve whether any durable row belongs
+   * to the visible conversation. Initial hydration requests this once; history
+   * pagination reuses the resulting renderer scalar and avoids repeated scans.
+   */
+  includeVisibleMessagePresence?: boolean
+  /**
+   * Internal checkpoint-recovery fence. Rows persisted after this timestamp
+   * belong to a later graph input and must not be folded into the old state.
+   */
+  notAfterCreatedAt?: number
+  /** Checkpoint identity paired with notAfterCreatedAt for legacy ordinal fencing. */
+  recoveryCheckpointId?: string
+}
+
+export interface ThreadHydrationOptions {
+  /** Cancel an older selected-task metadata read from the same renderer. */
+  requestScope?: "foreground-hydration"
+}
+
+export interface ThreadSummaryPageOptions {
+  beforeUpdatedAt?: number
+  beforeThreadId?: string
+  limit?: number
+  byteBudget?: number
+}
+
+export interface ThreadSummaryPage {
+  threads: Thread[]
+  beforeUpdatedAt: number | null
+  beforeThreadId: string | null
+  hasMore: boolean
+}
+
+export type ThreadGroupSelector =
+  | { type: "workspace"; workspacePath: string | null }
+  | { type: "harness-project"; projectId: string }
+  | { type: "harness-feature"; projectId: string; slug: string }
+
+export interface ThreadGroupIdsOptions {
+  selector: ThreadGroupSelector
+}
+
+/** Stable identity captured with a destructive group-selection snapshot. */
+export interface ThreadIncarnationSnapshot {
+  token: string | null
+  legacyCreatedAt: number
+}
+
+export interface ThreadGroupSelectionEntry {
+  threadId: string
+  incarnation: ThreadIncarnationSnapshot
+}
+
+export interface ThreadGroupIdsResult {
+  entries: ThreadGroupSelectionEntry[]
+}
+
+export interface ThreadGroupDeleteGuard {
+  selector: ThreadGroupSelector
+  incarnation: ThreadIncarnationSnapshot
+}
+
+export interface ThreadDeleteOptions {
+  requireIdle?: boolean
+  /**
+   * Bind a bulk-delete request to the exact row and group membership the user
+   * confirmed. Main rechecks this inside the same-thread mutation lock.
+   */
+  groupGuard?: ThreadGroupDeleteGuard
+}
+
+export interface ThreadMessagesPage {
+  /** Messages are always returned in durable ascending transcript order. */
+  messages: Message[]
+  /** Cursor for the next older page; explicit forward reads always return null here. */
+  beforeOrdinal: number | null
+  beforeMessageId: string | null
+  /** Whether more rows remain in the requested direction. */
+  hasMore: boolean
+  /** Echoed only for a successful explicit forward read after the durable anchor is verified. */
+  verifiedAnchorMessageId?: string
+  /** Total durable messages for the thread, independent of the cursor. */
+  total: number
+  /** Present only when includeVisibleMessagePresence was requested. */
+  hasVisibleMessages?: boolean
+  /**
+   * Present only with the initial presence summary. `migrating` means a legacy
+   * checkpoint copy was interrupted and must be resumed before an empty
+   * conversation can be trusted; `complete` makes the durable table authoritative.
+   */
+  legacyCheckpointMigrationStatus?: "migrating" | "complete" | null
+  /** Older completed imports may still need the worker's one-time timing backfill. */
+  legacyMessageTimesPending?: boolean
+  /** Durable rows represented by bounded previews because their payload exceeded the page budget. */
+  truncatedMessageIds?: string[]
+  /** Present only on recovery reads, after checking every returned row's storage provenance. */
+  recoveryIntegrity?: "verified" | "unverified"
+}
+
+export interface ThreadLegacyCheckpointMigrationStats {
+  checkpointId: string | null
+  totalMessages: number
+  migratedMessages: number
+  batches: number
+  payloadBytes: number
+}
+
+export interface ThreadLegacyCheckpointBootstrapResult {
+  checkpoint: unknown | null
+  page: ThreadMessagesPage
+  migration: ThreadLegacyCheckpointMigrationStats
+}
+
+export interface ThreadMessageSearchOptions {
+  /**
+   * Cursor returned by the previous search page. Both fields must be supplied
+   * together so duplicate legacy ordinals cannot skip or repeat messages.
+   */
+  beforeOrdinal?: number
+  beforeMessageId?: string
+  /** Maximum matches returned by one bounded database scan. */
+  limit?: number
+}
+
+export interface ThreadMessageSearchMatch {
+  locations?: import("../shared/chat-search-types").ChatSearchLocation[]
+  messageId: string
+  ordinal: number
+  role: Message["role"]
+  createdAt: number
+  /** Non-overlapping occurrences, matching the renderer's existing search semantics. */
+  occurrenceCount: number
+  /** Query-centred, bounded plain-text preview. */
+  preview: string
+}
+
+export interface ThreadMessageSearchPage {
+  /** Matches are returned from newest to oldest. */
+  matches: ThreadMessageSearchMatch[]
+  /** Cursor for continuing toward older durable messages. */
+  beforeOrdinal: number | null
+  beforeMessageId: string | null
+  /**
+   * True when more durable search space remains. A later page can legitimately
+   * contain no matches because each call scans a bounded transcript window.
+   */
+  hasMore: boolean
+  /** Number of durable message headers inspected by this page. */
+  scanned: number
+  /** True when an individual oversized row could not be inspected within the hard byte budget. */
+  truncated: boolean
 }
 
 export interface ContentBlock {
@@ -366,6 +607,13 @@ export type ScheduledTaskFrequency =
   | "interval"
 export type ScheduledTaskType = "action" | "reminder"
 
+export interface ScheduledTaskImDeliveryContext {
+  provider: ImChannelId
+  principalId: string
+  conversationKey: string
+  inboxThreadId: string
+}
+
 export interface ScheduledTask {
   id: string
   name: string
@@ -374,7 +622,7 @@ export interface ScheduledTask {
   taskType: ScheduledTaskType // "action" = agent 执行操作, "reminder" = 暖心提醒
   modelId: string | null
   workDir: string | null
-  chatxRobotChatId: string | null // 关联的机器人会话ID，执行完后 HTTP 回复
+  imDeliveryContext: ScheduledTaskImDeliveryContext | null
   frequency: ScheduledTaskFrequency
   intervalMinutes: number | null // 仅 interval 类型使用，如 5 表示每5分钟
   runAt: string | null // ISO 时间戳，仅 once 类型使用
@@ -396,7 +644,7 @@ export interface ScheduledTaskUpsert {
   taskType?: ScheduledTaskType
   modelId: string | null
   workDir: string | null
-  chatxRobotChatId?: string | null
+  imDeliveryContext?: ScheduledTaskImDeliveryContext | null
   frequency: ScheduledTaskFrequency
   intervalMinutes?: number | null
   runAt?: string | null
@@ -414,6 +662,105 @@ export interface TaskRunRecord {
   status: "ok" | "error"
   error: string | null
   durationMs: number
+}
+
+export interface BuiltinRobotSettings {
+  enabled: boolean
+  /** Optional runtime override. When null, the build-time environment value is used. */
+  gatewayUrl: string | null
+  remoteAccess: "inbox-only" | "inbox-and-features"
+  remoteApprovalEnabled: boolean
+  waitingDesktopTtlMinutes: number
+}
+
+export type BuiltinRobotConnectionState = "connecting" | "online" | "offline" | "error"
+export type BuiltinRobotIdentityState = "verified" | "verifying" | "missing" | "error"
+
+export interface BuiltinRobotRouteStatus {
+  /** Opaque enterprise subject asserted by the authenticated Gateway session. */
+  principalId: string
+  conversationKey: string
+  state: "active" | "suspended" | "revoked"
+}
+
+export interface BuiltinRobotFeatureBindingStatus {
+  conversationKey: string
+  bindingId: string
+  projectId: string
+  featureSlug: string
+  threadId: string
+  state: "pending" | "active" | "suspended" | "revoked" | "historical"
+  suspendReason: string | null
+  activeTarget: boolean
+}
+
+export interface BuiltinRobotThreadGrantStatus {
+  kind: "thread"
+  grantId: string
+  threadId: string
+  title: string
+  state: "active" | "suspended" | "revoked"
+  grantVersion: number
+  conversationKey: string
+  suspendReason: string | null
+}
+
+export interface BuiltinRobotFeatureGrantStatus {
+  kind: "feature"
+  grantId: string
+  projectId: string
+  featureSlug: string
+  projectName: string
+  featureTitle: string
+  state: "active" | "suspended" | "revoked"
+  grantVersion: number
+  suspendReason: string | null
+}
+
+export interface BuiltinRobotRemoteAccessOverview {
+  principalAvailable: boolean
+  principalReason: string | null
+  routeAvailable: boolean
+  routeReason: string | null
+  activeRoute: BuiltinRobotRouteStatus | null
+  threadGrants: BuiltinRobotThreadGrantStatus[]
+  featureGrants: BuiltinRobotFeatureGrantStatus[]
+}
+
+export interface BuiltinRobotGrantableFeature {
+  projectId: string
+  projectName: string
+  featureSlug: string
+  featureTitle: string
+  featureStatus: string
+  granted: boolean
+}
+
+export interface BuiltinRobotDiagnostics {
+  appVersion: string
+  gatewayUrl: string | null
+  authenticationFailed: boolean
+  lastHandshakeStatus: number | null
+  lastCloseCode: number | null
+  lastCloseReason: string | null
+  lastTransportError: string | null
+  reconnectAttempt: number
+}
+
+export interface BuiltinRobotStatus {
+  settings: BuiltinRobotSettings
+  connectionState: BuiltinRobotConnectionState
+  identityState: BuiltinRobotIdentityState
+  sessionId: string | null
+  principalId: string | null
+  lastConnectedAt: string | null
+  lastError: string | null
+  legacyConfigDetected: boolean
+  routes: BuiltinRobotRouteStatus[]
+  featureBindings: BuiltinRobotFeatureBindingStatus[]
+  eventCounts: Record<string, number>
+  pendingOutboxCount: number
+  diagnostics: BuiltinRobotDiagnostics
 }
 
 // Heartbeat types
@@ -499,6 +846,71 @@ export interface SkillHookMetadata extends HookConfig {
   pluginId?: string
   pluginName?: string
   pluginRoot?: string
+}
+
+/**
+ * Bounded, display-only hook catalog used by the right panel. Runtime hook
+ * resolution deliberately does not consume this projection: large values and
+ * catalogs may be truncated here to keep renderer IPC and Electron's main
+ * thread responsive without changing hook execution semantics.
+ */
+export interface HookCatalogPageInput {
+  /** Latest-wins namespace scoped by the main process to the calling renderer. */
+  requestScope: string
+  workspacePath?: string
+  /** Optional renderer token used only to fence stale UI results; main epochs own cache identity. */
+  revision?: string
+  /** Opaque continuation returned by the previous page. */
+  cursor?: string
+  /** Requested rows. Clamped to the catalog's hard page limit. */
+  limit?: number
+}
+
+export interface HookCatalogPageStats {
+  durationMs: number
+  responseBytes: number
+  /** True when this request reused the process-wide global skill/plugin snapshot. */
+  globalScanReused: boolean
+  /** True when this request reused its workspace-only hook overlay. */
+  workspaceScanReused: boolean
+  scannedDirectories: number
+  scannedFiles: number
+  discoveredSkills: number
+  readBytes: number
+}
+
+/**
+ * Counts produced while the hook worker is already discovering plugins and
+ * skills. Keeping these beside the hook totals lets collapsed consumers render
+ * all three badges without starting two more filesystem scans.
+ */
+export interface HookCatalogRelatedSummary {
+  skillEntries: number
+  enabledSkillEntries: number
+  skillTruncated: boolean
+  skillTruncatedReasons: string[]
+  pluginEntries: number
+  pluginTruncated: boolean
+  pluginTruncatedReasons: string[]
+}
+
+export interface HookCatalogPage {
+  globalHooks: HookConfig[]
+  workspaceHooks: HookConfig[]
+  pluginHooks: PluginHookMetadata[]
+  skillHooks: SkillHookMetadata[]
+  /** Opaque continuation for the same worker snapshot. */
+  nextCursor?: string
+  /** Total projected entries retained in this bounded snapshot. */
+  totalEntries: number
+  /** Enabled entries in the whole snapshot, independent of the current page. */
+  enabledEntries: number
+  /** Skill/plugin totals discovered by the same bounded filesystem pass. */
+  relatedSummary: HookCatalogRelatedSummary
+  /** True only when source data was omitted by a hard safety cap. */
+  truncated: boolean
+  truncatedReasons: string[]
+  stats: HookCatalogPageStats
 }
 
 export interface PluginMcpServerConfig {
@@ -698,8 +1110,14 @@ export interface ApprovalRequest extends HITLRequest {
   suggestedCommitFilePaths?: string[]
   /** For git_commit: cwd that explicit pathspecs are relative to (after git -C) */
   suggestedCommitFileBasePath?: string
-  /** For git_commit/git_push: Git working directory resolved from cd / git -C. */
+  /** For git_commit/git_push: preferred Git operation target (normally the repository root). */
   suggestedGitWorktreePath?: string
+  /** For git_commit: concrete repository targets when the command cwd contains multiple repos. */
+  suggestedGitRepositories?: Array<{
+    path: string
+    displayPath: string
+    gitRoot: string
+  }>
   /** For git_commit: where suggestedCommitFilePaths came from */
   suggestedCommitFileSelectionSource?: "pathspec" | "staged"
   filePath?: string // target file path (for write_file/edit_file operations)
@@ -766,6 +1184,7 @@ export interface UserInputRequest {
   requestId: string
   threadId: string
   questions: UserInputQuestion[]
+  autoResolutionMs?: number
   createdAt: string
 }
 
@@ -776,6 +1195,7 @@ export type UserInputAnswer =
       optionIndex: number
       label: string
       description: string
+      additionalText?: string
     }
   | {
       type: "other"
@@ -788,26 +1208,6 @@ export interface UserInputResponse {
   answers: Record<string, UserInputAnswer>
   submittedAt?: string
   ignored?: boolean
-}
-
-// ChatX types
-export interface ChatXRobotConfig {
-  chatId: string
-  httpUrl: string
-  fromId: string
-  clientId: string
-  clientSecret: string
-  channel: string
-  toUserList: string[]
-  modelId: string | null
-  workDir: string | null
-}
-
-export interface ChatXConfig {
-  enabled: boolean
-  wsUrl: string
-  userIp: string
-  robots: ChatXRobotConfig[]
 }
 
 /**
@@ -843,4 +1243,49 @@ export interface SkillMetadata {
   compatibility?: string | null
   metadata?: Record<string, string>
   allowedTools?: string[]
+}
+
+export type SkillPluginCatalogKind = "skills" | "plugins" | "disabled"
+
+export interface SkillPluginCatalogPageInput {
+  kind: SkillPluginCatalogKind
+  cursor?: string | null
+  limit?: number
+  /** Main-process-only legacy migration entries resolved by the disabled projection. */
+  mergeDisabledSkillIds?: string[]
+  /**
+   * Renderer cache token used for latest-wins UI state. Worker snapshot
+   * identity comes from the main-process source epoch so different windows can
+   * safely share one scan even though their renderer tokens differ.
+   */
+  revision?: string
+}
+
+export interface SkillPluginCatalogPageStats {
+  scannedDirectories: number
+  scannedFiles: number
+  discoveredSkills: number
+  readBytes: number
+}
+
+export interface SkillPluginCatalogPage {
+  kind: SkillPluginCatalogKind
+  /** Opaque Worker snapshot identity; stable across every page of one scan. */
+  sourceKey: string
+  /** Skill/plugin topology epoch captured before the Worker scan. */
+  catalogGlobalRevision: number
+  /** Disabled-store epoch captured by the main process before the scan. */
+  disabledSkillsRevision: number
+  /** Exact disabled-store content identity for projections that read that store. */
+  disabledStoreFingerprint?: string
+  skills: SkillMetadata[]
+  plugins: PluginMetadata[]
+  disabledSkillIds: string[]
+  cursor: string | null
+  total: number
+  /** Enabled skills in the whole skills snapshot; zero for plugin-only projections. */
+  enabledSkillCount: number
+  truncated: boolean
+  truncatedReasons: string[]
+  stats: SkillPluginCatalogPageStats
 }

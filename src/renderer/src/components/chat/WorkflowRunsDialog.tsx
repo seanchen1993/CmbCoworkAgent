@@ -16,7 +16,13 @@ import { toast } from "sonner"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
-import type { PersistedWorkflowRunDTO, WorkflowRunSummaryDTO } from "@/lib/workflow-run-view"
+import {
+  newerWorkflowWorktree,
+  toWorktreeView,
+  type PersistedWorkflowRunDTO,
+  type WorkflowRunSummaryDTO
+} from "@/lib/workflow-run-view"
+import { WorkflowWorktreeList } from "./WorkflowWorktreeList"
 
 /**
  * Runs-history management dialog — the desktop counterpart of Claude Code's
@@ -31,6 +37,9 @@ interface WorkflowRunsDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
 }
+
+const WORKFLOW_RUN_LIST_PAGE_SIZE = 50
+const WORKFLOW_AGENT_DETAIL_PAGE_SIZE = 240
 
 function statusChip(status: string): { label: string; className: string } {
   switch (status) {
@@ -236,6 +245,7 @@ function RunDetail({
 }): JSX.Element {
   const [run, setRun] = useState<PersistedWorkflowRunDTO | null>(null)
   const [loading, setLoading] = useState(true)
+  const [agentPageSelection, setAgentPageSelection] = useState({ runId: "", page: 0 })
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true)
@@ -254,6 +264,59 @@ function RunDetail({
     void load()
   }, [load])
 
+  // Keep an already-open history detail in sync when another window performs
+  // merge/discard/cleanup. The event already contains the durable record, so
+  // apply it directly instead of reloading and reconciling the whole run.
+  useEffect(() => {
+    return window.api.workflows.onWorkflowEvents(threadId, (payload) => {
+      const envelope =
+        payload && typeof payload === "object"
+          ? (payload as { workflowEvent?: unknown }).workflowEvent
+          : undefined
+      const event =
+        envelope && typeof envelope === "object"
+          ? (envelope as {
+              kind?: unknown
+              runId?: unknown
+              worktree?: unknown
+              worktreeId?: unknown
+            })
+          : payload && typeof payload === "object"
+            ? (payload as {
+                kind?: unknown
+                runId?: unknown
+                worktree?: unknown
+                worktreeId?: unknown
+              })
+            : undefined
+      if (event?.runId !== runId) return
+      if (event.kind === "worktree_update") {
+        const worktree = toWorktreeView(event.worktree)
+        if (!worktree) return
+        setRun((current) => {
+          if (!current) return current
+          const worktrees = current.worktrees ?? []
+          const index = worktrees.findIndex((candidate) => candidate.id === worktree.id)
+          if (index < 0) return { ...current, worktrees: [...worktrees, worktree] }
+          const next = [...worktrees]
+          next[index] = newerWorkflowWorktree(next[index], worktree)
+          return { ...current, worktrees: next }
+        })
+      } else if (event.kind === "worktree_remove" && typeof event.worktreeId === "string") {
+        setRun((current) =>
+          current
+            ? {
+                ...current,
+                worktrees: (current.worktrees ?? []).filter(
+                  (candidate) => candidate.id !== event.worktreeId
+                )
+              }
+            : current
+        )
+      }
+    })
+  }, [runId, threadId])
+
   if (loading) {
     return (
       <div className="flex h-48 items-center justify-center text-muted-foreground">
@@ -266,15 +329,22 @@ function RunDetail({
   }
 
   const chip = statusChip(run.status)
+  const requestedAgentPage = agentPageSelection.runId === runId ? agentPageSelection.page : 0
+  const agentPageCount = Math.max(1, Math.ceil(run.agents.length / WORKFLOW_AGENT_DETAIL_PAGE_SIZE))
+  const agentPage = Math.min(requestedAgentPage, agentPageCount - 1)
+  const agentPageStart = agentPage * WORKFLOW_AGENT_DETAIL_PAGE_SIZE
+  const agentPageEnd = Math.min(
+    run.agents.length,
+    agentPageStart + WORKFLOW_AGENT_DETAIL_PAGE_SIZE
+  )
+  const visibleAgents = run.agents.slice(agentPageStart, agentPageEnd)
   const agentsByPhase = new Map<string | null, PersistedWorkflowRunDTO["agents"]>()
-  for (const agent of run.agents) {
+  const phaseOrder: Array<string | null> = []
+  for (const agent of visibleAgents) {
+    if (!agentsByPhase.has(agent.phase)) phaseOrder.push(agent.phase)
     const list = agentsByPhase.get(agent.phase) ?? []
     list.push(agent)
     agentsByPhase.set(agent.phase, list)
-  }
-  const phaseOrder: Array<string | null> = [...run.phases]
-  for (const key of agentsByPhase.keys()) {
-    if (!phaseOrder.includes(key)) phaseOrder.push(key)
   }
   // Self-contained resume: just the runId — the script is loaded from the saved
   // run. (Passing scriptPath would fail if the .workflow.js was pruned while the
@@ -354,9 +424,65 @@ function RunDetail({
       {run.status !== "completed" && run.status !== "running" && (
         <div className="flex items-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 text-[11px] text-sky-800 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
           <span className="min-w-0 flex-1">
-            已完成的子代理结果保留在 journal,可让模型续跑该任务。
+            普通子代理可从 journal 回放；worktree 子代理会在新 worktree 重跑，原交付物仍保留。
           </span>
           <CopyButton text={resumeCommand} label="续跑指引" />
+        </div>
+      )}
+
+      {(run.worktrees?.length ?? 0) > 0 && (
+        <Section title={`Worktree 交付物(${run.worktrees?.length ?? 0})`} defaultOpen>
+          <WorkflowWorktreeList
+            threadId={threadId}
+            runId={run.runId}
+            worktrees={run.worktrees ?? []}
+            manageAllowed={run.status !== "running"}
+            onRecordChange={(record) => {
+              setRun((current) =>
+                current
+                  ? {
+                      ...current,
+                      worktrees: (current.worktrees ?? []).map((candidate) =>
+                        candidate.id === record.id
+                          ? newerWorkflowWorktree(candidate, record)
+                          : candidate
+                      )
+                    }
+                  : current
+              )
+            }}
+          />
+        </Section>
+      )}
+
+      {run.agents.length > WORKFLOW_AGENT_DETAIL_PAGE_SIZE && (
+        <div className="flex items-center justify-center gap-2 rounded-md border border-border/60 bg-muted/20 px-2 py-1.5 text-[11px] text-muted-foreground">
+          <span>
+            子代理 {agentPageStart + 1}–{agentPageEnd} / {run.agents.length}
+          </span>
+          <button
+            type="button"
+            disabled={agentPage === 0}
+            onClick={() =>
+              setAgentPageSelection({ runId, page: Math.max(0, agentPage - 1) })
+            }
+            className="rounded border border-border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            前一页
+          </button>
+          <button
+            type="button"
+            disabled={agentPage + 1 >= agentPageCount}
+            onClick={() =>
+              setAgentPageSelection({
+                runId,
+                page: Math.min(agentPageCount - 1, agentPage + 1)
+              })
+            }
+            className="rounded border border-border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            后一页
+          </button>
         </div>
       )}
 
@@ -421,12 +547,20 @@ export function WorkflowRunsDialog({
   const [runs, setRuns] = useState<WorkflowRunSummaryDTO[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const [currentCursor, setCurrentCursor] = useState<string | null>(null)
+  const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([])
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
 
-  const loadRuns = useCallback(async (): Promise<void> => {
+  const loadRuns = useCallback(async (cursor: string | null): Promise<void> => {
     setLoading(true)
     try {
-      const raw = await window.api.workflows.listRuns(threadId)
-      setRuns(raw as WorkflowRunSummaryDTO[])
+      const page = await window.api.workflows.listRuns(threadId, {
+        cursor,
+        limit: WORKFLOW_RUN_LIST_PAGE_SIZE
+      })
+      setRuns(page.runs as WorkflowRunSummaryDTO[])
+      setCurrentCursor(cursor)
+      setNextCursor(page.nextCursor)
     } catch (error) {
       console.warn("[WorkflowRunsDialog] Failed to list runs:", error)
       toast.error("加载工作流历史失败")
@@ -438,7 +572,8 @@ export function WorkflowRunsDialog({
   useEffect(() => {
     if (open) {
       setSelectedRunId(null)
-      void loadRuns()
+      setCursorHistory([])
+      void loadRuns(null)
     }
   }, [open, loadRuns])
 
@@ -495,6 +630,33 @@ export function WorkflowRunsDialog({
                 </button>
               )
             })}
+            <div className="flex items-center justify-center gap-2 pt-1.5 text-[11px] text-muted-foreground">
+              <button
+                type="button"
+                disabled={cursorHistory.length === 0}
+                onClick={() => {
+                  const previousCursor = cursorHistory.at(-1) ?? null
+                  setCursorHistory((history) => history.slice(0, -1))
+                  void loadRuns(previousCursor)
+                }}
+                className="rounded border border-border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                上一页
+              </button>
+              <span>本页 {runs.length} 条</span>
+              <button
+                type="button"
+                disabled={!nextCursor}
+                onClick={() => {
+                  if (!nextCursor) return
+                  setCursorHistory((history) => [...history, currentCursor])
+                  void loadRuns(nextCursor)
+                }}
+                className="rounded border border-border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                加载更多
+              </button>
+            </div>
           </div>
         )}
       </DialogContent>

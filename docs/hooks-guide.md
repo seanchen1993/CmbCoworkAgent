@@ -25,8 +25,8 @@
 | `UserPromptSubmit`   | 用户消息进入模型**前**                                                                                  | 拦截 / 改写用户输入                                                                          |
 | `Stop`               | 本轮**正常**结束                                                                                        | 最终验收，可要求修订；与 `StopFailure` 互斥                                                  |
 | `StopFailure`        | 本轮因 API 错误**异常**结束                                                                             | 失败告警；matcher 可按 6 种错误分类精确匹配；fire-and-forget                                 |
-| `SubagentStart`      | 父 Agent 发出 `task` tool call 的瞬间，子 Agent 尚未运行                                                | 子代理事前准备；与 `SubagentStop` 通过 `tool_call_id` 配对                                   |
-| `SubagentStop`       | 子 Agent 结束                                                                                           | 父轮的事后检查                                                                               |
+| `SubagentStart`      | 父 Agent 发出 `task` tool call 的瞬间，子 Agent 尚未运行                                                | 子代理事前准备；在父路径触发，但显式携带子 Agent 的 `tool_call_id` 作为 `agent_id`            |
+| `SubagentStop`       | 子 Agent 结束                                                                                           | 父轮的事后检查；在父路径触发，并用同一个子 Agent id 与 `SubagentStart` 配对                   |
 | `Setup`              | 工作区首次会话开始前（matcher=`init`），或用户主动触发"重新初始化工作区"按钮时（matcher=`maintenance`） | 工作区级初始化 / 维护脚本，**per-workspace 去重**（标记文件 `.cmbdevclaw/setup-state.json`） |
 | `Notification`       | 通知（目前唯一触发路径：审批弹窗）                                                                      | matcher=`permission_prompt`，或工具名（向后兼容）                                            |
 | `SessionStart`       | 每个 thread 第一次提问前                                                                                | matcher=`startup`（当前仅此一种 source）                                                     |
@@ -100,7 +100,8 @@ PR-16 之后，matcher 对照的不再只是"工具名/技能名"，而是按事
 | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` | `tool_name`                                                                                                           | 工具名                                                                                                    |
 | `PreSkillUse` / `PostSkillUse`                      | `skill_name`                                                                                                          | 技能名                                                                                                    |
-| `SubagentStart` / `SubagentStop`                    | 子 Agent 的 `name` / `id`（subagent_type）                                                                            | `general-purpose`、自定义 subagent 名等                                                                   |
+| `SubagentStart`                                      | 子 Agent 的 `name`，缺失时回退到 `id`                                                                                  | `general-purpose`、自定义 subagent 名，或子 Agent id                                                     |
+| `SubagentStop`                                       | 子 Agent 的 `id`（当前 Stop payload 不填 `name`）                                                                      | 子 Agent id                                                                                              |
 | `Setup`                                             | `trigger`                                                                                                             | `init` / `maintenance`                                                                                    |
 | `SessionStart`                                      | `source`                                                                                                              | `startup`（当前唯一值）                                                                                   |
 | `SessionEnd`                                        | `reason`                                                                                                              | `clear`（删 thread）/ `logout`（应用退出）                                                                |
@@ -165,13 +166,15 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 
 ### 3.1 stdin JSON（权威，无大小限制）
 
-所有 command 钩子都从 stdin 收到一份完整 JSON。通用字段：
+所有 command 钩子的 stdin 与 HTTP Hook 的请求体都会收到同一份完整 JSON。通用字段：
 
 ```jsonc
 {
   "hook_event_name": "PostToolUse",
   "session_id": "thread-abc123",
-  "cwd": "C:\\ai\\demo"
+  "cwd": "C:\\ai\\demo",
+  "workspace": "C:\\ai\\demo",
+  "workspace_path": "C:\\ai\\demo"
 }
 ```
 
@@ -179,18 +182,64 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 
 | 字段                                                                | 出现于                                                                                                                                                                                                                              |
 | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool_name`, `tool_input`                                           | Pre/PostToolUse、Pre/PostSkillUse、UserPromptSubmit（`tool_input.message`）                                                                                                                                                         |
+| `tool_name`, `tool_input`                                           | Pre/PostToolUse、Pre/PostSkillUse、UserPromptSubmit（`tool_input.message`），以及 SubagentStart。SubagentStart 固定 `tool_name="task"`；`tool_input` 含 `agent_id`、`tool_call_id`，并在原始参数存在时含 `agent_type`、`task_description` |
 | `tool_response`                                                     | **仅** PostToolUse（已自动 JSON.parse；解析失败时回退为原始字符串）                                                                                                                                                                 |
 | `prompt`                                                            | **仅** UserPromptSubmit                                                                                                                                                                                                             |
 | `skill_name`, `skill_path`, `skill_root`, `skill_trigger_tool_name` | Pre/PostSkillUse                                                                                                                                                                                                                    |
 | `plugin_id`, `plugin_name`, `plugin_root`                           | 工具/技能/钩子归属插件时                                                                                                                                                                                                            |
 | `hook_source_type`, `hook_source_root`, `hook_source_path`          | 钩子来源已知时                                                                                                                                                                                                                      |
-| `subagent`                                                          | **仅** SubagentStop                                                                                                                                                                                                                 |
+| `workspace`, `workspace_path`                                      | 当前会话工作区根；两者完全等价。工作区已知时，所有事件的 command stdin 与 HTTP 请求体都会携带                                                                                                                                        |
+| `subagent`                                                          | SubagentStart / SubagentStop。Start 为 `{ id, name?, status: "started" }`；Stop 的 `status` 为 `"completed"` 或 `"failed"`                                                                                                      |
 | `stop_context`                                                      | **仅** Stop / PostSkillUse —— 包含 `userMessage`、`assistantResponse`、`toolCalls[]`、`usedSkills[]`                                                                                                                                |
 | `user_context`                                                      | **仅当**该钩子开启了 `injectUserContext` 时出现，见 [3.5](#35-注入当前用户身份-injectusercontext)                                                                                                                                   |
 | `transcript_path`                                                   | **Claude Code 兼容字段 — 解析/透传能力已就绪，当前无填充入口**。Runner 的 stdin JSON 与 env 都已支持透传，但没有任何调用方填值，所以脚本目前永远拿不到。后续 PR 在确认 deepagents filesystem backend 的会话历史文件命名约定后填充。 |
 | `permission_mode`                                                   | **仅 Notification 事件填充**。值为 `"yolo"`（YOLO 模式）或 `"approve"`（默认审批模式）。其他事件目前不写出该 key。                                                                                                                  |
-| `agent_id`                                                          | **解析/透传能力已就绪，当前无填充入口**。等待 SubagentStart / 子 Agent 内部 hook 路径接通后填充（属于 PR-04 范围）。                                                                                                                |
+| `agent_id`                                                          | 子 Agent 内触发 Hook 时为当前 Agent id；SubagentStart / SubagentStop 虽在父路径触发，也显式填入子 Agent id。父 Agent / 无 Agent 执行上下文时省略；调用方显式提供的 `agentId` 优先                                                  |
+
+prompt Hook 的判决 payload 同样保留 `workspace`，并提供完全等价的
+`workspace_path`；工作区未知时这两个字段为空字符串。
+
+#### 3.1.1 Subagent 生命周期 payload 与 `agent_id` 映射
+
+`SubagentStart` 的 payload 形状如下；`agent_id`、`tool_input.agent_id`、
+`tool_input.tool_call_id` 与 `subagent.id` 是同一个子 `task` tool call id：
+
+```jsonc
+{
+  "hook_event_name": "SubagentStart",
+  "agent_id": "call_task_123",
+  "tool_name": "task",
+  "tool_input": {
+    "agent_id": "call_task_123",
+    "agent_type": "general-purpose",
+    "tool_call_id": "call_task_123",
+    "task_description": "检查 Hook 实现"
+  },
+  "subagent": {
+    "id": "call_task_123",
+    "name": "general-purpose",
+    "status": "started"
+  }
+}
+```
+
+`agent_type`、`task_description`、`subagent.name` 只在原始 `task` 参数提供对应值时出现。
+配对的 `SubagentStop` 不带 `tool_name` / `tool_input`；它仍在顶层携带同一个
+`agent_id`，并把 `subagent.status` 设为 `"completed"` 或 `"failed"`。首次执行、
+resume 和 interrupt-continue 三种流入口都会成对采集生命周期事件；
+`SubagentStop` 返回 `continue:false` 时会直接终止父轮，不会被模型 failover 重试。
+
+各运行模式内部触发 Hook 时，`agent_id` 的来源如下：
+
+| 场景 | `agent_id` | 稳定性 |
+| ---- | ---------- | ------ |
+| Solo 的 `task` 子 Agent | 父 `task` 的 `tool_call_id` | 与 UI 使用的子 Agent id 一致 |
+| Coordinator worker | `workerId` | 同一个 worker 的后续 turn、运行时重建或模型 fallback 继续使用同一值 |
+| Workflow 叶子 Agent | `${runId}:agent:${agentIndex}` | 重试或模型 fallback 时保持不变；内部 thread id 可追加 `_rN` |
+| `SubagentStart` / `SubagentStop` 生命周期 Hook | 子 `task` 的 `tool_call_id` | 两个事件用同一值配对；即使 Hook 从父路径发起也不会退回父 Agent id |
+
+调用方显式传入的 `agentId` 优先于自动传播的子 Agent 上下文。根 Agent 或其它没有
+Agent 身份的调用不会生成占位值，而是省略 `agent_id` / `AGENT_ID`。
 
 ### 3.2 环境变量（便利，**大字段会被丢弃**）
 
@@ -209,9 +258,11 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 | `HOOK_USER_*`                           | **仅当**该钩子开启了 `injectUserContext` 时出现（如 `HOOK_USER_SAP_ID`）；**token 字段永远不进 env**，见 [3.5](#35-注入当前用户身份-injectusercontext)                               |
 | `TRANSCRIPT_PATH`                       | **当前永远不下发**（透传能力已就绪，无填充入口；详见 §3.1 同名字段说明）                                                                                                             |
 | `PERMISSION_MODE`                       | **仅 Notification 事件下发**（值：`yolo` / `approve`）                                                                                                                               |
-| `AGENT_ID`                              | **当前永远不下发**（透传能力已就绪，等子 Agent hook 路径接通后填充）                                                                                                                 |
+| `AGENT_ID`                              | 与 stdin 顶层 `agent_id` 相同；子 Agent 内触发 Hook 时为当前 Agent id，SubagentStart / SubagentStop 为子 `task` tool call id；无 Agent 执行上下文时不下发                            |
 
 ⚠️ **铁律**：要可靠拿到完整工具入参/结果，**必须读 stdin JSON**——超过 4KB 时 env 里直接没有该 key。
+
+`AGENT_ID`、`WORKSPACE_PATH`、`CLAUDE_PROJECT_DIR` 只取本次 Hook 调用上下文；上下文缺失时不会继承 Electron 宿主进程中的同名旧值。HTTP Hook 不存在子进程环境变量，请从请求体的 `agent_id`、`workspace` / `workspace_path` 读取。
 
 ### 3.3 cwd 优先级
 
@@ -219,7 +270,14 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 
 **`HOOK_SOURCE_ROOT` ▶ `WORKSPACE_PATH` ▶ 进程默认 cwd**
 
-实战含义：**全局钩子的脚本工作目录是 `~/.cmbcoworkagent`，不是项目工作区**。要把日志写到工作区根，必须显式拼接 `WORKSPACE_PATH`，不能用相对路径。
+stdin / HTTP 请求体中的 `cwd` 就是按这个优先级算出的 Hook 执行目录；它不等于
+“当前项目目录”。`workspace`、`workspace_path`、`WORKSPACE_PATH` 和
+`CLAUDE_PROJECT_DIR` 则始终表示当前会话工作区根，不会因为 Hook 来自全局、插件或
+技能目录而改变。
+
+实战含义：**全局钩子的脚本工作目录通常是 `~/.cmbcoworkagent`，不是项目工作区**；
+插件 / 技能 Hook 的 `cwd` 也可能是各自的来源根目录。要把日志写到工作区根，必须
+显式使用 `WORKSPACE_PATH`（HTTP Hook 使用请求体的 `workspace_path`），不能用相对路径。
 
 ### 3.4 PLUGIN_ROOT 何时有值
 
@@ -333,11 +391,27 @@ sys.exit(0)
 
 | 退出码   | 含义                                                               |
 | -------- | ------------------------------------------------------------------ |
-| `0`      | 正常返回；stdout 若是合法 JSON 按结构化字段解析，否则当纯文本注入  |
+| `0`      | 正常返回；stdout 整体若为含协议字段的 JSON object，则解析控制字段，否则按普通文本处理 |
 | `2`      | **强制阻断**；等价于 `decision=block`，reason 取自 stderr / stdout |
 | 其它非零 | 视为"钩子自身报错"，**不阻断**业务，只打日志                       |
 
 > ⚠️ shell 里 `echo 'exit 2'` **不会**让进程退出码为 2，那只是 echo 出字面字符串。sh 里写 `exit 2`，Windows 用 `cmd /c "exit 2"`。
+
+只有 stdout **整体**是 JSON object，且顶层至少包含一个 §4.2 所列协议字段时，才会被
+识别为 Hook 协议 envelope。解析发生在 `exitCode=0` 时，并读取执行器保留下来的完整
+body；合法协议 JSON 超过 10,000 字符仍可解析，不再只检查前缀。
+
+协议 envelope 的原始 stdout 会从 Agent 反馈通道消费，因此不会再作为
+`[Hook output]` 拼到 `read_file` 等工具结果末尾。解析出的 `additionalContext`、
+`systemMessage`、阻断原因等仍按事件语义回灌。原始 JSON 不会丢失：Hook 执行记录使用
+独立的 `rawStdout` 展示它；UI 预览最多 4,000 字符，诊断模式写入的 JSONL 记录保留
+执行器边界内的完整值。stderr 不受这次消费影响。
+
+没有协议字段的普通业务 JSON、JSON 标量、JSON 数组和非 JSON 文本仍按普通 stdout
+记录，并依照 §5 进入 Agent 上下文。command Hook 的 stdout + stderr 合计上限为 1MB；
+超限时进程会被终止、stdout 被清空，并以非零退出结果记录截断提示，因此不会把半截
+协议 JSON 注入工具结果。HTTP Hook 响应体上限同样为 1MB；一旦超限，不解析或透传
+截断内容，而是按该 Hook 的 `fallback`（`allow` / `block`）处理并在 stderr 记录原因。
 
 ### 4.2 stdout JSON 可识别字段
 
@@ -388,7 +462,7 @@ sys.exit(0)
 | UserPromptSubmit                         | 追加上下文                         | 拒绝本轮提问                                             | 终止本轮         |
 | Stop                                     | 追加上下文                         | 要求 Agent 修订本轮回复                                  | 终止本轮         |
 | SubagentStop                             | 日志                               | （无效）                                                 | 终止父轮         |
-| Notification / SessionStart / SessionEnd | 日志                               | （无效）                                                 | （无效）         |
+| SubagentStart / Notification / SessionStart / SessionEnd | 日志                    | （无效）                                                 | （无效）         |
 
 > PostSkillUse 的非阻塞 stdout **不会**回灌——这是和 PostToolUse 最大的区别。要在 PostSkillUse 注入上下文，必须走 `decision=block` 路径。
 
@@ -845,7 +919,7 @@ Hook 配置（`hooks.json` 条目）：
 
 - 请求体 = 该事件的 stdin JSON（含 `tool_name`、`tool_input` 等，字段同对应事件的 command Hook），固定带 `Content-Type: application/json`。**HTTP Hook 不下发任何环境变量**，上下文全在请求体里。
 - `headers` 里的 `${POLICY_TOKEN}` 只有在 `allowedEnvVars` 白名单里才会被宿主环境变量替换，否则替换为空串（防止误把环境变量泄露到外部 URL）。
-- 响应：2xx + JSON 按 `decision` / `reason` / `continue` / `updatedInput` 决策；2xx + 纯文本当普通输出；非 2xx / 网络错误 / 超时则走 `fallback`（这里是放行，可设 `"block"`）。响应体上限 1MB，默认超时 30s（`async: true` 时上限 5 分钟）。
+- 响应：2xx + 含协议字段的 JSON object 按 `decision` / `reason` / `continue` / `updatedInput` 等字段处理；没有协议字段的业务 JSON 与纯文本都当普通输出。非 2xx / 网络错误 / 超时 / 响应体超过 1MB 都走 `fallback`（这里是放行，可设 `"block"`），不会透传半截响应。默认超时 30s（`async: true` 时上限 5 分钟）。
 - ⚠️ 无 SSRF 守卫，URL 与出网风险自负，别指向不可信地址。
 
 服务端最小实现（Python / Flask，仅示意）：
@@ -884,6 +958,10 @@ def check():
 | `tool_response` 是字符串不是对象                     | 上游 JSON 不合法时回退原文                     | 做类型判断再访问字段                                          |
 | 所有工具调用都慢了几秒                               | 挂了 `matcher: "*"` 的 prompt 钩子，每次走 LLM | matcher 收紧 / 改 command 类型 / 关掉                         |
 | stdout 里既输出日志又输出 JSON，JSON 没被识别        | 解析只接受 stdout **整体**是 JSON              | 日志一律打 stderr，stdout 只放最终 JSON                       |
+| 协议 JSON 没拼到工具结果里，以为输出丢了             | 协议 stdout 会从反馈通道消费                    | 在 Hook 执行记录看原始 JSON；业务提示改用 `additionalContext` |
+| UI 中 stdout 只显示前 4,000 字符                     | 执行记录的 UI 预览有长度上限                    | 开启诊断模式，从 JSONL 记录查看执行器边界内的完整 stdout      |
+| command Hook 输出超过 1MB 后没有 stdout              | stdout + stderr 超限会终止进程并清空半截 stdout | 缩短响应；把诊断日志写 stderr / 文件，协议 JSON 保持精简      |
+| HTTP Hook 返回超过 1MB 后走了放行 / 阻断             | 超限响应按 `fallback` 处理，不解析半截 body      | 让服务返回不超过 1MB 的完整协议 envelope；按风险配置 fallback |
 | PowerShell 脚本 stdin 总是空，但 env 正常            | Windows PS 5.x + `-File` 模式 stdin 不可达     | 改用 `$input` 自动变量                                        |
 | `ConvertFrom-Json -Depth N` 报"找不到参数名称 Depth" | `-Depth` 是 PowerShell 7+ 才加的               | 5.x 上去掉 `-Depth`                                           |
 | 深层 `tool_response` 序列化截断                      | `ConvertTo-Json` 默认 `-Depth 2`               | 显式 `-Depth 10`                                              |
@@ -897,7 +975,7 @@ def check():
 
 1. **日志双通道**：stderr 给你看，stdout 给系统看。永远把诊断信息打到 stderr，不影响决策。
 2. **最小化验证**：先用 `matcher: "*"` + 一行打印命令验证能触发，再逐步加策略。
-3. **看 Hook 执行记录**：UI 的 Hook 面板能看到每次触发的退出码、`decision`、`continue`、stderr 内容——比翻日志快。
+3. **看 Hook 执行记录**：UI 的 Hook 面板能看到每次触发的退出码、`decision`、`continue`、stderr，以及已从 Agent 反馈中消费的结构化 raw stdout（预览最多 4,000 字符）——比翻日志快；诊断 JSONL 保留执行器边界内的完整值。
 4. **dump payload**：把整份 stdin JSON 打到 stderr 一份，立刻看到实际字段，比对着文档猜更准。
 5. **超时排查**：`timeout` 默认 10s。LLM 类钩子拉到 20-30s；本地脚本能压到 2-3s 暴露慢路径。
 6. **once 一次性钩子**：开发期不要用 `"once": true`，触发一次后就消失，看起来像没生效。

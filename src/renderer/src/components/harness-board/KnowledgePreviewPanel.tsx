@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   AlertCircle,
   ChevronDown,
@@ -11,9 +11,12 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { FileViewer } from "@/components/tabs/FileViewer"
 import { cn } from "@/lib/utils"
 import type { HarnessKnowledgePreviewFile, HarnessKnowledgePreviewResult } from "@/types"
+
+const FileViewer = lazy(() =>
+  import("@/components/tabs/FileViewer").then((module) => ({ default: module.FileViewer }))
+)
 
 interface KnowledgePreviewPanelProps {
   preview: HarnessKnowledgePreviewResult | null
@@ -261,10 +264,20 @@ export function KnowledgePreviewPanel({
           </div>
           <div className="flex min-w-0 min-h-0 overflow-hidden">
             {selectedFullPath ? (
-              <FileViewer
-                filePath={selectedFile?.path ?? selectedFullPath}
-                externalFullPath={selectedFullPath}
-              />
+              <Suspense
+                fallback={(
+                  <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+                    <Loader2 className="mr-2 size-4 animate-spin" />
+                    正在加载文件预览...
+                  </div>
+                )}
+              >
+                <FileViewer
+                  filePath={selectedFile?.path ?? selectedFullPath}
+                  externalFullPath={selectedFullPath}
+                  externalPreviewGrant={preview?.previewGrant}
+                />
+              </Suspense>
             ) : (
               <KnowledgePreviewEmpty icon={<File className="size-5" />} text="请选择文件预览。" />
             )}

@@ -812,11 +812,11 @@ async function testSubdirectoryWorkspacePathspecs(): Promise<void> {
     await initRepo(repo)
     await setSettings(enabledSettings("diff"))
     const workspace = join(repo, "OSA_MicroService", "OSA_GateWay")
-    const fileRel = join("src", "main", "java", "com", "cmbchina", "ue", "filter", "AuthHeaderFilter.java")
-    const modifiedRel = join("src", "main", "java", "com", "cmbchina", "ue", "filter", "TrackedFilter.java")
-    const renameOldRel = join("src", "main", "java", "com", "cmbchina", "ue", "filter", "OldFilter.java")
-    const renameNewRel = join("src", "main", "java", "com", "cmbchina", "ue", "filter", "RenamedFilter.java")
-    await mkdir(join(workspace, "src", "main", "java", "com", "cmbchina", "ue", "filter"), {
+    const fileRel = join("src", "main", "java", "com", "example", "ue", "filter", "AuthHeaderFilter.java")
+    const modifiedRel = join("src", "main", "java", "com", "example", "ue", "filter", "TrackedFilter.java")
+    const renameOldRel = join("src", "main", "java", "com", "example", "ue", "filter", "OldFilter.java")
+    const renameNewRel = join("src", "main", "java", "com", "example", "ue", "filter", "RenamedFilter.java")
+    await mkdir(join(workspace, "src", "main", "java", "com", "example", "ue", "filter"), {
       recursive: true
     })
     await writeFile(join(workspace, modifiedRel), "public class TrackedFilter {}\n")
@@ -852,9 +852,9 @@ async function testSubdirectoryWorkspacePathspecs(): Promise<void> {
     }
     const committed = await git(repo, ["show", "--name-only", "--format=", "HEAD"])
     for (const expected of [
-      "OSA_MicroService/OSA_GateWay/src/main/java/com/cmbchina/ue/filter/AuthHeaderFilter.java",
-      "OSA_MicroService/OSA_GateWay/src/main/java/com/cmbchina/ue/filter/TrackedFilter.java",
-      "OSA_MicroService/OSA_GateWay/src/main/java/com/cmbchina/ue/filter/RenamedFilter.java"
+      "OSA_MicroService/OSA_GateWay/src/main/java/com/example/ue/filter/AuthHeaderFilter.java",
+      "OSA_MicroService/OSA_GateWay/src/main/java/com/example/ue/filter/TrackedFilter.java",
+      "OSA_MicroService/OSA_GateWay/src/main/java/com/example/ue/filter/RenamedFilter.java"
     ]) {
       assert(
         committed.includes(expected),

@@ -48,6 +48,7 @@ interface ToolCallRendererProps {
   isError?: boolean
   status?: ToolCallStatus
   needsApproval?: boolean
+  searchableSummary?: string
   showApprovalButtons?: boolean
   onApprovalDecision?: (
     decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
@@ -147,6 +148,18 @@ function safeStringify(value: unknown): string {
 // Helper to get a clean file name from path
 function getFileName(path: string): string {
   return path.split("/").pop() || path
+}
+
+/** Count lines without allocating one substring per line for large tool arguments. */
+function countTextLines(content: string): number {
+  let count = 1
+  let offset = 0
+  while (true) {
+    const nextBreak = content.indexOf("\n", offset)
+    if (nextBreak < 0) return count
+    count += 1
+    offset = nextBreak + 1
+  }
 }
 
 // Render todos nicely
@@ -264,9 +277,9 @@ function GrepResultsDisplay({
 
 // Render file content preview
 function FileContentPreview({ content }: { content: string; path?: string }): React.JSX.Element {
-  const lines = content.split("\n")
-  const preview = lines.slice(0, 10)
-  const hasMore = lines.length > 10
+  const lineCount = countTextLines(content)
+  const preview = content.split("\n", 10)
+  const hasMore = lineCount > preview.length
 
   return (
     <div className="text-xs font-mono bg-background rounded-sm overflow-hidden w-full">
@@ -282,7 +295,7 @@ function FileContentPreview({ content }: { content: string; path?: string }): Re
       </pre>
       {hasMore && (
         <div className="px-2 py-1 text-muted-foreground bg-background-elevated border-t border-border">
-          ... {lines.length - 10} more lines
+          ... {lineCount - preview.length} more lines
         </div>
       )}
     </div>
@@ -302,12 +315,12 @@ function FileEditSummary({ args }: { args: Record<string, unknown> }): React.JSX
       <div className="text-xs space-y-2">
         <div className="flex items-center gap-1.5 text-status-critical">
           <span className="font-mono bg-status-critical/10 px-1.5 py-0.5 rounded">
-            - {oldStr.split("\n").length} lines
+            - {countTextLines(oldStr)} lines
           </span>
         </div>
         <div className="flex items-center gap-1.5 text-status-nominal">
           <span className="font-mono bg-nominal/10 px-1.5 py-0.5 rounded">
-            + {newStr.split("\n").length} lines
+            + {countTextLines(newStr)} lines
           </span>
         </div>
       </div>
@@ -315,7 +328,7 @@ function FileEditSummary({ args }: { args: Record<string, unknown> }): React.JSX
   }
 
   if (content) {
-    const lines = content.split("\n").length
+    const lines = countTextLines(content)
     return (
       <div className="text-xs text-muted-foreground">
         Writing {lines} lines to {getFileName(path)}
@@ -387,6 +400,7 @@ export function ToolCallRenderer({
   isError,
   status,
   needsApproval,
+  searchableSummary,
   showApprovalButtons = true,
   onApprovalDecision,
   retryReason,
@@ -406,18 +420,18 @@ export function ToolCallRenderer({
   }
 
   const Icon = TOOL_ICONS[toolCall.name] || Terminal
-  const label = getToolLabel(toolCall.name)
+  const label = getToolLabel(toolCall.name, { args: toolCall.args })
   const isPanelSynced = PANEL_SYNCED_TOOLS.has(toolCall.name)
-  const effectiveStatus: ToolCallStatus =
+  const statusBadge = getStatusBadge(
     status ||
-    (needsApproval
-      ? "awaiting_approval"
-      : result !== undefined
-        ? (isError ? "failed" : "completed")
-        : isStreaming
-          ? "running"
-          : "interrupted")
-  const statusBadge = getStatusBadge(effectiveStatus)
+      (needsApproval
+        ? "awaiting_approval"
+        : result !== undefined
+          ? "completed"
+          : isStreaming
+            ? "running"
+            : "interrupted")
+  )
 
   const handleReject = (e: React.MouseEvent): void => {
     e.stopPropagation()
@@ -524,7 +538,7 @@ export function ToolCallRenderer({
     switch (toolCall.name) {
       case "read_file": {
         const content = typeof result === "string" ? result : safeStringify(result)
-        const lines = content.split("\n").length
+        const lines = countTextLines(content)
         return (
           <div className="space-y-2">
             <div className="text-xs text-status-nominal flex items-center gap-1.5">
@@ -819,9 +833,14 @@ export function ToolCallRenderer({
           className={cn("size-4 shrink-0", needsApproval ? "text-amber-500" : "text-status-info")}
         />
 
-        <span className="text-xs font-medium shrink-0">{label}</span>
+        <span
+          data-chat-search-text={searchableSummary ? true : undefined}
+          className="text-xs font-medium min-w-0 truncate text-left"
+        >
+          {searchableSummary ?? label}
+        </span>
 
-        {displayArg && (
+        {!searchableSummary && displayArg && (
           <span className="flex-1 truncate text-left text-xs text-muted-foreground font-mono">
             {displayArg}
           </span>
@@ -889,7 +908,7 @@ export function ToolCallRenderer({
                   )}
                   {approvalTypes.includes("approve") && (
                     <button
-                      className="px-3 py-1.5 text-xs bg-status-nominal text-background rounded-sm hover:bg-status-nominal/90 transition-colors"
+                      className="px-3 py-1.5 text-xs bg-status-nominal/15 text-status-nominal rounded-sm hover:bg-status-nominal/20 transition-colors"
                       onClick={(e) => {
                         e.stopPropagation()
                         onApprovalDecision?.("approve")

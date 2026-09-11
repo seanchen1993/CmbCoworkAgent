@@ -13,6 +13,8 @@ import { getHookLoggingConfig, getUserInfo } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { persistHookResultRecord } from "./log-record"
 import { trackEvent } from "../services/event-reporter"
+import { getCurrentHookAgentId } from "./execution-context"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -29,6 +31,11 @@ const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
+const INVOCATION_CONTEXT_ENV_KEYS = new Set([
+  "AGENT_ID",
+  "WORKSPACE_PATH",
+  "CLAUDE_PROJECT_DIR"
+])
 const DEFAULT_USER_CONTEXT_FIELDS = [
   "sap_id",
   "yst_id",
@@ -71,6 +78,12 @@ export interface HookContext {
   hookSourceType?: HookConfig["hookSourceType"]
   hookSourceRoot?: string
   hookSourcePath?: string
+  /** Internal override used only by isolated worktree runtimes. */
+  workspaceHookCwd?: string
+  /** An isolated worktree may be removed as soon as its agent settles. Run
+   * workspace hooks synchronously there so an async hook cannot write after
+   * checkout cleanup has started. */
+  forceSyncWorkspaceHooks?: boolean
   /** User prompt text for UserPromptSubmit — exposed as USER_PROMPT env and prompt in stdin JSON */
   userPrompt?: string
   /** Skill lifecycle context for PreSkillUse/PostSkillUse. */
@@ -173,7 +186,19 @@ export interface HookContext {
  * sync so the UI's reported cwd is always what the hook actually saw.
  */
 export function getCommandCwd(context: HookContext): string {
+  // Workspace hooks are loaded from the source checkout, but an isolated agent's
+  // explicit workspaceHookCwd is its linked checkout. Run relative commands there;
+  // hookSourceRoot remains available in env/stdin for locating hook-owned files.
+  if (context.hookSourceType === "workspace" && context.workspaceHookCwd) {
+    return context.workspaceHookCwd
+  }
   return context.hookSourceRoot ?? context.workspacePath ?? process.cwd()
+}
+
+function getInvocationWorkspace(context: HookContext): string | undefined {
+  return context.hookSourceType === "workspace" && context.workspaceHookCwd
+    ? context.workspaceHookCwd
+    : context.workspacePath
 }
 
 /**
@@ -348,15 +373,28 @@ function addHookUserContextEnv(env: Record<string, string>, hook: HookConfig): v
   }
 }
 
+function clearInheritedInvocationContextEnv(env: Record<string, string>): void {
+  for (const key of Object.keys(env)) {
+    // Environment names are case-insensitive on Windows. POSIX permits distinct
+    // mixed-case names, so retain its exact-key behaviour.
+    const comparableKey = process.platform === "win32" ? key.toUpperCase() : key
+    if (INVOCATION_CONTEXT_ENV_KEYS.has(comparableKey)) delete env[key]
+  }
+}
+
 function buildHookEnv(
   event: HookEvent,
   context: HookContext,
   hook: HookConfig
 ): Record<string, string> {
   const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    HOOK_EVENT: event
+    ...(process.env as Record<string, string>)
   }
+  // These keys describe the current hook invocation, not the Electron host.
+  // Remove inherited values first so a parent process cannot leak stale context
+  // into a hook whose invocation does not provide the corresponding field.
+  clearInheritedInvocationContextEnv(env)
+  env.HOOK_EVENT = event
   if (context.toolName) env.TOOL_NAME = context.toolName
   if (context.hookSourceType) env.HOOK_SOURCE_TYPE = context.hookSourceType
   if (context.hookSourceRoot) env.HOOK_SOURCE_ROOT = context.hookSourceRoot
@@ -374,10 +412,11 @@ function buildHookEnv(
   }
   // toolResult is already a JSON string from upstream — passing as-is avoids double encoding.
   setBestEffortJsonEnv(env, "TOOL_RESULT", context.toolResult)
-  if (context.workspacePath) {
-    env.WORKSPACE_PATH = context.workspacePath
+  const invocationWorkspace = getInvocationWorkspace(context)
+  if (invocationWorkspace) {
+    env.WORKSPACE_PATH = invocationWorkspace
     // Claude Code compatibility — the canonical env var hooks expect
-    env.CLAUDE_PROJECT_DIR = context.workspacePath
+    env.CLAUDE_PROJECT_DIR = invocationWorkspace
   }
   if (context.pluginOutputDir) env.PLUGIN_OUTPUT_DIR = context.pluginOutputDir
   if (context.pluginWorkspace) env.PLUGIN_WORKSPACE = context.pluginWorkspace
@@ -410,6 +449,11 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
     hook_event_name: event,
     session_id: context.sessionId ?? "",
     cwd: getCommandCwd(context)
+  }
+  const invocationWorkspace = getInvocationWorkspace(context)
+  if (invocationWorkspace) {
+    payload.workspace = invocationWorkspace
+    payload.workspace_path = invocationWorkspace
   }
   const userContext = buildHookUserContext(hook)
   if (userContext) payload.user_context = userContext
@@ -446,10 +490,9 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.transcriptPath) payload.transcript_path = context.transcriptPath
   if (context.permissionMode) payload.permission_mode = context.permissionMode
   if (context.agentId) payload.agent_id = context.agentId
-  // PR-11 — Setup event payload (`trigger` + `workspace_path`).
+  // PR-11 — Setup event payload. Workspace aliases are common to every event.
   if (context.setupTrigger) {
     payload.trigger = context.setupTrigger
-    if (context.workspacePath) payload.workspace_path = context.workspacePath
   }
   if (context.skillName) payload.skill_name = context.skillName
   if (context.skillPath) payload.skill_path = context.skillPath
@@ -663,6 +706,16 @@ function executeCommandHook(
     let outputBytes = 0
     let outputTruncated = false
 
+    const stopForOutputLimit = (): void => {
+      if (outputTruncated) return
+      outputTruncated = true
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        /* ignore */
+      }
+    }
+
     // Guard against double-resolve from concurrent timer + close/error events
     let resolved = false
     const settle = (result: HookResult): void => {
@@ -676,12 +729,7 @@ function executeCommandHook(
       if (outputTruncated) return
       outputBytes += chunk.length
       if (outputBytes > MAX_OUTPUT_BYTES) {
-        outputTruncated = true
-        try {
-          child.kill("SIGKILL")
-        } catch {
-          /* ignore */
-        }
+        stopForOutputLimit()
       } else {
         stdoutChunks.push(chunk)
       }
@@ -690,7 +738,9 @@ function executeCommandHook(
     child.stderr?.on("data", (chunk: Buffer) => {
       if (outputTruncated) return
       outputBytes += chunk.length
-      if (outputBytes <= MAX_OUTPUT_BYTES) {
+      if (outputBytes > MAX_OUTPUT_BYTES) {
+        stopForOutputLimit()
+      } else {
         stderrChunks.push(chunk)
       }
     })
@@ -715,8 +765,11 @@ function executeCommandHook(
       const decoded = decodeHookOutput(stdoutBuf, stderrBuf)
       const extraNote = outputTruncated ? `\n[output truncated at ${MAX_OUTPUT_BYTES} bytes]` : ""
       settle({
-        exitCode,
-        stdout: decoded.stdout.trim(),
+        // Never expose a partial stdout as ordinary Hook output: a truncated
+        // protocol envelope must be an explicit execution failure, not silently
+        // downgraded to text or a partial decision.
+        exitCode: outputTruncated ? 1 : exitCode,
+        stdout: outputTruncated ? "" : decoded.stdout.trim(),
         stderr: decoded.stderr.trim() + extraNote,
         blocked: exitCode === 2
       })
@@ -795,10 +848,9 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     maxRetries: 0,
     timeout,
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    topP: config.topP,
+    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
-      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      ...topKModelKwargs(config.model, config.topK)
     },
     configuration: { baseURL: config.baseUrl }
   })
@@ -811,6 +863,7 @@ function buildPromptHookUserMessage(
   hook: HookConfig
 ): string {
   const userContext = buildHookUserContext(hook, { includeTokens: false })
+  const invocationWorkspace = getInvocationWorkspace(context) ?? ""
   return JSON.stringify(
     {
       hook_event_name: event,
@@ -835,7 +888,8 @@ function buildPromptHookUserMessage(
       ...(context.permissionMode ? { permission_mode: context.permissionMode } : {}),
       ...(context.agentId ? { agent_id: context.agentId } : {}),
       ...(context.stopContext ? { stop_context: context.stopContext } : {}),
-      workspace: context.workspacePath ?? ""
+      workspace: invocationWorkspace,
+      workspace_path: invocationWorkspace
     },
     null,
     2
@@ -946,7 +1000,20 @@ async function executePromptHook(
 
 // ── JSON Output Protocol ─────────────────────────────────────────────────────
 
-const MAX_JSON_OUTPUT_CHARS = 10_000
+const HOOK_JSON_PROTOCOL_KEYS = [
+  "additionalContext",
+  "systemMessage",
+  "requiredSkill",
+  "updatedInput",
+  "suppressOutput",
+  "continue",
+  "stopReason",
+  "decision",
+  "reason",
+  "initialUserMessage",
+  "watchPaths",
+  "hookSpecificOutput"
+] as const
 
 /**
  * Try to parse structured JSON fields from hook stdout (exit 0 only).
@@ -958,14 +1025,23 @@ const MAX_JSON_OUTPUT_CHARS = 10_000
  * Also reads nested `hookSpecificOutput.{additionalContext,updatedInput,permissionDecision}`
  * which Claude Code's newer protocol uses for PreToolUse/UserPromptSubmit.
  *
- * If stdout is not valid JSON, these fields remain undefined (treated as plain text).
+ * A JSON object containing at least one recognised protocol key is a structured
+ * envelope, so its raw stdout is consumed after the fields above are extracted.
+ * Other JSON values and plain text remain visible output for backwards compatibility.
  */
 function parseHookJsonOutput(result: HookResult): HookResult {
   if (result.exitCode !== 0 || !result.stdout) return result
-  const raw = result.stdout.slice(0, MAX_JSON_OUTPUT_CHARS)
+  // Command and HTTP executors already enforce the 1 MB output limit. Parse the
+  // complete bounded body so a valid large decision cannot be truncated into an
+  // apparent plain-text success.
+  const raw = result.stdout
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return result
+    const isProtocolEnvelope = HOOK_JSON_PROTOCOL_KEYS.some((key) =>
+      Object.prototype.hasOwnProperty.call(parsed, key)
+    )
+    if (!isProtocolEnvelope) return result
 
     const nested =
       typeof parsed.hookSpecificOutput === "object" &&
@@ -997,8 +1073,12 @@ function parseHookJsonOutput(result: HookResult): HookResult {
         : undefined
 
     const decisionValue = parsed.decision
-    const decision: "block" | "approve" | undefined =
-      decisionValue === "block" ? "block" : decisionValue === "approve" ? "approve" : undefined
+    const decision: HookResult["decision"] =
+      decisionValue === "block" ||
+      decisionValue === "approve" ||
+      decisionValue === "human_gate"
+        ? decisionValue
+        : undefined
 
     // Nested permissionDecision=deny maps to block for backwards compat with our dispatcher
     const permDecision =
@@ -1038,6 +1118,8 @@ function parseHookJsonOutput(result: HookResult): HookResult {
 
     return {
       ...result,
+      stdout: "",
+      rawStdout: raw,
       additionalContext,
       systemMessage: typeof parsed.systemMessage === "string" ? parsed.systemMessage : undefined,
       requiredSkill,
@@ -1054,6 +1136,24 @@ function parseHookJsonOutput(result: HookResult): HookResult {
   } catch {
     // stdout is not JSON — treat as plain text (backwards compatible)
     return result
+  }
+}
+
+function normalizeHumanGateDecisionForEvent(
+  result: HookResult,
+  hook: HookConfig,
+  event: HookEvent
+): HookResult {
+  if (result.decision !== "human_gate") return result
+  if (event === "PreToolUse" && hook.async !== true) return result
+  console.warn(
+    `[Hooks] Ignoring decision=human_gate from unsupported ${hook.async === true ? "async " : ""}${event} hook "${hook.id}"`
+  )
+  return {
+    ...result,
+    decision: undefined,
+    systemMessage: undefined,
+    decisionSource: undefined
   }
 }
 
@@ -1102,7 +1202,11 @@ async function executeHook(
   // Setup owns workspace initialisation state, so its caller must observe the
   // real exit code before writing setup-state or starting SessionStart. Even
   // if a workspace/CC-imported config says async:true, run Setup synchronously.
-  if (hook.async === true && event !== "Setup") {
+  if (
+    hook.async === true &&
+    event !== "Setup" &&
+    !(context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
+  ) {
     void executeSyncHook(hook, env, context, event)
       .then((late) => {
         const finalLate: HookResult = {
@@ -1161,7 +1265,10 @@ async function executeSyncHook(
     if (diagnostic) stdinPayload = builtPayload
     result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
   }
-  const finalized = applyConfiguredOnBlock(parseHookJsonOutput(result), hook)
+  const finalized = applyConfiguredOnBlock(
+    normalizeHumanGateDecisionForEvent(parseHookJsonOutput(result), hook, event),
+    hook
+  )
   finalized.durationMs = Date.now() - startedAt
   if (stdinPayload !== undefined) finalized.stdinPayload = stdinPayload
   if (diagnostic) finalized.cwd = getCommandCwd(context)
@@ -1272,7 +1379,8 @@ function enrichContextFromHook(hook: HookConfig, context: HookContext): HookCont
     hookSourcePath: context.hookSourcePath ?? scopedHook.hookSourcePath,
     skillName: context.skillName ?? scopedHook.skillName,
     skillPath: context.skillPath ?? scopedHook.skillPath,
-    skillRoot: context.skillRoot ?? scopedHook.skillRoot
+    skillRoot: context.skillRoot ?? scopedHook.skillRoot,
+    agentId: context.agentId ?? getCurrentHookAgentId()
   }
 }
 
@@ -1354,7 +1462,18 @@ function recordHookResult(
         blocked: isBlockingResult(result),
         exitCode: result.exitCode,
         durationMs: result.durationMs,
-        source: hook.hookSourceType ?? "global"
+        source: hook.hookSourceType ?? "global",
+        threadId: context.sessionId,
+        turnId: context.turnId,
+        agentId: context.agentId,
+        pluginId: context.pluginId,
+        pluginName: context.pluginName,
+        harnessProjectId: context.harnessProjectId,
+        harnessFeatureSlug: context.featureId,
+        harnessAdapterName: context.harnessAdapterName,
+        harnessAdapterVersion: context.harnessAdapterVersion,
+        harnessNodeName: context.harnessNodeName,
+        harnessNodeStatus: context.harnessNodeStatus
       })
     } catch (e) {
       console.warn("[event] failed to emit hook.executed:", e)
@@ -1379,6 +1498,9 @@ export async function runHooks(
     let mergedAdditionalContext: string | undefined
     let mergedSystemMessage: string | undefined
     let mergedSuppressOutput = false
+    let humanGateDecision:
+      | { systemMessage: string; decisionSource: NonNullable<HookResult["decisionSource"]> }
+      | undefined
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
@@ -1422,6 +1544,41 @@ export async function runHooks(
           blocked: true
         }
       }
+      if (result.decision === "human_gate") {
+        const scopedHook = hook as ScopedHook
+        const systemMessage = result.systemMessage?.trim() ?? ""
+        if (context.toolName !== "execute") {
+          return {
+            ...result,
+            blocked: true,
+            continue: false,
+            stopReason: "decision=human_gate 仅支持 PreToolUse(execute) Hook"
+          }
+        }
+        if (!systemMessage) {
+          return {
+            ...result,
+            blocked: true,
+            continue: false,
+            stopReason: "decision=human_gate 必须提供非空 systemMessage"
+          }
+        }
+        if (humanGateDecision) {
+          return {
+            ...result,
+            blocked: true,
+            continue: false,
+            stopReason: "一次 execute 只能由一个 Hook 请求 decision=human_gate"
+          }
+        }
+        humanGateDecision = {
+          systemMessage,
+          decisionSource: {
+            hookId: hook.id,
+            pluginId: scopedHook.pluginId
+          }
+        }
+      }
       // Non-zero, non-blocking exit (error in hook itself) — log but continue
       if (result.exitCode !== 0 && result.exitCode !== null) {
         console.warn(
@@ -1449,8 +1606,10 @@ export async function runHooks(
       blocked: false,
       updatedInput: mergedUpdatedInput,
       additionalContext: mergedAdditionalContext,
-      systemMessage: mergedSystemMessage,
-      suppressOutput: mergedSuppressOutput || undefined
+      systemMessage: humanGateDecision?.systemMessage ?? mergedSystemMessage,
+      suppressOutput: mergedSuppressOutput || undefined,
+      decision: humanGateDecision ? "human_gate" : undefined,
+      decisionSource: humanGateDecision?.decisionSource
     }
   }
 

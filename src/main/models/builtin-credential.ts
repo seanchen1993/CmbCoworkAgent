@@ -5,16 +5,16 @@ import { createDecipheriv } from "crypto"
 // it is obfuscation rather than a security boundary; runtime overrides remain the
 // supported rotation mechanism.
 const BUNDLED_KEY_PARTS = [
-  "29c779f6cdcbaf32",
-  "ff54b9f6bbdfa814",
-  "07c42f0211cef59e",
-  "cd93d48a356926d2"
+  "236b5b573f3978a8",
+  "7542113972109735",
+  "d5e790fdee1d9cdc",
+  "1dcffe389e610737"
 ] as const
 
 const BUNDLED_CREDENTIAL = {
-  iv: "yTpNdMd7TBWEu8xV",
-  authTag: "eCdP1t/wbmw5RvvOxd4yew==",
-  ciphertext: "ib88K50Vghhw6MlNBXvr7/PRl+VOHBkGYQubKUdP320Oz6E="
+  iv: "QyVhAsQfufRtvAVz",
+  authTag: "8l923jtWfvqy18or4CG2PA==",
+  ciphertext: "A8Z7MXXdeLV/NkhFVOB07DAtrjeV873pvvnzga81LfK9xNw="
 } as const
 
 export function getBundledBuiltinModelApiKey(): string | undefined {

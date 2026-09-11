@@ -8,6 +8,7 @@
 import {
   buildRestoredCheckpointTranscript,
   buildCheckpointTranscriptForDisplay,
+  filterGoalEventsForDurablePage,
   formatGoalEventMessage,
   getInternalGoalPromptIdentity,
   goalNoticeEventsToGoalUiEvents,
@@ -15,10 +16,14 @@ import {
   isGoalResumeCommandContent,
   isGoalTranscriptArtifact,
   isVisibleCheckpointTranscriptMessage,
-  mergeGoalUserEventsIntoTranscript
+  mergeGoalUserEventsIntoDurablePage,
+  mergeGoalUserEventsIntoTranscript,
+  restoreDurableTranscriptOrdinals
 } from "../src/renderer/src/lib/goal-transcript.ts"
 import { buildGoalContinuationPrompt, buildGoalStartPrompt } from "../src/main/agent/goals/goal-manager.ts"
 import {
+  isWorkflowPlumbingTranscriptContent,
+  neutralizeWorkflowPlumbingUserText,
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
   WORKFLOW_NOTIFICATION_TURN_TRIGGER
@@ -122,6 +127,39 @@ function testGoalArtifactsAreNotCheckpointTranscript(): void {
   assert(
     !isGoalTranscriptArtifact(message("normal-system", "system", "Hook 已执行")),
     "non-goal system messages should remain visible"
+  )
+}
+
+function testContextCompactionProseRemainsVisibleWithoutStructuralMarker(): void {
+  assert(
+    isVisibleCheckpointTranscriptMessage(
+      message(
+        "compact-deepagents",
+        "assistant",
+        "You are in the middle of a conversation that has been summarized.\nsummary"
+      )
+    ),
+    "ordinary assistant text must not be hidden only because it resembles compaction prose"
+  )
+  assert(
+    isVisibleCheckpointTranscriptMessage(
+      message(
+        "compact-legacy",
+        "assistant",
+        "Here is a summary of the conversation to date:\nsummary"
+      )
+    ),
+    "legacy-looking assistant text must remain visible without an internal marker"
+  )
+  assert(
+    isVisibleCheckpointTranscriptMessage(
+      message(
+        "ordinary-user",
+        "user",
+        "You are in the middle of a conversation that has been summarized. 这句话是什么意思？"
+      )
+    ),
+    "ordinary user text that resembles summary prose should remain visible"
   )
 }
 
@@ -703,6 +741,7 @@ function testUnmatchedGoalContinuationPromptStaysHidden(): void {
 
 function testPersistedGoalControlEventsStayOutOfMainTranscript(): void {
   const baseMessages = [
+    message("assistant-before", "assistant", "开始。", new Date("2026-05-22T10:00:00.000Z")),
     message("assistant", "assistant", "当前状态已在 Goal 面板展示。", new Date("2026-05-22T10:00:10.000Z"))
   ]
   const events = goalNoticeEventsToGoalUiEvents("thread-1", [
@@ -747,8 +786,222 @@ function testPersistedGoalControlEventsStayOutOfMainTranscript(): void {
   const visible = mergeGoalUserEventsIntoTranscript(baseMessages, events)
   assertArrayEqual(
     visible.map((item) => item.content as string),
-    ["/goal resume", "/goal 新目标", "当前状态已在 Goal 面板展示。"],
+    ["开始。", "/goal resume", "/goal 新目标", "当前状态已在 Goal 面板展示。"],
     "restored side-channel goal controls should stay out of the main transcript"
+  )
+}
+
+function testGoalMergeDoesNotPrependEventsBeforeLoadedPage(): void {
+  const baseMessages = [
+    message("page-first", "assistant", "页首", new Date("2026-05-22T10:00:10.000Z")),
+    message("page-last", "assistant", "页尾", new Date("2026-05-22T10:00:20.000Z"))
+  ]
+  const events = goalNoticeEventsToGoalUiEvents("thread-1", [
+    {
+      event_id: 1,
+      goal_id: "goal-old",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 页外旧目标`,
+      created_at: "2026-05-22T10:00:09.999Z"
+    },
+    {
+      event_id: 2,
+      goal_id: "goal-visible",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 页内目标`,
+      created_at: "2026-05-22T10:00:15.000Z"
+    },
+    {
+      event_id: 3,
+      goal_id: "goal-new",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 页后目标`,
+      created_at: "2026-05-22T10:00:21.000Z"
+    }
+  ])
+
+  const visible = mergeGoalUserEventsIntoTranscript(baseMessages, events)
+  assertArrayEqual(
+    visible.map((item) => item.id),
+    ["page-first", "goal-user-event-2", "page-last", "goal-user-event-3"],
+    "goal restore must not prepend synthetic rows older than the loaded durable page"
+  )
+}
+
+function testGoalOutsideLatestDurablePageWaitsForEarlierPage(): void {
+  const messages = Array.from({ length: 502 }, (_, ordinal) =>
+    message(
+      `message-${ordinal}`,
+      "assistant",
+      `message ${ordinal}`,
+      new Date(2_000_000 + ordinal),
+      { ordinal }
+    )
+  )
+  const events = goalNoticeEventsToGoalUiEvents("thread-paged-goal", [
+    {
+      event_id: 1,
+      goal_id: "goal-old",
+      active_window_id: "window-old",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal historical objective`,
+      created_at: 1,
+      transcript_ordinal: 1,
+      transcript_message_id: "message-1"
+    }
+  ])
+  const latestPage = messages.slice(2)
+  const latestEvents = filterGoalEventsForDurablePage(latestPage, events)
+  assertEqual(latestEvents.length, 0, "a Goal outside the latest 500 rows must stay paged out")
+  assertArrayEqual(
+    mergeGoalUserEventsIntoDurablePage(latestPage, events).map((item) => item.id),
+    latestPage.map((item) => item.id),
+    "an old Goal event must not be inserted at index zero of the latest page"
+  )
+
+  const earlierPage = messages.slice(0, 2)
+  assertArrayEqual(
+    mergeGoalUserEventsIntoDurablePage(earlierPage, events).map((item) => item.id),
+    ["message-0", "goal-user-event-1", "message-1"],
+    "loading the owning ordinal page should reveal the Goal in its original position"
+  )
+}
+
+function testGoalOrdinalBeatsCheckpointFallbackTime(): void {
+  const fallbackNow = new Date("2026-05-22T11:00:00.000Z")
+  const latestPage = [
+    message("latest-2", "assistant", "latest 2", fallbackNow, { ordinal: 2 }),
+    message("latest-3", "assistant", "latest 3", fallbackNow, { ordinal: 3 })
+  ]
+  const events = goalNoticeEventsToGoalUiEvents("thread-fallback-time", [
+    {
+      event_id: 2,
+      goal_id: "goal-old",
+      active_window_id: "window-old",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal old`,
+      created_at: new Date("2020-01-01T00:00:00.000Z"),
+      transcript_ordinal: 1,
+      transcript_message_id: null
+    }
+  ])
+  const checkpointRows = latestPage.map((row) => {
+    const checkpointRow = {
+      ...row,
+      created_at: fallbackNow,
+      start_at: fallbackNow,
+      end_at: fallbackNow
+    }
+    delete checkpointRow.ordinal
+    return checkpointRow
+  })
+  const ordinalRestoredRows = restoreDurableTranscriptOrdinals(checkpointRows, latestPage)
+  const filteredEvents = filterGoalEventsForDurablePage(latestPage, events)
+  assertArrayEqual(
+    buildRestoredCheckpointTranscript(
+      ordinalRestoredRows,
+      ordinalRestoredRows,
+      filteredEvents
+    ).map((item) => item.id),
+    ["latest-2", "latest-3"],
+    "checkpoint fallback timestamps must not move an ordinal-outside Goal into the page"
+  )
+}
+
+function testHiddenGoalPromptStillUsesRawDurablePageBoundary(): void {
+  const hiddenPrompt = message(
+    "hidden-goal-prompt",
+    "user",
+    "<goal_id>goal-hidden</goal_id>",
+    new Date("2026-05-22T10:00:01.000Z"),
+    { ordinal: 1, goal_id: "goal-hidden", active_window_id: "window-hidden" }
+  )
+  const events = goalNoticeEventsToGoalUiEvents("thread-hidden-goal", [
+    {
+      event_id: 4,
+      goal_id: "goal-hidden",
+      active_window_id: "window-hidden",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal hidden objective`,
+      created_at: new Date("2026-05-22T10:00:01.000Z"),
+      transcript_ordinal: 1,
+      transcript_message_id: hiddenPrompt.id
+    }
+  ])
+  const filteredEvents = filterGoalEventsForDurablePage([hiddenPrompt], events)
+  assertArrayEqual(
+    mergeGoalUserEventsIntoDurablePage([], filteredEvents, [hiddenPrompt]).map(
+      (item) => item.content as string
+    ),
+    ["/goal hidden objective"],
+    "a hidden durable prompt should provide the page boundary without suppressing its UI alias"
+  )
+}
+
+function testShortDurableGoalKeepsPositionWithoutDuplication(): void {
+  const goalTime = new Date("2026-05-22T10:00:01.000Z")
+  const page = [
+    message("before", "assistant", "before", new Date("2026-05-22T10:00:00.000Z"), {
+      ordinal: 0
+    }),
+    message("durable-goal", "user", "/goal short", goalTime, {
+      ordinal: 1,
+      goal_id: "goal-short",
+      active_window_id: "window-short"
+    }),
+    message("after", "assistant", "after", new Date("2026-05-22T10:00:02.000Z"), {
+      ordinal: 2
+    })
+  ]
+  const events = goalNoticeEventsToGoalUiEvents("thread-short-goal", [
+    {
+      event_id: 3,
+      goal_id: "goal-short",
+      active_window_id: "window-short",
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal short`,
+      created_at: goalTime,
+      transcript_ordinal: 1,
+      transcript_message_id: "durable-goal"
+    }
+  ])
+  assertArrayEqual(
+    mergeGoalUserEventsIntoDurablePage(page, events).map((item) => item.id),
+    ["before", "durable-goal", "after"],
+    "a short durable Goal should remain in place and must not be duplicated"
+  )
+}
+
+function testGoalMergeScalesLinearlyWithPageAndEvents(): void {
+  const count = 2_000
+  let checkpointRoleReads = 0
+  const pageStart = Date.parse("2026-05-22T10:00:00.000Z")
+  const baseMessages = Array.from({ length: count }, (_, index) => {
+    const checkpoint = message(
+      `checkpoint-${index}`,
+      "assistant",
+      `assistant-${index}`,
+      new Date(pageStart + index * 2_000)
+    )
+    Object.defineProperty(checkpoint, "role", {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        checkpointRoleReads += 1
+        return "assistant"
+      }
+    })
+    return checkpoint
+  })
+  const events = goalNoticeEventsToGoalUiEvents(
+    "thread-linear",
+    Array.from({ length: count }, (_, index) => ({
+      event_id: index + 1,
+      goal_id: `goal-${index}`,
+      active_window_id: `window-${index}`,
+      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal objective-${index}`,
+      created_at: pageStart + index * 2_000 + 1_000
+    }))
+  )
+
+  const visible = mergeGoalUserEventsIntoTranscript(baseMessages, events)
+  assertEqual(visible.length, count * 2, "all in-page goal events should merge")
+  assert(
+    checkpointRoleReads <= count * 2,
+    `goal merge should index each checkpoint a constant number of times, got ${checkpointRoleReads} role reads`
   )
 }
 
@@ -868,6 +1121,27 @@ function testWorkflowPlumbingStaysOutOfCheckpointTranscript(): void {
   )
 }
 
+function testUserSuppliedWorkflowMarkersRemainVisible(): void {
+  const markerText = `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}workflow-run-1]] pasted log`
+  const neutralizedMarker = neutralizeWorkflowPlumbingUserText(markerText)
+  const neutralizedTurnPrompt = neutralizeWorkflowPlumbingUserText(
+    WORKFLOW_NOTIFICATION_TURN_PROMPT
+  )
+
+  assert(
+    neutralizedMarker.endsWith(markerText),
+    "neutralization should preserve the user's workflow marker text"
+  )
+  assert(
+    !isWorkflowPlumbingTranscriptContent(neutralizedMarker),
+    "a user-supplied V1 marker should remain visible after restore/export"
+  )
+  assert(
+    !isWorkflowPlumbingTranscriptContent(neutralizedTurnPrompt),
+    "a user-supplied full workflow turn prompt should remain visible after restore/export"
+  )
+}
+
 function testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore(): void {
   const rawCheckpointMessages = [
     message("user-1", "user", "用动态工作流实现！"),
@@ -893,6 +1167,7 @@ function testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore(): void
 function run(): void {
   const tests = [
     testGoalArtifactsAreNotCheckpointTranscript,
+    testContextCompactionProseRemainsVisibleWithoutStructuralMarker,
     testInternalGoalPromptsAndGoalArtifactsAreFilteredTogether,
     testAllGoalCommandsStayInCheckpointTranscript,
     testKnownGoalNoticeVariantsStayOutOfCheckpointTranscript,
@@ -910,11 +1185,18 @@ function run(): void {
     testGoalResumePromptDoesNotMatchWrongActiveWindowEvent,
     testUnmatchedGoalContinuationPromptStaysHidden,
     testPersistedGoalControlEventsStayOutOfMainTranscript,
+    testGoalMergeDoesNotPrependEventsBeforeLoadedPage,
+    testGoalOutsideLatestDurablePageWaitsForEarlierPage,
+    testGoalOrdinalBeatsCheckpointFallbackTime,
+    testHiddenGoalPromptStillUsesRawDurablePageBoundary,
+    testShortDurableGoalKeepsPositionWithoutDuplication,
+    testGoalMergeScalesLinearlyWithPageAndEvents,
     testPersistedGoalUserEventsDoNotDuplicateCheckpointUserMessages,
     testGoalUserEventDedupesWhenCheckpointMessageLacksActiveWindow,
     testGoalEventsStayInGoalUiState,
     testVisibilityPredicateMatchesTranscriptBuilder,
     testWorkflowPlumbingStaysOutOfCheckpointTranscript,
+    testUserSuppliedWorkflowMarkersRemainVisible,
     testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore
   ]
 

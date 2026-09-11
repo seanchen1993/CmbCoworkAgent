@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest"
 import {
   argsSnippet,
   classifyMalformedArgs,
+  createMalformedToolCallRecoveryMiddleware,
   jsonParseErrorDetail,
   recoverEmittedMalformedToolCalls,
   rejectRecoveredMalformedToolCall,
+  repairModelRequestToolCallParity,
   sanitizeModelRequestMessages
 } from "./malformed-tool-call-recovery"
 
@@ -24,6 +26,67 @@ function poisonedAssistant(content = "", id = "call_bad"): AIMessage {
     }
   })
 }
+
+describe("round-local model-request tool parity", () => {
+  it("repairs an interrupted reused id before an ordinary model request", async () => {
+    const firstCall = new AIMessage({
+      content: "first interrupted call",
+      tool_calls: [{ id: "call_0", name: "read_file", args: {}, type: "tool_call" }]
+    })
+    const secondCall = new AIMessage({
+      content: "second completed call",
+      tool_calls: [{ id: "call_0", name: "read_file", args: {}, type: "tool_call" }]
+    })
+    const secondResult = new ToolMessage({
+      content: "second result",
+      name: "read_file",
+      tool_call_id: "call_0"
+    })
+    const messages = [
+      new HumanMessage("start"),
+      firstCall,
+      new HumanMessage("interrupt"),
+      secondCall,
+      secondResult,
+      new HumanMessage("continue")
+    ]
+    const middleware = createMalformedToolCallRecoveryMiddleware()
+    let requestMessages: unknown
+
+    await middleware.wrapModelCall!({ messages } as never, async (request) => {
+      requestMessages = request.messages
+      return new AIMessage("handled")
+    })
+
+    const repaired = requestMessages as Array<AIMessage | HumanMessage | ToolMessage>
+    const firstCallIndex = repaired.indexOf(firstCall)
+    const cancellation = repaired[firstCallIndex + 1]
+    expect(ToolMessage.isInstance(cancellation)).toBe(true)
+    expect((cancellation as ToolMessage).tool_call_id).toBe("call_0")
+    expect(repaired.indexOf(secondResult)).toBeGreaterThan(repaired.indexOf(secondCall))
+    expect(messages).toHaveLength(6)
+    expect(messages[firstCallIndex + 1]).toBeInstanceOf(HumanMessage)
+  })
+
+  it("preserves valid completed rounds when a provider reuses the same id", () => {
+    const messages = [
+      new HumanMessage("first"),
+      new AIMessage({
+        content: "",
+        tool_calls: [{ id: "call_0", name: "read_file", args: {}, type: "tool_call" }]
+      }),
+      new ToolMessage({ content: "one", name: "read_file", tool_call_id: "call_0" }),
+      new HumanMessage("second"),
+      new AIMessage({
+        content: "",
+        tool_calls: [{ id: "call_0", name: "read_file", args: {}, type: "tool_call" }]
+      }),
+      new ToolMessage({ content: "two", name: "read_file", tool_call_id: "call_0" })
+    ]
+
+    expect(repairModelRequestToolCallParity(messages)).toBe(messages)
+  })
+})
 
 describe("recoverEmittedMalformedToolCalls (output repair)", () => {
   it("promotes a malformed tool call into a normalized tool_call the guard can reject", () => {
@@ -398,6 +461,36 @@ describe("sanitizeModelRequestMessages (input sanitize)", () => {
     expect(cleaned.additional_kwargs.tool_calls).toBeUndefined()
   })
 
+  it("keeps valid normalized calls while stripping a mixed raw provider copy", () => {
+    const mixed = new AIMessage({
+      content: "I will inspect both files.",
+      tool_calls: [
+        { id: "call_good", name: "read_file", args: { file_path: "good.ts" }, type: "tool_call" }
+      ],
+      additional_kwargs: {
+        tool_calls: [
+          {
+            id: "call_good",
+            type: "function",
+            function: { name: "read_file", arguments: '{"file_path":"good.ts"}' }
+          },
+          {
+            id: "call_bad",
+            type: "function",
+            function: { name: "read_file", arguments: '{"file_path":' }
+          }
+        ]
+      }
+    })
+
+    const out = sanitizeModelRequestMessages([mixed])
+    const cleaned = out[0] as AIMessage
+    expect(cleaned.tool_calls).toEqual(mixed.tool_calls)
+    expect(cleaned.invalid_tool_calls).toEqual([])
+    expect(cleaned.additional_kwargs.tool_calls).toBeUndefined()
+    expect(mixed.additional_kwargs.tool_calls).toHaveLength(2)
+  })
+
   it("strips a later raw call even if an OLDER turn has a ToolMessage with the same id", () => {
     // call_0 is legitimately used+answered earlier, then reused by a later
     // malformed emission. A global id set would falsely treat the later raw call
@@ -417,7 +510,7 @@ describe("sanitizeModelRequestMessages (input sanitize)", () => {
     expect((out[0] as AIMessage).tool_calls).toHaveLength(1) // earlier legit turn untouched
   })
 
-  it("leaves a normalized tool-call turn untouched (patchToolCalls owns it)", () => {
+  it("strips a redundant raw provider copy while preserving normalized tool calls", () => {
     const withNormalized = new AIMessage({
       content: "",
       tool_calls: [
@@ -434,7 +527,11 @@ describe("sanitizeModelRequestMessages (input sanitize)", () => {
       }
     })
     const messages = [new HumanMessage("go"), withNormalized]
-    expect(sanitizeModelRequestMessages(messages)).toBe(messages)
+    const out = sanitizeModelRequestMessages(messages)
+    const cleaned = out[1] as AIMessage
+    expect(cleaned.tool_calls).toEqual(withNormalized.tool_calls)
+    expect(cleaned.additional_kwargs.tool_calls).toBeUndefined()
+    expect(withNormalized.additional_kwargs.tool_calls).toHaveLength(1)
   })
 
   it("elides a completed large write_file argument only in the outgoing request", () => {

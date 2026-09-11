@@ -43,6 +43,16 @@ export interface DownloadedItemFile {
   filename: string
 }
 
+export interface DownloadedItemBytes {
+  buffer: ArrayBuffer
+  filename: string
+  contentType: string
+}
+
+export const MARKET_SKILL_LIST_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+export const MARKET_SKILL_LIST_MAX_ITEMS = 4096
+export const MARKET_INSTALL_FILE_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
 export interface MarketItem {
   name: string
   description: string
@@ -175,6 +185,121 @@ async function readOptionalJsonResponse<T>(response: Response): Promise<T | unde
   }
 }
 
+export async function readBoundedMarketJsonResponse<T>(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal
+): Promise<T> {
+  const boundedMaxBytes = Math.max(1, Math.floor(maxBytes))
+  const declaredLength = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declaredLength) && declaredLength > boundedMaxBytes) {
+    throw new Error(`Market response exceeds ${boundedMaxBytes} bytes`)
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) {
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (bytes.byteLength > boundedMaxBytes) {
+      throw new Error(`Market response exceeds ${boundedMaxBytes} bytes`)
+    }
+    return JSON.parse(new TextDecoder().decode(bytes)) as T
+  }
+
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  try {
+    while (true) {
+      if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+      const { done, value } = await reader.read()
+      if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+      if (done) break
+      totalBytes += value.byteLength
+      if (totalBytes > boundedMaxBytes) {
+        await reader.cancel("market-response-too-large")
+        throw new Error(`Market response exceeds ${boundedMaxBytes} bytes`)
+      }
+      chunks.push(value)
+    }
+  } catch (error) {
+    try {
+      await reader.cancel(error)
+    } catch {
+      // The stream may already be closed or errored.
+    }
+    throw error
+  }
+
+  const bytes = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder().decode(bytes)) as T
+}
+
+export async function readBoundedMarketBinaryResponse(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal
+): Promise<ArrayBuffer> {
+  const boundedMaxBytes = Math.max(1, Math.floor(maxBytes))
+  const declaredLength = Number(response.headers.get("content-length"))
+  if (Number.isFinite(declaredLength) && declaredLength > boundedMaxBytes) {
+    throw new Error(`Market download exceeds ${boundedMaxBytes} bytes`)
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) {
+    if (!Number.isFinite(declaredLength) || declaredLength < 0) {
+      throw new Error("Market download cannot be read with a bounded stream")
+    }
+    const buffer = await response.arrayBuffer()
+    if (buffer.byteLength > boundedMaxBytes) {
+      throw new Error(`Market download exceeds ${boundedMaxBytes} bytes`)
+    }
+    return buffer
+  }
+
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  const abortReader = (): void => {
+    void reader.cancel(signal?.reason ?? "market-download-aborted").catch(() => undefined)
+  }
+  signal?.addEventListener("abort", abortReader, { once: true })
+  try {
+    while (true) {
+      if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+      const { done, value } = await reader.read()
+      if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
+      if (done) break
+      totalBytes += value.byteLength
+      if (totalBytes > boundedMaxBytes) {
+        await reader.cancel("market-download-too-large")
+        throw new Error(`Market download exceeds ${boundedMaxBytes} bytes`)
+      }
+      chunks.push(value)
+    }
+  } catch (error) {
+    try {
+      await reader.cancel(error)
+    } catch {
+      // The stream may already be closed or cancelled by the fetch signal.
+    }
+    throw error
+  } finally {
+    signal?.removeEventListener("abort", abortReader)
+  }
+
+  const bytes = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return bytes.buffer
+}
+
 function getSuccessfulResponseFailureMessage(body: unknown): string | null {
   if (!body || typeof body !== "object") return null
 
@@ -217,7 +342,11 @@ const setCachedData = (key: string, data: MarketApiResponse): void => {
 
 // Updated API functions with caching
 export const marketApi = {
-  async fetchInstallFile(name: string, type: MarketItemType): Promise<DownloadedItemFile> {
+  async fetchInstallBytes(
+    name: string,
+    type: MarketItemType,
+    options?: { signal?: AbortSignal; maxBytes?: number }
+  ): Promise<DownloadedItemBytes> {
     if (type === "orgSkill") {
       throw new Error("组织级技能下载需要 skillId 和 versionId")
     }
@@ -225,6 +354,7 @@ export const marketApi = {
     console.log(`Fetching install file for ${type} item: ${name}`)
     const response = await fetch(ENDPOINTS.download(type, name), {
       method: "GET",
+      signal: options?.signal,
       headers: {
         Authorization: "Bearer your-api-token"
       }
@@ -234,12 +364,26 @@ export const marketApi = {
       await throwMarketError(response)
     }
 
-    const blob = await response.blob()
+    const contentType = response.headers.get("content-type") || "application/octet-stream"
+    const buffer = await readBoundedMarketBinaryResponse(
+      response,
+      options?.maxBytes ?? MARKET_INSTALL_FILE_MAX_RESPONSE_BYTES,
+      options?.signal
+    )
     const contentDisposition = response.headers.get("Content-Disposition")
     const defaultExt = type === "skill" || type === "plugin" ? "zip" : "json"
     const filename = contentDisposition?.match(/filename="([^"]+)"/)?.[1] || `${name}.${defaultExt}`
 
-    return { blob, filename }
+    return { buffer, filename, contentType }
+  },
+
+  async fetchInstallFile(
+    name: string,
+    type: MarketItemType,
+    options?: { signal?: AbortSignal; maxBytes?: number }
+  ): Promise<DownloadedItemFile> {
+    const { buffer, filename, contentType } = await this.fetchInstallBytes(name, type, options)
+    return { blob: new Blob([buffer], { type: contentType }), filename }
   },
 
   async fetchOrgSkillInstallFile(item: MarketItem): Promise<DownloadedItemFile> {
@@ -270,7 +414,7 @@ export const marketApi = {
     }
   },
 
-  async getSkills(): Promise<MarketApiResponse> {
+  async getSkills(options?: { signal?: AbortSignal }): Promise<MarketApiResponse> {
     const cacheKey = "skills"
 
     // Check cache first
@@ -283,6 +427,7 @@ export const marketApi = {
     try {
       const response = await fetch(ENDPOINTS.list("skill"), {
         method: "GET",
+        signal: options?.signal,
         headers: {
           "Content-Type": "application/json"
           // Remove placeholder auth token for now
@@ -290,20 +435,26 @@ export const marketApi = {
       })
 
       if (!response.ok) {
-        await throwMarketError(response)
+        throw new Error(`HTTP error! status: ${response.status}`)
       }
 
       const contentType = response.headers.get("content-type")
       if (!contentType || !contentType.includes("application/json")) {
-        const responseText = await response.text()
-        console.error("Expected JSON but received:", responseText.substring(0, 200))
+        console.error("Expected JSON but received content type:", contentType || "unknown")
         throw new Error("Response is not JSON")
       }
 
-      const data: MarketListResponse = await response.json()
+      const data = await readBoundedMarketJsonResponse<MarketListResponse>(
+        response,
+        MARKET_SKILL_LIST_MAX_RESPONSE_BYTES,
+        options?.signal
+      )
+      const items = Array.isArray(data.items) ? data.items : []
       const result = {
         success: true,
-        data: data.items || []
+        data: items.slice(0, MARKET_SKILL_LIST_MAX_ITEMS),
+        total: items.length,
+        hasNextPage: items.length > MARKET_SKILL_LIST_MAX_ITEMS
       }
 
       // Cache the result
@@ -312,6 +463,7 @@ export const marketApi = {
       return result
     } catch (error) {
       console.error("Error fetching skills:", error)
+      if (options?.signal?.aborted) throw error
       if (USE_MARKET_MOCK_ON_ERROR) {
         return getMockMarketResponse("skill", error)
       }
@@ -475,25 +627,33 @@ export const marketApi = {
     type: MarketItemType,
     downloadToLocal = false,
     _isFeatured = false,
-    item?: MarketItem
+    item?: MarketItem,
+    options?: { signal?: AbortSignal; maxBytes?: number }
   ): Promise<DownloadResponse> {
     void _isFeatured
     console.log(`Downloading ${type} item: ${name}`)
-    const { blob, filename } =
-      type === "orgSkill" && item
-        ? await this.fetchOrgSkillInstallFile(item)
-        : await this.fetchInstallFile(name, type)
+    const orgSkillFile =
+      type === "orgSkill" && item ? await this.fetchOrgSkillInstallFile(item) : null
+    const regularFile = orgSkillFile
+      ? null
+      : await this.fetchInstallBytes(name, type, options)
+    const filename = orgSkillFile?.filename ?? regularFile?.filename ?? `${name}.zip`
+    const getBuffer = async (): Promise<ArrayBuffer> =>
+      regularFile?.buffer ?? (await orgSkillFile!.blob.arrayBuffer())
+    const getBlob = (): Blob =>
+      orgSkillFile?.blob ??
+      new Blob([regularFile!.buffer], { type: regularFile!.contentType })
 
     // If user wants to download to local file system
     if (downloadToLocal) {
-      downloadBlobAsFile(blob, filename)
+      downloadBlobAsFile(getBlob(), filename)
       return { success: true }
     }
 
     // For skills, we need to handle the downloaded file
     if (type === "skill" || type === "orgSkill") {
       try {
-        const arrayBuffer = await blob.arrayBuffer()
+        const arrayBuffer = await getBuffer()
         if (typeof window.api?.skills?.upload === "function") {
           const uploadResult = await window.api.skills.upload(arrayBuffer, filename)
           return {
@@ -513,7 +673,7 @@ export const marketApi = {
     // For plugins, we need to handle the downloaded file similar to skills
     if (type === "plugin") {
       try {
-        const arrayBuffer = await blob.arrayBuffer()
+        const arrayBuffer = await getBuffer()
         if (typeof window.api?.plugins?.install === "function") {
           const installResult = await window.api.plugins.install(arrayBuffer, filename, "market", item?.version)
           return {
@@ -533,7 +693,7 @@ export const marketApi = {
     // For MCPs, handle JSON file content and add to system
     if (type === "mcp") {
       try {
-        const text = await blob.text()
+        const text = new TextDecoder().decode(await getBuffer())
         const mcpConfig = JSON.parse(text)
         const serverEntries =
           mcpConfig?.mcpServers && typeof mcpConfig.mcpServers === "object"

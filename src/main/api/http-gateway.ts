@@ -231,7 +231,7 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
     if (typeof body?.yolo === "boolean") metadata.yolo = body.yolo
     // sandbox: keep the (Windows) sandbox on. Default: OFF on Windows.
     if (typeof body?.sandbox === "boolean") metadata.sandbox = body.sandbox
-    const thread = apiCreateThread(metadata)
+    const thread = await apiCreateThread(metadata)
     sendJson(res, 201, thread)
     return
   }

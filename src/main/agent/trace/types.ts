@@ -20,20 +20,58 @@
 export interface TraceToolCall {
   /** Tool name, e.g. "read_file", "manage_skill" */
   name: string
-  /** Raw arguments passed to the tool (sanitized before trace storage/reporting). */
+  /**
+   * Raw arguments passed to the tool (sanitized before trace storage/reporting).
+   *
+   * Steps are the canonical home for tool args — the flattest place a query can
+   * reach them — so the literal stays on the step and the copies on model calls
+   * and tool nodes carry an id instead.
+   */
   args: Record<string, unknown>
+  /** Id of `args` as stored here — this is the copy others point at. */
+  argsMid?: string
+  /** `args` is empty; the real value lives under this id elsewhere in the trace. */
+  argsRef?: string
   /** Tool result (string representation, may be truncated) */
   result?: string
   /** Wall-clock time in ms for this tool call */
   durationMs?: number
+  /**
+   * The byte budget was spent when this was recorded, so only the shape was
+   * kept — name and timing, no args or result. The entry still exists because
+   * dropping it would also drop the count, and per-trace tool counts and tool
+   * names are operational metrics.
+   */
+  truncated?: boolean
 }
 
 /** A normalized chat message used by model-call traces. */
 export interface TraceChatMessage {
   role: "system" | "user" | "assistant" | "tool" | "unknown"
   content: string
+  /** Provider-explicit reasoning/summary visible to the client; never inferred hidden chain-of-thought. */
+  reasoning?: string
   name?: string
   toolCallId?: string
+  /**
+   * Content-addressed id, present on the FIRST occurrence of a message within a
+   * trace. The LLM input window slides by one call while advancing only a
+   * message or two, so the same message is recorded by several consecutive
+   * calls — and each call records its window twice (llm node input + model
+   * call). Later occurrences carry `ref` instead of the content; buildTraceTree
+   * puts the content back before anything renders it.
+   */
+  mid?: string
+  /** Set on a repeat: the `mid` of the occurrence that holds the content. */
+  ref?: string
+  /** Id of `content` as stored here — this is the copy others point at. */
+  contentMid?: string
+  /** `content` is empty; the text lives under this id elsewhere in the trace. */
+  contentRef?: string
+  /** Id of `reasoning` as stored here. */
+  reasoningMid?: string
+  /** `reasoning` is absent; the text lives under this id elsewhere in the trace. */
+  reasoningRef?: string
 }
 
 /** Token usage attached to a model call (if provider reports it). */
@@ -59,10 +97,19 @@ export interface TraceModelCall {
   toolCalls: TraceToolCall[]
   /** Provider token usage metadata */
   tokenUsage?: TraceTokenUsage
+  /**
+   * Recorded after the byte budget was spent: messages and tool args dropped,
+   * tokenUsage kept. Token totals are summed from this array, so a dropped
+   * entry would silently understate a long turn's cost.
+   */
+  truncated?: boolean
 }
 
 export type TraceNodeType =
   | "trace"
+  | "agent"
+  | "workflow"
+  | "handoff"
   | "llm"
   | "tool"
   | "tool_result"
@@ -81,8 +128,22 @@ export interface TraceNode {
   startedAt: string
   endedAt?: string
   input?: unknown
+  /**
+   * `input` is omitted; its value lives under this id elsewhere in the trace.
+   *
+   * A sibling string rather than a marker object inside `input`: the upload is
+   * ingested into Elasticsearch by the server, and putting an object where a
+   * string had been indexed risks a mapping conflict that rejects the whole
+   * document. A new field of its own can never collide.
+   */
+  inputRef?: string
   output?: unknown
+  /** `output` is omitted; its value lives under this id. Same reasoning as inputRef. */
+  outputRef?: string
+  /** Metadata values are interned as a sibling `<key>Ref` string, for the same reason. */
   metadata?: Record<string, unknown>
+  /** Recorded after the byte budget was spent: structure kept, payload dropped. */
+  truncated?: boolean
 }
 
 /** One reasoning step (one model message + its tool calls). */
@@ -91,10 +152,82 @@ export interface TraceStep {
   index: number
   /** ISO timestamp when the model started this step */
   startedAt: string
-  /** The assistant's text reasoning for this step (may be empty) */
+  /**
+   * The assistant's text reasoning for this step (may be empty).
+   *
+   * Steps are the canonical home for assistant text: they are the flattest
+   * structure a cloud query can reach, so the literal always stays here and the
+   * copies on model calls and llm nodes carry ids instead.
+   */
   assistantText: string
+  /** Id of `assistantText` as stored here — this is the copy others point at. */
+  assistantTextMid?: string
   /** All tool calls made during this step */
   toolCalls: TraceToolCall[]
+  /** Recorded after the byte budget was spent: shape kept, assistantText dropped. */
+  truncated?: boolean
+}
+
+// ─────────────────────────────────────────────────────────
+// Agent / workflow observability context
+// ─────────────────────────────────────────────────────────
+
+/** Current flattened schema version for trace/event fields used by dashboard DSL. */
+export const TRACE_OBSERVABILITY_SCHEMA_VERSION = 1
+
+export type TraceKind = "root" | "subagent" | "workflow_run"
+export type TraceExecutionMode = "normal" | "coordinator" | "workflow"
+export type TraceLinkType = "parent_child" | "async_span_link"
+export type TraceSubagentKind = "task" | "coordinator_worker" | "workflow_agent"
+export type TraceHandoffAction =
+  | "task"
+  | "start_worker"
+  | "continue_worker"
+  | "cancel_worker"
+  | "launch_workflow"
+  | "workflow_agent"
+
+export interface TraceObservabilityContext {
+  observabilitySchemaVersion: typeof TRACE_OBSERVABILITY_SCHEMA_VERSION
+  traceKind: TraceKind
+  executionMode: TraceExecutionMode
+  rootTraceId: string
+  rootThreadId: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: TraceLinkType
+  subagentKind?: TraceSubagentKind
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: TraceHandoffAction
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: "implementer" | "verifier"
+  coordinatorWorkerWorkload?: "read_only" | "verify" | "write"
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
+}
+
+/** Project-mode binding inherited by child traces so code adoption emitted from
+ * coordinator/workflow subagents keeps the same project/feature/stage scope as
+ * the root turn. */
+export interface TraceHarnessFeatureContext {
+  projectId: string
+  slug: string
+  nodeName?: string
+  nodeStatus?: string
+}
+
+export interface TraceContext extends TraceObservabilityContext {
+  traceId: string
+  threadId: string
+  rootNodeId?: string
+  harnessFeature?: TraceHarnessFeatureContext
 }
 
 // ─────────────────────────────────────────────────────────
@@ -149,7 +282,7 @@ export interface RoutingTrace {
   layers: RoutingLayerRecord[]
 }
 
-export type TraceTriggerSource = RoutingTrace["taskSource"]
+export type TraceTriggerSource = RoutingTrace["taskSource"] | "internal_notification"
 
 /** How the agent's run ended. */
 export type TraceOutcome =
@@ -318,7 +451,8 @@ export interface TraceSkillEvalExtension {
 /**
  * One complete execution trace for a single agent invocation.
  *
- * Written as a single JSON line to:
+ * Stored as a single encrypted JSON envelope line (legacy plaintext remains
+ * readable and is migrated at startup) under:
  *   ~/.cmbcoworkagent/traces/{threadId}/{traceId}.jsonl
  */
 export interface AgentTrace {
@@ -326,6 +460,42 @@ export interface AgentTrace {
   traceId: string
   /** Thread the trace belongs to */
   threadId: string
+  /** Version for flattened observability fields used by dashboard DSL and backfill. */
+  observabilitySchemaVersion?: number
+  /** Root user turn, linked async child run, or workflow-run aggregate trace. */
+  traceKind?: TraceKind
+  /** User-selected execution mode for the root chain this trace belongs to. */
+  executionMode?: TraceExecutionMode
+  /** Root trace for this causal chain. Root traces point to themselves. */
+  rootTraceId?: string
+  /** Root user-visible thread for this causal chain. */
+  rootThreadId?: string
+  /** Direct parent trace when this is a child / linked async trace. */
+  parentTraceId?: string
+  /** Direct parent thread when this is a child / linked async trace. */
+  parentThreadId?: string
+  /** Span/node in the parent trace that dispatched this trace. */
+  parentSpanId?: string
+  /** Whether this trace is nested synchronously or linked from an async dispatch. */
+  linkType?: TraceLinkType
+  /** Child agent family, populated for subagent traces. */
+  subagentKind?: TraceSubagentKind
+  /** Stable child run id within its family (worker turn, workflow agent, etc.). */
+  subagentRunId?: string
+  /** Runtime thread that executed the child agent. */
+  subagentThreadId?: string
+  /** Handoff/delegation action that created this trace when applicable. */
+  handoffAction?: TraceHandoffAction
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: "implementer" | "verifier"
+  coordinatorWorkerWorkload?: "read_only" | "verify" | "write"
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
   /** ISO timestamp when the run started */
   startedAt: string
   /** ISO timestamp when the run ended */
@@ -334,6 +504,11 @@ export interface AgentTrace {
   durationMs: number
   /** The user message that triggered this run */
   userMessage: string
+  /**
+   * Whether the full user input contains at least ten ASCII English letters.
+   * Missing on traces produced before this forward-only heuristic was introduced.
+   */
+  suspectedTechnicalDetailSupplement?: boolean
   /** Model identifier used for this run */
   modelId: string
   /** Human-readable model name (e.g. "minmax"), populated at recording time */
@@ -363,6 +538,27 @@ export interface AgentTrace {
   steps: TraceStep[]
   /** Ordered model-call runs (request + response) */
   modelCalls?: TraceModelCall[]
+  /**
+   * Σ cache-hit input tokens, flattened from `modelCalls[].tokenUsage` at
+   * finish time so the operations dashboard can aggregate it directly — a
+   * `sum` agg cannot reach into the nested per-call array.
+   *
+   * A subset of the trace's input tokens, never an addition to them: the
+   * LangChain adapters fold cache counts into `input_tokens`.
+   */
+  cacheReadTokens?: number
+  /**
+   * Σ token usage across every model call the turn actually made, counted as
+   * calls arrive rather than summed from `modelCalls`. That array stops at
+   * TRACE_MAX_MODEL_CALLS, so summing it understates long turns by exactly the
+   * amount that makes them interesting. Flattened for the same reason
+   * cacheReadTokens is: a `sum` agg cannot reach into a nested array.
+   */
+  totalInputTokens?: number
+  totalOutputTokens?: number
+  totalTokens?: number
+  /** Model calls the turn made, including any past TRACE_MAX_MODEL_CALLS. */
+  totalModelCalls?: number
   /** Unified LangSmith-style run tree nodes */
   nodes?: TraceNode[]
   /** Total number of tool calls across all steps */

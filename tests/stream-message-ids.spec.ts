@@ -11,8 +11,21 @@ import {
 } from "../src/renderer/src/lib/stream-message-ids.ts"
 import {
   ElectronIPCTransport,
-  transformSerializedValuesMessages
+  transformSerializedValuesMessages,
+  type TransformedValuesMessage
 } from "../src/renderer/src/lib/electron-transport.ts"
+import { isSerializedSummarizationMessage } from "../src/shared/context-compaction-messages.ts"
+import {
+  mergeLiveStreamMessages,
+  normalizeAppendedLiveStreamMessageIds,
+  replaceLiveStreamMessageId,
+  type LiveStreamMessage
+} from "../src/renderer/src/lib/live-stream-messages.ts"
+import {
+  buildMessageSameRoleDuplicateId,
+  getMessageProviderOccurrence,
+  getMessageProviderSourceId
+} from "../src/shared/message-role-collision.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
@@ -35,6 +48,55 @@ function testExplicitIdWins(): void {
   })
 
   assertEqual(id, "provider-id", "provider ids should remain authoritative")
+}
+
+function testSummarizationMessagesUseStructuralFiltering(): void {
+  const canonicalSummary = {
+    id: ["langchain_core", "messages", "HumanMessage"],
+    kwargs: {
+      id: "context-summary",
+      content: "You are in the middle of a conversation that has been summarized.\nsummary",
+      additional_kwargs: { lc_source: "summarization" }
+    }
+  }
+  const deserializedSummary = {
+    additional_kwargs: { lc_source: "summarization" },
+    content: "Here is a summary of the conversation to date:\nsummary"
+  }
+  const ordinaryAssistant = {
+    id: ["langchain_core", "messages", "AIMessage"],
+    kwargs: {
+      id: "ordinary-assistant",
+      content: "Here is a summary of the conversation to date:\n用户要求原样输出"
+    }
+  }
+
+  assertEqual(
+    isSerializedSummarizationMessage(canonicalSummary),
+    true,
+    "canonical serialized summary should be identified by lc_source"
+  )
+  assertEqual(
+    isSerializedSummarizationMessage(deserializedSummary),
+    true,
+    "deserialized checkpoint summary should be identified by top-level lc_source"
+  )
+  assertEqual(
+    isSerializedSummarizationMessage(ordinaryAssistant),
+    false,
+    "visible assistant prose should not be classified without lc_source"
+  )
+
+  const transformed = transformSerializedValuesMessages([
+    canonicalSummary,
+    ordinaryAssistant
+  ] as never)
+  assertEqual(transformed.length, 1, "values conversion should drop only marked summaries")
+  assertEqual(
+    transformed[0]?.id,
+    "ordinary-assistant",
+    "values conversion should preserve ordinary assistant prose"
+  )
 }
 
 function testFallbackIdIsStableForSameValuesMessage(): void {
@@ -494,6 +556,1042 @@ function testNormalValuesSnapshotsCollapseRepeatedProviderIdChanges(): void {
     lateChunk?.[0]?.id,
     "final-ai-id-3",
     "late chunks using an old provider id should resolve to the latest canonical id"
+  )
+}
+
+function testCurrentRunCompletedAliasSealsProviderOccurrenceAcrossDelayedChunk(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+  const providerId = "reused-provider-id"
+  const completedOccurrenceId = buildMessageSameRoleDuplicateId(providerId, "assistant", 2)
+  const stableCompletedId = "current-run-assistant:stable"
+
+  const streamAssistant = (
+    id: string,
+    content: string,
+    providerOccurrence?: number
+  ): Array<{ event: string; data: unknown }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: {
+              id,
+              content,
+              ...(providerOccurrence
+                ? {
+                    additional_kwargs: {
+                      cmb_internal_provider_source_id: providerId,
+                      cmb_internal_provider_occurrence: providerOccurrence
+                    }
+                  }
+                : {})
+            }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-1",
+      "normal"
+    )
+
+  streamAssistant(providerId, "new")
+  convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "message_id_alias",
+        fromId: completedOccurrenceId,
+        toId: stableCompletedId,
+        role: "assistant",
+        currentRunCompleted: true,
+        providerSourceId: providerId,
+        providerOccurrence: 2
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        messages: [{ id: "guided-user", content: "guide" }]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const delayedEvents = streamAssistant(stableCompletedId, "new final", 2)
+  const delayedMessage = delayedEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string; content?: string }]
+    | undefined
+  assertEqual(
+    delayedMessage?.[0]?.id,
+    stableCompletedId,
+    "the delayed completed chunk should update the sealed stable slot"
+  )
+  assertEqual(
+    delayedMessage?.[0]?.content,
+    " final",
+    "the delayed completed chunk should emit only the suffix of the sealed reply"
+  )
+
+  const guidedEvents = streamAssistant(providerId, "guided answer")
+  const guidedMessage = guidedEvents.find((event) => event.event === "messages")?.data as
+    | [
+        {
+          id?: string
+          content?: string
+          provider_source_id?: string
+          provider_occurrence?: number
+        }
+      ]
+    | undefined
+  const guidedOccurrenceId = buildMessageSameRoleDuplicateId(providerId, "assistant", 3)
+  assertEqual(
+    guidedMessage?.[0]?.id,
+    guidedOccurrenceId,
+    "the guided reply should allocate a new provider occurrence after the sealed reply"
+  )
+  assertEqual(
+    guidedMessage?.[0]?.content,
+    "guided answer",
+    "the guided reply should not reuse completed reply text state"
+  )
+  assertEqual(
+    guidedMessage?.[0]?.provider_source_id,
+    providerId,
+    "the guided reply should expose its provider source"
+  )
+  assertEqual(
+    guidedMessage?.[0]?.provider_occurrence,
+    3,
+    "the guided reply should expose occurrence three"
+  )
+
+  const valuesEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: providerId, content: "old" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: stableCompletedId,
+              content: "new final",
+              additional_kwargs: {
+                cmb_internal_provider_source_id: providerId,
+                cmb_internal_provider_occurrence: 2
+              }
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: providerId, content: "guided answer" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  const values = valuesEvents.find((event) => event.event === "values")?.data as
+    | {
+        messages?: Array<{
+          id: string
+          type: string
+          provider_source_id?: string
+          provider_occurrence?: number
+        }>
+      }
+    | undefined
+  const assistants = values?.messages?.filter((message) => message.type === "ai") ?? []
+  assertEqual(assistants.length, 3, "values replay should retain all three assistant replies")
+  assertEqual(assistants[0]?.id, providerId, "the historical provider occurrence should stay first")
+  assertEqual(
+    getMessageProviderOccurrence(assistants[0] ?? { id: providerId, type: "ai" }) ?? 1,
+    1,
+    "the historical reply should remain provider occurrence one"
+  )
+  assertEqual(assistants[1]?.id, stableCompletedId, "the completed reply should keep its stable id")
+  assertEqual(
+    getMessageProviderSourceId(assistants[1]),
+    providerId,
+    "the stable reply should reload with the provider source"
+  )
+  assertEqual(
+    getMessageProviderOccurrence(assistants[1]),
+    2,
+    "the stable reply should reload as provider occurrence two"
+  )
+  assertEqual(assistants[2]?.id, guidedOccurrenceId, "the guided reply should remain occurrence three")
+  assertEqual(
+    getMessageProviderOccurrence(assistants[2]),
+    3,
+    "the guided reply should reload as provider occurrence three"
+  )
+  const unexpectedAliases = valuesEvents.filter((event) => {
+    if (event.event !== "custom") return false
+    const data = event.data as { type?: string; fromId?: string; toId?: string }
+    return (
+      data.type === "message_id_alias" &&
+      ((data.fromId === providerId && data.toId === stableCompletedId) ||
+        (data.fromId === stableCompletedId && data.toId === completedOccurrenceId))
+    )
+  })
+  assertEqual(
+    unexpectedAliases.length,
+    0,
+    "values replay must not create a provider-wide alias into the completed slot"
+  )
+}
+
+function testCurrentRunCompletedAliasReservesSlotBeforeFirstAssistantChunk(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+  const providerId = "reused-provider-id-before-first-chunk"
+  const stableCompletedId = "current-run-assistant:stable-before-first-chunk"
+  const completedOccurrenceId = buildMessageSameRoleDuplicateId(providerId, "assistant", 2)
+
+  convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "message_id_alias",
+        fromId: completedOccurrenceId,
+        toId: stableCompletedId,
+        role: "assistant",
+        currentRunCompleted: true,
+        providerSourceId: providerId,
+        providerOccurrence: 2
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        messages: [{ id: "guided-user-before-first-chunk", content: "guide" }]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  const streamAssistant = (
+    id: string,
+    content: string,
+    providerOccurrence?: number
+  ): Array<{ event: string; data: unknown }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: {
+              id,
+              content,
+              ...(providerOccurrence
+                ? {
+                    additional_kwargs: {
+                      cmb_internal_provider_source_id: providerId,
+                      cmb_internal_provider_occurrence: providerOccurrence
+                    }
+                  }
+                : {})
+            }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-1",
+      "normal"
+    )
+
+  const delayedEvents = streamAssistant(stableCompletedId, "new final", 2)
+  const delayedMessage = delayedEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string; content?: string }]
+    | undefined
+  assertEqual(
+    delayedMessage?.[0]?.id,
+    stableCompletedId,
+    "a delayed first chunk should fill the reserved completed slot"
+  )
+  assertEqual(
+    delayedMessage?.[0]?.content,
+    "new final",
+    "a delayed first chunk should retain its complete content"
+  )
+
+  const guidedEvents = streamAssistant(providerId, "guided answer")
+  const guidedMessage = guidedEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string; content?: string; provider_occurrence?: number }]
+    | undefined
+  assertEqual(
+    guidedMessage?.[0]?.id,
+    buildMessageSameRoleDuplicateId(providerId, "assistant", 3),
+    "the guided reply should allocate occurrence three after a reserved completed slot"
+  )
+  assertEqual(
+    guidedMessage?.[0]?.content,
+    "guided answer",
+    "the guided reply should not append into the delayed completed slot"
+  )
+  assertEqual(
+    guidedMessage?.[0]?.provider_occurrence,
+    3,
+    "the guided reply should retain occurrence three after the no-chunk boundary"
+  )
+}
+
+function testSparseValuesKeepsCurrentRunProviderOccurrences(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+  const providerId = "sparse-values-reused-provider"
+  const stableCompletedId = "current-run-assistant:sparse-values-stable"
+  const completedOccurrenceId = buildMessageSameRoleDuplicateId(providerId, "assistant", 2)
+  const guidedOccurrenceId = buildMessageSameRoleDuplicateId(providerId, "assistant", 3)
+
+  convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "message_id_alias",
+        fromId: completedOccurrenceId,
+        toId: stableCompletedId,
+        role: "assistant",
+        currentRunCompleted: true,
+        providerSourceId: providerId,
+        providerOccurrence: 2
+      }
+    },
+    "thread-sparse-values",
+    "normal"
+  )
+  convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        messages: [{ id: "guided-user-sparse-values", content: "guide" }]
+      }
+    },
+    "thread-sparse-values",
+    "normal"
+  )
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: providerId, content: "guided" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-sparse-values",
+    "normal"
+  )
+
+  const valuesEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: stableCompletedId,
+              content: "completed",
+              additional_kwargs: {
+                cmb_internal_provider_source_id: providerId,
+                cmb_internal_provider_occurrence: 2
+              }
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: guidedOccurrenceId,
+              content: "guided",
+              additional_kwargs: {
+                cmb_internal_provider_source_id: providerId,
+                cmb_internal_provider_occurrence: 3
+              }
+            }
+          }
+        ]
+      }
+    },
+    "thread-sparse-values",
+    "normal"
+  )
+  const values = valuesEvents.find((event) => event.event === "values")?.data as
+    | { messages?: TransformedValuesMessage[] }
+    | undefined
+  const assistants = values?.messages?.filter((message) => message.type === "ai") ?? []
+  assertEqual(assistants.length, 2, "the sparse snapshot must keep both assistant replies")
+  assertEqual(assistants[0]?.id, stableCompletedId, "the completed reply must keep its stable id")
+  assertEqual(
+    assistants[0]?.provider_occurrence,
+    2,
+    "the completed reply must keep occurrence two"
+  )
+  assertEqual(assistants[1]?.id, guidedOccurrenceId, "the guided reply must keep occurrence three")
+  assertEqual(
+    assistants[1]?.provider_occurrence,
+    3,
+    "a sparse snapshot must not overwrite the guided provider occurrence"
+  )
+
+  const guidedOnlyEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: providerId, content: "rewritten guided" }
+          }
+        ]
+      }
+    },
+    "thread-sparse-values",
+    "normal"
+  )
+  const guidedOnlyValues = guidedOnlyEvents.find((event) => event.event === "values")?.data as
+    | { messages?: TransformedValuesMessage[] }
+    | undefined
+  const guidedOnly = guidedOnlyValues?.messages?.filter((message) => message.type === "ai") ?? []
+  assertEqual(guidedOnly.length, 1, "a compacted tail snapshot must keep its guided reply")
+  assertNotEqual(
+    guidedOnly[0]?.id,
+    stableCompletedId,
+    "a tuple-less rewritten tail must not alias into the completed slot"
+  )
+  assertEqual(
+    guidedOnly[0]?.provider_occurrence,
+    3,
+    "a tuple-less compacted tail must retain the guided provider occurrence"
+  )
+}
+
+function testCurrentRunCompletedAliasAcceptsStableSourceIdForKnownSlot(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+  const providerId = "stable-source-provider-id"
+  const previousStableId = "provider-final-stable-id"
+  const stableCompletedId = "current-run-assistant:stable-source"
+  const streamAssistant = (
+    id: string,
+    content: string,
+    providerOccurrence?: number
+  ): Array<{ event: string; data: unknown }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: {
+              id,
+              content,
+              ...(providerOccurrence
+                ? {
+                    additional_kwargs: {
+                      cmb_internal_provider_source_id: providerId,
+                      cmb_internal_provider_occurrence: providerOccurrence
+                    }
+                  }
+                : {})
+            }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-1",
+      "normal"
+    )
+
+  streamAssistant(previousStableId, "new")
+  convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "message_id_alias",
+        fromId: previousStableId,
+        toId: stableCompletedId,
+        role: "assistant",
+        currentRunCompleted: true,
+        providerSourceId: providerId,
+        providerOccurrence: 2
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        messages: [{ id: "guided-user-stable-source", content: "guide" }]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  const delayedEvents = streamAssistant(stableCompletedId, "new final", 2)
+  const delayedMessage = delayedEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string; content?: string }]
+    | undefined
+  assertEqual(
+    delayedMessage?.[0]?.content,
+    " final",
+    "a stable source alias should migrate existing assistant text state"
+  )
+
+  const guidedEvents = streamAssistant(providerId, "guided answer")
+  const guidedMessage = guidedEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string; content?: string }]
+    | undefined
+  assertEqual(
+    guidedMessage?.[0]?.id,
+    buildMessageSameRoleDuplicateId(providerId, "assistant", 3),
+    "a stable source alias should still reserve provider occurrence two"
+  )
+  assertEqual(
+    guidedMessage?.[0]?.content,
+    "guided answer",
+    "a stable source alias should keep the guided reply independent"
+  )
+}
+
+function testIdlessCurrentRunCompletionReservesStableSlot(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+  const stableCompletedId = "current-run-assistant:stable-no-provider"
+  const streamAssistant = (
+    id: string,
+    content: string
+  ): Array<{ event: string; data: unknown }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: { id, content }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-1",
+      "normal"
+    )
+
+  convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        completedAssistantId: stableCompletedId,
+        messages: [{ id: "guided-user-no-provider", content: "guide" }]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  const delayedEvents = streamAssistant(stableCompletedId, "first final")
+  const delayedMessage = delayedEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string; content?: string }]
+    | undefined
+  assertEqual(
+    delayedMessage?.[0]?.id,
+    stableCompletedId,
+    "an id-less completion should fill its reserved stable slot"
+  )
+
+  const guidedEvents = streamAssistant("guided-provider-id", "guided answer")
+  const guidedMessage = guidedEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string; content?: string }]
+    | undefined
+  assertEqual(
+    guidedMessage?.[0]?.id,
+    "guided-provider-id",
+    "a guided reply should not reuse the reserved id-less completion slot"
+  )
+  assertEqual(
+    guidedMessage?.[0]?.content,
+    "guided answer",
+    "a guided reply should not append to the id-less completed content"
+  )
+}
+
+function testIdlessCurrentRunCompletionRekeysPreBoundaryPartial(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+  const streamIdless = (content: string): Array<{ event: string; data: unknown }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: { content }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-pre-boundary",
+      "normal"
+    )
+
+  const partialEvents = streamIdless("first ")
+  const partialMessage = partialEvents.find((event) => event.event === "messages")
+    ?.data as [LiveStreamMessage] | undefined
+  const fallbackId = partialMessage?.[0]?.id
+  assertNotEqual(fallbackId, undefined, "the pre-boundary partial should have a fallback id")
+
+  const stableId = "current-run-assistant:pre-boundary-stable"
+  const boundaryEvents = convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        completedAssistantId: stableId,
+        completedAssistantContent: "first final",
+        completedAssistantProviderIdless: true,
+        messages: [{ id: "guided-user-pre-boundary", content: "guide" }]
+      }
+    },
+    "thread-pre-boundary",
+    "normal"
+  )
+  const aliasData = boundaryEvents.find(
+    (event) =>
+      event.event === "custom" &&
+      (event.data as { type?: string }).type === "message_id_alias"
+  )?.data as
+    | {
+        fromId?: string
+        toId?: string
+        providerSourceId?: string
+        providerOccurrence?: number
+        rendererOnlyAlias?: boolean
+      }
+    | undefined
+  assertEqual(
+    aliasData?.fromId,
+    fallbackId,
+    "the boundary must expose the already-emitted fallback id as an alias source"
+  )
+  assertEqual(
+    aliasData?.toId,
+    stableId,
+    "the boundary must expose the durable completed id as the alias target"
+  )
+  assertEqual(
+    aliasData?.rendererOnlyAlias,
+    true,
+    "the renderer fallback alias must bypass durable id migration"
+  )
+
+  let liveMessages: LiveStreamMessage[] = []
+  const appendMessage = (message: LiveStreamMessage): void => {
+    liveMessages = mergeLiveStreamMessages(
+      liveMessages,
+      normalizeAppendedLiveStreamMessageIds(liveMessages, [message])
+    )
+  }
+  if (partialMessage?.[0]) appendMessage(partialMessage[0])
+  for (const event of boundaryEvents) {
+    if (
+      event.event === "custom" &&
+      (event.data as { type?: string }).type === "message_id_alias"
+    ) {
+      const alias = event.data as {
+        fromId: string
+        toId: string
+        providerSourceId?: string
+        providerOccurrence?: number
+      }
+      liveMessages = replaceLiveStreamMessageId(
+        liveMessages,
+        alias.fromId,
+        alias.toId,
+        alias.providerSourceId,
+        alias.providerOccurrence
+      )
+      continue
+    }
+    if (event.event === "messages" && Array.isArray(event.data) && event.data[0]) {
+      appendMessage(event.data[0] as LiveStreamMessage)
+    }
+  }
+
+  const assistants = liveMessages.filter((message) => message.type === "ai")
+  assertEqual(
+    assistants.length,
+    1,
+    "the live merge layer must not retain both fallback partial and stable completion"
+  )
+  assertEqual(assistants[0]?.id, stableId, "the sole completed bubble should use the durable id")
+  assertEqual(
+    assistants[0]?.content,
+    "first final",
+    "the stable completed bubble should replace the pre-boundary partial"
+  )
+}
+
+function testFragmentedIdlessCurrentRunCompletionKeepsStableSlot(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+  const stableCompletedId = "current-run-assistant:fragmented-idless"
+  const streamIdlessAssistant = (
+    content: string
+  ): Array<{ event: string; data: unknown }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: { content }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-1",
+      "normal"
+    )
+
+  const injectionEvents = convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        completedAssistantId: stableCompletedId,
+        completedAssistantContent: "first final",
+        completedAssistantProviderIdless: true,
+        messages: [{ id: "guided-user-fragmented-idless", content: "guide" }]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  const syntheticCompleted = injectionEvents.find(
+    (event) =>
+      event.event === "messages" &&
+      (event.data as [{ id?: string }])?.[0]?.id === stableCompletedId
+  )?.data as [{ id?: string; content?: string }] | undefined
+  assertEqual(
+    syntheticCompleted?.[0]?.content,
+    "first final",
+    "an id-less completion must render durably before delayed transport chunks arrive"
+  )
+
+  const prefix = streamIdlessAssistant("first ").find(
+    (event) => event.event === "messages"
+  )?.data as [{ id?: string; content?: string }] | undefined
+  const suffix = streamIdlessAssistant("final").find(
+    (event) => event.event === "messages"
+  )?.data as [{ id?: string; content?: string }] | undefined
+  assertEqual(
+    prefix,
+    undefined,
+    "an ambiguous id-less prefix must stay buffered until its identity is known"
+  )
+  assertEqual(
+    suffix,
+    undefined,
+    "the final id-less delayed fragment must not duplicate the synthetic completed slot"
+  )
+
+  const guided = streamIdlessAssistant("guided answer").find(
+    (event) => event.event === "messages"
+  )?.data as [{ id?: string; content?: string }] | undefined
+  assertNotEqual(
+    guided?.[0]?.id,
+    stableCompletedId,
+    "the guided id-less reply must start a new logical slot"
+  )
+  assertEqual(
+    guided?.[0]?.content,
+    "guided answer",
+    "the guided id-less reply must not append to the completed reply"
+  )
+
+  const ambiguousTransport = new ElectronIPCTransport()
+  const convertAmbiguous = (
+    ambiguousTransport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(ambiguousTransport)
+  const ambiguousStableId = "current-run-assistant:ambiguous-idless"
+  convertAmbiguous(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        completedAssistantId: ambiguousStableId,
+        completedAssistantContent: "same target",
+        completedAssistantProviderIdless: true,
+        messages: [{ id: "guided-user-ambiguous-idless", content: "guide" }]
+      }
+    },
+    "thread-2",
+    "normal"
+  )
+  const ambiguousChunk = (content: string): Array<{ event: string; data: unknown }> =>
+    convertAmbiguous(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: { content }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-2",
+      "normal"
+    )
+  assertEqual(
+    ambiguousChunk("same ").find((event) => event.event === "messages"),
+    undefined,
+    "a guided reply sharing a completed prefix must not leak into the completed bubble"
+  )
+  const resolvedGuided = ambiguousChunk("different").find(
+    (event) => event.event === "messages"
+  )?.data as [{ id?: string; content?: string }] | undefined
+  assertNotEqual(
+    resolvedGuided?.[0]?.id,
+    ambiguousStableId,
+    "a mismatched buffered prefix must be released into a new guided slot"
+  )
+  assertEqual(
+    resolvedGuided?.[0]?.content,
+    "same different",
+    "a mismatched buffered prefix must be preserved in the guided reply"
+  )
+
+  const stableReplayTransport = new ElectronIPCTransport()
+  const convertStableReplay = (
+    stableReplayTransport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(stableReplayTransport)
+  const replayStableId = "current-run-assistant:idless-stable-replay"
+  convertStableReplay(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        completedAssistantId: replayStableId,
+        completedAssistantContent: "same target",
+        completedAssistantProviderIdless: true,
+        messages: [{ id: "guided-user-idless-stable-replay", content: "guide" }]
+      }
+    },
+    "thread-3",
+    "normal"
+  )
+  const stableReplayChunk = (
+    content: string,
+    id?: string
+  ): Array<{ event: string; data: unknown }> =>
+    convertStableReplay(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: { ...(id ? { id } : {}), content }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-3",
+      "normal"
+    )
+  assertEqual(
+    stableReplayChunk("same target", replayStableId).find(
+      (event) => event.event === "messages"
+    ),
+    undefined,
+    "a stable delayed replay must be deduplicated after the synthetic completion"
+  )
+  const guidedAfterStableReplay = stableReplayChunk("same").find(
+    (event) => event.event === "messages"
+  )?.data as [{ id?: string; content?: string }] | undefined
+  assertNotEqual(
+    guidedAfterStableReplay?.[0]?.id,
+    replayStableId,
+    "a stable delayed replay must clear the id-less pending route before guided output"
+  )
+  assertEqual(
+    guidedAfterStableReplay?.[0]?.content,
+    "same",
+    "a guided prefix after a stable delayed replay must remain visible"
+  )
+
+  const terminalTransport = new ElectronIPCTransport()
+  const convertTerminal = (
+    terminalTransport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(terminalTransport)
+  const terminalStableId = "current-run-assistant:idless-terminal"
+  convertTerminal(
+    {
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        completedAssistantId: terminalStableId,
+        completedAssistantContent: "same target",
+        completedAssistantProviderIdless: true,
+        messages: [{ id: "guided-user-idless-terminal", content: "guide" }]
+      }
+    },
+    "thread-4",
+    "normal"
+  )
+  assertEqual(
+    convertTerminal(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: { content: "same" }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-4",
+      "normal"
+    ).find((event) => event.event === "messages"),
+    undefined,
+    "an ambiguous terminal prefix must wait for the stream boundary"
+  )
+  const terminalGuided = convertTerminal(
+    { type: "done" },
+    "thread-4",
+    "normal"
+  ).find((event) => event.event === "messages")?.data as
+    | [{ id?: string; content?: string }]
+    | undefined
+  assertNotEqual(
+    terminalGuided?.[0]?.id,
+    terminalStableId,
+    "the stream boundary must flush a buffered guided prefix to a new slot"
+  )
+  assertEqual(
+    terminalGuided?.[0]?.content,
+    "same",
+    "the stream boundary must not drop a buffered guided prefix"
   )
 }
 
@@ -1865,6 +2963,10 @@ function testStreamRetryResetRestoresStableValuesAndClearsPartialDeltaState(): v
 
 const tests: Array<[string, () => void]> = [
   ["testExplicitIdWins", testExplicitIdWins],
+  [
+    "testSummarizationMessagesUseStructuralFiltering",
+    testSummarizationMessagesUseStructuralFiltering
+  ],
   ["testFallbackIdIsStableForSameValuesMessage", testFallbackIdIsStableForSameValuesMessage],
   ["testFallbackIdIgnoresGrowingContent", testFallbackIdIgnoresGrowingContent],
   [
@@ -1891,6 +2993,34 @@ const tests: Array<[string, () => void]> = [
   [
     "testNormalValuesSnapshotsCollapseRepeatedProviderIdChanges",
     testNormalValuesSnapshotsCollapseRepeatedProviderIdChanges
+  ],
+  [
+    "testCurrentRunCompletedAliasSealsProviderOccurrenceAcrossDelayedChunk",
+    testCurrentRunCompletedAliasSealsProviderOccurrenceAcrossDelayedChunk
+  ],
+  [
+    "testCurrentRunCompletedAliasReservesSlotBeforeFirstAssistantChunk",
+    testCurrentRunCompletedAliasReservesSlotBeforeFirstAssistantChunk
+  ],
+  [
+    "testSparseValuesKeepsCurrentRunProviderOccurrences",
+    testSparseValuesKeepsCurrentRunProviderOccurrences
+  ],
+  [
+    "testCurrentRunCompletedAliasAcceptsStableSourceIdForKnownSlot",
+    testCurrentRunCompletedAliasAcceptsStableSourceIdForKnownSlot
+  ],
+  [
+    "testIdlessCurrentRunCompletionReservesStableSlot",
+    testIdlessCurrentRunCompletionReservesStableSlot
+  ],
+  [
+    "testIdlessCurrentRunCompletionRekeysPreBoundaryPartial",
+    testIdlessCurrentRunCompletionRekeysPreBoundaryPartial
+  ],
+  [
+    "testFragmentedIdlessCurrentRunCompletionKeepsStableSlot",
+    testFragmentedIdlessCurrentRunCompletionKeepsStableSlot
   ],
   [
     "testNormalValuesSnapshotAliasesFullyRewrittenAnswerByLogicalSlot",

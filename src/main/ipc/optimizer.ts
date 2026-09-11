@@ -28,6 +28,7 @@ import {
   readRecentTraces,
   readThreadTraces,
   readTraceById,
+  readTracesByIds,
   deleteTraces
 } from "../agent/trace/collector"
 import { buildTraceTree } from "../agent/trace/tree-builder"
@@ -48,6 +49,8 @@ import {
 } from "../storage"
 import { getDefaultModelConfig } from "../models/registry"
 import { trackEvent } from "../services/event-reporter"
+import { bumpHookCatalogGlobalRevision } from "../hook-catalog/revision"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 
 function notifyRenderer(channel: string, payload?: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -59,11 +62,26 @@ function notifyRenderer(channel: string, payload?: unknown): void {
  * Sum token usage across all model calls in a trace.
  * Returns zeros when modelCalls is absent or empty.
  */
-function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
+/**
+ * Prefer the totals the collector counted as the turn ran. Summing modelCalls
+ * understates any turn that went past TRACE_MAX_MODEL_CALLS, and the array is
+ * still the only source for traces recorded before those fields existed.
+ */
+function summarizeTraceTokenUsage(
+  trace: Pick<AgentTrace, "modelCalls" | "totalInputTokens" | "totalOutputTokens" | "totalTokens">
+): {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
 } {
+  if (typeof trace.totalTokens === "number" || typeof trace.totalInputTokens === "number") {
+    return {
+      totalInputTokens: trace.totalInputTokens ?? 0,
+      totalOutputTokens: trace.totalOutputTokens ?? 0,
+      totalTokens: trace.totalTokens ?? 0
+    }
+  }
+  const modelCalls = trace.modelCalls
   if (!Array.isArray(modelCalls) || modelCalls.length === 0) {
     return { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
   }
@@ -82,6 +100,34 @@ function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
   )
 }
 
+function traceObservabilityFields(trace: AgentTrace): Partial<AgentTrace> {
+  return {
+    observabilitySchemaVersion: trace.observabilitySchemaVersion,
+    traceKind: trace.traceKind,
+    executionMode: trace.executionMode,
+    rootTraceId: trace.rootTraceId,
+    rootThreadId: trace.rootThreadId,
+    parentTraceId: trace.parentTraceId,
+    parentThreadId: trace.parentThreadId,
+    parentSpanId: trace.parentSpanId,
+    linkType: trace.linkType,
+    subagentKind: trace.subagentKind,
+    subagentRunId: trace.subagentRunId,
+    subagentThreadId: trace.subagentThreadId,
+    handoffAction: trace.handoffAction,
+    handoffSourceAgent: trace.handoffSourceAgent,
+    handoffTargetAgent: trace.handoffTargetAgent,
+    coordinatorWorkerId: trace.coordinatorWorkerId,
+    coordinatorWorkerTurn: trace.coordinatorWorkerTurn,
+    coordinatorWorkerRole: trace.coordinatorWorkerRole,
+    coordinatorWorkerWorkload: trace.coordinatorWorkerWorkload,
+    workflowRunId: trace.workflowRunId,
+    workflowAgentIndex: trace.workflowAgentIndex,
+    workflowPhase: trace.workflowPhase,
+    workflowAgentLabel: trace.workflowAgentLabel
+  }
+}
+
 function getDefaultModel(): ChatOpenAI | null {
   const config = getDefaultModelConfig()
   if (!config || !config.apiKey) return null
@@ -90,10 +136,9 @@ function getDefaultModel(): ChatOpenAI | null {
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    topP: config.topP,
+    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
-      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      ...topKModelKwargs(config.model, config.topK)
     },
     streaming: true
   })
@@ -141,6 +186,7 @@ function applyCandidate(
     }
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, "SKILL.md"), ensureEvolvedSkillMarker(content), "utf-8")
+    bumpHookCatalogGlobalRevision()
     if (action === "create") clearDisabledSkillsForSkillDir(skillDir)
     invalidateEnabledSkillsCache()
     notifyRenderer("skills:changed")
@@ -208,9 +254,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
       if (runMode === "selected") {
         const selectedIds = [...new Set(opts?.traceIds ?? [])]
-        const selectedTraces = selectedIds
-          .map((traceId) => readTraceById(traceId))
-          .filter((trace): trace is AgentTrace => !!trace)
+        const selectedTraces = await readTracesByIds(selectedIds)
 
         if (selectedTraces.length === 0) {
           notifyRenderer("optimizer:streamEnd", {
@@ -423,6 +467,29 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
       Array<{
         traceId: string
         threadId: string
+        observabilitySchemaVersion?: number
+        traceKind?: string
+        executionMode?: string
+        rootTraceId?: string
+        rootThreadId?: string
+        parentTraceId?: string
+        parentThreadId?: string
+        parentSpanId?: string
+        linkType?: string
+        subagentKind?: string
+        subagentRunId?: string
+        subagentThreadId?: string
+        handoffAction?: string
+        handoffSourceAgent?: string
+        handoffTargetAgent?: string
+        coordinatorWorkerId?: string
+        coordinatorWorkerTurn?: number
+        coordinatorWorkerRole?: string
+        coordinatorWorkerWorkload?: string
+        workflowRunId?: string
+        workflowAgentIndex?: number
+        workflowPhase?: string
+        workflowAgentLabel?: string
         startedAt: string
         durationMs: number
         userMessage: string
@@ -436,17 +503,16 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         triggerSource: string
       }>
     > => {
-      const traces = opts?.threadId
+      const traces = await (opts?.threadId
         ? readThreadTraces(opts.threadId)
-        : readRecentTraces(opts?.limit ?? 20)
+        : readRecentTraces(opts?.limit ?? 20))
 
       return traces.map((trace) => {
-        const { totalInputTokens, totalOutputTokens, totalTokens } = summarizeTraceTokenUsage(
-          trace.modelCalls
-        )
+        const { totalInputTokens, totalOutputTokens, totalTokens } = summarizeTraceTokenUsage(trace)
         return {
           traceId: trace.traceId,
           threadId: trace.threadId,
+          ...traceObservabilityFields(trace),
           startedAt: trace.startedAt,
           durationMs: trace.durationMs,
           userMessage: trace.userMessage,
@@ -466,7 +532,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "optimizer:traceDetail",
     async (_event, { traceId }: { traceId: string }): Promise<AgentTrace | null> => {
-      const found = readTraceById(traceId)
+      const found = await readTraceById(traceId)
       if (!found) return null
       return {
         ...found,
@@ -481,7 +547,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
       _event,
       { traceIds }: { traceIds: string[] }
     ): Promise<{ deletedIds: string[]; failed: Array<{ traceId: string; error: string }> }> => {
-      const result = deleteTraces(traceIds ?? [])
+      const result = await deleteTraces(traceIds ?? [])
       if (result.deletedIds.length > 0) {
         notifyRenderer("optimizer:tracesDeleted", { deletedIds: result.deletedIds })
       }

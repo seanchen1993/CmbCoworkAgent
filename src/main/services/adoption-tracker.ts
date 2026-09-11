@@ -8,13 +8,13 @@
  * was removed — its I/O fanout outweighed its signal value.
  *
  * ── Design guarantees ────────────────────────────────────
- *   1. Side-effect only. Every public entry point is non-blocking and wraps
- *      its body in try/catch. A failure in the tracker must NEVER surface
- *      into the main tool-invocation / git-commit / watcher flows.
+ *   1. Side-effect only for generation capture. Commit measurement returns an
+ *      explicit durable-success result so hook callers can defer processed
+ *      markers without changing the already-completed git commit outcome.
  *   2. Performance. Line-level hashing uses a lightweight FNV-1a 32-bit
  *      function; no new deps; no per-line crypto hashing.
- *   3. Local first, upload best-effort. JSONL shards on disk are the
- *      durable log; uploads reuse `trackEvent()` which is fire-and-forget.
+ *   3. Local first. `code_gen`, `code_adopt`, and `code_test_gen` envelopes use
+ *      a SQLite transactional outbox; retries reuse the exact top-level eventId.
  *   4. Only code files are tracked (whitelist + build-output blacklist).
  *
  * ── Storage layout ───────────────────────────────────────
@@ -22,7 +22,9 @@
  *     current.jsonl                ← append-only, rotated on size/age
  *     YYYY-MM-DDTHH-MM-SS.jsonl    ← sealed shards
  *   ~/.cmbcoworkagent/adoption-index.sqlite
- *     └─ gen_events                ← lookup index for commit-time L3
+ *     ├─ gen_events                ← lookup index for commit-time L3
+ *     ├─ event_outbox              ← immutable durable telemetry envelopes
+ *     └─ commit_jobs               ← restart-safe commit measurement queue
  *
  *   Retention: 14 days / 100 MB hard cap.
  */
@@ -30,32 +32,83 @@
 import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises"
 import { existsSync, mkdirSync, statSync } from "fs"
 import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
-import { randomUUID } from "crypto"
-import { execFile, execFileSync } from "child_process"
+import { createHash, randomUUID } from "crypto"
+import { execFile } from "child_process"
 import { promisify } from "util"
+import { gzipSync, gunzipSync } from "zlib"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import { getOpenworkDir } from "../storage"
+import {
+  TRACE_OBSERVABILITY_SCHEMA_VERSION,
+  type TraceObservabilityContext
+} from "../agent/trace/types"
 import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
 import { normalizeSkillSourceRefs } from "../utils/skill-source"
 import { extractShellFileOps } from "../agent/exec-policy"
-import { trackEvent } from "./event-reporter"
+import type {
+  LocalAdoptionLine,
+  LocalGeneratedLineDetail,
+  LocalGeneratedLineStatus,
+  LocalGenAdoptionLines
+} from "../../shared/adoption-trace-types"
 import {
+  buildEvent,
+  getEventReporter,
+  type CoworkEvent,
+  type EventReportResult,
+  type IEventReporter
+} from "./event-reporter"
+import { getGitRootForPath } from "./git-repository-discovery"
+import {
+  attributeChangeKind,
+  normalizeChangeKind,
+  normalizeNewRatio
+} from "./change-kind-classifier"
+import { getTestCodeMatchRule, type TestCodeMatchRule } from "./adoption-file-policy"
+import {
+  cleanupAdoptionDeliveryRecords,
   closeAdoptionIndex,
+  commitAdoptionMeasurements,
+  deleteAdoptLineDetailsOlderThan,
+  enqueueCommitJob,
+  enqueueEventOutbox,
+  enqueueEventOutboxBatch,
   findPendingGensForFile,
+  getAdoptLineDetails,
   flushAdoptionIndex,
+  getCommitJob,
   getGenRowByEventId,
   initializeAdoptionIndex,
-  insertGenEvent,
+  insertGenEventWithOutbox,
+  listDueCommitJobs,
+  listDueOutboxEvents,
   listPendingGenPaths,
-  markMeasured,
+  markCommitJobProcessing,
+  markCommitJobRetry,
+  markOutboxDeferred,
+  markOutboxDelivered,
+  markOutboxFailed,
+  markOutboxSending,
+  resetInterruptedCommitJobs,
+  resetInterruptedOutboxEvents,
+  trimAdoptLineDetails,
+  trimGeneratedSourceTextToByteCap,
   updateGenFilePath,
   deleteOlderThan,
   deleteMeasuredOlderThan,
   trimToRowCap,
   vacuumAdoptionIndex,
+  type AdoptLineDetailsInput,
+  type AdoptionMeasurementWrite,
+  type CommitJobStatus,
+  type CommitJobRow,
+  type EventOutboxInput,
+  type EventOutboxRow,
   type GenIndexRow
 } from "./adoption-index"
+
+const execFileAsync = promisify(execFile)
 
 // ─────────────────────────────────────────────────────────
 // Constants
@@ -79,8 +132,43 @@ const SHARD_SIZE_LIMIT_BYTES = 10 * 1024 * 1024 // 10 MB per shard
 const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
 const DISK_HARD_CAP_BYTES = 100 * 1024 * 1024 // 100 MB
 const MAX_LINES_FOR_MEASURE = 20000 // skip giant files (applied symmetrically at gen + measure)
-const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
+// One live entry per active TraceCollector. Multi-agent runs (coordinator
+// workers + workflow subagents) can keep dozens alive at once, and eviction is
+// insertion-ordered — the root thread goes first — so leave ample headroom.
+// Entries are ~KB-sized; 256 stays well under 1 MB.
+const MAX_CONTEXT_ENTRIES = 256 // bound in-memory context size
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
+const LOCAL_SOURCE_TEXT_MAX_BYTES = 2 * 1024 * 1024 // per-gen local-only source payload cap
+const LOCAL_PENDING_SOURCE_MAX_BYTES = 50 * 1024 * 1024
+const LOCAL_ADOPT_DETAILS_MAX_BYTES = 50 * 1024 * 1024
+const LOCAL_ADOPT_DETAILS_MAX_ROWS = 10000
+const OUTBOX_POLL_INTERVAL_MS = 15 * 1000
+const OUTBOX_BATCH_SIZE = 25
+// Normal code generation can be much more frequent than commit/test events.
+// Give the existing 500ms sql.js save debounce time to coalesce rapid edits
+// before draining; the drain itself still verifies the snapshot is durable.
+const CODE_GEN_OUTBOX_DRAIN_DELAY_MS = 750
+const OUTBOX_MAX_ATTEMPTS = 10
+const OUTBOX_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000
+const OUTBOX_SENDING_STALE_MS = 2 * 60 * 1000
+const OUTBOX_REPORT_DEADLINE_MS = 12 * 1000
+const COMMIT_JOB_POLL_INTERVAL_MS = 30 * 1000
+const COMMIT_JOB_BATCH_SIZE = 5
+const DELIVERY_RECORD_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
+const COMMIT_JOB_RETRY_DELAYS_MS = [5_000, 30_000, 2 * 60_000, 10 * 60_000, 60 * 60_000] as const
+// Ten upload attempts finish within one day. The event remains locally for the
+// 14-day audit/cleanup window, but stale telemetry is not uploaded after day one.
+const OUTBOX_RETRY_DELAYS_MS = [
+  5_000,
+  30_000,
+  2 * 60_000,
+  10 * 60_000,
+  30 * 60_000,
+  60 * 60_000,
+  3 * 60 * 60_000,
+  6 * 60 * 60_000,
+  12 * 60 * 60_000
+] as const
 
 // sqlite index safeguards — keep the on-disk file bounded even under abuse
 // Already-measured rows are kept for the full attribution window (14 days) so the
@@ -168,11 +256,16 @@ const EXCLUDED_FILENAME_PATTERNS = [
   /\.map$/i
 ]
 
+// Internal Dynamic Workflow source is an orchestration artifact, not product
+// code. The app explicitly keeps this tree gitignored, so counting edits to a
+// persisted workflow script would permanently inflate uncommitted code.
+const INTERNAL_WORKFLOW_SCRIPT_PATTERN = /(?:^|\/)\.cmbdevclaw\/workflows\/.+\.workflow\.js$/i
+
 // ─────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────
 
-export interface AdoptionContext {
+export interface AdoptionContext extends Partial<TraceObservabilityContext> {
   traceId?: string
   modelId?: string
   modelName?: string
@@ -219,24 +312,29 @@ export interface RecordGenInput {
   /** Optional: workspace root — used to turn absolute path into relative. */
   workspacePath?: string
   /**
-   * Optional: non-blank lines removed by this tool call. When provided, the
-   * tracker uses this directly. write_file passes 0 here (it can only create
-   * new files).
+   * Optional: non-blank old-only lines removed or replaced by this tool call.
+   * When provided, the tracker uses this directly. write_file passes 0 here
+   * because it can only create new files.
    */
   deletedLineCount?: number
   /**
    * Optional: the local `old_string` fragment being replaced by edit_file.
-   * Together with `newString` and `occurrences` the tracker derives a cheap
-   * net-deletion count in the microtask — no full-file scan, no references
-   * to editor buffers retained. Slight over/undercount at oldString boundary
-   * lines is accepted: deletedLineCount is an auxiliary metric; the primary
-   * adoption signal is `generatedContent` (= newString) retention.
+   * Together with `generatedContent` and `occurrences`, the tracker derives
+   * matching new-only and old-only line multisets without reading the full file
+   * or retaining editor buffers.
    */
   oldString?: string
-  /** Optional: the local `new_string` fragment. See `oldString`. */
-  newString?: string
   /** Optional: replacement count returned by the edit tool. Defaults to 1. */
   occurrences?: number
+  /**
+   * Point-in-time workflow stage captured immediately before the file mutation.
+   * Presence (including explicit nulls) overrides the turn-start context so a
+   * queued recordGen microtask cannot inherit a stale stage.
+   */
+  harnessStage?: {
+    nodeName: string | null
+    nodeStatus: string | null
+  }
 }
 
 interface JsonlGenEntry {
@@ -256,6 +354,7 @@ interface JsonlGenEntry {
 export interface AdoptionLineBaseline {
   generatedLineHashes: Uint32Array
   supersededLineHashes: Uint32Array
+  generatedLineTexts: string[]
   rawGeneratedLineCount: number
 }
 
@@ -271,6 +370,9 @@ export interface AdoptionLineMeasureResult {
 
 let initialized = false
 let sweepTimer: NodeJS.Timeout | null = null
+let outboxTimer: NodeJS.Timeout | null = null
+let codeGenOutboxDrainTimer: NodeJS.Timeout | null = null
+let commitJobTimer: NodeJS.Timeout | null = null
 let sweepCount = 0
 let currentShardPath: string | null = null
 let currentShardSize = 0
@@ -283,11 +385,73 @@ let currentShardStartMs = 0
  */
 let appendChain: Promise<unknown> = Promise.resolve()
 
+/** Accepted recordGen calls that have not finished their asynchronous git/JSONL/index work. */
+const inFlightRecordGenTasks = new Set<Promise<void>>()
+
 /** In-flight measurement dedup keyed by absolute file path. */
 const inFlightFileMeasurements = new Set<string>()
 
+let outboxDrainPromise: Promise<void> | null = null
+let outboxLifecycleGeneration = 0
+let outboxLifecycleController = new AbortController()
+let commitJobDrainPromise: Promise<void> | null = null
+const inFlightCommitJobs = new Map<string, Promise<boolean>>()
+
 /** threadId → AdoptionContext. Evicted oldest-first at MAX_CONTEXT_ENTRIES. */
 const threadContexts = new Map<string, AdoptionContext>()
+
+type GenIndexObservabilityColumns = Pick<
+  GenIndexRow,
+  | "observability_schema_version"
+  | "trace_kind"
+  | "execution_mode"
+  | "root_trace_id"
+  | "root_thread_id"
+  | "parent_trace_id"
+  | "parent_thread_id"
+  | "parent_span_id"
+  | "link_type"
+  | "subagent_kind"
+  | "subagent_run_id"
+  | "subagent_thread_id"
+  | "handoff_action"
+  | "handoff_source_agent"
+  | "handoff_target_agent"
+  | "coordinator_worker_id"
+  | "coordinator_worker_turn"
+  | "coordinator_worker_role"
+  | "coordinator_worker_workload"
+  | "workflow_run_id"
+  | "workflow_agent_index"
+  | "workflow_phase"
+  | "workflow_agent_label"
+>
+
+type AdoptionObservabilityEventProperties = {
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string | null
+  rootThreadId?: string | null
+  parentTraceId?: string | null
+  parentThreadId?: string | null
+  parentSpanId?: string | null
+  linkType?: string | null
+  subagentKind?: string | null
+  subagentRunId?: string | null
+  subagentThreadId?: string | null
+  handoffAction?: string | null
+  handoffSourceAgent?: string | null
+  handoffTargetAgent?: string | null
+  coordinatorWorkerId?: string | null
+  coordinatorWorkerTurn?: number | null
+  coordinatorWorkerRole?: string | null
+  coordinatorWorkerWorkload?: string | null
+  workflowRunId?: string | null
+  workflowAgentIndex?: number | null
+  workflowPhase?: string | null
+  workflowAgentLabel?: string | null
+}
 
 // ─────────────────────────────────────────────────────────
 // Paths
@@ -318,6 +482,7 @@ export function isCodeFile(filePath: string): boolean {
   if (!CODE_EXTENSIONS.has(ext)) return false
 
   const normalized = filePath.replace(/\\/g, "/").toLowerCase()
+  if (INTERNAL_WORKFLOW_SCRIPT_PATTERN.test(normalized)) return false
   // Segment-level match so root-relative paths like "node_modules/foo/x.ts" are
   // also excluded (the earlier substring check only caught paths with a leading "/").
   const segments = normalized.split("/").filter(Boolean)
@@ -351,34 +516,39 @@ export function isCodeFile(filePath: string): boolean {
 
 const GIT_WORKTREE_CACHE_MAX = 256
 const gitWorkTreeCache = new Map<string, boolean>()
+const gitWorkTreeRequests = new Map<string, Promise<boolean>>()
 
-function isInsideGitWorkTree(absPath: string): boolean {
-  const dir = dirname(absPath)
-  const cached = gitWorkTreeCache.get(dir)
-  if (cached !== undefined) return cached
-
-  let inside = false
-  try {
-    const out = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd: dir,
-      encoding: "utf-8",
-      timeout: 5000,
-      maxBuffer: 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"]
-    })
-    inside = out.trim() === "true"
-  } catch {
-    // Not a repo / git error / git missing — treat as outside a work tree.
-    inside = false
-  }
-
-  // Bounded cache (Map preserves insertion order → evict oldest first).
+function rememberGitWorkTreeResult(dir: string, inside: boolean): boolean {
+  // Bounded cache (Map preserves insertion order -> evict oldest first).
   if (!gitWorkTreeCache.has(dir) && gitWorkTreeCache.size >= GIT_WORKTREE_CACHE_MAX) {
     const oldest = gitWorkTreeCache.keys().next().value
     if (oldest !== undefined) gitWorkTreeCache.delete(oldest)
   }
   gitWorkTreeCache.set(dir, inside)
   return inside
+}
+
+async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
+  const dir = dirname(absPath)
+  const cached = gitWorkTreeCache.get(dir)
+  if (cached !== undefined) return cached
+  const inFlight = gitWorkTreeRequests.get(dir)
+  if (inFlight) return inFlight
+
+  const request = execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
+    cwd: dir,
+    encoding: "utf-8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+    windowsHide: true
+  })
+    .then(({ stdout }) => rememberGitWorkTreeResult(dir, stdout.trim() === "true"))
+    .catch(() => rememberGitWorkTreeResult(dir, false))
+    .finally(() => {
+      if (gitWorkTreeRequests.get(dir) === request) gitWorkTreeRequests.delete(dir)
+    })
+  gitWorkTreeRequests.set(dir, request)
+  return request
 }
 
 // ─────────────────────────────────────────────────────────
@@ -398,23 +568,6 @@ function normalizeLine(line: string): string {
   return line.trim().replace(/\s+/g, " ")
 }
 
-/**
- * Count non-blank, whitespace-normalised lines in `content`. Mirrors the
- * normalisation used by `computeLineHashes` so the count matches the number of
- * hashes we would actually compare. Exported so write/edit tool call sites can
- * compute `deletedLineCount` against the same definition the tracker uses for
- * added lines.
- */
-export function countNonBlankLines(content: string): number {
-  if (!content) return 0
-  const lines = content.split(/\r?\n/)
-  let count = 0
-  for (const raw of lines) {
-    if (normalizeLine(raw).length > 0) count++
-  }
-  return count
-}
-
 function computeLineHashes(content: string): Uint32Array {
   const lines = content.split(/\r?\n/)
   const hashes: number[] = []
@@ -426,6 +579,22 @@ function computeLineHashes(content: string): Uint32Array {
   return new Uint32Array(hashes)
 }
 
+interface LineEntry {
+  hash: number
+  text: string
+}
+
+function computeLineEntries(content: string): LineEntry[] {
+  const lines = content.split(/\r?\n/)
+  const entries: LineEntry[] = []
+  for (const raw of lines) {
+    const norm = normalizeLine(raw)
+    if (norm.length === 0) continue
+    entries.push({ hash: fnv1a32(norm), text: raw })
+  }
+  return entries
+}
+
 function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occurrences">): number {
   if (input.tool !== "edit_file") return 1
   if (typeof input.occurrences !== "number" || !Number.isFinite(input.occurrences)) return 1
@@ -435,57 +604,118 @@ function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occu
   return occurrences > 0 ? occurrences : 1
 }
 
-function repeatLineHashes(hashes: Uint32Array, occurrences: number): Uint32Array {
-  if (occurrences <= 1) return hashes
-  const repeated = new Uint32Array(hashes.length * occurrences)
-  for (let i = 0; i < occurrences; i++) {
-    repeated.set(hashes, i * hashes.length)
+export interface NetLineChangeCounts {
+  generatedLineCount: number
+  deletedLineCount: number
+}
+
+/**
+ * Count new-only and old-only non-blank lines as multisets, without expanding
+ * replaceAll occurrences into a potentially huge baseline. An old-only line is
+ * a deletion or replacement, so equal-size rewrites remain visible instead of
+ * looking like pure additions.
+ */
+export function countNetLineChanges(
+  input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
+): NetLineChangeCounts {
+  const generatedCounts = buildLineHashCounts(computeLineHashes(input.generatedContent))
+  const generationOccurrences = getGenerationOccurrenceCount(input)
+
+  if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
+    let generatedLineCount = 0
+    for (const count of generatedCounts.values()) {
+      generatedLineCount += count * generationOccurrences
+    }
+    return { generatedLineCount, deletedLineCount: 0 }
   }
+
+  const oldCounts = buildLineHashCounts(computeLineHashes(input.oldString))
+  const deletionOccurrences = getDeletionOccurrenceCount(input)
+  let generatedLineCount = 0
+  let deletedLineCount = 0
+  for (const [hash, count] of generatedCounts) {
+    const generated = count * generationOccurrences
+    const old = (oldCounts.get(hash) ?? 0) * deletionOccurrences
+    generatedLineCount += Math.max(0, generated - old)
+    deletedLineCount += Math.max(0, old - generated)
+  }
+  for (const [hash, count] of oldCounts) {
+    if (generatedCounts.has(hash)) continue
+    deletedLineCount += count * deletionOccurrences
+  }
+  return { generatedLineCount, deletedLineCount }
+}
+
+/** Backward-compatible projection used by existing oversize-count callers/tests. */
+export function countNetGeneratedLines(
+  input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
+): number {
+  return countNetLineChanges(input).generatedLineCount
+}
+
+function repeatLineEntries(entries: LineEntry[], occurrences: number): LineEntry[] {
+  if (occurrences <= 1) return entries
+  const repeated: LineEntry[] = []
+  for (let i = 0; i < occurrences; i++) repeated.push(...entries)
   return repeated
 }
 
-function subtractLineHashMultiset(source: Uint32Array, subtract: Uint32Array): Uint32Array {
+function lineEntriesToHashes(entries: LineEntry[]): Uint32Array {
+  return new Uint32Array(entries.map((entry) => entry.hash))
+}
+
+function lineEntriesToTexts(entries: LineEntry[]): string[] {
+  return entries.map((entry) => entry.text)
+}
+
+function subtractLineEntryMultiset(source: LineEntry[], subtract: LineEntry[]): LineEntry[] {
   if (source.length === 0) return source
   if (subtract.length === 0) return source
 
-  const subtractCounts = buildLineHashCounts(subtract)
-  const kept: number[] = []
-  for (let i = 0; i < source.length; i++) {
-    const h = source[i]
-    const count = subtractCounts.get(h)
+  const subtractCounts = new Map<number, number>()
+  for (const entry of subtract) {
+    subtractCounts.set(entry.hash, (subtractCounts.get(entry.hash) ?? 0) + 1)
+  }
+  const kept: LineEntry[] = []
+  for (const entry of source) {
+    const count = subtractCounts.get(entry.hash)
     if (count && count > 0) {
-      subtractCounts.set(h, count - 1)
+      subtractCounts.set(entry.hash, count - 1)
     } else {
-      kept.push(h)
+      kept.push(entry)
     }
   }
-  return new Uint32Array(kept)
+  return kept
 }
 
 export function buildAdoptionLineBaseline(
   input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
 ): AdoptionLineBaseline {
   const generationOccurrences = getGenerationOccurrenceCount(input)
-  const rawGeneratedLineHashes = repeatLineHashes(
-    computeLineHashes(input.generatedContent),
+  const rawGeneratedLineEntries = repeatLineEntries(
+    computeLineEntries(input.generatedContent),
     generationOccurrences
   )
   if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
     return {
-      generatedLineHashes: rawGeneratedLineHashes,
+      generatedLineHashes: lineEntriesToHashes(rawGeneratedLineEntries),
       supersededLineHashes: new Uint32Array(0),
-      rawGeneratedLineCount: rawGeneratedLineHashes.length
+      generatedLineTexts: lineEntriesToTexts(rawGeneratedLineEntries),
+      rawGeneratedLineCount: rawGeneratedLineEntries.length
     }
   }
 
-  const oldLineHashes = repeatLineHashes(
-    computeLineHashes(input.oldString),
+  const oldLineEntries = repeatLineEntries(
+    computeLineEntries(input.oldString),
     getDeletionOccurrenceCount(input)
   )
+  const generatedLineEntries = subtractLineEntryMultiset(rawGeneratedLineEntries, oldLineEntries)
+  const supersededLineEntries = subtractLineEntryMultiset(oldLineEntries, rawGeneratedLineEntries)
   return {
-    generatedLineHashes: subtractLineHashMultiset(rawGeneratedLineHashes, oldLineHashes),
-    supersededLineHashes: subtractLineHashMultiset(oldLineHashes, rawGeneratedLineHashes),
-    rawGeneratedLineCount: rawGeneratedLineHashes.length
+    generatedLineHashes: lineEntriesToHashes(generatedLineEntries),
+    supersededLineHashes: lineEntriesToHashes(supersededLineEntries),
+    generatedLineTexts: lineEntriesToTexts(generatedLineEntries),
+    rawGeneratedLineCount: rawGeneratedLineEntries.length
   }
 }
 
@@ -497,6 +727,43 @@ function unpackLineHashes(bytes: Uint8Array): Uint32Array {
   const copy = new Uint8Array(bytes.length)
   copy.set(bytes)
   return new Uint32Array(copy.buffer)
+}
+
+function shouldStoreLocalSourceText(): boolean {
+  return process.env.CMB_ADOPTION_STORE_CODE !== "false"
+}
+
+function packLocalJson(value: unknown): Uint8Array | null {
+  if (!shouldStoreLocalSourceText()) return null
+  try {
+    const json = JSON.stringify(value)
+    if (Buffer.byteLength(json, "utf-8") > LOCAL_SOURCE_TEXT_MAX_BYTES) return null
+    return gzipSync(Buffer.from(json, "utf-8"))
+  } catch {
+    return null
+  }
+}
+
+function unpackLocalJson<T>(bytes: Uint8Array | null | undefined): T | null {
+  if (!bytes) return null
+  try {
+    const json = gunzipSync(Buffer.from(bytes)).toString("utf-8")
+    return JSON.parse(json) as T
+  } catch {
+    return null
+  }
+}
+
+function packLocalLineTexts(lines: string[]): Uint8Array | null {
+  if (lines.length === 0) return null
+  return packLocalJson(lines)
+}
+
+function unpackLocalLineTexts(bytes: Uint8Array | null | undefined): string[] | null {
+  const value = unpackLocalJson<unknown>(bytes)
+  if (!Array.isArray(value)) return null
+  const lines = value.filter((line): line is string => typeof line === "string")
+  return lines.length === value.length ? lines : null
 }
 
 function contentFingerprint(content: string): string {
@@ -545,18 +812,11 @@ function getDeletionOccurrenceCount(input: Pick<RecordGenInput, "occurrences">):
   return Math.max(0, Math.floor(input.occurrences))
 }
 
-function deriveDeletedLineCount(input: RecordGenInput): number {
-  if (typeof input.deletedLineCount === "number") {
-    return Math.max(0, input.deletedLineCount)
+function resolveDeletedLineCount(input: RecordGenInput, detectedLineCount: number): number {
+  if (typeof input.deletedLineCount === "number" && Number.isFinite(input.deletedLineCount)) {
+    return Math.max(0, Math.floor(input.deletedLineCount))
   }
-  if (typeof input.oldString !== "string") return 0
-
-  const occurrences = getDeletionOccurrenceCount(input)
-  if (occurrences === 0) return 0
-
-  const oldNonBlank = countNonBlankLines(input.oldString)
-  const newNonBlank = typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
-  return Math.max(0, oldNonBlank - newNonBlank) * occurrences
+  return Math.max(0, Math.floor(detectedLineCount))
 }
 
 function normalizeUsedSkills(skills: unknown): string[] {
@@ -589,9 +849,169 @@ function parseStoredSkillSource(value: string | null, usedSkills: string[]): str
   }
 }
 
+function toOutboxEvent(event: CoworkEvent, createdAt = Date.now()): EventOutboxInput {
+  return {
+    eventId: event.eventId,
+    eventName: event.eventName,
+    payloadJson: JSON.stringify(event),
+    createdAt
+  }
+}
+
+function retryDelayMs(
+  attemptsBeforeCurrentAttempt: number,
+  retryAfterMs?: number,
+  delays: readonly number[] = COMMIT_JOB_RETRY_DELAYS_MS
+): number {
+  const fallback = delays[Math.min(attemptsBeforeCurrentAttempt, delays.length - 1)]
+  const safeRetryAfterMs =
+    typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs)
+      ? Math.min(OUTBOX_RETRY_WINDOW_MS, Math.max(0, Math.ceil(retryAfterMs)))
+      : 0
+  return Math.max(fallback, safeRetryAfterMs)
+}
+
+function nextOutboxAttemptAt(row: EventOutboxRow, delayMs: number, now = Date.now()): number {
+  const retryDeadline = row.created_at + OUTBOX_RETRY_WINDOW_MS
+  const safeDelayMs = Number.isFinite(delayMs)
+    ? Math.min(OUTBOX_RETRY_WINDOW_MS, Math.max(0, Math.ceil(delayMs)))
+    : 0
+  return Math.min(retryDeadline, now + safeDelayMs)
+}
+
 // ─────────────────────────────────────────────────────────
 // Context (set by TraceCollector during agent lifecycle)
 // ─────────────────────────────────────────────────────────
+
+function hasObservabilityContext(ctx: AdoptionContext): boolean {
+  return Boolean(
+    ctx.traceId ||
+    ctx.observabilitySchemaVersion ||
+    ctx.traceKind ||
+    ctx.executionMode ||
+    ctx.rootTraceId ||
+    ctx.parentTraceId ||
+    ctx.subagentKind ||
+    ctx.workflowRunId ||
+    ctx.coordinatorWorkerId
+  )
+}
+
+function buildObservabilityEventProperties(
+  ctx: AdoptionContext,
+  threadId: string | null | undefined
+): AdoptionObservabilityEventProperties {
+  // Even without a trace context (evicted entry, write outside a traced run),
+  // a known threadId must still yield rootThreadId: dashboard aggregations key
+  // on properties.rootThreadId and ES terms aggs silently drop docs missing it.
+  if (!hasObservabilityContext(ctx) && !threadId) return {}
+  return {
+    observabilitySchemaVersion:
+      ctx.observabilitySchemaVersion ?? TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind: ctx.traceKind ?? "root",
+    executionMode: ctx.executionMode ?? "normal",
+    rootTraceId: ctx.rootTraceId ?? ctx.traceId ?? null,
+    rootThreadId: ctx.rootThreadId ?? threadId ?? null,
+    parentTraceId: ctx.parentTraceId ?? null,
+    parentThreadId: ctx.parentThreadId ?? null,
+    parentSpanId: ctx.parentSpanId ?? null,
+    linkType: ctx.linkType ?? null,
+    subagentKind: ctx.subagentKind ?? null,
+    subagentRunId: ctx.subagentRunId ?? null,
+    subagentThreadId: ctx.subagentThreadId ?? null,
+    handoffAction: ctx.handoffAction ?? null,
+    handoffSourceAgent: ctx.handoffSourceAgent ?? null,
+    handoffTargetAgent: ctx.handoffTargetAgent ?? null,
+    coordinatorWorkerId: ctx.coordinatorWorkerId ?? null,
+    coordinatorWorkerTurn: ctx.coordinatorWorkerTurn ?? null,
+    coordinatorWorkerRole: ctx.coordinatorWorkerRole ?? null,
+    coordinatorWorkerWorkload: ctx.coordinatorWorkerWorkload ?? null,
+    workflowRunId: ctx.workflowRunId ?? null,
+    workflowAgentIndex: ctx.workflowAgentIndex ?? null,
+    workflowPhase: ctx.workflowPhase ?? null,
+    workflowAgentLabel: ctx.workflowAgentLabel ?? null
+  }
+}
+
+function buildGenIndexObservabilityColumns(
+  ctx: AdoptionContext,
+  threadId: string | null | undefined
+): GenIndexObservabilityColumns {
+  const props = buildObservabilityEventProperties(ctx, threadId)
+  return {
+    observability_schema_version: props.observabilitySchemaVersion ?? null,
+    trace_kind: props.traceKind ?? null,
+    execution_mode: props.executionMode ?? null,
+    root_trace_id: props.rootTraceId ?? null,
+    root_thread_id: props.rootThreadId ?? null,
+    parent_trace_id: props.parentTraceId ?? null,
+    parent_thread_id: props.parentThreadId ?? null,
+    parent_span_id: props.parentSpanId ?? null,
+    link_type: props.linkType ?? null,
+    subagent_kind: props.subagentKind ?? null,
+    subagent_run_id: props.subagentRunId ?? null,
+    subagent_thread_id: props.subagentThreadId ?? null,
+    handoff_action: props.handoffAction ?? null,
+    handoff_source_agent: props.handoffSourceAgent ?? null,
+    handoff_target_agent: props.handoffTargetAgent ?? null,
+    coordinator_worker_id: props.coordinatorWorkerId ?? null,
+    coordinator_worker_turn: props.coordinatorWorkerTurn ?? null,
+    coordinator_worker_role: props.coordinatorWorkerRole ?? null,
+    coordinator_worker_workload: props.coordinatorWorkerWorkload ?? null,
+    workflow_run_id: props.workflowRunId ?? null,
+    workflow_agent_index: props.workflowAgentIndex ?? null,
+    workflow_phase: props.workflowPhase ?? null,
+    workflow_agent_label: props.workflowAgentLabel ?? null
+  }
+}
+
+function hasPendingObservabilityContext(pending: GenIndexRow): boolean {
+  return Boolean(
+    pending.trace_id ||
+    pending.observability_schema_version ||
+    pending.trace_kind ||
+    pending.execution_mode ||
+    pending.root_trace_id ||
+    pending.parent_trace_id ||
+    pending.subagent_kind ||
+    pending.workflow_run_id ||
+    pending.coordinator_worker_id
+  )
+}
+
+function buildPendingObservabilityEventProperties(
+  pending: GenIndexRow
+): AdoptionObservabilityEventProperties {
+  // Same rootThreadId guarantee as buildObservabilityEventProperties: adopt
+  // events from gens recorded without a trace context must stay aggregable.
+  if (!hasPendingObservabilityContext(pending) && !pending.thread_id) return {}
+  return {
+    observabilitySchemaVersion:
+      pending.observability_schema_version ?? TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind: pending.trace_kind ?? "root",
+    executionMode: pending.execution_mode ?? "normal",
+    rootTraceId: pending.root_trace_id ?? pending.trace_id ?? null,
+    rootThreadId: pending.root_thread_id ?? pending.thread_id ?? null,
+    parentTraceId: pending.parent_trace_id ?? null,
+    parentThreadId: pending.parent_thread_id ?? null,
+    parentSpanId: pending.parent_span_id ?? null,
+    linkType: pending.link_type ?? null,
+    subagentKind: pending.subagent_kind ?? null,
+    subagentRunId: pending.subagent_run_id ?? null,
+    subagentThreadId: pending.subagent_thread_id ?? null,
+    handoffAction: pending.handoff_action ?? null,
+    handoffSourceAgent: pending.handoff_source_agent ?? null,
+    handoffTargetAgent: pending.handoff_target_agent ?? null,
+    coordinatorWorkerId: pending.coordinator_worker_id ?? null,
+    coordinatorWorkerTurn: pending.coordinator_worker_turn ?? null,
+    coordinatorWorkerRole: pending.coordinator_worker_role ?? null,
+    coordinatorWorkerWorkload: pending.coordinator_worker_workload ?? null,
+    workflowRunId: pending.workflow_run_id ?? null,
+    workflowAgentIndex: pending.workflow_agent_index ?? null,
+    workflowPhase: pending.workflow_phase ?? null,
+    workflowAgentLabel: pending.workflow_agent_label ?? null
+  }
+}
 
 export function setAdoptionContext(threadId: string, ctx: AdoptionContext): void {
   if (!threadId) return
@@ -605,7 +1025,20 @@ export function setAdoptionContext(threadId: string, ctx: AdoptionContext): void
   threadContexts.set(threadId, { ...(prior ?? {}), ...ctx })
 }
 
-export function clearAdoptionContext(threadId: string): void {
+/** Apply a late asynchronous enrichment only while the originating trace still owns the thread. */
+export function patchAdoptionContextForTrace(
+  threadId: string,
+  expectedTraceId: string,
+  ctx: AdoptionContext
+): boolean {
+  const prior = threadContexts.get(threadId)
+  if (!prior || prior.traceId !== expectedTraceId) return false
+  threadContexts.set(threadId, { ...prior, ...ctx })
+  return true
+}
+
+export function clearAdoptionContext(threadId: string, expectedTraceId?: string): void {
+  if (expectedTraceId && threadContexts.get(threadId)?.traceId !== expectedTraceId) return
   threadContexts.delete(threadId)
 }
 
@@ -706,7 +1139,20 @@ async function enforceRetention(): Promise<void> {
   } catch {
     // ignore
   }
-  // 3. Belt-and-suspenders row cap — protects against a single-day generation
+  // 3. Drop local-only generated source details on the same 14-day trace window.
+  try {
+    deleteAdoptLineDetailsOlderThan(Date.now() - INDEX_MEASURED_RETENTION_MS)
+  } catch {
+    // ignore
+  }
+  // 4. Keep the two local-only source payload pools within a shared 100 MB budget.
+  try {
+    trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
+    trimAdoptLineDetails(LOCAL_ADOPT_DETAILS_MAX_ROWS, LOCAL_ADOPT_DETAILS_MAX_BYTES)
+  } catch {
+    // ignore
+  }
+  // 5. Belt-and-suspenders row cap — protects against a single-day generation
   //    spree blowing up the sqlite file.
   try {
     trimToRowCap(INDEX_MAX_ROWS)
@@ -759,11 +1205,103 @@ export function recordGen(input: RecordGenInput): void {
   console.log(
     `[AdoptionTracker] recordGen: tool=${input.tool} file=${input.filePath} threadId=${input.threadId}`
   )
-  queueMicrotask(() => {
-    doRecordGen(input).catch((e) => {
-      console.warn("[AdoptionTracker] recordGen unexpected error:", e)
+  const task = new Promise<void>((resolveTask) => {
+    queueMicrotask(() => {
+      void doRecordGen(input)
+        .catch((e) => {
+          console.warn("[AdoptionTracker] recordGen unexpected error:", e)
+        })
+        .finally(resolveTask)
     })
   })
+  inFlightRecordGenTasks.add(task)
+  void task.then(() => {
+    inFlightRecordGenTasks.delete(task)
+  })
+}
+
+/** @internal Standalone regression seam; production recordGen remains fire-and-forget. */
+export async function waitForAdoptionRecordGenIdleForTest(): Promise<void> {
+  while (inFlightRecordGenTasks.size > 0) {
+    await Promise.all([...inFlightRecordGenTasks])
+  }
+}
+
+function buildCodeGenerationProperties(args: {
+  eventId: string
+  input: RecordGenInput
+  absPath: string
+  relPath: string
+  lineCount: number
+  deletedLineCount: number
+  createdAt: number
+  ctx: AdoptionContext
+  usedSkills: string[]
+  skillSource: string[]
+  testMatchRule?: TestCodeMatchRule
+}): Record<string, unknown> {
+  const {
+    eventId,
+    input,
+    absPath,
+    relPath,
+    lineCount,
+    deletedLineCount,
+    createdAt,
+    ctx,
+    usedSkills,
+    skillSource,
+    testMatchRule
+  } = args
+  // Bucketing for the 研发效能 panel: 新增 (绿地) vs 存量迭代 (棕地). Derived here
+  // from counts this function already has, and mirrored onto the commit-time
+  // `code_adopt` event so ES can slice adoption rates without a two-step join.
+  const { newRatio, changeKind } = attributeChangeKind(lineCount, deletedLineCount)
+  return {
+    schemaVersion: 1,
+    eventId,
+    threadId: input.threadId,
+    traceId: ctx.traceId,
+    stepIndex: input.stepIndex,
+    tool: input.tool,
+    language: extname(absPath).slice(1).toLowerCase() || null,
+    lineCount,
+    deletedLineCount,
+    // Explicitly mapped as `double` in ES. Do not reuse the legacy `newRatio`
+    // field: its first 0/1 value can make dynamic mapping lock it to `long`.
+    netNewRatio: newRatio,
+    changeKind,
+    usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
+    modelId: ctx.modelId ?? null,
+    modelName: ctx.modelName ?? null,
+    harnessProjectId: ctx.harnessProjectId ?? null,
+    harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessNodeName: ctx.harnessNodeName ?? null,
+    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
+    harnessAdapterName: ctx.harnessAdapterName ?? null,
+    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    ...buildObservabilityEventProperties(ctx, input.threadId),
+    ...(testMatchRule ? { testMatchRule } : {}),
+    // note: filePath / content / fingerprint intentionally withheld
+    createdAt: new Date(createdAt).toISOString(),
+    relativeHint: relPath.split("/").slice(-1)[0]
+  }
+}
+
+function enqueueTestCodeGeneration(
+  properties: Record<string, unknown>,
+  createdAt: number
+): boolean {
+  const event = buildEvent("code_test_gen", "code_adoption", properties)
+  if (!enqueueEventOutbox(toOutboxEvent(event, createdAt))) {
+    console.warn(
+      `[AdoptionTracker] failed to persist code_test_gen event for genEventId=${String(properties.eventId ?? "unknown")}`
+    )
+    return false
+  }
+  scheduleOutboxDrain()
+  return true
 }
 
 async function doRecordGen(input: RecordGenInput): Promise<void> {
@@ -778,7 +1316,14 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // can run and clearAdoptionContext(threadId) — which would zero out the
     // skill/model/trace fields on both the cloud event and the sqlite row,
     // and in turn strip skill attribution from the downstream code_adopt.
-    const ctx = getContext(input.threadId)
+    const turnContext = getContext(input.threadId)
+    const ctx: AdoptionContext = input.harnessStage
+      ? {
+          ...turnContext,
+          harnessNodeName: input.harnessStage.nodeName ?? undefined,
+          harnessNodeStatus: input.harnessStage.nodeStatus ?? undefined
+        }
+      : turnContext
 
     const absPath = input.workspacePath
       ? resolvePath(input.workspacePath, input.filePath)
@@ -788,7 +1333,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // isInsideGitWorkTree). Non-git files never reach a commit and are where
     // external platforms own reporting via their own hook — skipping them here
     // avoids double-counting and removes events that could never close the loop.
-    if (!isInsideGitWorkTree(absPath)) {
+    if (!(await isInsideGitWorkTree(absPath))) {
       console.log(`[AdoptionTracker] recordGen skip — not in a git work tree: ${input.filePath}`)
       return
     }
@@ -796,6 +1341,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     const relPath = input.workspacePath
       ? relative(input.workspacePath, absPath).replace(/\\/g, "/")
       : absPath.replace(/\\/g, "/")
+    const testMatchRule = getTestCodeMatchRule(relPath)
 
     // ── Cheap upper-bound line count check (skip hashing for giant baselines) ──
     // Counts every physical line incl. blanks — non-blank count can only be ≤ this.
@@ -803,18 +1349,25 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // `skipped_large` adopt event and skip hashing / JSONL / sqlite entirely.
     const generationOccurrences = getGenerationOccurrenceCount(input)
     const rawLineCount = input.generatedContent.split(/\r?\n/).length * generationOccurrences
+    const rawOldLineCount =
+      typeof input.oldString === "string"
+        ? input.oldString.split(/\r?\n/).length * getDeletionOccurrenceCount(input)
+        : 0
     const eventId = `g_${randomUUID()}`
     const createdAt = Date.now()
 
-    if (rawLineCount > MAX_LINES_FOR_MEASURE) {
+    if (Math.max(rawLineCount, rawOldLineCount) > MAX_LINES_FOR_MEASURE) {
+      const lineChanges = countNetLineChanges(input)
       emitSkippedLargeAtGen({
         eventId,
         input,
         absPath,
         relPath,
-        lineCount: rawLineCount,
+        lineCount: lineChanges.generatedLineCount,
+        deletedLineCount: resolveDeletedLineCount(input, lineChanges.deletedLineCount),
         createdAt,
-        ctx
+        ctx,
+        testMatchRule
       })
       return
     }
@@ -823,15 +1376,20 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
 
     // Keep the measured baseline guard explicit too, so the persisted row never
     // exceeds the commit-time comparison cap.
-    if (baseline.rawGeneratedLineCount > MAX_LINES_FOR_MEASURE) {
+    if (
+      Math.max(baseline.generatedLineHashes.length, baseline.supersededLineHashes.length) >
+      MAX_LINES_FOR_MEASURE
+    ) {
       emitSkippedLargeAtGen({
         eventId,
         input,
         absPath,
         relPath,
-        lineCount: baseline.rawGeneratedLineCount,
+        lineCount: baseline.generatedLineHashes.length,
+        deletedLineCount: resolveDeletedLineCount(input, baseline.supersededLineHashes.length),
         createdAt,
-        ctx
+        ctx,
+        testMatchRule
       })
       return
     }
@@ -842,23 +1400,47 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       console.log(`[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`)
       return
     }
-    const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
-
     // `hashes` is the net-new baseline. For edit_file this removes unchanged
-    // oldString context from newString, while `oldLineHashes` keeps only the
-    // old-only lines that should supersede earlier agent generations.
+    // oldString context from generatedContent, while `oldLineHashes` keeps only
+    // the old-only lines that should supersede earlier agent generations.
     const reportedLineCount = hashes.length
 
     // ── JSONL record ────────────────────────────────────
-    // Derive net-deletion count here (in the microtask), NOT at the tool
-    // call site — this keeps edit_file's hot path free of any O(N) scan for
-    // files that are about to be filtered out anyway (non-code, oversize,
-    // empty-after-normalization — all handled above).
-    // Only the local `oldString` / `newString` fragments are scanned — no
-    // full-file reads — so the cost is proportional to the edit size, not
-    // the file size. Boundary-line merging (e.g. oldString ending mid-line)
-    // can introduce small +/- 1 errors; acceptable for an auxiliary metric.
-    const deletedLineCount = deriveDeletedLineCount(input)
+    // The old-only baseline counts both outright deletions and replaced lines.
+    // Reusing it here keeps classification consistent with adoption supersession
+    // and avoids another scan of the edit fragment.
+    const deletedLineCount = resolveDeletedLineCount(input, oldLineHashes.length)
+    // 新增/存量 bucket for the 研发效能 panel. Computed once here so the sqlite row
+    // and the cloud `code_gen` event can never disagree.
+    const changeAttribution = attributeChangeKind(reportedLineCount, deletedLineCount)
+    const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+    const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
+    const generationProperties = buildCodeGenerationProperties({
+      eventId,
+      input,
+      absPath,
+      relPath,
+      lineCount: reportedLineCount,
+      deletedLineCount,
+      createdAt,
+      ctx,
+      usedSkills,
+      skillSource,
+      ...(testMatchRule ? { testMatchRule } : {})
+    })
+
+    // Test code is intentionally a separate analytics stream. It never enters
+    // gen_events, so commit measurement cannot turn it into a standard
+    // code_adopt or add it to the existing adoption-rate numerator/denominator.
+    if (testMatchRule) {
+      const persisted = enqueueTestCodeGeneration(generationProperties, createdAt)
+      console.log(
+        `[AdoptionTracker] recordTestGen ${persisted ? "OK" : "FAILED"}: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} deletedLineCount=${deletedLineCount} matchRule=${testMatchRule} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+      )
+      return
+    }
+
+    const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
     const jsonlEntry: JsonlGenEntry = {
       t: "gen",
       eventId,
@@ -877,58 +1459,52 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // carry them too (ES can then slice adoption rates by skill / model / trace
     // directly, without a two-step join against code_gen). Using the snapshot
     // taken before the await — see the top of this function.
-    const usedSkills = normalizeUsedSkills(ctx.usedSkills)
-    const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
-    insertGenEvent({
-      event_id: eventId,
-      file_path: absPath,
-      content_fingerprint: fingerprint,
-      shard_file: shardFile,
-      shard_offset: offset,
-      line_hashes: packLineHashes(hashes),
-      old_line_hashes: oldLineHashes.length > 0 ? packLineHashes(oldLineHashes) : null,
-      created_at: createdAt,
-      measured: 0,
-      tool: input.tool,
-      used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
-      skill_source: skillSource.length > 0 ? JSON.stringify(skillSource) : null,
-      thread_id: input.threadId || null,
-      trace_id: ctx.traceId ?? null,
-      model_id: ctx.modelId ?? null,
-      model_name: ctx.modelName ?? null,
-      harness_project_id: ctx.harnessProjectId ?? null,
-      harness_feature_slug: ctx.harnessFeatureSlug ?? null,
-      harness_node_name: ctx.harnessNodeName ?? null,
-      harness_node_status: ctx.harnessNodeStatus ?? null,
-      harness_adapter_name: ctx.harnessAdapterName ?? null,
-      harness_adapter_version: ctx.harnessAdapterVersion ?? null
-    })
+    const observabilityColumns = buildGenIndexObservabilityColumns(ctx, input.threadId)
+    const generationEvent = buildEvent("code_gen", "code_adoption", generationProperties)
+    const indexed = insertGenEventWithOutbox(
+      {
+        event_id: eventId,
+        file_path: absPath,
+        content_fingerprint: fingerprint,
+        shard_file: shardFile,
+        shard_offset: offset,
+        line_hashes: packLineHashes(hashes),
+        old_line_hashes: oldLineHashes.length > 0 ? packLineHashes(oldLineHashes) : null,
+        generated_lines_blob: packLocalLineTexts(baseline.generatedLineTexts),
+        created_at: createdAt,
+        measured: 0,
+        tool: input.tool,
+        used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
+        skill_source: skillSource.length > 0 ? JSON.stringify(skillSource) : null,
+        thread_id: input.threadId || null,
+        trace_id: ctx.traceId ?? null,
+        model_id: ctx.modelId ?? null,
+        model_name: ctx.modelName ?? null,
+        harness_project_id: ctx.harnessProjectId ?? null,
+        harness_feature_slug: ctx.harnessFeatureSlug ?? null,
+        harness_node_name: ctx.harnessNodeName ?? null,
+        harness_node_status: ctx.harnessNodeStatus ?? null,
+        harness_adapter_name: ctx.harnessAdapterName ?? null,
+        harness_adapter_version: ctx.harnessAdapterVersion ?? null,
+        // Persisted so the commit-time `code_adopt` event can carry the bucket
+        // without re-deriving it from a diff that has since moved on.
+        new_ratio: changeAttribution.newRatio,
+        change_kind: changeAttribution.changeKind,
+        ...observabilityColumns
+      },
+      toOutboxEvent(generationEvent, createdAt)
+    )
+    if (!indexed) {
+      console.warn(
+        `[AdoptionTracker] code_gen suppressed — generation baseline was not indexed: eventId=${eventId} file=${relPath}`
+      )
+      return
+    }
+    trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
 
-    // ── Cloud event (metadata only) ─────────────────────
-    trackEvent("code_gen", "code_adoption", {
-      schemaVersion: 1,
-      eventId,
-      threadId: input.threadId,
-      traceId: ctx.traceId,
-      stepIndex: input.stepIndex,
-      tool: input.tool,
-      language: extname(absPath).slice(1).toLowerCase() || null,
-      lineCount: reportedLineCount,
-      deletedLineCount,
-      usedSkills,
-      ...(skillSource.length > 0 ? { skillSource } : {}),
-      modelId: ctx.modelId ?? null,
-      modelName: ctx.modelName ?? null,
-      harnessProjectId: ctx.harnessProjectId ?? null,
-      harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
-      harnessNodeName: ctx.harnessNodeName ?? null,
-      harnessNodeStatus: ctx.harnessNodeStatus ?? null,
-      harnessAdapterName: ctx.harnessAdapterName ?? null,
-      harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
-      // note: filePath / content / fingerprint intentionally withheld
-      createdAt: new Date(createdAt).toISOString(),
-      relativeHint: relPath.split("/").slice(-1)[0] // leaf filename only, not a full path
-    })
+    // Let rapid write/edit calls share the existing debounced sql.js export.
+    // The outbox drain performs a final durability check before network I/O.
+    scheduleBatchedCodeGenOutboxDrain()
     console.log(
       `[AdoptionTracker] recordGen OK: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} rawHashes=${baseline.rawGeneratedLineCount} supersededHashes=${oldLineHashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
     )
@@ -940,7 +1516,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
 /**
  * Emit the L1 `code_gen` + a terminal `code_adopt(skipped_large)` pair for a
  * generation whose baseline exceeded `MAX_LINES_FOR_MEASURE`. Skips JSONL and
- * sqlite index so we do not blow up local storage with giant BLOBs.
+ * sqlite index so we do not blow up local storage with giant BLOBs. Oversize
+ * test code emits only its durable `code_test_gen` metadata event.
  */
 function emitSkippedLargeAtGen(args: {
   eventId: string
@@ -948,43 +1525,55 @@ function emitSkippedLargeAtGen(args: {
   absPath: string
   relPath: string
   lineCount: number
+  deletedLineCount: number
   createdAt: number
   /** Attribution snapshot taken before any await — see doRecordGen. */
   ctx: AdoptionContext
+  testMatchRule: TestCodeMatchRule | null
 }): void {
-  const { eventId, input, absPath, relPath, lineCount, createdAt, ctx } = args
-  const language = extname(absPath).slice(1).toLowerCase() || null
-  const deletedLineCount = deriveDeletedLineCount(input)
-  const usedSkills = normalizeUsedSkills(ctx.usedSkills)
-  const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
-
-  // L1 — record that the agent generated code (metadata only, no path/content)
-  trackEvent("code_gen", "code_adoption", {
-    schemaVersion: 1,
+  const {
     eventId,
-    threadId: input.threadId,
-    traceId: ctx.traceId,
-    stepIndex: input.stepIndex,
-    tool: input.tool,
-    language,
+    input,
+    absPath,
+    relPath,
     lineCount,
     deletedLineCount,
+    createdAt,
+    ctx,
+    testMatchRule
+  } = args
+  const changeAttribution = attributeChangeKind(lineCount, deletedLineCount)
+  const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+  const observabilityProps = buildObservabilityEventProperties(ctx, input.threadId)
+  const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
+  const generationProperties = buildCodeGenerationProperties({
+    eventId,
+    input,
+    absPath,
+    relPath,
+    lineCount,
+    deletedLineCount,
+    createdAt,
+    ctx,
     usedSkills,
-    ...(skillSource.length > 0 ? { skillSource } : {}),
-    modelId: ctx.modelId ?? null,
-    modelName: ctx.modelName ?? null,
-    harnessProjectId: ctx.harnessProjectId ?? null,
-    harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
-    harnessNodeName: ctx.harnessNodeName ?? null,
-    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
-    harnessAdapterName: ctx.harnessAdapterName ?? null,
-    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
-    createdAt: new Date(createdAt).toISOString(),
-    relativeHint: relPath.split("/").slice(-1)[0]
+    skillSource,
+    ...(testMatchRule ? { testMatchRule } : {})
   })
 
-  // Terminal L2/L3 equivalent — no hashing possible, so mark skipped_large now.
-  trackEvent("code_adopt", "code_adoption", {
+  if (testMatchRule) {
+    const persisted = enqueueTestCodeGeneration(generationProperties, createdAt)
+    console.log(
+      `[AdoptionTracker] recordTestGen ${persisted ? "OK" : "FAILED"}: eventId=${eventId} file=${relPath} lineCount=${lineCount} deletedLineCount=${deletedLineCount} matchRule=${testMatchRule} oversize=true threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+    )
+    return
+  }
+
+  const generationEvent = buildEvent("code_gen", "code_adoption", generationProperties)
+
+  // Terminal L2/L3 equivalent — no persisted per-line baseline, so persist
+  // skipped_large immediately. The complete envelope (including its top-level
+  // eventId) is immutable in the outbox and reused for every retry.
+  const adoptEvent = buildEvent("code_adopt", "code_adoption", {
     schemaVersion: 1,
     eventId: `a_${randomUUID()}`,
     genEventId: eventId,
@@ -1011,8 +1600,23 @@ function emitSkippedLargeAtGen(args: {
     harnessNodeName: ctx.harnessNodeName ?? null,
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
-    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null
+    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    netNewRatio: changeAttribution.newRatio,
+    changeKind: changeAttribution.changeKind,
+    ...observabilityProps
   })
+  if (
+    enqueueEventOutboxBatch(
+      [toOutboxEvent(generationEvent, createdAt), toOutboxEvent(adoptEvent, createdAt)],
+      false
+    )
+  ) {
+    scheduleBatchedCodeGenOutboxDrain()
+  } else {
+    console.warn(
+      `[AdoptionTracker] failed to persist oversize code_gen/code_adopt pair for genEventId=${eventId}`
+    )
+  }
 }
 
 interface MeasureOpts {
@@ -1051,7 +1655,7 @@ export type SupersedeReason =
   | "agent_rm" // the agent deleted the file (rm / git rm) before it was committed
 
 /**
- * Emit a terminal `superseded` code_adopt that voids an older generation:
+ * Build a terminal `superseded` code_adopt that voids an older generation:
  * effective/adopted = 0, so the discarded draft stops inflating the
  * adoption-rate denominator, while still emitting an adopt event so the gen is
  * not later miscounted as "generated but never committed" by the
@@ -1066,13 +1670,14 @@ export type SupersedeReason =
  *     Driven in real time by shell-op monitoring. `measureSource =
  *     agent_file_op`, no commit (commitSha = null).
  */
-async function emitSupersededAdopt(
+async function buildSupersededAdoptionWrite(
   pending: GenIndexRow,
   generatedLineCount: number,
   commitSha: string | null,
   reason: SupersedeReason,
-  measureSource: "git_commit" | "agent_file_op" = "git_commit"
-): Promise<void> {
+  measureSource: "git_commit" | "agent_file_op" = "git_commit",
+  localTraceRelPath: string | null = null
+): Promise<AdoptionMeasurementWrite> {
   const adoptEventId = `a_${randomUUID()}`
   const measuredAt = Date.now()
   await appendJsonl({
@@ -1091,8 +1696,9 @@ async function emitSupersededAdopt(
 
   const usedSkills = parseStoredSkills(pending.used_skills)
   const skillSource = parseStoredSkillSource(pending.skill_source, usedSkills)
+  const observabilityProps = buildPendingObservabilityEventProperties(pending)
 
-  trackEvent("code_adopt", "code_adoption", {
+  const event = buildEvent("code_adopt", "code_adoption", {
     schemaVersion: 1,
     eventId: adoptEventId,
     genEventId: pending.event_id,
@@ -1117,59 +1723,118 @@ async function emitSupersededAdopt(
     harnessNodeName: pending.harness_node_name ?? null,
     harnessNodeStatus: pending.harness_node_status ?? null,
     harnessAdapterName: pending.harness_adapter_name ?? null,
-    harnessAdapterVersion: pending.harness_adapter_version ?? null
+    harnessAdapterVersion: pending.harness_adapter_version ?? null,
+    ...observabilityProps
   })
 
   console.log(
     `[AdoptionTracker] measure verdict=superseded reason=${reason} genEventId=${pending.event_id} generatedLines=${generatedLineCount} commitSha=${commitSha ?? "none"}`
   )
+  const details = buildLocalAdoptLineDetailsRow({
+    commitSha,
+    pending,
+    details: buildLocalGeneratedLineDetails(
+      getStoredGeneratedLineTexts(pending, generatedLineCount),
+      Array<LocalGeneratedLineStatus>(generatedLineCount).fill("superseded_by_agent")
+    ),
+    measuredAt,
+    relPath: localTraceRelPath
+  })
+  return {
+    genEventId: pending.event_id,
+    outboxEvent: toOutboxEvent(event, measuredAt),
+    ...(details
+      ? {
+          details,
+          detailsLimits: {
+            maxRows: LOCAL_ADOPT_DETAILS_MAX_ROWS,
+            maxBytes: LOCAL_ADOPT_DETAILS_MAX_BYTES
+          }
+        }
+      : {})
+  }
+}
+
+async function resolveLocalTraceRelPath(absPath: string): Promise<string | null> {
+  const gitRoot = await getGitRootForPath(dirname(absPath))
+  return gitRoot ? relative(gitRoot, absPath).replace(/\\/g, "/") : null
+}
+
+function getStoredGeneratedLineTexts(
+  pending: GenIndexRow,
+  generatedLineCount: number
+): string[] | null {
+  const lines = unpackLocalLineTexts(pending.generated_lines_blob)
+  return lines && lines.length === generatedLineCount ? lines : null
+}
+
+function buildLocalGeneratedLineDetails(
+  texts: string[] | null,
+  statuses: LocalGeneratedLineStatus[]
+): LocalGeneratedLineDetail[] | null {
+  if (!texts || texts.length !== statuses.length) return null
+  return texts.map((text, index) => ({
+    lineNumber: index + 1,
+    text,
+    status: statuses[index]
+  }))
+}
+
+function buildLocalAdoptLineDetailsRow(args: {
+  commitSha: string | null | undefined
+  pending: GenIndexRow
+  details: LocalGeneratedLineDetail[] | null
+  measuredAt: number
+  relPath: string | null
+}): AdoptLineDetailsInput | null {
+  const commitSha = args.commitSha?.trim()
+  if (!commitSha || !args.details || args.details.length === 0) return null
+  const detailsBlob = packLocalJson(args.details)
+  if (!detailsBlob) return null
+  return {
+    commit_sha: commitSha,
+    file_path: args.pending.file_path,
+    rel_path: args.relPath,
+    details_blob: detailsBlob,
+    measured_at: args.measuredAt
+  }
 }
 
 /**
  * Resolve all pending gen rows for a file (newest first within the attribution
- * window) and produce `code_adopt` events against them. Never throws.
+ * window) and build their terminal writes. The caller persists every returned
+ * measured marker and immutable outbox event in one SQLite transaction.
  *
  * Only commit-driven measurements remain — the 10-min timer was retired for
  * being the dominant I/O spike source with marginal value over L1 + L3.
  */
-function measureFile(filePath: string, opts?: MeasureOpts): void {
-  if (!initialized) {
-    console.warn("[AdoptionTracker] measureFile skipped — tracker not initialized")
-    return
+async function buildMeasurementsForFile(
+  filePath: string,
+  opts?: MeasureOpts
+): Promise<AdoptionMeasurementWrite[]> {
+  const absPath = resolvePath(filePath)
+  const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
+  const maxCreated = resolveMaxGenCreatedAt(opts?.commitTimeMs)
+  const pendingRows = findPendingGensForFile(absPath, minCreated, maxCreated)
+  console.log(
+    `[AdoptionTracker] buildMeasurementsForFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} commitTimeMs=${opts?.commitTimeMs ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
+  )
+  if (pendingRows.length === 0) return []
+
+  // Concurrent measurement of the same pending rows could build two different
+  // event ids before either transaction closes the rows. Retry the owning job
+  // instead of silently treating that race as success.
+  if (inFlightFileMeasurements.has(absPath)) {
+    throw new Error(`measurement already in flight for ${absPath}`)
   }
-  queueMicrotask(() => {
-    doMeasureFile(filePath, opts).catch((e) => {
-      console.warn("[AdoptionTracker] measureFile unexpected error:", e)
-    })
-  })
-}
+  inFlightFileMeasurements.add(absPath)
 
-async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void> {
-  let absPath = ""
   try {
-    absPath = resolvePath(filePath)
-    const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
-    const maxCreated = resolveMaxGenCreatedAt(opts?.commitTimeMs)
-    const pendingRows = findPendingGensForFile(absPath, minCreated, maxCreated)
-    console.log(
-      `[AdoptionTracker] doMeasureFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} commitTimeMs=${opts?.commitTimeMs ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
-    )
-    if (pendingRows.length === 0) return
-
-    // Dedup concurrent measurements for the same file. Even without the
-    // timer/commit race, a single commit batch can pass the same file twice
-    // (rare but cheap to guard against).
-    if (inFlightFileMeasurements.has(absPath)) {
-      console.log(
-        `[AdoptionTracker] doMeasureFile dedup skip: absPath=${absPath} (already in-flight)`
-      )
-      return
-    }
-    inFlightFileMeasurements.add(absPath)
-
     let currentHashCounts: Map<number, number> | null = null
     let missingCurrentContent = false
     const supersededHashCounts = new Map<number, number>()
+    const localTraceRelPath = opts?.commitSha ? await resolveLocalTraceRelPath(absPath) : null
+    const writes: AdoptionMeasurementWrite[] = []
 
     if (!opts?.stagedDeleted) {
       let current = opts?.currentContent
@@ -1199,14 +1864,19 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
       // not later miscounted as "generated but never committed".
       if (sawFullRewrite) {
         if (storedHashes && storedHashes.length > 0) {
-          await emitSupersededAdopt(
-            pending,
-            storedHashes.length,
-            opts?.commitSha ?? null,
-            "same_path_rewrite"
+          writes.push(
+            await buildSupersededAdoptionWrite(
+              pending,
+              storedHashes.length,
+              opts?.commitSha ?? null,
+              "same_path_rewrite",
+              "git_commit",
+              localTraceRelPath
+            )
           )
+        } else {
+          writes.push({ genEventId: pending.event_id })
         }
-        markMeasured(pending.event_id)
         continue
       }
 
@@ -1223,16 +1893,24 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
             // corrupt row — keep measuring older rows without supersession hints
           }
         }
-        markMeasured(pending.event_id)
+        writes.push({ genEventId: pending.event_id })
         continue
       }
       const generatedLineCount = storedHashes.length
       const oversizedBaseline = storedHashes.length > MAX_LINES_FOR_MEASURE
-      const { effectiveLineCount, adoptedFromEffective } = consumeEffectiveAdoptionLines(
-        storedHashes,
-        supersededHashCounts,
-        oversizedBaseline ? null : currentHashCounts
-      )
+      const unavailableStatus: LocalGeneratedLineStatus =
+        opts?.stagedDeleted || missingCurrentContent
+          ? "deleted"
+          : oversizedBaseline
+            ? "unknown"
+            : "not_adopted"
+      const { effectiveLineCount, adoptedFromEffective, statuses } =
+        consumeEffectiveAdoptionLineDetails(
+          storedHashes,
+          supersededHashCounts,
+          oversizedBaseline ? null : currentHashCounts,
+          unavailableStatus
+        )
       let adoptedLineCount: number | null = null
 
       if (opts?.stagedDeleted || missingCurrentContent) {
@@ -1262,15 +1940,14 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         commitSha: opts?.commitSha ?? null
       })
 
-      markMeasured(pending.event_id)
-
       // Pull attribution columns that were persisted at gen time, so cloud ES
       // can aggregate adoption rates by skill / model without a two-step join
       // against code_gen via genEventId.
       const usedSkills = parseStoredSkills(pending.used_skills)
       const skillSource = parseStoredSkillSource(pending.skill_source, usedSkills)
+      const observabilityProps = buildPendingObservabilityEventProperties(pending)
 
-      trackEvent("code_adopt", "code_adoption", {
+      const event = buildEvent("code_adopt", "code_adoption", {
         schemaVersion: 1,
         eventId: adoptEventId,
         genEventId: pending.event_id,
@@ -1294,7 +1971,36 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         harnessNodeName: pending.harness_node_name ?? null,
         harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
-        harnessAdapterVersion: pending.harness_adapter_version ?? null
+        harnessAdapterVersion: pending.harness_adapter_version ?? null,
+        // Carried over from gen time. The adopted/effective line counts live on
+        // this event, so the bucket has to travel with them — otherwise slicing
+        // adoption by 新增/存量 would need a join back to code_gen.
+        netNewRatio: normalizeNewRatio(pending.new_ratio),
+        changeKind: normalizeChangeKind(pending.change_kind),
+        ...observabilityProps
+      })
+      const details = buildLocalAdoptLineDetailsRow({
+        commitSha: opts?.commitSha,
+        pending,
+        details: buildLocalGeneratedLineDetails(
+          getStoredGeneratedLineTexts(pending, generatedLineCount),
+          statuses
+        ),
+        measuredAt,
+        relPath: localTraceRelPath
+      })
+      writes.push({
+        genEventId: pending.event_id,
+        outboxEvent: toOutboxEvent(event, measuredAt),
+        ...(details
+          ? {
+              details,
+              detailsLimits: {
+                maxRows: LOCAL_ADOPT_DETAILS_MAX_ROWS,
+                maxBytes: LOCAL_ADOPT_DETAILS_MAX_BYTES
+              }
+            }
+          : {})
       })
 
       console.log(
@@ -1313,10 +2019,9 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
       // row is a pre-rewrite draft that cannot have survived — void it next.
       if (pending.tool === "write_file") sawFullRewrite = true
     }
-  } catch (e) {
-    console.warn("[AdoptionTracker] doMeasureFile failed:", e)
+    return writes
   } finally {
-    if (absPath) inFlightFileMeasurements.delete(absPath)
+    inFlightFileMeasurements.delete(absPath)
   }
 }
 
@@ -1343,29 +2048,59 @@ function consumeEffectiveAdoptionLines(
   supersededCounts: Map<number, number>,
   availableCounts: Map<number, number> | null
 ): { effectiveLineCount: number; adoptedFromEffective: number } {
+  const result = consumeEffectiveAdoptionLineDetails(
+    baseline,
+    supersededCounts,
+    availableCounts,
+    "unknown"
+  )
+  return {
+    effectiveLineCount: result.effectiveLineCount,
+    adoptedFromEffective: result.adoptedFromEffective
+  }
+}
+
+function consumeEffectiveAdoptionLineDetails(
+  baseline: Uint32Array,
+  supersededCounts: Map<number, number>,
+  availableCounts: Map<number, number> | null,
+  unavailableStatus: LocalGeneratedLineStatus
+): {
+  effectiveLineCount: number
+  adoptedFromEffective: number
+  statuses: LocalGeneratedLineStatus[]
+} {
   if (baseline.length === 0) {
-    return { effectiveLineCount: 0, adoptedFromEffective: 0 }
+    return { effectiveLineCount: 0, adoptedFromEffective: 0, statuses: [] }
   }
 
   let effectiveLineCount = 0
   let adoptedFromEffective = 0
+  const statuses: LocalGeneratedLineStatus[] = []
   for (let i = 0; i < baseline.length; i++) {
     const h = baseline[i]
     const superseded = supersededCounts.get(h)
     if (superseded && superseded > 0) {
       supersededCounts.set(h, superseded - 1)
+      statuses.push("superseded_by_agent")
       continue
     }
 
     effectiveLineCount++
-    if (!availableCounts) continue
+    if (!availableCounts) {
+      statuses.push(unavailableStatus)
+      continue
+    }
     const c = availableCounts.get(h)
     if (c && c > 0) {
       adoptedFromEffective++
       availableCounts.set(h, c - 1)
+      statuses.push("adopted")
+    } else {
+      statuses.push("not_adopted")
     }
   }
-  return { effectiveLineCount, adoptedFromEffective }
+  return { effectiveLineCount, adoptedFromEffective, statuses }
 }
 
 export function evaluateAdoptionLineBaselines(
@@ -1412,8 +2147,6 @@ export interface StagedSnapshot {
    */
   stagedContent: Buffer | null
 }
-
-const execFileAsync = promisify(execFile)
 
 // Bound how many `git show` blob reads run at once so a large staged set can't
 // spawn dozens of git processes simultaneously.
@@ -1554,43 +2287,239 @@ export async function captureStagedSnapshotsForCommit(
   }
 }
 
-/**
- * Called by git IPC commit handler AFTER the actual `git commit` succeeds.
- * The caller is responsible for capturing staged blob content *before* the
- * commit runs (because `git commit` clears the index); we compare the hash
- * of the staged blob — not whatever happens to be on disk — against the
- * pending gen baseline. Returns immediately; work happens in background
- * microtasks.
- *
- * NOTE: we deliberately do NOT hook workspace-watcher. Every fs.watch
- * event would otherwise hit sqlite for every keystroke-level save; commit
- * is the only signal we treat as adoption. Deletions surface via a null
- * stagedContent (→ `verdict: deleted`).
- */
-export function measureForCommit(
+interface ResolvedCommitIdentity {
+  repoPath: string
+  commitSha: string
+  commitTimeMs?: number
+  jobId: string
+}
+
+async function resolveCommitIdentity(
   snapshots: StagedSnapshot[],
   commitSha?: string,
-  commitTimeMs?: number
-): void {
-  if (!initialized) {
-    console.warn("[AdoptionTracker] measureForCommit skipped — tracker not initialized")
-    return
+  commitTimeMs?: number,
+  repoPath?: string
+): Promise<ResolvedCommitIdentity | null> {
+  const cwd = repoPath || (snapshots[0]?.absPath ? dirname(snapshots[0].absPath) : "")
+  if (!cwd) return null
+  try {
+    const root = (
+      await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+        cwd,
+        encoding: "utf-8",
+        timeout: 5000,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true
+      })
+    ).stdout.trim()
+    const requestedSha = commitSha?.trim() || "HEAD"
+    const sha = (
+      await execFileAsync("git", ["rev-parse", "--verify", `${requestedSha}^{commit}`], {
+        cwd: root,
+        encoding: "utf-8",
+        timeout: 5000,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true
+      })
+    ).stdout.trim()
+    if (!root || !/^[0-9a-f]{40,64}$/i.test(sha)) return null
+    let resolvedCommitTimeMs = commitTimeMs
+    if (typeof resolvedCommitTimeMs !== "number" || !Number.isFinite(resolvedCommitTimeMs)) {
+      const seconds = Number(
+        (
+          await execFileAsync("git", ["show", "-s", "--format=%ct", sha], {
+            cwd: root,
+            encoding: "utf-8",
+            timeout: 5000,
+            maxBuffer: 1024 * 1024,
+            windowsHide: true
+          })
+        ).stdout.trim()
+      )
+      resolvedCommitTimeMs = Number.isFinite(seconds) ? seconds * 1000 : undefined
+    }
+    const normalizedRoot = resolvePath(root)
+    const jobId = createHash("sha256")
+      .update(`${normalizedRoot.replace(/\\/g, "/")}\0${sha.toLowerCase()}`)
+      .digest("hex")
+    return {
+      repoPath: normalizedRoot,
+      commitSha: sha,
+      commitTimeMs: resolvedCommitTimeMs,
+      jobId
+    }
+  } catch (e) {
+    console.warn("[AdoptionTracker] failed to resolve commit identity:", e)
+    return null
   }
-  console.log(
-    `[AdoptionTracker] measureForCommit: snapshotCount=${snapshots.length} commitSha=${commitSha ?? "unknown"} commitTimeMs=${commitTimeMs ?? "none"}`
-  )
-  for (const snap of snapshots) {
-    if (!isCodeFile(snap.absPath)) continue
-    if (snap.stagedContent === null) {
-      measureFile(snap.absPath, { stagedDeleted: true, commitSha, commitTimeMs })
+}
+
+/** Existing job state lets hook/reconciler retries distinguish a recovered
+ * adoption commit from an unrelated commit that never had a code_gen match. */
+export async function getCommitMeasurementStatus(
+  repoPath: string,
+  commitSha: string
+): Promise<CommitJobStatus | null> {
+  if (!initialized) return null
+  const identity = await resolveCommitIdentity([], commitSha, undefined, repoPath)
+  if (!identity) return null
+  return getCommitJob(identity.jobId)?.status ?? null
+}
+
+async function captureSnapshotsFromCommit(job: CommitJobRow): Promise<StagedSnapshot[]> {
+  const raw = (
+    await execFileAsync(
+      "git",
+      ["diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", "-m", job.commit_sha],
+      {
+        cwd: job.repo_path,
+        encoding: "utf-8",
+        timeout: 10_000,
+        maxBuffer: 8 * 1024 * 1024,
+        windowsHide: true
+      }
+    )
+  ).stdout
+
+  type CommitEntry = { absPath: string; relPath: string; deleted: boolean }
+  const entries: CommitEntry[] = []
+  const seen = new Set<string>()
+  const tokens = raw.split("\0").filter(Boolean)
+  for (let i = 0; i < tokens.length; ) {
+    const status = tokens[i]
+    if (!status || !/^[ACDMRTUXB]/.test(status)) {
+      i++
       continue
     }
-    measureFile(snap.absPath, {
-      currentContent: snap.stagedContent,
-      commitSha,
-      commitTimeMs
-    })
+    const renameOrCopy = status.startsWith("R") || status.startsWith("C")
+    const pathsNeeded = renameOrCopy ? 2 : 1
+    if (i + pathsNeeded >= tokens.length) break
+    const relPath = renameOrCopy ? tokens[i + 2] : tokens[i + 1]
+    i += 1 + pathsNeeded
+    if (!relPath) continue
+    const absPath = resolvePath(job.repo_path, relPath)
+    if (!isCodeFile(absPath) || seen.has(absPath)) continue
+    seen.add(absPath)
+    entries.push({ absPath, relPath, deleted: status === "D" })
   }
+
+  const snapshots: (StagedSnapshot | undefined)[] = new Array(entries.length)
+  await mapWithConcurrency(entries, GIT_SHOW_CONCURRENCY, async (entry, index) => {
+    if (entry.deleted) {
+      snapshots[index] = { absPath: entry.absPath, stagedContent: null }
+      return
+    }
+    const content = (
+      await execFileAsync("git", ["show", `${job.commit_sha}:${entry.relPath}`], {
+        cwd: job.repo_path,
+        encoding: "buffer",
+        timeout: 10_000,
+        maxBuffer: STAGED_BLOB_MAX_BYTES,
+        windowsHide: true
+      })
+    ).stdout
+    snapshots[index] = { absPath: entry.absPath, stagedContent: content }
+  })
+  return snapshots.filter((snapshot): snapshot is StagedSnapshot => snapshot !== undefined)
+}
+
+async function runCommitJob(jobId: string, suppliedSnapshots?: StagedSnapshot[]): Promise<boolean> {
+  const initial = getCommitJob(jobId)
+  if (!initial) return false
+  if (initial.status === "completed") return true
+  if (!markCommitJobProcessing(jobId)) {
+    return getCommitJob(jobId)?.status === "completed"
+  }
+
+  try {
+    const job = getCommitJob(jobId)
+    if (!job) throw new Error(`commit job disappeared: ${jobId}`)
+    const snapshots = suppliedSnapshots ?? (await captureSnapshotsFromCommit(job))
+    const writes: AdoptionMeasurementWrite[] = []
+    const seenPaths = new Set<string>()
+    for (const snapshot of snapshots) {
+      const absPath = resolvePath(snapshot.absPath)
+      if (!isCodeFile(absPath) || seenPaths.has(absPath)) continue
+      seenPaths.add(absPath)
+      writes.push(
+        ...(await buildMeasurementsForFile(absPath, {
+          ...(snapshot.stagedContent === null
+            ? { stagedDeleted: true }
+            : { currentContent: snapshot.stagedContent }),
+          commitSha: job.commit_sha,
+          commitTimeMs: job.commit_time_ms ?? undefined
+        }))
+      )
+    }
+    const result = commitAdoptionMeasurements(writes, jobId)
+    if (!result.success) throw new Error("failed to persist adoption measurement transaction")
+    if (result.enqueuedCount > 0) scheduleOutboxDrain()
+    console.log(
+      `[AdoptionTracker] commit job completed: jobId=${jobId} commitSha=${job.commit_sha} measured=${result.measuredCount} enqueued=${result.enqueuedCount}`
+    )
+    return true
+  } catch (e) {
+    const current = getCommitJob(jobId)
+    const attemptsBeforeCurrent = Math.max(0, (current?.attempts ?? 1) - 1)
+    const error = e instanceof Error ? e.message : String(e)
+    markCommitJobRetry(jobId, Date.now() + retryDelayMs(attemptsBeforeCurrent), error)
+    flushAdoptionIndex()
+    console.warn(`[AdoptionTracker] commit job retry scheduled: jobId=${jobId}`, e)
+    return false
+  }
+}
+
+function runCommitJobDeduped(
+  jobId: string,
+  suppliedSnapshots?: StagedSnapshot[]
+): Promise<boolean> {
+  const existing = inFlightCommitJobs.get(jobId)
+  if (existing) return existing
+  const task = runCommitJob(jobId, suppliedSnapshots).catch((e) => {
+    console.warn(`[AdoptionTracker] unexpected commit job failure: jobId=${jobId}`, e)
+    return false
+  })
+  inFlightCommitJobs.set(jobId, task)
+  void task.then(() => {
+    if (inFlightCommitJobs.get(jobId) === task) inFlightCommitJobs.delete(jobId)
+  })
+  return task
+}
+
+/**
+ * Called after `git commit` succeeds. The commit is first recorded as a durable
+ * job; this promise resolves true only after all measurement markers, immutable
+ * outbox payloads, and the job's completed state are flushed together. Callers
+ * must not mark the commit processed when it resolves false.
+ */
+export async function measureForCommit(
+  snapshots: StagedSnapshot[],
+  commitSha?: string,
+  commitTimeMs?: number,
+  repoPath?: string
+): Promise<boolean> {
+  if (!initialized) {
+    console.warn("[AdoptionTracker] measureForCommit skipped — tracker not initialized")
+    return false
+  }
+  const identity = await resolveCommitIdentity(snapshots, commitSha, commitTimeMs, repoPath)
+  if (!identity) {
+    console.warn("[AdoptionTracker] measureForCommit skipped — commit identity unavailable")
+    return false
+  }
+  const job = enqueueCommitJob({
+    jobId: identity.jobId,
+    repoPath: identity.repoPath,
+    commitSha: identity.commitSha,
+    commitTimeMs: identity.commitTimeMs,
+    createdAt: Date.now()
+  })
+  if (!job) return false
+  if (job.status === "completed") return true
+  console.log(
+    `[AdoptionTracker] measureForCommit: jobId=${job.job_id} snapshotCount=${snapshots.length} commitSha=${job.commit_sha} commitTimeMs=${job.commit_time_ms ?? "none"}`
+  )
+  return runCommitJobDeduped(job.job_id, snapshots.length > 0 ? snapshots : undefined)
 }
 
 export function hasPendingGenerationsForCommit(
@@ -1724,6 +2653,8 @@ async function voidPendingGensUnderPath(prefixAbs: string): Promise<void> {
   } catch {
     return
   }
+  const writes: AdoptionMeasurementWrite[] = []
+  const measured: Array<{ eventId: string; filePath: string; generatedLineCount: number }> = []
   for (const { event_id, file_path } of pending) {
     if (!isPathAtOrUnder(file_path, prefixAbs)) continue
     const row = getGenRowByEventId(event_id)
@@ -1731,11 +2662,27 @@ async function voidPendingGensUnderPath(prefixAbs: string): Promise<void> {
     const storedHashes = row.line_hashes ? unpackLineHashes(row.line_hashes) : null
     const generatedLineCount = storedHashes ? storedHashes.length : 0
     if (generatedLineCount > 0) {
-      await emitSupersededAdopt(row, generatedLineCount, null, "agent_rm", "agent_file_op")
+      writes.push(
+        await buildSupersededAdoptionWrite(
+          row,
+          generatedLineCount,
+          null,
+          "agent_rm",
+          "agent_file_op"
+        )
+      )
+    } else {
+      writes.push({ genEventId: event_id })
     }
-    markMeasured(event_id)
+    measured.push({ eventId: event_id, filePath: file_path, generatedLineCount })
+  }
+  if (writes.length === 0) return
+  const result = commitAdoptionMeasurements(writes)
+  if (!result.success) throw new Error("failed to persist agent rm adoption measurements")
+  if (result.enqueuedCount > 0) scheduleOutboxDrain()
+  for (const item of measured) {
     console.log(
-      `[AdoptionTracker] agent rm voided pending gen: eventId=${event_id} file=${file_path} generatedLines=${generatedLineCount}`
+      `[AdoptionTracker] agent rm voided pending gen: eventId=${item.eventId} file=${item.filePath} generatedLines=${item.generatedLineCount}`
     )
   }
 }
@@ -1764,37 +2711,11 @@ function transferPendingGensUnderPath(srcAbs: string, finalBase: string): void {
 // ─────────────────────────────────────────────────────────
 // Local line-level 溯源 (read-only)
 //
-// Reconstructs, on demand, which committed lines a past generation was credited
-// for. Content was never stored — only per-line FNV hashes (sqlite) — so we
-// re-read the committed blob via `git show <sha>:<path>` and intersect its line
-// hashes with the stored generation hashes. This recovers the *committed* text
-// of adopted lines; lines the agent generated but that never reached the commit
-// have no retrievable text (only a count). Only works for the current machine's
-// own recent (≤7d) commits whose sqlite row survives.
+// New rows store local-only generated source details at measurement time, so
+// the UI can show adopted / not-adopted / superseded generated lines directly.
+// Older rows degrade to the historical hash-only path: re-read the committed
+// blob via `git show <sha>:<path>` and highlight committed lines that matched.
 // ─────────────────────────────────────────────────────────
-
-export interface LocalAdoptionLine {
-  lineNumber: number
-  text: string
-  /** True when this committed line matched a stored generated-line hash. */
-  adopted: boolean
-}
-
-export interface LocalGenAdoptionLines {
-  genEventId: string
-  available: boolean
-  /** Populated when available=false to explain the degradation. */
-  reason?: string
-  /** Repo-relative path of the committed file (best-effort). */
-  relPath?: string
-  /** Number of generated (net-new) lines recorded at gen time. */
-  generatedLineCount?: number
-  /** Committed lines that matched a stored generated-line hash. */
-  matchedLineCount?: number
-  /** True when the committed file exceeded the display cap and was truncated. */
-  truncated?: boolean
-  lines?: LocalAdoptionLine[]
-}
 
 const LOCAL_TRACE_MAX_GENS = 50
 const LOCAL_TRACE_MAX_LINES = 4000
@@ -1832,6 +2753,69 @@ function matchCommittedLinesAgainstHashes(
   return { lines, matchedLineCount, truncated: physical.length > limit }
 }
 
+function parseStoredGeneratedLineDetails(
+  blob: Uint8Array | null | undefined
+): LocalGeneratedLineDetail[] | null {
+  const value = unpackLocalJson<unknown>(blob)
+  if (!Array.isArray(value)) return null
+  const details: LocalGeneratedLineDetail[] = []
+  for (const item of value) {
+    if (!item || typeof item !== "object") return null
+    const record = item as Partial<LocalGeneratedLineDetail>
+    if (
+      typeof record.lineNumber !== "number" ||
+      typeof record.text !== "string" ||
+      !isLocalGeneratedLineStatus(record.status)
+    ) {
+      return null
+    }
+    details.push({
+      lineNumber: record.lineNumber,
+      text: record.text,
+      status: record.status
+    })
+  }
+  return details
+}
+
+function isLocalGeneratedLineStatus(value: unknown): value is LocalGeneratedLineStatus {
+  return (
+    value === "adopted" ||
+    value === "not_adopted" ||
+    value === "superseded_by_agent" ||
+    value === "deleted" ||
+    value === "unknown"
+  )
+}
+
+function summarizeGeneratedLineDetails(details: LocalGeneratedLineDetail[]): {
+  matchedLineCount: number
+  effectiveLineCount: number
+  notAdoptedLineCount: number
+  supersededLineCount: number
+} {
+  let matchedLineCount = 0
+  let effectiveLineCount = 0
+  let notAdoptedLineCount = 0
+  let supersededLineCount = 0
+  for (const line of details) {
+    if (line.status === "adopted") {
+      matchedLineCount++
+      effectiveLineCount++
+    } else if (line.status === "superseded_by_agent") {
+      supersededLineCount++
+    } else if (line.status === "not_adopted" || line.status === "deleted") {
+      effectiveLineCount++
+      notAdoptedLineCount++
+    } else {
+      // Unknown lines remain effective, but must not be presented as confirmed
+      // non-adoption because no committed-file comparison was available.
+      effectiveLineCount++
+    }
+  }
+  return { matchedLineCount, effectiveLineCount, notAdoptedLineCount, supersededLineCount }
+}
+
 /**
  * Reconstruct local line-level adoption for specific generations of a commit.
  * Never throws — each gen degrades independently to `available: false` with a
@@ -1852,6 +2836,27 @@ export async function readLocalCommitAdoptionLines(
   const results: LocalGenAdoptionLines[] = []
   for (const genEventId of ids) {
     try {
+      const storedDetailsRow = getAdoptLineDetails(sha, genEventId)
+      const storedDetails = parseStoredGeneratedLineDetails(storedDetailsRow?.details_blob)
+      if (storedDetailsRow && storedDetails) {
+        const summary = summarizeGeneratedLineDetails(storedDetails)
+        const truncated = storedDetails.length > LOCAL_TRACE_MAX_LINES
+        results.push({
+          genEventId,
+          available: true,
+          source: "stored_gen",
+          relPath: storedDetailsRow.rel_path ?? undefined,
+          generatedLineCount: storedDetails.length,
+          effectiveLineCount: summary.effectiveLineCount,
+          matchedLineCount: summary.matchedLineCount,
+          notAdoptedLineCount: summary.notAdoptedLineCount,
+          supersededLineCount: summary.supersededLineCount,
+          truncated,
+          generatedLines: truncated ? storedDetails.slice(0, LOCAL_TRACE_MAX_LINES) : storedDetails
+        })
+        continue
+      }
+
       const row = getGenRowByEventId(genEventId)
       if (!row || !row.line_hashes || !row.file_path) {
         results.push({
@@ -1908,6 +2913,7 @@ export async function readLocalCommitAdoptionLines(
       results.push({
         genEventId,
         available: true,
+        source: "commit_match",
         relPath,
         generatedLineCount: storedHashes.length,
         matchedLineCount,
@@ -1926,6 +2932,225 @@ export async function readLocalCommitAdoptionLines(
 }
 
 // ─────────────────────────────────────────────────────────
+// Durable delivery / recovery workers
+// ─────────────────────────────────────────────────────────
+
+function scheduleOutboxDrain(): void {
+  queueMicrotask(() => {
+    void flushAdoptionEventOutbox()
+  })
+}
+
+function scheduleBatchedCodeGenOutboxDrain(): void {
+  if (codeGenOutboxDrainTimer) return
+  codeGenOutboxDrainTimer = setTimeout(() => {
+    codeGenOutboxDrainTimer = null
+    void flushAdoptionEventOutbox()
+  }, CODE_GEN_OUTBOX_DRAIN_DELAY_MS)
+  if (typeof codeGenOutboxDrainTimer.unref === "function") codeGenOutboxDrainTimer.unref()
+}
+
+const OUTBOX_REPORT_CANCELLED = { kind: "outbox-report-cancelled" } as const
+type OutboxReportCancelled = typeof OUTBOX_REPORT_CANCELLED
+const OUTBOX_REPORT_TIMED_OUT = { kind: "outbox-report-timed-out" } as const
+type OutboxReportTimedOut = typeof OUTBOX_REPORT_TIMED_OUT
+type OutboxReportOutcome = EventReportResult | OutboxReportCancelled | OutboxReportTimedOut
+
+function isOutboxReportCancelled(result: OutboxReportOutcome): result is OutboxReportCancelled {
+  return result === OUTBOX_REPORT_CANCELLED
+}
+
+function isOutboxReportTimedOut(result: OutboxReportOutcome): result is OutboxReportTimedOut {
+  return result === OUTBOX_REPORT_TIMED_OUT
+}
+
+function isOutboxLifecycleCurrent(generation: number, signal: AbortSignal): boolean {
+  return initialized && generation === outboxLifecycleGeneration && !signal.aborted
+}
+
+function unrefAdoptionTimer(timer: ReturnType<typeof setTimeout>): void {
+  if (typeof timer === "object" && timer && "unref" in timer) timer.unref()
+}
+
+async function reportOutboxEventWithDeadline(
+  reporter: IEventReporter,
+  event: CoworkEvent,
+  signal: AbortSignal,
+  onAttempt: () => void
+): Promise<EventReportResult | OutboxReportCancelled | OutboxReportTimedOut> {
+  if (signal.aborted) return OUTBOX_REPORT_CANCELLED
+
+  // Start through a microtask so flushAdoptionEventOutbox can publish its
+  // single-flight placeholder before arbitrary custom reporter code runs.
+  const reportPromise = Promise.resolve().then(
+    async (): Promise<EventReportResult | OutboxReportCancelled> => {
+      if (signal.aborted) return OUTBOX_REPORT_CANCELLED
+      onAttempt()
+      return await reporter.report(event)
+    }
+  )
+  // Promise.race does not observe a rejection that happens after timeout or
+  // lifecycle cancellation. Keep a terminal handler attached for that case.
+  void reportPromise.catch(() => undefined)
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  let removeAbortListener: (() => void) | undefined
+  const timeoutPromise = new Promise<OutboxReportTimedOut>((resolvePromise) => {
+    timeoutId = setTimeout(() => {
+      resolvePromise(OUTBOX_REPORT_TIMED_OUT)
+    }, OUTBOX_REPORT_DEADLINE_MS)
+    unrefAdoptionTimer(timeoutId)
+  })
+  const cancellationPromise = new Promise<OutboxReportCancelled>((resolvePromise) => {
+    const cancel = () => resolvePromise(OUTBOX_REPORT_CANCELLED)
+    signal.addEventListener("abort", cancel, { once: true })
+    removeAbortListener = () => signal.removeEventListener("abort", cancel)
+    // Abort may have happened between the initial check and listener registration.
+    if (signal.aborted) cancel()
+  })
+
+  try {
+    return await Promise.race([reportPromise, timeoutPromise, cancellationPromise])
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+    removeAbortListener?.()
+  }
+}
+
+async function drainAdoptionEventOutbox(generation: number, signal: AbortSignal): Promise<void> {
+  if (!isOutboxLifecycleCurrent(generation, signal)) return
+  // A code_gen envelope and its measurement baseline share the in-memory
+  // transaction. Never expose either to the reporter until the current sql.js
+  // image is safely exported; failures stay queued for the next poll.
+  if (!flushAdoptionIndex()) {
+    console.warn("[AdoptionTracker] outbox drain deferred — adoption index flush failed")
+    return
+  }
+  if (!isOutboxLifecycleCurrent(generation, signal)) return
+  resetInterruptedOutboxEvents(Date.now() - OUTBOX_SENDING_STALE_MS)
+  const rows = listDueOutboxEvents(Date.now(), OUTBOX_BATCH_SIZE)
+  for (const row of rows) {
+    if (!isOutboxLifecycleCurrent(generation, signal)) return
+    if (Date.now() - row.created_at >= OUTBOX_RETRY_WINDOW_MS) {
+      markOutboxFailed(row.event_id, "retry window expired after 24 hours", Date.now(), true)
+      continue
+    }
+    if (!markOutboxSending(row.event_id)) continue
+    let reporterInvoked = false
+    try {
+      const event = JSON.parse(row.payload_json) as CoworkEvent
+      if (
+        !event ||
+        typeof event !== "object" ||
+        event.eventId !== row.event_id ||
+        event.eventName !== row.event_name
+      ) {
+        throw new Error("outbox payload identity does not match its immutable key")
+      }
+      const reporter = getEventReporter()
+      const result = await reportOutboxEventWithDeadline(reporter, event, signal, () => {
+        reporterInvoked = true
+      })
+      if (isOutboxReportCancelled(result)) return
+      if (!isOutboxLifecycleCurrent(generation, signal)) return
+      const reportTimedOut = isOutboxReportTimedOut(result)
+      const reportResult: EventReportResult = reportTimedOut
+        ? {
+            ok: false,
+            retryable: true,
+            error: `event reporter exceeded ${OUTBOX_REPORT_DEADLINE_MS}ms deadline`,
+            attempted: true
+          }
+        : result
+      if (reportResult.ok) {
+        markOutboxDelivered(row.event_id)
+      } else {
+        const attempted = reportResult.attempted !== false
+        const delay = retryDelayMs(row.attempts, reportResult.retryAfterMs, OUTBOX_RETRY_DELAYS_MS)
+        const nextAttemptAt = nextOutboxAttemptAt(row, delay)
+        if (!reportResult.retryable) {
+          markOutboxFailed(row.event_id, reportResult.error, nextAttemptAt, true, {
+            consumeAttempt: attempted,
+            requireSending: true
+          })
+        } else if (!attempted) {
+          markOutboxDeferred(row.event_id, reportResult.error, nextAttemptAt)
+        } else {
+          const attemptLimitReached = row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
+          const error = attemptLimitReached
+            ? `${reportResult.error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})`
+            : reportResult.error
+          markOutboxFailed(row.event_id, error, nextAttemptAt, attemptLimitReached, {
+            consumeAttempt: true,
+            requireSending: true
+          })
+        }
+      }
+      // A hung custom reporter is usually shared by the whole batch. Avoid
+      // multiplying the 12-second safety deadline across up to 25 rows.
+      if (reportTimedOut) break
+    } catch (e) {
+      if (!isOutboxLifecycleCurrent(generation, signal)) return
+      const error = e instanceof Error ? e.message : String(e)
+      // A malformed immutable payload cannot become valid through retry. An
+      // unexpected reporter exception can, so JSON/identity failures are
+      // dead-lettered immediately; transient failures stop at the attempt cap.
+      const malformed =
+        !reporterInvoked && (error.includes("outbox payload identity") || e instanceof SyntaxError)
+      const attemptLimitReached = reporterInvoked && row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
+      const delay = retryDelayMs(row.attempts, undefined, OUTBOX_RETRY_DELAYS_MS)
+      markOutboxFailed(
+        row.event_id,
+        attemptLimitReached ? `${error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})` : error,
+        nextOutboxAttemptAt(row, delay),
+        malformed || attemptLimitReached,
+        { consumeAttempt: reporterInvoked, requireSending: true }
+      )
+    }
+  }
+  if (isOutboxLifecycleCurrent(generation, signal)) flushAdoptionIndex()
+}
+
+/** Flush all currently due adoption events. Exported for deterministic tests. */
+export function flushAdoptionEventOutbox(): Promise<void> {
+  if (!initialized) return Promise.resolve()
+  if (outboxDrainPromise) return outboxDrainPromise
+  const generation = outboxLifecycleGeneration
+  const signal = outboxLifecycleController.signal
+  const task = Promise.resolve()
+    .then(() => drainAdoptionEventOutbox(generation, signal))
+    .catch((e) => {
+      console.warn("[AdoptionTracker] outbox drain failed:", e)
+    })
+  outboxDrainPromise = task
+  void task.then(() => {
+    if (outboxDrainPromise === task) outboxDrainPromise = null
+  })
+  return task
+}
+
+async function drainCommitJobs(): Promise<void> {
+  const jobs = listDueCommitJobs(Date.now(), COMMIT_JOB_BATCH_SIZE)
+  for (const job of jobs) {
+    await runCommitJobDeduped(job.job_id)
+  }
+}
+
+/** Run all currently due durable commit jobs. Exported for deterministic tests. */
+export function flushAdoptionCommitJobs(): Promise<void> {
+  if (!initialized) return Promise.resolve()
+  if (commitJobDrainPromise) return commitJobDrainPromise
+  const task = drainCommitJobs().catch((e) => {
+    console.warn("[AdoptionTracker] commit job drain failed:", e)
+  })
+  commitJobDrainPromise = task
+  void task.then(() => {
+    if (commitJobDrainPromise === task) commitJobDrainPromise = null
+  })
+  return task
+}
+
+// ─────────────────────────────────────────────────────────
 // Sweep — housekeeping only (no measurement). Handles shard rotation,
 // retention enforcement, periodic sqlite VACUUM, and index flush.
 // ─────────────────────────────────────────────────────────
@@ -1939,6 +3164,7 @@ async function sweep(): Promise<void> {
 
     // 2. Enforce retention (age + measured-age + row-cap all applied here).
     await enforceRetention()
+    cleanupAdoptionDeliveryRecords(Date.now() - DELIVERY_RECORD_RETENTION_MS)
 
     // 3. Reclaim sqlite free pages periodically. VACUUM is expensive-ish, so
     //    we only run it every N sweeps (≈ hourly by default).
@@ -1961,11 +3187,28 @@ async function sweep(): Promise<void> {
 // Lifecycle
 // ─────────────────────────────────────────────────────────
 
-export async function initializeAdoptionTracker(): Promise<void> {
-  if (initialized) return
+export async function initializeAdoptionTracker(): Promise<boolean> {
+  if (initialized) return true
   try {
     getAdoptionDir() // ensure dir exists
-    await initializeAdoptionIndex()
+    if (!(await initializeAdoptionIndex())) {
+      console.warn("[AdoptionTracker] index unavailable — tracker disabled")
+      return false
+    }
+    // Apply the new payload limits immediately to databases created by older
+    // builds instead of waiting for the first periodic sweep.
+    trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
+    trimAdoptLineDetails(LOCAL_ADOPT_DETAILS_MAX_ROWS, LOCAL_ADOPT_DETAILS_MAX_BYTES)
+    resetInterruptedCommitJobs()
+    resetInterruptedOutboxEvents(Date.now())
+    if (!flushAdoptionIndex()) {
+      console.warn("[AdoptionTracker] initial durable index flush failed — tracker disabled")
+      closeAdoptionIndex()
+      return false
+    }
+    outboxLifecycleGeneration += 1
+    outboxLifecycleController.abort()
+    outboxLifecycleController = new AbortController()
     initialized = true
 
     sweepTimer = setInterval(() => {
@@ -1973,17 +3216,53 @@ export async function initializeAdoptionTracker(): Promise<void> {
     }, SWEEP_INTERVAL_MS)
     if (typeof sweepTimer.unref === "function") sweepTimer.unref()
 
+    outboxTimer = setInterval(() => {
+      void flushAdoptionEventOutbox()
+    }, OUTBOX_POLL_INTERVAL_MS)
+    if (typeof outboxTimer.unref === "function") outboxTimer.unref()
+
+    commitJobTimer = setInterval(() => {
+      void flushAdoptionCommitJobs()
+    }, COMMIT_JOB_POLL_INTERVAL_MS)
+    if (typeof commitJobTimer.unref === "function") commitJobTimer.unref()
+
+    queueMicrotask(() => {
+      void flushAdoptionEventOutbox()
+      void flushAdoptionCommitJobs()
+    })
+
     console.log("[AdoptionTracker] initialized")
+    return true
   } catch (e) {
     console.warn("[AdoptionTracker] init failed — tracker disabled:", e)
-    initialized = false
+    shutdownAdoptionTracker()
+    return false
   }
 }
 
 export function shutdownAdoptionTracker(): void {
+  initialized = false
+  outboxLifecycleGeneration += 1
+  outboxLifecycleController.abort()
+  // A custom reporter may never settle. The lifecycle abort above releases
+  // the old drain, while clearing this pointer lets a reinitialized tracker
+  // start independently instead of inheriting the obsolete single-flight.
+  outboxDrainPromise = null
   if (sweepTimer) {
     clearInterval(sweepTimer)
     sweepTimer = null
+  }
+  if (outboxTimer) {
+    clearInterval(outboxTimer)
+    outboxTimer = null
+  }
+  if (codeGenOutboxDrainTimer) {
+    clearTimeout(codeGenOutboxDrainTimer)
+    codeGenOutboxDrainTimer = null
+  }
+  if (commitJobTimer) {
+    clearInterval(commitJobTimer)
+    commitJobTimer = null
   }
   try {
     flushAdoptionIndex()
@@ -1992,5 +3271,4 @@ export function shutdownAdoptionTracker(): void {
     // ignore
   }
   threadContexts.clear()
-  initialized = false
 }

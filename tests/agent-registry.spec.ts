@@ -3,6 +3,8 @@ import { homedir, tmpdir } from "os"
 import { join } from "path"
 import {
   loadAgentProfiles,
+  loadAgentProfilesAsync,
+  isGeneralPurposeSubagentEnabled,
   resolveAgentProfile,
   normalizeToolName,
   stripBlockedToolDocs,
@@ -511,12 +513,78 @@ const ACCESS_SRC = readSource("../src/main/agent/coordinator-worker-access.ts")
 const WORKFLOW_TOOL_SRC = readSource("../src/main/agent/workflow/tool.ts")
 const CHAT_CONTAINER_SRC = readSource("../src/renderer/src/components/chat/ChatContainer.tsx")
 
-function testLevel2GatedToSoloMainAgent(): void {
-  // Requirement 2: registry specs are built ONLY for the Solo main agent.
+function testLevel2AvailableToMultiAndWorkflowMainAgents(): void {
+  // Multi (normal + task enabled) and Workflow expose the same registry-backed
+  // inline task types. Coordinator and leaf runtimes remain excluded.
   assert(
-    RUNTIME_SRC.includes('agentMode === "normal" && !disableSubagents'),
-    "registry subagent specs are gated to the Solo main agent only"
+    RUNTIME_SRC.includes("const mainSubagentsEnabled = !isCoordinatorMode && !disableSubagents") &&
+      RUNTIME_SRC.includes("const registrySubagentSpecs = mainSubagentsEnabled"),
+    "registry task subagents follow the task tool's Multi/Workflow availability"
   )
+  assert(
+    RUNTIME_SRC.includes(
+      "runtimePolicy.isProjectMode && mainSubagentsEnabled ? subagentConfig : undefined"
+    ) &&
+      RUNTIME_SRC.includes("isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig)") &&
+      RUNTIME_SRC.includes("runtimePolicy.isProjectMode && mainSubagentsEnabled"),
+    "Workflow inline task subagents reuse Multi's project-mode selection and context policy"
+  )
+}
+
+function testProjectModeInlineTaskSelection(): void {
+  const workspace = makeWorkspace({
+    "project-reader.md": `---\nname: project-reader\ndescription: Project reader\nworkload: read_only\n---\nInspect the selected project.`
+  })
+  const customAgentPath = join(workspace, ".cmbcoworkagent", "agents", "project-reader.md")
+  const config = {
+    disabledBuiltinSubagents: ["Explore", "general-purpose"],
+    customSubagentFiles: [customAgentPath]
+  }
+  try {
+    const profiles = loadAgentProfiles(workspace, config)
+    assert(!profiles.some((profile) => profile.name === "Explore"), "disabled Explore stays hidden")
+    assert(
+      profiles.some((profile) => profile.name === "Plan"),
+      "enabled built-ins stay available"
+    )
+    assert(
+      profiles.some((profile) => profile.name === "project-reader"),
+      "explicit project-mode custom task subagent is available"
+    )
+    assert(
+      !isGeneralPurposeSubagentEnabled(config),
+      "project-mode general-purpose selection shares the same config"
+    )
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
+}
+
+async function testProjectModeInlineTaskSelectionAsync(): Promise<void> {
+  const workspace = makeWorkspace({
+    "workspace-only.md": `---\nname: workspace-only\ndescription: Workspace-only reader\nworkload: read_only\n---\nInspect the workspace.`
+  })
+  const explicitAgentRoot = makeWorkspace({
+    "project-reader.md": `---\nname: project-reader\ndescription: Explicit project reader\nworkload: read_only\n---\nInspect the selected project.`
+  })
+  const config = {
+    disabledBuiltinSubagents: ["Explore"],
+    customSubagentFiles: [join(explicitAgentRoot, ".cmbcoworkagent", "agents", "project-reader.md")]
+  }
+  try {
+    const profiles = await loadAgentProfilesAsync(workspace, config)
+    const names = new Set(profiles.map((profile) => profile.name))
+    assert(!names.has("Explore"), "async project selection hides disabled built-ins")
+    assert(names.has("Plan"), "async project selection keeps enabled built-ins")
+    assert(names.has("project-reader"), "async project selection loads explicit custom agents")
+    assert(
+      !names.has("workspace-only"),
+      "async project selection excludes unconfigured workspace agents"
+    )
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+    rmSync(explicitAgentRoot, { recursive: true, force: true })
+  }
 }
 
 function testLevel2DedupAndMerge(): void {
@@ -532,7 +600,7 @@ function testLevel2DedupAndMerge(): void {
 }
 
 function testLevel2ToolGuard(): void {
-  // Requirement 1 (correctness): a Solo subagent with a non-default tool policy
+  // Requirement 1 (correctness): a task subagent with a non-default tool policy
   // genuinely loses its tools (hidden from model + calls rejected), and a
   // read-only shell only runs provably read-only commands.
   assert(
@@ -558,15 +626,15 @@ function testLevel2ToolGuard(): void {
   )
 }
 
-function testSoloTaskDescriptionsExposeAccessPolicy(): void {
+function testTaskDescriptionsExposeAccessPolicy(): void {
   // Claude Code shows agent access next to each subagent description
-  // (`Tools: ...`). Keep Solo Task aligned so the main agent knows, before
+  // (`Tools: ...`). Keep Task aligned so the main agent knows, before
   // dispatching, that Explore/Plan are read-only and cannot write.
   assert(
     RUNTIME_SRC.includes(
       "appendRegistrySubagentAccessDescription(spec.description, disallowed, shell)"
     ),
-    "Solo registry subagent descriptions include access-policy suffixes"
+    "registry task-subagent descriptions include access-policy suffixes"
   )
   assert(
     RUNTIME_SRC.includes('no ${disallowedTools.join("/")}') &&
@@ -603,7 +671,7 @@ function testLevel1ToolPlumbing(): void {
   // (explicit) — so a removed tool's docs never contradict the tool list. Only
   // the unrestricted main agent (filesystemAccess undefined) keeps the full docs.
   assert(
-    RUNTIME_SRC.includes("filesystemSystemPrompt && filesystemAccess") &&
+    RUNTIME_SRC.includes("fsSystemPrompt && filesystemAccess") &&
       RUNTIME_SRC.includes("blockedToolNamesForAccess(filesystemAccess)"),
     "Level-1 cleans the fs system prompt for any restricted access (coordinator + workflow)"
   )
@@ -651,10 +719,11 @@ function testLevel2MemoryInjection(): void {
   // Mirrors CC's DEFAULT (tengu_moth_copse off): the user's auto-MEMORY.md (AutoMem)
   // rides in userContext.claudeMd alongside CLAUDE.md, so a write-capable subagent
   // inherits the WHOLE claudeMd channel (CLAUDE.md≈AGENTS.md + auto-MEMORY.md) and
-  // only omitClaudeMd roles (Explore/Plan ≈ our read_only) drop BOTH at once. So
-  // write-capable subagents (general-purpose + write/verify registry) GET both
-  // AGENTS.md and MEMORY.md; read-only registry subagents omit both. memory_search/
-  // memory_get TOOLS are inherited via defaultTools regardless of role.
+  // only omitClaudeMd roles (Explore/Plan ≈ our read_only) drop BOTH at once.
+  // Write-capable subagents (general-purpose + write/verify registry) get
+  // MEMORY.md; project-mode AGENTS prompt inheritance is covered behaviorally by
+  // runtime-final-system-prompt.spec.ts. memory_search/memory_get TOOLS are
+  // inherited via defaultTools regardless of role.
   assert(
     RUNTIME_SRC.includes("[...skillsMiddlewareArray, ...memoryMiddlewareArray]"),
     "general-purpose subagent gets MEMORY.md injection (write-capable, mirrors CC claudeMd inheritance)"
@@ -666,10 +735,6 @@ function testLevel2MemoryInjection(): void {
   assert(
     RUNTIME_SRC.includes("...(restrictedRole ? [] : memoryMiddlewareArray)"),
     "registry subagents inject MEMORY.md only for write/verify (full); read_only AND none omit it (mirrors CC omitClaudeMd)"
-  )
-  assert(
-    RUNTIME_SRC.includes("!restrictedRole && subagentExtraSystemPrompt"),
-    "registry write/verify subagents get AGENTS.md (## Project Instructions); read_only AND none omit it — same split as MEMORY.md (CC omitClaudeMd drops the whole claudeMd channel)"
   )
 }
 
@@ -703,7 +768,9 @@ function testRegistryAgentBlockedTools(): void {
 
   const vf = registryAgentBlockedTools(["write_file", "edit_file"], "full") // verify-like
   assert(
-    vf.has("code_exec") && vf.has("manage_scheduler") && vf.has("manage_skill"),
+    vf.has("code_exec") &&
+      vf.has("manage_scheduler") &&
+      vf.has("manage_skill"),
     "verify blocks code-exec + orchestration meta tools"
   )
   assert(!vf.has("execute"), "verify keeps execute (full shell)")
@@ -714,7 +781,9 @@ function testRegistryAgentBlockedTools(): void {
 
   const wr = registryAgentBlockedTools([], "full") // write custom agent
   assert(
-    wr.has("code_exec") && wr.has("manage_scheduler") && wr.has("manage_skill"),
+    wr.has("code_exec") &&
+      wr.has("manage_scheduler") &&
+      wr.has("manage_skill"),
     "even a write subagent blocks code-exec + orchestration meta tools"
   )
   assert(
@@ -737,20 +806,20 @@ function testStripCustomModelPrefix(): void {
   assert(stripCustomModelPrefix("custom:") === "", "empty after prefix is preserved")
 
   // Parity: the workflow agentType path PREPENDS custom: (subagent.ts) and the
-  // runtime then slices it; the Solo registry path STRIPS then looks up. From the
+  // runtime then slices it; the task registry path STRIPS then looks up. From the
   // same profile value both must reach the same lookup key. Simulate the workflow
-  // round-trip and assert it equals the Solo strip.
+  // round-trip and assert it equals the task-path strip.
   for (const raw of ["foo", "custom:foo", "custom:vendor:model-1"]) {
     const workflowModelId = raw.startsWith("custom:") ? raw : `custom:${raw}`
     const workflowLookup = stripCustomModelPrefix(workflowModelId) // runtime slices custom:
-    const soloLookup = stripCustomModelPrefix(raw)
+    const taskLookup = stripCustomModelPrefix(raw)
     assert(
-      workflowLookup === soloLookup,
-      `workflow and Solo must resolve "${raw}" to the same key (got ${workflowLookup} vs ${soloLookup})`
+      workflowLookup === taskLookup,
+      `workflow and task must resolve "${raw}" to the same key (got ${workflowLookup} vs ${taskLookup})`
     )
   }
 
-  // The Solo registry model resolver must use the shared strip (not a direct
+  // The task registry model resolver must use the shared strip (not a direct
   // lookup of the raw profile value), and must warn instead of silently
   // inheriting the main model when the config is missing.
   assert(
@@ -758,7 +827,7 @@ function testStripCustomModelPrefix(): void {
     "resolveRegistryModelInstance normalizes the custom: prefix"
   )
   assert(
-    RUNTIME_SRC.includes("not found in custom model configs; inheriting main model"),
+    RUNTIME_SRC.includes("not found in model configs; inheriting main model"),
     "registry model miss warns instead of silently inheriting"
   )
 }
@@ -790,7 +859,8 @@ function testExecuteAvailabilityGatesBackgroundExecPrompt(): void {
   // Wiring: the runtime derives executeToolAvailable from blockedToolNamesForAccess
   // and forwards it to getSystemPrompt, which gates the section on the flag.
   assert(
-    RUNTIME_SRC.includes("const executeToolAvailable = options.filesystemAccess") &&
+    RUNTIME_SRC.includes("const executeToolAvailable =") &&
+      RUNTIME_SRC.includes('!runtimeBlockedToolNames.has("execute")') &&
       RUNTIME_SRC.includes('blockedToolNamesForAccess(options.filesystemAccess).has("execute")'),
     "runtime computes execute availability from the access policy"
   )
@@ -877,7 +947,7 @@ Use this tool to run commands, scripts, tests, builds, and other shell operation
   )
   assert(
     RUNTIME_SRC.includes(
-      "...(mainFilesystemEnabled ? [createFsMiddleware()] : []),\n      ...postFsToolDocStripMiddleware,"
+      '...(mainFilesystemEnabled ? [createFsMiddleware("\\n")] : []),\n      ...postFsToolDocStripMiddleware,'
     ),
     "post-FS strip runs immediately after the deepagents fs middleware"
   )
@@ -885,7 +955,8 @@ Use this tool to run commands, scripts, tests, builds, and other shell operation
 
 function testEngineResolvesAndHashesAgentType(): void {
   assert(
-    ENGINE_SRC.includes("loadAgentProfiles(context.workspacePath)") &&
+    ENGINE_SRC.includes("await loadAgentProfilesAsync(options.workspacePath)") &&
+      ENGINE_SRC.includes("resolveProfileFromList(registryProfiles, name)") &&
       ENGINE_SRC.includes("resolveProfile(request.agentType)"),
     "engine resolves agentType against the run-cached workspace registry"
   )
@@ -1398,13 +1469,13 @@ function testReadOnlyShellGate(): void {
     ) && RUNTIME_SRC.includes("windowsShellKind"),
     "runtime threads the windows shell kind into the read-only gate"
   )
-  // Solo registry subagents share the main (non-flagged) sandbox, so their guard
+  // Registry task subagents share the main (non-flagged) sandbox, so their guard
   // runs the read-only execute call inside readOnlyShellExecutionContext — that's
   // what turns on the post-hook gate for them. LocalSandbox ORs the context with
   // the instance flag.
   assert(
     RUNTIME_SRC.includes("readOnlyShellExecutionContext.run(true, () => handler(request))"),
-    "Solo read-only guard runs execute inside the read-only execution context"
+    "task read-only guard runs execute inside the read-only execution context"
   )
   assert(
     LOCAL_SANDBOX_SRC.includes("readOnlyShellExecutionContext.getStore() === true"),
@@ -1489,8 +1560,9 @@ function testDeferredInventoryGatedOnBridge(): void {
   //     a bridge-less restricted leaf never sees IDs it can't use.
   assert(
     RUNTIME_SRC.includes(
-      "if (hasInvokeDeferredTool) {\n      systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)"
-    ),
+      "if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {"
+    ) &&
+      RUNTIME_SRC.includes("systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)"),
     "runtime gates the deferred-tool inventory on the invoke bridge being available"
   )
 }
@@ -2005,10 +2077,12 @@ const tests = [
   testCaseInsensitiveSurvivesUserOverride,
   testStripBlockedToolDocs,
   testCoordinatorReadOnlyKeepsExecute,
-  testLevel2GatedToSoloMainAgent,
+  testLevel2AvailableToMultiAndWorkflowMainAgents,
+  testProjectModeInlineTaskSelection,
+  testProjectModeInlineTaskSelectionAsync,
   testLevel2DedupAndMerge,
   testLevel2ToolGuard,
-  testSoloTaskDescriptionsExposeAccessPolicy,
+  testTaskDescriptionsExposeAccessPolicy,
   testLevel1ToolPlumbing,
   testWorkflowAgentTypeLeafConfig,
   testLevel2MemoryInjection,
@@ -2044,15 +2118,22 @@ const origHome = process.env.HOME
 const origUserProfile = process.env.USERPROFILE
 process.env.HOME = isolatedHome
 process.env.USERPROFILE = isolatedHome
-try {
-  for (const test of tests) {
-    test()
+async function run(): Promise<void> {
+  try {
+    for (const test of tests) {
+      await test()
+    }
+    console.log(`PASS agent-registry + wiring (${tests.length} tests)`)
+  } finally {
+    if (origHome === undefined) delete process.env.HOME
+    else process.env.HOME = origHome
+    if (origUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = origUserProfile
+    rmSync(isolatedHome, { recursive: true, force: true })
   }
-  console.log(`PASS agent-registry + wiring (${tests.length} tests)`)
-} finally {
-  if (origHome === undefined) delete process.env.HOME
-  else process.env.HOME = origHome
-  if (origUserProfile === undefined) delete process.env.USERPROFILE
-  else process.env.USERPROFILE = origUserProfile
-  rmSync(isolatedHome, { recursive: true, force: true })
 }
+
+run().catch((error: Error) => {
+  console.error(`FAIL ${error.message}`)
+  process.exit(1)
+})

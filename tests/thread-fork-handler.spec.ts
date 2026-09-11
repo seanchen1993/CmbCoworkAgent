@@ -6,7 +6,7 @@
  */
 
 import assert from "assert"
-import { mkdtemp, rm } from "fs/promises"
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import type { Checkpoint, CheckpointMetadata, PendingWrite } from "@langchain/langgraph-checkpoint"
@@ -16,6 +16,12 @@ import {
   FORK_BOUNDARY_MARKER_VERSION,
   FORK_BOUNDARY_THREAD_METADATA_KEY
 } from "../src/shared/checkpoint-forkability.ts"
+import {
+  buildMessageRoleCollisionId,
+  buildMessageSameRoleDuplicateId,
+  MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
+  MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
+} from "../src/shared/message-role-collision.ts"
 
 type IpcHandler = (_event: unknown, ...args: unknown[]) => unknown
 
@@ -28,12 +34,35 @@ async function withTempHome(run: () => Promise<void>): Promise<void> {
   try {
     await run()
   } finally {
+    // Native SQLite keeps Windows file handles until both the runtime
+    // checkpointer cache and the global DB are explicitly closed.
+    try {
+      const { closeRuntime } = await import("../src/main/agent/runtime.ts")
+      await closeRuntime()
+    } catch {
+      // Preserve the test's original failure; this is best-effort harness cleanup.
+    }
+    try {
+      const db = await import("../src/main/db/index.ts")
+      await db.closeDatabase()
+    } catch {
+      // Preserve the test's original failure.
+    }
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     if (previousUserProfile === undefined) delete process.env.USERPROFILE
     else process.env.USERPROFILE = previousUserProfile
     await rm(home, { recursive: true, force: true })
   }
+}
+
+async function closeAndDeleteThreadCheckpoint(
+  threadId: string,
+  deleteCheckpoint: (threadId: string) => void
+): Promise<void> {
+  const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
+  await closeCheckpointer(threadId)
+  deleteCheckpoint(threadId)
 }
 
 function makeCheckpoint(id: string, ts = "2026-07-08T01:00:00.000Z"): Checkpoint {
@@ -234,7 +263,7 @@ async function testResolveMessageForkSkipsHiddenRawTailCheckpoint(): Promise<voi
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -289,7 +318,162 @@ async function testResolveMessageForkReturnsNewestStableCheckpoint(): Promise<vo
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
+    await db.closeDatabase()
+  }
+}
+
+async function testResolveAndForkRoleCollisionAssistantBoundary(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread, resolveForkCheckpointForMessage } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-role-collision-source"
+  const checkpointId = "fork-role-collision-cp"
+  const sharedId = "fork-shared-provider-id"
+  const assistantRenderId = buildMessageRoleCollisionId(sharedId, "assistant")
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Role collision fork source",
+      agentMode: "normal"
+    })
+
+    const checkpoint = makeCheckpoint(checkpointId)
+    ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+      {
+        id: sharedId,
+        type: "human",
+        content: "hidden coordinator state",
+        additional_kwargs: { cmb_internal_coordinator_notification: true }
+      },
+      { id: sharedId, type: "human", content: "collision question" },
+      { id: sharedId, type: "ai", content: "collision answer" }
+    ]
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      checkpoint,
+      makeForkBoundaryMetadata(checkpointId, sharedId)
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const resolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: assistantRenderId,
+      message: {
+        id: assistantRenderId,
+        role: "assistant",
+        content: "collision answer"
+      }
+    })
+    assert.equal(resolved?.checkpointId, checkpointId)
+    assert.equal(
+      resolved?.resolvedMessageId,
+      assistantRenderId,
+      "message resolver should retain the render id needed to select the exact duplicate occurrence"
+    )
+
+    const forked = await forkThread({
+      sourceThreadId,
+      checkpointId: resolved!.checkpointId,
+      messageId: resolved!.resolvedMessageId,
+      title: "Fork from role collision assistant"
+    })
+    targetThreadId = forked.thread.thread_id
+    const targetMessages = db.getThreadMessages(targetThreadId)
+    assert.deepEqual(
+      targetMessages.map((message) => [message.role, message.content]),
+      [
+        ["user", "collision question"],
+        ["assistant", "collision answer"]
+      ],
+      "forking the synthetic assistant id must not truncate at the earlier user with the same raw id"
+    )
+    assert.equal(new Set(targetMessages.map((message) => message.id)).size, 2)
+  } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
+    }
+    db.deleteThread(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
+    await db.closeDatabase()
+  }
+}
+
+async function testResolveAndForkSameRoleDuplicateAssistantBoundary(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread, resolveForkCheckpointForMessage } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-same-role-duplicate-source"
+  const checkpointId = "fork-same-role-duplicate-cp"
+  const sharedId = "fork-same-role-provider-id"
+  const duplicateRenderId = buildMessageSameRoleDuplicateId(sharedId, "assistant")
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Same-role duplicate fork source",
+      agentMode: "normal"
+    })
+
+    const checkpoint = makeCheckpoint(checkpointId)
+    ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+      { id: sharedId, type: "ai", content: "first assistant chunk" },
+      { id: sharedId, type: "ai", content: "second assistant chunk" }
+    ]
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      checkpoint,
+      makeForkBoundaryMetadata(checkpointId, sharedId)
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const resolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: duplicateRenderId,
+      message: {
+        id: duplicateRenderId,
+        role: "assistant",
+        content: "second assistant chunk"
+      }
+    })
+    assert.equal(resolved?.checkpointId, checkpointId)
+    assert.equal(resolved?.resolvedMessageId, duplicateRenderId)
+
+    const forked = await forkThread({
+      sourceThreadId,
+      checkpointId: resolved!.checkpointId,
+      messageId: resolved!.resolvedMessageId,
+      title: "Fork from same-role duplicate assistant"
+    })
+    targetThreadId = forked.thread.thread_id
+    const targetMessages = db.getThreadMessages(targetThreadId)
+    assert.deepEqual(
+      targetMessages.map((message) => [message.id, message.content]),
+      [
+        [sharedId, "first assistant chunk"],
+        [duplicateRenderId, "second assistant chunk"]
+      ],
+      "forking a same-role duplicate boundary must preserve both durable rows"
+    )
+  } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
+    }
+    db.deleteThread(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -352,10 +536,10 @@ async function testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId(): Pr
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -416,7 +600,7 @@ async function testResolveMessageForkMatchesSparseToolAssistantSnapshot(): Promi
     assert.equal(resolved?.resolvedMessageId, "assistant-1")
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -527,11 +711,11 @@ async function testResolveMessageForkUsesCheckpointModeForInterruptedToolTail():
     if (targetThreadId) {
       await closeCheckpointer(targetThreadId)
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     await closeCheckpointer(sourceThreadId)
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -642,10 +826,10 @@ async function testResolveAndForkLegacyMessageBeforeFirstMarker(): Promise<void>
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -764,7 +948,7 @@ async function testUnmarkedCheckpointBetweenMarkersIsNotForkable(): Promise<void
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -858,24 +1042,194 @@ async function testForkWaitsForQueuedRendererThreadMutations(): Promise<void> {
       messageTimes?: Record<string, unknown>
       messageTimeOrder?: Array<{ id?: string }>
     }
-    assert.deepEqual(
+    assert.equal(
       targetValues.messageTimes,
-      { "assistant-1": { created_at: "2026-07-08T01:00:04.000Z" } },
-      "fork should see queued renderer thread_values before filtering"
+      undefined,
+      "fork should not copy deprecated lifetime message-time maps"
     )
-    assert.deepEqual(
-      targetValues.messageTimeOrder?.map((entry) => entry.id),
-      ["user-1", "assistant-1"],
-      "fork should preserve queued renderer message time order"
+    assert.equal(
+      targetValues.messageTimeOrder,
+      undefined,
+      "durable message rows replace the legacy message-time order"
+    )
+    assert.equal(
+      targetAssistant?.created_at.toISOString(),
+      "2026-07-08T01:00:04.000Z",
+      "fork should preserve queued renderer row-level message timing"
     )
   } finally {
     releaseLock?.()
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
+    await db.closeDatabase()
+  }
+}
+
+async function testQueuedRendererPersistenceRejectsSameIdReplacement(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { registerThreadHandlers } = await import("../src/main/ipc/threads.ts")
+  const { withThreadRunMutationLock } = await import(
+    "../src/main/ipc/thread-run-mutation-lock.ts"
+  )
+
+  const threadId = "queued-renderer-persistence-incarnation"
+  const originalNow = Date.now
+  let releaseLock!: () => void
+  Date.now = () => 777_777
+  await db.initializeDatabase()
+  try {
+    db.createThread(threadId, { workspacePath: "C:/same", agentMode: "normal" })
+    const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const appendMessages = handlers.get("threads:appendMessages")
+    const persistSubagentTranscripts = handlers.get("threads:persistSubagentTranscripts")
+    const replaceMessageId = handlers.get("threads:replaceMessageId")
+    const updateThread = handlers.get("threads:update")
+    const mergeThreadValues = handlers.get("threads:mergeThreadValues")
+    const listForkable = handlers.get("threads:list-forkable-checkpoints")
+    const resolveFork = handlers.get("threads:resolve-fork-checkpoint-for-message")
+    const fork = handlers.get("threads:fork")
+    assert(appendMessages, "appendMessages handler should be registered")
+    assert(
+      persistSubagentTranscripts,
+      "persistSubagentTranscripts handler should be registered"
+    )
+    assert(replaceMessageId, "replaceMessageId handler should be registered")
+    assert(updateThread, "update handler should be registered")
+    assert(mergeThreadValues, "mergeThreadValues handler should be registered")
+    assert(listForkable, "listForkable handler should be registered")
+    assert(resolveFork, "resolveFork handler should be registered")
+    assert(fork, "fork handler should be registered")
+
+    let lockAcquired!: () => void
+    const lockAcquiredPromise = new Promise<void>((resolve) => {
+      lockAcquired = resolve
+    })
+    const releaseLockPromise = new Promise<void>((resolve) => {
+      releaseLock = resolve
+    })
+    const lockHolder = withThreadRunMutationLock(threadId, async () => {
+      lockAcquired()
+      await releaseLockPromise
+    })
+    await lockAcquiredPromise
+
+    const appendPromise = appendMessages(null, {
+      threadId,
+      messages: [
+        {
+          id: "stale-main-row",
+          role: "assistant",
+          content: "must not reach replacement",
+          created_at: new Date("2026-07-08T01:00:04.000Z")
+        } as Message
+      ]
+    }) as Promise<{ count: number }>
+    const persistPromise = persistSubagentTranscripts(null, {
+      threadId,
+      transcripts: {
+        worker: [
+          {
+            id: "stale-subagent-row",
+            role: "assistant",
+            content: "must not reach replacement"
+          }
+        ]
+      }
+    }) as Promise<Record<string, unknown>>
+    const persistRejected = assert.rejects(
+      persistPromise,
+      /Thread changed while the request was queued/
+    )
+    const replaceRejected = assert.rejects(
+      replaceMessageId(null, {
+        threadId,
+        fromId: "replacement-message",
+        toId: "stale-renamed-message"
+      }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const updateRejected = assert.rejects(
+      updateThread(null, {
+        threadId,
+        updates: { title: "stale-title" }
+      }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const mergeRejected = assert.rejects(
+      mergeThreadValues(null, {
+        threadId,
+        patch: { staleValue: true }
+      }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const listRejected = assert.rejects(
+      listForkable(null, threadId) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const resolveRejected = assert.rejects(
+      resolveFork(null, {
+        threadId,
+        messageId: "replacement-message",
+        message: { id: "replacement-message", role: "assistant", content: "replacement" }
+      }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const forkRejected = assert.rejects(
+      fork(null, { sourceThreadId: threadId, title: "stale fork" }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+
+    // Both handlers captured the original row before queuing on the mutation lock.
+    // Recreate with the same id, timestamp and metadata before either can commit.
+    db.deleteThread(threadId)
+    db.createThread(threadId, { workspacePath: "C:/same", agentMode: "normal" })
+    db.updateThread(threadId, {
+      title: "replacement-title",
+      thread_values: JSON.stringify({ replacementValue: true })
+    })
+    db.upsertThreadMessages(threadId, [
+      {
+        id: "replacement-message",
+        role: "assistant",
+        content: "replacement",
+        created_at: new Date("2026-07-08T01:00:05.000Z")
+      } as Message
+    ])
+    releaseLock()
+    await lockHolder
+
+    assert.equal((await appendPromise).count, 0)
+    await Promise.all([
+      persistRejected,
+      replaceRejected,
+      updateRejected,
+      mergeRejected,
+      listRejected,
+      resolveRejected,
+      forkRejected
+    ])
+    assert.deepEqual(
+      db.getThreadMessages(threadId).map((message) => message.id),
+      ["replacement-message"]
+    )
+    const replacement = db.getThread(threadId)
+    assert.equal(replacement?.title, "replacement-title")
+    assert.deepEqual(JSON.parse(replacement?.thread_values ?? "{}"), {
+      replacementValue: true
+    })
+    assert.equal(
+      db.getThreadSubagentManifestPage(threadId, "worker", undefined, 100).total,
+      0,
+      "queued persistence from the deleted row must not contaminate its replacement"
+    )
+  } finally {
+    releaseLock?.()
+    Date.now = originalNow
+    db.deleteThread(threadId)
     await db.closeDatabase()
   }
 }
@@ -896,6 +1250,8 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
       title: "Source thread",
       model: "test-model",
       memoryEnabled: true,
+      conciseModeEnabled: true,
+      outputStyle: "learning",
       agentMode: "normal"
     })
     db.updateThread(sourceThreadId, {
@@ -919,14 +1275,44 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
       } as Message
     ])
 
+    const sourceCheckpoint = makeCheckpoint(checkpointId)
+    ;(sourceCheckpoint.channel_values as Record<string, unknown>)._summarizationSessionId =
+      "session_source"
+    ;(sourceCheckpoint.channel_values as Record<string, unknown>)._cmbSummarizationOwner =
+      "source-owner"
+    ;(sourceCheckpoint.channel_values as Record<string, unknown>)._summarizationEvent = {
+      cutoffIndex: 1,
+      filePath: "/source-thread/conversation_history/session_source.md",
+      summaryMessage: {
+        type: "human",
+        content:
+          "The full conversation history has been saved to /source-thread/conversation_history/session_source.md"
+      }
+    }
+    ;(sourceCheckpoint.channel_versions as Record<string, number>)._summarizationSessionId = 1
+    ;(sourceCheckpoint.channel_versions as Record<string, number>)._cmbSummarizationOwner = 1
+    ;(sourceCheckpoint.channel_versions as Record<string, number>)._summarizationEvent = 1
+
     const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
     await sourceSaver.put(
       { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
-      makeCheckpoint(checkpointId),
+      sourceCheckpoint,
       makeForkBoundaryMetadata(checkpointId)
     )
     await sourceSaver.flushStrict()
     await sourceSaver.close()
+
+    const sourceBeforeForkVerifier = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    const sourceBeforeFork = await sourceBeforeForkVerifier.getTuple({
+      configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+    })
+    await sourceBeforeForkVerifier.close()
+    assert.equal(
+      (sourceBeforeFork?.checkpoint.channel_values as Record<string, unknown>)
+        ._summarizationSessionId,
+      "session_source",
+      "test source checkpoint must contain the summarization state being sanitized"
+    )
 
     const forked = await forkThread({ sourceThreadId, title: "Forked thread" })
     targetThreadId = forked.thread.thread_id
@@ -935,6 +1321,16 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
     assert.equal(forked.sourceThreadId, sourceThreadId, "response should identify the source")
     assert.equal(forked.sourceCheckpointId, checkpointId, "response should identify checkpoint")
     assert.equal(forked.sourceCheckpointNs, "", "fork should stay in the root checkpoint namespace")
+    assert.equal(
+      forked.thread.metadata?.conciseModeEnabled,
+      true,
+      "fork should preserve an explicitly enabled concise mode"
+    )
+    assert.equal(
+      forked.thread.metadata?.outputStyle,
+      "learning",
+      "fork should preserve a valid explicit output style"
+    )
 
     const targetRow = db.getThread(targetThreadId)
     assert(targetRow, "target thread row should exist")
@@ -950,6 +1346,40 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
     })
     await targetSaver.close()
     assert.equal(targetTuple?.checkpoint.id, checkpointId, "target checkpoint should be persisted")
+    const targetChannelValues = targetTuple?.checkpoint.channel_values as
+      | Record<string, unknown>
+      | undefined
+    assert.equal(
+      targetChannelValues?._summarizationEvent,
+      undefined,
+      "fork must not retain a summary event that references the source thread history"
+    )
+    assert.equal(
+      targetChannelValues?._summarizationSessionId,
+      undefined,
+      "fork must create its own summarization session"
+    )
+    assert.equal(
+      targetChannelValues?._cmbSummarizationOwner,
+      undefined,
+      "fork must not retain source-private summarization ownership"
+    )
+    assert.equal(
+      Array.isArray(targetChannelValues?.messages),
+      true,
+      "fork must retain the raw messages needed for independent recompaction"
+    )
+
+    const sourceVerifier = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    const sourceTuple = await sourceVerifier.getTuple({
+      configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+    })
+    await sourceVerifier.close()
+    assert.equal(
+      (sourceTuple?.checkpoint.channel_values as Record<string, unknown>)._summarizationSessionId,
+      "session_source",
+      "fork sanitization must not mutate the source checkpoint"
+    )
 
     const targetMessages = db.getThreadMessages(targetThreadId)
     assert.deepEqual(
@@ -971,10 +1401,176 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
+    await db.closeDatabase()
+  }
+}
+
+async function testForkCopiesOnlyReferencedLargeToolResults(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
+  const { getProjectThreadDataDirectory } =
+    await import("../src/main/agent/context-history-path.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-large-result-source"
+  const checkpointId = "fork-large-result-checkpoint"
+  const workspace = await mkdtemp(join(tmpdir(), "cmb-fork-large-result-workspace-"))
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      workspacePath: workspace,
+      title: "Large result source",
+      [FORK_BOUNDARY_THREAD_METADATA_KEY]: FORK_BOUNDARY_MARKER_VERSION
+    })
+
+    const historicalCheckpointId = "fork-large-result-historical-checkpoint"
+    const historicalCheckpoint = makeCheckpoint(
+      historicalCheckpointId,
+      "2026-07-08T01:00:00.000Z"
+    )
+    ;(historicalCheckpoint.channel_values as Record<string, unknown>).messages = [
+      { id: "user-old", type: "human", content: "inspect the older large result" },
+      {
+        id: "assistant-old-tool-call",
+        type: "ai",
+        content: "I will inspect the older result.",
+        tool_calls: [{ id: "call-old", name: "inspect", args: { target: "older" } }]
+      },
+      {
+        id: "tool-result-old",
+        type: "tool",
+        tool_call_id: "call-old",
+        name: "inspect",
+        content:
+          "Tool result too large, the result of this tool call call-old was saved in the filesystem at this path: /large_tool_results/call-old\nRead it in chunks."
+      },
+      { id: "assistant-old-final", type: "ai", content: "The older inspection is complete." }
+    ]
+
+    const checkpoint = makeCheckpoint(checkpointId, "2026-07-08T01:00:02.000Z")
+    ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+      { id: "user-1", type: "human", content: "inspect the large result" },
+      {
+        id: "assistant-tool-call",
+        type: "ai",
+        content: "I will inspect it.",
+        tool_calls: [{ id: "call-fork", name: "inspect", args: { target: "large" } }]
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        tool_call_id: "call-fork",
+        name: "inspect",
+        content:
+          "Tool result too large, the result of this tool call call-fork was saved in the filesystem at this path: /large_tool_results/call-fork\nRead it in chunks."
+      },
+      { id: "assistant-final", type: "ai", content: "The inspection is complete." }
+    ]
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 3
+    })
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      historicalCheckpoint,
+      makeForkBoundaryMetadata(historicalCheckpointId, "assistant-old-final")
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: historicalCheckpointId
+        }
+      },
+      checkpoint,
+      makeForkBoundaryMetadata(checkpointId, "assistant-final")
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const sourceVerifier = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 3
+    })
+    const sourceTuple = await sourceVerifier.getTuple({
+      configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+    })
+    await sourceVerifier.close()
+    assert.equal(sourceTuple?.checkpoint.id, checkpointId)
+    assert.equal(
+      ((sourceTuple?.checkpoint.channel_values as { messages?: unknown[] }).messages ?? []).length,
+      4,
+      "native checkpoint reopen must hydrate the external tool-result transcript"
+    )
+
+    const sourceDataDirectory = await getProjectThreadDataDirectory(workspace, sourceThreadId)
+    const sourceLargeResultsDirectory = join(sourceDataDirectory, "large_tool_results")
+    const sourceLegacyLargeResultsDirectory = join(
+      workspace,
+      ".cmbdevclaw",
+      "large_tool_results"
+    )
+    await mkdir(sourceLargeResultsDirectory, { recursive: true })
+    await mkdir(sourceLegacyLargeResultsDirectory, { recursive: true })
+    await writeFile(join(sourceLargeResultsDirectory, "call-fork"), "complete fork evidence")
+    await writeFile(
+      join(sourceLegacyLargeResultsDirectory, "call-old"),
+      "historical legacy fork evidence"
+    )
+    await writeFile(join(sourceLargeResultsDirectory, "not-referenced"), "must not be copied")
+
+    const forked = await forkThread({ sourceThreadId, title: "Large result fork" })
+    targetThreadId = forked.thread.thread_id
+    const targetDataDirectory = await getProjectThreadDataDirectory(workspace, targetThreadId)
+    const copiedResultPath = join(targetDataDirectory, "large_tool_results", "call-fork")
+    const copiedHistoricalResultPath = join(targetDataDirectory, "large_tool_results", "call-old")
+    const unreferencedResultPath = join(targetDataDirectory, "large_tool_results", "not-referenced")
+
+    assert.equal(
+      await readFile(copiedResultPath, "utf8"),
+      "complete fork evidence",
+      "fork must copy the complete result referenced by its checkpoint"
+    )
+    assert.equal(
+      await readFile(copiedHistoricalResultPath, "utf8"),
+      "historical legacy fork evidence",
+      "fork must copy legacy results referenced only by an older retained checkpoint"
+    )
+    await assert.rejects(
+      access(unreferencedResultPath),
+      "fork must not copy large results outside the retained checkpoint history"
+    )
+
+    await rm(sourceDataDirectory, { recursive: true, force: true })
+    await rm(sourceLegacyLargeResultsDirectory, { recursive: true, force: true })
+    assert.equal(
+      await readFile(copiedResultPath, "utf8"),
+      "complete fork evidence",
+      "forked large results must remain readable after the source data is removed"
+    )
+    assert.equal(
+      await readFile(copiedHistoricalResultPath, "utf8"),
+      "historical legacy fork evidence",
+      "historical legacy fork results must remain readable after the source data is removed"
+    )
+  } finally {
+    if (targetThreadId) {
+      await closeCheckpointer(targetThreadId)
+      db.deleteThread(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
+    }
+    await closeCheckpointer(sourceThreadId)
+    db.deleteThread(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
+    await rm(workspace, { recursive: true, force: true })
     await db.closeDatabase()
   }
 }
@@ -1130,11 +1726,11 @@ async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void
     if (targetThreadId) {
       await closeCheckpointer(targetThreadId)
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     await closeCheckpointer(sourceThreadId)
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1142,6 +1738,7 @@ async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void
 async function testForkedBranchesRemainIndependentWhenForkedAgain(): Promise<void> {
   const db = await import("../src/main/db/index.ts")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
   const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
   const { forkThread } = await import("../src/main/ipc/threads.ts")
 
@@ -1290,8 +1887,9 @@ async function testForkedBranchesRemainIndependentWhenForkedAgain(): Promise<voi
   } finally {
     for (const threadId of [branchForkThreadId, sourceForkThreadId, branchThreadId, sourceThreadId]) {
       if (!threadId) continue
+      await closeCheckpointer(threadId)
       db.deleteThread(threadId)
-      deleteThreadCheckpoint(threadId)
+      await closeAndDeleteThreadCheckpoint(threadId, deleteThreadCheckpoint)
     }
     await db.closeDatabase()
   }
@@ -1325,6 +1923,8 @@ async function testInterruptedDurableTailForkIsConsistentAndComplete(): Promise<
       },
       {
         id: "assistant-tail",
+        provider_source_id: "reused-tail-provider",
+        provider_occurrence: 2,
         role: "assistant",
         content: "I will inspect the durable tail.",
         tool_calls: [{ id: "tail-tool-1", name: "inspect", args: { target: "tail" } }],
@@ -1405,12 +2005,32 @@ async function testInterruptedDurableTailForkIsConsistentAndComplete(): Promise<
     })
     await targetSaver.close()
     const targetMessages = (
-      targetTuple?.checkpoint.channel_values as { messages?: Array<{ id?: string }> } | undefined
+      targetTuple?.checkpoint.channel_values as
+        | {
+            messages?: Array<{
+              id?: string
+              additional_kwargs?: Record<string, unknown>
+            }>
+          }
+        | undefined
     )?.messages
     assert.deepEqual(
       targetMessages?.map((message) => message.id),
       ["user-1", "assistant-tail", "tool-tail"],
       "fork runtime checkpoint must contain the complete transcript"
+    )
+    const targetAssistantTail = targetMessages?.find(
+      (message) => message.id === "assistant-tail"
+    )
+    assert.equal(
+      targetAssistantTail?.additional_kwargs?.[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY],
+      "reused-tail-provider",
+      "fork runtime checkpoint must preserve durable-tail provider source identity"
+    )
+    assert.equal(
+      targetAssistantTail?.additional_kwargs?.[MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY],
+      2,
+      "fork runtime checkpoint must preserve durable-tail provider occurrence"
     )
     const targetRuntimeTail = await getDurableRuntimeTail(targetThreadId)
     assert.equal(
@@ -1430,10 +2050,10 @@ async function testInterruptedDurableTailForkIsConsistentAndComplete(): Promise<
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1558,10 +2178,10 @@ async function testUnsafeLatestDurableTailDoesNotHideHistoricalForks(): Promise<
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1618,10 +2238,10 @@ async function testForkLatestAllowsUserInterruptedPendingWritesBoundary(): Promi
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1672,7 +2292,7 @@ async function testForkLatestRejectsUnmarkedCheckpointAfterMarkerEra(): Promise<
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1710,7 +2330,7 @@ async function testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker(): Pr
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1773,7 +2393,7 @@ async function testForkOverrideValidationRejectsInconsistentTargetMetadata(): Pr
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1860,10 +2480,10 @@ async function testForkCopiesGoalStateAndEvents(): Promise<void> {
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1975,11 +2595,11 @@ async function testHistoricalForkDoesNotCopyFutureGoalStateAndEvents(): Promise<
     if (targetThreadId) {
       await closeCheckpointer(targetThreadId)
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     await closeCheckpointer(sourceThreadId)
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -2024,28 +2644,143 @@ async function testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint(): Pro
   assert.equal(merged[1].goal_id, "goal-1", "durable metadata should enrich checkpoint messages")
 }
 
+async function testSessionTranscriptMergeExcludesHiddenCoordinatorIdCollision(): Promise<void> {
+  const { mergeCheckpointAndPersistedThreadMessagesForSession } = await import(
+    "../src/main/ipc/threads.ts"
+  )
+  const sharedId = "hidden-coordinator-shared-id"
+  const checkpoint = makeCheckpoint("cp-hidden-coordinator-collision")
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    {
+      id: sharedId,
+      type: "human",
+      content: "hidden coordinator state",
+      additional_kwargs: { cmb_internal_coordinator_notification: true }
+    },
+    { id: sharedId, type: "ai", content: "visible assistant answer" }
+  ]
+
+  const merged = mergeCheckpointAndPersistedThreadMessagesForSession(checkpoint, [])
+
+  assert.deepEqual(
+    merged.map((message) => [message.role, message.content]),
+    [["assistant", "visible assistant answer"]],
+    "session export must filter checkpoint records by their exact raw occurrence"
+  )
+}
+
+async function testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence(): Promise<void> {
+  const { mergeCheckpointAndPersistedThreadMessagesForSession } = await import(
+    "../src/main/ipc/threads.ts"
+  )
+  const providerId = "session-reused-provider"
+  const stableId = "current-run-assistant:session-stable"
+  const guidedId = buildMessageSameRoleDuplicateId(providerId, "assistant", 3)
+  const checkpoint = makeCheckpoint("cp-current-run-provider-occurrence")
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: "session-user-1", type: "human", content: "first" },
+    { id: providerId, type: "ai", content: "old answer" },
+    { id: "session-user-2", type: "human", content: "second" },
+    {
+      id: stableId,
+      type: "ai",
+      content: "first final",
+      additional_kwargs: {
+        cmb_internal_provider_source_id: providerId,
+        cmb_internal_provider_occurrence: 2
+      }
+    },
+    { id: "session-user-3", type: "human", content: "guide" },
+    { id: providerId, type: "ai", content: "guided answer" }
+  ]
+  const persisted = [
+    { id: "session-user-1", role: "user", content: "first" },
+    { id: providerId, role: "assistant", content: "old answer" },
+    { id: "session-user-2", role: "user", content: "second" },
+    {
+      id: stableId,
+      provider_source_id: providerId,
+      provider_occurrence: 2,
+      role: "assistant",
+      content: "first final"
+    },
+    { id: "session-user-3", role: "user", content: "guide" },
+    {
+      id: guidedId,
+      provider_source_id: providerId,
+      provider_occurrence: 3,
+      role: "assistant",
+      content: "guided answer"
+    }
+  ].map((message, index) => ({
+    ...message,
+    created_at: new Date(`2026-07-22T02:00:0${index}.000Z`)
+  })) as Message[]
+
+  const merged = mergeCheckpointAndPersistedThreadMessagesForSession(checkpoint, persisted)
+
+  assert.equal(merged.length, 6, "session hydrate must not duplicate the guided provider reply")
+  assert.deepEqual(
+    merged.map((message) => [message.id, message.provider_occurrence ?? 1]),
+    [
+      ["session-user-1", 1],
+      [providerId, 1],
+      ["session-user-2", 1],
+      [stableId, 2],
+      ["session-user-3", 1],
+      [guidedId, 3]
+    ],
+    "checkpoint and DB transcripts must agree on completed and guided occurrences"
+  )
+}
+
 async function main(): Promise<void> {
   await withTempHome(async () => {
-    await testForkThreadCopiesCheckpointThreadRowAndTranscript()
-    await testInterruptedDurableTailForkIsConsistentAndComplete()
-    await testUnsafeLatestDurableTailDoesNotHideHistoricalForks()
-    await testForkLatestAllowsUserInterruptedPendingWritesBoundary()
-    await testForkLatestRejectsUnmarkedCheckpointAfterMarkerEra()
-    await testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker()
-    await testForkOverrideValidationRejectsInconsistentTargetMetadata()
-    await testForkCopiesGoalStateAndEvents()
-    await testHistoricalForkDoesNotCopyFutureGoalStateAndEvents()
-    await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
-    await testResolveMessageForkReturnsNewestStableCheckpoint()
-    await testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId()
-    await testResolveMessageForkMatchesSparseToolAssistantSnapshot()
-    await testResolveMessageForkUsesCheckpointModeForInterruptedToolTail()
-    await testResolveAndForkLegacyMessageBeforeFirstMarker()
-    await testUnmarkedCheckpointBetweenMarkersIsNotForkable()
-    await testResolveMessageForkSkipsHiddenRawTailCheckpoint()
-    await testForkWaitsForQueuedRendererThreadMutations()
-    await testForkThreadCopiesHistoricalForkableCheckpoints()
-    await testForkedBranchesRemainIndependentWhenForkedAgain()
+    const { setLegacySubagentMigrationParserForTests } = await import(
+      "../src/main/legacy-subagent-migration/coordinator.ts"
+    )
+    const restoreMigrationParser = setLegacySubagentMigrationParserForTests({
+      async parse() {
+        return {
+          inputBytes: 0,
+          batchCount: 0,
+          rowCount: 0,
+          maxBatchBytes: 0,
+          maxResponseBytes: 0,
+          finalization: "absent"
+        }
+      }
+    })
+    try {
+      await testForkThreadCopiesCheckpointThreadRowAndTranscript()
+      await testForkCopiesOnlyReferencedLargeToolResults()
+      await testInterruptedDurableTailForkIsConsistentAndComplete()
+      await testUnsafeLatestDurableTailDoesNotHideHistoricalForks()
+      await testForkLatestAllowsUserInterruptedPendingWritesBoundary()
+      await testForkLatestRejectsUnmarkedCheckpointAfterMarkerEra()
+      await testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker()
+      await testForkOverrideValidationRejectsInconsistentTargetMetadata()
+      await testForkCopiesGoalStateAndEvents()
+      await testHistoricalForkDoesNotCopyFutureGoalStateAndEvents()
+      await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
+      await testSessionTranscriptMergeExcludesHiddenCoordinatorIdCollision()
+      await testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence()
+      await testResolveMessageForkReturnsNewestStableCheckpoint()
+      await testResolveAndForkRoleCollisionAssistantBoundary()
+      await testResolveAndForkSameRoleDuplicateAssistantBoundary()
+      await testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId()
+      await testResolveMessageForkMatchesSparseToolAssistantSnapshot()
+      await testResolveMessageForkUsesCheckpointModeForInterruptedToolTail()
+      await testResolveAndForkLegacyMessageBeforeFirstMarker()
+      await testUnmarkedCheckpointBetweenMarkersIsNotForkable()
+      await testResolveMessageForkSkipsHiddenRawTailCheckpoint()
+      await testForkWaitsForQueuedRendererThreadMutations()
+      await testQueuedRendererPersistenceRejectsSameIdReplacement()
+      await testForkThreadCopiesHistoricalForkableCheckpoints()
+      await testForkedBranchesRemainIndependentWhenForkedAgain()
+    } finally {
+      restoreMigrationParser()
+    }
   })
   console.log("thread-fork-handler.spec.ts passed")
 }

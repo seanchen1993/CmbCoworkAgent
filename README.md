@@ -80,6 +80,10 @@ flowchart LR
 | `src/main/db/index.ts` | sql.js 线程元数据存储 |
 | `src/renderer/src/App.tsx` | 顶层布局（Thread / Kanban / Customize） |
 | `src/renderer/src/components/customize/*` | 自定义中心各能力面板 |
+| `docs/chatx-im-robot-api-compact-reference.md` | 招乎 IM 机器人接口能力精简参考，供 Agent 和开发快速检索 |
+| `docs/chatx-unified-builtin-robot-v1-design.md` | ChatX 统一内置机器人 V1 架构、协议、安全与 clean-cut 改造方案 |
+| `docs/chatx-project-feature-binding-v1-design.md` | 统一机器人绑定 Project Mode Feature 的领域模型、运行链路与生命周期设计 |
+| `docs/chatx-unified-bot-collaboration-brief.md` | ChatX 方案的多智能体协作上下文、并行评审任务与交付模板 |
 | `docs/claude-code-push-commit-tech-reference.md` | Claude Code `commit/push` 技术方案分析与本项目落地参考 |
 
 ## 数据存储
@@ -96,6 +100,8 @@ flowchart LR
 - `chatx-config.json`：机器人配置
 - `sandbox-settings.json` + `approval-rules.json`：沙箱模式与审批规则
 - `memory/`：记忆文件与索引
+- `traces/`：默认使用系统用户密钥加密的 Agent Trace；机制与配置见 [Trace 本地存储安全](docs/trace-local-storage-security.md)
+- `logs/`、`hooks/log/`：统一执行敏感字段脱敏；规则见 [本地日志敏感信息脱敏](docs/log-redaction-security.md)
 
 ## 项目结构
 
@@ -170,10 +176,12 @@ npm run dist
 | `VITE_CHATX_HTTP_URL` | ChatX HTTP 回调地址 |
 | `VITE_CHATX_CHANNEL` | ChatX channel |
 | `VITE_CHATX_CALLBACK_URL` | 机器人平台回调地址基址 |
+| `VITE_UNIFIED_IM_GATEWAY_WS_URL` | 内置统一机器人 Desktop WSS 默认地址，当前为 `wss://devclaw-im-gateway.paasst.cmbchina.cn/ws/desktop`；联调时可在 App 的“联调信息”中覆盖 |
 | `VITE_LOGIN_PT` | 登录环境标识 |
 | `VITE_INTRUCTION_URL` | 使用说明地址（前端展示） |
 | `VITE_APP_DOWNLOAD_URL` | 应用下载地址（前端展示） |
 | `VITE_CONSOLE_LOG_DEFAULT_ON` | DevTools Console 日志默认开关（`true/1/on/yes` 为开启） |
+| `CMB_COWORK_TRACE_STORAGE_MODE` | Trace 本地存储模式：`encrypted`（默认）、`off`、`plaintext`（仅限隔离测试数据） |
 
 ## 安全建议
 
@@ -181,6 +189,7 @@ npm run dist
 2. 对 `git push --force`、删除类命令、脚本下载执行类命令保持人工审批。
 3. 工作区建议使用独立目录，避免将敏感目录直接暴露给 Agent。
 4. 定时任务与远端机器人建议最小权限配置（模型、目录、连接器按需开通）。
+5. 本地日志默认对身份证号、手机号、邮箱、银行卡和凭据字段脱敏，机制与边界见 [本地日志敏感信息脱敏](docs/log-redaction-security.md)。
 
 ## License
 

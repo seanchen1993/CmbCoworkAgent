@@ -13,8 +13,10 @@ import type {
   DashboardCommitAdoptionEvents,
   DashboardCommitAdoptionPair,
   DashboardCommitDetail,
-  DashboardLocalGenAdoptionLines
+  DashboardLocalGenAdoptionLines,
+  DashboardLocalGeneratedLineStatus
 } from "./use-dashboard"
+import { shouldShowSupersededFallback } from "./commit-adoption-trace-logic"
 
 const TRACE_COLSPAN = 7
 
@@ -151,6 +153,59 @@ function VerdictBadge({
   )
 }
 
+const GENERATED_STATUS_META: Record<
+  DashboardLocalGeneratedLineStatus,
+  { label: string; cls: string; rowCls: string }
+> = {
+  adopted: {
+    label: "已采纳",
+    cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+    rowCls: "bg-emerald-500/15"
+  },
+  not_adopted: {
+    label: "未采纳",
+    cls: "bg-rose-500/10 text-rose-600 dark:text-rose-400",
+    rowCls: "bg-rose-500/10"
+  },
+  superseded_by_agent: {
+    label: "Agent 覆盖",
+    cls: "bg-muted text-muted-foreground",
+    rowCls: "bg-muted/40 text-muted-foreground"
+  },
+  deleted: {
+    label: "已删除",
+    cls: "bg-muted text-muted-foreground",
+    rowCls: "bg-muted/30 text-muted-foreground"
+  },
+  unknown: {
+    label: "未知",
+    cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+    rowCls: "bg-amber-500/10"
+  }
+}
+
+function generatedStatusMeta(status: DashboardLocalGeneratedLineStatus): {
+  label: string
+  cls: string
+  rowCls: string
+} {
+  return GENERATED_STATUS_META[status]
+}
+
+function SupersededLocalFallback({ reason }: { reason: string | null }): React.JSX.Element {
+  const removedByAgent = reason === "agent_rm"
+  return (
+    <div className="px-2 py-3 text-xs text-muted-foreground">
+      {removedByAgent
+        ? "该生成所在文件已被 agent 删除（rm），原稿作废，逐行从略。"
+        : "该生成已被后续整文件重写覆盖，原稿作废，逐行从略。"}
+      <div className="mt-1 text-[10px] text-muted-foreground/80">
+        其有效/采纳均计 0，不影响该 commit 的采纳率分母。
+      </div>
+    </div>
+  )
+}
+
 function LocalLinesPanel({
   loading,
   error,
@@ -182,6 +237,52 @@ function LocalLinesPanel({
   }
   const generated = data.generatedLineCount ?? 0
   const matched = data.matchedLineCount ?? 0
+  const effective = data.effectiveLineCount ?? generated
+  const notAdopted = data.notAdoptedLineCount ?? Math.max(0, generated - matched)
+  const superseded = data.supersededLineCount ?? 0
+  if (data.generatedLines && data.generatedLines.length > 0) {
+    return (
+      <div className="space-y-2 px-2 py-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+          <span className="font-mono text-foreground" title={data.relPath}>
+            {data.relPath}
+          </span>
+          <span>生成 {generated} 行</span>
+          <span>有效 {effective} 行</span>
+          <span className="text-emerald-600 dark:text-emerald-400">采纳 {matched} 行</span>
+          {notAdopted > 0 ? (
+            <span className="text-rose-600 dark:text-rose-400">未采纳 {notAdopted} 行</span>
+          ) : null}
+          {superseded > 0 ? <span>Agent 覆盖 {superseded} 行</span> : null}
+        </div>
+        <div className="max-h-[360px] overflow-auto rounded-md border border-border bg-muted/20">
+          <div className="min-w-max font-mono text-[11px] leading-relaxed">
+            {data.generatedLines.map((line) => {
+              const meta = generatedStatusMeta(line.status)
+              return (
+                <div key={line.lineNumber} className={`flex ${meta.rowCls}`}>
+                  <span className="w-10 shrink-0 select-none px-2 text-right text-muted-foreground/60">
+                    {line.lineNumber}
+                  </span>
+                  <span className="w-20 shrink-0 px-2">
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] ${meta.cls}`}>
+                      {meta.label}
+                    </span>
+                  </span>
+                  <span className="whitespace-pre px-2 text-foreground/85">{line.text || " "}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+        {data.truncated ? (
+          <div className="text-[10px] text-muted-foreground">
+            生成明细较大，已截断展示前 {(data.generatedLines ?? []).length.toLocaleString()} 行。
+          </div>
+        ) : null}
+      </div>
+    )
+  }
   const unmatched = Math.max(0, generated - matched)
   return (
     <div className="space-y-2 px-2 py-2">
@@ -210,7 +311,9 @@ function LocalLinesPanel({
         </div>
       </div>
       {data.truncated ? (
-        <div className="text-[10px] text-muted-foreground">文件较大，已截断展示前 4000 行。</div>
+        <div className="text-[10px] text-muted-foreground">
+          文件较大，已截断展示前 {(data.lines ?? []).length.toLocaleString()} 行。
+        </div>
       ) : null}
     </div>
   )
@@ -227,7 +330,6 @@ function TracePairRow({
 }): React.JSX.Element {
   const rate = pairRate(pair)
   const isSuperseded = pair.verdict === "superseded"
-  const supersededByAgentRm = isSuperseded && pair.reason === "agent_rm"
   // Superseded drafts are *expected* 0-adopt (their file was rewritten), so don't
   // flag them with the rose "generated-but-not-adopted" treatment.
   const zeroAdopted =
@@ -243,13 +345,16 @@ function TracePairRow({
   const [localLoading, setLocalLoading] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
   const [fetched, setFetched] = useState(false)
+  const showSupersededFallback = shouldShowSupersededFallback(
+    pair.verdict,
+    fetched,
+    localData?.source
+  )
 
   const toggle = (): void => {
     const next = !expanded
     setExpanded(next)
-    // Superseded drafts have no meaningful per-line view (the file was fully
-    // rewritten); the expanded panel shows a static note instead of fetching.
-    if (!next || fetched || !canTrace || isSuperseded) return
+    if (!next || fetched || !canTrace) return
     const api = window.api?.adoption
     if (!api || typeof api.commitLines !== "function") {
       setLocalError("当前环境不支持本地逐行溯源")
@@ -370,15 +475,8 @@ function TracePairRow({
       {expanded ? (
         <tr className="border-b border-border/60 bg-muted/10">
           <td colSpan={TRACE_COLSPAN} className="px-3 pb-3">
-            {isSuperseded ? (
-              <div className="px-2 py-3 text-xs text-muted-foreground">
-                {supersededByAgentRm
-                  ? "该生成所在文件已被 agent 删除（rm），原稿作废，逐行从略。"
-                  : "该生成已被后续整文件重写覆盖，原稿作废，逐行从略。"}
-                <div className="mt-1 text-[10px] text-muted-foreground/80">
-                  其有效/采纳均计 0，不影响该 commit 的采纳率分母。
-                </div>
-              </div>
+            {showSupersededFallback ? (
+              <SupersededLocalFallback reason={pair.reason} />
             ) : (
               <LocalLinesPanel loading={localLoading} error={localError} data={localData} />
             )}

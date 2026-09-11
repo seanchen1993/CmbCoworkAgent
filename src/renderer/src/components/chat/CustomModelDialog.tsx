@@ -9,8 +9,14 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import {
+  calculateSummarizationKeepTokens,
+  calculateSummarizationTriggerTokens,
+  MODEL_INPUT_SAFETY_BUFFER_TOKENS
+} from "../../../../shared/model-token-budget"
 
 interface CustomModelDialogProps {
   open: boolean
@@ -19,7 +25,7 @@ interface CustomModelDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-type ThinkingEffort = "high" | "max"
+type ThinkingEffort = "low" | "high" | "max"
 
 interface CustomConfig {
   id?: string
@@ -95,6 +101,7 @@ const FALLBACK_LIMITS: TokenLimits = {
 
 const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
 const THINKING_EFFORT_OPTIONS: Array<{ value: ThinkingEffort; label: string }> = [
+  { value: "low", label: "Low" },
   { value: "high", label: "High" },
   { value: "max", label: "Max" }
 ]
@@ -179,7 +186,8 @@ function configFromItem(item: CustomModelItem, limits: TokenLimits): CustomConfi
     temperatureInput: String(item.temperature ?? limits.defaultTemperature),
     topPInput: String(item.topP ?? limits.defaultTopP),
     topKInput: String(item.topK ?? limits.defaultTopK),
-    interleavedThinking: item.interleavedThinking ?? defaultInterleavedThinkingForModel(item.model),
+    interleavedThinking:
+      defaultInterleavedThinkingForModel(item.model) && (item.interleavedThinking ?? true),
     enableThinking: item.enableThinking === true,
     enableThinkingEffort: item.enableThinkingEffort === true,
     thinkingEffort: item.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
@@ -228,6 +236,24 @@ function getMaxOutputTokensError(value: string, limits: TokenLimits): string | n
     return `最大 Tokens 必须在 ${limits.minMaxOutputTokens.toLocaleString()} 到 ${limits.maxMaxOutputTokens.toLocaleString()} 之间`
   }
   return null
+}
+
+function getTokenBudgetError(maxTokensValue: string, maxOutputTokensValue: string): string | null {
+  const maxTokens = parseMaxTokens(maxTokensValue)
+  const maxOutputTokens = parseMaxOutputTokens(maxOutputTokensValue)
+  if (maxTokens === null || maxOutputTokens === null) return null
+
+  try {
+    calculateSummarizationTriggerTokens(maxTokens, maxOutputTokens)
+    return null
+  } catch {
+    const keepTokens = calculateSummarizationKeepTokens(maxTokens)
+    const maxAllowedOutput = Math.max(
+      maxTokens - MODEL_INPUT_SAFETY_BUFFER_TOKENS - keepTokens - 1,
+      0
+    )
+    return `最大 Tokens 过大：当前上下文窗口下最多为 ${maxAllowedOutput.toLocaleString()}，需预留 ${keepTokens.toLocaleString()} Tokens 的近期上下文及 ${MODEL_INPUT_SAFETY_BUFFER_TOKENS.toLocaleString()} Tokens 的安全空间`
+  }
 }
 
 function parseTemperature(value: string): number | null {
@@ -373,6 +399,10 @@ export function CustomModelDialog({
 
   const maxTokensError = getMaxTokensError(config.maxTokensInput, tokenLimits)
   const maxOutputTokensError = getMaxOutputTokensError(config.maxOutputTokensInput, tokenLimits)
+  const tokenBudgetError =
+    maxTokensError || maxOutputTokensError
+      ? null
+      : getTokenBudgetError(config.maxTokensInput, config.maxOutputTokensInput)
   const temperatureError = getTemperatureError(config.temperatureInput, tokenLimits)
   const topPError = getTopPError(config.topPInput, tokenLimits)
   const topKError = getTopKError(config.topKInput, tokenLimits)
@@ -393,6 +423,7 @@ export function CustomModelDialog({
     (hasExistingKey || config.apiKey.trim()) &&
     !maxTokensError &&
     !maxOutputTokensError &&
+    !tokenBudgetError &&
     !temperatureError &&
     !topPError &&
     !topKError &&
@@ -465,6 +496,7 @@ export function CustomModelDialog({
     if (!canSave) {
       if (maxTokensError) setFormError(maxTokensError)
       else if (maxOutputTokensError) setFormError(maxOutputTokensError)
+      else if (tokenBudgetError) setFormError(tokenBudgetError)
       else if (temperatureError) setFormError(temperatureError)
       else if (topPError) setFormError(topPError)
       else if (topKError) setFormError(topKError)
@@ -776,9 +808,10 @@ export function CustomModelDialog({
                         model: nextModel,
                         ...(shouldUseNextSamplingDefault ? nextSamplingDefault : {}),
                         interleavedThinking:
-                          c.interleavedThinking === currentInterleavedDefault
+                          nextInterleavedDefault &&
+                          (c.interleavedThinking === currentInterleavedDefault
                             ? nextInterleavedDefault
-                            : c.interleavedThinking,
+                            : c.interleavedThinking),
                         enableThinking:
                           c.enableThinking === currentEnableThinkingDefault
                             ? nextEnableThinkingDefault
@@ -835,6 +868,9 @@ export function CustomModelDialog({
                   />
                   {maxOutputTokensError && (
                     <p className="text-xs text-destructive">{maxOutputTokensError}</p>
+                  )}
+                  {tokenBudgetError && (
+                    <p className="text-xs text-destructive">{tokenBudgetError}</p>
                   )}
                 </div>
 
@@ -939,9 +975,9 @@ export function CustomModelDialog({
                       config.enableThinking ? "bg-primary" : "bg-muted-foreground/30"
                     )}
                   >
-                    <span
+                    <ToggleThumb
                       className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        "inline-block size-4",
                         config.enableThinking ? "translate-x-4" : "translate-x-0"
                       )}
                     />
@@ -977,9 +1013,9 @@ export function CustomModelDialog({
                           : "cursor-pointer bg-muted-foreground/30"
                     )}
                   >
-                    <span
+                    <ToggleThumb
                       className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        "inline-block size-4",
                         config.enableThinking && config.enableThinkingEffort
                           ? "translate-x-4"
                           : "translate-x-0"
@@ -1012,40 +1048,42 @@ export function CustomModelDialog({
                 </div>
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">交错思考</label>
-                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
-                  <div>
-                    <div className="text-sm text-foreground">
-                      {config.interleavedThinking ? "已开启" : "已关闭"}
+              {defaultInterleavedThinkingForModel(config.model) && (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">交错思考</label>
+                  <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                    <div>
+                      <div className="text-sm text-foreground">
+                        {config.interleavedThinking ? "已开启" : "已关闭"}
+                      </div>
                     </div>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={config.interleavedThinking}
-                    disabled={!config.enableThinking}
-                    onClick={() =>
-                      setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
-                    }
-                    className={cn(
-                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
-                      !config.enableThinking
-                        ? "cursor-not-allowed bg-muted-foreground/20"
-                        : config.interleavedThinking
-                          ? "cursor-pointer bg-primary"
-                          : "cursor-pointer bg-muted-foreground/30"
-                    )}
-                  >
-                    <span
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={config.interleavedThinking}
+                      disabled={!config.enableThinking}
+                      onClick={() =>
+                        setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
+                      }
                       className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
-                        config.interleavedThinking ? "translate-x-4" : "translate-x-0"
+                        "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
+                        !config.enableThinking
+                          ? "cursor-not-allowed bg-muted-foreground/20"
+                          : config.interleavedThinking
+                            ? "cursor-pointer bg-primary"
+                            : "cursor-pointer bg-muted-foreground/30"
                       )}
-                    />
-                  </button>
+                    >
+                      <ToggleThumb
+                        className={cn(
+                          "inline-block size-4",
+                          config.interleavedThinking ? "translate-x-4" : "translate-x-0"
+                        )}
+                      />
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">智能路由档位</label>
@@ -1099,9 +1137,9 @@ export function CustomModelDialog({
                           : "cursor-pointer bg-muted-foreground/30"
                     )}
                   >
-                    <span
+                    <ToggleThumb
                       className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        "inline-block size-4",
                         isDefaultModel ? "translate-x-4" : "translate-x-0"
                       )}
                     />
@@ -1156,7 +1194,7 @@ export function CustomModelDialog({
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="ml-auto shrink-0 h-6 px-2 text-xs border-blue-500/50 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700"
+                    className="ml-auto h-6 shrink-0 border-primary/50 px-2 text-xs text-primary hover:bg-primary/10 hover:text-primary/80"
                     onClick={handleTest}
                     disabled={!canTest || testing || saving || deleting}
                   >

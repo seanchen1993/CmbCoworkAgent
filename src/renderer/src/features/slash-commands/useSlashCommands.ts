@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react"
 import type { SkillMetadata } from "@/types"
 import { isGoalClearAlias, splitGoalTransportPayload } from "../../../../shared/goal-slash"
+import { BUILTIN_BROWSER_COMMAND } from "../builtin-browser/builtin-browser"
 
 export type SlashCommandItem = {
   id: string
@@ -30,7 +31,8 @@ const GENERAL_SLASH_COMMANDS: SlashCommandItem[] = [
     description: "设置可验收的长期任务；完成前会自动继续，/goal 查看状态",
     insertText: "/goal ",
     keywords: ["goal", "目标", "长期任务", "自动续跑", "完成条件"]
-  }
+  },
+  BUILTIN_BROWSER_COMMAND
 ]
 
 export function isGoalSlashCommandInput(input: string): boolean {
@@ -139,10 +141,11 @@ export function buildSlashPopoverMode(params: {
   input: string
   skills: SkillMetadata[]
   skillSelected: boolean
+  browserSelected?: boolean
 }): PopoverMode {
-  const { input, skills, skillSelected } = params
+  const { input, skills, skillSelected, browserSelected = false } = params
 
-  if (skillSelected) return { kind: "closed" }
+  if (skillSelected || browserSelected) return { kind: "closed" }
   if (!input.startsWith("/")) return { kind: "closed" }
 
   const filter = input.slice(1).toLowerCase()
@@ -173,13 +176,14 @@ export function useSlashCommands(params: {
   input: string
   skills: SkillMetadata[]
   skillSelected: boolean
+  browserSelected?: boolean
 }) {
-  const { input, skills, skillSelected } = params
+  const { input, skills, skillSelected, browserSelected = false } = params
   const [selectedIdx, setSelectedIdx] = useState(0)
 
   const mode = useMemo<PopoverMode>(() => {
-    return buildSlashPopoverMode({ input, skills, skillSelected })
-  }, [input, skills, skillSelected])
+    return buildSlashPopoverMode({ input, skills, skillSelected, browserSelected })
+  }, [input, skills, skillSelected, browserSelected])
 
   // Reset highlight to top whenever the popover (re-)opens or the filter changes,
   // so pressing Enter right after typing never selects a stale carry-over item.
