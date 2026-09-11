@@ -1467,7 +1467,11 @@ function App(): React.JSX.Element {
                     id="harness-sidebar-portal"
                     data-app-route-control
                     style={{ width: leftWidth }}
-                    className={browserFullscreen ? "hidden" : "relative z-[60] shrink-0"}
+                    className={
+                      browserFullscreen
+                        ? "hidden"
+                        : "relative z-[60] flex h-full min-h-0 shrink-0 flex-col"
+                    }
                   />
                   {!browserFullscreen && <ResizeHandle onDrag={handleLeftResize} />}
                 </>
