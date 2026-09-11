@@ -22,6 +22,7 @@ import {
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
 import { mergeStreamToolCallArgs } from "../../shared/stream-tool-call-chunks"
+import { isInternalNotificationMessage } from "../../shared/checkpoint-transcript"
 
 // ---------------------------------------------------------------------------
 // Standardised event types broadcast from scheduler → renderer
@@ -244,28 +245,36 @@ function convertValuesMessages(
   messages: readonly SerializedMsg[],
   messageIndexOffset: number
 ): Extract<SchedulerEvent, { type: "turn-messages" }>["messages"] {
-  return messages.map((message, index) => {
-    const kwargs = (message.kwargs || {}) as Record<string, unknown>
-    const className = getClassName(message)
+  // Filtered after mapping, so an internal turn does not shift the fallback ids
+  // of the messages around it. Transcript hydration drops these too; a live view
+  // that kept them showed the notification prompt as a user bubble until the
+  // next reload silently removed it.
+  return messages
+    .map((message, index) => {
+      const kwargs = (message.kwargs || {}) as Record<string, unknown>
+      const className = getClassName(message)
 
-    let role: "user" | "assistant" | "tool" | "system" = "assistant"
-    if (className.includes("Human")) role = "user"
-    else if (className.includes("Tool")) role = "tool"
-    else if (className.includes("System")) role = "system"
+      let role: "user" | "assistant" | "tool" | "system" = "assistant"
+      if (className.includes("Human")) role = "user"
+      else if (className.includes("Tool")) role = "tool"
+      else if (className.includes("System")) role = "system"
 
-    const reasoning = role === "assistant" ? extractVisibleReasoning(kwargs) : ""
-    return {
-      id: (kwargs.id as string) || `msg-${messageIndexOffset + index}`,
-      role,
-      content: extractContent(kwargs.content ?? message.content),
-      ...(reasoning ? { reasoning } : {}),
-      tool_calls: kwargs.tool_calls as unknown[] | undefined,
-      ...(role === "tool" && kwargs.tool_call_id
-        ? { tool_call_id: kwargs.tool_call_id as string }
-        : {}),
-      ...(role === "tool" && kwargs.name ? { name: kwargs.name as string } : {})
-    }
-  })
+      const reasoning = role === "assistant" ? extractVisibleReasoning(kwargs) : ""
+      return {
+        id: (kwargs.id as string) || `msg-${messageIndexOffset + index}`,
+        role,
+        content: extractContent(kwargs.content ?? message.content),
+        ...(reasoning ? { reasoning } : {}),
+        tool_calls: kwargs.tool_calls as unknown[] | undefined,
+        ...(role === "tool" && kwargs.tool_call_id
+          ? { tool_call_id: kwargs.tool_call_id as string }
+          : {}),
+        ...(role === "tool" && kwargs.name ? { name: kwargs.name as string } : {}),
+        internalNotification: isInternalNotificationMessage(message)
+      }
+    })
+    .filter((message) => !message.internalNotification)
+    .map(({ internalNotification: _internalNotification, ...message }) => message)
 }
 
 const SUBAGENT_NAME_MAP: Record<string, string> = {
