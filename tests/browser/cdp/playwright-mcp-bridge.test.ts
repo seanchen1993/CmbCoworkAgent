@@ -59,6 +59,7 @@ function browserState(visible: boolean, created = true): BrowserState {
     isLoading: false,
     canGoBack: false,
     canGoForward: false,
+    zoomFactor: 1,
     visible,
     created,
     consoleEntries: []

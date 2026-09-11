@@ -81,10 +81,7 @@ function registerBrowserRendererLifecycleIpc({
       return
     }
 
-    const disposedSessionId = browserService.disposeAll()
-    console.info(
-      `${BROWSER_SERVICE_LOG_PREFIX} Renderer unload cleanup requested by sender ${event.sender.id}; disposed=${disposedSessionId ?? "(none)"}.`
-    )
+    browserService.disposeAll()
   })
 }
 
@@ -99,6 +96,10 @@ function registerBrowserControlIpc({ browserService, ipcMain }: BrowserIpcContex
 
   ipcMain.handle("browser:setBounds", (_event, bounds: BrowserBounds, visible?: boolean) => {
     return browserService.setBounds(bounds, visible)
+  })
+
+  ipcMain.handle("browser:setZoomFactor", (_event, zoomFactor: number) => {
+    return browserService.setZoomFactor(zoomFactor)
   })
 
   ipcMain.handle(

@@ -503,7 +503,6 @@ function disposeBrowserServiceForMainWindow(reason: string): void {
   disposeBuiltinBrowserForMainWindowEvent({
     browserService,
     isAppQuitting: isAppQuitting(),
-    logPrefix: MAIN_BROWSER_LOG_PREFIX,
     reason
   })
 }
@@ -1595,10 +1594,7 @@ if (browserNativeMessagingHostLaunch) {
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)
-    const disposeBuiltinBrowserAfterAppCleanup = beginBuiltinBrowserAppQuitCleanup(
-      browserService,
-      MAIN_BROWSER_LOG_PREFIX
-    )
+    const disposeBuiltinBrowserAfterAppCleanup = beginBuiltinBrowserAppQuitCleanup(browserService)
     browserService = null
     disposeAllTerminals()
     LocalSandbox.killAll()
