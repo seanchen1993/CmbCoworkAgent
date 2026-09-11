@@ -2421,9 +2421,12 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   // The session export drops ONLY the new workflow notification plumbing.
   // Coordinator export keeps its HEAD behavior verbatim — this feature must not
   // alter what an existing coordinator session exports.
-  assertIncludes(
+  // Matched loosely on the call, not on the whole condition: the guard grew a
+  // `!complete &&` and the exact-text form then failed for a reason that had
+  // nothing to do with the property it guards.
+  assertMatches(
     threadsIpc,
-    "if (isWorkflowPlumbingTranscriptContent(rawContent)) return []",
+    /if \((?:[^)]*&&\s*)?isWorkflowPlumbingTranscriptContent\(rawContent\)\) return \[\]/,
     "session export filters workflow plumbing messages"
   )
   // Guard against regressing coordinator: the export filter must NOT match
