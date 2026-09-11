@@ -79,6 +79,7 @@ type CreateRequirementPayload = {
     sourcePath?: string
     url?: string
     content?: string
+    bytes?: ArrayBuffer
     initialDescription?: string
   }
 }
@@ -572,6 +573,11 @@ async function createRequirement(
     if (typeof source.content === "string") {
       validateTextContent(source.content, "需求内容")
       await fs.writeFile(sourcePath, source.content, "utf-8")
+    } else if (source.bytes) {
+      const buffer = Buffer.from(source.bytes)
+      if (buffer.byteLength === 0) throw new Error("选择的需求草稿内容为空")
+      if (buffer.byteLength > MAX_TEXT_BYTES) throw new Error("需求草稿超过 5MB 限制")
+      await fs.writeFile(sourcePath, buffer)
     } else if (source.sourcePath?.trim()) {
       const sourceStat = await fs.stat(source.sourcePath)
       if (!sourceStat.isFile()) throw new Error("选择的需求草稿不是文件")

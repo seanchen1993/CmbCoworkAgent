@@ -4852,6 +4852,7 @@ const api = {
         sourcePath?: string
         url?: string
         content?: string
+        bytes?: ArrayBuffer
         initialDescription?: string
       }
     }) =>

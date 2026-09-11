@@ -1618,24 +1618,6 @@ export function SkillsPanel(): React.JSX.Element {
           extra_json: item.extra_json
         }
       }
-      // 临时 mock 注入，用于验证「有更新」提示
-      if (import.meta.env.DEV) {
-        const mockName = "requirement-to-prd"
-        const mockNormalized = normalizeSkillName(mockName)
-        if (!next[mockNormalized]) {
-          next[mockNormalized] = {
-            name: mockName,
-            chinese_name: "需求转PRD",
-            category: "研发类场景/应用类研发",
-            description: "将需求描述转换为结构化 PRD 文档的技能，支持字段拆解、验收点整理和优先级标注。",
-            featured: "",
-            guidance: "可直接提问：帮我把这段需求描述转换为结构化 PRD。",
-            user_id: "10010001",
-            version: "1.2.0",
-            extra_json: JSON.stringify({ grayUserIds: ["10010001"] })
-          }
-        }
-      }
       setMarketSkillMap(next)
     } catch (e) {
       console.warn("[SkillsPanel] Failed to load market skills:", e)

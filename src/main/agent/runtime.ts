@@ -4618,6 +4618,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     soloTaskTraceManager,
     disableSubagents = false,
     allowedSkillNames,
+    allowedExpertNames,
     disableMcpTools = false,
     blockedToolNames = [],
     onHookResult,
@@ -4689,6 +4690,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // and every leaf runtime through the existing mainSubagentsEnabled policy.
   const projectModeTaskSubagentConfig =
     runtimePolicy.isProjectMode && mainSubagentsEnabled ? subagentConfig : undefined
+  // Session-scoped expert allowlist. Requirement conversations persist
+  // `allowedExperts` in thread metadata; undefined keeps the full registry.
+  const sessionAllowedExpertNames =
+    allowedExpertNames ?? parseAllowedNames(runtimeThreadMetadata, "allowedExperts")
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -4782,18 +4787,21 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return undefined
     }
   }
-  const registrySubagentSpecs = mainSubagentsEnabled
-    ? (await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)).map(
-        (profile) => ({
-          name: profile.name,
-          description: profile.description,
-          systemPrompt: profile.systemPrompt,
-          disallowedTools: profile.disallowedTools,
-          shellAccess: profile.shellAccess,
-          model: resolveRegistryModelInstance(profile.model)
-        })
-      )
+  const allRegistryProfiles = mainSubagentsEnabled
+    ? await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)
     : []
+  const registryProfiles =
+    sessionAllowedExpertNames === undefined
+      ? allRegistryProfiles
+      : allRegistryProfiles.filter((profile) => sessionAllowedExpertNames.includes(profile.name))
+  const registrySubagentSpecs = registryProfiles.map((profile) => ({
+    name: profile.name,
+    description: profile.description,
+    systemPrompt: profile.systemPrompt,
+    disallowedTools: profile.disallowedTools,
+    shellAccess: profile.shellAccess,
+    model: resolveRegistryModelInstance(profile.model)
+  }))
 
   const checkpointer = await getCheckpointer(threadId)
   console.log("[Runtime] Checkpointer ready for thread:", threadId)
@@ -6712,7 +6720,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent:
-      !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
+      sessionAllowedExpertNames === undefined &&
+      !isCoordinatorMode &&
+      isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
     skills: mainSkillSources,
     allowedSkillRootDirs,
     memory: mainMemorySources,

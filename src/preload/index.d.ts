@@ -2365,6 +2365,7 @@ interface CustomAPI {
         sourcePath?: string
         url?: string
         content?: string
+        bytes?: ArrayBuffer
         initialDescription?: string
       }
     }) => Promise<{

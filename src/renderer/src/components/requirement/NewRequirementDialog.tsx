@@ -29,6 +29,7 @@ import {
   normalizeMarketVersion
 } from "../customize/MarketPanel/MarketUpdateBadge"
 import { fromPersistedRequirement, type RequirementRecord } from "./requirement-data"
+import { MAX_ATTACHMENT_FILE_BYTES } from "../../../../shared/file-attachment"
 import {
   enableRequirementSessionExperts,
   getRequirementSessionCapabilities,
@@ -166,6 +167,10 @@ export function NewRequirementDialog({
       toast.error("仅支持 .docx 格式的需求草稿")
       return
     }
+    if (nextFile && nextFile.size > MAX_ATTACHMENT_FILE_BYTES) {
+      toast.error("需求草稿超过 5MB 限制")
+      return
+    }
     setFile(nextFile)
     const nextAutoFilledTitle = nextFile ? getRequirementTitleFromFileName(nextFile.name) : ""
     setTitle((currentTitle) => {
@@ -207,16 +212,23 @@ export function NewRequirementDialog({
     try {
       setPreparingSkill(true)
       const capabilities = getRequirementSessionCapabilities()
-      await Promise.all([
-        ensureRequirementSkills(),
-        enableRequirementSessionExperts(capabilities.allowedExperts)
-      ])
-      setPreparingSkill(false)
+      try {
+        await Promise.all([
+          ensureRequirementSkills(),
+          enableRequirementSessionExperts(capabilities.allowedExperts)
+        ])
+      } catch (prepareError) {
+        // 公共市场不可用或技能安装失败时，不应阻断需求归档；降级为记录日志后继续创建。
+        console.warn("[Requirement] 准备专家/技能失败，继续创建需求：", prepareError)
+      } finally {
+        setPreparingSkill(false)
+      }
+      const sourceBytes = source === "file" && file ? await file.arrayBuffer() : undefined
       const sourcePayload =
         source === "file"
           ? {
               fileName: sourceName || "新需求草稿.docx",
-              sourcePath: file ? window.api.file.getFilePath(file) : undefined
+              bytes: sourceBytes
             }
           : source === "link"
             ? {
