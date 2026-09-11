@@ -1,3 +1,7 @@
+import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
+import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
+import { formatHookDateTime } from "../../shared/hook-time"
+import { extractVisibleReasoning } from "../../shared/model-reasoning"
 import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electron"
 import { constants as fsConstants } from "fs"
 import { copyFile, lstat, mkdir } from "fs/promises"
@@ -244,6 +248,7 @@ interface ExportMessage {
   id: string
   role: ExportMessageRole
   content: string
+  reasoning?: string
   truncated?: boolean
   attachments: ExportAttachment[]
   toolCalls?: ExportToolCall[]
@@ -2507,7 +2512,10 @@ function truncateValue(value: string, limit: number): { value: string; truncated
   return { value: `${value.slice(0, limit)}\n...[truncated]`, truncated: true }
 }
 
-function buildExportToolCalls(toolCalls: CheckpointMessage["tool_calls"]): ExportToolCall[] {
+function buildExportToolCalls(
+  toolCalls: CheckpointMessage["tool_calls"],
+  complete = false
+): ExportToolCall[] {
   if (!Array.isArray(toolCalls)) return []
 
   return toolCalls.flatMap((toolCall): ExportToolCall[] => {
@@ -2515,7 +2523,9 @@ function buildExportToolCalls(toolCalls: CheckpointMessage["tool_calls"]): Expor
     if (!name) return []
 
     const serializedArgs = stringifyToolArgs(toolCall.args)
-    const truncated = truncateValue(serializedArgs, TOOL_CALL_ARGS_LIMIT)
+    const truncated = complete
+      ? { value: serializedArgs, truncated: false }
+      : truncateValue(serializedArgs, TOOL_CALL_ARGS_LIMIT)
 
     return [
       {
@@ -2550,6 +2560,7 @@ function formatMarkdown(payload: ExportPayload): string {
   for (const message of payload.messages) {
     if (
       !message.content.trim() &&
+      !message.reasoning &&
       message.attachments.length === 0 &&
       (!message.toolCalls || message.toolCalls.length === 0)
     ) {
@@ -2575,6 +2586,7 @@ function formatMarkdown(payload: ExportPayload): string {
         ""
       )
     }
+    if (message.reasoning) lines.push("### Reasoning", "", message.reasoning, "")
     if (message.content.trim()) {
       lines.push(message.content.trim(), "")
     }
@@ -2604,7 +2616,10 @@ async function getLatestCheckpoint(threadId: string): Promise<ThreadCheckpoint |
   })
 }
 
-function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportMessage[] {
+function buildExportMessages(
+  messages: CheckpointMessage[] | undefined,
+  complete = false
+): ExportMessage[] {
   if (!Array.isArray(messages)) return []
 
   return messages.flatMap((msg, index): ExportMessage[] => {
@@ -2614,16 +2629,24 @@ function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportM
     const rawContent = stringifyContent(getCheckpointMessageTranscriptContent(msg, role))
     // Drop the new workflow notification plumbing from the export. Coordinator
     // plumbing is intentionally left as-is (HEAD behavior) — see helper note.
-    if (isWorkflowPlumbingTranscriptContent(rawContent)) return []
+    if (!complete && isWorkflowPlumbingTranscriptContent(rawContent)) return []
     const { content, attachments } = sanitizeAttachmentContent(rawContent)
     const exportedContent =
-      role === "tool"
+      role === "tool" && !complete
         ? truncateValue(content, TOOL_RESULT_CONTENT_LIMIT)
         : { value: content, truncated: false }
-    const toolCalls = buildExportToolCalls(getCheckpointMessageToolCalls(msg))
+    const reasoning = complete
+      ? extractVisibleReasoning(getCheckpointMessageAdditionalKwargs(msg))
+      : ""
+    const toolCalls = buildExportToolCalls(getCheckpointMessageToolCalls(msg), complete)
     const toolCallNames = toolCalls.map((toolCall) => toolCall.name)
 
-    if (!exportedContent.value.trim() && attachments.length === 0 && toolCalls.length === 0) {
+    if (
+      !reasoning &&
+      !exportedContent.value.trim() &&
+      attachments.length === 0 &&
+      toolCalls.length === 0
+    ) {
       return []
     }
 
@@ -2632,6 +2655,7 @@ function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportM
         id: getCheckpointMessageId(msg, index),
         role,
         content: exportedContent.value,
+        ...(reasoning ? { reasoning } : {}),
         ...(exportedContent.truncated ? { truncated: true } : {}),
         attachments,
         ...(toolCalls.length > 0 ? { toolCalls, toolCallNames } : {}),
@@ -3985,18 +4009,30 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle("threads:exportSession", async (event, threadId: string) => {
+  ipcMain.handle("threads:exportSession", async (event, threadId: string, target?: ExportScope) => {
     try {
       const row = getThreadCore(threadId)
       if (!row) return { success: false, error: "Thread not found" }
-
-      const latestCheckpoint = await getLatestCheckpoint(threadId)
-      const messages = buildExportMessagesFromThreadMessages(
-        mergeCheckpointAndPersistedThreadMessagesForSession(
-          latestCheckpoint?.checkpoint,
-          getThreadMessages(threadId)
-        )
-      )
+      if (
+        target &&
+        (target.threadId !== threadId || !["multi", "workflow"].includes(target.kind))
+      ) {
+        return { success: false, error: "无效的子代理导出目标" }
+      }
+      const captured = target ? getCapturedSubagentSession(target) : null
+      if (target && !captured) {
+        return { success: false, error: "该子代理会话已不在内存中，无法导出" }
+      }
+      const rawApiCall = captured?.rawApiCall ?? getCapturedRawApiCall(threadId)
+      const latestCheckpoint = target ? null : await getLatestCheckpoint(threadId)
+      const messages = captured
+        ? buildExportMessages(captured.messages as CheckpointMessage[], true)
+        : buildExportMessagesFromThreadMessages(
+            mergeCheckpointAndPersistedThreadMessagesForSession(
+              latestCheckpoint?.checkpoint,
+              getThreadMessages(threadId)
+            )
+          )
 
       if (messages.length === 0) {
         return { success: false, error: "暂无可导出的消息" }
@@ -4008,16 +4044,19 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           ? metadata.workspacePath
           : null
       const title =
-        row.title || (typeof metadata?.title === "string" ? metadata.title : "") || row.thread_id
-      const exportedAt = new Date().toISOString()
+        captured?.title ||
+        row.title ||
+        (typeof metadata?.title === "string" ? metadata.title : "") ||
+        row.thread_id
+      const exportedAt = formatHookDateTime(Date.now())!
       const payload: ExportPayload = {
         version: 1,
         exportedAt,
         thread: {
-          threadId,
+          threadId: target ? subagentExportKey(target) : threadId,
           title,
-          createdAt: toIsoString(row.created_at),
-          updatedAt: toIsoString(row.updated_at),
+          createdAt: captured?.createdAt ?? formatHookDateTime(toIsoString(row.created_at))!,
+          updatedAt: captured?.updatedAt ?? formatHookDateTime(toIsoString(row.updated_at))!,
           workspacePath
         },
         messages
@@ -4038,7 +4077,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       const zip = new AdmZip()
       zip.addFile("session.md", Buffer.from(formatMarkdown(payload), "utf-8"))
       zip.addFile("session.json", Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf-8"))
-      zip.addFile("raw_api_call.json", Buffer.from(getCapturedRawApiCall(threadId), "utf-8"))
+      zip.addFile("raw_api_call.json", Buffer.from(rawApiCall, "utf-8"))
       zip.writeZip(result.filePath)
 
       return { success: true, filePath: result.filePath }

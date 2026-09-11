@@ -1,3 +1,4 @@
+import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
   WorkflowWorktreeAction,
@@ -1154,6 +1155,9 @@ interface CustomAPI {
       toId: string,
       role?: Message["role"]
     ) => Promise<{ replaced: boolean }>
+    exportSubagentSession: (
+      target: SubagentExportTarget
+    ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportSession: (
       threadId: string
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
