@@ -313,6 +313,12 @@ export function useMarkdownFilePreviewComponents({
     () => ({
       ...baseComponents,
       a({ node: _node, href, children, ...props }) {
+        // [文件](D:\...) 这类 Windows 本地路径会被 react-markdown 默认 URL 安全规则
+        // 清空 href。与其渲染成看似可用、点击无反应的 <a href="">，不如退化为普通文本。
+        if (!href) {
+          return <span>{children}</span>
+        }
+
         const previewPath = normalizePreviewFileHref(href, workspacePath)
         if (!threadId || !previewPath) {
           return (
