@@ -58,6 +58,8 @@ async function main() {
     )
   )
   env.CMB_TASK_CARDS_MOCK = "1"
+  env.CMB_E2E_DISABLE_GPU = "1"
+  env.CMB_E2E_ELECTRON_BIN = require("electron") as string
   delete env.ELECTRON_RUN_AS_NODE
   delete env.NODE_OPTIONS
   for (const key of [
@@ -77,7 +79,11 @@ async function main() {
   const results: string[] = []
   try {
     app = await _electron.launch({
-      executablePath: packaged || require("electron"),
+      executablePath:
+        packaged ||
+        (process.platform === "win32"
+          ? join(root, "tests/support/electron-launcher.cmd")
+          : require("electron")),
       args: [...(packaged ? [] : [root]), `--user-data-dir=${join(isolated, "profile")}`],
       env,
       cwd: root,

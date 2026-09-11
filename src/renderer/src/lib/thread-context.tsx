@@ -6665,10 +6665,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           scheduledTaskLoading: false,
           error: (event.error as string) || "Scheduled task failed"
         }))
-        // Match the done path: remount from the durable transcript baseline so
-        // a later foreground values replay can adopt the scheduler execution
-        // identities instead of manufacturing duplicate buckets.
-        loadThreadHistory(threadId)
+        // Remount only after persistence succeeded. A disk failure must leave
+        // the already visible partial transcript available beside the error.
+        if (event.transcriptPersisted !== false) loadThreadHistory(threadId)
         return
       }
 
