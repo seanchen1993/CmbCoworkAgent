@@ -3,11 +3,13 @@ import type { UseStreamCustom, UseStreamTransport } from "@langchain/langgraph-s
 import {
   MessageTupleManager,
   StreamManager,
+  toMessageDict,
   type EventStreamEvent
 } from "@langchain/langgraph-sdk/ui"
 
 type StreamValues = Record<string, unknown>
 type SubmitOptions = Parameters<UseStreamCustom<StreamValues>["submit"]>[1]
+type AssistantSnapshot = Extract<Message, { type: "ai" }> & { id: string }
 
 export interface ElectronStreamOptions {
   transport: UseStreamTransport
@@ -43,6 +45,7 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
   private frame: Message[] = EMPTY_MESSAGES
   private indexes: Map<string, number> | null = null
   private writtenId: string | null = null
+  private authoritativeContentIds = new Set<string>()
 
   readFrame(frame: Message[]): Message[] {
     if (frame !== this.frame) {
@@ -53,6 +56,15 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
   }
 
   commitFrame(frame: Message[]): void {
+    if (this.writtenId && this.authoritativeContentIds.has(this.writtenId)) {
+      const index = super.get(this.writtenId)?.index
+      if (index !== undefined && frame[index]?.id === this.writtenId) {
+        // Keep subsequent chunks at the same authority as the replacement;
+        // otherwise the live merger would permanently prefer the old snapshot.
+        const prioritized = { ...frame[index], content_priority: 1 }
+        frame[index] = prioritized
+      }
+    }
     if (frame.length < this.frame.length) {
       this.indexes = null
     } else if (this.writtenId && this.indexes) {
@@ -61,6 +73,32 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
     }
     this.frame = frame
     this.writtenId = null
+  }
+
+  replaceAssistantContent(frame: Message[], snapshot: AssistantSnapshot): Message[] {
+    const index = frame.findIndex((message) => message.id === snapshot.id && message.type === "ai")
+    const tuple = super.get(snapshot.id)
+    const merged = {
+      ...(index >= 0 ? frame[index] : undefined),
+      // An ordinary values frame may have omitted this message. Its buffered
+      // tool arguments still belong to the run and must survive a text rewrite.
+      ...(tuple?.chunk ? toMessageDict(tuple.chunk) : undefined),
+      ...snapshot
+    }
+    // Use the public SDK converter through a fresh manager, then replace only
+    // this tuple's seed. Clearing all tuples would lose interleaved tool streams.
+    const seed = new MessageTupleManager()
+    if (Object.hasOwn(snapshot, "tool_calls"))
+      delete (merged as { tool_call_chunks?: unknown }).tool_call_chunks
+    seed.add(merged, undefined)
+    if (tuple) tuple.chunk = seed.get(snapshot.id)?.chunk
+    else super.add(merged, undefined)
+    this.authoritativeContentIds.add(snapshot.id)
+    const messages = frame.slice()
+    const replacement = { ...merged, content_priority: 1 }
+    if (index >= 0) messages[index] = replacement
+    else messages.push(replacement)
+    return messages
   }
 
   override get(id: string | null | undefined, defaultIndex?: number) {
@@ -84,6 +122,7 @@ class SnapshotMessageTupleManager extends MessageTupleManager {
     this.frame = EMPTY_MESSAGES
     this.indexes = null
     this.writtenId = null
+    this.authoritativeContentIds.clear()
   }
 }
 
@@ -142,6 +181,30 @@ export function createElectronStream(options: ElectronStreamOptions) {
                 event.data.type === "stream_retry_reset"
               ) {
                 tuples.clear()
+              }
+              if (
+                event.event === "custom" &&
+                event.data &&
+                typeof event.data === "object" &&
+                "type" in event.data &&
+                event.data.type === "coordinator_ai_snapshot_message" &&
+                "assistantMessage" in event.data
+              ) {
+                const snapshot = event.data.assistantMessage as Partial<Message> | undefined
+                if (
+                  snapshot?.type === "ai" &&
+                  typeof snapshot.id === "string" &&
+                  snapshot.id &&
+                  (typeof snapshot.content === "string" || Array.isArray(snapshot.content))
+                ) {
+                  manager.setStreamValues({
+                    ...manager.values,
+                    messages: tuples.replaceAssistantContent(
+                      readMessages(manager.values),
+                      snapshot as AssistantSnapshot
+                    )
+                  })
+                }
               }
               yield event
             }

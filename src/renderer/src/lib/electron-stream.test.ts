@@ -10,7 +10,11 @@ import {
 } from "./live-stream-messages"
 
 type Event = { event: string; data: unknown }
-const ai = (id: string, content: string): Message => ({ id, type: "ai", content })
+const ai = (id: string, content: string): Extract<Message, { type: "ai" }> => ({
+  id,
+  type: "ai",
+  content
+})
 const tool = (id: string): Message => ({
   id,
   type: "tool",
@@ -48,6 +52,89 @@ async function run(events: Event[]) {
 }
 
 describe("Electron stream snapshot regression", () => {
+  it("replaces the SDK chunk seed after an authoritative rewrite and keeps later deltas", async () => {
+    const { stream, frames } = await run([
+      chunk(tool("stable")),
+      chunk(ai("a", "old draft")),
+      {
+        event: "custom",
+        data: { type: "coordinator_ai_snapshot_message", assistantMessage: ai("a", "corrected") }
+      },
+      chunk(ai("a", " tail"))
+    ])
+    expect(frames.some((frame) => frame[1]?.content === "corrected")).toBe(true)
+    expect(stream.messages.map((message) => message.content)).toEqual(["stable", "corrected tail"])
+    expect(stream.messages[1]).toMatchObject({ content_priority: 1 })
+  })
+
+  it("clears an authoritative draft without clearing another message or tool-call state", async () => {
+    const { stream } = await run([
+      chunk({
+        ...ai("a", "old"),
+        tool_calls: [{ id: "call", name: "echo", args: { value: "haha" } }]
+      }),
+      chunk(ai("b", "B")),
+      {
+        event: "custom",
+        data: { type: "coordinator_ai_snapshot_message", assistantMessage: ai("a", "") }
+      },
+      {
+        event: "custom",
+        data: {
+          type: "coordinator_ai_snapshot_message",
+          assistantMessage: { id: "a", type: "ai", reasoning: "reason only" }
+        }
+      },
+      chunk(ai("a", "new")),
+      chunk(ai("b", "!"))
+    ])
+    expect(stream.messages.map((message) => message.content)).toEqual(["new", "B!"])
+    expect(stream.messages[0]).toMatchObject({
+      tool_calls: [{ id: "call", name: "echo", args: { value: "haha" } }]
+    })
+  })
+
+  it("can seed a missing snapshot and resets its authority before a retry with the same ID", async () => {
+    const { stream } = await run([
+      {
+        event: "custom",
+        data: { type: "coordinator_ai_snapshot_message", assistantMessage: ai("a", "snapshot") }
+      },
+      chunk(ai("a", " tail")),
+      { event: "custom", data: { type: "stream_retry_reset", discardedMessageIds: ["a"] } },
+      values([]),
+      chunk(ai("a", "retry"))
+    ])
+    expect(stream.messages[0]).toMatchObject({ id: "a", content: "retry" })
+    expect(stream.messages[0]).not.toHaveProperty("content_priority")
+  })
+
+  it("preserves pending tool argument chunks when a replacement follows a partial values frame", async () => {
+    const first = {
+      ...ai("a", "draft"),
+      tool_call_chunks: [
+        { id: "call", name: "echo", index: 0, args: '{"value":"', type: "tool_call_chunk" }
+      ]
+    }
+    const last = {
+      ...ai("a", " tail"),
+      tool_call_chunks: [{ index: 0, args: 'haha"}', type: "tool_call_chunk" }]
+    }
+    const { stream } = await run([
+      chunk(first),
+      values([tool("partial")]),
+      {
+        event: "custom",
+        data: { type: "coordinator_ai_snapshot_message", assistantMessage: ai("a", "corrected") }
+      },
+      chunk(last)
+    ])
+    expect(stream.messages[1]).toMatchObject({
+      content: "corrected tail",
+      tool_calls: [{ id: "call", name: "echo", args: { value: "haha" } }]
+    })
+  })
+
   it("filters malformed snapshot entries without changing valid message references", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
     try {

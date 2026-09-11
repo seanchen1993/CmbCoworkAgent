@@ -9,6 +9,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
 import type { WebContents, MessageBoxOptions } from "electron"
+import { createStreamDataSerializer } from "../src/main/ipc/stream-data-serialization"
 
 interface MainFixture {
   fixtureWindowId: number
@@ -237,6 +238,46 @@ async function main() {
     assert.deepEqual(errors, [])
     results.push(
       `${chunks} chunks, ${toolLoops} tool loops and ${Math.ceil(chunks / 5)} history-thread round trips remain responsive`
+    )
+
+    const integritySerializer = createStreamDataSerializer()
+    for (const content of ["哈", "哈", "，重复分片完整保留。"]) {
+      await send({
+        type: "stream",
+        mode: "messages",
+        ...integritySerializer("messages", [
+          serialized("AIMessageChunk", { id: "integrity-repeat", content }),
+          { langgraph_node: "agent" }
+        ])
+      })
+    }
+    await until(
+      async () => (await page.locator("body").innerText()).includes("哈哈，重复分片完整保留。"),
+      "repeated initial provider deltas reach the UI intact"
+    )
+    const snapshotSerializer = createStreamDataSerializer({
+      messageChunkModes: { content: "snapshot" }
+    })
+    const prefix = "a".repeat(400)
+    const original = prefix + "b".repeat(400)
+    const corrected = original.slice(0, 100) + "Z" + original.slice(101) + "已更正"
+    for (const content of [prefix, original, corrected, corrected + "并继续输出"]) {
+      await send({
+        type: "stream",
+        mode: "messages",
+        ...snapshotSerializer("messages", [
+          serialized("AIMessageChunk", { id: "integrity-rewrite", content }),
+          { langgraph_node: "agent" }
+        ])
+      })
+      await until(
+        async () => (await page.locator("body").innerText()).includes(content),
+        `authoritative snapshot correction and subsequent growth reach the UI (${content.length} characters)`
+      )
+    }
+    assert.deepEqual(errors, [])
+    results.push(
+      "production serializer preserves repeated deltas, interior snapshot corrections and subsequent growth in React"
     )
     await page.screenshot({ path: join(artifacts, "stream-fixed.png") })
     const metrics = await app.evaluate(({ app }) =>

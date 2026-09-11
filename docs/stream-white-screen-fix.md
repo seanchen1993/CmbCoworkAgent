@@ -2,6 +2,8 @@
 
 修复分支：`codex/fix-stream-snapshot-white-screen`，基线：`9577a7bf`。
 
+后续数据完整性检视、修复及新的验证记录见 [流式完整性修复与检视](./stream-integrity-followup.md)。下文保留首轮白屏修复的验证记录。
+
 ## 已确认的问题
 
 用户提供的 `hasLiveStreamMessageId → canReuseLiveStreamMessageNormalization → projectCumulativeFrame → commitHookEffectListMount` 堆栈已在本地复现。

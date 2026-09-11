@@ -94,7 +94,10 @@ describe("durable thread reasoning", () => {
   it("persists provider reasoning snapshots independently of content delta mode", () => {
     const threadId = "provider-reasoning-thread"
     db.createThread(threadId)
-    const serialize = createStreamDataSerializer({ projectMessageChunks: true })
+    const serialize = createStreamDataSerializer({
+      projectMessageChunks: true,
+      messageChunkModes: { content: "snapshot", reasoning: "snapshot" }
+    })
     const snapshots = [
       "initial",
       "initial reasoning",
