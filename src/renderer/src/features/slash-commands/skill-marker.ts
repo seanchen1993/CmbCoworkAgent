@@ -24,7 +24,11 @@
  *     selected SKILL.md via read_file.
  */
 
-export { formatSkillUseBlock } from "../../../../shared/skill-use-block"
+export {
+  formatSkillUseBlock,
+  skillUseDisplayLabel,
+  stripSkillUseBlockForDisplay
+} from "../../../../shared/skill-use-block"
 
 const TAG_NAME = "CMBDEVCLAW-SKILL-USE-V1"
 
