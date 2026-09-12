@@ -6202,7 +6202,6 @@ function RemoteFeatureAccessPanel({
   onOpenThread: (threadId: string) => void
 }): React.JSX.Element {
   const [remoteAccess, setRemoteAccess] = useState<BuiltinRobotRemoteAccessOverview | null>(null)
-  const [busy, setBusy] = useState(false)
   const threads = useAppStore((state) => state.threads)
 
   useEffect(() => {
@@ -6237,7 +6236,8 @@ function RemoteFeatureAccessPanel({
   const featureGrant = remoteAccess?.featureGrants.find(
     (grant) => grant.projectId === projectId && grant.featureSlug === featureSlug
   )
-  const enabled = featureGrant?.state === "active"
+  const enabled = featureImManagementEnabled && featureGrant?.state === "active"
+  const busy = updatingFeatureImManagement || projectInteractionDisabled
   const relatedSessions =
     remoteAccess?.threadGrants.filter((grant) => {
       if (grant.state !== "active") return false
@@ -6249,32 +6249,9 @@ function RemoteFeatureAccessPanel({
       const binding = harnessFeature as Record<string, unknown>
       return binding.projectId === projectId && binding.slug === featureSlug
     }) ?? []
-  const remoteCreationText = enabled
-    ? "已允许从招乎在此 Feature 下新建会话"
-    : "尚未开放从招乎新建会话"
   const featureImAvailabilityText = featureImManagementAvailable
     ? "招乎已连接并完成登录验证"
     : (featureImUnavailableReason ?? "招乎当前不可用")
-
-  const toggleFeatureCreation = async (nextEnabled: boolean): Promise<void> => {
-    if (busy || (!nextEnabled && !enabled) || (nextEnabled && !featureImManagementAvailable)) return
-    setBusy(true)
-    try {
-      const next = await window.api.builtinRobot.setFeatureRemoteAccess(
-        projectId,
-        featureSlug,
-        nextEnabled
-      )
-      setRemoteAccess(next)
-      toast.success(
-        nextEnabled ? "已允许从招乎在此 Feature 下新建会话" : "已关闭此 Feature 的远程新建会话权限"
-      )
-    } catch (error) {
-      toast.error(cleanIpcError(error))
-    } finally {
-      setBusy(false)
-    }
-  }
 
   return (
     <section className="rounded-md border border-border bg-background">
@@ -6298,58 +6275,22 @@ function RemoteFeatureAccessPanel({
       </div>
       <div className="space-y-3 p-3">
         <div className="flex min-w-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-1.5 text-sm font-semibold">
-            <span className="truncate">通过招乎管理特性</span>
-            <TooltipProvider delayDuration={150}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    aria-label="查看通过招乎管理特性的说明"
-                  >
-                    <Info className="size-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
-                  创建的新会话将自动接入招乎，托管模式决策和需要人工审批推进的阶段也可经由招乎审批。
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          </div>
+          <span className="truncate text-sm font-semibold">通过招乎管理特性</span>
           <Switch
             aria-label="通过招乎管理特性"
-            checked={featureImManagementEnabled}
-            disabled={
-              updatingFeatureImManagement ||
-              projectInteractionDisabled ||
-              (!featureImManagementEnabled && !featureImManagementAvailable)
-            }
+            checked={enabled}
+            disabled={busy || (!enabled && !featureImManagementAvailable)}
             onCheckedChange={onFeatureImManagementChange}
           />
         </div>
         <p className="text-xs leading-5 text-muted-foreground">
-          {featureImManagementEnabled
-            ? "后续创建的特性顶层会话将自动接入招乎"
-            : "关闭只影响后续会话，不撤销已有会话授权"}
+          {enabled
+            ? "关闭后已经接入招乎的会话不受影响，可在会话中单独管理接入状态"
+            : "打开后创建会话将自动接入招乎，也可从招乎发起新会话"}
         </p>
-      </div>
-      <div className="space-y-3 border-t border-border p-3">
-        <div className="flex min-w-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
-            <span className="truncate">从招乎发起新会话</span>
-          </div>
-          <Switch
-            aria-label="允许从招乎在此 Feature 下新建会话"
-            checked={enabled}
-            disabled={busy || (!enabled && !featureImManagementAvailable)}
-            onCheckedChange={(checked) => void toggleFeatureCreation(checked)}
-          />
-        </div>
-        <p className="text-xs leading-5 text-muted-foreground">{remoteCreationText}</p>
         {relatedSessions.length === 0 ? (
           <p className="rounded border border-dashed px-2.5 py-3 text-xs text-muted-foreground">
-            当前没有已接入的会话。打开上方开关后，可在招乎通过 /会话 选择此 Feature 并新建会话。
+            当前没有已接入的会话。打开上方开关后，可在招乎通过 /会话 选择此特性并新建会话。
           </p>
         ) : (
           <div className="max-h-72 space-y-2 overflow-y-auto">
@@ -6371,9 +6312,6 @@ function RemoteFeatureAccessPanel({
             ))}
           </div>
         )}
-        <p className="text-[11px] leading-4 text-muted-foreground">
-          此开关只控制新建权限；关闭后，下方已经接入的会话仍由各自的会话开关管理。
-        </p>
       </div>
     </section>
   )
@@ -6677,6 +6615,70 @@ function FeatureDetailPage({
     threadsById
   ])
 
+  const setCombinedFeatureImManagement = useCallback(
+    async (enabled: boolean): Promise<void> => {
+      if (!detail) return
+      const projectId = detail.project.projectId
+      const featureId = detail.run.slug
+      const previousManagementEnabled = detail.run.imManagementEnabled === true
+      const remoteAccess = await window.api.builtinRobot.getRemoteAccess()
+      const previousRemoteCreationEnabled = remoteAccess.featureGrants.some(
+        (grant) =>
+          grant.projectId === projectId &&
+          grant.featureSlug === featureId &&
+          grant.state === "active"
+      )
+      let managementChanged = false
+      let remoteCreationChanged = false
+      try {
+        if (enabled) {
+          if (!previousRemoteCreationEnabled) {
+            await window.api.builtinRobot.setFeatureRemoteAccess(projectId, featureId, true)
+            remoteCreationChanged = true
+          }
+          if (!previousManagementEnabled) {
+            await window.api.harnessBoard.setFeatureImManagement({
+              projectId,
+              featureId,
+              enabled: true
+            })
+            managementChanged = true
+          }
+        } else {
+          if (previousManagementEnabled) {
+            await window.api.harnessBoard.setFeatureImManagement({
+              projectId,
+              featureId,
+              enabled: false
+            })
+            managementChanged = true
+          }
+          if (previousRemoteCreationEnabled) {
+            await window.api.builtinRobot.setFeatureRemoteAccess(projectId, featureId, false)
+            remoteCreationChanged = true
+          }
+        }
+      } catch (error) {
+        if (managementChanged) {
+          await window.api.harnessBoard
+            .setFeatureImManagement({
+              projectId,
+              featureId,
+              enabled: previousManagementEnabled
+            })
+            .catch(() => undefined)
+        }
+        if (remoteCreationChanged) {
+          await window.api.builtinRobot
+            .setFeatureRemoteAccess(projectId, featureId, previousRemoteCreationEnabled)
+            .catch(() => undefined)
+        }
+        throw error
+      }
+    },
+    [detail]
+  )
+
   const handleFeatureImManagementChange = useCallback(
     async (enabled: boolean): Promise<void> => {
       if (!detail || updatingFeatureImManagement) return
@@ -6693,20 +6695,18 @@ function FeatureDetailPage({
             throw new Error(status.lastError || "统一机器人尚未连接或登录验证尚未完成")
           }
         }
-        await window.api.harnessBoard.setFeatureImManagement({
-          projectId: detail.project.projectId,
-          featureId: detail.run.slug,
-          enabled
-        })
+        await setCombinedFeatureImManagement(enabled)
         await onRefresh()
-        toast.success(enabled ? "后续特性会话将接入招乎" : "后续会话将不再发送消息到招乎")
+        toast.success(
+          enabled ? "已开启通过招乎管理特性" : "已关闭通过招乎管理特性，已有会话授权不受影响"
+        )
       } catch (error) {
         toast.error(cleanIpcError(error))
       } finally {
         setUpdatingFeatureImManagement(false)
       }
     },
-    [detail, onRefresh, updatingFeatureImManagement]
+    [detail, onRefresh, setCombinedFeatureImManagement, updatingFeatureImManagement]
   )
 
   const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
@@ -6780,11 +6780,7 @@ function FeatureDetailPage({
         if (shouldStart) {
           const confirmedWorkspacePath = normalizeWorkspacePath(workspacePath)
           if (!confirmedWorkspacePath) throw new Error("请选择本次托管使用的会话工作区")
-          await window.api.harnessBoard.setFeatureImManagement({
-            projectId: detail.project.projectId,
-            featureId: detail.run.slug,
-            enabled: enableImManagement
-          })
+          await setCombinedFeatureImManagement(enableImManagement)
           const startedRun = await window.api.harnessBoard.startManagedRun({
             projectId: detail.project.projectId,
             featureId: detail.run.slug,
@@ -6821,7 +6817,13 @@ function FeatureDetailPage({
         setUpdatingManagedRun(false)
       }
     },
-    [detail, onRefresh, projectInteractionDisabled, updatingManagedRun]
+    [
+      detail,
+      onRefresh,
+      projectInteractionDisabled,
+      setCombinedFeatureImManagement,
+      updatingManagedRun
+    ]
   )
 
   const handleConfirmManagedRun = useCallback(async (): Promise<void> => {
@@ -7549,7 +7551,25 @@ function FeatureDetailPage({
             </div>
             <div className="mt-2 flex items-start justify-between gap-4 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
               <div>
-                <div className="text-sm font-medium">通过招乎管理托管运行</div>
+                <div className="flex items-center gap-1.5 text-sm font-medium">
+                  <span>通过招乎管理托管运行</span>
+                  <TooltipProvider delayDuration={150}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          aria-label="查看通过招乎管理托管运行的说明"
+                        >
+                          <Info className="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
+                        托管模式需要人工介入的决策可经由招乎审批
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
                 <div className="mt-1 text-xs text-muted-foreground">
                   {featureImUnavailableReason
                     ? featureImUnavailableReason
