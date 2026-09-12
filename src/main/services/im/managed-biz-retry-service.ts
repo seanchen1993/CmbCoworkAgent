@@ -117,28 +117,37 @@ export class ImManagedBizRetryService {
         ? "未知"
         : `${Math.round(input.contextUsageRatio * 100)}%`
     const text = [
-      `托管模式运行项目：[${projectName}]-特性:[${featureName}]需要人工决策：`,
-      `触发人工决策原因：${input.summary}`,
+      `托管模式运行项目：[${projectName}]`,
+      `特性: [${featureName}]需要人工介入：`,
+      `触发原因：${input.summary}`,
       `当前阶段：${input.stageName}`,
       `节点状态：${input.nodeStatus}`,
       `上下文占用：${contextText}`,
+      "",
+      "最近一条大模型返回消息：",
+      assistantTail || "（无可展示内容）",
+      "",
       "可选操作:",
       "",
       `/托管停止 ${code}`,
       `/托管继续当前会话 ${code} <输入消息，不填默认继续当前任务>`,
       `/托管开启新会话 ${code}`,
       "",
-      nextActionText,
-      "",
-      "最近一条大模型返回消息：",
-      assistantTail || "（无可展示内容）"
+      nextActionText
     ].join("\n")
     try {
       await imEventStore.enqueueProactiveReplies(
         buildImProactiveReplies({
           deliveryId: `managed-biz-retry:${decisionId}`,
           conversationKey: grant.conversationKey,
-          text
+          text,
+          segmentation: {
+            maxSegments: 1,
+            singleSegmentOverflow: {
+              minimumHeadCharacters: 300,
+              minimumTailCharacters: 300
+            }
+          }
         })
       )
       this.drainReplies()
@@ -216,11 +225,7 @@ export class ImManagedBizRetryService {
             .filter((block) => block.type === "text" && typeof block.text === "string")
             .map((block) => block.text)
             .join("\n")
-    const combined = [message.reasoning, text].filter(Boolean).join("\n\n")
-    const characters = Array.from(combined)
-    return characters.length > 4_000
-      ? `[已截断，仅保留末尾 4,000 字符]\n${characters.slice(-4_000).join("")}`
-      : combined
+    return text
   }
 
   private uniqueCode(): string {

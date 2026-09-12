@@ -49,6 +49,10 @@ export interface SegmentImReplyOptions {
   prefix?: string
   maxCharacters?: number
   maxSegments?: number
+  singleSegmentOverflow?: {
+    minimumHeadCharacters: number
+    minimumTailCharacters: number
+  }
 }
 
 export function segmentImReplyText(text: string, options: SegmentImReplyOptions = {}): string[] {
@@ -66,6 +70,34 @@ export function segmentImReplyText(text: string, options: SegmentImReplyOptions 
   const singlePrefix = visibleSegmentPrefix(prefix, 0, 1)
   if (lengthOf(singlePrefix) + lengthOf(normalized) <= maxCharacters) {
     return [`${singlePrefix}${normalized}`]
+  }
+
+  const singleSegmentOverflow = options.singleSegmentOverflow
+  if (singleSegmentOverflow) {
+    if (maxSegments !== 1) {
+      throw new Error("singleSegmentOverflow requires maxSegments to be 1")
+    }
+    const { minimumHeadCharacters, minimumTailCharacters } = singleSegmentOverflow
+    if (
+      !Number.isSafeInteger(minimumHeadCharacters) ||
+      minimumHeadCharacters < 1 ||
+      !Number.isSafeInteger(minimumTailCharacters) ||
+      minimumTailCharacters < 1
+    ) {
+      throw new Error("singleSegmentOverflow character counts must be positive integers")
+    }
+    const notice = `\n\n${IM_REPLY_TRUNCATION_NOTICE}\n\n`
+    const contentBudget = maxCharacters - lengthOf(singlePrefix) - lengthOf(notice)
+    if (minimumHeadCharacters + minimumTailCharacters > contentBudget) {
+      throw new Error("singleSegmentOverflow content exceeds the segment character limit")
+    }
+    const additionalCharacters = contentBudget - minimumHeadCharacters - minimumTailCharacters
+    const headCharacters = minimumHeadCharacters + Math.ceil(additionalCharacters / 2)
+    const tailCharacters = minimumTailCharacters + Math.floor(additionalCharacters / 2)
+    const points = codePoints(normalized)
+    return [
+      `${singlePrefix}${points.slice(0, headCharacters).join("")}${notice}${points.slice(-tailCharacters).join("")}`
+    ]
   }
 
   // V1 caps at eight segments, so every [i/n] marker has the same six-character
@@ -125,10 +157,14 @@ export function buildImProactiveReplies(input: {
   conversationKey: string
   text: string
   prefix?: string
+  segmentation?: Omit<SegmentImReplyOptions, "prefix">
 }): RemoteImReplyV1[] {
   const deliveryId = input.deliveryId.trim()
   if (!deliveryId) throw new Error("deliveryId is required")
-  const segments = segmentImReplyText(input.text, { prefix: input.prefix })
+  const segments = segmentImReplyText(input.text, {
+    ...input.segmentation,
+    prefix: input.prefix
+  })
   return segments.map((content, index) => ({
     schemaVersion: IM_GATEWAY_SCHEMA_VERSION,
     deliveryId,
