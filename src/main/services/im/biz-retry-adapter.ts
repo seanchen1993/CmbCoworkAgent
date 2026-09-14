@@ -35,25 +35,24 @@ export class ImBizRetryAdapter {
         : notification.featureId
     const assistantTail = this.lastAssistantTail(originThreadId)
     const nextActionText = notification.bizRetry?.nextAction
-      ? `若选择 /托管开启新会话，将调用 /${notification.bizRetry?.nextAction.slashSkill} 技能并输入 ${notification.bizRetry?.nextAction.userMessage}`
+      ? `若选择 /托管开启新会话，将调用 /${notification.bizRetry?.nextAction.slashSkill} 技能，并输入 ${notification.bizRetry?.nextAction.userMessage}`
       : "当前没有可用的新会话动作；回复时会重新检查最新状态。"
     const contextText =
       notification.policyResult?.facts?.contextUsageRatio === undefined
         ? "未知"
         : `${Math.round(notification.policyResult?.facts?.contextUsageRatio * 100)}%`
     const text = [
-      `托管模式运行项目：[${projectName}]`,
-      `特性: [${featureName}]需要人工介入：`,
+      `托管运行项目：【${projectName}】`,
+      `特性: 【${featureName}】需要人工确认：`,
       `触发原因：${notification.message}`,
       `当前阶段：${notification.nodeId ?? "未知"}`,
       `节点状态：${notification.policyResult?.facts?.currentNodeStatus ?? "未知"}`,
       `上下文占用：${contextText}`,
-      "",
       "最近一条大模型返回消息：",
+      "",
       assistantTail || "（无可展示内容）",
       "",
       "可选操作:",
-      "",
       `/托管停止 ${code}`,
       `/托管继续当前会话 ${code} <输入消息，不填默认继续当前任务>`,
       `/托管开启新会话 ${code}`,
