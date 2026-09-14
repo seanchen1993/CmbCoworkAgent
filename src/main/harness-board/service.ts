@@ -1,3 +1,5 @@
+import { formatGmt8Timestamp } from "../../shared/gmt8-time"
+import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
 import { createHash } from "crypto"
 import { access, mkdir } from "node:fs/promises"
@@ -89,7 +91,6 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
-  HarnessHumanGateSnapshot,
   ManagedFeatureStatusSnapshot,
   ManagedRunViewStatus,
   HarnessStatus,
@@ -399,22 +400,6 @@ function emptyFeatureDeployUnitBindingStore(): HarnessFeatureDeployUnitBindingSt
     version: 1,
     bindings: []
   }
-}
-
-export function formatGmt8Timestamp(date = new Date()): string {
-  const gmt8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000)
-  const pad = (value: number): string => String(value).padStart(2, "0")
-  return (
-    [gmt8Date.getUTCFullYear(), pad(gmt8Date.getUTCMonth() + 1), pad(gmt8Date.getUTCDate())].join(
-      "-"
-    ) +
-    " " +
-    [
-      pad(gmt8Date.getUTCHours()),
-      pad(gmt8Date.getUTCMinutes()),
-      pad(gmt8Date.getUTCSeconds())
-    ].join(":")
-  )
 }
 
 function isGmt8Timestamp(value: string | undefined): value is string {
@@ -1896,54 +1881,14 @@ function normalizeFeatureDeployUnitBinding(
   )
   const selectedDeployUnitMappings = normalizeDeployUnitMappings(value.selectedDeployUnitMappings)
   if (!projectId || !featureId) return null
-  const humanGate = normalizeHumanGate(value.humanGate, projectId, featureId)
   return {
     projectId,
     featureId,
     selectedDeployUnitMappings,
     sessionContextInjectionSource,
     ...(value.imManagementEnabled === true ? { imManagementEnabled: true } : {}),
-    ...(humanGate ? { humanGate } : {}),
     createdAt: normalizeText(value.createdAt).trim() || formatGmt8Timestamp(),
     updatedAt: normalizeText(value.updatedAt).trim() || undefined
-  }
-}
-
-function normalizeHumanGate(
-  value: unknown,
-  projectId: string,
-  featureId: string
-): HarnessHumanGateSnapshot | undefined {
-  if (value === undefined) return undefined
-  if (!isObject(value)) return undefined
-  const gateId = normalizeText(value.gateId).trim()
-  const sourceThreadId = normalizeText(value.sourceThreadId).trim()
-  const sourceManagedRunId = normalizeText(value.sourceManagedRunId).trim()
-  const hookId = normalizeText(value.hookId).trim()
-  const message = normalizeText(value.message).trim()
-  const createdAt = normalizeText(value.createdAt).trim()
-  if (
-    value.status !== "pending" ||
-    !gateId ||
-    !sourceThreadId ||
-    !hookId ||
-    !message ||
-    message.length > 2_000 ||
-    !isGmt8Timestamp(createdAt)
-  ) {
-    console.error("[HumanGate] Ignoring invalid persisted Gate", { projectId, featureId })
-    return undefined
-  }
-  return {
-    gateId,
-    status: "pending",
-    projectId,
-    featureId,
-    sourceThreadId,
-    ...(sourceManagedRunId ? { sourceManagedRunId } : {}),
-    hookId,
-    message,
-    createdAt
   }
 }
 
@@ -2118,11 +2063,10 @@ async function findFeatureDeployUnitBinding(
   featureId: string
 ): Promise<HarnessFeatureDeployUnitBindingRecord | null> {
   const key = featureDeployUnitBindingKey(projectId, featureId)
-  return (
-    (await readFeatureDeployUnitBindingStore()).bindings.find(
-      (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
-    ) ?? null
+  const binding = (await readFeatureDeployUnitBindingStore()).bindings.find(
+    (item) => featureDeployUnitBindingKey(item.projectId, item.featureId) === key
   )
+  return binding ?? null
 }
 
 async function saveFeatureDeployUnitBinding(
@@ -2150,7 +2094,6 @@ async function saveFeatureDeployUnitBinding(
       selectedDeployUnitMappings,
       sessionContextInjectionSource,
       ...(existing?.imManagementEnabled ? { imManagementEnabled: true } : {}),
-      ...(existing?.humanGate ? { humanGate: existing.humanGate } : {}),
       createdAt:
         existing?.createdAt && isGmt8Timestamp(existing.createdAt) ? existing.createdAt : now,
       updatedAt: now
@@ -2212,43 +2155,6 @@ export async function getHarnessFeatureBinding(
   return findFeatureDeployUnitBinding(projectId, featureId)
 }
 
-export async function listHarnessHumanGates(): Promise<HarnessHumanGateSnapshot[]> {
-  return (await readFeatureDeployUnitBindingStore()).bindings.flatMap((binding) =>
-    binding.humanGate ? [binding.humanGate] : []
-  )
-}
-
-export async function setHarnessHumanGate(
-  projectId: string,
-  featureId: string,
-  humanGate: HarnessHumanGateSnapshot | undefined
-): Promise<HarnessFeatureDeployUnitBinding> {
-  assertFeatureBindingKeyBudgets(projectId, featureId)
-  return withHarnessStoreMutation(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE, async () => {
-    const store = await readFeatureDeployUnitBindingStore()
-    const key = featureDeployUnitBindingKey(projectId, featureId)
-    const existingIndex = store.bindings.findIndex(
-      (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
-    )
-    if (existingIndex < 0) throw new Error("未找到该特性的项目模式绑定记录")
-    const existing = store.bindings[existingIndex]
-    const next: HarnessFeatureDeployUnitBindingRecord = {
-      ...existing,
-      ...(humanGate ? { humanGate } : {}),
-      updatedAt: formatGmt8Timestamp()
-    }
-    if (!humanGate) delete next.humanGate
-    store.bindings[existingIndex] = next
-    await writeHarnessJsonFileAtomic(
-      HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE,
-      store,
-      HARNESS_FEATURE_BINDING_MAX_BYTES,
-      "Harness feature binding store"
-    )
-    return next
-  })
-}
-
 export async function setHarnessFeatureImManagement(
   projectId: string,
   featureId: string,
@@ -2275,6 +2181,7 @@ export async function setHarnessFeatureImManagement(
       HARNESS_FEATURE_BINDING_MAX_BYTES,
       "Harness feature binding store"
     )
+    if (!enabled) harnessNotifications.disableIm(projectId, featureId)
     return next
   })
 }
@@ -2808,18 +2715,6 @@ function makeProjectDetailViewModel(
   }
 }
 
-function attachHumanGatesToProjectDetail(
-  detail: HarnessProjectDetailViewModel,
-  bindingByFeature: ReadonlyMap<string, HarnessFeatureDeployUnitBindingRecord>
-): HarnessProjectDetailViewModel {
-  const runs = detail.runs.map((run) => {
-    const humanGate = bindingByFeature.get(
-      featureDeployUnitBindingKey(detail.project.projectId, run.slug)
-    )?.humanGate
-    return humanGate ? { ...run, humanGate } : run
-  })
-  return { ...detail, runs }
-}
 
 async function initializeHarnessProject(project: HarnessProjectMetadata): Promise<void> {
   try {
@@ -3936,7 +3831,6 @@ async function loadHarnessProjectDetails(
   const result: Record<string, HarnessProjectDetailViewModel> = {}
   const configContextByProjectId = new Map<string, HarnessProjectConfigContext>()
   const projectDirectoryExistsById = new Map<string, boolean>()
-  let featureBindingByKey: Map<string, HarnessFeatureDeployUnitBindingRecord> | null = null
   const groups = new Map<
     string,
     {
@@ -4024,14 +3918,6 @@ async function loadHarnessProjectDetails(
         )
         throwIfHarnessDetailCancelled(signal)
         const workflow = snapshot.workflow
-        if (!featureBindingByKey) {
-          featureBindingByKey = new Map(
-            (await readFeatureDeployUnitBindingStore()).bindings.map((binding) => [
-              featureDeployUnitBindingKey(binding.projectId, binding.featureId),
-              binding
-            ])
-          )
-        }
 
         for (const project of batch) {
           const projectDir = projectDirectoryName(project)
@@ -4046,19 +3932,16 @@ async function loadHarnessProjectDetails(
             continue
           }
 
-          result[project.projectId] = attachHumanGatesToProjectDetail(
-            makeProjectDetailViewModel(
-              project,
-              {
-                workflow,
-                runs: projectData.runs,
-                watchRefs: projectData.watchRefs,
-                projectState: projectAdapterLoadedStatus(project),
-                error: null
-              },
-              configContextByProjectId.get(project.projectId)
-            ),
-            featureBindingByKey
+          result[project.projectId] = makeProjectDetailViewModel(
+            project,
+            {
+              workflow,
+              runs: projectData.runs,
+              watchRefs: projectData.watchRefs,
+              projectState: projectAdapterLoadedStatus(project),
+              error: null
+            },
+            configContextByProjectId.get(project.projectId)
           )
         }
       } catch (error) {
@@ -4163,8 +4046,7 @@ async function loadHarnessRunDetail(
       skipNodeAvailable,
       selectedDeployUnits,
       ...(managedRun ? { managedRun } : {}),
-      ...(featureBinding?.imManagementEnabled ? { imManagementEnabled: true } : {}),
-      ...(featureBinding?.humanGate ? { humanGate: featureBinding.humanGate } : {})
+      ...(featureBinding?.imManagementEnabled ? { imManagementEnabled: true } : {})
     },
     sessions: []
   }

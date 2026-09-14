@@ -28,12 +28,9 @@ import {
   imRemoteUserInputService,
   type ImRemoteUserInputService
 } from "./remote-user-input-service"
-import { imHumanGateService, type ImHumanGateService } from "./human-gate-service"
-import {
-  imManagedBizRetryService,
-  type ImManagedBizRetryService,
-  type ManagedBizRetryChoice
-} from "./managed-biz-retry-service"
+import { imHumanGateAdapter, type ImHumanGateAdapter } from "./human-gate-adapter"
+import { imBizRetryAdapter, type ImBizRetryAdapter } from "./biz-retry-adapter"
+import type { ManagedBizRetryChoice } from "../../../shared/harness-notifications"
 
 export type ImCommandName =
   | "help"
@@ -96,8 +93,8 @@ interface ImCommandRouterDependencies {
   access: ImRemoteAccessService
   approvals: Pick<ImRemoteApprovalService, "resolveCode">
   userInputs: Pick<ImRemoteUserInputService, "resolveAnswer">
-  humanGates: Pick<ImHumanGateService, "resolveCode">
-  managedBizRetries: Pick<ImManagedBizRetryService, "resolveCode">
+  humanGates: Pick<ImHumanGateAdapter, "resolveCode">
+  managedBizRetries: Pick<ImBizRetryAdapter, "resolveCode">
   selections: ImSelectionContextStore
   abortCurrent: (conversationKey: string, threadId?: string) => boolean
   getCurrentEventId: (conversationKey: string, threadId?: string) => string | null
@@ -165,8 +162,8 @@ export class ImCommandRouter {
       access: dependencies.access ?? imRemoteAccessService,
       approvals: dependencies.approvals ?? imRemoteApprovalService,
       userInputs: dependencies.userInputs ?? imRemoteUserInputService,
-      humanGates: dependencies.humanGates ?? imHumanGateService,
-      managedBizRetries: dependencies.managedBizRetries ?? imManagedBizRetryService,
+      humanGates: dependencies.humanGates ?? imHumanGateAdapter,
+      managedBizRetries: dependencies.managedBizRetries ?? imBizRetryAdapter,
       selections: dependencies.selections ?? imSelectionContextStore,
       abortCurrent: dependencies.abortCurrent ?? (() => false),
       getCurrentEventId: dependencies.getCurrentEventId ?? (() => null),

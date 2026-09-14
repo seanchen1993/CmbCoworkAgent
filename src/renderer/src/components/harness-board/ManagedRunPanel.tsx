@@ -195,11 +195,6 @@ function DecisionDetailsTooltip({
                   <div>会话结果：{facts.terminalOutcome === "success" ? "成功" : "失败"}</div>
                 )}
                 {facts.terminalReason && <div>会话说明：{facts.terminalReason}</div>}
-                {policyType === "biz_retry" ? (
-                  <div>本次当前任务重试：{Math.min(facts.bizRetryCount + 1, 3)}/3</div>
-                ) : (
-                  facts.bizRetryCount > 0 && <div>当前任务已重试：{facts.bizRetryCount}/3</div>
-                )}
                 {policyType === "provider_retry" ? (
                   <div>本次模型服务重试：{Math.min(facts.providerRetryCount + 1, 3)}/3</div>
                 ) : (
@@ -307,11 +302,6 @@ export function ManagedRunPanel({
       {run.status === "running" && run.nextRetryAt && (
         <div className="mt-2 rounded-lg border border-status-info/25 bg-status-info/5 px-2.5 py-2 text-[11px] text-status-info">
           托管模型服务重试中 {run.providerRetryCount}/3 · {run.nextRetryAt}
-        </div>
-      )}
-      {run.status === "running" && run.bizRetryCount > 0 && (
-        <div className="mt-2 rounded-lg border border-status-warning/25 bg-status-warning/5 px-2.5 py-2 text-[11px] text-status-warning">
-          托管当前任务重试中 {run.bizRetryCount}/3
         </div>
       )}
       {run.status === "corrupt" && (

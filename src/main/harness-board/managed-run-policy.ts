@@ -13,14 +13,12 @@ export interface ManagedRunPolicyEvaluation {
 
 export interface ManagedRunPolicyConfig {
   incompleteStageRetryMode: "adaptive" | ManagedBizRetryMode
-  maxBizRetries: number
   maxProviderRetries: number
   maxContextReuseRatio: number
 }
 
 export const DEFAULT_MANAGED_RUN_POLICY: ManagedRunPolicyConfig = {
   incompleteStageRetryMode: "adaptive",
-  maxBizRetries: 3,
   maxProviderRetries: 3,
   maxContextReuseRatio: 0.9
 }
@@ -250,22 +248,10 @@ export function resolveManagedRunDecision(input: {
         proposedAction: "start_new_thread",
         reasonCode: nodeChanged ? "current_node_changed" : "current_node_completed",
         rule: nodeChanged
-          ? "currentNodeId 变化表示进入新的工作阶段，创建新会话并清零 Biz Retry。"
-          : "当前阶段状态变化为已完成、已归档或已跳过时，创建新会话推进并清零 Biz Retry。"
+          ? "currentNodeId 变化表示进入新的工作阶段，创建新会话。"
+          : "当前阶段状态变化为已完成、已归档或已跳过时，创建新会话推进。"
       },
       summary: nodeChanged ? "当前阶段已经变化，创建新会话继续" : "当前阶段已经结束，创建新会话继续"
-    }
-  }
-
-  if (terminal?.outcome === "success" && run.bizRetryCount >= config.maxBizRetries) {
-    return {
-      policyResult: {
-        type: "biz_retry",
-        proposedAction: "fail_managed_run",
-        reasonCode: "biz_retry_limit_exceeded",
-        rule: "完成三次 Biz Retry 后当前阶段仍未结束时，结束托管运行。"
-      },
-      summary: "当前任务重试超过限制次数"
     }
   }
 

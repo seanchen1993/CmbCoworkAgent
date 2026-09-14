@@ -1,3 +1,6 @@
+import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { useHarnessNotifications } from "@/lib/harness-notifications"
+import { BizRetryNotice } from "./BizRetryNotice"
 import {
   Fragment,
   startTransition,
@@ -4315,14 +4318,23 @@ function ProjectActionMenu({
 }
 
 function FeatureCard({
+  projectId,
   run,
   workflowNodes,
   onOpen
 }: {
+  projectId: string
   run: HarnessFeatureSummary
   workflowNodes: Array<{ id: string; label: string }>
   onOpen: () => void
 }): React.JSX.Element {
+  const pendingDecision = useHarnessNotifications().some(
+    (item) =>
+      (item.type === "human_gate" || item.type === "biz_retry") &&
+      item.status === "pending" &&
+      item.projectId === projectId &&
+      item.featureId === run.slug
+  )
   const progressIndex = progressIndexFromCurrentNodeId(
     workflowNodes,
     run.currentNodeId,
@@ -4348,9 +4360,12 @@ function FeatureCard({
           <div className="mt-1 truncate text-[11px] text-muted-foreground">{run.slug}</div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
-          {managedRunStatus && <StatusPill status={managedRunStatus} />}
+          {pendingDecision ? (
+            <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
+          ) : (
+            managedRunStatus && <StatusPill status={managedRunStatus} />
+          )}
           <StatusPill status={run.overallStatus} />
-          {run.humanGate && <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />}
         </div>
       </div>
       <ProgressBar progressIndex={progressIndex} totalNodes={totalNodes} />
@@ -4417,6 +4432,7 @@ function ProjectCard({
   onProjectVisible: (project: HarnessProjectListItem) => void
   onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
+  const notifications = useHarnessNotifications()
   const cardRef = useRef<HTMLElement | null>(null)
   const projectCode = project.projectCode.trim()
   const runs = detail?.runs ?? []
@@ -4462,7 +4478,16 @@ function ProjectCard({
       run.overallStatus.uiKind === "blocked" ||
       run.overallStatus.uiKind === "error"
   ).length
-  const pendingHumanGateCount = runs.filter((run) => Boolean(run.humanGate)).length
+  const pendingDecisionCount = new Set(
+    notifications
+      .filter(
+        (item) =>
+          item.kind === "decision" &&
+          item.status === "pending" &&
+          item.projectId === project.projectId
+      )
+      .map((item) => item.featureId)
+  ).size
   const projectStatus = pluginCompatibilityMessage
     ? pluginCompatibilityStatus
     : detail?.projectState
@@ -4573,7 +4598,7 @@ function ProjectCard({
               <div className="min-w-0 text-[11px] text-muted-foreground">
                 待确认
                 <strong className="mt-0.5 block text-sm text-status-warning">
-                  {loading || !detail ? "-" : pendingHumanGateCount}
+                  {loading || !detail ? "-" : pendingDecisionCount}
                 </strong>
               </div>
             </div>
@@ -6102,6 +6127,7 @@ function ProjectDetailPage({
                         <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pr-2">
                           {runs.map((run) => (
                             <FeatureCard
+                              projectId={project.projectId}
                               key={run.slug}
                               run={run}
                               workflowNodes={workflowForProjectRun(detail, run).nodes}
@@ -6445,6 +6471,14 @@ function FeatureDetailPage({
   const [updatingManagedRun, setUpdatingManagedRun] = useState(false)
   const [updatingFeatureImManagement, setUpdatingFeatureImManagement] = useState(false)
   const [featureImRobotStatus, setFeatureImRobotStatus] = useState<BuiltinRobotStatus | null>(null)
+  const notifications = useHarnessNotifications()
+  const pendingHumanGate = projectHumanGate(notifications.find(
+    (item) =>
+      item.type === "human_gate" &&
+      item.status === "pending" &&
+      item.projectId === detail?.project.projectId &&
+      item.featureId === detail?.run.slug
+  ))
   const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
     null
   )
@@ -6844,19 +6878,14 @@ function FeatureDetailPage({
 
   const handleHumanGateDecision = useCallback(
     async (decision: "approve" | "reject"): Promise<void> => {
-      const humanGate = detail?.run.humanGate
+      const humanGate = pendingHumanGate
       if (!humanGate || humanGateDecisionBusy) return
       setHumanGateDecisionBusy(decision)
       try {
-        const input = {
-          projectId: humanGate.projectId,
-          featureId: humanGate.featureId,
-          gateId: humanGate.gateId
-        }
-        const changed =
-          decision === "approve"
-            ? await window.api.harnessBoard.approveHumanGate(input)
-            : await window.api.harnessBoard.rejectHumanGate(input)
+        const { applied: changed } = await window.api.appNotifications.decide({
+          notificationId: humanGate.gateId,
+          action: decision
+        })
         if (!changed) throw new Error("Human Gate 已发生变化，请刷新后重试")
         await onRefresh()
       } catch (error) {
@@ -6865,7 +6894,7 @@ function FeatureDetailPage({
         setHumanGateDecisionBusy(null)
       }
     },
-    [detail, humanGateDecisionBusy, onRefresh]
+    [pendingHumanGate, humanGateDecisionBusy, onRefresh]
   )
 
   const canSkipNode = useCallback(
@@ -7265,14 +7294,15 @@ function FeatureDetailPage({
       ) : (
         <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2">
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            {detail.run.humanGate && (
+            <BizRetryNotice projectId={detail.project.projectId} featureId={detail.run.slug} />
+            {pendingHumanGate && (
               <section className="mb-4 flex flex-col gap-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm sm:flex-row sm:items-center">
                 <div className="flex min-w-0 flex-1 items-start gap-3">
                   <PauseCircle className="mt-0.5 size-5 shrink-0 text-status-warning" />
                   <div className="min-w-0">
                     <div className="text-sm font-semibold">需要人工确认</div>
                     <p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground">
-                      {detail.run.humanGate.message}
+                      {pendingHumanGate.message}
                     </p>
                   </div>
                 </div>
@@ -7287,7 +7317,7 @@ function FeatureDetailPage({
                     {humanGateDecisionBusy === "reject" && (
                       <Loader2 className="size-4 animate-spin" />
                     )}
-                    拒绝并终止
+                    拒绝并终止本次托管运行
                   </Button>
                   <Button
                     type="button"
@@ -9702,31 +9732,6 @@ export function HarnessBoardView({
     })
   }, [loadProjectDetail, patchCachedProjectRuns])
 
-  useEffect(() => {
-    return window.api.harnessBoard.onHumanGateChanged((event) => {
-      patchCachedProjectRuns(event.projectId, (run) => {
-        if (run.slug !== event.featureId) return run
-        const nextRun = { ...run }
-        if (event.humanGate) nextRun.humanGate = event.humanGate
-        else delete nextRun.humanGate
-        return nextRun
-      })
-
-      setRunDetail((currentDetail) => {
-        if (
-          !currentDetail ||
-          currentDetail.project.projectId !== event.projectId ||
-          currentDetail.run.slug !== event.featureId
-        ) {
-          return currentDetail
-        }
-        const nextRun = { ...currentDetail.run }
-        if (event.humanGate) nextRun.humanGate = event.humanGate
-        else delete nextRun.humanGate
-        return { ...currentDetail, run: nextRun }
-      })
-    })
-  }, [patchCachedProjectRuns])
 
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {

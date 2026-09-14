@@ -1,3 +1,8 @@
+import type {
+  AppNotification,
+  AppDecisionInput,
+  AppDecisionResult
+} from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
@@ -122,9 +127,6 @@ import type {
   ManagedAutoSendStreamStartEvent,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent,
-  HarnessHumanGateChangedEvent,
-  HarnessHumanGateDecisionInput,
-  HarnessHumanGateSnapshot,
   ManagedRunEventCursor,
   ManagedRunEventsPage,
   ManagedRunIdentity,
@@ -2868,6 +2870,11 @@ interface CustomAPI {
       genEventIds: string[]
     ) => Promise<{ success: boolean; data?: LocalGenAdoptionLines[]; error?: string }>
   }
+  appNotifications: {
+    list: () => Promise<AppNotification[]>
+    decide: (input: AppDecisionInput) => Promise<AppDecisionResult>
+    onChanged: (callback: () => void) => () => void
+  }
   harnessBoard: {
     catalogPage: (input: HarnessBoardCatalogPageInput) => Promise<HarnessBoardCatalogPageResult>
     cancelCatalogRequests: (
@@ -2879,9 +2886,6 @@ interface CustomAPI {
     }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
-    getHumanGateForThread: (threadId: string) => Promise<HarnessHumanGateSnapshot | undefined>
-    approveHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
-    rejectHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
     getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
     getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
     saveDeployUnitMappings: (
@@ -2955,7 +2959,6 @@ interface CustomAPI {
     onManagedRunThreadCreated: (
       callback: (event: ManagedRunThreadCreatedEvent) => void
     ) => () => void
-    onHumanGateChanged: (callback: (event: HarnessHumanGateChangedEvent) => void) => () => void
   }
   app: {
     restart: () => Promise<void>
