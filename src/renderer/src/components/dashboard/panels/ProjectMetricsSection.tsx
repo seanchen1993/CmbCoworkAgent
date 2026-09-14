@@ -801,7 +801,7 @@ export function ProjectMetricsSection({
           </SelectTrigger>
           <SelectContent
             align="start"
-            className="w-56 p-2"
+            className="w-80 max-w-[calc(100vw-2rem)] p-2"
             viewportClassName="max-h-64 space-y-0.5 p-0"
           >
             <SelectItem
@@ -814,7 +814,7 @@ export function ProjectMetricsSection({
               <SelectItem
                 key={plugin}
                 value={plugin}
-                className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
+                className="cursor-pointer whitespace-normal break-words rounded py-1.5 pr-8 text-xs leading-5 focus:bg-muted focus:text-foreground"
               >
                 {plugin}
               </SelectItem>

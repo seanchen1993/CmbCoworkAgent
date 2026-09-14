@@ -29,13 +29,16 @@ export class ImHumanGateAdapter {
         ? featureGrant.featureTitleSnapshot
         : gate.featureId
     const text = [
-      `项目：[${projectName}]`,
-      `特性：[${featureName}]`,
-      `来源会话：[${threadTitle}]`,
+      `【项目模式需要审批】`,
+      `项目：【${projectName}】`,
+      `特性：【${featureName}】`,
+      `来源会话：【${threadTitle}】`,
       "",
       gate.message,
       "",
-      `/门禁批准 ${code}   或   /门禁拒绝 ${code}`
+      "可选操作:",
+      `/批准推进阶段 ${code}`,
+      `/拒绝 ${code}`
     ].join("\n")
     try {
       await imEventStore.enqueueProactiveReplies(

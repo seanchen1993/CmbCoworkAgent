@@ -508,8 +508,13 @@ async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promi
       ["waiting_desktop", "completed"]
     )
     assert.equal(context.events.getEvent(queued.eventId)?.state, "completed")
-    assert(gateway.replies.at(-1)?.message.content.includes("审批后完成"))
-    assert(gateway.replies.at(-1)?.message.content.includes("非当前绑定会话"))
+    const finalReply = gateway.replies.at(-1)?.message.content ?? ""
+    assert(finalReply.includes("【项目模式】（非当前绑定会话）"))
+    assert(finalReply.includes("项目：【统一机器人】"))
+    assert(finalReply.includes("特性：【审批流程】"))
+    assert(finalReply.includes("当前阶段：未知"))
+    assert(finalReply.includes("阶段状态：未知"))
+    assert(finalReply.includes("审批后完成"))
   } finally {
     context.database.close()
   }

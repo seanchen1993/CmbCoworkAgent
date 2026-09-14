@@ -33,9 +33,10 @@ import {
   type ImEventRecord,
   type ImEventStore
 } from "./event-store"
-import { imTargetReplyPrefix } from "./reply-context"
+import { imProjectModeReplyPrefix, imTargetReplyPrefix } from "./reply-context"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import { ImReplyClient } from "./reply-client"
+import { resolveImProjectModeReplyContext } from "./project-reply-context"
 import {
   createImInboxRemotePolicy,
   executePreparedRemoteStandardTurn,
@@ -749,7 +750,18 @@ export class ImRemoteModeNotificationPump {
     deliveryId: string,
     text: string
   ): Promise<void> {
-    const threadTitle = this.dependencies.getThread(notice.threadId)?.title?.trim()
+    const thread = this.dependencies.getThread(notice.threadId)
+    const threadTitle = thread?.title?.trim()
+    let metadata: Record<string, unknown> = {}
+    try {
+      metadata = thread?.metadata ? (JSON.parse(thread.metadata) as Record<string, unknown>) : {}
+    } catch {
+      metadata = {}
+    }
+    const projectContext = await resolveImProjectModeReplyContext({
+      metadata,
+      target: notice.targetSnapshot
+    })
     let switched = false
     try {
       const active = this.dependencies.conversations.getActiveTarget(notice.conversationKey)
@@ -763,7 +775,9 @@ export class ImRemoteModeNotificationPump {
           deliveryId,
           conversationKey: notice.conversationKey,
           text,
-          prefix: imTargetReplyPrefix(notice.targetSnapshot, { switched, threadTitle })
+          prefix: projectContext
+            ? imProjectModeReplyPrefix({ ...projectContext, switched })
+            : imTargetReplyPrefix(notice.targetSnapshot, { switched, threadTitle })
         })
       )
     } catch (error) {

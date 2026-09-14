@@ -42,20 +42,21 @@ export class ImBizRetryAdapter {
         ? "未知"
         : `${Math.round(notification.policyResult?.facts?.contextUsageRatio * 100)}%`
     const text = [
-      `托管运行项目：【${projectName}】`,
-      `特性: 【${featureName}】需要人工确认：`,
+      `【项目模式托管运行需要介入】`,
+      `项目：【${projectName}】`,
+      `特性: 【${featureName}】`,
       `触发原因：${notification.message}`,
       `当前阶段：${notification.nodeId ?? "未知"}`,
-      `节点状态：${notification.policyResult?.facts?.currentNodeStatus ?? "未知"}`,
+      `阶段状态：${notification.policyResult?.facts?.currentNodeStatus ?? "未知"}`,
       `上下文占用：${contextText}`,
       "最近一条大模型返回消息：",
       "",
       assistantTail || "（无可展示内容）",
       "",
       "可选操作:",
-      `/托管停止 ${code}`,
-      `/托管继续当前会话 ${code} <输入消息，不填默认继续当前任务>`,
-      `/托管开启新会话 ${code}`,
+      `/停止托管运行 ${code}`,
+      `/继续当前会话 ${code} <输入消息，不填默认继续当前任务>`,
+      `/开启新会话 ${code}`,
       "",
       nextActionText
     ].join("\n")
