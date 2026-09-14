@@ -2,7 +2,7 @@ import { _electron } from "playwright"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
 import { mkdirSync, writeFileSync } from "node:fs"
-import { resolve, join } from "node:path"
+import { resolve, join, relative, isAbsolute } from "node:path"
 
 // Actual composer/IPC/React integration, with an isolated profile and a deterministic producer.
 // Build first. CHAT_LAYOUT_PACKAGED_EXECUTABLE optionally runs a local diagnostic ASAR instead.
@@ -22,8 +22,12 @@ const env = Object.fromEntries(
 )
 for (const key of [
   "USERPROFILE",
+  "HOME",
   "APPDATA",
   "LOCALAPPDATA",
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
   "CMB_COWORK_AGENT_HOME",
   "TEMP",
   "TMP"
@@ -31,6 +35,8 @@ for (const key of [
   env[key] = join(profile, key)
   mkdirSync(env[key], { recursive: true })
 }
+// 只修改子进程环境，确保直接使用 os.homedir() 的服务也写入本次测试目录。
+env.HOME = env.USERPROFILE
 Object.assign(env, {
   CMB_TASK_CARDS_MOCK: "1",
   HTTP_PROXY: "http://127.0.0.1:9",
@@ -73,8 +79,20 @@ try {
         channel: `agent:stream:${request.threadId}:request:${encodeURIComponent(request.streamRequestId)}`
       }
     })
-    return { versions: process.versions, packaged: app.isPackaged }
+    const { homedir, tmpdir } = process.getBuiltinModule("os")
+    return {
+      versions: process.versions,
+      packaged: app.isPackaged,
+      paths: { home: homedir(), temp: tmpdir(), userData: app.getPath("userData") }
+    }
   })
+  for (const [name, directory] of Object.entries(runtime.paths)) {
+    const withinProfile = relative(profile, directory)
+    assert.ok(
+      withinProfile && !withinProfile.startsWith("..") && !isAbsolute(withinProfile),
+      `${name} must be isolated inside the test profile: ${directory}`
+    )
+  }
   const workspace = join(artifacts, "workspace")
   mkdirSync(workspace, { recursive: true })
   const threadId = await page.evaluate(
@@ -144,7 +162,7 @@ try {
   )
   assert.ok(rows.length > 1 && rows.length < 40)
   assert.ok(
-    rows.every((row) => row.margin === 0),
+    rows.every((row) => row.margin === 0 && Math.abs(row.height - row.known) <= 1),
     "All spacing must be included in measured boxes"
   )
   assert.equal(restoredExpansion, "true", "Expanded reasoning must survive virtual unmount")
@@ -182,30 +200,33 @@ try {
     }
     requestAnimationFrame(sample)
   })
-  const sendReasoning = async (tick) => {
-    await app.evaluate((_electron, tick) => {
-      const run = globalThis.layoutRun
-      run.sender.send(run.channel, {
-        type: "stream",
-        mode: "messages",
-        data: [
-          {
-            id: ["langchain_core", "messages", "AIMessageChunk"],
-            kwargs: {
-              id: "layout-live",
-              content: "",
-              additional_kwargs: {
-                reasoning_content:
-                  "继续分析消息高度和滚动变化，需要保证当前显示的内容稳定。\n\n".repeat(
-                    (tick + 1) * 5
-                  )
+  const sendReasoning = async (tick, id = "layout-live") => {
+    await app.evaluate(
+      (_electron, { tick, id }) => {
+        const run = globalThis.layoutRun
+        run.sender.send(run.channel, {
+          type: "stream",
+          mode: "messages",
+          data: [
+            {
+              id: ["langchain_core", "messages", "AIMessageChunk"],
+              kwargs: {
+                id,
+                content: "",
+                additional_kwargs: {
+                  reasoning_content:
+                    "继续分析消息高度和滚动变化，需要保证当前显示的内容稳定。\n\n".repeat(
+                      (tick + 1) * 5
+                    )
+                }
               }
-            }
-          },
-          { langgraph_node: "agent" }
-        ]
-      })
-    }, tick)
+            },
+            { langgraph_node: "agent" }
+          ]
+        })
+      },
+      { tick, id }
+    )
   }
   for (let tick = 0; tick < 90; tick++) {
     await sendReasoning(tick)
@@ -287,21 +308,24 @@ try {
   )
 
   // A new body must collapse reasoning once. Explicit expansion afterwards survives more output.
-  const sendBody = async (text) =>
-    app.evaluate((_electron, text) => {
-      const run = globalThis.layoutRun
-      run.sender.send(run.channel, {
-        type: "stream",
-        mode: "messages",
-        data: [
-          {
-            id: ["langchain_core", "messages", "AIMessageChunk"],
-            kwargs: { id: "layout-live", content: text }
-          },
-          { langgraph_node: "agent" }
-        ]
-      })
-    }, text)
+  const sendBody = async (text, id = "layout-live") =>
+    app.evaluate(
+      (_electron, { text, id }) => {
+        const run = globalThis.layoutRun
+        run.sender.send(run.channel, {
+          type: "stream",
+          mode: "messages",
+          data: [
+            {
+              id: ["langchain_core", "messages", "AIMessageChunk"],
+              kwargs: { id, content: text }
+            },
+            { langgraph_node: "agent" }
+          ]
+        })
+      },
+      { text, id }
+    )
   await sendBody("开始输出最终回答。")
   await page.waitForTimeout(500)
   const liveToggle = live.locator("button[aria-expanded]")
@@ -312,6 +336,47 @@ try {
   assert.equal(await liveToggle.getAttribute("aria-expanded"), "true")
   assert.deepEqual(errors, [])
   await page.screenshot({ path: join(artifacts, "answer-expanded.png") })
+
+  // 覆盖真实 IPC 完成事件：思考区离屏后收到正文并结束，返回时只自动收起一次。
+  await app.evaluate(() => {
+    const run = globalThis.layoutRun
+    run.sender.send(run.channel, { type: "done" })
+    globalThis.layoutRun = null
+  })
+  await page.getByRole("button", { name: "停止生成", exact: true }).waitFor({ state: "detached" })
+  await composer.fill("验证思考消息离屏期间完成回答")
+  await submit.click()
+  for (let i = 0; i < 100; i++) {
+    if (await app.evaluate(() => Boolean(globalThis.layoutRun))) break
+    await page.waitForTimeout(100)
+  }
+  assert.ok(await app.evaluate(() => Boolean(globalThis.layoutRun)), "Second request must start")
+  await sendReasoning(10, "layout-offscreen")
+  const offscreen = page.locator('[data-chat-message-id="layout-offscreen"]')
+  const offscreenToggle = offscreen.locator("button[aria-expanded]")
+  await offscreenToggle.waitFor()
+  assert.equal(await offscreenToggle.getAttribute("aria-expanded"), "true")
+  await page.mouse.move(
+    viewportBox.x + viewportBox.width / 2,
+    viewportBox.y + viewportBox.height / 2
+  )
+  await page.mouse.wheel(0, -10000)
+  await page.getByRole("button", { name: "回到会话底部", exact: true }).waitFor()
+  await offscreen.waitFor({ state: "detached" })
+  await sendBody("离屏期间已完成的回答。", "layout-offscreen")
+  await app.evaluate(() => {
+    const run = globalThis.layoutRun
+    run.sender.send(run.channel, { type: "done" })
+  })
+  await page.getByRole("button", { name: "停止生成", exact: true }).waitFor({ state: "detached" })
+  assert.equal(await offscreen.count(), 0, "Completion must happen while the row is unmounted")
+  await page.getByRole("button", { name: "回到会话底部", exact: true }).click()
+  await offscreenToggle.waitFor()
+  assert.equal(await offscreenToggle.getAttribute("aria-expanded"), "false")
+  await offscreenToggle.click()
+  assert.equal(await offscreenToggle.getAttribute("aria-expanded"), "true")
+  assert.deepEqual(errors, [])
+  await page.screenshot({ path: join(artifacts, "offscreen-completed.png") })
   writeFileSync(
     join(artifacts, "results.json"),
     JSON.stringify(
@@ -319,6 +384,7 @@ try {
         ...result,
         detachedDelta,
         checks: [
+          "isolated runtime paths",
           "measured spacing",
           "restored expansion",
           "long streaming follow",
@@ -326,7 +392,8 @@ try {
           "return to bottom",
           "64 Ki preview",
           "one-shot automatic collapse",
-          "manual expansion after answer"
+          "manual expansion after answer",
+          "offscreen answer completion"
         ]
       },
       null,

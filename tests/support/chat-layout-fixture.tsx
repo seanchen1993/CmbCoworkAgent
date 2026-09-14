@@ -80,7 +80,12 @@ const fixture = {
     props.contentVersion++
     messages = messages.map((message, index) =>
       index === 199
-        ? { ...message, content: "", reasoning: "持续思考的内容。\n\n".repeat(tick * 10) }
+        ? {
+            ...message,
+            content: "",
+            tool_calls: undefined,
+            reasoning: "持续思考的内容。\n\n".repeat(tick * 10)
+          }
         : message
     )
     render()
@@ -104,6 +109,14 @@ const fixture = {
   answer() {
     messages = messages.map((message, index) =>
       index === 199 ? { ...message, content: "思考结束，开始回答。" } : message
+    )
+    render()
+  },
+  tool() {
+    messages = messages.map((message, index) =>
+      index === 199
+        ? { ...message, tool_calls: [{ id: "layout-tool", name: "read_file", args: {} }] }
+        : message
     )
     render()
   }

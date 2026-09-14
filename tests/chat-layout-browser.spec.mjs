@@ -53,8 +53,14 @@ const bundle = await build({
               )
             : readFileSync(args.path, "utf8")
           if (args.path.endsWith("MessageBubble.tsx")) {
+            const marker = "  const [collapsedTools,"
+            assert.equal(
+              contents.split(marker).length - 1,
+              1,
+              "Render counter must be inserted once"
+            )
             contents = contents.replace(
-              "  const [collapsedTools,",
+              marker,
               "  window.chatLayoutRenders++;\n  const [collapsedTools,"
             )
           }
@@ -101,6 +107,10 @@ try {
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
   await page.locator('[data-chat-message-id="message-199"]').waitFor({ state: "attached" })
   await page.waitForTimeout(700)
+  assert.ok(
+    await page.evaluate(() => window.chatLayoutRenders > 0),
+    "Render counter must be active"
+  )
   async function check(name, fn) {
     try {
       results.push({ name, passed: true, details: await fn() })
@@ -126,7 +136,9 @@ try {
     writeFileSync(join(output, "row-measurements.json"), JSON.stringify(rows, null, 2))
     assert.ok(rows.length > 1)
     assert.ok(
-      rows.every((row) => row.margin === 0 && Math.abs(row.gap) <= 1),
+      rows.every(
+        (row) => row.margin === 0 && Math.abs(row.gap) <= 1 && Math.abs(row.height - row.known) <= 1
+      ),
       JSON.stringify(rows)
     )
     return rows
@@ -288,6 +300,35 @@ try {
     assert.ok(metrics.mountedRows >= 5 && metrics.mountedRows < 40, JSON.stringify(metrics))
     return metrics
   })
+  for (const phase of ["answer", "tool"]) {
+    await check(`reasoning catches up ${phase} completion while unmounted`, async () => {
+      await page.evaluate(() => window.chatLayoutFixture.resetAutomatic())
+      const row = page.locator('[data-chat-message-id="message-199"]')
+      const button = row.locator("button[aria-expanded]")
+      await button.waitFor()
+      assert.equal(await button.getAttribute("aria-expanded"), "true")
+      await page.evaluate(() => window.chatLayoutFixture.seek(0))
+      await row.waitFor({ state: "detached" })
+      await page.evaluate((phase) => {
+        window.chatLayoutFixture[phase]()
+        window.chatLayoutFixture.complete()
+      }, phase)
+      assert.equal(await row.count(), 0, "Completion must happen while the row is unmounted")
+      await page.evaluate(() => window.chatLayoutFixture.seek(199))
+      await button.waitFor()
+      assert.equal(await button.getAttribute("aria-expanded"), "false")
+      await button.click()
+      await page.evaluate(() => window.chatLayoutFixture.seek(0))
+      await row.waitFor({ state: "detached" })
+      await page.evaluate(() => window.chatLayoutFixture.seek(199))
+      await button.waitFor()
+      assert.equal(
+        await button.getAttribute("aria-expanded"),
+        "true",
+        "Manual reopening is retained"
+      )
+    })
+  }
   await check("no uncaught render errors", async () => assert.deepEqual(errors, []))
   writeFileSync(join(output, "results.json"), JSON.stringify(results, null, 2))
   assert.ok(

@@ -24,12 +24,14 @@ export function advanceReasoningExpansion(
   previous: ReasoningExpansionState,
   hasReasoning: boolean,
   isStreaming: boolean,
-  shouldCollapse: boolean
+  hasAnswer: boolean
 ): ReasoningExpansionState {
-  if (!hasReasoning || !isStreaming) return previous
+  if (!hasReasoning) return previous
   let next = previous
-  if (!next.autoOpened) next = { ...next, open: true, autoOpened: true }
-  if (shouldCollapse && !next.autoCollapsed) {
+  if (isStreaming && !next.autoOpened) next = { ...next, open: true, autoOpened: true }
+  // 消息可能在虚拟行卸载期间完成回答，恢复时补齐已开始的自动收起阶段。
+  // 普通历史消息从未自动展开；用户在自动收起后手动重开，也都保持原选择。
+  if (hasAnswer && next.autoOpened && !next.autoCollapsed) {
     next = { ...next, open: false, autoCollapsed: true }
   }
   return next
@@ -52,7 +54,7 @@ export function useReasoningExpansion(
   messageId: string,
   hasReasoning: boolean,
   isStreaming: boolean,
-  shouldCollapse: boolean
+  hasAnswer: boolean
 ): [boolean, () => void] {
   const choices = useContext(ReasoningExpansionContext)
   const [saved, setSaved] = useState(() => ({
@@ -62,14 +64,14 @@ export function useReasoningExpansion(
       choices?.get(messageId) ?? INITIAL_REASONING_STATE,
       hasReasoning,
       isStreaming,
-      shouldCollapse
+      hasAnswer
     )
   }))
   const previous =
     saved.messageId === messageId && saved.choices === choices
       ? saved.state
       : (choices?.get(messageId) ?? INITIAL_REASONING_STATE)
-  const state = advanceReasoningExpansion(previous, hasReasoning, isStreaming, shouldCollapse)
+  const state = advanceReasoningExpansion(previous, hasReasoning, isStreaming, hasAnswer)
   // Adjust this component's own state during render, before committing its DOM. An effect would
   // commit the wrong row height first and let ResizeObserver/scroll anchoring react to it.
   if (saved.messageId !== messageId || saved.choices !== choices || saved.state !== state) {

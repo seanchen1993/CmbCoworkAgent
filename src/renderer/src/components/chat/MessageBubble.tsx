@@ -51,10 +51,7 @@ import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
 import { isImRemoteControlTranscriptMessageId } from "../../../../shared/im-remote-transcript"
 import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
-import {
-  normalizeVisibleReasoningText,
-  shouldAutoCollapseReasoning
-} from "@/lib/message-display-visibility"
+import { normalizeVisibleReasoningText } from "@/lib/message-display-visibility"
 import {
   areMessageRenderFieldsEqual,
   areMessageToolRenderInputsEqual
@@ -474,12 +471,7 @@ function MessageBubbleImpl({
     `${threadId}:${message.role}:${message.id}`,
     Boolean(reasoningText),
     Boolean(isStreaming),
-    shouldAutoCollapseReasoning({
-      isStreaming: Boolean(isStreaming),
-      reasoningText,
-      hasVisibleAssistantContent,
-      hasToolCalls
-    })
+    hasVisibleAssistantContent || hasToolCalls
   )
 
   // 测量用户消息内容高度,超过阈值才启用折叠。气泡宽度是 max-w-[80%],会随窗口/

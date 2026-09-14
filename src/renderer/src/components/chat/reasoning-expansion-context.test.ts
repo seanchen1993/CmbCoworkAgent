@@ -58,6 +58,19 @@ describe("reasoning expansion preserves the existing one-shot lifecycle", () => 
     expect(advanceReasoningExpansion(reopened, true, true, true)).toBe(reopened)
   })
 
+  it("catches up the answer phase when a reasoning row completes while unmounted", () => {
+    const opened = advanceReasoningExpansion(initial, true, true, false)
+    const completed = advanceReasoningExpansion(opened, true, false, true)
+    expect(completed).toEqual({ open: false, autoOpened: true, autoCollapsed: true })
+    const manuallyReopened = { ...completed, open: true }
+    expect(advanceReasoningExpansion(manuallyReopened, true, false, true)).toBe(manuallyReopened)
+  })
+
+  it("does not auto-collapse a manually expanded historical answer", () => {
+    const historical = { ...initial, open: true }
+    expect(advanceReasoningExpansion(historical, true, false, true)).toBe(historical)
+  })
+
   it("bounds retained choices and keeps recently used messages across history paging", () => {
     const choices = new Map<string, ReasoningExpansionState>()
     for (let message = 0; message < 500; message++) {
