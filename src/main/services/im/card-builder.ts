@@ -58,11 +58,20 @@ function contentComponent(lines: ReadonlyArray<string>, model = 0): CardComponen
   }
 }
 
-/** InnerKV.title 最多显示 9 个字符，超出客户端截断。 */
+/**
+ * InnerKV.title 最多显示 9 个字符，超出客户端截断。
+ *
+ * `value` is a list of InnerContent objects, never a list of bare strings. The
+ * field is typed only as `List` in the spec, so the shape has to be read off
+ * the worked example — and getting it wrong is not a degraded row, it is a
+ * blank card: the client abandons the whole component array and renders an
+ * empty bubble, while the send API still answers code=0 with a message id.
+ * Every card here carries a kv, so that silently cost us all five of them.
+ */
 function kvComponent(pairs: ReadonlyArray<{ title: string; value: string }>): CardComponent {
   return {
     type: "kv",
-    list: pairs.map((pair) => ({ title: pair.title, value: [pair.value] }))
+    list: pairs.map((pair) => ({ title: pair.title, value: [{ content: pair.value }] }))
   }
 }
 

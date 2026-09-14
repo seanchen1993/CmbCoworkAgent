@@ -23,9 +23,13 @@ import {
   type RemoteImCardUpdateV1
 } from "../src/shared/im-gateway-contract"
 import {
+  buildAnsweredCard,
   buildApprovalCard,
+  buildExpiredCard,
   buildQuestionCard,
-  QUESTION_OTHER_SUFFIX
+  buildResolvedCard,
+  QUESTION_OTHER_SUFFIX,
+  type CardComponent
 } from "../src/main/services/im/card-builder"
 import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
 import { ImCardPublisher } from "../src/main/services/im/card-publisher"
@@ -494,6 +498,92 @@ function testARefusedSubmitLeavesTheFormUsable(): void {
   console.log("PASS testARefusedSubmitLeavesTheFormUsable")
 }
 
+/**
+ * A kv row's `value` is a list of objects, never a list of strings.
+ *
+ * This is pinned because getting it wrong fails silently in the worst way: the
+ * send API answers code=0 with a message id, the gateway records the card as
+ * SENT, and the client renders an empty bubble — no error anywhere in our logs
+ * or the platform's. Every card builder emits a kv, so one wrong helper blanked
+ * all five at once. Verified against the real client: a string list renders
+ * nothing, an object list renders the row.
+ */
+function testEveryKvRowIsShapedTheWayTheClientParses(): void {
+  const cards: Array<[string, CardComponent[]]> = [
+    [
+      "approval",
+      buildApprovalCard({
+        targetLabel: "会话：你好",
+        operation: "写文件",
+        detail: "src/a.ts",
+        tag: "tag",
+        allowedDecisions: ["approve", "reject"],
+        fallbackCommand: "/批准 ABC123"
+      } as Parameters<typeof buildApprovalCard>[0])
+    ],
+    [
+      "resolved",
+      buildResolvedCard({
+        targetLabel: "会话：你好",
+        operation: "写文件",
+        outcome: "已批准",
+        outcomeStyle: "approved"
+      })
+    ],
+    [
+      "question",
+      buildQuestionCard({
+        targetLabel: "会话：你好",
+        tag: "tag",
+        fallbackCommand: "/回答 ABC123 <编号>",
+        questions: [
+          {
+            key: "q0",
+            header: "标题",
+            question: "问题？",
+            options: [{ label: "甲" }, { label: "乙" }]
+          },
+          { key: "q1", header: "已答", question: "问题？", options: [], answered: true }
+        ]
+      })
+    ],
+    [
+      "answered",
+      buildAnsweredCard({
+        targetLabel: "会话：你好",
+        answers: [{ header: "标题", answer: "甲" }],
+        outcome: "已回答"
+      })
+    ],
+    ["expired", buildExpiredCard("approval", "会话：你好")]
+  ]
+
+  for (const [name, components] of cards) {
+    const kvComponents = components.filter((component) => component.type === "kv")
+    assert.ok(kvComponents.length > 0, `${name} card is expected to carry a kv component`)
+    for (const kv of kvComponents) {
+      const rows = kv.list as ReadonlyArray<{ title: unknown; value: unknown }>
+      assert.ok(Array.isArray(rows) && rows.length > 0, `${name}: kv.list must be a non-empty array`)
+      for (const row of rows) {
+        assert.equal(typeof row.title, "string", `${name}: kv row title must be a string`)
+        assert.ok(Array.isArray(row.value), `${name}: kv row value must be an array`)
+        for (const entry of row.value as unknown[]) {
+          assert.ok(
+            entry !== null && typeof entry === "object" && !Array.isArray(entry),
+            `${name}: kv value entries must be objects — a bare string blanks the whole card`
+          )
+          assert.equal(
+            typeof (entry as { content?: unknown }).content,
+            "string",
+            `${name}: kv value entries must carry a string content`
+          )
+        }
+      }
+    }
+  }
+  console.log("PASS testEveryKvRowIsShapedTheWayTheClientParses")
+}
+
 function testEveryBuiltCardSatisfiesTheContract(): void {
   const approval = buildApprovalCard({
     targetLabel: "快捷支付",
@@ -947,6 +1037,7 @@ async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<vo
 
 async function main(): Promise<void> {
   testEveryBuiltCardSatisfiesTheContract()
+  testEveryKvRowIsShapedTheWayTheClientParses()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
   testARefusedSubmitLeavesTheFormUsable()
   await testTheCardCarriesTheSameGateAsTheShortCode()
