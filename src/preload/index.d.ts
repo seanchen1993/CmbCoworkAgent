@@ -2899,6 +2899,7 @@ interface CustomAPI {
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
     ) => Promise<HarnessEnterpriseProjectSearchResult>
+    verifyEnterpriseProjectCode: (projectCode: string) => Promise<boolean>
     searchDeployUnits: (
       input: HarnessDeployUnitSearchInput
     ) => Promise<HarnessDeployUnitSearchResult>

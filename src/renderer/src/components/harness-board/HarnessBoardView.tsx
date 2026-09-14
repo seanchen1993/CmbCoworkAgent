@@ -2558,6 +2558,78 @@ function EnterpriseProjectSearchInput({
   )
 }
 
+function LeanProjectLinkStatus({ linked }: { linked: boolean }): React.JSX.Element {
+  const status = (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1.5 text-[11px] font-normal",
+        linked ? "text-status-nominal" : "text-status-warning"
+      )}
+    >
+      <span
+        className={cn("size-2 rounded-full", linked ? "bg-status-nominal" : "bg-status-warning")}
+      />
+      {linked ? "已关联精益项目" : "未关联精益项目"}
+    </span>
+  )
+
+  if (linked) return status
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1">
+      {status}
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label="未关联精益项目说明"
+              className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <Info className="size-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="z-[70] max-w-72">
+            代码生成和 Token 消耗将不会被关联到对应的精益项目。
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </span>
+  )
+}
+
+function useEnterpriseProjectCodeVerification(
+  enabled: boolean,
+  projectCode: string,
+  onVerified: (linked: boolean) => void
+): void {
+  const requestIdRef = useRef(0)
+
+  useEffect(() => {
+    requestIdRef.current += 1
+    const requestId = requestIdRef.current
+    if (!enabled) return
+
+    const normalizedProjectCode = projectCode.trim()
+    if (!normalizedProjectCode) {
+      onVerified(false)
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      window.api.harnessBoard
+        .verifyEnterpriseProjectCode(normalizedProjectCode)
+        .then((linked) => {
+          if (requestIdRef.current === requestId) onVerified(linked)
+        })
+        .catch(() => {
+          // 查询失败时保留现有状态，避免临时网络异常错误清除关联关系。
+        })
+    }, ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS)
+
+    return () => window.clearTimeout(timer)
+  }, [enabled, onVerified, projectCode])
+}
+
 function DeployUnitSearchInput({
   value,
   onValueChange,
@@ -2813,15 +2885,16 @@ function ProjectFormDialog({
               <div className="mb-3 text-sm font-semibold">项目信息</div>
               <div className="grid grid-cols-2 items-start gap-3">
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  项目编号 *
+                  <span className="flex items-center justify-between gap-2">
+                    <span>项目编号 *</span>
+                    <LeanProjectLinkStatus linked={form.projectFromLean} />
+                  </span>
                   <EnterpriseProjectSearchInput
                     value={form.projectCode}
                     searchField="code"
                     searchLabel="项目编号"
                     normalizeValue={sanitizeHarnessNameInput}
-                    onValueChange={(projectCode) =>
-                      onChange({ ...form, projectCode, projectFromLean: false })
-                    }
+                    onValueChange={(projectCode) => onChange({ ...form, projectCode })}
                     onSelect={(project) => {
                       const shouldSyncProjectDir =
                         !form.projectDir ||
@@ -2830,7 +2903,6 @@ function ProjectFormDialog({
                         ...form,
                         name: project.projectName,
                         projectCode: project.projectCode,
-                        projectFromLean: true,
                         systemId: project.systemId || form.systemId,
                         systemName: project.systemName || form.systemName,
                         projectDir: shouldSyncProjectDir
@@ -2858,7 +2930,6 @@ function ProjectFormDialog({
                       onChange({
                         ...form,
                         name,
-                        projectFromLean: false,
                         projectDir: shouldSyncProjectDir
                           ? sanitizeProjectDirFromProjectName(name)
                           : form.projectDir
@@ -2872,7 +2943,6 @@ function ProjectFormDialog({
                         ...form,
                         name: project.projectName,
                         projectCode: project.projectCode,
-                        projectFromLean: true,
                         systemId: project.systemId || form.systemId,
                         systemName: project.systemName || form.systemName,
                         projectDir: shouldSyncProjectDir
@@ -3144,21 +3214,21 @@ function ProjectEditDialog({
               <div className="mb-3 text-sm font-semibold">项目信息</div>
               <div className="grid grid-cols-2 items-start gap-3">
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  项目编号 *
+                  <span className="flex items-center justify-between gap-2">
+                    <span>项目编号 *</span>
+                    <LeanProjectLinkStatus linked={form.projectFromLean} />
+                  </span>
                   <EnterpriseProjectSearchInput
                     value={form.projectCode}
                     searchField="code"
                     searchLabel="项目编号"
                     normalizeValue={sanitizeHarnessNameInput}
-                    onValueChange={(projectCode) =>
-                      onChange({ ...form, projectCode, projectFromLean: false })
-                    }
+                    onValueChange={(projectCode) => onChange({ ...form, projectCode })}
                     onSelect={(project) =>
                       onChange({
                         ...form,
                         name: project.projectName,
                         projectCode: project.projectCode,
-                        projectFromLean: true,
                         systemId: project.systemId || form.systemId,
                         systemName: project.systemName || form.systemName
                       })
@@ -3176,13 +3246,12 @@ function ProjectEditDialog({
                     value={form.name}
                     searchField="name"
                     searchLabel="项目名称"
-                    onValueChange={(name) => onChange({ ...form, name, projectFromLean: false })}
+                    onValueChange={(name) => onChange({ ...form, name })}
                     onSelect={(project) =>
                       onChange({
                         ...form,
                         name: project.projectName,
                         projectCode: project.projectCode,
-                        projectFromLean: true,
                         systemId: project.systemId || form.systemId,
                         systemName: project.systemName || form.systemName
                       })
@@ -8398,6 +8467,26 @@ export function HarnessBoardView({
   )
   const [savingEdit, setSavingEdit] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
+  const handleCreateProjectLinkVerified = useCallback((linked: boolean): void => {
+    setForm((current) =>
+      current.projectFromLean === linked ? current : { ...current, projectFromLean: linked }
+    )
+  }, [])
+  const handleEditProjectLinkVerified = useCallback((linked: boolean): void => {
+    setEditForm((current) =>
+      current.projectFromLean === linked ? current : { ...current, projectFromLean: linked }
+    )
+  }, [])
+  useEnterpriseProjectCodeVerification(
+    dialogOpen,
+    form.projectCode,
+    handleCreateProjectLinkVerified
+  )
+  useEnterpriseProjectCodeVerification(
+    editingProject !== null,
+    editForm.projectCode,
+    handleEditProjectLinkVerified
+  )
   const [archivingProjectId, setArchivingProjectId] = useState<string | null>(null)
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null)
   const [pendingProjectAction, setPendingProjectAction] = useState<PendingProjectAction>(null)

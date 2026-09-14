@@ -47,7 +47,8 @@ import {
   queryPipelineLabels,
   queryPipelines,
   searchDeployUnits,
-  searchEnterpriseProjects
+  searchEnterpriseProjects,
+  verifyEnterpriseProjectCode
 } from "../harness-board/enterprise-projects"
 import {
   startHarnessWatchRefs,
@@ -390,6 +391,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       input: HarnessEnterpriseProjectSearchInput
     ): Promise<HarnessEnterpriseProjectSearchResult> => {
       return searchEnterpriseProjects(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:verifyEnterpriseProjectCode",
+    async (_event, projectCode: string): Promise<boolean> => {
+      return verifyEnterpriseProjectCode(projectCode)
     }
   )
 

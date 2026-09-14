@@ -4347,6 +4347,11 @@ const api = {
         "harnessBoard:searchEnterpriseProjects",
         input
       ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    verifyEnterpriseProjectCode: (projectCode: string): Promise<boolean> =>
+      ipcRenderer.invoke(
+        "harnessBoard:verifyEnterpriseProjectCode",
+        projectCode
+      ) as Promise<boolean>,
     searchDeployUnits: (
       input: HarnessDeployUnitSearchInput
     ): Promise<HarnessDeployUnitSearchResult> =>
