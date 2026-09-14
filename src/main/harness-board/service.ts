@@ -1385,10 +1385,13 @@ async function runHarnessInvocationAsync(
 
 async function runInspectAdapter(
   project: HarnessProjectMetadata,
+  context: HarnessProjectConfigContext,
   mode: "project" | "run",
   feature?: string
 ): Promise<Record<string, unknown>> {
-  const invocation = await buildConfiguredHarnessInvocation(project, mode, { feature })
+  const invocation = buildConfiguredHarnessInvocationFromContext(project, context, mode, {
+    feature
+  })
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
   const stdoutBuffer = await runHarnessInvocationAsync(
     invocation,
@@ -2263,10 +2266,14 @@ async function readProjectContextInWorker(
   return result.projects[projectId] ?? null
 }
 
-async function requireProject(projectId: string): Promise<HarnessProjectMetadata> {
+async function requireProjectContext(projectId: string): Promise<HarnessProjectContextItem> {
   const context = await readProjectContextInWorker(projectId, "harness-project-read")
   if (!context) throw new Error("Project not found")
-  return context.project
+  return context
+}
+
+async function requireProject(projectId: string): Promise<HarnessProjectMetadata> {
+  return (await requireProjectContext(projectId)).project
 }
 
 function validateCreateInput(input: HarnessProjectCreateInput): void {
@@ -2989,6 +2996,27 @@ async function readHarnessFeatureSessionContextAgentPrompt(
   }
 }
 
+export async function resolveHarnessFeaturePluginIdentity(
+  metadata: unknown
+): Promise<{ pluginId?: string; pluginName?: string }> {
+  const feature = readHarnessFeatureMetadata(metadata)
+  if (!feature) return {}
+  const workerContext = await readProjectContextInWorker(
+    feature.projectId,
+    "harness-plugin-identity"
+  )
+  if (!workerContext) throw new Error("Project not found")
+  const context = projectConfigContextFromWorker(workerContext)
+  if (!context.plugin || !context.configSnapshot || context.configSnapshot.error) {
+    throw context.configSnapshot?.error ?? new Error("Harness board config unavailable")
+  }
+  const adapter = workerContext.project["harness-adapter"]
+  return {
+    pluginId: normalizeText(context.plugin.id) || adapter.id,
+    pluginName: normalizeText(context.plugin.name) || adapter.name
+  }
+}
+
 export async function buildHarnessFeatureAgentContext(
   metadata: unknown,
   options: HarnessFeatureAgentContextOptions = {}
@@ -3125,8 +3153,13 @@ export async function resolveHarnessFeatureCurrentStage(
     const normalizedProjectId = normalizeText(projectId).trim()
     const normalizedSlug = normalizeText(slug).trim()
     if (!normalizedProjectId || !normalizedSlug) return null
-    const project = await requireProject(normalizedProjectId)
-    const snapshot = await runInspectAdapter(project, "run", normalizedSlug)
+    const context = await requireProjectContext(normalizedProjectId)
+    const snapshot = await runInspectAdapter(
+      context.project,
+      projectConfigContextFromWorker(context),
+      "run",
+      normalizedSlug
+    )
     return resolveCurrentStageFromSnapshot(snapshot)
   } catch {
     return null
@@ -3137,11 +3170,16 @@ export async function inspectHarnessManagedFeatureStatus(
   projectId: string,
   featureId: string
 ): Promise<ManagedFeatureStatusSnapshot> {
-  const project = await requireProject(normalizeText(projectId).trim())
+  const context = await requireProjectContext(normalizeText(projectId).trim())
   const normalizedFeatureId = normalizeText(featureId).trim()
   if (!normalizedFeatureId) throw new Error("Feature is required")
 
-  const snapshot = await runInspectAdapter(project, "run", normalizedFeatureId)
+  const snapshot = await runInspectAdapter(
+    context.project,
+    projectConfigContextFromWorker(context),
+    "run",
+    normalizedFeatureId
+  )
   const workflow = normalizeWorkflow(snapshot.workflow)
   const run = isObject(snapshot.run) ? snapshot.run : {}
   const currentNodeId = normalizeText(run.currentNodeId).trim() || "unknown"
@@ -3583,6 +3621,7 @@ export async function deleteHarnessProject(projectId: string): Promise<HarnessPr
 async function findCompatibleKnowledgePlugin(adapterId: string): Promise<{
   plugin: PluginMetadata
   adapter: HarnessAdapterRegistryItem
+  config: Record<string, unknown>
 }> {
   const normalizedAdapterId = normalizeText(adapterId).trim()
   const plugin = getPlugins().find((item) => pluginMatchesAdapterId(item, normalizedAdapterId))
@@ -3597,7 +3636,7 @@ async function findCompatibleKnowledgePlugin(adapterId: string): Promise<{
     throw new Error(adapter.boardCompatibility.message || adapter.boardCompatibility.label)
   }
 
-  return { plugin, adapter }
+  return { plugin, adapter, config }
 }
 
 function createKnowledgeCommandProject(
@@ -3625,8 +3664,8 @@ function createKnowledgeCommandProject(
 export async function syncHarnessProjectConstraints(
   adapterId: string
 ): Promise<HarnessProjectConstraintSyncResult> {
-  const { plugin, adapter } = await findCompatibleKnowledgePlugin(adapterId)
-  const configuredCommand = await readBoardConfigInspectCommand(plugin.path, "pullKnowledge")
+  const { plugin, adapter, config } = await findCompatibleKnowledgePlugin(adapterId)
+  const configuredCommand = readBoardConfigPlatformTextFromValue(config, "pull_knowledge")
   if (!configuredCommand) {
     throw new Error(`插件未配置 inspectCommands.${process.platform}.pull_knowledge，请检查插件设置`)
   }

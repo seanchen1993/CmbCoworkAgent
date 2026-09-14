@@ -3,18 +3,11 @@ import { existsSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { HARNESS_SOURCE, type HarnessFeatureSummary } from "../../../shared/harness-board-types"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
-import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getAgentModeFromMetadata, type AgentMode } from "../../agent/coordinator-mode"
-import { getThread } from "../../db"
 import type { createThreadService } from "../thread-service"
 import { isFeatureGateEnabled } from "../../feature-gates"
 import { defaultThreadTitle } from "../title-generator"
-import {
-  buildHarnessFeatureAgentContext,
-  getHarnessProjectDetail,
-  getHarnessRunDetail,
-  listHarnessProjects
-} from "../../harness-board/service"
+import { getHarnessProjectDetail, listHarnessProjects } from "../../harness-board/service"
 import { getBuiltinRobotSettings } from "../../storage"
 import { FEATURE_GATES } from "../../../shared/feature-gates"
 import {
@@ -84,9 +77,6 @@ interface FeatureBindingDependencies {
   projectModeEnabled: () => Promise<boolean>
   listProjects: typeof listHarnessProjects
   getProjectDetail: typeof getHarnessProjectDetail
-  getRunDetail: typeof getHarnessRunDetail
-  buildFeatureContext: typeof buildHarnessFeatureAgentContext
-  getThread: typeof getThread
   createThread: typeof createThreadService
   createId: () => string
 }
@@ -123,9 +113,6 @@ export class ImFeatureBindingService {
         (async () => (await isFeatureGateEnabled(FEATURE_GATES.projectMode)).enabled),
       listProjects: dependencies.listProjects ?? listHarnessProjects,
       getProjectDetail: dependencies.getProjectDetail ?? getHarnessProjectDetail,
-      getRunDetail: dependencies.getRunDetail ?? getHarnessRunDetail,
-      buildFeatureContext: dependencies.buildFeatureContext ?? buildHarnessFeatureAgentContext,
-      getThread: dependencies.getThread ?? getThread,
       // Imported lazily on purpose. thread-service reaches into the IPC layer
       // (models, recent-workspace, electron-store); a static edge from an IM
       // service pulls all of that into the IM module graph and reorders
@@ -166,6 +153,8 @@ export class ImFeatureBindingService {
     }))
   }
 
+  // Validate current access eligibility only. Thread creation and execution load
+  // the plugin context when they actually consume its prompt and agent config.
   async validateFeature(
     projectId: string,
     featureSlug: string
@@ -201,10 +190,8 @@ export class ImFeatureBindingService {
     }
 
     let detail: Awaited<ReturnType<typeof getHarnessProjectDetail>>
-    let runDetail: Awaited<ReturnType<typeof getHarnessRunDetail>>
     try {
       detail = await this.dependencies.getProjectDetail(projectId)
-      runDetail = await this.dependencies.getRunDetail(projectId, featureSlug)
     } catch {
       return {
         valid: false,
@@ -228,18 +215,8 @@ export class ImFeatureBindingService {
       }
     }
 
-    const sessionWorkspaceCandidates = runDetail.sessions
-      .slice()
-      .sort((left, right) => right.lastActiveAt.localeCompare(left.lastActiveAt))
-      .map((session) =>
-        existingDirectory(
-          parseStandardThreadMetadata(this.dependencies.getThread(session.threadId)?.metadata)
-            .workspacePath
-        )
-      )
     const workspacePath =
       existingDirectory(detail.project.sessionWorkspacePath) ??
-      sessionWorkspaceCandidates.find((candidate): candidate is string => Boolean(candidate)) ??
       existingDirectory(detail.project.projectRootPath)
     if (!workspacePath) {
       return {
@@ -249,17 +226,6 @@ export class ImFeatureBindingService {
       }
     }
 
-    const harnessContext = await this.dependencies.buildFeatureContext(
-      { harnessFeature: { projectId, slug: featureSlug, source: HARNESS_SOURCE } },
-      { workspacePath }
-    )
-    if (!harnessContext) {
-      return {
-        valid: false,
-        reasonCode: "REMOTE_HARNESS_CONTEXT_UNAVAILABLE",
-        message: "Feature 的插件或系统约束上下文无法加载。"
-      }
-    }
     return {
       valid: true,
       project: { id: projectId, name: project.name.trim() || projectId },
@@ -303,16 +269,6 @@ export class ImFeatureBindingService {
     }
     const validation = await this.validateFeature(feature.projectId, feature.slug)
     if (!validation.valid) return validation
-    const harnessContext = await this.dependencies.buildFeatureContext(metadata, {
-      workspacePath: normalizedWorkspace
-    })
-    if (!harnessContext) {
-      return {
-        valid: false,
-        reasonCode: "REMOTE_HARNESS_CONTEXT_UNAVAILABLE",
-        message: "Project Mode 会话的插件或系统约束上下文无法加载。"
-      }
-    }
     return { ...validation, workspacePath: normalizedWorkspace }
   }
 

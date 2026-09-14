@@ -4492,6 +4492,11 @@ const api = {
         "harnessBoard:getManagedRunEvents",
         input
       ) as Promise<ManagedRunEventsPage>,
+    getLatestManagedRun: (
+      projectId: string,
+      featureId: string
+    ): Promise<ManagedRunSummary | null> =>
+      ipcRenderer.invoke("harnessBoard:getLatestManagedRun", projectId, featureId),
     cancelDialogTips: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelDialogTips") as Promise<void>,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {

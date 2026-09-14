@@ -6356,6 +6356,7 @@ function FeatureDetailPage({
   onBackToProject,
   onEditDeployUnits,
   onRefresh,
+  onFeatureImManagementSaved,
   onActiveSessionChange,
   onSessionViewChange,
   onActiveSessionThreadChange,
@@ -6372,6 +6373,7 @@ function FeatureDetailPage({
   onBackToProject: () => void
   onEditDeployUnits: () => void
   onRefresh: () => void | Promise<void>
+  onFeatureImManagementSaved: (projectId: string, featureId: string, enabled: boolean) => void
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
   onActiveSessionThreadChange?: (threadId: string | null) => void
@@ -6709,8 +6711,9 @@ function FeatureDetailPage({
         }
         throw error
       }
+      onFeatureImManagementSaved(projectId, featureId, enabled)
     },
-    [detail]
+    [detail, onFeatureImManagementSaved]
   )
 
   const handleFeatureImManagementChange = useCallback(
@@ -6730,7 +6733,6 @@ function FeatureDetailPage({
           }
         }
         await setCombinedFeatureImManagement(enabled)
-        await onRefresh()
         toast.success(
           enabled ? "已开启通过招乎管理特性" : "已关闭通过招乎管理特性，已有会话授权不受影响"
         )
@@ -6740,7 +6742,7 @@ function FeatureDetailPage({
         setUpdatingFeatureImManagement(false)
       }
     },
-    [detail, onRefresh, setCombinedFeatureImManagement, updatingFeatureImManagement]
+    [detail, setCombinedFeatureImManagement, updatingFeatureImManagement]
   )
 
   const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
@@ -9733,6 +9735,20 @@ export function HarnessBoardView({
   }, [loadProjectDetail, patchCachedProjectRuns])
 
 
+  const handleFeatureImManagementSaved = useCallback(
+    (projectId: string, featureId: string, enabled: boolean): void => {
+      // Both local settings have been saved. Updating this field does not need
+      // another feature_status / project_status round trip.
+      setRunDetail((current) => {
+        if (!current || current.project.projectId !== projectId || current.run.slug !== featureId) {
+          return current
+        }
+        return { ...current, run: { ...current.run, imManagementEnabled: enabled } }
+      })
+    },
+    []
+  )
+
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {
       if (!selectedFeature || selectedFeature.deleted) return
@@ -11572,6 +11588,7 @@ export function HarnessBoardView({
           onBackToProject={handleBackToProject}
           onEditDeployUnits={openFeatureDeployUnitEditDialog}
           onRefresh={refreshSelectedRunDetail}
+          onFeatureImManagementSaved={handleFeatureImManagementSaved}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
           onActiveSessionThreadChange={onActiveSessionThreadChange}

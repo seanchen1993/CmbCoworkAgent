@@ -1983,8 +1983,8 @@ export function ChatContainer({
       applyManagedRunStatus(event.run)
     })
     void window.api.harnessBoard
-      .getRunDetail(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
-      .then((detail) => applyManagedRunStatus(detail.run.managedRun))
+      .getLatestManagedRun(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
+      .then((managedRun) => applyManagedRunStatus(managedRun ?? undefined))
       .catch((error) => {
         if (!cancelled) {
           console.warn("[ChatContainer] Failed to load managed run status:", error)

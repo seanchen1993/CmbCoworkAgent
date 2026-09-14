@@ -788,6 +788,12 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:getLatestManagedRun",
+    (_event, projectId: string, featureId: string): ManagedRunSummary | null =>
+      managedRunStore.getLatestRun(projectId, featureId)
+  )
+
+  ipcMain.handle(
     "harnessBoard:skipNode",
     async (_event, input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> => {
       const result = await skipHarnessRunNode(input)
