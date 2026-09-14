@@ -79,6 +79,16 @@ function separatorComponent(): CardComponent {
   return { type: "separate" }
 }
 
+/**
+ * The kv key naming where a card came from.
+ *
+ * Not 「会话」: the value is a reply prefix, and those name their own kind —
+ * 「会话：重构登录」, 「收件箱」, 「特性：xxx」. Pairing them with 「会话」 read as
+ * 「会话 会话：重构登录」 for threads and was simply wrong for the other two.
+ * 「来源」 is the one key that stays true for every prefix shape.
+ */
+const KV_SOURCE_TITLE = "来源"
+
 export interface ApprovalCardInput {
   /** Where this gate came from — the reader must never have to guess. */
   targetLabel: string
@@ -122,7 +132,7 @@ export function buildApprovalCard(input: ApprovalCardInput): CardComponent[] {
     titleComponent("需要批准"),
     statusComponent("待处理", STATUS_STYLE.orange),
     kvComponent([
-      { title: "会话", value: input.targetLabel },
+      { title: KV_SOURCE_TITLE, value: input.targetLabel },
       { title: "操作", value: input.operation }
     ]),
     contentComponent(input.detail.split("\n").filter((line) => line.length > 0))
@@ -166,7 +176,7 @@ export function buildResolvedCard(input: ResolvedCardInput): CardComponent[] {
     titleComponent("需要批准"),
     statusComponent(input.outcome, style),
     kvComponent([
-      { title: "会话", value: input.targetLabel },
+      { title: KV_SOURCE_TITLE, value: input.targetLabel },
       { title: "操作", value: input.operation }
     ])
   ]
@@ -250,7 +260,7 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
   const components: CardComponent[] = [
     titleComponent("需要你的选择"),
     statusComponent("待回答", STATUS_STYLE.orange),
-    kvComponent([{ title: "会话", value: input.targetLabel }])
+    kvComponent([{ title: KV_SOURCE_TITLE, value: input.targetLabel }])
   ]
 
   const answered = input.questions.filter((question) => question.answered)
@@ -324,7 +334,7 @@ export function buildAnsweredCard(input: AnsweredCardInput): CardComponent[] {
   const components: CardComponent[] = [
     titleComponent("需要你的选择"),
     statusComponent(input.outcome, STATUS_STYLE.green),
-    kvComponent([{ title: "会话", value: input.targetLabel }])
+    kvComponent([{ title: KV_SOURCE_TITLE, value: input.targetLabel }])
   ]
   if (input.answers.length > 0) {
     components.push(
@@ -342,7 +352,7 @@ export function buildExpiredCard(
   return [
     titleComponent(kind === "approval" ? "需要批准" : "需要你的选择"),
     statusComponent("已失效", STATUS_STYLE.black),
-    kvComponent([{ title: "会话", value: targetLabel }]),
+    kvComponent([{ title: KV_SOURCE_TITLE, value: targetLabel }]),
     contentComponent(["该请求已经结束，这张卡片不再接受操作。"], 1)
   ]
 }

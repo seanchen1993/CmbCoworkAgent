@@ -518,8 +518,8 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
         detail: "src/a.ts",
         tag: "tag",
         allowedDecisions: ["approve", "reject"],
-        fallbackCommand: "/批准 ABC123"
-      } as Parameters<typeof buildApprovalCard>[0])
+        fallbackCommands: "/批准 ABC123 或 /拒绝 ABC123"
+      })
     ],
     [
       "resolved",
