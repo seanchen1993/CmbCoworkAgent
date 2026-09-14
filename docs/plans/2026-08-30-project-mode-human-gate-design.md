@@ -2,13 +2,13 @@
 
 日期：2026-08-30
 
-状态：已确认，待实施
+状态：历史设计，Human Gate 已实现；消息持久化、操作入口及启动恢复方案已由 [托管模式设计](2026-07-28-managed-mode-v1-design.md) 第 3、5、7、9 节取代。下文保留原始方案供追溯，不再作为这些部分的实施依据。
 
 ## 1. 背景与目标
 
 项目模式中的插件可能在执行某个阶段推进命令前，需要用户人工检查产物或代码。Human Gate 提供一个框架级审批边界：插件通过 Hook 请求审批，框架挂起当前 Agent Run，并在来源会话和 Feature 详情页展示插件提供的提示。用户批准后原命令继续执行；用户拒绝后当前 Agent Run 立即 halt。
 
-Human Gate 不属于插件定义的阶段或 Feature 领域状态。框架不得把插件的 `in_progress`、`done` 等状态改写为等待审批，而是在 Feature 绑定记录中维护独立的 `humanGate` 字段。
+Human Gate 不属于插件定义的阶段或 Feature 领域状态。框架不得把插件的 `in_progress`、`done` 等状态改写为等待审批。当前实现将门禁状态保存在通用消息表中，领域关联与 hookId 保存在 payload 中，不再写入 Feature binding 的 `humanGate` 字段。
 
 V1 目标：
 
@@ -119,7 +119,7 @@ V1 的恢复策略为 fail closed：
 
 若用户已点击批准但应用在命令完成前退出，框架不重放该命令。插件领域状态可能已经由命令部分修改，仍由插件自身的 inspect 和幂等策略解释；框架不猜测或修复领域状态。
 
-## 4. Feature 持久化模型
+## 4. Feature 持久化模型（历史方案，已由通用消息表取代）
 
 V1 将 Gate 放在 `/Users/sixinjian/.cmbcoworkagent/harness-board-features.json` 对应 binding 下：
 
@@ -197,13 +197,9 @@ Human Gate 不使用不可关闭的全局模态层。用户始终可以切换会
 
 ## 7. IPC 与事件
 
-新增最小 IPC：
+APP 使用通用通知 IPC 查询待办并按 notificationId 提交 approve / reject，操作路由交给 Human Gate 领域处理器校验与执行。通知生命周期广播驱动 APP 更新，同一通知在 IM 完成后 APP 待办随之消失。
 
-- `harnessBoard:approveHumanGate({ projectId, featureId, gateId })`
-- `harnessBoard:rejectHumanGate({ projectId, featureId, gateId })`
-- `harnessBoard:humanGateChanged` 广播
-
-Feature 列表、Feature 详情和来源 Thread 的 ViewModel 增加可选 `humanGate` 摘要。
+Feature 和来源 Thread 的 Human Gate 展示从待处理通知即时投影，不回写 Feature binding 或 Run ViewModel。当前边界以 [托管模式设计](./2026-07-28-managed-mode-v1-design.md) 为准。
 
 Human Gate 事件至少包含：
 
