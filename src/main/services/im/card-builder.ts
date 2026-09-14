@@ -71,8 +71,25 @@ function contentComponent(lines: ReadonlyArray<string>, model = 0): CardComponen
 function kvComponent(pairs: ReadonlyArray<{ title: string; value: string }>): CardComponent {
   return {
     type: "kv",
-    list: pairs.map((pair) => ({ title: pair.title, value: [{ content: pair.value }] }))
+    list: pairs.map((pair) => ({
+      title: kvTitle(pair.title),
+      value: [{ content: pair.value }]
+    }))
   }
+}
+
+/**
+ * The client renders key and value flush against each other, so the separator
+ * has to live in the key — 「已答题要」 is what a bare key looks like. The spec's
+ * own example writes `"title": "时间："`, colon included, which is the same
+ * convention arrived at from the other direction.
+ *
+ * Applied here rather than at the four call sites so a new row cannot forget
+ * it. Headers reach this from model output, so a key that already ends in a
+ * colon keeps the one it has instead of collecting a second.
+ */
+function kvTitle(title: string): string {
+  return /[：:]$/u.test(title) ? title : `${title}：`
 }
 
 function separatorComponent(): CardComponent {

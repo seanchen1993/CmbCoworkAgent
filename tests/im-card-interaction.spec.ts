@@ -543,7 +543,9 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
             question: "问题？",
             options: [{ label: "甲" }, { label: "乙" }]
           },
-          { key: "q1", header: "已答", question: "问题？", options: [], answered: true }
+          // A header that already ends in a colon must not collect a second —
+          // these come from model output, not from a fixed vocabulary.
+          { key: "q1", header: "已答：", question: "问题？", options: [], answered: true }
         ]
       })
     ],
@@ -566,6 +568,14 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
       assert.ok(Array.isArray(rows) && rows.length > 0, `${name}: kv.list must be a non-empty array`)
       for (const row of rows) {
         assert.equal(typeof row.title, "string", `${name}: kv row title must be a string`)
+        // The client puts nothing between key and value, so the key carries the
+        // separator — without it the row reads 「已答题要」. Exactly one colon:
+        // a header that already ends in one must not collect a second.
+        assert.match(
+          row.title as string,
+          /[^：:][：:]$/u,
+          `${name}: kv row title must end in exactly one colon`
+        )
         assert.ok(Array.isArray(row.value), `${name}: kv row value must be an array`)
         for (const entry of row.value as unknown[]) {
           assert.ok(
