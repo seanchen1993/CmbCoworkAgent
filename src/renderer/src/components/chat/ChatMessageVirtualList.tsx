@@ -16,6 +16,7 @@ import type { HITLRequest, Message, ToolCallState } from "@/types"
 import { HookLogChip } from "./HookLogViews"
 import { MessageBubble } from "./MessageBubble"
 import { ChatSearchContext } from "./ChatSearchContext"
+import { ReasoningExpansionContext } from "./reasoning-expansion-context"
 import type { ChatSearchLocation, ChatSearchReveal } from "../../../../shared/chat-search-types"
 import type {
   ChatScrollVirtualRangeRef,
@@ -287,13 +288,15 @@ function areChatMessageRowPropsEqual(
 
 const ChatMessageRow = React.memo(ChatMessageRowImpl, areChatMessageRowPropsEqual)
 
+// Virtuoso measures item boxes, excluding margins. Put spacing inside each measured item;
+// space-y-* on the list makes the DOM taller than the virtual offsets and causes scroll jumps.
 const VirtuosoMessageListWrapper = React.forwardRef<
   HTMLDivElement,
   React.ComponentPropsWithoutRef<"div">
 >(({ className, style, children, ...props }, ref) => (
   <div
     ref={ref}
-    className={["space-y-4", className].filter(Boolean).join(" ")}
+    className={["[&>[data-item-index]]:pb-4", className].filter(Boolean).join(" ")}
     style={style}
     {...props}
   >
@@ -373,6 +376,10 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   footer
 }: ChatMessageVirtualListProps): React.JSX.Element | null {
   const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
+  const reasoningExpansion = useMemo<{
+    threadId: string
+    choices: NonNullable<React.ContextType<typeof ReasoningExpansionContext>>
+  }>(() => ({ threadId, choices: new Map() }), [threadId])
   const initialVirtualItemsRenderedThreadRef = useRef<string | null>(null)
   const [detachedHookLogOffsetFromTail, setDetachedHookLogOffsetFromTail] = useState(0)
 
@@ -615,28 +622,30 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   }
 
   return (
-    <Virtuoso<number, ChatVirtualListContext>
-      key={threadId}
-      ref={virtuosoRef}
-      data={visibleMessageIndexes}
-      customScrollParent={customScrollParent}
-      initialTopMostItemIndex={resolvedInitialTopMostItemIndex}
-      alignToBottom
-      atBottomThreshold={32}
-      followOutput={() => false}
-      atBottomStateChange={onAtBottomStateChange}
-      defaultItemHeight={112}
-      increaseViewportBy={{ top: 600, bottom: 900 }}
-      computeItemKey={(_index, messageIndex) => {
-        const message = messages[messageIndex]
-        return message ? `${message.role}:${message.id}` : messageIndex
-      }}
-      itemsRendered={handleItemsRendered}
-      rangeChanged={handleVirtualRangeChanged}
-      totalListHeightChanged={onContentHeightChanged}
-      context={{ header: historyHeader, footer: footerContent }}
-      components={chatVirtualListComponents}
-      itemContent={(visibleIndex, messageIndex) => renderMessage(visibleIndex, messageIndex)}
-    />
+    <ReasoningExpansionContext.Provider value={reasoningExpansion.choices}>
+      <Virtuoso<number, ChatVirtualListContext>
+        key={threadId}
+        ref={virtuosoRef}
+        data={visibleMessageIndexes}
+        customScrollParent={customScrollParent}
+        initialTopMostItemIndex={resolvedInitialTopMostItemIndex}
+        alignToBottom
+        atBottomThreshold={32}
+        followOutput={() => false}
+        atBottomStateChange={onAtBottomStateChange}
+        defaultItemHeight={112}
+        increaseViewportBy={{ top: 600, bottom: 900 }}
+        computeItemKey={(_index, messageIndex) => {
+          const message = messages[messageIndex]
+          return message ? `${message.role}:${message.id}` : messageIndex
+        }}
+        itemsRendered={handleItemsRendered}
+        rangeChanged={handleVirtualRangeChanged}
+        totalListHeightChanged={onContentHeightChanged}
+        context={{ header: historyHeader, footer: footerContent }}
+        components={chatVirtualListComponents}
+        itemContent={(visibleIndex, messageIndex) => renderMessage(visibleIndex, messageIndex)}
+      />
+    </ReasoningExpansionContext.Provider>
   )
 })
