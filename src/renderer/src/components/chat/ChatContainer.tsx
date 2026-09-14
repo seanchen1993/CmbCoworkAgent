@@ -1,5 +1,6 @@
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
+import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
   useRef,
   useEffect,
@@ -1931,9 +1932,20 @@ export function ChatContainer({
     Boolean(harnessFeatureBinding)
   const [isManagedRunSessionActive, setIsManagedRunSessionActive] = useState(false)
   const appNotifications = useHarnessNotifications()
-  const bizRetryPending = appNotifications.some(
+  const bizRetry = appNotifications.find(
     (item) =>
       item.type === "biz_retry" && item.status === "pending" && item.sourceThreadId === threadId
+  )
+  const bizRetryPending = Boolean(bizRetry)
+  const bizRetryHumanGatePending = Boolean(
+    bizRetry &&
+      appNotifications.some(
+        (item) =>
+          item.type === "human_gate" &&
+          item.status === "pending" &&
+          item.projectId === bizRetry.projectId &&
+          item.featureId === bizRetry.featureId
+      )
   )
   const humanGate = projectHumanGate(appNotifications.find(
     (item) =>
@@ -7934,6 +7946,19 @@ export function ChatContainer({
                 </div>
               </div>
             </ScrollArea>
+            {bizRetry && (
+              <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
+                <div className="mx-auto w-full max-w-3xl">
+                  <BizRetryDecisionCard
+                    key={bizRetry.notificationId}
+                    notificationId={bizRetry.notificationId}
+                    message={bizRetry.message}
+                    humanGatePending={bizRetryHumanGatePending}
+                    className="mb-0 rounded-md px-3 py-2.5"
+                  />
+                </div>
+              </div>
+            )}
             {humanGate && (
               <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="mx-auto flex w-full max-w-3xl items-center gap-3 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2.5">

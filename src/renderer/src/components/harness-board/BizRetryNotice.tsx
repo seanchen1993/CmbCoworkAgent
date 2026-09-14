@@ -4,6 +4,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useHarnessNotifications, refreshAppNotifications } from "@/lib/harness-notifications"
+import { cn } from "@/lib/utils"
 
 export function BizRetryNotice({
   projectId,
@@ -22,7 +23,7 @@ export function BizRetryNotice({
   )
   if (!pending) return null
   return (
-    <BizRetryActions
+    <BizRetryDecisionCard
       key={pending.notificationId}
       notificationId={pending.notificationId}
       message={pending.message}
@@ -37,14 +38,16 @@ export function BizRetryNotice({
   )
 }
 
-function BizRetryActions({
+export function BizRetryDecisionCard({
   notificationId,
   message,
-  humanGatePending
+  humanGatePending,
+  className
 }: {
   notificationId: string
   message: string
   humanGatePending: boolean
+  className?: string
 }): React.JSX.Element {
   const [input, setInput] = useState("")
   const [messageOpen, setMessageOpen] = useState(false)
@@ -78,7 +81,12 @@ function BizRetryActions({
     }
   }
   return (
-    <section className="mb-4 space-y-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm">
+    <section
+      className={cn(
+        "mb-4 space-y-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm",
+        className
+      )}
+    >
       <div className="flex items-start gap-3">
         <PauseCircle className="mt-0.5 size-5 shrink-0 text-status-warning" />
         <div className="min-w-0 flex-1">
