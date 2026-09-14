@@ -100,7 +100,7 @@ function resolveBizRetryMode(input: {
     return {
       retryMode: "new_thread",
       reasonCode: "biz_retry_context_limit",
-      summary: "上下文占用超过复用阈值，使用新会话重新执行当前阶段",
+      summary: "建议使用新会话重新执行当前阶段",
       rule: "当前阶段尚未结束且上下文占用超过90%时，不复用当前会话，创建新会话重试。"
     }
   }
@@ -108,7 +108,7 @@ function resolveBizRetryMode(input: {
     return {
       retryMode: "new_thread",
       reasonCode: "biz_retry_forced_new_thread",
-      summary: "当前策略要求使用新会话重新执行当前阶段",
+      summary: "建议使用新会话重新执行当前阶段",
       rule: "当前阶段尚未结束且策略配置为新会话模式时，创建新会话重试。"
     }
   }
@@ -116,7 +116,7 @@ function resolveBizRetryMode(input: {
     return {
       retryMode: "reuse_thread",
       reasonCode: "biz_retry_forced_reuse_thread",
-      summary: "当前策略要求复用原会话继续当前任务",
+      summary: "建议在原会话继续当前任务",
       rule: "当前阶段尚未结束且策略配置为复用模式时，在原会话继续当前任务。"
     }
   }
@@ -124,14 +124,14 @@ function resolveBizRetryMode(input: {
     return {
       retryMode: "new_thread",
       reasonCode: "biz_retry_no_progress",
-      summary: "未识别到业务进展，使用新会话重新执行当前阶段",
+      summary: "未识别到业务进展，建议新会话重新执行当前阶段",
       rule: "当前阶段尚未结束、上下文可复用且执行基线完全不变时，创建新会话重新执行当前阶段。"
     }
   }
   return {
     retryMode: "reuse_thread",
     reasonCode: "biz_retry_progress_detected",
-    summary: "检测到业务进展，复用原会话继续当前任务",
+    summary: "检测到业务进展，建议复用原会话继续当前任务",
     rule: "当前阶段尚未结束、上下文可复用且执行基线发生变化时，在原会话继续当前任务。"
   }
 }
