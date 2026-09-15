@@ -670,7 +670,7 @@ function MessageBubbleImpl({
         return (
           <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
             {isRequirementWorkbenchMessage && (
-              <span className="mr-1.5 inline-flex items-center gap-1 align-middle font-medium text-emerald-600 dark:text-emerald-400">
+              <span className="mr-1.5 inline-flex items-center gap-1 align-middle font-bold mb-1 text-emerald-600 dark:text-emerald-400">
                 <span className="inline-flex size-5 items-center justify-center rounded-md bg-lime-200/80 text-emerald-700 dark:bg-lime-300/20 dark:text-lime-300">
                   <Sparkles className="size-3.5" />
                 </span>
@@ -681,9 +681,14 @@ function MessageBubbleImpl({
               <SkillChip label={skillContent.skillName} compact className="mr-2" />
             )}
             {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-            <span data-chat-search-text data-chat-search-block-index={0}
-              data-chat-search-source-start={0} data-chat-search-source-end={displayContent.length}
-            >{browserContent.visibleText}</span>
+            <span
+              data-chat-search-text
+              data-chat-search-block-index={0}
+              data-chat-search-source-start={0}
+              data-chat-search-source-end={displayContent.length}
+            >
+              {browserContent.visibleText}
+            </span>
           </div>
         )
       }
@@ -708,7 +713,7 @@ function MessageBubbleImpl({
                 className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
               >
                 {isRequirementWorkbenchMessage && (
-                  <span className="mr-1.5 inline-flex items-center gap-1 align-middle font-medium text-emerald-600 dark:text-emerald-400">
+                  <span className="mr-1.5 inline-flex items-center gap-1 align-middle font-bold mb-1 text-emerald-600 dark:text-emerald-400">
                     <span className="inline-flex size-5 items-center justify-center rounded-md bg-lime-200/80 text-emerald-700 dark:bg-lime-300/20 dark:text-lime-300">
                       <Sparkles className="size-3.5" />
                     </span>
@@ -719,9 +724,14 @@ function MessageBubbleImpl({
                   <SkillChip label={skillContent.skillName} compact className="mr-2" />
                 )}
                 {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-                <span data-chat-search-text data-chat-search-block-index={index}
-                  data-chat-search-source-start={0} data-chat-search-source-end={displayText.length}
-                >{browserContent.visibleText}</span>
+                <span
+                  data-chat-search-text
+                  data-chat-search-block-index={index}
+                  data-chat-search-source-start={0}
+                  data-chat-search-source-end={displayText.length}
+                >
+                  {browserContent.visibleText}
+                </span>
               </div>
             )
           }
