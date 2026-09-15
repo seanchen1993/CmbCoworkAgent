@@ -1035,7 +1035,7 @@ export async function resolveManagedBizRetryDecision(
       } catch (error) {
         return reportManagedBizRetryCompletionFailure(input, error)
       }
-      return { applied: true, message: "托管运行已停止。" }
+      return { applied: true, message: "托管运行已停止" }
     }
 
     if (input.choice === "continue") {

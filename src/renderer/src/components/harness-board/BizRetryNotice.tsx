@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { ChevronDown, Loader2, PauseCircle } from "lucide-react"
+import { Loader2, MessageSquare, MessageSquarePlus, PauseCircle } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -8,10 +8,12 @@ import { cn } from "@/lib/utils"
 
 export function BizRetryNotice({
   projectId,
-  featureId
+  featureId,
+  onViewThread
 }: {
   projectId: string
   featureId: string
+  onViewThread: (threadId: string) => void
 }): React.JSX.Element | null {
   const notifications = useHarnessNotifications()
   const pending = notifications.find(
@@ -27,6 +29,7 @@ export function BizRetryNotice({
       key={pending.notificationId}
       notificationId={pending.notificationId}
       message={pending.message}
+      onViewThread={() => onViewThread(pending.sourceThreadId)}
       humanGatePending={notifications.some(
         (item) =>
           item.type === "human_gate" &&
@@ -41,11 +44,13 @@ export function BizRetryNotice({
 export function BizRetryDecisionCard({
   notificationId,
   message,
+  onViewThread,
   humanGatePending,
   className
 }: {
   notificationId: string
   message: string
+  onViewThread?: () => void
   humanGatePending: boolean
   className?: string
 }): React.JSX.Element {
@@ -71,7 +76,7 @@ export function BizRetryDecisionCard({
         toast.error(result.message)
       } else {
         setMessageOpen(false)
-        toast(result.message)
+        toast.success(result.message)
       }
       await refreshAppNotifications()
     } catch (cause) {
@@ -95,7 +100,15 @@ export function BizRetryDecisionCard({
             {message}
           </p>
         </div>
-        {busy && <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" />}
+        <div className="flex shrink-0 items-center gap-2">
+          {onViewThread && (
+            <Button type="button" size="sm" variant="outline" onClick={onViewThread}>
+              <MessageSquare className="size-3.5" />
+              查看会话
+            </Button>
+          )}
+          {busy && <Loader2 className="size-4 animate-spin" />}
+        </div>
       </div>
       {humanGatePending && (
         <p className="text-xs text-status-warning">请先处理 Human Gate，再继续托管。</p>
@@ -107,7 +120,7 @@ export function BizRetryDecisionCard({
       )}
       <div className="flex flex-wrap justify-end gap-2">
         <Button size="sm" variant="destructive" disabled={busy} onClick={() => void decide("stop")}>
-          终止本次托管运行
+          终止运行
         </Button>
         <Button
           size="sm"
@@ -125,19 +138,18 @@ export function BizRetryDecisionCard({
               disabled={busy || humanGatePending}
               onClick={() => void decide("continue")}
             >
-              继续当前会话
+              在当前会话继续
             </Button>
             <PopoverTrigger asChild>
               <Button
                 size="sm"
-                className="rounded-l-none border-l border-button-foreground/20 px-2"
+                className="rounded-l-none border-l border-button-foreground/20 px-2.5 data-[state=open]:bg-button/80"
                 disabled={busy || humanGatePending}
-                aria-label="补充消息后继续当前会话"
-                title="输入用户消息"
+                aria-label="输入自定义消息后继续当前会话"
+                aria-expanded={messageOpen}
+                title="输入自定义消息后继续"
               >
-                <ChevronDown
-                  className={`size-3.5 transition-transform ${messageOpen ? "rotate-180" : ""}`}
-                />
+                <MessageSquarePlus className="size-3.5" />
               </Button>
             </PopoverTrigger>
           </div>

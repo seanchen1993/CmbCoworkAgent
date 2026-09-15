@@ -6905,9 +6905,9 @@ function FeatureDetailPage({
         }
         await onRefresh()
         if (!shouldStart) {
-          toast.success("已停止托管")
+          toast.success("托管运行已停止")
         } else if (startStatus === "running") {
-          toast.success("已开始托管")
+          toast.success("托管运行已开始")
         } else if (startStatus === "completed") {
           toast.success("特性已完成，无需继续托管")
         } else {
@@ -7365,7 +7365,11 @@ function FeatureDetailPage({
       ) : (
         <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2">
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <BizRetryNotice projectId={detail.project.projectId} featureId={detail.run.slug} />
+            <BizRetryNotice
+              projectId={detail.project.projectId}
+              featureId={detail.run.slug}
+              onViewThread={handleHookSessionSelect}
+            />
             {pendingHumanGate && (
               <section className="mb-4 flex flex-col gap-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm sm:flex-row sm:items-center">
                 <div className="flex min-w-0 flex-1 items-start gap-3">
