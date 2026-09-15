@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { Loader2 } from "lucide-react"
 import {
   Virtuoso,
@@ -16,7 +16,8 @@ import type { HITLRequest, Message, ToolCallState } from "@/types"
 import { HookLogChip } from "./HookLogViews"
 import { MessageBubble } from "./MessageBubble"
 import { ChatSearchContext } from "./ChatSearchContext"
-import { ReasoningExpansionContext } from "./reasoning-expansion-context"
+import { ReasoningExpansionContext, ReasoningExpansionStore } from "./reasoning-expansion-context"
+import { subscribeToMessageDiscard, type MessageAttempts } from "@/lib/message-discard-events"
 import type { ChatSearchLocation, ChatSearchReveal } from "../../../../shared/chat-search-types"
 import type {
   ChatScrollVirtualRangeRef,
@@ -93,6 +94,7 @@ export function resolveChatScrollVirtualRangeSnapshot(
 }
 
 export interface ChatMessageVirtualListProps {
+  messageAttempts?: MessageAttempts
   searchReveal?: ChatSearchReveal | null
   messages: Message[]
   visibleMessageIndexes: readonly number[]
@@ -141,6 +143,8 @@ export interface ChatMessageVirtualListProps {
 }
 
 interface ChatMessageRowProps {
+  messageGeneration: number
+  messageRevision: number
   searchLocation?: ChatSearchLocation
   message: Message
   previousMessage: Message | null
@@ -168,6 +172,8 @@ interface ChatMessageRowProps {
 }
 
 function ChatMessageRowImpl({
+  messageGeneration,
+  messageRevision,
   message,
   previousMessage,
   isLastMessage,
@@ -221,6 +227,8 @@ function ChatMessageRowImpl({
       data-message-role={message.role}
     >
       <MessageBubble
+        messageGeneration={messageGeneration}
+        messageRevision={messageRevision}
         searchLocation={message.role === "assistant" && searchLocation?.kind === "body"
           ? searchLocation : undefined}
         message={message}
@@ -259,6 +267,8 @@ function areChatMessageRowPropsEqual(
   next: Readonly<ChatMessageRowProps>
 ): boolean {
   return (
+    previous.messageGeneration === next.messageGeneration &&
+    previous.messageRevision === next.messageRevision &&
     areMessageRenderFieldsEqual(previous.message, next.message) &&
     (previous.message === next.message ||
       getAssistantStartTime(previous.message) === getAssistantStartTime(next.message)) &&
@@ -290,13 +300,16 @@ const ChatMessageRow = React.memo(ChatMessageRowImpl, areChatMessageRowPropsEqua
 
 // Virtuoso measures item boxes, excluding margins. Put spacing inside each measured item;
 // space-y-* on the list makes the DOM taller than the virtual offsets and causes scroll jumps.
+// flow-root 同时阻止系统通知等子元素的顶部 margin 穿透 item，确保混合消息也能完整测量。
 const VirtuosoMessageListWrapper = React.forwardRef<
   HTMLDivElement,
   React.ComponentPropsWithoutRef<"div">
 >(({ className, style, children, ...props }, ref) => (
   <div
     ref={ref}
-    className={["[&>[data-item-index]]:pb-4", className].filter(Boolean).join(" ")}
+    className={["[&>[data-item-index]]:flow-root [&>[data-item-index]]:pb-4", className]
+      .filter(Boolean)
+      .join(" ")}
     style={style}
     {...props}
   >
@@ -333,6 +346,7 @@ const chatVirtualListComponents = {
 }
 
 export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList({
+  messageAttempts,
   messages,
   visibleMessageIndexes,
   lastUserMessageIndex,
@@ -379,7 +393,14 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   const reasoningExpansion = useMemo<{
     threadId: string
     choices: NonNullable<React.ContextType<typeof ReasoningExpansionContext>>
-  }>(() => ({ threadId, choices: new Map() }), [threadId])
+  }>(() => ({ threadId, choices: new ReasoningExpansionStore() }), [threadId])
+  useLayoutEffect(
+    () =>
+      subscribeToMessageDiscard(threadId, (messageIds, revision) =>
+        reasoningExpansion.choices.discardMessages(threadId, messageIds, revision)
+      ),
+    [reasoningExpansion, threadId]
+  )
   const initialVirtualItemsRenderedThreadRef = useRef<string | null>(null)
   const [detachedHookLogOffsetFromTail, setDetachedHookLogOffsetFromTail] = useState(0)
 
@@ -467,6 +488,8 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
             </div>
           ) : null}
           <ChatMessageRow
+            messageGeneration={messageAttempts?.generations.get(message.id) ?? 0}
+            messageRevision={messageAttempts?.revision ?? 0}
             searchLocation={searchReveal?.messageId === message.id ? searchReveal.location : undefined}
             message={message}
             previousMessage={previousMessage}
@@ -511,6 +534,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       isLoading,
       lastUserMessageIndex,
       messages,
+      messageAttempts,
       onApprovalDecision,
       onEditUserMessage,
       onForkFromMessage,

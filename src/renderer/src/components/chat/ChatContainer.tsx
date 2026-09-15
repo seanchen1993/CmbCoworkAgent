@@ -7892,6 +7892,7 @@ export function ChatContainer({
                     />
                   )}
                   <ChatMessageVirtualList
+                    messageAttempts={streamData.messageAttempts}
                     searchReveal={searchOpen ? searchReveal : null}
                     messages={displayMessages}
                     visibleMessageIndexes={visibleMessageIndexes}

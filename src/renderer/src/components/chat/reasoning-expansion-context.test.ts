@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   advanceReasoningExpansion,
   rememberReasoningExpansion,
+  ReasoningExpansionStore,
   type ReasoningExpansionState
 } from "./reasoning-expansion-context"
 
@@ -72,7 +73,7 @@ describe("reasoning expansion preserves the existing one-shot lifecycle", () => 
   })
 
   it("bounds retained choices and keeps recently used messages across history paging", () => {
-    const choices = new Map<string, ReasoningExpansionState>()
+    const choices = new ReasoningExpansionStore()
     for (let message = 0; message < 500; message++) {
       rememberReasoningExpansion(choices, String(message), initial)
     }
@@ -80,13 +81,33 @@ describe("reasoning expansion preserves the existing one-shot lifecycle", () => 
     rememberReasoningExpansion(choices, "0", expanded)
     rememberReasoningExpansion(choices, "500", initial)
     expect(choices.size).toBe(500)
-    expect(choices.get("0")).toBe(expanded)
+    expect(choices.get("0")?.state).toBe(expanded)
     expect(choices.has("1")).toBe(false)
     for (let message = 501; message < 10000; message++) {
       rememberReasoningExpansion(choices, String(message), initial)
     }
     expect(choices.size).toBe(500)
     expect(choices.has("9499")).toBe(false)
-    expect(choices.get("9500")).toBe(initial)
+    expect(choices.get("9500")?.state).toBe(initial)
+  })
+
+  it("rejects stale writes after discard and preserves unrelated history", () => {
+    const choices = new ReasoningExpansionStore()
+    const answered = advanceReasoningExpansion(initial, true, true, true)
+    const historical = { ...initial, open: true }
+    rememberReasoningExpansion(choices, "one:assistant:retry", answered)
+    rememberReasoningExpansion(choices, "one:assistant:history", historical)
+    rememberReasoningExpansion(choices, "two:assistant:retry", historical)
+    choices.discardMessages("one", new Set(["retry"]), 1)
+    expect(choices.has("one:assistant:retry")).toBe(false)
+    // An old Virtuoso closure can commit old body props before the replacement arrives.
+    rememberReasoningExpansion(choices, "one:assistant:retry", answered, 0, 0)
+    expect(choices.has("one:assistant:retry")).toBe(false)
+    const retried = advanceReasoningExpansion(initial, true, true, false)
+    rememberReasoningExpansion(choices, "one:assistant:retry", retried, 1, 1)
+    rememberReasoningExpansion(choices, "one:assistant:retry", answered, 0, 0)
+    expect(choices.get("one:assistant:retry")).toEqual({ generation: 1, state: retried })
+    expect(choices.get("one:assistant:history")?.state).toBe(historical)
+    expect(choices.get("two:assistant:retry")?.state).toBe(historical)
   })
 })

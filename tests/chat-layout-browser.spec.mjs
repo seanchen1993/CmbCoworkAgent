@@ -61,7 +61,7 @@ const bundle = await build({
             )
             contents = contents.replace(
               marker,
-              "  window.chatLayoutRenders++;\n  const [collapsedTools,"
+              "  window.chatLayoutRenders++;\n  window.chatLayoutRendersById[message.id] = (window.chatLayoutRendersById[message.id] || 0) + 1;\n  const [collapsedTools,"
             )
           }
           return { contents, loader: "tsx" }
@@ -103,6 +103,7 @@ try {
   await page.addStyleTag({ content: css.build(scanner.scan()) })
   await page.evaluate(() => {
     window.chatLayoutRenders = 0
+    window.chatLayoutRendersById = {}
   })
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
   await page.locator('[data-chat-message-id="message-199"]').waitFor({ state: "attached" })
@@ -280,6 +281,35 @@ try {
       )
     }
   )
+  await check("new reasoning tokens rerender only the active bubble", async () => {
+    await page.evaluate(() => {
+      window.chatLayoutFixture.resetAutomatic()
+      window.chatLayoutFixture.token(1)
+    })
+    await page.locator('[data-chat-message-id="message-199"]').waitFor()
+    await page.waitForTimeout(400)
+    const metrics = await page.evaluate(() => {
+      const before = { ...window.chatLayoutRendersById }
+      const started = performance.now()
+      for (let tick = 2; tick < 102; tick++) window.chatLayoutFixture.token(tick)
+      const counts = Object.entries(window.chatLayoutRendersById).map(([id, count]) => [
+        id,
+        count - (before[id] || 0)
+      ])
+      return {
+        activeRenders: counts.find(([id]) => id === "message-199")[1],
+        historicalRenders: counts
+          .filter(([id]) => id !== "message-199")
+          .reduce((sum, [, count]) => sum + count, 0),
+        durationMs: performance.now() - started,
+        mountedRows: document.querySelectorAll("[data-chat-message-row]").length
+      }
+    })
+    assert.equal(metrics.activeRenders, 100, JSON.stringify(metrics))
+    assert.equal(metrics.historicalRenders, 0, JSON.stringify(metrics))
+    assert.ok(metrics.mountedRows > 1 && metrics.mountedRows < 40, JSON.stringify(metrics))
+    return metrics
+  })
   await check("unchanged updates do not rerender historical bubbles", async () => {
     await page.evaluate(() => window.chatLayoutFixture.complete())
     await page.waitForTimeout(400)
@@ -329,6 +359,53 @@ try {
       )
     })
   }
+  for (const [batched, overflow] of [
+    [false, false],
+    [true, false],
+    [true, true]
+  ]) {
+    await check(
+      `retry resets reasoning with ${batched ? "batched" : "separate"} commits${overflow ? " beyond the cache window" : ""}`,
+      async () => {
+        await page.evaluate(() => {
+          window.chatLayoutFixture.resetAutomatic()
+          window.chatLayoutFixture.answer()
+        })
+        const button = page.locator('[data-chat-message-id="message-199"] button[aria-expanded]')
+        await button.waitFor()
+        assert.equal(await button.getAttribute("aria-expanded"), "false")
+        await page.evaluate(
+          ([batched, overflow]) => window.chatLayoutFixture.retry(batched, overflow),
+          [batched, overflow]
+        )
+        await button.waitFor()
+        assert.equal(await button.getAttribute("aria-expanded"), "true")
+        await page.evaluate(() => window.chatLayoutFixture.answer())
+        assert.equal(await button.getAttribute("aria-expanded"), "false")
+      }
+    )
+  }
+  await check("generation eviction preserves unrelated cached history", async () => {
+    await page.evaluate(() => {
+      window.chatLayoutFixture.resetAutomatic()
+      window.chatLayoutFixture.retry(false)
+      window.chatLayoutFixture.answer()
+    })
+    const row = page.locator('[data-chat-message-id="message-199"]')
+    const button = row.locator("button[aria-expanded]")
+    await button.waitFor()
+    assert.equal(await button.getAttribute("aria-expanded"), "false")
+    await button.click()
+    await page.evaluate(() => window.chatLayoutFixture.discardUnrelated())
+    assert.equal(await button.getAttribute("aria-expanded"), "true")
+    // 等待新列表首次定位及高度测量结束，再验证真正卸载后的缓存恢复。
+    await page.waitForTimeout(400)
+    await page.evaluate(() => window.chatLayoutFixture.seek(0))
+    await row.waitFor({ state: "detached" })
+    await page.evaluate(() => window.chatLayoutFixture.seek(199))
+    await button.waitFor()
+    assert.equal(await button.getAttribute("aria-expanded"), "true")
+  })
   await check("no uncaught render errors", async () => assert.deepEqual(errors, []))
   writeFileSync(join(output, "results.json"), JSON.stringify(results, null, 2))
   assert.ok(

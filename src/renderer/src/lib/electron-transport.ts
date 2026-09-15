@@ -1928,12 +1928,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
           break
         }
         if (data?.type === "stream_retry_reset") {
-          const discardedMessageIds = Array.isArray(data.discardedMessageIds)
+          const requestedDiscardedMessageIds = Array.isArray(data.discardedMessageIds)
             ? data.discardedMessageIds.filter((id): id is string => typeof id === "string")
             : []
-          this.resetMainStreamAttempt(discardedMessageIds)
           const messages = transformSerializedValuesMessages(
             Array.isArray(data.messages) ? (data.messages as SerializedMessageChunk[]) : []
+          )
+          const discardedMessageIds = this.resetMainStreamAttempt(
+            requestedDiscardedMessageIds,
+            messages
           )
           this.advanceFallbackIndexesFromValuesMessages(messages)
           // A values event replaces useStream's partial message state with the
@@ -2937,7 +2940,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
     })
   }
 
-  private resetMainStreamAttempt(messageIds: string[]): void {
+  private resetMainStreamAttempt(
+    messageIds: string[],
+    stableMessages: RoleCollisionMessage[] = []
+  ): string[] {
     this.mainAssistantIndexByStreamScope.clear()
     this.mainAssistantScopedObservedIds.clear()
     this.pendingIdlessCompletedAssistantRoute = undefined
@@ -2945,6 +2951,58 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.inFlightMainMessageIds.clear()
     for (const messageId of [...discardedMessageIds]) {
       discardedMessageIds.add(this.resolveMainAssistantMessageIdAlias(messageId))
+    }
+    for (const [fromId, toId] of this.mainAssistantMessageIdAliases) {
+      const resolvedId = this.resolveMainAssistantMessageIdAlias(toId)
+      if (discardedMessageIds.has(resolvedId)) {
+        discardedMessageIds.add(fromId)
+        discardedMessageIds.add(toId)
+      }
+    }
+    const discardedDisplaySourceIds = new Set(discardedMessageIds)
+    // Completed-run aliases retain their exact logical slot rather than entering the
+    // ordinary alias map. Expand only observations of discarded slots, not every
+    // message with the same provider source.
+    for (const [observedId, index] of this.mainAssistantIndexByObservedId) {
+      const currentId = this.mainAssistantMessageIdByIndex.get(index)
+      if (currentId && discardedMessageIds.has(this.resolveMainAssistantMessageIdAlias(currentId))) {
+        discardedDisplaySourceIds.add(observedId)
+      }
+    }
+
+    // The UI receives role-collision IDs, while the producer may only know raw IDs.
+    // Resolve against the pre-reset baseline, before it is cleared below. Match concrete
+    // occurrence IDs rather than provider_source_id, which is shared by historical replies.
+    const baseline = [...this.mainMessageRoleCollisionBaseline.values()]
+    const stableIdentities = new Set([
+      ...stableMessages.map(getMessageRoleCollisionIdentity),
+      // User turns are appended locally and intentionally omitted from SDK values.
+      // Retrying model output must never discard those locally retained identities.
+      ...baseline
+        .filter((message) => message.role === "user" || message.type === "human")
+        .map(getMessageRoleCollisionIdentity)
+    ])
+    const discardedRenderIds = new Set<string>()
+    for (const messageId of discardedDisplaySourceIds) {
+      let matched = false
+      for (const role of ["user", "assistant", "system", "tool"]) {
+        const message = this.mainMessageRoleCollisionBaseline.get(
+          getMessageRoleCollisionIdentity({ id: messageId, role })
+        )
+        if (!message) continue
+        matched = true
+        if (!stableIdentities.has(getMessageRoleCollisionIdentity(message))) {
+          discardedRenderIds.add(message.id)
+        }
+      }
+      // Unobserved IDs here include assistant alias endpoints. A stable message of
+      // another role with the same raw ID does not make that assistant endpoint durable.
+      if (
+        !matched &&
+        !stableIdentities.has(getMessageRoleCollisionIdentity({ id: messageId, role: "assistant" }))
+      ) {
+        discardedRenderIds.add(messageId)
+      }
     }
 
     const discardedAssistantIndexes = new Set<number>()
@@ -3028,6 +3086,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     this.currentChunkMessageId = undefined
     this.resetCurrentAssistantMessage()
+    return [...discardedRenderIds]
   }
 
   /**
