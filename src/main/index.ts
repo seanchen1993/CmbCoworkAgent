@@ -61,6 +61,7 @@ import {
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 import { createNativeClosePrompt } from "./native-close-prompt"
+import { shouldBlockEmbeddedNavigation } from "./html-preview-navigation"
 import {
   clearAppAttention,
   disposeAppTray,
@@ -756,6 +757,17 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: "deny" }
+  })
+
+  // CSP blocks subresources, but does not block a scripted iframe's own location changes.
+  // Only the trusted app frame may initiate a new embedded document. The built-in browser
+  // has separate webContents and keeps its own navigation policy.
+  const previewWebContents = mainWindow.webContents
+  previewWebContents.on("will-frame-navigate", (event) => {
+    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
+  })
+  previewWebContents.on("will-redirect", (event) => {
+    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
   })
 
   // Every new top-level document must opt in again from its trusted main frame.
