@@ -254,7 +254,7 @@ const MULTI_SUBMIT_UNLIMITED = 1
  * it. Fixed rather than derived: ids need only be unique within one message,
  * and a question card carries exactly one form.
  */
-const QUESTION_FORM_COMPONENT_ID = "question-form"
+const FORM_COMPONENT_ID = "interaction-form"
 
 /**
  * The free-text box holds prose, so it opens taller than one line. Both sets
@@ -325,7 +325,7 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
   if (controls.length > 0) {
     components.push({
       type: "interactive",
-      id: QUESTION_FORM_COMPONENT_ID,
+      id: FORM_COMPONENT_ID,
       inputControlArray: controls,
       submitStatus: 0,
       multiSubmit: MULTI_SUBMIT_UNLIMITED,
@@ -361,17 +361,142 @@ export function buildAnsweredCard(input: AnsweredCardInput): CardComponent[] {
   return components
 }
 
+/** The card title for each kind, so an expired card still names what it was. */
+const CARD_TITLE: Record<ImCardInteractionKind, string> = {
+  approval: "需要批准",
+  user_input: "需要你的选择",
+  target_bind: "切换会话"
+}
+
 /** Marks a card whose request is gone — a click from deep in the history. */
 export function buildExpiredCard(
   kind: ImCardInteractionKind,
   targetLabel: string
 ): CardComponent[] {
   return [
-    titleComponent(kind === "approval" ? "需要批准" : "需要你的选择"),
+    titleComponent(CARD_TITLE[kind] ?? CARD_TITLE.approval),
     statusComponent("已失效", STATUS_STYLE.black),
     kvComponent([{ title: KV_SOURCE_TITLE, value: targetLabel }]),
     contentComponent(["该请求已经结束，这张卡片不再接受操作。"], 1)
   ]
+}
+
+/**
+ * 「跟随特性配置」 as an explicit option rather than an empty value.
+ *
+ * The typed path expresses it by omitting the word, but a form cannot show an
+ * absence — and an option whose value is the empty string is the one shape a
+ * receipt cannot distinguish from 「nothing selected」. So the default is a real
+ * value the resolver maps back to omission.
+ */
+export const TARGET_BIND_MODE_INHERIT = "inherit"
+
+/** feedbackKey for the two controls on a target-bind card. */
+export const TARGET_BIND_TARGET_KEY = "target"
+export const TARGET_BIND_MODE_KEY = "mode"
+
+export interface TargetBindCardTarget {
+  /** 1-based, and the same number the text list prints. */
+  index: number
+  label: string
+  /** 「普通会话」「项目会话」「特性，可创建新会话」 */
+  kindLabel: string
+}
+
+export interface TargetBindCardInput {
+  /** What the conversation is bound to right now, for the reader's bearings. */
+  currentLabel: string
+  targets: ReadonlyArray<TargetBindCardTarget>
+  /** Offered only when the list contains something that creates a session. */
+  modeChoices: ReadonlyArray<{ label: string; value: string }>
+  tag: string
+  fallbackCommand: string
+}
+
+/**
+ * The numbered list from `/会话`, as a form.
+ *
+ * The option values are the same 1-based indexes the text list prints, so a
+ * submit and a typed `/绑定 <编号>` reach the identical selection-context
+ * lookup. Nothing here can name a target the list did not already authorize.
+ */
+export function buildTargetBindCard(input: TargetBindCardInput): CardComponent[] {
+  const components: CardComponent[] = [
+    titleComponent(CARD_TITLE.target_bind),
+    statusComponent("待选择", STATUS_STYLE.orange),
+    kvComponent([{ title: "当前", value: input.currentLabel }])
+  ]
+
+  const controls: CardComponent[] = [
+    {
+      subType: "listSelector",
+      title: "切换到",
+      promptText: "选择一个会话或特性",
+      feedbackKey: TARGET_BIND_TARGET_KEY,
+      required: true,
+      selectModel: LIST_SELECT_CUSTOM_OPTIONS,
+      isMultiple: false,
+      optionArray: input.targets.map((target) => ({
+        text: `${target.index}. ${target.label}（${target.kindLabel}）`,
+        value: String(target.index)
+      }))
+    }
+  ]
+
+  // Only when something in the list can create a session. On an existing
+  // session a mode word is refused by the typed path, and offering a control
+  // whose every use is an error is worse than not offering it.
+  if (input.modeChoices.length > 0) {
+    controls.push({
+      subType: "listSelector",
+      title: "新建会话模式",
+      promptText: "仅在特性下新建会话时生效，已有会话请忽略",
+      feedbackKey: TARGET_BIND_MODE_KEY,
+      required: false,
+      selectModel: LIST_SELECT_CUSTOM_OPTIONS,
+      isMultiple: false,
+      optionArray: input.modeChoices.map((choice) => ({
+        text: choice.label,
+        value: choice.value
+      }))
+    })
+  }
+
+  components.push({
+    type: "interactive",
+    id: FORM_COMPONENT_ID,
+    inputControlArray: controls,
+    submitStatus: 0,
+    multiSubmit: MULTI_SUBMIT_UNLIMITED,
+    submitButton: {
+      submitText: "切换",
+      actionLink: cardReceiptActionLink(input.tag)
+    }
+  })
+
+  components.push(separatorComponent())
+  components.push(contentComponent([`也可以回复：${input.fallbackCommand}`], 1))
+  return components
+}
+
+export interface BoundCardInput {
+  /** Where the conversation ended up — the same label the text reply names. */
+  targetLabel: string
+  outcome: string
+  detail?: string
+}
+
+/** The terminal card that replaces a live target list once something bound. */
+export function buildBoundCard(input: BoundCardInput): CardComponent[] {
+  const components: CardComponent[] = [
+    titleComponent(CARD_TITLE.target_bind),
+    statusComponent(input.outcome, STATUS_STYLE.green),
+    kvComponent([{ title: "当前", value: input.targetLabel }])
+  ]
+  if (input.detail) {
+    components.push(contentComponent([input.detail], 1))
+  }
+  return components
 }
 
 export { BUTTON_STATUS_DISABLED, BUTTON_STATUS_SELECTED }

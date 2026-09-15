@@ -28,7 +28,11 @@ import {
   buildExpiredCard,
   buildQuestionCard,
   buildResolvedCard,
+  buildTargetBindCard,
   QUESTION_OTHER_SUFFIX,
+  TARGET_BIND_MODE_INHERIT,
+  TARGET_BIND_MODE_KEY,
+  TARGET_BIND_TARGET_KEY,
   type CardComponent
 } from "../src/main/services/im/card-builder"
 import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
@@ -594,6 +598,75 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
   console.log("PASS testEveryKvRowIsShapedTheWayTheClientParses")
 }
 
+/**
+ * The target list's option values are the numbers the text list prints.
+ *
+ * That equality is the whole safety story for this card: a submit is resolved
+ * by handing the value to the same selection context `/绑定 <编号>` uses, so a
+ * value that is anything other than the printed index would either bind the
+ * wrong target or fail. Nothing else about the card is authorization.
+ */
+function testTheTargetListOffersExactlyThePrintedNumbers(): void {
+  const targets = [
+    { index: 1, label: "重构登录", kindLabel: "普通会话" },
+    { index: 2, label: "支付/对账", kindLabel: "项目会话" },
+    { index: 3, label: "支付 / 收银台", kindLabel: "特性，可创建新会话" }
+  ]
+  const components = buildTargetBindCard({
+    currentLabel: "收件箱",
+    targets,
+    modeChoices: [
+      { label: "跟随特性配置", value: TARGET_BIND_MODE_INHERIT },
+      { label: "Team", value: "team" }
+    ],
+    tag: "tag",
+    fallbackCommand: "/绑定 <编号>"
+  })
+
+  const interactive = components.find((component) => component.type === "interactive")
+  assert.ok(interactive, "the target list renders an interactive component")
+  const controls = interactive.inputControlArray as ReadonlyArray<Record<string, unknown>>
+  const target = controls.find((control) => control.feedbackKey === TARGET_BIND_TARGET_KEY)
+  assert.ok(target, "the form must carry the target control")
+
+  const options = target.optionArray as ReadonlyArray<{ text: string; value: string }>
+  assert.deepEqual(
+    options.map((option) => option.value),
+    ["1", "2", "3"],
+    "option values are the printed 1-based indexes, never grant ids or array offsets"
+  )
+  for (const [position, option] of options.entries()) {
+    assert.ok(
+      option.text.startsWith(`${position + 1}. `),
+      `option text must show the same number it submits: ${option.text}`
+    )
+  }
+
+  // Picking a target is the point of the card, so it is the one required
+  // control; a submit with nothing chosen would otherwise reach the desktop
+  // only to be refused there.
+  assert.equal(target.required, true, "the target control must be required")
+
+  const mode = controls.find((control) => control.feedbackKey === TARGET_BIND_MODE_KEY)
+  assert.ok(mode, "the mode control is offered when the list can create a session")
+  assert.equal(mode.required, false, "a mode must stay optional — omitting it is meaningful")
+
+  // Nothing in the list creates a session, so a mode control would be a field
+  // whose every use the typed path refuses.
+  const withoutFeature = buildTargetBindCard({
+    currentLabel: "收件箱",
+    targets: targets.slice(0, 2),
+    modeChoices: [],
+    tag: "tag",
+    fallbackCommand: "/绑定 <编号>"
+  })
+  const plainControls = (
+    withoutFeature.find((component) => component.type === "interactive") as Record<string, unknown>
+  ).inputControlArray as ReadonlyArray<Record<string, unknown>>
+  assert.equal(plainControls.length, 1, "no session can be created, so no mode is offered")
+  console.log("PASS testTheTargetListOffersExactlyThePrintedNumbers")
+}
+
 function testEveryBuiltCardSatisfiesTheContract(): void {
   const approval = buildApprovalCard({
     targetLabel: "快捷支付",
@@ -1048,6 +1121,7 @@ async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<vo
 async function main(): Promise<void> {
   testEveryBuiltCardSatisfiesTheContract()
   testEveryKvRowIsShapedTheWayTheClientParses()
+  testTheTargetListOffersExactlyThePrintedNumbers()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
   testARefusedSubmitLeavesTheFormUsable()
   await testTheCardCarriesTheSameGateAsTheShortCode()

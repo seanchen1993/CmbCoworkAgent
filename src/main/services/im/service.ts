@@ -47,6 +47,7 @@ export class ImUnifiedBotService {
   private readonly unregisterHumanGateReplyDrainer: () => void
   private readonly unregisterManagedBizRetryReplyDrainer: () => void
   private readonly unregisterCardReceiptReplyDrainer: () => void
+  private readonly unregisterCardReceiptCommandRouter: () => void
   private outboxRetryTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(
@@ -100,6 +101,11 @@ export class ImUnifiedBotService {
       getCurrentEventId: (conversationKey, threadId) =>
         this.turnQueue.getCurrentEventId(conversationKey, threadId)
     })
+    // This instance, not a module singleton: a target-bind click has to reach
+    // the router that can see the live turn queue.
+    this.unregisterCardReceiptCommandRouter = imCardReceiptRouter.registerCommandRouter(
+      this.commandRouter
+    )
     this.skillCommands = options.skillCommands ?? imSkillCommandService
   }
 
@@ -257,6 +263,7 @@ export class ImUnifiedBotService {
     this.unregisterHumanGateReplyDrainer()
     this.unregisterManagedBizRetryReplyDrainer()
     this.unregisterCardReceiptReplyDrainer()
+    this.unregisterCardReceiptCommandRouter()
     this.modeNotificationPump.stop()
     return this.turnQueue.stop()
   }

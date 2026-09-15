@@ -25,7 +25,15 @@ export interface ImCardInteraction {
    */
   tag: string
   kind: ImCardInteractionKind
-  threadId: string
+  /**
+   * Null for a card that answers no run.
+   *
+   * Retention for every other card is its thread's: when the thread is gone the
+   * request it gated is gone too. A target-bind card is published because the
+   * reader asked for a list, so it has no thread to inherit from and uses
+   * `expiresAt` instead.
+   */
+  threadId: string | null
   principalId: string
   conversationKey: string
   /** Approval request id, or the user-input session code. */
@@ -34,6 +42,8 @@ export interface ImCardInteraction {
   /** Monotonic; update-custom-card has no ordering guarantee of its own. */
   cardVersion: number
   createdAt: number
+  /** Set only for thread-less cards; past it the card is collected. */
+  expiresAt?: number
 }
 
 function createTag(): string {
@@ -51,11 +61,12 @@ export class ImCardInteractionStore {
 
   register(input: {
     kind: ImCardInteractionKind
-    threadId: string
+    threadId: string | null
     principalId: string
     conversationKey: string
     requestRef: string
     targetLabel: string
+    expiresAt?: number
   }): ImCardInteraction {
     const interaction: ImCardInteraction = {
       interactionId: this.createInteractionId(),
@@ -67,7 +78,8 @@ export class ImCardInteractionStore {
       requestRef: input.requestRef,
       targetLabel: input.targetLabel,
       cardVersion: 1,
-      createdAt: this.now()
+      createdAt: this.now(),
+      ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt })
     }
     this.interactions.set(interaction.interactionId, interaction)
     this.byTag.set(interaction.tag, interaction.interactionId)
@@ -128,10 +140,21 @@ export class ImCardInteractionStore {
     return interaction
   }
 
-  /** Drops every card belonging to threads that are no longer live. */
-  pruneThreads(isThreadLive: (threadId: string) => boolean): void {
+  /**
+   * Drops cards whose basis for existing is gone.
+   *
+   * Two bases, because a card either gates a run or does not. A thread-backed
+   * card dies with its thread; a thread-less one dies at `expiresAt`, which the
+   * publisher sets from whatever state the card renders. A card with neither
+   * would never be collected, so `register` makes the pair exhaustive.
+   */
+  prune(isThreadLive: (threadId: string) => boolean, now = this.now()): void {
     for (const interaction of [...this.interactions.values()]) {
-      if (!isThreadLive(interaction.threadId)) this.release(interaction.interactionId)
+      const dead =
+        interaction.threadId === null
+          ? interaction.expiresAt !== undefined && interaction.expiresAt <= now
+          : !isThreadLive(interaction.threadId)
+      if (dead) this.release(interaction.interactionId)
     }
   }
 
