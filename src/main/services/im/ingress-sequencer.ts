@@ -205,7 +205,11 @@ export class ImIngressSequencer {
         terminal = await this.eventStore.finalizeEventWithReplies({
           eventId: received.event.eventId,
           state: "completed",
-          replies: buildImEventReplies({ event: received.event, text }),
+          // An empty answer means the command already said everything it had to
+          // say by another route — /会话 answers with a card and has nothing to
+          // add under it. Segmentation would otherwise turn that into
+          // 「处理完成。」, which is the noise the card was meant to remove.
+          replies: text.trim() ? buildImEventReplies({ event: received.event, text }) : [],
           resultText: text,
           retryable: false
         })

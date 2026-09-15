@@ -327,13 +327,11 @@ export class ImCommandRouter {
     )
     // After the selection, so a card can never outlive the numbering it renders.
     const card = await this.publishTargetBindCard(input, targets, selection.expiresAt)
-    if (card) {
-      // The card carries the same numbers, so printing them again is the
-      // duplication that makes two messages read as one mistake. Nothing is
-      // blocked on this list — a reader who cannot see the card sends /会话
-      // again — so unlike an approval it is safe to let the card be the list.
-      return "可切换的目标在上面的卡片里，选好点「切换」即可。也可以回复 /绑定 <编号>。"
-    }
+    // The card is the list. An empty answer sends no message at all, which is
+    // what the ingress does with it — the numbered text below a card that
+    // already shows the same numbers is the duplication being removed here.
+    if (card) return ""
+
     return [
       "可用目标：",
       ...targets.map((target, index) =>

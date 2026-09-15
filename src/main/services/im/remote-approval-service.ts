@@ -551,15 +551,20 @@ export class ImRemoteApprovalService {
         this.dependencies.warn("Remote approval card could not be published.", error)
       }
     }
-    const finalReplies = carded
-      ? buildImProactiveReplies({
-          deliveryId: `approval-request:${registration.request.id}`,
-          conversationKey: route.conversationKey,
-          text: [`${route.prefix}需要批准 · 详情见上方卡片`, decisionCommands].join("\n")
-        })
-      : replies
+    if (carded) {
+      // The card carries the gate in full, so no notice follows it. The check
+      // below is the one the text path also does: publishing now happens before
+      // it, so a gate that closed while the card was in flight has to be taken
+      // back rather than left on screen looking live.
+      if (!this.dependencies.broker.get(registration.request.id)) {
+        // Revokes the code and closes the card it addresses, which is why this
+        // is the shared helper rather than a delete plus a close written again.
+        this.removeRequestCodes(registration.request.id)
+      }
+      return
+    }
     try {
-      const outbox = await this.dependencies.events.enqueueProactiveReplies(finalReplies)
+      const outbox = await this.dependencies.events.enqueueProactiveReplies(replies)
       if (!this.dependencies.broker.get(registration.request.id)) {
         if (code) this.codes.delete(code.code)
         await Promise.all(

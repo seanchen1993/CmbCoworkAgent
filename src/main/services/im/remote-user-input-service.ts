@@ -130,25 +130,6 @@ function renderQuestion(session: RemoteUserInputSession): string {
   ].join("\n")
 }
 
-/**
- * What the notice says when the card carries the question.
- *
- * Keeps the short code and the escape hatch, drops the header, the prose and
- * the numbered options — those are the part the card repeats, and repeating
- * them is what made one gate read as two messages.
- */
-function renderQuestionPointer(session: RemoteUserInputSession): string {
-  const progress =
-    session.request.questions.length > 1
-      ? `（${session.questionIndex + 1}/${session.request.questions.length}）`
-      : ""
-  return [
-    `${session.route.prefix}需要你确认${progress} · 详情见上方卡片`,
-    `回复 /回答 ${session.code} <编号>`,
-    `如以上选项都不合适：/回答 ${session.code} 其他 <你的回答>`
-  ].join("\n")
-}
-
 function answerFor(
   question: UserInputQuestion,
   rawAnswer: string
@@ -462,12 +443,25 @@ export class ImRemoteUserInputService {
       this.dependencies.warn("Remote user-input card could not be published.", error)
     }
 
+    if (carded) {
+      // The card carries the question in full, so no notice follows it. The
+      // pending check still runs: publishing now happens before it, so a
+      // request answered while the card was in flight has to have its card
+      // taken back rather than left on screen looking live.
+      const pending = this.dependencies.getPendingForThread(request.threadId)
+      if (!pending || pending.requestId !== request.requestId) {
+        this.resolveCardFor(session, "已在桌面处理")
+        this.removeSession(request.requestId)
+      }
+      return
+    }
+
     try {
       const outbox = await this.dependencies.events.enqueueProactiveReplies(
         buildImProactiveReplies({
           deliveryId: `user-input-request:${request.requestId}:0`,
           conversationKey: route.conversationKey,
-          text: carded ? renderQuestionPointer(session) : renderQuestion(session)
+          text: renderQuestion(session)
         })
       )
       const pending = this.dependencies.getPendingForThread(request.threadId)

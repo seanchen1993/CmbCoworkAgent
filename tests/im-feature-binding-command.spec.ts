@@ -5,6 +5,8 @@ import { join } from "node:path"
 import initSqlJs from "sql.js"
 import type { ThreadRow } from "../src/main/db"
 import { ImRemoteCapabilityGuard } from "../src/main/services/im/capability-guard"
+import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
+import { ImCardPublisher } from "../src/main/services/im/card-publisher"
 import { ImCommandRouter, parseImCommand } from "../src/main/services/im/command-router"
 import { ImConversationStateStore } from "../src/main/services/im/conversation-state"
 import { ImEventStore, type ImEventRecord } from "../src/main/services/im/event-store"
@@ -321,6 +323,59 @@ async function testSwitchBackByTheNameTheReplyAlreadyShows(): Promise<void> {
  * offered, and an index the list does not have is refused by the same code that
  * refuses it for a typed command. The card adds an affordance, never authority.
  */
+/**
+ * A delivered card replaces the notice rather than accompanying it.
+ *
+ * The numbered list is the card's own content, so printing it again underneath
+ * was the same thing said twice. An empty answer is how the router says it has
+ * nothing to add; the ingress turns that into no message at all.
+ */
+async function testADeliveredTargetCardSendsNoNoticeAtAll(): Promise<void> {
+  const context = await createContext()
+  const sent: string[] = []
+  const cards = new ImCardPublisher({
+    interactions: new ImCardInteractionStore(),
+    createIdempotencyKey: () => `idem-${sent.length}`,
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async (card: { content: unknown }) => {
+        sent.push(JSON.stringify(card.content))
+        return { state: "accepted" } as const
+      }
+    } as never,
+    warn: () => undefined
+  })
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    cards,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const answer = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    assert.equal(answer, "", "a delivered card leaves the router with nothing to say")
+    assert.equal(sent.length, 1, "exactly one card carries the list")
+    // The numbers the reader would type are in the card, so nothing was lost by
+    // dropping the text: /绑定 <编号> still matches what is on screen.
+    assert(sent[0]!.includes("特性，可创建新会话"), sent[0])
+    assert(sent[0]!.includes("/绑定 <编号>"), sent[0])
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function testACardSubmitBindsExactlyWhatTypingWouldBind(): Promise<void> {
   const context = await createContext()
   const router = new ImCommandRouter({
@@ -1183,6 +1238,7 @@ const tests: Array<[string, () => Promise<void>]> = [
   ["testSwitchBackByTheNameTheReplyAlreadyShows", testSwitchBackByTheNameTheReplyAlreadyShows],
   ["testBindModeOnlyAppliesWhereASessionIsCreated", testBindModeOnlyAppliesWhereASessionIsCreated],
   ["testACardSubmitBindsExactlyWhatTypingWouldBind", testACardSubmitBindsExactlyWhatTypingWouldBind],
+  ["testADeliveredTargetCardSendsNoNoticeAtAll", testADeliveredTargetCardSendsNoNoticeAtAll],
   [
     "testFeatureCreateGrantCreatesIndependentThreadGrants",
     testFeatureCreateGrantCreatesIndependentThreadGrants
