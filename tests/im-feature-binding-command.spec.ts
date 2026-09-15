@@ -364,7 +364,14 @@ async function testADeliveredTargetCardSendsNoNoticeAtAll(): Promise<void> {
       featureSlug: "feature-pay"
     })
     const answer = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
-    assert.equal(answer, "", "a delivered card leaves the router with nothing to say")
+    // Not empty: a control event has to finalize with at least one reply
+    // segment. An empty answer makes finalizeEventWithReplies throw
+    // OUTBOX_INCOMPLETE, the event never completes, and the gateway republishes
+    // this card every time the 90-second lease expires — forever.
+    assert.notEqual(answer, "", "a control command must always answer something")
+    assert(answer.includes("卡片"), answer)
+    // What it must not do is print the numbered list again; that is the card's.
+    assert(!/^\d+\. /mu.test(answer), answer)
     assert.equal(sent.length, 1, "exactly one card carries the list")
     // The numbers are in the option labels, which is the whole reason the text
     // list can be dropped: a submit sends the same index the option shows.

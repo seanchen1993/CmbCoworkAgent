@@ -327,10 +327,12 @@ export class ImCommandRouter {
     )
     // After the selection, so a card can never outlive the numbering it renders.
     const card = await this.publishTargetBindCard(input, targets, selection.expiresAt)
-    // The card is the list. An empty answer sends no message at all, which is
-    // what the ingress does with it — the numbered text below a card that
-    // already shows the same numbers is the duplication being removed here.
-    if (card) return ""
+    // A control event must finalize with at least one reply segment — the event
+    // store refuses an empty outbox with OUTBOX_INCOMPLETE, and a command that
+    // never finalizes is redelivered when its 90-second lease expires, which
+    // republishes this card forever. So the card replaces the numbered list,
+    // never the answer itself.
+    if (card) return "可切换的目标见上方卡片，选好点「切换」即可。"
 
     return [
       "可用目标：",
