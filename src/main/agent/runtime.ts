@@ -9,6 +9,7 @@ import {
   GENERAL_PURPOSE_SUBAGENT,
   StateBackend
 } from "deepagents"
+import { withModelResponseDiagnostics } from "./model-response-diagnostics"
 import {
   getThreadCheckpointPath,
   deleteThreadCheckpoint,
@@ -4297,7 +4298,11 @@ export function getModelInstance(
     },
     configuration: {
       baseURL: customConfig.baseUrl,
-      fetch: modelFetch
+      fetch: withModelResponseDiagnostics(
+        modelFetch,
+        { model: resolvedModel, purpose },
+        (diagnostic) => console.log("[Runtime][ModelResponse]", JSON.stringify(diagnostic))
+      )
     }
   }
 
