@@ -756,14 +756,14 @@ export async function verifyEnterpriseProjectCode(projectCode: string): Promise<
       "enterprise_project_code_verification",
       "POST",
       queryUrl,
-      `prjCode=${normalizedProjectCode}`
+      `prjCode=${normalizedProjectCode}, exactMatch=true`
     )
     const response = await fetch(queryUrl, {
       method: "POST",
       headers: {
         "content-type": "application/json"
       },
-      body: JSON.stringify({ prjCode: normalizedProjectCode }),
+      body: JSON.stringify({ prjCode: normalizedProjectCode, exactMatch: true }),
       signal: controller.signal
     })
 

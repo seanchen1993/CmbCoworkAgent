@@ -400,7 +400,7 @@ for (const source of ["human_gate", "biz_retry"] as const) {
       await Promise.resolve()
       const sent = JSON.stringify(dependencies.enqueue.mock.calls[0])
       const code = sent.match(
-        source === "human_gate" ? /门禁批准 ([A-F0-9]{6})/ : /托管停止 ([A-F0-9]{6})/
+        source === "human_gate" ? /门禁批准 ([A-F0-9]{6})/ : /停止托管运行 ([A-F0-9]{6})/
       )?.[1]
       expect(code).toBeDefined()
       return { code: code!, resolve, handler, adapter }

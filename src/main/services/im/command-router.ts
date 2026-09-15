@@ -71,9 +71,9 @@ const COMMANDS = new Map<string, ImCommandName>([
   ["回答", "answer"],
   ["门禁批准", "human_gate_approve"],
   ["门禁拒绝", "human_gate_reject"],
-  ["托管停止", "managed_stop"],
-  ["托管继续当前会话", "managed_continue"],
-  ["托管开启新会话", "managed_new_thread"],
+  ["停止托管运行", "managed_stop"],
+  ["在当前会话继续托管", "managed_continue"],
+  ["开启新会话继续托管", "managed_new_thread"],
   ["切换", "switch_target"]
 ])
 
@@ -265,9 +265,9 @@ export class ImCommandRouter {
       "/回答 <输入短码> <编号> — 回答 Agent 的补充问题；自定义回答使用“其他 <内容>”",
       "/门禁批准 <短码> — 批准 Human Gate",
       "/门禁拒绝 <短码> — 拒绝 Human Gate",
-      "/托管停止 <短码> — 停止待决策的托管运行",
-      "/托管继续当前会话 <短码> <消息> — 在当前托管会话继续执行",
-      "/托管开启新会话 <短码> — 创建新的托管会话",
+      "/停止托管运行 <短码> — 停止待决策的托管运行",
+      "/在当前会话继续托管 <短码> <消息> — 在当前托管会话继续执行",
+      "/开启新会话继续托管 <短码> — 创建新的托管会话",
       "//<文本> — 将以 / 开头的内容作为普通消息发送",
       "/重试 <事件短码> — 显式重试结果未知的事件"
     ].join("\n")
@@ -579,7 +579,7 @@ export class ImCommandRouter {
     const message = match?.[2]?.trim()
     if (choice !== "continue" && message) {
       return Promise.resolve(
-        choice === "new_thread" ? "托管开启新会话不支持附加消息。" : "用法：/托管停止 <短码>。"
+        choice === "new_thread" ? "托管开启新会话不支持附加消息。" : "用法：/停止托管运行 <短码>。"
       )
     }
     return this.dependencies.managedBizRetries.resolveCode({
