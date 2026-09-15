@@ -5,6 +5,10 @@ import {
   type ChatMessageVirtualListProps
 } from "../../src/renderer/src/components/chat/ChatMessageVirtualList"
 import type { Message } from "../../src/renderer/src/types"
+import {
+  advanceMessageAttempts,
+  publishMessageDiscard
+} from "../../src/renderer/src/lib/message-discard-events"
 
 const noop = () => {}
 const viewport = document.getElementById("viewport") as HTMLDivElement
@@ -13,7 +17,7 @@ let following = false
 let followFrame = 0
 let messages: Message[] = Array.from({ length: 200 }, (_, index) => ({
   id: `message-${index}`,
-  role: "assistant",
+  role: index < 198 ? (["user", "assistant", "system"] as const)[index % 3] : "assistant",
   created_at: new Date(2026, 8, 14),
   content: `消息 ${index}：用于检查滚动位置与实际行高。\n\n第二段内容。`,
   reasoning:
@@ -90,6 +94,21 @@ const fixture = {
     )
     render()
   },
+  token(tick: number) {
+    messages = messages.map((message, index) =>
+      index === 199 ? { ...message, reasoning: "思考。".repeat(tick) } : message
+    )
+    props.contentVersion++
+    render()
+  },
+  discardUnrelated() {
+    const ids = new Set(Array.from({ length: 501 }, (_, index) => `unrelated-${index}`))
+    const attempts = advanceMessageAttempts(props.messageAttempts, ids)
+    publishMessageDiscard(props.threadId, ids, attempts.revision)
+    render()
+    props.messageAttempts = attempts
+    render()
+  },
   follow() {
     following = true
     viewport.scrollTop = viewport.scrollHeight
@@ -119,6 +138,35 @@ const fixture = {
         : message
     )
     render()
+  },
+  retry(batched: boolean, overflow = false) {
+    const discarded = messages[199]
+    const restart = () => {
+      const ids = new Set([discarded.id])
+      if (overflow) for (let index = 0; index < 500; index++) ids.add(`overflow-${index}`)
+      const attempts = advanceMessageAttempts(props.messageAttempts, ids)
+      publishMessageDiscard(props.threadId, ids, attempts.revision)
+      // 强制旧正文在新消息快照进入前再提交一次，模拟 Virtuoso 旧回调。
+      messages = messages.map((message, index) =>
+        index === 199
+          ? { ...message, reasoning: `${message.reasoning}\n旧 attempt 的追加思考。` }
+          : message
+      )
+      props.contentVersion++
+      render()
+      props.messageAttempts = attempts
+      messages = messages.slice(0, 199)
+      props.visibleMessageIndexes = messages.map((_, index) => index)
+      if (!batched) render()
+      messages.push({ ...discarded, content: "", tool_calls: undefined, reasoning: "重试思考。" })
+      props.visibleMessageIndexes = messages.map((_, index) => index)
+      props.contentVersion++
+      props.isLoading = true
+      if (batched) root.render(<ChatMessageVirtualList {...props} messages={messages} />)
+      else render()
+    }
+    if (batched) flushSync(restart)
+    else restart()
   }
 }
 Object.assign(window, { chatLayoutFixture: fixture })

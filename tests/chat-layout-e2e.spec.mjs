@@ -108,7 +108,7 @@ try {
         id,
         Array.from({ length: 200 }, (_, i) => ({
           id: `layout-${i}`,
-          role: i % 2 ? "assistant" : "user",
+          role: i === 199 ? "assistant" : ["user", "assistant", "system"][i % 3],
           content: `消息 ${i}：用于检查滚动位置与实际行高。\n\n第二段内容。`,
           reasoning:
             i === 199 ? "思考内容用于排查消息展开和收起的高度变化。\n\n".repeat(150) : undefined,
@@ -133,7 +133,10 @@ try {
       height: el.getBoundingClientRect().height,
       known: Number(el.dataset.knownSize),
       margin:
-        parseFloat(getComputedStyle(el).marginTop) + parseFloat(getComputedStyle(el).marginBottom)
+        parseFloat(getComputedStyle(el).marginTop) + parseFloat(getComputedStyle(el).marginBottom),
+      gap: el.nextElementSibling?.matches("[data-item-index]")
+        ? el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom
+        : 0
     }))
   )
   const button = final.locator("button[aria-expanded]")
@@ -141,13 +144,21 @@ try {
   await page.waitForTimeout(600)
   await page.screenshot({ path: join(artifacts, "expanded.png") })
   const viewport = page.locator("[data-chat-thread-id] [data-radix-scroll-area-viewport]").first()
-  await viewport.evaluate((el) => {
-    el.scrollTop = 0
-  })
+  const returnToBottom = page.getByRole("button", { name: "回到会话底部", exact: true })
+  const detachAndScrollToTop = async () => {
+    const box = await viewport.boundingBox()
+    assert.ok(box, "Chat viewport must be visible for a user scroll gesture")
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.wheel(0, -500)
+    await returnToBottom.waitFor()
+    // 先用真实手势解除跟随，再定位顶部；纯 scrollTop 写入会被后续行高测量覆盖。
+    await viewport.evaluate((el) => {
+      el.scrollTop = 0
+    })
+  }
+  await detachAndScrollToTop()
   await final.waitFor({ state: "detached" })
-  await viewport.evaluate((el) => {
-    el.scrollTop = el.scrollHeight
-  })
+  await returnToBottom.click()
   await final.waitFor()
   await page.waitForTimeout(800)
   const restoredExpansion = await button.getAttribute("aria-expanded")
@@ -162,7 +173,9 @@ try {
   )
   assert.ok(rows.length > 1 && rows.length < 40)
   assert.ok(
-    rows.every((row) => row.margin === 0 && Math.abs(row.height - row.known) <= 1),
+    rows.every(
+      (row) => row.margin === 0 && Math.abs(row.gap) <= 1 && Math.abs(row.height - row.known) <= 1
+    ),
     "All spacing must be included in measured boxes"
   )
   assert.equal(restoredExpansion, "true", "Expanded reasoning must survive virtual unmount")
@@ -377,6 +390,200 @@ try {
   assert.equal(await offscreenToggle.getAttribute("aria-expanded"), "true")
   assert.deepEqual(errors, [])
   await page.screenshot({ path: join(artifacts, "offscreen-completed.png") })
+
+  // 无 provider ID 的重试会回退到同一个 fallback slot，必须重新开始自动开合阶段。
+  await app.evaluate(() => {
+    globalThis.layoutRun = null
+  })
+  await composer.fill("验证失败重试复用消息 ID")
+  await submit.click()
+  for (let i = 0; i < 100; i++) {
+    if (await app.evaluate(() => Boolean(globalThis.layoutRun))) break
+    await page.waitForTimeout(100)
+  }
+  assert.ok(await app.evaluate(() => Boolean(globalThis.layoutRun)), "Retry scenario must start")
+  await sendReasoning(4, null)
+  const retryRow = page
+    .locator('[data-message-role="assistant"][data-chat-message-id^="values:"]')
+    .last()
+  await retryRow.waitFor()
+  const retryId = await retryRow.getAttribute("data-chat-message-id")
+  const retryToggle = retryRow.locator("button[aria-expanded]")
+  assert.equal(await retryToggle.getAttribute("aria-expanded"), "true")
+  await sendBody("失败前已开始回答。", null)
+  await page.waitForFunction(
+    (id) =>
+      document
+        .querySelector(`[data-chat-message-id="${id}"] button[aria-expanded]`)
+        ?.getAttribute("aria-expanded") === "false",
+    retryId
+  )
+  await app.evaluate(() => {
+    const run = globalThis.layoutRun
+    run.sender.send(run.channel, {
+      type: "custom",
+      data: { type: "stream_retry_reset", discardedMessageIds: [], messages: [] }
+    })
+  })
+  await page.locator(`[data-chat-message-id="${retryId}"]`).waitFor({ state: "detached" })
+  await sendReasoning(5, null)
+  await retryRow.waitFor()
+  assert.equal(
+    await retryRow.getAttribute("data-chat-message-id"),
+    retryId,
+    "Retry must reuse the fallback ID"
+  )
+  assert.equal(
+    await retryToggle.getAttribute("aria-expanded"),
+    "true",
+    "Retry reasoning must open afresh"
+  )
+  await sendBody("重试的新回答。", null)
+  await page.waitForFunction(
+    (id) =>
+      document
+        .querySelector(`[data-chat-message-id="${id}"] button[aria-expanded]`)
+        ?.getAttribute("aria-expanded") === "false",
+    retryId
+  )
+  // 同一主进程 tick 连续发送正文、reset、新思考；不等待虚拟行卸载。
+  await app.evaluate(() => {
+    const run = globalThis.layoutRun
+    const chunk = (content, reasoning) => ({
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { content, additional_kwargs: { reasoning_content: reasoning } }
+        },
+        { langgraph_node: "agent" }
+      ]
+    })
+    run.sender.send(run.channel, chunk("失败的追加正文。", ""))
+    run.sender.send(run.channel, {
+      type: "custom",
+      data: { type: "stream_retry_reset", discardedMessageIds: [], messages: [] }
+    })
+    run.sender.send(run.channel, chunk("", "同 tick 新一轮思考。"))
+  })
+  await page.waitForFunction(
+    (id) =>
+      document
+        .querySelector(`[data-chat-message-id="${id}"] button[aria-expanded]`)
+        ?.getAttribute("aria-expanded") === "true",
+    retryId
+  )
+  await sendBody("同 tick 重试后的正文。", null)
+  await page.waitForFunction(
+    (id) =>
+      document
+        .querySelector(`[data-chat-message-id="${id}"] button[aria-expanded]`)
+        ?.getAttribute("aria-expanded") === "false",
+    retryId
+  )
+  await app.evaluate(() => {
+    const run = globalThis.layoutRun
+    run.sender.send(run.channel, { type: "done" })
+  })
+  await page.getByRole("button", { name: "停止生成", exact: true }).waitFor({ state: "detached" })
+  // 同线程 managed run 会替换 stream holder，但折叠缓存所在列表仍存活。
+  await retryRow.waitFor()
+  if ((await retryToggle.getAttribute("aria-expanded")) === "true") await retryToggle.click()
+  assert.equal(await retryToggle.getAttribute("aria-expanded"), "false")
+  await app.evaluate((_electron, id) => {
+    const run = globalThis.layoutRun
+    globalThis.layoutManagedChannel = `agent:stream:${id}:request:layout-managed-retry`
+    run.sender.send("harnessBoard:managedAutoSendStreamStarted", {
+      runId: "layout-managed-run",
+      threadId: id,
+      streamRequestId: "layout-managed-retry",
+      agentMode: "normal"
+    })
+  }, threadId)
+  await page.getByRole("button", { name: "停止生成", exact: true }).waitFor()
+  await app.evaluate(() => {
+    globalThis.layoutRun.sender.send(globalThis.layoutManagedChannel, { type: "done" })
+  })
+  await page.getByRole("button", { name: "停止生成", exact: true }).waitFor({ state: "detached" })
+  await retryToggle.waitFor()
+  assert.equal(await retryToggle.getAttribute("aria-expanded"), "false")
+  await retryToggle.click()
+  await page.waitForTimeout(400)
+  await detachAndScrollToTop()
+  await retryRow.waitFor({ state: "detached" })
+  await returnToBottom.click()
+  await retryToggle.waitFor()
+  assert.equal(
+    await retryToggle.getAttribute("aria-expanded"),
+    "true",
+    "New choice after managed holder replacement must survive virtual unmount"
+  )
+  // 历史 assistant 已在本地，provider 不提供 occurrence 元数据仍复用其 ID。
+  await app.evaluate(() => {
+    globalThis.layoutRun = null
+  })
+  await composer.fill("验证冷历史同角色消息 ID 的失败重试")
+  await submit.click()
+  for (let i = 0; i < 100; i++) {
+    if (await app.evaluate(() => Boolean(globalThis.layoutRun))) break
+    await page.waitForTimeout(100)
+  }
+  assert.ok(await app.evaluate(() => Boolean(globalThis.layoutRun)))
+  await sendReasoning(4, "layout-199")
+  const duplicateRow = page
+    .locator('[data-chat-message-id^="layout-199::cmb-same-role-duplicate:assistant:"]')
+    .last()
+  await duplicateRow.waitFor()
+  const duplicateId = await duplicateRow.getAttribute("data-chat-message-id")
+  const duplicateToggle = duplicateRow.locator("button[aria-expanded]")
+  assert.equal(await duplicateToggle.getAttribute("aria-expanded"), "true")
+  await sendBody("冷历史重试前的回答。", "layout-199")
+  await page.waitForFunction(
+    (id) =>
+      document
+        .querySelector(`[data-chat-message-id="${id}"] button[aria-expanded]`)
+        ?.getAttribute("aria-expanded") === "false",
+    duplicateId
+  )
+  await app.evaluate(() => {
+    const run = globalThis.layoutRun
+    run.sender.send(run.channel, {
+      type: "custom",
+      data: {
+        type: "stream_retry_reset",
+        discardedMessageIds: ["layout-199"],
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: "layout-199",
+              content: "消息 199：用于检查滚动位置与实际行高。\n\n第二段内容。"
+            }
+          }
+        ]
+      }
+    })
+  })
+  await duplicateRow.waitFor({ state: "detached" })
+  await sendReasoning(5, "layout-199")
+  await duplicateRow.waitFor()
+  assert.equal(await duplicateRow.getAttribute("data-chat-message-id"), duplicateId)
+  assert.equal(await duplicateToggle.getAttribute("aria-expanded"), "true")
+  await sendBody("冷历史重试后的新回答。", "layout-199")
+  await page.waitForFunction(
+    (id) =>
+      document
+        .querySelector(`[data-chat-message-id="${id}"] button[aria-expanded]`)
+        ?.getAttribute("aria-expanded") === "false",
+    duplicateId
+  )
+  await app.evaluate(() => {
+    const run = globalThis.layoutRun
+    run.sender.send(run.channel, { type: "done" })
+  })
+  await page.getByRole("button", { name: "停止生成", exact: true }).waitFor({ state: "detached" })
+  assert.deepEqual(errors, [])
   writeFileSync(
     join(artifacts, "results.json"),
     JSON.stringify(
@@ -393,7 +600,11 @@ try {
           "64 Ki preview",
           "one-shot automatic collapse",
           "manual expansion after answer",
-          "offscreen answer completion"
+          "offscreen answer completion",
+          "idless retry starts a fresh reasoning lifecycle",
+          "same-tick body/reset/reasoning lifecycle",
+          "managed holder replacement retains reasoning choices",
+          "cold same-role provider ID retry without occurrence metadata"
         ]
       },
       null,

@@ -364,6 +364,8 @@ interface ToolResultInfo {
 }
 
 interface MessageBubbleProps {
+  messageGeneration?: number
+  messageRevision?: number
   searchLocation?: import("../../../../shared/chat-search-types").ChatSearchLocation
   message: Message
   previousMessage?: Message | null
@@ -392,6 +394,8 @@ interface MessageBubbleProps {
 const USER_MESSAGE_COLLAPSED_MAX_PX = 260
 
 function MessageBubbleImpl({
+  messageGeneration = 0,
+  messageRevision = 0,
   message,
   previousMessage,
   isStreaming = true,
@@ -471,7 +475,9 @@ function MessageBubbleImpl({
     `${threadId}:${message.role}:${message.id}`,
     Boolean(reasoningText),
     Boolean(isStreaming),
-    hasVisibleAssistantContent || hasToolCalls
+    hasVisibleAssistantContent || hasToolCalls,
+    messageGeneration,
+    messageRevision
   )
 
   // 测量用户消息内容高度,超过阈值才启用折叠。气泡宽度是 max-w-[80%],会随窗口/
@@ -1292,6 +1298,8 @@ function areMessageBubblePropsEqual(
     previous.onForkFromMessage === next.onForkFromMessage &&
     previous.forkingMessageId === next.forkingMessageId &&
     previous.threadId === next.threadId &&
+    previous.messageGeneration === next.messageGeneration &&
+    previous.messageRevision === next.messageRevision &&
     previous.isLoading === next.isLoading &&
     previous.hasUserAfterHead === next.hasUserAfterHead &&
     previous.assistantDurationMs === next.assistantDurationMs &&
