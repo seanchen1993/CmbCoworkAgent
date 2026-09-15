@@ -191,6 +191,17 @@ export function RequirementEntryView(): React.JSX.Element {
   }
 
   const deleteRequirement = async (requirement: RequirementRecord): Promise<void> => {
+    const deletedRequirementIndex = requirements.findIndex((item) => item.id === requirement.id)
+    const remainingRequirements = requirements.filter((item) => item.id !== requirement.id)
+    const adjacentRequirement =
+      deletedRequirementIndex >= 0
+        ? (remainingRequirements[deletedRequirementIndex] ??
+          remainingRequirements[deletedRequirementIndex - 1] ??
+          null)
+        : null
+    const shouldOpenAdjacentRequirement =
+      screen === "conversation" && selectedRequirement?.id === requirement.id
+
     const threadIds = getRequirementThreadIds(requirement)
     for (const threadId of threadIds) {
       const thread = await window.api.threads.get(threadId)
@@ -202,11 +213,18 @@ export function RequirementEntryView(): React.JSX.Element {
       throw new Error(result.error || "删除需求失败")
     }
 
-    setRequirements((current) => current.filter((item) => item.id !== requirement.id))
-    if (selectedRequirement?.id === requirement.id) {
+    setRequirements(remainingRequirements)
+    if (shouldOpenAdjacentRequirement) {
+      if (adjacentRequirement) {
+        await openRequirement(adjacentRequirement)
+      } else {
+        setSelectedRequirement(null)
+        setSelectedRequirementThreadId(null)
+        setScreen("history")
+      }
+    } else if (selectedRequirement?.id === requirement.id) {
       setSelectedRequirement(null)
       setSelectedRequirementThreadId(null)
-      setScreen("history")
     }
     toast.success("需求、关联会话和归档文件已删除")
   }

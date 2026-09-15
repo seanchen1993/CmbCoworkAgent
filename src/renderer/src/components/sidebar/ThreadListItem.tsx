@@ -163,8 +163,12 @@ function ThreadListItemImpl({
       : inlineActionCount === 3
         ? "group-focus-within:w-[4.5rem]"
         : ""
-  const inlineOuterWidth =
-    inlineActionCount >= 4 ? "w-24" : inlineActionCount === 3 ? "w-[4.5rem]" : "w-14"
+  const inlineOuterHoverWidth =
+    inlineActionCount >= 4
+      ? "group-hover:w-24 group-focus-within:w-24"
+      : inlineActionCount === 3
+        ? "group-hover:w-[4.5rem] group-focus-within:w-[4.5rem]"
+        : "group-hover:w-14 group-focus-within:w-14"
 
   return (
     <ContextMenu>
@@ -243,8 +247,8 @@ function ThreadListItemImpl({
           )}
           <span
             className={cn(
-              "relative ml-auto flex h-6 shrink-0 items-center justify-end overflow-hidden",
-              inlineOuterWidth
+              "relative ml-auto flex h-6 w-9 shrink-0 items-center justify-end overflow-hidden transition-[width]",
+              inlineOuterHoverWidth
             )}
           >
             <span className="absolute right-0 text-[10px] text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
