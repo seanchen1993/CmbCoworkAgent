@@ -690,8 +690,7 @@ export class ImCommandRouter {
                   : "特性，可创建新会话"
             })),
             modeChoices: createsSession ? TARGET_BIND_MODE_CHOICES : [],
-            tag,
-            fallbackCommand: `/绑定 <编号>`
+            tag
           })
       })
       return interaction !== null

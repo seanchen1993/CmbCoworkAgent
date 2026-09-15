@@ -92,10 +92,6 @@ function kvTitle(title: string): string {
   return /[：:]$/u.test(title) ? title : `${title}：`
 }
 
-function separatorComponent(): CardComponent {
-  return { type: "separate" }
-}
-
 /**
  * The kv key naming where a card came from.
  *
@@ -113,7 +109,6 @@ export interface ApprovalCardInput {
   detail: string
   tag: string
   allowedDecisions: ReadonlyArray<"approve" | "reject">
-  fallbackCommands: string
 }
 
 /**
@@ -161,8 +156,6 @@ export function buildApprovalCard(input: ApprovalCardInput): CardComponent[] {
       list: buttons
     })
   }
-  components.push(separatorComponent())
-  components.push(contentComponent([`按钮失效时可回复：${input.fallbackCommands}`], 1))
   return components
 }
 
@@ -218,7 +211,6 @@ export interface QuestionCardInput {
   targetLabel: string
   questions: ReadonlyArray<QuestionCardQuestion>
   tag: string
-  fallbackCommand: string
 }
 
 /** listSelector selectModel: 1-自定义选项 2-会话人员 3-搜索 */
@@ -336,8 +328,6 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
     })
   }
 
-  components.push(separatorComponent())
-  components.push(contentComponent([`也可以回复：${input.fallbackCommand}`], 1))
   return components
 }
 
@@ -410,7 +400,6 @@ export interface TargetBindCardInput {
   /** Offered only when the list contains something that creates a session. */
   modeChoices: ReadonlyArray<{ label: string; value: string }>
   tag: string
-  fallbackCommand: string
 }
 
 /**
@@ -474,8 +463,6 @@ export function buildTargetBindCard(input: TargetBindCardInput): CardComponent[]
     }
   })
 
-  components.push(separatorComponent())
-  components.push(contentComponent([`也可以回复：${input.fallbackCommand}`], 1))
   return components
 }
 

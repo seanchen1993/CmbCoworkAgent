@@ -366,10 +366,10 @@ async function testADeliveredTargetCardSendsNoNoticeAtAll(): Promise<void> {
     const answer = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
     assert.equal(answer, "", "a delivered card leaves the router with nothing to say")
     assert.equal(sent.length, 1, "exactly one card carries the list")
-    // The numbers the reader would type are in the card, so nothing was lost by
-    // dropping the text: /绑定 <编号> still matches what is on screen.
+    // The numbers are in the option labels, which is the whole reason the text
+    // list can be dropped: a submit sends the same index the option shows.
     assert(sent[0]!.includes("特性，可创建新会话"), sent[0])
-    assert(sent[0]!.includes("/绑定 <编号>"), sent[0])
+    assert(sent[0]!.match(/"text":"1\. /u), sent[0])
   } finally {
     context.database.close()
     await rm(context.root, { recursive: true, force: true })

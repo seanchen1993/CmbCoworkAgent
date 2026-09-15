@@ -592,10 +592,6 @@ export class ImRemoteApprovalService {
     code: RemoteApprovalCode,
     presentation: ApprovalPresentation
   ): Promise<boolean> {
-    const fallbackCommands = [
-      ...(code.allowedDecisions.includes("approve") ? [`/批准 ${code.code}`] : []),
-      ...(code.allowedDecisions.includes("reject") ? [`/拒绝 ${code.code}`] : [])
-    ].join("   或   ")
     const interaction = await this.dependencies.cards.publish({
       kind: "approval",
       threadId: code.route.threadId,
@@ -612,8 +608,7 @@ export class ImRemoteApprovalService {
           operation: presentation.operation,
           detail: presentation.detail,
           tag,
-          allowedDecisions: code.allowedDecisions,
-          fallbackCommands
+          allowedDecisions: code.allowedDecisions
         })
     })
     return interaction !== null

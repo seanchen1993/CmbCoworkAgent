@@ -526,8 +526,7 @@ export class ImRemoteUserInputService {
         buildQuestionCard({
           targetLabel: session.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
           questions: this.cardQuestions(session),
-          tag,
-          fallbackCommand: `/回答 ${session.code} <编号>`
+          tag
         })
     })
     return interaction !== null

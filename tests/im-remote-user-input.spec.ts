@@ -283,13 +283,13 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     // included — it is the only way to answer when the buttons do not work.
     assert.equal(context.cardInteractions.list().length, 1)
     assert.equal(context.sendPendingCount(), 0, "nothing was queued to drain")
-    // Everything a reader needs is therefore in the card, the short code and
-    // its escape hatch included — they are the only way to answer when the
-    // buttons do not work, and nothing else now carries them.
+    // Everything a reader needs is therefore in the card: the question, the
+    // options, and the submit button. The short code is deliberately not among
+    // them — a delivered card is answered by pressing it.
     const card = context.cardJson()
     assert(card.includes("导出格式用哪种？"), card)
     assert(card.includes("CSV"), card)
-    assert(card.includes("/回答 A1B2C3 <编号>"), card)
+    assert(!card.includes("A1B2C3"), card)
 
     assert.equal(
       await context.service.resolveAnswer({
@@ -490,14 +490,16 @@ async function testConcurrentThreadsUseIndependentCodes(): Promise<void> {
     const requests = threadIds.map((threadId, index) =>
       userInputRequest({ requestId: `request-concurrent-${index + 1}`, threadId })
     )
+    // Cards off: this is about the codes being independent per thread, and a
+    // delivered card no longer prints one. The notice is where they appear.
+    context.cardSends.accept = false
     await Promise.all(requests.map((request) => context.publish(request)))
 
-    // The cards landed, so the short code reaches the reader inside them — the
-    // fallback line is part of the card, not a separate notice.
-    const codes = context.cardSends.cards.map(
-      (card) => card.json.match(/\/回答 ([A-F0-9]{6}) <编号>/u)?.[1]
+    const codes = requests.map(
+      (request) =>
+        context.deliveryText(request.requestId).match(/\/回答 ([A-F0-9]{6}) <编号>/u)?.[1]
     )
-    assert.deepEqual(codes.slice().sort(), ["012ABC", "A1B2C3", "D4E5F6"])
+    assert.deepEqual(codes, ["A1B2C3", "D4E5F6", "012ABC"])
 
     for (const code of codes) {
       assert(code)

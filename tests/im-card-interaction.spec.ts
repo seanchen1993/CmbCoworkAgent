@@ -219,8 +219,13 @@ async function testTheCardCarriesTheSameGateAsTheShortCode(): Promise<void> {
     // whose task asked is exactly what the text prefix prevents.
     assert.ok(rendered.includes("快捷支付"), "the card names its thread")
     assert.ok(rendered.includes("config.ts"), "the card names the file")
-    // The short code stays on the card: the buttons can fail, the code cannot.
-    assert.ok(rendered.includes("/批准 A1B2C3"), "the card keeps the short code")
+    // The code is deliberately absent: a delivered card is answered by pressing
+    // it, and the notice that carries the code is only sent when the card is
+    // not. Both places printing it is what made one gate read as two messages.
+    assert.ok(!rendered.includes("A1B2C3"), `the delivered card carries no short code: ${rendered}`)
+    // What it must keep is the decision the click applies — the tag is the
+    // capability, and it is still what routes a press back to this gate.
+    assert.ok(rendered.includes(`${card.tag}:approve`), "the card keeps its decision tags")
 
     const receipt: RemoteImCardReceiptV1 = {
       schemaVersion: 1,
