@@ -10115,6 +10115,9 @@ export function HarnessBoardView({
       detailsByProjectIdRef.current = nextDetails
       setDetailsByProjectId(nextDetails)
       await loadProjects({ force: true })
+      if (selectedProjectIdRef.current === projectId) {
+        await loadProjectDetail(projectId)
+      }
     } catch (error) {
       setEditError(cleanIpcError(error))
     } finally {
