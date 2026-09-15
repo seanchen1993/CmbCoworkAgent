@@ -22,8 +22,8 @@ import { ImSkillCommandService, imSkillCommandService } from "./skill-command"
 import { ImRemoteModeNotificationPump } from "./remote-mode-notification-pump"
 import { ImGoalRunBridge } from "./goal-runner"
 import { imRemoteCapabilityGuard } from "./capability-guard"
-import { imHumanGateService } from "./human-gate-service"
-import { imManagedBizRetryService } from "./managed-biz-retry-service"
+import { imHumanGateAdapter } from "./human-gate-adapter"
+import { imBizRetryAdapter } from "./biz-retry-adapter"
 
 /**
  * Headless orchestration boundary used by the production WSS adapter and the
@@ -68,8 +68,8 @@ export class ImUnifiedBotService {
     this.unregisterRemoteUserInputReplyDrainer = imRemoteUserInputService.registerReplyDrainer(
       this.replyClient
     )
-    this.unregisterHumanGateReplyDrainer = imHumanGateService.registerReplyDrainer(this.replyClient)
-    this.unregisterManagedBizRetryReplyDrainer = imManagedBizRetryService.registerReplyDrainer(
+    this.unregisterHumanGateReplyDrainer = imHumanGateAdapter.registerReplyDrainer(this.replyClient)
+    this.unregisterManagedBizRetryReplyDrainer = imBizRetryAdapter.registerReplyDrainer(
       this.replyClient
     )
     this.unregisterCardReceiptReplyDrainer = imCardReceiptRouter.registerReplyDrainer(

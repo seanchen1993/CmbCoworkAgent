@@ -1,9 +1,10 @@
 import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
 import { imEventStore, type ImEventStore } from "./event-store"
 import { imRemoteAccessService, type ImRemoteAccessService } from "./remote-access-service"
-import { imThreadReplyPrefix } from "./reply-context"
+import { imProjectModeReplyPrefix, imThreadReplyPrefix } from "./reply-context"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
+import { resolveImProjectModeReplyContext } from "./project-reply-context"
 
 export interface DesktopTurnCompletion {
   source: "desktop"
@@ -95,12 +96,25 @@ export class ImDesktopCompletionObserver {
     }
 
     let threadTitle = grant.titleSnapshot
+    let threadMetadata: Record<string, unknown> = {}
     try {
       const validated = this.dependencies.access.validateThreadForCompletionDelivery(threadId)
       threadTitle = validated.thread.title?.trim() || threadTitle
+      try {
+        threadMetadata = validated.thread.metadata
+          ? (JSON.parse(validated.thread.metadata) as Record<string, unknown>)
+          : {}
+      } catch {
+        threadMetadata = {}
+      }
     } catch {
       return { status: "skipped", reasonCode: "THREAD_STRUCTURE_INVALID" }
     }
+
+    const projectContext = await resolveImProjectModeReplyContext({ metadata: threadMetadata })
+    const prefix = projectContext
+      ? imProjectModeReplyPrefix(projectContext)
+      : imThreadReplyPrefix(threadTitle)
 
     const deliveryId = `desktop-turn:${threadId}:${finalAssistantMessageId}`
     await this.dependencies.events.enqueueProactiveReplies(
@@ -108,7 +122,7 @@ export class ImDesktopCompletionObserver {
         deliveryId,
         conversationKey: grant.conversationKey,
         text: finalText,
-        prefix: imThreadReplyPrefix(threadTitle)
+        prefix
       })
     )
 

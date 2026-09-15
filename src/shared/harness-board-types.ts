@@ -134,6 +134,7 @@ export interface HarnessLeanTokenConfig {
 export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
 
 export interface HarnessHumanGateSnapshot {
+  /** Alias of the Human Gate notificationId; retained by the managed-run event contract. */
   gateId: string
   status: "pending"
   projectId: string
@@ -149,13 +150,6 @@ export interface HarnessHumanGateDecisionInput {
   projectId: string
   featureId: string
   gateId: string
-}
-
-export interface HarnessHumanGateChangedEvent {
-  projectId: string
-  featureId: string
-  sourceThreadId: string
-  humanGate?: HarnessHumanGateSnapshot
 }
 
 export interface HarnessAgentmdLoadStatusItem {
@@ -179,7 +173,6 @@ export interface HarnessFeatureDeployUnitBinding {
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
   imManagementEnabled?: boolean
-  humanGate?: HarnessHumanGateSnapshot
 }
 
 function normalizeHarnessText(value: unknown): string {
@@ -583,7 +576,6 @@ export interface ManagedRunSnapshot {
     nextActionHash: string
   }
   providerRetryCount: number
-  bizRetryCount: number
   nextRetryAt?: string
   failureReason?: string
   cancellationReason?: string
@@ -616,7 +608,6 @@ export interface ManagedRunDecisionFacts {
   changedFields: ManagedRunDecisionChangedField[]
   initialInspection: boolean
   previousNodeId?: string
-  bizRetryCount: number
   providerRetryCount: number
   contextInputTokens?: number
   contextMaxTokens?: number
@@ -682,6 +673,8 @@ export type ManagedRunDecisionActor = "controller" | "user" | "system"
 export type ManagedRunDecisionChannel = "system" | "desktop" | "im"
 
 export type ManagedRunEventType =
+  | "decision_notification_created"
+  | "decision_notification_ended"
   | "run_started"
   | "managed_agent_turn_ended"
   | "provider_retry_timer_elapsed"
@@ -704,6 +697,9 @@ export type ManagedRunEventType =
 export interface ManagedRunEvent {
   version: 2.5
   eventId: string
+  notificationId?: string
+  notificationStatus?: "pending" | "resolved" | "invalidated"
+  notificationAction?: "stop" | "continue" | "new_thread" | "approve" | "reject"
   createTime: string
   type: ManagedRunEventType
   runId: string
@@ -806,7 +802,6 @@ export interface HarnessFeatureSummary {
   currentNodeId: string
   currentNodeStatus: HarnessNodeStatus
   currentNodeStatusLabel?: string
-  humanGate?: HarnessHumanGateSnapshot
   summary: {
     text: string
     updatedAt: string
@@ -1052,7 +1047,6 @@ export interface HarnessRunDetailViewModel {
     unmatchedHooks: HarnessHookLogView[]
     managedRun?: ManagedRunSummary
     imManagementEnabled?: boolean
-    humanGate?: HarnessHumanGateSnapshot
   }
   sessions: HarnessSessionBinding[]
 }

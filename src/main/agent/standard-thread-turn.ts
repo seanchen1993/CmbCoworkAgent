@@ -8,6 +8,7 @@ import type {
 import {
   buildHarnessFeatureAgentContext,
   readHarnessFeatureMetadata,
+  resolveHarnessFeaturePluginIdentity,
   resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
 import {
@@ -194,8 +195,15 @@ export async function resolveHarnessFeatureBindingContext(
 
 export async function getHarnessAgentContext(
   metadata: Record<string, unknown>,
-  options: { workspacePath?: string; featureBinding?: HarnessFeatureBindingContext } = {}
+  options: {
+    workspacePath?: string
+    featureBinding?: HarnessFeatureBindingContext
+    purpose?: "execution" | "plugin-identity"
+  } = {}
 ): Promise<HarnessAgentContext> {
+  if (options.purpose === "plugin-identity") {
+    return resolveHarnessFeaturePluginIdentity(metadata)
+  }
   const harnessProjectSession =
     metadata.harnessProjectSession &&
     typeof metadata.harnessProjectSession === "object" &&

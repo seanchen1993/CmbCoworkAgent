@@ -1,3 +1,6 @@
+import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { useHarnessNotifications } from "@/lib/harness-notifications"
+import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
   useRef,
   useEffect,
@@ -115,7 +118,6 @@ import {
 import type {
   GoalUiState,
   ForkableCheckpoint,
-  HarnessHumanGateSnapshot,
   Message,
   SkillMetadata,
   Thread,
@@ -1929,7 +1931,26 @@ export function ChatContainer({
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
   const [isManagedRunSessionActive, setIsManagedRunSessionActive] = useState(false)
-  const [humanGate, setHumanGate] = useState<HarnessHumanGateSnapshot | null>(null)
+  const appNotifications = useHarnessNotifications()
+  const bizRetry = appNotifications.find(
+    (item) =>
+      item.type === "biz_retry" && item.status === "pending" && item.sourceThreadId === threadId
+  )
+  const bizRetryPending = Boolean(bizRetry)
+  const bizRetryHumanGatePending = Boolean(
+    bizRetry &&
+      appNotifications.some(
+        (item) =>
+          item.type === "human_gate" &&
+          item.status === "pending" &&
+          item.projectId === bizRetry.projectId &&
+          item.featureId === bizRetry.featureId
+      )
+  )
+  const humanGate = projectHumanGate(appNotifications.find(
+    (item) =>
+      item.type === "human_gate" && item.status === "pending" && item.sourceThreadId === threadId
+  ))
   const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
     null
   )
@@ -1962,8 +1983,8 @@ export function ChatContainer({
       applyManagedRunStatus(event.run)
     })
     void window.api.harnessBoard
-      .getRunDetail(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
-      .then((detail) => applyManagedRunStatus(detail.run.managedRun))
+      .getLatestManagedRun(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
+      .then((managedRun) => applyManagedRunStatus(managedRun ?? undefined))
       .catch((error) => {
         if (!cancelled) {
           console.warn("[ChatContainer] Failed to load managed run status:", error)
@@ -1977,36 +1998,15 @@ export function ChatContainer({
     }
   }, [harnessFeatureBinding, threadId])
 
-  useEffect(() => {
-    let cancelled = false
-    void window.api.harnessBoard.getHumanGateForThread(threadId).then((gate) => {
-      if (cancelled) return
-      setHumanGate(gate ?? null)
-    })
-    const unsubscribe = window.api.harnessBoard.onHumanGateChanged((event) => {
-      if (event.sourceThreadId !== threadId) return
-      setHumanGate(event.humanGate ?? null)
-    })
-    return () => {
-      cancelled = true
-      unsubscribe()
-    }
-  }, [threadId])
-
   const decideHumanGate = useCallback(
     async (decision: "approve" | "reject"): Promise<void> => {
       if (!humanGate || humanGateDecisionBusy) return
       setHumanGateDecisionBusy(decision)
       try {
-        const input = {
-          projectId: humanGate.projectId,
-          featureId: humanGate.featureId,
-          gateId: humanGate.gateId
-        }
-        const changed =
-          decision === "approve"
-            ? await window.api.harnessBoard.approveHumanGate(input)
-            : await window.api.harnessBoard.rejectHumanGate(input)
+        const { applied: changed } = await window.api.appNotifications.decide({
+          notificationId: humanGate.gateId,
+          action: decision
+        })
         if (!changed) toast.error("Human Gate 已发生变化，请刷新后重试")
       } catch (error) {
         toast.error(error instanceof Error ? error.message : String(error))
@@ -5072,10 +5072,12 @@ export function ChatContainer({
     contextReminder
   )
   // 项目已删除时，会话仅可查看历史：禁用输入框与编辑器控件。
-  const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly
+  const effectiveInputDisabled =
+    inputDisabled || contextReminderPending || readOnly || bizRetryPending
   const effectiveComposerControlsDisabled =
-    composerControlsDisabled || contextReminderPending || readOnly
+    composerControlsDisabled || contextReminderPending || readOnly || bizRetryPending
   const inputPlaceholder = useMemo(() => {
+    if (bizRetryPending) return "请在决策入口操作"
     if (resolvedReadOnlyReason) return resolvedReadOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
     const goal = goalUi.goal
@@ -5098,6 +5100,7 @@ export function ChatContainer({
     }
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
   }, [
+    bizRetryPending,
     contextReminderPending,
     goalUi.goal,
     hasPendingFilePayload,
@@ -6473,7 +6476,7 @@ export function ChatContainer({
     if (queueAutoDrainSuppressed) return
     if (submitInFlightRef.current.has(threadId)) return
     if (isLoading || pendingApproval || threadError || !stream) return
-    if (historyLoading || readOnly || contextReminderPending) return
+    if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return
     if (hasActiveGoalRunning) return
     // Reconciliation owns transcript ordering for every handed-off draft, not
     // only the queue head. Draining any ordinary item first could append it
@@ -6529,6 +6532,7 @@ export function ChatContainer({
         releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
       })
   }, [
+    bizRetryPending,
     contextReminderPending,
     currentModel,
     hasActiveGoalRunning,
@@ -7943,6 +7947,19 @@ export function ChatContainer({
                 </div>
               </div>
             </ScrollArea>
+            {bizRetry && (
+              <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
+                <div className="mx-auto w-full max-w-3xl">
+                  <BizRetryDecisionCard
+                    key={bizRetry.notificationId}
+                    notificationId={bizRetry.notificationId}
+                    message={bizRetry.message}
+                    humanGatePending={bizRetryHumanGatePending}
+                    className="mb-0 rounded-md px-3 py-2.5"
+                  />
+                </div>
+              </div>
+            )}
             {humanGate && (
               <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="mx-auto flex w-full max-w-3xl items-center gap-3 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2.5">

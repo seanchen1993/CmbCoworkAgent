@@ -1,3 +1,6 @@
+import { initializeNotificationRuntime } from "./notification-runtime"
+import { notificationService } from "./services/notification-service"
+import { registerNotificationHandlers } from "./ipc/notifications"
 import {
   app,
   BrowserWindow,
@@ -371,7 +374,6 @@ import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
-import { recoverHumanGatesAtStartup } from "./harness-board/human-gate-service"
 import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
 import {
   getHarnessProjectRootPath,
@@ -1093,7 +1095,8 @@ if (browserNativeMessagingHostLaunch) {
 
     // Initialize database
     await initializeDatabase()
-    await recoverHumanGatesAtStartup()
+    initializeNotificationRuntime()
+    await notificationService.recover()
     recoverManagedRunsAtStartup()
     cleanupLegacySkillEvalRecords()
 
@@ -1132,6 +1135,7 @@ if (browserNativeMessagingHostLaunch) {
     registerDashboardHandlers(ipcMain)
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
+    registerNotificationHandlers(ipcMain)
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)

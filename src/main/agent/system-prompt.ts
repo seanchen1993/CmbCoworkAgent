@@ -177,6 +177,10 @@ If asked how to approach something, answer first before taking action.
 ## Following Conventions
 - Check existing code for libraries and frameworks before assuming availability
 - Mimic existing code style, naming conventions, and patterns
+- When creating or editing code, preserve the surrounding file's indentation, whitespace, line-ending, and formatter style
+- Keep indentation consistent within edited blocks; do not mix tabs and spaces
+- Do not reformat unrelated lines or normalize the entire file
+- If the convention is unclear, inspect nearby code and the project's formatter configuration before choosing a style
 - Never add comments unless asked
 
 ## Task Management

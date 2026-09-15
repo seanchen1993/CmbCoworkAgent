@@ -1,3 +1,4 @@
+import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import { randomUUID } from "crypto"
 import {
   closeSync,
@@ -49,6 +50,9 @@ export interface ManagedRunRecord extends ManagedRunIdentity {
 }
 
 interface ManagedRunEventInput {
+  notificationId?: string
+  notificationStatus?: "pending" | "resolved" | "invalidated"
+  notificationAction?: "stop" | "continue" | "new_thread" | "approve" | "reject"
   type: ManagedRunEvent["type"]
   summary: string
   scope?: ManagedRunEvent["scope"]
@@ -89,6 +93,8 @@ const EVENT_SUMMARY_MAX_LENGTH = 1024
 const EVENT_CURSOR_VERSION = 1
 const MANAGED_RUN_HASH_PATTERN = /^v1:sha256:[a-f0-9]{64}$/u
 const MANAGED_RUN_EVENT_TYPES = new Set<ManagedRunEvent["type"]>([
+  "decision_notification_created",
+  "decision_notification_ended",
   "run_started",
   "managed_agent_turn_ended",
   "provider_retry_timer_elapsed",
@@ -167,22 +173,6 @@ export class ManagedRunCorruptError extends Error {
     super(message)
     this.name = "ManagedRunCorruptError"
   }
-}
-
-export function formatManagedRunTimestamp(date = new Date()): string {
-  const gmt8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000)
-  const pad = (value: number): string => String(value).padStart(2, "0")
-  return (
-    [gmt8Date.getUTCFullYear(), pad(gmt8Date.getUTCMonth() + 1), pad(gmt8Date.getUTCDate())].join(
-      "-"
-    ) +
-    " " +
-    [
-      pad(gmt8Date.getUTCHours()),
-      pad(gmt8Date.getUTCMinutes()),
-      pad(gmt8Date.getUTCSeconds())
-    ].join(":")
-  )
 }
 
 function encodeSegment(value: string, label: string): string {
@@ -331,7 +321,6 @@ function isManagedRunDecisionFacts(value: unknown): value is ManagedRunDecisionF
     value.changedFields.length <= MANAGED_RUN_CHANGED_FIELDS.size &&
     value.changedFields.every((field) => MANAGED_RUN_CHANGED_FIELDS.has(field as string)) &&
     typeof value.initialInspection === "boolean" &&
-    isNonNegativeInteger(value.bizRetryCount) &&
     isNonNegativeInteger(value.providerRetryCount) &&
     isOptionalText(value.slashSkill, 256) &&
     isOptionalText(value.previousNodeId, 512) &&
@@ -450,7 +439,6 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
     !isManagedRunDecisionBaseline(snapshot.decisionBaseline) ||
     (snapshot.currentSession === undefined) !== (snapshot.decisionBaseline === undefined) ||
     !isNonNegativeInteger(snapshot.providerRetryCount) ||
-    !isNonNegativeInteger(snapshot.bizRetryCount) ||
     (snapshot.nextRetryAt !== undefined &&
       (typeof snapshot.nextRetryAt !== "string" ||
         !MANAGED_RUN_TIME_PATTERN.test(snapshot.nextRetryAt))) ||
@@ -491,6 +479,17 @@ function normalizeEvent(value: unknown, identity: ManagedRunIdentity): ManagedRu
         event.decisionChannel === "desktop" ||
         event.decisionChannel === "im") &&
       MANAGED_RUN_DECISION_ACTIONS.has(event.decisionAction as string))
+  const validNotification =
+    (event.type !== "decision_notification_created" &&
+      event.type !== "decision_notification_ended") ||
+    (typeof event.notificationId === "string" &&
+      event.notificationId.length > 0 &&
+      (event.policyResult === undefined || isManagedRunPolicyResult(event.policyResult)) &&
+      (event.notificationAction === undefined ||
+        ["stop", "continue", "new_thread", "approve", "reject"].includes(event.notificationAction)) &&
+      (event.type === "decision_notification_created"
+        ? event.notificationStatus === "pending"
+        : event.notificationStatus === "resolved" || event.notificationStatus === "invalidated"))
   const validManagedTurnEnd =
     event.type !== "managed_agent_turn_ended" ||
     (typeof event.threadId === "string" &&
@@ -536,6 +535,8 @@ function normalizeEvent(value: unknown, identity: ManagedRunIdentity): ManagedRu
     event.summary.length > EVENT_SUMMARY_MAX_LENGTH ||
     !validDecision ||
     !validManagedTurnEnd ||
+    !validNotification ||
+    !isOptionalText(event.notificationId, 128) ||
     !validDecisionLink ||
     (event.endReason !== undefined && !isAgentEndReason(event.endReason))
   ) {
@@ -744,7 +745,7 @@ export class ManagedRunStore {
 
   createRun(projectId: string, featureId: string, workspacePath?: string): ManagedRunSnapshot {
     const runId = `mr_${randomUUID().replace(/-/gu, "")}`
-    const now = formatManagedRunTimestamp()
+    const now = formatGmt8Timestamp()
     const snapshot: ManagedRunSnapshot = {
       version: 2.5,
       runId,
@@ -753,7 +754,6 @@ export class ManagedRunStore {
       status: "running",
       ...(workspacePath?.trim() ? { workspacePath: workspacePath.trim() } : {}),
       providerRetryCount: 0,
-      bizRetryCount: 0,
       startedAt: now,
       updatedAt: now
     }
@@ -769,12 +769,13 @@ export class ManagedRunStore {
     atomicWrite(path, `${JSON.stringify(validated, null, 2)}\n`)
   }
 
-  appendEvent(snapshot: ManagedRunSnapshot, event: ManagedRunEventInput): ManagedRunEvent {
-    return this.appendPreparedEvent(snapshot, event, formatManagedRunTimestamp())
+  /** occurredAt preserves source event time during notification journal backfill, not append order. */
+  appendEvent(snapshot: ManagedRunSnapshot, event: ManagedRunEventInput, occurredAt = formatGmt8Timestamp()): ManagedRunEvent {
+    return this.appendPreparedEvent(snapshot, event, occurredAt)
   }
 
   updateSnapshot(snapshot: ManagedRunSnapshot, event?: ManagedRunEventInput): ManagedRunSnapshot {
-    const now = formatManagedRunTimestamp()
+    const now = formatGmt8Timestamp()
     const summary = boundedText(event?.summary, EVENT_SUMMARY_MAX_LENGTH)
     const lastDecision =
       event?.type === "managed_run_decision" &&
@@ -914,7 +915,6 @@ export class ManagedRunStore {
         status: "corrupt",
         corrupt: true,
         providerRetryCount: 0,
-        bizRetryCount: 0,
         startedAt: "",
         updatedAt: ""
       }

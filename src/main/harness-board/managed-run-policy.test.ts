@@ -16,7 +16,6 @@ const baseRun: ManagedRunSnapshot = {
   featureId: "feature-1",
   status: "running",
   providerRetryCount: 0,
-  bizRetryCount: 0,
   startedAt: "2026-08-24 10:00:00",
   updatedAt: "2026-08-24 10:00:00"
 }
@@ -214,23 +213,6 @@ describe("resolveManagedRunDecision", () => {
         proposedAction: "continue_current_thread",
         reasonCode: "biz_retry_progress_detected"
       }
-    })
-  })
-
-  it("fails before a fourth Biz Retry", () => {
-    expect(
-      resolveManagedRunDecision({
-        run: runWithBaseline({ bizRetryCount: 3 }),
-        feature,
-        terminal: successTerminal
-      })
-    ).toMatchObject({
-      policyResult: {
-        type: "biz_retry",
-        proposedAction: "fail_managed_run",
-        reasonCode: "biz_retry_limit_exceeded"
-      },
-      summary: "当前任务重试超过限制次数"
     })
   })
 

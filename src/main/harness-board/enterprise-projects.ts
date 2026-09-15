@@ -733,6 +733,58 @@ export async function searchEnterpriseProjects(
   }
 }
 
+export async function verifyEnterpriseProjectCode(projectCode: string): Promise<boolean> {
+  const normalizedProjectCode = normalizeText(projectCode)
+  if (!normalizedProjectCode) return false
+
+  if (isEnterpriseProjectQueryMockEnabled()) {
+    return makeMockEnterpriseProjectSearchResult().projects.some(
+      (project) => project.projectCode === normalizedProjectCode
+    )
+  }
+
+  const queryUrl = getEnterpriseProjectQueryUrl()
+  if (!queryUrl) {
+    throw new Error("未配置项目查询地址")
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+
+  try {
+    logHarnessHttpRequest(
+      "enterprise_project_code_verification",
+      "POST",
+      queryUrl,
+      `prjCode=${normalizedProjectCode}`
+    )
+    const response = await fetch(queryUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ prjCode: normalizedProjectCode }),
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      throw new Error("项目编号校验失败")
+    }
+
+    const json = (await response.json()) as EnterpriseProjectQueryResponse
+    return normalizeSearchResponse(json).projects.some(
+      (project) => project.projectCode === normalizedProjectCode
+    )
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("项目编号校验超时")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export async function searchDeployUnits(
   input: HarnessDeployUnitSearchInput
 ): Promise<HarnessDeployUnitSearchResult> {

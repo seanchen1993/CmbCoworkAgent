@@ -1,3 +1,4 @@
+import { ensureAppNotificationsSchema } from "./app-notifications-schema"
 import {
   getDbPath,
   getMemorySessionOptInMigrationState,
@@ -950,6 +951,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
      WHERE goal_id IS NOT NULL AND goal_id != ''`
   )
 
+  ensureAppNotificationsSchema(db)
   ensureImServiceSchema(db)
 
   migrateLegacyMemorySessionOptIn(db)

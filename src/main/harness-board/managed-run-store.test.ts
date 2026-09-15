@@ -65,7 +65,6 @@ describe("ManagedRunStore", () => {
           slashSkill: "dev-plan",
           changedFields: ["currentNode"],
           initialInspection: false,
-          bizRetryCount: 0,
           providerRetryCount: 0,
           terminalOutcome: "success"
         },
@@ -285,7 +284,6 @@ describe("ManagedRunStore", () => {
             currentNodeStatus: "in_progress",
             changedFields: "currentNode",
             initialInspection: false,
-            bizRetryCount: 0,
             providerRetryCount: 0
           },
           rule: "无效 facts 不应通过校验"
@@ -340,5 +338,60 @@ describe("ManagedRunStore", () => {
     expect(second.runId).not.toBe(completed.runId)
     expect(store.findRunningRun("project-1", "feature-1")?.snapshot?.runId).toBe(second.runId)
     expect(store.listRuns()).toHaveLength(2)
+  })
+})
+
+describe("ManagedRun notification event validation", () => {
+  it("rejects an unknown persisted notification action", () => {
+    const store = makeStore()
+    const snapshot = store.createRun("project-1", "feature-1")
+    const input = {
+      type: "decision_notification_ended",
+      summary: "通知结束",
+      notificationId: "message",
+      notificationStatus: "resolved",
+      notificationAction: "unknown-action"
+    } as unknown as Parameters<ManagedRunStore["appendEvent"]>[1]
+    expect(() => store.appendEvent(snapshot, input)).toThrow()
+    expect(store.listEvents(snapshot).events).toEqual([])
+  })
+
+  it.each(["decision_notification_created", "decision_notification_ended"] as const)(
+    "rejects malformed policyResult on %s",
+    (type) => {
+      const store = makeStore()
+      const snapshot = store.createRun("project-1", "feature-1")
+      const input = {
+        type,
+        summary: "通知",
+        notificationId: "message",
+        notificationStatus: type === "decision_notification_created" ? "pending" : "resolved",
+        policyResult: { type: "biz_retry", facts: "invalid" }
+      } as unknown as Parameters<ManagedRunStore["appendEvent"]>[1]
+      expect(() => store.appendEvent(snapshot, input)).toThrow()
+      expect(store.listEvents(snapshot).events).toEqual([])
+    }
+  )
+
+  it("accepts supported actions and system invalidations with no user action", () => {
+    const store = makeStore()
+    const snapshot = store.createRun("project-1", "feature-1")
+    for (const action of ["stop", "continue", "new_thread", "approve", "reject"] as const) {
+      store.appendEvent(snapshot, {
+        type: "decision_notification_ended",
+        summary: "通知结束",
+        notificationId: action,
+        notificationStatus: "resolved",
+        notificationAction: action
+      })
+    }
+    store.appendEvent(snapshot, {
+      type: "decision_notification_ended",
+      summary: "通知结束",
+      notificationId: "system",
+      notificationStatus: "invalidated",
+      reasonCode: "app_restarted"
+    })
+    expect(store.listEvents(snapshot).events).toHaveLength(6)
   })
 })

@@ -71,8 +71,16 @@ import {
   type ImExecutionPermitResult,
   type ImGatewayClientPort
 } from "./gateway-client"
-import { imTargetReplyPrefix, SWITCHED_TARGET_MARK } from "./reply-context"
+import {
+  imProjectModeReplyPrefix,
+  imTargetReplyPrefix,
+  SWITCHED_TARGET_MARK
+} from "./reply-context"
 import { buildImEventReplies, buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
+import {
+  resolveImProjectModeReplyContext,
+  type ImProjectModeReplyContext
+} from "./project-reply-context"
 import {
   imRemoteInteractionRouteRegistry,
   type ImRemoteInteractionRouteRegistry
@@ -1062,6 +1070,10 @@ export class ImRemoteRunner {
       await this.generateFirstMessageTitle(latest, decision)
       const begun = await this.dependencies.eventStore.beginExecution(latest.eventId, runId)
       await this.dependencies.setThreadLifecycle(begun, "active")
+      const projectReplyContext = await resolveImProjectModeReplyContext({
+        metadata: decision.metadata,
+        target
+      })
       const result = await this.dependencies.executeTurn({
         event: this.dependencies.eventStore.getEvent(latest.eventId) ?? latest,
         runId,
@@ -1086,7 +1098,7 @@ export class ImRemoteRunner {
       const replies = buildImEventReplies({
         event: executing,
         text: result,
-        prefix: this.terminalPrefixForEvent(executing)
+        prefix: this.terminalPrefixForEvent(executing, projectReplyContext)
       })
       const completed = await this.dependencies.eventStore.completeEvent(
         executing.eventId,
@@ -1344,8 +1356,11 @@ export class ImRemoteRunner {
    * Only the terminal reply carries it. Mid-turn notices (waiting for
    * approval, asking a question) are already long, and the turn is not over.
    */
-  private terminalPrefixForEvent(event: ImEventRecord): string | undefined {
-    const prefix = this.targetPrefixForEvent(event)
+  private terminalPrefixForEvent(
+    event: ImEventRecord,
+    projectContext?: ImProjectModeReplyContext | null
+  ): string | undefined {
+    const prefix = this.targetPrefixForEvent(event, projectContext)
     if (!prefix || !prefix.includes(SWITCHED_TARGET_MARK)) return prefix
     const snapshot = event.targetSnapshot
     if (!snapshot || snapshot.kind !== "thread") return prefix
@@ -1358,7 +1373,10 @@ export class ImRemoteRunner {
     return [prefix, `回复不会发到这个会话。要继续它，请发送 /切换 ${name}`].join("\n")
   }
 
-  private targetPrefixForEvent(event: ImEventRecord): string | undefined {
+  private targetPrefixForEvent(
+    event: ImEventRecord,
+    projectContext?: ImProjectModeReplyContext | null
+  ): string | undefined {
     const snapshot = event.targetSnapshot
     if (!snapshot) return undefined
     const threadTitle =
@@ -1367,11 +1385,16 @@ export class ImRemoteRunner {
         : undefined
     try {
       const active = this.dependencies.conversationState.getActiveTarget(event.conversationKey)
+      const switched = Boolean(active && active.targetId !== snapshot.targetId)
+      if (projectContext) {
+        return imProjectModeReplyPrefix({ ...projectContext, switched })
+      }
       return imTargetReplyPrefix(snapshot, {
-        switched: Boolean(active && active.targetId !== snapshot.targetId),
+        switched,
         threadTitle
       })
     } catch {
+      if (projectContext) return imProjectModeReplyPrefix(projectContext)
       return imTargetReplyPrefix(snapshot, { threadTitle })
     }
   }
