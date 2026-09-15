@@ -130,6 +130,25 @@ function renderQuestion(session: RemoteUserInputSession): string {
   ].join("\n")
 }
 
+/**
+ * What the notice says when the card carries the question.
+ *
+ * Keeps the short code and the escape hatch, drops the header, the prose and
+ * the numbered options — those are the part the card repeats, and repeating
+ * them is what made one gate read as two messages.
+ */
+function renderQuestionPointer(session: RemoteUserInputSession): string {
+  const progress =
+    session.request.questions.length > 1
+      ? `（${session.questionIndex + 1}/${session.request.questions.length}）`
+      : ""
+  return [
+    `${session.route.prefix}需要你确认${progress} · 详情见上方卡片`,
+    `回复 /回答 ${session.code} <编号>`,
+    `如以上选项都不合适：/回答 ${session.code} 其他 <你的回答>`
+  ].join("\n")
+}
+
 function answerFor(
   question: UserInputQuestion,
   rawAnswer: string
@@ -432,12 +451,23 @@ export class ImRemoteUserInputService {
     this.sessions.set(request.requestId, session)
     this.codes.set(session.code, session)
 
+    // The card goes first so the reader acts on it rather than on a notice that
+    // repeats it. It does not replace the notice: a card can be accepted by the
+    // platform and still render as nothing, silently on both sides, and a run
+    // waiting on an answer has no timeout. The card earns a shorter notice.
+    let carded = false
+    try {
+      carded = await this.publishCard(session)
+    } catch (error) {
+      this.dependencies.warn("Remote user-input card could not be published.", error)
+    }
+
     try {
       const outbox = await this.dependencies.events.enqueueProactiveReplies(
         buildImProactiveReplies({
           deliveryId: `user-input-request:${request.requestId}:0`,
           conversationKey: route.conversationKey,
-          text: renderQuestion(session)
+          text: carded ? renderQuestionPointer(session) : renderQuestion(session)
         })
       )
       const pending = this.dependencies.getPendingForThread(request.threadId)
@@ -457,13 +487,6 @@ export class ImRemoteUserInputService {
     } catch (error) {
       this.removeSession(request.requestId)
       throw error
-    }
-    // Outside the block above for the same reason as the approval path: that
-    // catch drops the session and its short code, which the reader already has.
-    try {
-      await this.publishCard(session)
-    } catch (error) {
-      this.dependencies.warn("Remote user-input card could not be published.", error)
     }
   }
 
@@ -494,8 +517,9 @@ export class ImRemoteUserInputService {
     })
   }
 
-  private async publishCard(session: RemoteUserInputSession): Promise<void> {
-    await this.dependencies.cards.publish({
+  /** True only when the platform accepted the card; see the caller. */
+  private async publishCard(session: RemoteUserInputSession): Promise<boolean> {
+    const interaction = await this.dependencies.cards.publish({
       kind: "user_input",
       threadId: session.route.threadId,
       principalId: session.route.principalId,
@@ -512,6 +536,7 @@ export class ImRemoteUserInputService {
           fallbackCommand: `/回答 ${session.code} <编号>`
         })
     })
+    return interaction !== null
   }
 
   private resolveRoute(threadId: string): RemoteUserInputRoute | null {

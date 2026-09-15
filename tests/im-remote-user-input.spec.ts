@@ -109,12 +109,16 @@ async function createContext(
     })(),
     () => clock.now
   )
+  const cardSends = { accept: true }
   const cards = new ImCardPublisher({
     interactions: cardInteractions,
     createIdempotencyKey: () => `card-idem-${cardUpdates.length}`,
     gateway: {
       isAuthenticated: () => true,
-      sendCard: async () => ({ state: "accepted" }) as const,
+      sendCard: async () =>
+        cardSends.accept
+          ? ({ state: "accepted" } as const)
+          : ({ state: "rejected", reasonCode: "CARD_REJECTED" } as const),
       updateCard: async (update) => {
         cardUpdates.push({ interactionId: update.interactionId, content: [...update.content] })
         return { state: "accepted" } as const
@@ -208,12 +212,50 @@ async function createContext(
     sendPendingCount: () => sendPendingCount,
     cardUpdates,
     cardInteractions,
+    cardSends,
     removePending: (threadId = "thread-1") => {
       const removed = pending.get(threadId)
       if (!removed) return
       pending.delete(threadId)
       removedListener?.(removed.requestId, removed.threadId)
     }
+  }
+}
+
+/**
+ * The notice shortens only when the card is actually there.
+ *
+ * This is the safety boundary of publishing the card first: a card the platform
+ * refused must leave the reader the whole question, because a run waiting on an
+ * answer has no timeout and the short code alone cannot be acted on.
+ */
+async function testARefusedCardStillDeliversTheWholeQuestion(): Promise<void> {
+  const context = await createContext()
+  try {
+    context.cardSends.accept = false
+    const request = userInputRequest({ requestId: "request-no-card" })
+    await context.publish(request)
+    const text = context.deliveryText(request.requestId)
+    assert(!text.includes("详情见上方卡片"), text)
+    assert(text.includes("导出格式用哪种？"), text)
+    assert(text.includes("1. CSV (Recommended) — 兼容性最好。"), text)
+    assert(text.includes("/回答 A1B2C3 <编号>"), text)
+    // And the refused card is not retained, so a click can never arrive for it.
+    assert.equal(context.cardInteractions.list().length, 0)
+
+    // The question is still answerable by exactly the code that was printed.
+    assert.equal(
+      await context.service.resolveAnswer({
+        argument: "A1B2C3 1",
+        principalId: ROUTE.principalId,
+        conversationKey: ROUTE.conversationKey
+      }),
+      "已从招乎提交回答，任务将继续执行。"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
   }
 }
 
@@ -224,9 +266,14 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     await context.publish(request)
     const text = context.deliveryText(request.requestId)
     assert(text.includes("【会话：桌面会话】需要你确认"))
-    assert(text.includes("导出格式用哪种？"))
-    assert(text.includes("1. CSV (Recommended) — 兼容性最好。"))
+    // The card carried the question, so the notice under it is a pointer: the
+    // prose and the numbered options live in exactly one place.
+    assert(text.includes("详情见上方卡片"))
+    assert(!text.includes("导出格式用哪种？"), text)
+    assert(!text.includes("1. CSV (Recommended) — 兼容性最好。"), text)
+    // The short code and its escape hatch never move into the card.
     assert(text.includes("/回答 A1B2C3 <编号>"))
+    assert(text.includes("/回答 A1B2C3 其他 <你的回答>"))
     assert.equal(context.sendPendingCount(), 1)
 
     assert.equal(
@@ -491,6 +538,7 @@ async function testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled(): Promis
 
 async function main(): Promise<void> {
   await testPromptAndSingleUseOptionAnswer()
+  await testARefusedCardStillDeliversTheWholeQuestion()
   await testMultipleQuestionsRotateCodeAndAcceptCustomText()
   await testLongWaitDesktopRaceAndExplicitCommand()
   await testDisabledRobotDoesNotPublish()

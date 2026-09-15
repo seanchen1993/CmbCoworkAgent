@@ -325,10 +325,15 @@ export class ImCommandRouter {
         grantVersion: target.grantVersion
       }))
     )
-    // After the selection, so a card can never outlive the numbering it renders,
-    // and never before the text below is returned — the list with its numbers is
-    // the thing that has to work even when the card does not.
-    await this.publishTargetBindCard(input, targets, selection.expiresAt)
+    // After the selection, so a card can never outlive the numbering it renders.
+    const card = await this.publishTargetBindCard(input, targets, selection.expiresAt)
+    if (card) {
+      // The card carries the same numbers, so printing them again is the
+      // duplication that makes two messages read as one mistake. Nothing is
+      // blocked on this list — a reader who cannot see the card sends /会话
+      // again — so unlike an approval it is safe to let the card be the list.
+      return "可切换的目标在上面的卡片里，选好点「切换」即可。也可以回复 /绑定 <编号>。"
+    }
     return [
       "可用目标：",
       ...targets.map((target, index) =>
@@ -649,19 +654,20 @@ export class ImCommandRouter {
   /**
    * Renders the numbered list as a form, and never lets that fail loudly.
    *
-   * The text list is already on its way with the same numbers, so a card that
-   * cannot be built or sent costs a nicer affordance and nothing else — which
-   * is why every failure here is a warning, not a throw.
+   * Returns whether the card was accepted, because for this one card that
+   * decides what the text says: the caller prints the full numbered list only
+   * when the card is not there to carry it. A failure here is always a warning
+   * and never a throw — the list still goes out either way.
    */
   private async publishTargetBindCard(
     input: { conversationKey: string; principalId: string },
     targets: ReadonlyArray<ImAuthorizedRemoteTarget>,
     expiresAt: number
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const current = this.selectedTarget(input.conversationKey)
       const createsSession = targets.some((target) => target.kind === "feature_grant")
-      await this.dependencies.cards.publish({
+      const interaction = await this.dependencies.cards.publish({
         kind: "target_bind",
         // No run is waiting on this card, so it has no thread to be retained
         // by. It lives exactly as long as the numbering it renders.
@@ -690,8 +696,10 @@ export class ImCommandRouter {
             fallbackCommand: `/绑定 <编号>`
           })
       })
+      return interaction !== null
     } catch (error) {
       this.dependencies.warn("Zhaohu target list card could not be published.", error)
+      return false
     }
   }
 

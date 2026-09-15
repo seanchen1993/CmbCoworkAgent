@@ -535,8 +535,31 @@ export class ImRemoteApprovalService {
         ].join("\n")
       )
     }
+    // The card goes first so it is the thing the reader acts on, and the notice
+    // below it is visibly the fallback rather than the same gate stated twice.
+    //
+    // It cannot replace the notice outright: the card may be accepted by the
+    // platform and still render as nothing — that failure is silent on both
+    // sides — and an approval has no timeout, so a gate whose only affordance
+    // was invisible would wait forever. What the card earns is a shorter
+    // notice, not the absence of one.
+    let carded = false
+    if (code) {
+      try {
+        carded = await this.publishCard(code, presentation)
+      } catch (error) {
+        this.dependencies.warn("Remote approval card could not be published.", error)
+      }
+    }
+    const finalReplies = carded
+      ? buildImProactiveReplies({
+          deliveryId: `approval-request:${registration.request.id}`,
+          conversationKey: route.conversationKey,
+          text: [`${route.prefix}需要批准 · 详情见上方卡片`, decisionCommands].join("\n")
+        })
+      : replies
     try {
-      const outbox = await this.dependencies.events.enqueueProactiveReplies(replies)
+      const outbox = await this.dependencies.events.enqueueProactiveReplies(finalReplies)
       if (!this.dependencies.broker.get(registration.request.id)) {
         if (code) this.codes.delete(code.code)
         await Promise.all(
@@ -551,32 +574,24 @@ export class ImRemoteApprovalService {
       if (code) this.codes.delete(code.code)
       throw error
     }
-    // Deliberately outside the block above. That catch revokes the short code,
-    // which by this point the reader has already been given — letting a card
-    // failure reach it would take away the one way they had to answer.
-    if (code) {
-      try {
-        await this.publishCard(code, presentation)
-      } catch (error) {
-        this.dependencies.warn("Remote approval card could not be published.", error)
-      }
-    }
   }
 
   /**
-   * The card is published only after the text notice is durably queued and the
-   * request is confirmed still pending, so the reader never sees a card for a
-   * gate that already closed and never sees one without its short code.
+   * Returns whether the platform accepted the card.
+   *
+   * The caller shortens its notice on a true, so this must never report a card
+   * the reader might not have: a rejected send and an unknown outcome both
+   * answer false, and the full notice goes out.
    */
   private async publishCard(
     code: RemoteApprovalCode,
     presentation: ApprovalPresentation
-  ): Promise<void> {
+  ): Promise<boolean> {
     const fallbackCommands = [
       ...(code.allowedDecisions.includes("approve") ? [`/批准 ${code.code}`] : []),
       ...(code.allowedDecisions.includes("reject") ? [`/拒绝 ${code.code}`] : [])
     ].join("   或   ")
-    await this.dependencies.cards.publish({
+    const interaction = await this.dependencies.cards.publish({
       kind: "approval",
       threadId: code.route.threadId,
       principalId: code.route.principalId,
@@ -596,6 +611,7 @@ export class ImRemoteApprovalService {
           fallbackCommands
         })
     })
+    return interaction !== null
   }
 
   /**

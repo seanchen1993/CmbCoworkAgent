@@ -398,8 +398,16 @@ async function testAnUnsendableCardLeavesTheShortCodeWorking(): Promise<void> {
     context.gateway.accept = false
     const decisions = context.register(approvalRequest(context.root))
     await waitFor(() => context.gateway.sent.length === 1, "the attempted card")
-    // The gate is still answerable: no interaction is retained, the text notice
-    // with its short code was queued before the card was ever attempted.
+    // The card is attempted first now, so the notice it falls back to arrives
+    // after it — which is the whole point of waiting for the outbox here rather
+    // than reading it the moment the send is observed.
+    await waitFor(
+      () =>
+        context.events.listOutbox().some((row) => row.deliveryId === "approval-request:req-1"),
+      "the fallback notice"
+    )
+    // The gate is still answerable: no interaction is retained, and the refused
+    // card earned the full notice rather than the shortened one.
     assert.equal(context.interactions.list().length, 0, "a refused card is not retained")
     assert.equal(decisions.length, 0, "nothing was decided by the failure")
     const text = context.events
@@ -408,6 +416,13 @@ async function testAnUnsendableCardLeavesTheShortCodeWorking(): Promise<void> {
       .map((row) => row.content)
       .join("\n")
     assert.ok(text.includes("/批准 A1B2C3"), "the short code still reached the reader")
+    // Not just the code: with no card to read, the notice has to carry what is
+    // being approved, or the reader can only answer blind.
+    assert.ok(text.includes("config.ts"), `the refused card must fall back to the detail: ${text}`)
+    assert.ok(
+      !text.includes("详情见上方卡片"),
+      `a card that was refused must not be pointed at: ${text}`
+    )
     console.log("PASS testAnUnsendableCardLeavesTheShortCodeWorking")
   } finally {
     await context.dispose()
