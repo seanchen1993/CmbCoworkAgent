@@ -371,7 +371,7 @@ describeOnWindows("Windows background Job controller fallback shells", () => {
       expect(boundedResult.stderr).toContain("bounded transport limit")
       expect(existsSync(boundedMarker)).toBe(false)
     } finally {
-      await rm(isolatedDirectory, { recursive: true, force: true })
+      await rm(isolatedDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
     }
   })
 

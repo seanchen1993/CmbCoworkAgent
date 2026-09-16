@@ -245,8 +245,8 @@ function ensureDirectory(path: string): void {
   mkdirSync(path, { recursive: true })
 }
 
-function fsyncPath(path: string): void {
-  const descriptor = openSync(path, "r")
+function fsyncPath(path: string, writable = false): void {
+  const descriptor = openSync(path, writable ? "r+" : "r")
   try {
     fsyncSync(descriptor)
   } finally {
@@ -656,7 +656,8 @@ export class ManagedRunStore {
               : new ManagedRunCorruptError(String(error))
           }
           truncateSync(path, lineStart)
-          fsyncPath(path)
+          // Windows FlushFileBuffers requires a writable handle for the repaired journal.
+          fsyncPath(path, true)
           const repairedStat = statSync(path)
           this.validatedJournals.set(path, {
             size: repairedStat.size,
