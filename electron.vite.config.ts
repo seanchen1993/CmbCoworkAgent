@@ -29,6 +29,7 @@ function copyResources(): { name: string; closeBundle: () => void } {
       const destSkills = resolve("out/skills")
       mirrorRequiredDirectorySync(srcSkills, destSkills)
       mirrorRequiredDirectorySync(resolve("resources/mods"), resolve("out/resources/mods"))
+      copyFileSync(resolve("resources/mods-policy.json"), resolve("out/resources/mods-policy.json"))
 
       // Playwright vendored 录制器生成文件在主进程 bundle 中仍通过
       // require("./generated/*.js") 加载，因此这里把源码副本同步到

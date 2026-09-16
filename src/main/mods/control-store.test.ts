@@ -27,6 +27,60 @@ afterEach(() => {
 })
 
 describe("Mod durable control store", () => {
+  it("paginates without losing equal timestamps and keeps execution separate from publication", () => {
+    const { store } = fixture()
+    const identity = {
+      workspace: "project",
+      threadId: "thread",
+      turnId: "turn",
+      agentId: "main",
+      origin: "model" as const,
+      grantEpoch: 0,
+      callId: "a"
+    }
+    for (const id of ["a", "b", "c"])
+      store.claim(id, "host:read_file", { password: "never stored" }, { ...identity, callId: id })
+    store.settle("c", "succeeded")
+    store.publication("c", "digest", ["baseline-v1"], "blocked")
+    const first = store.audit("project", 2)
+    const second = store.audit("project", 2, first.at(-1)!.cursor)
+    expect([...first, ...second].map((row) => row.callId)).toEqual(["c", "b", "a"])
+    expect(first[0]).toMatchObject({
+      status: "succeeded",
+      publication: "blocked",
+      policyDigest: "digest"
+    })
+    expect(JSON.stringify(first)).not.toContain("never stored")
+    expect(store.audit("other")).toEqual([])
+  })
+  it("exports the WAL consistently and allows scoped one-time reconciliation without replay", () => {
+    const { store, file } = fixture()
+    const identity = {
+      workspace: "project",
+      threadId: "thread",
+      turnId: "turn",
+      agentId: "main",
+      origin: "model" as const,
+      grantEpoch: 0,
+      callId: "a"
+    }
+    store.claim("a", "host:execute", {}, identity)
+    store.grant("project", "test", "digest", true)
+    const path = `${file}.backup`
+    store.backup(path)
+    const copy = new ModControlStore(path)
+    stores.push(copy)
+    expect(copy.status("a")).toBe("unknown")
+    expect(copy.getGrant("project", "test")?.enabled).toBe(true)
+    expect(() => copy.reconcile("other", "a", "confirmed-success")).toThrow("STALE")
+    copy.reconcile("project", "a", "confirmed-success")
+    expect(copy.audit("project")[0]).toMatchObject({
+      status: "unknown",
+      reconciliation: "confirmed-success"
+    })
+    expect(() => copy.reconcile("project", "a", "confirmed-failure")).toThrow("STALE")
+    expect(() => copy.claim("a", "host:execute", {}, identity)).toThrow("ALREADY_STARTED")
+  })
   it("preserves cards and consumed action keys across restart", () => {
     const { store, file } = fixture()
     store.saveCard("card", "thread", { id: "card", nodes: [] })

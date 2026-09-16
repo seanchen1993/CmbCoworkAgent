@@ -980,6 +980,9 @@ interface CustomAPI {
     cards(threadId: string, callId: string): Promise<import("../shared/mods/types").ModCard[]>
     act(threadId: string, actionId: string): Promise<import("../shared/mods/types").ModProjection>
     installExamples(): Promise<void>
+    audit(threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]>
+    reconcile(threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void>
+    backup(): Promise<boolean>
     onCardsChanged(callback: (event: { threadId: string }) => void): () => void
   }
   agent: {

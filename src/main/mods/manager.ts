@@ -19,8 +19,10 @@ import { ModRuntimeClient } from "./runtime-client"
 import { ModEngine, classifyModTool, type ApprovedMod, type ModDispatchRequest } from "./engine"
 import { ModError, modErrorCode } from "./errors"
 import { validateModRegistrations } from "./registrations"
-import { filterModData, filterModResult } from "./publication"
+import { filterModData } from "./publication"
 import { getModCallContext, modCallContext } from "./context"
+import { ManagedModPolicy, DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
+import { orderApprovedMods } from "./order"
 
 export interface ModPluginSource {
   id: string
@@ -68,6 +70,7 @@ interface StoredCard {
 
 export class ModsManager {
   readonly store: ModControlStore
+  readonly policy: ManagedModPolicy
   private readonly settings = new Map<
     string,
     { enabled: boolean; policy: boolean; epoch: number }
@@ -95,13 +98,20 @@ export class ModsManager {
       signal?: AbortSignal
     ) => Promise<boolean>,
     private readonly notifyCards: (threadId: string) => void,
-    private readonly hostEntry?: string
+    private readonly hostEntry?: string,
+    deployment: ManagedModDeployment = DEFAULT_MOD_POLICY
   ) {
     const marker = `${controlPath}.initialized`
     if (existsSync(marker) && !existsSync(controlPath))
       throw new ModError("MODS_CONTROL_RECOVERY_REQUIRED")
+    this.policy = new ManagedModPolicy(deployment, hostEntry)
     this.store = new ModControlStore(controlPath)
-    writeFileSync(marker, "cmb.mods/v1\n", { flag: "w" })
+    try {
+      writeFileSync(marker, "cmb.mods/v1\n", { flag: "w" })
+    } catch (error) {
+      this.store.close()
+      throw error
+    }
   }
 
   workspaceKey(workspace: string): string {
@@ -120,7 +130,7 @@ export class ModsManager {
     if (!value) {
       value = {
         enabled: this.store.getSetting(`enabled:${workspace}`) === "true",
-        policy: this.store.getSetting(`policy:${workspace}`) === "true",
+        policy: this.policy.required || this.store.getSetting(`policy:${workspace}`) === "true",
         epoch: Number(this.store.getSetting(`epoch:${workspace}`, "0"))
       }
       this.settings.set(workspace, value)
@@ -137,7 +147,30 @@ export class ModsManager {
     return this.config(this.workspaceKey(workspace)).policy
   }
 
+  async publish<T>(workspace: string, value: T, callId?: string, signal?: AbortSignal): Promise<T> {
+    return this.protects(workspace) ? this.policy.publish(value, callId, signal) : value
+  }
+
+  async publishedCards(
+    workspace: string,
+    threadId: string,
+    callId: string,
+    senderId: number
+  ): Promise<ModCard[]> {
+    const cards = this.listCards(threadId, callId, senderId)
+    if (!this.protects(workspace)) return cards
+    const result: ModCard[] = []
+    for (const card of cards) {
+      const value = await this.policy.filter({ name: card.name, nodes: card.nodes })
+      const safe = value.value as ModObject
+      // Keep host-minted action IDs, never mint IDs from the policy result.
+      result.push({ ...card, name: String(safe.name), nodes: safe.nodes as unknown as ModUiNode[] })
+    }
+    return result
+  }
+
   configure(workspace: string, enabled: boolean, outputPolicy: boolean): void {
+    if (this.policy.required && !outputPolicy) throw new ModError("MODS_POLICY_REQUIRED")
     const key = this.workspaceKey(workspace)
     const previous = this.config(key)
     const next = { enabled, policy: outputPolicy, epoch: previous.epoch + 1 }
@@ -222,7 +255,12 @@ export class ModsManager {
       enabled: config.enabled,
       outputPolicy: config.policy,
       mods: (await this.candidates(key)).map((value) => value.status),
-      diagnostics: this.diagnostics.slice(-20)
+      diagnostics: this.diagnostics.slice(-20),
+      policy: {
+        id: this.policy.deployment.id,
+        digest: this.policy.digest,
+        required: this.policy.required
+      }
     }
   }
 
@@ -333,7 +371,7 @@ export class ModsManager {
         if (approved.length > 8) throw new ModError("MODS_CHAIN_CAPACITY")
         const client = this.client(binding.workspace)
         const engine = new ModEngine(this.store, client, (id, code) => this.diagnose(id, code))
-        await engine.load(approved)
+        await engine.load(orderApprovedMods(approved))
         return { engine, client, generation: client.version, used: Date.now(), refs: 0 }
       })()
       this.sessions.set(key, promise)
@@ -368,6 +406,37 @@ export class ModsManager {
       args,
       effect: classifyModTool(toolId),
       protectedOutput: this.config(binding.workspace).policy,
+      policyDigest: this.config(binding.workspace).policy ? this.policy.digest : undefined,
+      protectData: this.config(binding.workspace).policy
+        ? (value) => this.policy.observer(value)
+        : undefined,
+      admit: this.config(binding.workspace).policy
+        ? (input) => this.policy.admit(identity, toolId, input, binding.signal)
+        : undefined,
+      publish: this.config(binding.workspace).policy
+        ? async (value, stage) => {
+            assertEpoch()
+            try {
+              const result = await this.policy.publish(
+                value,
+                identity.toolCallId,
+                binding.signal,
+                (digest, rules) =>
+                  this.store.publication(
+                    identity.callId,
+                    digest,
+                    rules,
+                    stage === "final" ? "published" : "pending"
+                  )
+              )
+              assertEpoch()
+              return result
+            } catch (error) {
+              this.store.publication(identity.callId, this.policy.digest, [], "blocked")
+              throw error
+            }
+          }
+        : undefined,
       readOnly: binding.readOnly,
       signal: binding.signal,
       activePluginIds: binding.activePluginIds,
@@ -380,6 +449,8 @@ export class ModsManager {
       authorize: async (target, finalArgs) => {
         assertEpoch()
         if (target !== toolId) throw new ModError("MODS_TARGET_CHANGED")
+        if (request.protectedOutput)
+          await this.policy.admit(identity, target, finalArgs, binding.signal)
         if (!identity.modId || classifyModTool(target) === "read") return
         if (!userInitiated || binding.readOnly)
           throw new ModError("MODS_WRITE_REQUIRES_USER_ACTION")
@@ -427,6 +498,9 @@ export class ModsManager {
             userInitiated: userAction,
             signal: request.signal,
             originMod: grant.modId,
+            policyDigest: request.policyDigest,
+            protectData: request.protectData,
+            publish: request.publish,
             assertLive: () => {
               assertEpoch()
               this.store.assertGrant(grant)
@@ -503,11 +577,7 @@ export class ModsManager {
     const request = this.request(binding, identity, toolId, args, inherited?.userInitiated)
     try {
       const value = await session.engine.dispatch(request, core)
-      return filterModResult(
-        value,
-        this.protects(workspace),
-        identity.toolCallId ?? identity.callId
-      )
+      return this.publish(workspace, value, identity.toolCallId ?? identity.callId, binding.signal)
     } finally {
       session.refs--
       session.used = Date.now()
@@ -663,6 +733,7 @@ export class ModsManager {
   }
 
   close(): void {
+    this.policy.stop()
     for (const controller of this.activeActions.keys()) controller.abort()
     this.activeActions.clear()
     for (const client of this.clients.values()) client.stop()
@@ -673,10 +744,17 @@ export class ModsManager {
 }
 
 let manager: ModsManager | undefined
+let unavailable: string | undefined
 export function setModsManager(value: ModsManager | undefined): void {
   manager = value
+  unavailable = undefined
+}
+export function setModsUnavailable(code: string): void {
+  manager = undefined
+  unavailable = code
 }
 export function getModsManager(): ModsManager | undefined {
+  if (unavailable) throw new ModError(unavailable)
   return manager
 }
 

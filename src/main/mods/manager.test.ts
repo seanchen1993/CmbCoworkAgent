@@ -29,14 +29,22 @@ vi.mock("./runtime-client", () => ({
     }
   }
 }))
-import { ModsManager, authorizeCurrentModInput, hasModOperationApproval } from "./manager"
+import {
+  ModsManager,
+  authorizeCurrentModInput,
+  hasModOperationApproval,
+  getModsManager,
+  setModsManager,
+  setModsUnavailable
+} from "./manager"
+import { DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 
 const cleanup: Array<() => void> = []
 afterEach(() => {
   for (const fn of cleanup.splice(0)) fn()
 })
 
-async function fixture() {
+async function fixture(deployment?: ManagedModDeployment) {
   const root = mkdtempSync(join(tmpdir(), "cmb-mods-manager-"))
   const plugin = join(root, "plugin")
   mkdirSync(join(plugin, ".codex-plugin"), { recursive: true })
@@ -80,7 +88,7 @@ async function fixture() {
   const notify = vi.fn()
   const plugins = [{ id: "plugin", name: "Review", path: plugin, enabled: true }]
   const control = join(root, "control.sqlite")
-  const manager = new ModsManager(control, () => plugins, confirm, notify)
+  const manager = new ModsManager(control, () => plugins, confirm, notify, undefined, deployment)
   cleanup.push(() => {
     manager.close()
     if (
@@ -131,6 +139,47 @@ async function fixture() {
 }
 
 describe("project Mods lifecycle and UI authority", () => {
+  it("does not recreate a missing initialized control store or silently bypass unavailable policy", async () => {
+    const f = await fixture()
+    const path = join(f.root, "missing.sqlite")
+    writeFileSync(`${path}.initialized`, "cmb.mods/v1")
+    expect(
+      () =>
+        new ModsManager(
+          path,
+          () => [],
+          async () => true,
+          () => {}
+        )
+    ).toThrow("RECOVERY_REQUIRED")
+    setModsUnavailable("MODS_CONTROL_RECOVERY_REQUIRED")
+    try {
+      expect(() => getModsManager()).toThrow("RECOVERY_REQUIRED")
+    } finally {
+      setModsManager(undefined)
+    }
+  })
+  it("enforces mandatory deployment policy with ordinary Mods disabled", async () => {
+    const f = await fixture({
+      ...DEFAULT_MOD_POLICY,
+      required: true,
+      denyTools: ["host:write_file"],
+      redactLiterals: ["private-value"]
+    })
+    expect(() => f.manager.configure(f.root, false, false)).toThrow("POLICY_REQUIRED")
+    const core = vi.fn(async () => "private-value")
+    await expect(f.manager.dispatch(f.scope, "host:write_file", {}, core)).rejects.toThrow(
+      "POLICY_TOOL_DENIED"
+    )
+    expect(core).not.toHaveBeenCalled()
+    expect(f.manager.store.audit(f.manager.workspaceKey(f.root))[0].status).toBe("not_started")
+    expect(await f.manager.dispatch(f.scope, "host:read_file", {}, core)).toBe("[REDACTED]")
+    expect(f.manager.store.audit(f.manager.workspaceKey(f.root))[0]).toMatchObject({
+      status: "succeeded",
+      publication: "published",
+      policyDigest: f.manager.policy.digest
+    })
+  })
   it("keeps the disabled path unchanged and injects context only after approval", async () => {
     const f = await fixture()
     expect(await f.dispatch()).toBe("text")

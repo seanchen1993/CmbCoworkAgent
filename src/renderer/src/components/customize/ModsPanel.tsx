@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react"
 import type { ModWorkspaceStatus } from "../../../../shared/mods/types"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
+import { ModsAudit } from "./ModsAudit"
 
 export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.Element {
   const [status, setStatus] = useState<ModWorkspaceStatus | null>(null)
@@ -70,7 +71,14 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
           {error}
         </p>
       )}
-      {status && threadId && (
+      {status?.recovery && (
+        <p role="alert" className="text-destructive">
+          Mods 控制记录或组织策略不可用，工具执行已暂停（{status.recovery}
+          ）。请关闭应用并联系管理员检查控制库和部署策略；保留原数据库及 WAL
+          文件，从已核实的完整备份恢复。不要删除数据库重新授权。
+        </p>
+      )}
+      {status && !status.recovery && threadId && (
         <>
           <p className="text-xs text-muted-foreground break-all">作用目录：{status.workspace}</p>
           <div className="flex flex-wrap gap-5">
@@ -91,14 +99,14 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
               <input
                 type="checkbox"
                 checked={status.outputPolicy}
-                disabled={busy}
+                disabled={busy || status.policy?.required}
                 onChange={(event) =>
                   void run(() =>
                     window.api.mods.configure(threadId, status.enabled, event.target.checked)
                   )
                 }
               />
-              启用宿主输出保护
+              启用宿主输出保护{status.policy?.required ? "（组织要求）" : ""}
             </label>
           </div>
           {status.outputPolicy && (
@@ -106,6 +114,12 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
               检查工具结果中的常见凭据；后台输出通过完整检查后显示。不支持检查的内容会被隐藏。
             </p>
           )}
+          {status.policy && (
+            <p className="text-xs text-muted-foreground break-all">
+              策略版本：{status.policy.id} · {status.policy.digest.slice(0, 16)}
+            </p>
+          )}
+          <ModsAudit key={threadId} threadId={threadId} />
           <details>
             <summary className="cursor-pointer">模块与权限（{status.mods.length}）</summary>
             <div className="max-h-64 overflow-auto mt-2 space-y-2">

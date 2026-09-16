@@ -1,4 +1,4 @@
-import { protectCurrentModData, protectCurrentModResult } from "../mods/adapters"
+import { protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
 import { getModCallContext } from "../mods/context"
 import { DynamicStructuredTool } from "@langchain/core/tools"
 import { ToolMessage } from "@langchain/core/messages"
@@ -133,7 +133,7 @@ class NonValidatingMcpTool extends DynamicStructuredTool {
       content = result
     }
 
-    const formattedOutput = protectCurrentModResult(
+    const formattedOutput = await publishCurrentModResult(
       formatToolOutput({
         content,
         artifact,

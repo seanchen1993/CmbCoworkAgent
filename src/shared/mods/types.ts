@@ -20,6 +20,8 @@ export interface ModManifest {
     store: boolean
   }
   activation: "project" | "plugin"
+  before?: string[]
+  after?: string[]
 }
 
 export interface ModIdentity {
@@ -91,6 +93,24 @@ export interface ModWorkspaceStatus {
   outputPolicy: boolean
   mods: ModStatus[]
   diagnostics: ModDiagnostic[]
+  policy?: { id: string; digest: string; required: boolean }
+  recovery?: string
+}
+
+export interface ModAuditEntry {
+  cursor: number
+  callId: string
+  toolId: string
+  identity: ModIdentity | null
+  status: ModExecution
+  startedAt: number
+  finishedAt: number | null
+  originalArgsHash: string
+  finalArgsHash: string | null
+  policyDigest: string | null
+  publication: "pending" | "published" | "blocked"
+  ruleIds: string[]
+  reconciliation: "confirmed-success" | "confirmed-failure" | null
 }
 
 export interface ModRuntimeRequest {

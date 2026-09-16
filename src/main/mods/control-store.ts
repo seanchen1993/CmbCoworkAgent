@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import type { ModExecution, ModJson, ModIdentity } from "../../shared/mods/types"
+import type { ModExecution, ModJson, ModIdentity, ModAuditEntry } from "../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { ModError } from "./errors"
 
@@ -20,7 +20,8 @@ export class ModControlStore {
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path, { timeout: 1000 })
-    this.db.exec(`
+    try {
+      this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
       CREATE TABLE IF NOT EXISTS mods_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -43,23 +44,42 @@ export class ModControlStore {
       CREATE INDEX IF NOT EXISTS mods_cards_thread ON mods_cards(thread_id,at);
       CREATE TABLE IF NOT EXISTS mods_consumed_actions (id TEXT PRIMARY KEY);
     `)
-    const version = this.getSetting("schema", "")
-    if (version && version !== "1" && version !== "2") {
+      const version = this.getSetting("schema", "")
+      if (version && !["1", "2", "3"].includes(version)) {
+        throw new ModError("MODS_STORE_VERSION")
+      }
+      const columns = new Set(
+        this.db
+          .prepare("PRAGMA table_info(mods_calls)")
+          .all()
+          .map((row) => row.name)
+      )
+      for (const column of [
+        "tool_id",
+        "scope",
+        "final_args_hash",
+        "workspace",
+        "thread_id",
+        "policy_digest",
+        "publication",
+        "rule_ids",
+        "reconciliation"
+      ]) {
+        if (!columns.has(column)) this.db.exec(`ALTER TABLE mods_calls ADD COLUMN ${column} TEXT`)
+      }
+      this.db.exec(`
+      UPDATE mods_calls SET workspace=json_extract(scope,'$.workspace'),thread_id=json_extract(scope,'$.threadId')
+        WHERE workspace IS NULL AND scope IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS mods_calls_workspace ON mods_calls(workspace,at);
+      CREATE INDEX IF NOT EXISTS mods_calls_thread ON mods_calls(thread_id,at);
+    `)
+      this.setSetting("schema", "3")
+      // An interrupted operation may have reached an external service. Never replay it.
+      this.db.prepare("UPDATE mods_calls SET status = 'unknown' WHERE status = 'running'").run()
+    } catch (error) {
       this.db.close()
-      throw new ModError("MODS_STORE_VERSION")
+      throw error
     }
-    const columns = new Set(
-      this.db
-        .prepare("PRAGMA table_info(mods_calls)")
-        .all()
-        .map((row) => row.name)
-    )
-    for (const column of ["tool_id", "scope", "final_args_hash"]) {
-      if (!columns.has(column)) this.db.exec(`ALTER TABLE mods_calls ADD COLUMN ${column} TEXT`)
-    }
-    this.setSetting("schema", "2")
-    // An interrupted operation may have reached an external service. Never replay it.
-    this.db.prepare("UPDATE mods_calls SET status = 'unknown' WHERE status = 'running'").run()
   }
 
   getSetting(key: string, fallback = "false"): string {
@@ -155,13 +175,32 @@ export class ModControlStore {
     }
   }
 
-  claim(id: string, toolId: string, args: unknown, identity?: ModIdentity): void {
+  claim(
+    id: string,
+    toolId: string,
+    args: unknown,
+    identity?: ModIdentity,
+    finalArgs: unknown = args
+  ): void {
     const hash = createHash("sha256").update(toolId).update(encodeModJson(args)).digest("hex")
+    const finalHash =
+      args === finalArgs
+        ? hash
+        : createHash("sha256").update(toolId).update(encodeModJson(finalArgs)).digest("hex")
     const inserted = this.db
       .prepare(
-        "INSERT OR IGNORE INTO mods_calls(id,args_hash,status,at,tool_id,scope) VALUES(?,?,'running',?,?,?)"
+        "INSERT OR IGNORE INTO mods_calls(id,args_hash,status,at,tool_id,scope,workspace,thread_id,publication,final_args_hash) VALUES(?,?,'running',?,?,?,?,?,'pending',?)"
       )
-      .run(id, hash, Date.now(), toolId, identity ? encodeModJson(identity) : null)
+      .run(
+        id,
+        hash,
+        Date.now(),
+        toolId,
+        identity ? encodeModJson(identity) : null,
+        identity?.workspace ?? null,
+        identity?.threadId ?? null,
+        finalHash
+      )
     if (!inserted.changes) {
       const row = this.db.prepare("SELECT args_hash FROM mods_calls WHERE id=?").get(id)
       throw new ModError(
@@ -190,6 +229,62 @@ export class ModControlStore {
   status(id: string): string | undefined {
     const row = this.db.prepare("SELECT status FROM mods_calls WHERE id=?").get(id)
     return typeof row?.status === "string" ? row.status : undefined
+  }
+
+  publication(
+    id: string,
+    digest: string,
+    ruleIds: string[],
+    status: ModAuditEntry["publication"]
+  ): void {
+    this.db
+      .prepare("UPDATE mods_calls SET policy_digest=?,rule_ids=?,publication=? WHERE id=?")
+      .run(digest, encodeModJson(ruleIds), status, id)
+  }
+
+  audit(workspace: string, limit = 50, before = Number.MAX_SAFE_INTEGER): ModAuditEntry[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200 || !Number.isSafeInteger(before))
+      throw new ModError("MODS_AUDIT_QUERY")
+    return this.db
+      .prepare(
+        "SELECT rowid AS cursor,* FROM mods_calls WHERE workspace=? AND rowid<? ORDER BY rowid DESC LIMIT ?"
+      )
+      .all(workspace, before, limit)
+      .map((row) => ({
+        cursor: Number(row.cursor),
+        callId: String(row.id),
+        toolId: String(row.tool_id),
+        identity: row.scope ? (parseModJson(String(row.scope)) as unknown as ModIdentity) : null,
+        status: String(row.status) as ModExecution,
+        startedAt: Number(row.at),
+        finishedAt: row.finished_at === null ? null : Number(row.finished_at),
+        originalArgsHash: String(row.args_hash),
+        finalArgsHash: row.final_args_hash as string | null,
+        policyDigest: row.policy_digest as string | null,
+        publication: (row.publication ?? "pending") as ModAuditEntry["publication"],
+        ruleIds: row.rule_ids ? JSON.parse(String(row.rule_ids)) : [],
+        reconciliation: row.reconciliation as ModAuditEntry["reconciliation"]
+      }))
+  }
+
+  reconcile(
+    workspace: string,
+    id: string,
+    resolution: "confirmed-success" | "confirmed-failure"
+  ): void {
+    if (!["confirmed-success", "confirmed-failure"].includes(resolution))
+      throw new ModError("MODS_RECONCILIATION_INVALID")
+    const result = this.db
+      .prepare(
+        "UPDATE mods_calls SET reconciliation=? WHERE workspace=? AND id=? AND status='unknown' AND reconciliation IS NULL"
+      )
+      .run(resolution, workspace, id)
+    if (!result.changes) throw new ModError("MODS_RECONCILIATION_STALE")
+  }
+
+  backup(path: string): void {
+    // VACUUM INTO is a consistent SQLite snapshot, including the live WAL.
+    this.db.prepare("VACUUM INTO ?").run(path)
   }
 
   read(namespace: string, key: string): ModJson {

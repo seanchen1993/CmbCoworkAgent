@@ -101,7 +101,9 @@ export function parseModManifest(value: unknown): ModManifest {
       context: names(permissions.context, 8),
       store: permissions.store
     },
-    activation: input.activation
+    activation: input.activation,
+    ...(input.before !== undefined ? { before: names(input.before, 8) } : {}),
+    ...(input.after !== undefined ? { after: names(input.after, 8) } : {})
   }
 }
 

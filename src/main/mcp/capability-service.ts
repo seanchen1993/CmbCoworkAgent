@@ -18,7 +18,7 @@ import { resolveMcpHeaders } from "./headers"
 import { normalizeMcpInvocationResult } from "./result-utils"
 import { SchemaCache } from "./schema-cache"
 import { recordSuccessfulToolExample } from "./tool-example-store"
-import { withRawModMcp, protectCurrentModResult } from "../mods/adapters"
+import { withRawModMcp, publishCurrentModResult } from "../mods/adapters"
 import { getModCallContext } from "../mods/context"
 import { authorizeCurrentModInput } from "../mods/manager"
 import { invokeMcpToolWithRetry } from "./invocation-retry"
@@ -257,7 +257,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
         }
       )
 
-      const result = protectCurrentModResult(normalizeMcpInvocationResult(tool.capabilityId, raw))
+      const result = await publishCurrentModResult(normalizeMcpInvocationResult(tool.capabilityId, raw))
 
       try {
         if (!getModCallContext()) recordSuccessfulToolExample(tool, result)

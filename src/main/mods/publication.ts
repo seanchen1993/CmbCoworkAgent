@@ -113,6 +113,65 @@ export function filterModResult<T>(value: T, protectedOutput: boolean, toolCallI
   return filterModData(value, true) as T
 }
 
+/** A single policy payload contains every observable field, while host routing stays private. */
+export async function mapModResult<T>(
+  value: T,
+  filter: (data: unknown) => Promise<ModJson>,
+  toolCallId?: string
+): Promise<T> {
+  if (ToolMessage.isInstance(value)) {
+    const data = (await filter({
+      content: value.content,
+      artifact: value.artifact ?? null,
+      metadata: value.metadata ?? {},
+      additional_kwargs: value.additional_kwargs ?? {},
+      response_metadata: value.response_metadata ?? {}
+    })) as Record<string, unknown>
+    return new ToolMessage({
+      content: data.content as ToolMessage["content"],
+      artifact: data.artifact,
+      metadata: data.metadata as Record<string, unknown>,
+      additional_kwargs: data.additional_kwargs as Record<string, unknown>,
+      response_metadata: data.response_metadata as Record<string, unknown>,
+      tool_call_id: value.tool_call_id,
+      id: value.id,
+      name: value.name,
+      status: value.status
+    }) as T
+  }
+  if (isCommand(value)) {
+    const command = value as Command
+    const update = command.update as Record<string, unknown> | undefined
+    if (!update || !Array.isArray(update.messages)) return value
+    const messages = [] as unknown[]
+    for (const message of update.messages)
+      messages.push(
+        ToolMessage.isInstance(message) && (!toolCallId || message.tool_call_id === toolCallId)
+          ? await mapModResult(message, filter, toolCallId)
+          : message
+      )
+    return new Command({
+      update: { ...update, messages },
+      ...(command.graph !== undefined ? { graph: command.graph } : {}),
+      ...(command.goto !== undefined ? { goto: command.goto } : {}),
+      ...(command.resume !== undefined ? { resume: command.resume } : {})
+    }) as T
+  }
+  const result = await filter(value)
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    result &&
+    typeof result === "object" &&
+    !Array.isArray(result)
+  ) {
+    for (const key of ["exitCode", "status", "isError", "capabilityId", "task_id"])
+      if (Object.hasOwn(value, key)) result[key] = (value as Record<string, ModJson>)[key]
+  }
+  return result as T
+}
+
 export function projectModResult(value: unknown, toolCallId?: string): ModProjection {
   if (ToolMessage.isInstance(value)) {
     const content = filterModData(value.content, false)

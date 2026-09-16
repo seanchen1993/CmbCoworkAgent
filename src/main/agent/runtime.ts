@@ -1,4 +1,4 @@
-import { withScopedModMcp, protectCurrentModResult } from "../mods/adapters"
+import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
 import { recordSuccessfulToolExample } from "../mcp/tool-example-store"
@@ -1533,7 +1533,7 @@ export function createScopedMcpCapabilityService(
           })
 
           if (pluginId) hookScope.activatePlugin(pluginId)
-          const result = protectCurrentModResult(
+          const result = await publishCurrentModResult(
             await invokeMcpToolWithPlaywrightInAppBrowserSupport({
               tool,
               workspacePath: baseContext.workspacePath,

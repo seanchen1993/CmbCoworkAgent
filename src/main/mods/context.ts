@@ -17,6 +17,9 @@ export interface ModCallContext {
   mcpPermitConsumed?: boolean
   approvedOperation?: { toolId: string; args: Record<string, unknown> }
   assertLive?: () => void
+  policyDigest?: string
+  publish?: <T>(value: T, stage: "before-observers" | "final") => Promise<T>
+  protectData?: <T>(value: T) => T
 }
 
 export const modCallContext = new AsyncLocalStorage<ModCallContext>()

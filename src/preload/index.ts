@@ -3054,6 +3054,9 @@ const api = {
     cards: (threadId: string, callId: string): Promise<ModCard[]> => ipcRenderer.invoke("mods:cards", { threadId, callId }),
     act: (threadId: string, actionId: string): Promise<ModProjection> => ipcRenderer.invoke("mods:act", { threadId, actionId }),
     installExamples: (): Promise<void> => ipcRenderer.invoke("mods:install-examples"),
+    audit: (threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]> => ipcRenderer.invoke("mods:audit", { threadId, before }),
+    reconcile: (threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
+    backup: (): Promise<boolean> => ipcRenderer.invoke("mods:backup"),
     onCardsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
       const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void => callback(value)
       ipcRenderer.on("mods:cards-changed", listener)
