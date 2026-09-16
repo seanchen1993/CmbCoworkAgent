@@ -575,7 +575,8 @@ async function inspectAndLaunch(
   run: ManagedRunSnapshot,
   delivery: AgentRunDelivery,
   sourceEvent: ManagedRunSourceRef,
-  terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">
+  terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">,
+  initialUserMessage?: string
 ): Promise<void> {
   if (isManagedRunStopRequested(run)) return
   const feature = await inspectHarnessManagedFeatureStatus(run.projectId, run.featureId)
@@ -667,6 +668,9 @@ async function inspectAndLaunch(
   }
 
   const nextAction = toManagedRunSessionAction(feature.nextAction)
+  if (initialUserMessage?.trim()) {
+    nextAction.userMessage = initialUserMessage.trim()
+  }
   const workspacePath = decidedRun.workspacePath?.trim()
   if (!workspacePath) {
     await markTerminal(
@@ -771,7 +775,13 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     })
     publishManagedRunChanged(lastRunSummary(created))
     try {
-      await inspectAndLaunch(created, input.delivery, sourceEvent)
+      await inspectAndLaunch(
+        created,
+        input.delivery,
+        sourceEvent,
+        undefined,
+        input.initialUserMessage
+      )
     } catch (error) {
       const failed = recordManagedRunDecision({
         run: created,

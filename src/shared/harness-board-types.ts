@@ -408,6 +408,7 @@ export interface ManagedRunStartInput {
   projectId: string
   featureId: string
   workspacePath: string
+  initialUserMessage?: string
 }
 
 export interface ManagedRunStartValidationInput {
