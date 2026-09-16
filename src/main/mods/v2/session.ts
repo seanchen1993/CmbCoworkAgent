@@ -12,6 +12,8 @@ import {
 } from "./basic-sdk"
 export { SESSION_CAPABILITIES } from "./basic-sdk"
 import type { FunctionStateAccess } from "./state-store"
+import { FILE_CAPABILITIES, type FunctionFileAccess } from "./file-access"
+import { resolve } from "node:path"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -19,6 +21,7 @@ export interface FunctionSessionHost {
   assertLive(plugin?: FunctionPlugin): void
   publish(value: ModJson, signal: AbortSignal): Promise<ModJson>
   state?(plugin: FunctionPlugin): FunctionStateAccess
+  files?(plugin: FunctionPlugin): FunctionFileAccess
   capability?(
     plugin: FunctionPlugin,
     method: string,
@@ -119,10 +122,12 @@ export class FunctionSession {
     operation?: {
       plugin: FunctionPlugin
       core(input: ModObject, signal: AbortSignal): Promise<ModJson | undefined>
-    }
+    },
+    held?: string
   ): Promise<ModJson> {
     if (depth > 16) throw new ModFunctionError("MODS_DISPATCH_DEPTH")
     this.assertLive()
+    const turnHeld = held ?? (event === "command.run" ? "command.run" : undefined)
     const scopedSignal = signal
       ? AbortSignal.any([signal, this.controller.signal])
       : this.controller.signal
@@ -130,6 +135,12 @@ export class FunctionSession {
       skip,
       signal: scopedSignal,
       operation: !!operation,
+      normalizeInput: (name, value) =>
+        FILE_CAPABILITIES.some((method) => method === name) &&
+        typeof value.path === "string" &&
+        value.path !== ""
+          ? { ...value, path: resolve(this.host.workspace, value.path) }
+          : value,
       validateInput: (name, value) => {
         validateBasicInput(name, value)
         if (name === "command.run" && (typeof value.args !== "string" || value.args.length > 32000))
@@ -189,9 +200,11 @@ export class FunctionSession {
                   plugin: plugin.name,
                   registry: this.registry,
                   state: this.host.state?.(plugin),
+                  files: this.host.files?.(plugin),
                   signal
                 })
-            }
+            },
+            turnHeld
           )
           if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (typeof answer.deny === "string")
@@ -199,6 +212,12 @@ export class FunctionSession {
           return answer.value
         }
         if (method === "command.run") {
+          if (turnHeld)
+            throw new ModFunctionError(
+              "MODS_COMMAND_TURN_HELD",
+              `MODS_COMMAND_TURN_HELD: $.command.run cannot wait inside ${turnHeld}`,
+              true
+            )
           const command = args[0]
           if (
             !isModObject(command) ||

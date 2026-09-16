@@ -57,6 +57,29 @@
 可复现：`npx tsx tests/mods-function-state.perf.ts current`；前后报告位于忽略目录
 `output/mods-v2-validation/state-perf-*.json`。
 
+## 宿主 SDK：项目文件读取与命令调度语义
+
+增加 `fs.read/list/exists/stat`，生产 SDK 为 17 项。所有真实读取按授权项目检查路径，
+复用宿主稳定文件句柄；磁盘结果在交给可选 hook 之前执行内容保护。授权修订号再次更新，
+旧授权不会自动取得读文件权限。示例 `/claw-files [文件路径]` 可列目录或读取文本。
+与 Claude 的宿主可达路径、4 MiB 上限相比，这一授权限定项目内只读、512 KiB 单文件、
+1024 目录条目；具体差异已写入作者文档。
+
+新增 `readonly-files` 与 `command-held` 两个原文件对照夹具，官方 2.1.273 `plugin test`
+均通过，累计 25 个场景。前者验证路径在 hook 前绝对化、改写后再次解析和返回格式；后者
+验证 `command.run` 内直接或通过另一 SDK hook 间接调用命令均拒绝。检视发现此前 CMB
+允许嵌套命令，已经修正，并在生产会话和真实 utilityProcess 重跑同一模块。
+
+真实隔离进程累计 28 项通过，销毁后 runtime/frame/reply/pending/call 计数全为零。
+两层普通 hook 100 次热调用 P95 7.35 ms；含两项文件 hook 和五次真实磁盘操作的完整命令，
+20 次预热后 100 次测量 P50 20.00 ms、P95 22.55 ms。这是小文件、本机无内容过滤配置
+的路径测量，不是长期压力或所有保护策略的性能结论。
+
+此批专项回归 195/195，Node/Web 类型检查与定向 lint 通过；真实应用 E2E 18 组通过，
+包含输入框文件命令、过滤内容、拒绝越界及应用重启。截图检视发现失败原因被包装成通用码，
+随后保留宿主错误类别，并为文件不存在、越界、超限和读取期间变化增加中文提示；
+对应跨进程与 UI 断言纳入回归。
+
 ## 已验证的契约与原型
 
 同一夹具位于 `tests/fixtures/mods-v2/conformance`。隔离安装官方
@@ -124,6 +147,9 @@ Claude 2.1.273 的测试 SDK 外层流在实测中不暴露可用的 `.result`�
 - 持久状态批全量 Vitest 为 3188 项：3157 通过、26 失败、5 跳过。26 个失败均与 v1
   基线同名同因，前一批偶发的浏览器脚本用例本次通过；全量仍非全绿。
   报告为 `vitest-state-full.json`，逐项原因对照为 `state-failure-comparison.json`。
+- 项目读取批全量 Vitest 为 3197 项：3166 通过、26 失败、5 跳过。失败与上一批同名同因，
+  三个 Windows socket 错误只更换临时文件名；全量仍非全绿。报告为 `vitest-files-full.json`，
+  原因对照为 `files-failure-comparison.json`。后续错误类别与提示修正另跑受影响的专项和 E2E。
 
 ## 待完成的验证
 

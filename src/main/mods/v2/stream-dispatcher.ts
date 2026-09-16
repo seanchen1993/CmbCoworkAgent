@@ -58,7 +58,7 @@ export function dispatchFunctionStream(
         return yield* options.core(received, { callId: randomUUID(), signal })
       } catch (error) {
         throw new ModFunctionError(
-          "MODS_DOWNSTREAM_REJECTED",
+          error instanceof ModFunctionError ? error.code : "MODS_DOWNSTREAM_REJECTED",
           error instanceof Error ? error.message : "MODS_STREAM_ERROR",
           true
         )

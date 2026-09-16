@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it } from "vitest"
@@ -144,7 +144,9 @@ it("unapproved plugin queries do not consume the limited session pool", async ()
   for (let i = 0; i < 12; i++) expect(await f.manager.commands(f.root, `t${i}`)).toEqual([])
   expect(f.loads()).toBe(0)
   await f.approve()
-  expect(await f.manager.commands(f.root, "fresh")).toHaveLength(1)
+  expect(await f.manager.commands(f.root, "fresh")).toEqual(
+    expect.arrayContaining([expect.objectContaining({ command: "claw-info" })])
+  )
 })
 
 it("rebuilds a crashed approved VM only for a later call and refuses the old descriptor", async () => {
@@ -288,4 +290,57 @@ it("revocation during state publication prevents a delayed write from committing
   expect(
     f.control.functionState.get(JSON.stringify([f.root, "function-commands"]), "delayed")
   ).toBeUndefined()
+})
+
+it("runs the official file fixture through the project filesystem and normalizes rewritten paths", async () => {
+  const f = await fixture()
+  await mkdir(join(f.root, "fixture"))
+  await writeFile(join(f.root, "fixture/hello.txt"), "hi")
+  await cp(
+    resolve("tests/fixtures/mods-v2/readonly-files/hooks/register.ts"),
+    join(f.plugin, "hooks/register.ts")
+  )
+  await f.approve()
+  const [command] = await f.manager.commands(f.root, "thread")
+  const answer = await f.manager.runCommand(
+    f.root,
+    "thread",
+    command,
+    "",
+    new AbortController().signal
+  )
+  expect(JSON.parse(answer.text)).toEqual({
+    text: "HI",
+    absolute: true,
+    entries: [{ name: "hello.txt", kind: "file", size: 2 }],
+    exists: true,
+    missing: false,
+    stat: { kind: "file", size: 2, modified: true }
+  })
+})
+
+it("protects raw file content before observers and denies a hook rewrite outside the project", async () => {
+  const f = await fixture()
+  await writeFile(join(f.root, "source.txt"), "SECRET")
+  await writeFile(
+    join(f.plugin, "hooks/register.ts"),
+    `export function register(on){
+    on("session.start",async($,e,next)=>{await $.command.register({name:"files",description:"Files"});return next(e)})
+    on("fs.read",async($,e,next)=>{
+      if(e.path.endsWith("escape")) return next({...e,path:"../outside.txt"})
+      const result=await next(e)
+      return {value:result.value==="HIDDEN"?"protected":"raw reached observer"}
+    })
+    on("command.run",async($,e)=>({text:await $.fs.read(e.args||"source.txt")}))
+  }`
+  )
+  f.setPublication(async (v) => JSON.parse(JSON.stringify(v).replaceAll("SECRET", "HIDDEN")))
+  await f.approve()
+  const [command] = await f.manager.commands(f.root, "thread")
+  expect(
+    await f.manager.runCommand(f.root, "thread", command, "", new AbortController().signal)
+  ).toEqual({ text: "protected" })
+  await expect(
+    f.manager.runCommand(f.root, "thread", command, "escape", new AbortController().signal)
+  ).rejects.toMatchObject({ code: "MODS_FS_OUTSIDE_PROJECT", downstream: true })
 })

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict"
 import { join, resolve } from "node:path"
 import { app } from "electron"
-import { writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { ProjectFunctionFiles } from "../../src/main/mods/v2/file-access"
 import type { ModJson, ModObject } from "../../src/shared/mods/types"
 import { FunctionRuntimeClient } from "../../src/main/mods/v2/runtime-client"
 import { FunctionDispatcher } from "../../src/main/mods/v2/dispatcher"
@@ -12,6 +14,7 @@ import { FunctionSession, SESSION_CAPABILITIES } from "../../src/main/mods/v2/se
 const root = resolve(process.argv[2])
 const client = new FunctionRuntimeClient(join(__dirname, "function-mod-host.cjs"))
 const checks: string[] = []
+let temporaryProject: string | undefined
 void app.whenReady().then(async () => {
   try {
     const compiled = await compileFunctionPlugin(join(root, "tests/fixtures/mods-v2/conformance"))
@@ -210,6 +213,72 @@ void app.whenReady().then(async () => {
       "same official SDK conformance fixture through utilityProcess and the production session"
     )
 
+    temporaryProject = await realpath(await mkdtemp(join(tmpdir(), "function-process-files-")))
+    await mkdir(join(temporaryProject, "fixture"))
+    await writeFile(join(temporaryProject, "fixture/hello.txt"), "hi")
+    const fileTimes: number[] = []
+    for (const [fixture, command, expected] of [
+      ["command-held", "held-probe", { direct: true, indirect: true, calls: 0 }],
+      [
+        "readonly-files",
+        "files-probe",
+        {
+          text: "HI",
+          absolute: true,
+          entries: [{ name: "hello.txt", kind: "file", size: 2 }],
+          exists: true,
+          missing: false,
+          stat: { kind: "file", size: 2, modified: true }
+        }
+      ]
+    ] as const) {
+      const fixturePlugin = await compileFunctionPlugin(
+        join(root, "tests/fixtures/mods-v2", fixture)
+      )
+      const fixtureGuest = await client.load(fixturePlugin.code, fixturePlugin.options)
+      const files = new ProjectFunctionFiles(
+        temporaryProject,
+        () => undefined,
+        async (value) => value
+      )
+      const fixtureSession = new FunctionSession(
+        [
+          {
+            name: fixture,
+            root: fixturePlugin.root,
+            guest: fixtureGuest,
+            tier: "user",
+            capabilities: [...SESSION_CAPABILITIES]
+          }
+        ],
+        {
+          threadId: fixture,
+          workspace: temporaryProject,
+          assertLive: () => undefined,
+          publish: async (v) => v,
+          files: () => files
+        }
+      )
+      assert.deepEqual(JSON.parse(String((await fixtureSession.run(command, "")).text)), expected)
+      if (fixture === "readonly-files") {
+        await assert.rejects(fixtureSession.run(command, "escape"), {
+          code: "MODS_FS_OUTSIDE_PROJECT",
+          downstream: true
+        })
+        for (let index = 0; index < 120; index++) {
+          const before = performance.now()
+          assert.deepEqual(
+            JSON.parse(String((await fixtureSession.run(command, "")).text)),
+            expected
+          )
+          if (index >= 20) fileTimes.push(performance.now() - before)
+        }
+      }
+      await fixtureSession.close()
+      checks.push(`${fixture}: same official source through utilityProcess and production session`)
+    }
+    fileTimes.sort((a, b) => a - b)
+
     const exhausted = await client.load(`var __cmbFunctionMod={register(on){
       on("command.run", async()=>{await Promise.resolve();const until=Date.now()+30;while(Date.now()<until){};return {text:"ok"}})
     }}`)
@@ -300,15 +369,25 @@ void app.whenReady().then(async () => {
         p95Ms: samples[94],
         maxMs: samples[99],
         scope: "two hooks plus matcher IPC; warmed isolated runtime"
+      },
+      filesPerformance: {
+        count: fileTimes.length,
+        p50Ms: fileTimes[49],
+        p95Ms: fileTimes[94],
+        maxMs: fileTimes[99],
+        scope:
+          "complete command, two file hooks, five real project file operations; 20 warmups; no content filtering configured"
       }
     }
     await writeFile(join(__dirname, "process-report.json"), JSON.stringify(report, null, 2))
     console.log(JSON.stringify(report, null, 2))
     client.stop()
+    await rm(temporaryProject, { recursive: true, force: true })
     app.exit(0)
   } catch (error) {
     console.error(error)
     client.stop()
+    if (temporaryProject) await rm(temporaryProject, { recursive: true, force: true })
     app.exit(1)
   }
 })

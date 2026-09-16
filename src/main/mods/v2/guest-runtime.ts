@@ -73,6 +73,7 @@ export class FunctionGuestRuntime {
           (error) =>
             guest.reply(pending, {
               error: {
+                code: error instanceof ModFunctionError ? error.code : "MODS_HOST_ERROR",
                 message: error instanceof Error ? error.message.slice(0, 2048) : "MODS_HOST_ERROR",
                 downstream: error instanceof ModFunctionError && error.downstream
               }
@@ -236,7 +237,11 @@ export class FunctionGuestRuntime {
         if (!isModObject(packet)) throw new ModFunctionError("MODS_INVALID_GUEST_RESULT")
         if (isModObject(packet.error)) {
           throw new ModFunctionError(
-            "MODS_HOOK_FAILED",
+            packet.error.downstream === true &&
+              typeof packet.error.code === "string" &&
+              /^MODS_[A-Z0-9_]{1,80}$/.test(packet.error.code)
+              ? packet.error.code
+              : "MODS_HOOK_FAILED",
             String(packet.error.message),
             packet.error.downstream === true
           )

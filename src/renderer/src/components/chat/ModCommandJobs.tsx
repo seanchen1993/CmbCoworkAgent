@@ -10,6 +10,19 @@ const labels = {
   cancelled: "已取消",
   unknown: "结果待核查"
 }
+const errorMessages: Record<string, string> = {
+  MODS_TOOL_UNAVAILABLE: "请先在本会话运行一次任务以建立工具上下文，再重新发起命令。",
+  MODS_FS_OUTSIDE_PROJECT: "无法读取项目目录之外的文件。请使用本项目内的路径。",
+  MODS_FS_ROOT_CHANGED: "项目目录已变更，请重新打开项目后再试。",
+  MODS_FS_NOT_FOUND: "文件不存在，请检查路径。",
+  MODS_FS_ACCESS_DENIED: "系统未允许读取这个文件。",
+  MODS_FS_PATH: "文件路径无效，请检查名称。",
+  MODS_FS_READ_LIMIT: "文件超过当前插件读取上限（512 KiB）。",
+  MODS_FS_ENTRY_LIMIT: "目录超过当前插件列举上限（1024 项）。",
+  MODS_FS_CHANGED: "文件在读取期间发生变化，请重新读取。",
+  MODS_FS_FAILED: "无法读取文件或目录，请检查文件类型和访问权限。",
+  MODS_COMMAND_TURN_HELD: "当前命令不能等待另一条命令，请调整插件实现。"
+}
 export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.Element | null {
   const [jobs, setJobs] = useState<ModCommandJob[]>([])
   const [error, setError] = useState("")
@@ -61,13 +74,7 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
             </p>
             <p className="text-muted-foreground">{new Date(job.createdAt).toLocaleString()}</p>
             {job.result && <pre className="whitespace-pre-wrap break-words">{job.result.text}</pre>}
-            {job.error && (
-              <p role="status">
-                {job.error === "MODS_TOOL_UNAVAILABLE"
-                  ? "请先在本会话运行一次任务以建立工具上下文，再重新发起命令。"
-                  : job.error}
-              </p>
-            )}
+            {job.error && <p role="status">{errorMessages[job.error] ?? job.error}</p>}
             {job.state === "unknown" && (
               <p>操作可能已生效。请在项目执行记录中核查，不要直接重试。</p>
             )}

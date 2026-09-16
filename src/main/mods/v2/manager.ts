@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { randomInt } from "node:crypto"
+import { ProjectFunctionFiles } from "./file-access"
 import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModPluginSource } from "../manager"
 import type { ModCommandDescriptor, ModJson, ModProjection } from "../../../shared/mods/types"
@@ -239,6 +240,12 @@ export class FunctionModsManager {
           workspace,
           threadId,
           assertLive,
+          files: (plugin) =>
+            new ProjectFunctionFiles(
+              workspace,
+              () => assertLive(plugin),
+              (value, signal) => this.host.publish(workspace, value, signal)
+            ),
           state: (plugin) => {
             // Reloads keep state; project and plugin identity remain separate namespaces.
             const namespace = JSON.stringify([workspace, plugin.name])

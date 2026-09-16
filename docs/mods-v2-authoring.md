@@ -13,6 +13,9 @@
    最近填写的备注通过插件存储保留；下次不带参数执行即可看到。
 5. 修改插件源码后重新检查并批准新摘要；撤销权限后菜单和旧命令描述符同时失效。
 
+同一示例还提供 `/claw-files` 列出项目目录，`/claw-files README.md` 读取文本文件。
+启用内容保护时，文件结果会先经过保护再进入插件与界面。
+
 自建插件用已有的本地插件安装入口安装，随后在函数插件区域授权。
 
 ## 一个直接命令
@@ -53,7 +56,7 @@ export function register(on) {
 ## SDK 事件和返回值
 
 当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces`、
-`clock.now/sleep`、`store.get/set/delete/keys`，以及 `$.plugin.name/root` 元数据。
+`clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`，以及 `$.plugin.name/root` 元数据。
 SDK 调用同样经过事件链。
 
 普通操作 hook 返回 `{ value }` 或 `{ deny }`，调用 SDK 得到拆出的值；
@@ -70,6 +73,8 @@ on("clock.sleep", { ms: 10 }, () => ({ value: undefined }))
 `$.command.register(spec)` 返回 `{ command: spec.name }`；`clock.sleep` 返回 `undefined`。
 从 hook 中再次调用 SDK 会跳过发起调用的那一个处理器，同插件的其他匹配处理器仍会执行。
 `command.describe` 的 `isHidden: true` 隐藏菜单条目，但保留按完整命令名执行的能力。
+在 `command.run` hook 内不能再调用 `$.command.run`，经其他 SDK 间接调用也会拒绝，
+与 Claude 的会话执行通道规则一致；应直接返回当前命令的 `{ text }`。
 
 ## 插件状态
 
@@ -91,13 +96,28 @@ const preferences = await $.store.get("preferences")
 这些属于宿主资源限制。单次 `set` 是事务，但 `get` 后再 `set` 不是原子加一；并发计数需要另行设计。
 数据库备份包含状态，控制库迁移与回退限制见 [运维说明](mods-operations.md)。
 
+## 项目文件
+
+`$.fs.read(path)` 读 UTF-8 文本，`list(path = ".")` 返回按名称排序的
+`{ name, kind, size }`，`stat(path)` 返回 `{ kind, size, mtimeMs }`；
+`kind` 为 `file`、`dir` 或 `other`。`exists(path)` 对缺失或不可访问路径返回 false。
+取消、撤销和 hook 拒绝仍会使调用失败。
+
+相对路径在进入 hook 之前转成项目下的绝对路径；`next({ ...e, path })` 改写后再次解析。
+所有真正访问磁盘的请求都经过项目边界检查，读取通过稳定文件句柄完成，结果先经过宿主内容保护。
+外部目录、逃逸链接、Windows 设备路径和替代数据流不能通过此授权读取。
+
+这是明确的宿主差异：Claude 允许访问宿主可达路径，并对读写设 4 MiB 上限；当前 CMB
+这一授权仅允许项目内只读访问，单文件最多 512 KiB、单目录最多 1024 个条目，并受 1 MiB
+JSON 传输上限约束。超限报错，不截断伪装为完整文件。`fs.write/ancestors` 仍未交付。
+
 ## 检查和边界
 
 构建后运行 `node bin/cli.js plugin check <目录>` 可检查包、快照摘要和事件注册。
 它不是授权，也不证明所用宿主能力全部已经接入。`inspect` 输出相同范围的检查报告。
 
 当前尚不能用这一入口交付官方完整 diff、Client 面板、`engine.create` 能力提供方、
-模型/工具/文件/网络 SDK、配置表单或完整 classic 事件。这些保持在后续实施项中。
+模型/工具/网络 SDK、文件写入与祖先指令读取、配置表单或完整 classic 事件。这些保持在后续实施项中。
 命令文本以桌面结果区呈现；终端的显示宽度与布局不能等同于 Electron 窗口尺寸。
 
 运行中最多保留 6 个函数会话，每个会话最多 8 个插件；单命令参数上限为 32000 字符。

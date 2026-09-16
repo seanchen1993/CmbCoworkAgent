@@ -2,6 +2,7 @@ import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import type { FunctionStateAccess } from "./state-store"
+import { FILE_CAPABILITIES, type FunctionFileAccess, type FunctionFileMethod } from "./file-access"
 
 export const SESSION_CAPABILITIES = [
   "command.register",
@@ -16,11 +17,14 @@ export const SESSION_CAPABILITIES = [
   "store.get",
   "store.set",
   "store.delete",
-  "store.keys"
+  "store.keys",
+  ...FILE_CAPABILITIES
 ] as const
 
 /** SDK positional arguments become the same structured input a hook receives in Claude. */
 export function basicSdkInput(method: string, args: ModJson[]): ModObject {
+  if (FILE_CAPABILITIES.some((name) => name === method))
+    return { path: method === "fs.list" && args[0] === undefined ? "." : args[0] }
   if (method === "clock.sleep") return { ms: args[0] }
   if (method === "store.get" || method === "store.delete") return { key: args[0] }
   if (method === "store.set") return { key: args[0], value: args[1] }
@@ -32,6 +36,11 @@ export function basicSdkInput(method: string, args: ModJson[]): ModObject {
 }
 
 export function validateBasicInput(name: string, value: ModObject): void {
+  if (
+    FILE_CAPABILITIES.some((method) => name === method) &&
+    (typeof value.path !== "string" || value.path.length === 0)
+  )
+    throw new ModFunctionError("MODS_FS_PATH")
   if (name.startsWith("store.") && name !== "store.keys" && typeof value.key !== "string")
     throw new ModFunctionError("MODS_STORE_KEY")
   if (name === "store.set" && !Object.hasOwn(value, "value"))
@@ -60,7 +69,25 @@ export function validateBasicInput(name: string, value: ModObject): void {
 }
 
 export function validateBasicResult(name: string, value: ModJson | undefined): void {
+  const fileStat = (entry: ModJson | undefined): boolean =>
+    isModObject(entry) &&
+    ["file", "dir", "other"].includes(String(entry.kind)) &&
+    typeof entry.size === "number" &&
+    Number.isSafeInteger(entry.size) &&
+    entry.size >= 0
   if (
+    (name === "fs.read" && typeof value !== "string") ||
+    (name === "fs.exists" && typeof value !== "boolean") ||
+    (name === "fs.stat" &&
+      (!fileStat(value) ||
+        !isModObject(value) ||
+        typeof value.mtimeMs !== "number" ||
+        !Number.isFinite(value.mtimeMs))) ||
+    (name === "fs.list" &&
+      (!Array.isArray(value) ||
+        value.some(
+          (entry) => !fileStat(entry) || !isModObject(entry) || typeof entry.name !== "string"
+        ))) ||
     ((name === "session.id" || name === "session.cwd") && typeof value !== "string") ||
     (name === "session.surface" && value !== "desktop") ||
     (name === "session.surfaces" &&
@@ -94,11 +121,16 @@ export async function runBasicSdk(
     registry: Map<string, FunctionCommand>
     signal: AbortSignal
     state?: FunctionStateAccess
+    files?: FunctionFileAccess
   }
 ): Promise<ModJson | undefined> {
   const { registry, signal } = context
   signal.throwIfAborted()
   validateBasicInput(method, input)
+  if (FILE_CAPABILITIES.some((name) => name === method)) {
+    if (!context.files) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")
+    return context.files.run(method as FunctionFileMethod, input.path as string, signal)
+  }
   if (method.startsWith("store.")) {
     if (!context.state) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")
     if (method === "store.get") return context.state.get(input.key as string, signal)

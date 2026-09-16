@@ -637,6 +637,32 @@ async function main(): Promise<void> {
     pass(
       "standard function plugin grants, direct text commands, persistent state and immediate queries work through production UI"
     )
+    for (const path of ["secret.txt", "../outside.txt"]) {
+      await functionComposer.fill(`/claw-files ${path}`)
+      await functionComposer.press("Enter")
+      await until(async () => {
+        const jobs = await page!.evaluate((id) => window.api.mods.jobs(id), threadId)
+        if (path === "secret.txt")
+          return jobs.some(
+            (job) =>
+              job.command === "claw-files" &&
+              job.state === "succeeded" &&
+              job.result?.text.includes("[REDACTED]") === true &&
+              !job.result.text.includes("sk-private-fixture")
+          )
+        return jobs.some(
+          (job) =>
+            job.command === "claw-files" &&
+            job.state === "failed" &&
+            job.error === "MODS_FS_OUTSIDE_PROJECT"
+        )
+      }, "function file reads protect content and reject project escape")
+    }
+    await page!
+      .getByText("无法读取项目目录之外的文件。请使用本项目内的路径。", { exact: true })
+      .waitFor()
+    await page!.screenshot({ path: join(artifacts, "function-files.png") })
+    pass("function file command reads the real project through protection and refuses traversal")
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     await page!.locator("textarea.composer-textarea").fill("/claw-info 重载后")

@@ -29,6 +29,7 @@ export interface FunctionDispatchOptions {
   signal?: AbortSignal
   timeoutMs?: number
   operation?: boolean
+  normalizeInput?(event: string, input: ModObject): ModObject
   validateInput?(event: string, input: ModObject): void
   validateResult?(event: string, output: ModJson): void
   core(
@@ -91,6 +92,7 @@ export class FunctionDispatcher {
     ): Promise<ModJson> => {
       if (options.signal?.aborted)
         throw new ModFunctionError("MODS_CANCELLED", "MODS_CANCELLED", true)
+      received = options.normalizeInput?.(event, received) ?? received
       options.validateInput?.(event, received)
       if (index === chain.length) {
         if (++requests > 32)
@@ -119,7 +121,7 @@ export class FunctionDispatcher {
         } catch (error) {
           entry.outcome = "rejected"
           throw new ModFunctionError(
-            "MODS_DOWNSTREAM_REJECTED",
+            error instanceof ModFunctionError ? error.code : "MODS_DOWNSTREAM_REJECTED",
             error instanceof Error ? error.message : "MODS_CORE_ERROR",
             true
           )
