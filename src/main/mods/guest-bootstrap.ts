@@ -76,6 +76,7 @@ export const GUEST_BOOTSTRAP = String.raw`
         delete: (key) => call("store.delete", { key })
       }),
       log: freeze({ write: (level, code) => call("log", { level, code }) })
+      ,artifacts: freeze({ create: (value) => call("artifacts.create", value) })
     });
     try {
       const value = registration.event === "ui.render"

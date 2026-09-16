@@ -1,5 +1,6 @@
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
+import { getModsManager } from "../mods/manager"
 import {
   StopHookContextCollector,
   STOP_HOOK_REVISION_PROMPT_PREFIX,
@@ -1033,7 +1034,7 @@ function sendDesktopForeignOwnerBusy(
   channel: string,
   lease: LocalThreadRunLease
 ): void {
-  const sourceLabel = lease.owner === "im" ? "招乎远程任务" : "定时任务"
+  const sourceLabel = lease.owner === "im" ? "招乎远程任务" : lease.owner === "mods" ? "Mods 命令" : "定时任务"
   safeSendToWindow(window, channel, {
     type: "error",
     error: "THREAD_RUN_OWNED_BY_ANOTHER_SOURCE",
@@ -1950,6 +1951,11 @@ async function settlePhysicalAgentRun({
         run: cleanupNotificationSkills
       },
       ...criticalBeforeReleasePhases,
+      {
+        name: "render-mod-turn-summary",
+        shouldRun: terminalRunOwnsSharedResources,
+        run: () => getModsManager()?.finishTurn(threadId)
+      },
       {
         name: "release-active-controller",
         run: () => {

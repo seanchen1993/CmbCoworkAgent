@@ -164,8 +164,33 @@ async function main(): Promise<void> {
       const approved = await page!.evaluate((id) => window.api.mods.status(id), threadId)
       assert(approved.mods.every((mod) => mod.state === "ready"))
       pass("packaged esbuild and QuickJS compile and validate both bundled examples")
+      await app.evaluate(({ dialog }) => {
+        dialog.showMessageBox = (async () => ({
+          response: 1,
+          checkboxChecked: false
+        })) as typeof dialog.showMessageBox
+      })
       await page!.reload({ waitUntil: "domcontentloaded" })
       await page!.getByText("Mods E2E", { exact: true }).first().click()
+      await page!.locator("textarea.composer-textarea").fill("/mod project-quality:verify {}")
+      await page!.locator("textarea.composer-textarea").press("Enter")
+      await until(
+        async () => existsSync(join(workspace, "verified.txt")),
+        "packaged cold command writes through real native tool"
+      )
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+            (job) => job.state === "succeeded"
+          ),
+        "packaged command terminal state"
+      )
+      assert.equal(readFileSync(join(workspace, "verified.txt"), "utf8"), "once\n")
+      await page!.getByRole("button", { name: "查看测试报告", exact: true }).click()
+      await page!.screenshot({ path: join(artifacts, "cold-command.png") })
+      pass(
+        "packaged cold session executes a real approved command and previews its report without a model or test bridge"
+      )
       await page!.getByRole("button", { name: "自定义", exact: true }).click()
       await page!.getByRole("button", { name: "插件", exact: true }).click()
       await page!.locator("[data-mods-settings]").waitFor()
@@ -320,6 +345,142 @@ async function main(): Promise<void> {
         .isDisabled()
     )
     pass("real React card executes once through host approval and stays consumed after reload")
+    await app.evaluate(
+      (_electron, threadId) =>
+        (
+          globalThis as unknown as {
+            modsFixture: { setThreadBusy(id: string, busy: boolean): void }
+          }
+        ).modsFixture.setThreadBusy(threadId, true),
+      threadId
+    )
+    const composer = page!.locator("textarea.composer-textarea")
+    await composer.fill("/mod")
+    await page!.getByText("project-quality:verify", { exact: true }).first().waitFor()
+    await composer.fill("/mod project-quality:verify {}")
+    await composer.press("Enter")
+    await page!.locator('[data-mod-job-state="queued"]').waitFor()
+    assert.equal(readFileSync(join(workspace, "verified.txt"), "utf8"), "once\n")
+    await app.evaluate(
+      (_electron, threadId) =>
+        (
+          globalThis as unknown as {
+            modsFixture: { setThreadBusy(id: string, busy: boolean): void }
+          }
+        ).modsFixture.setThreadBusy(threadId, false),
+      threadId
+    )
+    await until(
+      async () => readFileSync(join(workspace, "verified.txt"), "utf8") === "once\nonce\n",
+      "slash command executes once after releasing model lease"
+    )
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).filter(
+          (job) => job.state === "succeeded"
+        ).length >= 2,
+      "command jobs settle"
+    )
+    await page!.getByRole("button", { name: "查看测试报告", exact: true }).last().click()
+    await page!.screenshot({ path: join(artifacts, "commands-and-report.png") })
+    const summaryCards = await page!.evaluate((id) => window.api.mods.cards(id, ""), threadId)
+    const references = JSON.stringify(summaryCards)
+    assert(references.includes("artifact-link"))
+    pass("real slash command queues behind model lease and publishes a scoped text report")
+    await app.evaluate(
+      (_electron, threadId) =>
+        (
+          globalThis as unknown as {
+            modsFixture: { setThreadBusy(id: string, busy: boolean): void }
+          }
+        ).modsFixture.setThreadBusy(threadId, true),
+      threadId
+    )
+    await composer.fill("/mod project-quality:verify {}")
+    await composer.press("Enter")
+    await page!
+      .locator('[data-mod-job-state="queued"]')
+      .getByRole("button", { name: "取消排队" })
+      .click()
+    await page!.locator('[data-mod-job-state="cancelled"]').waitFor({ state: "attached" })
+    await app.evaluate(
+      (_electron, threadId) =>
+        (
+          globalThis as unknown as {
+            modsFixture: { setThreadBusy(id: string, busy: boolean): void }
+          }
+        ).modsFixture.setThreadBusy(threadId, false),
+      threadId
+    )
+    assert.equal(readFileSync(join(workspace, "verified.txt"), "utf8"), "once\nonce\n")
+    await app.evaluate(
+      async (_electron, threadId) =>
+        (
+          globalThis as unknown as { modsFixture: { finishTurn(id: string): Promise<void> } }
+        ).modsFixture.finishTurn(threadId),
+      threadId
+    )
+    assert(
+      (
+        await page!.evaluate((id) => window.api.mods.cards(id, "turn:mods-e2e-turn"), threadId)
+      ).some((card) => card.slot === "turn.summary")
+    )
+    pass(
+      "queued cancellation prevents execution and turn summary comes from durable execution facts"
+    )
+    const policy = await app.evaluate(
+      async (_electron, scope) =>
+        (
+          globalThis as unknown as {
+            modsFixture: {
+              managedPolicyProbe(scope: unknown): Promise<{
+                required: boolean
+                blocked: boolean
+                executions: number
+                result: unknown
+                rebuilt: string
+              }>
+            }
+          }
+        ).modsFixture.managedPolicyProbe(scope),
+      scope
+    )
+    assert(policy.required && policy.blocked && policy.executions === 0)
+    assert(!JSON.stringify(policy.result).includes("corporate-sensitive-fixture"))
+    assert(!JSON.stringify(policy.result).includes("do-not-publish"))
+    assert.equal(policy.rebuilt, "[REDACTED]")
+    pass(
+      "separate managed policy process enforces mandatory admission, complete filtering and rebuild"
+    )
+    const coldId = await page!.evaluate(async (workspace) => {
+      const thread = await window.api.threads.create({
+        title: "Mods cold start",
+        workspacePath: workspace,
+        agentMode: "normal"
+      })
+      const id =
+        (thread as unknown as { thread_id: string; id?: string }).thread_id ??
+        (thread as unknown as { id: string }).id
+      await window.api.workspace.set(id, workspace)
+      return id
+    }, workspace)
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Mods cold start", { exact: true }).first().click()
+    await page!.locator("textarea.composer-textarea").fill("/mod project-quality:verify {}")
+    await page!.locator("textarea.composer-textarea").press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), coldId)).some(
+          (job) => job.state === "succeeded"
+        ),
+      "cold project command completes without a model turn"
+    )
+    assert.equal(readFileSync(join(workspace, "verified.txt"), "utf8"), "once\nonce\nonce\n")
+    await page!.screenshot({ path: join(artifacts, "cold-command.png") })
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    pass(
+      "fresh project session runs native Mods commands with inherited sandbox settings and explicit approval"
+    )
     timings.enabled = await benchmark()
     timings.noop1000 = await app.evaluate(
       async (_electron, scope) =>
@@ -352,6 +513,8 @@ async function main(): Promise<void> {
     await page!.getByRole("button", { name: "自定义", exact: true }).click()
     await page!.getByRole("button", { name: "插件", exact: true }).click()
     await page!.locator("[data-mods-settings]").waitFor()
+    await page!.locator("[data-mods-audit] > summary").click()
+    await page!.getByText("审计摘要", { exact: true }).first().waitFor()
     await page!.screenshot({ path: join(artifacts, "settings.png") })
     pass("production settings panel renders project grants")
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))

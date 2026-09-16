@@ -81,6 +81,8 @@ export function parseModManifest(value: unknown): ModManifest {
   if (declaredEvents.some((event) => !events.has(event))) throw new Error("MODS_INVALID_EVENT")
   const permissions = object(input.permissions)
   if (typeof permissions.store !== "boolean") throw new Error("MODS_INVALID_STORE_PERMISSION")
+  if (permissions.artifacts !== undefined && typeof permissions.artifacts !== "boolean")
+    throw new Error("MODS_INVALID_ARTIFACT_PERMISSION")
   if (input.activation !== "project" && input.activation !== "plugin") {
     throw new Error("MODS_INVALID_ACTIVATION")
   }
@@ -99,7 +101,8 @@ export function parseModManifest(value: unknown): ModManifest {
       readTools: names(permissions.readTools),
       writeTools: names(permissions.writeTools),
       context: names(permissions.context, 8),
-      store: permissions.store
+      store: permissions.store,
+      ...(permissions.artifacts !== undefined ? { artifacts: permissions.artifacts } : {})
     },
     activation: input.activation,
     ...(input.before !== undefined ? { before: names(input.before, 8) } : {}),
@@ -154,6 +157,11 @@ export function parseModUi(value: unknown): ModUiNode[] {
           command: text("command"),
           args: object(node.args) as ModObject
         }
+      case "artifact-link": {
+        const artifactId = text("artifactId")
+        if (!/^[a-f0-9-]{36}$/.test(artifactId)) throw new Error("MODS_ARTIFACT_ID")
+        return { type: "artifact-link", label: text("label"), artifactId }
+      }
       default:
         throw new Error("MODS_UI_COMPONENT")
     }

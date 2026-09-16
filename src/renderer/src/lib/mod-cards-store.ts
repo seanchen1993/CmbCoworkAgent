@@ -21,20 +21,46 @@ export function subscribeModCards(threadId: string, listener: () => void): () =>
       refresh: () => {},
       stop: () => {}
     }
+    let running = false
+    let pending = false
     value.refresh = () => {
+      if (running) {
+        pending = true
+        value.sequence++
+        return
+      }
+      running = true
       const sequence = ++value.sequence
-      void window.api.mods.cards(threadId, "").then(
-        (cards) => {
-          if (threads.get(threadId) !== value || sequence !== value.sequence) return
-          value.cards = cards
-          for (const notify of value.listeners) notify()
-        },
-        () => {}
-      )
+      void window.api.mods
+        .cards(threadId, "")
+        .then(
+          (cards) => {
+            if (threads.get(threadId) !== value || sequence !== value.sequence) return
+            value.cards = cards
+            for (const notify of value.listeners) notify()
+          },
+          () => {
+            if (threads.get(threadId) !== value || sequence !== value.sequence) return
+            value.cards = empty
+            for (const notify of value.listeners) notify()
+          }
+        )
+        .finally(() => {
+          running = false
+          if (pending && threads.get(threadId) === value) {
+            pending = false
+            value.refresh()
+          }
+        })
     }
-    value.stop = window.api.mods.onCardsChanged((event) => {
+    const stopCards = window.api.mods.onCardsChanged((event) => {
       if (event.threadId === threadId) value.refresh()
     })
+    window.addEventListener("mods:configuration-changed", value.refresh)
+    value.stop = () => {
+      stopCards()
+      window.removeEventListener("mods:configuration-changed", value.refresh)
+    }
     threads.set(threadId, value)
     value.refresh()
     entry = value

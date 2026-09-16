@@ -8,6 +8,7 @@ export function validateModRegistrations(
   if (!Array.isArray(registrations) || registrations.length > 64)
     throw new ModError("MODS_REGISTRATION_LIMIT")
   const ids = new Set<string>()
+  const commands = new Set<string>()
   for (const registration of registrations) {
     if (
       !registration ||
@@ -27,10 +28,17 @@ export function validateModRegistrations(
       throw new ModError("MODS_UNDECLARED_TOOL")
     if (
       registration.event === "command.run" &&
-      (!registration.command?.startsWith(`${manifest.id}:`) || registration.command.length > 160)
+      (!registration.command?.startsWith(`${manifest.id}:`) ||
+        registration.command.length > 160 ||
+        !/^[a-zA-Z0-9_.:-]+$/.test(registration.command) ||
+        commands.has(registration.command))
     )
       throw new ModError("MODS_COMMAND_NAMESPACE")
-    if (registration.event === "ui.render" && registration.slot !== "tool.result.after")
+    if (registration.command) commands.add(registration.command)
+    if (
+      registration.event === "ui.render" &&
+      !["tool.result.after", "turn.summary"].includes(registration.slot ?? "")
+    )
       throw new ModError("MODS_UI_SLOT_UNSUPPORTED")
   }
 }

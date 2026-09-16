@@ -983,6 +983,13 @@ interface CustomAPI {
     audit(threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]>
     reconcile(threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void>
     backup(): Promise<boolean>
+    artifact(threadId: string, id: string): Promise<{ label: string; text: string }>
+    saveArtifact(threadId: string, id: string): Promise<boolean>
+    commands(threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]>
+    enqueue(threadId: string, descriptor: import("../shared/mods/types").ModCommandDescriptor, args: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModCommandJob>
+    jobs(threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]>
+    cancelJob(threadId: string, id: string): Promise<void>
+    onJobsChanged(callback: (event: { threadId: string }) => void): () => void
     onCardsChanged(callback: (event: { threadId: string }) => void): () => void
   }
   agent: {

@@ -22,9 +22,9 @@ export default {
         command: "npm test",
         cwd: event.identity.workspace
       })
-      return {
-        text: `${result.execution === "succeeded" ? "验证完成" : "验证未通过"}\n${result.projection.text}`
-      }
+      const text = `${result.execution === "succeeded" ? "验证完成" : "验证未通过"}\n${result.projection.text}`
+      const artifact = await $.artifacts.create({ label: "项目测试结果", text })
+      return { text, data: { artifact } }
     })
     on.ui({ id: "quality-card", slot: "tool.result.after" }, async () => [
       {
@@ -35,6 +35,13 @@ export default {
           { type: "button", label: "运行项目测试", command: "project-quality:verify", args: {} }
         ]
       }
+    ])
+    on.ui({ id: "turn-summary", slot: "turn.summary" }, async (event) => [
+      { type: "card", title: "本轮执行总结", children: [
+        { type: "text", text: event.model.text },
+        ...(event.model.data?.artifact ? [{ type: "artifact-link", label: "查看测试报告", artifactId: event.model.data.artifact.id }] : []),
+        { type: "button", label: "运行项目测试", command: "project-quality:verify", args: {} }
+      ] }
     ])
   }
 }

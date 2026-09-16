@@ -82,6 +82,7 @@ async function fixture(deployment?: ManagedModDeployment) {
       const r=await $.tools.invoke("host:execute",{command:"echo verified"}); return r.projection
     });
     on.ui({id:"card",slot:"tool.result.after"},async()=>[{type:"button",label:"Verify",command:"review:run",args:{}}]);
+    on.ui({id:"summary",slot:"turn.summary"},async(e)=>[{type:"text",text:e.model.text}]);
   } }`
   )
   const confirm = vi.fn(async () => true)
@@ -139,6 +140,61 @@ async function fixture(deployment?: ManagedModDeployment) {
 }
 
 describe("project Mods lifecycle and UI authority", () => {
+  it("discovers approved commands and rechecks queued permission snapshots", async () => {
+    const f = await fixture()
+    expect(await f.manager.commands(f.root, "thread")).toEqual([])
+    await f.enable()
+    const [command] = await f.manager.commands(f.root, "thread")
+    expect(command.command).toBe("review:run")
+    expect(
+      (await f.manager.runCommand(f.root, "thread", command, {}, new AbortController().signal)).text
+    ).toBe("verified")
+    expect(f.executions).toHaveLength(1)
+    f.manager.revoke(f.root, "review")
+    await expect(
+      f.manager.runCommand(f.root, "thread", command, {}, new AbortController().signal)
+    ).rejects.toThrow("SCOPE_CHANGED")
+    expect(f.executions).toHaveLength(1)
+  })
+  it("summarizes a settled turn once from execution facts", async () => {
+    const f = await fixture()
+    await f.enable()
+    await f.dispatch()
+    await f.manager.finishTurn("thread")
+    await f.manager.finishTurn("thread")
+    const cards = f.manager.listCards("thread", "turn:turn", 7)
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({
+      slot: "turn.summary",
+      nodes: [{ type: "text", text: "本轮工具：成功 1，失败 0，待核查 0，未执行 0。" }]
+    })
+  })
+  it("never transfers artifacts across workspaces, threads or code grants", async () => {
+    const f = await fixture()
+    await f.enable()
+    const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    const workspace = f.manager.workspaceKey(f.root)
+    f.manager.store.saveArtifact({
+      id,
+      workspace,
+      threadId: "thread",
+      modId: "review",
+      digest: f.digest,
+      label: "Report",
+      text: "result",
+      createdAt: Date.now()
+    })
+    expect(await f.manager.artifact(f.root, "thread", id)).toEqual({
+      label: "Report",
+      text: "result"
+    })
+    await expect(f.manager.artifact(f.root, "other", id)).rejects.toThrow("UNAVAILABLE")
+    await expect(f.manager.artifact(f.plugin, "thread", id)).rejects.toThrow("UNAVAILABLE")
+    const pending = f.manager.artifact(f.root, "thread", id)
+    f.manager.revoke(f.root, "review")
+    await expect(pending).rejects.toThrow("REVOKED")
+    await expect(f.manager.artifact(f.root, "thread", id)).rejects.toThrow("UNAVAILABLE")
+  })
   it("does not recreate a missing initialized control store or silently bypass unavailable policy", async () => {
     const f = await fixture()
     const path = join(f.root, "missing.sqlite")

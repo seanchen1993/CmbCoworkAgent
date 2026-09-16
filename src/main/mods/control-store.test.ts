@@ -27,6 +27,29 @@ afterEach(() => {
 })
 
 describe("Mod durable control store", () => {
+  it("recovers queued jobs as cancelled and running jobs as unknown without storing executable intent", () => {
+    const { store, file } = fixture()
+    for (const state of ["queued", "running"] as const)
+      store.saveJob({
+        id: state,
+        threadId: "thread",
+        workspace: "workspace",
+        command: "test:write",
+        state,
+        createdAt: Date.now()
+      })
+    store.close()
+    stores.pop()
+    const reopened = new ModControlStore(file)
+    stores.push(reopened)
+    expect(
+      reopened
+        .jobs("thread")
+        .map((job) => job.state)
+        .sort()
+    ).toEqual(["cancelled", "unknown"])
+    expect(reopened.jobs("other")).toEqual([])
+  })
   it("paginates without losing equal timestamps and keeps execution separate from publication", () => {
     const { store } = fixture()
     const identity = {
@@ -42,6 +65,7 @@ describe("Mod durable control store", () => {
       store.claim(id, "host:read_file", { password: "never stored" }, { ...identity, callId: id })
     store.settle("c", "succeeded")
     store.publication("c", "digest", ["baseline-v1"], "blocked")
+    store.publication("c", "digest", ["deployment-literal"], "blocked")
     const first = store.audit("project", 2)
     const second = store.audit("project", 2, first.at(-1)!.cursor)
     expect([...first, ...second].map((row) => row.callId)).toEqual(["c", "b", "a"])
@@ -51,6 +75,7 @@ describe("Mod durable control store", () => {
       policyDigest: "digest"
     })
     expect(JSON.stringify(first)).not.toContain("never stored")
+    expect(first[0].ruleIds.sort()).toEqual(["baseline-v1", "deployment-literal"])
     expect(store.audit("other")).toEqual([])
   })
   it("exports the WAL consistently and allows scoped one-time reconciliation without replay", () => {

@@ -325,6 +325,10 @@ export class ModEngine {
         this.assertLive(request, selected)
         return published
       } catch (error) {
+        if (!corePromise && this.store.status(request.identity.callId) === undefined) {
+          this.store.claim(request.identity.callId, request.toolId, request.args, request.identity)
+          this.store.settle(request.identity.callId, "not_started")
+        }
         if (corePromise) {
           try {
             await corePromise
@@ -401,6 +405,36 @@ export class ModEngine {
         : filterModData(value, request.protectedOutput)
     }
     const namespace = `${mod.grant.workspace}\u001f${mod.compiled.manifest.id}\u001f${mod.compiled.digest}`
+    if (method === "artifacts.create") {
+      if (
+        !permissions.artifacts ||
+        typeof args.label !== "string" ||
+        !args.label.length ||
+        args.label.length > 200 ||
+        typeof args.text !== "string" ||
+        args.text.length > 240_000
+      )
+        throw new ModError("MODS_ARTIFACT_DENIED")
+      const content = request.publish
+        ? await request.publish({ label: args.label, text: args.text }, "final")
+        : (filterModData(
+            { label: args.label, text: args.text },
+            request.protectedOutput
+          ) as unknown as { label: string; text: string })
+      this.assertLive(request, [mod])
+      const id = randomUUID()
+      this.store.saveArtifact({
+        id,
+        workspace: request.identity.workspace,
+        threadId: request.identity.threadId,
+        modId: mod.grant.modId,
+        digest: mod.grant.digest,
+        label: content.label,
+        text: content.text,
+        createdAt: Date.now()
+      })
+      return { id, label: content.label }
+    }
     if (method.startsWith("store.")) {
       if (!permissions.store || typeof args.key !== "string")
         throw new ModError("MODS_STORE_DENIED")
@@ -498,21 +532,45 @@ export class ModEngine {
         request.signal
       )
       this.assertLive(request, [mod])
-      return request.publish
+      const published = request.publish
         ? await request.publish(projection(value), "final")
         : (filterModData(projection(value), request.protectedOutput) as unknown as ModProjection)
+      await this.render(request, [mod], published, "turn.summary")
+      return published
     })
+  }
+
+  commands(
+    request: ModDispatchRequest
+  ): Array<{ modId: string; name: string; command: string; grant: ModGrant }> {
+    return this.selected(request).flatMap((mod) =>
+      mod.registrations
+        .filter((r) => r.event === "command.run")
+        .map((r) => ({
+          modId: mod.compiled.manifest.id,
+          name: mod.compiled.manifest.name,
+          command: r.command!,
+          grant: mod.grant
+        }))
+    )
+  }
+
+  async summary(request: ModDispatchRequest, model: ModProjection): Promise<void> {
+    await this.exclusive(request, () =>
+      this.render(request, this.selected(request), model, "turn.summary")
+    )
   }
 
   private async render(
     request: ModDispatchRequest,
     selected: LoadedMod[],
-    projection: ModProjection
+    projection: ModProjection,
+    slot: "tool.result.after" | "turn.summary" = "tool.result.after"
   ): Promise<void> {
     if (!request.onCard) return
     for (const mod of selected) {
       for (const registration of mod.registrations.filter(
-        (r) => r.event === "ui.render" && r.slot === "tool.result.after"
+        (r) => r.event === "ui.render" && r.slot === slot
       )) {
         try {
           this.assertLive(request, [mod])
@@ -521,7 +579,7 @@ export class ModEngine {
             registration.id,
             {
               identity: request.identity,
-              slot: "tool.result.after",
+              slot,
               model: { ...projection, outputProtected: request.protectedOutput },
               nodes: []
             } as unknown as ModObject,
@@ -544,6 +602,7 @@ export class ModEngine {
             name: mod.compiled.manifest.name,
             threadId: request.identity.threadId,
             callId: request.identity.toolCallId ?? request.identity.callId,
+            slot,
             nodes: safeNodes
           })
         } catch (error) {

@@ -35,6 +35,7 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
     try {
       await action()
       await refresh()
+      window.dispatchEvent(new Event("mods:configuration-changed"))
     } catch (error) {
       setError(error instanceof Error ? error.message : "操作失败")
     } finally {
@@ -152,6 +153,7 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
                       <p className="text-xs">
                         上下文：{mod.manifest.permissions.context.join("、") || "无"}
                         ；插件状态存储：{mod.manifest.permissions.store ? "允许" : "不申请"}
+                        ；文本产物：{mod.manifest.permissions.artifacts ? "允许" : "不申请"}
                       </p>
                     </>
                   )}

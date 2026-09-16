@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { ModControlStore } from "./control-store"
 import { ModGuestRuntime } from "./guest-runtime"
 import { ModEngine, type ModDispatchRequest, type ModRuntime } from "./engine"
-import type { ModManifest } from "../../shared/mods/types"
+import type { ModManifest, ModCard } from "../../shared/mods/types"
 
 class LocalRuntime implements ModRuntime {
   guests = new Map<string, ModGuestRuntime>()
@@ -84,6 +84,70 @@ async function fixture(body: string, options: Partial<ModManifest> = {}) {
 }
 
 describe("Mod execution contract", () => {
+  it("records a pre-execution denial without inventing execution or publishing arguments", async () => {
+    const f = await fixture(
+      'on.tool({id:"deny",tools:["host:write_file"]},async()=>({kind:"deny"}))'
+    )
+    let calls = 0
+    await expect(
+      f.engine.dispatch(f.request, async () => {
+        calls++
+        return "no"
+      })
+    ).rejects.toThrow("DENIED")
+    expect(calls).toBe(0)
+    expect(f.store.audit("workspace")[0]).toMatchObject({
+      status: "not_started",
+      toolId: "host:write_file"
+    })
+  })
+  it("creates policy-checked text artifacts and renders them through the pure summary slot", async () => {
+    const f = await fixture(
+      `
+      on.command({id:"report",command:"quality:report"},async($)=>{
+        const artifact=await $.artifacts.create({label:"Report",text:"sk-private-artifact-123456789"});
+        return {text:"Created report",data:{artifact}};
+      });
+      on.ui({id:"summary",slot:"turn.summary"},async(e)=>[{type:"artifact-link",label:"Report",artifactId:e.model.data.artifact.id}]);
+    `,
+      {
+        events: ["command.run", "ui.render"],
+        permissions: { readTools: [], writeTools: [], context: [], store: false, artifacts: true }
+      }
+    )
+    const cards: ModCard[] = []
+    const request = {
+      ...f.request,
+      protectedOutput: true,
+      identity: { ...f.request.identity, origin: "user-action" as const },
+      onCard: (card: ModCard) => {
+        cards.push(card)
+      }
+    }
+    expect((await f.engine.command(request, "quality", "quality:report", {})).text).toBe(
+      "Created report"
+    )
+    expect(cards[0].slot).toBe("turn.summary")
+    const node = cards[0].nodes[0]
+    expect(node.type).toBe("artifact-link")
+    if (node.type !== "artifact-link") throw Error("Missing artifact")
+    expect(f.store.artifact(node.artifactId)?.text).toBe("[REDACTED]")
+    expect(f.store.artifact(node.artifactId)?.modId).toBe("quality")
+  })
+  it("denies undeclared artifact storage", async () => {
+    const f = await fixture(
+      'on.command({id:"report",command:"quality:report"},async($)=>{await $.artifacts.create({label:"Report",text:"data"});return {text:"bad"}})',
+      { events: ["command.run"] }
+    )
+    await expect(
+      f.engine.command(
+        { ...f.request, identity: { ...f.request.identity, origin: "user-action" } },
+        "quality",
+        "quality:report",
+        {}
+      )
+    ).rejects.toThrow()
+  })
   it("applies current output protection when reading previously stored data", async () => {
     const { engine, request, store } = await fixture(
       `on.context({id:"stored"},async($)=>[

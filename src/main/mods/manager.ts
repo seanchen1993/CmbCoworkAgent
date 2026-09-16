@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { existsSync, realpathSync, writeFileSync } from "node:fs"
 import { basename } from "node:path"
 import type {
   ModCard,
+  ModCommandDescriptor,
   ModDiagnostic,
   ModIdentity,
   ModObject,
@@ -31,6 +32,7 @@ export interface ModPluginSource {
   enabled: boolean
 }
 export interface ModThreadBinding {
+  commandOnly?: boolean
   threadId: string
   turnId: string
   workspace: string
@@ -181,6 +183,8 @@ export class ModsManager {
     })
     this.settings.set(key, next)
     this.clearActions(key)
+    for (const binding of this.bindings.values())
+      if (binding.workspace === key) this.notifyCards(binding.threadId)
     for (const [controller, workspace] of this.activeActions)
       if (workspace === key) controller.abort()
   }
@@ -304,6 +308,11 @@ export class ModsManager {
     const key = `${binding.threadId}:${binding.agentId ?? "main"}`
     this.bindings.set(key, { ...binding, workspace: this.workspaceKey(binding.workspace) })
     if (this.bindings.size > 100) this.bindings.delete(this.bindings.keys().next().value!)
+  }
+
+  needsCommandBinding(threadId: string): boolean {
+    const binding = this.bindings.get(`${threadId}:main`)
+    return !binding || binding.commandOnly === true
   }
 
   bindMcp(
@@ -513,6 +522,23 @@ export class ModsManager {
         assertEpoch()
         const grant = this.store.getGrant(binding.workspace, card.modId)
         if (!grant?.enabled) throw new ModError("MODS_GRANT_REVOKED")
+        const checkArtifacts = (nodes: ModUiNode[]): void => {
+          for (const node of nodes) {
+            if (node.type === "card") checkArtifacts(node.children)
+            if (node.type === "artifact-link") {
+              const artifact = this.store.artifact(node.artifactId)
+              if (
+                !artifact ||
+                artifact.workspace !== binding.workspace ||
+                artifact.threadId !== binding.threadId ||
+                artifact.modId !== card.modId ||
+                artifact.digest !== grant.digest
+              )
+                throw new ModError("MODS_ARTIFACT_SCOPE")
+            }
+          }
+        }
+        checkArtifacts(card.nodes)
         this.store.saveCard(card.id, binding.threadId, {
           card,
           grant,
@@ -611,6 +637,146 @@ export class ModsManager {
     }
   }
 
+  async commands(workspace: string, threadId: string): Promise<ModCommandDescriptor[]> {
+    workspace = this.workspaceKey(workspace)
+    if (!this.config(workspace).enabled) return []
+    const binding = this.bindings.get(`${threadId}:main`) ?? {
+      workspace,
+      threadId,
+      turnId: `commands:${threadId}`
+    }
+    if (binding.workspace !== workspace) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    const session = await this.session(binding)
+    const identity: ModIdentity = {
+      workspace,
+      threadId,
+      turnId: binding.turnId,
+      agentId: "main",
+      callId: randomUUID(),
+      origin: "user-action",
+      grantEpoch: 0
+    }
+    return session.engine
+      .commands(this.request(binding, identity, "host:command", {}))
+      .map((entry) => ({
+        turnId: binding.turnId,
+        modId: entry.modId,
+        name: entry.name,
+        command: entry.command,
+        digest: entry.grant.digest,
+        grantEpoch: entry.grant.epoch,
+        workspaceEpoch: this.config(workspace).epoch
+      }))
+  }
+
+  async artifact(
+    workspace: string,
+    threadId: string,
+    id: string
+  ): Promise<{ label: string; text: string }> {
+    workspace = this.workspaceKey(workspace)
+    const artifact = this.store.artifact(id)
+    const grant = artifact && this.store.getGrant(workspace, artifact.modId)
+    if (
+      !artifact ||
+      artifact.threadId !== threadId ||
+      artifact.workspace !== workspace ||
+      !grant?.enabled ||
+      grant.digest !== artifact.digest
+    )
+      throw new ModError("MODS_ARTIFACT_UNAVAILABLE")
+    const published = await this.publish(workspace, { label: artifact.label, text: artifact.text })
+    this.store.assertGrant(grant)
+    return published
+  }
+
+  async runCommand(
+    workspace: string,
+    threadId: string,
+    expected: ModCommandDescriptor,
+    args: ModObject,
+    signal: AbortSignal
+  ): Promise<ModProjection> {
+    workspace = this.workspaceKey(workspace)
+    if (!this.config(workspace).enabled || this.config(workspace).epoch !== expected.workspaceEpoch)
+      throw new ModError("MODS_SCOPE_CHANGED")
+    this.store.assertGrant({
+      workspace,
+      modId: expected.modId,
+      digest: expected.digest,
+      epoch: expected.grantEpoch,
+      enabled: true
+    })
+    const saved = this.bindings.get(`${threadId}:main`)
+    if (saved && saved.turnId !== expected.turnId) throw new ModError("MODS_COMMAND_STALE")
+    if (saved && saved.workspace !== workspace) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    const binding: ModThreadBinding = {
+      ...(saved ?? { workspace, threadId, turnId: `commands:${threadId}` }),
+      signal: saved?.signal ? AbortSignal.any([saved.signal, signal]) : signal
+    }
+    const session = await this.session(binding)
+    const controller = new AbortController()
+    binding.signal = AbortSignal.any([binding.signal!, controller.signal])
+    this.activeActions.set(controller, workspace)
+    session.refs++
+    try {
+      const identity: ModIdentity = {
+        workspace,
+        threadId,
+        turnId: binding.turnId,
+        agentId: "main",
+        callId: randomUUID(),
+        origin: "user-action",
+        modId: expected.modId,
+        grantEpoch: expected.grantEpoch
+      }
+      return await session.engine.command(
+        this.request(binding, identity, "host:command", args, true),
+        expected.modId,
+        expected.command,
+        args
+      )
+    } finally {
+      session.refs--
+      this.activeActions.delete(controller)
+    }
+  }
+
+  async finishTurn(threadId: string): Promise<void> {
+    const binding = this.bindings.get(`${threadId}:main`)
+    if (!binding || !this.config(binding.workspace).enabled) return
+    const key = `summary:${createHash("sha256").update(threadId).update("\0").update(binding.turnId).digest("hex")}`
+    if (this.store.getSetting(key) === "true") return
+    this.store.setSetting(key, "true")
+    const session = await this.session(binding)
+    session.refs++
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5000)
+    timer.unref()
+    try {
+      const identity: ModIdentity = {
+        workspace: binding.workspace,
+        threadId,
+        turnId: binding.turnId,
+        agentId: "main",
+        callId: `turn:${binding.turnId}`,
+        origin: "model",
+        grantEpoch: 0
+      }
+      const counts = this.store.turnSummary(binding.workspace, threadId, binding.turnId)
+      await session.engine.summary(
+        this.request({ ...binding, signal: controller.signal }, identity, "host:turn_summary", {}),
+        {
+          text: `本轮工具：成功 ${counts.succeeded}，失败 ${counts.failed}，待核查 ${counts.unknown}，未执行 ${counts.not_started}。`,
+          data: counts
+        }
+      )
+    } finally {
+      clearTimeout(timer)
+      session.refs--
+    }
+  }
+
   listCards(threadId: string, callId: string, senderId: number): ModCard[] {
     const list = (this.store.cards(threadId) as StoredCard[]).filter(
       (item) => !callId || item.card.callId === callId
@@ -672,7 +838,12 @@ export class ModsManager {
     })
   }
 
-  async act(senderId: number, threadId: string, actionId: string): Promise<ModProjection> {
+  async act(
+    senderId: number,
+    threadId: string,
+    actionId: string,
+    signal?: AbortSignal
+  ): Promise<ModProjection> {
     const action = this.actions.get(actionId)
     if (
       !action ||
@@ -703,9 +874,11 @@ export class ModsManager {
     timer.unref()
     const actionBinding = {
       ...binding,
-      signal: binding.signal
-        ? AbortSignal.any([binding.signal, controller.signal])
-        : controller.signal
+      signal: AbortSignal.any([
+        controller.signal,
+        ...(binding.signal ? [binding.signal] : []),
+        ...(signal ? [signal] : [])
+      ])
     }
     session.refs++
     try {

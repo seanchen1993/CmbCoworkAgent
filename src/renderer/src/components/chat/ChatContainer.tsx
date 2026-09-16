@@ -1,4 +1,7 @@
 import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { useModCommands } from "../../features/slash-commands/useModCommands"
+import { ModCommandJobs } from "./ModCommandJobs"
+import { ModCards } from "./ModCards"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
@@ -4996,11 +4999,13 @@ export function ChatContainer({
     threadMessages.length
   ])
 
+  const modCommands = useModCommands(threadId)
   const slash = useSlashCommands({
     input,
     skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null,
-    browserSelected: selectedBuiltinBrowser
+    browserSelected: selectedBuiltinBrowser,
+    modCommands: modCommands.items
   })
   const loadMoreWorkspaceMentionFiles = useCallback(
     async (signal: AbortSignal) => {
@@ -5421,6 +5426,16 @@ export function ChatContainer({
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
     if (readOnly) return
     if (contextReminderPending) return
+    if (/^\/mod(?:\s|$)/i.test(trimmedInput)) {
+      if (historyLoading) return
+      if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser) {
+        setError("Mods 命令只接收 JSON 参数，请先移除附件、技能和浏览器选择。")
+        return
+      }
+      try { if (await modCommands.submit(trimmedInput)) setInput("") }
+      catch (error) { setError(error instanceof Error ? error.message : "Mods 命令提交失败") }
+      return
+    }
     // A plain (non-/goal) message submitted while the thread is busy — running,
     // or a tool approval is pending — is parked in the draft queue instead of
     // being blocked (running) or interrupting the run (approval). Every /goal
@@ -8300,6 +8315,8 @@ export function ChatContainer({
               )}
             >
               <GitChangeNotice threadId={threadId} />
+              <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
+              <ModCommandJobs key={threadId} threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
                   visible={chatScrollUiState.mode === "detached"}

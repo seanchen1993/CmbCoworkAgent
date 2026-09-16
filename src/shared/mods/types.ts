@@ -18,6 +18,7 @@ export interface ModManifest {
     writeTools: string[]
     context: string[]
     store: boolean
+    artifacts?: boolean
   }
   activation: "project" | "plugin"
   before?: string[]
@@ -61,6 +62,18 @@ export type ModUiNode =
   | { type: "card"; title: string; children: ModUiNode[] }
   | { type: "table"; columns: string[]; rows: string[][] }
   | { type: "button"; label: string; command: string; args: ModObject; actionId?: string }
+  | { type: "artifact-link"; label: string; artifactId: string }
+
+export interface ModArtifact {
+  id: string
+  workspace: string
+  threadId: string
+  modId: string
+  digest: string
+  label: string
+  text: string
+  createdAt: number
+}
 
 export interface ModCard {
   id: string
@@ -70,6 +83,29 @@ export interface ModCard {
   threadId: string
   callId: string
   nodes: ModUiNode[]
+  slot?: "tool.result.after" | "turn.summary"
+}
+
+export interface ModCommandDescriptor {
+  turnId: string
+  modId: string
+  name: string
+  command: string
+  digest: string
+  grantEpoch: number
+  workspaceEpoch: number
+}
+
+export interface ModCommandJob {
+  id: string
+  threadId: string
+  workspace: string
+  command: string
+  state: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "unknown"
+  createdAt: number
+  finishedAt?: number
+  result?: ModProjection
+  error?: string
 }
 
 export interface ModDiagnostic {

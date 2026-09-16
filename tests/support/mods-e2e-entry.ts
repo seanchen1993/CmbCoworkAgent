@@ -1,6 +1,11 @@
 // Compiled only by CMB_MODS_E2E=1. No IPC handler or production test backdoor.
 import { LocalSandbox } from "../../src/main/agent/local-sandbox"
-import { getModsManager, setModsManager } from "../../src/main/mods/manager"
+import { getModsManager, setModsManager, ModsManager } from "../../src/main/mods/manager"
+import { DEFAULT_MOD_POLICY } from "../../src/main/mods/policy"
+import {
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../../src/main/agent/thread-run-lease"
 import { withModToolCall } from "../../src/main/mods/adapters"
 import { ModRuntimeClient } from "../../src/main/mods/runtime-client"
 import { ModControlStore } from "../../src/main/mods/control-store"
@@ -13,6 +18,67 @@ interface Scope {
   turnId: string
 }
 const backends = new Map<string, LocalSandbox>()
+export function setThreadBusy(threadId: string, busy: boolean): void {
+  if (busy) {
+    if (!claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "mods-e2e-model" }).acquired)
+      throw Error("Thread unexpectedly busy")
+  } else releaseLocalThreadRunLease(threadId, "desktop", "mods-e2e-model")
+}
+export async function finishTurn(threadId: string): Promise<void> {
+  await getModsManager()!.finishTurn(threadId)
+}
+export async function managedPolicyProbe(scope: Scope): Promise<unknown> {
+  const manager = new ModsManager(
+    join(scope.workspace, "managed-policy.sqlite"),
+    () => [],
+    async () => true,
+    () => {},
+    join(__dirname, "mod-host.js"),
+    {
+      ...DEFAULT_MOD_POLICY,
+      required: true,
+      denyTools: ["host:write_file"],
+      redactLiterals: ["corporate-sensitive-fixture"]
+    }
+  )
+  let executions = 0
+  let blocked = false
+  let required = false
+  try {
+    try {
+      manager.configure(scope.workspace, false, false)
+    } catch {
+      required = true
+    }
+    try {
+      await manager.dispatch(scope, "host:write_file", {}, async () => ++executions)
+    } catch {
+      blocked = true
+    }
+    const result = await manager.dispatch(scope, "host:read_file", {}, async () => ({
+      text: "corporate-sensitive-fixture",
+      raw: { value: "corporate-sensitive-fixture" },
+      metadata: { password: "do-not-publish" }
+    }))
+    manager.policy.stop()
+    const rebuilt = await manager.dispatch(
+      scope,
+      "host:read_file",
+      {},
+      async () => "corporate-sensitive-fixture"
+    )
+    return {
+      required,
+      blocked,
+      executions,
+      result,
+      rebuilt,
+      audit: manager.store.audit(manager.workspaceKey(scope.workspace))
+    }
+  } finally {
+    manager.close()
+  }
+}
 export async function runTool(
   scope: Scope,
   callId: string,

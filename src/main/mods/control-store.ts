@@ -2,7 +2,14 @@ import { createHash } from "node:crypto"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import type { ModExecution, ModJson, ModIdentity, ModAuditEntry } from "../../shared/mods/types"
+import type {
+  ModExecution,
+  ModJson,
+  ModIdentity,
+  ModAuditEntry,
+  ModCommandJob,
+  ModArtifact
+} from "../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { ModError } from "./errors"
 
@@ -43,9 +50,13 @@ export class ModControlStore {
       );
       CREATE INDEX IF NOT EXISTS mods_cards_thread ON mods_cards(thread_id,at);
       CREATE TABLE IF NOT EXISTS mods_consumed_actions (id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS mods_jobs (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload TEXT NOT NULL, at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS mods_jobs_thread ON mods_jobs(thread_id,at);
+      CREATE TABLE IF NOT EXISTS mods_artifacts (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload TEXT NOT NULL, at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS mods_artifacts_thread ON mods_artifacts(thread_id,at);
     `)
       const version = this.getSetting("schema", "")
-      if (version && !["1", "2", "3"].includes(version)) {
+      if (version && !["1", "2", "3", "4"].includes(version)) {
         throw new ModError("MODS_STORE_VERSION")
       }
       const columns = new Set(
@@ -73,9 +84,22 @@ export class ModControlStore {
       CREATE INDEX IF NOT EXISTS mods_calls_workspace ON mods_calls(workspace,at);
       CREATE INDEX IF NOT EXISTS mods_calls_thread ON mods_calls(thread_id,at);
     `)
-      this.setSetting("schema", "3")
+      this.setSetting("schema", "4")
       // An interrupted operation may have reached an external service. Never replay it.
       this.db.prepare("UPDATE mods_calls SET status = 'unknown' WHERE status = 'running'").run()
+      for (const row of this.db
+        .prepare(
+          "SELECT payload FROM mods_jobs WHERE json_extract(payload,'$.state') IN ('queued','running')"
+        )
+        .all()) {
+        const job = parseModJson(String(row.payload)) as unknown as ModCommandJob
+        this.saveJob({
+          ...job,
+          state: job.state === "queued" ? "cancelled" : "unknown",
+          error: "MODS_PROCESS_RESTARTED",
+          finishedAt: Date.now()
+        })
+      }
     } catch (error) {
       this.db.close()
       throw error
@@ -85,6 +109,75 @@ export class ModControlStore {
   getSetting(key: string, fallback = "false"): string {
     const row = this.db.prepare("SELECT value FROM mods_meta WHERE key = ?").get(key)
     return typeof row?.value === "string" ? row.value : fallback
+  }
+
+  saveJob(job: ModCommandJob): void {
+    const text = encodeModJson(job)
+    if (Buffer.byteLength(text) > 64 * 1024) throw new ModError("MODS_JOB_RESULT_LIMIT")
+    this.db
+      .prepare(
+        "INSERT INTO mods_jobs VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload"
+      )
+      .run(job.id, job.threadId, text, job.createdAt)
+    this.db
+      .prepare(
+        "DELETE FROM mods_jobs WHERE thread_id=? AND json_extract(payload,'$.state') NOT IN ('queued','running') AND id NOT IN (SELECT id FROM mods_jobs WHERE thread_id=? ORDER BY at DESC,rowid DESC LIMIT 50)"
+      )
+      .run(job.threadId, job.threadId)
+  }
+
+  jobs(threadId: string): ModCommandJob[] {
+    return this.db
+      .prepare(
+        "SELECT payload FROM mods_jobs WHERE thread_id=? ORDER BY at DESC,rowid DESC LIMIT 50"
+      )
+      .all(threadId)
+      .map((row) => parseModJson(String(row.payload)) as unknown as ModCommandJob)
+  }
+
+  turnSummary(workspace: string, threadId: string, turnId: string): Record<ModExecution, number> {
+    const counts: Record<ModExecution, number> = {
+      not_started: 0,
+      running: 0,
+      succeeded: 0,
+      failed: 0,
+      unknown: 0
+    }
+    for (const row of this.db
+      .prepare(
+        "SELECT status,COUNT(*) AS n FROM mods_calls WHERE workspace=? AND thread_id=? AND json_extract(scope,'$.turnId')=? GROUP BY status"
+      )
+      .all(workspace, threadId, turnId))
+      if (Object.hasOwn(counts, String(row.status)))
+        counts[String(row.status) as ModExecution] = Number(row.n)
+    return counts
+  }
+
+  saveArtifact(artifact: ModArtifact): void {
+    const text = encodeModJson(artifact)
+    if (Buffer.byteLength(text) > 256 * 1024) throw new ModError("MODS_ARTIFACT_LIMIT")
+    this.db.exec("BEGIN IMMEDIATE")
+    try {
+      this.db
+        .prepare("INSERT INTO mods_artifacts VALUES(?,?,?,?)")
+        .run(artifact.id, artifact.threadId, text, artifact.createdAt)
+      const total = this.db
+        .prepare(
+          "SELECT COUNT(*) AS n,SUM(length(CAST(payload AS BLOB))) AS bytes FROM mods_artifacts WHERE thread_id=?"
+        )
+        .get(artifact.threadId)!
+      if (Number(total.n) > 50 || Number(total.bytes) > 2 * 1024 * 1024)
+        throw new ModError("MODS_ARTIFACT_QUOTA")
+      this.db.exec("COMMIT")
+    } catch (error) {
+      this.db.exec("ROLLBACK")
+      throw error
+    }
+  }
+
+  artifact(id: string): ModArtifact | null {
+    const row = this.db.prepare("SELECT payload FROM mods_artifacts WHERE id=?").get(id)
+    return row ? (parseModJson(String(row.payload)) as unknown as ModArtifact) : null
   }
 
   setSetting(key: string, value: string): void {
@@ -238,7 +331,9 @@ export class ModControlStore {
     status: ModAuditEntry["publication"]
   ): void {
     this.db
-      .prepare("UPDATE mods_calls SET policy_digest=?,rule_ids=?,publication=? WHERE id=?")
+      .prepare(
+        "UPDATE mods_calls SET policy_digest=?,rule_ids=(SELECT json_group_array(value) FROM (SELECT value FROM json_each(COALESCE(mods_calls.rule_ids,'[]')) UNION SELECT value FROM json_each(?))),publication=? WHERE id=?"
+      )
       .run(digest, encodeModJson(ruleIds), status, id)
   }
 

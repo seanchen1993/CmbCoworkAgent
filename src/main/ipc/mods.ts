@@ -1,5 +1,6 @@
 import { app, dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { join } from "node:path"
+import { writeFile } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { getThreadCore } from "../db"
 import { getOpenworkDir, getPlugins } from "../storage"
@@ -7,6 +8,11 @@ import { ModsManager, setModsManager, setModsUnavailable } from "../mods/manager
 import { ModError, modErrorCode } from "../mods/errors"
 import { installPluginFromDir } from "./plugins"
 import { readManagedModDeployment } from "../mods/policy"
+import { ModCommandQueue } from "../mods/command-queue"
+import { bindStandaloneModCommand } from "../mods/command-backend"
+import { encodeModJson, parseModJson } from "../../shared/mods/validation"
+import type { ModCommandDescriptor, ModObject } from "../../shared/mods/types"
+import { resolveAgentModeFromMetadata } from "../../shared/agent-mode-metadata"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -51,7 +57,12 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return
   }
   setModsManager(manager)
+  const queue = new ModCommandQueue(manager.store, (threadId) => {
+    const owner = window()
+    if (owner && !owner.isDestroyed()) owner.webContents.send("mods:jobs-changed", { threadId })
+  })
   app.once("will-quit", () => {
+    queue.close()
     setModsManager(undefined)
     manager.close()
   })
@@ -87,6 +98,113 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     if (typeof metadata?.workspacePath !== "string") throw new ModError("MODS_WORKSPACE_REQUIRED")
     return manager.workspaceKey(metadata.workspacePath)
   }
+  function writableScope(event: IpcMainInvokeEvent, threadId: string): string {
+    const workspace = scope(event, threadId)
+    const thread = getThreadCore(threadId)!
+    const metadata =
+      typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
+    if (
+      metadata?.remoteState === "historical" ||
+      (metadata?.targetKind === "inbox" && metadata?.remoteReadOnly === true)
+    )
+      throw new ModError("MODS_THREAD_READ_ONLY")
+    return workspace
+  }
+  ipcMain.handle("mods:commands", (event, threadId: string) =>
+    manager.commands(scope(event, threadId), threadId)
+  )
+  ipcMain.handle("mods:artifact", (event, input: { threadId: string; id: string }) => {
+    const workspace = scope(event, input?.threadId)
+    if (typeof input.id !== "string" || !/^[a-f0-9-]{36}$/.test(input.id))
+      throw new ModError("MODS_ARTIFACT_ID")
+    return manager.artifact(workspace, input.threadId, input.id)
+  })
+  ipcMain.handle("mods:save-artifact", async (event, input: { threadId: string; id: string }) => {
+    const workspace = scope(event, input?.threadId)
+    if (typeof input.id !== "string" || !/^[a-f0-9-]{36}$/.test(input.id))
+      throw new ModError("MODS_ARTIFACT_ID")
+    const owner = window()!
+    await manager.artifact(workspace, input.threadId, input.id)
+    const choice = await dialog.showSaveDialog(owner, {
+      title: "导出检查后的文本产物",
+      defaultPath: "mod-result.txt",
+      filters: [{ name: "Text", extensions: ["txt"] }]
+    })
+    if (choice.canceled || !choice.filePath) return false
+    const content = await manager.artifact(workspace, input.threadId, input.id)
+    await writeFile(choice.filePath, content.text, { encoding: "utf8", flag: "wx" })
+    return true
+  })
+  ipcMain.handle(
+    "mods:enqueue",
+    async (
+      event,
+      input: { threadId: string; descriptor: ModCommandDescriptor; args: ModObject }
+    ) => {
+      const workspace = writableScope(event, input?.threadId)
+      const args = parseModJson(encodeModJson(input.args))
+      if (
+        !args ||
+        typeof args !== "object" ||
+        Array.isArray(args) ||
+        encodeModJson(args).length > 16_000
+      )
+        throw new ModError("MODS_COMMAND_ARGS")
+      const candidate = (await manager.commands(workspace, input.threadId)).find(
+        (entry) => entry.command === input.descriptor?.command
+      )
+      if (
+        !candidate ||
+        candidate.digest !== input.descriptor.digest ||
+        candidate.grantEpoch !== input.descriptor.grantEpoch ||
+        candidate.workspaceEpoch !== input.descriptor.workspaceEpoch ||
+        candidate.turnId !== input.descriptor.turnId
+      )
+        throw new ModError("MODS_COMMAND_STALE")
+      return queue.enqueue(workspace, input.threadId, candidate.command, async (signal) => {
+        if (writableScope(event, input.threadId) !== workspace)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        let cleanup: (() => Promise<void>) | undefined
+        if (manager.needsCommandBinding(input.threadId)) {
+          const thread = getThreadCore(input.threadId)!
+          const metadata =
+            typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
+          if (
+            resolveAgentModeFromMetadata(metadata) !== "normal" ||
+            metadata?.harnessProjectId ||
+            metadata?.featureId ||
+            metadata?.workflowRunId ||
+            metadata?.parentThreadId
+          )
+            throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
+          cleanup = bindStandaloneModCommand(workspace, input.threadId, candidate.turnId, signal)
+        }
+        try {
+          return await manager.runCommand(
+            workspace,
+            input.threadId,
+            candidate,
+            args as ModObject,
+            signal
+          )
+        } finally {
+          await cleanup?.()
+        }
+      }).job
+    }
+  )
+  ipcMain.handle("mods:jobs", async (event, threadId: string) => {
+    const workspace = scope(event, threadId)
+    const jobs = manager.store.jobs(threadId).filter((job) => job.workspace === workspace)
+    for (const job of jobs)
+      if (job.result) job.result = await manager.publish(workspace, job.result)
+    return jobs
+  })
+  ipcMain.handle("mods:cancel-job", (event, input: { threadId: string; id: string }) => {
+    writableScope(event, input?.threadId)
+    if (typeof input.id !== "string") throw new ModError("MODS_JOB_UNAVAILABLE")
+    queue.cancel(input.threadId, input.id)
+  })
   ipcMain.handle("mods:status", (event, threadId: string) => manager.status(scope(event, threadId)))
   ipcMain.handle(
     "mods:configure",
@@ -163,9 +281,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return true
   })
   ipcMain.handle("mods:act", (event, input: { threadId: string; actionId: string }) => {
-    scope(event, input?.threadId)
+    const workspace = writableScope(event, input?.threadId)
     if (typeof input.actionId !== "string") throw new ModError("MODS_ACTION_INVALID")
-    return manager.act(event.sender.id, input.threadId, input.actionId)
+    return queue.enqueue(workspace, input.threadId, "卡片操作", (signal) => {
+      if (writableScope(event, input.threadId) !== workspace)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      return manager.act(event.sender.id, input.threadId, input.actionId, signal)
+    }).completion
   })
   ipcMain.handle("mods:install-examples", async (event) => {
     trusted(event)
