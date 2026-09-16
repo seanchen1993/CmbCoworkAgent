@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { ModCommandDescriptor } from "../../../../shared/mods/types"
 import { parseModCommandInput } from "../../../../shared/mods/command-input"
+import { parseFunctionCommandInput } from "../../../../shared/mods/v2/command-input"
 import type { SlashCommandItem } from "./useSlashCommands"
 
 export function useModCommands(threadId: string) {
@@ -27,27 +28,49 @@ export function useModCommands(threadId: string) {
     const stop = window.api.mods.onCardsChanged((event) => {
       if (event.threadId === threadId) refresh()
     })
+    const stopJobs = window.api.mods.onJobsChanged((event) => {
+      if (event.threadId === threadId) refresh()
+    })
     return () => {
       live = false
       stop()
+      stopJobs()
       window.removeEventListener("focus", refresh)
       window.removeEventListener("mods:configuration-changed", refresh)
     }
   }, [threadId])
   const items = useMemo<SlashCommandItem[]>(
     () =>
-      commands.map((entry) => ({
-        id: `mod:${entry.command}`,
-        title: entry.command,
-        command: `/mod ${entry.command}`,
-        usage: `/mod ${entry.command} [JSON 参数]`,
-        description: `${entry.name} · 会话空闲后执行，写操作仍需批准`,
-        insertText: `/mod ${entry.command} `,
-        keywords: ["mod", "mods", entry.name, entry.command]
-      })),
+      commands
+        .filter((entry) => !entry.isHidden)
+        .map((entry) => ({
+          id: `mod:${entry.command}`,
+          title: entry.command,
+          command:
+            entry.apiVersion === "cmb.mods/v2" ? `/${entry.command}` : `/mod ${entry.command}`,
+          usage:
+            entry.apiVersion === "cmb.mods/v2"
+              ? `/${entry.command} ${entry.argumentHint ?? ""}`
+              : `/mod ${entry.command} [JSON 参数]`,
+          description: `${entry.name} · ${entry.immediate ? "可在运行中使用" : "会话空闲后执行"}`,
+          insertText:
+            entry.apiVersion === "cmb.mods/v2" ? `/${entry.command} ` : `/mod ${entry.command} `,
+          keywords: ["mod", "mods", entry.name, entry.command]
+        })),
     [commands]
   )
   async function submit(text: string): Promise<boolean> {
+    const direct = parseFunctionCommandInput(text, commands)
+    if (direct) {
+      if (submitting.current) return true
+      submitting.current = true
+      try {
+        await window.api.mods.enqueue(threadId, direct.descriptor, { text: direct.args })
+      } finally {
+        submitting.current = false
+      }
+      return true
+    }
     const parsed = parseModCommandInput(text)
     if (!parsed) return false
     if (submitting.current) return true
@@ -61,5 +84,9 @@ export function useModCommands(threadId: string) {
     }
     return true
   }
-  return { items, submit }
+  return {
+    items,
+    submit,
+    handles: (text: string) => parseFunctionCommandInput(text, commands) !== null
+  }
 }

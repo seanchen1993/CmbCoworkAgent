@@ -5000,6 +5000,7 @@ export function ChatContainer({
   ])
 
   const modCommands = useModCommands(threadId)
+  const isModCommandInput = modCommands.handles(input.trim())
   const slash = useSlashCommands({
     input,
     skills: enabledSkillsForSlash,
@@ -5426,10 +5427,10 @@ export function ChatContainer({
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
     if (readOnly) return
     if (contextReminderPending) return
-    if (/^\/mod(?:\s|$)/i.test(trimmedInput)) {
+    if (/^\/mod(?:\s|$)/i.test(trimmedInput) || modCommands.handles(trimmedInput)) {
       if (historyLoading) return
       if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser) {
-        setError("Mods 命令只接收 JSON 参数，请先移除附件、技能和浏览器选择。")
+        setError("Mods 命令接收文本参数，请先移除附件、技能和浏览器选择。")
         return
       }
       try { if (await modCommands.submit(trimmedInput)) setInput("") }
@@ -8985,11 +8986,11 @@ export function ChatContainer({
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
                           {isLoading ? (
                             <>
-                              {canSubmitGoalCommandWhileLoading && (
+                              {(canSubmitGoalCommandWhileLoading || isModCommandInput) && (
                                 <button
                                   type="submit"
-                                  disabled={goalSendButtonDisabledWhileLoading}
-                                  aria-label="发送 goal 命令"
+                                  disabled={isModCommandInput ? slash.mode.kind === "slash" : goalSendButtonDisabledWhileLoading}
+                                  aria-label={isModCommandInput ? "执行 Mods 命令" : "发送 goal 命令"}
                                   className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
                                   <ArrowUp className="size-5" strokeWidth={1.75} />

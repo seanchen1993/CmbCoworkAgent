@@ -576,6 +576,111 @@ async function main(): Promise<void> {
     await page!.getByText("审计摘要", { exact: true }).first().waitFor()
     await page!.screenshot({ path: join(artifacts, "settings.png") })
     pass("production settings panel renders project grants")
+    const functionSettings = page!.locator('[data-function-mod-id="function-commands"]')
+    await functionSettings.waitFor()
+    await functionSettings.getByRole("button", { name: "授权以上能力", exact: true }).click()
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.status(id), threadId)).functionMods?.some(
+          (mod) => mod.name === "function-commands" && mod.state === "ready"
+        ) === true,
+      "function plugin approved through React"
+    )
+    await page!.screenshot({ path: join(artifacts, "function-grant.png") })
+    await page!.getByRole("button", { name: "返回会话", exact: true }).click()
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    const functionComposer = page!.locator("textarea.composer-textarea")
+    await functionComposer.fill("/claw")
+    await page!.getByText("claw-info", { exact: true }).first().waitFor()
+    const [functionCommand] = (
+      await page!.evaluate((id) => window.api.mods.commands(id), threadId)
+    ).filter((command) => command.apiVersion === "cmb.mods/v2")
+    assert.equal(functionCommand.command, "claw-info")
+    await app.evaluate(
+      (_electron, id) =>
+        (
+          globalThis as unknown as {
+            modsFixture: { setThreadBusy(id: string, busy: boolean): void }
+          }
+        ).modsFixture.setThreadBusy(id, true),
+      threadId
+    )
+    for (const count of [1, 2]) {
+      await functionComposer.fill(`/claw-info 查询${count}`)
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+            (job) =>
+              job.command === "claw-info" &&
+              job.state === "succeeded" &&
+              job.result?.text.includes(`本次会话查询：${count}`) === true
+          ),
+        "immediate function command completes while model lease is held"
+      )
+    }
+    await app.evaluate(
+      (_electron, id) =>
+        (
+          globalThis as unknown as {
+            modsFixture: { setThreadBusy(id: string, busy: boolean): void }
+          }
+        ).modsFixture.setThreadBusy(id, false),
+      threadId
+    )
+    const functionResult = page!
+      .locator("[data-mod-jobs] pre")
+      .filter({ hasText: "本次会话查询：2" })
+    await functionResult.waitFor({ state: "visible" })
+    await functionResult.scrollIntoViewIfNeeded()
+    await page!.screenshot({ path: join(artifacts, "function-command.png") })
+    pass(
+      "standard function plugin grants, direct text commands, persistent state and immediate queries work through production UI"
+    )
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await page!.locator("textarea.composer-textarea").fill("/claw-info 重载后")
+    await page!.locator("textarea.composer-textarea").press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+          (job) =>
+            job.command === "claw-info" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("本次会话查询：3") === true
+        ),
+      "renderer reload keeps function session state"
+    )
+    await page!.getByRole("button", { name: "自定义", exact: true }).click()
+    await page!.getByRole("button", { name: "插件", exact: true }).click()
+    await page!
+      .locator('[data-function-mod-id="function-commands"]')
+      .getByRole("button", { name: "撤销权限", exact: true })
+      .click()
+    await until(
+      async () =>
+        !(await page!.evaluate((id) => window.api.mods.commands(id), threadId)).some(
+          (command) => command.apiVersion === "cmb.mods/v2"
+        ),
+      "revoked function commands disappear"
+    )
+    assert.equal(
+      await page!.evaluate(
+        async ({ id, descriptor }) => {
+          try {
+            await window.api.mods.enqueue(id, descriptor, { text: "stale" })
+            return false
+          } catch {
+            return true
+          }
+        },
+        { id: threadId, descriptor: functionCommand }
+      ),
+      true
+    )
+    pass(
+      "renderer reload preserves function state; revoking a digest removes commands and rejects stale execution"
+    )
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})

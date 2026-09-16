@@ -42,7 +42,9 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
   return (
     <details
       className="mx-auto my-2 max-w-3xl rounded border p-3 text-xs"
-      open={jobs.some((job) => job.state === "queued" || job.state === "running")}
+      open={jobs.some(
+        (job) => job.presentation === "inline" || job.state === "queued" || job.state === "running"
+      )}
       data-mod-jobs
     >
       <summary>Mods 命令（{jobs.length}）</summary>

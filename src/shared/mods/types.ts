@@ -87,6 +87,10 @@ export interface ModCard {
 }
 
 export interface ModCommandDescriptor {
+  apiVersion?: "cmb.mods/v2"
+  isHidden?: true
+  immediate?: true
+  argumentHint?: string
   turnId: string
   modId: string
   name: string
@@ -97,6 +101,7 @@ export interface ModCommandDescriptor {
 }
 
 export interface ModCommandJob {
+  presentation?: "inline"
   id: string
   threadId: string
   workspace: string
@@ -124,6 +129,7 @@ export interface ModStatus {
 }
 
 export interface ModWorkspaceStatus {
+  functionMods?: import("./v2/commands").FunctionPluginStatus[]
   workspace: string
   enabled: boolean
   outputPolicy: boolean

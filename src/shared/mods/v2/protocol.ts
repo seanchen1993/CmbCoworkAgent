@@ -25,6 +25,7 @@ export type FunctionRequest = {
 
 export type FunctionResponse =
   | { type: "ready" }
+  | { type: "disposed"; runtimeId: string }
   | { type: "heartbeat"; rss: number; runtimes: number; frames: number; replies: number }
   | { type: "result"; id: string; runtimeId: string; value: ModJson }
   | { type: "error"; id: string; runtimeId: string; error: FunctionWireError }

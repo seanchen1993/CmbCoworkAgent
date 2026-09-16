@@ -37,6 +37,7 @@ export class FunctionRuntimeClient {
   private generation = 0
   private readonly pending = new Map<string, Pending>()
   private readonly calls = new Map<string, { requestId: string; controller: AbortController }>()
+  private readonly deadRuntimes = new Set<string>()
   private remote = { rss: 0, runtimes: 0, frames: 0, replies: 0 }
 
   constructor(private readonly entry: string) {}
@@ -93,6 +94,10 @@ export class FunctionRuntimeClient {
 
   private onMessage(message: FunctionResponse): void {
     if (message.type === "ready") return
+    if (message.type === "disposed") {
+      this.deadRuntimes.add(message.runtimeId)
+      return
+    }
     if (message.type === "heartbeat") {
       this.heartbeatAt = Date.now()
       const { rss, runtimes, frames, replies } = message
@@ -211,10 +216,11 @@ export class FunctionRuntimeClient {
     })) as unknown as FunctionRegistration[]
     const generation = this.generation
     let disposed = false
-    const isDisposed = (): boolean => disposed || generation !== this.generation
+    const isDisposed = (): boolean =>
+      disposed || generation !== this.generation || this.deadRuntimes.has(runtimeId)
     const request = this.request.bind(this)
     const assertLive = (): void => {
-      if (disposed || generation !== this.generation) throw new ModFunctionError("MODS_UNLOADED")
+      if (isDisposed()) throw new ModFunctionError("MODS_UNLOADED")
     }
     return {
       registrations,
@@ -259,6 +265,7 @@ export class FunctionRuntimeClient {
     }
     for (const call of this.calls.values()) call.controller.abort(error)
     this.calls.clear()
+    this.deadRuntimes.clear()
     this.pending.clear()
     child?.kill()
   }

@@ -35,6 +35,13 @@ export interface CompiledMod {
   code: string
 }
 
+/** Reads only bounded data; shared by version routing and both loaders. */
+export async function readModApiVersion(root: string, path: string): Promise<unknown> {
+  const file = resolveModFile(root, path)
+  const input = JSON.parse((await snapshot(root, file, 32768)).toString("utf8"))
+  return input && typeof input === "object" ? input.apiVersion : undefined
+}
+
 export function resolveModFile(root: string, input: string): string {
   if (!input || isAbsolute(input) || /[:\0]/.test(input)) throw new ModError("MODS_PATH_INVALID")
   const parts = input.replace(/\\/g, "/").split("/")

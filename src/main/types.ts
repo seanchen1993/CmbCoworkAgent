@@ -956,6 +956,7 @@ export interface PluginMcpServerDetail {
 }
 
 export interface PluginDetail {
+  modCount?: number
   skills: string[]
   mcpServers: string[]
   mcpServerDetails: PluginMcpServerDetail[]

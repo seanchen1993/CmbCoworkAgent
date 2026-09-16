@@ -60,4 +60,46 @@ describe("function plugin snapshot loader", () => {
       diagnostics: [{ code: "MODS_EVENT_PROVIDER_REQUIRED", pattern: "turn.typo" }]
     })
   })
+
+  it("resolves a custom hooks path relative to the package, then modules relative to hooks", async () => {
+    const root = await plugin(
+      "export function register(on){on('session.start',(_,e,next)=>next(e))}"
+    )
+    await writeFile(
+      join(root, ".claude-plugin/plugin.json"),
+      JSON.stringify({ name: "custom", hooks: "./hooks/custom.json" })
+    )
+    await writeFile(join(root, "hooks/custom.json"), JSON.stringify({ modules: ["./register.ts"] }))
+    const compiled = await compileFunctionPlugin(root)
+    expect(compiled.name).toBe("custom")
+    expect(compiled.sources).toContain("hooks/custom.json")
+    expect(compiled.code).toContain("session.start")
+  })
+
+  it("routes a native v2 manifest in a plugin package without requiring Claude hooks", async () => {
+    const root = await plugin("export function register(){}")
+    await writeFile(
+      join(root, ".claude-plugin/plugin.json"),
+      JSON.stringify({ name: "native-package", mods: "hooks/native.json" })
+    )
+    await writeFile(
+      join(root, "hooks/native.json"),
+      JSON.stringify({
+        apiVersion: "cmb.mods/v2",
+        id: "native",
+        entry: "register.ts",
+        options: { level: 2 }
+      })
+    )
+    const compiled = await compileFunctionPlugin(root)
+    expect(compiled).toMatchObject({ name: "native", options: { level: 2 } })
+    expect(compiled.sources).toContain("hooks/native.json")
+  })
+
+  it("rejects duplicate unqualified registrations as the upstream loader does", async () => {
+    const root = await plugin(
+      'export function register(on){on("session.id",()=>({value:"a"}));on("session.id",()=>({value:"b"}))}'
+    )
+    await expect(checkFunctionPlugin(root)).rejects.toThrow()
+  })
 })

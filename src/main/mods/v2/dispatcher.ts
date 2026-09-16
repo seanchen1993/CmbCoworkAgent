@@ -24,9 +24,11 @@ export interface FunctionPlugin {
 }
 
 export interface FunctionDispatchOptions {
+  skip?: { plugin: string; registration: string }
   origin?: ModOrigin
   signal?: AbortSignal
   timeoutMs?: number
+  operation?: boolean
   validateInput?(event: string, input: ModObject): void
   validateResult?(event: string, output: ModJson): void
   core(
@@ -42,7 +44,8 @@ export interface FunctionDispatchOptions {
     plugin: FunctionPlugin,
     method: string,
     args: ModJson,
-    signal: AbortSignal
+    signal: AbortSignal,
+    source: { event: string; registration: string }
   ): Promise<ModJson | undefined>
 }
 
@@ -69,7 +72,14 @@ export class FunctionDispatcher {
       .sort((a, b) => MOD_TIERS.indexOf(a.tier) - MOD_TIERS.indexOf(b.tier))
       .flatMap((plugin) =>
         plugin.guest.registrations
-          .filter((registration) => matchesEventPattern(registration.pattern, event))
+          .filter(
+            (registration) =>
+              matchesEventPattern(registration.pattern, event) &&
+              !(
+                options.skip?.plugin === plugin.name &&
+                options.skip.registration === registration.id
+              )
+          )
           .map((registration) => ({ plugin, registration }))
       )
     let requests = 0
@@ -174,7 +184,10 @@ export class FunctionDispatcher {
         if (method !== "next") {
           if (!plugin.capabilities.includes(method) || !options.capability)
             throw new ModFunctionError("MODS_CAPABILITY_DENIED")
-          const value = await options.capability(plugin, method, args, signal)
+          const value = await options.capability(plugin, method, args, signal, {
+            event,
+            registration: registration.id
+          })
           return value === undefined ? {} : { value }
         }
         // A recovery handler replays the last downstream call; it cannot accidentally repeat writes.
@@ -223,6 +236,7 @@ export class FunctionDispatcher {
           origin,
           capabilities: plugin.capabilities,
           plugin: { name: plugin.name, root: plugin.root },
+          ...(options.operation ? { operation: true } : {}),
           ...(options.signal ? { signal: options.signal } : {}),
           ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
           ...(caught ? { caught } : {})

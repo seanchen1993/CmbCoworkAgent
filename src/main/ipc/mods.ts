@@ -13,6 +13,8 @@ import { bindStandaloneModCommand } from "../mods/command-backend"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import type { ModCommandDescriptor, ModObject } from "../../shared/mods/types"
 import { resolveAgentModeFromMetadata } from "../../shared/agent-mode-metadata"
+import { FunctionModsManager } from "../mods/v2/manager"
+import { FunctionRuntimeClient } from "../mods/v2/runtime-client"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -57,6 +59,17 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return
   }
   setModsManager(manager)
+  const functions = new FunctionModsManager(
+    manager.store,
+    {
+      plugins: getPlugins,
+      enabled: (workspace) => manager.isEnabled(workspace),
+      publish: (workspace, value, signal) => manager.publish(workspace, value, undefined, signal),
+      changed: (threadId) => window()?.webContents.send("mods:cards-changed", { threadId })
+    },
+    () => new FunctionRuntimeClient(join(__dirname, "function-mod-host.js"))
+  )
+  manager.attachFunctions(functions)
   const queue = new ModCommandQueue(manager.store, (threadId) => {
     const owner = window()
     if (owner && !owner.isDestroyed()) owner.webContents.send("mods:jobs-changed", { threadId })
@@ -110,9 +123,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       throw new ModError("MODS_THREAD_READ_ONLY")
     return workspace
   }
-  ipcMain.handle("mods:commands", (event, threadId: string) =>
-    manager.commands(scope(event, threadId), threadId)
-  )
+  ipcMain.handle("mods:commands", async (event, threadId: string) => {
+    const workspace = scope(event, threadId)
+    return [
+      ...(await manager.commands(workspace, threadId)),
+      ...(await functions.commands(workspace, threadId))
+    ]
+  })
   ipcMain.handle("mods:artifact", (event, input: { threadId: string; id: string }) => {
     const workspace = scope(event, input?.threadId)
     if (typeof input.id !== "string" || !/^[a-f0-9-]{36}$/.test(input.id))
@@ -142,6 +159,33 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       input: { threadId: string; descriptor: ModCommandDescriptor; args: ModObject }
     ) => {
       const workspace = writableScope(event, input?.threadId)
+      if (input.descriptor?.apiVersion === "cmb.mods/v2") {
+        if (!input.args || typeof input.args.text !== "string" || input.args.text.length > 32000)
+          throw new ModError("MODS_COMMAND_ARGS")
+        const descriptor = (await functions.commands(workspace, input.threadId)).find(
+          (entry) => entry.command === input.descriptor.command
+        )
+        if (
+          !descriptor ||
+          descriptor.digest !== input.descriptor.digest ||
+          descriptor.grantEpoch !== input.descriptor.grantEpoch ||
+          descriptor.workspaceEpoch !== input.descriptor.workspaceEpoch ||
+          descriptor.modId !== input.descriptor.modId
+        )
+          throw new ModError("MODS_COMMAND_STALE")
+        const text = input.args.text
+        return queue.enqueue(
+          workspace,
+          input.threadId,
+          descriptor.command,
+          async (signal) => {
+            if (writableScope(event, input.threadId) !== workspace)
+              throw new ModError("MODS_CALL_SCOPE_CHANGED")
+            return functions.runCommand(workspace, input.threadId, descriptor, text, signal)
+          },
+          { immediate: descriptor.immediate === true, inlineResult: true }
+        ).job
+      }
       const args = parseModJson(encodeModJson(input.args))
       if (
         !args ||
@@ -210,7 +254,25 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     if (typeof input.id !== "string") throw new ModError("MODS_JOB_UNAVAILABLE")
     queue.cancel(input.threadId, input.id)
   })
-  ipcMain.handle("mods:status", (event, threadId: string) => manager.status(scope(event, threadId)))
+  ipcMain.handle("mods:status", async (event, threadId: string) => {
+    const workspace = scope(event, threadId)
+    return { ...(await manager.status(workspace)), functionMods: await functions.status(workspace) }
+  })
+  ipcMain.handle(
+    "mods:approve-function",
+    (event, input: { threadId: string; pluginId: string; digest: string }) => {
+      const workspace = scope(event, input?.threadId)
+      if (typeof input.pluginId !== "string" || !/^[a-f0-9]{64}$/.test(input.digest))
+        throw new ModError("MODS_GRANT_INVALID")
+      return functions.approve(workspace, input.pluginId, input.digest)
+    }
+  )
+  ipcMain.handle("mods:revoke-function", (event, input: { threadId: string; name: string }) => {
+    const workspace = scope(event, input?.threadId)
+    if (typeof input.name !== "string" || input.name.length > 100)
+      throw new ModError("MODS_GRANT_INVALID")
+    functions.revoke(workspace, input.name)
+  })
   ipcMain.handle(
     "mods:configure",
     (event, input: { threadId: string; enabled: boolean; outputPolicy: boolean }) => {
@@ -296,7 +358,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   })
   ipcMain.handle("mods:install-examples", async (event) => {
     trusted(event)
-    for (const name of ["project-quality", "company-output-policy"]) {
+    for (const name of ["project-quality", "company-output-policy", "function-commands"]) {
       const result = await installPluginFromDir(
         join(__dirname, "../resources/mods", name),
         name,

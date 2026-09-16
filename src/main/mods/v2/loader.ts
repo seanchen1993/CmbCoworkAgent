@@ -2,13 +2,19 @@ import { createHash } from "node:crypto"
 import { realpathSync, statSync } from "node:fs"
 import { dirname, extname, relative, resolve } from "node:path"
 import type { ModObject } from "../../../shared/mods/types"
-import { isModObject, CLAUDE_MODS_PROFILE, MODS_V2_API } from "../../../shared/mods/v2/contracts"
+import {
+  isModObject,
+  CLAUDE_MODS_PROFILE,
+  FUNCTION_HOST_REVISION,
+  MODS_V2_API
+} from "../../../shared/mods/v2/contracts"
 import { parseModJson } from "../../../shared/mods/validation"
 import {
   openStableFileHandle,
   readStableFileHandleBounded
 } from "../../services/stable-file-handle"
 import { modCompiler, resolveModFile } from "../loader"
+import { normalizePluginRelativePath, readPluginManifest } from "../../plugins/manifest"
 
 export interface CompiledFunctionPlugin {
   name: string
@@ -34,9 +40,11 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
   const root = realpathSync(directory)
   const captured = new Map<string, string>()
   const readJson = async (path: string): Promise<ModObject> => {
-    const file = resolveModFile(root, path)
+    const clean = normalizePluginRelativePath(path)
+    if (!clean) throw Error("MODS_PATH_INVALID")
+    const file = resolveModFile(root, clean)
     const text = (await read(root, file, 32768)).toString("utf8")
-    captured.set(path, text)
+    captured.set(clean, text)
     const result = parseModJson(text)
     if (!isModObject(result)) throw Error("MODS_MANIFEST_INVALID")
     return result
@@ -44,31 +52,37 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
   let name: string
   let modules: string[]
   let options: ModObject = {}
-  let claude = true
+  const packageInfo = readPluginManifest(root)
+  const packageManifest = packageInfo ? await readJson(packageInfo.relPath) : undefined
+  const nativePath =
+    typeof packageManifest?.mods === "string" ? packageManifest.mods : "mods/manifest.json"
+  let native: ModObject | undefined
   try {
-    resolveModFile(root, ".claude-plugin/plugin.json")
+    native = await readJson(nativePath)
   } catch (error) {
     if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
-    claude = false
   }
-  if (claude) {
-    const manifest = await readJson(".claude-plugin/plugin.json")
-    if (typeof manifest.name !== "string") throw Error("MODS_PLUGIN_NAME")
-    name = manifest.name
-    const hooks = await readJson("hooks/hooks.json")
+  if (packageManifest && native?.apiVersion !== MODS_V2_API) {
+    if (typeof packageManifest.name !== "string") throw Error("MODS_PLUGIN_NAME")
+    name = packageManifest.name
+    const hooksPath =
+      typeof packageManifest.hooks === "string" ? packageManifest.hooks : "hooks/hooks.json"
+    const hooks = await readJson(hooksPath)
     if (!Array.isArray(hooks.modules) || !hooks.modules.every((m) => typeof m === "string"))
       throw Error("MODS_MODULES_INVALID")
-    modules = hooks.modules.map((m) => relative(root, resolve(root, "hooks", m as string)))
+    modules = hooks.modules.map((m) =>
+      relative(root, resolve(root, dirname(hooksPath), m as string))
+    )
   } else {
-    const manifest = await readJson("mods/manifest.json")
+    const manifest = native
     if (
-      manifest.apiVersion !== MODS_V2_API ||
+      manifest?.apiVersion !== MODS_V2_API ||
       typeof manifest.id !== "string" ||
       typeof manifest.entry !== "string"
     )
       throw Error("MODS_MANIFEST_INVALID")
     name = manifest.id
-    modules = [relative(root, resolve(root, "mods", manifest.entry))]
+    modules = [relative(root, resolve(root, dirname(nativePath), manifest.entry))]
     if (manifest.options !== undefined) {
       if (!isModObject(manifest.options)) throw Error("MODS_OPTIONS_INVALID")
       options = manifest.options
@@ -162,6 +176,7 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
       JSON.stringify({
         name,
         profile: CLAUDE_MODS_PROFILE,
+        hostRevision: FUNCTION_HOST_REVISION,
         version,
         code,
         sources: [...captured].sort(([a], [b]) => a.localeCompare(b))

@@ -973,6 +973,8 @@ interface DashboardPluginAggregate {
 
 interface CustomAPI {
   mods: {
+    approveFunction(threadId: string, pluginId: string, digest: string): Promise<void>
+    revokeFunction(threadId: string, name: string): Promise<void>
     status(threadId: string): Promise<import("../shared/mods/types").ModWorkspaceStatus>
     configure(threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void>
     approve(threadId: string, pluginId: string, digest: string): Promise<void>

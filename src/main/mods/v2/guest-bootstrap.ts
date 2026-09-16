@@ -12,6 +12,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
   const handlers = new Map();
   const signals = new Map();
   const registrations = [];
+  const unqualified = new Set();
   let registering = true;
   function pack(value) {
     const text = stringify(value);
@@ -52,6 +53,10 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     if (!registering) throw Error("MODS_REGISTRATION_CLOSED");
     if (typeof matcher === "function") { fn = matcher; matcher = undefined; }
     if (typeof pattern !== "string" || typeof fn !== "function") throw Error("MODS_REGISTRATION_INVALID");
+    if (matcher === undefined) {
+      if (unqualified.has(pattern)) throw Error("MODS_DUPLICATE_REGISTRATION");
+      unqualified.add(pattern);
+    }
     if (registrations.length >= 128) throw Error("MODS_REGISTRATION_LIMIT");
     const id = String(registrations.length);
     const record = { id, pattern, hasCatch: false };
@@ -111,6 +116,9 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
         define(error, "__downstream", { value: reply.error.downstream === true });
         throw error;
       }
+      if (meta.operation && method === "next" && reply.value && typeof reply.value === "object" &&
+          !Object.hasOwn(reply.value, "value") && !Object.hasOwn(reply.value, "deny"))
+        reply.value.value = undefined;
       return frozen(reply.value);
     }
     function streamNext(input, tier) {
@@ -177,6 +185,9 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
         if (value === undefined) return pack({absent:true});
       } else value = await fn(sdk, event, next);
       if (value === undefined && meta.caught) return pack({ absent: true });
+      if (meta.operation && (!value || typeof value !== "object" || Array.isArray(value) ||
+          (!Object.hasOwn(value, "value") && typeof value.deny !== "string")))
+        throw Error("MODS_OPERATION_RESULT");
       return pack({ value });
     } catch (error) {
       return pack({ error: {

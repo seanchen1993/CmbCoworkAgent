@@ -33,6 +33,7 @@ import { getModsManager } from "../mods/manager"
 import { discoverSkills } from "../skills/discovery"
 import { parseModManifest } from "../../shared/mods/validation"
 import { resolveModFile } from "../mods/loader"
+import { compileFunctionPlugin } from "../mods/v2/loader"
 import { decodeArchiveEntryName } from "../skills/archive"
 import {
   DEFAULT_PLUGIN_HOOKS_PATH,
@@ -219,6 +220,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
 
   // Count hooks — supports our flat array and CC formats
   let hookCount = 0
+  let hasFunctionModules = false
   const hookPath = normalizePluginRelativePath(manifest?.hooks) ?? DEFAULT_PLUGIN_HOOKS_PATH
   const hooksFilePath = path.join(dirPath, hookPath)
   if (existsSync(hooksFilePath)) {
@@ -227,6 +229,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
       if (Array.isArray(raw)) {
         hookCount = raw.length
       } else if (raw && typeof raw === "object") {
+        hasFunctionModules = Array.isArray(raw.modules) && raw.modules.length > 0
         // CC plugin wrapper { description?, hooks: {...} } or CC settings { EventName: [...] }
         const settingsObj =
           typeof (raw as Record<string, unknown>).hooks === "object" &&
@@ -252,12 +255,21 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
   }
 
   let modCount = 0
+  if (hasFunctionModules) {
+    await compileFunctionPlugin(dirPath)
+    modCount++
+  }
   if (manifest?.mods) {
     const moduleManifest = resolveModFile(dirPath, manifest.mods)
     if ((await fs.stat(moduleManifest)).size > 32_768) throw new Error("MODS_MANIFEST_SIZE")
     const moduleText = await fs.readFile(moduleManifest, "utf8")
-    parseModManifest(JSON.parse(moduleText))
-    modCount = 1
+    const moduleConfig = JSON.parse(moduleText)
+    if (moduleConfig.apiVersion === "cmb.mods/v2") await compileFunctionPlugin(dirPath)
+    else parseModManifest(moduleConfig)
+    modCount++
+  } else if (!hasFunctionModules && existsSync(path.join(dirPath, "mods/manifest.json"))) {
+    await compileFunctionPlugin(dirPath)
+    modCount++
   }
 
   return {
@@ -446,7 +458,8 @@ async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
     if (
       parsed.skillNames.length > 0 ||
       Object.keys(parsed.mcpConfigs).length > 0 ||
-      parsed.hookCount > 0
+      parsed.hookCount > 0 ||
+      parsed.modCount > 0
     ) {
       validCandidates.push(candidate)
     }
@@ -610,6 +623,7 @@ export async function inspectPluginZip(buffer: ArrayBuffer): Promise<PluginDetai
       mcpServers: Object.keys(parsed.mcpConfigs),
       mcpServerDetails: parsed.mcpServerDetails,
       hookCount: parsed.hookCount,
+      modCount: parsed.modCount,
       // Uninstalled plugins have no per-hook enable metadata; only the count
       // is meaningful here. The detail panel reads hookCount for the summary.
       hooks: [],

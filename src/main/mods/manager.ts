@@ -15,7 +15,7 @@ import type {
 import { encodeModJson, parseModUi } from "../../shared/mods/validation"
 import { readPluginManifest } from "../plugins/manifest"
 import { ModControlStore, type ModGrant } from "./control-store"
-import { compileMod, type CompiledMod } from "./loader"
+import { compileMod, readModApiVersion, type CompiledMod } from "./loader"
 import { ModRuntimeClient } from "./runtime-client"
 import { ModEngine, classifyModTool, type ApprovedMod, type ModDispatchRequest } from "./engine"
 import { ModError, modErrorCode } from "./errors"
@@ -71,6 +71,15 @@ interface StoredCard {
 }
 
 export class ModsManager {
+  private functionLifecycle?: { invalidate(workspace: string): void; close(): void }
+
+  attachFunctions(lifecycle: { invalidate(workspace: string): void; close(): void }): void {
+    this.functionLifecycle = lifecycle
+  }
+
+  isEnabled(workspace: string): boolean {
+    return this.config(this.workspaceKey(workspace)).enabled
+  }
   readonly store: ModControlStore
   readonly policy: ManagedModPolicy
   private readonly settings = new Map<
@@ -182,6 +191,7 @@ export class ModsManager {
       [`epoch:${key}`]: String(next.epoch)
     })
     this.settings.set(key, next)
+    this.functionLifecycle?.invalidate(key)
     this.clearActions(key)
     for (const binding of this.bindings.values())
       if (binding.workspace === key) this.notifyCards(binding.threadId)
@@ -208,6 +218,7 @@ export class ModsManager {
       const manifest = readPluginManifest(plugin.path)?.manifest
       if (!manifest?.mods) continue
       try {
+        if ((await readModApiVersion(plugin.path, manifest.mods)) === "cmb.mods/v2") continue
         const compiled = await compileMod(plugin.id, plugin.path, manifest.mods)
         if (seen.has(compiled.manifest.id)) {
           for (const prior of results)
@@ -906,6 +917,7 @@ export class ModsManager {
   }
 
   close(): void {
+    this.functionLifecycle?.close()
     this.policy.stop()
     for (const controller of this.activeActions.keys()) controller.abort()
     this.activeActions.clear()

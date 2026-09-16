@@ -7,6 +7,7 @@ import { FunctionRuntimeClient } from "../../src/main/mods/v2/runtime-client"
 import { FunctionDispatcher } from "../../src/main/mods/v2/dispatcher"
 import { dispatchFunctionStream } from "../../src/main/mods/v2/stream-dispatcher"
 import { compileFunctionPlugin } from "../../src/main/mods/v2/loader"
+import { FunctionSession, SESSION_CAPABILITIES } from "../../src/main/mods/v2/session"
 
 const root = resolve(process.argv[2])
 const client = new FunctionRuntimeClient(join(__dirname, "function-mod-host.cjs"))
@@ -182,6 +183,50 @@ void app.whenReady().then(async () => {
     assert.deepEqual(await b, { value: { text: "b" } })
     checks.push("concurrent frames and cancellation")
     await concurrent.dispose()
+
+    const sdk = await compileFunctionPlugin(join(root, "tests/fixtures/mods-v2/basic-session"))
+    const sdkSession = new FunctionSession(
+      [
+        {
+          name: sdk.name,
+          root: sdk.root,
+          tier: "user",
+          guest: await client.load(sdk.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      { workspace: root, threadId: "thread", assertLive: () => undefined, publish: async (v) => v }
+    )
+    assert.deepEqual(JSON.parse(String((await sdkSession.run("sdk-probe", "")).text)), {
+      registered: { command: "sdk-child" },
+      description: "Child!",
+      id: "nested:other:thread",
+      now: 123,
+      short: "undefined",
+      next: "undefined"
+    })
+    await sdkSession.close()
+    checks.push(
+      "same official SDK conformance fixture through utilityProcess and the production session"
+    )
+
+    const exhausted = await client.load(`var __cmbFunctionMod={register(on){
+      on("command.run", async()=>{await Promise.resolve();const until=Date.now()+30;while(Date.now()<until){};return {text:"ok"}})
+    }}`)
+    for (let attempt = 0; attempt < 40 && !exhausted.stats.disposed; attempt++) {
+      await exhausted
+        .invoke("0", {}, async () => ({}), {
+          event: "command.run",
+          origin: { plugin: "engine", tier: "core" },
+          capabilities: [],
+          plugin: { name: "budget", root }
+        })
+        .catch(() => undefined)
+    }
+    assert.equal(exhausted.stats.disposed, true)
+    await assert.rejects(exhausted.matches("0", {}), /MODS_UNLOADED/)
+    assert.equal(await guest.matches("0", { command: "cmb-pinned" }), true)
+    checks.push("a single exhausted VM invalidates its proxy without killing another plugin")
 
     const samples: number[] = []
     for (let i = 0; i < 100; i++) {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
 import type { ModCommandJob } from "../../shared/mods/types"
 import {
   claimLocalThreadRunLease,
@@ -32,6 +33,33 @@ function fixture() {
   return { threadId, rows, queue }
 }
 describe("Mods command physical thread queue", () => {
+  it("preserves a function-runtime failure code in the durable job", async () => {
+    const f = fixture()
+    const item = f.queue.enqueue("workspace", f.threadId, "function", async () => {
+      throw new ModFunctionError("MODS_RUNTIME_LOST")
+    })
+    await expect(item.completion).rejects.toThrow("MODS_RUNTIME_LOST")
+    expect(f.rows.get(item.job.id)).toMatchObject({ state: "failed", error: "MODS_RUNTIME_LOST" })
+  })
+  it("runs an immediate query during a model lease without releasing or overtaking the write lane", async () => {
+    const f = fixture()
+    claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "model" })
+    const write = vi.fn(async () => ({ text: "write" }))
+    const waiting = f.queue.enqueue("workspace", f.threadId, "write", write)
+    const query = f.queue.enqueue(
+      "workspace",
+      f.threadId,
+      "query",
+      async () => ({ text: "query" }),
+      { immediate: true }
+    )
+    expect(await query.completion).toEqual({ text: "query" })
+    expect(write).not.toHaveBeenCalled()
+    expect(getLocalThreadRunLease(f.threadId)?.runId).toBe("model")
+    releaseLocalThreadRunLease(f.threadId, "desktop", "model")
+    await waiting.completion
+    expect(write).toHaveBeenCalledTimes(1)
+  })
   it("waits for a model/IM lease, preserves FIFO and executes each command once", async () => {
     const f = fixture()
     claimLocalThreadRunLease({ threadId: f.threadId, owner: "im", runId: "model" })

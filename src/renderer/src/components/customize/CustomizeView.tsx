@@ -236,6 +236,7 @@ export function CustomizeView(): React.JSX.Element {
             variant="ghost"
             size="sm"
             className="h-7 w-9 p-0"
+            aria-label="返回会话"
             onClick={() => setShowCustomizeView(false)}
           >
             <ArrowLeft className="size-6" strokeWidth={1} />

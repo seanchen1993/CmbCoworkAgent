@@ -45,6 +45,36 @@ afterEach(() => {
   for (const fn of cleanup.splice(0)) fn()
 })
 
+it("does not route a native v2 manifest into the v1 runtime", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cmb-mods-v2-routing-"))
+  if (
+    dirname(resolve(root)) !== resolve(tmpdir()) ||
+    !basename(root).startsWith("cmb-mods-v2-routing-")
+  )
+    throw Error("Unexpected cleanup path")
+  mkdirSync(join(root, ".claude-plugin"))
+  writeFileSync(
+    join(root, ".claude-plugin/plugin.json"),
+    JSON.stringify({ name: "v2", mods: "manifest.json" })
+  )
+  writeFileSync(
+    join(root, "manifest.json"),
+    JSON.stringify({ apiVersion: "cmb.mods/v2", id: "v2", entry: "register.ts" })
+  )
+  const manager = new ModsManager(
+    join(root, "control.sqlite"),
+    () => [{ id: "v2", name: "v2", path: root, enabled: true }],
+    async () => true,
+    () => undefined
+  )
+  try {
+    expect((await manager.status(root)).mods).toEqual([])
+  } finally {
+    manager.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 async function fixture(deployment?: ManagedModDeployment) {
   const root = mkdtempSync(join(tmpdir(), "cmb-mods-manager-"))
   const plugin = join(root, "plugin")

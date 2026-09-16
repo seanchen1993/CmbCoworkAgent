@@ -121,6 +121,71 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
             </p>
           )}
           <ModsAudit key={threadId} threadId={threadId} />
+          {(status.functionMods?.length ?? 0) > 0 && (
+            <details open>
+              <summary className="cursor-pointer">
+                函数插件（{status.functionMods!.length}）
+              </summary>
+              <p className="text-xs text-muted-foreground mt-2">
+                当前开放自定义命令、会话基本信息和时钟能力。面板、模型及文件能力仍在接入。
+                授权绑定以下版本，源码变化后需要重新授权。
+              </p>
+              <div className="mt-2 space-y-2">
+                {status.functionMods!.map((mod) => (
+                  <div
+                    key={mod.pluginId}
+                    className="rounded border p-3 space-y-2"
+                    data-function-mod-id={mod.name}
+                  >
+                    <div className="flex justify-between gap-3">
+                      <strong>{mod.name}</strong>
+                      <span>
+                        {
+                          {
+                            ready: "已授权",
+                            disabled: "插件已禁用",
+                            "needs-approval": "等待授权",
+                            invalid: "插件无效"
+                          }[mod.state]
+                        }
+                      </span>
+                    </div>
+                    <p className="text-xs">
+                      允许注册和执行命令、读取当前项目与会话标识、使用时钟。
+                    </p>
+                    <p className="text-xs font-mono break-all">
+                      版本摘要：{mod.digest ?? mod.error}
+                    </p>
+                    {mod.state === "needs-approval" && mod.digest && (
+                      <Button
+                        size="sm"
+                        disabled={busy}
+                        onClick={() =>
+                          void run(() =>
+                            window.api.mods.approveFunction(threadId, mod.pluginId, mod.digest!)
+                          )
+                        }
+                      >
+                        授权以上能力
+                      </Button>
+                    )}
+                    {mod.state === "ready" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() =>
+                          void run(() => window.api.mods.revokeFunction(threadId, mod.name))
+                        }
+                      >
+                        撤销权限
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
           <details>
             <summary className="cursor-pointer">模块与权限（{status.mods.length}）</summary>
             <div className="max-h-64 overflow-auto mt-2 space-y-2">

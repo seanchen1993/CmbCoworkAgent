@@ -3045,6 +3045,8 @@ const api = {
     }
   },
   mods: {
+    approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
+    revokeFunction: (threadId: string, name: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
     status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),
     configure: (threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void> =>
       ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy }),

@@ -148,6 +148,10 @@ async function handle(request: FunctionRequest): Promise<ModJson> {
     )
   } finally {
     frames.delete(request.id)
+    if (guest.stats.disposed && runtimes.get(request.runtimeId) === guest) {
+      runtimes.delete(request.runtimeId)
+      port.postMessage({ type: "disposed", runtimeId: request.runtimeId })
+    }
   }
 }
 
