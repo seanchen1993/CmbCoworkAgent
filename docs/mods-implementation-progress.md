@@ -9,6 +9,11 @@ artifacts. Final delivery scope, code review, functional regression, performance
 E2E, packaging, baseline failures and release limits are recorded in
 [Mods v1 最终交付与验收](mods-final-delivery-2026-09-16.md).
 
+The proposed next stage is documented in
+[Mods v2 能力补齐与兼容设计](mods-v2-parity-design-2026-09-16.md), with an
+[API coverage matrix](mods-v2-compatibility-matrix.json). This is a design-only
+eight-batch plan, not an implemented extension of the v1 delivery above.
+
 The earlier [core delivery record](mods-v1-delivery-2026-09-16.md) describes batch 1
 only; its then-unimplemented list does not describe the final branch.
 
