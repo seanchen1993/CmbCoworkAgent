@@ -6606,6 +6606,8 @@ function FeatureDetailPage({
   )
   const [managedRunDialogOpen, setManagedRunDialogOpen] = useState(false)
   const [managedRunWorkspacePath, setManagedRunWorkspacePath] = useState("")
+  const [managedRunUserMessage, setManagedRunUserMessage] = useState("")
+  const managedRunDefaultUserMessageRef = useRef("")
   const [managedRunImEnabled, setManagedRunImEnabled] = useState(true)
   const [openingManagedRunDialog, setOpeningManagedRunDialog] = useState(false)
   const [pickingManagedRunWorkspace, setPickingManagedRunWorkspace] = useState(false)
@@ -6895,6 +6897,9 @@ function FeatureDetailPage({
       const configuredWorkspacePath = normalizeWorkspacePath(detail.project.sessionWorkspacePath)
       const defaultWorkspacePath = latestSessionWorkspacePath ?? configuredWorkspacePath
       setManagedRunWorkspacePath(defaultWorkspacePath ?? "")
+      const defaultUserMessage = getHarnessRunNextAction(detail)?.userMessage ?? ""
+      managedRunDefaultUserMessageRef.current = defaultUserMessage
+      setManagedRunUserMessage(defaultUserMessage)
       setManagedRunImEnabled(featureImManagementAvailable)
       setPickingManagedRunWorkspace(false)
       setManagedRunDialogOpen(true)
@@ -6917,7 +6922,8 @@ function FeatureDetailPage({
     async (
       shouldStart: boolean,
       workspacePath?: string,
-      enableImManagement = true
+      enableImManagement = true,
+      initialUserMessage?: string
     ): Promise<boolean> => {
       if (
         !detail ||
@@ -6940,7 +6946,8 @@ function FeatureDetailPage({
           const startedRun = await window.api.harnessBoard.startManagedRun({
             projectId: detail.project.projectId,
             featureId: detail.run.slug,
-            workspacePath: confirmedWorkspacePath
+            workspacePath: confirmedWorkspacePath,
+            initialUserMessage
           })
           startStatus = startedRun.status
           startFailureReason = startedRun.failureReason
@@ -6983,9 +6990,19 @@ function FeatureDetailPage({
   )
 
   const handleConfirmManagedRun = useCallback(async (): Promise<void> => {
-    const started = await handleManagedRunChange(true, managedRunWorkspacePath, managedRunImEnabled)
+    const userMessage = managedRunUserMessage.trim()
+    const initialUserMessage =
+      userMessage && userMessage !== managedRunDefaultUserMessageRef.current.trim()
+        ? userMessage
+        : undefined
+    const started = await handleManagedRunChange(
+      true,
+      managedRunWorkspacePath,
+      managedRunImEnabled,
+      initialUserMessage
+    )
     if (started) setManagedRunDialogOpen(false)
-  }, [handleManagedRunChange, managedRunImEnabled, managedRunWorkspacePath])
+  }, [handleManagedRunChange, managedRunImEnabled, managedRunUserMessage, managedRunWorkspacePath])
 
   const handleContextReminderSessionCreated = useCallback(
     (threadId: string): void => {
@@ -7695,6 +7712,17 @@ function FeatureDetailPage({
                 选择文件夹
               </Button>
             </div>
+            <label className="mt-2 grid gap-2 text-sm font-medium">
+              启动会话的初始用户消息
+              <textarea
+                value={managedRunUserMessage}
+                onChange={(event) => setManagedRunUserMessage(event.target.value)}
+                placeholder="留空则使用当前步骤的默认用户消息"
+                rows={4}
+                disabled={updatingManagedRun}
+                className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm font-normal shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              />
+            </label>
             <div className="mt-2 flex items-start justify-between gap-4 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
               <div>
                 <div className="flex items-center gap-1.5 text-sm font-medium">
