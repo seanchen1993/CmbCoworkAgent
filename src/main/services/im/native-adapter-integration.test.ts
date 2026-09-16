@@ -1,8 +1,8 @@
 import { mkdtempSync, rmSync } from "fs"
 import { tmpdir } from "os"
-import { join } from "path"
+import { basename, dirname, join, resolve } from "path"
 import { afterEach, describe, expect, it } from "vitest"
-import { openNativeSqliteDatabase } from "../../db/native-sqlite-adapter"
+import { openNativeSqliteDatabase, type NativeSqliteAdapter } from "../../db/native-sqlite-adapter"
 import type { RemoteImEventV1, RemoteImReplyV1 } from "../../../shared/im-gateway-contract"
 import { ImConversationStateStore } from "./conversation-state"
 import { ImEventStore } from "./event-store"
@@ -21,6 +21,7 @@ import { ImSelectionContextStore } from "./selection-context"
  * changes its database call surface.
  */
 const TEMPORARY_DIRECTORIES: string[] = []
+const OPEN_DATABASES: NativeSqliteAdapter[] = []
 
 function temporaryDatabasePath(name: string): string {
   const directory = mkdtempSync(join(tmpdir(), "cmb-im-native-"))
@@ -29,8 +30,15 @@ function temporaryDatabasePath(name: string): string {
 }
 
 afterEach(() => {
+  for (const database of OPEN_DATABASES.splice(0)) database.close()
   while (TEMPORARY_DIRECTORIES.length > 0) {
-    rmSync(TEMPORARY_DIRECTORIES.pop()!, { recursive: true, force: true })
+    const directory = resolve(TEMPORARY_DIRECTORIES.pop()!)
+    if (
+      dirname(directory) !== resolve(tmpdir()) ||
+      !basename(directory).startsWith("cmb-im-native-")
+    )
+      throw Error("Unexpected cleanup path")
+    rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })
 
@@ -39,6 +47,7 @@ function openProductionWiredStore() {
     temporaryDatabasePath("im-native.sqlite"),
     "ImNativeIntegrationTest"
   ).database
+  OPEN_DATABASES.push(database)
   ensureImServiceSchema(database)
   const dependencies: ImPersistenceDependencies = {
     getDatabase: () => database,
