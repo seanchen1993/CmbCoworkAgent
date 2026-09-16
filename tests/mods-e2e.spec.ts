@@ -651,6 +651,62 @@ async function main(): Promise<void> {
         ),
       "renderer reload keeps function session state"
     )
+    await app.close()
+    page = undefined
+    app = await _electron.launch({
+      executablePath: join(root, "tests/support/electron-launcher.cmd"),
+      args: [join(root, "out/main/index.js"), `--user-data-dir=${join(isolated, "electron")}`],
+      cwd: root,
+      env,
+      timeout: 60_000
+    })
+    await app.evaluate(({ ipcMain }) => {
+      ipcMain.removeHandler("open-login-page")
+      ipcMain.handle("open-login-page", () => undefined)
+    })
+    await until(async () => {
+      for (const candidate of app!.windows())
+        if (await candidate.evaluate(() => Boolean(window.api?.mods)).catch(() => false)) {
+          page = candidate
+          return true
+        }
+      return false
+    }, "production preload after process restart")
+    await page!.addInitScript("window.__name = value => value")
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    assert.equal(
+      await page!.evaluate(
+        async ({ id, descriptor }) => {
+          try {
+            await window.api.mods.enqueue(id, descriptor, { text: "old runtime" })
+            return false
+          } catch {
+            return true
+          }
+        },
+        { id: threadId, descriptor: functionCommand }
+      ),
+      true
+    )
+    await page!.locator("textarea.composer-textarea").fill("/claw")
+    await page!.getByText("claw-info", { exact: true }).first().waitFor()
+    await page!.locator("textarea.composer-textarea").fill("/claw-info ")
+    await page!.locator("textarea.composer-textarea").press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+          (job) =>
+            job.command === "claw-info" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("本次会话查询：1") === true &&
+            job.result.text.includes("备注：重载后")
+        ),
+      "process restart recreates closure state but preserves the plugin preference"
+    )
+    await page!.screenshot({ path: join(artifacts, "function-restart.png") })
+    pass(
+      "application restart retains plugin preferences and grants while invalidating old runtime descriptors"
+    )
     await page!.getByRole("button", { name: "自定义", exact: true }).click()
     await page!.getByRole("button", { name: "插件", exact: true }).click()
     await page!

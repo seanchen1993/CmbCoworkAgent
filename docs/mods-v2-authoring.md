@@ -9,7 +9,8 @@
 1. 打开有项目目录的会话，进入“自定义 → 插件”。
 2. 点击“安装示范插件”，启用项目 Mods，在 `function-commands` 一行授权显示的版本。
 3. 返回会话，输入 `/claw-info 我的备注`。命令在输入框上方显示项目、会话和本会话查询次数。
-4. 可以在模型运行时使用这条命令；页面重载保留计数。应用重启或重新授权会重建模块实例。
+4. 可以在模型运行时使用这条命令；页面重载保留计数。应用重启或重新授权会重建模块实例，
+   最近填写的备注通过插件存储保留；下次不带参数执行即可看到。
 5. 修改插件源码后重新检查并批准新摘要；撤销权限后菜单和旧命令描述符同时失效。
 
 自建插件用已有的本地插件安装入口安装，随后在函数插件区域授权。
@@ -52,7 +53,8 @@ export function register(on) {
 ## SDK 事件和返回值
 
 当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces`、
-`clock.now/sleep`，以及 `$.plugin.name/root` 元数据。SDK 调用同样经过事件链。
+`clock.now/sleep`、`store.get/set/delete/keys`，以及 `$.plugin.name/root` 元数据。
+SDK 调用同样经过事件链。
 
 普通操作 hook 返回 `{ value }` 或 `{ deny }`，调用 SDK 得到拆出的值；
 `command.run` 是引擎事件，返回 `{ text }`。例如：
@@ -68,6 +70,26 @@ on("clock.sleep", { ms: 10 }, () => ({ value: undefined }))
 `$.command.register(spec)` 返回 `{ command: spec.name }`；`clock.sleep` 返回 `undefined`。
 从 hook 中再次调用 SDK 会跳过发起调用的那一个处理器，同插件的其他匹配处理器仍会执行。
 `command.describe` 的 `isHidden: true` 隐藏菜单条目，但保留按完整命令名执行的能力。
+
+## 插件状态
+
+`$.store.get("key")` 对未设置的键返回 `undefined`，保存的 `null` 则原样返回。
+`set` 保存 JSON 数据；日期转换为字符串，对象中的 `undefined` 字段丢弃，函数与循环数据拒绝。
+`keys` 保持插入顺序，覆盖已有键不会移动它，删除后重建会放到最后。
+
+```ts
+await $.store.set("preferences", { language: "zh-CN" })
+const preferences = await $.store.get("preferences")
+```
+
+状态按项目和插件名隔离，在应用重启、源码重载和重新授权后保留。与 Claude 按用户配置目录
+保存整个插件状态相比，这里增加项目隔离；`store.*` 仍是可被已授权 hook 观察和改写的事件。
+写入前及读取结果交给插件处理器之前，都执行适用的宿主输出策略。
+
+存储总量最多 4 MiB；当前跨进程 JSON 单次上限 1 MiB，键名必须是合法 Unicode，
+最多 4096 UTF-8 字节，最多 8192 个键。
+这些属于宿主资源限制。单次 `set` 是事务，但 `get` 后再 `set` 不是原子加一；并发计数需要另行设计。
+数据库备份包含状态，控制库迁移与回退限制见 [运维说明](mods-operations.md)。
 
 ## 检查和边界
 

@@ -34,6 +34,29 @@
 
 用法和准确边界见 [函数插件开发说明](mods-v2-authoring.md)。此批并未完成 B3/B4 的全部范围。
 
+## 宿主 SDK：持久状态
+
+继续补入 `store.get/set/delete/keys`，基础 SDK 从 9 项增加到 13 项。状态按项目及插件名
+保存，跨源码重载和应用重启保留；宿主修订号更新使旧授权必须重新批准，防止静默增加能力。
+控制库从 schema 4 增量升级到 5，v1 状态和原有执行事实保留，备份同时包含函数插件状态。
+
+同一 `persistent-state` 夹具在官方 2.1.273 和 CMB 的真实存储后端通过，累计官方对照场景
+为 23 个。覆盖未设置值、null、JSON 转换、插入顺序、hook 改写及非法数据拒绝。
+额外单测验证配额回滚、跨项目隔离、授权源码更新后的状态保留、读取前保护和撤销时取消写入。
+应用 E2E 增加真实主进程退出后重启：授权与备注仍在，闭包计数重置，旧运行时描述符拒绝，
+累计 17 组场景通过，截图 `output/mods-validation/e2e/function-restart.png` 已检查。
+
+这一批专项回归 `npm run test:mods` 为 186/186；Node/Web 类型检查和定向 lint 通过。
+状态总量 4 MiB，但仍受单次 1 MiB 的传输限制；键名和键数量也有明确资源上限。
+这类限制与项目隔离已写入使用文档，不能把它们隐去并宣称任意上游插件完全兼容。
+
+存储性能回检使用实际磁盘 SQLite WAL/FULL 事务，已有约 3 MiB 状态，50 次预热后测 1000 次
+小键更新并立即读取。配额检查从“把所有值读入 JS 后计数”改为 SQLite 内聚合，P50 从
+22.93 ms 降为 6.98 ms，P95 从 41.91 ms 降为 7.61 ms；两组保留相同事务、配额与工作量。
+这是本机存储路径测量，不代表包含 VM、策略和 UI 的完整命令延迟。
+可复现：`npx tsx tests/mods-function-state.perf.ts current`；前后报告位于忽略目录
+`output/mods-v2-validation/state-perf-*.json`。
+
 ## 已验证的契约与原型
 
 同一夹具位于 `tests/fixtures/mods-v2/conformance`。隔离安装官方
@@ -98,6 +121,9 @@ Claude 2.1.273 的测试 SDK 外层流在实测中不暴露可用的 `.result`�
   唯一额外的浏览器录制脚本用例单独复跑通过，该文件剩下原有的 Windows 路径断言失败。
   全量仍非全绿。报告：`output/mods-v2-validation/vitest-session-full.json`，逐项对照为
   `session-failure-comparison.json`，复跑为 `browser-session-rerun.json`。
+- 持久状态批全量 Vitest 为 3188 项：3157 通过、26 失败、5 跳过。26 个失败均与 v1
+  基线同名同因，前一批偶发的浏览器脚本用例本次通过；全量仍非全绿。
+  报告为 `vitest-state-full.json`，逐项原因对照为 `state-failure-comparison.json`。
 
 ## 待完成的验证
 

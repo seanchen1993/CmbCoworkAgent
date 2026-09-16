@@ -1,6 +1,7 @@
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
+import type { FunctionStateAccess } from "./state-store"
 
 export const SESSION_CAPABILITIES = [
   "command.register",
@@ -11,12 +12,18 @@ export const SESSION_CAPABILITIES = [
   "session.surface",
   "session.surfaces",
   "clock.now",
-  "clock.sleep"
+  "clock.sleep",
+  "store.get",
+  "store.set",
+  "store.delete",
+  "store.keys"
 ] as const
 
 /** SDK positional arguments become the same structured input a hook receives in Claude. */
 export function basicSdkInput(method: string, args: ModJson[]): ModObject {
   if (method === "clock.sleep") return { ms: args[0] }
+  if (method === "store.get" || method === "store.delete") return { key: args[0] }
+  if (method === "store.set") return { key: args[0], value: args[1] }
   if (method === "command.register") {
     if (!isModObject(args[0])) throw new ModFunctionError("MODS_COMMAND_SPEC")
     return args[0]
@@ -25,6 +32,10 @@ export function basicSdkInput(method: string, args: ModJson[]): ModObject {
 }
 
 export function validateBasicInput(name: string, value: ModObject): void {
+  if (name.startsWith("store.") && name !== "store.keys" && typeof value.key !== "string")
+    throw new ModFunctionError("MODS_STORE_KEY")
+  if (name === "store.set" && !Object.hasOwn(value, "value"))
+    throw new ModFunctionError("MODS_STORE_VALUE")
   if (name === "clock.sleep") {
     if (
       typeof value.ms !== "number" ||
@@ -56,6 +67,9 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
       (!Array.isArray(value) || value.some((surface) => surface !== "desktop"))) ||
     (name === "clock.now" && (typeof value !== "number" || !Number.isFinite(value))) ||
     (name === "clock.sleep" && value !== undefined) ||
+    ((name === "store.set" || name === "store.delete") && value !== undefined) ||
+    (name === "store.keys" &&
+      (!Array.isArray(value) || value.some((key) => typeof key !== "string"))) ||
     (name === "command.register" && (!isModObject(value) || typeof value.command !== "string")) ||
     (name === "command.list" &&
       (!Array.isArray(value) ||
@@ -79,11 +93,25 @@ export async function runBasicSdk(
     plugin: string
     registry: Map<string, FunctionCommand>
     signal: AbortSignal
+    state?: FunctionStateAccess
   }
 ): Promise<ModJson | undefined> {
   const { registry, signal } = context
   signal.throwIfAborted()
   validateBasicInput(method, input)
+  if (method.startsWith("store.")) {
+    if (!context.state) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")
+    if (method === "store.get") return context.state.get(input.key as string, signal)
+    if (method === "store.set") {
+      await context.state.set(input.key as string, input.value, signal)
+      return undefined
+    }
+    if (method === "store.delete") {
+      context.state.delete(input.key as string)
+      return undefined
+    }
+    if (method === "store.keys") return context.state.keys(signal)
+  }
   if (method === "session.id") return context.threadId
   if (method === "session.cwd") return context.workspace
   if (method === "session.surface") return "desktop"

@@ -166,7 +166,10 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       if (!noun || !method || noun === "plugin" || ["__proto__", "constructor", "prototype"].includes(noun))
         throw Error("MODS_CAPABILITY_NAME");
       if (!sdk[noun]) sdk[noun] = Object.create(null);
-      sdk[noun][method] = (...args) => call(capability, args);
+      sdk[noun][method] = async (...args) => {
+        if (capability === "store.set") args = [args[0], parse(pack(args[1]))];
+        return call(capability, args);
+      };
     }
     for (const noun of ownKeys(sdk)) freeze(sdk[noun]);
     freeze(sdk);

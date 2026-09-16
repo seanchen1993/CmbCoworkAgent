@@ -12,6 +12,7 @@ import type {
 } from "../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { ModError } from "./errors"
+import { FunctionStateStore } from "./v2/state-store"
 
 export interface ModGrant {
   workspace: string
@@ -23,6 +24,7 @@ export interface ModGrant {
 
 export class ModControlStore {
   private readonly db: DatabaseSync
+  readonly functionState: FunctionStateStore
 
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true })
@@ -56,7 +58,7 @@ export class ModControlStore {
       CREATE INDEX IF NOT EXISTS mods_artifacts_thread ON mods_artifacts(thread_id,at);
     `)
       const version = this.getSetting("schema", "")
-      if (version && !["1", "2", "3", "4"].includes(version)) {
+      if (version && !["1", "2", "3", "4", "5"].includes(version)) {
         throw new ModError("MODS_STORE_VERSION")
       }
       const columns = new Set(
@@ -84,7 +86,8 @@ export class ModControlStore {
       CREATE INDEX IF NOT EXISTS mods_calls_workspace ON mods_calls(workspace,at);
       CREATE INDEX IF NOT EXISTS mods_calls_thread ON mods_calls(thread_id,at);
     `)
-      this.setSetting("schema", "4")
+      this.functionState = new FunctionStateStore(this.db)
+      this.setSetting("schema", "5")
       // An interrupted operation may have reached an external service. Never replay it.
       this.db.prepare("UPDATE mods_calls SET status = 'unknown' WHERE status = 'running'").run()
       for (const row of this.db

@@ -5,6 +5,7 @@ import { afterEach, expect, it } from "vitest"
 import { ModControlStore } from "../control-store"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionModsManager } from "./manager"
+import type { ModJson } from "../../../shared/mods/types"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -19,6 +20,7 @@ async function fixture() {
   let enabled = true
   let pluginEnabled = true
   let loads = 0
+  let publish = async (value: ModJson): Promise<ModJson> => value
   const allGuests = new Set<FunctionGuestRuntime>()
   const manager = new FunctionModsManager(
     store,
@@ -27,7 +29,7 @@ async function fixture() {
         { id: "source", name: "function-commands", path: plugin, enabled: pluginEnabled }
       ],
       enabled: () => enabled,
-      publish: async (_, value) => value,
+      publish: async (_, value) => publish(value),
       changed: () => undefined
     },
     () => {
@@ -55,6 +57,10 @@ async function fixture() {
     root,
     plugin,
     manager,
+    control: store,
+    setPublication(value: typeof publish) {
+      publish = value
+    },
     loads: () => loads,
     kill() {
       for (const guest of allGuests) guest.dispose()
@@ -172,4 +178,114 @@ it("keeps hidden commands invocable through their scoped descriptor", async () =
   expect(
     await f.manager.runCommand(f.root, "thread", command, "", new AbortController().signal)
   ).toEqual({ text: "available by name" })
+})
+
+it("keeps plugin state across sessions and approved source reloads while separating workspaces", async () => {
+  const f = await fixture()
+  const path = join(f.plugin, "hooks/register.ts")
+  const source = `export function register(on) {
+    on("session.start",async($,e,next)=>{await $.command.register({name:"count",description:"Count"});return next(e)})
+    on("command.run",async($)=>{const count=(await $.store.get("count")??0)+1;await $.store.set("count",count);return {text:String(count)}})
+  }`
+  await writeFile(path, source)
+  await f.approve()
+  const run = async (workspace: string, thread: string) => {
+    const [descriptor] = await f.manager.commands(workspace, thread)
+    return f.manager.runCommand(workspace, thread, descriptor, "", new AbortController().signal)
+  }
+  expect(await run(f.root, "one")).toEqual({ text: "1" })
+  expect(await run(f.root, "two")).toEqual({ text: "2" })
+  await writeFile(path, source + "\n// new approved source")
+  await f.approve()
+  expect(await run(f.root, "one")).toEqual({ text: "3" })
+  const other = join(f.root, "other-workspace")
+  const [status] = await f.manager.status(other)
+  await f.manager.approve(other, "source", status.digest!)
+  expect(await run(other, "three")).toEqual({ text: "1" })
+})
+
+it("runs the same store fixture as official plugin test against the durable host backend", async () => {
+  const f = await fixture()
+  await cp(
+    resolve("tests/fixtures/mods-v2/persistent-state/hooks/register.ts"),
+    join(f.plugin, "hooks/register.ts")
+  )
+  await f.approve()
+  const [command] = await f.manager.commands(f.root, "thread")
+  const answer = await f.manager.runCommand(
+    f.root,
+    "thread",
+    command,
+    "",
+    new AbortController().signal
+  )
+  expect(JSON.parse(answer.text)).toEqual({
+    missing: true,
+    nullValue: null,
+    label: "HELLO",
+    data: { when: "2020-01-01T00:00:00.000Z" },
+    before: ["null", "label", "data"],
+    after: ["null", "data"],
+    refused: true,
+    cycleRefused: true
+  })
+})
+
+it("filters stored values before plugin observers and before writing new state", async () => {
+  const f = await fixture()
+  await writeFile(
+    join(f.plugin, "hooks/register.ts"),
+    `export function register(on){
+    on("session.start",async($,e,next)=>{await $.command.register({name:"check",description:"Check"});return next(e)})
+    on("store.get",async($,e,next)=>({value:(await next(e)).value==="HIDDEN"?"safe":"raw reached observer"}))
+    on("command.run",async($)=>{await $.store.set("new","SECRET");return {text:await $.store.get("saved")}})
+  }`
+  )
+  const namespace = JSON.stringify([f.root, "function-commands"])
+  f.control.functionState.set(namespace, "saved", "SECRET")
+  f.setPublication(async (value) =>
+    JSON.parse(JSON.stringify(value).replaceAll("SECRET", "HIDDEN"))
+  )
+  await f.approve()
+  const [command] = await f.manager.commands(f.root, "thread")
+  expect(
+    await f.manager.runCommand(f.root, "thread", command, "", new AbortController().signal)
+  ).toEqual({ text: "safe" })
+  expect(f.control.functionState.get(namespace, "new")).toBe("HIDDEN")
+})
+
+it("revocation during state publication prevents a delayed write from committing", async () => {
+  const f = await fixture()
+  await writeFile(
+    join(f.plugin, "hooks/register.ts"),
+    `export function register(on){
+    on("session.start",async($,e,next)=>{await $.command.register({name:"wait",description:"Wait"});return next(e)})
+    on("command.run",async($)=>{await $.store.set("delayed","WAIT");return {text:"written"}})
+  }`
+  )
+  let entered!: () => void
+  let release!: () => void
+  const started = new Promise<void>((r) => {
+    entered = r
+  })
+  f.setPublication(async (value) => {
+    if (value === "WAIT") {
+      entered()
+      await new Promise<void>((r) => {
+        release = r
+      })
+    }
+    return value
+  })
+  await f.approve()
+  const [command] = await f.manager.commands(f.root, "thread")
+  const pending = f.manager.runCommand(f.root, "thread", command, "", new AbortController().signal)
+  const rejected = expect(pending).rejects.toThrow()
+  await started
+  f.manager.revoke(f.root, "function-commands")
+  release()
+  await rejected
+  expect(
+    f.control.functionState.get(JSON.stringify([f.root, "function-commands"]), "delayed")
+  ).toBeUndefined()
 })

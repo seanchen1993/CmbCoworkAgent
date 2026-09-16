@@ -11,12 +11,14 @@ import {
   validateBasicResult
 } from "./basic-sdk"
 export { SESSION_CAPABILITIES } from "./basic-sdk"
+import type { FunctionStateAccess } from "./state-store"
 
 export interface FunctionSessionHost {
   threadId: string
   workspace: string
   assertLive(plugin?: FunctionPlugin): void
   publish(value: ModJson, signal: AbortSignal): Promise<ModJson>
+  state?(plugin: FunctionPlugin): FunctionStateAccess
   capability?(
     plugin: FunctionPlugin,
     method: string,
@@ -186,6 +188,7 @@ export class FunctionSession {
                   ...this.host,
                   plugin: plugin.name,
                   registry: this.registry,
+                  state: this.host.state?.(plugin),
                   signal
                 })
             }

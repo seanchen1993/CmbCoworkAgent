@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
+import { randomInt } from "node:crypto"
 import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModPluginSource } from "../manager"
 import type { ModCommandDescriptor, ModJson, ModProjection } from "../../../shared/mods/types"
@@ -38,6 +39,7 @@ interface FunctionManagerHost {
 
 /** Grants bind a complete source snapshot; a live session never rereads mutable plugin source. */
 export class FunctionModsManager {
+  private readonly initialEpoch = randomInt(1, 2 ** 48)
   private readonly epochs = new Map<string, number>()
   private readonly sessions = new Map<string, SessionEntry>()
   private closed = false
@@ -50,7 +52,7 @@ export class FunctionModsManager {
   ) {}
 
   private epoch(workspace: string): number {
-    return this.epochs.get(workspace) ?? 0
+    return this.epochs.get(workspace) ?? this.initialEpoch
   }
 
   private sources(): ModPluginSource[] {
@@ -237,6 +239,45 @@ export class FunctionModsManager {
           workspace,
           threadId,
           assertLive,
+          state: (plugin) => {
+            // Reloads keep state; project and plugin identity remain separate namespaces.
+            const namespace = JSON.stringify([workspace, plugin.name])
+            return {
+              get: async (key, signal) => {
+                assertLive(plugin)
+                const value = this.store.functionState.get(namespace, key)
+                const checked =
+                  value === undefined
+                    ? undefined
+                    : await this.host.publish(workspace, value, signal)
+                assertLive(plugin)
+                return checked
+              },
+              keys: async (signal) => {
+                assertLive(plugin)
+                const checked = await this.host.publish(
+                  workspace,
+                  this.store.functionState.keys(namespace),
+                  signal
+                )
+                assertLive(plugin)
+                if (!Array.isArray(checked) || checked.some((key) => typeof key !== "string"))
+                  throw new ModFunctionError("MODS_STORE_PUBLICATION")
+                return checked as string[]
+              },
+              delete: (key) => {
+                assertLive(plugin)
+                this.store.functionState.delete(namespace, key)
+              },
+              set: async (key, value, signal) => {
+                assertLive(plugin)
+                const checked = await this.host.publish(workspace, value, signal)
+                assertLive(plugin)
+                signal.throwIfAborted()
+                this.store.functionState.set(namespace, key, checked)
+              }
+            }
+          },
           publish: (value, signal) => this.host.publish(workspace, value, signal)
         })
         await current.session.start()
