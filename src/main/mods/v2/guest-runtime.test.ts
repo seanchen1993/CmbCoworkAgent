@@ -58,12 +58,50 @@ describe("persistent function guest frame boundaries", () => {
     })
     expect(runtime.stats.frames).toBe(0)
   })
-  it("does not let a retained SDK inherit a later frame's authority", async () => {
+  it("allows a retained plugin SDK to use the calling hook's own continuation", async () => {
     const runtime = await guest(`let saved; on("command.run", async ($) => {
-      if (!saved) {saved=$; return {text:"saved"};}
-      return {text:await saved.session.id()};
+      if (!saved) {saved=()=>$.session.id(); return {text:"saved"};}
+      return {text:await saved()};
     })`)
     await runtime.invoke("0", {}, async () => ({ value: "first" }), options)
+    let calls = 0
+    expect(
+      await runtime.invoke(
+        "0",
+        {},
+        async () => {
+          calls++
+          return { value: "second" }
+        },
+        options
+      )
+    ).toEqual({ value: { text: "second" } })
+    expect(calls).toBe(1)
+  })
+  it("does not let a detached continuation borrow a later hook's authority", async () => {
+    const runtime = await guest(`let saved,release,task;
+      on("command.run",async($)=>{
+        if(!saved){saved=$;const wait=new Promise(r=>release=r);
+          task=wait.then(async()=>{try{await saved.session.id();return "escaped"}catch{return "blocked"}});
+          return {text:"started"};
+        }
+        release();const status=await task;return {text:status+":"+await saved.session.id()};
+      })`)
+    let calls = 0
+    const host = async () => {
+      calls++
+      return { value: "current" }
+    }
+    await runtime.invoke("0", {}, host, options)
+    expect(await runtime.invoke("0", {}, host, options)).toEqual({
+      value: { text: "blocked:current" }
+    })
+    expect(calls).toBe(1)
+  })
+  it("keeps retained next bound to the original dispatch", async () => {
+    const runtime = await guest(`let saved;
+      on("command.run",async($,e,next)=>{if(!saved){saved=next;return {text:"saved"}}return saved(e)});`)
+    await runtime.invoke("0", {}, async () => ({}), options)
     let calls = 0
     await expect(
       runtime.invoke(
@@ -71,7 +109,7 @@ describe("persistent function guest frame boundaries", () => {
         {},
         async () => {
           calls++
-          return { value: "second" }
+          return { value: { text: "escaped" } }
         },
         options
       )

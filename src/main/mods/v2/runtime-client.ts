@@ -231,6 +231,10 @@ export class FunctionRuntimeClient {
         assertLive()
         return (await request({ type: "match", runtimeId, registration, event })) === true
       },
+      async releaseUi(generation) {
+        assertLive()
+        await request({ type: "release-ui", runtimeId, generation })
+      },
       async invoke(registration, event, host, invocation: FunctionInvocation) {
         assertLive()
         const { signal, ...metadata } = invocation

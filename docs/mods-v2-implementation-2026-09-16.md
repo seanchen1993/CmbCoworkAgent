@@ -4,6 +4,48 @@
 目标是完成 v2 设计中的八批补齐，并以同一插件在 Claude Code 与 CMB 中的结果作对照。
 本记录不把底层通过等同于产品全部可用；尚未完成项继续保留在兼容矩阵中。
 
+## 已接入的交互 Pane 子集
+
+`/claw-board` 通过标准 `hooks.modules` + TSX 打开“我的 Claw”：可以重复点击计数、
+输入并保存项目备注、选择面板视图，关闭后重新打开。状态使用已有真实控制库，跨应用重启保存；
+面板实例与模块闭包仍归属会话，应用重启后需重新打开。React 只解释校验后的数据树。
+
+- `ui.open/close` 走操作事件链；`ui.render/press/input/select` 接入桌面 Pane。
+  `ui.resolve` 同步返回七种内置元素的冻结构造器表；`ui.invalidate("ui.render")` 为 void，
+  宿主合并重绘通知。按钮回调留在隔离 VM，点击通过所属插件、绘制代次、元素与 intent 核验。
+- 重复点击可反复执行，重复 IPC intent 只执行一次；旧绘制、关闭、撤权及进程替换后拒绝旧句柄。
+  新绘制释放旧回调；260 次重绘的回归验证不耗尽句柄池。树、面板、调用、intent 均有上限。
+- SDK 按异步延续传递调用身份；next 仍绑定原分发。旧异步延续不会在后续点击时重新获权。
+  async/await 与异步生成器在加载时下降为 Promise 延续；16 项与 Node AsyncLocalStorage 对照，
+  包括并发、thenable、异地 resolve、finally、生成器、取消后延续及重复 resolve。
+- 检视修复：整个 Pane 快照（包括标题）必须经过输出保护；构造器回调只能属于当前插件，
+  或来自本次 next 下游树，不能猜测其他插件的 handle；属性、URL、控制字符与选择值均校验。
+- 官方隔离 2.1.273 新增 3 项通过：open/close 的 void 操作、桌面元素树与回调句柄、跨次 hook
+  使用捕获 SDK 的闭包。连同前批为 28 项上游对照。官方静态扫描禁止给 `$` 本身赋别名，
+  所以对照使用 `saved = () => $.session.id()`；这不是直接保存 `$` 对象的兼容承诺。
+
+本批专项回归 230/230；实际 Electron UI E2E 为 20 组通过，包括保存、重复点击、关闭重开、
+旧绘制拒绝、页面重载、真实应用重启后的状态与撤权。截图
+`output/mods-validation/e2e/function-pane.png` 已目视检视。测试完成后恢复普通构建入口。
+首次跨进程 29 项通过；普通双层 hook 的 100 次测量 P50 4.91 ms、P95 6.85 ms，
+文件命令 P50 16.60 ms、P95 19.26 ms。新增面板压力路径为 20 次预热 + 100 次绘制/点击，
+不把初版内存 store 的 5.98 ms P95 外推为数据库存储性能。随后改用真实 SQLite，
+绘制加点击 P50 8.94 ms、P95 11.07 ms；29 项跨进程验证通过，卸载后 VM、frame、reply、
+pending 与 call 均为零。报告 `panes-process-reviewed.txt`。
+
+另外以 `76023d64` 的运行时源文件和当前工作树作 ABBA 交替对照，每版 900 个测量样本，
+每个进程先预热 30 次。检视移除了无待处理通知时的一次多余 Promise await：
+基线 P50/P95 5.152/7.542 ms，修改后 5.432/7.858 ms，分别增加 0.280/0.316 ms
+（5.44%/4.19%）。中位数仍有额外上下文成本，不能宣称零退化或整应用 5% 门禁已通过。
+可复现：`node tests/run-function-mods-performance.mjs 76023d64`；
+对照按 git 读取基线源文件，不切换工作树，保存两个宿主 bundle 的 SHA-256。
+
+**本批不等于 B5 或完整兼容完成。** 已开放的 4 项 UI SDK 为部分支持：仅 inline Pane、七种
+元素及有限属性；其余 13 个位置、Client/Svg、diff Code、自定义构造器 hook、尺寸/焦点/快捷键/
+滚动/hover/holdToasts 尚待接入。面板回调发起 command.run 仍拒绝，等待统一执行队列；
+上游静态 SDK 用法扫描也尚未接入。本轮新增宿主能力使授权摘要版本提升，旧摘要需重新批准。
+详见 [开发说明](mods-v2-authoring.md) 和兼容矩阵；不能把同名方法视作完整行为一致。
+
 ## 已落地的运行时基础
 
 - 标准 `.claude-plugin/plugin.json`、`hooks/hooks.json` 的同步 `register(on, options)`
@@ -17,7 +59,7 @@
   当前明确返回 `scope: package-and-registration-check` 和 `authorized: false`；
   尚不是完整宿主 API 兼容检查，不授予插件权限。
 
-边界：完整字段 schema、engine.create 能力提供、模型/工具接入、持久面板与
+边界：完整字段 schema、engine.create 能力提供、模型/工具接入、完整桌面面板协议与
 完整开发工具链还未交付。117 个事件名称与 65 个成员的清单仅用于覆盖盘点。
 
 ## 已接入的桌面命令与会话
@@ -150,6 +192,11 @@ Claude 2.1.273 的测试 SDK 外层流在实测中不暴露可用的 `.result`�
 - 项目读取批全量 Vitest 为 3197 项：3166 通过、26 失败、5 跳过。失败与上一批同名同因，
   三个 Windows socket 错误只更换临时文件名；全量仍非全绿。报告为 `vitest-files-full.json`，
   原因对照为 `files-failure-comparison.json`。后续错误类别与提示修正另跑受影响的专项和 E2E。
+- 面板批全量 Vitest 为 3232 项：3200 通过、27 失败、5 跳过。26 个失败与上一批同名同因，
+  三个 socket 错误仍只更换临时文件名；额外一项是 Windows 后台控制器测试删除临时 exe
+  时的 `EBUSY`。该文件随后单独复跑 9/9 通过。全量报告仍保留为失败，未改写成全绿；
+  `vitest-panes-full.json`、`panes-failure-comparison.json`、`panes-background-rerun.json`。
+  后续移除多余 await 的性能修正由专项与真实应用 E2E 回检。
 
 ## 待完成的验证
 

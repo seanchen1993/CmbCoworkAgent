@@ -29,6 +29,7 @@ export interface FunctionDispatchOptions {
   signal?: AbortSignal
   timeoutMs?: number
   operation?: boolean
+  uiGeneration?: string
   normalizeInput?(event: string, input: ModObject): ModObject
   validateInput?(event: string, input: ModObject): void
   validateResult?(event: string, output: ModJson): void
@@ -239,6 +240,7 @@ export class FunctionDispatcher {
           capabilities: plugin.capabilities,
           plugin: { name: plugin.name, root: plugin.root },
           ...(options.operation ? { operation: true } : {}),
+          ...(options.uiGeneration ? { uiGeneration: options.uiGeneration } : {}),
           ...(options.signal ? { signal: options.signal } : {}),
           ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
           ...(caught ? { caught } : {})

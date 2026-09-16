@@ -663,8 +663,58 @@ async function main(): Promise<void> {
       .waitFor()
     await page!.screenshot({ path: join(artifacts, "function-files.png") })
     pass("function file command reads the real project through protection and refuses traversal")
+    await functionComposer.fill("/claw-board ")
+    await functionComposer.press("Enter")
+    const board = page!.locator('[data-function-pane="claw-board"]')
+    await board.waitFor({ state: "visible" })
+    await board.getByText("点击次数：0", { exact: true }).waitFor()
+    const oldPane = (await page!.evaluate((id) => window.api.mods.panes(id), threadId))[0]
+    for (const count of [1, 2]) {
+      await board.getByRole("button", { name: "加一", exact: true }).click()
+      await board.getByText(`点击次数：${count}`, { exact: true }).waitFor()
+    }
+    await board.getByRole("textbox", { name: "项目备注", exact: true }).fill("这是保存到项目的偏好")
+    await board.getByRole("button", { name: "保存备注", exact: true }).click()
+    await board.getByText("备注：这是保存到项目的偏好 · 视图：检视", { exact: true }).waitFor()
+    await board.getByRole("combobox", { name: "面板视图", exact: true }).selectOption("build")
+    await board.getByText("备注：这是保存到项目的偏好 · 视图：构建", { exact: true }).waitFor()
+    assert.equal(
+      await page!.evaluate(
+        async ({ id, pane }) => {
+          try {
+            await window.api.mods.paneAct(id, {
+              pane: pane.key,
+              generation: pane.generation,
+              intentId: crypto.randomUUID(),
+              plugin: pane.plugin,
+              handle: 0,
+              kind: "close"
+            })
+            return false
+          } catch {
+            return true
+          }
+        },
+        { id: threadId, pane: oldPane }
+      ),
+      true
+    )
+    await board.scrollIntoViewIfNeeded()
+    await page!.screenshot({ path: join(artifacts, "function-pane.png") })
+    await board.getByRole("button", { name: "关闭 我的 Claw", exact: true }).click()
+    await board.waitFor({ state: "detached" })
+    await functionComposer.fill("/claw-board ")
+    await functionComposer.press("Enter")
+    await board.getByText("点击次数：2", { exact: true }).waitFor()
+    pass(
+      "TSX pane presses, input, selection, close/reopen and stale drawing rejection work through production React and IPC"
+    )
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await page!
+      .locator('[data-function-pane="claw-board"]')
+      .getByText("点击次数：2", { exact: true })
+      .waitFor()
     await page!.locator("textarea.composer-textarea").fill("/claw-info 重载后")
     await page!.locator("textarea.composer-textarea").press("Enter")
     await until(
@@ -733,6 +783,17 @@ async function main(): Promise<void> {
     pass(
       "application restart retains plugin preferences and grants while invalidating old runtime descriptors"
     )
+    await page!.locator("textarea.composer-textarea").fill("/claw-board ")
+    await page!.locator("textarea.composer-textarea").press("Enter")
+    await page!
+      .locator('[data-function-pane="claw-board"]')
+      .getByText("点击次数：2", { exact: true })
+      .waitFor()
+    await page!
+      .locator('[data-function-pane="claw-board"]')
+      .getByText("备注：这是保存到项目的偏好 · 视图：构建", { exact: true })
+      .waitFor()
+    pass("pane preferences survive renderer reload and complete application restart")
     await page!.getByRole("button", { name: "自定义", exact: true }).click()
     await page!.getByRole("button", { name: "插件", exact: true }).click()
     await page!
@@ -763,6 +824,7 @@ async function main(): Promise<void> {
     pass(
       "renderer reload preserves function state; revoking a digest removes commands and rejects stale execution"
     )
+    assert.deepEqual(await page!.evaluate((id) => window.api.mods.panes(id), threadId), [])
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})

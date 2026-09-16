@@ -3045,6 +3045,12 @@ const api = {
     }
   },
   mods: {
+    panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
+      ipcRenderer.invoke("mods:function-panes", threadId),
+    paneAct: (
+      threadId: string,
+      action: import("../shared/mods/v2/ui").FunctionUiAction
+    ): Promise<void> => ipcRenderer.invoke("mods:function-ui-act", { threadId, action }),
     approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
     revokeFunction: (threadId: string, name: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
     status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),

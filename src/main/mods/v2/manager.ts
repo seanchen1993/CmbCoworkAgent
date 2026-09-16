@@ -13,6 +13,7 @@ import { FunctionSession, SESSION_CAPABILITIES } from "./session"
 import type { FunctionPlugin } from "./dispatcher"
 import { normalizePluginRelativePath, readPluginManifest } from "../../plugins/manifest"
 import { resolveModFile } from "../loader"
+import type { FunctionPaneSnapshot, FunctionUiAction } from "../../../shared/mods/v2/ui"
 
 interface Snapshot {
   compiled: CompiledFunctionPlugin
@@ -240,6 +241,7 @@ export class FunctionModsManager {
           workspace,
           threadId,
           assertLive,
+          uiChanged: () => this.host.changed(threadId),
           files: (plugin) =>
             new ProjectFunctionFiles(
               workspace,
@@ -324,6 +326,22 @@ export class FunctionModsManager {
         argumentHint: command.argumentHint
       }
     })
+  }
+
+  async panes(workspace: string, threadId: string): Promise<FunctionPaneSnapshot[]> {
+    // Merely mounting the renderer must not allocate or restart a plugin session.
+    if (!this.host.enabled(workspace)) return []
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry) return []
+    await entry.loading
+    return entry.session!.panes.snapshot()
+  }
+
+  async act(workspace: string, threadId: string, action: FunctionUiAction): Promise<void> {
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_UI_STALE_ACTION")
+    await entry.loading
+    await entry.session!.panes.act(action)
   }
 
   async runCommand(

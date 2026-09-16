@@ -1,6 +1,6 @@
 # 函数 Mods 开发与当前支持范围
 
-当前分支实现了标准函数插件的加载、授权和直接命令。目标兼容版本固定为 Claude Code
+当前分支实现了标准函数插件的加载、授权、直接命令与有限的交互 Pane。目标兼容版本固定为 Claude Code
 2.1.273；这不是全部 Mods API 已经可用的声明。实现和验证状态见
 [实施记录](mods-v2-implementation-2026-09-16.md)。
 
@@ -15,6 +15,7 @@
 
 同一示例还提供 `/claw-files` 列出项目目录，`/claw-files README.md` 读取文本文件。
 启用内容保护时，文件结果会先经过保护再进入插件与界面。
+`/claw-board` 打开交互面板；下文说明如何用 TSX 定制它。
 
 自建插件用已有的本地插件安装入口安装，随后在函数插件区域授权。
 
@@ -57,7 +58,8 @@ export function register(on) {
 
 当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces`、
 `clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`，以及 `$.plugin.name/root` 元数据。
-SDK 调用同样经过事件链。
+上述 SDK 操作同样经过事件链。另已接入有限的桌面 Pane：`ui.open/close`、
+同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，范围见下文。
 
 普通操作 hook 返回 `{ value }` 或 `{ deny }`，调用 SDK 得到拆出的值；
 `command.run` 是引擎事件，返回 `{ text }`。例如：
@@ -110,6 +112,44 @@ const preferences = await $.store.get("preferences")
 这是明确的宿主差异：Claude 允许访问宿主可达路径，并对读写设 4 MiB 上限；当前 CMB
 这一授权仅允许项目内只读访问，单文件最多 512 KiB、单目录最多 1024 个条目，并受 1 MiB
 JSON 传输上限约束。超限报错，不截断伪装为完整文件。`fs.write/ancestors` 仍未交付。
+
+## 交互面板
+
+更新内置示例并批准新摘要后，输入 `/claw-board` 可打开“我的 Claw”：反复点击计数、
+保存项目备注、切换视图、关闭后重新打开。偏好跨应用重启保存；面板本身归属会话，
+应用重启后需重新输入命令打开。示例源文件为
+`resources/mods/function-commands/hooks/board.tsx`，通过第二个 `hooks.modules` 加载。
+
+```tsx
+on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
+  const { Box, Text, Button } = $.ui.resolve(e)
+  return <Box flexDirection="column">
+    <Text>我的工作面板</Text>
+    <Button label="刷新" onPress={() => $.ui.invalidate("ui.render")} />
+  </Box>
+})
+// 在已注册命令的处理器内：await $.ui.open({ id: "board", title: "我的面板" })
+```
+
+`ui.resolve` 同步返回冻结的构造器表；回调可以直接捕获 `$`，在渲染结束后继续使用。
+无需把函数序列化或自己维护按钮句柄。不要将 `$` 本身赋给其他变量：Claude 的静态检查
+会拒绝这种写法；可以保存直接调用 `$.noun.method()` 的闭包。
+`ui.open/close` 是返回 `undefined` 的操作，hook 使用 `{ value }` / `{ deny }`。
+`ui.press/input/select` 在原回调之前运行，回调结束后可以请求重绘。
+`Input` 必须提供 `onSubmit`；`onInput` 可选。`Select` 提供唯一值的选项和 `onSelect`。
+
+每个会话最多 8 个面板、每个 VM 最多 1024 个存活回调、每棵树最多 1000 节点/24 层，
+最多保留 4096 个操作 intent；超限明确失败。新点击使用新 intent，IPC 重试使用原 intent。
+旧绘制、关闭、撤权、运行时替换后的句柄不能执行；卸载清理资源。重绘通知按 100 ms 合并。
+普通 `next` 始终绑定原分发；SDK 使用异步延续自己的调用身份，失效调用不能借用新回调。
+
+**当前仍是桌面 Pane 子集**：仅 inline 位置与 Box/Text/Button/Input/Select/Link/Code 的
+明确属性白名单；Code 当前是普通源文本。未交付其余 13 个渲染位置、Client/Svg、diff
+高亮、自定义构造器 hook、实际尺寸上报、聚焦/快捷键/hover/scroll/holdToasts。
+`ui.invalidate` 目前仅支持 `ui.render`；面板回调中 `$.command.run` 暂时拒绝，待接统一写队列。
+`focus`/`autoFocus`、`Code.language/path/startLine` 等当前不会产生完整上游效果，不能据此
+声明所有桌面属性兼容。插件中的 async/await 和异步生成器在载入时编译为 Promise 延续；
+动态创建的原生 async 函数不保证保留该上下文，应使用源码中声明的异步函数。
 
 ## 检查和边界
 

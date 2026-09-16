@@ -6,11 +6,17 @@ import { FunctionDispatcher, type FunctionPlugin } from "./dispatcher"
 import {
   basicSdkInput,
   runBasicSdk,
-  SESSION_CAPABILITIES,
+  SESSION_CAPABILITIES as BASIC_CAPABILITIES,
   validateBasicInput,
   validateBasicResult
 } from "./basic-sdk"
-export { SESSION_CAPABILITIES } from "./basic-sdk"
+import {
+  FUNCTION_UI_CAPABILITIES,
+  validateFunctionTree,
+  validatePaneArgs
+} from "../../../shared/mods/v2/ui"
+import { FunctionPanes, type FunctionUiDispatch } from "./panes"
+export const SESSION_CAPABILITIES = [...BASIC_CAPABILITIES, ...FUNCTION_UI_CAPABILITIES]
 import type { FunctionStateAccess } from "./state-store"
 import { FILE_CAPABILITIES, type FunctionFileAccess } from "./file-access"
 import { resolve } from "node:path"
@@ -19,6 +25,7 @@ export interface FunctionSessionHost {
   threadId: string
   workspace: string
   assertLive(plugin?: FunctionPlugin): void
+  uiChanged?(): void
   publish(value: ModJson, signal: AbortSignal): Promise<ModJson>
   state?(plugin: FunctionPlugin): FunctionStateAccess
   files?(plugin: FunctionPlugin): FunctionFileAccess
@@ -32,6 +39,7 @@ export interface FunctionSessionHost {
 
 /** A session keeps registration state and VMs across turns; every call still has its own frame. */
 export class FunctionSession {
+  readonly panes: FunctionPanes
   private readonly controller = new AbortController()
   private readonly registry = new Map<string, FunctionCommand>()
   private readonly dispatcher: FunctionDispatcher
@@ -42,6 +50,53 @@ export class FunctionSession {
     private readonly host: FunctionSessionHost
   ) {
     this.dispatcher = new FunctionDispatcher(plugins)
+    this.panes = new FunctionPanes({
+      plugins,
+      assertLive: () => this.assertLive(),
+      changed: () => this.host.uiChanged?.(),
+      publish: (value) => this.host.publish(value, this.controller.signal),
+      dispatch: (event, input, presentation) =>
+        this.dispatch(
+          event,
+          input,
+          undefined,
+          undefined,
+          0,
+          undefined,
+          event.startsWith("ui.") ? event : undefined,
+          presentation
+        ),
+      callback: async (plugin, event, input, callback, signal) => {
+        this.assertLive(plugin)
+        await plugin.guest.invoke(
+          "callback",
+          input,
+          async (method, args, callSignal) => {
+            if (!plugin.capabilities.includes(method))
+              throw new ModFunctionError("MODS_CAPABILITY_DENIED")
+            const value = await this.capability(
+              plugin,
+              method,
+              args,
+              callSignal,
+              { event, registration: "callback" },
+              0,
+              event
+            )
+            return value === undefined ? {} : { value }
+          },
+          {
+            event,
+            callback,
+            signal,
+            origin: { plugin: "engine", tier: "core" },
+            capabilities: plugin.capabilities,
+            plugin: { name: plugin.name, root: plugin.root }
+          }
+        )
+        this.assertLive(plugin)
+      }
+    })
   }
 
   start(): Promise<void> {
@@ -123,18 +178,21 @@ export class FunctionSession {
       plugin: FunctionPlugin
       core(input: ModObject, signal: AbortSignal): Promise<ModJson | undefined>
     },
-    held?: string
+    held?: string,
+    presentation?: FunctionUiDispatch
   ): Promise<ModJson> {
     if (depth > 16) throw new ModFunctionError("MODS_DISPATCH_DEPTH")
     this.assertLive()
     const turnHeld = held ?? (event === "command.run" ? "command.run" : undefined)
+    const isOperation = !!operation || presentation?.operation === true
     const scopedSignal = signal
       ? AbortSignal.any([signal, this.controller.signal])
       : this.controller.signal
     const result = await this.dispatcher.dispatch(event, input, {
       skip,
       signal: scopedSignal,
-      operation: !!operation,
+      operation: isOperation,
+      ...(presentation?.generation ? { uiGeneration: presentation.generation } : {}),
       normalizeInput: (name, value) =>
         FILE_CAPABILITIES.some((method) => method === name) &&
         typeof value.path === "string" &&
@@ -143,16 +201,29 @@ export class FunctionSession {
           : value,
       validateInput: (name, value) => {
         validateBasicInput(name, value)
+        if (name === "ui.open") validatePaneArgs(value)
+        if (
+          (name === "ui.input" || name === "ui.select") &&
+          (typeof value.value !== "string" || value.value.length > 10000)
+        )
+          throw new ModFunctionError("MODS_UI_ACTION_INVALID")
         if (name === "command.run" && (typeof value.args !== "string" || value.args.length > 32000))
           throw new ModFunctionError("MODS_COMMAND_ARGS")
       },
       validateResult: (name, value) => {
-        if (operation) {
+        if (name === "ui.render") return validateFunctionTree(value)
+        if (isOperation) {
           if (!isModObject(value)) throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (typeof value.deny === "string") return
           return validateBasicResult(name, value.value)
         }
         if (!isModObject(value)) throw new ModFunctionError("MODS_EVENT_RESULT")
+        if (
+          ["ui.press", "ui.input", "ui.select"].includes(name) &&
+          (typeof value.element !== "string" ||
+            (name !== "ui.press" && typeof value.value !== "string"))
+        )
+          throw new ModFunctionError("MODS_UI_ACTION_RESULT")
         if (name === "command.run" && value.text !== undefined && typeof value.text !== "string")
           throw new ModFunctionError("MODS_COMMAND_RESULT")
         if (
@@ -166,6 +237,7 @@ export class FunctionSession {
       origin: skip ? { plugin: skip.plugin, tier: "user" } : { plugin: "engine", tier: "core" },
       core: async (_, e): Promise<ModJson> => {
         this.assertLive(operation?.plugin)
+        if (presentation?.core) return presentation.core(e, scopedSignal)
         if (operation) {
           const value = await operation.core(e, scopedSignal)
           // Only the wire omits the undefined field; the guest restores { value: undefined }.
@@ -181,69 +253,8 @@ export class FunctionSession {
           }
         throw new ModFunctionError("MODS_EVENT_UNAVAILABLE")
       },
-      capability: async (plugin, method, raw, callSignal, source) => {
-        this.assertLive(plugin)
-        if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
-        const args = raw
-        if (method !== "command.run" && SESSION_CAPABILITIES.some((name) => name === method)) {
-          const answer = await this.dispatch(
-            method,
-            basicSdkInput(method, args),
-            callSignal,
-            { plugin: plugin.name, registration: source.registration },
-            depth + 1,
-            {
-              plugin,
-              core: (input, signal) =>
-                runBasicSdk(method, input, {
-                  ...this.host,
-                  plugin: plugin.name,
-                  registry: this.registry,
-                  state: this.host.state?.(plugin),
-                  files: this.host.files?.(plugin),
-                  signal
-                })
-            },
-            turnHeld
-          )
-          if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
-          if (typeof answer.deny === "string")
-            throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
-          return answer.value
-        }
-        if (method === "command.run") {
-          if (turnHeld)
-            throw new ModFunctionError(
-              "MODS_COMMAND_TURN_HELD",
-              `MODS_COMMAND_TURN_HELD: $.command.run cannot wait inside ${turnHeld}`,
-              true
-            )
-          const command = args[0]
-          if (
-            !isModObject(command) ||
-            typeof command.command !== "string" ||
-            !this.registry.has(command.command) ||
-            (command.args !== undefined && typeof command.args !== "string")
-          )
-            throw new ModFunctionError("MODS_COMMAND_ARGS")
-          return this.dispatch(
-            "command.run",
-            {
-              command: command.command,
-              args: command.args ?? "",
-              origin: { kind: "plugin", name: plugin.name },
-              presentation: { isFullscreen: false, columns: 80 }
-            },
-            callSignal,
-            { plugin: plugin.name, registration: source.registration },
-            depth + 1
-          )
-        }
-        if (!this.host.capability) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")
-        const value = await this.host.capability(plugin, method, args, callSignal)
-        this.assertLive(plugin)
-        return value
-      }
+      capability: (plugin, method, raw, callSignal, source) =>
+        this.capability(plugin, method, raw, callSignal, source, depth, turnHeld)
     })
     this.assertLive()
     // Policy sees short-circuit results as well as results that passed through core.
@@ -252,8 +263,115 @@ export class FunctionSession {
     return parseModJson(encodeModJson(published)) as ModJson
   }
 
+  private async capability(
+    plugin: FunctionPlugin,
+    method: string,
+    raw: ModJson,
+    callSignal: AbortSignal,
+    source: { event: string; registration: string },
+    depth = 0,
+    turnHeld?: string
+  ): Promise<ModJson | undefined> {
+    this.assertLive(plugin)
+    if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
+    const args = raw
+    if (method === "ui.invalidate") {
+      if (args[0] !== "ui.render") throw new ModFunctionError("MODS_UI_INVALIDATE_UNAVAILABLE")
+      this.panes.invalidate()
+      return undefined
+    }
+    if (method === "ui.open" || method === "ui.close") {
+      if (!isModObject(args[0])) throw new ModFunctionError("MODS_UI_PANE_ARGUMENTS")
+      validatePaneArgs(args[0])
+      const input =
+        method === "ui.close"
+          ? { id: args[0].id, origin: { kind: "plugin", name: plugin.name } }
+          : args[0]
+      const answer = await this.dispatch(
+        method,
+        input,
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: async (e) => {
+            this.assertLive(plugin)
+            if (method === "ui.open") this.panes.open(plugin.name, e)
+            else await this.panes.closePane(plugin.name, e.id as string)
+            return undefined
+          }
+        },
+        turnHeld
+      )
+      if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof answer.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      return answer.value
+    }
+    if (method !== "command.run" && BASIC_CAPABILITIES.some((name) => name === method)) {
+      const answer = await this.dispatch(
+        method,
+        basicSdkInput(method, args),
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: (input, signal) =>
+            runBasicSdk(method, input, {
+              ...this.host,
+              plugin: plugin.name,
+              registry: this.registry,
+              state: this.host.state?.(plugin),
+              files: this.host.files?.(plugin),
+              signal
+            })
+        },
+        turnHeld
+      )
+      if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof answer.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      return answer.value
+    }
+    if (method === "command.run") {
+      if (turnHeld)
+        throw new ModFunctionError(
+          "MODS_COMMAND_TURN_HELD",
+          `MODS_COMMAND_TURN_HELD: $.command.run cannot wait inside ${turnHeld}`,
+          true
+        )
+      const command = args[0]
+      if (
+        !isModObject(command) ||
+        typeof command.command !== "string" ||
+        !this.registry.has(command.command) ||
+        (command.args !== undefined && typeof command.args !== "string")
+      )
+        throw new ModFunctionError("MODS_COMMAND_ARGS")
+      return this.dispatch(
+        "command.run",
+        {
+          command: command.command,
+          args: command.args ?? "",
+          origin: { kind: "plugin", name: plugin.name },
+          presentation: { isFullscreen: false, columns: 80 }
+        },
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1
+      )
+    }
+    if (!this.host.capability) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")
+    const value = await this.host.capability(plugin, method, args, callSignal)
+    this.assertLive(plugin)
+    return value
+  }
+
   async close(): Promise<void> {
     this.controller.abort(new ModFunctionError("MODS_SESSION_CLOSED"))
+    this.panes.close()
     this.registry.clear()
     await Promise.allSettled(this.plugins.map((plugin) => plugin.guest.dispose()))
   }

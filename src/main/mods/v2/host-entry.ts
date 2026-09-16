@@ -103,6 +103,10 @@ async function handle(request: FunctionRequest): Promise<ModJson> {
     return null
   }
   if (request.type === "match") return guest.matches(request.registration, request.event)
+  if (request.type === "release-ui") {
+    guest.releaseUi(request.generation)
+    return null
+  }
   if (request.type !== "invoke") throw new ModFunctionError("MODS_REQUEST_INVALID")
   if (frames.size >= 128) throw new ModFunctionError("MODS_HOST_CAPACITY")
   const controller = new AbortController()

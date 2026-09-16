@@ -1,6 +1,7 @@
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useModCommands } from "../../features/slash-commands/useModCommands"
 import { ModCommandJobs } from "./ModCommandJobs"
+import { FunctionPanes } from "./FunctionPanes"
 import { ModCards } from "./ModCards"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
@@ -8318,6 +8319,7 @@ export function ChatContainer({
               <GitChangeNotice threadId={threadId} />
               <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
               <ModCommandJobs key={threadId} threadId={threadId} />
+              <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
                   visible={chatScrollUiState.mode === "detached"}

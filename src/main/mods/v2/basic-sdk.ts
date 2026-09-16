@@ -93,7 +93,7 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
     (name === "session.surfaces" &&
       (!Array.isArray(value) || value.some((surface) => surface !== "desktop"))) ||
     (name === "clock.now" && (typeof value !== "number" || !Number.isFinite(value))) ||
-    (name === "clock.sleep" && value !== undefined) ||
+    (["clock.sleep", "ui.open", "ui.close"].includes(name) && value !== undefined) ||
     ((name === "store.set" || name === "store.delete") && value !== undefined) ||
     (name === "store.keys" &&
       (!Array.isArray(value) || value.some((key) => typeof key !== "string"))) ||

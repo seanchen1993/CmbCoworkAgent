@@ -8,7 +8,13 @@ const pinned: Record<string, readonly string[]> = {
   "command.describe": ["command", "immediate", "provider"],
   "config.describe": ["key", "provider"],
   "tool.call": ["tool", "tool_use_id", "agentId"],
-  "turn.step": ["turnId", "index", "messageCount", "agentId"]
+  "turn.step": ["turnId", "index", "messageCount", "agentId"],
+  "ui.open": ["id"],
+  "ui.close": ["id", "origin"],
+  "ui.render": ["surface", "component", "requestId", "viewport"],
+  "ui.press": ["plugin", "element", "component", "requestId", "surface"],
+  "ui.input": ["plugin", "element", "component", "requestId", "surface", "kind"],
+  "ui.select": ["plugin", "element", "component", "requestId", "surface"]
 }
 const required: Record<string, readonly string[]> = {
   "command.run": ["command", "origin"],

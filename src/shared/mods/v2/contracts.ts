@@ -3,7 +3,7 @@ import type { ModJson, ModObject } from "../types"
 export const MODS_V2_API = "cmb.mods/v2" as const
 export const CLAUDE_MODS_PROFILE = "claude-code/2.1.273" as const
 /** Bump when expanding host authority so an old digest grant cannot silently gain capabilities. */
-export const FUNCTION_HOST_REVISION = "desktop-project-reads-v3" as const
+export const FUNCTION_HOST_REVISION = "desktop-pane-callbacks-v4" as const
 export const MOD_TIERS = ["prepend", "user", "append", "builtin", "core"] as const
 export type ModTier = (typeof MOD_TIERS)[number]
 
@@ -41,6 +41,12 @@ export interface FunctionInvocation {
   timeoutMs?: number
   streaming?: boolean
   operation?: boolean
+  uiGeneration?: string
+  callback?: {
+    handle: number
+    generation: string
+    kind: "onPress" | "onInput" | "onSubmit" | "onSelect"
+  }
 }
 
 export interface FunctionHostReply {
@@ -66,6 +72,7 @@ export interface FunctionGuest {
     options: FunctionInvocation
   ): Promise<{ value?: ModJson; absent?: boolean }>
   dispose(): void | Promise<void>
+  releaseUi(generation: string): void | Promise<void>
 }
 
 /** The host distinguishes downstream rejection from a failing optional hook. */

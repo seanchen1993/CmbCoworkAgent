@@ -10,13 +10,15 @@
     "source": "https://github.com/anthropics/claude-code/blob/b782847db9a18667f00918ea341197f201b22bb4/mods/types/claude-code.d.ts",
     "runtimePreviouslyVerified": "2.1.272",
     "runtime273Verified": true,
-    "runtime273VerificationScope": "25 command/stream/basic-SDK/state/read-only-file/held-command conformance cases in real plugin test; not full API or product parity"
+    "runtime273VerificationScope": "28 command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK conformance cases in real plugin test; not full API or product parity"
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
-    "scope": "isolated runtime plus production desktop commands; B3/B4 remain incomplete",
-    "desktopEvents": ["session.start", "command.run", "command.describe"],
+    "scope": "isolated runtime, production desktop commands and a limited interactive Pane surface; B3-B8 remain incomplete",
+    "desktopEvents": ["session.start", "command.run", "command.describe", "ui.render (desktop Pane)", "ui.press", "ui.input", "ui.select", "ui.open", "ui.close"],
     "desktopSdk": ["command.register", "command.list", "command.run", "session.id", "session.cwd", "session.surface", "session.surfaces", "clock.now", "clock.sleep", "store.get", "store.set", "store.delete", "store.keys", "fs.read", "fs.list", "fs.exists", "fs.stat"],
+    "partialDesktopSdk": ["ui.open", "ui.close", "ui.resolve", "ui.invalidate"],
+    "paneLimitations": ["inline Pane only; no dock or remaining 13 sites", "seven elements with a restricted prop allowlist; no Client/Svg/diff Code", "ui.resolve returns native constructors only; constructor replacement hooks pending", "ui.invalidate supports ui.render only", "focus, hotkeys, hover, scroll, holdToasts and measured viewport pending", "ui callbacks cannot launch command.run yet; physical write-queue integration pending", "native dynamically compiled async functions do not inherit guest continuation identity", "Claude static dollar-SDK usage scanner not yet implemented"],
     "unitPrototypeOnly": ["turn.step", "Client", "model stream boundary"],
     "evidence": "mods-v2-implementation-2026-09-16.md",
     "fullParity": false

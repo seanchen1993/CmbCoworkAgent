@@ -151,7 +151,7 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
                       </span>
                     </div>
                     <p className="text-xs">
-                      允许注册和执行命令、读取当前项目的文件与会话标识、使用时钟、保存插件在本项目的偏好。
+                      允许注册和执行命令、读取当前项目的文件与会话标识、使用时钟、保存项目偏好，以及打开交互面板。
                     </p>
                     <p className="text-xs font-mono break-all">
                       版本摘要：{mod.digest ?? mod.error}

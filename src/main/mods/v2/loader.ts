@@ -112,9 +112,9 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
     format: "iife",
     globalName: "__cmbFunctionMod",
     platform: "neutral",
-    target: "es2020",
-    jsxFactory: "h",
-    jsxFragment: "Fragment",
+    target: "es2016",
+    jsxFactory: "__functionJsx",
+    jsxFragment: "__functionFragment",
     logLevel: "silent",
     plugins: [
       {

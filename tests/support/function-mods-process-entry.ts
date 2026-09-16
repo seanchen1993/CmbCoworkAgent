@@ -10,11 +10,15 @@ import { FunctionDispatcher } from "../../src/main/mods/v2/dispatcher"
 import { dispatchFunctionStream } from "../../src/main/mods/v2/stream-dispatcher"
 import { compileFunctionPlugin } from "../../src/main/mods/v2/loader"
 import { FunctionSession, SESSION_CAPABILITIES } from "../../src/main/mods/v2/session"
+import { randomUUID } from "node:crypto"
+import type { FunctionUiElement } from "../../src/shared/mods/v2/ui"
+import { ModControlStore } from "../../src/main/mods/control-store"
 
 const root = resolve(process.argv[2])
 const client = new FunctionRuntimeClient(join(__dirname, "function-mod-host.cjs"))
 const checks: string[] = []
 let temporaryProject: string | undefined
+let paneStore: ModControlStore | undefined
 void app.whenReady().then(async () => {
   try {
     const compiled = await compileFunctionPlugin(join(root, "tests/fixtures/mods-v2/conformance"))
@@ -279,6 +283,68 @@ void app.whenReady().then(async () => {
     }
     fileTimes.sort((a, b) => a - b)
 
+    const boardPlugin = await compileFunctionPlugin(join(root, "resources/mods/function-commands"))
+    paneStore = new ModControlStore(join(temporaryProject, "panes-control.sqlite"))
+    const boardState = paneStore.functionState
+    const boardSession = new FunctionSession(
+      [
+        {
+          name: boardPlugin.name,
+          root: boardPlugin.root,
+          tier: "user",
+          guest: await client.load(boardPlugin.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      {
+        workspace: root,
+        threadId: "board",
+        assertLive: () => {},
+        publish: async (value) => value,
+        state: () => ({
+          get: async (key) => boardState.get("board", key),
+          keys: async () => boardState.keys("board"),
+          set: async (key, value) => {
+            boardState.set("board", key, value)
+          },
+          delete: (key) => {
+            boardState.delete("board", key)
+          }
+        })
+      }
+    )
+    await boardSession.run("claw-board", "")
+    const paneTimes: number[] = []
+    for (let index = 0; index < 120; index++) {
+      const before = performance.now()
+      const [pane] = await boardSession.panes.snapshot()
+      let button: FunctionUiElement | undefined
+      const visit = (node: FunctionUiElement | string): void => {
+        if (typeof node === "string") return
+        if (node.props.key === "count") button = node
+        node.children?.forEach(visit)
+      }
+      visit(pane.tree)
+      assert.ok(button?.press)
+      await boardSession.panes.act({
+        pane: pane.key,
+        generation: pane.generation,
+        plugin: button.press.plugin,
+        handle: button.press.handle,
+        kind: "press",
+        intentId: randomUUID()
+      })
+      assert.equal(boardState.get("board", "board-count"), index + 1)
+      if (index >= 20) paneTimes.push(performance.now() - before)
+    }
+    paneTimes.sort((a, b) => a - b)
+    await boardSession.close()
+    paneStore.close()
+    paneStore = undefined
+    checks.push(
+      "TSX panes keep captured SDK callbacks across 120 drawings in the real utility process"
+    )
+
     const exhausted = await client.load(`var __cmbFunctionMod={register(on){
       on("command.run", async()=>{await Promise.resolve();const until=Date.now()+30;while(Date.now()<until){};return {text:"ok"}})
     }}`)
@@ -377,6 +443,14 @@ void app.whenReady().then(async () => {
         maxMs: fileTimes[99],
         scope:
           "complete command, two file hooks, five real project file operations; 20 warmups; no content filtering configured"
+      },
+      panesPerformance: {
+        count: paneTimes.length,
+        p50Ms: paneTimes[49],
+        p95Ms: paneTimes[94],
+        maxMs: paneTimes[99],
+        scope:
+          "redraw and press through production session and utilityProcess; real SQLite state; 20 warmups; no content filtering"
       }
     }
     await writeFile(join(__dirname, "process-report.json"), JSON.stringify(report, null, 2))
@@ -387,6 +461,7 @@ void app.whenReady().then(async () => {
   } catch (error) {
     console.error(error)
     client.stop()
+    paneStore?.close()
     if (temporaryProject) await rm(temporaryProject, { recursive: true, force: true })
     app.exit(1)
   }

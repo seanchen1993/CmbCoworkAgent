@@ -1,3 +1,6 @@
+import { FUNCTION_ASYNC_SCOPE } from "./async-scope"
+import { FUNCTION_UI_BOOTSTRAP } from "./guest-ui"
+
 /** Only evaluated in QuickJS. No host closures or objects are handed to plugin code. */
 export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
 (() => {
@@ -9,6 +12,8 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
   const freeze = Object.freeze.bind(Object);
   const define = Object.defineProperty.bind(Object);
   const ownKeys = Object.keys.bind(Object);
+  ${FUNCTION_ASYNC_SCOPE}
+  ${FUNCTION_UI_BOOTSTRAP}
   const handlers = new Map();
   const signals = new Map();
   const registrations = [];
@@ -89,10 +94,11 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     const event = frozen(parse(json));
     const meta = frozen(parse(metadata));
     const registration = handlers.get(id);
-    if (!registration) throw Error("MODS_HANDLER_MISSING");
+    if (!registration && !meta.callback) throw Error("MODS_HANDLER_MISSING");
     let aborted = false;
     let reason;
     let trace = freeze([]);
+    const inheritedActions = new Set();
     const listeners = new Set();
     const signal = freeze({
       get aborted() { return aborted; },
@@ -120,6 +126,8 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       if (meta.operation && method === "next" && reply.value && typeof reply.value === "object" &&
           !Object.hasOwn(reply.value, "value") && !Object.hasOwn(reply.value, "deny"))
         reply.value.value = undefined;
+      if (meta.event === "ui.render" && method === "next")
+        uiHandles(reply.value, press => inheritedActions.add(pack(press)));
       return frozen(reply.value);
     }
     function streamNext(input, tier) {
@@ -162,33 +170,60 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     freeze(next);
     const sdk = Object.create(null);
     sdk.plugin = meta.plugin;
+    const scope = {
+      call, plugin: meta.plugin.name, callback: !!meta.callback, event: meta.event,
+      uiGeneration: meta.uiGeneration, requestId: event.requestId
+    };
+    const unawaited = [];
+    function sdkCall(method, args) {
+      const current = asyncScope;
+      return current && current.plugin === meta.plugin.name
+        ? current.call(method, args) : call(method, args);
+    }
     for (const capability of meta.capabilities) {
       const [noun, method] = capability.split(".");
       if (!noun || !method || noun === "plugin" || ["__proto__", "constructor", "prototype"].includes(noun))
         throw Error("MODS_CAPABILITY_NAME");
       if (!sdk[noun]) sdk[noun] = Object.create(null);
+      if (capability === "ui.resolve") {
+        sdk.ui.resolve = input => uiElements(meta, input);
+        continue;
+      }
+      if (capability === "ui.invalidate") {
+        sdk.ui.invalidate = event => {
+          const pending = sdkCall(capability, [event]);
+          pending.catch(() => {});
+          const current = asyncScope;
+          (current && current.plugin === meta.plugin.name ? current.unawaited : unawaited).push(pending);
+        };
+        continue;
+      }
       sdk[noun][method] = async (...args) => {
         if (capability === "store.set") args = [args[0], parse(pack(args[1]))];
         if (capability === "fs.list" && args[0] === undefined) args = ["."];
-        return call(capability, args);
+        return sdkCall(capability, args);
       };
     }
+    scope.unawaited = unawaited;
     for (const noun of ownKeys(sdk)) freeze(sdk[noun]);
     freeze(sdk);
     try {
-      const fn = meta.caught ? registration.recover : registration.fn;
+      const fn = meta.callback ? uiCallback(meta, event) : meta.caught ? registration.recover : registration.fn;
       if (typeof fn !== "function") throw Error("MODS_CATCH_MISSING");
       let value;
       if (meta.streaming) {
-        const body = fn(sdk, event, next);
+        const body = inScope(scope, () => fn(sdk, event, next));
         if (!body || typeof body.next !== "function" || !body[Symbol.asyncIterator]) throw Error("MODS_STREAM_HANDLER");
         while (true) {
-          const item = await body.next();
+          const item = await inScope(scope, () => body.next());
           if (item.done) {value=item.value;break;}
           await call("stream.yield", {chunk:item.value});
         }
         if (value === undefined) return pack({absent:true});
-      } else value = await fn(sdk, event, next);
+      } else value = await inScope(scope, () => Promise.resolve(fn(sdk, event, next)));
+      if (unawaited.length) await Promise.all(unawaited);
+      if (meta.callback) return pack({ value: {} });
+      if (meta.event === "ui.render") uiProvenance(value, meta, inheritedActions);
       if (value === undefined && meta.caught) return pack({ absent: true });
       if (meta.operation && (!value || typeof value !== "object" || Array.isArray(value) ||
           (!Object.hasOwn(value, "value") && typeof value.deny !== "string")))

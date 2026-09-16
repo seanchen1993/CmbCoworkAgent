@@ -973,6 +973,11 @@ interface DashboardPluginAggregate {
 
 interface CustomAPI {
   mods: {
+    panes(threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]>
+    paneAct(
+      threadId: string,
+      action: import("../shared/mods/v2/ui").FunctionUiAction
+    ): Promise<void>
     approveFunction(threadId: string, pluginId: string, digest: string): Promise<void>
     revokeFunction(threadId: string, name: string): Promise<void>
     status(threadId: string): Promise<import("../shared/mods/types").ModWorkspaceStatus>

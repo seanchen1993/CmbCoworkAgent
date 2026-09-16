@@ -15,6 +15,7 @@ import type { ModCommandDescriptor, ModObject } from "../../shared/mods/types"
 import { resolveAgentModeFromMetadata } from "../../shared/agent-mode-metadata"
 import { FunctionModsManager } from "../mods/v2/manager"
 import { FunctionRuntimeClient } from "../mods/v2/runtime-client"
+import type { FunctionUiAction } from "../../shared/mods/v2/ui"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -130,6 +131,20 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       ...(await functions.commands(workspace, threadId))
     ]
   })
+  ipcMain.handle("mods:function-panes", (event, threadId: string) =>
+    functions.panes(scope(event, threadId), threadId)
+  )
+  ipcMain.handle(
+    "mods:function-ui-act",
+    (event, input: { threadId: string; action: FunctionUiAction }) => {
+      const workspace = writableScope(event, input?.threadId)
+      return functions.act(
+        workspace,
+        input.threadId,
+        parseModJson(encodeModJson(input.action)) as unknown as FunctionUiAction
+      )
+    }
+  )
   ipcMain.handle("mods:artifact", (event, input: { threadId: string; id: string }) => {
     const workspace = scope(event, input?.threadId)
     if (typeof input.id !== "string" || !/^[a-f0-9-]{36}$/.test(input.id))
