@@ -6,6 +6,7 @@ import type {
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
+import type { ModCard, ModProjection, ModWorkspaceStatus } from "../shared/mods/types"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import {
   isWindowCloseBehavior,
@@ -3043,7 +3044,24 @@ const api = {
       }
     }
   },
+  mods: {
+    status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),
+    configure: (threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void> =>
+      ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy }),
+    approve: (threadId: string, pluginId: string, digest: string): Promise<void> =>
+      ipcRenderer.invoke("mods:approve", { threadId, pluginId, digest }),
+    revoke: (threadId: string, modId: string): Promise<void> => ipcRenderer.invoke("mods:revoke", { threadId, modId }),
+    cards: (threadId: string, callId: string): Promise<ModCard[]> => ipcRenderer.invoke("mods:cards", { threadId, callId }),
+    act: (threadId: string, actionId: string): Promise<ModProjection> => ipcRenderer.invoke("mods:act", { threadId, actionId }),
+    installExamples: (): Promise<void> => ipcRenderer.invoke("mods:install-examples"),
+    onCardsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void => callback(value)
+      ipcRenderer.on("mods:cards-changed", listener)
+      return () => ipcRenderer.removeListener("mods:cards-changed", listener)
+    }
+  },
   plugins: {
+    // Existing plugin APIs remain independent of project-scoped module grants.
     list: (): Promise<PluginMetadata[]> =>
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
     install: (

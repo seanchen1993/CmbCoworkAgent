@@ -360,6 +360,7 @@ import { closeMemoryCatalogWorker } from "./memory-catalog/client"
 import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
+import { registerModsHandlers } from "./ipc/mods"
 import { registerPluginFileHandlers } from "./ipc/plugin-files"
 import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
@@ -1135,6 +1136,7 @@ if (browserNativeMessagingHostLaunch) {
     registerTaskMmdHandlers(ipcMain)
     registerGitHandlers()
     registerPluginHandlers(ipcMain)
+    registerModsHandlers(ipcMain, () => mainWindow)
     registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)
     registerOptimizerHandlers(ipcMain)

@@ -1,0 +1,186 @@
+import { useCallback, useEffect, useState } from "react"
+import type { ModWorkspaceStatus } from "../../../../shared/mods/types"
+import { Button } from "@/components/ui/button"
+import { useAppStore } from "@/lib/store"
+
+export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.Element {
+  const [status, setStatus] = useState<ModWorkspaceStatus | null>(null)
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const refresh = useCallback(async () => {
+    if (!threadId) return
+    setStatus(await window.api.mods.status(threadId))
+  }, [threadId])
+  useEffect(() => {
+    let live = true
+    setStatus(null)
+    setError("")
+    if (threadId)
+      window.api.mods.status(threadId).then(
+        (value) => {
+          if (live) setStatus(value)
+        },
+        () => {
+          if (live) setError("请先为当前会话选择项目目录。")
+        }
+      )
+    return () => {
+      live = false
+    }
+  }, [threadId])
+  async function run(action: () => Promise<unknown>): Promise<void> {
+    setBusy(true)
+    setError("")
+    try {
+      await action()
+      await refresh()
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "操作失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <section className="border-b p-4 space-y-3 text-sm" data-mods-settings>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="font-medium">项目 Mods（试验）</div>
+          <p className="text-xs text-muted-foreground">
+            为项目启用工具增强、上下文和交互卡片。安装后需单独授权。此处权限仅适用于 Mods；插件中的
+            Shell Hooks 和 MCP 服务仍使用各自权限。
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => {
+              await window.api.mods.installExamples()
+              useAppStore.getState().bumpPluginVersion()
+            })
+          }
+        >
+          安装示范插件
+        </Button>
+      </div>
+      {!threadId && <p className="text-muted-foreground">打开项目会话后配置权限。</p>}
+      {error && (
+        <p role="alert" className="text-destructive break-all">
+          {error}
+        </p>
+      )}
+      {status && threadId && (
+        <>
+          <p className="text-xs text-muted-foreground break-all">作用目录：{status.workspace}</p>
+          <div className="flex flex-wrap gap-5">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={status.enabled}
+                disabled={busy}
+                onChange={(event) =>
+                  void run(() =>
+                    window.api.mods.configure(threadId, event.target.checked, status.outputPolicy)
+                  )
+                }
+              />
+              启用项目 Mods
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={status.outputPolicy}
+                disabled={busy}
+                onChange={(event) =>
+                  void run(() =>
+                    window.api.mods.configure(threadId, status.enabled, event.target.checked)
+                  )
+                }
+              />
+              启用宿主输出保护
+            </label>
+          </div>
+          {status.outputPolicy && (
+            <p className="text-xs text-muted-foreground">
+              检查工具结果中的常见凭据；后台输出通过完整检查后显示。不支持检查的内容会被隐藏。
+            </p>
+          )}
+          <details>
+            <summary className="cursor-pointer">模块与权限（{status.mods.length}）</summary>
+            <div className="max-h-64 overflow-auto mt-2 space-y-2">
+              {status.mods.map((mod) => (
+                <div
+                  key={mod.pluginId}
+                  className="rounded border p-3 space-y-1"
+                  data-mod-id={mod.manifest?.id}
+                >
+                  <div className="flex justify-between gap-3">
+                    <strong>{mod.manifest?.name ?? mod.pluginId}</strong>
+                    <span>
+                      {
+                        {
+                          ready: "已授权",
+                          disabled: "插件已禁用",
+                          "needs-approval": "等待授权",
+                          invalid: "清单无效"
+                        }[mod.state]
+                      }
+                    </span>
+                  </div>
+                  {mod.manifest && (
+                    <>
+                      <p className="text-xs">增强工具：{mod.manifest.tools.join("、") || "无"}</p>
+                      <p className="text-xs">
+                        读取能力：{mod.manifest.permissions.readTools.join("、") || "无"}
+                        ；执行能力：{mod.manifest.permissions.writeTools.join("、") || "无"}
+                      </p>
+                      <p className="text-xs">
+                        上下文：{mod.manifest.permissions.context.join("、") || "无"}
+                        ；插件状态存储：{mod.manifest.permissions.store ? "允许" : "不申请"}
+                      </p>
+                    </>
+                  )}
+                  <p className="text-xs font-mono break-all">版本摘要：{mod.digest ?? mod.error}</p>
+                  {mod.state === "needs-approval" && mod.digest && (
+                    <Button
+                      size="sm"
+                      disabled={busy}
+                      onClick={() =>
+                        void run(() => window.api.mods.approve(threadId, mod.pluginId, mod.digest!))
+                      }
+                    >
+                      授权以上权限
+                    </Button>
+                  )}
+                  {mod.state === "ready" && mod.manifest && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() =>
+                        void run(() => window.api.mods.revoke(threadId, mod.manifest!.id))
+                      }
+                    >
+                      撤销权限
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </details>
+          {status.diagnostics.length > 0 && (
+            <details>
+              <summary>运行诊断</summary>
+              {status.diagnostics.map((item, index) => (
+                <p className="text-xs" key={`${item.at}-${index}`}>
+                  {item.modId} · {item.code}
+                </p>
+              ))}
+            </details>
+          )}
+        </>
+      )}
+    </section>
+  )
+}

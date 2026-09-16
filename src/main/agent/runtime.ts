@@ -1,3 +1,7 @@
+import { withScopedModMcp, protectCurrentModResult } from "../mods/adapters"
+import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
+import { getModCallContext } from "../mods/context"
+import { recordSuccessfulToolExample } from "../mcp/tool-example-store"
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // Runtime: agent lifecycle and middleware orchestration
 import {
@@ -1428,7 +1432,7 @@ export function createScopedMcpCapabilityService(
     })
   }
 
-  return {
+  const scopedService: McpCapabilityService = {
     listTools: async () => (await getScopedToolSnapshot()).tools,
     getSnapshot: async () => {
       const baseSnapshot = await getBaseToolSnapshot()
@@ -1449,147 +1453,186 @@ export function createScopedMcpCapabilityService(
       const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
       if (!tool) return service.invoke(idOrAlias, args)
 
-      const hookContext: HookContext = {
-        toolName: tool.toolId,
-        toolArgs: args,
-        workspacePath: baseContext.workspacePath,
-        sessionId: baseContext.threadId,
-        agentId: baseContext.agentId,
-        turnId: baseContext.turnId,
-        pluginOutputDir: baseContext.pluginOutputDir,
-        systemId: baseContext.systemId,
-        pluginWorkspace: baseContext.pluginWorkspace,
-        featureId: baseContext.featureId,
-        harnessProjectId: baseContext.harnessProjectId,
-        harnessAdapterName: baseContext.harnessAdapterName,
-        harnessAdapterVersion: baseContext.harnessAdapterVersion,
-        harnessNodeName: baseContext.harnessNodeName,
-        harnessNodeStatus: baseContext.harnessNodeStatus,
-        projectCode: baseContext.projectCode,
-        projectDir: baseContext.projectDir,
-        workspaceHookCwd: baseContext.workspaceHookCwd,
-        forceSyncWorkspaceHooks: baseContext.forceSyncWorkspaceHooks,
-        pluginId,
-        pluginName: pluginId ? getPluginName(pluginId) : undefined
-      }
-      const preHooks = resolveHooksForContext("PreToolUse", hookContext)
-      const preResult = await runHooksEnriched(preHooks, "PreToolUse", hookContext, onHookResult)
-      if (preResult) {
-        hookScope.activatePersistentHooks(preHooks)
-      }
-      throwIfHookHalt(
-        "PreToolUse",
-        preResult,
-        `MCP tool ${tool.toolId} was stopped by a PreToolUse hook`
-      )
-      if (preResult?.blocked || preResult?.decision === "block") {
-        throw new Error(
-          preResult.reason ||
-            preResult.stopReason ||
-            preResult.stdout ||
-            preResult.stderr ||
-            `MCP tool ${tool.toolId} was blocked by a hook`
-        )
-      }
-
-      const effectiveArgs = mergeUpdatedInput(args, preResult?.updatedInput)
-
-      const tabsTool =
-        tool.toolName === "browser_tabs"
-          ? tool
-          : (snapshot.tools.find(
-              (candidate) =>
-                candidate.providerKey === tool.providerKey && candidate.toolName === "browser_tabs"
-            ) ?? null)
-
-      await autoSelectPlaywrightInAppBrowserTab({
+      const modResult = await withScopedModMcp(
+        {
+          workspace: baseContext.workspacePath,
+          threadId: baseContext.threadId,
+          turnId: baseContext.turnId ?? baseContext.threadId,
+          agentId: getModCallContext()?.identity.agentId ?? baseContext.agentId,
+          activePluginIds: hookScope.activePluginIds
+        },
         tool,
-        tabsTool,
-        capabilityService: service,
-        workspacePath: baseContext.workspacePath,
-        threadId: baseContext.threadId
-      })
-
-      if (pluginId) hookScope.activatePlugin(pluginId)
-      const result = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
-        tool,
-        workspacePath: baseContext.workspacePath,
-        threadId: baseContext.threadId,
-        args: effectiveArgs,
-        prepareBeforeInvoke: false,
-        invoke: async () => {
-          try {
-            return await service.invoke(tool.capabilityId, effectiveArgs)
-          } catch (error) {
-            const fallbackTool = shouldFallbackMcpError(error)
-              ? findFallbackTool(tool, snapshot.tools)
-              : null
-            if (!fallbackTool) throw error
-            return appendFallbackNotice(
-              await service.invoke(fallbackTool.capabilityId, effectiveArgs),
-              tool,
-              fallbackTool
+        args,
+        async (args) => {
+          const hookContext: HookContext = {
+            toolName: tool.toolId,
+            toolArgs: args,
+            workspacePath: baseContext.workspacePath,
+            sessionId: baseContext.threadId,
+            agentId: baseContext.agentId,
+            turnId: baseContext.turnId,
+            pluginOutputDir: baseContext.pluginOutputDir,
+            systemId: baseContext.systemId,
+            pluginWorkspace: baseContext.pluginWorkspace,
+            featureId: baseContext.featureId,
+            harnessProjectId: baseContext.harnessProjectId,
+            harnessAdapterName: baseContext.harnessAdapterName,
+            harnessAdapterVersion: baseContext.harnessAdapterVersion,
+            harnessNodeName: baseContext.harnessNodeName,
+            harnessNodeStatus: baseContext.harnessNodeStatus,
+            projectCode: baseContext.projectCode,
+            projectDir: baseContext.projectDir,
+            workspaceHookCwd: baseContext.workspaceHookCwd,
+            forceSyncWorkspaceHooks: baseContext.forceSyncWorkspaceHooks,
+            pluginId,
+            pluginName: pluginId ? getPluginName(pluginId) : undefined
+          }
+          const preHooks = resolveHooksForContext("PreToolUse", hookContext)
+          const preResult = await runHooksEnriched(
+            preHooks,
+            "PreToolUse",
+            hookContext,
+            onHookResult
+          )
+          if (preResult) {
+            hookScope.activatePersistentHooks(preHooks)
+          }
+          throwIfHookHalt(
+            "PreToolUse",
+            preResult,
+            `MCP tool ${tool.toolId} was stopped by a PreToolUse hook`
+          )
+          if (preResult?.blocked || preResult?.decision === "block") {
+            throw new Error(
+              preResult.reason ||
+                preResult.stopReason ||
+                preResult.stdout ||
+                preResult.stderr ||
+                `MCP tool ${tool.toolId} was blocked by a hook`
             )
           }
-        }
-      })
-      const postContext: HookContext = {
-        ...hookContext,
-        toolArgs: effectiveArgs,
-        toolResult: result.text
-      }
-      const postHooks = resolveHooksForContext("PostToolUse", postContext)
-      const postResult = await runHooksEnriched(postHooks, "PostToolUse", postContext, onHookResult)
-      if (postResult) {
-        hookScope.activatePersistentHooks(postHooks)
-      }
-      throwIfHookHalt(
-        "PostToolUse",
-        postResult,
-        `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
-      )
-      const failureFuseDecision = buildMcpFailureFuseDecision(tool, effectiveArgs, result)
-      if (shouldSendFailureFuseNotice(failureFuseDecision)) {
-        onFailureFuseNotice?.(failureFuseDecision)
-      }
-      // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
-      // than a throw or a `success: false` shape, so `detectToolFailure` (which
-      // looks at common ad-hoc shapes) doesn't see them. Translate isError →
-      // PostToolUseFailure here so OMC-style security/observability hooks see
-      // MCP failures on the same channel as the rest.
-      if (result.isError === true) {
-        const failureContext: HookContext = {
-          ...postContext,
-          toolResult: JSON.stringify({
-            error: result.text || `MCP tool ${tool.toolId} returned isError`,
-            error_type: "unknown",
-            failure_kind: "explicit-error",
-            is_interrupt: false,
-            is_timeout: false
+
+          const effectiveArgs = mergeUpdatedInput(args, preResult?.updatedInput)
+          await authorizeCurrentModInput(`mcp:${tool.capabilityId}`, effectiveArgs)
+
+          const tabsTool =
+            tool.toolName === "browser_tabs"
+              ? tool
+              : (snapshot.tools.find(
+                  (candidate) =>
+                    candidate.providerKey === tool.providerKey &&
+                    candidate.toolName === "browser_tabs"
+                ) ?? null)
+
+          await autoSelectPlaywrightInAppBrowserTab({
+            tool,
+            tabsTool,
+            capabilityService: service,
+            workspacePath: baseContext.workspacePath,
+            threadId: baseContext.threadId
           })
+
+          if (pluginId) hookScope.activatePlugin(pluginId)
+          const result = protectCurrentModResult(
+            await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+              tool,
+              workspacePath: baseContext.workspacePath,
+              threadId: baseContext.threadId,
+              args: effectiveArgs,
+              prepareBeforeInvoke: false,
+              invoke: async () => {
+                try {
+                  return await service.invoke(tool.capabilityId, effectiveArgs)
+                } catch (error) {
+                  const fallbackTool =
+                    !getModCallContext() && shouldFallbackMcpError(error)
+                      ? findFallbackTool(tool, snapshot.tools)
+                      : null
+                  if (!fallbackTool) throw error
+                  return appendFallbackNotice(
+                    await service.invoke(fallbackTool.capabilityId, effectiveArgs),
+                    tool,
+                    fallbackTool
+                  )
+                }
+              }
+            })
+          )
+          const postContext: HookContext = {
+            ...hookContext,
+            toolArgs: effectiveArgs,
+            toolResult: result.text
+          }
+          const postHooks = resolveHooksForContext("PostToolUse", postContext)
+          const postResult = await runHooksEnriched(
+            postHooks,
+            "PostToolUse",
+            postContext,
+            onHookResult
+          )
+          if (postResult) {
+            hookScope.activatePersistentHooks(postHooks)
+          }
+          throwIfHookHalt(
+            "PostToolUse",
+            postResult,
+            `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
+          )
+          const failureFuseDecision = buildMcpFailureFuseDecision(tool, effectiveArgs, result)
+          if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+            onFailureFuseNotice?.(failureFuseDecision)
+          }
+          // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
+          // than a throw or a `success: false` shape, so `detectToolFailure` (which
+          // looks at common ad-hoc shapes) doesn't see them. Translate isError →
+          // PostToolUseFailure here so OMC-style security/observability hooks see
+          // MCP failures on the same channel as the rest.
+          if (result.isError === true) {
+            const failureContext: HookContext = {
+              ...postContext,
+              toolResult: JSON.stringify({
+                error: result.text || `MCP tool ${tool.toolId} returned isError`,
+                error_type: "unknown",
+                failure_kind: "explicit-error",
+                is_interrupt: false,
+                is_timeout: false
+              })
+            }
+            const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
+            runHooksEnriched(
+              failureHooks,
+              "PostToolUseFailure",
+              failureContext,
+              onHookResult
+            ).catch((e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e))
+          }
+          if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
+          const hookFeedback = formatPostHookFeedback(postResult)
+          const failureFuseFeedback = shouldAttachFailureFuseFeedback(failureFuseDecision)
+            ? formatFailureFuseWarning(failureFuseDecision)
+            : null
+          const feedback = [hookFeedback, failureFuseFeedback].filter(Boolean).join("\n\n")
+          const isError =
+            result.isError || postResult?.decision === "block" || postResult?.continue === false
+          return {
+            ...result,
+            isError,
+            text: feedback ? `${result.text}\n\n${feedback}` : result.text,
+            contentBlocks:
+              feedback && result.contentBlocks
+                ? [...result.contentBlocks, { type: "text", text: feedback }]
+                : result.contentBlocks
+          }
         }
-        const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
-        runHooksEnriched(failureHooks, "PostToolUseFailure", failureContext, onHookResult).catch(
-          (e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
-        )
+      )
+      if (getModCallContext()) {
+        try {
+          recordSuccessfulToolExample(tool, modResult)
+        } catch {
+          console.warn(`[MCP] failed to persist filtered tool example for "${tool.toolId}"`)
+        }
       }
-      if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
-      const hookFeedback = formatPostHookFeedback(postResult)
-      const failureFuseFeedback = shouldAttachFailureFuseFeedback(failureFuseDecision)
-        ? formatFailureFuseWarning(failureFuseDecision)
-        : null
-      const feedback = [hookFeedback, failureFuseFeedback].filter(Boolean).join("\n\n")
-      const isError =
-        result.isError || postResult?.decision === "block" || postResult?.continue === false
-      return {
-        ...result,
-        isError,
-        text: feedback ? `${result.text}\n\n${feedback}` : result.text,
-        contentBlocks:
-          feedback && result.contentBlocks
-            ? [...result.contentBlocks, { type: "text", text: feedback }]
-            : result.contentBlocks
-      }
+      return modResult
     },
     invalidate: async (reason) => {
       scopedSnapshotCache = null
@@ -1602,6 +1645,16 @@ export function createScopedMcpCapabilityService(
       await service.close()
     }
   }
+  getModsManager()?.bindMcp(
+    {
+      workspace: baseContext.workspacePath,
+      threadId: baseContext.threadId,
+      turnId: baseContext.turnId ?? baseContext.threadId,
+      agentId: baseContext.agentId
+    },
+    (id, args) => scopedService.invoke(id, args)
+  )
+  return scopedService
 }
 
 const TASK_TOOL_PROMPT = `## \`task\` (subagent spawner)

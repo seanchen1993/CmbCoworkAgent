@@ -792,6 +792,8 @@ export interface PluginManifest {
   mcpServers?: string
   /** Path to hooks config file relative to plugin root (default: "hooks/hooks.json") */
   hooks?: string
+  /** CMB function module manifest, relative to plugin root. */
+  mods?: string
 }
 
 export interface PluginMetadata {
@@ -817,6 +819,7 @@ export interface PluginMetadata {
    */
   mcpServerCount: number
   hookCount?: number
+  modCount?: number
   /** Cached hooks config path relative to plugin root, read from manifest at install/inspect time. */
   hookPath?: string
   /**

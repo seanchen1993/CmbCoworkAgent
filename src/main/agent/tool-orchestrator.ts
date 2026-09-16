@@ -1,3 +1,5 @@
+import { getModCallContext } from "../mods/context"
+import { hasModOperationApproval } from "../mods/manager"
 /**
  * Tool Orchestrator: approval + sandbox + retry pipeline.
  *
@@ -270,7 +272,8 @@ export class ToolOrchestrator {
     outsideShellSyntax: CommandShellSyntax = shellSyntax
   ): Promise<ExecuteResponse> {
     {
-      const yoloMode = this.readYoloMode()
+      const modApproved = hasModOperationApproval("host:execute", { command, cwd })
+      const yoloMode = this.readYoloMode() || modApproved
       console.log(
         `[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${yoloMode}`
       )
@@ -718,6 +721,7 @@ export class ToolOrchestrator {
     outsideShellSyntax: CommandShellSyntax = process.platform === "win32" ? "powershell" : "posix"
   ): Promise<ExecuteResponse> {
     if (sandboxMode === "none") return result
+    if (getModCallContext()) return result
     if (!this.sandboxEscapeAllowed) return result
     // Single Codex-style bypass check — covers piped-spawn EPERM, git .git writes,
     // dubious ownership, ssh auth, generic EACCES/Access-is-denied/拒绝访问, etc.
@@ -810,6 +814,7 @@ export class ToolOrchestrator {
     cwd: string
   ): Promise<boolean> {
     {
+      if (hasModOperationApproval(`host:${operation}`, { filePath })) return true
       if (this.readYoloMode() || this.autoApproveFileEdits) return true
 
       const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")

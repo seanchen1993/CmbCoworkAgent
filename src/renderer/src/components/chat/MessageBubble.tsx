@@ -1,5 +1,6 @@
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer"
+import { ModCards } from "./ModCards"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { useReasoningExpansion } from "./reasoning-expansion-context"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
@@ -1141,6 +1142,7 @@ function MessageBubbleImpl({
                       />
                     </div>
                   )}
+                  <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
                 </div>
               )
             })}

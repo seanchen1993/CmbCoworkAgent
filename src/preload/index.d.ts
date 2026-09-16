@@ -972,6 +972,16 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  mods: {
+    status(threadId: string): Promise<import("../shared/mods/types").ModWorkspaceStatus>
+    configure(threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void>
+    approve(threadId: string, pluginId: string, digest: string): Promise<void>
+    revoke(threadId: string, modId: string): Promise<void>
+    cards(threadId: string, callId: string): Promise<import("../shared/mods/types").ModCard[]>
+    act(threadId: string, actionId: string): Promise<import("../shared/mods/types").ModProjection>
+    installExamples(): Promise<void>
+    onCardsChanged(callback: (event: { threadId: string }) => void): () => void
+  }
   agent: {
     invoke: (
       threadId: string,
