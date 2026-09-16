@@ -87,7 +87,9 @@
     "env:decrypt:quick": "rm -f .env && git checkout -- .env",
     "env:filter:disable": "git config --local --unset filter.envcrypt.clean; git config --local --unset filter.envcrypt.smudge; git config --local --unset filter.envcrypt.required",
     "test:mods": "vitest run src/main/mods src/shared/mods src/main/agent/codex-sandbox-binary.test.ts src/main/agent/local-sandbox-background-settlement.test.ts src/main/agent/tool-orchestrator.test.ts src/main/mcp/langchain-tool.test.ts src/main/mcp/invocation-retry.test.ts",
-    "test:mods:e2e": "node tests/run-mods-e2e.mjs"
+    "test:mods:e2e": "node tests/run-mods-e2e.mjs",
+    "test:mods:function": "vitest run src/main/mods/v2 src/shared/mods/v2",
+    "test:mods:function:process": "node tests/run-function-mods-process.mjs"
   },
   "build": {
     "appId": "com.cmbdevclaw.com",

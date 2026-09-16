@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "status": "design-only-not-implemented",
+  "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-16",
   "codeBaseline": "6abb89dcec5a4f7ee30407dc27db7b9a947aa92e",
   "upstream": {
@@ -9,7 +9,8 @@
     "declarationSha256": "3320DB952D7441BECA33D4AE084A3FFC99D206F92911280A93D27D9EAA670D36",
     "source": "https://github.com/anthropics/claude-code/blob/b782847db9a18667f00918ea341197f201b22bb4/mods/types/claude-code.d.ts",
     "runtimePreviouslyVerified": "2.1.272",
-    "runtime273Verified": false
+    "runtime273Verified": true,
+    "runtime273VerificationScope": "21 command/stream conformance cases in real plugin test; not full API or product parity"
   },
   "meaning": {
     "planned-adapter": "A design commitment, not a claim of current implementation or source-level conformance.",

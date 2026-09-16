@@ -1,0 +1,6 @@
+{
+  "name": "cmb-mods-semantics-probe",
+  "version": "0.0.1",
+  "description": "Local middleware semantics tests",
+  "author": { "name": "Local research" }
+}

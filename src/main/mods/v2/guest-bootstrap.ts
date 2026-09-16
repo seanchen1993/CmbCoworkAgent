@@ -1,0 +1,196 @@
+/** Only evaluated in QuickJS. No host closures or objects are handed to plugin code. */
+export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
+(() => {
+  "use strict";
+  const host = globalThis.__functionHost;
+  delete globalThis.__functionHost;
+  const stringify = JSON.stringify.bind(JSON);
+  const parse = JSON.parse.bind(JSON);
+  const freeze = Object.freeze.bind(Object);
+  const define = Object.defineProperty.bind(Object);
+  const ownKeys = Object.keys.bind(Object);
+  const handlers = new Map();
+  const signals = new Map();
+  const registrations = [];
+  let registering = true;
+  function pack(value) {
+    const text = stringify(value);
+    if (typeof text !== "string") throw Error("MODS_RETURN_UNDEFINED");
+    if (text.length > 1048576) throw Error("MODS_JSON_SIZE");
+    return text;
+  }
+  function frozen(value, depth = 0) {
+    if (depth > 32) throw Error("MODS_JSON_DEPTH");
+    if (value && typeof value === "object") {
+      for (const key of ownKeys(value)) frozen(value[key], depth + 1);
+      freeze(value);
+    }
+    return value;
+  }
+  function match(pattern, value, depth = 0) {
+    if (depth > 8) throw Error("MODS_MATCHER_DEPTH");
+    if (pattern instanceof RegExp) {
+      pattern.lastIndex = 0;
+      return typeof value === "string" && pattern.test(value);
+    }
+    if (Array.isArray(pattern)) return pattern.some(item => match(item, value, depth + 1));
+    if (Array.isArray(value)) return value.some(item => match(pattern, item, depth + 1));
+    if (pattern && typeof pattern === "object") {
+      return value !== null && typeof value === "object" &&
+        ownKeys(pattern).every(key => match(pattern[key], value[key], depth + 1));
+    }
+    return pattern === value;
+  }
+  function eventMatches(pattern, event) {
+    const negative = pattern.startsWith("!");
+    const positive = negative ? pattern.slice(1) : pattern;
+    const result = positive === "*" || positive === event ||
+      (positive.endsWith(".*") && event.startsWith(positive.slice(0, -1)));
+    return negative ? !result : result;
+  }
+  const on = freeze((pattern, matcher, fn) => {
+    if (!registering) throw Error("MODS_REGISTRATION_CLOSED");
+    if (typeof matcher === "function") { fn = matcher; matcher = undefined; }
+    if (typeof pattern !== "string" || typeof fn !== "function") throw Error("MODS_REGISTRATION_INVALID");
+    if (registrations.length >= 128) throw Error("MODS_REGISTRATION_LIMIT");
+    const id = String(registrations.length);
+    const record = { id, pattern, hasCatch: false };
+    const handler = { fn, matcher, recover: undefined };
+    registrations.push(record);
+    handlers.set(id, handler);
+    return freeze({ catch(recover) {
+      if (!registering || record.hasCatch || pattern === "engine.create" || typeof recover !== "function")
+        throw Error("MODS_CATCH_INVALID");
+      record.hasCatch = true;
+      handler.recover = recover;
+    }});
+  });
+  define(globalThis, "__functionRegister", { value(json) {
+    const options = frozen(parse(json));
+    const module = globalThis.__cmbFunctionMod;
+    if (!module || typeof module.register !== "function") throw Error("MODS_NO_REGISTER");
+    try {
+      const result = module.register(on, options);
+      if (result && typeof result.then === "function") throw Error("MODS_ASYNC_REGISTER");
+      return pack(registrations);
+    } finally { registering = false; }
+  }});
+  define(globalThis, "__functionMatches", { value(id, json) {
+    const handler = handlers.get(id);
+    if (!handler) throw Error("MODS_HANDLER_MISSING");
+    return handler.matcher === undefined || match(handler.matcher, parse(json)) ? "true" : "false";
+  }});
+  define(globalThis, "__functionInvoke", { value: async (token, id, json, metadata) => {
+    const event = frozen(parse(json));
+    const meta = frozen(parse(metadata));
+    const registration = handlers.get(id);
+    if (!registration) throw Error("MODS_HANDLER_MISSING");
+    let aborted = false;
+    let reason;
+    let trace = freeze([]);
+    const listeners = new Set();
+    const signal = freeze({
+      get aborted() { return aborted; },
+      get reason() { return reason; },
+      throwIfAborted() { if (aborted) throw reason; },
+      addEventListener(type, fn) { if (type === "abort") listeners.add(fn); },
+      removeEventListener(type, fn) { if (type === "abort") listeners.delete(fn); }
+    });
+    signals.set(token, () => {
+      aborted = true;
+      reason = Error("MODS_CANCELLED");
+      for (const fn of listeners) { try { fn.call(signal); } catch {} }
+      listeners.clear();
+    });
+    async function call(method, args) {
+      signal.throwIfAborted();
+      const reply = parse(await host(token, method, pack(args)));
+      if (reply.trace) trace = frozen(reply.trace);
+      if (reply.error) {
+        const error = Error(reply.error.message);
+        define(error, "__downstream", { value: reply.error.downstream === true });
+        throw error;
+      }
+      return frozen(reply.value);
+    }
+    function streamNext(input, tier) {
+      const opening = call("stream.open", tier === undefined ? {input} : {input,tier});
+      let settle, fail;
+      const result = new Promise((resolve, reject) => {settle=resolve;fail=reject;});
+      result.catch(() => {});
+      const stream = (async function* () {
+        let done = false;
+        let opened;
+        try {
+          opened = await opening;
+          while (true) {
+            const item = await call("stream.pull", {id:opened.id});
+            if (item.done) {done=true;settle(item.value);return item.value;}
+            yield item.value;
+          }
+        } catch (error) {fail(error);throw error;}
+        finally {
+          if (!done) {
+            fail(Error("MODS_STREAM_CLOSED"));
+            if (opened) await call("stream.close", {id:opened.id});
+          }
+        }
+      })();
+      define(stream,"result",{value:result});
+      return stream;
+    }
+    const next = meta.streaming ? (input) => streamNext(input) : (input) => call("next", { input });
+    define(next, "to", { value: meta.streaming ? (input,tier) => streamNext(input,tier) : (input, tier) => call("next", { input, tier }) });
+    define(next, "signal", { value: signal });
+    define(next, "origin", { value: meta.origin });
+    define(next, "event", { value: meta.event });
+    define(next, "trace", { get: () => trace });
+    define(next, "is", { value: (pattern) => eventMatches(pattern, meta.event) });
+    if (meta.caught) {
+      define(next, "called", { value: meta.caught.called });
+      define(next, "error", { value: frozen({ kind: meta.caught.kind || "throw", message: meta.caught.message, budget: meta.caught.budget || 100 }) });
+    }
+    freeze(next);
+    const sdk = Object.create(null);
+    sdk.plugin = meta.plugin;
+    for (const capability of meta.capabilities) {
+      const [noun, method] = capability.split(".");
+      if (!noun || !method || noun === "plugin" || ["__proto__", "constructor", "prototype"].includes(noun))
+        throw Error("MODS_CAPABILITY_NAME");
+      if (!sdk[noun]) sdk[noun] = Object.create(null);
+      sdk[noun][method] = (...args) => call(capability, args);
+    }
+    for (const noun of ownKeys(sdk)) freeze(sdk[noun]);
+    freeze(sdk);
+    try {
+      const fn = meta.caught ? registration.recover : registration.fn;
+      if (typeof fn !== "function") throw Error("MODS_CATCH_MISSING");
+      let value;
+      if (meta.streaming) {
+        const body = fn(sdk, event, next);
+        if (!body || typeof body.next !== "function" || !body[Symbol.asyncIterator]) throw Error("MODS_STREAM_HANDLER");
+        while (true) {
+          const item = await body.next();
+          if (item.done) {value=item.value;break;}
+          await call("stream.yield", {chunk:item.value});
+        }
+        if (value === undefined) return pack({absent:true});
+      } else value = await fn(sdk, event, next);
+      if (value === undefined && meta.caught) return pack({ absent: true });
+      return pack({ value });
+    } catch (error) {
+      return pack({ error: {
+        message: String(error && error.message || error).slice(0, 2048),
+        downstream: error && error.__downstream === true
+      }});
+    } finally {
+      signals.delete(token);
+      listeners.clear();
+    }
+  }});
+  define(globalThis, "__functionCancel", { value: token => {
+    signals.get(token)?.();
+    signals.delete(token);
+  }});
+})();
+`
