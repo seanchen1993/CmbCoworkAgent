@@ -4,6 +4,7 @@ import {
   INTERNAL_NOTIFICATION_TRIGGER_SOURCE,
   WORKFLOW_NOTIFICATION_TURN_PROMPT
 } from "../../../../shared/internal-notification-turn"
+import { SKILL_USE_TAG_NAME, skillUseDisplayLabel } from "../../../../shared/skill-use-block"
 import {
   buildThreadConversation,
   buildTraceConversation,
@@ -492,5 +493,66 @@ describe("整个 thread 还是摘要预览时不渲染时间线", () => {
 
   it("空列表不算「等待加载」，走原来的空态文案", () => {
     expect(isThreadAwaitingFullLoad([])).toBe(false)
+  })
+})
+
+describe("显式技能的传输块不得当成用户原话渲染", () => {
+  const skillPath = String.raw`D:\kanban\单据预审核\.autobizdevops\cmb_kanban_latest\skills\autobiz\autobiz-requirement-discuss\SKILL.md`
+  const instruction = [
+    `<${SKILL_USE_TAG_NAME}>`,
+    "<instruction>",
+    "用户显式选择了下面 <name> 指定的技能。请先使用 read_file 工具读取 <path> 指定的 SKILL.md 文件。",
+    "- 不要跳过任何步骤；",
+    "- 始终使用中文回答。",
+    "</instruction>"
+  ].join("\n")
+  const wholeBlock = [
+    instruction,
+    "<name>autobiz-requirement-discuss</name>",
+    `<path>${skillPath}</path>`,
+    `</${SKILL_USE_TAG_NAME}>`
+  ].join("\n")
+  // What the upload sanitizer's head+tail cut leaves behind once the block
+  // pushes the message past the compressed userMessage budget: </name> and the
+  // opening <path> are both inside the elided middle.
+  const cutBlock = [
+    instruction,
+    "<name>autobiz-require",
+    "...[已省略 133 字符]...",
+    String.raw`ban_latest\skills\autobiz\autobiz-requirement-discuss\SKILL.md</path>`,
+    `</${SKILL_USE_TAG_NAME}>`
+  ].join("\n")
+  const userText = (userMessage: string): string =>
+    buildTraceConversation(traceWithResponse({ userMessage })).userText
+
+  it("块被腰斩时仍然只渲染用户自己写的那句话", () => {
+    expect(
+      userText(`请使用 /autobiz-requirement-discuss 继续推进当前 Feature。\n\n${cutBlock}`)
+    ).toBe("请使用 /autobiz-requirement-discuss 继续推进当前 Feature。")
+  })
+
+  it("块完好时只渲染用户原话", () => {
+    expect(userText(`帮我理一下需求\n\n${wholeBlock}`)).toBe("帮我理一下需求")
+  })
+
+  it("没有原话时用与上传标记同一套文案，新旧数据读起来一致", () => {
+    expect(userText(wholeBlock)).toBe(skillUseDisplayLabel("autobiz-requirement-discuss"))
+    expect(userText(wholeBlock)).toBe("[技能] autobiz-requirement-discuss")
+  })
+
+  it("没有原话时从 path 尾巴救回完整技能名，而不是半截的 <name>", () => {
+    expect(userText(cutBlock)).toBe("[技能] autobiz-requirement-discuss")
+  })
+
+  it("连路径都被截断时不猜名字", () => {
+    const nameless = [instruction, "<name>autobiz-require", "...[已省略 200 字符]...", "SKI"].join(
+      "\n"
+    )
+    expect(userText(nameless)).toBe("[技能] （名称未完整记录）")
+  })
+
+  it("用户自己写的标签名不被当成传输块切掉", () => {
+    const prose = `这个 <${SKILL_USE_TAG_NAME}> 标签是干嘛用的？`
+    expect(userText(prose)).toBe(prose)
   })
 })

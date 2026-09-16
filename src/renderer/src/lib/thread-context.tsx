@@ -124,6 +124,12 @@ import {
 } from "./live-stream-messages"
 import { hasModelRetryProgress, liveAssistantContentWatermark } from "./model-retry-indicator"
 import {
+  advanceMessageAttempts,
+  publishMessageDiscard,
+  type MessageAttempts
+} from "./message-discard-events"
+import { resolveDiscardedLiveMessageIds } from "./message-discard-identities"
+import {
   applySchedulerAssistantSnapshot,
   mergeSchedulerReasoning
 } from "./scheduler-assistant-snapshot"
@@ -847,6 +853,7 @@ type StreamInstance = ReturnType<typeof useElectronStream>
 
 // Stream data that we want to be reactive
 interface StreamData {
+  messageAttempts?: MessageAttempts
   messages: StreamInstance["messages"]
   liveMessages: LiveStreamMessage[]
   isLoading: boolean
@@ -2928,7 +2935,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         durableTranscriptSyncGateRef.current.finish(threadId, invalidation)
       }
       if (!options.ignoreHistoryLoading && threadStatesRef.current[threadId]?.historyLoading) {
-        streamDataRef.current[threadId] = { ...data, liveMessages: [] }
+        streamDataRef.current[threadId] = {
+          ...data,
+          liveMessages: [],
+          messageAttempts: previousStreamData?.messageAttempts
+        }
         setThreadLoadingState(threadId, data.isLoading)
         notifyStreamSubscribers(threadId)
         if (!data.isLoading) {
@@ -2990,7 +3001,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         liveMessages = flushLiveStreamAccumulator(threadId)
       }
 
-      streamDataRef.current[threadId] = { ...data, liveMessages }
+      streamDataRef.current[threadId] = {
+        ...data,
+        liveMessages,
+        messageAttempts: previousStreamData?.messageAttempts
+      }
       if (!data.isLoading) delete rendererOnlyMessageIdAliasesRef.current[threadId]
       setThreadLoadingState(threadId, data.isLoading)
       notifyStreamSubscribers(threadId)
@@ -4136,11 +4151,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           )
           break
         case "stream_retry_reset": {
-          const discardedMessageIds = new Set(
-            Array.isArray(data.discardedMessageIds) ? data.discardedMessageIds : []
-          )
-          const stableMessages = Array.isArray(data.messages) ? data.messages : []
           const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+          const stableMessages = Array.isArray(data.messages) ? data.messages : []
+          const discardedMessageIds = resolveDiscardedLiveMessageIds(
+            new Set(Array.isArray(data.discardedMessageIds) ? data.discardedMessageIds : []),
+            accumulator.messages,
+            stableMessages as LiveStreamMessage[],
+            getLiveStreamTranscriptIndex(threadStatesRef.current[threadId]?.messages ?? [])
+              .messageIdentities
+          )
           accumulator.messages = []
           accumulator.normalizeMessageIds = createLiveStreamMessageIdNormalizer()
           accumulator.mergeMessages = createLiveStreamMessageMerger()
@@ -4153,11 +4172,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
 
           const current = streamDataRef.current[threadId] ?? defaultStreamData
+          const messageAttempts = advanceMessageAttempts(current.messageAttempts, discardedMessageIds)
           streamDataRef.current[threadId] = {
             ...current,
             messages: stableMessages as StreamData["messages"],
-            liveMessages: []
+            liveMessages: [],
+            messageAttempts
           }
+          publishMessageDiscard(threadId, discardedMessageIds, messageAttempts.revision)
           notifyStreamSubscribers(threadId)
           break
         }
@@ -4868,6 +4890,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       applyCoordinatorAssistantSnapshotMessage,
       applyMessageIdAlias,
       flushGoalSubturnComplete,
+      getLiveStreamTranscriptIndex,
       getOrCreateLiveStreamAccumulator,
       notifyHookLogSubscribers,
       notifyStreamSubscribers,
@@ -6665,10 +6688,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           scheduledTaskLoading: false,
           error: (event.error as string) || "Scheduled task failed"
         }))
-        // Match the done path: remount from the durable transcript baseline so
-        // a later foreground values replay can adopt the scheduler execution
-        // identities instead of manufacturing duplicate buckets.
-        loadThreadHistory(threadId)
+        // Remount only after persistence succeeded. A disk failure must leave
+        // the already visible partial transcript available beside the error.
+        if (event.transcriptPersisted !== false) loadThreadHistory(threadId)
         return
       }
 
@@ -7636,7 +7658,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     // An idle-holder eviction never reaches this branch. Retain an unexpected
     // live snapshot defensively if a run edge raced with reconciliation.
     if (streamData?.isLoading) return
-    delete streamDataRef.current[threadId]
+    if (streamData?.messageAttempts) {
+      // managed runId 变化也会重挂 holder，而同线程列表仍存活；只释放流对象和正文。
+      // 代次跟随线程 retire/dehydrate 清理，避免仍挂载的列表退回 revision 0。
+      streamDataRef.current[threadId] = {
+        ...defaultStreamData,
+        messageAttempts: streamData.messageAttempts
+      }
+    } else {
+      delete streamDataRef.current[threadId]
+    }
     const accumulator = liveStreamAccumulatorsRef.current[threadId]
     if (!accumulator?.active) delete liveStreamAccumulatorsRef.current[threadId]
     delete transitionalLiveMessagesRef.current[threadId]

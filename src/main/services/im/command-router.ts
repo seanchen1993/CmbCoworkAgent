@@ -36,12 +36,9 @@ import {
   imRemoteUserInputService,
   type ImRemoteUserInputService
 } from "./remote-user-input-service"
-import { imHumanGateService, type ImHumanGateService } from "./human-gate-service"
-import {
-  imManagedBizRetryService,
-  type ImManagedBizRetryService,
-  type ManagedBizRetryChoice
-} from "./managed-biz-retry-service"
+import { imHumanGateAdapter, type ImHumanGateAdapter } from "./human-gate-adapter"
+import { imBizRetryAdapter, type ImBizRetryAdapter } from "./biz-retry-adapter"
+import type { ManagedBizRetryChoice } from "../../../shared/harness-notifications"
 
 export type ImCommandName =
   | "help"
@@ -82,9 +79,9 @@ const COMMANDS = new Map<string, ImCommandName>([
   ["回答", "answer"],
   ["门禁批准", "human_gate_approve"],
   ["门禁拒绝", "human_gate_reject"],
-  ["托管停止", "managed_stop"],
-  ["托管继续当前会话", "managed_continue"],
-  ["托管开启新会话", "managed_new_thread"],
+  ["停止托管运行", "managed_stop"],
+  ["在当前会话继续托管", "managed_continue"],
+  ["开启新会话继续托管", "managed_new_thread"],
   ["切换", "switch_target"]
 ])
 
@@ -104,8 +101,8 @@ interface ImCommandRouterDependencies {
   access: ImRemoteAccessService
   approvals: Pick<ImRemoteApprovalService, "resolveCode">
   userInputs: Pick<ImRemoteUserInputService, "resolveAnswer">
-  humanGates: Pick<ImHumanGateService, "resolveCode">
-  managedBizRetries: Pick<ImManagedBizRetryService, "resolveCode">
+  humanGates: Pick<ImHumanGateAdapter, "resolveCode">
+  managedBizRetries: Pick<ImBizRetryAdapter, "resolveCode">
   selections: ImSelectionContextStore
   abortCurrent: (conversationKey: string, threadId?: string) => boolean
   getCurrentEventId: (conversationKey: string, threadId?: string) => string | null
@@ -189,8 +186,8 @@ export class ImCommandRouter {
       access: dependencies.access ?? imRemoteAccessService,
       approvals: dependencies.approvals ?? imRemoteApprovalService,
       userInputs: dependencies.userInputs ?? imRemoteUserInputService,
-      humanGates: dependencies.humanGates ?? imHumanGateService,
-      managedBizRetries: dependencies.managedBizRetries ?? imManagedBizRetryService,
+      humanGates: dependencies.humanGates ?? imHumanGateAdapter,
+      managedBizRetries: dependencies.managedBizRetries ?? imBizRetryAdapter,
       selections: dependencies.selections ?? imSelectionContextStore,
       abortCurrent: dependencies.abortCurrent ?? (() => false),
       getCurrentEventId: dependencies.getCurrentEventId ?? (() => null),
@@ -295,9 +292,9 @@ export class ImCommandRouter {
       "/回答 <输入短码> <编号> — 回答 Agent 的补充问题；自定义回答使用“其他 <内容>”",
       "/门禁批准 <短码> — 批准 Human Gate",
       "/门禁拒绝 <短码> — 拒绝 Human Gate",
-      "/托管停止 <短码> — 停止待决策的托管运行",
-      "/托管继续当前会话 <短码> <消息> — 在当前托管会话继续执行",
-      "/托管开启新会话 <短码> — 创建新的托管会话",
+      "/停止托管运行 <短码> — 停止待决策的托管运行",
+      "/在当前会话继续托管 <短码> <消息> — 在当前托管会话继续执行",
+      "/开启新会话继续托管 <短码> — 创建新的托管会话",
       "//<文本> — 将以 / 开头的内容作为普通消息发送",
       "/重试 <事件短码> — 显式重试结果未知的事件"
     ].join("\n")
@@ -635,7 +632,7 @@ export class ImCommandRouter {
     const message = match?.[2]?.trim()
     if (choice !== "continue" && message) {
       return Promise.resolve(
-        choice === "new_thread" ? "托管开启新会话不支持附加消息。" : "用法：/托管停止 <短码>。"
+        choice === "new_thread" ? "托管开启新会话不支持附加消息。" : "用法：/停止托管运行 <短码>。"
       )
     }
     return this.dependencies.managedBizRetries.resolveCode({

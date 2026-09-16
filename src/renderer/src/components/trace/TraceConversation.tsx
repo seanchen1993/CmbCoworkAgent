@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Bot, ChevronDown, ChevronRight, Info, Route, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import {
+  parseSkillUseBlock,
+  skillUseDisplayLabel,
+  stripSkillUseBlockForDisplay
+} from "@/features/slash-commands/skill-marker"
 import {
   classifyInternalNotificationTurn,
   type InternalNotificationTurnKind
@@ -176,15 +180,28 @@ function textFromUnknown(value: unknown): string {
  * (read-instructions + name + path) to the end of the user message. That block
  * is plumbing meant for the model, not something a human wants to read back in
  * the conversation reconstruction. Strip it: keep the user's own prose, and if
- * the prose is empty, fall back to a short "使用 /skill 技能" label.
+ * the prose is empty, fall back to the short label naming the skill — the same
+ * one the upload sanitizer now writes in the block's place, so a trace list
+ * does not mix two spellings of the same event.
+ *
+ * parseSkillUseBlock refuses a block whose `<name>`/`<path>` pairs are not both
+ * intact, which is the right call where it also drives skill activation and the
+ * composer's edit round-trip. Here the payload has been through the upload
+ * sanitizer, whose compressed userMessage budget elides the middle of a long
+ * message and routinely takes `</name>` and the opening `<path>` with it. So a
+ * refusal is not evidence that this is user prose, and the looser display-only
+ * strip takes over rather than rendering the raw block.
  */
 function cleanUserText(raw: string): string {
   const text = raw.trim()
   if (!text) return text
   const parsed = parseSkillUseBlock(text)
-  if (!parsed) return text
-  const prose = parsed.rest.trim()
-  return prose || `使用 /${parsed.skillName} 技能`
+  if (parsed) {
+    return parsed.rest.trim() || skillUseDisplayLabel(parsed.skillName)
+  }
+  const salvaged = stripSkillUseBlockForDisplay(text)
+  if (!salvaged) return text
+  return salvaged.rest.trim() || skillUseDisplayLabel(salvaged.skillName)
 }
 
 function uniqueToolNames(names: string[]): string[] {

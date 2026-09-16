@@ -1,3 +1,6 @@
+import { initializeNotificationRuntime } from "./notification-runtime"
+import { notificationService } from "./services/notification-service"
+import { registerNotificationHandlers } from "./ipc/notifications"
 import {
   app,
   BrowserWindow,
@@ -58,6 +61,7 @@ import {
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 import { createNativeClosePrompt } from "./native-close-prompt"
+import { shouldBlockEmbeddedNavigation } from "./html-preview-navigation"
 import {
   clearAppAttention,
   disposeAppTray,
@@ -371,7 +375,6 @@ import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
-import { recoverHumanGatesAtStartup } from "./harness-board/human-gate-service"
 import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
 import {
   getHarnessProjectRootPath,
@@ -756,6 +759,17 @@ function createWindow(): void {
     return { action: "deny" }
   })
 
+  // CSP blocks subresources, but does not block a scripted iframe's own location changes.
+  // Only the trusted app frame may initiate a new embedded document. The built-in browser
+  // has separate webContents and keeps its own navigation policy.
+  const previewWebContents = mainWindow.webContents
+  previewWebContents.on("will-frame-navigate", (event) => {
+    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
+  })
+  previewWebContents.on("will-redirect", (event) => {
+    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
+  })
+
   // Every new top-level document must opt in again from its trusted main frame.
   // This also closes the teardown race while a previously trusted frame reloads.
   mainWindow.webContents.on("will-navigate", () => {
@@ -1093,7 +1107,8 @@ if (browserNativeMessagingHostLaunch) {
 
     // Initialize database
     await initializeDatabase()
-    await recoverHumanGatesAtStartup()
+    initializeNotificationRuntime()
+    await notificationService.recover()
     recoverManagedRunsAtStartup()
     cleanupLegacySkillEvalRecords()
 
@@ -1132,6 +1147,7 @@ if (browserNativeMessagingHostLaunch) {
     registerDashboardHandlers(ipcMain)
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
+    registerNotificationHandlers(ipcMain)
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)

@@ -55,6 +55,24 @@ export function imFeatureReplyPrefix(input: {
   return withSwitchNotice(`【Feature：${feature}${thread}】`, input.switched === true)
 }
 
+export function imProjectModeReplyPrefix(input: {
+  projectName: string
+  featureName: string
+  nodeName?: string | null
+  nodeStatus?: string | null
+  switched?: boolean
+}): string {
+  return [
+    withSwitchNotice("【项目模式会话返回】", input.switched === true),
+    `项目：【${readableLabel(input.projectName, "未知")}】`,
+    `特性：【${readableLabel(input.featureName, "未知")}】`,
+    `当前阶段：${readableLabel(input.nodeName, "未知")}`,
+    `阶段状态：${readableLabel(input.nodeStatus, "未知")}`,
+    `模型返回：`,
+    ""
+  ].join("\n")
+}
+
 export function imTargetReplyPrefix(
   target: ImTargetSnapshot,
   options: { switched?: boolean; threadTitle?: string | null } = {}

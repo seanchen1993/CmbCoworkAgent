@@ -27,6 +27,12 @@ interface PreparedHarnessMessage {
   userMessageId: string
 }
 
+interface PreparedManagedAgentRun {
+  request: AgentInvokeParams & { streamRequestId: string }
+  message: PreparedHarnessMessage
+  delivery: AgentRunDelivery
+}
+
 export class ManagedActionValidationError extends Error {
   constructor(
     readonly reasonCode: string,
@@ -157,7 +163,7 @@ async function prepareHarnessMessage(
   }
 }
 
-function resolveAgentRunDelivery(preferred: AgentRunDelivery): AgentRunDelivery {
+function requireAvailableDelivery(preferred: AgentRunDelivery): AgentRunDelivery {
   if (preferred.isAvailable()) return preferred
   throw new Error("没有可用的应用主窗口，无法启动托管 Agent")
 }
@@ -185,13 +191,27 @@ function buildManagedAgentRunRequest(
   }
 }
 
-async function startManagedAgentRun(
+function prepareManagedAgentRun(
   threadId: string,
   prepared: PreparedHarnessMessage,
   delivery: AgentRunDelivery
-): Promise<void> {
+): PreparedManagedAgentRun {
   const request = buildManagedAgentRunRequest(threadId, prepared)
-  const resolvedDelivery = resolveAgentRunDelivery(delivery)
+  const resolvedDelivery = requireAvailableDelivery(delivery)
+  if (!request.streamRequestId) {
+    throw new Error(`托管 Agent 缺少流请求标识：${threadId}`)
+  }
+  return {
+    request: { ...request, streamRequestId: request.streamRequestId },
+    message: prepared,
+    delivery: resolvedDelivery
+  }
+}
+
+/** The caller must finish preparation before entering this side-effecting submission step. */
+export async function startPreparedManagedAgentRun(input: PreparedManagedAgentRun): Promise<void> {
+  const { request, message: prepared, delivery: resolvedDelivery } = input
+  const threadId = request.threadId
   const persistedCount = upsertThreadMessages(threadId, [
     {
       id: prepared.userMessageId,
@@ -204,9 +224,6 @@ async function startManagedAgentRun(
     throw new Error(`无法保存托管用户消息：${threadId}`)
   }
   const streamRequestId = request.streamRequestId
-  if (!streamRequestId) {
-    throw new Error(`托管 Agent 缺少流请求标识：${threadId}`)
-  }
   const streamStartEvent: ManagedAutoSendStreamStartEvent = {
     runId: streamRequestId,
     threadId,
@@ -243,24 +260,25 @@ export async function sendManagedProviderRetry(
   threadId: string,
   delivery: AgentRunDelivery
 ): Promise<void> {
-  await startManagedAgentRun(
+  const prepared = prepareManagedAgentRun(
     threadId,
     {
       modelMessage: "继续当前任务",
-      displayMessage: "继续当前任务（ManagedRun 模型服务重试）",
+      displayMessage: "继续当前任务（由托管模式发起重试）",
       userMessageId: uuid()
     },
     delivery
   )
+  await startPreparedManagedAgentRun(prepared)
 }
 
-export async function sendManagedBizRetryReuseThread(
+export function prepareManagedBizRetryRun(
   threadId: string,
   delivery: AgentRunDelivery,
   message = "继续当前任务"
-): Promise<void> {
+): PreparedManagedAgentRun {
   const normalizedMessage = message.trim() || "继续当前任务"
-  await startManagedAgentRun(
+  return prepareManagedAgentRun(
     threadId,
     {
       modelMessage: normalizedMessage,
@@ -274,25 +292,42 @@ export async function sendManagedBizRetryReuseThread(
 export async function createAndStartManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<{ threadId: string; thread: Thread }> {
-  const prepared = await prepareHarnessMessage(input.projectId, input.nextAction)
+  const prepared = await prepareManagedHarnessSession(input)
   const thread = await createManagedHarnessSession(input)
+  await startManagedHarnessSession(input, thread.threadId, prepared)
+  return thread
+}
+
+export async function prepareManagedHarnessSession(
+  input: CreateManagedHarnessSessionInput
+): Promise<PreparedHarnessMessage> {
+  const prepared = await prepareHarnessMessage(input.projectId, input.nextAction)
+  // Fail before creating a thread; startup checks availability again after async grant creation.
+  requireAvailableDelivery(input.delivery)
+  return prepared
+}
+
+export async function startManagedHarnessSession(
+  input: CreateManagedHarnessSessionInput,
+  threadId: string,
+  prepared: PreparedHarnessMessage
+): Promise<void> {
   const grant = await materializeHarnessFeatureThreadGrant({
     projectId: input.projectId,
     featureId: input.featureId,
-    threadId: thread.threadId,
+    threadId,
     route: input.imRoute
   })
   if (grant.required && !grant.granted) {
-    throw new Error(grant.error || `无法为 ManagedRun 会话 ${thread.threadId} 创建招乎授权`)
+    throw new Error(grant.error || `无法为 ManagedRun 会话 ${threadId} 创建招乎授权`)
   }
   try {
-    await startManagedAgentRun(thread.threadId, prepared, input.delivery)
+    await startPreparedManagedAgentRun(prepareManagedAgentRun(threadId, prepared, input.delivery))
   } catch (error) {
     throw new Error(
-      `无法启动 ManagedRun 会话 ${thread.threadId}：${error instanceof Error ? error.message : String(error)}`
+      `无法启动 ManagedRun 会话 ${threadId}：${error instanceof Error ? error.message : String(error)}`
     )
   }
-  return thread
 }
 
 export async function createManagedHarnessSession(

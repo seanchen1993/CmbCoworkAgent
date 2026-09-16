@@ -10,6 +10,7 @@ import type { ImPersistenceDependencies } from "../src/main/services/im/persiste
 import {
   imFeatureReplyPrefix,
   imInboxReplyPrefix,
+  imProjectModeReplyPrefix,
   imThreadReplyPrefix
 } from "../src/main/services/im/reply-context"
 import {
@@ -158,6 +159,21 @@ function testReplySegmentationAndStableEnvelope(): void {
       switched: true
     }),
     "【Feature：支付平台 / 快捷支付｜会话：验收会话】（非当前绑定会话）"
+  )
+  assert.equal(
+    imProjectModeReplyPrefix({
+      projectName: "支付平台",
+      featureName: "快捷支付",
+      nodeName: "Dev-代码实现",
+      nodeStatus: "进行中"
+    }),
+    [
+      "【项目模式】",
+      "项目：【支付平台】",
+      "特性：【快捷支付】",
+      "当前阶段：Dev-代码实现",
+      "阶段状态：进行中"
+    ].join("\n")
   )
 }
 

@@ -120,6 +120,33 @@ afterEach(() => {
 })
 
 describe("turn completion gate inside the real agent graph", () => {
+  it("recovers a leaked DSML tail and executes only the subsequent structured tool call", async () => {
+    const { model, final } = await runGraph([
+      scriptedAi(
+        "现在编辑 ServicesReport：</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>",
+        { finish_reason: "stop" }
+      ),
+      scriptedAi("", { finish_reason: "tool_calls" }, [
+        { name: "read_file", args: { file_path: "a.ts" }, id: "call_dsml_recovery" }
+      ]),
+      scriptedAi("已检查文件，answer = 42。", { finish_reason: "stop" })
+    ])
+    expect(model.calls).toHaveLength(3)
+    expect(String(model.calls[1].at(-1)?.content)).toContain("textual_tool_call")
+    expect(model.calls[2].filter((message) => message.type === "tool")).toHaveLength(1)
+    expect(final).toContain("answer = 42")
+    expect(readTurnCompletionGateReport(THREAD, RUN)?.unresolved).toBeNull()
+  })
+
+  it("records persistent DSML leakage as incomplete after two recovery attempts", async () => {
+    const leaked = "</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+    const { model } = await runGraph(
+      Array.from({ length: 3 }, () => scriptedAi(leaked, { finish_reason: "stop" }))
+    )
+    expect(model.calls).toHaveLength(3)
+    expect(readTurnCompletionGateReport(THREAD, RUN)?.unresolved?.defect).toBe("textual_tool_call")
+  })
+
   it("does not end the turn on an empty reply after a tool result", async () => {
     // The exact reported sequence: read_file runs, the model answers with
     // nothing, and the UI's last visible item was the tool call.

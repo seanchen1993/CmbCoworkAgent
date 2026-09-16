@@ -323,7 +323,7 @@ export class ImSkillCommandService {
     let visiblePluginSkills = pluginSkills
     if (isProjectTargetMetadata(metadata)) {
       const context: Awaited<ReturnType<typeof getHarnessAgentContext>> = await this.dependencies
-        .getHarnessAgentContext(metadata, { workspacePath: target.workspacePath })
+        .getHarnessAgentContext(metadata, { purpose: "plugin-identity" })
         .catch(() => ({}))
       const preferred = { id: context.pluginId, name: context.pluginName }
       visiblePluginSkills =

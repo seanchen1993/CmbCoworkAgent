@@ -1,3 +1,4 @@
+import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import {
   StopHookContextCollector,
@@ -5721,6 +5722,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         managedExecution,
         coordinatorInternalNotification
       }: AgentInvokeParams = request
+      if (!managedExecution && managedBizRetryService.blocksThread(threadId)) {
+        const error = "请在决策入口操作"
+        delivery.send(
+          resolveAgentStreamRequestChannel(`agent:stream:${threadId}`, streamRequestId),
+          { type: "error", error }
+        )
+        runExecutionContext.onRunTerminated?.({
+          outcome: "error",
+          code: "human_decision_pending",
+          message: error
+        })
+        return
+      }
       // Freeze a mode/workspace snapshot from the durable thread BEFORE anything
       // can patch it: workflow-notification detection and forced-coordinator
       // gating must see the state the request was prepared against, not a later

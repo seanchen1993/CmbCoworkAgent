@@ -18,7 +18,11 @@ import {
   retireThreadCheckpointers
 } from "../agent/runtime"
 import { purgeThreadCheckpointArtifacts } from "../storage"
-import { createThread as dbCreateThread, deleteThread as dbDeleteThread } from "../db"
+import {
+  createThread as dbCreateThread,
+  deleteThread as dbDeleteThread,
+  upsertThreadMessages
+} from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
@@ -31,6 +35,7 @@ import {
 import type { ScheduledTask } from "../types"
 import { executeImInboxScheduledTask } from "./im/inbox-scheduler"
 import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
+import { ScheduledTranscript } from "./scheduled-transcript"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 import {
   clearTrustedToolFilePreviewSourcesForThread,
@@ -240,6 +245,7 @@ async function executeTask(taskId: string): Promise<void> {
   let threadCreated = false
   let hasStreamedContent = false
   let taskError: unknown = null
+  let transcriptPersisted = true
 
   // Hoisted so catch/finally blocks can access for routing feedback & trace
   let routingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
@@ -323,76 +329,98 @@ async function executeTask(taskId: string): Promise<void> {
       abortSignal: abortController.signal
     })
 
-    const converter = new StreamConverter()
+    const userMessage = new HumanMessage({ id: uuid(), content: finalPrompt })
+    if (
+      upsertThreadMessages(threadId, [
+        {
+          id: userMessage.id!,
+          role: "user",
+          content: finalPrompt,
+          created_at: startedAt
+        }
+      ]) !== 1
+    ) {
+      throw new Error("Failed to persist scheduled task input")
+    }
+    hasStreamedContent = true
+    const converter = new StreamConverter(schedulerRunId, userMessage.id)
     const serializeForRun = createStreamDataSerializer()
-
-    const stream = await agent.stream(
-      { messages: [new HumanMessage(finalPrompt)] },
-      {
-        configurable: { thread_id: threadId },
-        signal: abortController.signal,
-        streamMode: ["messages", "values"],
-        recursionLimit: getAgentGraphRecursionLimit()
-      }
-    )
+    const transcript = new ScheduledTranscript(threadId)
 
     let lastAssistantText = ""
-    for await (const chunk of stream) {
-      if (abortController.signal.aborted) break
-      const [mode, data] = chunk as [string, unknown]
-      const {
-        data: serialized,
-        valuesMessageIndexOffset,
-        valuesSnapshotKind
-      } = serializeForRun(mode, data)
-      const events = converter.processChunk(mode, serialized, {
-        valuesMessageIndexOffset,
-        valuesSnapshotScope: "turn",
-        valuesSnapshotKind
-      })
-      for (const evt of events) {
-        broadcastToChannel(channel, evt)
+    try {
+      const stream = await agent.stream(
+        { messages: [userMessage] },
+        {
+          configurable: { thread_id: threadId },
+          signal: abortController.signal,
+          streamMode: ["messages", "values"],
+          recursionLimit: getAgentGraphRecursionLimit()
+        }
+      )
 
-        // Track token usage from stream events
-        if (evt.type === "custom") {
-          const customData = evt.data as Record<string, unknown>
-          if (customData.type === "token_usage") {
-            const usage = customData.usage as { inputTokens?: number } | undefined
-            if (usage?.inputTokens && usage.inputTokens > highWaterInputTokens) {
-              highWaterInputTokens = usage.inputTokens
+      for await (const chunk of stream) {
+        if (abortController.signal.aborted) break
+        const [mode, data] = chunk as [string, unknown]
+        const frame = serializeForRun(mode, data)
+        const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
+        const events = converter.processChunk(mode, serialized, {
+          valuesMessageIndexOffset,
+          valuesSnapshotScope: "turn",
+          valuesSnapshotKind
+        })
+        transcript.consume(mode, frame, events)
+        for (const evt of events) {
+          broadcastToChannel(channel, evt)
+
+          // Track token usage from stream events
+          if (evt.type === "custom") {
+            const customData = evt.data as Record<string, unknown>
+            if (customData.type === "token_usage") {
+              const usage = customData.usage as { inputTokens?: number } | undefined
+              if (usage?.inputTokens && usage.inputTokens > highWaterInputTokens) {
+                highWaterInputTokens = usage.inputTokens
+              }
+            }
+          }
+
+          // Track tool calls
+          if (evt.type === "message-delta" && evt.toolCalls && Array.isArray(evt.toolCalls)) {
+            toolCallCount += evt.toolCalls.length
+          }
+
+          // Track tool errors
+          if (evt.type === "tool-message") {
+            const content = typeof evt.content === "string" ? evt.content : ""
+            if (/error|exception|failed/i.test(content)) {
+              toolErrorCount++
+            }
+          }
+
+          // Capture last assistant text for notification
+          if (evt.type === "full-messages" || evt.type === "turn-messages") {
+            // 只取最后一条没有 tool_calls 的 assistant 消息（最终回复）
+            for (let index = evt.messages.length - 1; index >= 0; index -= 1) {
+              const candidate = evt.messages[index]
+              if (
+                candidate.role === "assistant" &&
+                (!Array.isArray(candidate.tool_calls) || candidate.tool_calls.length === 0)
+              ) {
+                if (candidate.content.trim()) lastAssistantText = candidate.content.trim()
+                break
+              }
             }
           }
         }
-
-        // Track tool calls
-        if (evt.type === "message-delta" && evt.toolCalls && Array.isArray(evt.toolCalls)) {
-          toolCallCount += evt.toolCalls.length
-        }
-
-        // Track tool errors
-        if (evt.type === "tool-message") {
-          const content = typeof evt.content === "string" ? evt.content : ""
-          if (/error|exception|failed/i.test(content)) {
-            toolErrorCount++
-          }
-        }
-
-        // Capture last assistant text for notification
-        if (evt.type === "full-messages" || evt.type === "turn-messages") {
-          // 只取最后一条没有 tool_calls 的 assistant 消息（最终回复）
-          for (let index = evt.messages.length - 1; index >= 0; index -= 1) {
-            const candidate = evt.messages[index]
-            if (
-              candidate.role === "assistant" &&
-              (!Array.isArray(candidate.tool_calls) || candidate.tool_calls.length === 0)
-            ) {
-              if (candidate.content.trim()) lastAssistantText = candidate.content.trim()
-              break
-            }
-          }
-        }
+        hasStreamedContent = true
       }
-      hasStreamedContent = true
+    } finally {
+      // Completion, cancellation and provider errors all retain the last
+      // displayed partial message before the renderer reloads durable history.
+      await transcript.finish().catch((error) => {
+        transcriptPersisted = false
+        throw error
+      })
     }
 
     if (!abortController.signal.aborted) {
@@ -447,7 +475,9 @@ async function executeTask(taskId: string): Promise<void> {
   } catch (error) {
     taskError = error
     const isAbortError =
-      error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
+      transcriptPersisted &&
+      error instanceof Error &&
+      (error.name === "AbortError" || error.message.includes("aborted"))
     const errMsg = isAbortError
       ? "Cancelled by user"
       : error instanceof Error
@@ -532,13 +562,18 @@ async function executeTask(taskId: string): Promise<void> {
     // Now broadcast lifecycle event — renderer can safely call isRunning() = false
     if (taskError) {
       const isAbortError =
+        transcriptPersisted &&
         taskError instanceof Error &&
         (taskError.name === "AbortError" || taskError.message.includes("aborted"))
       if (isAbortError) {
         broadcastToChannel(channel, { type: "done" })
       } else {
         const errMsg = taskError instanceof Error ? taskError.message : String(taskError)
-        broadcastToChannel(channel, { type: "error", error: errMsg })
+        broadcastToChannel(channel, {
+          type: "error",
+          error: errMsg,
+          ...(transcriptPersisted ? {} : { transcriptPersisted: false })
+        })
       }
     } else {
       broadcastToChannel(channel, { type: "done" })
