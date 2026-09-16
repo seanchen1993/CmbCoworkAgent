@@ -177,7 +177,12 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
             metadata?.parentThreadId
           )
             throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
-          cleanup = bindStandaloneModCommand(workspace, input.threadId, candidate.turnId, signal)
+          cleanup = await bindStandaloneModCommand(
+            workspace,
+            input.threadId,
+            candidate.turnId,
+            signal
+          )
         }
         try {
           return await manager.runCommand(

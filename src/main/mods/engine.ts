@@ -222,6 +222,7 @@ export class ModEngine {
               toolId: request.toolId,
               signal: request.signal,
               routeClaimed: true,
+              effectiveArgs: args,
               protectedOutput: request.protectedOutput,
               readOnly: request.readOnly ?? false,
               originMod: request.identity.modId,

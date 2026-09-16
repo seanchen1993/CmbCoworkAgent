@@ -187,9 +187,27 @@ async function main(): Promise<void> {
       )
       assert.equal(readFileSync(join(workspace, "verified.txt"), "utf8"), "once\n")
       await page!.getByRole("button", { name: "查看测试报告", exact: true }).click()
+      const preview = page!.locator("[data-mod-cards] pre[aria-live='polite']").last()
+      await until(
+        async () =>
+          (await preview.count()) > 0 && (await preview.innerText()).includes("项目测试结果"),
+        "packaged report content arrives through production IPC"
+      )
+      assert((await preview.innerText()).includes("PROJECT_VERIFIED"))
+      const exported = join(workspace, "exported-report.txt")
+      await app.evaluate(({ dialog }, filePath) => {
+        dialog.showSaveDialog = (async () => ({
+          canceled: false,
+          filePath
+        })) as typeof dialog.showSaveDialog
+      }, exported)
+      await page!.getByRole("button", { name: "导出文本", exact: true }).click()
+      await until(async () => existsSync(exported), "packaged report export creates a real file")
+      assert(readFileSync(exported, "utf8").includes("PROJECT_VERIFIED"))
+      await preview.scrollIntoViewIfNeeded()
       await page!.screenshot({ path: join(artifacts, "cold-command.png") })
       pass(
-        "packaged cold session executes a real approved command and previews its report without a model or test bridge"
+        "packaged cold session executes a real approved command and previews/exports its report without a model or test bridge"
       )
       await page!.getByRole("button", { name: "自定义", exact: true }).click()
       await page!.getByRole("button", { name: "插件", exact: true }).click()
@@ -382,6 +400,15 @@ async function main(): Promise<void> {
       "command jobs settle"
     )
     await page!.getByRole("button", { name: "查看测试报告", exact: true }).last().click()
+    const reportPreview = page!.locator("[data-mod-cards] pre[aria-live='polite']").last()
+    await until(
+      async () =>
+        (await reportPreview.count()) > 0 &&
+        (await reportPreview.innerText()).includes("项目测试结果"),
+      "report content arrives through production IPC"
+    )
+    assert((await reportPreview.innerText()).includes("PROJECT_VERIFIED"))
+    await reportPreview.scrollIntoViewIfNeeded()
     await page!.screenshot({ path: join(artifacts, "commands-and-report.png") })
     const summaryCards = await page!.evaluate((id) => window.api.mods.cards(id, ""), threadId)
     const references = JSON.stringify(summaryCards)
@@ -480,6 +507,38 @@ async function main(): Promise<void> {
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     pass(
       "fresh project session runs native Mods commands with inherited sandbox settings and explicit approval"
+    )
+    const mcp = await app.evaluate(
+      async (_electron, input) =>
+        (
+          globalThis as unknown as {
+            modsFixture: {
+              mcpProbe(
+                scope: unknown,
+                node: string,
+                server: string
+              ): Promise<{
+                direct: unknown
+                eager: unknown
+                callbacks: unknown[]
+                lostReply: boolean
+                audit: Array<{ status: string }>
+              }>
+            }
+          }
+        ).modsFixture.mcpProbe(input.scope, input.node, input.server),
+      { scope, node: process.execPath, server: join(root, "tests/support/mods-mcp-server.mjs") }
+    )
+    assert(mcp.lostReply)
+    assert.equal(
+      readFileSync(join(workspace, "mcp-counter.txt"), "utf8"),
+      "echo\necho\ndisconnect\n"
+    )
+    assert(!JSON.stringify([mcp.direct, mcp.eager, mcp.callbacks]).includes("sk-mcp-fixture"))
+    assert(mcp.callbacks.length > 0)
+    assert.equal(mcp.audit.filter((row) => row.status === "unknown").length, 1)
+    pass(
+      "real MCP stdio discovery and eager/direct calls filter all projections; lost write reply is not retried"
     )
     timings.enabled = await benchmark()
     timings.noop1000 = await app.evaluate(

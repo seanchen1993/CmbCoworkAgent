@@ -114,10 +114,8 @@ import type * as _lcZodTypes from "@langchain/core/utils/types"
 
 import path from "path"
 import { join, resolve, delimiter } from "path"
-import { createWriteStream, createReadStream } from "fs"
+import { ensureCodexExe } from "./codex-sandbox-binary"
 import fs from "fs/promises"
-import { createGunzip } from "zlib"
-import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
 import {
   appendTaskCompletionAndRepetitionPrompt,
@@ -377,26 +375,6 @@ function describeToolError(error: unknown): string {
     return JSON.stringify(error) ?? String(error)
   } catch {
     return String(error)
-  }
-}
-
-/** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
-async function ensureCodexExe(exePath: string): Promise<void> {
-  const gzPath = exePath + ".gz"
-  const gzStat = await fs.stat(gzPath).catch(() => null)
-  if (!gzStat) return
-  const exeStat = await fs.stat(exePath).catch(() => null)
-  if (exeStat) {
-    // Skip if exe is up-to-date (gz not newer)
-    if (exeStat.mtimeMs >= gzStat.mtimeMs) return
-    // gz is newer — remove stale exe before re-extracting
-    await fs.unlink(exePath).catch(() => {})
-  }
-  try {
-    await pipeline(createReadStream(gzPath), createGunzip(), createWriteStream(exePath))
-    console.log("[Runtime] codex.exe extracted from .gz")
-  } catch (e) {
-    console.error("[Runtime] Failed to extract codex.exe:", e)
   }
 }
 

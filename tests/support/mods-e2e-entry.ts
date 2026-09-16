@@ -6,7 +6,10 @@ import {
   claimLocalThreadRunLease,
   releaseLocalThreadRunLease
 } from "../../src/main/agent/thread-run-lease"
-import { withModToolCall } from "../../src/main/mods/adapters"
+import { withModToolCall, withScopedModMcp } from "../../src/main/mods/adapters"
+import { upsertMcpConnector, deleteMcpConnector } from "../../src/main/storage"
+import { getGlobalMcpCapabilityService } from "../../src/main/mcp/capability-service"
+import { createEagerMcpTool } from "../../src/main/mcp/langchain-tool"
 import { ModRuntimeClient } from "../../src/main/mods/runtime-client"
 import { ModControlStore } from "../../src/main/mods/control-store"
 import { ModEngine, type ModDispatchRequest } from "../../src/main/mods/engine"
@@ -18,6 +21,59 @@ interface Scope {
   turnId: string
 }
 const backends = new Map<string, LocalSandbox>()
+export async function mcpProbe(scope: Scope, node: string, server: string): Promise<unknown> {
+  const service = getGlobalMcpCapabilityService()
+  const id = upsertMcpConnector({
+    name: "Mods local fixture",
+    kind: "stdio",
+    command: node,
+    args: [server, join(scope.workspace, "mcp-counter.txt")],
+    enabled: true
+  })
+  const callbacks: unknown[] = []
+  try {
+    const tools = await service.listTools()
+    const echo = tools.find((tool) => tool.toolName === "mods_echo")!
+    const disconnect = tools.find((tool) => tool.toolName === "mods_disconnect")!
+    if (!echo || !disconnect) throw Error("Local MCP fixture discovery failed")
+    const direct = await withScopedModMcp(scope, echo, {}, (args) =>
+      service.invoke(echo.capabilityId, args)
+    )
+    const eager = await withModToolCall(
+      scope,
+      { toolCall: { id: "mcp-eager", name: echo.toolId, args: {} } },
+      new Set([echo.toolId]),
+      () =>
+        createEagerMcpTool(service, echo).invoke(
+          { type: "tool_call", id: "mcp-eager", name: echo.toolId, args: {} },
+          {
+            callbacks: [
+              {
+                handleToolEnd: (output) => {
+                  callbacks.push(output)
+                }
+              }
+            ]
+          }
+        )
+    )
+    let lostReply = false
+    try {
+      await withScopedModMcp(scope, disconnect, {}, (args) =>
+        service.invoke(disconnect.capabilityId, args)
+      )
+    } catch {
+      lostReply = true
+    }
+    const audit = getModsManager()!
+      .store.audit(getModsManager()!.workspaceKey(scope.workspace))
+      .filter((row) => row.toolId.startsWith("mcp:"))
+    return { direct, eager, callbacks, lostReply, audit }
+  } finally {
+    deleteMcpConnector(id)
+    await service.close()
+  }
+}
 export function setThreadBusy(threadId: string, busy: boolean): void {
   if (busy) {
     if (!claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "mods-e2e-model" }).acquired)

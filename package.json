@@ -86,7 +86,7 @@
     "env:encrypt:quick": "git add --renormalize .env && git show :.env | head -n 1",
     "env:decrypt:quick": "rm -f .env && git checkout -- .env",
     "env:filter:disable": "git config --local --unset filter.envcrypt.clean; git config --local --unset filter.envcrypt.smudge; git config --local --unset filter.envcrypt.required",
-    "test:mods": "vitest run src/main/mods src/shared/mods src/main/agent/local-sandbox-background-settlement.test.ts src/main/agent/tool-orchestrator.test.ts src/main/mcp/langchain-tool.test.ts src/main/mcp/invocation-retry.test.ts",
+    "test:mods": "vitest run src/main/mods src/shared/mods src/main/agent/codex-sandbox-binary.test.ts src/main/agent/local-sandbox-background-settlement.test.ts src/main/agent/tool-orchestrator.test.ts src/main/mcp/langchain-tool.test.ts src/main/mcp/invocation-retry.test.ts",
     "test:mods:e2e": "node tests/run-mods-e2e.mjs"
   },
   "build": {

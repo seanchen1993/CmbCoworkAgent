@@ -38,6 +38,7 @@ import {
   setModsUnavailable
 } from "./manager"
 import { DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
+import { withScopedModMcp, withRawModMcp } from "./adapters"
 
 const cleanup: Array<() => void> = []
 afterEach(() => {
@@ -140,6 +141,42 @@ async function fixture(deployment?: ManagedModDeployment) {
 }
 
 describe("project Mods lifecycle and UI authority", () => {
+  it("consumes the MCP scoped route once before entering the raw service", async () => {
+    const f = await fixture()
+    await f.enable()
+    setModsManager(f.manager)
+    const tool = {
+      capabilityId: "connector:test:echo",
+      toolId: "mcp__test__echo",
+      providerKey: "connector:test",
+      providerAlias: "test",
+      providerDisplayName: "Test",
+      toolName: "echo",
+      visibility: "eager" as const
+    }
+    let executions = 0
+    try {
+      await withScopedModMcp(f.scope, tool, { input: "one" }, (args) =>
+        withRawModMcp(tool, args, async () => {
+          executions++
+          return {
+            capabilityId: tool.capabilityId,
+            raw: { text: "result" },
+            text: "result",
+            isError: false
+          }
+        })
+      )
+      expect(executions).toBe(1)
+      expect(
+        f.manager.store
+          .audit(f.manager.workspaceKey(f.root))
+          .filter((row) => row.toolId === `mcp:${tool.capabilityId}`)
+      ).toHaveLength(1)
+    } finally {
+      setModsManager(undefined)
+    }
+  })
   it("discovers approved commands and rechecks queued permission snapshots", async () => {
     const f = await fixture()
     expect(await f.manager.commands(f.root, "thread")).toEqual([])

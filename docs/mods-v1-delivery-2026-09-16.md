@@ -1,5 +1,8 @@
 # Mods 核心实现与验收记录
 
+> 本文是第一批交付的历史记录。四批完成后的功能、测试与限制以
+> [Mods v1 最终交付与验收](mods-final-delivery-2026-09-16.md) 为准。
+
 日期：2026-09-16。分支：`codex/mods-v1`。
 基线：新拉取的 `origin/UAT`，提交 `18e2ea88a21d0ed745a523307ff083579aba94df`。
 独立工作目录：`C:/ai/CmbCoworkAgent-mods-v1`，原工程目录保持原状。

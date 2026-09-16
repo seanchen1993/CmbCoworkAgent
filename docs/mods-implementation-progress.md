@@ -3,9 +3,14 @@
 Branch: `codex/mods-v1`, based on freshly fetched `origin/UAT`
 `18e2ea88a21d0ed745a523307ff083579aba94df`, 2026-09-16.
 
-The default-off core implementation is integrated. Delivery scope, code review,
-functional regression, performance, E2E, baseline failures, and remaining gates
-are recorded in [Mods 核心实现与验收记录](mods-v1-delivery-2026-09-16.md).
+All four implementation batches are integrated, including managed policy,
+audit/reconciliation, slash commands, a shared thread queue, summaries and text
+artifacts. Final delivery scope, code review, functional regression, performance,
+E2E, packaging, baseline failures and release limits are recorded in
+[Mods v1 最终交付与验收](mods-final-delivery-2026-09-16.md).
+
+The earlier [core delivery record](mods-v1-delivery-2026-09-16.md) describes batch 1
+only; its then-unimplemented list does not describe the final branch.
 
 Earlier uncontrolled test counts and initial Windows timer measurements were
 superseded by controlled UAT comparisons and real utility-process measurements.
