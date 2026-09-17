@@ -97,6 +97,14 @@ export function ModsAudit({ threadId }: { threadId: string }): React.JSX.Element
               {row.identity?.modId ?? "宿主"}
             </p>
             <p className="break-all font-mono">调用：{row.callId}</p>
+            {row.modelUsage && (
+              <p>
+                模型：{row.modelUsage.modelRef}；输入 Token：
+                {row.modelUsage.inputTokens ?? "未返回"}； 输出 Token：
+                {row.modelUsage.outputTokens ?? "未返回"}； 输出上限：
+                {row.modelUsage.outputTokenLimit}
+              </p>
+            )}
             <details>
               <summary>审计摘要</summary>
               <p className="break-all">原始参数 SHA-256：{row.originalArgsHash}</p>

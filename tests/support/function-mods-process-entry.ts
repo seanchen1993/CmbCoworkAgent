@@ -258,6 +258,35 @@ void app.whenReady().then(async () => {
     await toolSession.close()
     checks.push("tool SDK contract and host authority survive real utilityProcess callbacks")
 
+    const modelPlugin = await compileFunctionPlugin(join(root, "tests/fixtures/mods-v2/model-sdk"))
+    const modelCalls: string[] = []
+    const modelSession = new FunctionSession(
+      [
+        {
+          name: modelPlugin.name,
+          root: modelPlugin.root,
+          tier: "user",
+          guest: await client.load(modelPlugin.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      {
+        workspace: root,
+        threadId: "models",
+        assertLive: () => {},
+        publish: async (v) => v,
+        completeModel: async (_, input) => {
+          modelCalls.push(String(input.prompt))
+          return String(input.prompt)
+        }
+      }
+    )
+    assert.equal((await modelSession.run("model-probe", "input")).text, "model-sdk:first:second")
+    assert.equal((await modelSession.run("model-probe", "short")).text, "local answer")
+    assert.deepEqual(modelCalls, ["first", "second"])
+    await modelSession.close()
+    checks.push("same official model SDK source preserves operation results across utilityProcess")
+
     temporaryProject = await realpath(await mkdtemp(join(tmpdir(), "function-process-files-")))
     await mkdir(join(temporaryProject, "fixture"))
     await writeFile(join(temporaryProject, "fixture/hello.txt"), "hi")

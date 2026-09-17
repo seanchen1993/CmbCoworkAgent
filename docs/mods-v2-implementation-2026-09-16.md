@@ -279,15 +279,61 @@ Client 消息存储使用内存夹具，这些数字不代表真实模型或完�
 `tool-performance-first-comparison.txt`。
 
 最终 Electron E2E 24 组通过；普通构建已恢复，测试入口未留在输出包中。
-定向 ESLint 0 错误，ChatContainer 保留 30 条已有告警；斜杠命令、goal 路由与提交锁
+定向 ESLint 0 错误，ChatContainer 保留 29 条已有告警，E2E 测试有 1 条导入格式告警；斜杠命令、goal 路由与提交锁
 三个 standalone 套件通过。全量 Vitest 3263 项：3226 通过、32 失败、5 跳过。
 26 个失败与项目读取批基线同名同因；额外的 Git/迁移 5 项在单 worker 复跑中通过。
 浏览器录制用例第一次复跑仍失败，进一步单独运行该用例通过（726 ms）。
 这些结果不能改写为全量全绿。报告 `vitest-tool-full.json`、`tool-failure-comparison.json`、
 `tool-flake-rerun.json`、`tool-browser-detail.txt`、`tool-e2e-final.txt` 均保留。
 
+## 文本模型 SDK（2026-09-17）
+
+`$.model.complete({model,prompt,system?,maxTokens?})` 通过现有模型注册表和客户端发起
+一次无历史、无工具的文本请求，返回字符串；`model.complete` 进入同一操作 hook 链。
+插件可以本地返回、拒绝或多次 next；每个实际请求单独记账。示例 `/claw-ask` 使用已配置
+默认模型，明确模型名找不到时不会回退到其他模型。主会话流和 `model.fork/classify` 未包含在本批。
+
+批准能力增加模型调用，宿主版本摘要升级到 v8，旧授权不能自动取得新能力。
+模型密钥和端点只在宿主；插件参数限制、最终模型解析、项目/授权复核、策略准入、
+完整回复保护、取消、60 秒时限和并发限制均在宿主执行。每插件每项目一分钟的调用次数
+与预留输出预算写入执行记录；重载与重启不能重置预算。不确定的请求不自动重试。
+控制数据库增量升到 schema 6，仅新增模型用量字段；备份、原状态、授权和执行事实保留。
+服务未提供 Token 用量时保持未知，UI 不显示成零用量。日志/记录不保存提示词原文或密钥。
+
+检视发现原客户端的首字节重试控制器在收到响应头后解绑取消信号；上层停止等待时，
+HTTP 流可能仍存在。模型 SDK 的响应体现在通过带取消信号的流连接到客户端，取消会传到
+底层连接。真实本地 HTTP 测试检查服务端关闭事件，不能只依据 SDK Promise 拒绝判定成功。
+保持主代理与压缩原有调用路径；压缩协议回归 8 项通过。
+
+同一模型操作夹具在官方 2.1.273 `plugin test` 通过，累计 31 个对照场景。
+实际 Electron E2E 26 组通过：新增的两组使用本地 HTTP 服务，经过生产模型设置、
+IPC、QuickJS、模型客户端、输出保护、执行记录和 UI；取消后服务端连接关闭，调用未重试。
+截图 `output/mods-validation/e2e/function-model.png` 已检视。它不证明真实远端模型可用。
+Node/Web 类型检查通过。专项首轮 275 项中出现 3 个失败：模型客户端首次被 Vitest
+转换的耗时进入请求用例时限，随后影响取消用例；并发负载下另一个 Pane VM 触及原有预算。
+把测试模块转换移到准备阶段后改用单 worker 复核，生产执行预算没有放宽。
+最终 Mods 专项 275/275，跨进程 32 项通过，卸载后所有运行时和待处理计数归零。
+两层 hook P50 6.40 ms、P95 7.93 ms；Client P95 5.69 ms，含 SQLite 的 Pane P95 11.54 ms。
+运行时 ABBA 对照每侧 900 次，P50 增幅 1.80%、P95 增幅 4.94%；两侧运行时产物摘要
+相同，因此这只是运行时噪声对照，不能证明新增模型请求或完整应用性能已通过门禁。
+最终 Node/Web 类型检查通过；除既有 `runtime.ts` 外的本批 TypeScript 文件定向 lint
+为 0 错误、0 告警。`runtime.ts` 原有 `subagent: any` 仍被 ESLint 报错，未隐瞒或全文件禁用规则。
+报告 `model-first-failure.txt`、`model-mods-first-failure.txt`、`model-narrow.txt`、
+`model-e2e.txt`、`model-types-final.txt`、`model-mods.txt`、`model-process.txt`、
+`model-performance.txt`、`model-lint-final.txt`、`claude-model-sdk.txt` 保留原始证据。
+
+本批全量 Vitest 3279 项：3247 通过、27 失败、5 跳过。26 个失败与项目读取批基线
+同名同因（socket 路径仅临时 UUID 不同）；额外的浏览器录制超时用例单独复跑通过，713 ms。
+完整回归仍非全绿，报告为 `vitest-model-full.json`、`model-failure-comparison.json` 和
+`model-browser-rerun.json`，未删改原始失败结果。
+独立脚本回归共 81 个套件，73 通过、8 失败：7 个断言失败与既有基线同名同因，
+工作流 worktree 套件仍在 180 秒截止时间后被终止；原先失败的本地沙箱隔离套件本轮通过。
+逐项证据保存在 `model-standalone-results.json`、`model-standalone-comparison.json` 及
+`model-standalone/` 日志目录。原有 lint 错误也通过 HEAD 源码复核，见
+`model-runtime-baseline-lint.txt`。
+
 ## 后续集成与验收
 
 基础批 standalone 回归 81 项中 72 通过、9 失败；9 个失败与 v1 对照基线一致。
-实际应用 UI E2E 的命令场景已接通；v2 真实模型与 MCP SDK、长时资源压力、最终安装包
+实际应用 UI E2E 的命令场景已接通；v2 真实远端模型与 MCP SDK、长时资源压力、最终安装包
 及逐项兼容复核尚待后续集成完成后执行。不能把这些项记为通过。

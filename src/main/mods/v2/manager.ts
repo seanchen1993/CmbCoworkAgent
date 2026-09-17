@@ -56,6 +56,13 @@ interface FunctionManagerHost {
     input: ModObject,
     signal: AbortSignal
   ): Promise<ModObject>
+  completeModel?(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<string>
   scheduleCommand?(
     workspace: string,
     threadId: string,
@@ -278,6 +285,14 @@ export class FunctionModsManager {
           workspace,
           threadId,
           assertLive,
+          completeModel: async (plugin, input, signal) => {
+            assertLive(plugin)
+            if (!this.host.completeModel) throw new ModFunctionError("MODS_MODEL_UNAVAILABLE")
+            const grant = current.snapshots.get(plugin.name)!.grant
+            const result = await this.host.completeModel(workspace, threadId, grant, input, signal)
+            assertLive(plugin)
+            return result
+          },
           callTool: async (plugin, input, signal) => {
             assertLive(plugin)
             if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")

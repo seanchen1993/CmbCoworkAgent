@@ -21,6 +21,8 @@ import type { FunctionClientAction } from "../../shared/mods/v2/ui"
 import { scheduleFunctionTool, withFunctionExecution } from "../mods/v2/execution-context"
 import { functionToolTarget } from "../mods/v2/tool-sdk"
 import { randomUUID } from "node:crypto"
+import { FunctionModels } from "../mods/v2/models"
+import { invokeFunctionModel, resolveFunctionModel } from "../mods/v2/model-provider"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -65,10 +67,31 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return
   }
   setModsManager(manager)
+  const models = new FunctionModels(manager.store, {
+    assertScope: (workspace, threadId) => {
+      if (!manager.isEnabled(workspace)) throw new ModError("MODS_DISABLED")
+      if (writableThreadScope(threadId) !== workspace) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    },
+    resolve: resolveFunctionModel,
+    invoke: invokeFunctionModel,
+    admit: async (identity, input, signal) => {
+      if (manager.protects(identity.workspace))
+        await manager.policy.admit(identity, "model.complete", input, signal)
+    },
+    publish: async (identity, value, signal) => {
+      if (manager.protects(identity.workspace))
+        return manager.policy.publish(value, identity.callId, signal, (digest, rules) =>
+          manager.store.publication(identity.callId, digest, rules, "published")
+        )
+      manager.store.publication(identity.callId, "", [], "published")
+      return value
+    }
+  })
   const functions = new FunctionModsManager(
     manager.store,
     {
       plugins: getPlugins,
+      completeModel: (...args) => models.complete(...args),
       enabled: (workspace) => manager.isEnabled(workspace),
       publish: (workspace, value, signal) => manager.publish(workspace, value, undefined, signal),
       assertThread: (workspace, threadId) => {

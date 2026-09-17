@@ -27,6 +27,60 @@ afterEach(() => {
 })
 
 describe("Mod durable control store", () => {
+  it("keeps model reservations, unknown usage and per-plugin budgets across backups and restart", () => {
+    const { store, file } = fixture()
+    const identity = {
+      workspace: "project",
+      threadId: "thread",
+      turnId: "model",
+      agentId: "main",
+      origin: "mod" as const,
+      modId: "function:demo",
+      grantEpoch: 1,
+      callId: "model-0"
+    }
+    for (let i = 0; i < 8; i++)
+      store.claimFunctionModel(
+        { ...identity, callId: `model-${i}` },
+        { prompt: "never persist" },
+        { prompt: "never persist", model: "custom:configured" },
+        "custom:configured",
+        4096
+      )
+    store.recordFunctionModelUsage("model-0", 12, 3)
+    store.settle("model-0", "succeeded")
+    const backup = `${file}.model-backup`
+    store.backup(backup)
+    const reopened = new ModControlStore(backup)
+    stores.push(reopened)
+    expect(() =>
+      reopened.claimFunctionModel(
+        { ...identity, callId: "over-budget" },
+        {},
+        {},
+        "custom:configured",
+        1
+      )
+    ).toThrow("MODS_MODEL_BUDGET")
+    const records = reopened.audit("project")
+    expect(records).toHaveLength(8)
+    expect(records[0]).toMatchObject({ status: "unknown", modelUsage: { outputTokenLimit: 4096 } })
+    expect(records[0].modelUsage).not.toHaveProperty("outputTokens")
+    expect(records.at(-1)).toMatchObject({
+      status: "succeeded",
+      modelUsage: { inputTokens: 12, outputTokens: 3 }
+    })
+    expect(JSON.stringify(records)).not.toContain("never persist")
+    expect(() =>
+      reopened.claimFunctionModel(
+        { ...identity, modId: "function:other", callId: "independent" },
+        {},
+        {},
+        "custom:configured",
+        1
+      )
+    ).not.toThrow()
+  })
   it("migrates v1 state without loss and includes function state in restart and backup", () => {
     const { store, file } = fixture()
     store.setSetting("schema", "4")
@@ -35,7 +89,7 @@ describe("Mod durable control store", () => {
     stores.pop()
     const migrated = new ModControlStore(file)
     stores.push(migrated)
-    expect(migrated.getSetting("schema")).toBe("5")
+    expect(migrated.getSetting("schema")).toBe("6")
     expect(migrated.read("legacy", "count")).toBe(7)
     migrated.functionState.set("plugin", "pref", { theme: "dark" })
     const backup = join(dirname(file), "function-backup.sqlite")

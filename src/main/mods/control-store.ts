@@ -58,7 +58,7 @@ export class ModControlStore {
       CREATE INDEX IF NOT EXISTS mods_artifacts_thread ON mods_artifacts(thread_id,at);
     `)
       const version = this.getSetting("schema", "")
-      if (version && !["1", "2", "3", "4", "5"].includes(version)) {
+      if (version && !["1", "2", "3", "4", "5", "6"].includes(version)) {
         throw new ModError("MODS_STORE_VERSION")
       }
       const columns = new Set(
@@ -76,7 +76,8 @@ export class ModControlStore {
         "policy_digest",
         "publication",
         "rule_ids",
-        "reconciliation"
+        "reconciliation",
+        "model_usage"
       ]) {
         if (!columns.has(column)) this.db.exec(`ALTER TABLE mods_calls ADD COLUMN ${column} TEXT`)
       }
@@ -87,7 +88,7 @@ export class ModControlStore {
       CREATE INDEX IF NOT EXISTS mods_calls_thread ON mods_calls(thread_id,at);
     `)
       this.functionState = new FunctionStateStore(this.db)
-      this.setSetting("schema", "5")
+      this.setSetting("schema", "6")
       // An interrupted operation may have reached an external service. Never replay it.
       this.db.prepare("UPDATE mods_calls SET status = 'unknown' WHERE status = 'running'").run()
       for (const row of this.db
@@ -305,6 +306,51 @@ export class ModControlStore {
     }
   }
 
+  claimFunctionModel(
+    identity: ModIdentity,
+    input: unknown,
+    finalInput: unknown,
+    modelRef: string,
+    outputTokenLimit: number
+  ): void {
+    if (!Number.isSafeInteger(outputTokenLimit) || outputTokenLimit < 1 || outputTokenLimit > 4096)
+      throw new ModError("MODS_MODEL_ARGUMENTS")
+    this.db.exec("BEGIN IMMEDIATE")
+    try {
+      const usage = this.db
+        .prepare(
+          `SELECT COUNT(*) AS calls, COALESCE(SUM(json_extract(model_usage,'$.outputTokenLimit')),0) AS tokens
+         FROM mods_calls WHERE workspace=? AND tool_id='model.complete' AND at>?
+         AND json_extract(scope,'$.modId')=?`
+        )
+        .get(identity.workspace, Date.now() - 60000, identity.modId ?? "")
+      if (Number(usage?.calls) >= 30 || Number(usage?.tokens) + outputTokenLimit > 32768)
+        throw new ModError("MODS_MODEL_BUDGET")
+      this.claim(identity.callId, "model.complete", input, identity, finalInput)
+      this.db
+        .prepare("UPDATE mods_calls SET model_usage=? WHERE id=?")
+        .run(encodeModJson({ modelRef, outputTokenLimit }), identity.callId)
+      this.db.exec("COMMIT")
+    } catch (error) {
+      this.db.exec("ROLLBACK")
+      throw error
+    }
+  }
+
+  recordFunctionModelUsage(id: string, inputTokens?: number, outputTokens?: number): void {
+    const row = this.db.prepare("SELECT model_usage FROM mods_calls WHERE id=?").get(id)
+    if (typeof row?.model_usage !== "string") throw new ModError("MODS_MODEL_USAGE_SCOPE")
+    const usage = JSON.parse(row.model_usage) as NonNullable<ModAuditEntry["modelUsage"]>
+    // Missing provider accounting stays absent; it is never reported as zero cost.
+    if (Number.isSafeInteger(inputTokens) && inputTokens! >= 0) usage.inputTokens = inputTokens
+    if (Number.isSafeInteger(outputTokens) && outputTokens! >= 0) usage.outputTokens = outputTokens
+    this.db.prepare("UPDATE mods_calls SET model_usage=? WHERE id=?").run(encodeModJson(usage), id)
+  }
+
+  blockPublication(id: string): void {
+    this.db.prepare("UPDATE mods_calls SET publication='blocked' WHERE id=?").run(id)
+  }
+
   bindFinalInput(id: string, toolId: string, args: unknown): void {
     const row = this.db
       .prepare("SELECT status,tool_id,final_args_hash FROM mods_calls WHERE id=?")
@@ -361,7 +407,8 @@ export class ModControlStore {
         policyDigest: row.policy_digest as string | null,
         publication: (row.publication ?? "pending") as ModAuditEntry["publication"],
         ruleIds: row.rule_ids ? JSON.parse(String(row.rule_ids)) : [],
-        reconciliation: row.reconciliation as ModAuditEntry["reconciliation"]
+        reconciliation: row.reconciliation as ModAuditEntry["reconciliation"],
+        ...(typeof row.model_usage === "string" ? { modelUsage: JSON.parse(row.model_usage) } : {})
       }))
   }
 

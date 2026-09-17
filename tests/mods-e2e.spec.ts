@@ -3,11 +3,19 @@
  * Native confirmation is answered by the test; no external model/API is used.
  */
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from "node:fs"
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  renameSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
 import { _electron, type ElectronApplication, type Page } from "playwright"
+import { startModsModelServer } from "./support/mods-model-server"
 
 const root = resolve(__dirname, "..")
 const localRequire = createRequire(join(root, "package.json"))
@@ -63,6 +71,7 @@ const checks: string[] = []
 const timings: Record<string, unknown> = {}
 let app: ElectronApplication | undefined
 let page: Page | undefined
+let modelServer: Awaited<ReturnType<typeof startModsModelServer>> | undefined
 const pass = (name: string) => {
   checks.push(name)
   console.log(`PASS ${name}`)
@@ -728,6 +737,80 @@ async function main(): Promise<void> {
     pass(
       "function SDK creates and refreshes native tool context in a cold session with no model turn"
     )
+    modelServer = await startModsModelServer()
+    await page!.evaluate(async (baseUrl) => {
+      await window.api.models.setCustomConfig({
+        id: "mods-model-fixture",
+        name: "Mods protocol fixture",
+        baseUrl,
+        model: "gpt-4",
+        apiKey: "fixture-key",
+        maxTokens: 32000,
+        maxOutputTokens: 4096
+      })
+      await window.api.models.setDefault("custom:mods-model-fixture")
+    }, modelServer.url)
+    await functionComposer.fill("/claw-ask 模型 SDK 协议回检")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+          (job) =>
+            job.command === "claw-ask" &&
+            job.state === "succeeded" &&
+            job.result?.text === "SDK_MODEL_OK [REDACTED]"
+        ),
+      "model SDK publishes protected text"
+    )
+    assert.equal(modelServer.requests.length, 1)
+    const modelRequest = modelServer.requests[0]
+    assert.equal(modelRequest.max_tokens, 512)
+    assert.deepEqual(
+      modelRequest.messages.map((message) => message.role),
+      ["system", "user"]
+    )
+    assert.equal(modelRequest.messages[1].content, "模型 SDK 协议回检")
+    assert.equal(modelRequest.tools, undefined)
+    const modelAudit = (await page!.evaluate((id) => window.api.mods.audit(id), threadId)).find(
+      (row) => row.toolId === "model.complete"
+    )!
+    assert.equal(modelAudit.status, "succeeded")
+    assert.deepEqual(modelAudit.modelUsage, {
+      modelRef: "custom:mods-model-fixture",
+      outputTokenLimit: 512,
+      inputTokens: 12,
+      outputTokens: 3
+    })
+    await page!.screenshot({ path: join(artifacts, "function-model.png") })
+    pass(
+      "function model SDK uses production settings and HTTP client, excludes history/tools, protects text and accounts provider usage"
+    )
+    await functionComposer.fill("/claw-ask [stall]")
+    await functionComposer.press("Enter")
+    await until(async () => modelServer!.requests.length === 2, "stalled model reaches the server")
+    const modelJob = (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).find(
+      (job) => job.command === "claw-ask" && job.state === "running"
+    )!
+    assert.ok(modelJob)
+    await page!.evaluate(({ id, job }) => window.api.mods.cancelJob(id, job), {
+      id: threadId,
+      job: modelJob.id
+    })
+    await until(
+      async () => modelServer!.closedStalls() === 1,
+      "cancellation closes real HTTP stream"
+    )
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).find(
+          (job) => job.id === modelJob.id
+        )?.state === "unknown",
+      "cancelled started model is not falsely marked unexecuted"
+    )
+    assert.equal(modelServer.requests.length, 2)
+    pass(
+      "cancelling a function model command closes its provider stream and preserves uncertain execution without retry"
+    )
     for (const path of ["secret.txt", "../outside.txt"]) {
       await functionComposer.fill(`/claw-files ${path}`)
       await functionComposer.press("Enter")
@@ -992,6 +1075,7 @@ async function main(): Promise<void> {
       JSON.stringify({ checks, timings, isolated }, null, 2)
     )
     await app?.close()
+    await modelServer?.close()
   }
 }
 void main().catch((error) => {

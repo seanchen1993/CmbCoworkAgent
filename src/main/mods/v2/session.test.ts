@@ -5,8 +5,67 @@ import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { ModError } from "../errors"
+import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 
 const sessions: FunctionSession[] = []
+it("runs the identical model SDK fixture with independent next results and local short circuits", async () => {
+  const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/model-sdk"))
+  const guest = await FunctionGuestRuntime.create(compiled.code, compiled.options)
+  const calls: string[] = []
+  const s = new FunctionSession(
+    [
+      {
+        name: compiled.name,
+        root: compiled.root,
+        tier: "user",
+        guest,
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+    ],
+    {
+      threadId: "thread",
+      workspace: "/project",
+      assertLive: () => {},
+      publish: async (v) => v,
+      completeModel: async (_plugin, input) => {
+        calls.push(String(input.prompt))
+        return String(input.prompt)
+      }
+    }
+  )
+  sessions.push(s)
+  expect((await s.run("model-probe", "input")).text).toBe("model-sdk:first:second")
+  expect((await s.run("model-probe", "short")).text).toBe("local answer")
+  expect(calls).toEqual(["first", "second"])
+})
+
+it("does not run denied model requests or fall back after a provider failure", async () => {
+  let calls = 0
+  const s = await session(
+    `
+    on("session.start", async ($,e,next) => {await $.command.register({name:"model",description:"Model"});return next(e)});
+    on("command.run",{command:"model"},async($,e)=>{
+      try{return {text:await $.model.complete({model:"chosen",prompt:e.args})}}
+      catch(error){if(e.args==="denied")return {text:error.message};throw error}
+    });
+    on("model.complete",{prompt:"denied"},()=>({deny:"refused"}));
+    on("model.complete",{prompt:"fail"},async($,e,next)=>{await next(e);return {value:"fake"}});
+  `,
+    {
+      completeModel: async () => {
+        calls++
+        throw new ModFunctionError("MODS_MODEL_FAILED")
+      }
+    }
+  )
+  expect((await s.run("model", "denied")).text).toBe("refused")
+  expect(calls).toBe(0)
+  await expect(s.run("model", "fail")).rejects.toMatchObject({
+    code: "MODS_MODEL_FAILED",
+    downstream: true
+  })
+  expect(calls).toBe(1)
+})
 it("runs SDK tool hooks with pinned identity, independent next calls and retained host scope", async () => {
   const context = new AsyncLocalStorage<string>(),
     calls: unknown[] = []

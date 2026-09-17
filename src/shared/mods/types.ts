@@ -153,6 +153,12 @@ export interface ModAuditEntry {
   publication: "pending" | "published" | "blocked"
   ruleIds: string[]
   reconciliation: "confirmed-success" | "confirmed-failure" | null
+  modelUsage?: {
+    modelRef: string
+    outputTokenLimit: number
+    inputTokens?: number
+    outputTokens?: number
+  }
 }
 
 export interface ModRuntimeRequest {

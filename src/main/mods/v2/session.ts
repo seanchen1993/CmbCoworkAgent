@@ -19,7 +19,8 @@ import { FunctionPanes, type FunctionUiDispatch } from "./panes"
 export const SESSION_CAPABILITIES = [
   ...BASIC_CAPABILITIES,
   ...FUNCTION_UI_CAPABILITIES,
-  "tool.call"
+  "tool.call",
+  "model.complete"
 ]
 import type { FunctionStateAccess } from "./state-store"
 import { FILE_CAPABILITIES, type FunctionFileAccess } from "./file-access"
@@ -28,6 +29,7 @@ import { FunctionClients } from "./clients"
 import type { FunctionGuest } from "../../../shared/mods/v2/contracts"
 import { randomUUID } from "node:crypto"
 import { functionToolTarget, validateFunctionToolResult } from "./tool-sdk"
+import { functionModelRequest, validateFunctionModelText } from "./model-sdk"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -36,6 +38,7 @@ export interface FunctionSessionHost {
   uiChanged?(): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
   callTool?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
+  completeModel?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<string>
   scheduleCommand?(
     command: FunctionCommand,
     signal: AbortSignal,
@@ -230,6 +233,7 @@ export class FunctionSession {
       operation: isOperation,
       ...(event === "command.run" ||
       event === "tool.call" ||
+      event === "model.complete" ||
       ["ui.press", "ui.input", "ui.select", "ui.message"].includes(event)
         ? { timeoutMs: 120000 }
         : {}),
@@ -243,6 +247,7 @@ export class FunctionSession {
       validateInput: (name, value) => {
         validateBasicInput(name, value)
         if (name === "tool.call") functionToolTarget(value)
+        if (name === "model.complete") functionModelRequest(value)
         if (name === "ui.open") validatePaneArgs(value)
         if (
           (name === "ui.input" || name === "ui.select") &&
@@ -258,6 +263,7 @@ export class FunctionSession {
         if (isOperation) {
           if (!isModObject(value)) throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (typeof value.deny === "string") return
+          if (name === "model.complete") return validateFunctionModelText(value.value)
           return validateBasicResult(name, value.value)
         }
         if (!isModObject(value)) throw new ModFunctionError("MODS_EVENT_RESULT")
@@ -320,6 +326,32 @@ export class FunctionSession {
     this.assertLive(plugin)
     if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
     const args = raw
+    if (method === "model.complete") {
+      if (args.length !== 1 || !isModObject(args[0]))
+        throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
+      functionModelRequest(args[0])
+      const result = await this.dispatch(
+        method,
+        args[0],
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: (input, signal) => {
+            this.assertLive(plugin)
+            if (!this.host.completeModel) throw new ModFunctionError("MODS_MODEL_UNAVAILABLE")
+            return this.host.completeModel(plugin, input, signal)
+          }
+        },
+        turnHeld
+      )
+      if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof result.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
+      validateFunctionModelText(result.value)
+      return result.value
+    }
     if (method === "tool.call") {
       if (!isModObject(args[0]) || args.length !== 1)
         throw new ModFunctionError("MODS_TOOL_ARGUMENTS")

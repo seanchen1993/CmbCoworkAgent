@@ -14,6 +14,7 @@ import {
   StateBackend
 } from "deepagents"
 import { withModelResponseDiagnostics } from "./model-response-diagnostics"
+import { withModelStreamCancellation } from "./model-stream-cancellation"
 import {
   getThreadCheckpointPath,
   deleteThreadCheckpoint,
@@ -4212,7 +4213,7 @@ async function runWorkerStopHooksWithRevision({
 /** Default fetch (no UI hooks) for model instances without a UI context (e.g. skill generation). */
 const defaultRetryingFetch = createRetryingFetch()
 
-type ModelInstancePurpose = "agent" | "context-compaction"
+type ModelInstancePurpose = "agent" | "context-compaction" | "function-completion"
 
 function localCompactionTokenCount(content: unknown): number {
   let text: string
@@ -4301,9 +4302,8 @@ export function getModelInstance(
   const baseFields = {
     model: resolvedModel,
     apiKey,
-    // Keep the established agent protocol unchanged. Context compaction uses a
-    // separate model instance because its invoke() must consume SSE internally.
-    ...(purpose === "context-compaction" ? { streaming: true } : {}),
+    // Text-only helpers use separate SSE instances and never change the agent protocol.
+    ...(purpose !== "agent" ? { streaming: true } : {}),
     maxTokens: maxOutputTokens,
     ...samplingFields(resolvedModel, { temperature, topP }),
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
@@ -4330,7 +4330,7 @@ export function getModelInstance(
     configuration: {
       baseURL: customConfig.baseUrl,
       fetch: withModelResponseDiagnostics(
-        modelFetch,
+        purpose === "function-completion" ? withModelStreamCancellation(modelFetch) : modelFetch,
         { model: resolvedModel, purpose },
         (diagnostic) => console.log("[Runtime][ModelResponse]", JSON.stringify(diagnostic))
       )
@@ -4355,9 +4355,9 @@ export function getModelInstance(
       ...baseFields,
       completions: new ReasoningDisplayChatOpenAICompletions(baseFields)
     } as never)
-  } else if (purpose === "context-compaction") {
+  } else if (purpose !== "agent") {
     // ChatOpenAI.withConfig() rebuilds the wrapper from its original fields.
-    // Keep the compaction completions explicit so the local token counter below
+    // Keep text-only completions explicit so the local token counter below
     // survives the tags/callback binding applied by configureContextCompactionModel().
     model = new ChatOpenAI({
       ...baseFields,
@@ -4370,7 +4370,7 @@ export function getModelInstance(
     } as never)
   }
 
-  return purpose === "context-compaction" ? configureLocalCompactionTokenEstimation(model) : model
+  return purpose !== "agent" ? configureLocalCompactionTokenEstimation(model) : model
 }
 
 type AgentsPromptLoader = "plugin" | "cmbdevclaw"

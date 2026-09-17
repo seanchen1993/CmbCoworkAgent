@@ -1,6 +1,6 @@
 # 函数 Mods 开发与当前支持范围
 
-当前分支实现了标准函数插件的加载、授权、直接命令与有限的交互 Pane。目标兼容版本固定为 Claude Code
+当前分支实现了标准函数插件的加载、授权、直接命令、交互 Pane/Client、原生工具调用和独立文本模型请求。目标兼容版本固定为 Claude Code
 2.1.273；这不是全部 Mods API 已经可用的声明。实现和验证状态见
 [实施记录](mods-v2-implementation-2026-09-16.md)。
 
@@ -59,7 +59,7 @@ export function register(on) {
 当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces`、
 `clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`，以及 `$.plugin.name/root` 元数据。
 上述 SDK 操作同样经过事件链。另已接入有限的桌面 Pane：`ui.open/close`、
-同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call`，范围见下文。
+同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call`、`model.complete`，范围见下文。
 
 普通操作 hook 返回 `{ value }` 或 `{ deny }`，调用 SDK 得到拆出的值；
 `command.run` 是引擎事件，返回 `{ text }`。例如：
@@ -77,6 +77,39 @@ on("clock.sleep", { ms: 10 }, () => ({ value: undefined }))
 `command.describe` 的 `isHidden: true` 隐藏菜单条目，但保留按完整命令名执行的能力。
 在 `command.run` hook 内不能再调用 `$.command.run`，经其他 SDK 间接调用也会拒绝，
 与 Claude 的会话执行通道规则一致；应直接返回当前命令的 `{ text }`。
+
+## 调用已配置的模型
+
+`/claw-ask 问题` 使用模型设置中的默认模型回答一次问题。自建插件可以调用：
+
+```ts
+const text = await $.model.complete({
+  model: "default", // 或模型设置中的明确 ID / custom:ID / builtin:ID
+  prompt: "请为这个项目列出三项自检建议。",
+  system: "用简洁的中文回答。",
+  maxTokens: 512
+})
+return { text }
+```
+
+它只发送这一次文本和系统说明，不附带聊天历史、不调用工具；工程身份说明由宿主添加。
+返回字符串。模型地址和密钥始终由宿主配置，插件不能传入。模型名不存在或缺少密钥会报错，
+不会悄悄改用另一个模型；Claude 的 `haiku` 等别名只有匹配本机已配置模型时才可使用。
+拦截 `model.complete` 的 hook 返回 `{ value: "文本" }` 或 `{ deny: "原因" }`；
+多次 `next` 会产生独立请求和实际用量。普通 hook 自己抛出的错误仍遵循跳过规则，
+需要显示 SDK 拒绝原因时应在命令中捕获并返回文本。
+
+默认输出上限 256 Token，可指定 1–4096，并受模型配置的更低上限约束。
+提示词最多 32000 字符、系统说明最多 8000 字符、返回最多 64000 UTF-8 字节。
+应用最多同时 4 个请求，同一项目/插件最多 2 个；每个项目/插件的滚动一分钟限制为
+30 次调用、32768 个预留输出 Token。预算随执行记录持久保存，重载插件或重启不会清零。
+每次请求最多 60 秒；取消会关闭实际响应流，不自动重试不确定的请求。
+
+在项目 Mods 的执行记录可看到配置引用、输出上限及服务返回的输入/输出 Token；
+服务未返回用量时显示“未返回”，不能视为零消耗。调用记录只保留提示词摘要，不保存原文或密钥。
+启用内容保护时，模型完整文本先经保护，再进入插件后置 hook 和界面。
+本次新增模型权限使旧授权摘要失效，需要在 Mods 页重新批准明确列出的能力。
+`model.fork/classify`、主会话模型流和 `turn.step` 尚未接通，不能由此推断它们已支持。
 
 ## 插件状态
 
@@ -161,7 +194,7 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 它不是授权，也不证明所用宿主能力全部已经接入。`inspect` 输出相同范围的检查报告。
 
 当前尚不能用这一入口交付官方完整 diff、`engine.create` 能力提供方、
-模型/网络 SDK、MCP SDK、`fs.write` 与祖先指令读取、配置表单或完整 classic 事件。这些保持在后续实施项中。
+主模型流程拦截与 `model.fork/classify`、网络 SDK、MCP SDK、`fs.write` 与祖先指令读取、配置表单或完整 classic 事件。这些保持在后续实施项中。
 命令文本以桌面结果区呈现；终端的显示宽度与布局不能等同于 Electron 窗口尺寸。
 
 运行中最多保留 6 个函数会话，每个会话最多 8 个插件；单命令参数上限为 32000 字符。

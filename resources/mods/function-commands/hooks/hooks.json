@@ -1,3 +1,3 @@
 {
-  "modules": ["./register.ts", "./board.tsx", "./client-board.tsx", "./tools.ts"]
+  "modules": ["./register.ts", "./board.tsx", "./client-board.tsx", "./tools.ts", "./model.ts"]
 }
