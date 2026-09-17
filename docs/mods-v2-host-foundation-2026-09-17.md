@@ -74,6 +74,7 @@ flowchart LR
 上游 `tool.check` 的语义依据是已冻结的 2.1.273 声明 `ToolCheckArgs/Input/Result`：
 查询无 tool_use_id，真实调用由宿主提供该字段，tool/input/id 均固定；返回 allow/ask/deny。
 见 [兼容设计](mods-v2-parity-design-2026-09-16.md) 的版本、哈希与本机还原证据索引。
-当前尚未开放 `tool.check` 或 MCP SDK，此文不把后续方案计入完成项。
+基础批交付时尚未开放 `tool.check` 或 MCP SDK；随后 MCP SDK 已按上述执行边界接入，
+见 [MCP SDK 实施复核](mods-v2-mcp-sdk-2026-09-17.md)。`tool.check` 仍待真实权限查询适配。
 
 验证结果与性能边界记录在 [实施记录](mods-v2-implementation-2026-09-16.md)。

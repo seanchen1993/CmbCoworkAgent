@@ -8,13 +8,7 @@ import { functionExecutionScope } from "./execution-context"
 
 const calls = new AsyncLocalStorage<{ identity: ModIdentity; active: boolean }>()
 
-/** Host identities never come from guest arguments; nested calls retain their real owner. */
-export function functionCallIdentity(
-  workspace: string,
-  threadId: string,
-  grant: ModGrant,
-  options: Pick<ModIdentity, "origin"> & { toolCallId?: string; fallbackTurnId: string }
-): ModIdentity {
+function functionCallScope(workspace: string, threadId: string) {
   const scope = functionExecutionScope(workspace, threadId)
   const current = calls.getStore()
   if (current && !current.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
@@ -27,6 +21,23 @@ export function functionCallIdentity(
       (scope?.turnId && parent.turnId !== scope.turnId))
   )
     throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+  return { scope, parent }
+}
+
+/** Resolve provenance before creating a command adapter, without minting an unused receipt. */
+export function functionCallTurn(workspace: string, threadId: string): string | undefined {
+  const { scope, parent } = functionCallScope(workspace, threadId)
+  return scope?.turnId ?? parent?.turnId
+}
+
+/** Host identities never come from guest arguments; nested calls retain their real owner. */
+export function functionCallIdentity(
+  workspace: string,
+  threadId: string,
+  grant: ModGrant,
+  options: Pick<ModIdentity, "origin"> & { toolCallId?: string; fallbackTurnId: string }
+): ModIdentity {
+  const { scope, parent } = functionCallScope(workspace, threadId)
   return {
     workspace,
     threadId,

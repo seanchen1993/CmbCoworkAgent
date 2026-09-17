@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import type { ModIdentity } from "../../shared/mods/types"
+import type { McpCapabilityTool } from "../mcp/capability-types"
 
 export interface ModCallContext {
   identity: ModIdentity
@@ -17,6 +18,7 @@ export interface ModCallContext {
   mcpPermitConsumed?: boolean
   approvedOperation?: { toolId: string; args: Record<string, unknown> }
   assertLive?: () => void
+  assertMcpTool?: (tool: McpCapabilityTool) => void
   policyDigest?: string
   publish?: <T>(value: T, stage: "before-observers" | "final") => Promise<T>
   protectData?: <T>(value: T) => T

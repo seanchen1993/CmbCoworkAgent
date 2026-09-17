@@ -10,6 +10,9 @@ import { installPluginFromDir } from "./plugins"
 import { readManagedModDeployment } from "../mods/policy"
 import { ModCommandQueue } from "../mods/command-queue"
 import { bindStandaloneModCommand } from "../mods/command-backend"
+import { withFunctionMcpCommand } from "../mods/v2/mcp-command"
+import { functionExecutionScope } from "../mods/v2/execution-context"
+import { functionCallTurn } from "../mods/v2/host-call"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import type { ModCommandDescriptor, ModObject } from "../../shared/mods/types"
 import { resolveAgentModeFromMetadata } from "../../shared/agent-mode-metadata"
@@ -124,6 +127,49 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         return manager.functionToolCatalog(workspace, threadId, functionExecutionAgent())
       },
       completeModel: (...args) => models.complete(...args),
+      callMcp: (workspace, threadId, grant, input, signal) =>
+        scheduleFunctionTool(
+          queue,
+          workspace,
+          threadId,
+          "mcp:call",
+          signal,
+          async (operationSignal, readOnly, userInitiated) => {
+            if (writableThreadScope(threadId) !== workspace)
+              throw new ModError("MODS_CALL_SCOPE_CHANGED")
+            manager.store.assertGrant(grant)
+            const execution = functionExecutionScope(workspace, threadId)
+            if ((execution?.agentId ?? "main") !== "main")
+              throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+            if (execution?.turnId)
+              return manager.invokeFunctionMcp(
+                workspace,
+                threadId,
+                grant,
+                input,
+                operationSignal,
+                readOnly,
+                userInitiated
+              )
+            assertStandaloneThread(threadId)
+            const turnId = functionCallTurn(workspace, threadId) ?? `function-mcp:${randomUUID()}`
+            return withFunctionMcpCommand(workspace, threadId, turnId, operationSignal, () =>
+              withFunctionExecution(
+                { workspace, threadId, turnId, leased: true, immediate: readOnly, userInitiated },
+                () =>
+                  manager.invokeFunctionMcp(
+                    workspace,
+                    threadId,
+                    grant,
+                    input,
+                    operationSignal,
+                    readOnly,
+                    userInitiated
+                  )
+              )
+            )
+          }
+        ),
       enabled: (workspace) => manager.isEnabled(workspace),
       publish: (workspace, value, signal) => manager.publish(workspace, value, undefined, signal),
       assertThread: (workspace, threadId) => {
@@ -251,6 +297,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   }
   async function ensureCommandBinding(workspace: string, threadId: string, signal: AbortSignal) {
     if (!manager.needsCommandBinding(threadId)) return undefined
+    assertStandaloneThread(threadId)
+    return bindStandaloneModCommand(workspace, threadId, `function-tools:${randomUUID()}`, signal)
+  }
+  function assertStandaloneThread(threadId: string): void {
     const thread = getThreadCore(threadId)!
     const metadata =
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
@@ -262,7 +312,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       metadata?.parentThreadId
     )
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
-    return bindStandaloneModCommand(workspace, threadId, `function-tools:${randomUUID()}`, signal)
   }
   ipcMain.handle("mods:commands", async (event, threadId: string) => {
     const workspace = scope(event, threadId)

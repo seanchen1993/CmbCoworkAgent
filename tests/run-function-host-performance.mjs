@@ -14,9 +14,16 @@ const baseline = execFileSync(
   ["rev-parse", "--verify", `${process.argv[2] ?? "aa97b145"}^{commit}`],
   { cwd: root, encoding: "utf8" }
 ).trim()
-const output = join(root, "output/mods-v2-validation/host-performance")
+const mcpMode = ["mcp", "mcp-matched"].includes(process.argv[3])
+const matchedPublication = process.argv[3] === "mcp-matched"
+const output = join(
+  root,
+  `output/mods-v2-validation/${mcpMode ? process.argv[3] : "host"}-performance`
+)
 await mkdir(output, { recursive: true })
-const source = `
+const source = mcpMode
+  ? await readFile(join(root, "tests/support/function-mcp-performance-entry.ts"), "utf8")
+  : `
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
@@ -54,15 +61,37 @@ const hashes = {}
 for (const variant of ["baseline", "current"]) {
   const outfile = join(output, `${variant}.mjs`)
   await build({
-    stdin: { contents: source, resolveDir: root, loader: "ts" },
+    stdin: {
+      contents: source,
+      resolveDir: mcpMode ? join(root, "tests/support") : root,
+      loader: "ts"
+    },
+    define: {
+      __MODS_MCP_SDK__: variant === "current" ? "true" : "false",
+      __MODS_MATCHED_PUBLICATION__: matchedPublication ? "true" : "false"
+    },
     outfile,
     bundle: true,
     format: "esm",
     platform: "node",
     target: "node22",
     packages: "external",
-    plugins:
-      variant === "baseline"
+    plugins: [
+      ...(mcpMode
+        ? [
+            {
+              name: "no-guest-in-host-performance",
+              setup(builder) {
+                builder.onLoad({ filter: /[\\/]main[\\/]mods[\\/]runtime-client\.ts$/ }, () => ({
+                  contents:
+                    "export class ModRuntimeClient { version=0; stop(){}; load(){throw Error('Unexpected guest in host benchmark')} }",
+                  loader: "ts"
+                }))
+              }
+            }
+          ]
+        : []),
+      ...(variant === "baseline"
         ? [
             {
               name: "frozen-mods-baseline",
@@ -82,7 +111,8 @@ for (const variant of ["baseline", "current"]) {
               }
             }
           ]
-        : []
+        : [])
+    ]
   })
   hashes[variant] = createHash("sha256")
     .update(await readFile(outfile))
@@ -124,8 +154,12 @@ const prior = summarize(samples.baseline),
 const report = {
   baseline,
   hashes,
-  scope:
-    "registered host boundary + actual SQLite; no VM, policy worker, native tool I/O or provider",
+  scope: mcpMode
+    ? "baseline internal MCP capability route versus new named SDK resolver (1000 tools), both actual ModEngine + SQLite; stub approval/transport, no guest VM or policy worker; " +
+      (matchedPublication
+        ? "benchmark adds equivalent publication persistence to baseline, isolating resolver/guard overhead"
+        : "SDK additionally persists publication with policy off, baseline leaves it pending")
+    : "registered host boundary + actual SQLite; no VM, policy worker, native tool I/O or provider",
   prior,
   current,
   p95DeltaPercent: (current.p95Ms / prior.p95Ms - 1) * 100,

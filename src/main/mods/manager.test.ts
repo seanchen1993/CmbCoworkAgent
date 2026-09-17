@@ -41,6 +41,8 @@ import { DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { withScopedModMcp, withRawModMcp } from "./adapters"
 import { withFunctionExecution } from "./v2/execution-context"
 import { FunctionRegisteredTools } from "./v2/registered-tools"
+import { getModCallContext } from "./context"
+import type { McpCapabilityTool } from "../mcp/capability-types"
 
 const cleanup: Array<() => void> = []
 afterEach(() => {
@@ -173,6 +175,136 @@ async function fixture(deployment?: ManagedModDeployment) {
 }
 
 describe("project Mods lifecycle and UI authority", () => {
+  async function mcpFixture() {
+    const f = await fixture()
+    await f.enable()
+    const workspace = f.manager.workspaceKey(f.root)
+    const grant = f.manager.store.grant(workspace, "function:mcp", "snapshot", true)
+    const tool: McpCapabilityTool = {
+      capabilityId: "connector:mail/send",
+      toolId: "mcp__mail__send",
+      providerKey: "connector:mail",
+      providerAlias: "mail",
+      providerDisplayName: "Company Mail",
+      toolName: "send",
+      visibility: "lazy",
+      inputSchema: { type: "object", properties: { text: { type: "string" } } }
+    }
+    const scope = { ...f.scope, workspace, leased: true, immediate: false, userInitiated: true }
+    const actual = vi.fn(async () => ({
+      capabilityId: tool.capabilityId,
+      text: "delivered",
+      raw: { content: [{ type: "text", text: "delivered" }], structuredContent: { id: 1 } },
+      isError: false
+    }))
+    const invoke = (id: string, args: ModObject) =>
+      f.manager.dispatch(scope, `mcp:${id}`, args, async (input) => {
+        await authorizeCurrentModInput(`mcp:${id}`, input)
+        getModCallContext()?.assertMcpTool?.(tool)
+        return actual()
+      })
+    const bind = () => f.manager.bindMcp(scope, invoke, async () => [tool])
+    const release = bind()
+    const controller = new AbortController()
+    const call = (userInitiated = true) =>
+      f.manager.invokeFunctionMcp(
+        workspace,
+        scope.threadId,
+        grant,
+        { server: "Company_Mail", tool: "send", args: { text: "hello" } },
+        controller.signal,
+        false,
+        userInitiated
+      )
+    return { ...f, workspace, grant, tool, scope, actual, bind, release, controller, call }
+  }
+
+  it("routes MCP SDK through final approval with one real receipt and preserved structured output", async () => {
+    const f = await mcpFixture()
+    const result = await withFunctionExecution(f.scope, () => f.call())
+    expect(result).toEqual({
+      content: [{ type: "text", text: "delivered" }],
+      structuredContent: { id: 1 },
+      isError: false
+    })
+    expect(f.confirm).toHaveBeenCalledWith(
+      "thread",
+      "function:mcp",
+      `mcp:${f.tool.capabilityId}`,
+      { text: "hello" },
+      expect.anything()
+    )
+    expect(f.actual).toHaveBeenCalledOnce()
+    const rows = f.manager.store.audit(f.workspace)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      status: "succeeded",
+      publication: "published",
+      identity: { modId: "function:mcp", turnId: "turn", agentId: "main" }
+    })
+    expect(rows[0].identity?.parentCallId).toBeUndefined()
+    expect(f.executions).toEqual([])
+  })
+
+  it("rejects automatic, child, cross-turn and closed MCP calls without borrowing a native adapter", async () => {
+    const f = await mcpFixture()
+    await expect(withFunctionExecution(f.scope, () => f.call(false))).rejects.toThrow("USER_ACTION")
+    await expect(
+      withFunctionExecution({ ...f.scope, agentId: "worker" }, () => f.call())
+    ).rejects.toThrow("AGENT_UNAVAILABLE")
+    await expect(
+      withFunctionExecution({ ...f.scope, turnId: "other" }, () => f.call())
+    ).rejects.toThrow("SCOPE_CHANGED")
+    f.manager.closeFunctionThread(f.scope.threadId)
+    await expect(f.call()).rejects.toThrow("MCP_CONTEXT_REQUIRED")
+    expect(f.actual).not.toHaveBeenCalled()
+    expect(f.confirm).not.toHaveBeenCalled()
+    expect(f.executions).toEqual([])
+  })
+
+  it.each(["replace", "schema", "connection", "revoke", "cancel"])(
+    "rechecks MCP %s while approval is outstanding before any transport side effect",
+    async (mode) => {
+      const f = await mcpFixture()
+      let approve!: (value: boolean) => void
+      f.confirm.mockImplementation(
+        () =>
+          new Promise<boolean>((resolve) => {
+            approve = resolve
+          })
+      )
+      const operation = withFunctionExecution(f.scope, () => f.call())
+      const rejection = expect(operation).rejects.toThrow(/MODS_/)
+      await expect.poll(() => f.confirm.mock.calls.length).toBe(1)
+      if (mode === "replace") f.bind()
+      if (mode === "schema") f.tool.inputSchema = { type: "object", required: ["newArgument"] }
+      if (mode === "connection") f.tool.connectionGeneration = "replacement"
+      if (mode === "revoke") f.manager.store.grant(f.workspace, "function:mcp", "snapshot", false)
+      if (mode === "cancel") f.controller.abort()
+      approve(true)
+      await rejection
+      expect(f.actual).not.toHaveBeenCalled()
+      expect(f.manager.store.audit(f.workspace)[0]?.publication).toBe("blocked")
+    }
+  )
+
+  it("keeps replacement MCP bindings when an old disposer runs and never replays a lost reply", async () => {
+    const f = await mcpFixture()
+    f.bind()
+    f.release()
+    f.actual.mockImplementation(async () => {
+      throw Error("ECONN disconnected sk-secret-value")
+    })
+    await expect(withFunctionExecution(f.scope, () => f.call())).rejects.toThrow(
+      "MODS_EXECUTION_FAILED"
+    )
+    expect(f.actual).toHaveBeenCalledOnce()
+    expect(f.manager.store.audit(f.workspace)[0]).toMatchObject({
+      status: "unknown",
+      publication: "blocked"
+    })
+  })
+
   it("scopes discovered tools by workspace, thread and agent and clears closed thread catalogs", async () => {
     const f = await fixture()
     expect(() => f.manager.functionToolCatalog(f.root, "thread")).toThrow(

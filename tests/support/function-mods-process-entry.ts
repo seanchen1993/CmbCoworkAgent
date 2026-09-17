@@ -258,6 +258,53 @@ void app.whenReady().then(async () => {
     await toolSession.close()
     checks.push("tool SDK contract and host authority survive real utilityProcess callbacks")
 
+    const mcpPlugin = await compileFunctionPlugin(join(root, "tests/fixtures/mods-v2/mcp-sdk"))
+    let mcpCalls = 0
+    const mcpSession = new FunctionSession(
+      [
+        {
+          name: mcpPlugin.name,
+          root: mcpPlugin.root,
+          tier: "user",
+          guest: await client.load(mcpPlugin.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      {
+        workspace: root,
+        threadId: "mcp",
+        assertLive: () => {},
+        publish: async (v) => v,
+        callMcp: async (_, input) => {
+          assert.equal(toolContext.getStore(), "mcp authority")
+          assert.deepEqual(input, { server: "Company Mail", tool: "send", args: {} })
+          mcpCalls++
+          return {
+            content: [{ type: "resource_link", uri: "test://resource", name: "resource" }],
+            isError: false,
+            structuredContent: { count: mcpCalls }
+          }
+        }
+      }
+    )
+    assert.deepEqual(
+      JSON.parse(
+        String(
+          (await toolContext.run("mcp authority", () => mcpSession.run("mcp-probe", "empty"))).text
+        )
+      ),
+      {
+        content: [{ type: "resource_link", uri: "test://resource", name: "resource" }],
+        isError: false,
+        structuredContent: { count: 1 }
+      }
+    )
+    assert.equal(mcpCalls, 1)
+    await mcpSession.close()
+    checks.push(
+      "official MCP SDK fixture preserves structured blocks and host context across utilityProcess"
+    )
+
     const registryPlugin = await compileFunctionPlugin(
       join(root, "tests/fixtures/mods-v2/tool-registry")
     )

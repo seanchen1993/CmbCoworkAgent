@@ -10,6 +10,8 @@ export interface McpFallbackPolicy {
 }
 
 export interface McpCapabilityTool {
+  /** Opaque host connection snapshot, never a credential or a server-provided annotation. */
+  connectionGeneration?: string
   capabilityId: string
   toolId: string
   canonicalToolId?: string

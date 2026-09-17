@@ -621,9 +621,11 @@ async function main(): Promise<void> {
     const functionComposer = page!.locator("textarea.composer-textarea")
     await functionComposer.fill("/claw")
     await page!.getByText("claw-info", { exact: true }).first().waitFor()
-    const [functionCommand] = (
+    const functionCommand = (
       await page!.evaluate((id) => window.api.mods.commands(id), threadId)
-    ).filter((command) => command.apiVersion === "cmb.mods/v2")
+    ).find(
+      (command) => command.modId === "function:function-commands" && command.command === "claw-info"
+    )!
     assert.equal(functionCommand.command, "claw-info")
     await app.evaluate(
       (_electron, id) =>
@@ -940,6 +942,183 @@ async function main(): Promise<void> {
     }, workspace)
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Registered tools", { exact: true }).first().click()
+    const mcpConnector = await app.evaluate(
+      (_electron, input) =>
+        (
+          globalThis as unknown as {
+            modsFixture: {
+              startFunctionMcpFixture(
+                workspace: string,
+                node: string,
+                server: string
+              ): Promise<string>
+            }
+          }
+        ).modsFixture.startFunctionMcpFixture(input.workspace, input.node, input.server),
+      { workspace, node: process.execPath, server: join(root, "tests/support/mods-mcp-server.mjs") }
+    )
+    try {
+      const requestsBeforeMcp = modelServer.requests.length
+      const approvalsBeforeMcp = await app.evaluate(
+        () => (globalThis as unknown as { modsConfirmations: unknown[] }).modsConfirmations.length
+      )
+      await functionComposer.fill(
+        '/claw-mcp {"server":"Mods SDK fixture","tool":"mods_echo","args":{}}'
+      )
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+            (job) =>
+              job.command === "claw-mcp" &&
+              job.state === "succeeded" &&
+              job.result?.text.includes("structuredContent")
+          ),
+        "cold command calls real MCP without a model"
+      )
+      assert.equal(modelServer.requests.length, requestsBeforeMcp)
+      assert.equal(readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8"), "echo\n")
+      const sdkJob = (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).find(
+        (job) => job.command === "claw-mcp"
+      )!
+      const sdkResult = JSON.parse(sdkJob.result!.text)
+      assert.equal(sdkResult.isError, false)
+      assert.equal(sdkResult.content[0].type, "text")
+      assert.ok(sdkResult.structuredContent)
+      assert.doesNotMatch(JSON.stringify(sdkJob), /sk-mcp-fixture/)
+      const approvals = await app.evaluate(
+        () =>
+          (
+            globalThis as unknown as {
+              modsConfirmations: Array<{ message: string; detail: string }>
+            }
+          ).modsConfirmations
+      )
+      assert(
+        approvals
+          .slice(approvalsBeforeMcp)
+          .some((c) => c.message.includes("function:function-commands"))
+      )
+      const sdkAudit = (
+        await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+      ).filter((row) => row.identity?.threadId === registryThread && row.toolId.startsWith("mcp:"))
+      assert.equal(sdkAudit.length, 1)
+      assert.equal(sdkAudit[0].status, "succeeded")
+      assert.equal(sdkAudit[0].publication, "published")
+      assert.match(sdkAudit[0].identity!.turnId, /^function-mcp:/)
+      assert.doesNotMatch(await page!.locator("body").innerText(), /sk-mcp-fixture/)
+      await page!.screenshot({ path: join(artifacts, "function-mcp-sdk.png") })
+      pass(
+        "cold UI command uses real MCP stdio, final approval, protected raw blocks and one receipt without model traffic"
+      )
+      await functionComposer.fill('/claw-mcp {"server":"Mods SDK fixture","tool":"mods_error"}')
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+            (job) =>
+              job.command === "claw-mcp" &&
+              job.state === "succeeded" &&
+              job.result?.text.includes('"isError":true')
+          ),
+        "MCP protocol errors retain failed status"
+      )
+      assert.equal(readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8"), "echo\nerror\n")
+      const failedMcp = (
+        await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+      ).find(
+        (row) => row.identity?.threadId === registryThread && row.toolId.endsWith("mods_error")
+      )
+      assert.ok(failedMcp)
+      assert.equal(failedMcp.status, "failed")
+      assert.equal(failedMcp.publication, "published")
+      assert.doesNotMatch(await page!.locator("body").innerText(), /sk-mcp-fixture/)
+      assert.equal(modelServer.requests.length, requestsBeforeMcp)
+      pass(
+        "MCP error result and resource block remain policy-protected with a failed execution receipt"
+      )
+      await functionComposer.fill("/foundation-mcp ")
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+            (job) =>
+              job.command === "foundation-mcp" &&
+              job.state === "succeeded" &&
+              job.result?.text.includes("structuredContent")
+          ),
+        "registered tool calls MCP in a cold command"
+      )
+      const nestedAudit = await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+      const nestedParent = nestedAudit.find(
+        (row) =>
+          row.identity?.threadId === registryThread &&
+          row.toolId === "function:mcp__host-foundation__probe" &&
+          row.identity?.origin === "mod"
+      )!
+      assert.ok(nestedParent)
+      const nestedChildren = nestedAudit.filter(
+        (row) => row.identity?.parentCallId === nestedParent.identity!.callId
+      )!
+      assert.equal(nestedChildren.length, 2)
+      for (const child of nestedChildren) {
+        assert.equal(child.identity!.turnId, nestedParent.identity!.turnId)
+        assert.equal(child.identity!.modId, "function:host-foundation")
+        assert.equal(child.publication, "published")
+        assert.equal(child.status, "succeeded")
+      }
+      assert.equal(
+        readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8"),
+        "echo\nerror\necho\necho\n"
+      )
+      assert.equal(modelServer.requests.length, requestsBeforeMcp)
+      pass(
+        "cold command to registered tool to MCP retains the real parent turn, owner and execution receipt"
+      )
+      await app.evaluate(({ dialog }, id) => {
+        const original = dialog.showMessageBox
+        dialog.showMessageBox = (async (...args: unknown[]) => {
+          dialog.showMessageBox = original
+          const result = await (original as (...args: unknown[]) => Promise<unknown>)(...args)
+          ;(
+            globalThis as unknown as {
+              modsFixture: { removeFunctionMcpConfiguration(id: string): void }
+            }
+          ).modsFixture.removeFunctionMcpConfiguration(id)
+          return result
+        }) as typeof dialog.showMessageBox
+      }, mcpConnector)
+      await functionComposer.fill('/claw-mcp {"server":"Mods SDK fixture","tool":"mods_echo"}')
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.audit(id), registryThread)).some(
+            (row) =>
+              row.identity?.threadId === registryThread &&
+              row.toolId.startsWith("mcp:") &&
+              row.publication === "blocked"
+          ),
+        "connection settings changed during approval block transport"
+      )
+      assert.equal(
+        readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8"),
+        "echo\nerror\necho\necho\n"
+      )
+      assert.equal(modelServer.requests.length, requestsBeforeMcp)
+      pass(
+        "deleting MCP configuration during real approval cannot reuse a cached connection or repeat a side effect"
+      )
+    } finally {
+      await app.evaluate(
+        (_electron, id) =>
+          (
+            globalThis as unknown as {
+              modsFixture: { stopFunctionMcpFixture(id: string): Promise<void> }
+            }
+          ).modsFixture.stopFunctionMcpFixture(id),
+        mcpConnector
+      )
+    }
     await functionComposer.fill("[mods-registered] 请调用自定义工具查看项目概览。")
     await functionComposer.press("Enter")
     await page!.getByText("REGISTERED_TOOL_OK", { exact: true }).first().waitFor({ timeout: 30000 })
@@ -1316,9 +1495,15 @@ async function main(): Promise<void> {
     await until(
       async () =>
         !(await page!.evaluate((id) => window.api.mods.commands(id), threadId)).some(
-          (command) => command.apiVersion === "cmb.mods/v2"
+          (command) => command.modId === "function:function-commands"
         ),
       "revoked function commands disappear"
+    )
+    assert(
+      (await page!.evaluate((id) => window.api.mods.commands(id), threadId)).some(
+        (command) => command.modId === "function:host-foundation"
+      ),
+      "revoking one plugin preserves another approved plugin's commands"
     )
     await page!.getByRole("button", { name: "返回会话", exact: true }).click()
     await page!.getByText("Registered tools", { exact: true }).first().click()

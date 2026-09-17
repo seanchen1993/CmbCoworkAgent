@@ -25,8 +25,15 @@ import { getModCallContext, modCallContext } from "./context"
 import { ManagedModPolicy, DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { orderApprovedMods } from "./order"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../shared/mods/v2/tools"
-import { assertFunctionGrant, functionCallIdentity } from "./v2/host-call"
+import { assertFunctionGrant, functionCallIdentity, functionCallTurn } from "./v2/host-call"
 import { functionExecutionScope } from "./v2/execution-context"
+import type { McpCapabilityTool } from "../mcp/capability-types"
+import {
+  functionMcpInput,
+  functionMcpResult,
+  functionMcpToolFingerprint,
+  resolveFunctionMcpTool
+} from "./v2/mcp-sdk"
 
 export interface ModPluginSource {
   id: string
@@ -35,6 +42,8 @@ export interface ModPluginSource {
   enabled: boolean
 }
 export interface ModThreadBinding {
+  assertLive?: () => void
+  assertMcpTool?: (tool: McpCapabilityTool) => void
   commandOnly?: boolean
   threadId: string
   turnId: string
@@ -93,6 +102,8 @@ export class ModsManager {
 
   closeFunctionThread(threadId: string): void {
     this.functionLifecycle?.closeThread(threadId)
+    for (const [key, entry] of this.mcpBindings)
+      if (entry.binding.threadId === threadId) this.mcpBindings.delete(key)
     for (const key of this.functionToolCatalogs.keys())
       if (JSON.parse(key)[1] === threadId) this.functionToolCatalogs.delete(key)
   }
@@ -149,7 +160,12 @@ export class ModsManager {
   private readonly bindings = new Map<string, ModThreadBinding>()
   private readonly mcpBindings = new Map<
     string,
-    { turnId: string; invoke: (id: string, args: ModObject) => Promise<unknown> }
+    {
+      binding: ModThreadBinding
+      assertLive(): void
+      listTools?: () => Promise<McpCapabilityTool[]>
+      invoke: (id: string, args: ModObject) => Promise<unknown>
+    }
   >()
   private readonly sessions = new Map<string, Promise<Session>>()
   private readonly clients = new Map<string, ModRuntimeClient>()
@@ -397,37 +413,16 @@ export class ModsManager {
     readOnly: boolean,
     userInitiated: boolean
   ): Promise<ModObject> {
-    workspace = this.workspaceKey(workspace)
-    if (
-      !this.isEnabled(workspace) ||
-      grant.workspace !== workspace ||
-      !grant.modId.startsWith("function:")
+    const published = await this.invokeFunctionCapability(
+      workspace,
+      threadId,
+      grant,
+      toolId,
+      args,
+      signal,
+      readOnly,
+      userInitiated
     )
-      throw new ModError("MODS_GRANT_REVOKED")
-    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
-    const identity = functionCallIdentity(workspace, threadId, grant, {
-      origin: "mod",
-      fallbackTurnId: this.bindings.get(`${threadId}:main`)?.turnId ?? `function-tool:${threadId}`
-    })
-    // Child agents must never inherit the main agent's backend or approval context.
-    if (identity.agentId !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
-    const saved = this.bindings.get(`${threadId}:main`)
-    if (!saved?.invokeTool || saved.workspace !== workspace)
-      throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
-    const binding = {
-      ...saved,
-      readOnly: readOnly || saved.readOnly === true,
-      signal: saved.signal ? AbortSignal.any([signal, saved.signal]) : signal
-    }
-    binding.signal.throwIfAborted()
-    if (classifyModTool(toolId) !== "read" && (binding.readOnly || !userInitiated))
-      throw new ModError("MODS_WRITE_REQUIRES_USER_ACTION")
-    const request = this.request(binding, identity, toolId, args, userInitiated, true)
-    const actual = await request.invokeTool!(toolId, args, grant, userInitiated)
-    request.assertScope?.()
-    this.store.assertGrant(grant)
-    const published = await this.publish(workspace, actual, identity.callId, binding.signal)
-    request.assertScope?.()
     const result = filterModData(published, false)
     const text = projectModResult(published).text
     const failed =
@@ -441,15 +436,171 @@ export class ModsManager {
     return { result, text, ...(failed ? { isError: true } : {}) }
   }
 
+  async invokeFunctionMcp(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal,
+    readOnly: boolean,
+    userInitiated: boolean
+  ): Promise<ModObject> {
+    try {
+      return await this.callFunctionMcp(
+        workspace,
+        threadId,
+        grant,
+        input,
+        signal,
+        readOnly,
+        userInitiated
+      )
+    } catch (error) {
+      if (signal.aborted) throw new ModError("MODS_CANCELLED")
+      throw new ModError(modErrorCode(error))
+    }
+  }
+
+  private async callFunctionMcp(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal,
+    readOnly: boolean,
+    userInitiated: boolean
+  ): Promise<ModObject> {
+    workspace = this.workspaceKey(workspace)
+    input = functionMcpInput(input)
+    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    const scope = functionExecutionScope(workspace, threadId)
+    if ((scope?.agentId ?? "main") !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+    const mcp = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId }))
+    if (!mcp?.listTools) throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
+    mcp.assertLive()
+    const turn = functionCallTurn(workspace, threadId)
+    if (turn && turn !== mcp.binding.turnId) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    const tool = resolveFunctionMcpTool(
+      await mcp.listTools(),
+      String(input.server),
+      String(input.tool)
+    )
+    mcp.assertLive()
+    const fingerprint = functionMcpToolFingerprint(tool)
+    const binding = {
+      ...mcp.binding,
+      assertLive: mcp.assertLive,
+      assertMcpTool: (actual: McpCapabilityTool) => {
+        mcp.assertLive()
+        if (functionMcpToolFingerprint(actual) !== fingerprint)
+          throw new ModError("MODS_MCP_TOOL_CHANGED")
+      }
+    }
+    return this.invokeFunctionCapability(
+      workspace,
+      threadId,
+      grant,
+      `mcp:${tool.capabilityId}`,
+      input.args as ModObject,
+      signal,
+      readOnly,
+      userInitiated,
+      binding,
+      functionMcpResult
+    ) as Promise<ModObject>
+  }
+
+  private async invokeFunctionCapability(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    toolId: string,
+    args: ModObject,
+    signal: AbortSignal,
+    readOnly: boolean,
+    userInitiated: boolean,
+    mcpBinding?: ModThreadBinding,
+    project: (value: unknown) => unknown = (value) => value
+  ): Promise<unknown> {
+    workspace = this.workspaceKey(workspace)
+    if (
+      !this.isEnabled(workspace) ||
+      grant.workspace !== workspace ||
+      !grant.modId.startsWith("function:")
+    )
+      throw new ModError("MODS_GRANT_REVOKED")
+    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    const identity = functionCallIdentity(workspace, threadId, grant, {
+      origin: "mod",
+      fallbackTurnId:
+        mcpBinding?.turnId ??
+        this.bindings.get(`${threadId}:main`)?.turnId ??
+        `function-tool:${threadId}`
+    })
+    // Child agents must never inherit the main agent's backend or approval context.
+    if (identity.agentId !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+    const saved = mcpBinding ?? this.bindings.get(`${threadId}:main`)
+    if ((!mcpBinding && !saved?.invokeTool) || !saved || saved.workspace !== workspace)
+      throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
+    const binding = {
+      ...saved,
+      readOnly: readOnly || saved.readOnly === true,
+      signal: saved.signal ? AbortSignal.any([signal, saved.signal]) : signal
+    }
+    binding.signal.throwIfAborted()
+    if (classifyModTool(toolId) !== "read" && (binding.readOnly || !userInitiated))
+      throw new ModError("MODS_WRITE_REQUIRES_USER_ACTION")
+    const request = this.request(binding, identity, toolId, args, userInitiated, true)
+    try {
+      const actual = await request.invokeTool!(toolId, args, grant, userInitiated)
+      request.assertScope?.()
+      this.store.assertGrant(grant)
+      const published = await this.publish(
+        workspace,
+        project(actual),
+        identity.callId,
+        binding.signal
+      )
+      request.assertScope?.()
+      if (!this.protects(workspace)) this.store.publication(identity.callId, "", [], "published")
+      return published
+    } catch (error) {
+      this.store.blockPublication(identity.callId)
+      throw new ModError(modErrorCode(error))
+    }
+  }
+
+  private mcpBindingKey(
+    binding: Pick<ModThreadBinding, "workspace" | "threadId" | "agentId">
+  ): string {
+    return JSON.stringify([
+      this.workspaceKey(binding.workspace),
+      binding.threadId,
+      binding.agentId ?? "main"
+    ])
+  }
+
   bindMcp(
     binding: ModThreadBinding,
-    invoke: (id: string, args: ModObject) => Promise<unknown>
-  ): void {
-    this.mcpBindings.set(`${binding.threadId}:${binding.agentId ?? "main"}`, {
-      turnId: binding.turnId,
-      invoke
-    })
+    invoke: (id: string, args: ModObject) => Promise<unknown>,
+    listTools?: () => Promise<McpCapabilityTool[]>
+  ): () => void {
+    const key = this.mcpBindingKey(binding)
+    const entry = {
+      binding: { ...binding, workspace: this.workspaceKey(binding.workspace) },
+      invoke,
+      listTools,
+      assertLive: () => {
+        if (this.mcpBindings.get(key) !== entry) throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
+        binding.signal?.throwIfAborted()
+        binding.assertLive?.()
+      }
+    }
+    this.mcpBindings.set(key, entry)
     if (this.mcpBindings.size > 100) this.mcpBindings.delete(this.mcpBindings.keys().next().value!)
+    return () => {
+      if (this.mcpBindings.get(key) === entry) this.mcpBindings.delete(key)
+    }
   }
 
   private client(workspace: string): ModRuntimeClient {
@@ -527,6 +678,7 @@ export class ModsManager {
   ): ModDispatchRequest {
     const epoch = this.config(binding.workspace).epoch
     const assertEpoch = (): void => {
+      binding.assertLive?.()
       if (identity.modId?.startsWith("function:"))
         functionExecutionScope(binding.workspace, binding.threadId)
       if (this.config(binding.workspace).epoch !== epoch) throw new ModError("MODS_SCOPE_CHANGED")
@@ -580,6 +732,7 @@ export class ModsManager {
       activePluginIds: binding.activePluginIds,
       userInitiated,
       assertScope: assertEpoch,
+      assertMcpTool: binding.assertMcpTool,
       context: {
         "project.name": basename(binding.workspace),
         "thread.mode": binding.readOnly ? "read-only" : "normal"
@@ -612,10 +765,15 @@ export class ModsManager {
         assertEpoch()
         if (++capabilityCalls > 16) throw new ModError("MODS_CAPABILITY_LIMIT")
         this.store.assertGrant(grant)
-        const mcp = this.mcpBindings.get(`${binding.threadId}:${binding.agentId ?? "main"}`)
+        const mcp = this.mcpBindings.get(this.mcpBindingKey(binding))
+        if (target.startsWith("mcp:") && (!mcp || mcp.binding.turnId !== binding.turnId))
+          throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
         const invoke =
-          target.startsWith("mcp:") && mcp?.turnId === binding.turnId
-            ? (id: string, args: ModObject) => mcp.invoke(id.slice(4), args)
+          target.startsWith("mcp:") && mcp
+            ? (id: string, args: ModObject) => {
+                mcp.assertLive()
+                return mcp.invoke(id.slice(4), args)
+              }
             : binding.invokeTool
         if (!invoke) throw new ModError("MODS_TOOL_UNAVAILABLE")
         const childIdentity: ModIdentity = capabilityRoot
@@ -640,6 +798,7 @@ export class ModsManager {
             originMod: grant.modId,
             policyDigest: request.policyDigest,
             protectData: request.protectData,
+            assertMcpTool: binding.assertMcpTool,
             publish: request.publish,
             assertLive: () => {
               assertEpoch()
@@ -702,6 +861,14 @@ export class ModsManager {
       invokeTool: binding.invokeTool ?? saved?.invokeTool
     }
     const inherited = getModCallContext()
+    if (inherited) {
+      const assertBinding = binding.assertLive
+      binding.assertLive = () => {
+        assertBinding?.()
+        inherited.assertLive?.()
+      }
+      binding.assertMcpTool = inherited.assertMcpTool ?? binding.assertMcpTool
+    }
     if (inherited?.signal)
       binding.signal = binding.signal
         ? AbortSignal.any([binding.signal, inherited.signal])
@@ -1039,6 +1206,8 @@ export class ModsManager {
   close(): void {
     this.functionLifecycle?.close()
     this.functionToolCatalogs.clear()
+    this.mcpBindings.clear()
+    this.bindings.clear()
     this.policy.stop()
     for (const controller of this.activeActions.keys()) controller.abort()
     this.activeActions.clear()

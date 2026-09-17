@@ -21,6 +21,29 @@ interface Scope {
   turnId: string
 }
 const backends = new Map<string, LocalSandbox>()
+export async function startFunctionMcpFixture(
+  workspace: string,
+  node: string,
+  server: string
+): Promise<string> {
+  const id = upsertMcpConnector({
+    name: "Mods SDK fixture",
+    kind: "stdio",
+    command: node,
+    args: [server, join(workspace, "mcp-sdk-counter.txt")],
+    enabled: true
+  })
+  await getGlobalMcpCapabilityService().invalidate("function-mcp-fixture")
+  return id
+}
+export async function stopFunctionMcpFixture(id: string): Promise<void> {
+  deleteMcpConnector(id)
+  await getGlobalMcpCapabilityService().invalidate("function-mcp-fixture-done")
+}
+export function removeFunctionMcpConfiguration(id: string): void {
+  // Deliberately retain the cached transport to test the post-approval configuration check.
+  deleteMcpConnector(id)
+}
 export async function mcpProbe(scope: Scope, node: string, server: string): Promise<unknown> {
   const service = getGlobalMcpCapabilityService()
   const id = upsertMcpConnector({

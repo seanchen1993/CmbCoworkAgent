@@ -20,6 +20,21 @@ server.registerTool(
   }
 )
 server.registerTool(
+  "mods_error",
+  { description: "Return a protocol error and resource block", inputSchema: {} },
+  async () => {
+    appendFileSync(counter, "error\n")
+    return {
+      content: [
+        { type: "text", text: "Fixture tool failed" },
+        { type: "resource", resource: { uri: "test://fixture", text: marker } }
+      ],
+      structuredContent: { detail: marker },
+      isError: true
+    }
+  }
+)
+server.registerTool(
   "mods_disconnect",
   { description: "Write then disconnect without a reply", inputSchema: {} },
   async () => {

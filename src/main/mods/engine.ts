@@ -21,7 +21,7 @@ import {
   projectModResult,
   replaceModProjection
 } from "./publication"
-import { modCallContext } from "./context"
+import { modCallContext, type ModCallContext } from "./context"
 
 export interface ModRuntime {
   load(id: string, code: string): Promise<ModRegistration[]>
@@ -63,6 +63,7 @@ export interface ModDispatchRequest {
   authorize?: (toolId: string, args: Record<string, unknown>) => Promise<void>
   userInitiated?: boolean
   assertScope?: () => void
+  assertMcpTool?: ModCallContext["assertMcpTool"]
   context?: Record<string, ModJson>
   onCard?: (card: ModCard) => void
   policyDigest?: string
@@ -232,6 +233,7 @@ export class ModEngine {
               protectData: request.protectData,
               userInitiated: request.userInitiated,
               assertLive: () => this.assertLive(request, selected),
+              assertMcpTool: request.assertMcpTool,
               approvalFingerprint:
                 `${request.identity.threadId}:${request.identity.turnId}:${request.identity.agentId}:${request.identity.modId ?? "model"}:${request.identity.grantEpoch}:${request.policyDigest ?? "none"}|` +
                 selected

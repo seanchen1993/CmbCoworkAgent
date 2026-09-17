@@ -268,6 +268,7 @@ export function withRawModMcp(
   core: (args: Record<string, unknown>) => Promise<McpInvocationResult>
 ): Promise<McpInvocationResult> {
   const context = getModCallContext()
+  context?.assertMcpTool?.(tool)
   const manager = getModsManager()
   if (!context || !manager) return core(args)
   const toolId = `mcp:${tool.capabilityId}`

@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest"
 import type { ModIdentity } from "../../../shared/mods/types"
-import { functionCallIdentity, runFunctionHostCall } from "./host-call"
+import { functionCallIdentity, functionCallTurn, runFunctionHostCall } from "./host-call"
 import { withFunctionExecution } from "./execution-context"
 import { modCallContext } from "../context"
 
@@ -71,6 +71,20 @@ it("uses one admission, one reservation and one execution before publishing", as
   const f = fixture()
   expect(await runFunctionHostCall(f.call)).toBe("protected")
   expect(f.events).toEqual(["admit", "claim", "invoke", "succeeded", "account", "publish"])
+})
+
+it("resolves a nested cold command's parent turn before binding an adapter without minting identity", async () => {
+  const f = fixture()
+  expect(functionCallTurn("/project", "thread")).toBeUndefined()
+  await runFunctionHostCall({
+    ...f.call,
+    invoke: async () => {
+      expect(functionCallTurn("/project", "thread")).toBe("turn")
+      expect(() => functionCallTurn("/other", "thread")).toThrow("MODS_CALL_SCOPE_CHANGED")
+      return "private"
+    }
+  })
+  expect(functionCallTurn("/project", "thread")).toBeUndefined()
 })
 
 it.each(["admit", "claim", "invoke", "recordResult", "publish"] as const)(

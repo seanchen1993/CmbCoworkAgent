@@ -67,6 +67,13 @@ interface FunctionManagerHost {
     input: ModObject,
     signal: AbortSignal
   ): Promise<ModObject>
+  callMcp?(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject>
   completeModel?(
     workspace: string,
     threadId: string,
@@ -328,6 +335,14 @@ export class FunctionModsManager {
             if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
             const grant = current.snapshots.get(plugin.name)!.grant
             const result = await this.host.callTool(workspace, threadId, grant, input, signal)
+            assertLive(plugin)
+            return result
+          },
+          callMcp: async (plugin, input, signal) => {
+            assertLive(plugin)
+            if (!this.host.callMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
+            const grant = current.snapshots.get(plugin.name)!.grant
+            const result = await this.host.callMcp(workspace, threadId, grant, input, signal)
             assertLive(plugin)
             return result
           },

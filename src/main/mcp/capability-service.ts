@@ -1,4 +1,4 @@
-import { createHash } from "crypto"
+import { createHash, randomUUID } from "crypto"
 import { join } from "path"
 import { MultiServerMCPClient } from "@langchain/mcp-adapters"
 import { shouldSuppressInAppBrowserMcpTool } from "../browser/cdp/in-app-browser-mcp-tools"
@@ -22,6 +22,7 @@ import { withRawModMcp, publishCurrentModResult } from "../mods/adapters"
 import { getModCallContext } from "../mods/context"
 import { authorizeCurrentModInput } from "../mods/manager"
 import { invokeMcpToolWithRetry } from "./invocation-retry"
+import { ModError } from "../mods/errors"
 
 interface CapabilitySource {
   kind: "connector" | "plugin"
@@ -226,7 +227,8 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       throw new Error(`MCP tool not found: ${idOrAlias}`)
     }
 
-    const client = this.cache?.client
+    const connection = this.cache
+    const client = connection?.client
     if (!client) {
       throw new Error("MCP runtime is not initialized")
     }
@@ -238,6 +240,15 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
 
     return withRawModMcp(tool, args, async (args) => {
       await authorizeCurrentModInput(`mcp:${tool.capabilityId}`, args)
+      getModCallContext()?.assertMcpTool?.(tool)
+      // Approval can await UI while settings change. Never send to a replaced connection,
+      // even when the server still advertises the same name and schema.
+      if (
+        getModCallContext()?.assertMcpTool &&
+        (this.cache !== connection ||
+          buildFingerprint(this.readSources()) !== connection?.fingerprint)
+      )
+        throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
       const callClient = serverClient as {
         callTool(
           request: { name: string; arguments: Record<string, unknown> },
@@ -257,7 +268,9 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
         }
       )
 
-      const result = await publishCurrentModResult(normalizeMcpInvocationResult(tool.capabilityId, raw))
+      const result = await publishCurrentModResult(
+        normalizeMcpInvocationResult(tool.capabilityId, raw)
+      )
 
       try {
         if (!getModCallContext()) recordSuccessfulToolExample(tool, result)
@@ -404,6 +417,8 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       })
 
       const previous = this.cache
+      const connectionGeneration = randomUUID()
+      for (const tool of tools) tool.connectionGeneration = connectionGeneration
       this.cache = {
         fingerprint,
         client,

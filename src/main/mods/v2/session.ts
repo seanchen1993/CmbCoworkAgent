@@ -22,6 +22,7 @@ export const SESSION_CAPABILITIES = [
   "tool.call",
   "tool.register",
   "tool.list",
+  "mcp.call",
   "model.complete"
 ]
 import type { FunctionStateAccess } from "./state-store"
@@ -34,6 +35,7 @@ import { functionToolTarget, validateFunctionToolResult, validateModelToolInput 
 import { functionModelRequest, validateFunctionModelText } from "./model-sdk"
 import { FunctionToolRegistry, functionToolSpec } from "./tool-registry"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
+import { functionMcpInput, validateFunctionMcpResult } from "./mcp-sdk"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -42,6 +44,7 @@ export interface FunctionSessionHost {
   uiChanged?(): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
   callTool?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
+  callMcp?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
   listTools?(signal: AbortSignal): Promise<FunctionToolInfo[]>
   registeredTool?(
     owner: FunctionPlugin,
@@ -310,6 +313,7 @@ export class FunctionSession {
       ...(event === "command.run" ||
       event === "tool.call" ||
       event === "model.complete" ||
+      event === "mcp.call" ||
       ["ui.press", "ui.input", "ui.select", "ui.message"].includes(event)
         ? { timeoutMs: 120000 }
         : {}),
@@ -332,6 +336,7 @@ export class FunctionSession {
           } else functionToolTarget(value)
         }
         if (name === "model.complete") functionModelRequest(value)
+        if (name === "mcp.call") functionMcpInput(value)
         if (name === "ui.open") validatePaneArgs(value)
         if (
           (name === "ui.input" || name === "ui.select") &&
@@ -348,6 +353,7 @@ export class FunctionSession {
           if (!isModObject(value)) throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (typeof value.deny === "string") return
           if (name === "model.complete") return validateFunctionModelText(value.value)
+          if (name === "mcp.call") return validateFunctionMcpResult(value.value)
           if (
             name === "tool.register" &&
             (!isModObject(value.value) || typeof value.value.tool !== "string")
@@ -427,6 +433,31 @@ export class FunctionSession {
     this.assertLive(plugin)
     if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
     const args = raw
+    if (method === "mcp.call") {
+      if (args.length < 2 || args.length > 3) throw new ModFunctionError("MODS_MCP_ARGUMENTS")
+      const input = functionMcpInput({ server: args[0], tool: args[1], args: args[2] ?? {} })
+      const result = await this.dispatch(
+        method,
+        input,
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: (value, signal) => {
+            this.assertLive(plugin)
+            if (!this.host.callMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
+            return this.host.callMcp(plugin, value, signal)
+          }
+        },
+        turnHeld
+      )
+      if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof result.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
+      validateFunctionMcpResult(result.value)
+      return result.value
+    }
     if (method === "tool.register" || method === "tool.list") {
       if (
         (method === "tool.register" && (args.length !== 1 || !isModObject(args[0]))) ||
