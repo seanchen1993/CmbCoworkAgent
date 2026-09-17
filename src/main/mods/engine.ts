@@ -22,6 +22,7 @@ import {
   replaceModProjection
 } from "./publication"
 import { modCallContext, type ModCallContext } from "./context"
+import { modToolHasNotStarted } from "./execution-error"
 
 export interface ModRuntime {
   load(id: string, code: string): Promise<ModRegistration[]>
@@ -255,7 +256,12 @@ export class ModEngine {
             }
           } catch (error) {
             coreFailure = error
-            this.store.settle(request.identity.callId, executed ? "unknown" : "not_started")
+            this.store.settle(
+              request.identity.callId,
+              executed && !modToolHasNotStarted(error, request.identity.callId)
+                ? "unknown"
+                : "not_started"
+            )
             throw error
           }
         })()

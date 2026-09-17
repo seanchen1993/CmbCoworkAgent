@@ -119,8 +119,10 @@ import {
   trimReadFileOutputLines
 } from "./read-file-output"
 import { resolveWindowsBackgroundJobControllerPath } from "./windows-background-job-controller-path"
+import type { ToolPermissionResult } from "../../shared/tool-permission"
 
 const execFileP = promisify(execFile)
+const permissionProbe = Symbol("permission-probe")
 
 // DeepAgents keeps these helpers private even though LocalSandbox must wrap
 // them to preserve its virtual-path and ripgrep behavior. Keep the compatibility
@@ -343,6 +345,7 @@ function gitConfigEnvironmentPreamble(
 export interface LocalSandboxOptions {
   /** Host-created command-only context; a model turn replaces it with its own full runtime. */
   modCommandOnly?: boolean
+  onModBinding?: (release: () => void) => void
   /** Root directory for file operations and command execution (default: process.cwd()) */
   rootDir?: string
   /** Dynamic-workflow checkout identity and best-effort Git/path guards. */
@@ -1954,7 +1957,7 @@ export class LocalSandbox
     return LocalSandbox.isPythonCliTool(command)
   }
 
-  constructor(options: LocalSandboxOptions = {}) {
+  constructor(options: LocalSandboxOptions = {}, mode?: typeof permissionProbe) {
     super({
       rootDir: options.rootDir,
       virtualMode: options.virtualMode,
@@ -2075,19 +2078,20 @@ export class LocalSandbox
       baseEnv,
       path.resolve(this.workingDir)
     )
-    this._sandboxCacheRootPromise = LocalSandbox.buildSandboxCacheRoot(
-      baseEnv,
-      this.workingDir
-    ).catch((err) => {
-      console.warn("[LocalSandbox] failed to canonicalize sandbox cache root:", err)
-      return this._sandboxCacheRoot
-    })
+    this._sandboxCacheRootPromise =
+      mode === permissionProbe
+        ? Promise.resolve(this._sandboxCacheRoot)
+        : LocalSandbox.buildSandboxCacheRoot(baseEnv, this.workingDir).catch((err) => {
+            console.warn("[LocalSandbox] failed to canonicalize sandbox cache root:", err)
+            return this._sandboxCacheRoot
+          })
     this._sharedSandboxCacheRoot = LocalSandbox.buildSharedSandboxCacheRoot(baseEnv)
     this.abortSignal = options.abortSignal
 
     // Prewarm sandbox state during construction so command execution avoids
     // kicking off expensive setup work on the hot path.
-    LocalSandbox.prewarmForWorkspace(this.workingDir, this.windowsSandbox, baseEnv)
+    if (mode !== permissionProbe)
+      LocalSandbox.prewarmForWorkspace(this.workingDir, this.windowsSandbox, baseEnv)
 
     // Redirect deepagents' virtual eviction paths (e.g. /large_tool_results/)
     // to app-managed storage, since virtualMode=false treats "/" as absolute
@@ -2101,16 +2105,107 @@ export class LocalSandbox
     this._virtualMode = this.virtualMode
     this._cwd = this.cwd
     this._maxFileSizeBytes = (options.maxFileSizeMb ?? 10) * 1024 * 1024
-    attachModBackend(this, () => ({
-      commandOnly: options.modCommandOnly,
-      workspace: this.workingDir,
-      threadId: this.runId,
-      turnId: this._hookTurnId ?? this.runId,
-      agentId: getModCallContext()?.identity.agentId ?? this.agentId,
-      readOnly: this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true,
-      signal: this.abortSignal,
-      activePluginIds: this._hookScope?.activePluginIds
-    }))
+    if (mode !== permissionProbe) {
+      const release = attachModBackend(this, () => ({
+        commandOnly: options.modCommandOnly,
+        workspace: this.workingDir,
+        threadId: this.runId,
+        turnId: this._hookTurnId ?? this.runId,
+        agentId: getModCallContext()?.identity.agentId ?? this.agentId,
+        readOnly: this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true,
+        signal: this.abortSignal,
+        activePluginIds: this._hookScope?.activePluginIds
+      }))
+      options.onModBinding?.(release)
+    }
+  }
+
+  /** The probe exposes only a query closure: no setup, hooks, ACLs, adapter binding or tools. */
+  static createPermissionProbe(
+    options: LocalSandboxOptions
+  ): (tool: string, input: Record<string, unknown>) => Promise<ToolPermissionResult> {
+    const sandbox = new LocalSandbox(options, permissionProbe)
+    return (tool, input) => sandbox.queryToolPermission(tool, input)
+  }
+
+  /** Inspect the same sandbox/path/command predicates used below, without running a tool. */
+  async queryToolPermission(
+    tool: string,
+    input: Record<string, unknown>
+  ): Promise<ToolPermissionResult> {
+    this.abortSignal?.throwIfAborted()
+    const deny = (reason: string): ToolPermissionResult => ({ decision: "deny", reason })
+    const readOnly = this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true
+    if (tool === "execute") {
+      if (typeof input.command !== "string" || !input.command.trim())
+        return deny("COMMAND_ARGUMENTS_INVALID")
+      if (input.cwd !== undefined && typeof input.cwd !== "string")
+        return deny("COMMAND_ARGUMENTS_INVALID")
+      const cwd = this.resolveExecutionCwd(input.cwd as string | undefined)
+      if (this.validateExecutionCwd(cwd)) return deny("COMMAND_CWD_DENIED")
+      const syntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+      this.abortSignal?.throwIfAborted()
+      if (
+        this.worktreeIsolation &&
+        getWorktreeShellIsolationViolation(
+          input.command,
+          cwd,
+          this.worktreeIsolation,
+          this.worktreeAdditionalExecutionRoots(cwd),
+          syntax
+        )
+      )
+        return deny("WORKTREE_COMMAND_DENIED")
+      const windowsShell =
+        process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
+      const safety = assessCommandSafety(input.command, cwd, {
+        windowsShell,
+        enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+        nativeGitWorktree: Boolean(this.worktreeIsolation),
+        shellSyntax: syntax
+      })
+      if (safety.level === "forbidden") return deny("COMMAND_FORBIDDEN")
+      if (readOnly && !isReadOnlyShellCommand(input.command, cwd, windowsShell))
+        return deny("READ_ONLY_COMMAND_DENIED")
+      if (readOnly && this.commandReadsSensitivePath(input.command, cwd))
+        return deny("SENSITIVE_PATH_DENIED")
+      return (
+        this.orchestrator?.queryExecute(input.command, cwd, this.windowsSandbox, syntax) ?? {
+          decision: "allow"
+        }
+      )
+    }
+    if (tool === "task_output") {
+      const task =
+        typeof input.task_id === "string"
+          ? LocalSandbox.backgroundTasks.get(input.task_id)
+          : undefined
+      const context = getModCallContext()
+      return task?.threadId === this.runId &&
+        (!context || !task.modAgentId || context.identity.agentId === task.modAgentId)
+        ? { decision: "allow" }
+        : deny("TASK_CONTEXT_UNAVAILABLE")
+    }
+    const write = tool === "write_file" || tool === "edit_file"
+    const file = write || tool === "read_file"
+    if (!file && !["ls", "glob", "grep"].includes(tool)) return deny("TOOL_UNAVAILABLE")
+    const requested = file ? (input.file_path ?? input.filePath) : (input.path ?? ".")
+    if (typeof requested !== "string" || !requested) return deny("FILE_ARGUMENTS_INVALID")
+    const target = tool === "ls" && requested === "/" ? "." : requested
+    try {
+      this._resolvePath(target)
+    } catch {
+      return deny("FILE_PATH_DENIED")
+    }
+    if (this.isBlockedBySandbox(target)) return deny("SANDBOX_PATH_DENIED")
+    if (this.isHiddenSkillPath(target)) return deny("DISABLED_SKILL_PATH")
+    if (!write) return { decision: "allow" }
+    if (readOnly) return deny("READ_ONLY_FILE_DENIED")
+    if (this.isMemoryStorageWritePath(target)) return deny("MANAGED_MEMORY_WRITE_DENIED")
+    if (await this.isWorktreeFileWriteBlocked(target)) return deny("WORKTREE_FILE_DENIED")
+    if (await this.isWriteBlocked(target)) return deny("SANDBOX_FILE_WRITE_DENIED")
+    this.abortSignal?.throwIfAborted()
+    return this.orchestrator?.queryFileOp(tool, target, this.workingDir) ?? { decision: "allow" }
   }
 
   /**
@@ -3028,7 +3123,10 @@ export class LocalSandbox
     const preResult = await this.runHooks("PreToolUse", context)
     throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
     if (toolName !== "execute" && !preResult?.blocked && preResult?.decision !== "block") {
-      await authorizeCurrentModInput(`host:${toolName}`, LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput))
+      await authorizeCurrentModInput(
+        `host:${toolName}`,
+        LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
+      )
     }
     return preResult
   }
@@ -7060,7 +7158,8 @@ export class LocalSandbox
     const task = LocalSandbox.backgroundTasks.get(taskId)
     if (!task || task.threadId !== this.runId) return null
     const modContext = getModCallContext()
-    if (modContext && task.modAgentId && task.modAgentId !== modContext.identity.agentId) return null
+    if (modContext && task.modAgentId && task.modAgentId !== modContext.identity.agentId)
+      return null
     const elapsedSeconds = Math.round((Date.now() - task.startedAt) / 1000)
     if (!task.completed) {
       return {
@@ -7068,15 +7167,19 @@ export class LocalSandbox
         elapsedSeconds,
         command: protectCurrentModData(task.command),
         cwd: task.cwd,
-        partialOutput: getModCallContext()?.protectedOutput ? "[Output pending policy check]" : task.partialOutput,
+        partialOutput: getModCallContext()?.protectedOutput
+          ? "[Output pending policy check]"
+          : task.partialOutput,
         partialTruncated: task.partialTruncated,
         idleSeconds: Math.round((Date.now() - task.lastOutputAt) / 1000)
       }
     }
     return {
       completed: true,
-      output: task.result?.truncated && getModCallContext()?.protectedOutput
-        ? "[Truncated output suppressed]" : protectCurrentModData(task.result?.output),
+      output:
+        task.result?.truncated && getModCallContext()?.protectedOutput
+          ? "[Truncated output suppressed]"
+          : protectCurrentModData(task.result?.output),
       exitCode: task.result?.exitCode,
       elapsedSeconds,
       capReached: task.result?.capReached
@@ -7456,7 +7559,11 @@ export class LocalSandbox
           `[HarnessMode][LocalSandbox] project plugin hook sandbox bypass check: allowed=${shouldBypassSandboxForProjectPluginHook} mode=${effectiveSandboxMode} pluginRoot="${this.pluginRoot}"`
         )
       }
-      if (shouldBypassSandboxForProjectPluginHook && !this.worktreeIsolation && !getModCallContext()) {
+      if (
+        shouldBypassSandboxForProjectPluginHook &&
+        !this.worktreeIsolation &&
+        !getModCallContext()
+      ) {
         const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
         const outsideSafety = assessCommandSafety(command, effectiveCwd, {
           shellSyntax: outsideShellSyntax
@@ -7557,8 +7664,10 @@ export class LocalSandbox
       options
     )
     const modSignal = getModCallContext()?.signal
-    if (modSignal) overrideAbortSignal = overrideAbortSignal
-      ? AbortSignal.any([overrideAbortSignal, modSignal]) : modSignal
+    if (modSignal)
+      overrideAbortSignal = overrideAbortSignal
+        ? AbortSignal.any([overrideAbortSignal, modSignal])
+        : modSignal
     const effectiveCwd = this.resolveExecutionCwd(options?.cwd)
     const cwdError = this.validateExecutionCwd(effectiveCwd)
     if (cwdError) {

@@ -121,10 +121,14 @@ export function withModToolCall<T, R extends ToolRequest>(
           "MODS_REGISTERED_TOOL_UNHANDLED",
           "MODS_TOOL_INPUT_LIMIT",
           "MODS_TOOL_VALIDATION_LIMIT",
-          "MODS_TOOL_AGENT_UNAVAILABLE"
+          "MODS_TOOL_AGENT_UNAVAILABLE",
+          "MODS_TOOL_PERMISSION_DENIED"
         ].includes(error.code)
       )
-        return { result: error.code, isError: true }
+        return {
+          result: error.code === "MODS_TOOL_PERMISSION_DENIED" ? error.message : error.code,
+          isError: true
+        }
       throw error
     })
     .then((answer) =>
@@ -148,7 +152,7 @@ const backendMethods: Record<string, MethodSpec> = {
 }
 
 /** Only host-owned backend methods receive this wrapper; guests never get the instance. */
-export function attachModBackend(instance: object, binding: () => ModThreadBinding): void {
+export function attachModBackend(instance: object, binding: () => ModThreadBinding): () => void {
   const record = instance as Record<string, unknown>
   const originalMethods = new Map<string, (...args: unknown[]) => Promise<unknown>>()
   for (const [name, spec] of Object.entries(backendMethods)) {
@@ -202,29 +206,45 @@ export function attachModBackend(instance: object, binding: () => ModThreadBindi
     })
   }
   const scope = binding()
-  getModsManager()?.bindThread({
-    ...scope,
-    invokeTool: async (toolId, args) => {
-      if (toolId === "host:task_output" && typeof record.getTaskOutput === "function") {
-        const manager = getModsManager()
-        if (!manager || typeof args.task_id !== "string")
-          throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
-        return manager.dispatch(binding(), toolId, args, async (input) => {
-          if (typeof input.task_id !== "string") throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
-          return Reflect.apply(record.getTaskOutput as (...args: unknown[]) => unknown, instance, [
-            input.task_id
-          ])
-        })
+  return (
+    getModsManager()?.bindThread({
+      ...scope,
+      ...(typeof record.queryToolPermission === "function"
+        ? {
+            queryTool: (tool: string, input: Record<string, unknown>) =>
+              Reflect.apply(
+                record.queryToolPermission as (
+                  ...args: unknown[]
+                ) => Promise<import("../../shared/tool-permission").ToolPermissionResult>,
+                instance,
+                [tool.replace(/^host:/, ""), input]
+              )
+          }
+        : {}),
+      invokeTool: async (toolId, args) => {
+        if (toolId === "host:task_output" && typeof record.getTaskOutput === "function") {
+          const manager = getModsManager()
+          if (!manager || typeof args.task_id !== "string")
+            throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
+          return manager.dispatch(binding(), toolId, args, async (input) => {
+            if (typeof input.task_id !== "string") throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
+            return Reflect.apply(
+              record.getTaskOutput as (...args: unknown[]) => unknown,
+              instance,
+              [input.task_id]
+            )
+          })
+        }
+        const tool = toolId.replace(/^host:/, "")
+        const method = originalMethods.get(tool)
+        const spec = Object.values(backendMethods).find((value) => value.tool === tool)
+        if (!method || !spec) throw new ModError("MODS_TOOL_UNAVAILABLE")
+        const values = spec.names.map((key) => args[key])
+        // A capability request is a new operation, never an internal backend helper call.
+        return backendOperation.run(false, () => method(...values))
       }
-      const tool = toolId.replace(/^host:/, "")
-      const method = originalMethods.get(tool)
-      const spec = Object.values(backendMethods).find((value) => value.tool === tool)
-      if (!method || !spec) throw new ModError("MODS_TOOL_UNAVAILABLE")
-      const values = spec.names.map((key) => args[key])
-      // A capability request is a new operation, never an internal backend helper call.
-      return backendOperation.run(false, () => method(...values))
-    }
-  })
+    }) ?? (() => {})
+  )
 }
 
 export function protectCurrentModResult<T>(value: T): T {
@@ -258,7 +278,12 @@ export function withScopedModMcp(
 ): Promise<McpInvocationResult> {
   const manager = getModsManager()
   return manager?.isActive(binding.workspace)
-    ? manager.dispatch(binding, `mcp:${tool.capabilityId}`, args, core)
+    ? manager.dispatch(
+        { ...binding, permissionToolName: tool.toolId },
+        `mcp:${tool.capabilityId}`,
+        args,
+        core
+      )
     : core(args)
 }
 

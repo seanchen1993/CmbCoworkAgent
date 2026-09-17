@@ -17,6 +17,7 @@ export interface ModCallContext {
   userInitiated?: boolean
   mcpPermitConsumed?: boolean
   approvedOperation?: { toolId: string; args: Record<string, unknown> }
+  permissionReason?: string
   assertLive?: () => void
   assertMcpTool?: (tool: McpCapabilityTool) => void
   policyDigest?: string
@@ -28,4 +29,9 @@ export const modCallContext = new AsyncLocalStorage<ModCallContext>()
 
 export function getModCallContext(): ModCallContext | undefined {
   return modCallContext.getStore()
+}
+
+export function modPermissionReason(reason?: string): string | undefined {
+  const permission = getModCallContext()?.permissionReason
+  return permission ? [permission, reason].filter(Boolean).join("\n") : reason
 }

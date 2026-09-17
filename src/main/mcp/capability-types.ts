@@ -41,6 +41,8 @@ export interface McpInvocationResult {
 }
 
 export interface McpCapabilityService {
+  /** Current discovered metadata only; must not open/reconnect a server for a permission query. */
+  peekTools?(): McpCapabilityTool[] | null
   listTools(): Promise<McpCapabilityTool[]>
   getSnapshot?(): Promise<{ fingerprint: string; tools: McpCapabilityTool[] }>
   getTool(idOrAlias: string): Promise<McpCapabilityTool | null>

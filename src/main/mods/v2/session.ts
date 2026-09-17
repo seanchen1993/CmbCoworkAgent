@@ -22,6 +22,7 @@ export const SESSION_CAPABILITIES = [
   "tool.call",
   "tool.register",
   "tool.list",
+  "tool.check",
   "mcp.call",
   "model.complete"
 ]
@@ -29,13 +30,16 @@ import type { FunctionStateAccess } from "./state-store"
 import { FILE_CAPABILITIES, type FunctionFileAccess } from "./file-access"
 import { resolve } from "node:path"
 import { FunctionClients } from "./clients"
-import type { FunctionGuest } from "../../../shared/mods/v2/contracts"
+import type { FunctionGuest, ModOrigin } from "../../../shared/mods/v2/contracts"
 import { randomUUID } from "node:crypto"
 import { functionToolTarget, validateFunctionToolResult, validateModelToolInput } from "./tool-sdk"
 import { functionModelRequest, validateFunctionModelText } from "./model-sdk"
 import { FunctionToolRegistry, functionToolSpec } from "./tool-registry"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
 import { functionMcpInput, validateFunctionMcpResult } from "./mcp-sdk"
+import { functionToolCheckInput, validateToolCheckResult } from "./tool-check"
+import { constrainToolPermission, type ToolPermissionResult } from "../../../shared/tool-permission"
+import { validateRegisteredToolInput } from "./tool-schema"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -45,13 +49,20 @@ export interface FunctionSessionHost {
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
   callTool?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
   callMcp?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
+  checkTool?(
+    plugin: FunctionPlugin,
+    input: ModObject,
+    signal: AbortSignal,
+    registered?: RegisteredFunctionTool
+  ): Promise<ToolPermissionResult>
   listTools?(signal: AbortSignal): Promise<FunctionToolInfo[]>
   registeredTool?(
     owner: FunctionPlugin,
     input: ModObject,
     origin: "model" | "mod",
     signal: AbortSignal,
-    run: () => Promise<ModObject>
+    run: () => Promise<ModObject>,
+    caller?: ModOrigin
   ): Promise<ModObject>
   completeModel?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<string>
   scheduleCommand?(
@@ -242,6 +253,26 @@ export class FunctionSession {
     return this.tools.list()
   }
 
+  async checkTool(
+    input: ModObject,
+    signal: AbortSignal | undefined,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>,
+    origin?: import("../../../shared/mods/v2/contracts").ModOrigin
+  ): Promise<ToolPermissionResult> {
+    const value = await this.dispatch(
+      "tool.check",
+      functionToolCheckInput(input, true),
+      signal,
+      undefined,
+      0,
+      undefined,
+      undefined,
+      { core, origin }
+    )
+    validateToolCheckResult(value)
+    return value
+  }
+
   private async runRegisteredTool(
     input: ModObject,
     signal: AbortSignal | undefined,
@@ -280,8 +311,16 @@ export class FunctionSession {
       this.assertLive(owner)
       return result
     }
+    const caller = skip && this.plugins.find((plugin) => plugin.name === skip.plugin)
     return this.host.registeredTool
-      ? this.host.registeredTool(owner, input, skip ? "mod" : "model", scoped, run)
+      ? this.host.registeredTool(
+          owner,
+          input,
+          skip ? "mod" : "model",
+          scoped,
+          run,
+          caller ? { plugin: caller.name, tier: caller.tier } : { plugin: "engine", tier: "core" }
+        )
       : run()
   }
 
@@ -337,6 +376,7 @@ export class FunctionSession {
         }
         if (name === "model.complete") functionModelRequest(value)
         if (name === "mcp.call") functionMcpInput(value)
+        if (name === "tool.check") functionToolCheckInput(value, true)
         if (name === "ui.open") validatePaneArgs(value)
         if (
           (name === "ui.input" || name === "ui.select") &&
@@ -347,6 +387,7 @@ export class FunctionSession {
           throw new ModFunctionError("MODS_COMMAND_ARGS")
       },
       validateResult: (name, value) => {
+        if (name === "tool.check") return validateToolCheckResult(value)
         if (name === "tool.call") return validateFunctionToolResult(value)
         if (name === "ui.render") return validateFunctionTree(value)
         if (isOperation) {
@@ -433,6 +474,48 @@ export class FunctionSession {
     this.assertLive(plugin)
     if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
     const args = raw
+    if (method === "tool.check") {
+      if (args.length !== 1) throw new ModFunctionError("MODS_TOOL_CHECK_ARGUMENTS")
+      const input = functionToolCheckInput(args[0])
+      const query = async (signal: AbortSignal): Promise<ToolPermissionResult> => {
+        this.assertLive(plugin)
+        const registered = this.tools.get(String(input.tool))
+        const owner = registered
+          ? this.plugins.find((p) => p.name === registered.plugin)
+          : undefined
+        if (registered) {
+          if (!owner) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
+          this.assertLive(owner)
+          if (!isModObject(input.input)) return { decision: "deny", reason: "MODS_TOOL_ARGUMENTS" }
+          validateRegisteredToolInput(registered.inputSchema, input.input)
+        }
+        if (!this.host.checkTool) throw new ModFunctionError("MODS_TOOL_CHECK_UNAVAILABLE")
+        const value = await this.host.checkTool(plugin, input, signal, registered)
+        this.assertLive(plugin)
+        if (owner) this.assertLive(owner)
+        if (this.tools.get(String(input.tool)) !== registered)
+          throw new ModFunctionError("MODS_TOOL_CHANGED")
+        validateToolCheckResult(value)
+        return value
+      }
+      const proposed = await this.dispatch(
+        method,
+        input,
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        undefined,
+        turnHeld,
+        { core: (_, signal) => query(signal) }
+      )
+      validateToolCheckResult(proposed)
+      // A short-circuit allow cannot bypass the current host's mandatory permission decision.
+      const checked = constrainToolPermission(proposed, await query(callSignal))
+      const published = await this.host.publish(checked, callSignal)
+      this.assertLive(plugin)
+      validateToolCheckResult(published)
+      return published
+    }
     if (method === "mcp.call") {
       if (args.length < 2 || args.length > 3) throw new ModFunctionError("MODS_MCP_ARGUMENTS")
       const input = functionMcpInput({ server: args[0], tool: args[1], args: args[2] ?? {} })

@@ -18,16 +18,23 @@ import { ModControlStore, type ModGrant } from "./control-store"
 import { compileMod, readModApiVersion, type CompiledMod } from "./loader"
 import { ModRuntimeClient } from "./runtime-client"
 import { ModEngine, classifyModTool, type ApprovedMod, type ModDispatchRequest } from "./engine"
-import { ModError, modErrorCode } from "./errors"
+import { ModError, ModPermissionError, modErrorCode } from "./errors"
 import { validateModRegistrations } from "./registrations"
 import { filterModData, projectModResult } from "./publication"
 import { getModCallContext, modCallContext } from "./context"
 import { ManagedModPolicy, DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { orderApprovedMods } from "./order"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../shared/mods/v2/tools"
-import { assertFunctionGrant, functionCallIdentity, functionCallTurn } from "./v2/host-call"
+import {
+  assertFunctionGrant,
+  functionCallIdentity,
+  functionCallTurn,
+  functionCallAgent
+} from "./v2/host-call"
 import { functionExecutionScope } from "./v2/execution-context"
 import type { McpCapabilityTool } from "../mcp/capability-types"
+import { constrainToolPermission, type ToolPermissionResult } from "../../shared/tool-permission"
+import { beforeModToolExecution } from "./execution-error"
 import {
   functionMcpInput,
   functionMcpResult,
@@ -44,6 +51,7 @@ export interface ModPluginSource {
 export interface ModThreadBinding {
   assertLive?: () => void
   assertMcpTool?: (tool: McpCapabilityTool) => void
+  permissionToolName?: string
   commandOnly?: boolean
   threadId: string
   turnId: string
@@ -53,6 +61,7 @@ export interface ModThreadBinding {
   signal?: AbortSignal
   activePluginIds?: ReadonlySet<string>
   invokeTool?: (id: string, args: ModObject) => Promise<unknown>
+  queryTool?: (id: string, args: Record<string, unknown>) => Promise<ToolPermissionResult>
 }
 interface Session {
   engine: ModEngine
@@ -89,6 +98,13 @@ export class ModsManager {
     closeThread(threadId: string): void
     close(): void
     registeredTools?(workspace: string, threadId: string): Promise<RegisteredFunctionTool[]>
+    hasToolCheck?(workspace: string, threadId: string): boolean
+    toolCheck?(
+      binding: ModThreadBinding,
+      input: ModObject,
+      core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>,
+      origin?: import("../../shared/mods/v2/contracts").ModOrigin
+    ): Promise<ToolPermissionResult>
     toolCall?(
       binding: ModThreadBinding,
       input: ModObject,
@@ -102,6 +118,8 @@ export class ModsManager {
 
   closeFunctionThread(threadId: string): void {
     this.functionLifecycle?.closeThread(threadId)
+    for (const [key, binding] of this.bindings)
+      if (binding.threadId === threadId) this.bindings.delete(key)
     for (const [key, entry] of this.mcpBindings)
       if (entry.binding.threadId === threadId) this.mcpBindings.delete(key)
     for (const key of this.functionToolCatalogs.keys())
@@ -182,7 +200,8 @@ export class ModsManager {
       modId: string,
       toolId: string,
       args: Record<string, unknown>,
-      signal?: AbortSignal
+      signal?: AbortSignal,
+      reason?: string
     ) => Promise<boolean>,
     private readonly notifyCards: (threadId: string) => void,
     private readonly hostEntry?: string,
@@ -391,15 +410,185 @@ export class ModsManager {
       if (action.grant.workspace === workspace) this.actions.delete(id)
   }
 
-  bindThread(binding: ModThreadBinding): void {
+  bindThread(binding: ModThreadBinding): () => void {
     const key = `${binding.threadId}:${binding.agentId ?? "main"}`
-    this.bindings.set(key, { ...binding, workspace: this.workspaceKey(binding.workspace) })
+    const entry = {
+      ...binding,
+      workspace: this.workspaceKey(binding.workspace),
+      assertLive: () => {
+        if (this.bindings.get(key) !== entry) throw new ModError("MODS_THREAD_CONTEXT_EXPIRED")
+        binding.signal?.throwIfAborted()
+        binding.assertLive?.()
+      }
+    }
+    this.bindings.set(key, entry)
     if (this.bindings.size > 100) this.bindings.delete(this.bindings.keys().next().value!)
+    return () => {
+      if (this.bindings.get(key) === entry) this.bindings.delete(key)
+    }
   }
 
   needsCommandBinding(threadId: string): boolean {
     const binding = this.bindings.get(`${threadId}:main`)
     return !binding || binding.commandOnly === true || binding.signal?.aborted === true
+  }
+
+  /** A query neither takes a thread lease nor creates an execution/approval record. */
+  async queryFunctionTool(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    toolId: string,
+    args: ModObject,
+    signal: AbortSignal,
+    query: (tool: string, input: Record<string, unknown>) => Promise<ToolPermissionResult>
+  ): Promise<ToolPermissionResult> {
+    workspace = this.workspaceKey(workspace)
+    const config = this.config(workspace)
+    const assertLive = () => {
+      assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+      functionCallTurn(workspace, threadId)
+      getModCallContext()?.assertLive?.()
+      if (!this.isEnabled(workspace) || this.config(workspace).epoch !== config.epoch)
+        throw new ModError("MODS_SCOPE_CHANGED")
+    }
+    assertLive()
+    const execution = functionExecutionScope(workspace, threadId)
+    if (functionCallAgent(workspace, threadId) !== "main")
+      return { decision: "deny", reason: "MODS_TOOL_AGENT_UNAVAILABLE" }
+    const binding = this.bindings.get(`${threadId}:main`)
+    const turnId = functionCallTurn(workspace, threadId)
+    const applicable =
+      binding?.workspace === workspace &&
+      !binding.signal?.aborted &&
+      (!turnId || binding.turnId === turnId)
+    if (turnId && toolId.startsWith("host:") && !applicable)
+      return { decision: "deny", reason: "MODS_THREAD_CONTEXT_REQUIRED" }
+    const result = await (
+      applicable && toolId.startsWith("host:") && binding.queryTool ? binding.queryTool : query
+    )(toolId, args)
+    assertLive()
+    if (applicable) binding.assertLive?.()
+    let mandatory = config.policy ? this.policy.query(toolId) : { decision: "allow" as const }
+    if (classifyModTool(toolId) !== "read" && !toolId.startsWith("function:")) {
+      mandatory = constrainToolPermission(
+        mandatory,
+        execution?.userInitiated && !execution.immediate && !(applicable && binding.readOnly)
+          ? { decision: "ask", reason: "MODS_FINAL_APPROVAL_REQUIRED" }
+          : { decision: "deny", reason: "MODS_WRITE_REQUIRES_USER_ACTION" }
+      )
+    }
+    return constrainToolPermission(result, mandatory)
+  }
+
+  private async toolPermissionHooks(
+    binding: ModThreadBinding,
+    identity: ModIdentity,
+    toolId: string,
+    args: Record<string, unknown>,
+    userInitiated: boolean,
+    assertLive: () => void,
+    caller?: import("../../shared/mods/v2/contracts").ModOrigin
+  ): Promise<{ value: ToolPermissionResult; adapterAsks: boolean } | undefined> {
+    const lifecycle = this.functionLifecycle
+    if (
+      !lifecycle?.toolCheck ||
+      lifecycle.hasToolCheck?.(binding.workspace, binding.threadId) === false
+    )
+      return undefined
+    const mandatory = async (): Promise<ToolPermissionResult> => {
+      assertLive()
+      const query =
+        toolId.startsWith("host:") && binding.queryTool
+          ? await binding.queryTool(toolId, args)
+          : { decision: "allow" as const }
+      assertLive()
+      const policy = this.protects(binding.workspace)
+        ? this.policy.query(toolId)
+        : { decision: "allow" as const }
+      let value = constrainToolPermission(query, policy)
+      if (identity.modId && classifyModTool(toolId) !== "read" && !toolId.startsWith("function:"))
+        value = constrainToolPermission(
+          value,
+          userInitiated && !binding.readOnly
+            ? { decision: "ask", reason: "MODS_FINAL_APPROVAL_REQUIRED" }
+            : { decision: "deny", reason: "MODS_WRITE_REQUIRES_USER_ACTION" }
+        )
+      return value
+    }
+    const initial = await mandatory()
+    const value = await lifecycle.toolCheck(
+      binding,
+      {
+        tool: binding.permissionToolName ?? toolId.replace(/^(?:host:|function:)/, ""),
+        input: filterModData(args, false),
+        tool_use_id: identity.toolCallId ?? identity.callId
+      },
+      async () => initial,
+      caller ??
+        (identity.origin === "mod" && identity.modId?.startsWith("function:")
+          ? { plugin: identity.modId.slice(9), tier: "user" }
+          : { plugin: "engine", tier: "core" })
+    )
+    const final = await mandatory()
+    return { value: constrainToolPermission(value, final), adapterAsks: final.decision === "ask" }
+  }
+
+  async authorizeRegisteredTool(
+    identity: ModIdentity,
+    toolId: string,
+    input: ModObject,
+    signal: AbortSignal,
+    caller?: import("../../shared/mods/v2/contracts").ModOrigin
+  ): Promise<void> {
+    const epoch = this.config(identity.workspace).epoch
+    const assertLive = () => {
+      signal.throwIfAborted()
+      if (this.config(identity.workspace).epoch !== epoch) throw new ModError("MODS_SCOPE_CHANGED")
+      const grant = identity.modId && this.store.getGrant(identity.workspace, identity.modId)
+      if (!grant || !grant.enabled || grant.epoch !== identity.grantEpoch)
+        throw new ModError("MODS_GRANT_REVOKED")
+    }
+    const args = { ...input }
+    delete args.tool
+    delete args.tool_use_id
+    delete args.agentId
+    const checked = await this.toolPermissionHooks(
+      { ...identity, signal },
+      identity,
+      toolId,
+      args,
+      false,
+      assertLive,
+      caller
+    )
+    if (!checked) return
+    if (checked.value.decision === "deny") throw new ModPermissionError(checked.value.reason)
+    if (checked.value.decision === "ask") {
+      const allowed = await this.confirmToolOperation(
+        identity.threadId,
+        identity.modId ?? "engine",
+        toolId,
+        args,
+        signal,
+        checked.value.reason
+      )
+      assertLive()
+      if (!allowed) throw new ModError("MODS_USER_REJECTED")
+    }
+  }
+
+  private confirmToolOperation(
+    threadId: string,
+    modId: string,
+    toolId: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    reason?: string
+  ): Promise<boolean> {
+    return reason
+      ? this.confirmOperation(threadId, modId, toolId, args, signal, reason)
+      : this.confirmOperation(threadId, modId, toolId, args, signal)
   }
 
   /** Function SDK calls reuse native tool authority, execution receipts and final-argument approval. */
@@ -489,6 +678,7 @@ export class ModsManager {
     const fingerprint = functionMcpToolFingerprint(tool)
     const binding = {
       ...mcp.binding,
+      permissionToolName: tool.toolId,
       assertLive: mcp.assertLive,
       assertMcpTool: (actual: McpCapabilityTool) => {
         mcp.assertLive()
@@ -548,6 +738,9 @@ export class ModsManager {
       signal: saved.signal ? AbortSignal.any([signal, saved.signal]) : signal
     }
     binding.signal.throwIfAborted()
+    binding.assertLive?.()
+    const turnId = functionExecutionScope(workspace, threadId)?.turnId
+    if (turnId && binding.turnId !== turnId) throw new ModError("MODS_CALL_SCOPE_CHANGED")
     if (classifyModTool(toolId) !== "read" && (binding.readOnly || !userInitiated))
       throw new ModError("MODS_WRITE_REQUIRES_USER_ACTION")
     const request = this.request(binding, identity, toolId, args, userInitiated, true)
@@ -566,6 +759,7 @@ export class ModsManager {
       return published
     } catch (error) {
       this.store.blockPublication(identity.callId)
+      if (error instanceof ModPermissionError) throw error
       throw new ModError(modErrorCode(error))
     }
   }
@@ -742,7 +936,32 @@ export class ModsManager {
         if (target !== toolId) throw new ModError("MODS_TARGET_CHANGED")
         if (request.protectedOutput)
           await this.policy.admit(identity, target, finalArgs, binding.signal)
-        if (!identity.modId || classifyModTool(target) === "read") return
+        const checked = await this.toolPermissionHooks(
+          binding,
+          identity,
+          target,
+          finalArgs,
+          userInitiated,
+          assertEpoch
+        )
+        if (checked?.value.decision === "deny") throw new ModPermissionError(checked.value.reason)
+        const context = getModCallContext()
+        if (context) context.permissionReason = checked?.value.reason
+        if (!identity.modId || classifyModTool(target) === "read") {
+          if (checked?.value.decision === "ask" && !checked.adapterAsks) {
+            const approved = await this.confirmToolOperation(
+              binding.threadId,
+              identity.modId ?? "engine",
+              target,
+              finalArgs,
+              binding.signal,
+              checked.value.reason
+            )
+            assertEpoch()
+            if (!approved) throw new ModError("MODS_USER_REJECTED")
+          }
+          return
+        }
         if (!userInitiated || binding.readOnly)
           throw new ModError("MODS_WRITE_REQUIRES_USER_ACTION")
         if (JSON.stringify(finalArgs, null, 2).length > 16_000)
@@ -750,12 +969,13 @@ export class ModsManager {
         const granted = this.store.getGrant(binding.workspace, identity.modId)
         if (!granted?.enabled || granted.epoch !== identity.grantEpoch)
           throw new ModError("MODS_GRANT_REVOKED")
-        const approved = await this.confirmOperation(
+        const approved = await this.confirmToolOperation(
           binding.threadId,
           identity.modId,
           target,
           finalArgs,
-          binding.signal
+          binding.signal,
+          checked?.value.reason
         )
         if (!approved) throw new ModError("MODS_USER_REJECTED")
         assertEpoch()
@@ -1239,20 +1459,22 @@ export async function authorizeCurrentModInput(
 ): Promise<void> {
   const context = getModCallContext()
   if (!context) return
-  args = filterModData(args, false) as Record<string, unknown>
-  const signature = `${toolId}:${encodeModJson(args)}`
-  context.assertLive?.()
-  if (context.approvedOperation && context.authorizedInput === signature) return
-  context.approvedOperation = undefined
-  await context.authorize?.(toolId, args)
-  context.assertLive?.()
-  context.effectiveArgs = args
-  if (context.routeClaimed)
-    getModsManager()?.store.bindFinalInput(context.identity.callId, toolId, args)
-  if (context.originMod && context.authorize) {
-    context.authorizedInput = signature
-    context.approvedOperation = { toolId, args }
-  }
+  await beforeModToolExecution(async () => {
+    args = filterModData(args, false) as Record<string, unknown>
+    const signature = `${toolId}:${encodeModJson(args)}`
+    context.assertLive?.()
+    if (context.approvedOperation && context.authorizedInput === signature) return
+    context.approvedOperation = undefined
+    await context.authorize?.(toolId, args)
+    context.assertLive?.()
+    context.effectiveArgs = args
+    if (context.routeClaimed)
+      getModsManager()?.store.bindFinalInput(context.identity.callId, toolId, args)
+    if (context.originMod && context.authorize) {
+      context.authorizedInput = signature
+      context.approvedOperation = { toolId, args }
+    }
+  })
 }
 
 export function hasModOperationApproval(toolId: string, args: Record<string, unknown>): boolean {

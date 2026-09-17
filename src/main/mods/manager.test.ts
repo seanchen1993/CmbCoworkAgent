@@ -43,6 +43,7 @@ import { withFunctionExecution } from "./v2/execution-context"
 import { FunctionRegisteredTools } from "./v2/registered-tools"
 import { getModCallContext } from "./context"
 import type { McpCapabilityTool } from "../mcp/capability-types"
+import { beforeModToolExecution } from "./execution-error"
 
 const cleanup: Array<() => void> = []
 afterEach(() => {
@@ -175,6 +176,190 @@ async function fixture(deployment?: ManagedModDeployment) {
 }
 
 describe("project Mods lifecycle and UI authority", () => {
+  it("queries real permissions without approval, execution or receipt writes", async () => {
+    const f = await fixture()
+    f.manager.configure(f.root, true, false)
+    const workspace = f.manager.workspaceKey(f.root)
+    const grant = f.manager.store.grant(workspace, "function:query", "snapshot", true)
+    const query = vi.fn(async () => ({ decision: "allow" as const }))
+    f.manager.bindThread({ ...f.scope, queryTool: query })
+    const fallback = vi.fn(async () => ({ decision: "deny" as const }))
+    const run = (tool: string) =>
+      f.manager.queryFunctionTool(
+        workspace,
+        "thread",
+        grant,
+        tool,
+        {},
+        new AbortController().signal,
+        fallback
+      )
+    expect(await run("host:read_file")).toEqual({ decision: "allow" })
+    expect(await run("host:write_file")).toMatchObject({ decision: "deny" })
+    await withFunctionExecution(
+      {
+        workspace,
+        threadId: "thread",
+        turnId: "turn",
+        leased: true,
+        userInitiated: true,
+        immediate: false
+      },
+      async () => {
+        expect(await run("host:write_file")).toMatchObject({ decision: "ask" })
+      }
+    )
+    expect(query).toHaveBeenCalledTimes(3)
+    expect(fallback).not.toHaveBeenCalled()
+    expect(f.confirm).not.toHaveBeenCalled()
+    expect(f.manager.store.audit(workspace)).toEqual([])
+  })
+
+  it("rejects a permission query whose native binding was replaced while awaiting metadata", async () => {
+    const f = await fixture()
+    f.manager.configure(f.root, true, false)
+    const workspace = f.manager.workspaceKey(f.root)
+    const grant = f.manager.store.grant(workspace, "function:query", "snapshot", true)
+    const query = vi.fn(async () => {
+      f.manager.bindThread(f.scope)
+      return { decision: "allow" as const }
+    })
+    f.manager.bindThread({ ...f.scope, queryTool: query })
+    await expect(
+      f.manager.queryFunctionTool(
+        workspace,
+        "thread",
+        grant,
+        "host:read_file",
+        {},
+        new AbortController().signal,
+        query
+      )
+    ).rejects.toThrow("CONTEXT_EXPIRED")
+    expect(f.manager.store.audit(workspace)).toEqual([])
+  })
+
+  it.each(["allow", "deny", "ask"] as const)(
+    "applies a %s permission hook to the actual model tool with pinned real input and origin",
+    async (decision) => {
+      const f = await fixture()
+      f.manager.configure(f.root, true, false)
+      const workspace = f.manager.workspaceKey(f.root)
+      const checked = vi.fn(async (_binding, input, _core, origin) => {
+        expect(input).toMatchObject({ tool: "read_file", input: { file_path: "final.txt" } })
+        expect(typeof input.tool_use_id).toBe("string")
+        expect(origin).toEqual({ plugin: "engine", tier: "core" })
+        return { decision, reason: "permission explanation" }
+      })
+      f.manager.attachFunctions({
+        invalidate: () => {},
+        closeThread: () => {},
+        close: () => {},
+        toolCheck: checked
+      })
+      const actual = vi.fn(async () => "read")
+      const call = f.manager.dispatch(
+        f.scope,
+        "host:read_file",
+        { file_path: "final.txt" },
+        async (input) => {
+          await authorizeCurrentModInput("host:read_file", input)
+          return actual()
+        }
+      )
+      if (decision === "deny") {
+        await expect(call).rejects.toThrow("MODS_TOOL_PERMISSION_DENIED: permission explanation")
+        expect(actual).not.toHaveBeenCalled()
+        expect(f.manager.store.audit(workspace)[0].status).toBe("not_started")
+      } else {
+        expect(await call).toBe("read")
+        expect(actual).toHaveBeenCalledOnce()
+      }
+      expect(checked).toHaveBeenCalledOnce()
+      expect(f.confirm).toHaveBeenCalledTimes(decision === "ask" ? 1 : 0)
+      if (decision === "ask")
+        expect(f.confirm).toHaveBeenCalledWith(
+          "thread",
+          "engine",
+          "host:read_file",
+          { file_path: "final.txt" },
+          undefined,
+          "permission explanation"
+        )
+    }
+  )
+
+  it("clamps a hook allow to a changed native permission and does not execute", async () => {
+    const f = await fixture()
+    f.manager.configure(f.root, true, false)
+    const query = vi.fn(async () => ({ decision: "allow" as const }))
+    query.mockResolvedValueOnce({ decision: "allow" })
+    const finalQuery = vi.fn(async () => ({ decision: "deny" as const }))
+    let changed = false
+    f.manager.bindThread({ ...f.scope, queryTool: () => (changed ? finalQuery() : query()) })
+    f.manager.attachFunctions({
+      invalidate: () => {},
+      closeThread: () => {},
+      close: () => {},
+      toolCheck: async () => {
+        changed = true
+        return { decision: "allow" }
+      }
+    })
+    const actual = vi.fn(async () => "read")
+    await expect(
+      f.manager.dispatch(f.scope, "host:read_file", {}, async (input) => {
+        await authorizeCurrentModInput("host:read_file", input)
+        return actual()
+      })
+    ).rejects.toThrow("PERMISSION_DENIED")
+    expect(actual).not.toHaveBeenCalled()
+    expect(query).toHaveBeenCalledOnce()
+    expect(finalQuery).toHaveBeenCalledOnce()
+  })
+
+  it("does not execute a native SDK request after its binding changes during approval", async () => {
+    const f = await fixture()
+    f.manager.configure(f.root, true, false)
+    const workspace = f.manager.workspaceKey(f.root)
+    const grant = f.manager.store.grant(workspace, "function:native", "snapshot", true)
+    const actual = vi.fn(async () => ({ exitCode: 0, output: "ran" }))
+    const bind = () =>
+      f.manager.bindThread({
+        ...f.scope,
+        invokeTool: (tool, args) =>
+          f.manager.dispatch(f.scope, tool, args, async (input) => {
+            await authorizeCurrentModInput(tool, input)
+            return actual()
+          })
+      })
+    const release = bind()
+    bind()
+    release()
+    f.confirm.mockImplementation(async () => {
+      bind()
+      return true
+    })
+    await expect(
+      f.manager.invokeFunctionTool(
+        workspace,
+        "thread",
+        grant,
+        "host:execute",
+        { command: "echo test" },
+        new AbortController().signal,
+        false,
+        true
+      )
+    ).rejects.toThrow("CONTEXT_EXPIRED")
+    expect(f.confirm).toHaveBeenCalledOnce()
+    expect(actual).not.toHaveBeenCalled()
+    expect(f.manager.store.audit(workspace)[0]).toMatchObject({
+      status: "not_started",
+      publication: "blocked"
+    })
+  })
+
   async function mcpFixture() {
     const f = await fixture()
     await f.enable()
@@ -200,7 +385,7 @@ describe("project Mods lifecycle and UI authority", () => {
     const invoke = (id: string, args: ModObject) =>
       f.manager.dispatch(scope, `mcp:${id}`, args, async (input) => {
         await authorizeCurrentModInput(`mcp:${id}`, input)
-        getModCallContext()?.assertMcpTool?.(tool)
+        await beforeModToolExecution(() => getModCallContext()?.assertMcpTool?.(tool))
         return actual()
       })
     const bind = () => f.manager.bindMcp(scope, invoke, async () => [tool])
@@ -285,6 +470,7 @@ describe("project Mods lifecycle and UI authority", () => {
       await rejection
       expect(f.actual).not.toHaveBeenCalled()
       expect(f.manager.store.audit(f.workspace)[0]?.publication).toBe("blocked")
+      expect(f.manager.store.audit(f.workspace)[0]?.status).toBe("not_started")
     }
   )
 
@@ -416,6 +602,16 @@ describe("project Mods lifecycle and UI authority", () => {
       immediate: false,
       userInitiated: true
     }
+    f.scope.turnId = scope.turnId
+    f.manager.bindThread({
+      ...f.scope,
+      invokeTool: (tool, args) =>
+        f.manager.dispatch(f.scope, tool, args, async (input) => {
+          await authorizeCurrentModInput(tool, input)
+          f.executions.push(input)
+          return { output: "verified", exitCode: 0 }
+        })
+    })
     const invoke = () =>
       f.manager.invokeFunctionTool(
         workspace,
@@ -457,6 +653,9 @@ describe("project Mods lifecycle and UI authority", () => {
     )
     expect(f.executions).toHaveLength(1)
     expect(f.confirm).toHaveBeenCalledOnce()
+    await expect(
+      withFunctionExecution({ ...scope, turnId: "different-turn" }, invoke)
+    ).rejects.toThrow("MODS_CALL_SCOPE_CHANGED")
   })
   it("rechecks the live function scope after native approval before allowing a side effect", async () => {
     const f = await fixture()

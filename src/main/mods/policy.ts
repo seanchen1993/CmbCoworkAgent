@@ -5,6 +5,7 @@ import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { ModRuntimeClient } from "./runtime-client"
 import { ModError } from "./errors"
 import { filterModData, mapModResult } from "./publication"
+import type { ToolPermissionResult } from "../../shared/tool-permission"
 
 export interface ManagedModDeployment {
   version: 1
@@ -118,6 +119,13 @@ export class ManagedModPolicy {
   }
   get stats() {
     return this.client.stats
+  }
+
+  /** Declarative part of the same deployment used by admit; no policy worker is started. */
+  query(toolId: string): ToolPermissionResult {
+    return this.deployment.denyTools.includes(toolId)
+      ? { decision: "deny", reason: "MODS_POLICY_TOOL_DENIED", rule: toolId }
+      : { decision: "allow" }
   }
 
   /** Conservative synchronous mirror for diagnostics emitted before async publication. */

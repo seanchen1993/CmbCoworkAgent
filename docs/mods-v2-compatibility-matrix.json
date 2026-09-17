@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-17",
-  "codeBaseline": "dde4af7c",
+  "codeBaseline": "2002fe64",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -10,18 +10,100 @@
     "source": "https://github.com/anthropics/claude-code/blob/b782847db9a18667f00918ea341197f201b22bb4/mods/types/claude-code.d.ts",
     "runtimePreviouslyVerified": "2.1.272",
     "runtime273Verified": true,
-    "runtime273VerificationScope": "36 command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor/tool-SDK-envelope/model-completion-operation/engine-tool-ingress/tool-registration-operation/MCP-operation conformance cases in real plugin test; not full API or product parity"
+    "runtime273VerificationScope": "39 permission-query/command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor/tool-SDK-envelope/model-completion-operation/engine-tool-ingress/tool-registration-operation/MCP-operation conformance cases in real plugin test; not full API or product parity"
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
     "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, main-agent custom tool registration/discovery, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete",
-    "desktopEvents": ["session.start","command.run","command.describe","ui.render (desktop Pane)","ui.press","ui.input","ui.select","ui.message (owner only)","ui.open","ui.close","tool.call (SDK and model-raised tools)","tool.register","tool.list","model.complete","mcp.call"],
-    "desktopSdk": ["command.register", "command.list", "command.run", "session.id", "session.cwd", "session.surface", "session.surfaces", "clock.now", "clock.sleep", "store.get", "store.set", "store.delete", "store.keys", "fs.read", "fs.list", "fs.exists", "fs.stat"],
-    "partialDesktopSdk": ["ui.open","ui.close","ui.resolve","ui.invalidate","tool.call","tool.register","tool.list","model.complete","mcp.call"],
-    "modelLimitations": ["model.complete only; main-agent model hooks/turn.step/fork/classify pending", "configured model IDs/refs and default alias only; no implicit Claude alias remapping", "one text prompt, host identity plus optional system; no tools or history", "256 default output tokens, 4096 ceiling additionally capped by configured model; 32000 prompt/8000 system characters, 64000 response bytes", "4 concurrent application calls, 2 per project/plugin; persistent 30 calls and 32768 reserved output tokens per rolling minute/project/plugin", "60-second deadline; no automatic provider retry; missing provider usage remains unknown", "local real-client protocol and UI fixtures do not prove external production-model behavior"],
-    "toolLimitations": ["native CMB tool names/arguments/results; Claude built-in Read/Bash schemas pending","SDK supports read_file/write_file/edit_file/ls/glob/grep/execute/task_output and registered guest tools; model ingress retains actual adapter schemas","SDK writes require live user action and shared thread lease; model hooks do not grant that authority; actual native writes retain host approval","MCP named SDK is main-agent user-action only with final approval; $.tool.call MCP-name routing and tool.check pending","tool.register exposes mcp__plugin__name tools to the main agent only; restricted subagents reject them","tool.list is main-agent only and uses the latest model tool metadata snapshot plus current registered entries; before first model request it fails with MODS_TOOL_CONTEXT_REQUIRED","JSON Schema bounded subset; refs, regex, format and other unsupported keywords explicitly rejected; see authoring guide","32 registrations/plugin, 128/session, 256000 aggregate metadata characters; input schemas 16000 characters and registered inputs 64000 characters; validation work bounded","16000-character native SDK input bound; model ingress uses bounded JSON","tool/agentId/tool_use_id are host event identities; colliding native arguments retain their original values","ref selects original host messages within one ingress; result replacement preserves real execution status and graph control","context is model-only for the latest contiguous tool round, 128000 aggregate characters; normal remote providers not tested"],
-    "paneLimitations": ["inline Pane only; no dock or remaining 13 sites", "eight elements including Client with a restricted prop allowlist; no Svg/diff Code", "ui.resolve returns native constructors only; constructor replacement hooks pending", "ui.invalidate supports ui.render only", "Pane focus, hotkeys, hover, scroll, holdToasts and measured viewport pending", "native dynamically compiled async functions do not inherit guest continuation identity", "Claude static dollar-SDK usage scanner not yet implemented"],
-    "clientLimitations": ["synchronous render and callbacks only", "static literal module and approved relative imports only", "eight active Client VMs per session; sixteen timers and 256 controls per Client", "minimum timer interval 16ms; busy ticks coalesce", "desktop cell dimensions estimated at 8x24 pixels", "upstream descriptor conformance verified; full upstream event lifecycle comparison pending"],
+    "desktopEvents": [
+      "session.start",
+      "command.run",
+      "command.describe",
+      "ui.render (desktop Pane)",
+      "ui.press",
+      "ui.input",
+      "ui.select",
+      "ui.message (owner only)",
+      "ui.open",
+      "ui.close",
+      "tool.call (SDK and model-raised tools)",
+      "tool.register",
+      "tool.list",
+      "model.complete",
+      "mcp.call",
+      "tool.check"
+    ],
+    "desktopSdk": [
+      "command.register",
+      "command.list",
+      "command.run",
+      "session.id",
+      "session.cwd",
+      "session.surface",
+      "session.surfaces",
+      "clock.now",
+      "clock.sleep",
+      "store.get",
+      "store.set",
+      "store.delete",
+      "store.keys",
+      "fs.read",
+      "fs.list",
+      "fs.exists",
+      "fs.stat"
+    ],
+    "partialDesktopSdk": [
+      "ui.open",
+      "ui.close",
+      "ui.resolve",
+      "ui.invalidate",
+      "tool.call",
+      "tool.register",
+      "tool.list",
+      "model.complete",
+      "mcp.call",
+      "tool.check"
+    ],
+    "modelLimitations": [
+      "model.complete only; main-agent model hooks/turn.step/fork/classify pending",
+      "configured model IDs/refs and default alias only; no implicit Claude alias remapping",
+      "one text prompt, host identity plus optional system; no tools or history",
+      "256 default output tokens, 4096 ceiling additionally capped by configured model; 32000 prompt/8000 system characters, 64000 response bytes",
+      "4 concurrent application calls, 2 per project/plugin; persistent 30 calls and 32768 reserved output tokens per rolling minute/project/plugin",
+      "60-second deadline; no automatic provider retry; missing provider usage remains unknown",
+      "local real-client protocol and UI fixtures do not prove external production-model behavior"
+    ],
+    "toolLimitations": [
+      "native CMB tool names/arguments/results; Claude built-in Read/Bash schemas pending",
+      "SDK supports read_file/write_file/edit_file/ls/glob/grep/execute/task_output and registered guest tools; model ingress retains actual adapter schemas",
+      "SDK writes require live user action and shared thread lease; model hooks do not grant that authority; actual native writes retain host approval",
+      "MCP named SDK is main-agent user-action only with final approval; $.tool.call MCP-name routing pending; tool.check supports native permissions and fresh cached MCP metadata",
+      "tool.register exposes mcp__plugin__name tools to the main agent only; restricted subagents reject them",
+      "tool.list is main-agent only and uses the latest model tool metadata snapshot plus current registered entries; before first model request it fails with MODS_TOOL_CONTEXT_REQUIRED",
+      "JSON Schema bounded subset; refs, regex, format and other unsupported keywords explicitly rejected; see authoring guide",
+      "32 registrations/plugin, 128/session, 256000 aggregate metadata characters; input schemas 16000 characters and registered inputs 64000 characters; validation work bounded",
+      "16000-character native SDK input bound; model ingress uses bounded JSON",
+      "tool/agentId/tool_use_id are host event identities; colliding native arguments retain their original values",
+      "ref selects original host messages within one ingress; result replacement preserves real execution status and graph control",
+      "context is model-only for the latest contiguous tool round, 128000 aggregate characters; normal remote providers not tested"
+    ],
+    "paneLimitations": [
+      "inline Pane only; no dock or remaining 13 sites",
+      "eight elements including Client with a restricted prop allowlist; no Svg/diff Code",
+      "ui.resolve returns native constructors only; constructor replacement hooks pending",
+      "ui.invalidate supports ui.render only",
+      "Pane focus, hotkeys, hover, scroll, holdToasts and measured viewport pending",
+      "native dynamically compiled async functions do not inherit guest continuation identity",
+      "Claude static dollar-SDK usage scanner not yet implemented"
+    ],
+    "clientLimitations": [
+      "synchronous render and callbacks only",
+      "static literal module and approved relative imports only",
+      "eight active Client VMs per session; sixteen timers and 256 controls per Client",
+      "minimum timer interval 16ms; busy ticks coalesce",
+      "desktop cell dimensions estimated at 8x24 pixels",
+      "upstream descriptor conformance verified; full upstream event lifecycle comparison pending"
+    ],
     "unitPrototypeOnly": ["turn.step", "model stream boundary"],
     "evidence": "mods-v2-implementation-2026-09-16.md",
     "mcpSdk": {
@@ -36,7 +118,24 @@
         "cold command MCP calls serialize per thread, at most 16 pending, preserving a registered parent's turn",
         "actual MCP server schema validation; no guest registered-schema substitution",
         "D01 mandatory policy and final approval differ from upstream no-prompt grant",
-        "tool.call MCP names, OAuth/reconnect parity, remote-provider qualification and tool.check pending"
+        "tool.call MCP names, OAuth/reconnect parity, remote-provider qualification and complete scoped permission catalog pending"
+      ],
+      "upstreamConformance": 3,
+      "fullParity": false
+    },
+    "toolPermission": {
+      "revision": "desktop-tool-permission-v13",
+      "design": "mods-v2-tool-permission-2026-09-17.md",
+      "signature": "$.tool.check({ tool, input }) -> { decision, reason?, rule? }",
+      "scope": "pure real native permission probes, registered schema/grants, cached MCP metadata; real native/MCP authorization and registered admission",
+      "identity": "pinned tool/input/tool_use_id; engine/model origin, caller plugin origin independent of registered owner",
+      "safety": "mandatory decision rechecked after optional hooks; no tool/dialog/classic hook/receipt on query; protected deny and approval reasons",
+      "binding": "native instance/turn guards and conditional release; bounded native/MCP command queues; private call-specific not-started receipt evidence",
+      "limits": [
+        "main-agent SDK only",
+        "D01 mandatory ask/deny cannot be relaxed",
+        "cold MCP query cannot discover or reconnect",
+        "complete scoped MCP aliases and Claude built-in schemas pending"
       ],
       "upstreamConformance": 3,
       "fullParity": false
@@ -46,7 +145,7 @@
       "design": "mods-v2-host-foundation-2026-09-17.md",
       "scope": "shared model/custom-tool admission, receipt and publication lifecycle; host-owned agent/turn/parent identity; queued continuation provenance; native SDK receipt alignment",
       "nativeAgentLimit": "function SDK native calls remain main-agent only; child calls cannot borrow the main backend",
-      "notImplemented": ["declarative permission query adapters","tool.check","cross-plugin authority delegation"]
+      "notImplemented": ["complete scoped MCP query aliases", "cross-plugin authority delegation"]
     },
     "fullParity": false
   },

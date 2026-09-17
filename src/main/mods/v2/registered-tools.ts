@@ -1,12 +1,18 @@
 import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModIdentity, ModObject } from "../../../shared/mods/types"
-import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { ModFunctionError, type ModOrigin } from "../../../shared/mods/v2/contracts"
 import { ModError } from "../errors"
 import { assertFunctionGrant, functionCallIdentity, runFunctionHostCall } from "./host-call"
 
 interface RegisteredToolHost {
   assertScope(workspace: string, threadId: string): void
-  admit(identity: ModIdentity, tool: string, input: ModObject, signal: AbortSignal): Promise<void>
+  admit(
+    identity: ModIdentity,
+    tool: string,
+    input: ModObject,
+    signal: AbortSignal,
+    caller?: ModOrigin
+  ): Promise<void>
   publish(identity: ModIdentity, value: ModObject, signal: AbortSignal): Promise<ModObject>
 }
 
@@ -24,7 +30,8 @@ export class FunctionRegisteredTools {
     input: ModObject,
     origin: "model" | "mod",
     signal: AbortSignal,
-    run: () => Promise<ModObject>
+    run: () => Promise<ModObject>,
+    caller?: ModOrigin
   ): Promise<ModObject> {
     const identity = functionCallIdentity(workspace, threadId, grant, {
       fallbackTurnId: `function-tool:${threadId}`,
@@ -43,7 +50,7 @@ export class FunctionRegisteredTools {
         store: this.store,
         identity,
         assertLive,
-        admit: () => this.host.admit(identity, target, input, signal),
+        admit: () => this.host.admit(identity, target, input, signal, caller),
         claim: () => this.store.claim(identity.callId, target, input, identity),
         invoke: run,
         status: (result) =>

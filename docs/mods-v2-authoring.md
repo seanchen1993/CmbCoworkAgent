@@ -62,7 +62,7 @@ export function register(on) {
 当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces`、
 `clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`，以及 `$.plugin.name/root` 元数据。
 上述 SDK 操作同样经过事件链。另已接入有限的桌面 Pane：`ui.open/close`、
-同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call/register/list`、`model.complete`，范围见下文。
+同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call/register/list/check`、`model.complete`，范围见下文。
 
 普通操作 hook 返回 `{ value }` 或 `{ deny }`，调用 SDK 得到拆出的值；
 `command.run` 是引擎事件，返回 `{ text }`。例如：
@@ -128,13 +128,33 @@ schema、授权、项目和组织策略，完成后检查输出；撤权后下�
   `title/description/default/examples/$comment` 仅作注解。其余关键字（含 `$ref`、`pattern`、
   `patternProperties`、`format`）明确拒绝，不声称支持完整 JSON Schema。比较和组合校验有工作量预算。
   顶层参数不能使用宿主身份名 `tool/tool_use_id/agentId`。
-- `tool.check` 和 Claude 内建工具参数映射仍待补齐。MCP 使用下述独立 SDK。
+- `tool.check` 已支持权限查询；Claude 内建工具参数映射仍待补齐。MCP 使用下述独立 SDK。
 
 宿主调用会记录真实轮次、代理和父子调用关系。自定义工具内部调用原生工具或
 `$.model.complete()`，审计能追溯到外层工具；每次实际执行仍单独记账和保护输出。
 原生工具 SDK 暂仅限主助手，子代理不能借用主助手后端。排队任务保留原调用身份，
-调用方已结束的遗留任务不能重新获得授权。当前宿主修订 v12，需要重新批准旧授权快照。
+调用方已结束的遗留任务不能重新获得授权。当前宿主修订 v13，需要重新批准旧授权快照。
 架构边界及后续顺序见 [宿主调用基础复核](mods-v2-host-foundation-2026-09-17.md)。
+
+## 查询和定制工具权限
+
+权限查询可先使用 `/claw-check {"tool":"read_file","input":{"file_path":"README.md"}}`。
+在处理器中调用 `await $.tool.check({ tool: "read_file", input: { file_path: "README.md" } })`，
+返回 `{ decision, reason?, rule? }`，没有 `value` 外层。查询不执行工具、不审批、不运行
+classic Hook，也不产生工具执行账本。已有有效 MCP 元数据才可被查询，不会为查询连接服务器。
+
+在 `register(on)` 中可以添加权限规则：
+
+```ts
+on("tool.check", { tool: "read_file" }, async ($, e, next) => {
+  if (e.input.file_path === "private.txt") return { decision: "deny", reason: "项目规则禁止读取此文件" }
+  return next(e)
+})
+```
+
+查询与实际调用都经过此事件；后者由宿主提供 `tool_use_id`。`tool/input/tool_use_id` 固定，
+模型来源是 engine，SDK 来源是发起插件。Hook 不能放宽宿主强制约束；查询结果也不能
+代替实际审批。理由经保护后供用户和模型查看。详见 [权限机制复核](mods-v2-tool-permission-2026-09-17.md)。
 
 ## 调用已配置的 MCP 服务
 
@@ -359,7 +379,7 @@ const answer = await $.tool.call({ tool: "write_file", file_path: "notes.md", co
 当前可调用 `read_file/write_file/edit_file/ls/glob/grep/execute/task_output`，名称、参数、
 `result` 使用本工程原生工具格式；还不是 Claude 的 `Read/Bash` 等内置工具 schema。
 只允许相应适配器已支持的字段，未支持的后台执行选项明确拒绝。输入最多 16000 字符；
-这不是 `fs.write` 的实现。插件工具注册仍待接入；模型发起的工具调用也会进入同一 hook 链。
+这不是 `fs.write` 的实现。插件工具注册见上文；模型发起的工具调用也会进入同一 hook 链。
 
 SDK 发起的 `tool.call` 经过函数 hook 链，允许改写普通参数、拒绝、短路及有界多次 `next`；
 工具名称和调用身份不能改写。每次进入真正的工具核心都重新做范围检查、审批和执行记录，
@@ -397,4 +417,4 @@ hook 中嵌套 SDK 读取复用当前执行权，写入仍需要存活的用户�
 多工具同轮上下文合计上限 128000 字符。宿主策略继续检查实际参数和最终输出。
 
 本批接入工程现有的模型工具入口，并未把原生工具换成 Claude 的 Read/Bash schema，
-也未实现工具注册、MCP SDK 或主模型流 hook。调用包版本升级到 v9，需要重新批准。
+工具注册和 MCP SDK 见上文；主模型流 hook 仍待完成。当前宿主修订 v13，需要重新批准。

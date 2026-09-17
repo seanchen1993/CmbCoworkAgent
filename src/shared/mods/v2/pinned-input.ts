@@ -8,6 +8,7 @@ const pinned: Record<string, readonly string[]> = {
   "command.describe": ["command", "immediate", "provider"],
   "config.describe": ["key", "provider"],
   "tool.call": ["tool", "tool_use_id", "agentId"],
+  "tool.check": ["tool", "input", "tool_use_id"],
   "turn.step": ["turnId", "index", "messageCount", "agentId"],
   "ui.open": ["id"],
   "ui.close": ["id", "origin"],

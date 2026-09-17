@@ -26,12 +26,16 @@ export async function bindStandaloneModCommand(
     throw new ModError("MODS_SANDBOX_NOT_READY")
   // Construction only installs host-owned adapters. It cannot start a tool by itself.
   const aclOwnerId = `mod-command:${randomUUID()}`
+  let release = () => {}
   new LocalSandbox({
     rootDir: workspace,
     runId: threadId,
     hookTurnId: turnId,
     aclOwnerId,
     modCommandOnly: true,
+    onModBinding: (dispose) => {
+      release = dispose
+    },
     virtualMode: false,
     windowsSandbox,
     codexExePath,
@@ -40,5 +44,8 @@ export async function bindStandaloneModCommand(
     timeout: 60_000,
     maxOutputBytes: 48_000
   })
-  return () => LocalSandbox.revokeGrantedAclsForRun(aclOwnerId)
+  return async () => {
+    release()
+    await LocalSandbox.revokeGrantedAclsForRun(aclOwnerId)
+  }
 }

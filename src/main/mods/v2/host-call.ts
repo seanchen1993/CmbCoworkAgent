@@ -30,6 +30,11 @@ export function functionCallTurn(workspace: string, threadId: string): string | 
   return scope?.turnId ?? parent?.turnId
 }
 
+export function functionCallAgent(workspace: string, threadId: string): string {
+  const { scope, parent } = functionCallScope(workspace, threadId)
+  return scope?.agentId ?? parent?.agentId ?? "main"
+}
+
 /** Host identities never come from guest arguments; nested calls retain their real owner. */
 export function functionCallIdentity(
   workspace: string,

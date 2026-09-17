@@ -14,7 +14,8 @@ const baseline = execFileSync(
   ["rev-parse", "--verify", `${process.argv[2] ?? "aa97b145"}^{commit}`],
   { cwd: root, encoding: "utf8" }
 ).trim()
-const mcpMode = ["mcp", "mcp-matched"].includes(process.argv[3])
+const mcpMode = ["mcp", "mcp-matched", "mcp-sdk"].includes(process.argv[3])
+const sameSdk = process.argv[3] === "mcp-sdk"
 const matchedPublication = process.argv[3] === "mcp-matched"
 const output = join(
   root,
@@ -67,7 +68,7 @@ for (const variant of ["baseline", "current"]) {
       loader: "ts"
     },
     define: {
-      __MODS_MCP_SDK__: variant === "current" ? "true" : "false",
+      __MODS_MCP_SDK__: variant === "current" || sameSdk ? "true" : "false",
       __MODS_MATCHED_PUBLICATION__: matchedPublication ? "true" : "false"
     },
     outfile,
@@ -154,12 +155,14 @@ const prior = summarize(samples.baseline),
 const report = {
   baseline,
   hashes,
-  scope: mcpMode
-    ? "baseline internal MCP capability route versus new named SDK resolver (1000 tools), both actual ModEngine + SQLite; stub approval/transport, no guest VM or policy worker; " +
-      (matchedPublication
-        ? "benchmark adds equivalent publication persistence to baseline, isolating resolver/guard overhead"
-        : "SDK additionally persists publication with policy off, baseline leaves it pending")
-    : "registered host boundary + actual SQLite; no VM, policy worker, native tool I/O or provider",
+  scope: sameSdk
+    ? "same named MCP SDK in both revisions (1000 tools), actual ModEngine + SQLite including publication; stub approval/transport, no guest VM or policy worker"
+    : mcpMode
+      ? "baseline internal MCP capability route versus new named SDK resolver (1000 tools), both actual ModEngine + SQLite; stub approval/transport, no guest VM or policy worker; " +
+        (matchedPublication
+          ? "benchmark adds equivalent publication persistence to baseline, isolating resolver/guard overhead"
+          : "SDK additionally persists publication with policy off, baseline leaves it pending")
+      : "registered host boundary + actual SQLite; no VM, policy worker, native tool I/O or provider",
   prior,
   current,
   p95DeltaPercent: (current.p95Ms / prior.p95Ms - 1) * 100,

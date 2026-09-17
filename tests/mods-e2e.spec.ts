@@ -730,6 +730,118 @@ async function main(): Promise<void> {
     }, workspace)
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Function SDK cold start", { exact: true }).first().click()
+    const permissionApprovals = await app.evaluate(
+      () => (globalThis as unknown as { modsConfirmations: unknown[] }).modsConfirmations.length
+    )
+    const permissionAudit = await page!.evaluate((id) => window.api.mods.audit(id), coldFunctionId)
+    for (const [input, decision] of [
+      [{ tool: "read_file", input: { file_path: "secret.txt" } }, "allow"],
+      [
+        { tool: "write_file", input: { file_path: "permission-never.txt", content: "never" } },
+        "ask"
+      ]
+    ] as const) {
+      const before = (await page!.evaluate((id) => window.api.mods.jobs(id), coldFunctionId)).map(
+        (job) => job.id
+      )
+      await functionComposer.fill(`/claw-check ${JSON.stringify(input)}`)
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), coldFunctionId)).some(
+            (job) =>
+              !before.includes(job.id) &&
+              job.command === "claw-check" &&
+              job.state === "succeeded" &&
+              JSON.parse(job.result?.text ?? "{}").decision === decision
+          ),
+        "cold pure permission query"
+      )
+    }
+    assert(!existsSync(join(workspace, "permission-never.txt")))
+    assert.equal(
+      await app.evaluate(
+        () => (globalThis as unknown as { modsConfirmations: unknown[] }).modsConfirmations.length
+      ),
+      permissionApprovals
+    )
+    const permissionAfter = await page!.evaluate((id) => window.api.mods.audit(id), coldFunctionId)
+    assert.deepEqual(
+      permissionAfter.map((row) => row.callId),
+      permissionAudit.map((row) => row.callId)
+    )
+    await page!.screenshot({ path: join(artifacts, "function-tool-permission.png") })
+    pass(
+      "cold permission queries return allow/ask with no tool, file, approval or execution receipt"
+    )
+    writeFileSync(join(workspace, "permission-asked.txt"), "ASKED_READ_OK")
+    writeFileSync(join(workspace, "permission-blocked.txt"), "MUST_NOT_READ")
+    for (const file of ["permission-asked.txt", "permission-blocked.txt"]) {
+      await functionComposer.fill(`/claw-tool-read ${file}`)
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.audit(id), coldFunctionId)).some(
+            (row) =>
+              row.identity?.threadId === coldFunctionId &&
+              row.toolId === "host:read_file" &&
+              row.status === (file.includes("asked") ? "succeeded" : "not_started")
+          ),
+        "actual permission verdict"
+      )
+    }
+    const permissionDialogs = await app.evaluate(
+      () =>
+        (
+          globalThis as unknown as {
+            modsConfirmations: Array<{ detail: string }>
+          }
+        ).modsConfirmations
+    )
+    assert(
+      permissionDialogs.some((item) =>
+        item.detail.includes("Permission fixture asks function-commands")
+      )
+    )
+    assert(
+      !(await page!
+        .locator("body")
+        .innerText()
+        .then((text) => text.includes("MUST_NOT_READ")))
+    )
+    pass("actual native reads honor permission ask/deny and expose the protected approval reason")
+    await functionComposer.fill("/foundation-native ")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), coldFunctionId)).some(
+          (job) =>
+            job.command === "foundation-native" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("REDACTED")
+        ),
+      "concurrent cold native SDK calls"
+    )
+    const nativeParent = (
+      await page!.evaluate((id) => window.api.mods.audit(id), coldFunctionId)
+    ).find(
+      (row) =>
+        row.identity?.threadId === coldFunctionId &&
+        row.toolId === "function:mcp__host-foundation__probe"
+    )!
+    const nativeChildren = (
+      await page!.evaluate((id) => window.api.mods.audit(id), coldFunctionId)
+    ).filter((row) => row.identity?.parentCallId === nativeParent.callId)
+    assert.equal(nativeChildren.length, 2)
+    assert(
+      nativeChildren.every(
+        (row) =>
+          row.status === "succeeded" && row.identity?.turnId === nativeParent.identity?.turnId
+      )
+    )
+    pass(
+      "concurrent cold native SDK reads retain parent identity and release their temporary adapters"
+    )
     await functionComposer.fill("/claw-tool-write COLD SDK body")
     await functionComposer.press("Enter")
     await until(
@@ -1216,6 +1328,31 @@ async function main(): Promise<void> {
       0
     )
     pass("model schema violations produce tool errors before the custom handler executes")
+    await functionComposer.fill("[mods-registered-denied] 请验证注册工具的权限拒绝。")
+    await functionComposer.press("Enter")
+    await page!
+      .getByText("REGISTERED_PERMISSION_DENIED_OK", { exact: true })
+      .first()
+      .waitFor({ timeout: 30000 })
+    const deniedRegistered = modelServer.requests.find(
+      (request) =>
+        JSON.stringify(request.messages).includes("[mods-registered-denied]") &&
+        request.messages.at(-1)?.role === "tool"
+    )
+    assert(deniedRegistered)
+    assert.match(
+      JSON.stringify(deniedRegistered.messages.at(-1)?.content),
+      /Permission fixture rejected registered tool/
+    )
+    assert.doesNotMatch(JSON.stringify(deniedRegistered), /sk-permission-fixture/)
+    assert(
+      !(await page!.evaluate((id) => window.api.mods.audit(id), registryThread)).some(
+        (row) => row.identity?.toolCallId === "registered-denied"
+      )
+    )
+    pass(
+      "registered permission rejection becomes a protected model tool error with no guest execution receipt"
+    )
     const beforeFoundation = modelServer.requests.length
     await functionComposer.fill("[mods-foundation] 请读取项目备注并用自定义工具总结。")
     await functionComposer.press("Enter")
@@ -1510,7 +1647,13 @@ async function main(): Promise<void> {
     await page!
       .locator("textarea.composer-textarea")
       .fill("[mods-registered-removed] 请确认撤权后的工具列表。")
-    await page!.locator("textarea.composer-textarea").press("Enter")
+    // Switching a restored thread hydrates history asynchronously. A raw Enter can
+    // reach the submit guard before it is ready; click waits for the real control.
+    await page!
+      .locator("form")
+      .filter({ has: page!.locator("textarea.composer-textarea") })
+      .locator('button[type="submit"]')
+      .click()
     await page!
       .getByText("REGISTERED_TOOL_REMOVED_OK", { exact: true })
       .first()

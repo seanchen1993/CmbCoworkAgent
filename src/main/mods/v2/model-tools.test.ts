@@ -42,6 +42,8 @@ import { ModsManager, setModsManager } from "../manager"
 import { withModToolCall } from "../adapters"
 import { getModCallContext } from "../context"
 import { DEFAULT_MOD_POLICY } from "../policy"
+import { ModPermissionError } from "../errors"
+import { FunctionRegisteredTools } from "./registered-tools"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -359,4 +361,52 @@ it("preserves native parameters whose names collide with reserved event fields",
   expect(functionToolContexts([await f.run(parameters)])).toEqual(["main"])
   expect(f.calls[1].args).toEqual(parameters)
   expect(parameters.agentId).toBe("native agent")
+})
+
+it("returns protected registered-tool permission denials as model tool errors without running the handler", async () => {
+  const f = await fixture(`on("session.start",async($,e,next)=>{
+    await $.tool.register({name:"probe",description:"Probe"});return next(e)
+  });on("tool.call",{tool:"mcp__demo__probe"},()=>({result:"must not run"}));`)
+  await f.session.registeredTools()
+  const grant = f.manager.store.getGrant(f.workspace, "function:demo")!
+  const run = vi.fn(async () => ({ result: "must not run" }))
+  const registered = new FunctionRegisteredTools(f.manager.store, {
+    assertScope: () => {},
+    admit: async () => {
+      throw new ModPermissionError("protected rule explanation")
+    },
+    publish: async (_, value) => value
+  })
+  f.manager.attachFunctions({
+    invalidate: () => {},
+    close: () => {},
+    closeThread: () => {},
+    toolCall: (scope, input) =>
+      registered.call(
+        f.workspace,
+        "thread",
+        grant,
+        input,
+        "model",
+        scope.signal ?? new AbortController().signal,
+        run
+      )
+  })
+  const native = vi.fn()
+  const call = (signal?: AbortSignal) =>
+    withModToolCall(
+      { workspace: f.workspace, threadId: "thread", turnId: "turn", signal },
+      { toolCall: { name: "mcp__demo__probe", id: "denied", args: {} } },
+      new Set(),
+      native
+    )
+  expect(await call()).toMatchObject({
+    tool_call_id: "denied",
+    status: "error",
+    content: "MODS_TOOL_PERMISSION_DENIED: protected rule explanation"
+  })
+  expect(run).not.toHaveBeenCalled()
+  expect(native).not.toHaveBeenCalled()
+  expect(f.manager.store.audit(f.workspace)).toEqual([])
+  await expect(call(AbortSignal.abort())).rejects.toThrow()
 })

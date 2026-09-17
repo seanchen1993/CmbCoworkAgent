@@ -261,3 +261,51 @@ it("runs the official registry fixture through a real VM and serves both SDK and
   await session.close()
   await expect(session.registeredTools()).rejects.toThrow("MODS_SESSION_CLOSED")
 })
+
+it("separates the actual SDK caller from the registered tool owner during admission", async () => {
+  const plugins = await Promise.all(
+    [
+      [
+        "owner",
+        `on("session.start",async($,e,next)=>{await $.tool.register({name:"probe",description:"Probe"});return next(e)});
+      on("tool.call",{tool:"mcp__owner__probe"},()=>({result:"ok"}));`
+      ],
+      [
+        "caller",
+        `on("session.start",async($,e,next)=>{await $.command.register({name:"cross",description:"Cross"});return next(e)});
+      on("command.run",{command:"cross"},async($)=>({text:JSON.stringify(await $.tool.call({tool:"mcp__owner__probe"}))}));`
+      ]
+    ].map(async ([name, body]) => ({
+      name,
+      root: "/plugin",
+      tier: "user" as const,
+      guest: await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){${body}}}`),
+      capabilities: [...SESSION_CAPABILITIES]
+    }))
+  )
+  const origins: unknown[] = []
+  const session = new FunctionSession(plugins, {
+    workspace: "/project",
+    threadId: "thread",
+    assertLive: () => {},
+    publish: async (value) => value,
+    registeredTool: async (owner, _input, kind, _signal, run, caller) => {
+      expect(owner.name).toBe("owner")
+      origins.push([kind, caller])
+      return run()
+    }
+  })
+  sessions.push(session)
+  expect(JSON.parse(String((await session.run("cross", "")).text))).toEqual({ result: "ok" })
+  expect(
+    await session.interceptTool(
+      { tool: "mcp__owner__probe", tool_use_id: "real" },
+      undefined,
+      async () => ({})
+    )
+  ).toEqual({ result: "ok" })
+  expect(origins).toEqual([
+    ["mod", { plugin: "caller", tier: "user" }],
+    ["model", { plugin: "engine", tier: "core" }]
+  ])
+})

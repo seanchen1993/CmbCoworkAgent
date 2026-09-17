@@ -305,6 +305,51 @@ void app.whenReady().then(async () => {
       "official MCP SDK fixture preserves structured blocks and host context across utilityProcess"
     )
 
+    const permissionPlugin = await compileFunctionPlugin(
+      join(root, "tests/fixtures/mods-v2/tool-check")
+    )
+    let permissionCalls = 0
+    const permissionSession = new FunctionSession(
+      [
+        {
+          name: permissionPlugin.name,
+          root: permissionPlugin.root,
+          tier: "user",
+          guest: await client.load(permissionPlugin.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      {
+        workspace: root,
+        threadId: "permission",
+        assertLive: () => {},
+        publish: async (value) => value,
+        callTool: async () => {
+          throw Error("Permission query invoked a tool")
+        },
+        checkTool: async (plugin, input) => {
+          assert.equal(toolContext.getStore(), "permission authority")
+          assert.equal(plugin.name, "tool-check")
+          assert.equal(input.tool, "Read")
+          assert.equal(input.tool_use_id, undefined)
+          permissionCalls++
+          return { decision: "ask", reason: String((input.input as ModObject).file_path) }
+        }
+      }
+    )
+    for (const [args, file] of [
+      ["", "fixture.txt"],
+      ["rewrite", "original.txt"]
+    ]) {
+      const answer = await toolContext.run("permission authority", () =>
+        permissionSession.run("permission-probe", args)
+      )
+      assert.deepEqual(JSON.parse(String(answer.text)), { decision: "ask", reason: file })
+      checks.push(`official permission query preserves bare result and pinned input: ${file}`)
+    }
+    assert.equal(permissionCalls, 4)
+    await permissionSession.close()
+
     const registryPlugin = await compileFunctionPlugin(
       join(root, "tests/fixtures/mods-v2/tool-registry")
     )

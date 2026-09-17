@@ -18,6 +18,10 @@ const tools: Record<string, { target: string; required: string[]; optional: stri
   task_output: { target: "host:task_output", required: ["task_id"], optional: [] }
 }
 
+export function isNativeFunctionTool(name: string): boolean {
+  return Object.hasOwn(tools, name)
+}
+
 export function functionToolTarget(input: ModObject): { target: string; args: ModObject } {
   const spec =
     typeof input.tool === "string" && Object.hasOwn(tools, input.tool)

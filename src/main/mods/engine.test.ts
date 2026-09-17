@@ -6,6 +6,9 @@ import { ModControlStore } from "./control-store"
 import { ModGuestRuntime } from "./guest-runtime"
 import { ModEngine, type ModDispatchRequest, type ModRuntime } from "./engine"
 import type { ModManifest, ModCard } from "../../shared/mods/types"
+import { beforeModToolExecution } from "./execution-error"
+import { ModError } from "./errors"
+import { modCallContext, getModCallContext } from "./context"
 
 class LocalRuntime implements ModRuntime {
   guests = new Map<string, ModGuestRuntime>()
@@ -84,6 +87,32 @@ async function fixture(body: string, options: Partial<ModManifest> = {}) {
 }
 
 describe("Mod execution contract", () => {
+  it.each(["admission", "lost-reply", "foreign-receipt"])(
+    "keeps %s execution facts distinct without treating a child failure as proof about its parent",
+    async (mode) => {
+      const f = await fixture("")
+      await expect(
+        f.engine.dispatch(f.request, async () => {
+          if (mode === "admission")
+            return beforeModToolExecution(() => {
+              throw new ModError("MODS_USER_REJECTED")
+            })
+          if (mode === "foreign-receipt")
+            return modCallContext.run(
+              { ...getModCallContext()!, identity: { ...f.request.identity, callId: "child" } },
+              () =>
+                beforeModToolExecution(() => {
+                  throw new ModError("MODS_USER_REJECTED")
+                })
+            )
+          throw Error("lost response")
+        })
+      ).rejects.toThrow()
+      expect(f.store.audit("workspace")[0].status).toBe(
+        mode === "admission" ? "not_started" : "unknown"
+      )
+    }
+  )
   it("records a pre-execution denial without inventing execution or publishing arguments", async () => {
     const f = await fixture(
       'on.tool({id:"deny",tools:["host:write_file"]},async()=>({kind:"deny"}))'

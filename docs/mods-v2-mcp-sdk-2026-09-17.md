@@ -41,6 +41,9 @@
 
 ## 上游对照与差异
 
+后续权限批已接入 `tool.check`、原生权限探针和执行前复核；本节以下的“下一阶段”是本 MCP
+批交付时的记录。当前范围见 [权限机制复核](mods-v2-tool-permission-2026-09-17.md)。
+
 新增 fixture `tests/fixtures/mods-v2/mcp-sdk`。3 项测试已在真正的 2.1.273 `plugin test`
 运行：默认参数与调用方 origin、结构化/错误结果、拒绝操作。累计上游契约证据由 33 项
 增至 36 项；该测试不连接外部 MCP，不证明 OAuth、远端服务或完整产品行为。
