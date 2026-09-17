@@ -9,10 +9,11 @@ export const FUNCTION_UI_CAPABILITIES = [
   "ui.invalidate"
 ] as const
 export interface FunctionUiElement {
-  type: "Box" | "Text" | "Button" | "Input" | "Select" | "Link" | "Code"
+  type: "Box" | "Text" | "Button" | "Input" | "Select" | "Link" | "Code" | "Client"
   props: ModObject
   children?: (FunctionUiElement | string)[]
   press?: { plugin: string; handle: number }
+  client?: { plugin: string }
 }
 export interface FunctionPaneSnapshot {
   key: string
@@ -23,6 +24,23 @@ export interface FunctionPaneSnapshot {
   tree: FunctionUiElement
   closeOnEscape: boolean
   rows: number
+  clients?: FunctionClientSnapshot[]
+}
+export interface FunctionClientSnapshot {
+  id: string
+  plugin: string
+  element: string
+  module: string
+  tree: FunctionUiElement
+  error?: string
+}
+export interface FunctionClientAction {
+  pane: string
+  instance: string
+  intentId: string
+  kind: "press" | "change" | "submit" | "select" | "key" | "pointer" | "resize"
+  handle?: number
+  value?: ModJson
 }
 export interface FunctionUiAction {
   pane: string
@@ -66,7 +84,8 @@ const props: Record<FunctionUiElement["type"], readonly string[]> = {
   Input: ["key", "label", "placeholder", "value", "submitLabel", "autoFocus"],
   Select: ["key", "label", "options", "value", "autoFocus"],
   Link: ["href", "label"],
-  Code: ["source", "language", "path", "startLine", "format", "wrap"]
+  Code: ["source", "language", "path", "startLine", "format", "wrap"],
+  Client: ["key", "module", "props", "width", "height", "flexGrow"]
 }
 const text = (value: unknown, max = 10000): value is string =>
   typeof value === "string" &&
@@ -108,7 +127,9 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       typeof node.type !== "string" ||
       !Object.hasOwn(props, node.type) ||
       !isModObject(node.props) ||
-      Object.keys(node).some((key) => !["type", "props", "children", "press"].includes(key))
+      Object.keys(node).some(
+        (key) => !["type", "props", "children", "press", "client"].includes(key)
+      )
     )
       fail()
     const item = node as unknown as FunctionUiElement
@@ -116,6 +137,7 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
     for (const [key, value] of Object.entries(p)) {
       if (!props[item.type].includes(key)) fail()
       if (key === "options") continue
+      if (key === "props" && item.type === "Client") continue
       if (
         ["bold", "italic", "underline", "strikethrough", "dimColor"].includes(key) &&
         typeof value !== "boolean"
@@ -131,6 +153,7 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
           "margin",
           "marginX",
           "marginY",
+          "flexGrow",
           "startLine"
         ].includes(key) &&
         typeof value !== "number"
@@ -183,6 +206,23 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       if (keys.has(address)) fail()
       keys.add(address)
     } else if (item.press) fail()
+    if (item.type === "Client") {
+      if (
+        !text(p.key, 256) ||
+        !p.key ||
+        !text(p.module, 1024) ||
+        /[\\:]/.test(p.module) ||
+        p.module.startsWith("/") ||
+        p.module.split("/").some((part) => !part || part === "." || part === "..") ||
+        !isModObject(item.client) ||
+        Object.keys(item.client).some((key) => key !== "plugin") ||
+        !text(item.client.plugin, 100)
+      )
+        fail()
+      const address = JSON.stringify([item.client!.plugin, p.key])
+      if (keys.has(address)) fail()
+      keys.add(address)
+    } else if (item.client) fail()
     if (item.type === "Button" && !text(p.label, 1000)) fail()
     if (item.type === "Select") {
       if (!Array.isArray(p.options) || !p.options.length || p.options.length > 200) fail()

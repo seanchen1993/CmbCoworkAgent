@@ -20,12 +20,15 @@ export const SESSION_CAPABILITIES = [...BASIC_CAPABILITIES, ...FUNCTION_UI_CAPAB
 import type { FunctionStateAccess } from "./state-store"
 import { FILE_CAPABILITIES, type FunctionFileAccess } from "./file-access"
 import { resolve } from "node:path"
+import { FunctionClients } from "./clients"
+import type { FunctionGuest } from "../../../shared/mods/v2/contracts"
 
 export interface FunctionSessionHost {
   threadId: string
   workspace: string
   assertLive(plugin?: FunctionPlugin): void
   uiChanged?(): void
+  loadClient?(plugin: string, module: string): Promise<FunctionGuest>
   scheduleCommand?(
     command: FunctionCommand,
     signal: AbortSignal,
@@ -45,6 +48,7 @@ export interface FunctionSessionHost {
 /** A session keeps registration state and VMs across turns; every call still has its own frame. */
 export class FunctionSession {
   readonly panes: FunctionPanes
+  readonly clients: FunctionClients
   private readonly controller = new AbortController()
   private readonly registry = new Map<string, FunctionCommand>()
   private readonly dispatcher: FunctionDispatcher
@@ -55,7 +59,25 @@ export class FunctionSession {
     private readonly host: FunctionSessionHost
   ) {
     this.dispatcher = new FunctionDispatcher(plugins)
+    this.clients = new FunctionClients({
+      assertLive: () => this.assertLive(),
+      changed: () => this.panes.notify(),
+      publish: (value) => this.host.publish(value, this.controller.signal),
+      load: (plugin, module) => {
+        if (!this.host.loadClient) throw new ModFunctionError("MODS_CLIENT_UNAVAILABLE")
+        return this.host.loadClient(plugin, module)
+      },
+      message: (plugin, input, signal) =>
+        this.dispatch("ui.message", input, signal, undefined, 0, undefined, undefined, {
+          onlyPlugin: plugin,
+          origin: { plugin: "client", tier: "core" },
+          core: async () => ({})
+        }),
+      control: (event, input, core, signal) =>
+        this.dispatch(event, input, signal, undefined, 0, undefined, undefined, { core })
+    })
     this.panes = new FunctionPanes({
+      clients: this.clients,
       plugins,
       assertLive: () => this.assertLive(),
       changed: () => this.host.uiChanged?.(),
@@ -196,9 +218,11 @@ export class FunctionSession {
       : this.controller.signal
     const result = await this.dispatcher.dispatch(event, input, {
       skip,
+      onlyPlugin: presentation?.onlyPlugin,
       signal: scopedSignal,
       operation: isOperation,
-      ...(event === "command.run" || ["ui.press", "ui.input", "ui.select"].includes(event)
+      ...(event === "command.run" ||
+      ["ui.press", "ui.input", "ui.select", "ui.message"].includes(event)
         ? { timeoutMs: 120000 }
         : {}),
       ...(presentation?.generation ? { uiGeneration: presentation.generation } : {}),
@@ -243,7 +267,9 @@ export class FunctionSession {
         if (name === "session.start" && typeof value.cwd !== "string")
           throw new ModFunctionError("MODS_SESSION_START_RESULT")
       },
-      origin: skip ? { plugin: skip.plugin, tier: "user" } : { plugin: "engine", tier: "core" },
+      origin:
+        presentation?.origin ??
+        (skip ? { plugin: skip.plugin, tier: "user" } : { plugin: "engine", tier: "core" }),
       core: async (_, e): Promise<ModJson> => {
         this.assertLive(operation?.plugin)
         if (presentation?.core) return presentation.core(e, scopedSignal)
@@ -388,6 +414,7 @@ export class FunctionSession {
   async close(): Promise<void> {
     this.controller.abort(new ModFunctionError("MODS_SESSION_CLOSED"))
     this.panes.close()
+    this.clients.close()
     this.registry.clear()
     await Promise.allSettled(this.plugins.map((plugin) => plugin.guest.dispose()))
   }

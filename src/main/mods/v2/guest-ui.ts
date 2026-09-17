@@ -26,7 +26,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
         asyncScope.plugin !== meta.plugin.name || asyncScope.requestId !== input.requestId)
       throw Error("MODS_UI_SURFACE_UNAVAILABLE");
     const table = Object.create(null);
-    for (const name of ["Box", "Text", "Button", "Input", "Select", "Link", "Code"]) {
+    for (const name of ["Box", "Text", "Button", "Input", "Select", "Link", "Code", "Client"]) {
       table[name] = raw => {
         const scope = asyncScope;
         if (!scope || scope.event !== "ui.render" || !scope.uiGeneration ||
@@ -46,6 +46,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
             typeof children[0] === "string") props.label = children[0];
         if (name === "Button" && props.key === undefined) props.key = props.label;
         const tree = { type: name, props };
+        if (name === "Client") tree.client = { plugin: scope.plugin };
         if (name === "Box" || name === "Text" || name === "Link") tree.children = children;
         if (["Button", "Input", "Select"].includes(name)) {
           const primary = name === "Button" ? "onPress" : name === "Select" ? "onSelect" : "onInput";
@@ -82,10 +83,16 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
     if (depth > 24) throw Error("MODS_UI_DEPTH");
     if (!tree || typeof tree !== "object") return;
     if (tree.press) visit(tree.press);
+    if (tree.client) visit({ client: tree.client.plugin, module: tree.props?.module, key: tree.props?.key });
     if (Array.isArray(tree.children)) for (const child of tree.children) uiHandles(child, visit, depth + 1);
   }
   function uiProvenance(tree, meta, inherited) {
     uiHandles(tree, press => {
+      if (press.client) {
+        if (press.client !== meta.plugin.name && !inherited.has(pack(press)))
+          throw Error("MODS_UI_ACTION_OWNER");
+        return;
+      }
       const record = press.plugin === meta.plugin.name && uiCallbacks.get(press.handle);
       if (record ? record.generation !== meta.uiGeneration : !inherited.has(pack(press)))
         throw Error("MODS_UI_ACTION_OWNER");

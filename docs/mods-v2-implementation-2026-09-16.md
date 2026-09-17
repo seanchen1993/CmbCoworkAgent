@@ -165,8 +165,8 @@ pending 与 call 均为零。报告 `panes-process-reviewed.txt`。
 回调、消息流和 checkpoint 能同时得到改写文本。此测试用模拟模型，不证明真实多供应商、
 工具参数片段、签名 thinking 或所有流出口已经接通。
 
-Client 原型证明独立 VM 的状态、尺寸、输入、重复按钮、定时器及销毁可以隔离。
-它还不是接入 React 的 Pane，更不能称官方 diff 插件已经原文件可用。
+最初 Client 原型只验证独立 VM；2026-09-17 已接入真实 React Pane，具体范围见下节。
+这仍不能证明官方 diff 插件原文件可用。
 
 第二批增加 `tests/fixtures/mods-v2/basic-session`：同一模块在官方 `plugin test` 和
 CMB 生产 FunctionSession 上验证 SDK 操作返回、事件嵌套、注册结果及 void 值。
@@ -218,7 +218,37 @@ Claude 2.1.273 的测试 SDK 外层流在实测中不暴露可用的 `.result`�
   `vitest-panes-full.json`、`panes-failure-comparison.json`、`panes-background-rerun.json`。
   后续移除多余 await 的性能修正由专项与真实应用 E2E 回检。
 
-## 待完成的验证
+## Client 组件集成（2026-09-17）
+
+`<Client key module props>` 现在从批准快照加载独立 QuickJS VM，接入实际 Pane。
+同一 key/module 在父面板重绘时保留状态；移除、关闭、撤权及会话删除均清理组件。
+状态、尺寸、输入、选择、键盘、指针、计时器、消息端口已接通；`ui.message` 只进入所属
+插件。示例 `/claw-client` 能本地计数、保存消息、显示宿主确认并保持父面板重绘后的状态。
+
+检视补上三个生命周期边界：面板关闭时取消正在等待的宿主 hook；发布等待期间关闭面板
+不再创建组件；外层 props 更新不会被延迟消息帧覆盖。组件生成的内容、消息和最终快照
+经过适用输出策略。旧控件、卸载组件及伪造实例动作均拒绝。计时器积压合并，失败组件单独停止。
+
+同一 Client 描述符夹具在官方 2.1.273 `plugin test` 通过，累计 29 个对照场景；官方测试
+界面不提供完整 Client 交互驱动，未把自己的生命周期测试当作全部上游行为一致的证据。
+同步组件绘制/回调、静态模块、资源限额和网格尺寸估算等边界见作者文档和兼容矩阵。
+
+验证：Client 单测 10/10；完整 Node/Web 类型检查通过；定向 lint 0 错误、19 个已有
+preload 格式告警。实际 Electron E2E 22 组通过，覆盖组件点击、宿主回传、父重绘保留
+计数、输入/选择/键盘/时钟、尺寸、Escape 焦点返回以及关闭后旧动作拒绝。截图已人工检视。
+其后补入的取消与默认 props 边界由专项和全量回归验证，未重新计为新的 E2E 场景。
+
+最终跨进程 30 项通过；20 次预热后 100 次测量，Client 快照/点击/消息回传 P50 1.96 ms、
+P95 3.31 ms；普通两层 hook P95 6.09 ms，含 SQLite 的 Pane 操作 P95 9.52 ms。
+Client 消息存储使用内存夹具，这些数字不代表真实模型或完整应用开销。卸载后所有计数归零。
+报告：`client-process-final.txt`、`client-e2e.txt`、`client-narrow.txt`、`client-types.txt`。
+
+本批全量 Vitest 3253 项：3221 通过、27 失败、5 跳过。26 个失败与项目读取批基线同名；
+额外的浏览器录制脚本用例随后单独复跑通过，剩下原有 Windows 上传路径断言失败。
+完整回归仍非全绿；报告 `vitest-client-full.json`、`client-failure-comparison.json`、
+`client-browser-rerun.json` 保留原始结果。
+
+## 后续集成与验收
 
 基础批 standalone 回归 81 项中 72 通过、9 失败；9 个失败与 v1 对照基线一致。
 实际应用 UI E2E 的命令场景已接通；v2 真实模型与 MCP SDK、长时资源压力、最终安装包

@@ -978,6 +978,10 @@ interface CustomAPI {
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction
     ): Promise<void>
+    clientAct(
+      threadId: string,
+      action: import("../shared/mods/v2/ui").FunctionClientAction
+    ): Promise<void>
     approveFunction(threadId: string, pluginId: string, digest: string): Promise<void>
     revokeFunction(threadId: string, name: string): Promise<void>
     status(threadId: string): Promise<import("../shared/mods/types").ModWorkspaceStatus>

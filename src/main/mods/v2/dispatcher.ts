@@ -24,6 +24,7 @@ export interface FunctionPlugin {
 }
 
 export interface FunctionDispatchOptions {
+  onlyPlugin?: string
   skip?: { plugin: string; registration: string }
   origin?: ModOrigin
   signal?: AbortSignal
@@ -71,6 +72,7 @@ export class FunctionDispatcher {
     const origin = options.origin ?? { plugin: "engine", tier: "core" }
     // Snapshot the chain: reload cannot change what next() means midway through a dispatch.
     const chain = [...this.plugins]
+      .filter((plugin) => !options.onlyPlugin || plugin.name === options.onlyPlugin)
       .sort((a, b) => MOD_TIERS.indexOf(a.tier) - MOD_TIERS.indexOf(b.tier))
       .flatMap((plugin) =>
         plugin.guest.registrations

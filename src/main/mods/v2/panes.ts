@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import {
@@ -16,6 +16,8 @@ import {
 import type { FunctionPlugin } from "./dispatcher"
 
 export interface FunctionUiDispatch {
+  onlyPlugin?: string
+  origin?: import("../../../shared/mods/v2/contracts").ModOrigin
   signal?: AbortSignal
   generation?: string
   operation?: boolean
@@ -25,6 +27,7 @@ interface Pane extends FunctionPaneSnapshot {
   dirty: boolean
 }
 interface PaneHost {
+  clients?: import("./clients").FunctionClients
   plugins: readonly FunctionPlugin[]
   assertLive(): void
   changed(): void
@@ -62,6 +65,10 @@ export class FunctionPanes {
     this.notification.unref()
   }
 
+  notify(): void {
+    this.changed()
+  }
+
   open(plugin: string, input: ModObject): void {
     this.host.assertLive()
     validatePaneArgs(input)
@@ -87,6 +94,7 @@ export class FunctionPanes {
     const pane = this.panes.get(`${plugin}:${id}`)
     if (!pane) return
     this.panes.delete(pane.key)
+    this.host.clients?.closePane(pane.key)
     for (const [controller, key] of this.active)
       if (cancelActions && key === pane.key)
         controller.abort(new ModFunctionError("MODS_UI_PANE_CLOSED"))
@@ -151,6 +159,7 @@ export class FunctionPanes {
         }
       }
       this.host.assertLive()
+      const originals = new Map(this.panes)
       const snapshots = [...this.panes.values()].map(
         ({ key, id, plugin, title, generation, tree, closeOnEscape, rows }) =>
           parseModJson(
@@ -161,6 +170,7 @@ export class FunctionPanes {
       this.host.assertLive()
       if (!Array.isArray(published) || published.length !== snapshots.length)
         throw new ModFunctionError("MODS_UI_PUBLICATION")
+      const visible: ModJson[] = []
       for (let index = 0; index < snapshots.length; index++) {
         const result = published[index]
         const original = snapshots[index] as unknown as ModObject
@@ -173,8 +183,23 @@ export class FunctionPanes {
         )
           throw new ModFunctionError("MODS_UI_PUBLICATION")
         validateFunctionTree(result.tree)
+        const current = () =>
+          this.panes.get(result.key as string) === originals.get(result.key as string)
+        if (!current()) continue
+        if (this.host.clients)
+          result.clients = (await this.host.clients.reconcile(
+            result.key as string,
+            result.id as string,
+            result.generation as string,
+            result.tree
+          )) as unknown as ModJson
+        if (!current()) {
+          this.host.clients?.closePane(result.key as string)
+          continue
+        }
+        visible.push(result)
       }
-      return published as unknown as FunctionPaneSnapshot[]
+      return visible as unknown as FunctionPaneSnapshot[]
     })
   }
 
@@ -197,7 +222,7 @@ export class FunctionPanes {
         (typeof action.value !== "string" || action.value.length > 10000))
     )
       return Promise.reject(new ModFunctionError("MODS_UI_ACTION_INVALID"))
-    const input = encodeModJson(action)
+    const input = createHash("sha256").update(encodeModJson(action)).digest("hex")
     const prior = this.intents.get(action.intentId)
     if (prior)
       return prior.input === input

@@ -17,6 +17,7 @@ import { FunctionModsManager } from "../mods/v2/manager"
 import { FunctionRuntimeClient } from "../mods/v2/runtime-client"
 import { scheduleFunctionCommand } from "../mods/v2/command-scheduler"
 import type { FunctionUiAction } from "../../shared/mods/v2/ui"
+import type { FunctionClientAction } from "../../shared/mods/v2/ui"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -154,6 +155,17 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   })
   ipcMain.handle("mods:function-panes", (event, threadId: string) =>
     functions.panes(scope(event, threadId), threadId)
+  )
+  ipcMain.handle(
+    "mods:function-client-act",
+    (event, input: { threadId: string; action: FunctionClientAction }) => {
+      const workspace = writableScope(event, input?.threadId)
+      return functions.clientAct(
+        workspace,
+        input.threadId,
+        parseModJson(encodeModJson(input.action)) as unknown as FunctionClientAction
+      )
+    }
   )
   ipcMain.handle(
     "mods:function-ui-act",

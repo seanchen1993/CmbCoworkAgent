@@ -15,6 +15,7 @@ import {
 } from "../../services/stable-file-handle"
 import { modCompiler, resolveModFile } from "../loader"
 import { normalizePluginRelativePath, readPluginManifest } from "../../plugins/manifest"
+import { resolveClientModules } from "./client-loader"
 
 export interface CompiledFunctionPlugin {
   name: string
@@ -24,6 +25,7 @@ export interface CompiledFunctionPlugin {
   code: string
   options: ModObject
   sources: string[]
+  clients: Record<string, string>
 }
 
 async function read(root: string, path: string, limit: number): Promise<Buffer> {
@@ -94,68 +96,65 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
   const { build, version } = modCompiler()
   let bytes = 0
   let files = 0
-  const output = await build({
-    stdin: {
-      contents:
-        modules
-          .map(
-            (path, i) =>
-              `import { register as r${i} } from ${JSON.stringify("./" + path.replace(/\\/g, "/"))}`
-          )
-          .join("\n") +
-        `\nexport function register(on, options) { ${modules.map((_, i) => `const v${i} = r${i}(on, options); if (v${i} && typeof v${i}.then === "function") throw Error("MODS_ASYNC_REGISTER");`).join(" ")} }`,
-      resolveDir: root,
-      loader: "js"
-    },
-    bundle: true,
-    write: false,
-    format: "iife",
-    globalName: "__cmbFunctionMod",
-    platform: "neutral",
-    target: "es2016",
-    jsxFactory: "__functionJsx",
-    jsxFragment: "__functionFragment",
-    logLevel: "silent",
-    plugins: [
-      {
-        name: "mods-v2-snapshot",
-        setup(builder) {
-          builder.onResolve({ filter: /.*/ }, (args) => {
-            if (args.kind === "dynamic-import" || !args.path.startsWith("."))
-              throw Error("MODS_IMPORT_DENIED")
-            const requested = resolve(
-              args.importer && args.importer !== "<stdin>" ? dirname(args.importer) : root,
-              args.path
-            )
-            const candidates = extname(requested)
-              ? [requested]
-              : [".ts", ".tsx", ".js", ".jsx", "/index.ts"].map((s) => requested + s)
-            for (const candidate of candidates) {
-              try {
-                return {
-                  path: resolveModFile(root, relative(root, candidate)),
-                  namespace: "function-mod"
+  const clientModules = new Set<string>()
+  const buildModule = (contents: string, globalName: string, surface = false) =>
+    build({
+      stdin: {
+        contents,
+        resolveDir: root,
+        loader: "js"
+      },
+      bundle: true,
+      write: false,
+      format: "iife",
+      globalName,
+      platform: "neutral",
+      target: "es2016",
+      jsxFactory: "__functionJsx",
+      jsxFragment: "__functionFragment",
+      logLevel: "silent",
+      plugins: [
+        {
+          name: "mods-v2-snapshot",
+          setup(builder) {
+            builder.onResolve({ filter: /.*/ }, (args) => {
+              if (args.kind === "dynamic-import" || !args.path.startsWith("."))
+                throw Error("MODS_IMPORT_DENIED")
+              const requested = resolve(
+                args.importer && args.importer !== "<stdin>" ? dirname(args.importer) : root,
+                args.path
+              )
+              const candidates = extname(requested)
+                ? [requested]
+                : [".ts", ".tsx", ".js", ".jsx", "/index.ts"].map((s) => requested + s)
+              for (const candidate of candidates) {
+                try {
+                  return {
+                    path: resolveModFile(root, relative(root, candidate)),
+                    namespace: "function-mod"
+                  }
+                } catch (error) {
+                  if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT")
+                    throw error
                 }
-              } catch (error) {
-                if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT")
-                  throw error
               }
-            }
-            throw Error("MODS_IMPORT_MISSING")
-          })
-          builder.onLoad({ filter: /.*/, namespace: "function-mod" }, async (args) => {
-            const extension = extname(args.path)
-            if (![".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs"].includes(extension))
-              throw Error("MODS_IMPORT_TYPE")
-            const file = resolveModFile(root, relative(root, args.path))
-            const size = statSync(file).size
-            bytes += size
-            if (++files > 128 || bytes > 2 * 1024 * 1024) throw Error("MODS_SOURCE_LIMIT")
-            const content = await read(root, file, size)
-            captured.set(relative(root, file).replace(/\\/g, "/"), content.toString("utf8"))
-            return {
-              contents: content,
-              loader:
+              throw Error("MODS_IMPORT_MISSING")
+            })
+            builder.onLoad({ filter: /.*/, namespace: "function-mod" }, async (args) => {
+              const extension = extname(args.path)
+              if (![".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs"].includes(extension))
+                throw Error("MODS_IMPORT_TYPE")
+              const file = resolveModFile(root, relative(root, args.path))
+              const key = relative(root, file).replace(/\\/g, "/")
+              let content = captured.get(key)
+              if (content === undefined) {
+                const size = statSync(file).size
+                bytes += size
+                if (++files > 128 || bytes > 2 * 1024 * 1024) throw Error("MODS_SOURCE_LIMIT")
+                content = (await read(root, file, size)).toString("utf8")
+                captured.set(key, content)
+              }
+              const loader =
                 extension === ".tsx"
                   ? "tsx"
                   : extension === ".jsx"
@@ -163,14 +162,46 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
                     : extension.endsWith("ts")
                       ? "ts"
                       : "js"
-            }
-          })
+              if (!surface) {
+                const result = resolveClientModules(content, loader, file, root)
+                for (const module of result.modules) clientModules.add(module)
+                return { contents: result.code, loader: "js" }
+              }
+              return {
+                contents: content,
+                loader
+              }
+            })
+          }
         }
-      }
-    ]
-  })
+      ]
+    })
+  const output = await buildModule(
+    modules
+      .map(
+        (path, i) =>
+          `import { register as r${i} } from ${JSON.stringify("./" + path.replace(/\\/g, "/"))}`
+      )
+      .join("\n") +
+      `\nexport function register(on, options) { ${modules.map((_, i) => `const v${i} = r${i}(on, options); if (v${i} && typeof v${i}.then === "function") throw Error("MODS_ASYNC_REGISTER");`).join(" ")} }`,
+    "__cmbFunctionMod"
+  )
   const code = output.outputFiles[0]?.text
   if (!code || Buffer.byteLength(code) > 2 * 1024 * 1024) throw Error("MODS_BUNDLE_LIMIT")
+  const clients: Record<string, string> = Object.create(null)
+  if (clientModules.size > 16) throw Error("MODS_CLIENT_MODULE_LIMIT")
+  let bundleBytes = Buffer.byteLength(code)
+  for (const module of [...clientModules].sort()) {
+    const output = await buildModule(
+      `import * as surface from ${JSON.stringify("./" + module)}; export default surface.default; export * from ${JSON.stringify("./" + module)}`,
+      "__cmbSurfaceMod",
+      true
+    )
+    const source = output.outputFiles[0]?.text
+    if (!source || (bundleBytes += Buffer.byteLength(source)) > 2 * 1024 * 1024)
+      throw Error("MODS_BUNDLE_LIMIT")
+    clients[module] = source
+  }
   const digest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -179,6 +210,7 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
         hostRevision: FUNCTION_HOST_REVISION,
         version,
         code,
+        clients,
         sources: [...captured].sort(([a], [b]) => a.localeCompare(b))
       })
     )
@@ -189,6 +221,7 @@ export async function compileFunctionPlugin(directory: string): Promise<Compiled
     profile: CLAUDE_MODS_PROFILE,
     digest,
     code,
+    clients,
     options,
     sources: [...captured.keys()].sort()
   }

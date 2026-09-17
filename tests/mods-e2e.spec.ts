@@ -716,6 +716,58 @@ async function main(): Promise<void> {
     await page!.screenshot({ path: join(artifacts, "function-pane.png") })
     await board.getByRole("button", { name: "关闭 我的 Claw", exact: true }).click()
     await board.waitFor({ state: "detached" })
+    await functionComposer.fill("/claw-client ")
+    await functionComposer.press("Enter")
+    const clientPane = page!.locator('[data-function-pane="claw-client"]')
+    const clientRegion = clientPane.locator('[data-function-client="workbench"]')
+    await clientRegion.getByText(/本地计数：0/).waitFor()
+    await clientRegion.getByRole("button", { name: "本地加一", exact: true }).click()
+    await clientRegion.getByText(/宿主已收到点击.*本地计数：1/).waitFor()
+    await clientRegion.getByRole("button", { name: "重绘面板", exact: true }).click()
+    await clientRegion.getByText(/交互组件.*本地计数：1/).waitFor()
+    await clientRegion
+      .getByRole("textbox", { name: "组件备注", exact: true })
+      .fill("Client 本地状态")
+    await clientRegion.getByRole("button", { name: "确认", exact: true }).click()
+    await clientRegion
+      .getByRole("combobox", { name: "组件模式", exact: true })
+      .selectOption("build")
+    await clientRegion.getByText("备注：Client 本地状态 · 模式：构建", { exact: true }).waitFor()
+    await clientRegion.focus()
+    await clientRegion.press("ArrowUp")
+    await clientRegion.getByText(/本地计数：2/).waitFor()
+    await clientRegion.getByText(/时钟：[1-9].*尺寸：[1-9]/).waitFor()
+    await clientRegion.press("Escape")
+    assert.equal(await clientRegion.evaluate((el) => document.activeElement === el), false)
+    const clientSnapshot = (await page!.evaluate((id) => window.api.mods.panes(id), threadId)).find(
+      (p) => p.id === "claw-client"
+    )!.clients![0]
+    await page!.screenshot({ path: join(artifacts, "function-client.png") })
+    await clientPane.getByRole("button", { name: "关闭 Claw 交互工作台", exact: true }).click()
+    await clientPane.waitFor({ state: "detached" })
+    assert.equal(
+      await page!.evaluate(
+        async ({ threadId, client }) => {
+          try {
+            await window.api.mods.clientAct(threadId, {
+              pane: "function-commands:claw-client",
+              instance: client.id,
+              intentId: crypto.randomUUID(),
+              kind: "key",
+              value: { key: "up" }
+            })
+            return false
+          } catch {
+            return true
+          }
+        },
+        { threadId, client: clientSnapshot }
+      ),
+      true
+    )
+    pass(
+      "isolated Client renders real controls, persists state across parent redraw, posts to hooks, measures and ticks, then rejects unmounted input"
+    )
     await functionComposer.fill("/claw-board ")
     await functionComposer.press("Enter")
     await board.getByText("点击次数：2", { exact: true }).waitFor()

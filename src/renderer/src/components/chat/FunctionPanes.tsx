@@ -8,6 +8,7 @@ import {
   type FunctionUiAction
 } from "../../../../shared/mods/v2/ui"
 import type { ModObject } from "../../../../shared/mods/types"
+import { FunctionClient } from "./FunctionClient"
 
 type Act = (
   node: FunctionUiElement | undefined,
@@ -127,11 +128,13 @@ function style(node: FunctionUiElement): CSSProperties {
 function Element({
   node,
   busy,
-  act
+  act,
+  renderClient
 }: {
   node: FunctionUiElement | string
   busy: boolean
   act: Act
+  renderClient?(node: FunctionUiElement): React.ReactNode
 }): React.ReactNode {
   if (typeof node === "string") return node
   const p = node.props
@@ -140,7 +143,7 @@ function Element({
     return (
       <Tag style={style(node)}>
         {node.children?.map((child, index) => (
-          <Element key={index} node={child} busy={busy} act={act} />
+          <Element key={index} node={child} busy={busy} act={act} renderClient={renderClient} />
         ))}
       </Tag>
     )
@@ -158,7 +161,7 @@ function Element({
       </Button>
     )
   if (node.type === "Input" || node.type === "Select")
-    return <Field node={node} busy={busy} act={act} />
+    return <Field key={node.press?.handle} node={node} busy={busy} act={act} />
   if (node.type === "Link")
     return (
       <a
@@ -171,7 +174,7 @@ function Element({
       >
         {node.children?.length
           ? node.children.map((child, index) => (
-              <Element key={index} node={child} busy={busy} act={act} />
+              <Element key={index} node={child} busy={busy} act={act} renderClient={renderClient} />
             ))
           : String(p.label ?? p.href)}
       </a>
@@ -182,7 +185,7 @@ function Element({
         <code>{String(p.source)}</code>
       </pre>
     )
-  return null
+  return node.type === "Client" ? (renderClient?.(node) ?? null) : null
 }
 
 export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Element | null {
@@ -200,7 +203,10 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
         .panes(threadId)
         .then((rows) => {
           if (!live || request !== sequence) return
-          for (const row of rows) validateFunctionTree(row.tree)
+          for (const row of rows) {
+            validateFunctionTree(row.tree)
+            for (const client of row.clients ?? []) validateFunctionTree(client.tree)
+          }
           setPanes(rows)
         })
         .catch(() => {
@@ -290,10 +296,25 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
             style={{ maxHeight: Math.min(pane.rows * 24, 480) }}
           >
             <Element
-              key={pane.generation}
               node={pane.tree}
               busy={busy}
               act={(node, kind, value) => act(pane, node, kind, value)}
+              renderClient={(node) => {
+                const client = pane.clients?.find(
+                  (c) => c.plugin === node.client?.plugin && c.element === node.props.key
+                )
+                return client ? (
+                  <FunctionClient
+                    key={client.id}
+                    threadId={threadId}
+                    pane={pane.key}
+                    node={node}
+                    snapshot={client}
+                    refresh={() => refreshRef.current()}
+                    render={(tree, busy, act) => <Element node={tree} busy={busy} act={act} />}
+                  />
+                ) : null
+              }}
             />
           </div>
           <p className="mt-2 text-xs text-muted-foreground">由 {pane.plugin} 提供</p>

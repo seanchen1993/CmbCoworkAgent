@@ -144,7 +144,7 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 普通 `next` 始终绑定原分发；SDK 使用异步延续自己的调用身份，失效调用不能借用新回调。
 
 **当前仍是桌面 Pane 子集**：仅 inline 位置与 Box/Text/Button/Input/Select/Link/Code 的
-明确属性白名单；Code 当前是普通源文本。未交付其余 13 个渲染位置、Client/Svg、diff
+明确属性白名单及下述 Client；Code 当前是普通源文本。未交付其余 13 个渲染位置、Svg、diff
 高亮、自定义构造器 hook、实际尺寸上报、聚焦/快捷键/hover/scroll/holdToasts。
 `ui.invalidate` 目前仅支持 `ui.render`。面板回调可以 `await $.command.run({ command, args })`：
 普通命令等待统一会话队列，`immediate: true` 命令可以在模型运行时查询。返回值保持 SDK 原样，
@@ -160,7 +160,7 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 构建后运行 `node bin/cli.js plugin check <目录>` 可检查包、快照摘要和事件注册。
 它不是授权，也不证明所用宿主能力全部已经接入。`inspect` 输出相同范围的检查报告。
 
-当前尚不能用这一入口交付官方完整 diff、Client 面板、`engine.create` 能力提供方、
+当前尚不能用这一入口交付官方完整 diff、`engine.create` 能力提供方、
 模型/工具/网络 SDK、文件写入与祖先指令读取、配置表单或完整 classic 事件。这些保持在后续实施项中。
 命令文本以桌面结果区呈现；终端的显示宽度与布局不能等同于 Electron 窗口尺寸。
 
@@ -171,3 +171,42 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 释放 VM，并使旧会话描述符失效。内置 `/claw-board` 的“查看项目文件”演示面板调用命令。
 
 v1 的 `/mod 模块:命令 [JSON]` 和权限模型继续独立运行；v1 授权不等于函数插件授权。
+
+## Client 持续交互组件
+
+更新并重新批准内置示例后，`/claw-client` 打开交互工作台。点击“本地加一”更新组件状态，
+向所属插件发送消息并获得确认；“重绘面板”保留计数。备注、选择、方向键、指针及计时器
+都在独立组件 VM 内处理，不请求模型。Escape 离开组件焦点。关闭后重新打开会重置本地状态；
+需要跨重启的数据由宿主 hook 显式写入 `$.store`。
+
+```tsx
+on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
+  const { Client } = $.ui.resolve(e)
+  return <Client key="counter" module="./counter.tsx" props={{ label: "计数" }} />
+})
+on("ui.message", { element: "counter" }, async ($, e) => {
+  await $.store.set("last-count", e.data)
+  return { props: { label: "已保存" } }
+})
+// counter.tsx：独立模块，无 $、Node 或 DOM。
+export default function Counter(props = { label: "计数" }, surface) {
+  const { Button } = surface.elements
+  const count = surface.state ?? 0
+  return Button({ key: "add", label: `${props.label} ${count}`, onPress() {
+    surface.setState(count + 1)
+    surface.post({ count: count + 1 })
+  } })
+}
+```
+
+`module` 必须是静态字面量，按源文件相对位置解析；组件及依赖一起纳入批准的快照。
+组件通过 `surface.state/setState`、`columns/rows`、`every`、`onKey/onPointer` 和 `post`
+运行。相同面板、插件、key、module 的组件在外层重绘时复用；移除或换模块后销毁。
+消息只发给所属插件的 `ui.message`，返回的 `props` 更新组件；外层重绘重新应用父 props。
+发布内容及消息先经过工程的输出保护。卸载会取消正在等待的回调，旧动作无法恢复组件。
+
+当前差异：仅同步组件绘制和同步组件回调；每会话最多 8 个活跃 Client，每组件最多 16 个
+计时器及 256 个控件。计时器最快 16 ms，积压事件合并；尺寸按桌面 8×24 px 网格估算。
+Client 元素与 Pane 共用明确的属性白名单。超预算只停止该组件；它不加载任意脚本、网络资源
+或尚未批准的模块。已验证官方 Client 描述符契约；自身生命周期和 React E2E 的通过不等于
+所有上游 Client 行为已经完成对照。

@@ -10,16 +10,17 @@
     "source": "https://github.com/anthropics/claude-code/blob/b782847db9a18667f00918ea341197f201b22bb4/mods/types/claude-code.d.ts",
     "runtimePreviouslyVerified": "2.1.272",
     "runtime273Verified": true,
-    "runtime273VerificationScope": "28 command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK conformance cases in real plugin test; not full API or product parity"
+    "runtime273VerificationScope": "29 command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor conformance cases in real plugin test; not full API or product parity"
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
-    "scope": "isolated runtime, production desktop commands and a limited interactive Pane surface; B3-B8 remain incomplete",
-    "desktopEvents": ["session.start", "command.run", "command.describe", "ui.render (desktop Pane)", "ui.press", "ui.input", "ui.select", "ui.open", "ui.close"],
+    "scope": "isolated runtime, production desktop commands, interactive Pane and isolated Client surface; B3-B8 remain incomplete",
+    "desktopEvents": ["session.start", "command.run", "command.describe", "ui.render (desktop Pane)", "ui.press", "ui.input", "ui.select", "ui.message (owner only)", "ui.open", "ui.close"],
     "desktopSdk": ["command.register", "command.list", "command.run", "session.id", "session.cwd", "session.surface", "session.surfaces", "clock.now", "clock.sleep", "store.get", "store.set", "store.delete", "store.keys", "fs.read", "fs.list", "fs.exists", "fs.stat"],
     "partialDesktopSdk": ["ui.open", "ui.close", "ui.resolve", "ui.invalidate"],
-    "paneLimitations": ["inline Pane only; no dock or remaining 13 sites", "seven elements with a restricted prop allowlist; no Client/Svg/diff Code", "ui.resolve returns native constructors only; constructor replacement hooks pending", "ui.invalidate supports ui.render only", "focus, hotkeys, hover, scroll, holdToasts and measured viewport pending", "native dynamically compiled async functions do not inherit guest continuation identity", "Claude static dollar-SDK usage scanner not yet implemented"],
-    "unitPrototypeOnly": ["turn.step", "Client", "model stream boundary"],
+    "paneLimitations": ["inline Pane only; no dock or remaining 13 sites", "eight elements including Client with a restricted prop allowlist; no Svg/diff Code", "ui.resolve returns native constructors only; constructor replacement hooks pending", "ui.invalidate supports ui.render only", "Pane focus, hotkeys, hover, scroll, holdToasts and measured viewport pending", "native dynamically compiled async functions do not inherit guest continuation identity", "Claude static dollar-SDK usage scanner not yet implemented"],
+    "clientLimitations": ["synchronous render and callbacks only", "static literal module and approved relative imports only", "eight active Client VMs per session; sixteen timers and 256 controls per Client", "minimum timer interval 16ms; busy ticks coalesce", "desktop cell dimensions estimated at 8x24 pixels", "upstream descriptor conformance verified; full upstream event lifecycle comparison pending"],
+    "unitPrototypeOnly": ["turn.step", "model stream boundary"],
     "evidence": "mods-v2-implementation-2026-09-16.md",
     "fullParity": false
   },

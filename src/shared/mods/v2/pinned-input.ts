@@ -14,7 +14,8 @@ const pinned: Record<string, readonly string[]> = {
   "ui.render": ["surface", "component", "requestId", "viewport"],
   "ui.press": ["plugin", "element", "component", "requestId", "surface"],
   "ui.input": ["plugin", "element", "component", "requestId", "surface", "kind"],
-  "ui.select": ["plugin", "element", "component", "requestId", "surface"]
+  "ui.select": ["plugin", "element", "component", "requestId", "surface"],
+  "ui.message": ["surface", "component", "requestId", "element", "module"]
 }
 const required: Record<string, readonly string[]> = {
   "command.run": ["command", "origin"],

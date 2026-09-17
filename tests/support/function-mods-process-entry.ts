@@ -13,6 +13,7 @@ import { FunctionSession, SESSION_CAPABILITIES } from "../../src/main/mods/v2/se
 import { randomUUID } from "node:crypto"
 import type { FunctionUiElement } from "../../src/shared/mods/v2/ui"
 import { ModControlStore } from "../../src/main/mods/control-store"
+import { CLIENT_BOOTSTRAP } from "../../src/main/mods/v2/client-bootstrap"
 
 const root = resolve(process.argv[2])
 const client = new FunctionRuntimeClient(join(__dirname, "function-mod-host.cjs"))
@@ -345,6 +346,66 @@ void app.whenReady().then(async () => {
       "TSX panes keep captured SDK callbacks across 120 drawings in the real utility process"
     )
 
+    const surfacePlugin = await compileFunctionPlugin(
+      join(root, "tests/fixtures/mods-v2/client-board")
+    )
+    const clientState = new Map<string, ModJson>()
+    const surfaceSession = new FunctionSession(
+      [
+        {
+          name: surfacePlugin.name,
+          root: surfacePlugin.root,
+          tier: "user",
+          guest: await client.load(surfacePlugin.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      {
+        workspace: root,
+        threadId: "surface",
+        assertLive: () => undefined,
+        publish: async (v) => v,
+        loadClient: async (plugin, module) => {
+          assert.equal(plugin, surfacePlugin.name)
+          assert.ok(Object.hasOwn(surfacePlugin.clients, module))
+          return client.load(CLIENT_BOOTSTRAP + "\n" + surfacePlugin.clients[module], { plugin })
+        },
+        state: () => ({
+          get: async (k) => clientState.get(k),
+          keys: async () => [...clientState.keys()],
+          set: async (k, v) => {
+            clientState.set(k, v)
+          },
+          delete: (k) => {
+            clientState.delete(k)
+          }
+        })
+      }
+    )
+    await surfaceSession.run("client-board", "")
+    const clientTimes: number[] = []
+    for (let index = 0; index < 120; index++) {
+      const before = performance.now()
+      const [pane] = await surfaceSession.panes.snapshot()
+      const surface = pane.clients![0]
+      assert.equal(surface.error, undefined)
+      const button = surface.tree.children![1] as FunctionUiElement
+      await surfaceSession.clients.act({
+        pane: pane.key,
+        instance: surface.id,
+        intentId: randomUUID(),
+        kind: "press",
+        handle: button.press!.handle
+      })
+      assert.deepEqual(clientState.get("client-message"), { count: index + 1 })
+      if (index >= 20) clientTimes.push(performance.now() - before)
+    }
+    clientTimes.sort((a, b) => a - b)
+    await surfaceSession.close()
+    checks.push(
+      "isolated Client preserves state, controls and messages across 120 production process frames"
+    )
+
     const exhausted = await client.load(`var __cmbFunctionMod={register(on){
       on("command.run", async()=>{await Promise.resolve();const until=Date.now()+30;while(Date.now()<until){};return {text:"ok"}})
     }}`)
@@ -451,6 +512,14 @@ void app.whenReady().then(async () => {
         maxMs: paneTimes[99],
         scope:
           "redraw and press through production session and utilityProcess; real SQLite state; 20 warmups; no content filtering"
+      },
+      clientsPerformance: {
+        count: clientTimes.length,
+        p50Ms: clientTimes[49],
+        p95Ms: clientTimes[94],
+        maxMs: clientTimes[99],
+        scope:
+          "Client snapshot, press and owner ui.message across two utility VMs; 20 warmups; in-memory message store; timers active"
       }
     }
     await writeFile(join(__dirname, "process-report.json"), JSON.stringify(report, null, 2))
