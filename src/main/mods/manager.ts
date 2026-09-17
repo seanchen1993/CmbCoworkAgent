@@ -24,6 +24,7 @@ import { filterModData, projectModResult } from "./publication"
 import { getModCallContext, modCallContext } from "./context"
 import { ManagedModPolicy, DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { orderApprovedMods } from "./order"
+import type { FunctionToolInfo, RegisteredFunctionTool } from "../../shared/mods/v2/tools"
 
 export interface ModPluginSource {
   id: string
@@ -71,10 +72,12 @@ interface StoredCard {
 }
 
 export class ModsManager {
+  private readonly functionToolCatalogs = new Map<string, FunctionToolInfo[]>()
   private functionLifecycle?: {
     invalidate(workspace: string): void
     closeThread(threadId: string): void
     close(): void
+    registeredTools?(workspace: string, threadId: string): Promise<RegisteredFunctionTool[]>
     toolCall?(
       binding: ModThreadBinding,
       input: ModObject,
@@ -88,6 +91,42 @@ export class ModsManager {
 
   closeFunctionThread(threadId: string): void {
     this.functionLifecycle?.closeThread(threadId)
+    for (const key of this.functionToolCatalogs.keys())
+      if (JSON.parse(key)[1] === threadId) this.functionToolCatalogs.delete(key)
+  }
+
+  bindFunctionToolCatalog(binding: ModThreadBinding, tools: FunctionToolInfo[]): void {
+    const key = JSON.stringify([
+      this.workspaceKey(binding.workspace),
+      binding.threadId,
+      binding.agentId ?? "main"
+    ])
+    this.functionToolCatalogs.set(
+      key,
+      tools.map((tool) => ({ ...tool }))
+    )
+    if (this.functionToolCatalogs.size > 100)
+      this.functionToolCatalogs.delete(this.functionToolCatalogs.keys().next().value!)
+  }
+
+  functionToolCatalog(workspace: string, threadId: string, agentId = "main"): FunctionToolInfo[] {
+    const tools = this.functionToolCatalogs.get(
+      JSON.stringify([this.workspaceKey(workspace), threadId, agentId])
+    )
+    if (!tools) throw new ModError("MODS_TOOL_CONTEXT_REQUIRED")
+    return tools.map((tool) => ({ ...tool }))
+  }
+
+  async registeredFunctionTools(
+    workspace: string,
+    threadId: string
+  ): Promise<RegisteredFunctionTool[]> {
+    return this.isEnabled(workspace)
+      ? ((await this.functionLifecycle?.registeredTools?.(
+          this.workspaceKey(workspace),
+          threadId
+        )) ?? [])
+      : []
   }
 
   getFunctionToolHandler(
@@ -997,6 +1036,7 @@ export class ModsManager {
 
   close(): void {
     this.functionLifecycle?.close()
+    this.functionToolCatalogs.clear()
     this.policy.stop()
     for (const controller of this.activeActions.keys()) controller.abort()
     this.activeActions.clear()

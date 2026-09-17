@@ -152,8 +152,9 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
                       </span>
                     </div>
                     <p className="text-xs">
-                      允许注册命令、读取项目文件与会话标识、保存偏好、打开交互组件、调用或拦截工具及调用已配置的模型。
+                      允许注册命令和主助手的自定义工具、读取项目文件与会话标识、保存偏好、打开交互组件、调用或拦截工具及调用已配置的模型。
                       写文件和执行命令仍需批准最终参数；即时查询命令不能执行写操作。
+                      模型调用自定义工具时可读取项目，不能借此自动执行写操作。
                       模型请求会产生实际用量，限每插件每项目每分钟 30 次及 32768 个预留输出 Token。
                     </p>
                     <p className="text-xs font-mono break-all">

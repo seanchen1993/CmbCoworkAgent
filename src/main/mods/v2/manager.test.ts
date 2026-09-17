@@ -31,6 +31,7 @@ async function fixture() {
         { id: "source", name: "function-commands", path: plugin, enabled: pluginEnabled }
       ],
       enabled: () => enabled,
+      registeredTool: async (_workspace, _threadId, _grant, _input, _origin, _signal, run) => run(),
       publish: async (_, value) => publish(value),
       changed: () => undefined
     },
@@ -82,6 +83,40 @@ async function fixture() {
     }
   }
 }
+
+it("registers tools before the first model prompt and drops them on revocation and disable", async () => {
+  const f = await fixture()
+  expect(await f.manager.registeredTools(f.root, "cold")).toEqual([])
+  expect(f.loads()).toBe(0)
+  await f.approve()
+  expect((await f.manager.registeredTools(f.root, "cold"))[0]).toMatchObject({
+    name: "mcp__function-commands__project_brief",
+    mcp: true
+  })
+  await writeFile(join(f.root, "brief-proof.txt"), "proof")
+  const call = () =>
+    f.manager.interceptTool(
+      f.root,
+      "cold",
+      {
+        tool: "mcp__function-commands__project_brief",
+        tool_use_id: "model",
+        limit: 20
+      },
+      undefined,
+      async () => {
+        throw Error("MODS_NATIVE_TOOL_UNAVAILABLE")
+      }
+    )
+  expect(JSON.stringify(await call())).toContain("brief-proof.txt")
+  f.manager.revoke(f.root, "function-commands")
+  expect(await f.manager.registeredTools(f.root, "cold")).toEqual([])
+  await expect(call()).rejects.toThrow("MODS_NATIVE_TOOL_UNAVAILABLE")
+  await f.approve()
+  expect(await f.manager.registeredTools(f.root, "cold")).toHaveLength(1)
+  f.setEnabled(false)
+  expect(await f.manager.registeredTools(f.root, "cold")).toEqual([])
+})
 
 it("requires a digest grant, exposes direct commands and keeps session state until revoked", async () => {
   const f = await fixture()

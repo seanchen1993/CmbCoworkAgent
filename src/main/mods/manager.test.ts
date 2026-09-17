@@ -171,6 +171,34 @@ async function fixture(deployment?: ManagedModDeployment) {
 }
 
 describe("project Mods lifecycle and UI authority", () => {
+  it("scopes discovered tools by workspace, thread and agent and clears closed thread catalogs", async () => {
+    const f = await fixture()
+    expect(() => f.manager.functionToolCatalog(f.root, "thread")).toThrow(
+      "MODS_TOOL_CONTEXT_REQUIRED"
+    )
+    const tools = [{ name: "read_file", description: "Read", mcp: false }]
+    f.manager.bindFunctionToolCatalog(f.scope, tools)
+    tools[0].description = "mutated"
+    f.manager.bindFunctionToolCatalog({ ...f.scope, agentId: "worker" }, [
+      { name: "mcp__demo__tool", description: "MCP", mcp: true }
+    ])
+    expect(f.manager.functionToolCatalog(f.root, "thread")[0].description).toBe("Read")
+    expect(f.manager.functionToolCatalog(f.root, "thread", "worker")[0].mcp).toBe(true)
+    expect(() => f.manager.functionToolCatalog(f.root, "other")).toThrow(
+      "MODS_TOOL_CONTEXT_REQUIRED"
+    )
+    expect(() => f.manager.functionToolCatalog(f.plugin, "thread")).toThrow(
+      "MODS_TOOL_CONTEXT_REQUIRED"
+    )
+    f.manager.closeFunctionThread("thread")
+    expect(() => f.manager.functionToolCatalog(f.root, "thread")).toThrow(
+      "MODS_TOOL_CONTEXT_REQUIRED"
+    )
+    expect(() => f.manager.functionToolCatalog(f.root, "thread", "worker")).toThrow(
+      "MODS_TOOL_CONTEXT_REQUIRED"
+    )
+  })
+
   it("executes a function SDK write through final-input approval and refuses stale or read-only calls", async () => {
     const f = await fixture()
     await f.enable()

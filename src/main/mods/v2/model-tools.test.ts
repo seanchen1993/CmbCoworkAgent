@@ -1,7 +1,11 @@
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
-import { ToolMessage } from "@langchain/core/messages"
+import { AIMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
+import { FakeChatModel } from "@langchain/core/utils/testing"
+import { createAgent } from "langchain"
+import { createToolHookMiddleware } from "../../agent/tool-hooks"
+import { createHookScope } from "../../hooks/scope"
 import { afterEach, expect, it, vi } from "vitest"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
@@ -89,6 +93,7 @@ async function fixture(code: string, denyTools: string[] = []) {
     }
   )
   manager.attachFunctions({
+    registeredTools: () => session.registeredTools(),
     invalidate: () => {
       void session.close()
     },
@@ -169,6 +174,97 @@ it("routes model tools through real hooks, pins identities and records each expl
   const audit = f.manager.store.audit(f.workspace)
   expect(audit).toHaveLength(2)
   expect(audit.every((row) => row.status === "succeeded")).toBe(true)
+})
+
+it("reports invalid dynamic tool input and missing handlers as model tool errors without native execution", async () => {
+  const f = await fixture(`
+    on("session.start",async($,e,next)=>{await $.tool.register({name:"probe",description:"Probe",inputSchema:{type:"object",properties:{count:{type:"integer"}},required:["count"]}});return next(e)});
+  `)
+  const call = (args: ModObject) =>
+    withModToolCall(
+      { workspace: f.workspace, threadId: "thread", turnId: "turn" },
+      { toolCall: { name: "mcp__demo__probe", id: "dynamic", args } },
+      new Set(),
+      async () => {
+        throw Error("native fallback")
+      }
+    )
+  expect(await call({ count: "bad" })).toMatchObject({
+    status: "error",
+    content: "MODS_REGISTERED_TOOL_INPUT"
+  })
+  expect(await call({ count: 1 })).toMatchObject({
+    status: "error",
+    content: "MODS_REGISTERED_TOOL_UNHANDLED"
+  })
+  expect(f.manager.store.audit(f.workspace)).toEqual([])
+})
+
+it("advertises dynamic schemas through the real AgentNode, serves calls, refreshes replacements and hides revoked tools", async () => {
+  const f = await fixture(`
+    on("session.start",async($,e,next)=>{
+      await $.tool.register({name:"probe",description:"First",inputSchema:{type:"object",properties:{count:{type:"integer"}},required:["count"]}});
+      await $.command.register({name:"replace",description:"Replace"}); return next(e)
+    });
+    on("command.run",{command:"replace"},async($)=>{await $.tool.register({name:"probe",description:"Replaced"});return {text:"ok"}});
+    on("tool.call",{tool:"mcp__demo__probe"},($,e)=>({result:{count:e.count},context:["custom context"]}));
+  `)
+  const definitions: unknown[][] = []
+  const observed: BaseMessage[][] = []
+  let count: number | string = 1
+  class Model extends FakeChatModel {
+    bindTools(tools: unknown[]) {
+      definitions.push(tools)
+      return this
+    }
+    async _generate(messages: BaseMessage[]) {
+      observed.push(messages)
+      const done =
+        ToolMessage.isInstance(messages.at(-1)) ||
+        !JSON.stringify(definitions.at(-1)).includes("mcp__demo__probe")
+      const message = done
+        ? new AIMessage("done")
+        : new AIMessage({
+            content: "",
+            tool_calls: [
+              { name: "mcp__demo__probe", id: "dynamic", args: { count }, type: "tool_call" }
+            ]
+          })
+      return { generations: [{ text: done ? "done" : "", message }] }
+    }
+  }
+  const middleware = (agentId?: string) =>
+    createToolHookMiddleware({
+      workspacePath: f.workspace,
+      threadId: "thread",
+      agentId,
+      hookScope: createHookScope(),
+      resolveHooksForContext: () => []
+    })
+  const agent = createAgent({ model: new Model({}), tools: [], middleware: [middleware()] })
+  const first = await agent.invoke({ messages: [{ role: "user", content: "probe" }] })
+  expect(JSON.stringify(definitions[0])).toContain('"description":"First"')
+  expect(JSON.stringify(definitions[0])).toContain('"parameters":{"type":"object"')
+  expect(first.messages.find(ToolMessage.isInstance)).toMatchObject({
+    status: "success",
+    content: '{"count":1}'
+  })
+  expect(JSON.stringify(observed.at(-1))).toContain("custom context")
+  count = "bad"
+  const invalid = await agent.invoke({ messages: [{ role: "user", content: "invalid" }] })
+  expect(invalid.messages.find(ToolMessage.isInstance)).toMatchObject({
+    status: "error",
+    content: "MODS_REGISTERED_TOOL_INPUT"
+  })
+  await f.session.run("replace", "")
+  await agent.invoke({ messages: [{ role: "user", content: "replacement" }] })
+  expect(JSON.stringify(definitions.at(-1))).toContain('"description":"Replaced"')
+  const child = createAgent({ model: new Model({}), tools: [], middleware: [middleware("worker")] })
+  await child.invoke({ messages: [{ role: "user", content: "child" }] })
+  expect(definitions.at(-1)).toEqual([])
+  f.manager.configure(f.workspace, false, true)
+  await agent.invoke({ messages: [{ role: "user", content: "revoked" }] })
+  expect(definitions.at(-1)).toEqual([])
 })
 
 it("does not execute denied or locally answered calls", async () => {

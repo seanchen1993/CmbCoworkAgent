@@ -4,6 +4,7 @@ import { createMiddleware } from "langchain"
 import { withModToolCall, publishCurrentModResult } from "../mods/adapters"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { functionToolContexts } from "../mods/v2/tool-result"
+import { withFunctionExecution } from "../mods/v2/execution-context"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
 import {
@@ -257,6 +258,67 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
     wrapModelCall: async (request, handler) => {
       const manager = getModsManager()
       if (!manager?.isActive(options.workspacePath)) return handler(request)
+      const agentId = getHookAgentIdFromRequest(request) ?? options.agentId ?? "main"
+      const nativeTools = request.tools.flatMap((entry) => {
+        const value = entry as {
+          name?: unknown
+          description?: unknown
+          function?: { name?: unknown; description?: unknown }
+        }
+        const name = value.name ?? value.function?.name
+        const description = value.description ?? value.function?.description
+        return typeof name === "string"
+          ? [
+              {
+                name,
+                description: typeof description === "string" ? description : "",
+                mcp: name.startsWith("mcp__")
+              }
+            ]
+          : []
+      })
+      manager.bindFunctionToolCatalog(
+        {
+          workspace: options.workspacePath,
+          threadId: options.threadId,
+          turnId: options.hookTurnId ?? options.threadId,
+          agentId
+        },
+        nativeTools
+      )
+      // Restricted subagents need their own tool-policy integration before receiving guest tools.
+      const registered = await withFunctionExecution(
+        {
+          workspace: manager.workspaceKey(options.workspacePath),
+          threadId: options.threadId,
+          agentId,
+          userInitiated: false,
+          turnId: options.hookTurnId ?? options.threadId,
+          leased: true,
+          immediate: false
+        },
+        () =>
+          agentId === "main"
+            ? manager.registeredFunctionTools(options.workspacePath, options.threadId)
+            : Promise.resolve([])
+      )
+      if (registered.some((tool) => nativeTools.some((native) => native.name === tool.name)))
+        throw new Error("MODS_TOOL_NAME_COLLISION")
+      const tools = registered.length
+        ? [
+            ...request.tools,
+            // Dynamic client Runnable instances are rejected by AgentNode. Advertise schemas;
+            // wrapToolCall serves them through the same grant-checked FunctionSession.
+            ...registered.map((tool) => ({
+              type: "function" as const,
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.inputSchema
+              }
+            }))
+          ]
+        : request.tools
       const blocks = [
         ...(await manager.context({
           workspace: options.workspacePath,
@@ -267,12 +329,13 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
         })),
         ...functionToolContexts(request.messages)
       ]
-      return blocks.length
-        ? handler({
-            ...request,
-            systemMessage: request.systemMessage.concat("\n\n" + blocks.join("\n\n"))
-          })
-        : handler(request)
+      return handler({
+        ...request,
+        tools,
+        ...(blocks.length
+          ? { systemMessage: request.systemMessage.concat("\n\n" + blocks.join("\n\n")) }
+          : {})
+      })
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapToolCall: async (request: any, handler: any): Promise<any> => {

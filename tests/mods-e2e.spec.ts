@@ -908,6 +908,117 @@ async function main(): Promise<void> {
       0
     )
     pass("model tool denial becomes a tool error with zero native executions")
+    const registryThread = await page!.evaluate(async (workspace) => {
+      const thread = await window.api.threads.create({
+        title: "Registered tools",
+        workspacePath: workspace,
+        agentMode: "normal"
+      })
+      const id =
+        (thread as unknown as { thread_id: string }).thread_id ??
+        (thread as unknown as { id: string }).id
+      await window.api.workspace.set(id, workspace)
+      return id
+    }, workspace)
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Registered tools", { exact: true }).first().click()
+    await functionComposer.fill("[mods-registered] 请调用自定义工具查看项目概览。")
+    await functionComposer.press("Enter")
+    await page!.getByText("REGISTERED_TOOL_OK", { exact: true }).first().waitFor({ timeout: 30000 })
+    const registryRequests = modelServer.requests.filter((request) =>
+      JSON.stringify(request.messages).includes("[mods-registered]")
+    )
+    const advertised = (
+      registryRequests[0].tools as Array<{ function: { name: string; parameters: unknown } }>
+    ).find((tool) => tool.function.name === "mcp__function-commands__project_brief")
+    assert.ok(advertised, "registered tool is in the first real provider request")
+    assert.deepEqual(advertised.function.parameters, {
+      type: "object",
+      properties: { limit: { type: "integer", minimum: 1, maximum: 20 } },
+      additionalProperties: false
+    })
+    const registryResult = registryRequests.find(
+      (request) => request.messages.at(-1)?.role === "tool"
+    )
+    assert.ok(registryResult)
+    assert.match(JSON.stringify(registryResult.messages.at(-1)?.content), /files/)
+    assert.ok(
+      registryResult.messages.some(
+        (message) =>
+          message.role === "system" &&
+          JSON.stringify(message.content).includes("项目概览来自当前项目目录")
+      )
+    )
+    const registryAudit = await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+    assert.ok(
+      registryAudit.some(
+        (row) =>
+          row.identity?.toolCallId === "registered-model" &&
+          row.toolId === "function:mcp__function-commands__project_brief" &&
+          row.status === "succeeded" &&
+          row.publication === "published"
+      )
+    )
+    assert.notEqual(
+      registryAudit.find((row) => row.identity?.toolCallId === "registered-model")?.identity
+        ?.turnId,
+      `function-tool:${registryThread}`,
+      "model tool receipt retains the host turn for the durable turn summary"
+    )
+    await page!.screenshot({ path: join(artifacts, "function-registered-tool.png") })
+    pass(
+      "cold model prompt advertises custom schema, executes the registered tool and records protected publication"
+    )
+    await functionComposer.fill("/claw-tools ")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+          (job) =>
+            job.command === "claw-tools" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("mcp__function-commands__project_brief") &&
+            job.result.text.includes("read_file")
+        ),
+      "SDK lists actual model tools and custom tools"
+    )
+    await functionComposer.fill("/claw-brief ")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+          (job) =>
+            job.command === "claw-brief" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("files")
+        ),
+      "command calls the same registered tool"
+    )
+    pass(
+      "SDK discovers native and custom model tools and calls a registered tool from a direct command"
+    )
+    await functionComposer.fill("[mods-registered-invalid] 请测试错误参数。")
+    await functionComposer.press("Enter")
+    await page!
+      .getByText("REGISTERED_TOOL_INVALID_OK", { exact: true })
+      .first()
+      .waitFor({ timeout: 30000 })
+    const invalidRegistry = modelServer.requests.find(
+      (request) =>
+        JSON.stringify(request.messages).includes("[mods-registered-invalid]") &&
+        request.messages.at(-1)?.role === "tool"
+    )
+    assert.match(
+      JSON.stringify(invalidRegistry?.messages.at(-1)?.content),
+      /MODS_REGISTERED_TOOL_INPUT/
+    )
+    assert.equal(
+      (await page!.evaluate((id) => window.api.mods.audit(id), registryThread)).filter(
+        (row) => row.identity?.toolCallId === "registered-invalid"
+      ).length,
+      0
+    )
+    pass("model schema violations produce tool errors before the custom handler executes")
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     for (const path of ["secret.txt", "../outside.txt"]) {
       await functionComposer.fill(`/claw-files ${path}`)
@@ -1145,6 +1256,25 @@ async function main(): Promise<void> {
         ),
       "revoked function commands disappear"
     )
+    await page!.getByRole("button", { name: "返回会话", exact: true }).click()
+    await page!.getByText("Registered tools", { exact: true }).first().click()
+    await page!
+      .locator("textarea.composer-textarea")
+      .fill("[mods-registered-removed] 请确认撤权后的工具列表。")
+    await page!.locator("textarea.composer-textarea").press("Enter")
+    await page!
+      .getByText("REGISTERED_TOOL_REMOVED_OK", { exact: true })
+      .first()
+      .waitFor({ timeout: 30000 })
+    const removedRegistry = modelServer.requests.find((request) =>
+      JSON.stringify(request.messages).includes("[mods-registered-removed]")
+    )
+    assert.ok(removedRegistry)
+    assert.equal(
+      JSON.stringify(removedRegistry.tools).includes("mcp__function-commands__project_brief"),
+      false
+    )
+    pass("revoking a plugin removes its custom tools from the next production model request")
     assert.equal(
       await page!.evaluate(
         async ({ id, descriptor }) => {

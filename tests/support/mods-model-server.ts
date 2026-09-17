@@ -35,6 +35,50 @@ export async function startModsModelServer() {
     const userPrompt = JSON.stringify(
       body.messages?.findLast((message: { role: string }) => message.role === "user")?.content
     )
+    if (Array.isArray(body.tools) && userPrompt?.includes("[mods-registered")) {
+      const removed = userPrompt.includes("[mods-registered-removed]")
+      const invalid = userPrompt.includes("[mods-registered-invalid]")
+      if (removed || body.messages?.at(-1)?.role === "tool") {
+        event([
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              content: removed
+                ? "REGISTERED_TOOL_REMOVED_OK"
+                : invalid
+                  ? "REGISTERED_TOOL_INVALID_OK"
+                  : "REGISTERED_TOOL_OK"
+            },
+            finish_reason: "stop"
+          }
+        ])
+      } else {
+        event([
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: invalid ? "registered-invalid" : "registered-model",
+                  type: "function",
+                  function: {
+                    name: "mcp__function-commands__project_brief",
+                    arguments: JSON.stringify({ limit: invalid ? "bad" : 5 })
+                  }
+                }
+              ]
+            },
+            finish_reason: "tool_calls"
+          }
+        ])
+      }
+      event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
     const modelToolMode =
       Array.isArray(body.tools) &&
       (userPrompt?.includes("[mods-tool-rewrite]") || userPrompt?.includes("[mods-tool-deny]"))

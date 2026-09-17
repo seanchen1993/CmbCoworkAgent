@@ -20,6 +20,8 @@ export const SESSION_CAPABILITIES = [
   ...BASIC_CAPABILITIES,
   ...FUNCTION_UI_CAPABILITIES,
   "tool.call",
+  "tool.register",
+  "tool.list",
   "model.complete"
 ]
 import type { FunctionStateAccess } from "./state-store"
@@ -30,6 +32,8 @@ import type { FunctionGuest } from "../../../shared/mods/v2/contracts"
 import { randomUUID } from "node:crypto"
 import { functionToolTarget, validateFunctionToolResult, validateModelToolInput } from "./tool-sdk"
 import { functionModelRequest, validateFunctionModelText } from "./model-sdk"
+import { FunctionToolRegistry, functionToolSpec } from "./tool-registry"
+import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -38,6 +42,14 @@ export interface FunctionSessionHost {
   uiChanged?(): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
   callTool?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
+  listTools?(signal: AbortSignal): Promise<FunctionToolInfo[]>
+  registeredTool?(
+    owner: FunctionPlugin,
+    input: ModObject,
+    origin: "model" | "mod",
+    signal: AbortSignal,
+    run: () => Promise<ModObject>
+  ): Promise<ModObject>
   completeModel?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<string>
   scheduleCommand?(
     command: FunctionCommand,
@@ -61,6 +73,7 @@ export class FunctionSession {
   readonly clients: FunctionClients
   private readonly controller = new AbortController()
   private readonly registry = new Map<string, FunctionCommand>()
+  private readonly tools = new FunctionToolRegistry()
   private readonly dispatcher: FunctionDispatcher
   private starting?: Promise<void>
 
@@ -212,10 +225,61 @@ export class FunctionSession {
     core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>
   ): Promise<ModObject> {
     await this.start()
+    if (this.tools.get(String(input.tool)))
+      return this.runRegisteredTool(input, signal, undefined, 0, "tool.call")
     return (await this.dispatch("tool.call", input, signal, undefined, 0, undefined, "tool.call", {
       core,
       modelTool: true
     })) as ModObject
+  }
+
+  async registeredTools(): Promise<RegisteredFunctionTool[]> {
+    await this.start()
+    this.assertLive()
+    return this.tools.list()
+  }
+
+  private async runRegisteredTool(
+    input: ModObject,
+    signal: AbortSignal | undefined,
+    skip: { plugin: string; registration: string } | undefined,
+    depth: number,
+    held?: string
+  ): Promise<ModObject> {
+    const tool = this.tools.validate(input)
+    const owner = this.plugins.find((plugin) => plugin.name === tool?.plugin)
+    if (!tool || !owner) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
+    const scoped = signal
+      ? AbortSignal.any([signal, this.controller.signal])
+      : this.controller.signal
+    const run = async (): Promise<ModObject> => {
+      this.assertLive(owner)
+      const result = (await this.dispatch(
+        "tool.call",
+        input,
+        scoped,
+        skip,
+        depth,
+        undefined,
+        held,
+        {
+          modelTool: true,
+          core: async () => {
+            throw new ModFunctionError(
+              "MODS_REGISTERED_TOOL_UNHANDLED",
+              "MODS_REGISTERED_TOOL_UNHANDLED",
+              true
+            )
+          }
+        }
+      )) as ModObject
+      if (result.ref !== undefined) throw new ModFunctionError("MODS_TOOL_RESULT_REF")
+      this.assertLive(owner)
+      return result
+    }
+    return this.host.registeredTool
+      ? this.host.registeredTool(owner, input, skip ? "mod" : "model", scoped, run)
+      : run()
   }
 
   private async dispatch(
@@ -251,16 +315,21 @@ export class FunctionSession {
         : {}),
       ...(presentation?.generation ? { uiGeneration: presentation.generation } : {}),
       normalizeInput: (name, value) =>
-        FILE_CAPABILITIES.some((method) => method === name) &&
-        typeof value.path === "string" &&
-        value.path !== ""
-          ? { ...value, path: resolve(this.host.workspace, value.path) }
-          : value,
+        name === "tool.register"
+          ? functionToolSpec(value)
+          : FILE_CAPABILITIES.some((method) => method === name) &&
+              typeof value.path === "string" &&
+              value.path !== ""
+            ? { ...value, path: resolve(this.host.workspace, value.path) }
+            : value,
       validateInput: (name, value) => {
         validateBasicInput(name, value)
+        if (name === "tool.register") functionToolSpec(value)
         if (name === "tool.call") {
-          if (presentation?.modelTool) validateModelToolInput(value)
-          else functionToolTarget(value)
+          if (presentation?.modelTool) {
+            validateModelToolInput(value)
+            this.tools.validate(value)
+          } else functionToolTarget(value)
         }
         if (name === "model.complete") functionModelRequest(value)
         if (name === "ui.open") validatePaneArgs(value)
@@ -279,6 +348,23 @@ export class FunctionSession {
           if (!isModObject(value)) throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (typeof value.deny === "string") return
           if (name === "model.complete") return validateFunctionModelText(value.value)
+          if (
+            name === "tool.register" &&
+            (!isModObject(value.value) || typeof value.value.tool !== "string")
+          )
+            throw new ModFunctionError("MODS_TOOL_REGISTER_RESULT")
+          if (
+            name === "tool.list" &&
+            (!Array.isArray(value.value) ||
+              value.value.some(
+                (tool) =>
+                  !isModObject(tool) ||
+                  typeof tool.name !== "string" ||
+                  typeof tool.description !== "string" ||
+                  typeof tool.mcp !== "boolean"
+              ))
+          )
+            throw new ModFunctionError("MODS_TOOL_LIST_RESULT")
           return validateBasicResult(name, value.value)
         }
         if (!isModObject(value)) throw new ModFunctionError("MODS_EVENT_RESULT")
@@ -341,6 +427,41 @@ export class FunctionSession {
     this.assertLive(plugin)
     if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
     const args = raw
+    if (method === "tool.register" || method === "tool.list") {
+      if (
+        (method === "tool.register" && (args.length !== 1 || !isModObject(args[0]))) ||
+        (method === "tool.list" && args.length !== 0)
+      )
+        throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
+      const input = method === "tool.register" ? functionToolSpec(args[0] as ModObject) : {}
+      const result = await this.dispatch(
+        method,
+        input,
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: async (value, signal) => {
+            this.assertLive(plugin)
+            if (method === "tool.register") return this.tools.register(plugin.name, value)
+            const native = (await this.host.listTools?.(signal)) ?? []
+            const registered = this.tools.list()
+            if (registered.some((tool) => native.some((entry) => entry.name === tool.name)))
+              throw new ModFunctionError("MODS_TOOL_NAME_COLLISION")
+            return [
+              ...native,
+              ...registered.map(({ name, description, mcp }) => ({ name, description, mcp }))
+            ] as unknown as ModJson
+          }
+        },
+        turnHeld
+      )
+      if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof result.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
+      return result.value
+    }
     if (method === "model.complete") {
       if (args.length !== 1 || !isModObject(args[0]))
         throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
@@ -373,6 +494,14 @@ export class FunctionSession {
       const input = { ...args[0] }
       delete input.tool_use_id
       delete input.agentId
+      if (this.tools.get(String(input.tool)))
+        return this.runRegisteredTool(
+          { ...input, tool_use_id: randomUUID() },
+          callSignal,
+          { plugin: plugin.name, registration: source.registration },
+          depth + 1,
+          turnHeld ?? "tool.call"
+        )
       functionToolTarget(input)
       const result = await this.dispatch(
         "tool.call",
@@ -498,6 +627,7 @@ export class FunctionSession {
     this.panes.close()
     this.clients.close()
     this.registry.clear()
+    this.tools.clear()
     await Promise.allSettled(this.plugins.map((plugin) => plugin.guest.dispose()))
   }
 }

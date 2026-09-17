@@ -1,6 +1,6 @@
 # 函数 Mods 开发与当前支持范围
 
-当前分支实现了标准函数插件的加载、授权、直接命令、交互 Pane/Client、原生工具调用和独立文本模型请求。目标兼容版本固定为 Claude Code
+当前分支实现了标准函数插件的加载、授权、直接命令、交互 Pane/Client、原生工具调用、自定义工具注册和独立文本模型请求。目标兼容版本固定为 Claude Code
 2.1.273；这不是全部 Mods API 已经可用的声明。实现和验证状态见
 [实施记录](mods-v2-implementation-2026-09-16.md)。
 
@@ -16,6 +16,9 @@
 同一示例还提供 `/claw-files` 列出项目目录，`/claw-files README.md` 读取文本文件。
 启用内容保护时，文件结果会先经过保护再进入插件与界面。
 `/claw-board` 打开交互面板；下文说明如何用 TSX 定制它。
+`/claw-brief` 调用自定义项目概览工具；也可以发送普通消息“请调用项目概览工具”。
+模型是否选用工具取决于已配置模型。发送过一次普通消息后，`/claw-tools` 可查看该会话
+最近一次模型请求的宿主工具列表和当前已注册工具。
 
 自建插件用已有的本地插件安装入口安装，随后在函数插件区域授权。
 
@@ -59,7 +62,7 @@ export function register(on) {
 当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces`、
 `clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`，以及 `$.plugin.name/root` 元数据。
 上述 SDK 操作同样经过事件链。另已接入有限的桌面 Pane：`ui.open/close`、
-同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call`、`model.complete`，范围见下文。
+同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call/register/list`、`model.complete`，范围见下文。
 
 普通操作 hook 返回 `{ value }` 或 `{ deny }`，调用 SDK 得到拆出的值；
 `command.run` 是引擎事件，返回 `{ text }`。例如：
@@ -77,6 +80,55 @@ on("clock.sleep", { ms: 10 }, () => ({ value: undefined }))
 `command.describe` 的 `isHidden: true` 隐藏菜单条目，但保留按完整命令名执行的能力。
 在 `command.run` hook 内不能再调用 `$.command.run`，经其他 SDK 间接调用也会拒绝，
 与 Claude 的会话执行通道规则一致；应直接返回当前命令的 `{ text }`。
+
+## 给 Claw 增加自定义工具
+
+在 `session.start` 里注册工具；工具通过 `tool.call` hook 实现。以下代码放进 `register(on)`：
+
+```ts
+on("session.start", async ($, e, next) => {
+  await $.tool.register({
+    name: "project_note",
+    description: "读取用户保存的项目备注",
+    inputSchema: { type: "object", additionalProperties: false }
+  })
+  return next(e)
+})
+on("tool.call", { tool: "mcp__my-claw__project_note" }, async ($) => ({
+  result: { note: (await $.store.get("last-note")) || "尚无备注" }
+}))
+```
+
+完整工具名中的 `my-claw` 必须等于插件清单的 `name`。注册返回
+`{ tool: "mcp__my-claw__project_note" }`；同插件同名注册会覆盖说明和 schema，下一次模型
+请求使用新定义。未提供 schema 时默认 `{ type: "object" }`。注册本身不会实现工具，
+缺少匹配处理器时返回 `MODS_REGISTERED_TOOL_UNHANDLED` 工具错误。
+命令或其他 hook 也可用 `$.tool.call({ tool: "mcp__my-claw__project_note" })` 调用。
+注册和列举是操作事件，后置 hook 返回 `{ value }`；调用是引擎事件，直接返回 `{ result }`、
+`{ result, isError: true }` 或 `{ deny }`。这些接口与固定版本的公开契约对照，不能推及未开放的 API。
+
+模型会在首轮请求看到已授权插件注册的工具，包含名称、说明和参数 schema。执行前检查
+schema、授权、项目和组织策略，完成后检查输出；撤权后下一轮移除工具，旧调用不能继续
+执行。输入错误转成模型可见的工具错误，插件处理器不会先执行。本批能力扩大，宿主摘要
+升到 v10，旧授权需在界面重新批准。示例插件更新需重新安装示例并授权当前摘要。
+
+当前边界：
+
+- 只向主助手开放，受限子代理暂不广告或执行自定义工具。
+- 模型调用内可以读文件、读写插件状态；原生写文件和执行命令仍要求正在进行的用户操作，
+  不能从模型 hook 自动取得写权限。非即时命令中的工具调用保留既有写入审批流程。
+- `$.tool.list()` 当前向主助手开放，返回最近一次该会话模型请求的宿主工具元数据，再追加当前注册工具，
+  包括 `{ name, description, mcp }`。首次普通消息之前报 `MODS_TOOL_CONTEXT_REQUIRED`；
+  `/claw-tools` 会显示说明。模型模式切换后的列表要等下一次请求刷新，尚非完整冷启动对齐。
+- 每插件最多 32 个、每会话最多 128 个工具；元数据 JSON 合计最多 256000 字符，工具说明
+  最多 8000 字符。超限替换不会破坏旧条目。
+- schema 最多 16000 字符、256 个节点、12 层，输入最多 64000 字符；不做类型强转或默认值填充。
+  支持 `type/properties/required/additionalProperties/items/enum/const`、
+  `anyOf/allOf/oneOf/not`、`uniqueItems`、长度/数量/数值范围和 `multipleOf`。
+  `title/description/default/examples/$comment` 仅作注解。其余关键字（含 `$ref`、`pattern`、
+  `patternProperties`、`format`）明确拒绝，不声称支持完整 JSON Schema。比较和组合校验有工作量预算。
+  顶层参数不能使用宿主身份名 `tool/tool_use_id/agentId`。
+- `tool.check`、MCP SDK 和 Claude 内建工具参数映射仍待补齐。
 
 ## 调用已配置的模型
 

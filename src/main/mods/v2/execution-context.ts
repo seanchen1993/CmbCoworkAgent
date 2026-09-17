@@ -7,6 +7,8 @@ import type { ModObject } from "../../../shared/mods/types"
 interface FunctionExecution {
   workspace: string
   threadId: string
+  agentId?: string
+  turnId?: string
   userInitiated: boolean
   leased: boolean
   immediate: boolean
@@ -14,6 +16,18 @@ interface FunctionExecution {
 }
 
 const context = new AsyncLocalStorage<FunctionExecution>()
+
+export function functionExecutionAgent(): string {
+  const scope = context.getStore()
+  return scope?.active ? (scope.agentId ?? "main") : "main"
+}
+
+export function functionExecutionTurn(workspace: string, threadId: string): string | undefined {
+  const scope = context.getStore()
+  return scope?.active && scope.workspace === workspace && scope.threadId === threadId
+    ? scope.turnId
+    : undefined
+}
 
 export function isFunctionUserAction(workspace: string, threadId: string): boolean {
   const current = context.getStore()

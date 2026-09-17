@@ -3,7 +3,11 @@ import { afterEach, expect, it, vi } from "vitest"
 import { ModCommandQueue } from "../command-queue"
 import type { ModCommandJob } from "../../../shared/mods/types"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
-import { scheduleFunctionTool, withFunctionExecution } from "./execution-context"
+import {
+  scheduleFunctionTool,
+  withFunctionExecution,
+  functionExecutionAgent
+} from "./execution-context"
 
 const cleanups: Array<() => void> = []
 afterEach(() => cleanups.splice(0).forEach((fn) => fn()))
@@ -35,6 +39,20 @@ function fixture() {
     scheduleFunctionTool(queue, "/project", threadId, tool, abort, run)
   return { jobs, queue, scope, threadId, call }
 }
+
+it("retains the active agent across async callbacks and isolates concurrent scopes", async () => {
+  const f = fixture()
+  expect(functionExecutionAgent()).toBe("main")
+  await Promise.all(
+    ["worker-a", "worker-b"].map((agentId) =>
+      withFunctionExecution({ ...f.scope, agentId }, async () => {
+        await Promise.resolve()
+        expect(functionExecutionAgent()).toBe(agentId)
+      })
+    )
+  )
+  expect(functionExecutionAgent()).toBe("main")
+})
 
 it("queues a pane tool behind the model and cancels it before execution", async () => {
   const f = fixture(),

@@ -18,11 +18,16 @@ import { FunctionRuntimeClient } from "../mods/v2/runtime-client"
 import { scheduleFunctionCommand } from "../mods/v2/command-scheduler"
 import type { FunctionUiAction } from "../../shared/mods/v2/ui"
 import type { FunctionClientAction } from "../../shared/mods/v2/ui"
-import { scheduleFunctionTool, withFunctionExecution } from "../mods/v2/execution-context"
+import {
+  scheduleFunctionTool,
+  withFunctionExecution,
+  functionExecutionAgent
+} from "../mods/v2/execution-context"
 import { functionToolTarget } from "../mods/v2/tool-sdk"
 import { randomUUID } from "node:crypto"
 import { FunctionModels } from "../mods/v2/models"
 import { invokeFunctionModel, resolveFunctionModel } from "../mods/v2/model-provider"
+import { FunctionRegisteredTools } from "../mods/v2/registered-tools"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -67,6 +72,25 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return
   }
   setModsManager(manager)
+  const registeredTools = new FunctionRegisteredTools(manager.store, {
+    assertScope: (workspace, threadId) => {
+      if (functionExecutionAgent() !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+      if (!manager.isEnabled(workspace) || writableThreadScope(threadId) !== workspace)
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    },
+    admit: async (identity, tool, input, signal) => {
+      if (manager.protects(identity.workspace))
+        await manager.policy.admit(identity, tool, input, signal)
+    },
+    publish: async (identity, value, signal) => {
+      if (manager.protects(identity.workspace))
+        return manager.policy.publish(value, identity.callId, signal, (digest, rules) =>
+          manager.store.publication(identity.callId, digest, rules, "published")
+        )
+      manager.store.publication(identity.callId, "", [], "published")
+      return value
+    }
+  })
   const models = new FunctionModels(manager.store, {
     assertScope: (workspace, threadId) => {
       if (!manager.isEnabled(workspace)) throw new ModError("MODS_DISABLED")
@@ -91,6 +115,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     manager.store,
     {
       plugins: getPlugins,
+      registeredTool: (...args) => registeredTools.call(...args),
+      listTools: async (workspace, threadId, signal) => {
+        signal.throwIfAborted()
+        if (functionExecutionAgent() !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+        if (writableThreadScope(threadId) !== workspace)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        return manager.functionToolCatalog(workspace, threadId, functionExecutionAgent())
+      },
       completeModel: (...args) => models.complete(...args),
       enabled: (workspace) => manager.isEnabled(workspace),
       publish: (workspace, value, signal) => manager.publish(workspace, value, undefined, signal),
@@ -139,11 +171,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     if (owner && !owner.isDestroyed()) owner.webContents.send("mods:jobs-changed", { threadId })
   })
   manager.attachFunctions({
+    registeredTools: (workspace, threadId) => functions.registeredTools(workspace, threadId),
     toolCall: (binding, input, core) =>
       withFunctionExecution(
         {
           workspace: binding.workspace,
           threadId: binding.threadId,
+          agentId: binding.agentId,
+          turnId: binding.turnId,
           userInitiated: false,
           leased: true,
           immediate: false

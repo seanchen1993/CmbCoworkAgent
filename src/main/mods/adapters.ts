@@ -10,6 +10,7 @@ import type { McpCapabilityTool, McpInvocationResult } from "../mcp/capability-t
 import { encodeModJson } from "../../shared/mods/validation"
 import { FunctionToolResults } from "./v2/tool-result"
 import type { ToolMessage } from "@langchain/core/messages"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
 
 const nativeNames = new Set([
   "ls",
@@ -108,9 +109,27 @@ export function withModToolCall<T, R extends ToolRequest>(
       }
       return results.add(await execute(args, signal))
     }
-  ).then((answer) =>
-    manager.publish(binding.workspace, results.resolve(answer), callId, binding.signal)
   )
+    .catch((error: unknown) => {
+      // These failures belong to dynamic guest tools and occur outside LangChain's native tool
+      // error middleware. Let the model correct arguments without swallowing cancellation.
+      if (
+        !binding.signal?.aborted &&
+        (error instanceof ModFunctionError || error instanceof ModError) &&
+        [
+          "MODS_REGISTERED_TOOL_INPUT",
+          "MODS_REGISTERED_TOOL_UNHANDLED",
+          "MODS_TOOL_INPUT_LIMIT",
+          "MODS_TOOL_VALIDATION_LIMIT",
+          "MODS_TOOL_AGENT_UNAVAILABLE"
+        ].includes(error.code)
+      )
+        return { result: error.code, isError: true }
+      throw error
+    })
+    .then((answer) =>
+      manager.publish(binding.workspace, results.resolve(answer), callId, binding.signal)
+    )
 }
 
 interface MethodSpec {

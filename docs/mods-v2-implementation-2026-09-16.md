@@ -390,6 +390,73 @@ QuickJS、持久执行记录与 React：实际文件读取被改写，隐藏上�
 `model-tools-standalone-comparison.json`、`model-tools-standalone-results.json` 和
 `model-tools-standalone/`。最终定向 ESLint 0 错误、0 告警，未扩大规则豁免。
 
+## 自定义工具注册与发现（2026-09-17）
+
+本批继续在 `C:\ai\CmbCoworkAgent-mods-v2` 的 `codex/mods-v2` 开发，父提交
+`1ff9a16e`。原 UAT 工作目录未用于本批修改。实现 `$.tool.register/list`、会话内注册表、
+同名替换、首个模型请求加载、SDK/模型调用共用处理器和撤权失效。函数工具名称为
+`mcp__插件名__工具名`；模型请求携带协议 schema，调用仍进入实际 FunctionSession。
+新示例 `/claw-brief`、`/claw-tools` 和 `project_brief` 提供可直接体验的使用方式。
+宿主摘要升级到 v10，增加能力必须重新批准，不沿用旧授权。
+
+与 2.1.273 公开类型和本地解包产物对照的范围是名称规则、默认 schema、注册返回值、
+同名替换、`tool.register/list` 的 `{ value }` 操作封装及 `tool.call` 来源和结果语义。
+同一注册样例通过官方 `plugin test`，累计 33 个对照场景；官方样例使用操作 mock，
+不能据此声称上游真实会话的全部注册生命周期已经得到验证。本地另用真实 VM、
+实际 AgentNode、utilityProcess 和 Electron 验证注册表及模型循环。
+
+执行前的 schema 校验不做强转或填充，有限 JSON Schema 配置明确拒绝未知关键字。
+对象枚举比较与 uniqueItems 比较也计入工作量预算，避免嵌套对象比较绕过限制。
+注册表数量和元数据大小受限，失败替换保留原条目。每次自定义调用具有独立执行记录，
+组织策略在处理器执行前准入，结果经过保护后发布；撤权、取消与失败不重放。
+已执行但无法确认完成的处理器记为 unknown，已完成但撤权的结果记为发布被阻止。
+记录不保存参数或输出原文。
+最终检视补齐模型调用的真实 turnId，使自定义工具计入本轮持久执行汇总；独立命令
+保留自己的函数工具轮次。专门回归检查模型轮次的 succeeded 计数，防止仅线程归属正确。
+
+检视与首轮 E2E 找到两处接入问题并修正：动态工具输入异常发生在原生错误处理层外，
+需要转换成模型可见的工具错误；AgentNode 拒绝在 wrapModelCall 中新建 Runnable 工具，
+改为广告 JSON 协议定义并由已有 wrapToolCall 处理。新增真实 AgentNode 回归覆盖首轮
+发现、参数错误、再次注册、子代理不广告及禁用移除。首轮 Electron 失败日志、截图和
+完整应用日志保留在 `tool-registry-e2e-first-*`；它不是夹具误报。
+
+当前差异仍明确保留：主助手开放自定义工具，受限子代理暂拒绝；SDK 的工具目录取自
+最近一次模型请求，冷会话目录不可用；模型调用不能获得原生写权限；只支持文档列出的
+JSON Schema 子集。`tool.check`、MCP SDK、Claude 原生参数映射及其他全量兼容项未在
+本批冒充完成。详细限制见作者指南和兼容矩阵，`fullParity` 仍为 false。
+
+专项最终 309/309 通过，Node/Web 类型检查、定向 ESLint 通过；Electron E2E 32 组通过，
+普通构建恢复，测试入口不存在于输出。新增工具的成功调用截图
+`output/mods-validation/e2e/function-registered-tool.png` 已检视。跨进程 34 项通过，
+卸载后的 runtimes/frames/replies/pending/calls 均为 0。注册回声工具预热 20 次、
+测量 100 次：P50 0.956 ms，P95 1.386 ms，不包含数据库、I/O 和内容保护。
+
+完整性能门禁仍未通过。两轮 Electron 测得关闭 Mods 的实际读取 P95 增幅分别为
+11.09% 和 12.37%，高于 5% 目标；最终轮从 2.545 ms 到 2.860 ms，读取中位数
+从 1.279 ms 到 1.273 ms。关闭 Mods 的无 I/O 入口 P95 为 0.0062 ms；提前返回、
+backend 包装及配置/项目键查询代码与父提交逐段摘要相同。它们不能解释或抹去真实读取
+尾延迟的结果，不据此宣布没有回归。完整路径的尾延迟定位、更多对照轮次和两小时压力
+测试仍是待验收项。证据：`tool-registry-disabled-source.json`、
+`tool-registry-e2e-first-failure.json`、`output/mods-validation/e2e/result.json`。
+
+全量 Vitest 3313 项：3282 通过、26 失败、5 跳过，26 个失败均与既有基线同名同因。
+该全量运行开始后，最终检视又补了 turnId 归属，因此另跑包含该修正的 21 项定向回归，
+全部通过；不把前一份全量报告改写为覆盖最后新增的测试。原始报告
+`vitest-tool-registry-full-final.json`、`tool-registry-failure-comparison-final.json` 和
+`tool-registry-turn-final.txt` 均保留。
+
+独立脚本回归 81 个套件：73 通过、8 未通过；7 个断言失败与既有基线同名同因，
+工作流 worktree 套件仍在 180 秒截止后终止。证据为
+`tool-registry-standalone-results.json`、`tool-registry-standalone-comparison.json`
+及 `tool-registry-standalone/` 日志目录。
+
+最后一轮检视后复验：Node/Web 类型检查、定向 ESLint 0 错误/0 告警，Mods 专项
+310/310、跨进程 34 项、Electron E2E 32 组全部通过。E2E 额外检查模型工具记录不是
+独立命令的合成 turnId；构建后普通输出恢复，`out/main/mods-e2e.js` 不存在。
+相应证据均为 `tool-registry-*-post-review.txt`。该轮实际读取 P95 从 2.648 ms 到
+2.695 ms，增加 1.77%；前两轮的 11.09% 和 12.37% 仍保留，不能用最后一轮覆盖
+多轮波动。第一次成功的完整测量另存 `tool-registry-e2e-first-success.json`。
+
 ## 后续集成与验收
 
 基础批 standalone 回归 81 项中 72 通过、9 失败；9 个失败与 v1 对照基线一致。

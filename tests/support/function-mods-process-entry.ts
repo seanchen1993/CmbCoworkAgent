@@ -258,6 +258,51 @@ void app.whenReady().then(async () => {
     await toolSession.close()
     checks.push("tool SDK contract and host authority survive real utilityProcess callbacks")
 
+    const registryPlugin = await compileFunctionPlugin(
+      join(root, "tests/fixtures/mods-v2/tool-registry")
+    )
+    const registrySession = new FunctionSession(
+      [
+        {
+          name: registryPlugin.name,
+          root: registryPlugin.root,
+          tier: "user",
+          guest: await client.load(registryPlugin.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      { workspace: root, threadId: "registry", assertLive: () => {}, publish: async (v) => v }
+    )
+    assert.equal((await registrySession.registeredTools())[0].name, "mcp__tool-registry__echo")
+    assert.deepEqual(
+      JSON.parse(String((await registrySession.run("registry-probe", "hello")).text)),
+      {
+        registered: { tool: "mcp__tool-registry__echo" },
+        tools: [{ name: "mcp__tool-registry__echo", description: "Echo replaced", mcp: true }],
+        answer: { result: "hello", context: ["tool-registry"] }
+      }
+    )
+    const registryTimes: number[] = []
+    for (let i = 0; i < 120; i++) {
+      const before = performance.now()
+      assert.deepEqual(
+        await registrySession.interceptTool(
+          { tool: "mcp__tool-registry__echo", tool_use_id: `model-${i}`, text: "model" },
+          undefined,
+          async () => {
+            throw Error("Unexpected native fallback")
+          }
+        ),
+        { result: "model", context: ["engine"] }
+      )
+      if (i >= 20) registryTimes.push(performance.now() - before)
+    }
+    registryTimes.sort((a, b) => a - b)
+    await registrySession.close()
+    checks.push(
+      "same official registered tool fixture is discovered and served across utilityProcess without native fallback"
+    )
+
     const ingressPlugin = await compileFunctionPlugin(
       join(root, "tests/fixtures/mods-v2/model-tools")
     )
@@ -627,6 +672,14 @@ void app.whenReady().then(async () => {
         maxMs: ingressTimes[99],
         scope:
           "model tool ingress with two explicit next calls through utilityProcess; 20 warmups; stub tool core, no native I/O or filtering"
+      },
+      registeredToolPerformance: {
+        count: registryTimes.length,
+        p50Ms: registryTimes[49],
+        p95Ms: registryTimes[94],
+        maxMs: registryTimes[99],
+        scope:
+          "registered echo tool through utilityProcess and schema validation; 20 warmups; no SQLite, I/O or content filtering"
       },
       filesPerformance: {
         count: fileTimes.length,

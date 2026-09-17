@@ -24,6 +24,7 @@ import type {
   FunctionClientAction
 } from "../../../shared/mods/v2/ui"
 import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
+import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
 
 interface Snapshot {
   compiled: CompiledFunctionPlugin
@@ -49,6 +50,16 @@ interface FunctionManagerHost {
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
   changed(threadId: string): void
   assertThread?(workspace: string, threadId: string): void
+  listTools?(workspace: string, threadId: string, signal: AbortSignal): Promise<FunctionToolInfo[]>
+  registeredTool?(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    origin: "model" | "mod",
+    signal: AbortSignal,
+    run: () => Promise<ModObject>
+  ): Promise<ModObject>
   callTool?(
     workspace: string,
     threadId: string,
@@ -285,6 +296,25 @@ export class FunctionModsManager {
           workspace,
           threadId,
           assertLive,
+          listTools: this.host.listTools
+            ? (signal) => this.host.listTools!(workspace, threadId, signal)
+            : undefined,
+          registeredTool: async (owner, input, origin, signal, run) => {
+            assertLive(owner)
+            if (!this.host.registeredTool)
+              throw new ModFunctionError("MODS_REGISTERED_TOOL_UNAVAILABLE")
+            const answer = await this.host.registeredTool(
+              workspace,
+              threadId,
+              current.snapshots.get(owner.name)!.grant,
+              input,
+              origin,
+              signal,
+              run
+            )
+            assertLive(owner)
+            return answer
+          },
           completeModel: async (plugin, input, signal) => {
             assertLive(plugin)
             if (!this.host.completeModel) throw new ModFunctionError("MODS_MODEL_UNAVAILABLE")
@@ -438,6 +468,18 @@ export class FunctionModsManager {
       return core(input, signal ?? new AbortController().signal)
     const entry = await this.session(workspace, threadId)
     return entry.session!.interceptTool(input, signal, core)
+  }
+
+  async registeredTools(workspace: string, threadId: string): Promise<RegisteredFunctionTool[]> {
+    if (
+      !this.host.enabled(workspace) ||
+      this.sources().length === 0 ||
+      (!this.sessions.has(JSON.stringify([workspace, threadId])) &&
+        !(await this.status(workspace)).some((item) => item.state === "ready"))
+    )
+      return []
+    const entry = await this.session(workspace, threadId)
+    return entry.session!.registeredTools()
   }
 
   async panes(workspace: string, threadId: string): Promise<FunctionPaneSnapshot[]> {
