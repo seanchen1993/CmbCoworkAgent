@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-18",
-  "codeBaseline": "733414f5",
+  "codeBaseline": "a8975f89",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -118,11 +118,11 @@
       "model stream boundary"
     ],
     "turnLifecycle": {
-      "revision": "desktop-refusal-turns-v23",
-      "design": "mods-v2-refusal-turns-2026-09-18.md",
-      "scope": "desktop and managed main runs plus host-bound shared child completion; distinct child turns, actual usage and partial stream observations; fresh lifecycle entry without inherited task receipts; explicit provider refusal metadata and terminal transport settlement",
+      "revision": "desktop-turn-presentation-v24",
+      "design": "mods-v2-turn-presentation-2026-09-18.md",
+      "scope": "desktop and managed main runs plus host-bound shared child completion; native task refusal errors independent of Mods; distinct child turns, actual usage and partial streams; explicit provider refusal and terminal settlement; host-owned per-message notice anchors in the virtual transcript",
       "limits": [
-        "opaque child lifecycle, native child refusal status and per-turn notice placement pending",
+        "opaque child lifecycle and durable notice transcript persistence pending",
         "100 active/pending turns; 10000 response identities per turn; session-local 64 notices / 1 MiB",
         "50 admitted abort attempts per plugin/session with 2s spacing; only exact current main turn can be cancelled",
         "missing actual model/usage is skipped; no inference from configured aliases; absent valid usage omits the field",
@@ -131,7 +131,7 @@
         "cancellation receipt only allows protected publication; expired runtime and adapters remain unusable"
       ],
       "upstreamConformanceAdded": 4,
-      "validation": "610 focused regressions + Node/Web + 37 process checks + completion hooks standalone pass; 63 Electron E2E pass before final two-line interleaved reasoning fix, which has actual SDK/graph/checkpoint regressions; 23 changed source files lint has no new diagnostics; disabled-read P95 -2.59%, no-op 1000 P95 8.8997ms, pending 0; full performance gate pending",
+      "validation": "663 focused regressions + Node/Web + 37 process checks + 63 Electron E2E pass; notices verified adjacent to real message across reload and cleared on revocation; child task refusal receipt failed and FAILED badge visually confirmed; 22 changed source files lint has no new diagnostics; disabled-read P95 -4.02%, no-op 1000 P95 8.7600ms, pending 0; full performance gate pending",
       "fullParity": false
     },
     "evidence": "mods-v2-implementation-2026-09-16.md",

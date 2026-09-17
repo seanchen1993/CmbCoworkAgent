@@ -8,9 +8,14 @@ export class FunctionTurnNotices {
   private readonly entries: FunctionTurnNotice[] = []
   private bytes = 2
 
-  append(turnId: string, answer: string, text: string): boolean {
+  append(turnId: string, answer: string, text: string, anchorMessageId?: string): boolean {
     if (!text.trim() || text === answer) return false
-    const entry = { id: randomUUID(), turnId, text }
+    const entry = {
+      id: randomUUID(),
+      turnId,
+      text,
+      ...(anchorMessageId ? { anchorMessageId } : {})
+    }
     const bytes = Buffer.byteLength(JSON.stringify(entry)) + 1
     if (bytes + 2 > MODS_MAX_BYTES) throw new ModFunctionError("MODS_JSON_SIZE")
     this.entries.push(entry)

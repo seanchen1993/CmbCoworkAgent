@@ -1697,9 +1697,34 @@ async function main(): Promise<void> {
       .getByText(/^本轮完成/)
       .first()
       .waitFor()
+    const firstTurnNotice = (
+      await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)
+    ).find((notice) => notice.turnId === completedFacts.turnId)!
+    assert.ok(firstTurnNotice.anchorMessageId)
+    const assertNoticeRow = async (turnId: string) => {
+      const element = page!.locator(`[data-function-turn-notices] [data-turn-id="${turnId}"]`)
+      await element.waitFor()
+      const placement = await element.evaluate((node) => {
+        const parent = node.parentElement!
+        return {
+          anchor: parent.getAttribute("data-anchor-message-id"),
+          row: parent.previousElementSibling?.getAttribute("data-chat-message-id"),
+          insideComposer: !!parent.closest("form")
+        }
+      })
+      assert.ok(placement.anchor)
+      assert.equal(placement.anchor, placement.row)
+      assert.equal(placement.insideComposer, false)
+      return placement.anchor
+    }
+    const firstNoticeRow = await assertNoticeRow(completedFacts.turnId)
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Registered tools", { exact: true }).first().click()
+    assert.equal(await assertNoticeRow(completedFacts.turnId), firstNoticeRow)
+    assert.equal(modelServer.requests.length, afterRunRequests)
     await page!.screenshot({ path: join(artifacts, "function-turn-complete.png") })
     pass(
-      "real turn lifecycle delivers one completion with actual response usage and renders plugin text"
+      "real turn lifecycle delivers actual usage and anchors plugin text to its message across renderer reload"
     )
 
     const backgroundCommand = async (id: string, text = "") => {
@@ -2251,7 +2276,23 @@ async function main(): Promise<void> {
       category: null,
       explanation: "MODS_CHILD_REFUSED"
     })
-    pass("real shared child refusal is attributed independently from its parent's answer")
+    const refusedMainTurn = (refusedChildFacts!.last as { turnId: string }).turnId
+    const refusalReceipts = await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+    const refusedTaskReceipt = refusalReceipts.find(
+      (row) =>
+        row.identity?.toolCallId === "mods-child-task" && row.identity.turnId === refusedMainTurn
+    )
+    assert.equal(refusedTaskReceipt?.status, "failed")
+    assert.equal(refusedTaskReceipt?.publication, "published")
+    await assertNoticeRow(refusedMainTurn)
+    const retainedFirstNotice = (
+      await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)
+    ).find((notice) => notice.id === firstTurnNotice.id)
+    assert.deepEqual(retainedFirstNotice, firstTurnNotice)
+    await page!.screenshot({ path: join(artifacts, "function-child-refusal-status.png") })
+    pass(
+      "shared child refusal produces a failed native task receipt while the parent can recover; older notice anchors remain stable"
+    )
 
     for (const [marker, refusal, answer] of [
       ["", { category: null, explanation: "MODS_PROVIDER_REFUSED" }, "MODS_PROVIDER_REFUSED"],
@@ -2536,6 +2577,14 @@ async function main(): Promise<void> {
     )
     await page!.getByRole("button", { name: "返回会话", exact: true }).click()
     await page!.getByText("Registered tools", { exact: true }).first().click()
+    assert.deepEqual(
+      await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread),
+      []
+    )
+    await until(
+      async () => (await page!.locator("[data-function-turn-notices]").count()) === 0,
+      "revocation clears old turn notices from the message list"
+    )
     await page!
       .locator("textarea.composer-textarea")
       .fill("[mods-registered-removed] 请确认撤权后的工具列表。")

@@ -18,8 +18,8 @@ export class FunctionTurnObservation {
   private readonly usage = new Map<number, FunctionTurnUsage>()
   private count = 0
   private usageOverflow = false
-  private response?: { content: unknown }
-  private partial?: { id: string; text: string }
+  private response?: { content: unknown; id?: string }
+  private partial?: { id: string; text: string; messageId?: string }
   private overflow = false
   private refusal?: ModelRefusal
 
@@ -47,12 +47,23 @@ export class FunctionTurnObservation {
               .join("")
           : ""
     const previous = mode === "delta" && this.partial?.id === id ? this.partial.text : ""
+    const messageId =
+      typeof message.id === "string"
+        ? message.id
+        : this.partial?.id === id
+          ? this.partial.messageId
+          : undefined
     if (previous.length + text.length > MODS_MAX_BYTES) {
-      this.partial = { id, text: "" }
+      this.partial = { id, text: "", messageId }
       this.overflow = true
       return
     }
-    this.partial = { id, text: previous + text }
+    this.partial = { id, text: previous + text, messageId }
+  }
+
+  /** Presentation identity stays outside the plugin's public event and result. */
+  get anchorMessageId(): string | undefined {
+    return this.partial ? this.partial.messageId : this.response?.id
   }
 
   observe(value: unknown): void {

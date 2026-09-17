@@ -1,4 +1,5 @@
 import { foregroundToolPolicy } from "./foreground-tool-policy"
+import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
 import {
   createFunctionChildTurnMiddleware,
@@ -2111,7 +2112,7 @@ export function wrapTaskToolWithOwnerMetadata(
             ...patchedConfig,
             callbacks: subagentSessionCallbacks(patchedConfig.callbacks)
           })
-        const execute = () =>
+        const invokeCaptured = () =>
           captureThreadId && ownerId
             ? withSubagentSessionCapture(
                 { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
@@ -2119,6 +2120,7 @@ export function wrapTaskToolWithOwnerMetadata(
                 invoke
               )
             : taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+        const execute = () => withTaskModelOutcome(invokeCaptured, config?.signal)
         const result = await (runModTask
           ? runModTask(
               {
@@ -2862,6 +2864,7 @@ function assembleDeepAgent(
     // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
     createMalformedToolCallRecoveryMiddleware(),
     createPatchToolCallsMiddleware(),
+    createTaskModelOutcomeMiddleware(),
     ...(modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)
       ? [createFunctionChildTurnMiddleware(modManager)]
       : [])

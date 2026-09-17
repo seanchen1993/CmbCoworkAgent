@@ -32,4 +32,5 @@ export interface FunctionTurnNotice {
   id: string
   turnId: string
   text: string
+  anchorMessageId?: string
 }

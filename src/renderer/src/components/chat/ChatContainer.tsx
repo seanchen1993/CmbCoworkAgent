@@ -2,7 +2,7 @@ import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useModCommands } from "../../features/slash-commands/useModCommands"
 import { ModCommandJobs } from "./ModCommandJobs"
 import { FunctionPanes } from "./FunctionPanes"
-import { FunctionTurnNotices } from "./FunctionTurnNotices"
+import { useFunctionTurnNotices } from "@/lib/use-function-turn-notices"
 import { ModCards } from "./ModCards"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
@@ -1659,6 +1659,7 @@ export function ChatContainer({
   readOnlyReason = null,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
+  const functionTurnNotices = useFunctionTurnNotices(threadId)
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
   )
@@ -7920,6 +7921,7 @@ export function ChatContainer({
                     />
                   )}
                   <ChatMessageVirtualList
+                    functionTurnNotices={functionTurnNotices}
                     messageAttempts={streamData.messageAttempts}
                     searchReveal={searchOpen ? searchReveal : null}
                     messages={displayMessages}
@@ -8326,7 +8328,6 @@ export function ChatContainer({
               <GitChangeNotice threadId={threadId} />
               <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
               <ModCommandJobs key={threadId} threadId={threadId} />
-              <FunctionTurnNotices key={`turns:${threadId}`} threadId={threadId} />
               <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton

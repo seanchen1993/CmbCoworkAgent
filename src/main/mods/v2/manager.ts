@@ -605,7 +605,8 @@ export class FunctionModsManager {
     workspace: string,
     threadId: string,
     input: FunctionTurnComplete,
-    signal: AbortSignal
+    signal: AbortSignal,
+    anchorMessageId?: string
   ): Promise<FunctionTurnResult> {
     // A terminal event belongs to the already loaded session; it must not start a new generation.
     const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
@@ -626,7 +627,8 @@ export class FunctionModsManager {
       entry.turnNotices.append(
         input.turnId,
         (safe as unknown as FunctionTurnComplete).answer,
-        result.text
+        result.text,
+        anchorMessageId
       )
     )
       this.host.changed(threadId)

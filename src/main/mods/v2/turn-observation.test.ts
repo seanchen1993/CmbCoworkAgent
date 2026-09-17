@@ -1,6 +1,7 @@
 import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { expect, it } from "vitest"
 import { FunctionTurnObservation } from "./turn-observation"
+import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../../shared/message-role-collision"
 
 it("counts real responses once, separates cached input, and retains the last API model", () => {
   const view = new FunctionTurnObservation()
@@ -154,6 +155,7 @@ it("retains an interrupted visible text stream, replaces snapshots, and excludes
     {}
   ]
   view.observeStream(part("one", "hel"), "delta")
+  expect(view.anchorMessageId).toBe("one")
   view.observeStream(
     part("one", [
       { type: "reasoning", text: "hidden" },
@@ -167,6 +169,30 @@ it("retains an interrupted visible text stream, replaces snapshots, and excludes
   view.observe(new AIMessage({ id: "one", content: "complete" }))
   view.observeStream(part("one", "late fragment"), "delta")
   expect(view.snapshot()).toEqual({ answer: "complete" })
+  expect(view.anchorMessageId).toBe("one")
   view.observeStream(part("two", "partial next"), "delta")
   expect(view.snapshot()).toEqual({ answer: "partial next" })
+  expect(view.anchorMessageId).toBe("two")
+})
+
+it("uses the actual message id for presentation separately from stream deduplication", () => {
+  const view = new FunctionTurnObservation()
+  view.observeStream(
+    [
+      {
+        id: ["AIMessageChunk"],
+        kwargs: {
+          id: "visible",
+          content: "partial",
+          additional_kwargs: { [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: "provider" }
+        }
+      },
+      {}
+    ],
+    "delta"
+  )
+  expect(view.anchorMessageId).toBe("visible")
+  expect(view.snapshot()).not.toHaveProperty("anchorMessageId")
+  view.observe(new AIMessage({ id: "complete", content: "answer" }))
+  expect(view.anchorMessageId).toBe("complete")
 })

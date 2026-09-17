@@ -41,6 +41,7 @@ interface TurnEntry {
   dispatching: boolean
   controller: AbortController
   observation: FunctionTurnObservation
+  anchorMessageId?: string
   suspended?: boolean
 }
 
@@ -49,7 +50,8 @@ export interface FunctionTurnLifecycleHost {
   complete(
     binding: FunctionTurnBinding | FunctionChildTurnBinding,
     input: FunctionTurnComplete,
-    signal: AbortSignal
+    signal: AbortSignal,
+    anchorMessageId?: string
   ): Promise<void>
   isBusy(threadId: string): boolean
   onIdle(listener: (threadId: string) => void): () => void
@@ -243,6 +245,7 @@ export class FunctionTurnLifecycle {
       return
     }
     const { refusal, ...facts } = observation
+    entry.anchorMessageId = entry.observation.anchorMessageId
     const ending =
       entry.binding.signal.aborted || result.reason === "aborted"
         ? { reason: "aborted" as const }
@@ -285,7 +288,12 @@ export class FunctionTurnLifecycle {
         entry.controller.signal.throwIfAborted()
         // An async startup may have allowed another physical run to claim the thread.
         if (waitForIdle && this.host.isBusy(threadId)) return
-        await this.host.complete(entry.binding, entry.terminal!, entry.controller.signal)
+        await this.host.complete(
+          entry.binding,
+          entry.terminal!,
+          entry.controller.signal,
+          entry.anchorMessageId
+        )
         if (this.entries.get(this.key(threadId, entry.binding.runId)) === entry)
           this.entries.delete(this.key(threadId, entry.binding.runId))
       })

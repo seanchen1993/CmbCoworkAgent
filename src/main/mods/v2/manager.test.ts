@@ -508,6 +508,7 @@ it("protects real turn facts before observers and notices after hooks, including
       let start;
       on("turn.start",async($,e,next)=>{start=e.text;return next(e)});
       on("turn.complete",async($,e,next)=>{
+        if (e.anchorMessageId) throw Error("host identity leaked to guest");
         await next(e);return {text:"SECRET:"+start+":"+e.answer}
       });
     }`
@@ -529,11 +530,16 @@ it("protects real turn facts before observers and notices after hooks, including
         isAborted: false,
         reason: "answer"
       },
-      signal
+      signal,
+      "actual-message"
     )
   ).toEqual({ text: "HIDDEN:HIDDEN:HIDDEN" })
   expect(await f.manager.turnNotices(f.root, "thread")).toEqual([
-    expect.objectContaining({ turnId: "turn", text: "HIDDEN:HIDDEN:HIDDEN" })
+    expect.objectContaining({
+      turnId: "turn",
+      text: "HIDDEN:HIDDEN:HIDDEN",
+      anchorMessageId: "actual-message"
+    })
   ])
   const loads = f.loads()
   let release!: () => void
