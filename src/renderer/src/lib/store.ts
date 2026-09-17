@@ -1,3 +1,4 @@
+import { resolveWorkerSnapshotContent } from "./worker-message-content"
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
 import type {
@@ -571,11 +572,10 @@ function workerTurnKeys(
 }
 
 function relativeWorkerTurnKeys(messages: readonly Message[], turnOffset: number): string[] {
-  let currentTurn = turnOffset
-  return messages.map((message) => {
-    if (message.role === "user") currentTurn += 1
-    return currentTurn > 0 ? `__cmb-worker-turn-${currentTurn}__` : WORKER_PRE_USER_TURN_KEY
-  })
+  return workerTurnKeys(
+    messages,
+    turnOffset > 0 ? `__cmb-worker-turn-${turnOffset}__` : WORKER_PRE_USER_TURN_KEY
+  )
 }
 
 function workerTurnSignatureKey(
@@ -719,6 +719,8 @@ function resolveWorkerFocusContent(
   incomingIsOrderedSnapshot: boolean = false,
   incomingDefinesRepeatedOccurrence: boolean = false
 ): Message["content"] {
+  const snapshotContent = resolveWorkerSnapshotContent(existingMessage, incomingMessage)
+  if (snapshotContent !== undefined) return snapshotContent
   if (incomingIsOrderedSnapshot && incomingDefinesRepeatedOccurrence) {
     return incomingMessage.content ?? ""
   }

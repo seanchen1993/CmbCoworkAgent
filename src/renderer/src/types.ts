@@ -289,6 +289,10 @@ export interface Message {
   ordinal?: number
   provider_source_id?: string
   provider_occurrence?: number
+  /** Renderer-only provenance for Team worker content; absent for partial fragments. */
+  worker_content_source?: "values" | "snapshot"
+  /** This worker identity has appeared in a complete ordered values frame. */
+  worker_snapshot_identity?: boolean
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number
