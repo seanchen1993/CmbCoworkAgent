@@ -495,3 +495,65 @@ it("protects session repository data before observer hooks and after their chang
     observed: "/protected"
   })
 })
+
+it("protects real turn facts before observers and notices after hooks, including revocation during publication", async () => {
+  const f = await fixture()
+  await writeFile(
+    join(f.plugin, "hooks", "hooks.json"),
+    JSON.stringify({ modules: ["./turns.ts"] })
+  )
+  await writeFile(
+    join(f.plugin, "hooks", "turns.ts"),
+    `export function register(on){
+      let start;
+      on("turn.start",async($,e,next)=>{start=e.text;return next(e)});
+      on("turn.complete",async($,e,next)=>{
+        await next(e);return {text:"SECRET:"+start+":"+e.answer}
+      });
+    }`
+  )
+  f.setPublication(async (value) =>
+    JSON.parse(JSON.stringify(value).replaceAll("SECRET", "HIDDEN"))
+  )
+  await f.approve()
+  const signal = new AbortController().signal
+  await f.manager.turnStart(f.root, "thread", { turnId: "turn", text: "SECRET" }, signal)
+  expect(
+    await f.manager.turnComplete(
+      f.root,
+      "thread",
+      {
+        turnId: "turn",
+        answer: "SECRET",
+        durationMs: 15,
+        isAborted: false,
+        reason: "answer"
+      },
+      signal
+    )
+  ).toEqual({ text: "HIDDEN:HIDDEN:HIDDEN" })
+  expect(await f.manager.turnNotices(f.root, "thread")).toEqual([
+    expect.objectContaining({ turnId: "turn", text: "HIDDEN:HIDDEN:HIDDEN" })
+  ])
+  const loads = f.loads()
+  let release!: () => void
+  let entered!: () => void
+  const started = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  f.setPublication(async (value) => {
+    entered()
+    await pending
+    return value
+  })
+  const result = expect(f.manager.turnNotices(f.root, "thread")).rejects.toThrow("SCOPE_CHANGED")
+  await started
+  f.manager.revoke(f.root, "function-commands")
+  release()
+  await result
+  expect(await f.manager.turnNotices(f.root, "thread")).toEqual([])
+  expect(f.loads()).toBe(loads)
+})

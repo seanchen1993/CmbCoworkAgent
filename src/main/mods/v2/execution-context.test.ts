@@ -7,13 +7,53 @@ import {
   scheduleFunctionTool,
   withFunctionExecution,
   functionExecutionAgent,
-  functionExecutionScope
+  functionExecutionScope,
+  assertFunctionPublicationScope,
+  recordFunctionCancellationReceipt,
+  withFreshFunctionExecution
 } from "./execution-context"
 import { scheduleFunctionCommand } from "./command-scheduler"
 import { functionCallIdentity, runFunctionHostCall } from "./host-call"
 import { ModRuntimeAuthorities } from "../runtime-instance"
 
 const cleanups: Array<() => void> = []
+
+it("limits cancellation receipts to their live publication scope, never a new SDK authority", async () => {
+  const f = fixture()
+  const registry = new ModRuntimeAuthorities()
+  cleanups.push(() => registry.close())
+  const instance = registry.create({ ...f.scope, turnId: "cancelled" })
+  let resume!: () => void
+  let late!: Promise<void>
+  await withFunctionExecution({ ...f.scope, runtimeAuthority: instance.authority }, async () => {
+    recordFunctionCancellationReceipt()
+    instance.release()
+    expect(() => assertFunctionPublicationScope(f.scope.workspace, f.threadId)).not.toThrow()
+    expect(() => assertFunctionPublicationScope("/other", f.threadId)).toThrow(
+      "MODS_CALL_SCOPE_CHANGED"
+    )
+    expect(() => assertFunctionPublicationScope(f.scope.workspace, "other")).toThrow(
+      "MODS_CALL_SCOPE_CHANGED"
+    )
+    expect(() => functionExecutionScope(f.scope.workspace, f.threadId)).toThrow(
+      "MODS_RUNTIME_INSTANCE_EXPIRED"
+    )
+    await expect(
+      withFreshFunctionExecution({ ...f.scope, runtimeAuthority: instance.authority }, async () =>
+        assertFunctionPublicationScope(f.scope.workspace, f.threadId)
+      )
+    ).rejects.toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+    late = new Promise<void>((resolve) => {
+      resume = resolve
+    }).then(() => {
+      expect(() => assertFunctionPublicationScope(f.scope.workspace, f.threadId)).toThrow(
+        "MODS_CALL_SCOPE_EXPIRED"
+      )
+    })
+  })
+  resume()
+  await late
+})
 afterEach(() => cleanups.splice(0).forEach((fn) => fn()))
 function fixture() {
   const jobs = new Map<string, ModCommandJob>(),

@@ -14,7 +14,10 @@ import { ModCommandQueue } from "../mods/command-queue"
 import { bindStandaloneModCommand } from "../mods/command-backend"
 import { withFunctionMcpCommand } from "../mods/v2/mcp-command"
 import { withFunctionCommandBinding } from "../mods/v2/command-binding"
-import { functionExecutionScope } from "../mods/v2/execution-context"
+import {
+  functionExecutionScope,
+  recordFunctionCancellationReceipt
+} from "../mods/v2/execution-context"
 import { functionCallTurn } from "../mods/v2/host-call"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import type { ModCommandDescriptor, ModObject } from "../../shared/mods/types"
@@ -139,6 +142,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         manager.assertFunctionToolNameAvailable(workspace, threadId, name)
       },
       registeredTool: (...args) => registeredTools.call(...args),
+      abortTurn: async (workspace, threadId, grant, turnId, signal) => {
+        signal.throwIfAborted()
+        if (writableThreadScope(threadId) !== workspace)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        manager.store.assertGrant(grant)
+        manager.functionTurns.abort(workspace, threadId, turnId)
+        recordFunctionCancellationReceipt()
+      },
       readSession: (workspace, threadId, method, signal) =>
         queryFunctionSessionRead(
           manager,
@@ -326,6 +337,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     )
   }
   manager.attachFunctions({
+    turnStart: (...args) => functions.turnStart(...args),
+    turnComplete: (...args) => functions.turnComplete(...args),
     hasToolCheck: (workspace, threadId) => functions.hasToolCheck(workspace, threadId),
     toolCheck: (binding, input, core, origin) =>
       functions.interceptToolCheck(
@@ -435,6 +448,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       ...(await functions.commands(workspace, threadId))
     ]
   })
+  ipcMain.handle("mods:function-turn-notices", (event, threadId: string) =>
+    functions.turnNotices(scope(event, threadId), threadId)
+  )
   ipcMain.handle("mods:function-panes", (event, threadId: string) =>
     functions.panes(scope(event, threadId), threadId)
   )

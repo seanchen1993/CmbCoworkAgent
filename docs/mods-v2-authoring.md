@@ -20,6 +20,7 @@
 模型是否选用工具取决于已配置模型。首次发消息前就可用 `/claw-tools` 查看当前会话工具摘要，
 用 `/claw-tools read_file` 查看某个工具的完整说明；包括当前已注册工具。
 `/claw-session` 查看主模型、用户轮次、消息数量、最近回复及 Git 仓库；查询不会调用模型。
+`/claw-turn` 查看本会话的轮次事件，`/claw-turn abort` 停止正在执行的主轮次；结束时会显示插件附加说明。
 
 自建插件用已有的本地插件安装入口安装，随后在函数插件区域授权。
 
@@ -61,7 +62,7 @@ export function register(on) {
 ## SDK 事件和返回值
 
 当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces/model/messages/turns/repo/authorize`、
-`clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`，以及 `$.plugin.name/root` 元数据。
+`clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`、`turn.abort`，以及 `$.plugin.name/root` 元数据。
 上述 SDK 操作同样经过事件链。另已接入有限的桌面 Pane：`ui.open/close`、
 同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call/register/list/check`、`model.complete`，范围见下文。
 
@@ -81,6 +82,36 @@ on("clock.sleep", { ms: 10 }, () => ({ value: undefined }))
 `command.describe` 的 `isHidden: true` 隐藏菜单条目，但保留按完整命令名执行的能力。
 在 `command.run` hook 内不能再调用 `$.command.run`，经其他 SDK 间接调用也会拒绝，
 与 Claude 的会话执行通道规则一致；应直接返回当前命令的 `{ text }`。
+
+## 观察和停止主轮次
+
+在 `register(on)` 中订阅实际运行事件：
+
+```ts
+on("turn.start", async ($, e, next) => {
+  await $.store.set("last-turn", e.turnId)
+  return next(e)
+})
+on("turn.complete", async ($, e, next) => {
+  const result = await next(e)
+  if (e.agentId) return result
+  return { ...result, text: `本轮状态：${e.reason}，耗时 ${Math.round(e.durationMs)} 毫秒` }
+})
+```
+
+`turn.start` 提供 `{ text, turnId }`，默认返回 `{ turnId }`。`turn.complete` 提供
+`answer/durationMs/isAborted/turnId/reason` 及实际可得的 `usage`，默认返回
+`{ text: answer, usage? }`。没有实际模型名或完整统计时不返回用量。完成 Hook 的新文本
+作为附加说明，空文本或与回答相同的文本不再显示。
+
+示例的即时命令使用 `await $.turn.abort({ turnId })`，只停止当前身份匹配的主轮次。
+停止成功后可以继续发消息；旧轮次 ID 不能停止新任务。每个插件每会话最多尝试 50 次，
+间隔至少 2 秒，错误 ID 也消耗已进入核心的尝试次数。停止的返回值不授予后续工具执行权。
+
+当前已接入桌面 invoke、审批恢复及中断恢复；模型初始化重试不重复触发开始事件，
+审批暂停不触发完成事件。后台入口、共享子代理完成、真实提供商拒绝及按轮次定位附加说明
+仍在继续实现。附加说明保存在当前插件会话中，最多 64 条，重建插件会话后清空。
+宿主修订为 v20，更新后需重新批准插件摘要。
 
 ## 给 Claw 增加自定义工具
 
@@ -143,7 +174,7 @@ schema、授权、项目和组织策略，完成后检查输出；撤权后下�
 `$.model.complete()`，审计能追溯到外层工具；每次实际执行仍单独记账和保护输出。
 原生读取 SDK 支持宿主明确绑定的子代理，子代理不能借用其他实例的后端。排队任务保留
 原调用实例身份，同 ID 重建、取消或调用方结束后，遗留任务不能重新获得授权。
-当前宿主修订 v18，需要重新批准旧授权快照。
+当前宿主修订 v20，需要重新批准旧授权快照。
 运行时禁用的工具在 SDK 查询和真实调用中也会被拒绝，不依赖是否安装 tool.check Hook。
 隔离执行目录与授权项目分别保留；session.cwd 和文件 SDK 使用实际执行目录，授权及审计
 继续属于原项目。文件 SDK 复用后端路径检查，不能读取被工作树边界禁止的 .git 文件。

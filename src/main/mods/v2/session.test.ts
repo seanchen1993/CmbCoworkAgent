@@ -6,8 +6,103 @@ import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from 
 import { AsyncLocalStorage } from "node:async_hooks"
 import { ModError } from "../errors"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { ModRuntimeAuthorities } from "../runtime-instance"
+import { withFunctionExecution, recordFunctionCancellationReceipt } from "./execution-context"
 
 const sessions: FunctionSession[] = []
+
+it("returns a successful cancellation receipt without reauthorizing later SDK calls", async () => {
+  const authorities = new ModRuntimeAuthorities()
+  const controller = new AbortController()
+  const { authority } = authorities.create(
+    { workspace: "/project", threadId: "thread", turnId: "turn" },
+    controller.signal
+  )
+  const value = await session(
+    `
+    on("session.start",async($,e,next)=>{await $.command.register({name:"cancel",description:"Cancel",immediate:true});return next(e)});
+    on("command.run",{command:"cancel"},async($)=>{
+      await $.turn.abort({turnId:"turn"});
+      try {await $.session.id(); return {text:"wrongly authorized"}} catch {return {text:"cancelled; execution expired"}}
+    });
+  `,
+    {
+      abortTurn: async () => {
+        controller.abort()
+        recordFunctionCancellationReceipt()
+      }
+    }
+  )
+  try {
+    await value.start()
+    const result = await withFunctionExecution(
+      {
+        workspace: "/project",
+        threadId: "thread",
+        turnId: "turn",
+        runtimeAuthority: authority,
+        leased: false,
+        immediate: true,
+        userInitiated: true
+      },
+      () => value.run("cancel", "")
+    )
+    expect(result).toEqual({ text: "cancelled; execution expired" })
+    expect(controller.signal.aborted).toBe(true)
+  } finally {
+    authorities.close()
+  }
+})
+
+it("runs the same upstream turn fixture with real session dispatch and abort operation", async () => {
+  const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/turn-lifecycle"))
+  const guest = await FunctionGuestRuntime.create(compiled.code, compiled.options)
+  const calls: string[] = []
+  const value = new FunctionSession(
+    [
+      {
+        name: compiled.name,
+        root: compiled.root,
+        tier: "user",
+        guest,
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+    ],
+    {
+      threadId: "thread",
+      workspace: "/root",
+      assertLive: () => undefined,
+      publish: async (value) => value,
+      abortTurn: async (plugin, turnId) => {
+        calls.push(`${plugin.name}:${turnId}`)
+      }
+    }
+  )
+  sessions.push(value)
+  await value.turnStart({ turnId: "turn-1", text: "prompt" })
+  expect((await value.run("turn-probe", "")).text).toBe("turn-1")
+  const usage = {
+    model: "api-model",
+    input_tokens: 3,
+    output_tokens: 2,
+    cache_read_input_tokens: 1,
+    cache_creation_input_tokens: 0
+  }
+  expect(
+    await value.turnComplete({
+      turnId: "turn-1",
+      answer: "answer",
+      reason: "answer",
+      isAborted: false,
+      durationMs: 20,
+      usage
+    })
+  ).toEqual({ text: "done:turn-1:answer:answer", usage })
+  expect((await value.run("turn-probe", "abort")).text).toBe("aborted:undefined")
+  expect(calls).toEqual(["turn-lifecycle:turn-1"])
+  expect((await value.run("turn-probe", "abort")).text).toContain("MODS_TURN_ABORT_RATE")
+  expect(calls).toHaveLength(1)
+})
 
 it("normalizes file SDK paths and cwd from the current host execution scope without changing the session realm", async () => {
   const roots = new AsyncLocalStorage<string>()

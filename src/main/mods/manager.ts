@@ -33,7 +33,14 @@ import {
   functionCallAuthority,
   withFunctionAgentExecution
 } from "./v2/host-call"
-import { functionExecutionScope } from "./v2/execution-context"
+import { functionExecutionScope, withFreshFunctionExecution } from "./v2/execution-context"
+import { FunctionTurnLifecycle, type FunctionTurnBinding } from "./v2/turn-lifecycle"
+import type {
+  FunctionTurnStart,
+  FunctionTurnComplete,
+  FunctionTurnResult
+} from "../../shared/mods/v2/turn"
+import { getLocalThreadRunLease, onLocalThreadRunLeaseReleased } from "../agent/thread-run-lease"
 import type { McpCapabilityTool } from "../mcp/capability-types"
 import { constrainToolPermission, type ToolPermissionResult } from "../../shared/tool-permission"
 import { beforeModToolExecution } from "./execution-error"
@@ -106,6 +113,52 @@ interface StoredCard {
 }
 
 export class ModsManager {
+  readonly functionTurns = new FunctionTurnLifecycle({
+    isBusy: (threadId) => !!getLocalThreadRunLease(threadId),
+    onIdle: (listener) => onLocalThreadRunLeaseReleased((lease) => listener(lease.threadId)),
+    error: (error) => console.warn("[Mods] Turn completion failed:", error),
+    start: (binding, input, signal) =>
+      withFreshFunctionExecution(
+        {
+          workspace: binding.workspace,
+          threadId: binding.threadId,
+          userInitiated: false,
+          leased: true,
+          immediate: false
+        },
+        async () => {
+          await this.functionLifecycle?.turnStart?.(
+            binding.workspace,
+            binding.threadId,
+            input,
+            signal
+          )
+        }
+      ),
+    complete: (binding, input, signal) =>
+      withFreshFunctionExecution(
+        {
+          workspace: binding.workspace,
+          threadId: binding.threadId,
+          userInitiated: false,
+          leased: false,
+          immediate: false
+        },
+        async () => {
+          await this.functionLifecycle?.turnComplete?.(
+            binding.workspace,
+            binding.threadId,
+            input,
+            signal
+          )
+        }
+      )
+  })
+
+  async startFunctionTurn(binding: FunctionTurnBinding): Promise<void> {
+    if (!this.isEnabled(binding.workspace)) return
+    await this.functionTurns.start({ ...binding, workspace: this.workspaceKey(binding.workspace) })
+  }
   private readonly runtimeAuthorities = new ModRuntimeAuthorities()
   private readonly functionSessions = new WeakMap<
     ModRuntimeAuthority,
@@ -184,6 +237,18 @@ export class ModsManager {
     { tools: FunctionToolInfo[]; binding: ModThreadBinding }
   >()
   private functionLifecycle?: {
+    turnStart?(
+      workspace: string,
+      threadId: string,
+      input: FunctionTurnStart,
+      signal: AbortSignal
+    ): Promise<void>
+    turnComplete?(
+      workspace: string,
+      threadId: string,
+      input: FunctionTurnComplete,
+      signal: AbortSignal
+    ): Promise<FunctionTurnResult>
     invalidate(workspace: string): void
     closeThread(threadId: string): void
     close(): void
@@ -207,6 +272,7 @@ export class ModsManager {
   }
 
   closeFunctionThread(threadId: string): void {
+    this.functionTurns.invalidate(undefined, threadId)
     this.invalidateFunctionReads(threadId)
     this.runtimeAuthorities.closeThread(threadId)
     this.functionLifecycle?.closeThread(threadId)
@@ -504,6 +570,7 @@ export class ModsManager {
       [`epoch:${key}`]: String(next.epoch)
     })
     this.settings.set(key, next)
+    this.functionTurns.invalidate(key)
     this.functionLifecycle?.invalidate(key)
     this.clearActions(key)
     for (const binding of this.bindings.values())
@@ -663,6 +730,26 @@ export class ModsManager {
   needsCommandBinding(threadId: string): boolean {
     const binding = this.bindings.get(`${threadId}:main`)
     return !binding || binding.commandOnly === true || binding.signal?.aborted === true
+  }
+
+  /** Drop only expired physical owners; late settlement must retain a replacement runtime. */
+  releaseExpiredRuntimeBindings(threadId: string): void {
+    const expired = (binding: ModThreadBinding): boolean => {
+      if (binding.threadId !== threadId) return false
+      if (binding.signal?.aborted) return true
+      try {
+        binding.runtimeAuthority?.assertLive()
+      } catch (error) {
+        if (error instanceof ModError && error.code === "MODS_RUNTIME_INSTANCE_EXPIRED") return true
+        throw error
+      }
+      return false
+    }
+    for (const [key, binding] of this.bindings) if (expired(binding)) this.bindings.delete(key)
+    for (const [key, entry] of this.mcpBindings)
+      if (expired(entry.binding)) this.mcpBindings.delete(key)
+    for (const [key, entry] of this.functionToolCatalogs)
+      if (expired(entry.binding)) this.functionToolCatalogs.delete(key)
   }
 
   createRuntimeAuthority(binding: ModThreadBinding) {
@@ -1824,10 +1911,26 @@ export class ModsManager {
   async finishTurn(threadId: string): Promise<void> {
     const binding = this.bindings.get(`${threadId}:main`)
     if (!binding || !this.config(binding.workspace).enabled) return
+    // This view reads durable execution facts after cancellation. It owns no
+    // runtime, adapter or tool authority; render() rejects every I/O capability.
+    const summaryBinding: ModThreadBinding = {
+      workspace: binding.workspace,
+      threadId,
+      turnId: binding.turnId,
+      readOnly: true,
+      activePluginIds: binding.activePluginIds,
+      assertLive: () => {
+        if (this.bindings.get(`${threadId}:main`) !== binding)
+          throw new ModError("MODS_THREAD_CONTEXT_EXPIRED")
+      }
+    }
     const key = `summary:${createHash("sha256").update(threadId).update("\0").update(binding.turnId).digest("hex")}`
     if (this.store.getSetting(key) === "true") return
     this.store.setSetting(key, "true")
-    const session = await this.session(binding)
+    const session = await this.session(summaryBinding).catch((error) => {
+      this.store.setSetting(key, "false")
+      throw error
+    })
     session.refs++
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 5000)
@@ -1844,12 +1947,20 @@ export class ModsManager {
       }
       const counts = this.store.turnSummary(binding.workspace, threadId, binding.turnId)
       await session.engine.summary(
-        this.request({ ...binding, signal: controller.signal }, identity, "host:turn_summary", {}),
+        this.request(
+          { ...summaryBinding, signal: controller.signal },
+          identity,
+          "host:turn_summary",
+          {}
+        ),
         {
           text: `本轮工具：成功 ${counts.succeeded}，失败 ${counts.failed}，待核查 ${counts.unknown}，未执行 ${counts.not_started}。`,
           data: counts
         }
       )
+    } catch (error) {
+      this.store.setSetting(key, "false")
+      throw error
     } finally {
       clearTimeout(timer)
       session.refs--
@@ -1985,6 +2096,7 @@ export class ModsManager {
   }
 
   close(): void {
+    this.functionTurns.close()
     this.invalidateFunctionReads()
     this.runtimeAuthorities.close()
     this.functionLifecycle?.close()

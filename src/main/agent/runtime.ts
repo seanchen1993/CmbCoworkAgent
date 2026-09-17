@@ -3176,7 +3176,14 @@ function assembleDeepAgent(
       modRuntimeAuthority?.agentId === "main" &&
       typeof modSessionModel === "string" &&
       modManager?.isActive(modRuntimeAuthority.workspace)
-        ? [createFunctionSessionViewMiddleware(modManager, modRuntimeAuthority, modSessionModel)]
+        ? [
+            createFunctionSessionViewMiddleware(
+              modManager,
+              modRuntimeAuthority,
+              modSessionModel,
+              currentRunMessageQueueOwnerToken
+            )
+          ]
         : [])
     ],
     ...(responseFormat != null && { responseFormat }),
@@ -4486,7 +4493,7 @@ export function getModelInstance(
     configuration: {
       baseURL: customConfig.baseUrl,
       fetch: withModelResponseDiagnostics(
-        purpose === "function-completion" ? withModelStreamCancellation(modelFetch) : modelFetch,
+        withModelStreamCancellation(modelFetch),
         { model: resolvedModel, purpose },
         (diagnostic) => console.log("[Runtime][ModelResponse]", JSON.stringify(diagnostic))
       )

@@ -41,6 +41,7 @@ it("observes real model/tool/final graph states and preserves completion recover
   })
   let current: readonly unknown[] = []
   const manager = {
+    functionTurns: { observe: vi.fn() },
     bindFunctionSession: vi.fn(),
     updateFunctionSessionMessages: vi.fn((_authority, messages: readonly unknown[]) => {
       current = messages
@@ -70,7 +71,8 @@ it("observes real model/tool/final graph states and preserves completion recover
         createFunctionSessionViewMiddleware(
           manager as unknown as ModsManager,
           authority,
-          "actual-model"
+          "actual-model",
+          "physical-run"
         )
       ]
     })
@@ -83,6 +85,20 @@ it("observes real model/tool/final graph states and preserves completion recover
     expect((current.at(-1) as AIMessage).content).toBe("finished")
     expect(current.some((message) => (message as BaseMessage).getType() === "tool")).toBe(true)
     expect(manager.bindFunctionSession).toHaveBeenCalledWith(authority, "actual-model")
+    expect(manager.functionTurns.observe).toHaveBeenCalledTimes(3)
+    expect(manager.functionTurns.observe.mock.calls.map((call) => call.slice(0, 2))).toEqual([
+      ["thread", "physical-run"],
+      ["thread", "physical-run"],
+      ["thread", "physical-run"]
+    ])
+    expect(manager.functionTurns.observe.mock.calls.map((call) => call[2].content)).toEqual([
+      "",
+      "reading",
+      "finished"
+    ])
+    expect(
+      manager.functionTurns.observe.mock.calls.every((call) => call[2].getType() === "ai")
+    ).toBe(true)
   } finally {
     authorities.close()
     clearTurnCompletionGateState("thread", "turn")

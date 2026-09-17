@@ -18,6 +18,25 @@ interface FunctionExecution {
 }
 
 const context = new AsyncLocalStorage<FunctionExecution>()
+const cancellationReceipts = new WeakSet<FunctionExecution>()
+
+/** Called by the host only after its exact active-turn cancellation has succeeded. */
+export function recordFunctionCancellationReceipt(): void {
+  const scope = context.getStore()
+  if (scope?.active) cancellationReceipts.add(scope)
+}
+
+/** A completed cancellation can return its protected result; it grants no further SDK execution. */
+export function assertFunctionPublicationScope(workspace: string, threadId: string): void {
+  const scope = context.getStore()
+  if (scope && cancellationReceipts.has(scope)) {
+    if (!scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+    if (scope.workspace !== workspace || scope.threadId !== threadId)
+      throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+    return
+  }
+  functionExecutionScope(workspace, threadId)
+}
 
 export function currentFunctionExecution() {
   const scope = context.getStore()

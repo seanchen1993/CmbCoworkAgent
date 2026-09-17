@@ -25,7 +25,8 @@ export const SESSION_CAPABILITIES = [
   "tool.list",
   "tool.check",
   "mcp.call",
-  "model.complete"
+  "model.complete",
+  "turn.abort"
 ]
 import type { FunctionStateAccess } from "./state-store"
 import { FILE_CAPABILITIES, type FunctionFileAccess } from "./file-access"
@@ -51,14 +52,22 @@ import { functionToolCheckInput, validateToolCheckResult } from "./tool-check"
 import { constrainToolPermission, type ToolPermissionResult } from "../../../shared/tool-permission"
 import { validateRegisteredToolInput } from "./tool-schema"
 import { functionCallAgent, withFunctionAgentExecution } from "./host-call"
-import { currentFunctionExecution } from "./execution-context"
+import { currentFunctionExecution, assertFunctionPublicationScope } from "./execution-context"
 import { functionMcpToolName } from "./mcp-names"
+import type {
+  FunctionTurnStart,
+  FunctionTurnComplete,
+  FunctionTurnResult
+} from "../../../shared/mods/v2/turn"
+import { validateFunctionTurnInput, validateFunctionTurnResult } from "./turn-contract"
+import { FunctionTurnAbortBudget } from "./turn-lifecycle"
 
 export interface FunctionSessionHost {
   threadId: string
   workspace: string
   cwd?(): string
   readSession?(method: FunctionSessionReadMethod, signal: AbortSignal): Promise<ModJson>
+  abortTurn?(plugin: FunctionPlugin, turnId: string, signal: AbortSignal): Promise<void>
   assertLive(plugin?: FunctionPlugin): void
   uiChanged?(): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
@@ -112,6 +121,7 @@ export class FunctionSession {
   private readonly tools = new FunctionToolRegistry()
   private readonly dispatcher: FunctionDispatcher
   private starting?: Promise<void>
+  private readonly abortBudget = new FunctionTurnAbortBudget()
 
   constructor(
     readonly plugins: readonly FunctionPlugin[],
@@ -208,9 +218,10 @@ export class FunctionSession {
     return this.starting
   }
 
-  private assertLive(plugin?: FunctionPlugin): void {
+  private assertLive(plugin?: FunctionPlugin, publication = false): void {
     this.controller.signal.throwIfAborted()
-    currentFunctionExecution()
+    if (publication) assertFunctionPublicationScope(this.host.workspace, this.host.threadId)
+    else currentFunctionExecution()
     this.host.assertLive(plugin)
     if (plugin?.guest.stats.disposed) throw new ModFunctionError("MODS_UNLOADED")
   }
@@ -246,6 +257,35 @@ export class FunctionSession {
       })
     }
     return commands
+  }
+
+  async turnStart(input: FunctionTurnStart, signal?: AbortSignal): Promise<void> {
+    await this.start()
+    await this.dispatch("turn.start", { ...input }, signal, undefined, 0, undefined, "turn.start", {
+      core: async (value) => ({ turnId: value.turnId })
+    })
+  }
+
+  async turnComplete(
+    input: FunctionTurnComplete,
+    signal?: AbortSignal
+  ): Promise<FunctionTurnResult> {
+    await this.start()
+    return (await this.dispatch(
+      "turn.complete",
+      input as unknown as ModObject,
+      signal,
+      undefined,
+      0,
+      undefined,
+      undefined,
+      {
+        core: async (value) => ({
+          text: value.answer,
+          ...(value.usage ? { usage: value.usage } : {})
+        })
+      }
+    )) as unknown as FunctionTurnResult
   }
 
   async run(command: string, args: string, signal?: AbortSignal): Promise<ModObject> {
@@ -413,6 +453,7 @@ export class FunctionSession {
             : value,
       validateInput: (name, value) => {
         validateBasicInput(name, value)
+        validateFunctionTurnInput(name, value)
         if (name === "tool.register") functionToolSpec(value)
         if (name === "tool.call") {
           if (presentation?.modelTool) {
@@ -433,6 +474,7 @@ export class FunctionSession {
           throw new ModFunctionError("MODS_COMMAND_ARGS")
       },
       validateResult: (name, value) => {
+        validateFunctionTurnResult(name, value)
         if (name === "tool.check") return validateToolCheckResult(value)
         if (name === "tool.call") return validateFunctionToolResult(value)
         if (name === "ui.render") return validateFunctionTree(value)
@@ -501,10 +543,10 @@ export class FunctionSession {
       capability: (plugin, method, raw, callSignal, source) =>
         this.capability(plugin, method, raw, callSignal, source, depth, turnHeld)
     })
-    this.assertLive()
     // Policy sees short-circuit results as well as results that passed through core.
+    this.assertLive(undefined, true)
     const published = await this.host.publish(result.value, scopedSignal)
-    this.assertLive()
+    this.assertLive(undefined, true)
     return parseModJson(encodeModJson(published)) as ModJson
   }
 
@@ -520,6 +562,32 @@ export class FunctionSession {
     this.assertLive(plugin)
     if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
     const args = raw
+    if (method === "turn.abort") {
+      if (args.length !== 1 || !isModObject(args[0]))
+        throw new ModFunctionError("MODS_TURN_ABORT_ARGUMENTS")
+      validateFunctionTurnInput(method, args[0])
+      const result = await this.dispatch(
+        method,
+        args[0],
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: async (input, signal) => {
+            this.abortBudget.take(plugin.name)
+            if (!this.host.abortTurn) throw new ModFunctionError("MODS_TURN_UNAVAILABLE")
+            await this.host.abortTurn(plugin, String(input.turnId), signal)
+            return undefined
+          }
+        },
+        turnHeld
+      )
+      if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof result.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
+      return undefined
+    }
     if (method === "tool.check") {
       if (args.length !== 1) throw new ModFunctionError("MODS_TOOL_CHECK_ARGUMENTS")
       const input = functionToolCheckInput(args[0])

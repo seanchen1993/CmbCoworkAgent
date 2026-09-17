@@ -1640,12 +1640,128 @@ async function main(): Promise<void> {
     assert.equal(modelServer.requests.length, afterRunRequests)
     await page!.screenshot({ path: join(artifacts, "function-session-transcript.png") })
     pass("session SDK reports actual model transcript and turns without another model request")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)).some(
+          (notice) => notice.text.startsWith("本轮完成")
+        ),
+      "real turn completion arrives after settlement"
+    )
+    const inspectTurn = async () => {
+      const before = new Set(
+        (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map(
+          (job) => job.id
+        )
+      )
+      await functionComposer.fill("/claw-turn ")
+      await functionComposer.press("Enter")
+      let result: Record<string, unknown> | undefined
+      await until(async () => {
+        const job = (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).find(
+          (job) => !before.has(job.id) && job.command === "claw-turn" && job.state === "succeeded"
+        )
+        if (!job?.result?.text) return false
+        result = JSON.parse(job.result.text)
+        return true
+      }, "turn status comes from the public SDK example")
+      return result!
+    }
+    const completedTurn = await inspectTurn()
+    assert.equal(completedTurn.active, null)
+    assert.equal(completedTurn.starts, 1)
+    assert.equal(completedTurn.completions, 1)
+    const completedFacts = completedTurn.last as {
+      turnId: string
+      answer: string
+      reason: string
+      durationMs: number
+      usage: unknown
+    }
+    assert.equal(completedFacts.answer, "REGISTERED_TOOL_OK")
+    assert.equal(completedFacts.reason, "answer")
+    assert.ok(completedFacts.durationMs > 0)
+    assert.equal(
+      completedFacts.turnId,
+      registryAudit.find((row) => row.identity?.toolCallId === "registered-model")?.identity?.turnId
+    )
+    assert.deepEqual(completedFacts.usage, {
+      model: "mods-model-fixture",
+      input_tokens: 24,
+      output_tokens: 6,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0
+    })
+    assert.equal(modelServer.requests.length, afterRunRequests)
+    await page!
+      .locator("[data-function-turn-notices]")
+      .getByText(/^本轮完成/)
+      .first()
+      .waitFor()
+    await page!.screenshot({ path: join(artifacts, "function-turn-complete.png") })
+    pass(
+      "real turn lifecycle delivers one completion with actual response usage and renders plugin text"
+    )
+
+    const beforeTurnCancel = modelServer.requests.length
+    const beforeClosedStalls = modelServer.closedStalls()
+    await functionComposer.fill("[mods-turn-cancel] [stall] 请等待停止。")
+    await functionComposer.press("Enter")
+    await until(
+      async () => modelServer!.requests.length > beforeTurnCancel,
+      "main turn reaches the real streaming transport"
+    )
+    const runningTurn = await inspectTurn()
+    assert.equal(typeof runningTurn.active, "string")
+    const beforeAbortJobs = new Set(
+      (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map((job) => job.id)
+    )
+    await functionComposer.fill("/claw-turn abort")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+          (job) =>
+            !beforeAbortJobs.has(job.id) &&
+            job.command === "claw-turn" &&
+            job.state === "succeeded" &&
+            job.result?.text === "已请求停止当前轮次。"
+        ),
+      "abort returns its successful receipt"
+    )
+    await until(
+      async () => modelServer!.closedStalls() === beforeClosedStalls + 1,
+      "turn abort closes the actual provider socket"
+    )
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)).some(
+          (notice) => notice.text.startsWith("本轮已停止")
+        ),
+      "aborted turn completes after the physical run releases"
+    )
+    const abortedTurn = await inspectTurn()
+    assert.equal(abortedTurn.active, null)
+    assert.equal(abortedTurn.starts, 2)
+    assert.equal(abortedTurn.completions, 2)
+    assert.equal((abortedTurn.last as { turnId: string }).turnId, runningTurn.active)
+    assert.equal((abortedTurn.last as { reason: string }).reason, "aborted")
+    assert.match((abortedTurn.last as { answer: string }).answer, /SDK_MODEL_OK/)
+    assert.equal(modelServer.requests.length, beforeTurnCancel + 1)
+    await page!.getByRole("button", { name: "停止生成", exact: true }).waitFor({ state: "hidden" })
+    await page!.screenshot({ path: join(artifacts, "function-turn-abort.png") })
+    pass(
+      "immediate turn abort cancels the actual stream once and retains its visible partial answer"
+    )
+    const postAbortJobs = new Set(
+      (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map((job) => job.id)
+    )
     await functionComposer.fill("/claw-tools ")
     await functionComposer.press("Enter")
     await until(
       async () =>
         (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
           (job) =>
+            !postAbortJobs.has(job.id) &&
             job.command === "claw-tools" &&
             job.state === "succeeded" &&
             job.result?.text.includes("mcp__function-commands__project_brief") &&
@@ -1659,6 +1775,7 @@ async function main(): Promise<void> {
       async () =>
         (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
           (job) =>
+            !postAbortJobs.has(job.id) &&
             job.command === "claw-brief" &&
             job.state === "succeeded" &&
             job.result?.text.includes("files")

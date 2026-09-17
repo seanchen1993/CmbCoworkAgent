@@ -1,6 +1,8 @@
 import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages"
 import type { ChatGenerationChunk } from "@langchain/core/outputs"
 import { describe, expect, it, vi } from "vitest"
+import { ChatOpenAI } from "@langchain/openai"
+import { createAgent } from "langchain"
 
 import {
   InterleavedThinkingChatOpenAICompletions,
@@ -33,6 +35,58 @@ const completionClasses = [
   InterleavedThinkingChatOpenAICompletions,
   ReasoningDisplayChatOpenAICompletions
 ]
+
+it("preserves actual provider model and usage through graph-triggered streaming invoke", async () => {
+  const fields = {
+    model: "configured-alias",
+    apiKey: "test-key",
+    maxRetries: 0,
+    configuration: {
+      baseURL: "https://example.test/v1",
+      fetch: async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                sse(chunk("actual-response", { role: "assistant", content: "ok" }))
+              )
+              controller.enqueue(sse(chunk("actual-response", {}, "stop")))
+              controller.enqueue(
+                sse({
+                  ...chunk("actual-response", {}),
+                  choices: [],
+                  usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 }
+                })
+              )
+              controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+              controller.close()
+            }
+          }),
+          { headers: { "content-type": "text/event-stream" } }
+        )
+    }
+  }
+  const agent = createAgent({
+    model: new ChatOpenAI({
+      ...fields,
+      completions: new ToolCallAwareChatOpenAICompletions(fields)
+    } as never),
+    tools: []
+  })
+  let final: AIMessage | undefined
+  for await (const [mode, state] of await agent.stream(
+    { messages: [new HumanMessage("hello")] },
+    { streamMode: ["messages", "values"] }
+  )) {
+    if (mode === "values") final = state.messages.at(-1) as AIMessage
+  }
+  expect(final?.content).toBe("ok")
+  expect(final?.response_metadata).toMatchObject({
+    model_name: "test-model",
+    finish_reason: "stop"
+  })
+  expect(final?.usage_metadata).toMatchObject({ input_tokens: 12, output_tokens: 3 })
+})
 
 async function collectSse(
   Model: (typeof completionClasses)[number],

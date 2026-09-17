@@ -1,4 +1,11 @@
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
+import type {
+  FunctionTurnStart,
+  FunctionTurnComplete,
+  FunctionTurnResult
+} from "../../../shared/mods/v2/turn"
+import { FunctionTurnNotices } from "./turn-notices"
+import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { randomInt } from "node:crypto"
@@ -42,6 +49,7 @@ interface FunctionConnection {
   stop(): void
 }
 interface SessionEntry {
+  turnNotices: FunctionTurnNotices
   workspace: string
   threadId: string
   epoch: number
@@ -57,6 +65,13 @@ interface FunctionManagerHost {
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
   changed(threadId: string): void
   assertThread?(workspace: string, threadId: string): void
+  abortTurn?(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    turnId: string,
+    signal: AbortSignal
+  ): Promise<void>
   readSession?(
     workspace: string,
     threadId: string,
@@ -270,6 +285,7 @@ export class FunctionModsManager {
     }
     if (this.sessions.size >= 6) throw new ModFunctionError("MODS_SESSION_CAPACITY")
     entry = {
+      turnNotices: new FunctionTurnNotices(),
       workspace,
       threadId,
       epoch: this.epoch(workspace),
@@ -330,6 +346,17 @@ export class FunctionModsManager {
           threadId,
           cwd: () => this.host.fileScope?.(workspace, threadId).workspace ?? workspace,
           assertLive,
+          abortTurn: async (plugin, turnId, signal) => {
+            assertLive(plugin)
+            if (!this.host.abortTurn) throw new ModFunctionError("MODS_TURN_UNAVAILABLE")
+            await this.host.abortTurn(
+              workspace,
+              threadId,
+              current.snapshots.get(plugin.name)!.grant,
+              turnId,
+              signal
+            )
+          },
           readSession: async (method, signal) => {
             assertLive()
             if (!this.host.readSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
@@ -555,6 +582,72 @@ export class FunctionModsManager {
       return core(input, signal ?? new AbortController().signal)
     const entry = await this.session(workspace, threadId)
     return entry.session!.interceptTool(input, signal, core)
+  }
+
+  async turnStart(
+    workspace: string,
+    threadId: string,
+    input: FunctionTurnStart,
+    signal: AbortSignal
+  ): Promise<void> {
+    if (!this.host.enabled(workspace) || this.sources().length === 0) return
+    if (
+      !this.sessions.has(JSON.stringify([workspace, threadId])) &&
+      !(await this.status(workspace)).some((entry) => entry.state === "ready")
+    )
+      return
+    const entry = await this.session(workspace, threadId)
+    const safe = await this.host.publish(workspace, input as unknown as ModJson, signal)
+    await entry.session!.turnStart(safe as unknown as FunctionTurnStart, signal)
+  }
+
+  async turnComplete(
+    workspace: string,
+    threadId: string,
+    input: FunctionTurnComplete,
+    signal: AbortSignal
+  ): Promise<FunctionTurnResult> {
+    // A terminal event belongs to the already loaded session; it must not start a new generation.
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry || !this.host.enabled(workspace))
+      return { text: input.answer, ...(input.usage ? { usage: input.usage } : {}) }
+    await entry.loading
+    if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    const safe = await this.host.publish(workspace, input as unknown as ModJson, signal)
+    const result = await entry.session!.turnComplete(
+      safe as unknown as FunctionTurnComplete,
+      signal
+    )
+    if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    if (
+      !input.agentId &&
+      entry.turnNotices.append(
+        input.turnId,
+        (safe as unknown as FunctionTurnComplete).answer,
+        result.text
+      )
+    )
+      this.host.changed(threadId)
+    return result
+  }
+
+  async turnNotices(workspace: string, threadId: string): Promise<FunctionTurnNotice[]> {
+    this.host.assertThread?.(workspace, threadId)
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry || !this.host.enabled(workspace)) return []
+    for (const snapshot of entry.snapshots.values()) this.store.assertGrant(snapshot.grant)
+    const published = await this.host.publish(
+      workspace,
+      entry.turnNotices.snapshot() as unknown as ModJson,
+      new AbortController().signal
+    )
+    this.host.assertThread?.(workspace, threadId)
+    if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    for (const snapshot of entry.snapshots.values()) this.store.assertGrant(snapshot.grant)
+    return published as unknown as FunctionTurnNotice[]
   }
 
   async registeredTools(workspace: string, threadId: string): Promise<RegisteredFunctionTool[]> {

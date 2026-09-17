@@ -925,6 +925,70 @@ describe("project Mods lifecycle and UI authority", () => {
       nodes: [{ type: "text", text: "本轮工具：成功 1，失败 0，待核查 0，未执行 0。" }]
     })
   })
+  it("renders cancelled turn facts without restoring its expired execution authority", async () => {
+    const f = await fixture()
+    await f.enable()
+    await f.dispatch()
+    const controller = new AbortController()
+    const instance = f.manager.createRuntimeAuthority({ ...f.scope, signal: controller.signal })
+    const invokeTool = vi.fn(async () => "must not execute")
+    f.manager.bindThread({
+      ...f.scope,
+      signal: controller.signal,
+      runtimeAuthority: instance.authority,
+      invokeTool
+    })
+    controller.abort()
+    await f.manager.finishTurn("thread")
+    await f.manager.finishTurn("thread")
+    expect(f.manager.listCards("thread", "turn:turn", 7)).toHaveLength(1)
+    expect(() => instance.authority.assertLive()).toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+    expect(invokeTool).not.toHaveBeenCalled()
+  })
+  it("releases cancelled adapters and catalogs without reviving old authority or dropping replacements", async () => {
+    const f = await fixture()
+    await f.enable()
+    const bind = (threadId: string) => {
+      const controller = new AbortController()
+      const scope = { ...f.scope, threadId, signal: controller.signal }
+      const instance = f.manager.createRuntimeAuthority(scope)
+      const binding = { ...scope, runtimeAuthority: instance.authority }
+      const release = f.manager.bindThread(binding)
+      const releaseMcp = f.manager.bindMcp(
+        binding,
+        async () => ({}),
+        undefined,
+        () => []
+      )
+      // Production catalogs retain the authority, but need not retain the abort signal.
+      f.manager.bindFunctionToolCatalog(
+        { ...f.scope, threadId, runtimeAuthority: instance.authority },
+        [{ name: "read_file", description: "Read", mcp: false }]
+      )
+      return { controller, instance, release, releaseMcp }
+    }
+    const old = bind("thread")
+    const other = bind("other")
+    other.controller.abort()
+    old.controller.abort()
+    f.manager.releaseExpiredRuntimeBindings("thread")
+    expect(f.manager.needsCommandBinding("thread")).toBe(true)
+    expect(f.manager.filterFunctionTools(f.root, "thread", [{ name: "read_file" }])).toHaveLength(1)
+    expect(await f.manager.registeredFunctionTools(f.root, "thread")).toEqual([])
+    expect(f.manager.peekFunctionMcpTools(f.root, "thread")).toBeUndefined()
+    expect(() => f.manager.functionToolCatalog(f.root, "thread")).toThrow("CONTEXT_REQUIRED")
+    expect(() => f.manager.peekFunctionMcpTools(f.root, "other")).toThrow("INSTANCE_EXPIRED")
+    expect(() => old.instance.authority.assertLive()).toThrow("INSTANCE_EXPIRED")
+
+    const current = bind("thread")
+    old.release()
+    old.releaseMcp()
+    f.manager.releaseExpiredRuntimeBindings("thread")
+    expect(() => current.instance.authority.assertLive()).not.toThrow()
+    expect(f.manager.needsCommandBinding("thread")).toBe(false)
+    expect(f.manager.peekFunctionMcpTools(f.root, "thread")).toEqual([])
+    expect(f.manager.functionToolCatalog(f.root, "thread")).toHaveLength(1)
+  })
   it("never transfers artifacts across workspaces, threads or code grants", async () => {
     const f = await fixture()
     await f.enable()

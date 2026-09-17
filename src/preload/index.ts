@@ -3045,6 +3045,10 @@ const api = {
     }
   },
   mods: {
+    turnNotices: (
+      threadId: string
+    ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
+      ipcRenderer.invoke("mods:function-turn-notices", threadId),
     panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
       ipcRenderer.invoke("mods:function-panes", threadId),
     paneAct: (

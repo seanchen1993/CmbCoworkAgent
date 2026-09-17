@@ -1,6 +1,8 @@
 import { createServer } from "node:http"
 import { afterEach, beforeAll, expect, it, vi } from "vitest"
 import { RunnableLambda } from "@langchain/core/runnables"
+import { HumanMessage } from "@langchain/core/messages"
+import { createAgent } from "langchain"
 import { invokeFunctionModel } from "./model-provider"
 import type { ResolvedModelConfig } from "../../models/registry"
 
@@ -137,6 +139,29 @@ it("aborts a stalled response after headers without waiting for another provider
   await rejected
   await expect.poll(f.closed).toBe(true)
 }, 10000)
+
+it("cancels a real graph model stream after its first chunk and closes the provider connection", async () => {
+  const f = await endpoint("stall")
+  const { getModelInstance } = await import("../../agent/runtime")
+  const controller = new AbortController()
+  const agent = createAgent({ model: getModelInstance(f.config, undefined, 1), tools: [] })
+  let sawText = false
+  const pending = (async () => {
+    for await (const [message] of await agent.stream(
+      { messages: [new HumanMessage("cancel the actual main stream")] },
+      { signal: controller.signal, streamMode: "messages" }
+    )) {
+      if (String(message.content).includes("first")) {
+        sawText = true
+        controller.abort()
+      }
+    }
+  })()
+  await expect(pending).rejects.toThrow()
+  expect(sawText).toBe(true)
+  await expect.poll(f.closed).toBe(true)
+  expect(f.bodies).toHaveLength(1)
+})
 
 it("does not retry a failed provider request or accept a tool call in a text completion", async () => {
   const failed = await endpoint("error")

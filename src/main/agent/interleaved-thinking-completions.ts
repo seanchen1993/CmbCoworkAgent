@@ -138,6 +138,23 @@ function mergeReasoningIntoContent(content: unknown, reasoning: unknown): string
 }
 
 export class ToolCallAwareChatOpenAICompletions extends ChatOpenAICompletions {
+  override async *_streamResponseChunks(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun
+  ): AsyncGenerator<ChatGenerationChunk> {
+    for await (const chunk of super._streamResponseChunks(messages, options, runManager)) {
+      // Core's graph-triggered streaming invoke aggregates messages without copying
+      // generationInfo, unlike direct stream(). Preserve actual provider metadata
+      // before that boundary so checkpoints and all observers see the same facts.
+      chunk.message.response_metadata = {
+        ...chunk.generationInfo,
+        ...chunk.message.response_metadata
+      }
+      yield chunk
+    }
+  }
+
   override _convertCompletionsDeltaToBaseMessageChunk(
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]> {
