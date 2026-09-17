@@ -9,7 +9,7 @@ import type { FunctionPluginStatus } from "../../../shared/mods/v2/commands"
 import { ModFunctionError, type FunctionGuest } from "../../../shared/mods/v2/contracts"
 import { FunctionRuntimeClient } from "./runtime-client"
 import { compileFunctionPlugin, type CompiledFunctionPlugin } from "./loader"
-import { FunctionSession, SESSION_CAPABILITIES } from "./session"
+import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
 import type { FunctionPlugin } from "./dispatcher"
 import { normalizePluginRelativePath, readPluginManifest } from "../../plugins/manifest"
 import { resolveModFile } from "../loader"
@@ -27,6 +27,7 @@ interface SessionEntry {
   workspace: string
   threadId: string
   epoch: number
+  generation: number
   client: FunctionConnection
   session?: FunctionSession
   loading: Promise<FunctionSession>
@@ -37,6 +38,12 @@ interface FunctionManagerHost {
   enabled(workspace: string): boolean
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
   changed(threadId: string): void
+  assertThread?(workspace: string, threadId: string): void
+  scheduleCommand?(
+    workspace: string,
+    threadId: string,
+    ...args: Parameters<NonNullable<FunctionSessionHost["scheduleCommand"]>>
+  ): ReturnType<NonNullable<FunctionSessionHost["scheduleCommand"]>>
 }
 
 /** Grants bind a complete source snapshot; a live session never rereads mutable plugin source. */
@@ -45,6 +52,7 @@ export class FunctionModsManager {
   private readonly epochs = new Map<string, number>()
   private readonly sessions = new Map<string, SessionEntry>()
   private closed = false
+  private sessionGeneration = this.initialEpoch
 
   constructor(
     private readonly store: ModControlStore,
@@ -171,6 +179,16 @@ export class FunctionModsManager {
     }
   }
 
+  closeThread(threadId: string): void {
+    for (const [key, entry] of this.sessions) {
+      if (entry.threadId !== threadId) continue
+      this.sessions.delete(key)
+      void entry.session?.close()
+      entry.client.stop()
+      this.host.changed(threadId)
+    }
+  }
+
   private async session(workspace: string, threadId: string): Promise<SessionEntry> {
     if (this.closed || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_DISABLED")
     const key = JSON.stringify([workspace, threadId])
@@ -187,6 +205,7 @@ export class FunctionModsManager {
       workspace,
       threadId,
       epoch: this.epoch(workspace),
+      generation: ++this.sessionGeneration,
       client: this.createClient(),
       snapshots: new Map(),
       loading: Promise.resolve(undefined as unknown as FunctionSession)
@@ -194,6 +213,7 @@ export class FunctionModsManager {
     const current = entry
     this.sessions.set(key, current)
     const assertLive = (plugin?: FunctionPlugin): void => {
+      this.host.assertThread?.(workspace, threadId)
       if (
         this.closed ||
         this.sessions.get(key) !== current ||
@@ -242,6 +262,23 @@ export class FunctionModsManager {
           threadId,
           assertLive,
           uiChanged: () => this.host.changed(threadId),
+          scheduleCommand: this.host.scheduleCommand
+            ? (command, signal, run) => {
+                assertLive()
+                return this.host.scheduleCommand!(
+                  workspace,
+                  threadId,
+                  command,
+                  signal,
+                  async (s) => {
+                    assertLive()
+                    const result = await run(s)
+                    assertLive()
+                    return result
+                  }
+                )
+              }
+            : undefined,
           files: (plugin) =>
             new ProjectFunctionFiles(
               workspace,
@@ -320,7 +357,7 @@ export class FunctionModsManager {
         turnId: `functions:${threadId}`,
         digest: snapshot.compiled.digest,
         grantEpoch: snapshot.grant.epoch,
-        workspaceEpoch: entry.epoch,
+        workspaceEpoch: entry.generation,
         immediate: command.immediate,
         isHidden: command.isHidden,
         argumentHint: command.argumentHint

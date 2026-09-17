@@ -71,10 +71,18 @@ interface StoredCard {
 }
 
 export class ModsManager {
-  private functionLifecycle?: { invalidate(workspace: string): void; close(): void }
+  private functionLifecycle?: {
+    invalidate(workspace: string): void
+    closeThread(threadId: string): void
+    close(): void
+  }
 
-  attachFunctions(lifecycle: { invalidate(workspace: string): void; close(): void }): void {
+  attachFunctions(lifecycle: NonNullable<ModsManager["functionLifecycle"]>): void {
     this.functionLifecycle = lifecycle
+  }
+
+  closeFunctionThread(threadId: string): void {
+    this.functionLifecycle?.closeThread(threadId)
   }
 
   isEnabled(workspace: string): boolean {

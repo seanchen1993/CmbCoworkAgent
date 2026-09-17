@@ -33,6 +33,37 @@ function fixture() {
   return { threadId, rows, queue }
 }
 describe("Mods command physical thread queue", () => {
+  it("links caller cancellation and removes the listener when a job settles", async () => {
+    const f = fixture()
+    const controller = new AbortController()
+    const remove = vi.spyOn(controller.signal, "removeEventListener")
+    claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "model" })
+    const run = vi.fn(async () => ({ text: "must not run" }))
+    const item = f.queue.enqueue("workspace", f.threadId, "button", run, {
+      signal: controller.signal
+    })
+    controller.abort()
+    await expect(item.completion).rejects.toThrow("MODS_CANCELLED")
+    expect(f.rows.get(item.job.id)?.state).toBe("cancelled")
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function))
+    releaseLocalThreadRunLease(f.threadId, "desktop", "model")
+    expect(run).not.toHaveBeenCalled()
+    expect(() =>
+      f.queue.enqueue("workspace", f.threadId, "aborted", run, {
+        signal: controller.signal
+      })
+    ).toThrow("MODS_CANCELLED")
+  })
+
+  it("closes just the deleted thread's queued work", async () => {
+    const f = fixture()
+    claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "model" })
+    const item = f.queue.enqueue("workspace", f.threadId, "deleted", async () => ({ text: "no" }))
+    f.queue.closeThread(f.threadId)
+    await expect(item.completion).rejects.toThrow("MODS_CANCELLED")
+    const other = f.queue.enqueue("workspace", "survivor", "live", async () => ({ text: "yes" }))
+    expect(await other.completion).toEqual({ text: "yes" })
+  })
   it("preserves a function-runtime failure code in the durable job", async () => {
     const f = fixture()
     const item = f.queue.enqueue("workspace", f.threadId, "function", async () => {

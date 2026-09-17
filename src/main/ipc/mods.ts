@@ -15,6 +15,7 @@ import type { ModCommandDescriptor, ModObject } from "../../shared/mods/types"
 import { resolveAgentModeFromMetadata } from "../../shared/agent-mode-metadata"
 import { FunctionModsManager } from "../mods/v2/manager"
 import { FunctionRuntimeClient } from "../mods/v2/runtime-client"
+import { scheduleFunctionCommand } from "../mods/v2/command-scheduler"
 import type { FunctionUiAction } from "../../shared/mods/v2/ui"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
@@ -66,14 +67,27 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       plugins: getPlugins,
       enabled: (workspace) => manager.isEnabled(workspace),
       publish: (workspace, value, signal) => manager.publish(workspace, value, undefined, signal),
+      assertThread: (workspace, threadId) => {
+        if (writableThreadScope(threadId) !== workspace)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      },
+      scheduleCommand: (workspace, threadId, command, signal, run) =>
+        scheduleFunctionCommand(queue, workspace, threadId, command, signal, run),
       changed: (threadId) => window()?.webContents.send("mods:cards-changed", { threadId })
     },
     () => new FunctionRuntimeClient(join(__dirname, "function-mod-host.js"))
   )
-  manager.attachFunctions(functions)
   const queue = new ModCommandQueue(manager.store, (threadId) => {
     const owner = window()
     if (owner && !owner.isDestroyed()) owner.webContents.send("mods:jobs-changed", { threadId })
+  })
+  manager.attachFunctions({
+    invalidate: (workspace) => functions.invalidate(workspace),
+    closeThread: (threadId) => {
+      functions.closeThread(threadId)
+      queue.closeThread(threadId)
+    },
+    close: () => functions.close()
   })
   app.once("will-quit", () => {
     queue.close()
@@ -103,6 +117,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   }
   function scope(event: IpcMainInvokeEvent, threadId: string): string {
     trusted(event)
+    return threadScope(threadId)
+  }
+  function threadScope(threadId: string): string {
     if (typeof threadId !== "string" || threadId.length > 200)
       throw new ModError("MODS_THREAD_INVALID")
     const thread = getThreadCore(threadId)
@@ -113,7 +130,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     return manager.workspaceKey(metadata.workspacePath)
   }
   function writableScope(event: IpcMainInvokeEvent, threadId: string): string {
-    const workspace = scope(event, threadId)
+    trusted(event)
+    return writableThreadScope(threadId)
+  }
+  function writableThreadScope(threadId: string): string {
+    const workspace = threadScope(threadId)
     const thread = getThreadCore(threadId)!
     const metadata =
       typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata

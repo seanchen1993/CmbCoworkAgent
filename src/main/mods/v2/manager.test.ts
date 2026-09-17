@@ -6,6 +6,8 @@ import { ModControlStore } from "../control-store"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionModsManager } from "./manager"
 import type { ModJson } from "../../../shared/mods/types"
+import { randomUUID } from "node:crypto"
+import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -147,6 +149,22 @@ it("unapproved plugin queries do not consume the limited session pool", async ()
   expect(await f.manager.commands(f.root, "fresh")).toEqual(
     expect.arrayContaining([expect.objectContaining({ command: "claw-info" })])
   )
+})
+
+it("reclaims deleted sessions and rejects descriptors from the previous incarnation", async () => {
+  const f = await fixture()
+  await f.approve()
+  const [old] = await f.manager.commands(f.root, "thread")
+  for (let i = 0; i < 5; i++) await f.manager.commands(f.root, `other-${i}`)
+  await expect(f.manager.commands(f.root, "overflow")).rejects.toThrow("MODS_SESSION_CAPACITY")
+  f.manager.closeThread("thread")
+  const [fresh] = await f.manager.commands(f.root, "thread")
+  expect(fresh.workspaceEpoch).not.toBe(old.workspaceEpoch)
+  await expect(
+    f.manager.runCommand(f.root, "thread", old, "", new AbortController().signal)
+  ).rejects.toThrow("MODS_COMMAND_STALE")
+  f.manager.closeThread("thread")
+  expect(await f.manager.commands(f.root, "overflow")).not.toHaveLength(0)
 })
 
 it("rebuilds a crashed approved VM only for a later call and refuses the old descriptor", async () => {
@@ -317,6 +335,29 @@ it("runs the official file fixture through the project filesystem and normalizes
     missing: false,
     stat: { kind: "file", size: 2, modified: true }
   })
+})
+
+it("runs the shipped board's file-list command from its captured callback", async () => {
+  const f = await fixture()
+  await writeFile(join(f.root, "button-proof.txt"), "proof")
+  await f.approve()
+  const command = (await f.manager.commands(f.root, "thread")).find(
+    (c) => c.command === "claw-board"
+  )!
+  await f.manager.runCommand(f.root, "thread", command, "", new AbortController().signal)
+  const [pane] = await f.manager.panes(f.root, "thread")
+  const button = pane.tree.children!.find(
+    (node) => typeof node !== "string" && node.props.key === "project-files"
+  ) as FunctionUiElement
+  await f.manager.act(f.root, "thread", {
+    pane: pane.key,
+    generation: pane.generation,
+    plugin: button.press!.plugin,
+    handle: button.press!.handle,
+    kind: "press",
+    intentId: randomUUID()
+  })
+  expect(JSON.stringify(await f.manager.panes(f.root, "thread"))).toContain("button-proof.txt")
 })
 
 it("protects raw file content before observers and denies a hook rewrite outside the project", async () => {

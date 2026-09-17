@@ -279,7 +279,6 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
             <Button
               size="sm"
               variant="ghost"
-              disabled={busy}
               aria-label={`关闭 ${pane.title}`}
               onClick={() => void act(pane, undefined, "close")}
             >

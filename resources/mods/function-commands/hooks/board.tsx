@@ -1,5 +1,6 @@
 /** A desktop pane built entirely through the public function SDK. */
 export function register(on) {
+  let report = ""
   on("session.start", {}, async ($, event, next) => {
     await $.command.register({
       name: "claw-board",
@@ -65,6 +66,22 @@ export function register(on) {
         <Text dimColor>
           备注：{note || "尚未填写"} · 视图：{mode === "review" ? "检视" : "构建"}
         </Text>
+        <Button
+          key="project-files"
+          label="查看项目文件"
+          onPress={async () => {
+            report = "正在读取项目文件…"
+            $.ui.invalidate("ui.render")
+            try {
+              const result = await $.command.run({ command: "claw-files" })
+              report = (result.text || "目录为空。").slice(0, 8000)
+            } catch {
+              report = "读取未完成，请检查插件授权和项目目录。"
+            }
+            $.ui.invalidate("ui.render")
+          }}
+        />
+        <Text>{report}</Text>
       </Box>
     )
   })

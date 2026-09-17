@@ -678,6 +678,19 @@ async function main(): Promise<void> {
     await board.getByText("备注：这是保存到项目的偏好 · 视图：检视", { exact: true }).waitFor()
     await board.getByRole("combobox", { name: "面板视图", exact: true }).selectOption("build")
     await board.getByText("备注：这是保存到项目的偏好 · 视图：构建", { exact: true }).waitFor()
+    const jobsBeforeButton = new Set(
+      (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).map((job) => job.id)
+    )
+    await board.getByRole("button", { name: "查看项目文件", exact: true }).click()
+    await until(async () => {
+      const jobs = await page!.evaluate((id) => window.api.mods.jobs(id), threadId)
+      return jobs.some(
+        (job) =>
+          !jobsBeforeButton.has(job.id) && job.command === "claw-files" && job.state === "succeeded"
+      )
+    }, "pane button uses the physical command queue")
+    await board.getByText(/secret\.txt/).waitFor()
+    pass("pane callback launches a real command through the shared queue and renders its result")
     assert.equal(
       await page!.evaluate(
         async ({ id, pane }) => {

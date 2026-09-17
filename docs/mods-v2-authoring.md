@@ -146,7 +146,11 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 **当前仍是桌面 Pane 子集**：仅 inline 位置与 Box/Text/Button/Input/Select/Link/Code 的
 明确属性白名单；Code 当前是普通源文本。未交付其余 13 个渲染位置、Client/Svg、diff
 高亮、自定义构造器 hook、实际尺寸上报、聚焦/快捷键/hover/scroll/holdToasts。
-`ui.invalidate` 目前仅支持 `ui.render`；面板回调中 `$.command.run` 暂时拒绝，待接统一写队列。
+`ui.invalidate` 目前仅支持 `ui.render`。面板回调可以 `await $.command.run({ command, args })`：
+普通命令等待统一会话队列，`immediate: true` 命令可以在模型运行时查询。返回值保持 SDK 原样，
+任务栏保留执行记录。回调等待期间仍可重绘进度；用户关闭面板或撤销授权会取消其未执行任务。
+已经开始的任务取消后保留待核查状态，不重放。插件自己的 `$.ui.close` 不会取消自己的回调。
+命令处理器内直接或间接等待 `$.command.run` 仍被拒绝，避免在已持有执行权时等待自身队列。
 `focus`/`autoFocus`、`Code.language/path/startLine` 等当前不会产生完整上游效果，不能据此
 声明所有桌面属性兼容。插件中的 async/await 和异步生成器在载入时编译为 Promise 延续；
 动态创建的原生 async 函数不保证保留该上下文，应使用源码中声明的异步函数。
@@ -163,5 +167,7 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 运行中最多保留 6 个函数会话，每个会话最多 8 个插件；单命令参数上限为 32000 字符。
 普通命令等待会话执行租约，`immediate: true` 命令可立即运行；当前开放的能力不包含外部写操作。
 基础 hook 的超时、CPU、内存和递归预算仍受宿主限制。
+命令及 UI 动作最多等待 120 秒；每段 JS 的 CPU/内存预算不变。删除会话会取消排队任务、
+释放 VM，并使旧会话描述符失效。内置 `/claw-board` 的“查看项目文件”演示面板调用命令。
 
 v1 的 `/mod 模块:命令 [JSON]` 和权限模型继续独立运行；v1 授权不等于函数插件授权。

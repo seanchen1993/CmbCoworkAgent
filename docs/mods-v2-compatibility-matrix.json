@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
-  "date": "2026-09-16",
+  "date": "2026-09-17",
   "codeBaseline": "6abb89dcec5a4f7ee30407dc27db7b9a947aa92e",
   "upstream": {
     "versionInDeclaration": "2.1.273",
@@ -18,7 +18,7 @@
     "desktopEvents": ["session.start", "command.run", "command.describe", "ui.render (desktop Pane)", "ui.press", "ui.input", "ui.select", "ui.open", "ui.close"],
     "desktopSdk": ["command.register", "command.list", "command.run", "session.id", "session.cwd", "session.surface", "session.surfaces", "clock.now", "clock.sleep", "store.get", "store.set", "store.delete", "store.keys", "fs.read", "fs.list", "fs.exists", "fs.stat"],
     "partialDesktopSdk": ["ui.open", "ui.close", "ui.resolve", "ui.invalidate"],
-    "paneLimitations": ["inline Pane only; no dock or remaining 13 sites", "seven elements with a restricted prop allowlist; no Client/Svg/diff Code", "ui.resolve returns native constructors only; constructor replacement hooks pending", "ui.invalidate supports ui.render only", "focus, hotkeys, hover, scroll, holdToasts and measured viewport pending", "ui callbacks cannot launch command.run yet; physical write-queue integration pending", "native dynamically compiled async functions do not inherit guest continuation identity", "Claude static dollar-SDK usage scanner not yet implemented"],
+    "paneLimitations": ["inline Pane only; no dock or remaining 13 sites", "seven elements with a restricted prop allowlist; no Client/Svg/diff Code", "ui.resolve returns native constructors only; constructor replacement hooks pending", "ui.invalidate supports ui.render only", "focus, hotkeys, hover, scroll, holdToasts and measured viewport pending", "native dynamically compiled async functions do not inherit guest continuation identity", "Claude static dollar-SDK usage scanner not yet implemented"],
     "unitPrototypeOnly": ["turn.step", "Client", "model stream boundary"],
     "evidence": "mods-v2-implementation-2026-09-16.md",
     "fullParity": false
