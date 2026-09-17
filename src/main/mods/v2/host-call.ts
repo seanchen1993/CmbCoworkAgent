@@ -1,18 +1,36 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
 import type { ModControlStore, ModGrant } from "../control-store"
-import { getModCallContext } from "../context"
+import { getModCallContext, modCallContext } from "../context"
 import type { ModIdentity } from "../../../shared/mods/types"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
-import { functionExecutionScope } from "./execution-context"
+import { functionExecutionScope, withFreshFunctionExecution } from "./execution-context"
+import { assertModRuntimeAuthority, type ModRuntimeAuthority } from "../runtime-instance"
 
-const calls = new AsyncLocalStorage<{ identity: ModIdentity; active: boolean }>()
+const calls = new AsyncLocalStorage<{
+  identity: ModIdentity
+  active: boolean
+  runtimeAuthority?: ModRuntimeAuthority
+}>()
 
 function functionCallScope(workspace: string, threadId: string) {
   const scope = functionExecutionScope(workspace, threadId)
   const current = calls.getStore()
   if (current && !current.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
-  const parent = current?.identity ?? getModCallContext()?.identity
+  const modContext = getModCallContext()
+  modContext?.assertLive?.()
+  const parent = current?.identity ?? modContext?.identity
+  const parentAuthority = current?.runtimeAuthority ?? modContext?.runtimeAuthority
+  if (scope?.runtimeAuthority && parentAuthority && scope.runtimeAuthority !== parentAuthority)
+    throw new ModFunctionError("MODS_RUNTIME_SCOPE_CHANGED")
+  const runtimeAuthority = scope?.runtimeAuthority ?? parentAuthority
+  if (runtimeAuthority)
+    assertModRuntimeAuthority(runtimeAuthority, {
+      workspace,
+      threadId,
+      agentId: scope?.agentId ?? parent?.agentId,
+      turnId: scope?.turnId ?? parent?.turnId ?? runtimeAuthority.turnId
+    })
   if (
     parent &&
     (parent.workspace !== workspace ||
@@ -21,7 +39,19 @@ function functionCallScope(workspace: string, threadId: string) {
       (scope?.turnId && parent.turnId !== scope.turnId))
   )
     throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
-  return { scope, parent }
+  return { scope, parent, runtimeAuthority }
+}
+
+export function functionCallAuthority(workspace: string, threadId: string) {
+  return functionCallScope(workspace, threadId).runtimeAuthority
+}
+
+/** Only explicit host lifecycles may create a fresh entry; task parent receipts stay explicit. */
+export function withFunctionAgentExecution<T>(
+  scope: Parameters<typeof withFreshFunctionExecution>[0],
+  run: () => Promise<T>
+): Promise<T> {
+  return calls.exit(() => modCallContext.exit(() => withFreshFunctionExecution(scope, run)))
 }
 
 /** Resolve provenance before creating a command adapter, without minting an unused receipt. */
@@ -42,14 +72,16 @@ export function functionCallIdentity(
   grant: ModGrant,
   options: Pick<ModIdentity, "origin"> & { toolCallId?: string; fallbackTurnId: string }
 ): ModIdentity {
-  const { scope, parent } = functionCallScope(workspace, threadId)
+  const { scope, parent, runtimeAuthority } = functionCallScope(workspace, threadId)
   return {
     workspace,
     threadId,
     turnId: scope?.turnId ?? parent?.turnId ?? options.fallbackTurnId,
     agentId: scope?.agentId ?? parent?.agentId ?? "main",
     callId: randomUUID(),
-    ...(parent ? { parentCallId: parent.callId } : {}),
+    ...((parent?.callId ?? runtimeAuthority?.parentCallId)
+      ? { parentCallId: parent?.callId ?? runtimeAuthority?.parentCallId }
+      : {}),
     ...(options.toolCallId ? { toolCallId: options.toolCallId } : {}),
     origin: options.origin,
     modId: grant.modId,
@@ -65,7 +97,7 @@ export function assertFunctionGrant(
   signal: AbortSignal
 ): void {
   signal.throwIfAborted()
-  functionExecutionScope(workspace, threadId)
+  functionCallScope(workspace, threadId)
   if (grant.workspace !== workspace || !grant.modId.startsWith("function:"))
     throw new ModFunctionError("MODS_GRANT_REVOKED")
   store.assertGrant(grant)
@@ -90,17 +122,25 @@ interface FunctionHostCall<T, R> {
  * a lost response stays unknown and is never replayed by this boundary.
  */
 export async function runFunctionHostCall<T, R>(call: FunctionHostCall<T, R>): Promise<R> {
-  const scope = { identity: call.identity, active: true }
+  const scope = {
+    identity: call.identity,
+    active: true,
+    runtimeAuthority: functionCallAuthority(call.identity.workspace, call.identity.threadId)
+  }
+  const assertLive = () => {
+    scope.runtimeAuthority?.assertLive()
+    call.assertLive()
+  }
   let claimed = false,
     started = false,
     settled = false
   try {
-    call.assertLive()
+    assertLive()
     await call.admit()
-    call.assertLive()
+    assertLive()
     call.claim()
     claimed = true
-    call.assertLive()
+    assertLive()
     let result: T
     try {
       started = true
@@ -112,9 +152,9 @@ export async function runFunctionHostCall<T, R>(call: FunctionHostCall<T, R>): P
     call.store.settle(call.identity.callId, call.status(result))
     settled = true
     call.recordResult?.(result)
-    call.assertLive()
+    assertLive()
     const published = await call.publish(result)
-    call.assertLive()
+    assertLive()
     return published
   } catch (error) {
     if (claimed) {

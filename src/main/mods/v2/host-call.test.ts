@@ -3,6 +3,7 @@ import type { ModIdentity } from "../../../shared/mods/types"
 import { functionCallIdentity, functionCallTurn, runFunctionHostCall } from "./host-call"
 import { withFunctionExecution } from "./execution-context"
 import { modCallContext } from "../context"
+import { ModRuntimeAuthorities } from "../runtime-instance"
 
 const grant = {
   workspace: "/project",
@@ -22,6 +23,36 @@ const identity: ModIdentity = {
   origin: "model"
 }
 const options = { origin: "mod" as const, fallbackTurnId: "fallback" }
+
+it("retains private runtime authority across nested calls and rejects a replaced instance", async () => {
+  const registry = new ModRuntimeAuthorities()
+  const first = registry.create(identity)
+  const f = fixture()
+  await withFunctionExecution(
+    {
+      ...identity,
+      runtimeAuthority: first.authority,
+      leased: true,
+      immediate: false,
+      userInitiated: false
+    },
+    async () => {
+      await expect(
+        runFunctionHostCall({
+          ...f.call,
+          invoke: async () => {
+            registry.create(identity)
+            return "finished privately"
+          }
+        })
+      ).rejects.toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+      expect(f.call.store.blockPublication).toHaveBeenCalledOnce()
+      expect(() =>
+        functionCallIdentity(identity.workspace, identity.threadId, grant, options)
+      ).toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+    }
+  )
+})
 
 function fixture() {
   const events: string[] = []

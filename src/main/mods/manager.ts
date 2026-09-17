@@ -29,7 +29,9 @@ import {
   assertFunctionGrant,
   functionCallIdentity,
   functionCallTurn,
-  functionCallAgent
+  functionCallAgent,
+  functionCallAuthority,
+  withFunctionAgentExecution
 } from "./v2/host-call"
 import { functionExecutionScope } from "./v2/execution-context"
 import type { McpCapabilityTool } from "../mcp/capability-types"
@@ -43,8 +45,13 @@ import {
   resolveFunctionMcpTool,
   resolveFunctionMcpToolName
 } from "./v2/mcp-sdk"
-import { functionSdkToolInput } from "./v2/tool-sdk"
+import { functionSdkToolInput, isNativeFunctionTool } from "./v2/tool-sdk"
 import { queryModRuntimeToolAccess, type ModRuntimeToolAccess } from "./runtime-tool-access"
+import {
+  assertModRuntimeAuthority,
+  ModRuntimeAuthorities,
+  type ModRuntimeAuthority
+} from "./runtime-instance"
 
 export interface ModPluginSource {
   id: string
@@ -53,6 +60,8 @@ export interface ModPluginSource {
   enabled: boolean
 }
 export interface ModThreadBinding extends ModRuntimeToolAccess {
+  runtimeAuthority?: ModRuntimeAuthority
+  delegatedBlockedToolNames?: ReadonlySet<string>
   assertLive?: () => void
   assertMcpTool?: (tool: McpCapabilityTool) => void
   commandOnly?: boolean
@@ -97,7 +106,11 @@ interface StoredCard {
 }
 
 export class ModsManager {
-  private readonly functionToolCatalogs = new Map<string, FunctionToolInfo[]>()
+  private readonly runtimeAuthorities = new ModRuntimeAuthorities()
+  private readonly functionToolCatalogs = new Map<
+    string,
+    { tools: FunctionToolInfo[]; binding: ModThreadBinding }
+  >()
   private functionLifecycle?: {
     invalidate(workspace: string): void
     closeThread(threadId: string): void
@@ -122,6 +135,7 @@ export class ModsManager {
   }
 
   closeFunctionThread(threadId: string): void {
+    this.runtimeAuthorities.closeThread(threadId)
     this.functionLifecycle?.closeThread(threadId)
     for (const [key, binding] of this.bindings)
       if (binding.threadId === threadId) this.bindings.delete(key)
@@ -132,30 +146,57 @@ export class ModsManager {
   }
 
   bindFunctionToolCatalog(binding: ModThreadBinding, tools: FunctionToolInfo[]): void {
+    this.assertRuntimeBinding(binding)
     const key = JSON.stringify([
       this.workspaceKey(binding.workspace),
       binding.threadId,
       binding.agentId ?? "main"
     ])
-    this.functionToolCatalogs.set(
-      key,
-      tools.map((tool) => ({ ...tool }))
-    )
+    this.functionToolCatalogs.set(key, { tools: tools.map((tool) => ({ ...tool })), binding })
     if (this.functionToolCatalogs.size > 100)
       this.functionToolCatalogs.delete(this.functionToolCatalogs.keys().next().value!)
   }
 
   functionToolCatalog(workspace: string, threadId: string, agentId = "main"): FunctionToolInfo[] {
-    const tools = this.functionToolCatalogs.get(
+    const catalog = this.functionToolCatalogs.get(
       JSON.stringify([this.workspaceKey(workspace), threadId, agentId])
     )
-    if (!tools) throw new ModError("MODS_TOOL_CONTEXT_REQUIRED")
+    if (!catalog) throw new ModError("MODS_TOOL_CONTEXT_REQUIRED")
+    this.assertFunctionBinding(catalog.binding)
+    return this.filterFunctionTools(workspace, threadId, catalog.tools, agentId).map((tool) => ({
+      ...tool
+    }))
+  }
+
+  filterFunctionTools<T extends { name: string }>(
+    workspace: string,
+    threadId: string,
+    tools: T[],
+    agentId = this.functionToolAgent(workspace, threadId)
+  ): T[] {
     const binding = this.bindings.get(`${threadId}:${agentId}`)
-    return tools
-      .filter(
-        (tool) => !binding || queryModRuntimeToolAccess(binding, tool.name).decision !== "deny"
-      )
-      .map((tool) => ({ ...tool }))
+    if (binding) this.assertFunctionBinding(binding)
+    if (!binding?.blockedToolNames?.size) return [...tools]
+    const mcp = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId, agentId }))
+    const aliases = new Map<string, readonly string[]>()
+    if (mcp) {
+      mcp.assertLive()
+      this.assertFunctionBinding(mcp.binding)
+      for (const tool of mcp.peekTools?.() ?? []) {
+        const names = [tool.toolId, tool.canonicalToolId ?? tool.toolId]
+        for (const name of names) aliases.set(name, names)
+      }
+    }
+    return tools.filter(
+      (tool) =>
+        queryModRuntimeToolAccess(
+          {
+            ...binding,
+            permissionToolAliases: aliases.get(tool.name)
+          },
+          tool.name
+        ).decision !== "deny"
+    )
   }
 
   async registeredFunctionTools(
@@ -166,12 +207,10 @@ export class ModsManager {
     workspace = this.workspaceKey(workspace)
     const agentId = functionCallAgent(workspace, threadId)
     const binding = this.bindings.get(`${threadId}:${agentId}`)
-    binding?.assertLive?.()
+    if (binding) this.assertFunctionBinding(binding)
     const tools = (await this.functionLifecycle?.registeredTools?.(workspace, threadId)) ?? []
-    binding?.assertLive?.()
-    return tools.filter(
-      (tool) => !binding || queryModRuntimeToolAccess(binding, tool.name).decision !== "deny"
-    )
+    if (binding) this.assertFunctionBinding(binding)
+    return this.filterFunctionTools(workspace, threadId, tools)
   }
 
   getFunctionToolHandler(
@@ -426,19 +465,32 @@ export class ModsManager {
   }
 
   bindThread(binding: ModThreadBinding): () => void {
+    this.assertRuntimeBinding(binding)
     const key = `${binding.threadId}:${binding.agentId ?? "main"}`
+    if (!this.bindings.has(key) && this.bindings.size >= 100) {
+      for (const [id, current] of this.bindings) {
+        try {
+          current.assertLive?.()
+        } catch {
+          this.bindings.delete(id)
+        }
+      }
+      if (this.bindings.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
+    }
     const entry = {
       ...binding,
       blockedToolNames: binding.blockedToolNames && new Set(binding.blockedToolNames),
+      delegatedBlockedToolNames:
+        binding.delegatedBlockedToolNames && new Set(binding.delegatedBlockedToolNames),
       workspace: this.workspaceKey(binding.workspace),
       assertLive: () => {
         if (this.bindings.get(key) !== entry) throw new ModError("MODS_THREAD_CONTEXT_EXPIRED")
+        this.assertRuntimeBinding(binding)
         binding.signal?.throwIfAborted()
         binding.assertLive?.()
       }
     }
     this.bindings.set(key, entry)
-    if (this.bindings.size > 100) this.bindings.delete(this.bindings.keys().next().value!)
     return () => {
       if (this.bindings.get(key) === entry) this.bindings.delete(key)
     }
@@ -449,11 +501,147 @@ export class ModsManager {
     return !binding || binding.commandOnly === true || binding.signal?.aborted === true
   }
 
+  createRuntimeAuthority(binding: ModThreadBinding) {
+    const scope = { ...binding, workspace: this.workspaceKey(binding.workspace) }
+    const instance = this.runtimeAuthorities.create(scope, binding.signal)
+    this.functionToolCatalogs.delete(
+      JSON.stringify([scope.workspace, scope.threadId, scope.agentId ?? "main"])
+    )
+    return instance
+  }
+
+  /** Only a fresh host entry may acquire the current instance; SDK continuations retain theirs. */
+  functionUserScope(workspace: string, threadId: string) {
+    const runtimeAuthority = this.runtimeAuthorities.get({
+      workspace: this.workspaceKey(workspace),
+      threadId
+    })
+    return runtimeAuthority
+      ? { runtimeAuthority, turnId: runtimeAuthority.turnId, agentId: runtimeAuthority.agentId }
+      : {}
+  }
+
+  private assertRuntimeBinding(binding: ModThreadBinding): void {
+    if (binding.runtimeAuthority)
+      assertModRuntimeAuthority(binding.runtimeAuthority, {
+        ...binding,
+        workspace: this.workspaceKey(binding.workspace)
+      })
+  }
+
+  private assertFunctionBinding(binding: ModThreadBinding): void {
+    this.assertRuntimeBinding(binding)
+    const authority = functionCallAuthority(this.workspaceKey(binding.workspace), binding.threadId)
+    if (authority && authority !== binding.runtimeAuthority)
+      throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
+    binding.assertLive?.()
+  }
+
+  functionToolAgent(workspace: string, threadId: string): string {
+    workspace = this.workspaceKey(workspace)
+    const agentId = functionCallAgent(workspace, threadId)
+    if (agentId !== "main") {
+      const authority = functionCallAuthority(workspace, threadId)
+      const binding = this.bindings.get(`${threadId}:${agentId}`)
+      if (!authority || !binding || binding.runtimeAuthority !== authority)
+        throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+      this.assertFunctionBinding(binding)
+    }
+    return agentId
+  }
+
+  async withSharedAgent<T>(
+    parent: ModRuntimeAuthority,
+    agentId: string,
+    signal: AbortSignal | undefined,
+    access: { blockedToolNames: ReadonlySet<string>; readOnly: boolean } | undefined,
+    run: () => Promise<T>
+  ): Promise<T> {
+    parent.assertLive()
+    const parentBinding = this.bindings.get(`${parent.threadId}:${parent.agentId}`)
+    if (!parentBinding || parentBinding.runtimeAuthority !== parent)
+      throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
+    this.assertRuntimeBinding(parentBinding)
+    parentBinding.assertLive?.()
+    const identity = {
+      workspace: parent.workspace,
+      threadId: parent.threadId,
+      turnId: parent.turnId,
+      agentId
+    }
+    // Opaque/custom agents retain their native lifecycle but receive no inferred SDK authority.
+    if (!access)
+      return withFunctionAgentExecution(
+        { ...identity, userInitiated: false, leased: true, immediate: false },
+        run
+      )
+    const parentCallId = getModCallContext()?.identity.callId
+    const instance = this.runtimeAuthorities.create(identity, signal, parent, parentCallId)
+    const binding: ModThreadBinding = {
+      ...parentBinding,
+      agentId,
+      runtimeAuthority: instance.authority,
+      blockedToolNames: new Set([
+        ...(parentBinding.delegatedBlockedToolNames ?? parentBinding.blockedToolNames ?? []),
+        ...access.blockedToolNames
+      ]),
+      delegatedBlockedToolNames: undefined,
+      readOnly: parentBinding.readOnly === true || access.readOnly,
+      signal:
+        parentBinding.signal && signal
+          ? AbortSignal.any([parentBinding.signal, signal])
+          : (signal ?? parentBinding.signal),
+      assertLive: () => {
+        instance.authority.assertLive()
+        parentBinding.assertLive?.()
+      }
+    }
+    const releases: Array<() => void> = []
+    try {
+      releases.push(this.bindThread(binding))
+      const mcp = this.mcpBindings.get(this.mcpBindingKey(parent))
+      if (mcp && mcp.binding.runtimeAuthority === parent) {
+        mcp.assertLive()
+        releases.push(
+          this.bindMcp(
+            {
+              ...binding,
+              assertLive: () => {
+                binding.assertLive?.()
+                mcp.assertLive()
+              }
+            },
+            mcp.invoke,
+            mcp.listTools,
+            mcp.peekTools
+          )
+        )
+      }
+      return await withFunctionAgentExecution(
+        {
+          ...identity,
+          runtimeAuthority: instance.authority,
+          userInitiated: false,
+          leased: true,
+          immediate: false
+        },
+        run
+      )
+    } finally {
+      for (const release of releases.reverse()) release()
+      const catalogKey = JSON.stringify([parent.workspace, parent.threadId, agentId])
+      if (
+        this.functionToolCatalogs.get(catalogKey)?.binding.runtimeAuthority === instance.authority
+      )
+        this.functionToolCatalogs.delete(catalogKey)
+      instance.release()
+    }
+  }
+
   /** Capture a live adapter instance for cwd/file SDK calls, without creating a runtime. */
   functionRuntimeScope(workspace: string, threadId: string) {
     workspace = this.workspaceKey(workspace)
-    const agentId = functionCallAgent(workspace, threadId)
-    if (agentId !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+    const agentId = this.functionToolAgent(workspace, threadId)
     const turnId = functionExecutionScope(workspace, threadId)?.turnId
     const key = `${threadId}:${agentId}`
     const saved = this.bindings.get(key)
@@ -465,7 +653,7 @@ export class ModsManager {
       if (this.config(workspace).epoch !== epoch || this.bindings.get(key) !== saved)
         throw new ModError("MODS_CALL_SCOPE_CHANGED")
       if (binding) {
-        binding.assertLive?.()
+        this.assertFunctionBinding(binding)
         if (binding.workspace !== workspace || (turnId && binding.turnId !== turnId))
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
       } else if (turnId) throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
@@ -510,14 +698,18 @@ export class ModsManager {
     }
     assertLive()
     const execution = functionExecutionScope(workspace, threadId)
-    if (functionCallAgent(workspace, threadId) !== "main")
-      return { decision: "deny", reason: "MODS_TOOL_AGENT_UNAVAILABLE" }
+    let agentId: string
+    try {
+      agentId = this.functionToolAgent(workspace, threadId)
+    } catch (error) {
+      return { decision: "deny", reason: modErrorCode(error) }
+    }
     const mcp = toolId.startsWith("mcp:")
-      ? this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId }))
+      ? this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId, agentId }))
       : undefined
     const binding = mcp
       ? { ...mcp.binding, assertLive: mcp.assertLive }
-      : this.bindings.get(`${threadId}:main`)
+      : this.bindings.get(`${threadId}:${agentId}`)
     const turnId = functionCallTurn(workspace, threadId)
     const applicable =
       binding?.workspace === workspace &&
@@ -526,7 +718,7 @@ export class ModsManager {
     if (turnId && toolId.startsWith("host:") && !applicable)
       return { decision: "deny", reason: "MODS_THREAD_CONTEXT_REQUIRED" }
     if (applicable) {
-      binding.assertLive?.()
+      this.assertFunctionBinding(binding)
       const access = queryModRuntimeToolAccess(
         { ...binding, permissionToolAliases: toolNames },
         toolId
@@ -534,10 +726,15 @@ export class ModsManager {
       if (access.decision === "deny") return access
     }
     const result = await (
-      applicable && toolId.startsWith("host:") && binding.queryTool ? binding.queryTool : query
+      applicable &&
+        toolId.startsWith("host:") &&
+        isNativeFunctionTool(toolId.slice(5)) &&
+        binding.queryTool
+        ? binding.queryTool
+        : query
     )(toolId, args)
     assertLive()
-    if (applicable) binding.assertLive?.()
+    if (applicable) this.assertFunctionBinding(binding)
     let mandatory = config.policy ? this.policy.query(toolId) : { decision: "allow" as const }
     if (classifyModTool(toolId) !== "read" && !toolId.startsWith("function:")) {
       mandatory = constrainToolPermission(
@@ -570,7 +767,7 @@ export class ModsManager {
       const access = queryModRuntimeToolAccess(binding, toolId)
       if (access.decision === "deny") return access
       const query =
-        toolId.startsWith("host:") && binding.queryTool
+        toolId.startsWith("host:") && isNativeFunctionTool(toolId.slice(5)) && binding.queryTool
           ? await binding.queryTool(toolId, args)
           : { decision: "allow" as const }
       assertLive()
@@ -623,7 +820,7 @@ export class ModsManager {
       if (!grant || !grant.enabled || grant.epoch !== identity.grantEpoch)
         throw new ModError("MODS_GRANT_REVOKED")
       if (binding) {
-        binding.assertLive?.()
+        this.assertFunctionBinding(binding)
         if (binding.workspace !== identity.workspace || (turnId && binding.turnId !== turnId))
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
         if (queryModRuntimeToolAccess(binding, toolId).decision === "deny")
@@ -776,6 +973,7 @@ export class ModsManager {
       String(input.tool)
     )
     mcp.assertLive()
+    this.assertFunctionBinding(mcp.binding)
     assertFunctionGrant(this.store, workspace, threadId, grant, signal)
     return { name: tool.toolId, fingerprint: functionMcpToolFingerprint(tool) }
   }
@@ -788,11 +986,11 @@ export class ModsManager {
   ) {
     assertFunctionGrant(this.store, workspace, threadId, grant, signal)
     if (!this.isEnabled(workspace)) throw new ModError("MODS_DISABLED")
-    if (functionCallAgent(workspace, threadId) !== "main")
-      throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
-    const mcp = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId }))
+    const agentId = this.functionToolAgent(workspace, threadId)
+    const mcp = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId, agentId }))
     if (!mcp?.listTools) throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
     mcp.assertLive()
+    this.assertFunctionBinding(mcp.binding)
     const turn = functionCallTurn(workspace, threadId)
     if (turn && turn !== mcp.binding.turnId) throw new ModError("MODS_CALL_SCOPE_CHANGED")
     return mcp
@@ -871,9 +1069,9 @@ export class ModsManager {
         this.bindings.get(`${threadId}:main`)?.turnId ??
         `function-tool:${threadId}`
     })
-    // Child agents must never inherit the main agent's backend or approval context.
-    if (identity.agentId !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
-    const saved = mcpBinding ?? this.bindings.get(`${threadId}:main`)
+    // Only an explicit instance binding may supply a child backend.
+    const agentId = this.functionToolAgent(workspace, threadId)
+    const saved = mcpBinding ?? this.bindings.get(`${threadId}:${agentId}`)
     if ((!mcpBinding && !saved?.invokeTool) || !saved || saved.workspace !== workspace)
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
     const binding = {
@@ -882,7 +1080,7 @@ export class ModsManager {
       signal: saved.signal ? AbortSignal.any([signal, saved.signal]) : signal
     }
     binding.signal.throwIfAborted()
-    binding.assertLive?.()
+    this.assertFunctionBinding(binding)
     const turnId = functionExecutionScope(workspace, threadId)?.turnId
     if (turnId && binding.turnId !== turnId) throw new ModError("MODS_CALL_SCOPE_CHANGED")
     if (classifyModTool(toolId) !== "read" && (binding.readOnly || !userInitiated))
@@ -924,7 +1122,18 @@ export class ModsManager {
     listTools?: () => Promise<McpCapabilityTool[]>,
     peekTools?: () => McpCapabilityTool[] | null
   ): () => void {
+    this.assertRuntimeBinding(binding)
     const key = this.mcpBindingKey(binding)
+    if (!this.mcpBindings.has(key) && this.mcpBindings.size >= 100) {
+      for (const [id, current] of this.mcpBindings) {
+        try {
+          current.assertLive()
+        } catch {
+          this.mcpBindings.delete(id)
+        }
+      }
+      if (this.mcpBindings.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
+    }
     const entry = {
       binding: {
         ...binding,
@@ -936,12 +1145,12 @@ export class ModsManager {
       peekTools,
       assertLive: () => {
         if (this.mcpBindings.get(key) !== entry) throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
+        this.assertRuntimeBinding(binding)
         binding.signal?.throwIfAborted()
         binding.assertLive?.()
       }
     }
     this.mcpBindings.set(key, entry)
-    if (this.mcpBindings.size > 100) this.mcpBindings.delete(this.mcpBindings.keys().next().value!)
     return () => {
       if (this.mcpBindings.get(key) === entry) this.mcpBindings.delete(key)
     }
@@ -951,8 +1160,7 @@ export class ModsManager {
     workspace: string,
     threadId: string
   ): McpCapabilityTool[] | null | undefined {
-    const agentId = functionCallAgent(workspace, threadId)
-    if (agentId !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+    const agentId = this.functionToolAgent(workspace, threadId)
     const scope = functionExecutionScope(workspace, threadId)
     const entry = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId, agentId }))
     if (!entry) {
@@ -960,6 +1168,7 @@ export class ModsManager {
       return undefined
     }
     entry.assertLive()
+    this.assertFunctionBinding(entry.binding)
     const turnId = functionCallTurn(workspace, threadId)
     if (turnId && turnId !== entry.binding.turnId) throw new ModError("MODS_CALL_SCOPE_CHANGED")
     return entry.peekTools?.() ?? null
@@ -1040,6 +1249,7 @@ export class ModsManager {
   ): ModDispatchRequest {
     const epoch = this.config(binding.workspace).epoch
     const assertEpoch = (): void => {
+      this.assertRuntimeBinding(binding)
       binding.assertLive?.()
       if (queryModRuntimeToolAccess(binding, toolId).decision === "deny")
         throw new ModError("MODS_RUNTIME_TOOL_DENIED")
@@ -1055,6 +1265,7 @@ export class ModsManager {
     }
     let capabilityCalls = 0
     const request: ModDispatchRequest = {
+      runtimeAuthority: binding.runtimeAuthority,
       identity,
       toolId,
       args,
@@ -1178,6 +1389,7 @@ export class ModsManager {
             }
         return modCallContext.run(
           {
+            runtimeAuthority: binding.runtimeAuthority,
             identity: childIdentity,
             toolId: target,
             routeClaimed: false,
@@ -1240,15 +1452,27 @@ export class ModsManager {
     // An in-flight capability cannot escape revocation by reaching the now-disabled fast path.
     getModCallContext()?.assertLive?.()
     const workspace = this.workspaceKey(binding.workspace)
+    this.assertRuntimeBinding(binding)
     if (!this.isActive(workspace)) return core(args)
     const saved = this.bindings.get(`${binding.threadId}:${binding.agentId ?? "main"}`)
+    if (
+      saved &&
+      (saved.workspace !== workspace ||
+        saved.turnId !== binding.turnId ||
+        (binding.runtimeAuthority && saved.runtimeAuthority !== binding.runtimeAuthority))
+    )
+      throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
     binding = {
       ...saved,
       ...binding,
       workspace,
-      invokeTool: binding.invokeTool ?? saved?.invokeTool
+      invokeTool: binding.invokeTool ?? saved?.invokeTool,
+      blockedToolNames: saved?.blockedToolNames ?? binding.blockedToolNames,
+      readOnly: saved?.readOnly === true || binding.readOnly === true
     }
     const inherited = getModCallContext()
+    if (inherited?.runtimeAuthority && inherited.runtimeAuthority !== binding.runtimeAuthority)
+      throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
     if (inherited) {
       const assertBinding = binding.assertLive
       binding.assertLive = () => {
@@ -1297,6 +1521,7 @@ export class ModsManager {
   }
 
   async context(binding: ModThreadBinding): Promise<string[]> {
+    this.assertRuntimeBinding(binding)
     if (!this.isActive(binding.workspace)) return []
     const saved = this.bindings.get(`${binding.threadId}:${binding.agentId ?? "main"}`)
     binding = {
@@ -1592,6 +1817,7 @@ export class ModsManager {
   }
 
   close(): void {
+    this.runtimeAuthorities.close()
     this.functionLifecycle?.close()
     this.functionToolCatalogs.clear()
     this.mcpBindings.clear()

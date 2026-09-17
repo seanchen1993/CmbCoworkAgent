@@ -35,6 +35,43 @@ export async function startModsModelServer() {
     const userPrompt = JSON.stringify(
       body.messages?.findLast((message: { role: string }) => message.role === "user")?.content
     )
+    if (
+      Array.isArray(body.tools) &&
+      (userPrompt?.includes("[mods-child]") || userPrompt?.includes("[mods-child-worker]"))
+    ) {
+      const child = userPrompt.includes("[mods-child-worker]")
+      const completed = body.messages?.at(-1)?.role === "tool"
+      event([
+        {
+          index: 0,
+          delta: completed
+            ? { role: "assistant", content: child ? "MODS_CHILD_WORKER_OK" : "MODS_CHILD_OK" }
+            : {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: child ? "mods-child-inspect" : "mods-child-task",
+                    type: "function",
+                    function: child
+                      ? { name: "mcp__host-foundation__probe", arguments: '{"mode":"child"}' }
+                      : {
+                          name: "task",
+                          arguments: JSON.stringify({
+                            subagent_type: "Explore",
+                            description: "[mods-child-worker] Inspect using the registered probe"
+                          })
+                        }
+                  }
+                ]
+              },
+          finish_reason: completed ? "stop" : "tool_calls"
+        }
+      ])
+      event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
     if (Array.isArray(body.tools) && userPrompt?.includes("[mods-foundation]")) {
       const completed = body.messages?.at(-1)?.role === "tool"
       event([

@@ -12,6 +12,7 @@ import type {
 } from "../../../shared/mods/v2/ui"
 import type { ModJson } from "../../../shared/mods/types"
 import { isModObject } from "../../../shared/mods/v2/contracts"
+import { currentFunctionExecution, withFunctionExecution } from "./execution-context"
 
 const cleanup: Array<() => Promise<void>> = []
 function content(node: FunctionUiElement | string): string {
@@ -159,6 +160,41 @@ it("supports size, key, pointer, input, select and clock updates, then releases 
   const fresh = (await f.snapshot()).client
   expect(fresh.id).not.toBe(client.id)
   expect(content(fresh.tree)).toContain("count:0")
+})
+
+it("keeps redraws and timers alive after a click ends without retaining its write authority", async () => {
+  const scopes: Array<{ userInitiated: boolean; leased: boolean; immediate: boolean }> = []
+  const f = await fixture(undefined, async (value) => {
+    const scope = currentFunctionExecution()
+    if (scope)
+      scopes.push({
+        userInitiated: scope.userInitiated,
+        leased: scope.leased,
+        immediate: scope.immediate
+      })
+    return value
+  })
+  await withFunctionExecution(
+    {
+      workspace: "/project",
+      threadId: "thread",
+      turnId: "clicked-turn",
+      userInitiated: true,
+      leased: true,
+      immediate: false
+    },
+    async () => {
+      const { client } = await f.snapshot()
+      await f.session.clients.act(action(client, "press"))
+    }
+  )
+  await expect.poll(async () => content((await f.snapshot()).client.tree)).toContain("Acknowledged")
+  await expect
+    .poll(async () => content((await f.snapshot()).client.tree), { timeout: 2500 })
+    .toContain("ticks:1")
+  expect((await f.snapshot()).client.error).toBeUndefined()
+  expect(scopes).toContainEqual({ userInitiated: true, leased: true, immediate: false })
+  expect(scopes).toContainEqual({ userInitiated: false, leased: false, immediate: true })
 })
 
 it("rejects malformed/forged controls and does not send Client messages to another plugin", async () => {

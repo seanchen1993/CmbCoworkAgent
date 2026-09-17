@@ -1,6 +1,8 @@
 import { attachModBackend, protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
 import { authorizeCurrentModInput } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
+import type { ModRuntimeAuthority } from "../mods/runtime-instance"
+import { currentFunctionExecution } from "../mods/v2/execution-context"
 /**
  * LocalSandbox: Execute shell commands locally on the host machine.
  *
@@ -347,7 +349,9 @@ export interface LocalSandboxOptions {
   modWorkspace?: string
   /** Runtime capabilities must also constrain SDK calls that bypass model middleware. */
   modBlockedToolNames?: ReadonlySet<string>
+  modDelegatedBlockedToolNames?: ReadonlySet<string>
   modReadOnly?: boolean
+  modRuntimeAuthority?: ModRuntimeAuthority
   /** Host-created command-only context; a model turn replaces it with its own full runtime. */
   modCommandOnly?: boolean
   onModBinding?: (release: () => void) => void
@@ -2111,21 +2115,41 @@ export class LocalSandbox
     this._cwd = this.cwd
     this._maxFileSizeBytes = (options.maxFileSizeMb ?? 10) * 1024 * 1024
     if (mode !== permissionProbe) {
-      const release = attachModBackend(this, () => ({
+      const owner = {
         commandOnly: options.modCommandOnly,
         workspace: options.modWorkspace ?? this.workingDir,
         executionWorkspace: this.workingDir,
         blockedToolNames: options.modBlockedToolNames,
+        delegatedBlockedToolNames: options.modDelegatedBlockedToolNames,
         threadId: this.runId,
         turnId: this._hookTurnId ?? this.runId,
-        agentId: getModCallContext()?.identity.agentId ?? this.agentId,
-        readOnly:
-          options.modReadOnly === true ||
-          this.readOnlyShellEnforced ||
-          readOnlyShellExecutionContext.getStore() === true,
+        agentId: this.agentId,
         signal: this.abortSignal,
         activePluginIds: this._hookScope?.activePluginIds
-      }))
+      }
+      const runtimeAuthority = options.modRuntimeAuthority
+      const binding = () => {
+        const call = getModCallContext(),
+          execution = currentFunctionExecution()
+        return {
+          ...owner,
+          runtimeAuthority: call
+            ? call.runtimeAuthority
+            : execution
+              ? execution.runtimeAuthority
+              : runtimeAuthority,
+          agentId: call?.identity.agentId ?? execution?.agentId ?? owner.agentId,
+          readOnly:
+            options.modReadOnly === true ||
+            this.readOnlyShellEnforced ||
+            readOnlyShellExecutionContext.getStore() === true
+        }
+      }
+      const release = attachModBackend(this, binding, {
+        ...owner,
+        runtimeAuthority,
+        readOnly: options.modReadOnly === true || this.readOnlyShellEnforced
+      })
       options.onModBinding?.(release)
     }
   }

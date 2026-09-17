@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-17",
-  "codeBaseline": "ba02fc60",
+  "codeBaseline": "31de982c",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -14,7 +14,7 @@
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
-    "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, main-agent custom tool registration/discovery, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete; MCP tool.call routing and scoped permission metadata; explicit grant/execution workspace separation and runtime tool restrictions",
+    "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, registered tools in main and explicitly host-bound shared task agents, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete; MCP tool.call routing and scoped permission metadata; explicit grant/execution workspace separation, runtime tool restrictions and private instance lifetimes",
     "desktopEvents": [
       "session.start",
       "command.run",
@@ -78,8 +78,8 @@
       "SDK supports read_file/write_file/edit_file/ls/glob/grep/execute/task_output and registered guest tools; model ingress retains actual adapter schemas",
       "SDK writes require live user action and shared thread lease; model hooks do not grant that authority; actual native writes retain host approval",
       "MCP named SDK and exact scoped/canonical tool.call names are main-agent user-action only with final approval; tool.check uses current scoped or cold valid cached metadata",
-      "tool.register exposes mcp__plugin__name tools to the main agent only; restricted subagents reject them",
-      "tool.list is main-agent only and uses the latest model tool metadata snapshot plus current registered entries; before first model request it fails with MODS_TOOL_CONTEXT_REQUIRED",
+      "tool.register exposes mcp__plugin__name tools to main and explicitly host-bound shared task agents; custom/opaque agents without a known authority cannot acquire them",
+      "tool.list uses the actual agent's latest model catalog plus registered entries, filtered by its role and MCP aliases; before first model request it fails with MODS_TOOL_CONTEXT_REQUIRED",
       "JSON Schema bounded subset; refs, regex, format and other unsupported keywords explicitly rejected; see authoring guide",
       "32 registrations/plugin, 128/session, 256000 aggregate metadata characters; input schemas 16000 characters and registered inputs 64000 characters; validation work bounded",
       "16000-character native SDK input bound; model ingress uses bounded JSON",
@@ -136,21 +136,21 @@
       "safety": "mandatory decision rechecked after optional hooks; no tool/dialog/classic hook/receipt on query; protected deny and approval reasons",
       "binding": "native instance/turn guards and conditional release; bounded native/MCP command queues; private call-specific not-started receipt evidence",
       "limits": [
-        "main-agent SDK only",
+        "main and explicitly host-bound shared task agents only",
         "D01 mandatory ask/deny cannot be relaxed",
         "cold MCP query cannot discover or reconnect",
-        "Claude built-in schemas and child-agent authority pending"
+        "Claude built-in schemas and opaque/provider child-agent authority pending"
       ],
       "upstreamConformance": 3,
       "fullParity": false
     },
     "hostFoundation": {
-      "revision": "desktop-runtime-authority-v15",
+      "revision": "desktop-agent-instances-v16",
       "design": "mods-v2-host-foundation-2026-09-17.md",
       "scope": "shared model/custom-tool admission, receipt and publication lifecycle; host-owned agent/turn/parent identity; queued continuation provenance; native SDK receipt alignment",
-      "nativeAgentLimit": "function SDK native calls remain main-agent only; child calls cannot borrow the main backend",
+      "nativeAgentLimit": "known shared task agents receive explicit private instance identities and role-constrained backend bindings; unbound agents cannot borrow main",
       "notImplemented": [
-        "explicit shared child-agent bindings",
+        "opaque/provider agent bindings",
         "cross-plugin authority delegation"
       ]
     },
@@ -171,9 +171,17 @@
       "evidence": "real LocalSandbox/SQLite tests, concurrent VM cwd scopes, 43 Electron E2E cases including an alternate execution root; not full workflow or child-agent parity",
       "limits": [
         "child SDK remains unavailable without explicit host binding",
-        "SDK tool.list registered entries and cold catalog still need unified filtering",
+        "cold catalog before the first model request remains unavailable",
         "full performance and two-hour resource gate pending"
       ],
+      "fullParity": false
+    },
+    "agentInstances": {
+      "revision": "desktop-agent-instances-v16",
+      "design": "mods-v2-agent-instances-2026-09-17.md",
+      "scope": "private host runtime identity; same-ID replacement, abort and parent lifecycle; explicit deepagents task bindings; role-filtered native/registered/MCP catalogs; fixed constructor ownership and queued continuation provenance",
+      "ui": "Client background frames use fresh read-only host entries instead of retaining an expired click's write authority",
+      "evidence": "real deepagents/QuickJS/LocalSandbox tests and Electron HTTP/utilityProcess Explore task; upstream conformance remains 39 cases",
       "fullParity": false
     }
   },

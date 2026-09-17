@@ -47,6 +47,7 @@ interface LoadedMod extends ApprovedMod {
 }
 
 export interface ModDispatchRequest {
+  runtimeAuthority?: ModCallContext["runtimeAuthority"]
   identity: ModIdentity
   toolId: string
   effect: ModEffect
@@ -220,6 +221,7 @@ export class ModEngine {
             await request.admit?.(args)
             executed = true
             const context = {
+              runtimeAuthority: request.runtimeAuthority,
               identity: request.identity,
               toolId: request.toolId,
               signal: request.signal,

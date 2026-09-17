@@ -3,12 +3,14 @@ import type { ModCommandQueue } from "../command-queue"
 import { classifyModTool } from "../engine"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import type { ModObject } from "../../../shared/mods/types"
+import { assertModRuntimeAuthority, type ModRuntimeAuthority } from "../runtime-instance"
 
 interface FunctionExecution {
   workspace: string
   threadId: string
   agentId?: string
   turnId?: string
+  runtimeAuthority?: ModRuntimeAuthority
   userInitiated: boolean
   leased: boolean
   immediate: boolean
@@ -16,6 +18,19 @@ interface FunctionExecution {
 }
 
 const context = new AsyncLocalStorage<FunctionExecution>()
+
+export function currentFunctionExecution() {
+  const scope = context.getStore()
+  return scope && functionExecutionScope(scope.workspace, scope.threadId)
+}
+
+/** Only explicit host task creation may start a different agent's execution scope. */
+export function withFreshFunctionExecution<T>(
+  input: Omit<FunctionExecution, "active">,
+  run: () => Promise<T>
+): Promise<T> {
+  return context.exit(() => withFunctionExecution(input, run))
+}
 
 /** An inherited but expired scope must never silently become the main agent. */
 export function functionExecutionScope(
@@ -26,12 +41,18 @@ export function functionExecutionScope(
   if (scope && !scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
   if (scope && (scope.workspace !== workspace || scope.threadId !== threadId))
     throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+  if (scope?.runtimeAuthority)
+    assertModRuntimeAuthority(scope.runtimeAuthority, {
+      ...scope,
+      turnId: scope.turnId ?? scope.runtimeAuthority.turnId
+    })
   return scope
 }
 
 export function functionExecutionAgent(): string {
   const scope = context.getStore()
   if (scope && !scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+  if (scope) functionExecutionScope(scope.workspace, scope.threadId)
   return scope?.agentId ?? "main"
 }
 
@@ -55,9 +76,14 @@ export async function withFunctionExecution<T>(
   input: Omit<FunctionExecution, "active">,
   run: () => Promise<T>
 ): Promise<T> {
-  const scope = { ...input, active: true }
+  const inherited = context.getStore()
+  const runtimeAuthority = input.runtimeAuthority ?? inherited?.runtimeAuthority
+  const scope = { ...input, runtimeAuthority, active: true }
   try {
-    return await context.run(scope, run)
+    return await context.run(scope, () => {
+      functionExecutionScope(input.workspace, input.threadId)
+      return run()
+    })
   } finally {
     scope.active = false
   }
@@ -92,6 +118,7 @@ export async function scheduleFunctionTool(
           threadId,
           agentId: scope?.agentId,
           turnId: scope?.turnId,
+          runtimeAuthority: scope?.runtimeAuthority,
           leased: true,
           immediate: false,
           userInitiated

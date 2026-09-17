@@ -14,8 +14,11 @@ const baseline = execFileSync(
   ["rev-parse", "--verify", `${process.argv[2] ?? "aa97b145"}^{commit}`],
   { cwd: root, encoding: "utf8" }
 ).trim()
-const mcpMode = ["mcp", "mcp-matched", "mcp-sdk", "mcp-routing"].includes(process.argv[3])
-const routing = process.argv[3] === "mcp-routing"
+const instanceMode = process.argv[3] === "mcp-instances"
+const mcpMode = ["mcp", "mcp-matched", "mcp-sdk", "mcp-routing", "mcp-instances"].includes(
+  process.argv[3]
+)
+const routing = process.argv[3] === "mcp-routing" || instanceMode
 const sameSdk = process.argv[3] === "mcp-sdk" || routing
 const matchedPublication = process.argv[3] === "mcp-matched"
 const output = join(
@@ -70,7 +73,8 @@ for (const variant of ["baseline", "current"]) {
     },
     define: {
       __MODS_MCP_SDK__: variant === "current" || sameSdk ? "true" : "false",
-      __MODS_MCP_ROUTING__: routing && variant === "current" ? "true" : "false",
+      __MODS_MCP_ROUTING__: routing && (instanceMode || variant === "current") ? "true" : "false",
+      __MODS_RUNTIME_AUTHORITY__: instanceMode && variant === "current" ? "true" : "false",
       __MODS_MATCHED_PUBLICATION__: matchedPublication ? "true" : "false"
     },
     outfile,
@@ -157,16 +161,18 @@ const prior = summarize(samples.baseline),
 const report = {
   baseline,
   hashes,
-  scope: routing
-    ? "same MCP SDK with current name-resolution/tool-hook host bridge; real ModEngine, SQLite and 1000-tool catalog; passthrough dispatcher, no VM, policy worker, queue binding or network"
-    : sameSdk
-      ? "same named MCP SDK in both revisions (1000 tools), actual ModEngine + SQLite including publication; stub approval/transport, no guest VM or policy worker"
-      : mcpMode
-        ? "baseline internal MCP capability route versus new named SDK resolver (1000 tools), both actual ModEngine + SQLite; stub approval/transport, no guest VM or policy worker; " +
-          (matchedPublication
-            ? "benchmark adds equivalent publication persistence to baseline, isolating resolver/guard overhead"
-            : "SDK additionally persists publication with policy off, baseline leaves it pending")
-        : "registered host boundary + actual SQLite; no VM, policy worker, native tool I/O or provider",
+  scope: instanceMode
+    ? "same named MCP resolution/tool-hook host bridge in both revisions; current uses a real runtime authority; real ModEngine, SQLite and 1000-tool catalog; passthrough dispatcher, no VM, policy worker, queue binding or network"
+    : routing
+      ? "same MCP SDK with current name-resolution/tool-hook host bridge; real ModEngine, SQLite and 1000-tool catalog; passthrough dispatcher, no VM, policy worker, queue binding or network"
+      : sameSdk
+        ? "same named MCP SDK in both revisions (1000 tools), actual ModEngine + SQLite including publication; stub approval/transport, no guest VM or policy worker"
+        : mcpMode
+          ? "baseline internal MCP capability route versus new named SDK resolver (1000 tools), both actual ModEngine + SQLite; stub approval/transport, no guest VM or policy worker; " +
+            (matchedPublication
+              ? "benchmark adds equivalent publication persistence to baseline, isolating resolver/guard overhead"
+              : "SDK additionally persists publication with policy off, baseline leaves it pending")
+          : "registered host boundary + actual SQLite; no VM, policy worker, native tool I/O or provider",
   prior,
   current,
   p95DeltaPercent: (current.p95Ms / prior.p95Ms - 1) * 100,

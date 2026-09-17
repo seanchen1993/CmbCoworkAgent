@@ -58,6 +58,7 @@ interface FunctionManagerHost {
   assertThread?(workspace: string, threadId: string): void
   fileScope?(workspace: string, threadId: string): FunctionFileScope
   listTools?(workspace: string, threadId: string, signal: AbortSignal): Promise<FunctionToolInfo[]>
+  filterTools?(workspace: string, threadId: string, tools: FunctionToolInfo[]): FunctionToolInfo[]
   registeredTool?(
     workspace: string,
     threadId: string,
@@ -323,6 +324,9 @@ export class FunctionModsManager {
           assertLive,
           listTools: this.host.listTools
             ? (signal) => this.host.listTools!(workspace, threadId, signal)
+            : undefined,
+          filterTools: this.host.filterTools
+            ? (tools) => this.host.filterTools!(workspace, threadId, tools)
             : undefined,
           registeredTool: async (owner, input, origin, signal, run, caller) => {
             assertLive(owner)

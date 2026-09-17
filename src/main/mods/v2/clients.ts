@@ -15,6 +15,7 @@ import {
 
 interface ClientHost {
   assertLive(): void
+  background<T>(run: () => Promise<T>): Promise<T>
   load(plugin: string, module: string): Promise<FunctionGuest>
   changed(): void
   publish(value: ModJson): Promise<ModJson>
@@ -131,11 +132,14 @@ export class FunctionClients {
     instance.frame = setTimeout(() => {
       instance.frame = undefined
       instance.backgroundRunning = true
-      void this.enqueue(instance, async () => {
-        const events = [...instance.backgroundEvents.values()]
-        instance.backgroundEvents.clear()
-        for (const event of events) await this.update(instance, event)
-      })
+      void this.host
+        .background(() =>
+          this.enqueue(instance, async () => {
+            const events = [...instance.backgroundEvents.values()]
+            instance.backgroundEvents.clear()
+            for (const event of events) await this.update(instance, event)
+          })
+        )
         .catch(() => this.fail(instance))
         .finally(() => {
           instance.backgroundRunning = false

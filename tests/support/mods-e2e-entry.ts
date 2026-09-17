@@ -25,9 +25,11 @@ const executionScopes = new Map<string, () => void>()
 export function bindExecutionScope(scope: Scope, executionWorkspace: string): void {
   releaseExecutionScope(scope.threadId)
   const controller = new AbortController()
+  const instance = getModsManager()!.createRuntimeAuthority({ ...scope, signal: controller.signal })
   let release = () => {}
   new LocalSandbox({
     rootDir: executionWorkspace,
+    modRuntimeAuthority: instance.authority,
     modWorkspace: scope.workspace,
     modBlockedToolNames: new Set(["execute"]),
     runId: scope.threadId,

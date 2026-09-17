@@ -72,6 +72,24 @@ export function register(on) {
     return next(e)
   })
   on("tool.call", { tool: "mcp__host-foundation__probe" }, async ($, e) => {
+    if (e.mode === "child")
+      return {
+        result: {
+          agentId: e.agentId,
+          cwd: await $.session.cwd(),
+          native: await $.tool.call({ tool: "read_file", file_path: "secret.txt" }),
+          file: await $.fs.read("secret.txt"),
+          tools: await $.tool.list(),
+          readPermission: await $.tool.check({
+            tool: "read_file",
+            input: { file_path: "secret.txt" }
+          }),
+          writePermission: await $.tool.check({
+            tool: "write_file",
+            input: { file_path: "blocked.txt", content: "must not write" }
+          })
+        }
+      }
     if (e.mode === "native")
       return {
         result: await Promise.all([

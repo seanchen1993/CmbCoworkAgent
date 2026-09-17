@@ -11,6 +11,7 @@ import {
 } from "./execution-context"
 import { scheduleFunctionCommand } from "./command-scheduler"
 import { functionCallIdentity, runFunctionHostCall } from "./host-call"
+import { ModRuntimeAuthorities } from "../runtime-instance"
 
 const cleanups: Array<() => void> = []
 afterEach(() => cleanups.splice(0).forEach((fn) => fn()))
@@ -120,6 +121,9 @@ it.each(["tool", "command"])(
     }
     claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "model" })
     const run = vi.fn(async () => {
+      expect(functionExecutionScope(f.scope.workspace, f.threadId)?.runtimeAuthority).toBe(
+        instance.authority
+      )
       expect(functionExecutionScope(f.scope.workspace, f.threadId)).toMatchObject({
         agentId: "worker",
         turnId: "worker-turn",
@@ -135,7 +139,9 @@ it.each(["tool", "command"])(
       return { result: "done" }
     })
     const scope = { ...f.scope, agentId: "worker", turnId: "worker-turn", userInitiated: false }
-    const pending = withFunctionExecution(scope, () =>
+    const instance = new ModRuntimeAuthorities().create(scope)
+    cleanups.push(instance.release)
+    const pending = withFunctionExecution({ ...scope, runtimeAuthority: instance.authority }, () =>
       runFunctionHostCall({
         store: { settle: () => {}, blockPublication: () => {} },
         identity: {
@@ -179,6 +185,25 @@ it("does not renew an abandoned caller's write authority when its queued job fin
     pending = f.call("host:write_file", run)
   })
   const rejected = expect(pending).rejects.toThrow("MODS_CALL_SCOPE_EXPIRED")
+  releaseLocalThreadRunLease(f.threadId, "desktop", "model")
+  await rejected
+  expect(run).not.toHaveBeenCalled()
+})
+
+it("rejects queued SDK work if its runtime is replaced before the lease becomes available", async () => {
+  const f = fixture(),
+    registry = new ModRuntimeAuthorities()
+  const scope = { ...f.scope, turnId: "turn" }
+  const instance = registry.create(scope)
+  cleanups.push(() => registry.close())
+  claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "model" })
+  const run = vi.fn(async () => ({ result: "must not run" }))
+  const pending = withFunctionExecution({ ...scope, runtimeAuthority: instance.authority }, () =>
+    f.call("host:read_file", run)
+  )
+  const rejected = expect(pending).rejects.toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+  await expect.poll(() => [...f.jobs.values()][0]?.state).toBe("queued")
+  registry.create(scope)
   releaseLocalThreadRunLease(f.threadId, "desktop", "model")
   await rejected
   expect(run).not.toHaveBeenCalled()

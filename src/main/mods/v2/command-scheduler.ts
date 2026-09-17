@@ -33,6 +33,7 @@ export async function scheduleFunctionCommand(
           threadId,
           agentId: scope?.agentId,
           turnId: scope?.turnId,
+          runtimeAuthority: scope?.runtimeAuthority,
           leased: !command.immediate,
           immediate: command.immediate === true,
           userInitiated

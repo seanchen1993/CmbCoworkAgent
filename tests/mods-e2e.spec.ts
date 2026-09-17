@@ -1519,6 +1519,62 @@ async function main(): Promise<void> {
     pass(
       "registered tool, native SDK read and model completion share the real turn and parent receipts across utilityProcess"
     )
+    const beforeChild = modelServer.requests.length
+    await functionComposer.fill("[mods-child] 请通过 Explore 子代理调用注册工具。")
+    await functionComposer.press("Enter")
+    await page!.getByText("MODS_CHILD_OK", { exact: true }).first().waitFor({ timeout: 30000 })
+    const childRequests = modelServer.requests.slice(beforeChild)
+    writeFileSync(
+      join(artifacts, "function-child-protocol.json"),
+      JSON.stringify(childRequests, null, 2)
+    )
+    const childReply = childRequests.find(
+      (request) =>
+        request.messages.at(-1)?.role === "tool" &&
+        String(request.messages.at(-1)?.content).includes('"agentId":"mods-child-task"')
+    )
+    assert.ok(childReply, "real child model receives its registered-tool result")
+    const childValue = JSON.parse(String(childReply.messages.at(-1)!.content))
+    assert.equal(childValue.agentId, "mods-child-task")
+    assert.equal(resolve(childValue.cwd).toLowerCase(), resolve(workspace).toLowerCase())
+    assert.match(childValue.file, /REDACTED/)
+    assert.match(childValue.native.text, /REDACTED/)
+    assert.equal(childValue.readPermission.decision, "allow")
+    assert.equal(childValue.writePermission.decision, "deny")
+    assert(
+      !childValue.tools.some((tool: { name: string }) =>
+        ["write_file", "edit_file"].includes(tool.name)
+      )
+    )
+    assert(
+      childValue.tools.some((tool: { name: string }) => tool.name === "mcp__host-foundation__probe")
+    )
+    const childAudit = await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+    const taskReceipt = childAudit.find((row) => row.identity?.toolCallId === "mods-child-task")!
+    const registeredReceipt = childAudit.find(
+      (row) => row.identity?.toolCallId === "mods-child-inspect"
+    )!
+    assert.ok(taskReceipt?.identity && registeredReceipt?.identity)
+    assert.equal(registeredReceipt.identity.agentId, "mods-child-task")
+    assert.equal(registeredReceipt.identity.parentCallId, taskReceipt.identity.callId)
+    const sdkReceipts = childAudit.filter(
+      (row) => row.identity?.parentCallId === registeredReceipt.identity!.callId
+    )
+    assert.equal(sdkReceipts.length, 1)
+    assert.equal(sdkReceipts[0].toolId, "host:read_file")
+    for (const row of [registeredReceipt, ...sdkReceipts]) {
+      assert.equal(row.identity?.agentId, "mods-child-task")
+      assert.equal(row.identity?.turnId, taskReceipt.identity.turnId)
+      assert.equal(row.status, "succeeded")
+      assert.equal(row.publication, "published")
+    }
+    assert.doesNotMatch(JSON.stringify(childRequests), /sk-private-fixture/)
+    assert.doesNotMatch(await page!.locator("body").innerText(), /sk-private-fixture/)
+    assert(!existsSync(join(workspace, "blocked.txt")))
+    await page!.screenshot({ path: join(artifacts, "function-child-authority.png") })
+    pass(
+      "real Explore task uses scoped registered tools and file SDK across utilityProcess with protected parent/child receipts"
+    )
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     for (const path of ["secret.txt", "../outside.txt"]) {
       await functionComposer.fill(`/claw-files ${path}`)

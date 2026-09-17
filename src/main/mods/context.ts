@@ -1,9 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import type { ModIdentity } from "../../shared/mods/types"
 import type { McpCapabilityTool } from "../mcp/capability-types"
+import type { ModRuntimeAuthority } from "./runtime-instance"
 
 export interface ModCallContext {
   identity: ModIdentity
+  runtimeAuthority?: ModRuntimeAuthority
   toolId: string
   signal?: AbortSignal
   originMod?: string

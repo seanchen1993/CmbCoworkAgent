@@ -4,7 +4,8 @@ import { createMiddleware } from "langchain"
 import { withModToolCall, publishCurrentModResult } from "../mods/adapters"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { functionToolContexts } from "../mods/v2/tool-result"
-import { withFunctionExecution } from "../mods/v2/execution-context"
+import { withFunctionExecution, currentFunctionExecution } from "../mods/v2/execution-context"
+import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
 import {
@@ -27,6 +28,7 @@ import {
 } from "./failure-fuse"
 
 export interface ToolHookMiddlewareOptions {
+  runtimeAuthority?: ModRuntimeAuthority
   workspacePath: string
   threadId: string
   hookScope: HookScopeController
@@ -258,7 +260,10 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
     wrapModelCall: async (request, handler) => {
       const manager = getModsManager()
       if (!manager?.isActive(options.workspacePath)) return handler(request)
-      const agentId = getHookAgentIdFromRequest(request) ?? options.agentId ?? "main"
+      const execution = currentFunctionExecution()
+      const runtimeAuthority = execution ? execution.runtimeAuthority : options.runtimeAuthority
+      const agentId =
+        getHookAgentIdFromRequest(request) ?? execution?.agentId ?? options.agentId ?? "main"
       const nativeTools = request.tools.flatMap((entry) => {
         const value = entry as {
           name?: unknown
@@ -279,6 +284,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
       })
       manager.bindFunctionToolCatalog(
         {
+          runtimeAuthority,
           workspace: options.workspacePath,
           threadId: options.threadId,
           turnId: options.hookTurnId ?? options.threadId,
@@ -286,10 +292,11 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
         },
         nativeTools
       )
-      // Restricted subagents need their own tool-policy integration before receiving guest tools.
+      // Only known host-bound subagents may receive guest tools under their role policy.
       const registered = await withFunctionExecution(
         {
           workspace: manager.workspaceKey(options.workspacePath),
+          runtimeAuthority,
           threadId: options.threadId,
           agentId,
           userInitiated: false,
@@ -298,7 +305,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           immediate: false
         },
         () =>
-          agentId === "main"
+          agentId === "main" || runtimeAuthority
             ? manager.registeredFunctionTools(options.workspacePath, options.threadId)
             : Promise.resolve([])
       )
@@ -321,6 +328,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
         : request.tools
       const blocks = [
         ...(await manager.context({
+          runtimeAuthority,
           workspace: options.workspacePath,
           threadId: options.threadId,
           turnId: options.hookTurnId ?? options.threadId,
@@ -339,19 +347,23 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapToolCall: async (request: any, handler: any): Promise<any> => {
+      const execution = currentFunctionExecution()
+      const runtimeAuthority = execution ? execution.runtimeAuthority : options.runtimeAuthority
       return withModToolCall(
         {
+          runtimeAuthority,
           workspace: options.workspacePath,
           threadId: options.threadId,
           turnId: options.hookTurnId ?? options.threadId,
-          agentId: options.agentId,
+          agentId: execution?.agentId ?? options.agentId,
           activePluginIds: options.hookScope.activePluginIds,
           signal: request.runtime?.signal
         },
         request,
         skipToolNames,
         async (request) => {
-          const agentId = getHookAgentIdFromRequest(request) ?? options.agentId
+          const agentId =
+            getHookAgentIdFromRequest(request) ?? execution?.agentId ?? options.agentId
           return runWithHookAgentId(agentId, async () => {
             const toolCall = request.toolCall as
               | { id?: string; name?: string; args?: unknown }
