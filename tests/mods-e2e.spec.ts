@@ -1456,11 +1456,91 @@ async function main(): Promise<void> {
         mcpConnector
       )
     }
+    const requestsBeforeCatalog = modelServer.requests.length
+    const auditBeforeCatalog = (
+      await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+    ).map((row) => row.callId)
+    await functionComposer.fill("/claw-tools ")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+          (job) =>
+            job.command === "claw-tools" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("read_file")
+        ),
+      "cold SDK lists real tools before the first model request"
+    )
+    const coldCatalogText = (
+      await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)
+    ).find((job) => job.command === "claw-tools" && job.state === "succeeded")!.result!.text
+    const coldCatalogNames = [...coldCatalogText.matchAll(/^([a-zA-Z0-9_-]+)：/gm)]
+      .map((match) => match[1])
+      .sort()
+    for (const name of [
+      "read_file",
+      "task_output",
+      "write_todos",
+      "request_user_input",
+      "manage_scheduler",
+      "mcp__function-commands__project_brief"
+    ])
+      assert.ok(coldCatalogNames.includes(name), `cold catalog includes ${name}`)
+    assert.ok(!coldCatalogNames.includes("manage_skill"))
+    assert.equal(modelServer.requests.length, requestsBeforeCatalog)
+    assert.deepEqual(
+      (await page!.evaluate((id) => window.api.mods.audit(id), registryThread)).map(
+        (row) => row.callId
+      ),
+      auditBeforeCatalog
+    )
+    assert.ok(coldCatalogText.includes("查看完整说明"))
+    for (const line of coldCatalogText.split("\n").filter((line) => /^[a-zA-Z0-9_-]+：/.test(line)))
+      assert.ok(
+        line.split("：").slice(1).join("：").length <= 121,
+        "default list has bounded summaries"
+      )
+    await page!.screenshot({ path: join(artifacts, "function-cold-tools.png") })
+    const beforeToolDetail = new Set(
+      (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map((job) => job.id)
+    )
+    await functionComposer.fill("/claw-tools read_file")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+          (job) =>
+            !beforeToolDetail.has(job.id) &&
+            job.command === "claw-tools" &&
+            job.state === "succeeded" &&
+            job.result?.text.startsWith("read_file\n") &&
+            job.result.text.length > 130
+        ),
+      "tool name opens the complete description without a model"
+    )
+    assert.equal(modelServer.requests.length, requestsBeforeCatalog)
+    assert.deepEqual(
+      (await page!.evaluate((id) => window.api.mods.audit(id), registryThread)).map(
+        (row) => row.callId
+      ),
+      auditBeforeCatalog
+    )
+    pass(
+      "cold tool catalog uses actual foreground capabilities without a model or execution receipt"
+    )
     await functionComposer.fill("[mods-registered] 请调用自定义工具查看项目概览。")
     await functionComposer.press("Enter")
     await page!.getByText("REGISTERED_TOOL_OK", { exact: true }).first().waitFor({ timeout: 30000 })
     const registryRequests = modelServer.requests.filter((request) =>
       JSON.stringify(request.messages).includes("[mods-registered]")
+    )
+    assert.deepEqual(
+      (registryRequests[0].tools as Array<{ function: { name: string } }>)
+        .map((tool) => tool.function.name)
+        .sort(),
+      coldCatalogNames,
+      "cold catalog names match the first real provider request"
     )
     const advertised = (
       registryRequests[0].tools as Array<{ function: { name: string; parameters: unknown } }>

@@ -107,6 +107,13 @@ interface StoredCard {
 
 export class ModsManager {
   private readonly runtimeAuthorities = new ModRuntimeAuthorities()
+  private readonly functionCatalogQueries = new Set<{ threadId: string; release(): void }>()
+
+  private invalidateFunctionCatalogQueries(threadId?: string): void {
+    for (const query of this.functionCatalogQueries)
+      if (!threadId || query.threadId === threadId) query.release()
+  }
+
   private readonly functionToolCatalogs = new Map<
     string,
     { tools: FunctionToolInfo[]; binding: ModThreadBinding }
@@ -135,6 +142,7 @@ export class ModsManager {
   }
 
   closeFunctionThread(threadId: string): void {
+    this.invalidateFunctionCatalogQueries(threadId)
     this.runtimeAuthorities.closeThread(threadId)
     this.functionLifecycle?.closeThread(threadId)
     for (const [key, binding] of this.bindings)
@@ -152,9 +160,25 @@ export class ModsManager {
       binding.threadId,
       binding.agentId ?? "main"
     ])
-    this.functionToolCatalogs.set(key, { tools: tools.map((tool) => ({ ...tool })), binding })
-    if (this.functionToolCatalogs.size > 100)
-      this.functionToolCatalogs.delete(this.functionToolCatalogs.keys().next().value!)
+    if (!this.functionToolCatalogs.has(key) && this.functionToolCatalogs.size >= 100) {
+      for (const [id, catalog] of this.functionToolCatalogs) {
+        try {
+          this.assertRuntimeBinding(catalog.binding)
+          catalog.binding.signal?.throwIfAborted()
+          catalog.binding.assertLive?.()
+        } catch {
+          this.functionToolCatalogs.delete(id)
+        }
+      }
+      if (this.functionToolCatalogs.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
+    }
+    this.functionToolCatalogs.set(key, {
+      tools: tools.map((tool) => ({ ...tool })),
+      binding: {
+        ...binding,
+        blockedToolNames: binding.blockedToolNames && new Set(binding.blockedToolNames)
+      }
+    })
   }
 
   functionToolCatalog(workspace: string, threadId: string, agentId = "main"): FunctionToolInfo[] {
@@ -163,9 +187,65 @@ export class ModsManager {
     )
     if (!catalog) throw new ModError("MODS_TOOL_CONTEXT_REQUIRED")
     this.assertFunctionBinding(catalog.binding)
-    return this.filterFunctionTools(workspace, threadId, catalog.tools, agentId).map((tool) => ({
-      ...tool
-    }))
+    return this.filterFunctionTools(workspace, threadId, catalog.tools, agentId)
+      .filter((tool) => queryModRuntimeToolAccess(catalog.binding, tool.name).decision !== "deny")
+      .map((tool) => ({ ...tool }))
+  }
+
+  /** Metadata queries retain an exact scope; they never create execution authority. */
+  captureFunctionToolCatalog(workspace: string, threadId: string) {
+    workspace = this.workspaceKey(workspace)
+    const agentId = this.functionToolAgent(workspace, threadId)
+    const scope = { workspace, threadId, agentId }
+    const authority = functionCallAuthority(workspace, threadId)
+    const active = this.runtimeAuthorities.get(scope)
+    const binding = this.bindings.get(`${threadId}:${agentId}`)
+    const key = JSON.stringify([workspace, threadId, agentId])
+    let catalog = this.functionToolCatalogs.get(key)
+    const cold =
+      agentId === "main" &&
+      !authority &&
+      !active &&
+      (!binding || binding.commandOnly || binding.signal?.aborted)
+    if (catalog) {
+      try {
+        this.assertRuntimeBinding(catalog.binding)
+        catalog.binding.signal?.throwIfAborted()
+        catalog.binding.assertLive?.()
+      } catch (error) {
+        if (!cold) throw error
+        this.functionToolCatalogs.delete(key)
+        catalog = undefined
+      }
+    }
+    if (!catalog && !cold) throw new ModError("MODS_TOOL_CONTEXT_REQUIRED")
+    const epoch = this.config(workspace).epoch
+    let live = true
+    const query: { threadId: string; release(): void } = {
+      threadId,
+      release: () => {
+        live = false
+        this.functionCatalogQueries.delete(query)
+      }
+    }
+    const assertLive = () => {
+      if (
+        !live ||
+        this.functionToolAgent(workspace, threadId) !== agentId ||
+        functionCallAuthority(workspace, threadId) !== authority ||
+        this.runtimeAuthorities.get(scope) !== active ||
+        this.bindings.get(`${threadId}:${agentId}`) !== binding ||
+        this.functionToolCatalogs.get(key) !== catalog ||
+        this.config(workspace).epoch !== epoch
+      )
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      if (catalog) this.assertFunctionBinding(catalog.binding)
+    }
+    assertLive()
+    const tools = catalog ? this.functionToolCatalog(workspace, threadId, agentId) : undefined
+    if (this.functionCatalogQueries.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
+    this.functionCatalogQueries.add(query)
+    return { tools, assertLive, release: query.release }
   }
 
   /** Registration cannot shadow a real host tool, even when the role hides it from discovery. */
@@ -521,6 +601,7 @@ export class ModsManager {
   }
 
   createRuntimeAuthority(binding: ModThreadBinding) {
+    this.invalidateFunctionCatalogQueries(binding.threadId)
     const scope = { ...binding, workspace: this.workspaceKey(binding.workspace) }
     const instance = this.runtimeAuthorities.create(scope, binding.signal)
     this.functionToolCatalogs.delete(
@@ -573,7 +654,9 @@ export class ModsManager {
     parent: ModRuntimeAuthority,
     agentId: string,
     signal: AbortSignal | undefined,
-    access: { blockedToolNames: ReadonlySet<string>; readOnly: boolean } | undefined,
+    access:
+      | { blockedToolNames: ReadonlySet<string>; readOnly: boolean; tools?: FunctionToolInfo[] }
+      | undefined,
     run: () => Promise<T>
   ): Promise<T> {
     parent.assertLive()
@@ -618,6 +701,7 @@ export class ModsManager {
     const releases: Array<() => void> = []
     try {
       releases.push(this.bindThread(binding))
+      if (access.tools) this.bindFunctionToolCatalog(binding, access.tools)
       const mcp = this.mcpBindings.get(this.mcpBindingKey(parent))
       if (mcp && mcp.binding.runtimeAuthority === parent) {
         mcp.assertLive()
@@ -1836,6 +1920,7 @@ export class ModsManager {
   }
 
   close(): void {
+    this.invalidateFunctionCatalogQueries()
     this.runtimeAuthorities.close()
     this.functionLifecycle?.close()
     this.functionToolCatalogs.clear()

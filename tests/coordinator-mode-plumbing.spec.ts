@@ -962,8 +962,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
   const standardThreadTurn = await readProjectFile("src/main/agent/standard-thread-turn.ts")
   assertIncludes(
-    agentIpc,
-    'return agentMode === "normal" && metadata.subagentsEnabled === false',
+    await readProjectFile("src/main/agent/foreground-tool-policy.ts"),
+    'disableSubagents: agentMode === "normal" && metadata.subagentsEnabled === false',
     "main process disables task subagents only for explicitly persisted Solo threads"
   )
   assertNotIncludes(
@@ -983,7 +983,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertOccurrenceCount(
     agentIpc,
-    "disableSubagents: shouldDisableNormalModeSubagents(",
+    "...foregroundToolPolicy(",
     3,
     "invoke, resume, and interrupt runtime factories preserve the Solo/Multi policy across failovers"
   )

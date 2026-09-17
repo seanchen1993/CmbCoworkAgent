@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-17",
-  "codeBaseline": "236f4aef",
+  "codeBaseline": "51dbec50",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -79,7 +79,7 @@
       "SDK writes require live user action and shared thread lease; model hooks do not grant that authority; actual native writes retain host approval",
       "physical MCP SDK requires live user action and final approval; named MCP can also call registered tools in main or explicitly host-bound tasks under registered admission; tool.check uses current scoped or cold valid cached metadata",
       "tool.register exposes normalized mcp__plugin__name tools to main and explicitly host-bound shared task agents; namespace conflicts and changed in-flight definitions are rejected; custom/opaque agents without a known authority cannot acquire them",
-      "tool.list uses the actual agent's latest model catalog plus registered entries, filtered by its role and MCP aliases; before first model request it fails with MODS_TOOL_CONTEXT_REQUIRED",
+      "tool.list uses actual graph construction and model catalogs plus registered entries; known child roles own their initial catalogs; cold ordinary foreground threads use the same production metadata factories with no model or tool execution",
       "JSON Schema bounded subset; refs, regex, format and other unsupported keywords explicitly rejected; see authoring guide",
       "32 registrations/plugin, 128/session, 256000 aggregate metadata characters; input schemas 16000 characters and registered inputs 64000 characters; validation work bounded",
       "16000-character native SDK input bound; model ingress uses bounded JSON",
@@ -155,6 +155,18 @@
         "cross-plugin authority delegation"
       ]
     },
+    "toolCatalog": {
+      "revision": "desktop-tool-catalog-v18",
+      "design": "mods-v2-tool-catalog-2026-09-17.md",
+      "scope": "actual explicit and middleware tool definitions at graph construction; initial known child catalog; cold foreground metadata; 100 live query/catalog caps with invalidation and no live eviction",
+      "limits": [
+        "cold metadata can discover configured MCP services",
+        "opaque and cold non-foreground roles require their real runtime context",
+        "metadata availability does not grant SDK execution"
+      ],
+      "upstreamConformanceAdded": 0,
+      "fullParity": false
+    },
     "fullParity": false,
     "mcpToolRouting": {
       "revision": "desktop-mcp-tool-routing-v14",
@@ -172,7 +184,7 @@
       "evidence": "real LocalSandbox/SQLite tests, concurrent VM cwd scopes, 43 Electron E2E cases including an alternate execution root; not full workflow or child-agent parity",
       "limits": [
         "child SDK remains unavailable without explicit host binding",
-        "cold catalog before the first model request remains unavailable",
+        "cold catalog is supported for ordinary foreground threads; other cold transport roles require their real runtime context",
         "full performance and two-hour resource gate pending"
       ],
       "fullParity": false

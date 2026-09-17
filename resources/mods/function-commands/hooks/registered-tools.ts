@@ -16,7 +16,7 @@ export function register(on) {
     })
     await $.command.register({
       name: "claw-tools",
-      description: "查看本会话模型可用的工具",
+      description: "查看工具目录；填写工具名可查看完整说明",
       immediate: true
     })
     return next(e)
@@ -37,14 +37,19 @@ export function register(on) {
     const answer = await $.tool.call({ tool: "mcp__function-commands__project_brief", limit: 10 })
     return { text: answer.deny || JSON.stringify(answer.result, null, 2) }
   })
-  on("command.run", { command: "claw-tools" }, async ($) => {
-    try {
-      const tools = await $.tool.list()
-      return { text: tools.map((tool) => `${tool.name}：${tool.description}`).join("\n") }
-    } catch (error) {
-      if (error.message.includes("MODS_TOOL_CONTEXT_REQUIRED"))
-        return { text: "请先发送一条普通消息，建立本会话的模型工具列表。" }
-      throw error
+  on("command.run", { command: "claw-tools" }, async ($, e) => {
+    const tools = await $.tool.list()
+    const name = e.args.trim()
+    if (name) {
+      const tool = tools.find((entry) => entry.name === name)
+      return { text: tool ? `${tool.name}\n${tool.description}` : `未找到工具：${name}` }
+    }
+    const lines = tools.map((tool) => {
+      const description = tool.description.replace(/\s+/g, " ").trim()
+      return `${tool.name}：${description.slice(0, 120)}${description.length > 120 ? "…" : ""}`
+    })
+    return {
+      text: `${tools.length} 个工具。使用 /claw-tools <工具名> 查看完整说明。\n\n${lines.join("\n")}`
     }
   })
 }

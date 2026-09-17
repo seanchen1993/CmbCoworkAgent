@@ -783,6 +783,7 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
         () => session.interceptTool(input, binding.signal, core)
       )
   })
+  const initialCatalogs = new Map<string, string[]>()
   const definitions = new Map<string, string>()
   const replies: BaseMessage[] = []
   const childAuthorities: ModRuntimeAuthority[] = []
@@ -833,23 +834,32 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
           disallowedTools: ["write_file", "edit_file", "mcp__demo__forbidden"]
         }
       ],
-      toolHookMiddleware: createToolHookMiddleware({
-        workspacePath: f.scope.workspace,
-        threadId: "thread",
-        hookTurnId: "turn",
-        runtimeAuthority,
-        hookScope: createHookScope(),
-        resolveHooksForContext: () => [],
-        skipToolNames: new Set([
-          "read_file",
-          "write_file",
-          "edit_file",
-          "ls",
-          "glob",
-          "grep",
-          "execute"
-        ])
-      }),
+      toolHookMiddleware: {
+        ...createToolHookMiddleware({
+          workspacePath: f.scope.workspace,
+          threadId: "thread",
+          hookTurnId: "turn",
+          runtimeAuthority,
+          hookScope: createHookScope(),
+          resolveHooksForContext: () => [],
+          skipToolNames: new Set([
+            "read_file",
+            "write_file",
+            "edit_file",
+            "ls",
+            "glob",
+            "grep",
+            "execute"
+          ])
+        }),
+        beforeAgent: () => {
+          const agentId = currentFunctionExecution()?.agentId ?? "main"
+          initialCatalogs.set(
+            agentId,
+            f.manager.functionToolCatalog(f.workspace, "thread", agentId).map((tool) => tool.name)
+          )
+        }
+      },
       summarizationTrigger: { type: "messages", value: 200 }
     })
     const result = await agent.invoke(
@@ -857,6 +867,10 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
       { recursionLimit: 12 }
     )
     expect(result.messages.at(-1).content).toBe("done")
+    expect(initialCatalogs.get("main")).toContain("task")
+    expect(initialCatalogs.get("task-child")).toContain("read_file")
+    expect(initialCatalogs.get("task-child")).not.toContain("write_file")
+    expect(initialCatalogs.get("task-child")).not.toContain("task")
     expect(definitions.get("task-child")).toContain("mcp__demo__inspect")
     expect(definitions.get("task-child")).not.toContain("mcp__demo__forbidden")
     const reply = replies.find(
@@ -971,4 +985,92 @@ it("does not lend built-in authority to a custom agent that overrides general-pu
   expect(entered).toHaveLength(1)
   expect(entered[0]?.runtimeAuthority).toBeUndefined()
   parent.assertLive()
+})
+
+it("captures actual native and middleware tools at graph construction without a model request", () => {
+  const f = fixture()
+  const authority = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+  const generated = vi.fn()
+  class Model extends FakeChatModel {
+    bindTools() {
+      return this
+    }
+    async _generate(): Promise<never> {
+      generated()
+      throw Error("A catalog query must not call the model")
+    }
+  }
+  const declared = tool(async () => "unused", {
+    name: "declared",
+    description: "Declared engine tool",
+    schema: z.object({})
+  })
+  const hidden = tool(async () => "unused", {
+    name: "hidden",
+    description: "Transport blocked",
+    schema: z.object({})
+  })
+  const fromMiddleware = tool(async () => "unused", {
+    name: "middleware_tool",
+    description: "Middleware tool",
+    schema: z.object({})
+  })
+  createDeepAgent({
+    model: new Model({}),
+    backend: f.sandbox,
+    threadId: "thread",
+    modRuntimeAuthority: authority,
+    tools: [declared, hidden],
+    middleware: [{ name: "extra", tools: [fromMiddleware] }],
+    mainBlockedToolNames: ["hidden"],
+    mainSubagentsEnabled: false,
+    mainTodosEnabled: false
+  })
+  const initial = f.manager.functionToolCatalog(f.workspace, "thread")
+  expect(initial).toContainEqual({
+    name: "declared",
+    description: "Declared engine tool",
+    mcp: false
+  })
+  expect(initial).toContainEqual({
+    name: "middleware_tool",
+    description: "Middleware tool",
+    mcp: false
+  })
+  expect(initial.map((tool) => tool.name)).toEqual(
+    expect.arrayContaining(["read_file", "execute", "task_output"])
+  )
+  expect(initial.map((tool) => tool.name)).not.toContain("hidden")
+  expect(initial.map((tool) => tool.name)).not.toContain("task")
+  expect(generated).not.toHaveBeenCalled()
+  expect(f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority).toBe(authority)
+  expect(f.manager.store.audit(f.scope.workspace)).toHaveLength(0)
+  authority.assertLive()
+})
+
+it("keeps live catalogs at capacity and only reclaims expired entries without borrowing SDK scope", async () => {
+  const f = fixture()
+  let expired = false
+  for (let index = 0; index < 100; index++)
+    f.manager.bindFunctionToolCatalog(
+      {
+        workspace: f.workspace,
+        threadId: `catalog-${index}`,
+        turnId: "turn",
+        assertLive: () => {
+          if (index === 50 && expired) throw Error("expired")
+        }
+      },
+      [{ name: `tool-${index}`, description: "Actual host metadata", mcp: false }]
+    )
+  const next = { workspace: f.workspace, threadId: "catalog-next", turnId: "turn" }
+  expect(() => f.manager.bindFunctionToolCatalog(next, [])).toThrow("MODS_RUNTIME_CAPACITY")
+  expect(f.manager.functionToolCatalog(f.workspace, "catalog-0")[0].name).toBe("tool-0")
+  expired = true
+  await withFunctionExecution(f.scope, async () => f.manager.bindFunctionToolCatalog(next, []))
+  expect(f.manager.functionToolCatalog(f.workspace, "catalog-next")).toEqual([])
+  expect(f.manager.functionToolCatalog(f.workspace, "catalog-0")[0].name).toBe("tool-0")
+  expect(() => f.manager.functionToolCatalog(f.workspace, "catalog-50")).toThrow(
+    "MODS_TOOL_CONTEXT_REQUIRED"
+  )
 })

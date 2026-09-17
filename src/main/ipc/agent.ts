@@ -1,3 +1,4 @@
+import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import { getModsManager } from "../mods/manager"
@@ -3218,13 +3219,6 @@ function buildNormalModeGuardMessage(state: NormalModeGuardState): string {
   return (
     "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切换到 Solo 或 Multi。" + suffix
   )
-}
-
-function shouldDisableNormalModeSubagents(
-  agentMode: AgentMode,
-  metadata: Record<string, unknown>
-): boolean {
-  return agentMode === "normal" && metadata.subagentsEnabled === false
 }
 
 function getRequestedOutputStyle(metadata: Record<string, unknown>): AgentOutputStyle {
@@ -7904,16 +7898,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
-              enableRequestUserInput: true,
+              ...foregroundToolPolicy(effectiveAgentMode, metadata),
               allowDeferredUserInputRenderer: runExecutionContext.source === "im",
               interactionWaitHooks:
                 runExecutionContext.source === "im"
                   ? runExecutionContext.interactionWaitHooks
                   : undefined,
               extraSystemPrompt: runExecutionContext.extraSystemPrompt,
-              noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
               traceContext: runtimeTraceContext,
               soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -10778,10 +10770,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
+              ...foregroundToolPolicy(resumeAgentMode, metadata),
               agentMode: resumeAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(resumeAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -11926,10 +11916,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
+              ...foregroundToolPolicy(interruptAgentMode, metadata),
               agentMode: interruptAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(interruptAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),

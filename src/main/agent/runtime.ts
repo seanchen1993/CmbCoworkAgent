@@ -1,8 +1,11 @@
+import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { ModError } from "../mods/errors"
+import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
+import type { FunctionToolInfo } from "../../shared/mods/v2/tools"
 import { currentFunctionExecution } from "../mods/v2/execution-context"
 import { recordSuccessfulToolExample } from "../mcp/tool-example-store"
 /* eslint-disable @typescript-eslint/no-unused-vars */
@@ -107,7 +110,7 @@ import {
   tool as lcTool
 } from "langchain"
 import { HumanMessage, ToolMessage } from "@langchain/core/messages"
-import { Runnable } from "@langchain/core/runnables"
+import { Runnable, RunnableLambda } from "@langchain/core/runnables"
 import { Command, isGraphBubbleUp } from "@langchain/langgraph"
 import { z } from "zod"
 
@@ -2204,8 +2207,41 @@ function markFilesystemWriteToolAsUserInitiated(middleware: {
  *   - Accepts custom argument-truncation thresholds so large-context models
  *     don't trim old edit/write tool args after a fixed 20 messages.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
+export function createDeepAgent(params: Parameters<typeof assembleDeepAgent>[0] = {}): DeepAgent {
+  return assembleDeepAgent(params, false) as DeepAgent
+}
+
+export interface DeepAgentToolCatalogOptions {
+  tools: unknown[]
+  mainSubagentsEnabled: boolean
+  registrySubagentSpecs: Array<{
+    name: string
+    description: string
+    systemPrompt: string
+    disallowedTools?: string[]
+    shellAccess?: AgentShellAccess
+  }>
+}
+
+/** The same tool factories, without creating a model, graph, sandbox or runtime authority. */
+export function prepareDeepAgentToolCatalog(
+  options: DeepAgentToolCatalogOptions
+): FunctionToolInfo[] {
+  return assembleDeepAgent(
+    {
+      ...options,
+      backend: () => {
+        throw new ModError("MODS_TOOL_METADATA_ONLY")
+      }
+    },
+    true
+  ) as FunctionToolInfo[]
+}
+
+function assembleDeepAgent(
+  params: Record<string, unknown>,
+  metadataOnly: boolean
+): DeepAgent | FunctionToolInfo[] {
   const {
     model = "claude-sonnet-4-5-20250929",
     summarizationModel = model,
@@ -2854,7 +2890,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   )
   const modAgentAccess = new Map<
     string,
-    { blockedToolNames: ReadonlySet<string>; readOnly: boolean }
+    { blockedToolNames: ReadonlySet<string>; readOnly: boolean; tools?: FunctionToolInfo[] }
   >()
   if (
     includeGeneralPurposeSubagent &&
@@ -2959,6 +2995,17 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     }
   })
 
+  // Capture each known graph's own tool sources before its first model request.
+  // The execution binding below still owns filtering and the child's private lifetime.
+  for (const subagent of availableSubagents) {
+    const access = modAgentAccess.get(subagent?.name)
+    if (!access) continue
+    access.tools = collectRuntimeToolCatalog(subagent.tools ?? subagentDefaultTools ?? tools, [
+      ...subagentMiddleware,
+      ...(subagent.middleware ?? [])
+    ])
+  }
+
   if (mainSubagentsEnabled && onTaskSubagentPromptsResolved) {
     onTaskSubagentPromptsResolved(
       availableSubagents.flatMap((subagent) =>
@@ -3028,7 +3075,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     ? [createOutputStyleTurnReminderMiddleware(effectiveOutputStyle)]
     : []
 
-  return createAgent({
+  const agentOptions = {
     model,
     systemPrompt: finalSystemPrompt,
     tools,
@@ -3072,7 +3119,15 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 defaultTools: subagentDefaultTools ?? tools,
                 defaultMiddleware: subagentMiddleware,
                 defaultInterruptOn: null,
-                subagents: availableSubagents,
+                subagents: metadataOnly
+                  ? availableSubagents.map((subagent) => ({
+                      name: subagent.name,
+                      description: subagent.description,
+                      runnable: RunnableLambda.from(() => {
+                        throw new ModError("MODS_TOOL_METADATA_ONLY")
+                      })
+                    }))
+                  : availableSubagents,
                 generalPurposeAgent: false,
                 systemPrompt: taskSystemPrompt
               } as Parameters<typeof createSubAgentMiddleware>[0]),
@@ -3121,7 +3176,20 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     checkpointer,
     store,
     name
-  } as unknown as Parameters<typeof createAgent>[0])
+  }
+  if (metadataOnly) return collectRuntimeToolCatalog(agentOptions.tools, agentOptions.middleware)
+  const agent = createAgent(agentOptions as unknown as Parameters<typeof createAgent>[0])
+  if (modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)) {
+    modManager.bindFunctionToolCatalog(
+      {
+        ...modRuntimeAuthority,
+        runtimeAuthority: modRuntimeAuthority,
+        blockedToolNames: new Set(mainBlockedToolNames)
+      },
+      collectRuntimeToolCatalog(agentOptions.tools, agentOptions.middleware)
+    )
+  }
+  return agent
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -4702,6 +4770,139 @@ export interface RuntimeInteractionWaitHooks {
 // Create agent runtime with configured model and checkpointer
 export type AgentRuntime = ReturnType<typeof createAgent>
 
+type RuntimeTool = {
+  name?: string
+  func?: unknown
+  invoke?: unknown
+}
+function createRuntimeBaseTools(
+  options: CreateAgentRuntimeOptions,
+  fileRoot: string,
+  runtimePolicy: RuntimePromptToolPolicy
+): RuntimeTool[] {
+  const { workspacePath } = options
+  const extraTools: RuntimeTool[] = []
+  if (options.enableRequestUserInput) {
+    extraTools.push(
+      createRequestUserInputTool({
+        threadId: options.threadId,
+        abortSignal: options.abortSignal,
+        allowDeferredRenderer: options.allowDeferredUserInputRenderer,
+        interactionWaitHooks: options.interactionWaitHooks,
+        requestUserInputConfig: options.requestUserInputConfig
+      })
+    )
+  }
+  if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
+    extraTools.push(
+      createSchedulerTool({
+        workspacePath,
+        modelId: options.modelId,
+        threadId: options.threadId,
+        imDeliveryContext: options.imDeliveryContext ?? null
+      })
+    )
+  }
+  if (!options.noSkillEvolutionTool) {
+    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
+  }
+
+  // Conditionally inject Java LSP tool
+  try {
+    const lspConfig = getLspConfig()
+    // LSP indexes the sources the agent edits, so it follows the file root.
+    if (lspConfig.enabled && detectJavaProject(fileRoot)) {
+      extraTools.push(createLspTool({ workspacePath: fileRoot }))
+      console.log("[Runtime] Java LSP tool injected for:", fileRoot)
+    }
+  } catch (e) {
+    console.warn("[Runtime] Failed to check LSP config:", e)
+  }
+
+  return extraTools
+}
+
+/** Inspect an ordinary desktop thread using the production definition factories only. */
+export async function prepareForegroundRuntimeToolCatalog(
+  workspacePath: string,
+  threadId: string,
+  metadata: Record<string, unknown>,
+  signal: AbortSignal
+): Promise<FunctionToolInfo[]> {
+  signal.throwIfAborted()
+  const settingsKey = () =>
+    JSON.stringify({
+      memory: isThreadMemoryEnabled(metadata),
+      code: isCodeExecEnabled(),
+      lsp: getLspConfig()
+    })
+  const initialSettings = settingsKey()
+  const options: CreateAgentRuntimeOptions = {
+    workspacePath,
+    threadId,
+    agentMode: "normal",
+    abortSignal: signal,
+    ...foregroundToolPolicy("normal", metadata)
+  }
+  const policy = createRuntimePromptToolPolicy({
+    agentMode: "normal",
+    memoryEnabled: isThreadMemoryEnabled(metadata)
+  })
+  const service = getGlobalMcpCapabilityService()
+  const snapshot = await service.getSnapshot!()
+  signal.throwIfAborted()
+  const scoped = scopedMcpTools(snapshot.tools, new Set())
+  const unavailable = async (): Promise<never> => {
+    throw new ModError("MODS_TOOL_METADATA_ONLY")
+  }
+  // Only factory metadata reads are supported. No closure can operate the shared transport.
+  const definitions: McpCapabilityService = {
+    listTools: async () => [...scoped],
+    getSnapshot: async () => ({ fingerprint: snapshot.fingerprint, tools: [...scoped] }),
+    getTool: unavailable,
+    invoke: unavailable,
+    invalidate: unavailable,
+    close: unavailable
+  }
+  const codeExecEnabled = isCodeExecEnabled()
+  const codeExecRouteEnabled = codeExecEnabled && scoped.length > 0 && policy.includeCodeExecRoute
+  const mcpTools = createEagerMcpTools(
+    definitions,
+    scoped.filter((tool) => tool.visibility === "eager"),
+    options
+  )
+  const memoryTools = policy.includeMemory
+    ? [createMemorySearchTool([]), createMemoryGetTool([])]
+    : []
+  const extras = createRuntimeBaseTools(options, workspacePath, policy)
+  const deferred = await createToolSearchTools(definitions, options, {
+    codeExecRouteEnabled,
+    savedToolsEnabled: codeExecEnabled
+  })
+  if (codeExecRouteEnabled)
+    extras.push(
+      createCodeExecTool({
+        workspacePath,
+        threadId,
+        readYoloMode: () => false,
+        capabilityService: definitions,
+        requestApproval: unavailable
+      })
+    )
+  const profiles = options.disableSubagents ? [] : await loadAgentProfilesAsync(workspacePath)
+  signal.throwIfAborted()
+  const result = prepareDeepAgentToolCatalog({
+    tools: [...mcpTools, ...memoryTools, ...extras, ...deferred],
+    mainSubagentsEnabled: !options.disableSubagents,
+    registrySubagentSpecs: profiles
+  })
+  const current = await service.getSnapshot!()
+  signal.throwIfAborted()
+  if (current.fingerprint !== snapshot.fingerprint || settingsKey() !== initialSettings)
+    throw new ModError("MODS_CALL_SCOPE_CHANGED")
+  return result
+}
+
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
   const {
     threadId,
@@ -5580,48 +5781,7 @@ The workspace root is: ${fileRoot}`
     }
   }
 
-  type RuntimeTool = {
-    name?: string
-    func?: unknown
-    invoke?: unknown
-  }
-  const extraTools: RuntimeTool[] = []
-  if (options.enableRequestUserInput) {
-    extraTools.push(
-      createRequestUserInputTool({
-        threadId: options.threadId,
-        abortSignal: options.abortSignal,
-        allowDeferredRenderer: options.allowDeferredUserInputRenderer,
-        interactionWaitHooks: options.interactionWaitHooks,
-        requestUserInputConfig: options.requestUserInputConfig
-      })
-    )
-  }
-  if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
-    extraTools.push(
-      createSchedulerTool({
-        workspacePath,
-        modelId: options.modelId,
-        threadId: options.threadId,
-        imDeliveryContext: options.imDeliveryContext ?? null
-      })
-    )
-  }
-  if (!options.noSkillEvolutionTool) {
-    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
-  }
-
-  // Conditionally inject Java LSP tool
-  try {
-    const lspConfig = getLspConfig()
-    // LSP indexes the sources the agent edits, so it follows the file root.
-    if (lspConfig.enabled && detectJavaProject(fileRoot)) {
-      extraTools.push(createLspTool({ workspacePath: fileRoot }))
-      console.log("[Runtime] Java LSP tool injected for:", fileRoot)
-    }
-  } catch (e) {
-    console.warn("[Runtime] Failed to check LSP config:", e)
-  }
+  const extraTools = createRuntimeBaseTools(options, fileRoot, runtimePolicy)
 
   // Wrap extra tools so that errors are returned as strings instead of throwing
   function wrapToolErrors(tools: RuntimeTool[]): void {
