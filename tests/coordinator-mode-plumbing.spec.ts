@@ -11,6 +11,7 @@
 
 import { readFile } from "fs/promises"
 import { join, resolve } from "path"
+import { isCoordinatorWorkerStreamChunk } from "../src/main/agent/main-turn-stream"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
 
@@ -2123,10 +2124,37 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "} = serializeForRun(mode, data)",
     "agent IPC filters async worker chunks before serializing payloads for renderer forwarding"
   )
+  const streamHelper = await readProjectFile("src/main/agent/main-turn-stream.ts")
   assertIncludes(
     agentIpc,
-    "messageStreamMetadata(mode, payload)",
-    "agent IPC detects async worker chunks from stream metadata, not message content"
+    'from "../agent/main-turn-stream"',
+    "agent IPC uses the shared stream attribution helper"
+  )
+  assertIncludes(
+    streamHelper,
+    "const value = metadata(mode, payload)",
+    "stream attribution reads host metadata before classifying coordinator workers"
+  )
+  assertIncludes(
+    streamHelper,
+    "value.langgraph_checkpoint_ns",
+    "stream attribution checks checkpoint namespace metadata"
+  )
+  assert(
+    isCoordinatorWorkerStreamChunk(
+      "messages",
+      [{ content: "main__worker__spoofed" }, { thread_id: "main__worker__actual" }],
+      "main"
+    ),
+    "shared stream attribution must use host metadata rather than message content"
+  )
+  assert(
+    !isCoordinatorWorkerStreamChunk(
+      "messages",
+      [{ content: "main__worker__actual" }, { thread_id: "main" }],
+      "main"
+    ),
+    "message content alone must not classify a coordinator worker stream"
   )
   assertNotIncludes(
     agentIpc,

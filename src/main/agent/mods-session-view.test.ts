@@ -4,6 +4,8 @@ import type { ChatResult } from "@langchain/core/outputs"
 import { tool } from "@langchain/core/tools"
 import { createAgent } from "langchain"
 import { z } from "zod"
+import { MemorySaver } from "@langchain/langgraph"
+import { readLiveContextUsage } from "./context-usage"
 import { expect, it, vi } from "vitest"
 import type { ModsManager } from "../mods/manager"
 import { ModRuntimeAuthorities } from "../mods/runtime-instance"
@@ -72,7 +74,8 @@ it("observes real model/tool/final graph states and preserves completion recover
           manager as unknown as ModsManager,
           authority,
           "actual-model",
-          "physical-run"
+          "physical-run",
+          32000
         )
       ]
     })
@@ -84,7 +87,7 @@ it("observes real model/tool/final graph states and preserves completion recover
     expect(current).toEqual(result.messages)
     expect((current.at(-1) as AIMessage).content).toBe("finished")
     expect(current.some((message) => (message as BaseMessage).getType() === "tool")).toBe(true)
-    expect(manager.bindFunctionSession).toHaveBeenCalledWith(authority, "actual-model")
+    expect(manager.bindFunctionSession).toHaveBeenCalledWith(authority, "actual-model", 32000)
     expect(manager.functionTurns.observe).toHaveBeenCalledTimes(3)
     expect(manager.functionTurns.observe.mock.calls.map((call) => call.slice(0, 2))).toEqual([
       ["thread", "physical-run"],
@@ -102,5 +105,73 @@ it("observes real model/tool/final graph states and preserves completion recover
   } finally {
     authorities.close()
     clearTurnCompletionGateState("thread", "turn")
+  }
+})
+
+it("observes the private compaction boundary through real graph middleware state", async () => {
+  const authorities = new ModRuntimeAuthorities()
+  const { authority } = authorities.create({
+    workspace: "/root",
+    threadId: "thread",
+    turnId: "turn"
+  })
+  let observedMessages: readonly unknown[] = []
+  let observedState: unknown
+  const manager = {
+    functionTurns: { observe: vi.fn() },
+    bindFunctionSession: vi.fn(),
+    updateFunctionSessionMessages: vi.fn(
+      (_authority, messages: readonly unknown[], state: unknown) => {
+        observedMessages = messages
+        observedState = state
+      }
+    )
+  }
+  try {
+    const agent = createAgent({
+      model: new ScriptedModel([new AIMessage("no provider usage yet")]),
+      tools: [],
+      middleware: [
+        createFunctionSessionViewMiddleware(
+          manager as unknown as ModsManager,
+          authority,
+          "actual",
+          "run",
+          32000
+        )
+      ],
+      checkpointer: new MemorySaver()
+    })
+    const config = { configurable: { thread_id: "thread" } }
+    await agent.updateState(
+      config,
+      {
+        messages: [
+          new AIMessage({
+            content: "old",
+            usage_metadata: { input_tokens: 900, output_tokens: 1, total_tokens: 901 }
+          })
+        ],
+        _summarizationEvent: {
+          cutoffIndex: 0,
+          usageStartIndex: 1,
+          summaryMessage: new HumanMessage("summary"),
+          filePath: null
+        }
+      },
+      "model_request"
+    )
+    await agent.invoke({ messages: [new HumanMessage("continue")] }, config)
+    expect(observedState).toHaveProperty("_summarizationEvent.usageStartIndex", 1)
+    expect(
+      await readLiveContextUsage(
+        observedMessages,
+        observedState,
+        new AbortController().signal,
+        () => {}
+      )
+    ).toBeUndefined()
+  } finally {
+    authorities.close()
   }
 })

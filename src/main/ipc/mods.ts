@@ -150,7 +150,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         manager.functionTurns.abort(workspace, threadId, turnId)
         recordFunctionCancellationReceipt()
       },
-      readSession: (workspace, threadId, method, signal) =>
+      readSession: (workspace, threadId, method, signal, usageArgs) =>
         queryFunctionSessionRead(
           manager,
           assertStandaloneThread,
@@ -161,7 +161,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           workspace,
           threadId,
           method,
-          signal
+          signal,
+          undefined,
+          usageArgs
         ),
       listTools: async (workspace, threadId, signal) => {
         signal.throwIfAborted()

@@ -24,7 +24,7 @@ afterEach(() => {
   }
 })
 
-async function fixture(messages: unknown[], inline = false) {
+async function fixture(messages: unknown[], inline = false, state: Record<string, unknown> = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mods-session-checkpoint-"))
   directories.push(directory)
   const path = join(directory, "checkpoint.sqlite")
@@ -33,7 +33,7 @@ async function fixture(messages: unknown[], inline = false) {
     v: 1,
     id: "01",
     ts: "2026-09-18T00:00:00Z",
-    channel_values: { messages },
+    channel_values: { ...state, messages },
     channel_versions: { messages: 1 },
     versions_seen: {}
   } as Checkpoint
@@ -93,6 +93,69 @@ for (const inline of [true, false])
     } finally {
       db.close()
     }
+  })
+
+for (const inline of [true, false])
+  it(`reads only post-compaction usage from ${inline ? "inline" : "external"} checkpoints`, async () => {
+    const messages = [
+      new HumanMessage("prompt"),
+      new AIMessage({
+        content: "old",
+        usage_metadata: { input_tokens: 900, output_tokens: 3, total_tokens: 903 }
+      }),
+      new HumanMessage("continue")
+    ]
+    const state = {
+      _summarizationEvent: {
+        cutoffIndex: 1,
+        usageStartIndex: 3,
+        summaryMessage: new HumanMessage("summary"),
+        filePath: null
+      }
+    }
+    const compacted = await fixture(messages, inline, state)
+    const first = readFunctionSessionCheckpoint(compacted, "thread", "", undefined, "usage")
+    expect(first?.usage).toBeUndefined()
+    expect(first).not.toHaveProperty("messages")
+    const current = await fixture(
+      [
+        ...messages,
+        new AIMessage({
+          content: "new",
+          usage_metadata: { input_tokens: 50, output_tokens: 2, total_tokens: 52 }
+        })
+      ],
+      inline,
+      state
+    )
+    expect(readFunctionSessionCheckpoint(current, "thread", "", undefined, "usage")?.usage).toEqual(
+      {
+        input_tokens: 50,
+        output_tokens: 2,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0
+      }
+    )
+  })
+
+for (const inline of [true, false])
+  it(`does not resurrect usage from legacy or invalid ${inline ? "inline" : "external"} boundaries`, async () => {
+    const messages = [
+      new AIMessage({
+        content: "old",
+        usage_metadata: { input_tokens: 900, output_tokens: 3, total_tokens: 903 }
+      })
+    ]
+    for (const event of [{ cutoffIndex: 0 }, { usageStartIndex: -1 }, { usageStartIndex: "0" }]) {
+      const path = await fixture(messages, inline, { _summarizationEvent: event })
+      expect(
+        readFunctionSessionCheckpoint(path, "thread", "", undefined, "usage")?.usage
+      ).toBeUndefined()
+    }
+    const path = await fixture(messages, inline)
+    expect(
+      readFunctionSessionCheckpoint(path, "thread", "", undefined, "usage")?.usage?.input_tokens
+    ).toBe(900)
   })
 
 it("returns absent checkpoints, rejects cancelled reads, oversized rows and malformed inline entries", async () => {

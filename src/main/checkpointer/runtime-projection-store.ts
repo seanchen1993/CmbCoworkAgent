@@ -2554,7 +2554,10 @@ export function visitLatestCheckpointMessages(
   threadId: string,
   checkpointNs: string,
   visit: (message: unknown) => void,
-  options: { cancellationBuffer?: SharedArrayBuffer } = {}
+  options: {
+    cancellationBuffer?: SharedArrayBuffer
+    onContextUsageStart?(startIndex: number | undefined): void
+  } = {}
 ): { checkpointId: string; messageCount: number } | null {
   const cancellation = options.cancellationBuffer
     ? new Int32Array(options.cancellationBuffer)
@@ -2574,6 +2577,31 @@ export function visitLatestCheckpointMessages(
       cancellation
     )
     if (!runtime) return null
+    if (options.onContextUsageStart) {
+      // The renderer projection deliberately drops graph channels. Read only the scalar
+      // context boundary from the same authoritative checkpoint/transaction, never its summary.
+      const boundary = database
+        .prepare(
+          `SELECT
+        json_type(CAST(checkpoint AS TEXT), '$.channel_values._summarizationEvent') AS event_type,
+        CASE WHEN json_type(CAST(checkpoint AS TEXT), '$.channel_values._summarizationEvent.usageStartIndex') = 'integer'
+          THEN json_extract(CAST(checkpoint AS TEXT), '$.channel_values._summarizationEvent.usageStartIndex')
+          ELSE NULL END AS usage_start
+        FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`
+        )
+        .get(threadId, checkpointNs, runtime.row.checkpointId) as
+        | { event_type: string | null; usage_start: number | null }
+        | undefined
+      if (!boundary) throw new Error("CHECKPOINT_CONTEXT_UNAVAILABLE")
+      const startIndex = boundary.usage_start
+      options.onContextUsageStart(
+        boundary.event_type && boundary.event_type !== "null"
+          ? typeof startIndex === "number" && Number.isSafeInteger(startIndex) && startIndex >= 0
+            ? startIndex
+            : undefined
+          : 0
+      )
+    }
     const source = inspectBoundedCheckpointMessageSource(database, runtime.row, true)
     const window: CheckpointMessageSink = {
       isDisabled: false,

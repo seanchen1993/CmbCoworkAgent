@@ -22,6 +22,7 @@ import {
   sanitizeModelRequestMessages
 } from "./malformed-tool-call-recovery"
 import { isWorkflowNotificationPrompt } from "../../shared/internal-notification-turn"
+import { withCompactedContext } from "./context-usage"
 
 export interface ContextSize {
   type: "messages" | "tokens" | "fraction"
@@ -220,8 +221,10 @@ Use concise, high-information bullets. Preserve exact file paths, commands, erro
 const SUMMARY_TEXT_ONLY_INSTRUCTION =
   "Do not call, request, or imitate any tool. Do not emit tool-call markup or arguments. Return only the continuation handoff as text in the final content field."
 
-const SummarizationEventSchema = z.object({
+export const SummarizationEventSchema = z.object({
   cutoffIndex: z.number(),
+  // First response in the new context window, including when old responses are kept as tail.
+  usageStartIndex: z.number().int().nonnegative().optional(),
   // Checkpointers can restore a valid message through a different module or
   // serialization boundary. LangChain's branded guard is cross-runtime safe;
   // JavaScript instanceof can reject "HumanMessage received HumanMessage".
@@ -1664,6 +1667,13 @@ ${summary}
     let finalFilePath = summaryResult.filePath
     let finalStateCutoffIndex = summaryResult.stateCutoffIndex
     let modifiedMessages = [summaryResult.summaryMessage, ...preservedMessages]
+    const invokeCompactedModel = () =>
+      withCompactedContext(
+        Array.isArray(request.state.messages)
+          ? request.state.messages.length
+          : request.messages.length,
+        async () => handler({ ...request, messages: modifiedMessages })
+      )
     const modifiedTokens = countTotalTokens(modifiedMessages, request.systemMessage, request.tools)
     const estimatedModifiedTokens = Math.ceil(modifiedTokens * tokenEstimationMultiplier)
     let needsWholeConversationRetry =
@@ -1671,7 +1681,7 @@ ${summary}
 
     if (!needsWholeConversationRetry) {
       try {
-        await handler({ ...request, messages: modifiedMessages })
+        await invokeCompactedModel()
       } catch (error) {
         if (!isCmbContextOverflow(error)) throw error
         needsWholeConversationRetry = true
@@ -1765,13 +1775,16 @@ ${summary}
         finalSummaryMessage = shortenedSummaryMessage
         modifiedMessages = [shortenedSummaryMessage]
       }
-      await handler({ ...request, messages: modifiedMessages })
+      await invokeCompactedModel()
     }
 
     return new Command({
       update: {
         _summarizationEvent: {
           cutoffIndex: finalStateCutoffIndex,
+          usageStartIndex: Array.isArray(request.state.messages)
+            ? request.state.messages.length
+            : request.messages.length,
           summaryMessage: finalSummaryMessage,
           filePath: finalFilePath
         } satisfies SummarizationEvent,
@@ -1786,56 +1799,75 @@ ${summary}
     stateSchema: SummarizationStateSchema,
     async wrapModelCall(request, handler) {
       const owner = getStateOwner(request)
-      const effectiveMessages = getEffectiveMessages(request.messages ?? [], request.state, owner)
-      if (effectiveMessages.length === 0) return handler(request)
+      const execute = async () => {
+        const effectiveMessages = getEffectiveMessages(request.messages ?? [], request.state, owner)
+        if (effectiveMessages.length === 0) return handler(request)
 
-      const resolvedModel = await getChatModel()
-      const resolvedFallbackModel = await getFallbackChatModel()
-      const maxInputTokens = getMaxInputTokens(resolvedModel)
-      applyModelDefaults(resolvedModel)
-      const initialTokens = countTotalTokens(
-        effectiveMessages,
-        request.systemMessage,
-        request.tools
-      )
-      const { messages: truncatedMessages, modified: truncateModified } = truncateArgs(
-        effectiveMessages,
-        initialTokens,
-        maxInputTokens
-      )
-      // Match DeepAgents Python's count-once behavior: tool schema conversion
-      // is comparatively expensive, so share the initial count across argument
-      // truncation and trigger checks. Recount only when truncation changed the
-      // actual outbound messages.
-      const totalTokens = truncateModified
-        ? countTotalTokens(truncatedMessages, request.systemMessage, request.tools)
-        : initialTokens
-      const triggerTokens = countTokensForTrigger(truncatedMessages, totalTokens)
+        const resolvedModel = await getChatModel()
+        const resolvedFallbackModel = await getFallbackChatModel()
+        const maxInputTokens = getMaxInputTokens(resolvedModel)
+        applyModelDefaults(resolvedModel)
+        const initialTokens = countTotalTokens(
+          effectiveMessages,
+          request.systemMessage,
+          request.tools
+        )
+        const { messages: truncatedMessages, modified: truncateModified } = truncateArgs(
+          effectiveMessages,
+          initialTokens,
+          maxInputTokens
+        )
+        // Match DeepAgents Python's count-once behavior: tool schema conversion
+        // is comparatively expensive, so share the initial count across argument
+        // truncation and trigger checks. Recount only when truncation changed the
+        // actual outbound messages.
+        const totalTokens = truncateModified
+          ? countTotalTokens(truncatedMessages, request.systemMessage, request.tools)
+          : initialTokens
+        const triggerTokens = countTokensForTrigger(truncatedMessages, totalTokens)
 
-      if (!shouldSummarize(truncatedMessages, triggerTokens, maxInputTokens)) {
-        try {
-          return await handler({ ...request, messages: truncatedMessages })
-        } catch (error) {
-          if (!isCmbContextOverflow(error)) throw error
-          if (maxInputTokens && totalTokens > 0) {
-            const observedRatio = maxInputTokens / totalTokens
-            if (observedRatio > tokenEstimationMultiplier) {
-              tokenEstimationMultiplier = observedRatio * 1.1
+        if (!shouldSummarize(truncatedMessages, triggerTokens, maxInputTokens)) {
+          try {
+            return await handler({ ...request, messages: truncatedMessages })
+          } catch (error) {
+            if (!isCmbContextOverflow(error)) throw error
+            if (maxInputTokens && totalTokens > 0) {
+              const observedRatio = maxInputTokens / totalTokens
+              if (observedRatio > tokenEstimationMultiplier) {
+                tokenEstimationMultiplier = observedRatio * 1.1
+              }
             }
           }
         }
-      }
 
-      return performSummarization(
-        request as any,
-        handler,
-        truncatedMessages,
-        resolvedModel,
-        resolvedFallbackModel,
-        maxInputTokens,
-        owner,
-        effectiveMessages
-      )
+        return performSummarization(
+          request as any,
+          handler,
+          truncatedMessages,
+          resolvedModel,
+          resolvedFallbackModel,
+          maxInputTokens,
+          owner,
+          effectiveMessages
+        )
+      }
+      const result = await execute()
+      const previous = getValidSummarizationEvent(request.state, owner)
+      if (previous && previous.usageStartIndex === undefined && AIMessage.isInstance(result)) {
+        // The framework keeps the actual handler response when collecting this state update.
+        // Upgrade an old checkpoint on its first new response without guessing its old window.
+        return new Command({
+          update: {
+            _summarizationEvent: {
+              ...previous,
+              usageStartIndex: Array.isArray(request.state.messages)
+                ? request.state.messages.length
+                : request.messages.length
+            }
+          }
+        })
+      }
+      return result
     }
   })
 }

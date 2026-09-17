@@ -13,7 +13,10 @@ vi.mock("../../models/registry", () => ({
   getModelConfigByRef: mocks.selected,
   getAvailableModelConfigOrDefault: mocks.defaultModel
 }))
-vi.mock("../../storage", () => ({ peekThreadCheckpointPath: mocks.path }))
+vi.mock("../../storage", () => ({
+  peekThreadCheckpointPath: mocks.path,
+  DEFAULT_MAX_TOKENS: 128000
+}))
 vi.mock("../../checkpointer/runtime-projection-client", () => ({
   readFunctionSessionTranscriptInWorker: mocks.read
 }))
@@ -52,4 +55,43 @@ it("distinguishes absent checkpoints from failed/invalid reads and requests only
   await expect(readColdFunctionSession("thread", "session.messages", signal)).rejects.toThrow(
     "unreadable"
   )
+})
+
+it("projects the selected model's actual context limit and omits unknown ledger and rate limits", async () => {
+  mocks.thread.mockReturnValue({ metadata: '{"modelId":"chosen"}' })
+  mocks.selected.mockReturnValue({ id: "chosen", model: "actual", maxTokens: 1000 })
+  mocks.path.mockReturnValue("checkpoint.sqlite")
+  mocks.read.mockResolvedValue({
+    usage: {
+      input_tokens: 80,
+      output_tokens: 7,
+      cache_read_input_tokens: 60,
+      cache_creation_input_tokens: 10
+    }
+  })
+  const result = await readColdFunctionSession(
+    "thread",
+    "session.usage",
+    new AbortController().signal
+  )
+  expect(result.value).toEqual({
+    context: { window: 1000, tokens: 150, percent: 15 },
+    rateLimits: []
+  })
+  expect(mocks.read.mock.calls[0][3]).toBe("usage")
+  mocks.selected.mockReturnValue({ id: "chosen", model: "actual", maxTokens: 2000 })
+  expect(result.assertLive).toThrow("MODS_CALL_SCOPE_CHANGED")
+})
+
+it("uses the same default context window as native runtime construction", async () => {
+  mocks.thread.mockReturnValue({ metadata: "{}" })
+  mocks.defaultModel.mockReturnValue({ id: "default", model: "actual" })
+  mocks.path.mockReturnValue("checkpoint.sqlite")
+  mocks.read.mockResolvedValue(null)
+  const result = await readColdFunctionSession(
+    "thread",
+    "session.usage",
+    new AbortController().signal
+  )
+  expect(result.value).toEqual({ context: { window: 128000 }, rateLimits: [] })
 })

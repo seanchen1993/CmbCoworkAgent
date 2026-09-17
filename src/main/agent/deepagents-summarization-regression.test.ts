@@ -7,7 +7,11 @@ import {
   SystemMessage,
   ToolMessage
 } from "@langchain/core/messages"
-import { FakeListChatModel } from "@langchain/core/utils/testing"
+import { FakeChatModel, FakeListChatModel } from "@langchain/core/utils/testing"
+import { readLiveContextUsage } from "./context-usage"
+import { createFunctionSessionViewMiddleware } from "./mods-session-view"
+import { ModRuntimeAuthorities } from "../mods/runtime-instance"
+import type { ModsManager } from "../mods/manager"
 import { Command, MemorySaver } from "@langchain/langgraph"
 import { createAgent, FakeToolCallingModel } from "langchain"
 import { describe, expect, it, vi } from "vitest"
@@ -204,6 +208,176 @@ describe("OpenAI-compatible context overflow classification", () => {
 })
 
 describe("CmbCowork context compaction middleware", () => {
+  it("clears live usage before the post-compaction response arrives", async () => {
+    const authorities = new ModRuntimeAuthorities()
+    const { authority } = authorities.create({
+      workspace: "/root",
+      threadId: "live",
+      turnId: "turn"
+    })
+    let observedMessages: readonly unknown[] = []
+    let observedState: unknown
+    let checked = false
+    const manager = {
+      bindFunctionSession: vi.fn(),
+      updateFunctionSessionMessages(
+        _authority: unknown,
+        messages: readonly unknown[],
+        state: unknown
+      ) {
+        observedMessages = messages
+        observedState = state
+      }
+    }
+    class Model extends FakeChatModel {
+      bindTools() {
+        return this
+      }
+      async _generate() {
+        // The actual model is in flight; no new response or checkpoint has been produced.
+        expect(
+          await readLiveContextUsage(
+            observedMessages,
+            observedState,
+            new AbortController().signal,
+            () => {}
+          )
+        ).toBeUndefined()
+        checked = true
+        const message = new AIMessage({
+          content: "new",
+          usage_metadata: {
+            input_tokens: 50,
+            output_tokens: 2,
+            total_tokens: 52
+          }
+        })
+        return { generations: [{ message, text: "new" }] }
+      }
+    }
+    try {
+      const agent = createAgent({
+        model: new Model({}),
+        tools: [],
+        middleware: [
+          createCmbSummarizationMiddleware({
+            model: new FakeListChatModel({ responses: [validSummary("live window")] }),
+            backend: createBackend() as never,
+            trigger: { type: "messages", value: 2 },
+            keep: { type: "messages", value: 1 },
+            maxInputTokens: 32000
+          }),
+          createFunctionSessionViewMiddleware(
+            manager as unknown as ModsManager,
+            authority,
+            "actual",
+            undefined,
+            32000
+          )
+        ]
+      })
+      await agent.invoke({
+        messages: [
+          new HumanMessage("old"),
+          new AIMessage({
+            content: "old answer",
+            usage_metadata: {
+              input_tokens: 900,
+              output_tokens: 3,
+              total_tokens: 903
+            }
+          }),
+          new HumanMessage("continue")
+        ]
+      })
+      expect(checked).toBe(true)
+      expect(
+        (
+          await readLiveContextUsage(
+            observedMessages,
+            observedState,
+            new AbortController().signal,
+            () => {}
+          )
+        )?.input_tokens
+      ).toBe(50)
+    } finally {
+      authorities.close()
+    }
+  })
+
+  it.each([false, true])(
+    "persists the real usage boundary and response across compaction (legacy=%s)",
+    async (legacy) => {
+      class Model extends FakeChatModel {
+        bindTools() {
+          return this
+        }
+        async _generate() {
+          const message = new AIMessage({
+            content: "actual new answer",
+            usage_metadata: { input_tokens: 50, output_tokens: 2, total_tokens: 52 }
+          })
+          return { generations: [{ message, text: "actual new answer" }] }
+        }
+      }
+      const middleware = createCmbSummarizationMiddleware({
+        model: new FakeListChatModel({ responses: [validSummary("usage boundary")] }),
+        backend: createBackend() as never,
+        trigger: { type: "messages", value: legacy ? 100 : 2 },
+        keep: { type: "messages", value: 1 },
+        maxInputTokens: 32000
+      })
+      const agent = createAgent({
+        model: new Model({}),
+        tools: [],
+        middleware: [middleware],
+        checkpointer: new MemorySaver()
+      })
+      const config = { configurable: { thread_id: "usage-boundary" } }
+      const history = [
+        new HumanMessage("old"),
+        new AIMessage({
+          content: "old answer",
+          usage_metadata: { input_tokens: 900, output_tokens: 3, total_tokens: 903 }
+        })
+      ]
+      if (legacy)
+        await agent.updateState(
+          config,
+          {
+            messages: history,
+            _summarizationEvent: {
+              cutoffIndex: 1,
+              summaryMessage: new HumanMessage({
+                content: "legacy summary",
+                additional_kwargs: { lc_source: "summarization" }
+              }),
+              filePath: null
+            }
+          },
+          "model_request"
+        )
+      await agent.invoke(
+        { messages: [...(legacy ? [] : history), new HumanMessage("continue")] },
+        config
+      )
+      const state = (
+        (await agent.getState(config)) as unknown as {
+          values: {
+            messages: BaseMessage[]
+            _summarizationEvent: { usageStartIndex: number }
+          }
+        }
+      ).values
+      expect(state._summarizationEvent.usageStartIndex).toBe(3)
+      expect(state.messages.at(-1)?.content).toBe("actual new answer")
+      expect(
+        (await readLiveContextUsage(state.messages, state, new AbortController().signal, () => {}))
+          ?.input_tokens
+      ).toBe(50)
+    }
+  )
   it("restores a summarized HumanMessage through MemorySaver on the next invocation", async () => {
     const summaryModel = new FakeListChatModel({
       responses: Array(4).fill(validSummary("MemorySaver restore"))
@@ -515,7 +689,8 @@ describe("CmbCowork context compaction middleware", () => {
       handler
     )
 
-    expect(result).toBeInstanceOf(AIMessage)
+    expect(result).toBeInstanceOf(Command)
+    expect((result as Command).update).toHaveProperty("_summarizationEvent.usageStartIndex", 1)
     expect(invoke).not.toHaveBeenCalled()
     expect(write).not.toHaveBeenCalled()
     expect(handler).toHaveBeenCalledTimes(1)
@@ -556,7 +731,8 @@ describe("CmbCowork context compaction middleware", () => {
       handler
     )
 
-    expect(result).toBeInstanceOf(AIMessage)
+    expect(result).toBeInstanceOf(Command)
+    expect((result as Command).update).toHaveProperty("_summarizationEvent.usageStartIndex", 2)
     expect(invoke).not.toHaveBeenCalled()
     expect(handler).toHaveBeenCalledTimes(1)
   })

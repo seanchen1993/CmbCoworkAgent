@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import { ModsManager } from "../manager"
 import { queryFunctionSessionRead } from "./session-read-host"
-import { HumanMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 
 const read = vi.hoisted(() => vi.fn())
@@ -119,7 +119,7 @@ it("reads the actual main model and messages inside a shared child without openi
   const instance = f.manager.createRuntimeAuthority(binding)
   cleanup.push(instance.release)
   cleanup.push(f.manager.bindThread({ ...binding, runtimeAuthority: instance.authority }))
-  f.manager.bindFunctionSession(instance.authority, "actual-main-model")
+  f.manager.bindFunctionSession(instance.authority, "actual-main-model", 1000)
   f.manager.updateFunctionSessionMessages(instance.authority, [new HumanMessage("actual prompt")])
   const cold = vi.fn()
   const query = (method: FunctionSessionReadMethod) =>
@@ -135,6 +135,7 @@ it("reads the actual main model and messages inside a shared child without openi
     )
   expect(await query("session.model")).toBe("actual-main-model")
   expect(await query("session.turns")).toBe(1)
+  expect(await query("session.usage")).toEqual({ context: { window: 1000 }, rateLimits: [] })
   await f.manager.withSharedAgent(
     instance.authority,
     "child",
@@ -149,6 +150,20 @@ it("reads the actual main model and messages inside a shared child without openi
   )
   expect(cold).not.toHaveBeenCalled()
   expect(f.manager.store.audit(binding.workspace)).toEqual([])
+  f.manager.updateFunctionSessionMessages(instance.authority, [
+    new AIMessage({
+      content: "actual",
+      usage_metadata: { input_tokens: 250, output_tokens: 10, total_tokens: 260 }
+    })
+  ])
+  expect(await query("session.usage")).toEqual({
+    context: { window: 1000, tokens: 250, percent: 25 },
+    rateLimits: []
+  })
+  f.manager.updateFunctionSessionMessages(instance.authority, [], {
+    _summarizationEvent: { usageStartIndex: 1 }
+  })
+  expect(await query("session.usage")).toEqual({ context: { window: 1000 }, rateLimits: [] })
 })
 
 it("invalidates a pending cold read on close and on a new runtime even when the adapter is still absent", async () => {

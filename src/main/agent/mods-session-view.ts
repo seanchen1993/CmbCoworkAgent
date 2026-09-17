@@ -1,4 +1,7 @@
 import { createMiddleware } from "langchain"
+import { z } from "zod"
+import { SummarizationEventSchema } from "./context-summarization-middleware"
+import { currentCompactedContextStart } from "./context-usage"
 import type { ModsManager } from "../mods/manager"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 
@@ -18,14 +21,24 @@ export function createFunctionSessionViewMiddleware(
   manager: ModsManager,
   authority: ModRuntimeAuthority,
   model: string,
-  runId?: string
+  runId?: string,
+  contextWindow?: number
 ) {
-  manager.bindFunctionSession(authority, model)
-  const capture = (state: { messages: readonly unknown[] }) => {
-    manager.updateFunctionSessionMessages(authority, state.messages)
+  manager.bindFunctionSession(authority, model, contextWindow)
+  const capture = (
+    state: { messages: readonly unknown[]; _summarizationEvent?: unknown },
+    pendingStartIndex?: number
+  ) => {
+    manager.updateFunctionSessionMessages(authority, state.messages, {
+      _summarizationEvent:
+        pendingStartIndex === undefined
+          ? state._summarizationEvent
+          : { usageStartIndex: pendingStartIndex }
+    })
   }
   return createMiddleware({
     name: "functionSessionView",
+    stateSchema: z.object({ _summarizationEvent: SummarizationEventSchema.optional() }),
     beforeAgent: (state) => {
       capture(state)
       return undefined
@@ -40,7 +53,7 @@ export function createFunctionSessionViewMiddleware(
       return undefined
     },
     wrapModelCall: async (request, handler) => {
-      capture(request.state)
+      capture(request.state, currentCompactedContextStart())
       return handler(request)
     },
     wrapToolCall: async (request, handler) => {

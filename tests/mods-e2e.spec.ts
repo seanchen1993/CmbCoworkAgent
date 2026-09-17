@@ -1480,6 +1480,7 @@ async function main(): Promise<void> {
     assert.ok(sessionText.includes("模型：gpt-4"))
     assert.ok(sessionText.includes("用户轮次：0"))
     assert.ok(sessionText.includes("消息：0"))
+    assert.ok(sessionText.includes("上下文：尚无实际读数（窗口 32000）"))
     assert.equal(modelServer.requests.length, requestsBeforeSession)
     assert.deepEqual(
       (await page!.evaluate((id) => window.api.mods.audit(id), registryThread)).map(
@@ -1633,7 +1634,8 @@ async function main(): Promise<void> {
             job.command === "claw-session" &&
             job.state === "succeeded" &&
             job.result?.text.includes("REGISTERED_TOOL_OK") &&
-            job.result.text.includes("用户轮次：1")
+            job.result.text.includes("用户轮次：1") &&
+            job.result.text.includes("上下文：12 tokens / 0%（窗口 32000）")
         ),
       "session SDK reads the real completed transcript and prompt count"
     )

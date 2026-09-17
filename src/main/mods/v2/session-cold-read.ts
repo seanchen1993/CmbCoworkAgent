@@ -1,6 +1,7 @@
 import type { ModJson } from "../../../shared/mods/types"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import { ModError } from "../errors"
+import { projectContextUsage } from "../../agent/context-usage"
 
 /** No runtime/model construction, transcript migration, or display-log fallback. */
 export async function readColdFunctionSession(
@@ -16,7 +17,7 @@ export async function readColdFunctionSession(
     signal.throwIfAborted()
     if (getThreadCore(threadId)?.metadata !== initial) throw new ModError("MODS_CALL_SCOPE_CHANGED")
   }
-  if (method === "session.model") {
+  if (method === "session.model" || method === "session.usage") {
     const metadata = typeof initial === "string" ? JSON.parse(initial) : initial
     const registry = await import("../../models/registry")
     assertLive()
@@ -25,7 +26,42 @@ export async function readColdFunctionSession(
         ? registry.getModelConfigByRef(metadata.modelId)
         : registry.getAvailableModelConfigOrDefault()
     if (!config) throw new ModError("MODS_MODEL_UNAVAILABLE")
-    return { value: config.model, assertLive }
+    const initialConfig = JSON.stringify({
+      id: config.id,
+      model: config.model,
+      maxTokens: config.maxTokens
+    })
+    const assertModelLive = () => {
+      assertLive()
+      const current =
+        typeof metadata.modelId === "string" && metadata.modelId
+          ? registry.getModelConfigByRef(metadata.modelId)
+          : registry.getAvailableModelConfigOrDefault()
+      if (
+        !current ||
+        JSON.stringify({ id: current.id, model: current.model, maxTokens: current.maxTokens }) !==
+          initialConfig
+      )
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    if (method === "session.model") return { value: config.model, assertLive: assertModelLive }
+    const { peekThreadCheckpointPath, DEFAULT_MAX_TOKENS } = await import("../../storage")
+    const { readFunctionSessionTranscriptInWorker } =
+      await import("../../checkpointer/runtime-projection-client")
+    const checkpoint = await readFunctionSessionTranscriptInWorker(
+      peekThreadCheckpointPath(threadId),
+      threadId,
+      signal,
+      "usage"
+    )
+    assertModelLive()
+    return {
+      value: {
+        context: projectContextUsage(config.maxTokens ?? DEFAULT_MAX_TOKENS, checkpoint?.usage),
+        rateLimits: []
+      },
+      assertLive: assertModelLive
+    }
   }
   const { peekThreadCheckpointPath } = await import("../../storage")
   const { readFunctionSessionTranscriptInWorker } =

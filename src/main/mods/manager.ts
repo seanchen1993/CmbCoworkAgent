@@ -180,20 +180,23 @@ export class ModsManager {
     ModRuntimeAuthority,
     {
       model: string
+      contextWindow?: number
+      contextState?: { _summarizationEvent?: unknown }
       messages?: readonly unknown[]
     }
   >()
 
-  bindFunctionSession(authority: ModRuntimeAuthority, model: string): void {
+  bindFunctionSession(authority: ModRuntimeAuthority, model: string, contextWindow?: number): void {
     authority.assertLive()
     if (authority.agentId !== "main" || this.runtimeAuthorities.get(authority) !== authority)
       throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
-    this.functionSessions.set(authority, { model })
+    this.functionSessions.set(authority, { model, contextWindow })
   }
 
   updateFunctionSessionMessages(
     authority: ModRuntimeAuthority,
-    messages: readonly unknown[]
+    messages: readonly unknown[],
+    contextState?: { _summarizationEvent?: unknown }
   ): void {
     authority.assertLive()
     const view = this.functionSessions.get(authority)
@@ -201,6 +204,7 @@ export class ModsManager {
       throw new ModError("MODS_SESSION_UNAVAILABLE")
     // Graph message reducers replace the array; retain that exact engine snapshot.
     view.messages = messages
+    view.contextState = contextState
   }
 
   /** Claude's session view is the main conversation, even during a shared child tool call. */
@@ -236,6 +240,8 @@ export class ModsManager {
     return {
       model: view?.model,
       messages: view?.messages,
+      contextWindow: view?.contextWindow,
+      contextState: view?.contextState,
       bound: !!authority,
       assertLive,
       release: query.release

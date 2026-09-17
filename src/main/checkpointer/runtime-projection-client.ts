@@ -209,7 +209,7 @@ export class CheckpointRuntimeProjectionClient {
         }
       | {
           type: "read-session-transcript"
-          projection: "messages" | "turns"
+          projection: "messages" | "turns" | "usage"
           databasePath: string
           threadId: string
           checkpointNs: string
@@ -405,7 +405,7 @@ export class CheckpointRuntimeProjectionClient {
     threadId: string,
     signal: AbortSignal,
     checkpointNs = "",
-    projection: "messages" | "turns" = "messages"
+    projection: "messages" | "turns" | "usage" = "messages"
   ): Promise<FunctionSessionCheckpoint | null> {
     signal.throwIfAborted()
     if (this.pending.size >= 128) return Promise.reject(new Error("CHECKPOINT_QUERY_CAPACITY"))
@@ -563,7 +563,7 @@ export async function readFunctionSessionTranscriptInWorker(
   databasePath: string,
   threadId: string,
   signal: AbortSignal,
-  projection: "messages" | "turns" = "messages"
+  projection: "messages" | "turns" | "usage" = "messages"
 ): Promise<FunctionSessionCheckpoint | null> {
   signal.throwIfAborted()
   if (!existsSync(databasePath)) return Promise.resolve(null)

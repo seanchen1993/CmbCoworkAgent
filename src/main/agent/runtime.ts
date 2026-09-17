@@ -3202,7 +3202,8 @@ function assembleDeepAgent(
               modManager,
               modRuntimeAuthority,
               modSessionModel,
-              modTurnRunId
+              modTurnRunId,
+              summarizationMaxInputTokens
             )
           ]
         : [])

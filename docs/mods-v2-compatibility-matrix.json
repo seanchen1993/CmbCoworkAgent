@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-18",
-  "codeBaseline": "a8975f89",
+  "codeBaseline": "d0c7d84f",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -10,7 +10,7 @@
     "source": "https://github.com/anthropics/claude-code/blob/b782847db9a18667f00918ea341197f201b22bb4/mods/types/claude-code.d.ts",
     "runtimePreviouslyVerified": "2.1.272",
     "runtime273Verified": true,
-    "runtime273VerificationScope": "49 turn-lifecycle/session-metadata/session-state/permission-query/command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor/tool-SDK-envelope/model-completion-operation/engine-tool-ingress/tool-registration-operation/MCP-operation conformance cases in real plugin test; turn lifecycle uses mocked lower engine, not actual upstream transport; not full API or product parity"
+    "runtime273VerificationScope": "52 usage-operation/turn-lifecycle/session-metadata/session-state/permission-query/command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor/tool-SDK-envelope/model-completion-operation/engine-tool-ingress/tool-registration-operation/MCP-operation conformance cases in real plugin test; usage and turn lifecycle use mocked lower engine, not actual upstream transport; not full API or product parity"
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
@@ -62,6 +62,7 @@
       "fs.stat"
     ],
     "partialDesktopSdk": [
+      "session.usage",
       "ui.open",
       "ui.close",
       "ui.resolve",
@@ -162,10 +163,24 @@
         "main conversation even for shared child callers",
         "newest 4096 eligible messages; 100000 source messages; 1 MiB raw row/output; node/depth budgets",
         "oversized or malformed exact reads reject instead of using UI previews",
-        "usage/compact remain pending; desktop turn lifecycle is tracked separately"
+        "usage base reads are tracked separately; breakdown/compact remain pending; desktop turn lifecycle is tracked separately"
       ],
       "upstreamConformanceAdded": 6,
       "validation": "62 focused + 473 Mods + 37 process + 49 Electron E2E pass; full 3487: 3456 pass, 26 unchanged baseline failures, 5 skipped; standalone 74/81 with 7 unchanged failures; subsequent hardening 38 focused + Node/Web pass, no new lint issues; disabled-read first +22.15% retained, isolated 5x1000 per arm P95 changes +4.66/-2.44/-4.81/+1.87/+2.17%, full performance gate pending",
+      "fullParity": false
+    },
+    "contextUsage": {
+      "revision": "desktop-context-usage-v25",
+      "design": "mods-v2-context-usage-2026-09-18.md",
+      "scope": "actual main live window plus exact read-only checkpoint worker; latest valid response input including cache, never turn accumulation; durable and in-flight native compaction boundaries",
+      "limits": [
+        "breakdown and explicit compact remain pending",
+        "unknown or zero input omits tokens/percent; legacy compaction boundary remains unknown until a new response",
+        "no real cost ledger or subscription rate-limit reading; cost omitted and rateLimits empty",
+        "100000 scanned messages, 1 MiB cold row; cancellation and scope/config invalidation enforced"
+      ],
+      "upstreamConformanceAdded": 3,
+      "validation": "839 focused regressions, Node/Web types, 37 process checks and final 63 Electron E2E pass; frozen upstream fixture 3/3 pass; full Vitest 3630: 3599 pass, 26 unchanged baseline failures, 5 skipped, no changed failures; standalone completed 70 before its known 180s workflow-driver hang with 65 pass and 5 unchanged failures; final E2E no-op 1000 P95 8.6033ms, pending 0, disabled-read comparison +5.27%; explicit breakdown/compact and full performance gate remain pending",
       "fullParity": false
     },
     "toolPermission": {

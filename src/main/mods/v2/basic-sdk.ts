@@ -1,4 +1,7 @@
-import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
+import type {
+  FunctionSessionReadMethod,
+  FunctionSessionUsageArgs
+} from "../../../shared/mods/v2/session"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
@@ -17,6 +20,7 @@ export const SESSION_CAPABILITIES = [
   "session.model",
   "session.messages",
   "session.turns",
+  "session.usage",
   "session.authorize",
   "clock.now",
   "clock.sleep",
@@ -29,6 +33,11 @@ export const SESSION_CAPABILITIES = [
 
 /** SDK positional arguments become the same structured input a hook receives in Claude. */
 export function basicSdkInput(method: string, args: ModJson[]): ModObject {
+  if (method === "session.usage") {
+    if (args[0] === undefined) return {}
+    if (!isModObject(args[0])) throw new ModFunctionError("MODS_SESSION_USAGE_ARGUMENT")
+    return args[0]
+  }
   if (FILE_CAPABILITIES.some((name) => name === method))
     return { path: method === "fs.list" && args[0] === undefined ? "." : args[0] }
   if (method === "clock.sleep") return { ms: args[0] }
@@ -42,6 +51,17 @@ export function basicSdkInput(method: string, args: ModJson[]): ModObject {
 }
 
 export function validateBasicInput(name: string, value: ModObject): void {
+  if (
+    name === "session.usage" &&
+    ((value.breakdown !== undefined &&
+      value.breakdown !== "summary" &&
+      value.breakdown !== "full") ||
+      (value.columns !== undefined &&
+        (typeof value.columns !== "number" ||
+          !Number.isSafeInteger(value.columns) ||
+          value.columns <= 0)))
+  )
+    throw new ModFunctionError("MODS_SESSION_USAGE_ARGUMENT")
   if (
     FILE_CAPABILITIES.some((method) => name === method) &&
     (typeof value.path !== "string" || value.path.length === 0)
@@ -75,6 +95,37 @@ export function validateBasicInput(name: string, value: ModObject): void {
 }
 
 export function validateBasicResult(name: string, value: ModJson | undefined): void {
+  if (name === "session.usage") {
+    const count = (value: unknown): value is number =>
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    if (
+      !isModObject(value) ||
+      !isModObject(value.context) ||
+      !count(value.context.window) ||
+      value.context.window === 0 ||
+      (value.context.tokens !== undefined && !count(value.context.tokens)) ||
+      (value.context.percent !== undefined &&
+        (!count(value.context.percent) || value.context.percent > 100)) ||
+      !Array.isArray(value.rateLimits) ||
+      value.rateLimits.some(
+        (limit) =>
+          !isModObject(limit) ||
+          typeof limit.kind !== "string" ||
+          typeof limit.percentUsed !== "number" ||
+          !Number.isFinite(limit.percentUsed) ||
+          limit.percentUsed < 0 ||
+          (limit.resetsAt !== undefined &&
+            (typeof limit.resetsAt !== "string" || !Number.isFinite(Date.parse(limit.resetsAt))))
+      ) ||
+      (value.cost !== undefined &&
+        (!isModObject(value.cost) ||
+          typeof value.cost.usd !== "number" ||
+          !Number.isFinite(value.cost.usd) ||
+          value.cost.usd < 0))
+    )
+      throw new ModFunctionError("MODS_SDK_RESULT", `MODS_SDK_RESULT: ${name}`)
+    return
+  }
   const toolUse = (call: ModJson): boolean =>
     isModObject(call) &&
     typeof call.tool_use_id === "string" &&
@@ -169,7 +220,11 @@ export async function runBasicSdk(
     registry: Map<string, FunctionCommand>
     signal: AbortSignal
     state?: FunctionStateAccess
-    readSession?(method: FunctionSessionReadMethod, signal: AbortSignal): Promise<ModJson>
+    readSession?(
+      method: FunctionSessionReadMethod,
+      signal: AbortSignal,
+      usageArgs?: FunctionSessionUsageArgs
+    ): Promise<ModJson>
     files?: FunctionFileAccess
   }
 ): Promise<ModJson | undefined> {
@@ -198,10 +253,13 @@ export async function runBasicSdk(
     method === "session.repo" ||
     method === "session.model" ||
     method === "session.messages" ||
-    method === "session.turns"
+    method === "session.turns" ||
+    method === "session.usage"
   ) {
     if (!context.readSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
-    return context.readSession(method, signal)
+    return method === "session.usage"
+      ? context.readSession(method, signal, input as FunctionSessionUsageArgs)
+      : context.readSession(method, signal)
   }
   if (method === "session.id") return context.threadId
   if (method === "session.cwd") return context.workspace

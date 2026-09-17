@@ -16,6 +16,18 @@ export type FunctionSessionReadMethod =
   | "session.model"
   | "session.messages"
   | "session.turns"
+  | "session.usage"
+
+export interface FunctionSessionUsageArgs {
+  breakdown?: "summary" | "full"
+  columns?: number
+}
+
+export interface FunctionSessionUsage {
+  context: { window: number; tokens?: number; percent?: number }
+  rateLimits: Array<{ kind: string; percentUsed: number; resetsAt?: string }>
+  cost?: { usd: number }
+}
 
 export interface FunctionSessionToolResult {
   tool_use_id: string
@@ -44,5 +56,11 @@ export interface FunctionSessionCheckpoint {
   checkpointId: string
   messageCount: number
   messages?: FunctionSessionMessage[]
-  turns: number
+  turns?: number
+  usage?: {
+    input_tokens: number
+    output_tokens: number
+    cache_read_input_tokens: number
+    cache_creation_input_tokens: number
+  }
 }

@@ -6,6 +6,7 @@ import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from 
 import { AsyncLocalStorage } from "node:async_hooks"
 import { ModError } from "../errors"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import type { ModObject } from "../../../shared/mods/types"
 import { ModRuntimeAuthorities } from "../runtime-instance"
 import { withFunctionExecution, recordFunctionCancellationReceipt } from "./execution-context"
 
@@ -516,6 +517,72 @@ it("projects repository SDK operations and returns no first-party authorization"
     auth: null
   })
   expect(calls).toEqual(["session.repo"])
+})
+
+it("passes usage arguments through operation hooks without fabricating cost or rate limits", async () => {
+  const calls: unknown[] = []
+  const value = await session(
+    `
+    on("session.start",async($,e,next)=>{await $.command.register({name:"usage",description:"Usage"});return next(e)});
+    on("session.usage",async($,e,next)=>{return next({...e,columns:60})});
+    on("command.run",{command:"usage"},async($)=>({text:JSON.stringify(await $.session.usage())}));
+  `,
+    {
+      readSession: async (method, _signal, args) => {
+        calls.push([method, args])
+        return { context: { window: 1000, tokens: 150, percent: 15 }, rateLimits: [] }
+      }
+    }
+  )
+  expect(JSON.parse(String((await value.run("usage", "")).text))).toEqual({
+    context: { window: 1000, tokens: 150, percent: 15 },
+    rateLimits: []
+  })
+  expect(calls).toEqual([["session.usage", { columns: 60 }]])
+})
+
+it("runs the identical usage operation fixture used in Claude's plugin test", async () => {
+  const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/session-usage"))
+  for (const mode of ["data", "empty", "deny"]) {
+    const plugins = [
+      {
+        name: "session-usage",
+        root: compiled.root,
+        tier: "user" as const,
+        guest: await FunctionGuestRuntime.create(compiled.code, compiled.options),
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+    ] as ConstructorParameters<typeof FunctionSession>[0][number][]
+    if (mode === "deny")
+      plugins.push({
+        name: "test-lower",
+        root: "/root",
+        tier: "append",
+        capabilities: [],
+        guest: await FunctionGuestRuntime.create(
+          'globalThis.__cmbFunctionMod={register(on){on("session.usage",()=>({deny:"usage denied"}))}}'
+        )
+      })
+    const expected: ModObject = {
+      context: mode === "data" ? { window: 1000, tokens: 120, percent: 12 } : { window: 1000 },
+      rateLimits: []
+    }
+    const value = new FunctionSession(plugins, {
+      threadId: "thread",
+      workspace: "/root",
+      assertLive: () => {},
+      publish: async (value) => value,
+      readSession: async (method, _signal, args) => {
+        expect(method).toBe("session.usage")
+        expect(args).toEqual({ columns: 60 })
+        return expected
+      }
+    })
+    sessions.push(value)
+    const result = await value.run("usage-probe", "")
+    if (mode === "deny") expect(result.text).toContain("caught:")
+    else expect(JSON.parse(String(result.text))).toEqual(expected)
+  }
 })
 
 it("honors repository operation vetoes without reading Git", async () => {
