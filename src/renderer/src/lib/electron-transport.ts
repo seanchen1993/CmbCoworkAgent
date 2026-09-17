@@ -294,27 +294,28 @@ export function transformSerializedValuesMessages(
   for (const msg of messages ?? []) {
     if (isSerializedSummarizationMessage(msg)) continue
     const className = getSerializedMessageClassName(msg)
-    if (className.includes("Human")) {
+    const kwargs = msg.kwargs || {}
+    const type: "ai" | "tool" | "system" | "human" =
+      className.includes("Tool") || kwargs.type === "tool"
+        ? "tool"
+        : className.includes("System") || kwargs.type === "system"
+          ? "system"
+          : className.includes("Human") || kwargs.type === "human" || kwargs.type === "user"
+            ? "human"
+            : "ai"
+    if (type === "human") {
       // Local user bubbles are appended before stream submit. Internal goal
       // prompts are hidden, but still need timing for transcript restore anchors.
       if (
         !isInternalGoalPromptMessage({
           role: "user",
-          content: extractSerializedContent(msg.kwargs?.content)
+          content: extractSerializedContent(kwargs.content)
         })
       ) {
         continue
       }
     }
 
-    const kwargs = msg.kwargs || {}
-    const type: "ai" | "tool" | "system" | "human" = className.includes("Tool")
-      ? "tool"
-      : className.includes("System")
-        ? "system"
-        : className.includes("Human")
-          ? "human"
-          : "ai"
     const content = extractSerializedContent(kwargs.content)
     const reasoning = type === "ai" ? extractVisibleReasoning(kwargs) : ""
     const isToolError =
@@ -982,27 +983,34 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (event.mode === "values") {
       const state = event.data as { messages?: SerializedMessageChunk[] }
       if (!Array.isArray(state.messages)) return []
-      if ((event.valuesSnapshotKind ?? "full") !== "full") {
-        return state.messages.flatMap((message) =>
-          this.createFocusedCoordinatorWorkerEvents({
-            parentThreadId,
-            checkpointNs: focused.workerThreadId,
-            className: this.getSerializedMessageClassName(message),
-            kwargs: message.kwargs
-          })
-            .filter((sdkEvent) => sdkEvent.event === "custom")
-            .map((sdkEvent) => sdkEvent.data as { type?: unknown; workerMessage?: unknown })
-            .filter((data) => data.type === "coordinator_worker_stream_message")
-            .map((data) => data.workerMessage)
-            .filter(
-              (message): message is Message => Boolean(message && typeof message === "object")
+      const messages =
+        (event.valuesSnapshotKind ?? "full") !== "full"
+          ? state.messages.flatMap((message) =>
+              this.createFocusedCoordinatorWorkerEvents({
+                parentThreadId,
+                checkpointNs: focused.workerThreadId,
+                className: this.getSerializedMessageClassName(message),
+                kwargs: message.kwargs
+              })
+                .filter((sdkEvent) => sdkEvent.event === "custom")
+                .map((sdkEvent) => sdkEvent.data as { type?: unknown; workerMessage?: unknown })
+                .filter((data) => data.type === "coordinator_worker_stream_message")
+                .map((data) => data.workerMessage)
+                .filter((message): message is Message =>
+                  Boolean(message && typeof message === "object")
+                )
             )
-        )
-      }
-      return this.createFocusedCoordinatorWorkerEventsFromValues(
-        state.messages,
-        focused.workerThreadId
-      )
+          : this.createFocusedCoordinatorWorkerEventsFromValues(
+              state.messages,
+              focused.workerThreadId
+            )
+      return messages.map((message) => ({
+        ...message,
+        ...((event.valuesSnapshotKind ?? "full") === "full" && { worker_snapshot_identity: true }),
+        // Legacy empty values rows may be sparse. Only a non-empty complete body
+        // supersedes older text; explicit wire snapshot clears are marked below.
+        ...(message.content.length > 0 && { worker_content_source: "values" as const })
+      }))
     }
 
     return this.processStreamEvent(event, "coordinator", focused.workerThreadId)
@@ -1081,11 +1089,24 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const reasoningWireMode = readStreamMessageWireMode(
       metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]
     )
+    const explicitProviderTuple = getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
+    const explicitProviderSourceId = explicitProviderTuple?.provider_source_id
+      ? scopeId(explicitProviderTuple.provider_source_id)
+      : undefined
     let messageId: string
-    if (typeof kwargs.id === "string") {
-      const providerSourceId = scopeId(kwargs.id)
+    if (typeof kwargs.id === "string" || explicitProviderSourceId) {
+      const providerSourceId = explicitProviderSourceId ?? scopeId(kwargs.id!)
       const currentMessageId = this.staleWorkerCurrentMessageIdByTurn.get(staleTurnKey)
-      if (
+      if (explicitProviderTuple?.provider_occurrence) {
+        messageId =
+          explicitProviderTuple.provider_occurrence > 1
+            ? buildMessageSameRoleDuplicateId(
+                providerSourceId,
+                "assistant",
+                explicitProviderTuple.provider_occurrence
+              )
+            : providerSourceId
+      } else if (
         currentMessageId &&
         this.staleWorkerCurrentProviderSourceIdByTurn.get(staleTurnKey) === providerSourceId
       ) {
@@ -1161,6 +1182,18 @@ export class ElectronIPCTransport implements UseStreamTransport {
         id: messageId,
         role: "assistant",
         content: resolvedContent,
+        ...(contentWireMode === "snapshot" && { worker_content_source: "snapshot" }),
+        // A late update belongs to this known old-turn slot, even when the store
+        // has already appended another user turn. Do not infer a new occurrence.
+        ...(explicitProviderSourceId
+          ? {
+              provider_source_id: explicitProviderSourceId,
+              provider_occurrence: explicitProviderTuple!.provider_occurrence
+            }
+          : storedMessage?.role === "assistant" && {
+              provider_source_id: getMessageProviderSourceId(storedMessage),
+              provider_occurrence: getMessageProviderOccurrence(storedMessage) ?? 1
+            }),
         ...((reasoning || reasoningWireMode === "snapshot") && { reasoning }),
         ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
         created_at: new Date()
@@ -3419,19 +3452,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
           const observedProviderMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
           // A provider can reuse its ID after tools while values replaces the old graph slot.
           // The model execution namespace distinguishes those cycles without scanning history.
-          const explicitProviderTuple = !isCoordinatorMode
-            ? getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
-            : undefined
+          const explicitProviderTuple = getMessageProviderTupleFromMetadata(
+            kwargs.additional_kwargs
+          )
           const explicitMessageIndex = explicitProviderTuple
-            ? this.mainAssistantIndexByProviderIdentity.get(
+            ? (this.mainAssistantIndexByProviderIdentity.get(
                 this.mainAssistantProviderIdentityKey(
                   explicitProviderTuple.provider_source_id!,
                   explicitProviderTuple.provider_occurrence!
                 )
-              ) ?? this.nextMessageFallbackIndex("ai")
+              ) ?? this.nextMessageFallbackIndex("ai"))
             : undefined
           const streamScopeKey =
-            !isCoordinatorMode && observedProviderMessageId && checkpointNs
+            observedProviderMessageId && checkpointNs
               ? JSON.stringify([observedProviderMessageId, checkpointNs])
               : undefined
           const scopedMessageIndex = streamScopeKey
@@ -3441,13 +3474,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
             !!streamScopeKey &&
             scopedMessageIndex === undefined &&
             this.mainAssistantScopedObservedIds.has(observedProviderMessageId!)
-          const idlessCompletedResolution =
-            !isCoordinatorMode
-              ? this.routePendingIdlessCompletedAssistant(
-                  observedProviderMessageId,
-                  content
-                )
-              : undefined
+          const idlessCompletedResolution = this.routePendingIdlessCompletedAssistant(
+            observedProviderMessageId,
+            content
+          )
           if (idlessCompletedResolution?.buffer) return events
           content = idlessCompletedResolution?.content ?? content
           const observedMessageIndex =
@@ -3455,11 +3485,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
             scopedMessageIndex ??
             (startsNewScopedOccurrence ? this.nextMessageFallbackIndex("ai") : undefined) ??
             idlessCompletedResolution?.messageIndex ??
-            (!isCoordinatorMode && observedProviderMessageId
+            (observedProviderMessageId
               ? this.mainAssistantIndexByObservedId.get(observedProviderMessageId)
               : undefined)
           const currentToolCallIds =
-            !isCoordinatorMode && this.currentMessageId !== null
+            this.currentMessageId !== null
               ? this.observedMainToolCallIdsByMessageId.get(
                   this.resolveMainAssistantMessageIdAlias(this.currentMessageId)
                 )
@@ -3487,10 +3517,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
             !incomingContinuesCurrentToolCall
               ? this.nextMessageFallbackIndex("ai")
               : (this.currentMessageIndex ?? this.nextMessageFallbackIndex("ai")))
-          const providerMessageId =
-            !isCoordinatorMode && observedProviderMessageId
-              ? this.resolveMainAssistantMessageIdAlias(observedProviderMessageId)
-              : observedProviderMessageId
+          const providerMessageId = observedProviderMessageId
+            ? this.resolveMainAssistantMessageIdAlias(observedProviderMessageId)
+            : observedProviderMessageId
           if (streamScopeKey && observedProviderMessageId) {
             this.mainAssistantIndexByStreamScope.set(streamScopeKey, messageIndex)
             this.mainAssistantScopedObservedIds.add(observedProviderMessageId)
@@ -3508,13 +3537,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
               })
             }
           }
-          const providerIdentity = !isCoordinatorMode
-            ? this.resolveMainAssistantProviderIdentity(
-                messageIndex,
-                observedProviderMessageId,
-                kwargs.additional_kwargs
-              )
-            : undefined
+          const providerIdentity = this.resolveMainAssistantProviderIdentity(
+            messageIndex,
+            observedProviderMessageId,
+            kwargs.additional_kwargs
+          )
           const occurrenceScopedProviderMessageId =
             providerIdentity &&
             observedProviderMessageId &&
@@ -3530,9 +3557,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 )
               : undefined
           const msgId =
-            (!isCoordinatorMode
-              ? this.mainAssistantMessageIdByIndex.get(messageIndex)
-              : undefined) ||
+            this.mainAssistantMessageIdByIndex.get(messageIndex) ||
             occurrenceScopedProviderMessageId ||
             providerMessageId ||
             this.currentMessageId ||
@@ -3543,17 +3568,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
               content,
               toolCalls: kwargs.tool_calls
             })
-          if (!isCoordinatorMode) {
-            this.mainAssistantMessageIdByIndex.set(messageIndex, msgId)
-            this.streamedMainAssistantIndexes.add(messageIndex)
-            if (observedProviderMessageId) {
-              this.mainAssistantIndexByObservedId.set(observedProviderMessageId, messageIndex)
-            }
-            this.mainAssistantIndexByObservedId.set(msgId, messageIndex)
-            pruneMapToLimit(this.mainAssistantMessageIdByIndex, MAX_TRACKED_EMITTED_MESSAGES)
-            pruneMapToLimit(this.mainAssistantIndexByObservedId, MAX_TRACKED_EMITTED_MESSAGES)
-            pruneSetToLimit(this.streamedMainAssistantIndexes, MAX_TRACKED_EMITTED_MESSAGES)
+          this.mainAssistantMessageIdByIndex.set(messageIndex, msgId)
+          this.streamedMainAssistantIndexes.add(messageIndex)
+          if (observedProviderMessageId) {
+            this.mainAssistantIndexByObservedId.set(observedProviderMessageId, messageIndex)
           }
+          this.mainAssistantIndexByObservedId.set(msgId, messageIndex)
+          pruneMapToLimit(this.mainAssistantMessageIdByIndex, MAX_TRACKED_EMITTED_MESSAGES)
+          pruneMapToLimit(this.mainAssistantIndexByObservedId, MAX_TRACKED_EMITTED_MESSAGES)
+          pruneSetToLimit(this.streamedMainAssistantIndexes, MAX_TRACKED_EMITTED_MESSAGES)
           this.currentMessageId = msgId
           this.currentMessageIndex = messageIndex
           this.currentChunkMessageId = msgId
@@ -3565,12 +3588,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
             kwargs.tool_call_chunks,
             isCoordinatorMode
           )
-          if (!isCoordinatorMode) {
-            this.rememberObservedMainToolCallIds(msgId, [
-              ...visibleToolCalls,
-              ...visibleToolCallChunks
-            ])
-          }
+          this.rememberObservedMainToolCallIds(msgId, [
+            ...visibleToolCalls,
+            ...visibleToolCallChunks
+          ])
           const contentWireMode = readStreamMessageWireMode(
             metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY]
           )
@@ -3728,7 +3749,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             const tokenUsageEvent = createTokenUsageEvent(usageMetadata)
             if (tokenUsageEvent) events.push(tokenUsageEvent)
           }
-          if (!isCoordinatorMode && this.sealedMainAssistantIndexes.has(messageIndex)) {
+          if (this.sealedMainAssistantIndexes.has(messageIndex)) {
             this.resetCurrentAssistantMessage()
           }
         }
@@ -4198,7 +4219,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
 
         if (isCoordinatorMode) {
-          events.push(...this.createCurrentTurnMessageEventsFromValues(state.messages, threadId))
+          events.push(
+            ...this.createCurrentTurnMessageEventsFromValues(
+              state.messages,
+              threadId,
+              transformedMessages.filter((message) => message.type === "ai")
+            )
+          )
         }
       }
 
@@ -4523,6 +4550,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           id: msgId,
           role: "assistant",
           content,
+          ...(contentWireMode === "snapshot" && { worker_content_source: "snapshot" }),
           ...(resolvedProviderMessage?.providerSourceId && {
             provider_source_id: resolvedProviderMessage.providerSourceId
           }),
@@ -6292,7 +6320,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private createCurrentTurnMessageEventsFromValues(
     messages: SerializedMessageChunk[],
-    threadId: string
+    threadId: string,
+    canonicalAssistants: TransformedValuesMessage[]
   ): StreamEvent[] {
     const events: StreamEvent[] = []
     let currentTurnStart = 0
@@ -6429,6 +6458,22 @@ export class ElectronIPCTransport implements UseStreamTransport {
         ) {
           msgId = reusableCurrentMessageIdForIndex
         }
+        // Explicit provider occurrences already identify the logical model cycle.
+        // Do not route a replay back into another cycle that reused the raw ID.
+        const canonicalAssistant = canonicalAssistants[fallbackIndex]
+        if (canonicalAssistant?.provider_source_id && canonicalAssistant.provider_occurrence) {
+          const canonicalIndex = this.mainAssistantIndexByProviderIdentity.get(
+            this.mainAssistantProviderIdentityKey(
+              canonicalAssistant.provider_source_id,
+              canonicalAssistant.provider_occurrence
+            )
+          )
+          msgId =
+            (canonicalIndex !== undefined
+              ? this.mainAssistantMessageIdByIndex.get(canonicalIndex)
+              : undefined) ?? canonicalAssistant.id
+        }
+        const wasEmitted = this.hasEmittedMessage(msgId)
         const snapshotUpdate = this.prepareMainAssistantSnapshotUpdate(msgId, content)
         const reasoningUpdate = this.prepareMainAssistantReasoning(msgId, reasoning)
         if (
@@ -6438,11 +6483,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
         )
           continue
         this.rememberEmittedMessage(msgId)
-        if (snapshotUpdate.kind === "replace") {
+        if (snapshotUpdate.kind === "replace" || (wasEmitted && visibleToolCalls.length > 0)) {
           events.push(
             this.createCoordinatorAssistantSnapshotEvent({
               id: msgId,
-              content: snapshotUpdate.content,
+              content: this.mainAssistantTextByMessageId.get(msgId) ?? "",
               reasoning: reasoningUpdate,
               toolCalls: visibleToolCalls
             })
