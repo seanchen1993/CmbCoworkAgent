@@ -106,7 +106,8 @@ import {
   parseThreadListKeys,
   threadListBucketsNeeded,
   threadListKeysAgg,
-  threadListPreviewSourceIncludes
+  threadListPreviewSourceIncludes,
+  resolveModelCallCount
 } from "./dashboard-trace-thread-list"
 import {
   buildChatTriggeredTraceFilter,
@@ -2571,9 +2572,12 @@ function normalizeTraceDetail(
       ...traceObservabilityDetailFields(trace, source),
       outcome: trace.outcome || asString(source.outcome, "unknown"),
       totalToolCalls: asNumber(trace.totalToolCalls, asNumber(source.totalToolCalls)),
-      modelCallCount: Array.isArray(trace.modelCalls)
-        ? trace.modelCalls.length
-        : asNumber(source.modelCallCount),
+      // 索引字段优先，和上一行的 totalToolCalls 同款口径。
+      // `modelCalls` 在客户端就停在 TRACE_MAX_MODEL_CALLS(64)，sanitizer 还可能
+      // 把它整个清空，而 `Array.isArray([])` 为真——原先的三元式让这两种情况都
+      // 绕过了回退，长会话直接少算成个位数。服务端存的 modelCallCount 取自客户端
+      // 的 totalModelCalls（实时计数，不受上限影响），才是该用的那个值。
+      modelCallCount: resolveModelCallCount(source.modelCallCount, trace.modelCalls),
       userInputRequestCount: countUserInputRequests(nodes),
       totalInputTokens,
       totalOutputTokens,
@@ -2650,7 +2654,9 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     ...traceObservabilityDetailFields(trace),
     outcome: trace.outcome,
     totalToolCalls: asNumber(trace.totalToolCalls),
-    modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
+    // 本地 AgentTrace 上 totalModelCalls 一定在（collector 实时累加），数组长度
+    // 只作为上线前旧数据的兜底——理由同 normalizeTraceDetail。
+    modelCallCount: resolveModelCallCount(trace.totalModelCalls, trace.modelCalls),
     userInputRequestCount: countUserInputRequests(nodes),
     totalInputTokens: usage.totalInputTokens,
     totalOutputTokens: usage.totalOutputTokens,

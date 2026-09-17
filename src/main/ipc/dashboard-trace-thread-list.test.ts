@@ -5,6 +5,7 @@ import {
   MAX_THREAD_LIST_BUCKETS,
   orderThreadListPreviewHits,
   parseThreadListKeys,
+  resolveModelCallCount,
   threadListBucketsNeeded,
   threadListKeysAgg,
   threadListPreviewSourceIncludes,
@@ -323,5 +324,33 @@ describe("完整会话分批拉取", () => {
         dedupeKey: (trace) => trace.id
       })
     ).rejects.toThrow("数据量过大")
+  })
+})
+
+describe("resolveModelCallCount", () => {
+  it("用标量，而不是被截断的 modelCalls 数组", () => {
+    // 客户端在 TRACE_MAX_MODEL_CALLS(64) 处停止记录，标量是实时累加的真实次数。
+    expect(resolveModelCallCount(412, new Array(64).fill({}))).toBe(412)
+  })
+
+  it("空数组不当作 0——这正是长会话被少算一个数量级的原因", () => {
+    // sanitizer 可能把 modelCalls 整个清空，而 Array.isArray([]) 为真，
+    // 原先的三元式会直接返回 0 并绕过回退。
+    expect(resolveModelCallCount(412, [])).toBe(412)
+  })
+
+  it("标量是 0 时按 0 算，不回退到数组", () => {
+    // 索引里的 0 是权威结果，不是缺失。
+    expect(resolveModelCallCount(0, [{}, {}])).toBe(0)
+  })
+
+  it("标量缺失时回退到数组长度，兼容上线前的老文档", () => {
+    expect(resolveModelCallCount(undefined, [{}, {}, {}])).toBe(3)
+    expect(resolveModelCallCount(null, [{}])).toBe(1)
+  })
+
+  it("两边都没有就是 0", () => {
+    expect(resolveModelCallCount(undefined, undefined)).toBe(0)
+    expect(resolveModelCallCount(Number.NaN, "not-an-array")).toBe(0)
   })
 })
