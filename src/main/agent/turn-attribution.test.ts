@@ -6,11 +6,15 @@ vi.mock("../services/adoption-tracker", () => ({
 }))
 
 const { SkillUsageDetector } = await import("./skill-evolution/usage-detector")
-const { setThreadActiveSkills } = await import("./skill-evolution/proposal-window")
+const { getThreadActiveSkills, setThreadActiveSkills } =
+  await import("./skill-evolution/proposal-window")
 const {
   TurnAttributionRecorder,
   observeExplicitSkillActivation,
   observeToolCallForAttribution,
+  resolveSubagentAttributionSkills,
+  syncSubagentSkillAttribution,
+  syncTaskSubagentSkillAttribution,
   syncTurnSkillAttribution
 } = await import("./turn-attribution")
 
@@ -321,5 +325,147 @@ describe("TurnAttributionRecorder", () => {
     expect(imTracer.skillSource).toEqual(desktopTracer.skillSource)
     expect(imTracer.evolvedSkills).toEqual(desktopTracer.evolvedSkills)
     expect(imRecorder.getFileWritePaths()).toEqual(desktopWritePaths)
+  })
+})
+
+describe("sub-agent attribution", () => {
+  it("prefers the sub-agent's own run over any sticky set", () => {
+    const parentThreadId = freshThreadId()
+    const threadId = freshThreadId()
+    setThreadActiveSkills(parentThreadId, ["parent-skill"], ["plugin:p/parent-skill"])
+    setThreadActiveSkills(threadId, ["own-sticky"], ["plugin:p/own-sticky"])
+
+    expect(
+      resolveSubagentAttributionSkills({
+        threadId,
+        parentThreadId,
+        currentRunSkills: ["this-run"],
+        currentRunSkillSource: ["plugin:p/this-run"]
+      })
+    ).toEqual({ usedSkills: ["this-run"], skillSource: ["plugin:p/this-run"] })
+  })
+
+  it("falls back to the sub-agent's own sticky set before the parent's", () => {
+    const parentThreadId = freshThreadId()
+    const threadId = freshThreadId()
+    setThreadActiveSkills(parentThreadId, ["parent-skill"], ["plugin:p/parent-skill"])
+    setThreadActiveSkills(threadId, ["own-sticky"], ["plugin:p/own-sticky"])
+
+    expect(
+      resolveSubagentAttributionSkills({
+        threadId,
+        parentThreadId,
+        currentRunSkills: [],
+        currentRunSkillSource: []
+      })
+    ).toEqual({ usedSkills: ["own-sticky"], skillSource: ["plugin:p/own-sticky"] })
+  })
+
+  it("inherits the parent's skills when the sub-agent has none of its own", () => {
+    const parentThreadId = freshThreadId()
+    const threadId = freshThreadId()
+    setThreadActiveSkills(parentThreadId, ["parent-skill"], ["plugin:p/parent-skill"])
+
+    syncSubagentSkillAttribution({
+      threadId,
+      parentThreadId,
+      currentRunSkills: [],
+      currentRunSkillSource: []
+    })
+
+    expect(setAdoptionContext).toHaveBeenCalledWith(threadId, {
+      usedSkills: ["parent-skill"],
+      skillSource: ["plugin:p/parent-skill"]
+    })
+  })
+
+  it("reports nothing when neither the sub-agent nor its parent used a skill", () => {
+    const threadId = freshThreadId()
+    expect(
+      resolveSubagentAttributionSkills({
+        threadId,
+        parentThreadId: freshThreadId(),
+        currentRunSkills: [],
+        currentRunSkillSource: []
+      })
+    ).toEqual({ usedSkills: [], skillSource: [] })
+  })
+})
+
+describe("task sub-agent attribution", () => {
+  it("merges the child's skills into the parent instead of superseding them", () => {
+    const parentThreadId = freshThreadId()
+    setThreadActiveSkills(parentThreadId, ["parent-skill"], ["plugin:p/parent-skill"])
+
+    syncTaskSubagentSkillAttribution({
+      parentThreadId,
+      currentRunSkills: ["child-skill"],
+      currentRunSkillSource: ["plugin:p/child-skill"]
+    })
+
+    // The parent's own skill must survive: its writes are recorded on the same
+    // thread as the child's, so dropping it would mis-bucket the parent's code.
+    expect(getThreadActiveSkills(parentThreadId)).toEqual(["parent-skill", "child-skill"])
+    expect(setAdoptionContext).toHaveBeenCalledWith(parentThreadId, {
+      usedSkills: ["parent-skill", "child-skill"],
+      skillSource: ["plugin:p/parent-skill", "plugin:p/child-skill"]
+    })
+  })
+
+  it("attributes the parent thread when only the child read a SKILL.md", () => {
+    const parentThreadId = freshThreadId()
+
+    syncTaskSubagentSkillAttribution({
+      parentThreadId,
+      currentRunSkills: ["child-skill"],
+      currentRunSkillSource: ["plugin:p/child-skill"]
+    })
+
+    expect(getThreadActiveSkills(parentThreadId)).toEqual(["child-skill"])
+  })
+
+  it("leaves the parent untouched when the child used no skill", () => {
+    const parentThreadId = freshThreadId()
+    setThreadActiveSkills(parentThreadId, ["parent-skill"], ["plugin:p/parent-skill"])
+    setAdoptionContext.mockClear()
+
+    syncTaskSubagentSkillAttribution({
+      parentThreadId,
+      currentRunSkills: [],
+      currentRunSkillSource: []
+    })
+
+    expect(setAdoptionContext).not.toHaveBeenCalled()
+    expect(getThreadActiveSkills(parentThreadId)).toEqual(["parent-skill"])
+  })
+})
+
+describe("turn-start publishing", () => {
+  it("republishes the sticky set as soon as the recorder is built", () => {
+    const threadId = freshThreadId()
+    setThreadActiveSkills(threadId, ["sticky-skill"], ["plugin:p/sticky-skill"])
+    setAdoptionContext.mockClear()
+
+    // Starting a trace resets the adoption context, and a turn that never reads
+    // a SKILL.md produces no skill hit to trigger a sync — so without this the
+    // turn's generated code would be recorded with no attribution at all.
+    new TurnAttributionRecorder({ threadId, tracer: createTracer() })
+
+    expect(setAdoptionContext).toHaveBeenCalledWith(threadId, {
+      usedSkills: ["sticky-skill"],
+      skillSource: ["plugin:p/sticky-skill"]
+    })
+  })
+
+  it("invents no attribution for a thread that never used a skill", () => {
+    const threadId = freshThreadId()
+    setAdoptionContext.mockClear()
+
+    new TurnAttributionRecorder({ threadId, tracer: createTracer() })
+
+    expect(setAdoptionContext).toHaveBeenCalledWith(threadId, {
+      usedSkills: [],
+      skillSource: []
+    })
   })
 })

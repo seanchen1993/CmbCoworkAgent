@@ -7,6 +7,7 @@ import {
   type TraceCollector
 } from "./collector"
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
+import { syncTaskSubagentSkillAttribution } from "../turn-attribution"
 import type { TraceChatMessage, TraceContext, TraceOutcome, TraceTokenUsage } from "./types"
 import { normalizeTraceTokenUsage } from "./token-usage"
 import { nowIsoLocal } from "../../util/local-time"
@@ -348,9 +349,24 @@ export class SoloTaskTraceManager {
   }
 
   private syncSkills(entry: SoloTaskTraceEntry): void {
-    entry.tracer.setUsedSkills(entry.skillUsageDetector.getUsedSkillNames())
-    entry.tracer.setSkillSource(entry.skillUsageDetector.getUsedSkillSourceRefs())
+    const usedSkills = entry.skillUsageDetector.getUsedSkillNames()
+    const skillSource = entry.skillUsageDetector.getUsedSkillSourceRefs()
+    entry.tracer.setUsedSkills(usedSkills)
+    entry.tracer.setSkillSource(skillSource)
     entry.tracer.setEvolvedSkills(entry.skillUsageDetector.getUsedEvolvedSkillNames())
+    // Task sub-agents share the parent's filesystem backend, so recordGen files
+    // their generated code under the *parent* thread and reads the parent's
+    // adoption context. A skill this child read therefore has to travel up, or
+    // code written under an explicitly invoked plugin skill lands in the
+    // vibecoding bucket. Merged rather than superseded — see
+    // syncTaskSubagentSkillAttribution for why.
+    runTraceSideEffect("SoloTask adoption attribution", () => {
+      syncTaskSubagentSkillAttribution({
+        parentThreadId: this.parent.threadId,
+        currentRunSkills: usedSkills,
+        currentRunSkillSource: skillSource
+      })
+    })
   }
 
   private runSideEffect(scope: string, effect: () => void): boolean {

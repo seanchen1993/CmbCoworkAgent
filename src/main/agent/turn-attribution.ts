@@ -1,6 +1,7 @@
 import {
   getThreadActiveSkills,
   getThreadActiveSkillSource,
+  mergeThreadActiveSkills,
   setThreadActiveSkills
 } from "./skill-evolution/proposal-window"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
@@ -33,18 +34,119 @@ export interface TurnAttributionTracer {
  * skill-less turn leaves it intact. The trace's own usedSkills is the
  * current-run set only, which is why the two are computed separately below.
  */
-function codeGenAttributionSkills(threadId: string, currentRunSkills: string[]): string[] {
-  if (currentRunSkills.length > 0) return currentRunSkills
-  return getThreadActiveSkills(threadId)
-}
-
-function codeGenAttributionSkillSource(
+function codeGenAttribution(
   threadId: string,
   currentRunSkills: string[],
   currentRunSkillSource: string[]
-): string[] {
-  if (currentRunSkills.length > 0) return currentRunSkillSource
-  return getThreadActiveSkillSource(threadId)
+): ResolvedAttributionSkills {
+  if (currentRunSkills.length > 0) {
+    return { usedSkills: currentRunSkills, skillSource: currentRunSkillSource }
+  }
+  // Resolved together rather than through two accessors: this runs on the
+  // streaming hot path, and each lookup can reach the sticky-skill store.
+  return {
+    usedSkills: getThreadActiveSkills(threadId),
+    skillSource: getThreadActiveSkillSource(threadId)
+  }
+}
+
+/** The skills + sources a generation on `threadId` should be attributed to. */
+export interface ResolvedAttributionSkills {
+  usedSkills: string[]
+  skillSource: string[]
+}
+
+/**
+ * Skill attribution for a sub-agent that owns its own thread (workflow agents,
+ * coordinator workers). Their generated code is recorded against the *child*
+ * thread, so the child's adoption context is what `recordGen` reads — and a
+ * child that never re-reads a SKILL.md has nothing of its own to report.
+ *
+ * Falls back down the ownership chain: this run's skills → the child thread's
+ * sticky set (it may have used a skill on an earlier turn) → the parent
+ * thread's sticky set. Without the last hop, delegating work to a sub-agent
+ * silently drops the plugin attribution the parent had already established.
+ */
+export function resolveSubagentAttributionSkills(input: {
+  threadId: string
+  parentThreadId?: string
+  currentRunSkills: string[]
+  currentRunSkillSource: string[]
+}): ResolvedAttributionSkills {
+  const { threadId, parentThreadId, currentRunSkills, currentRunSkillSource } = input
+  if (currentRunSkills.length > 0) {
+    return { usedSkills: currentRunSkills, skillSource: currentRunSkillSource }
+  }
+  const own = getThreadActiveSkills(threadId)
+  if (own.length > 0) {
+    return { usedSkills: own, skillSource: getThreadActiveSkillSource(threadId) }
+  }
+  if (!parentThreadId) return { usedSkills: [], skillSource: [] }
+  return {
+    usedSkills: getThreadActiveSkills(parentThreadId),
+    skillSource: getThreadActiveSkillSource(parentThreadId)
+  }
+}
+
+/**
+ * Publish a sub-agent's attribution to its own thread's adoption context,
+ * resolving the fallback chain first. Mirrors `syncTurnSkillAttribution` for
+ * paths that drive their own detector instead of the standard graph stream.
+ */
+export function syncSubagentSkillAttribution(input: {
+  threadId: string
+  parentThreadId?: string
+  currentRunSkills: string[]
+  currentRunSkillSource: string[]
+}): void {
+  const { threadId, currentRunSkills, currentRunSkillSource } = input
+  // A sub-agent that used a skill of its own keeps it for its later turns, but
+  // in memory only: these thread ids are minted per run and never resumed, so a
+  // persisted row would be dead weight in a database that is re-serialized
+  // whole on every save. Across a restart the parent chain answers instead.
+  if (currentRunSkills.length > 0) {
+    setThreadActiveSkills(threadId, currentRunSkills, currentRunSkillSource, { persist: false })
+  }
+  setAdoptionContext(threadId, resolveSubagentAttributionSkills(input))
+}
+
+/**
+ * Skill attribution for a sub-agent that shares its parent's filesystem
+ * backend (Task sub-agents). Their writes are recorded against the *parent*
+ * thread, so attribution has to travel up rather than down: a skill the child
+ * read never reaches the parent's adoption context on its own, and the parent
+ * is what `recordGen` will consult.
+ *
+ * Merged, never superseded — the parent may be running its own skill
+ * concurrently, and several Task sub-agents can be live at once. The
+ * consequence is that code the parent writes itself after this point also
+ * carries the child's skill. That is intended: the bucket asks whether the work
+ * was produced under plugin constraint, and it was.
+ *
+ * Known imprecision, deliberately not fixed: if the parent then reads a skill of
+ * its own, `setThreadActiveSkills` supersedes the whole set and drops the
+ * child's skill with it, because the sticky set has no notion of which turn a
+ * skill came from and so cannot tell a cross-turn supersede from a same-turn
+ * one. Bucketing is unaffected (it only asks whether *any* skill is attached);
+ * only skill-sliced adoption rates lose the child's entry. It also self-heals:
+ * `SoloTaskTraceMiddleware.beforeModel` re-syncs before every model call the
+ * child makes, which merges the skill back. Teaching the store about turns
+ * would change a rule the whole attribution chain rests on, and a mistake there
+ * fails silently, so the trade is not worth it without data showing how often
+ * parent and child really run different skills in one turn.
+ */
+export function syncTaskSubagentSkillAttribution(input: {
+  parentThreadId: string
+  currentRunSkills: string[]
+  currentRunSkillSource: string[]
+}): void {
+  const { parentThreadId, currentRunSkills, currentRunSkillSource } = input
+  if (!parentThreadId || currentRunSkills.length === 0) return
+  mergeThreadActiveSkills(parentThreadId, currentRunSkills, currentRunSkillSource)
+  setAdoptionContext(parentThreadId, {
+    usedSkills: getThreadActiveSkills(parentThreadId),
+    skillSource: getThreadActiveSkillSource(parentThreadId)
+  })
 }
 
 /**
@@ -66,10 +168,10 @@ export function syncTurnSkillAttribution(input: {
   if (currentRunSkills.length > 0) {
     setThreadActiveSkills(threadId, currentRunSkills, currentRunSkillSource)
   }
-  setAdoptionContext(threadId, {
-    usedSkills: codeGenAttributionSkills(threadId, currentRunSkills),
-    skillSource: codeGenAttributionSkillSource(threadId, currentRunSkills, currentRunSkillSource)
-  })
+  setAdoptionContext(
+    threadId,
+    codeGenAttribution(threadId, currentRunSkills, currentRunSkillSource)
+  )
 }
 
 /** A tool call as it appears on a serialized stream message. */
@@ -195,6 +297,22 @@ export class TurnAttributionRecorder {
     this.tracer = input.tracer
     this.userMessageId = input.userMessageId ?? ""
     this.detector = input.detector ?? new SkillUsageDetector()
+    // Publish the sticky set immediately, before the turn writes anything.
+    //
+    // Starting a trace resets the adoption context (a new trace is a new
+    // ownership epoch), which drops the skills the previous turn published.
+    // Every other sync here is conditional — it fires when the detector gains a
+    // skill or a `values` snapshot carries skillsMetadata — so a turn that
+    // never re-reads a SKILL.md used to generate code against an empty context
+    // and be misfiled as vibecoding. Observed in the wild: a single turn whose
+    // early writes carried no skill and whose later writes, after the agent
+    // happened to read a SKILL.md, carried the right one.
+    //
+    // The detector is empty at this point, so this publishes exactly the
+    // fallback chain (sticky set, else nothing) and never invents attribution.
+    // Callers construct this after the tracer has started, so the reset has
+    // already happened and cannot wipe what we write here.
+    this.sync()
   }
 
   /** Files this turn wrote, in first-seen order. */
