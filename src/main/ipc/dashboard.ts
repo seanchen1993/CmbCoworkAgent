@@ -109,6 +109,17 @@ import {
   threadListPreviewSourceIncludes
 } from "./dashboard-trace-thread-list"
 import {
+  buildChatTriggeredTraceFilter,
+  mainAgentConversationAggs,
+  parseStageBucketConversations,
+  projectModeMainAgentConversationFilter,
+  readMainAgentConversations,
+  stageBucketAggKey,
+  stageBucketCodeAggs,
+  stageBucketTraceAggs,
+  stageBucketTraceFilterClause
+} from "./dashboard-stage-buckets"
+import {
   STAGE_BUCKET_LABELS,
   STAGE_DONE_LABEL,
   STAGE_IN_PROGRESS_LABEL,
@@ -1784,19 +1795,6 @@ const SKILL_EVAL_RECENT_TASK_SCAN_LIMIT = 2000
 const SKILL_EVAL_STAT_CACHE_TTL_MS = 60_000
 const SKILL_EVAL_STAT_CACHE_LIMIT = 30
 const SKILL_EVAL_STATS_QUERY_TIMEOUT_MS = 45_000
-
-function buildChatTriggeredTraceFilter(): Record<string, unknown> {
-  return {
-    bool: {
-      should: [
-        { term: { triggerSource: "chat" } },
-        { term: { "triggerSource.keyword": "chat" } },
-        { bool: { must_not: { exists: { field: "triggerSource" } } } }
-      ],
-      minimum_should_match: 1
-    }
-  }
-}
 
 /**
  * 清洗技能名参数：
@@ -11252,114 +11250,11 @@ function emptyStageBuckets(): DashboardStageBuckets {
   }
 }
 
-/** ES agg key for one bucket (shared between trace + code aggregations). */
-function stageBucketAggKey(bucket: StageBucket): string {
-  return `sb_${bucket}`
-}
-
-/**
- * Four named filter sub-aggs splitting code events by stage×skill, each wrapping
- * the same `perBucketAggs` (code_gen/code_adopt/pushed) so every bucket yields a
- * clean DashboardCodeStats via normalizeCodeStatsFromContainer — no cross-status
- * summing of adoption rates. `unattributed` is the complement of 进行中/已完成 and
- * so also captures events missing harnessNodeStatus (historical / unresolved).
- */
-function stageBucketCodeAggs(perBucketAggs: Record<string, unknown>): Record<string, unknown> {
-  const inProgress = { term: { "properties.harnessNodeStatus": STAGE_IN_PROGRESS_LABEL } }
-  const done = { term: { "properties.harnessNodeStatus": STAGE_DONE_LABEL } }
-  const hasSkill = { exists: { field: "properties.usedSkills" } }
-  return {
-    [stageBucketAggKey("plugin_constrained")]: {
-      filter: { bool: { filter: [inProgress, hasSkill] } },
-      aggs: perBucketAggs
-    },
-    // VibeCoding = 进行中但绕过插件（无 Skill）∪ 已完成后的自由产出。
-    [stageBucketAggKey("vibecoding")]: {
-      filter: {
-        bool: {
-          should: [{ bool: { filter: [inProgress], must_not: [hasSkill] } }, done],
-          minimum_should_match: 1
-        }
-      },
-      aggs: perBucketAggs
-    },
-    [stageBucketAggKey("unattributed")]: {
-      filter: {
-        bool: {
-          must_not: [
-            {
-              terms: { "properties.harnessNodeStatus": [STAGE_IN_PROGRESS_LABEL, STAGE_DONE_LABEL] }
-            }
-          ]
-        }
-      },
-      aggs: perBucketAggs
-    }
-  }
-}
-
-/**
- * Trace-side ES filter clause for one stage bucket（字段无 `properties.` 前缀，用于 trace 索引）。
- * 单一来源：既给 stageBucketTraceAggs 的分桶用，也给「查看对话」按桶过滤 trace 用。
- *  - 插件约束（Harness）= 进行中 + 有 Skill
- *  - VibeCoding        = 进行中但无 Skill ∪ 已完成（不论 Skill）
- *  - 未归因            = 其余状态 / 无状态
- */
-function stageBucketTraceFilterClause(bucket: StageBucket): Record<string, unknown> {
-  const inProgress = { term: { harnessNodeStatus: STAGE_IN_PROGRESS_LABEL } }
-  const done = { term: { harnessNodeStatus: STAGE_DONE_LABEL } }
-  const hasSkill = { exists: { field: "usedSkills" } }
-  switch (bucket) {
-    case "plugin_constrained":
-      return { bool: { filter: [inProgress, hasSkill] } }
-    case "vibecoding":
-      return {
-        bool: {
-          should: [{ bool: { filter: [inProgress], must_not: [hasSkill] } }, done],
-          minimum_should_match: 1
-        }
-      }
-    case "unattributed":
-      return {
-        bool: {
-          must_not: [{ terms: { harnessNodeStatus: [STAGE_IN_PROGRESS_LABEL, STAGE_DONE_LABEL] } }]
-        }
-      }
-  }
-}
-
-/** Trace-side mirror of stageBucketCodeAggs (conversation counts, no perBucketAggs). */
-function stageBucketTraceAggs(): Record<string, unknown> {
-  return {
-    [stageBucketAggKey("plugin_constrained")]: {
-      filter: stageBucketTraceFilterClause("plugin_constrained")
-    },
-    [stageBucketAggKey("vibecoding")]: {
-      filter: stageBucketTraceFilterClause("vibecoding")
-    },
-    [stageBucketAggKey("unattributed")]: {
-      filter: stageBucketTraceFilterClause("unattributed")
-    }
-  }
-}
-
 /** Parse a container holding `sb_*` filter buckets → per-bucket code stats. */
 function parseStageBucketCodeStats(container: unknown): Record<StageBucket, DashboardCodeStats> {
   const c = asRecord(container)
   const read = (bucket: StageBucket): DashboardCodeStats =>
     normalizeCodeStatsFromContainer(asRecord(c[stageBucketAggKey(bucket)]))
-  return {
-    plugin_constrained: read("plugin_constrained"),
-    vibecoding: read("vibecoding"),
-    unattributed: read("unattributed")
-  }
-}
-
-/** Parse a container holding `sb_*` filter buckets → per-bucket conversation counts. */
-function parseStageBucketConversations(container: unknown): Record<StageBucket, number> {
-  const c = asRecord(container)
-  const read = (bucket: StageBucket): number =>
-    asNumber(asRecord(c[stageBucketAggKey(bucket)]).doc_count)
   return {
     plugin_constrained: read("plugin_constrained"),
     vibecoding: read("vibecoding"),
@@ -11468,42 +11363,6 @@ function projectModeTraceFilters(
     { exists: { field: "harnessProjectId" } },
     ...(orgFilterClause ? [orgFilterClause] : [])
   ]
-}
-
-/**
- * Project-list conversation count = user-initiated main-Agent turns only.
- *
- * Child traces inherit `triggerSource=chat` from their root turn, so the active-trigger
- * filter alone would still count coordinator workers / workflow agents / task agents.
- * Documents written before multi-Agent observability have no traceKind or parent fields;
- * treat those legacy records as root turns for backwards-compatible time ranges.
- */
-function projectModeMainAgentConversationFilter(): Record<string, unknown> {
-  return {
-    bool: {
-      filter: [
-        buildChatTriggeredTraceFilter(),
-        {
-          bool: {
-            should: [
-              { term: { traceKind: "root" } },
-              { term: { "traceKind.keyword": "root" } },
-              {
-                bool: {
-                  must_not: [
-                    { exists: { field: "traceKind" } },
-                    { exists: { field: "parentTraceId" } },
-                    { exists: { field: "subagentKind" } }
-                  ]
-                }
-              }
-            ],
-            minimum_should_match: 1
-          }
-        }
-      ]
-    }
-  }
 }
 
 /** Build the `name@version` key used to merge adapter rows across snapshot + usage. */
@@ -12737,17 +12596,9 @@ async function fetchProjectModeUsage(
         aggs: {
           by_version: {
             terms: { field: "harnessAdapterVersion", size: 50 },
-            aggs: {
-              main_agent_conversations: {
-                filter: projectModeMainAgentConversationFilter(),
-                aggs: stageBucketTraceAggs()
-              }
-            }
+            aggs: mainAgentConversationAggs(stageBucketTraceAggs())
           },
-          main_agent_conversations: {
-            filter: projectModeMainAgentConversationFilter(),
-            aggs: stageBucketTraceAggs()
-          }
+          ...mainAgentConversationAggs(stageBucketTraceAggs())
         }
       }
     }
@@ -12772,7 +12623,7 @@ async function fetchProjectModeUsage(
       const rawVersions = asRecord(b.by_version).buckets
       const versions = Array.isArray(rawVersions) ? rawVersions : []
       if (versions.length === 0) {
-        const mainAgent = asRecord(b.main_agent_conversations)
+        const mainAgent = readMainAgentConversations(b)
         adapters.set(adapterKey(name), {
           name,
           version: undefined,
@@ -12787,7 +12638,7 @@ async function fetchProjectModeUsage(
       for (const vb of versions) {
         const v = asRecord(vb)
         const version = asOptionalString(v.key)
-        const mainAgent = asRecord(v.main_agent_conversations)
+        const mainAgent = readMainAgentConversations(v)
         adapters.set(adapterKey(name, version), {
           name,
           version,
@@ -12963,31 +12814,28 @@ async function fetchProjectModePageUsage(
           // trace 一并计入了，与同一行的「对话数」对不上；现在一起收进 filter 内。
           // 三桶尤其明显：一次用户轮次派出 10 个 Task 子代理就会被记成 11 次对话，
           // 让「VibeCoding 对话远多于 Harness」看起来像结论，其实是口径差。
-          main_agent_conversations: {
-            filter: projectModeMainAgentConversationFilter(),
-            aggs: {
-              ...stageBucketTraceAggs(),
-              ...(includeSuspectedTechnicalDetail
-                ? {
-                    suspected_technical_detail_supplements: {
-                      filter: { term: { suspectedTechnicalDetailSupplement: true } }
-                    }
+          ...mainAgentConversationAggs({
+            ...stageBucketTraceAggs(),
+            ...(includeSuspectedTechnicalDetail
+              ? {
+                  suspected_technical_detail_supplements: {
+                    filter: { term: { suspectedTechnicalDetailSupplement: true } }
                   }
-                : {}),
-              by_node: { terms: { field: "harnessNodeName", size: 100 } },
-              by_feature: {
-                terms: {
-                  field: "harnessFeatureSlug",
-                  size: PROJECT_MODE_FEATURE_SLUG_LIMIT
-                },
-                aggs: {
-                  by_node: {
-                    terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
-                  }
+                }
+              : {}),
+            by_node: { terms: { field: "harnessNodeName", size: 100 } },
+            by_feature: {
+              terms: {
+                field: "harnessFeatureSlug",
+                size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+              },
+              aggs: {
+                by_node: {
+                  terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
                 }
               }
             }
-          },
+          }),
           skills: { terms: { field: "usedSkills", size: 100 } },
           skill_source: { terms: { field: "skillSource", size: 100 } }
         }
@@ -13011,7 +12859,7 @@ async function fetchProjectModePageUsage(
     const b = asRecord(bucket)
     const key = asString(b.key)
     if (!key) continue
-    const mainAgentConversations = asRecord(b.main_agent_conversations)
+    const mainAgentConversations = readMainAgentConversations(b)
     perProject.set(key, asNumber(mainAgentConversations.doc_count))
     if (includeSuspectedTechnicalDetail) {
       perProjectSuspectedTechnicalDetail.set(
@@ -14794,13 +14642,10 @@ async function fetchPluginAggregate(
         // 对话数与阶段细分同项目列表口径：主动触发的主 Agent root trace。
         // project_count 留在外层不收窄：它回答「这个插件被多少项目用过」，
         // 按项目存在性算，不该受轮次归属影响。
-        main_agent_conversations: {
-          filter: projectModeMainAgentConversationFilter(),
-          aggs: {
-            conversation_count: { value_count: { field: "traceId" } },
-            ...traceNodeStatusAgg()
-          }
-        },
+        ...mainAgentConversationAggs({
+          conversation_count: { value_count: { field: "traceId" } },
+          ...traceNodeStatusAgg()
+        }),
         project_count: { cardinality: { field: "harnessProjectId" } }
       }
     }) as Promise<EsSearchResponse>,
@@ -14809,7 +14654,7 @@ async function fetchPluginAggregate(
   ])
 
   const traceAggs = asRecord(traceRaw.aggregations)
-  const mainAgentTraceAggs = asRecord(traceAggs.main_agent_conversations)
+  const mainAgentTraceAggs = readMainAgentConversations(traceAggs)
   const conversationCount = asNumber(asRecord(mainAgentTraceAggs.conversation_count).value)
   const projectCount = asNumber(asRecord(traceAggs.project_count).value)
   const traceParsed = parseTraceNodeBuckets(mainAgentTraceAggs)
