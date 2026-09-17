@@ -1253,6 +1253,111 @@ async function main(): Promise<void> {
       pass(
         "cold command to registered tool to MCP retains the real parent turn, owner and execution receipt"
       )
+      const registeredMcpBefore = await page!.evaluate(
+        (id) => window.api.mods.audit(id),
+        registryThread
+      )
+      const registeredMcpPhysical = readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8")
+      await functionComposer.fill("/foundation-mcp-registered ")
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+            (job) =>
+              job.command === "foundation-mcp-registered" &&
+              job.state === "succeeded" &&
+              job.result?.text.includes("registeredCaller")
+          ),
+        "named MCP invokes registered tools through the production host"
+      )
+      const registeredMcpJob = (
+        await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)
+      ).find((job) => job.command === "foundation-mcp-registered")!
+      const registeredMcpValue = JSON.parse(registeredMcpJob.result!.text!)
+      assert.equal(registeredMcpValue.isError, false)
+      const registeredMcpResult = JSON.parse(registeredMcpValue.content[0].text)
+      assert.equal(registeredMcpResult.caller, "host-foundation")
+      assert.equal(registeredMcpResult.registeredCaller, "host-foundation")
+      assert.equal(registeredMcpResult.child.isError, false)
+      assert.equal(JSON.parse(registeredMcpResult.child.content[0].text).files.length, 2)
+      assert.match(JSON.stringify(registeredMcpResult), /REDACTED/)
+      assert.doesNotMatch(JSON.stringify(registeredMcpResult), /sk-private-fixture/)
+      const registeredMcpRows = (
+        await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+      ).filter((row) => !registeredMcpBefore.some((old) => old.callId === row.callId))
+      assert.equal(registeredMcpRows.length, 2)
+      const registeredMcpOuter = registeredMcpRows.find(
+        (row) => row.toolId === "function:mcp__host-foundation__probe"
+      )!
+      const registeredMcpInner = registeredMcpRows.find(
+        (row) => row.toolId === "function:mcp__function-commands__project_brief"
+      )!
+      assert.equal(registeredMcpInner.identity!.parentCallId, registeredMcpOuter.callId)
+      assert.equal(registeredMcpOuter.identity!.modId, "function:host-foundation")
+      assert.equal(registeredMcpInner.identity!.modId, "function:function-commands")
+      for (const row of registeredMcpRows) {
+        assert.equal(row.status, "succeeded")
+        assert.equal(row.publication, "published")
+        assert.equal(row.identity!.turnId, registeredMcpOuter.identity!.turnId)
+      }
+      assert.equal(
+        readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8"),
+        registeredMcpPhysical
+      )
+      assert.equal(modelServer.requests.length, requestsBeforeMcp)
+      await page!.screenshot({ path: join(artifacts, "function-registered-mcp.png") })
+      pass(
+        "cold named MCP calls own and cross-plugin registered tools with protected results, actual caller and one receipt each"
+      )
+      const collisionId = await app.evaluate(() =>
+        (
+          globalThis as unknown as {
+            modsFixture: { reserveFunctionMcpNamespace(name: string): string }
+          }
+        ).modsFixture.reserveFunctionMcpNamespace("function-commands")
+      )
+      try {
+        const collisionBefore = await page!.evaluate(
+          (id) => window.api.mods.audit(id),
+          registryThread
+        )
+        await functionComposer.fill("/foundation-mcp-collision ")
+        await functionComposer.press("Enter")
+        await until(
+          async () =>
+            (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+              (job) =>
+                job.command === "foundation-mcp-collision" &&
+                job.state === "succeeded" &&
+                job.result?.text.includes("MODS_MCP_SERVER_NAME_COLLISION")
+            ),
+          "newly configured MCP namespace blocks a registered tool before execution"
+        )
+        assert.deepEqual(
+          (await page!.evaluate((id) => window.api.mods.audit(id), registryThread)).map(
+            (row) => row.callId
+          ),
+          collisionBefore.map((row) => row.callId)
+        )
+        assert.equal(
+          readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8"),
+          registeredMcpPhysical
+        )
+        assert.equal(modelServer.requests.length, requestsBeforeMcp)
+        pass(
+          "a newly configured MCP server reserves its name before discovery and prevents registered execution without an audit claim"
+        )
+      } finally {
+        await app.evaluate(
+          (_electron, id) =>
+            (
+              globalThis as unknown as {
+                modsFixture: { removeFunctionMcpConfiguration(id: string): void }
+              }
+            ).modsFixture.removeFunctionMcpConfiguration(id),
+          collisionId
+        )
+      }
       await functionComposer.fill(
         '/claw-mcp {"server":"Mods SDK fixture","tool":"mods_route","args":{"text":"named"}}'
       )

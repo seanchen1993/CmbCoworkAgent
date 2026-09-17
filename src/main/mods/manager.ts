@@ -168,6 +168,25 @@ export class ModsManager {
     }))
   }
 
+  /** Registration cannot shadow a real host tool, even when the role hides it from discovery. */
+  assertFunctionToolNameAvailable(workspace: string, threadId: string, name: string): void {
+    workspace = this.workspaceKey(workspace)
+    const agentId = this.functionToolAgent(workspace, threadId)
+    const catalog = this.functionToolCatalogs.get(JSON.stringify([workspace, threadId, agentId]))
+    if (catalog) {
+      this.assertFunctionBinding(catalog.binding)
+      if (catalog.tools.some((tool) => tool.name === name))
+        throw new ModError("MODS_TOOL_NAME_COLLISION")
+    }
+    const mcp = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId, agentId }))
+    if (mcp) {
+      mcp.assertLive()
+      this.assertFunctionBinding(mcp.binding)
+      if (mcp.peekTools?.()?.some((tool) => tool.toolId === name || tool.canonicalToolId === name))
+        throw new ModError("MODS_TOOL_NAME_COLLISION")
+    }
+  }
+
   filterFunctionTools<T extends { name: string }>(
     workspace: string,
     threadId: string,

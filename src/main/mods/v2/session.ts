@@ -42,6 +42,7 @@ import { FunctionToolRegistry, functionToolSpec } from "./tool-registry"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
 import {
   functionMcpInput,
+  functionRegisteredMcpResult,
   validateFunctionMcpResult,
   type FunctionMcpToolDispatch
 } from "./mcp-sdk"
@@ -50,6 +51,7 @@ import { constrainToolPermission, type ToolPermissionResult } from "../../../sha
 import { validateRegisteredToolInput } from "./tool-schema"
 import { functionCallAgent, withFunctionAgentExecution } from "./host-call"
 import { currentFunctionExecution } from "./execution-context"
+import { functionMcpToolName } from "./mcp-names"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -73,6 +75,7 @@ export interface FunctionSessionHost {
   ): Promise<ToolPermissionResult>
   listTools?(signal: AbortSignal): Promise<FunctionToolInfo[]>
   filterTools?(tools: FunctionToolInfo[]): FunctionToolInfo[]
+  assertToolNameAvailable?(plugin: string, name: string): void
   registeredTool?(
     owner: FunctionPlugin,
     input: ModObject,
@@ -281,7 +284,9 @@ export class FunctionSession {
   async registeredTools(): Promise<RegisteredFunctionTool[]> {
     await this.start()
     this.assertLive()
-    return this.tools.list()
+    const tools = this.tools.list()
+    for (const tool of tools) this.host.assertToolNameAvailable?.(tool.plugin, tool.name)
+    return tools
   }
 
   async checkTool(
@@ -314,11 +319,17 @@ export class FunctionSession {
     const tool = this.tools.validate(input)
     const owner = this.plugins.find((plugin) => plugin.name === tool?.plugin)
     if (!tool || !owner) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
+    const assertRegistered = () => {
+      this.assertLive(owner)
+      if (this.tools.get(tool.name) !== tool) throw new ModFunctionError("MODS_TOOL_CHANGED")
+      this.host.assertToolNameAvailable?.(tool.plugin, tool.name)
+    }
+    assertRegistered()
     const scoped = signal
       ? AbortSignal.any([signal, this.controller.signal])
       : this.controller.signal
     const run = async (): Promise<ModObject> => {
-      this.assertLive(owner)
+      assertRegistered()
       const result = (await this.dispatch(
         "tool.call",
         input,
@@ -339,11 +350,11 @@ export class FunctionSession {
         }
       )) as ModObject
       if (result.ref !== undefined) throw new ModFunctionError("MODS_TOOL_RESULT_REF")
-      this.assertLive(owner)
+      assertRegistered()
       return result
     }
     const caller = skip && this.plugins.find((plugin) => plugin.name === skip.plugin)
-    return this.host.registeredTool
+    const answer = await (this.host.registeredTool
       ? this.host.registeredTool(
           owner,
           input,
@@ -352,7 +363,9 @@ export class FunctionSession {
           run,
           caller ? { plugin: caller.name, tier: caller.tier } : { plugin: "engine", tier: "core" }
         )
-      : run()
+      : run())
+    assertRegistered()
+    return answer
   }
 
   private async dispatch(
@@ -517,6 +530,7 @@ export class FunctionSession {
         if (registered) {
           if (!owner) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
           this.assertLive(owner)
+          this.host.assertToolNameAvailable?.(registered.plugin, registered.name)
           if (!isModObject(input.input)) return { decision: "deny", reason: "MODS_TOOL_ARGUMENTS" }
           validateRegisteredToolInput(registered.inputSchema, input.input)
         }
@@ -526,6 +540,7 @@ export class FunctionSession {
         if (owner) this.assertLive(owner)
         if (this.tools.get(String(input.tool)) !== registered)
           throw new ModFunctionError("MODS_TOOL_CHANGED")
+        if (registered) this.host.assertToolNameAvailable?.(registered.plugin, registered.name)
         validateToolCheckResult(value)
         return value
       }
@@ -558,8 +573,28 @@ export class FunctionSession {
         depth + 1,
         {
           plugin,
-          core: (value, signal) => {
+          core: async (value, signal) => {
             this.assertLive(plugin)
+            const registered = this.tools.resolveMcp(String(value.server), String(value.tool))
+            if (registered) {
+              const agentId = functionCallAgent(this.host.workspace, this.host.threadId)
+              const input: ModObject = {
+                ...(value.args as ModObject),
+                tool: registered.name,
+                tool_use_id: randomUUID()
+              }
+              delete input.agentId
+              if (agentId !== "main") input.agentId = agentId
+              return functionRegisteredMcpResult(
+                await this.runRegisteredTool(
+                  input,
+                  signal,
+                  { plugin: plugin.name, registration: source.registration },
+                  depth + 2,
+                  turnHeld ?? "tool.call"
+                )
+              )
+            }
             if (!this.host.callMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
             return this.host.callMcp(
               plugin,
@@ -609,9 +644,17 @@ export class FunctionSession {
           plugin,
           core: async (value, signal) => {
             this.assertLive(plugin)
-            if (method === "tool.register") return this.tools.register(plugin.name, value)
+            if (method === "tool.register") {
+              this.host.assertToolNameAvailable?.(
+                plugin.name,
+                functionMcpToolName(plugin.name, String(value.name))
+              )
+              return this.tools.register(plugin.name, value)
+            }
             const native = (await this.host.listTools?.(signal)) ?? []
             const registered = this.tools.list()
+            for (const tool of registered)
+              this.host.assertToolNameAvailable?.(tool.plugin, tool.name)
             if (registered.some((tool) => native.some((entry) => entry.name === tool.name)))
               throw new ModFunctionError("MODS_TOOL_NAME_COLLISION")
             const tools = [

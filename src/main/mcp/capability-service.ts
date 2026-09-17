@@ -201,6 +201,10 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   private initPromise: Promise<void> | null = null
   private readonly schemaCache = new SchemaCache()
 
+  configuredServerNames(): string[] {
+    return this.readSources().map((source) => source.providerDisplayName)
+  }
+
   peekTools(): McpCapabilityTool[] | null {
     if (!this.cache || this.cache.fingerprint !== buildFingerprint(this.readSources())) return null
     return structuredClone(this.cache.tools)

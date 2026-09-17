@@ -664,6 +664,30 @@ describe("project Mods lifecycle and UI authority", () => {
     )
   })
 
+  it("rejects registered names that shadow scoped native or canonical MCP tools without discovery", async () => {
+    const f = await fixture()
+    const name = "mcp__demo__probe"
+    f.manager.assertFunctionToolNameAvailable(f.root, "thread", name)
+    f.manager.bindFunctionToolCatalog(f.scope, [{ name, description: "Host", mcp: true }])
+    expect(() => f.manager.assertFunctionToolNameAvailable(f.root, "thread", name)).toThrow(
+      "MODS_TOOL_NAME_COLLISION"
+    )
+    f.manager.assertFunctionToolNameAvailable(f.root, "other", name)
+    f.manager.bindFunctionToolCatalog(f.scope, [])
+    const discovery = vi.fn(async () => [] as McpCapabilityTool[])
+    const invoke = vi.fn(async () => ({}))
+    const release = f.manager.bindMcp(f.scope, invoke, discovery, () => [
+      { toolId: "mcp__probe", canonicalToolId: name } as McpCapabilityTool
+    ])
+    expect(() => f.manager.assertFunctionToolNameAvailable(f.root, "thread", name)).toThrow(
+      "MODS_TOOL_NAME_COLLISION"
+    )
+    release()
+    f.manager.assertFunctionToolNameAvailable(f.root, "thread", name)
+    expect(discovery).not.toHaveBeenCalled()
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
   it("executes a function SDK write through final-input approval and refuses stale or read-only calls", async () => {
     const f = await fixture()
     await f.enable()

@@ -33,6 +33,8 @@ import { invokeFunctionModel, resolveFunctionModel } from "../mods/v2/model-prov
 import { FunctionRegisteredTools } from "../mods/v2/registered-tools"
 import { queryFunctionToolPermission } from "../mods/v2/tool-permission-host"
 import { functionFileScope } from "../mods/v2/file-permission-host"
+import { assertFunctionMcpServerAvailable } from "../mods/v2/mcp-names"
+import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -125,6 +127,15 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         functionFileScope(manager, assertStandaloneThread, workspace, threadId),
       filterTools: (workspace, threadId, tools) =>
         manager.filterFunctionTools(workspace, threadId, tools),
+      assertToolNameAvailable: (workspace, threadId, plugin, name) => {
+        if (writableThreadScope(threadId) !== workspace)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        assertFunctionMcpServerAvailable(
+          plugin,
+          getGlobalMcpCapabilityService().configuredServerNames?.() ?? []
+        )
+        manager.assertFunctionToolNameAvailable(workspace, threadId, name)
+      },
       registeredTool: (...args) => registeredTools.call(...args),
       listTools: async (workspace, threadId, signal) => {
         signal.throwIfAborted()

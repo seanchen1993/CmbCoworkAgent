@@ -1,8 +1,17 @@
 export function register(on) {
   let mcpRouteName
+  let registeredCaller
   on("session.start", async ($, e, next) => {
     await $.tool.register({ name: "probe", description: "Read a project note and summarize it" })
     await $.command.register({ name: "foundation-mcp", description: "Nested MCP identity probe" })
+    await $.command.register({
+      name: "foundation-mcp-registered",
+      description: "Named registered tools"
+    })
+    await $.command.register({
+      name: "foundation-mcp-collision",
+      description: "MCP name reservation"
+    })
     await $.command.register({
       name: "foundation-scope",
       description: "Execution root and capability probe"
@@ -20,6 +29,18 @@ export function register(on) {
   on("command.run", { command: "foundation-mcp" }, async ($) => ({
     text: JSON.stringify(await $.tool.call({ tool: "mcp__host-foundation__probe", mode: "mcp" }))
   }))
+  on("command.run", { command: "foundation-mcp-registered" }, async ($) => ({
+    text: JSON.stringify(await $.mcp.call("host-foundation", "probe", { mode: "registered" }))
+  }))
+  on("command.run", { command: "foundation-mcp-collision" }, async ($) => {
+    try {
+      return {
+        text: JSON.stringify(await $.mcp.call("function-commands", "project_brief", { limit: 2 }))
+      }
+    } catch (error) {
+      return { text: `collision:${error.message}` }
+    }
+  })
   on("command.run", { command: "foundation-scope" }, async ($) => {
     let blocked
     try {
@@ -60,6 +81,8 @@ export function register(on) {
     return next({ ...e, text: `${e.text}:${next.origin.plugin}:rewritten` })
   })
   on("tool.check", (_, e, next) => {
+    if (e.tool === "mcp__function-commands__project_brief" && e.input.limit === 2)
+      registeredCaller = next.origin.plugin
     if (e.tool === "mcp__function-commands__project_brief" && e.input.limit === 13)
       return {
         decision: "deny",
@@ -71,7 +94,18 @@ export function register(on) {
       return { decision: "ask", reason: `Permission fixture asks ${next.origin.plugin}` }
     return next(e)
   })
-  on("tool.call", { tool: "mcp__host-foundation__probe" }, async ($, e) => {
+  on("tool.call", { tool: "mcp__host-foundation__probe" }, async ($, e, next) => {
+    if (e.mode === "registered") {
+      const child = await $.mcp.call("function-commands", "project_brief", { limit: 2 })
+      return {
+        result: {
+          child,
+          caller: next.origin.plugin,
+          registeredCaller,
+          secret: "sk-private-fixture"
+        }
+      }
+    }
     if (e.mode === "child")
       return {
         result: {

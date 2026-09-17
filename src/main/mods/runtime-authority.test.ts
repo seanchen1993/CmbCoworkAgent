@@ -534,6 +534,105 @@ it("binds concurrent shared children explicitly and expires each scope when its 
   expect(audit[0].identity).toMatchObject({ agentId: "reader" })
 })
 
+it("keeps named registered MCP calls on the real shared child and native receipt chain", async () => {
+  const f = fixture()
+  const authority = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+  const host = new FunctionRegisteredTools(f.manager.store, {
+    assertScope: (workspace, threadId) => {
+      f.manager.functionToolAgent(workspace, threadId)
+    },
+    admit: (...args) => f.manager.authorizeRegisteredTool(...args),
+    publish: async (identity, value) => {
+      f.manager.store.publication(identity.callId, "", [], "published")
+      return value
+    }
+  })
+  const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+    on("session.start",async($,e,next)=>{
+      await $.tool.register({name:"outer",description:"Outer"});
+      await $.tool.register({name:"inner",description:"Inner"});
+      return next(e);
+    });
+    on("tool.call",{tool:"mcp__demo__outer"},async($)=>({result:await $.mcp.call("demo","inner")}));
+    on("tool.call",{tool:"mcp__demo__inner"},async($,e)=>({result:{agent:e.agentId,
+      read:await $.tool.call({tool:"read_file",file_path:"name.txt"})}}));
+  }}`)
+  const physical = vi.fn()
+  const session = new FunctionSession(
+    [
+      {
+        name: "demo",
+        root: f.workspace,
+        tier: "user",
+        guest,
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+    ],
+    {
+      workspace: f.scope.workspace,
+      threadId: "thread",
+      assertLive: () => f.manager.store.assertGrant(f.grant),
+      publish: async (v) => v,
+      assertToolNameAvailable: (_plugin, name) =>
+        f.manager.assertFunctionToolNameAvailable(f.workspace, "thread", name),
+      registeredTool: (_owner, input, kind, signal, run, caller) =>
+        host.call(f.scope.workspace, "thread", f.grant, input, kind, signal, run, caller),
+      callMcp: physical,
+      callTool: async (_plugin, input, signal) => {
+        const { target, args } = functionSdkToolInput(input)
+        return f.manager.invokeFunctionTool(
+          f.workspace,
+          "thread",
+          f.grant,
+          target,
+          args,
+          signal,
+          false,
+          false
+        )
+      }
+    }
+  )
+  try {
+    const result = await f.manager.withSharedAgent(
+      authority,
+      "worker",
+      f.controller.signal,
+      { blockedToolNames: new Set(), readOnly: true },
+      () =>
+        session.interceptTool(
+          {
+            tool: "mcp__demo__outer",
+            tool_use_id: "real-model-tool",
+            agentId: "worker"
+          },
+          f.controller.signal,
+          async () => {
+            throw Error("Unexpected native fallback")
+          }
+        )
+    )
+    expect(JSON.stringify(result)).toContain("isolated checkout")
+    const audit = f.manager.store.audit(f.scope.workspace)
+    expect(audit).toHaveLength(3)
+    const outer = audit.find((row) => row.toolId === "function:mcp__demo__outer")!
+    const inner = audit.find((row) => row.toolId === "function:mcp__demo__inner")!
+    const read = audit.find((row) => row.toolId === "host:read_file")!
+    expect(inner.identity?.parentCallId).toBe(outer.identity?.callId)
+    expect(read.identity?.parentCallId).toBe(inner.identity?.callId)
+    for (const row of audit)
+      expect(row).toMatchObject({
+        status: "succeeded",
+        publication: "published",
+        identity: { agentId: "worker", turnId: "turn", modId: "function:demo" }
+      })
+    expect(physical).not.toHaveBeenCalled()
+    authority.assertLive()
+  } finally {
+    await session.close()
+  }
+})
+
 it("uses the constructor's fixed owner even when a backend is created inside a parent tool call", async () => {
   const f = fixture()
   const childIdentity = { ...f.scope, agentId: "explicit-child" }

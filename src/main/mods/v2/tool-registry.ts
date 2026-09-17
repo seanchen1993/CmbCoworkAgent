@@ -3,6 +3,8 @@ import type { RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { validateToolSchema, validateRegisteredToolInput } from "./tool-schema"
+import { functionMcpToolCandidates, functionMcpToolName } from "./mcp-names"
+import { isDeepStrictEqual } from "node:util"
 
 export function functionToolSpec(input: ModObject): ModObject {
   if (
@@ -24,7 +26,7 @@ export class FunctionToolRegistry {
 
   register(plugin: string, raw: ModObject): ModObject {
     const spec = functionToolSpec(raw)
-    const name = `mcp__${plugin}__${spec.name}`
+    const name = functionMcpToolName(plugin, String(spec.name))
     if (name.length > 256) throw new ModFunctionError("MODS_TOOL_SPEC")
     const previous = this.tools.get(name)
     if (previous && previous.plugin !== plugin)
@@ -42,6 +44,8 @@ export class FunctionToolRegistry {
       inputSchema: spec.inputSchema as ModObject,
       mcp: true
     }
+    // Repeating an identical registration must not invalidate an in-flight tool definition.
+    if (previous && isDeepStrictEqual(previous, tool)) return { tool: name }
     const totalChars = [...this.tools.values()]
       .filter((entry) => entry.name !== name)
       .reduce((size, entry) => size + JSON.stringify(entry).length, JSON.stringify(tool).length)
@@ -52,6 +56,13 @@ export class FunctionToolRegistry {
 
   get(name: string): RegisteredFunctionTool | undefined {
     return this.tools.get(name)
+  }
+
+  resolveMcp(server: string, name: string): RegisteredFunctionTool | undefined {
+    const candidates = functionMcpToolCandidates(server, name)
+    const matches = [...this.tools.values()].filter((tool) => candidates.has(tool.name))
+    if (matches.length > 1) throw new ModFunctionError("MODS_MCP_TOOL_AMBIGUOUS")
+    return matches[0]
   }
 
   list(): RegisteredFunctionTool[] {

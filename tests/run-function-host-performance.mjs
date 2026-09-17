@@ -6,7 +6,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
-// Focused ABBA/BAAB comparison of the actual host wrapper + SQLite, without a guest VM or I/O.
+// ABBA/BAAB comparisons of real host paths. Each mode reports its VM and I/O coverage.
 // The baseline is loaded from Git into the bundler, never checked out over the user's files.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const baseline = execFileSync(
@@ -15,6 +15,7 @@ const baseline = execFileSync(
   { cwd: root, encoding: "utf8" }
 ).trim()
 const instanceMode = process.argv[3] === "mcp-instances"
+const registeredMode = process.argv[3] === "registered-mcp"
 const mcpMode = ["mcp", "mcp-matched", "mcp-sdk", "mcp-routing", "mcp-instances"].includes(
   process.argv[3]
 )
@@ -23,12 +24,21 @@ const sameSdk = process.argv[3] === "mcp-sdk" || routing
 const matchedPublication = process.argv[3] === "mcp-matched"
 const output = join(
   root,
-  `output/mods-v2-validation/${mcpMode ? process.argv[3] : "host"}-performance`
+  `output/mods-v2-validation/${mcpMode || registeredMode ? process.argv[3] : "host"}-performance`
 )
 await mkdir(output, { recursive: true })
-const source = mcpMode
-  ? await readFile(join(root, "tests/support/function-mcp-performance-entry.ts"), "utf8")
-  : `
+const source =
+  mcpMode || registeredMode
+    ? await readFile(
+        join(
+          root,
+          registeredMode
+            ? "tests/support/function-registered-mcp-performance-entry.ts"
+            : "tests/support/function-mcp-performance-entry.ts"
+        ),
+        "utf8"
+      )
+    : `
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
@@ -68,10 +78,11 @@ for (const variant of ["baseline", "current"]) {
   await build({
     stdin: {
       contents: source,
-      resolveDir: mcpMode ? join(root, "tests/support") : root,
+      resolveDir: mcpMode || registeredMode ? join(root, "tests/support") : root,
       loader: "ts"
     },
     define: {
+      __MODS_REGISTERED_MCP__: registeredMode && variant === "current" ? "true" : "false",
       __MODS_MCP_SDK__: variant === "current" || sameSdk ? "true" : "false",
       __MODS_MCP_ROUTING__: routing && (instanceMode || variant === "current") ? "true" : "false",
       __MODS_RUNTIME_AUTHORITY__: instanceMode && variant === "current" ? "true" : "false",
@@ -80,11 +91,16 @@ for (const variant of ["baseline", "current"]) {
     outfile,
     bundle: true,
     format: "esm",
+    banner: registeredMode
+      ? {
+          js: 'import { fileURLToPath as perfFileURLToPath } from "node:url"; import { dirname as perfDirname } from "node:path"; import { createRequire as perfCreateRequire } from "node:module"; const __dirname = perfDirname(perfFileURLToPath(import.meta.url)); const require = perfCreateRequire(import.meta.url);'
+        }
+      : undefined,
     platform: "node",
     target: "node22",
     packages: "external",
     plugins: [
-      ...(mcpMode
+      ...(mcpMode || registeredMode
         ? [
             {
               name: "no-guest-in-host-performance",
@@ -161,18 +177,20 @@ const prior = summarize(samples.baseline),
 const report = {
   baseline,
   hashes,
-  scope: instanceMode
-    ? "same named MCP resolution/tool-hook host bridge in both revisions; current uses a real runtime authority; real ModEngine, SQLite and 1000-tool catalog; passthrough dispatcher, no VM, policy worker, queue binding or network"
-    : routing
-      ? "same MCP SDK with current name-resolution/tool-hook host bridge; real ModEngine, SQLite and 1000-tool catalog; passthrough dispatcher, no VM, policy worker, queue binding or network"
-      : sameSdk
-        ? "same named MCP SDK in both revisions (1000 tools), actual ModEngine + SQLite including publication; stub approval/transport, no guest VM or policy worker"
-        : mcpMode
-          ? "baseline internal MCP capability route versus new named SDK resolver (1000 tools), both actual ModEngine + SQLite; stub approval/transport, no guest VM or policy worker; " +
-            (matchedPublication
-              ? "benchmark adds equivalent publication persistence to baseline, isolating resolver/guard overhead"
-              : "SDK additionally persists publication with policy off, baseline leaves it pending")
-          : "registered host boundary + actual SQLite; no VM, policy worker, native tool I/O or provider",
+  scope: registeredMode
+    ? "baseline direct tool.call versus current named mcp.call for the same registered guest handler; real QuickJS, instance authority and SQLite; 1000 host tools and 100 configured server-name fixtures; no policy worker, command queue, transport or model"
+    : instanceMode
+      ? "same named MCP resolution/tool-hook host bridge in both revisions; current uses a real runtime authority; real ModEngine, SQLite and 1000-tool catalog; passthrough dispatcher, no VM, policy worker, queue binding or network"
+      : routing
+        ? "same MCP SDK with current name-resolution/tool-hook host bridge; real ModEngine, SQLite and 1000-tool catalog; passthrough dispatcher, no VM, policy worker, queue binding or network"
+        : sameSdk
+          ? "same named MCP SDK in both revisions (1000 tools), actual ModEngine + SQLite including publication; stub approval/transport, no guest VM or policy worker"
+          : mcpMode
+            ? "baseline internal MCP capability route versus new named SDK resolver (1000 tools), both actual ModEngine + SQLite; stub approval/transport, no guest VM or policy worker; " +
+              (matchedPublication
+                ? "benchmark adds equivalent publication persistence to baseline, isolating resolver/guard overhead"
+                : "SDK additionally persists publication with policy off, baseline leaves it pending")
+            : "registered host boundary + actual SQLite; no VM, policy worker, native tool I/O or provider",
   prior,
   current,
   p95DeltaPercent: (current.p95Ms / prior.p95Ms - 1) * 100,

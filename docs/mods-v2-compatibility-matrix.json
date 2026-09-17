@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-17",
-  "codeBaseline": "31de982c",
+  "codeBaseline": "236f4aef",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -77,8 +77,8 @@
       "native CMB tool names/arguments/results; Claude built-in Read/Bash schemas pending",
       "SDK supports read_file/write_file/edit_file/ls/glob/grep/execute/task_output and registered guest tools; model ingress retains actual adapter schemas",
       "SDK writes require live user action and shared thread lease; model hooks do not grant that authority; actual native writes retain host approval",
-      "MCP named SDK and exact scoped/canonical tool.call names are main-agent user-action only with final approval; tool.check uses current scoped or cold valid cached metadata",
-      "tool.register exposes mcp__plugin__name tools to main and explicitly host-bound shared task agents; custom/opaque agents without a known authority cannot acquire them",
+      "physical MCP SDK requires live user action and final approval; named MCP can also call registered tools in main or explicitly host-bound tasks under registered admission; tool.check uses current scoped or cold valid cached metadata",
+      "tool.register exposes normalized mcp__plugin__name tools to main and explicitly host-bound shared task agents; namespace conflicts and changed in-flight definitions are rejected; custom/opaque agents without a known authority cannot acquire them",
       "tool.list uses the actual agent's latest model catalog plus registered entries, filtered by its role and MCP aliases; before first model request it fails with MODS_TOOL_CONTEXT_REQUIRED",
       "JSON Schema bounded subset; refs, regex, format and other unsupported keywords explicitly rejected; see authoring guide",
       "32 registrations/plugin, 128/session, 256000 aggregate metadata characters; input schemas 16000 characters and registered inputs 64000 characters; validation work bounded",
@@ -110,22 +110,23 @@
     ],
     "evidence": "mods-v2-implementation-2026-09-16.md",
     "mcpSdk": {
-      "revision": "desktop-mcp-tool-routing-v14",
+      "revision": "desktop-registered-mcp-v17",
       "design": "mods-v2-mcp-sdk-2026-09-17.md",
       "signature": "$.mcp.call(server, tool, args?) -> { content, isError, structuredContent? }",
-      "scope": "connected configured providers, fresh plain-project command scope without model traffic, original protected MCP content blocks, scoped classic hooks and raw transport",
+      "scope": "configured providers plus actual registered tools; cold named registered calls do not connect MCP; protected blocks and engine result text; physical providers retain scoped classic hooks and raw transport",
       "identity": "canonical workspace/thread/agent/turn plus binding instance and host connection generation; final schema/provider/config checks after approval",
       "limits": [
-        "main agent and live non-immediate user action only",
+        "physical MCP calls require live non-immediate user action; registered tools use actual owner, caller, instance and role admission",
         "16000-character arguments",
         "cold command MCP calls serialize per thread, at most 16 pending, preserving a registered parent's turn",
         "actual MCP server schema validation; no guest registered-schema substitution",
         "D01 mandatory policy and final approval differ from upstream no-prompt grant",
-        "MCP SDK calls to guest registered tools, OAuth/reconnect parity and remote-provider qualification pending"
+        "OAuth/reconnect parity and remote-provider qualification pending"
       ],
       "upstreamConformance": 3,
       "fullParity": false,
-      "routingDesign": "mods-v2-mcp-tool-routing-2026-09-17.md"
+      "routingDesign": "mods-v2-mcp-tool-routing-2026-09-17.md",
+      "registeredDesign": "mods-v2-registered-mcp-2026-09-17.md"
     },
     "toolPermission": {
       "revision": "desktop-tool-permission-v13",

@@ -41,6 +41,8 @@ export interface McpInvocationResult {
 }
 
 export interface McpCapabilityService {
+  /** Configured provider names only; no credentials, connection initialization or discovery. */
+  configuredServerNames?(): string[]
   /** Current discovered metadata only; must not open/reconnect a server for a permission query. */
   peekTools?(): McpCapabilityTool[] | null
   listTools(): Promise<McpCapabilityTool[]>

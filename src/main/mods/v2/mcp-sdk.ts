@@ -2,6 +2,8 @@ import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import type { McpCapabilityTool } from "../../mcp/capability-types"
+import { projectModResult } from "../publication"
+import { validateFunctionToolResult } from "./tool-sdk"
 
 /** SDK arguments are data, never a connection, credential or executable supplied by a guest. */
 export function functionMcpInput(input: ModObject): ModObject {
@@ -80,6 +82,22 @@ export function functionMcpToolResult(value: ModObject): ModObject {
   }
 }
 
+/** A synthetic engine tool result has the same text projection as its model-facing message. */
+export function functionRegisteredMcpResult(answer: ModObject): ModObject {
+  validateFunctionToolResult(answer)
+  if (typeof answer.deny === "string")
+    throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+  if (answer.ref !== undefined) throw new ModFunctionError("MODS_TOOL_RESULT_REF")
+  const value = {
+    content: Array.isArray(answer.result)
+      ? answer.result
+      : [{ type: "text", text: projectModResult(answer.result).text }],
+    isError: answer.isError === true
+  }
+  validateFunctionMcpResult(value)
+  return value
+}
+
 /** Refs preserve protected host blocks/schema output within one MCP SDK dispatch only. */
 export class FunctionMcpToolResults {
   private readonly values: ModObject[] = []
@@ -98,9 +116,7 @@ export class FunctionMcpToolResults {
       return this.values[Number(answer.ref)]
     }
     const value = {
-      content: Array.isArray(answer.result)
-        ? answer.result
-        : [{ type: "text", text: typeof answer.text === "string" ? answer.text : "" }],
+      ...functionRegisteredMcpResult(answer),
       isError: answer.isError === true || this.values.at(-1)?.isError === true
     }
     validateFunctionMcpResult(value)

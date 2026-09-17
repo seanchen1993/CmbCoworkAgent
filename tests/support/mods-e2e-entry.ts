@@ -76,6 +76,17 @@ export function removeFunctionMcpConfiguration(id: string): void {
   // Deliberately retain the cached transport to test the post-approval configuration check.
   deleteMcpConnector(id)
 }
+
+export function reserveFunctionMcpNamespace(name: string): string {
+  // A name reservation must be detected without trying to launch this nonexistent transport.
+  return upsertMcpConnector({
+    name,
+    kind: "stdio",
+    command: "mods-e2e-must-not-spawn",
+    args: [],
+    enabled: true
+  })
+}
 export async function mcpProbe(scope: Scope, node: string, server: string): Promise<unknown> {
   const service = getGlobalMcpCapabilityService()
   const id = upsertMcpConnector({

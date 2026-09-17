@@ -166,3 +166,14 @@ it("does not replay a lost MCP reply through optional hook recovery", async () =
   expect((await f.session.run("run", "lost")).text).toContain("caught:")
   expect(f.invoke).toHaveBeenCalledOnce()
 })
+
+it("uses the engine result projection for synthetic non-block MCP results rather than losing their text", async () => {
+  const f = await fixture(`on("tool.call",{tool:"mcp__echo"},()=>({
+    result:{message:"secret"},text:"not the engine result"
+  }));`)
+  expect(JSON.parse(String((await f.session.run("run", "fake")).text))).toEqual({
+    content: [{ type: "text", text: JSON.stringify({ message: "protected" }) }],
+    isError: false
+  })
+  expect(f.invoke).not.toHaveBeenCalled()
+})
