@@ -8,6 +8,38 @@ import { ModError } from "../errors"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 
 const sessions: FunctionSession[] = []
+
+it("normalizes file SDK paths and cwd from the current host execution scope without changing the session realm", async () => {
+  const roots = new AsyncLocalStorage<string>()
+  const received: string[] = []
+  const value = await session(
+    `
+    on("session.start",async($,e,next)=>{await $.command.register({name:"root",description:"Root"});return next(e)});
+    on("command.run",{command:"root"},async($)=>({text:JSON.stringify({cwd:await $.session.cwd(),value:await $.fs.read("name.txt")})}));
+  `,
+    {
+      cwd: () => roots.getStore() ?? "/project",
+      files: () => ({
+        run: async (_method, path) => {
+          received.push(path)
+          return path
+        }
+      })
+    }
+  )
+  await value.start()
+  const results = await Promise.all(
+    ["/tree-a", "/tree-b"].map((root) => roots.run(root, () => value.run("root", "")))
+  )
+  expect(results.map((result) => JSON.parse(String(result.text)))).toEqual([
+    { cwd: "/tree-a", value: resolve("/tree-a", "name.txt") },
+    { cwd: "/tree-b", value: resolve("/tree-b", "name.txt") }
+  ])
+  expect(received.sort()).toEqual(
+    [resolve("/tree-a", "name.txt"), resolve("/tree-b", "name.txt")].sort()
+  )
+})
+
 it("runs the identical model SDK fixture with independent next results and local short circuits", async () => {
   const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/model-sdk"))
   const guest = await FunctionGuestRuntime.create(compiled.code, compiled.options)

@@ -1,6 +1,7 @@
 import { lstat, opendir, realpath, stat } from "node:fs/promises"
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path"
 import type { ModJson } from "../../../shared/mods/types"
+import type { ToolPermissionResult } from "../../../shared/tool-permission"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import {
   openStableFileHandle,
@@ -17,6 +18,12 @@ export interface FunctionFileAccess {
   run(method: FunctionFileMethod, path: string, signal: AbortSignal): Promise<ModJson>
 }
 
+export interface FunctionFileScope {
+  workspace: string
+  assertLive(): void
+  queryTool(tool: string, input: Record<string, unknown>): Promise<ToolPermissionResult>
+}
+
 function inside(root: string, path: string): boolean {
   const child = relative(root, path)
   return child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child)
@@ -31,8 +38,19 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
   constructor(
     private readonly workspace: string,
     private readonly assertLive: () => void,
-    private readonly publish: (value: ModJson, signal: AbortSignal) => Promise<ModJson>
+    private readonly publish: (value: ModJson, signal: AbortSignal) => Promise<ModJson>,
+    private readonly queryTool?: FunctionFileScope["queryTool"]
   ) {}
+
+  private async allowed(method: FunctionFileMethod, path: string): Promise<boolean> {
+    if (!this.queryTool) return true
+    const list = method === "fs.list"
+    const answer = await this.queryTool(
+      list ? "host:ls" : "host:read_file",
+      list ? { path } : { file_path: path }
+    )
+    return answer.decision === "allow"
+  }
 
   private async path(input: string): Promise<{ root: string; path: string }> {
     if (
@@ -75,7 +93,13 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
     check()
     let result: ModJson
     try {
+      if (!(await this.allowed(method, resolve(this.workspace, input))))
+        throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
+      check()
       const target = await this.path(input)
+      check()
+      if (!(await this.allowed(method, target.path)))
+        throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
       check()
       if (method === "fs.read") {
         const opened = await openStableFileHandle(target.root, target.path)
@@ -92,9 +116,12 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
         if (!before.isDirectory()) throw new ModFunctionError("ENOTDIR")
         const entries: Array<{ name: string; kind: string; size: number }> = []
         const directory = await opendir(target.path)
+        let visited = 0
         for await (const entry of directory) {
           check()
-          if (entries.length >= ENTRY_LIMIT) throw new ModFunctionError("MODS_FS_ENTRY_LIMIT")
+          if (++visited > ENTRY_LIMIT) throw new ModFunctionError("MODS_FS_ENTRY_LIMIT")
+          if (!(await this.allowed("fs.stat", join(target.path, entry.name)))) continue
+          check()
           let size = 0
           if (entry.isFile()) {
             // Do not follow a child replaced with a link while the directory is listed.
@@ -117,6 +144,8 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
             ? true
             : { kind: kind(value), size: value.size, mtimeMs: value.mtimeMs }
       }
+      if (!(await this.allowed(method, target.path)))
+        throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
     } catch (error) {
       check()
       if (method !== "fs.exists") {
@@ -139,6 +168,12 @@ export class ProjectFunctionFiles implements FunctionFileAccess {
     check()
     // No optional hook receives the raw host result before mandatory publication.
     const published = await this.publish(result, signal)
+    check()
+    if (!(await this.allowed(method, resolve(this.workspace, input)))) {
+      check()
+      if (method === "fs.exists") return false
+      throw new ModFunctionError("MODS_FS_ACCESS_DENIED")
+    }
     check()
     return published
   }

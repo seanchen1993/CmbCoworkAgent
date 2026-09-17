@@ -842,6 +842,72 @@ async function main(): Promise<void> {
     pass(
       "concurrent cold native SDK reads retain parent identity and release their temporary adapters"
     )
+    const executionWorkspace = join(isolated, "execution-worktree")
+    mkdirSync(executionWorkspace)
+    writeFileSync(join(workspace, "scope-note.txt"), "GRANT_PROJECT_CONTENT")
+    writeFileSync(join(executionWorkspace, "scope-note.txt"), "EXECUTION_ROOT_OK")
+    writeFileSync(join(executionWorkspace, ".git"), "PRIVATE_WORKTREE_POINTER")
+    await app.evaluate(
+      (_electron, input) =>
+        (
+          globalThis as unknown as {
+            modsFixture: { bindExecutionScope(scope: unknown, root: string): void }
+          }
+        ).modsFixture.bindExecutionScope(input.scope, input.root),
+      {
+        scope: { workspace, threadId: coldFunctionId, turnId: "mods-execution-scope" },
+        root: executionWorkspace
+      }
+    )
+    try {
+      const beforeScope = await page!.evaluate((id) => window.api.mods.audit(id), coldFunctionId)
+      await functionComposer.fill("/foundation-scope ")
+      await page!
+        .locator("form")
+        .filter({ has: page!.locator("textarea.composer-textarea") })
+        .locator('button[type="submit"]')
+        .click()
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), coldFunctionId)).some(
+            (job) => job.command === "foundation-scope" && job.state === "succeeded"
+          ),
+        "isolated SDK execution scope"
+      )
+      const job = (await page!.evaluate((id) => window.api.mods.jobs(id), coldFunctionId)).find(
+        (job) => job.command === "foundation-scope"
+      )!
+      const value = JSON.parse(job.result!.text)
+      assert.equal(value.cwd.toLowerCase(), executionWorkspace.toLowerCase())
+      assert.equal(value.file, "EXECUTION_ROOT_OK")
+      assert.equal(value.git, false)
+      assert.deepEqual(
+        value.entries.map((entry: { name: string }) => entry.name),
+        ["scope-note.txt"]
+      )
+      assert(value.native.text.includes("EXECUTION_ROOT_OK"))
+      assert.equal(value.permission.decision, "deny")
+      assert.match(value.blocked, /MODS_RUNTIME_TOOL_DENIED/)
+      assert.doesNotMatch(JSON.stringify(value), /GRANT_PROJECT_CONTENT|PRIVATE_WORKTREE_POINTER/)
+      const audit = (
+        await page!.evaluate((id) => window.api.mods.audit(id), coldFunctionId)
+      ).filter((row) => !beforeScope.some((prior) => prior.callId === row.callId))
+      assert.equal(audit.length, 1)
+      assert.equal(audit[0].toolId, "host:read_file")
+      assert.equal(audit[0].identity!.workspace.toLowerCase(), workspace.toLowerCase())
+      await page!.screenshot({ path: join(artifacts, "function-execution-scope.png") })
+      pass(
+        "real native and file SDKs use the execution root, keep project grants and reject runtime-blocked tools without execution"
+      )
+    } finally {
+      await app.evaluate(
+        (_electron, id) =>
+          (
+            globalThis as unknown as { modsFixture: { releaseExecutionScope(id: string): void } }
+          ).modsFixture.releaseExecutionScope(id),
+        coldFunctionId
+      )
+    }
     await functionComposer.fill("/claw-tool-write COLD SDK body")
     await functionComposer.press("Enter")
     await until(

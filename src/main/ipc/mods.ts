@@ -36,6 +36,7 @@ import { FunctionModels } from "../mods/v2/models"
 import { invokeFunctionModel, resolveFunctionModel } from "../mods/v2/model-provider"
 import { FunctionRegisteredTools } from "../mods/v2/registered-tools"
 import { queryFunctionToolPermission } from "../mods/v2/tool-permission-host"
+import { functionFileScope } from "../mods/v2/file-permission-host"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -124,6 +125,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     manager.store,
     {
       plugins: getPlugins,
+      fileScope: (workspace, threadId) =>
+        functionFileScope(manager, assertStandaloneThread, workspace, threadId),
       registeredTool: (...args) => registeredTools.call(...args),
       listTools: async (workspace, threadId, signal) => {
         signal.throwIfAborted()

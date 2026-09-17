@@ -52,6 +52,7 @@ import { validateRegisteredToolInput } from "./tool-schema"
 export interface FunctionSessionHost {
   threadId: string
   workspace: string
+  cwd?(): string
   assertLive(plugin?: FunctionPlugin): void
   uiChanged?(): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
@@ -376,7 +377,7 @@ export class FunctionSession {
           : FILE_CAPABILITIES.some((method) => method === name) &&
               typeof value.path === "string" &&
               value.path !== ""
-            ? { ...value, path: resolve(this.host.workspace, value.path) }
+            ? { ...value, path: resolve(this.host.cwd?.() ?? this.host.workspace, value.path) }
             : value,
       validateInput: (name, value) => {
         validateBasicInput(name, value)
@@ -709,10 +710,16 @@ export class FunctionSession {
           core: (input, signal) =>
             runBasicSdk(method, input, {
               ...this.host,
+              workspace:
+                method === "session.cwd"
+                  ? (this.host.cwd?.() ?? this.host.workspace)
+                  : this.host.workspace,
               plugin: plugin.name,
               registry: this.registry,
               state: this.host.state?.(plugin),
-              files: this.host.files?.(plugin),
+              files: FILE_CAPABILITIES.some((name) => name === method)
+                ? this.host.files?.(plugin)
+                : undefined,
               signal
             })
         },

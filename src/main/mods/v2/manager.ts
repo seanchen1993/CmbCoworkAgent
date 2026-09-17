@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { randomInt } from "node:crypto"
-import { ProjectFunctionFiles } from "./file-access"
+import { ProjectFunctionFiles, type FunctionFileScope } from "./file-access"
 import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModPluginSource } from "../manager"
 import type {
@@ -56,6 +56,7 @@ interface FunctionManagerHost {
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
   changed(threadId: string): void
   assertThread?(workspace: string, threadId: string): void
+  fileScope?(workspace: string, threadId: string): FunctionFileScope
   listTools?(workspace: string, threadId: string, signal: AbortSignal): Promise<FunctionToolInfo[]>
   registeredTool?(
     workspace: string,
@@ -318,6 +319,7 @@ export class FunctionModsManager {
         current.session = new FunctionSession(plugins, {
           workspace,
           threadId,
+          cwd: () => this.host.fileScope?.(workspace, threadId).workspace ?? workspace,
           assertLive,
           listTools: this.host.listTools
             ? (signal) => this.host.listTools!(workspace, threadId, signal)
@@ -420,12 +422,18 @@ export class FunctionModsManager {
                 )
               }
             : undefined,
-          files: (plugin) =>
-            new ProjectFunctionFiles(
-              workspace,
-              () => assertLive(plugin),
-              (value, signal) => this.host.publish(workspace, value, signal)
-            ),
+          files: (plugin) => {
+            const scope = this.host.fileScope?.(workspace, threadId)
+            return new ProjectFunctionFiles(
+              scope?.workspace ?? workspace,
+              () => {
+                assertLive(plugin)
+                scope?.assertLive()
+              },
+              (value, signal) => this.host.publish(workspace, value, signal),
+              scope?.queryTool
+            )
+          },
           state: (plugin) => {
             // Reloads keep state; project and plugin identity remain separate namespaces.
             const namespace = JSON.stringify([workspace, plugin.name])

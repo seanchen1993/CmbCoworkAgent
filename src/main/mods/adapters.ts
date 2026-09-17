@@ -122,6 +122,7 @@ export function withModToolCall<T, R extends ToolRequest>(
           "MODS_TOOL_INPUT_LIMIT",
           "MODS_TOOL_VALIDATION_LIMIT",
           "MODS_TOOL_AGENT_UNAVAILABLE",
+          "MODS_RUNTIME_TOOL_DENIED",
           "MODS_TOOL_PERMISSION_DENIED"
         ].includes(error.code)
       )

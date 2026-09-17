@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { afterEach, expect, it } from "vitest"
+import { afterEach, expect, it, vi } from "vitest"
 import { FUNCTION_READ_LIMIT, ProjectFunctionFiles } from "./file-access"
 
 const roots: string[] = []
@@ -120,4 +120,52 @@ it("bounds directory iteration instead of accumulating an unbounded host result"
   const f = await fixture()
   for (let index = 0; index < 1025; index++) await writeFile(join(f.project, `entry-${index}`), "")
   await expect(f.files.run("fs.list", ".", f.signal)).rejects.toThrow("MODS_FS_ENTRY_LIMIT")
+  const filtered = new ProjectFunctionFiles(
+    f.project,
+    () => {},
+    async (v) => v,
+    async (tool) => ({ decision: tool === "host:ls" ? "allow" : "deny" })
+  )
+  await expect(filtered.run("fs.list", ".", f.signal)).rejects.toThrow("MODS_FS_ENTRY_LIMIT")
+})
+
+it("applies real backend path policy before reading and hides denied directory entries", async () => {
+  const f = await fixture()
+  await writeFile(join(f.project, "public.txt"), "public")
+  await writeFile(join(f.project, "private.txt"), "never publish")
+  const query = vi.fn(async (_tool: string, input: Record<string, unknown>) => ({
+    decision: String(input.file_path ?? input.path).endsWith("private.txt")
+      ? ("deny" as const)
+      : ("allow" as const)
+  }))
+  const files = new ProjectFunctionFiles(
+    f.project,
+    () => {},
+    async (v) => v,
+    query
+  )
+  expect(await files.run("fs.read", "public.txt", f.signal)).toBe("public")
+  await expect(files.run("fs.read", "private.txt", f.signal)).rejects.toThrow(
+    "MODS_FS_ACCESS_DENIED"
+  )
+  expect(await files.run("fs.exists", "private.txt", f.signal)).toBe(false)
+  expect(await files.run("fs.list", ".", f.signal)).toEqual([
+    { name: "public.txt", kind: "file", size: 6 }
+  ])
+  expect(query).toHaveBeenCalledWith("host:read_file", { file_path: join(f.project, "public.txt") })
+})
+
+it("does not publish a read whose backend policy changed during the operation", async () => {
+  const f = await fixture()
+  await writeFile(join(f.project, "name.txt"), "private")
+  let checked = 0
+  const publish = vi.fn(async (v) => v)
+  const files = new ProjectFunctionFiles(
+    f.project,
+    () => {},
+    publish,
+    async () => ({ decision: ++checked < 3 ? "allow" : "deny" })
+  )
+  await expect(files.run("fs.read", "name.txt", f.signal)).rejects.toThrow("MODS_FS_ACCESS_DENIED")
+  expect(publish).not.toHaveBeenCalled()
 })

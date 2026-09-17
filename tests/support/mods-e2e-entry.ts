@@ -21,6 +21,36 @@ interface Scope {
   turnId: string
 }
 const backends = new Map<string, LocalSandbox>()
+const executionScopes = new Map<string, () => void>()
+export function bindExecutionScope(scope: Scope, executionWorkspace: string): void {
+  releaseExecutionScope(scope.threadId)
+  const controller = new AbortController()
+  let release = () => {}
+  new LocalSandbox({
+    rootDir: executionWorkspace,
+    modWorkspace: scope.workspace,
+    modBlockedToolNames: new Set(["execute"]),
+    runId: scope.threadId,
+    hookTurnId: scope.turnId,
+    windowsSandbox: "none",
+    abortSignal: controller.signal,
+    onModBinding: (dispose) => {
+      release = dispose
+    },
+    worktreeIsolation: {
+      workspaceRoot: executionWorkspace,
+      worktreeRoot: executionWorkspace
+    } as import("../../src/main/agent/workflow/types").WorkflowWorktreeIsolationBoundary
+  })
+  executionScopes.set(scope.threadId, () => {
+    controller.abort()
+    release()
+  })
+}
+export function releaseExecutionScope(threadId: string): void {
+  executionScopes.get(threadId)?.()
+  executionScopes.delete(threadId)
+}
 export async function startFunctionMcpFixture(
   workspace: string,
   node: string,

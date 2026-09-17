@@ -4,6 +4,10 @@ export function register(on) {
     await $.tool.register({ name: "probe", description: "Read a project note and summarize it" })
     await $.command.register({ name: "foundation-mcp", description: "Nested MCP identity probe" })
     await $.command.register({
+      name: "foundation-scope",
+      description: "Execution root and capability probe"
+    })
+    await $.command.register({
       name: "foundation-mcp-direct",
       description: "Direct MCP tool probe"
     })
@@ -16,6 +20,28 @@ export function register(on) {
   on("command.run", { command: "foundation-mcp" }, async ($) => ({
     text: JSON.stringify(await $.tool.call({ tool: "mcp__host-foundation__probe", mode: "mcp" }))
   }))
+  on("command.run", { command: "foundation-scope" }, async ($) => {
+    let blocked
+    try {
+      await $.tool.call({ tool: "execute", command: "echo MUST_NOT_RUN" })
+    } catch (error) {
+      blocked = error.message
+    }
+    return {
+      text: JSON.stringify({
+        cwd: await $.session.cwd(),
+        file: await $.fs.read("scope-note.txt"),
+        entries: await $.fs.list("."),
+        git: await $.fs.exists(".git"),
+        native: await $.tool.call({ tool: "read_file", file_path: "scope-note.txt" }),
+        permission: await $.tool.check({
+          tool: "execute",
+          input: { command: "echo MUST_NOT_RUN" }
+        }),
+        blocked
+      })
+    }
+  })
   on("command.run", { command: "foundation-native" }, async ($) => ({
     text: JSON.stringify(await $.tool.call({ tool: "mcp__host-foundation__probe", mode: "native" }))
   }))

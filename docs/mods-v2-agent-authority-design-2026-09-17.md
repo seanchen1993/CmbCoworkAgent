@@ -51,3 +51,42 @@ LocalSandbox 构造绑定后才设置 readOnlyShellEnforced，因此只在构造
 
 实施中继续保留明确的未支持错误，不能用删除 `MODS_TOOL_AGENT_UNAVAILABLE` 检查来
 代替上述宿主接入。完成这些契约后再扩展 session/turn、代理 Hook 与能力提供方。
+
+## 运行目录基础之后的具体接入点
+
+[运行目录与宿主权限基础](mods-v2-runtime-authority-2026-09-17.md) 已实现原项目授权域、
+实际执行目录、原生/MCP/注册工具的运行时禁用清单、文件 SDK 后端路径查询，以及 v1
+dispatch 移除未知子代理到 main 的后端回退。以下项仍是下一阶段设计。
+
+共享代理的生命周期入口应使用 `wrapTaskToolWithOwnerMetadata`，它已掌握真实 task
+ToolCall、经过 schema 校验的 subagent_type、invoke Promise 和 finally 边界。不能只在
+wrapModelCall 临时绑定，然后在模型返回时释放：后续工具调用仍属于同一次子代理运行。
+从 availableSubagents 的宿主规格建立权限记录；opaque Runnable 不推测其后端或权限。
+
+同一 agentId、turnId 下重建代理仍可能发生。仅比较这些字符串不够：旧回调可能在新绑定
+建立后发起另一个 SDK 调用，取得新权限。每个真实 runtime/子代理实例需要宿主生成的私有
+authority token，模型 Hook、FunctionExecution、ModCallContext、原生和 MCP 绑定共同
+检查它。SDK 参数不得携带或覆盖此 token。命令临时适配器的实例与所属 runtime 权限代次
+应分开表达，不能因 MCP 解析阶段主动释放临时绑定就错误撤销命令。
+
+LocalSandbox 创建时的绑定 agentId 必须来自创建者给出的实例身份；当前按每次调用取
+ModCallContext 的闭包适合共享工具执行，不适合在构造阶段决定后端所有者。下一步需要
+分别表达固定所有者和调用时上下文，避免在父工具的异步上下文中创建后端时误绑定到父代理。
+
+`taskInvocationOwnerId` 为无 ToolCall ID 的任务生成内部 stationarity ID，但现有 Hook
+代理解析只读取真实 owner ID。新权限记录还需覆盖此路径，不能让无 ID 的任务默认取得
+main 身份；同时维持 renderer 只展示真实 ToolCall 归因的既有约定。
+
+实例权限由 ModsManager 管理的宿主注册表签发，范围为规范化 workspace、thread、agent、
+turn，值是不可序列化给 guest 的对象身份。新的同 key 实例使旧实例失效；原生/MCP 适配器
+必须持有同一对象，延迟完成初始化的旧适配器也不能覆盖新实例。注册表关闭、父信号取消
+和显式释放均使对象失效；旧释放器不删除新对象。ModIdentity 的持久化结构不增加此对象。
+
+模型中间件持有构造时的对象；用户从 IPC 开始新动作时明确捕获当前对象。临时命令适配器
+保留自己的释放边界，不单独更换真实 runtime 的对象。FunctionExecution、内部 host-call
+上下文和 ModCallContext 传递同一对象，排队时保留、执行/发布时校验。实例变化不能靠
+重新按 agentId 查询并取得新对象来修复；应拒绝旧调用，由新宿主入口开始新动作。
+
+共享子代理可克隆父后端的调用闭包，但其权限绑定必须由 task 创建者显式安装，并套用
+实际角色的禁用清单和只读执行上下文。后端构造绑定使用固定 owner，执行中的动态 owner
+只来自上述实例上下文。MCP 转发不能用父 baseContext 的宽松属性覆盖子实例限制。

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-17",
-  "codeBaseline": "721f51af",
+  "codeBaseline": "ba02fc60",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -14,7 +14,7 @@
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
-    "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, main-agent custom tool registration/discovery, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete; MCP tool.call routing and scoped permission metadata",
+    "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, main-agent custom tool registration/discovery, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete; MCP tool.call routing and scoped permission metadata; explicit grant/execution workspace separation and runtime tool restrictions",
     "desktopEvents": [
       "session.start",
       "command.run",
@@ -145,12 +145,12 @@
       "fullParity": false
     },
     "hostFoundation": {
-      "revision": "desktop-mcp-tool-routing-v14",
+      "revision": "desktop-runtime-authority-v15",
       "design": "mods-v2-host-foundation-2026-09-17.md",
       "scope": "shared model/custom-tool admission, receipt and publication lifecycle; host-owned agent/turn/parent identity; queued continuation provenance; native SDK receipt alignment",
       "nativeAgentLimit": "function SDK native calls remain main-agent only; child calls cannot borrow the main backend",
       "notImplemented": [
-        "child-agent execution realms",
+        "explicit shared child-agent bindings",
         "cross-plugin authority delegation"
       ]
     },
@@ -162,6 +162,18 @@
       "scope": "named MCP SDK dispatches tool.call; direct MCP tool.call resolves exact scoped/canonical names; rechecks provider/schema/connection fingerprint; scoped permission metadata uses shared alias projection",
       "lifecycle": "temporary discovery binding released before guest hooks; each actual continuation acquires its own binding and final approval",
       "evidence": "Electron protocol fixture with a real stdio server and native reads; not upstream live-server conformance",
+      "fullParity": false
+    },
+    "runtimeAuthority": {
+      "revision": "desktop-runtime-authority-v15",
+      "design": "mods-v2-runtime-authority-2026-09-17.md",
+      "scope": "explicit project grant realm and execution workspace; cwd/file SDK uses live backend permissions; runtime blocked tools apply to native/MCP/registered execution and model catalogs; no legacy main-backend fallback for unbound child",
+      "evidence": "real LocalSandbox/SQLite tests, concurrent VM cwd scopes, 43 Electron E2E cases including an alternate execution root; not full workflow or child-agent parity",
+      "limits": [
+        "child SDK remains unavailable without explicit host binding",
+        "SDK tool.list registered entries and cold catalog still need unified filtering",
+        "full performance and two-hour resource gate pending"
+      ],
       "fullParity": false
     }
   },

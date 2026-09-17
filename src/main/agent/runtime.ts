@@ -1202,6 +1202,8 @@ export function createScopedMcpCapabilityService(
     threadId: string
     signal?: AbortSignal
     readOnly?: boolean
+    blockedToolNames?: ReadonlySet<string>
+    executionWorkspace?: string
     onModBinding?: (release: () => void) => void
     agentId?: string
     turnId?: string
@@ -1435,6 +1437,9 @@ export function createScopedMcpCapabilityService(
           threadId: baseContext.threadId,
           turnId: baseContext.turnId ?? baseContext.threadId,
           agentId: getModCallContext()?.identity.agentId ?? baseContext.agentId,
+          blockedToolNames: baseContext.blockedToolNames,
+          permissionToolName: tool.toolId,
+          permissionToolAliases: [tool.toolId, tool.canonicalToolId ?? tool.toolId],
           activePluginIds: hookScope.activePluginIds,
           ...(baseContext.signal ? { signal: baseContext.signal } : {}),
           ...(baseContext.readOnly === undefined ? {} : { readOnly: baseContext.readOnly })
@@ -1628,6 +1633,8 @@ export function createScopedMcpCapabilityService(
   const releaseModBinding = getModsManager()?.bindMcp(
     {
       workspace: baseContext.workspacePath,
+      executionWorkspace: baseContext.executionWorkspace,
+      blockedToolNames: baseContext.blockedToolNames,
       threadId: baseContext.threadId,
       turnId: baseContext.turnId ?? baseContext.threadId,
       agentId: baseContext.agentId,
@@ -4692,6 +4699,16 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const runtimeBlockedToolNames = new Set(
     blockedToolNames.map((name) => name.trim()).filter(Boolean)
   )
+  const modBlockedToolNames = new Set([
+    ...runtimeBlockedToolNames,
+    ...(options.filesystemAccess ? blockedToolNamesForAccess(options.filesystemAccess) : []),
+    ...(agentMode === "coordinator"
+      ? ["read_file", "write_file", "edit_file", "ls", "glob", "grep", "execute", "task_output"]
+      : [])
+  ])
+  const modReadOnly =
+    options.filesystemAccess?.shellAccess === "read_only" ||
+    options.filesystemAccess?.workload === "read_only"
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
   const outputStyle =
@@ -4909,6 +4926,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     // remains an additional execution policy rather than a worktree prerequisite.
     rootDir: fileRoot,
     agentId,
+    modWorkspace: workspacePath,
+    modBlockedToolNames,
+    modReadOnly,
     worktreeIsolation: options.worktreeIsolation,
     virtualMode: false,
     // Native Git in an isolated worktree runs through the normal shell path.
@@ -5375,6 +5395,10 @@ The workspace root is: ${fileRoot}`
     onFailureFuseNotice,
     {
       workspacePath,
+      executionWorkspace: fileRoot,
+      blockedToolNames: modBlockedToolNames,
+      readOnly: modReadOnly,
+      signal: options.abortSignal,
       threadId,
       agentId,
       pluginOutputDir,
