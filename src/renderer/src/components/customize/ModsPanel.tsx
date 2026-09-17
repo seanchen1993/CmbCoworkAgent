@@ -127,7 +127,8 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
                 函数插件（{status.functionMods!.length}）
               </summary>
               <p className="text-xs text-muted-foreground mt-2">
-                可定制命令、项目偏好、交互面板和 Client 组件，调用原生工具与已配置的模型。
+                可定制命令、项目偏好、交互面板和 Client
+                组件，调整模型使用工具的行为，调用已配置的模型。
                 授权绑定以下版本，源码变化后需要重新授权。
               </p>
               <div className="mt-2 space-y-2">
@@ -151,7 +152,7 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
                       </span>
                     </div>
                     <p className="text-xs">
-                      允许注册命令、读取项目文件与会话标识、保存偏好、打开交互组件、调用原生工具和已配置的模型。
+                      允许注册命令、读取项目文件与会话标识、保存偏好、打开交互组件、调用或拦截工具及调用已配置的模型。
                       写文件和执行命令仍需批准最终参数；即时查询命令不能执行写操作。
                       模型请求会产生实际用量，限每插件每项目每分钟 30 次及 32768 个预留输出 Token。
                     </p>

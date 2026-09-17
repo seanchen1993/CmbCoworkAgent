@@ -53,10 +53,26 @@ export function validateFunctionToolResult(result: ModJson): void {
     result.deny !== undefined ||
     (result.text !== undefined && typeof result.text !== "string") ||
     (result.isError !== undefined && result.isError !== true) ||
+    (result.ref !== undefined &&
+      (typeof result.ref !== "number" || !Number.isSafeInteger(result.ref) || result.ref < 0)) ||
     (result.context !== undefined &&
       (!Array.isArray(result.context) ||
         result.context.some((v) => typeof v !== "string") ||
         result.context.join("\n").length > 32000))
   )
     throw new ModFunctionError("MODS_TOOL_RESULT")
+}
+
+/** Model tool schemas remain owned by their actual host adapters, including MCP tools. */
+export function validateModelToolInput(input: ModObject): void {
+  if (
+    typeof input.tool !== "string" ||
+    !input.tool ||
+    input.tool.length > 256 ||
+    typeof input.tool_use_id !== "string" ||
+    !input.tool_use_id ||
+    (input.agentId !== undefined && typeof input.agentId !== "string")
+  )
+    throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
+  encodeModJson(input)
 }

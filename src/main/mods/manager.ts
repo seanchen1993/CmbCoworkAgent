@@ -75,6 +75,11 @@ export class ModsManager {
     invalidate(workspace: string): void
     closeThread(threadId: string): void
     close(): void
+    toolCall?(
+      binding: ModThreadBinding,
+      input: ModObject,
+      core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>
+    ): Promise<ModObject>
   }
 
   attachFunctions(lifecycle: NonNullable<ModsManager["functionLifecycle"]>): void {
@@ -83,6 +88,12 @@ export class ModsManager {
 
   closeFunctionThread(threadId: string): void {
     this.functionLifecycle?.closeThread(threadId)
+  }
+
+  getFunctionToolHandler(
+    workspace: string
+  ): NonNullable<ModsManager["functionLifecycle"]>["toolCall"] {
+    return this.isEnabled(workspace) ? this.functionLifecycle?.toolCall : undefined
   }
 
   isEnabled(workspace: string): boolean {

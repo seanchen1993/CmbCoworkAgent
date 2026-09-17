@@ -28,7 +28,7 @@ import { resolve } from "node:path"
 import { FunctionClients } from "./clients"
 import type { FunctionGuest } from "../../../shared/mods/v2/contracts"
 import { randomUUID } from "node:crypto"
-import { functionToolTarget, validateFunctionToolResult } from "./tool-sdk"
+import { functionToolTarget, validateFunctionToolResult, validateModelToolInput } from "./tool-sdk"
 import { functionModelRequest, validateFunctionModelText } from "./model-sdk"
 
 export interface FunctionSessionHost {
@@ -206,6 +206,18 @@ export class FunctionSession {
     return value
   }
 
+  async interceptTool(
+    input: ModObject,
+    signal: AbortSignal | undefined,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>
+  ): Promise<ModObject> {
+    await this.start()
+    return (await this.dispatch("tool.call", input, signal, undefined, 0, undefined, "tool.call", {
+      core,
+      modelTool: true
+    })) as ModObject
+  }
+
   private async dispatch(
     event: string,
     input: ModObject,
@@ -217,7 +229,7 @@ export class FunctionSession {
       core(input: ModObject, signal: AbortSignal): Promise<ModJson | undefined>
     },
     held?: string,
-    presentation?: FunctionUiDispatch
+    presentation?: FunctionUiDispatch & { modelTool?: boolean }
   ): Promise<ModJson> {
     if (depth > 16) throw new ModFunctionError("MODS_DISPATCH_DEPTH")
     this.assertLive()
@@ -246,7 +258,10 @@ export class FunctionSession {
           : value,
       validateInput: (name, value) => {
         validateBasicInput(name, value)
-        if (name === "tool.call") functionToolTarget(value)
+        if (name === "tool.call") {
+          if (presentation?.modelTool) validateModelToolInput(value)
+          else functionToolTarget(value)
+        }
         if (name === "model.complete") functionModelRequest(value)
         if (name === "ui.open") validatePaneArgs(value)
         if (

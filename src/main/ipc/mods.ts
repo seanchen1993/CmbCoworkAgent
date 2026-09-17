@@ -139,6 +139,18 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     if (owner && !owner.isDestroyed()) owner.webContents.send("mods:jobs-changed", { threadId })
   })
   manager.attachFunctions({
+    toolCall: (binding, input, core) =>
+      withFunctionExecution(
+        {
+          workspace: binding.workspace,
+          threadId: binding.threadId,
+          userInitiated: false,
+          leased: true,
+          immediate: false
+        },
+        () =>
+          functions.interceptTool(binding.workspace, binding.threadId, input, binding.signal, core)
+      ),
     invalidate: (workspace) => functions.invalidate(workspace),
     closeThread: (threadId) => {
       functions.closeThread(threadId)

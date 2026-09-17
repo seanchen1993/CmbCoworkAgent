@@ -3,6 +3,7 @@ import { Command, isCommand } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
 import { withModToolCall, publishCurrentModResult } from "../mods/adapters"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
+import { functionToolContexts } from "../mods/v2/tool-result"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
 import {
@@ -256,13 +257,16 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
     wrapModelCall: async (request, handler) => {
       const manager = getModsManager()
       if (!manager?.isActive(options.workspacePath)) return handler(request)
-      const blocks = await manager.context({
-        workspace: options.workspacePath,
-        threadId: options.threadId,
-        turnId: options.hookTurnId ?? options.threadId,
-        agentId: options.agentId,
-        activePluginIds: options.hookScope.activePluginIds
-      })
+      const blocks = [
+        ...(await manager.context({
+          workspace: options.workspacePath,
+          threadId: options.threadId,
+          turnId: options.hookTurnId ?? options.threadId,
+          agentId: options.agentId,
+          activePluginIds: options.hookScope.activePluginIds
+        })),
+        ...functionToolContexts(request.messages)
+      ]
       return blocks.length
         ? handler({
             ...request,
@@ -278,7 +282,8 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           threadId: options.threadId,
           turnId: options.hookTurnId ?? options.threadId,
           agentId: options.agentId,
-          activePluginIds: options.hookScope.activePluginIds
+          activePluginIds: options.hookScope.activePluginIds,
+          signal: request.runtime?.signal
         },
         request,
         skipToolNames,

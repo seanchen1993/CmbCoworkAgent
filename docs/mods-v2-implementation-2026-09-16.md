@@ -257,7 +257,7 @@ Client 消息存储使用内存夹具，这些数字不代表真实模型或完�
 普通项目冷会话按需创建原生工具上下文；过期上下文刷新，继承项目沙箱配置。
 
 当前支持 CMB 原生工具名和参数，尚未把 Claude 的 Read/Bash 等名称与结果全部映射；
-也尚未把正常模型发起的工具调用接入 v2 hook。`tool.register` 和 MCP SDK 仍待实现。
+本批之后的“模型工具入口”补齐了正常模型调用的 v2 hook。`tool.register` 和 MCP SDK 仍待实现。
 示例 `/claw-tool-write` 创建记录，`/claw-tool-read` 读取；原生 write_file 不覆盖已有文件。
 
 检视与 E2E 发现并修复：冷启动命令表未加载时，直接命令可能误送给模型。
@@ -331,6 +331,64 @@ Node/Web 类型检查通过。专项首轮 275 项中出现 3 个失败：模型
 逐项证据保存在 `model-standalone-results.json`、`model-standalone-comparison.json` 及
 `model-standalone/` 日志目录。原有 lint 错误也通过 HEAD 源码复核，见
 `model-runtime-baseline-lint.txt`。
+
+## 模型工具入口（2026-09-17）
+
+正常模型发起的工具调用已接入 v2 `tool.call`，并保留原生及 MCP 适配器的实际执行路径。
+SDK 调用不重复进入外层模型 hook。输入改写、拒绝、本地结果、显式多次 next、结果 ref 和
+隐藏 context 已落实。每次实际执行有独立审计身份；重写结果保留真实错误与 LangGraph
+调度信息，后置异常不重放副作用。模型 hook 内嵌套 SDK 读取不等待自身租约，不能获得用户写权限。
+
+`context` 随工具消息的内部 metadata 保留到下一次模型请求，只作为模型上下文附加，
+不出现在工具正文；下一轮用户消息或模型回复后停止附加。多个工具的上下文有总量上限。
+新增 `/claw-tool-hooks on|off` 示例演示真实读取路径改写与拒绝。宿主摘要升至 v9，必须重新批准。
+
+检视修复了原生参数与 `tool/agentId/tool_use_id` 重名时被误删的问题；主代理没有子代理 ID 时，
+也不能把同名原生参数误当宿主身份。回归分别覆盖主代理与子代理，固定身份字段的改写被拒绝。
+同一模型工具夹具在官方 2.1.273 `plugin test` 通过，累计 32 个对照场景。
+官方夹具证明来源、结果封装、多个 next、拒绝和异常恢复；真正的宿主 ref 映射与消息保护另有本地回归。
+
+Electron E2E 28 组通过，新增两组通过本地 HTTP 服务驱动真实代理循环、原生工具、
+QuickJS、持久执行记录与 React：实际文件读取被改写，隐藏上下文进入第二次 HTTP 请求，
+拒绝场景没有原生执行记录。首轮失败是断言错误地把结构化 system 消息当纯字符串；
+第二轮失败是测试服务复用回复 ID，导致检查点消息被覆盖。修正夹具后两组通过；
+原始日志、截图、结构化协议摘要及诊断检查点保留，不把这两次失败解释为功能已成功。
+最终代码复跑还发现已有的启动覆盖竞态：测试过早注册 `open-login-page`，生产随后重复注册，
+主窗口未创建。测试现等待主窗口后再替换离线登录行为；生产启动逻辑未修改。
+对应失败报告与主进程日志为 `model-tools-e2e-restart-race.*` 和
+`model-tools-e2e-restart-main.log`。
+证据位于 `output/mods-v2-validation/model-tools-*` 和
+`output/mods-validation/e2e/function-model-tool.png`。
+
+最终 Mods 专项 289/289 通过，跨进程 33 项通过，Node/Web 类型检查通过。
+跨进程新增工具入口测量：20 次预热后 100 次，每次两个显式 next，P50 2.90 ms、P95 3.68 ms。
+该测量的工具核心是桩，不含原生 I/O、模型网络与内容保护，不能代替完整应用性能。
+两层普通 hook P95 5.67 ms；Pane P95 9.80 ms；Client P95 3.62 ms；卸载后各待处理计数归零。
+首轮通过的 E2E 中关闭 Mods 的真实读取 p95 从 2.523 ms 到 2.660 ms，增加 5.43%，超过设计的
+5% 目标；本批不据此宣布完整性能门禁通过。原始报告保留，最终复跑另行列出。
+
+最终 E2E 再次 28 组通过，正常构建已经恢复；测试入口不留在普通构建输出中。
+该轮关闭 Mods 的真实读取 p95：基线 2.664 ms，关闭后 2.661 ms（-0.12%）。
+启动竞态失败那轮的有效前段测量为 +1.48%；首轮 +5.43% 同样保留，不能只选最好的一轮。
+这些测量尚不覆盖设计要求的全部轮次、完整模型路径与两小时压力测试。
+报告 `model-tools-e2e-final.txt`、`model-tools-e2e-first-success.json`、
+`model-tools-e2e-restart-race.json` 与 `output/mods-validation/e2e/result.json`。
+
+全量 Vitest 3292 项：3260 通过、27 失败、5 跳过。26 个失败与既有基线同名同因，
+另一个是上述主代理同名参数回归在修复前加载的适配器上失败；最终专项已经覆盖并通过。
+全量记录不回写成全绿。证据：`vitest-model-tools-full.json`、
+`model-tools-failure-comparison.json`、`model-tools-mods-final.txt`、
+`model-tools-types-final.txt`、`model-tools-process-final.txt`、`claude-model-tools.txt`。
+
+最终代码的完整 Vitest 复跑共 3293 项：3262 通过、26 失败、5 跳过。
+26 个失败全部与既有基线同名同因；本批新增失败已消除。报告
+`vitest-model-tools-full-final.json` 与 `model-tools-failure-comparison-final.json`。
+仍不能把完整项目回归描述为全绿。
+
+独立脚本回归 81 个套件：73 通过、8 失败；7 个断言失败与上一批基线同名同因，
+工作流 worktree 套件再次在 180 秒截止后终止。完整失败对照与日志保存在
+`model-tools-standalone-comparison.json`、`model-tools-standalone-results.json` 和
+`model-tools-standalone/`。最终定向 ESLint 0 错误、0 告警，未扩大规则豁免。
 
 ## 后续集成与验收
 

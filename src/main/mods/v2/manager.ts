@@ -422,6 +422,24 @@ export class FunctionModsManager {
     })
   }
 
+  async interceptTool(
+    workspace: string,
+    threadId: string,
+    input: ModObject,
+    signal: AbortSignal | undefined,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>
+  ): Promise<ModObject> {
+    if (
+      !this.host.enabled(workspace) ||
+      this.sources().length === 0 ||
+      (!this.sessions.has(JSON.stringify([workspace, threadId])) &&
+        !(await this.status(workspace)).some((item) => item.state === "ready"))
+    )
+      return core(input, signal ?? new AbortController().signal)
+    const entry = await this.session(workspace, threadId)
+    return entry.session!.interceptTool(input, signal, core)
+  }
+
   async panes(workspace: string, threadId: string): Promise<FunctionPaneSnapshot[]> {
     // Merely mounting the renderer must not allocate or restart a plugin session.
     if (!this.host.enabled(workspace)) return []

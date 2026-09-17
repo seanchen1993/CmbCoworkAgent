@@ -258,6 +258,60 @@ void app.whenReady().then(async () => {
     await toolSession.close()
     checks.push("tool SDK contract and host authority survive real utilityProcess callbacks")
 
+    const ingressPlugin = await compileFunctionPlugin(
+      join(root, "tests/fixtures/mods-v2/model-tools")
+    )
+    let ingressCalls = 0
+    const ingressSession = new FunctionSession(
+      [
+        {
+          name: ingressPlugin.name,
+          root: ingressPlugin.root,
+          tier: "user",
+          guest: await client.load(ingressPlugin.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      {
+        workspace: root,
+        threadId: "ingress",
+        assertLive: () => {},
+        publish: async (value) => value
+      }
+    )
+    const ingress = (file_path: string) =>
+      toolContext.run("model authority", () =>
+        ingressSession.interceptTool(
+          { tool: "read_file", tool_use_id: "model-tool-id", file_path },
+          undefined,
+          async (input) => {
+            assert.equal(toolContext.getStore(), "model authority")
+            return { result: input.file_path, text: input.file_path, ref: ++ingressCalls }
+          }
+        )
+      )
+    assert.deepEqual(await ingress("input"), {
+      result: "second",
+      text: "second",
+      ref: 2,
+      context: ["engine", "first"]
+    })
+    assert.deepEqual(await ingress("deny"), { deny: "No read" })
+    assert.deepEqual(await ingress("throw-after"), { result: "once", text: "once", ref: 3 })
+    assert.equal(ingressCalls, 3)
+    const ingressTimes: number[] = []
+    for (let index = 0; index < 120; index++) {
+      const before = performance.now()
+      const answer = await ingress("input")
+      assert.equal(answer.text, "second")
+      if (index >= 20) ingressTimes.push(performance.now() - before)
+    }
+    ingressTimes.sort((a, b) => a - b)
+    await ingressSession.close()
+    checks.push(
+      "same official engine tool fixture preserves origin, refs, context and recovery across utilityProcess"
+    )
+
     const modelPlugin = await compileFunctionPlugin(join(root, "tests/fixtures/mods-v2/model-sdk"))
     const modelCalls: string[] = []
     const modelSession = new FunctionSession(
@@ -565,6 +619,14 @@ void app.whenReady().then(async () => {
         p95Ms: samples[94],
         maxMs: samples[99],
         scope: "two hooks plus matcher IPC; warmed isolated runtime"
+      },
+      modelToolPerformance: {
+        count: ingressTimes.length,
+        p50Ms: ingressTimes[49],
+        p95Ms: ingressTimes[94],
+        maxMs: ingressTimes[99],
+        scope:
+          "model tool ingress with two explicit next calls through utilityProcess; 20 warmups; stub tool core, no native I/O or filtering"
       },
       filesPerformance: {
         count: fileTimes.length,

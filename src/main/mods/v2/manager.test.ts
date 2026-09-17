@@ -151,6 +151,37 @@ it("unapproved plugin queries do not consume the limited session pool", async ()
   )
 })
 
+it("model tools bypass unapproved plugins without allocating sessions and stop intercepting after revocation", async () => {
+  const f = await fixture()
+  await writeFile(
+    join(f.plugin, "hooks/register.ts"),
+    `export function register(on) {
+      on("tool.call", {tool:"probe"}, () => ({deny:"approved rule"}))
+    }`
+  )
+  let calls = 0
+  const run = (thread: string) =>
+    f.manager.interceptTool(
+      f.root,
+      thread,
+      { tool: "probe", tool_use_id: "call" },
+      undefined,
+      async () => {
+        calls++
+        return { result: "original" }
+      }
+    )
+  for (let index = 0; index < 8; index++)
+    expect(await run(`unapproved-${index}`)).toEqual({ result: "original" })
+  expect(f.loads()).toBe(0)
+  await f.approve()
+  expect(await run("approved")).toEqual({ deny: "approved rule" })
+  expect(calls).toBe(8)
+  f.manager.revoke(f.root, "function-commands")
+  expect(await run("approved")).toEqual({ result: "original" })
+  expect(calls).toBe(9)
+})
+
 it("reclaims deleted sessions and rejects descriptors from the previous incarnation", async () => {
   const f = await fixture()
   await f.approve()

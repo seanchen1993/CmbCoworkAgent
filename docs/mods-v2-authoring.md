@@ -262,7 +262,7 @@ const answer = await $.tool.call({ tool: "write_file", file_path: "notes.md", co
 当前可调用 `read_file/write_file/edit_file/ls/glob/grep/execute/task_output`，名称、参数、
 `result` 使用本工程原生工具格式；还不是 Claude 的 `Read/Bash` 等内置工具 schema。
 只允许相应适配器已支持的字段，未支持的后台执行选项明确拒绝。输入最多 16000 字符；
-这不是 `fs.write` 的实现。插件工具注册及对模型原生调用的 v2 拦截仍待接入。
+这不是 `fs.write` 的实现。插件工具注册仍待接入；模型发起的工具调用也会进入同一 hook 链。
 
 SDK 发起的 `tool.call` 经过函数 hook 链，允许改写普通参数、拒绝、短路及有界多次 `next`；
 工具名称和调用身份不能改写。每次进入真正的工具核心都重新做范围检查、审批和执行记录，
@@ -270,3 +270,34 @@ SDK 发起的 `tool.call` 经过函数 hook 链，允许改写普通参数、拒
 普通命令复用已有会话租约，面板工具操作排队等待；即时命令允许读，拒绝写。
 自动回调不能沿用已经结束的用户动作权限。取消、关闭或撤权向等待和执行中的调用传播。
 工作流等特殊会话仍要求已有的相应工具上下文，不自动降级到普通项目沙箱。
+
+## 定制模型使用工具的行为
+
+更新并重新批准示例插件后，输入 `/claw-tool-hooks on`，再让 Claw 读取 `claw-notes`。
+实际会读取项目的 `mods-sdk-note.txt`（可先用 `/claw-tool-write 一条记录` 创建）。
+读取 `claw-blocked` 则被示例拒绝，不执行原生读取。`/claw-tool-hooks off` 关闭示例规则；
+开关保存在当前项目的插件偏好中。普通对话经过真实的模型工具调用，无须手动调用 SDK。
+
+```ts
+on("tool.call", { tool: "read_file" }, async ($, e, next) => {
+  if (next.origin.plugin !== "engine") return next(e)
+  if (e.file_path === "blocked.txt") return { deny: "此文件不允许读取" }
+  const result = await next(e)
+  return { ...result, context: ["请结合项目规则解释读取结果。"] }
+})
+```
+
+模型调用的 `next.origin.plugin` 为 `engine`；SDK 调用为发起插件。可改写普通参数，
+以 `{ result }` 短路，或 `{ deny }` 拒绝。`tool`、`tool_use_id`、`agentId` 由宿主固定。
+与这些保留名称重名的原生工具参数仍按原值传给工具，不能通过事件字段改写。
+每次显式 `next` 都是独立执行并单独审计；后置 hook 异常保留最后一次结果，不重复执行。
+hook 中嵌套 SDK 读取复用当前执行权，写入仍需要存活的用户动作，不能借模型调用取得写权限。
+
+模型工具的下游结果包含仅在本次调用有效的 `ref`：保留它会选择原始宿主消息，
+`result/text` 的改写不会替换该消息。要更换展示结果需去掉 `ref`，返回 `{ result, context? }`。
+真实执行记录、错误状态及代理调度控制信息保留；改写展示不能撤销已经执行的操作。
+`context` 只进入下一次模型请求，不显示为工具正文；新用户消息或模型回复后不再重复附加。
+多工具同轮上下文合计上限 128000 字符。宿主策略继续检查实际参数和最终输出。
+
+本批接入工程现有的模型工具入口，并未把原生工具换成 Claude 的 Read/Bash schema，
+也未实现工具注册、MCP SDK 或主模型流 hook。调用包版本升级到 v9，需要重新批准。

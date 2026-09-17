@@ -1,5 +1,5 @@
 /** Real Electron, production IPC/React, SQLite, QuickJS utility process and LocalSandbox.
- * The model producer is replaced by deterministic calls through the real tool ingress.
+ * Tool probes use the real ingress; model scenarios use a local HTTP producer and real agent loop.
  * Native confirmation is answered by the test; no external model/API is used.
  */
 import assert from "node:assert/strict"
@@ -103,6 +103,8 @@ async function main(): Promise<void> {
     })
     // Match existing Electron suites: prevent corporate SSO navigation in an
     // isolated offline test profile. Mods IPC and runtime remain production code.
+    // Production registers its IPC handlers before creating the main window.
+    await app.firstWindow()
     await app.evaluate(({ ipcMain }) => {
       ipcMain.removeHandler("open-login-page")
       ipcMain.handle("open-login-page", () => undefined)
@@ -811,6 +813,102 @@ async function main(): Promise<void> {
     pass(
       "cancelling a function model command closes its provider stream and preserves uncertain execution without retry"
     )
+    const modelToolsThread = await page!.evaluate(async (workspace) => {
+      const thread = await window.api.threads.create({
+        title: "Function model tools",
+        workspacePath: workspace,
+        agentMode: "normal"
+      })
+      const id =
+        (thread as unknown as { thread_id: string }).thread_id ??
+        (thread as unknown as { id: string }).id
+      await window.api.workspace.set(id, workspace)
+      return id
+    }, workspace)
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Function model tools", { exact: true }).first().click()
+    await functionComposer.fill("/claw-tool-hooks on")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), modelToolsThread)).some(
+          (job) => job.command === "claw-tool-hooks" && job.state === "succeeded"
+        ),
+      "enable model tool hooks"
+    )
+    await functionComposer.fill("[mods-tool-rewrite] 请读取 claw-notes。")
+    await functionComposer.press("Enter")
+    await page!.getByText("MODEL_TOOL_HOOK_OK", { exact: true }).first().waitFor({ timeout: 30000 })
+    const toolModelRequests = modelServer.requests.filter((request) => Array.isArray(request.tools))
+    const afterRead = toolModelRequests.find((request) => request.messages.at(-1)?.role === "tool")
+    assert.ok(afterRead, "agent sends a second model request after the actual tool")
+    writeFileSync(
+      join(artifacts, "function-model-tool-protocol.json"),
+      JSON.stringify(
+        afterRead.messages.map((message) => ({
+          role: message.role,
+          contentKind: typeof message.content,
+          hasReminder: JSON.stringify(message.content).includes("本轮读取已通过自定义 Claw 检查。"),
+          hasFileContents: JSON.stringify(message.content).includes("COLD SDK body")
+        })),
+        null,
+        2
+      )
+    )
+    assert.ok(
+      afterRead.messages.some(
+        (message) =>
+          message.role === "system" &&
+          JSON.stringify(message.content).includes("本轮读取已通过自定义 Claw 检查。")
+      )
+    )
+    assert.ok(
+      afterRead.messages.some(
+        (message) =>
+          message.role === "tool" && JSON.stringify(message.content).includes("COLD SDK body")
+      )
+    )
+    assert.equal(
+      await page!.getByText("本轮读取已通过自定义 Claw 检查。", { exact: true }).count(),
+      0
+    )
+    const modelToolsAudit = await page!.evaluate(
+      (id) => window.api.mods.audit(id),
+      modelToolsThread
+    )
+    assert.ok(
+      modelToolsAudit.some(
+        (row) =>
+          row.identity?.threadId === modelToolsThread &&
+          row.identity?.toolCallId === "mods-model-read" &&
+          row.toolId === "host:read_file" &&
+          row.status === "succeeded"
+      )
+    )
+    await page!.screenshot({ path: join(artifacts, "function-model-tool.png") })
+    pass(
+      "normal agent HTTP tool call enters function hooks, rewrites the real read and receives hidden context"
+    )
+    await functionComposer.fill("[mods-tool-deny] 请读取 claw-blocked。")
+    await functionComposer.press("Enter")
+    await page!
+      .getByText("MODEL_TOOL_DENIED_OK", { exact: true })
+      .first()
+      .waitFor({ timeout: 30000 })
+    const afterDeny = modelServer.requests.find(
+      (request) =>
+        Array.isArray(request.tools) &&
+        request.messages.at(-1)?.role === "tool" &&
+        JSON.stringify(request.messages.at(-1)?.content).includes("此路径已被 Claw Mod 拒绝读取。")
+    )
+    assert.ok(afterDeny)
+    const deniedAudit = await page!.evaluate((id) => window.api.mods.audit(id), modelToolsThread)
+    assert.equal(
+      deniedAudit.filter((row) => row.identity?.toolCallId === "mods-model-deny").length,
+      0
+    )
+    pass("model tool denial becomes a tool error with zero native executions")
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
     for (const path of ["secret.txt", "../outside.txt"]) {
       await functionComposer.fill(`/claw-files ${path}`)
       await functionComposer.press("Enter")
@@ -975,6 +1073,7 @@ async function main(): Promise<void> {
       env,
       timeout: 60_000
     })
+    await app.firstWindow()
     await app.evaluate(({ ipcMain }) => {
       ipcMain.removeHandler("open-login-page")
       ipcMain.handle("open-login-page", () => undefined)

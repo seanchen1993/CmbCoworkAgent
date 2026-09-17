@@ -8,6 +8,8 @@ import { filterModData, filterModResult } from "./publication"
 import { ModError } from "./errors"
 import type { McpCapabilityTool, McpInvocationResult } from "../mcp/capability-types"
 import { encodeModJson } from "../../shared/mods/validation"
+import { FunctionToolResults } from "./v2/tool-result"
+import type { ToolMessage } from "@langchain/core/messages"
 
 const nativeNames = new Set([
   "ls",
@@ -29,7 +31,7 @@ export function withModToolCall<T, R extends ToolRequest>(
   request: R,
   delegatedNames: ReadonlySet<string>,
   handler: (request: R) => Promise<T>
-): Promise<T> {
+): Promise<T | ToolMessage> {
   const manager = getModsManager()
   if (!manager || !manager.isActive(binding.workspace) || !request.toolCall?.name)
     return handler(request)
@@ -46,34 +48,69 @@ export function withModToolCall<T, R extends ToolRequest>(
     origin: "model" as const,
     grantEpoch: 0
   }
-  const context = {
-    identity,
-    toolId: `host:${tool.name}`,
-    routeClaimed: false,
-    protectedOutput: manager.protects(binding.workspace),
-    readOnly: binding.readOnly ?? false,
-    signal: binding.signal,
-    protectData: manager.protects(binding.workspace)
-      ? <V>(value: V): V => manager.policy.observer(value)
-      : undefined,
-    publish: manager.protects(binding.workspace)
-      ? <V>(value: V): Promise<V> =>
-          manager.publish(binding.workspace, value, callId, binding.signal)
-      : undefined
+  let executions = 0
+  const execute = (args: Record<string, unknown>, signal = binding.signal): Promise<T> => {
+    const currentIdentity =
+      executions++ === 0
+        ? identity
+        : {
+            ...identity,
+            callId: randomUUID(),
+            parentCallId: identity.callId
+          }
+    const currentBinding = { ...binding, agentId, signal }
+    const context = {
+      identity: currentIdentity,
+      toolId: `host:${tool.name}`,
+      routeClaimed: false,
+      protectedOutput: manager.protects(binding.workspace),
+      readOnly: binding.readOnly ?? false,
+      signal,
+      protectData: manager.protects(binding.workspace)
+        ? <V>(value: V): V => manager.policy.observer(value)
+        : undefined,
+      publish: manager.protects(binding.workspace)
+        ? <V>(value: V): Promise<V> => manager.publish(binding.workspace, value, callId, signal)
+        : undefined
+    }
+    return modCallContext.run(context, async () => {
+      const delegated =
+        nativeNames.has(tool.name!) ||
+        (delegatedNames.has(tool.name!) && tool.name !== "task_output")
+      const value = delegated
+        ? await handler({ ...request, toolCall: { ...tool, args } })
+        : await manager.dispatch(currentBinding, `host:${tool.name}`, args, (args) =>
+            handler({ ...request, toolCall: { ...tool, args } })
+          )
+      return manager.publish(binding.workspace, value, callId, signal)
+    })
   }
-  return modCallContext.run(context, async () => {
-    const delegated =
-      nativeNames.has(tool.name!) || (delegatedNames.has(tool.name!) && tool.name !== "task_output")
-    const value = delegated
-      ? await handler(request)
-      : await manager.dispatch(
-          { ...binding, agentId },
-          `host:${tool.name}`,
-          tool.args ?? {},
-          (args) => handler({ ...request, toolCall: { ...tool, args } })
-        )
-    return manager.publish(binding.workspace, value, callId, binding.signal)
-  })
+  const intercept = manager.getFunctionToolHandler(binding.workspace)
+  if (!intercept) return execute(tool.args ?? {})
+  const results = new FunctionToolResults<T>(tool.name!, callId)
+  const input = { ...(filterModData(tool.args ?? {}, false) as ModObject) }
+  delete input.agentId
+  return intercept(
+    { ...binding, agentId, workspace: identity.workspace },
+    {
+      ...input,
+      tool: tool.name!,
+      tool_use_id: callId,
+      ...(agentId !== "main" ? { agentId } : {})
+    },
+    async (input, signal) => {
+      signal.throwIfAborted()
+      const args: Record<string, unknown> = { ...input }
+      // Event identities are host-owned; colliding native arguments must still reach the tool.
+      for (const key of ["tool", "tool_use_id", "agentId"]) {
+        if (tool.args && Object.hasOwn(tool.args, key)) args[key] = tool.args[key]
+        else delete args[key]
+      }
+      return results.add(await execute(args, signal))
+    }
+  ).then((answer) =>
+    manager.publish(binding.workspace, results.resolve(answer), callId, binding.signal)
+  )
 }
 
 interface MethodSpec {
