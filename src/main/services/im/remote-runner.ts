@@ -1,5 +1,6 @@
 import { HumanMessage } from "@langchain/core/messages"
 import { randomUUID } from "node:crypto"
+import { FunctionTurnRun } from "../../mods/v2/turn-run"
 import { getAgentGraphRecursionLimit } from "../../../shared/agent-runtime-limits"
 import {
   closeCheckpointer,
@@ -344,7 +345,7 @@ export async function executePreparedRemoteStandardTurn(
     runOwner,
     source,
     routingTaskSource,
-    signal,
+    signal: parentSignal,
     remotePolicy,
     interactionWaitHooks,
     explicitSkill,
@@ -357,6 +358,8 @@ export async function executePreparedRemoteStandardTurn(
     onCoordinatorNotificationAction,
     onDetachedResultAvailable
   } = input
+  const localAbortController = new AbortController()
+  const signal = AbortSignal.any([parentSignal, localAbortController.signal])
   const agentMode = requestedAgentMode ?? getAgentModeFromMetadata(metadata)
   const channel = `scheduler:stream:${threadId}`
   const hookScope = createPersistentThreadHookScope(threadId)
@@ -439,6 +442,16 @@ export async function executePreparedRemoteStandardTurn(
   let agent: DeepAgent | null = null
   let completionSucceeded = false
   let terminalError: unknown = null
+  const functionTurn = new FunctionTurnRun({
+    workspace: workspacePath,
+    threadId,
+    runId,
+    turnId: userMessageId,
+    text: rawMessage,
+    owner: runOwner,
+    signal,
+    cancel: () => localAbortController.abort()
+  })
   updateThread(threadId, { status: "busy" })
   notifyRemoteThreadChanged()
   mirrorStandardTurnStreamToRenderer(threadId, { type: "started" })
@@ -446,7 +459,7 @@ export async function executePreparedRemoteStandardTurn(
     threadId,
     (streamEvent) => mirrorStandardTurnStreamToRenderer(threadId, streamEvent),
     tracer,
-    { attribution }
+    { attribution, onStreamChunk: (mode, payload) => functionTurn.observeStream(mode, payload) }
   )
 
   try {
@@ -518,6 +531,7 @@ export async function executePreparedRemoteStandardTurn(
       const modelId = candidates[index]
       try {
         agent = await runtimeFactory.create(modelId)
+        await functionTurn.start()
         if (modelId) {
           tracer.setModelId(modelId)
           // Fallback name until the API reports its own: config.model is the
@@ -539,6 +553,7 @@ export async function executePreparedRemoteStandardTurn(
           }
         )
         await streamConsumer.consume(stream, signal)
+        signal.throwIfAborted()
         lastError = undefined
         break
       } catch (error) {
@@ -621,6 +636,7 @@ export async function executePreparedRemoteStandardTurn(
         snapshot
       }).catch((error) => console.warn("[IM] Auto-commit finalize failed:", error))
     }
+    signal.throwIfAborted()
     completionSucceeded = true
     return finalText
   } catch (error) {
@@ -633,6 +649,7 @@ export async function executePreparedRemoteStandardTurn(
     }
     throw error
   } finally {
+    functionTurn.finish(completionSucceeded ? "answer" : "error")
     if (!completionSucceeded) discardAgentAutoCommitTracking(threadId)
     releasePin()
     await closeCheckpointer(threadId).catch(() => undefined)

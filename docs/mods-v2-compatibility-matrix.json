@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-18",
-  "codeBaseline": "16029109",
+  "codeBaseline": "5e4def91",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -17,8 +17,8 @@
     "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, registered tools in main and explicitly host-bound shared task agents, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete; MCP tool.call routing and scoped permission metadata; explicit grant/execution workspace separation, runtime tool restrictions and private instance lifetimes",
     "desktopEvents": [
       "session.start",
-      "turn.start (desktop main run)",
-      "turn.complete (desktop main run)",
+      "turn.start (desktop/scheduler/heartbeat/legacy remote main runs)",
+      "turn.complete (desktop/scheduler/heartbeat/legacy remote main runs)",
       "turn.abort",
       "command.run",
       "command.describe",
@@ -118,19 +118,20 @@
       "model stream boundary"
     ],
     "turnLifecycle": {
-      "revision": "desktop-turn-lifecycle-v20",
-      "design": "mods-v2-turn-lifecycle-2026-09-18.md",
-      "scope": "desktop invoke/resume/interrupt lifecycle, private physical-run cancellation, real graph response usage, published partial answers, completion notices after lease release",
+      "revision": "desktop-background-turns-v21",
+      "design": "mods-v2-background-turns-2026-09-18.md",
+      "scope": "desktop invoke/resume/interrupt, scheduler, heartbeat and legacy remote main lifecycles; private physical-run cancellation, real graph response usage, published partial answers, completion notices after lease release",
       "limits": [
-        "background and child lifecycles, actual provider refusal and per-turn notice placement pending",
+        "child lifecycles, actual provider refusal and per-turn notice placement pending",
         "100 active/pending turns; 10000 response identities per turn; session-local 64 notices / 1 MiB",
         "50 admitted abort attempts per plugin/session with 2s spacing; only exact current main turn can be cancelled",
-        "missing actual model/usage omits usage; no inference from configured aliases",
-        "same-response-id usage replacement and skip-missing aggregation still differ from frozen upstream; queued for next implementation step",
+        "missing actual model/usage is skipped; no inference from configured aliases; absent valid usage omits the field",
+        "same-response-id valid usage replaces prior usage; first-valid insertion order and skip-missing aggregation match frozen fzn/gUe/Ryt",
+        "6 resident sessions remain bounded; long-lived background session retirement policy remains part of resource qualification",
         "cancellation receipt only allows protected publication; expired runtime and adapters remain unusable"
       ],
       "upstreamConformanceAdded": 4,
-      "validation": "63 final focused + 492 Mods + 37 process + Node/Web + 51 Electron E2E pass, normal build restored; full 3509: 3478 pass, 26 unchanged baseline failures, 5 skipped; standalone 74/81 with 7 unchanged failures including the runner's 180s worktree-suite timeout; 34 changed-source files: no new lint issues, 1 baseline explicit-any error and 4202 baseline formatting warnings; final indentation-only fix has identical TypeScript AST; first three E2E failures retained; disabled-read P95 -0.70%, no-op 1000 P95 8.8443ms, pending 0; full performance gate pending",
+      "validation": "521 focused Mods/transport/graph regressions + Node/Web + 55 Electron E2E pass, normal build restored; remote actual graph covers answer, SDK cancellation, parent cancellation, failure, checkpoint retry and completion revision; previous whole-repository failures remain recorded at v20; first two E2E failures retained; disabled-read P95 +4.12%, no-op 1000 P95 8.8343ms, pending 0; full performance gate pending",
       "fullParity": false
     },
     "evidence": "mods-v2-implementation-2026-09-16.md",

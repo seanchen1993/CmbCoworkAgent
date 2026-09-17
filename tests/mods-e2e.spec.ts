@@ -1702,6 +1702,177 @@ async function main(): Promise<void> {
       "real turn lifecycle delivers one completion with actual response usage and renders plugin text"
     )
 
+    const backgroundCommand = async (id: string, text = "") => {
+      const jobId = await page!.evaluate(
+        async ({ id, text }) => {
+          const descriptor = (await window.api.mods.commands(id)).find(
+            (command) => command.command === "claw-turn"
+          )
+          if (!descriptor) throw new Error("Missing public turn command")
+          return (await window.api.mods.enqueue(id, descriptor, { text })).id
+        },
+        { id, text }
+      )
+      let result = ""
+      await until(async () => {
+        const job = (await page!.evaluate((id) => window.api.mods.jobs(id), id)).find(
+          (job) => job.id === jobId
+        )
+        if (job?.state === "failed") throw new Error(job.error)
+        if (job?.state !== "succeeded") return false
+        result = job.result?.text ?? ""
+        return true
+      }, "background command publishes its own result")
+      return result
+    }
+    const backgroundFacts = async (id: string) =>
+      JSON.parse(await backgroundCommand(id)) as {
+        active: string | null
+        starts: number
+        completions: number
+        last: { turnId: string; answer: string; reason: string; usage?: unknown }
+      }
+    for (const cancel of [false, true]) {
+      const requestCount = modelServer.requests.length
+      const closedCount = modelServer.closedStalls()
+      const task = await page!.evaluate(
+        async ({ workspace, cancel }) => {
+          const task = await window.api.scheduledTasks.create({
+            name: `Mods scheduled ${cancel ? "cancel" : "answer"}`,
+            description: "isolated lifecycle qualification",
+            prompt: `[mods-scheduled] ${cancel ? "[stall]" : ""} 请返回一次简短回答`,
+            taskType: "action",
+            modelId: "custom:mods-model-fixture",
+            workDir: workspace,
+            frequency: "manual",
+            enabled: true
+          })
+          await window.api.scheduledTasks.runNow(task.id)
+          return task
+        },
+        { workspace, cancel }
+      )
+      let scheduledThread = ""
+      await until(async () => {
+        scheduledThread =
+          (await page!.evaluate(() => window.api.threads.list())).find(
+            (thread) => thread.metadata?.scheduledTaskId === task.id
+          )?.thread_id ?? ""
+        return !!scheduledThread && modelServer!.requests.length > requestCount
+      }, "scheduled task reaches the actual provider")
+      if (cancel) {
+        const running = await backgroundFacts(scheduledThread)
+        assert.equal(typeof running.active, "string")
+        assert.equal(await backgroundCommand(scheduledThread, "abort"), "已请求停止当前轮次。")
+        await until(
+          async () => modelServer!.closedStalls() === closedCount + 1,
+          "scheduled SDK abort closes its provider socket"
+        )
+      }
+      await until(
+        async () =>
+          !(await page!.evaluate((id) => window.api.scheduledTasks.isRunning(id), task.id)) &&
+          (await page!.evaluate((id) => window.api.mods.turnNotices(id), scheduledThread))
+            .length === 1,
+        "scheduled completion follows physical settlement"
+      )
+      const facts = await backgroundFacts(scheduledThread)
+      assert.equal(facts.active, null)
+      assert.equal(facts.starts, 1)
+      assert.equal(facts.completions, 1)
+      assert.equal(facts.last.reason, cancel ? "aborted" : "answer")
+      assert.match(facts.last.answer, /SDK_MODEL_OK/)
+      const messages = await page!.evaluate(
+        (id) => window.api.threads.getMessages(id),
+        scheduledThread
+      )
+      assert.equal(facts.last.turnId, messages.find((message) => message.role === "user")?.id)
+      if (!cancel)
+        assert.deepEqual(facts.last.usage, {
+          model: "mods-model-fixture",
+          input_tokens: 12,
+          output_tokens: 3,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0
+        })
+      assert.equal(modelServer.requests.length, requestCount + 1)
+      await page!.evaluate((id) => window.api.scheduledTasks.delete(id), task.id)
+      await page!.evaluate((id) => window.api.threads.delete(id), scheduledThread)
+      pass(`scheduled ${cancel ? "abort" : "answer"} reports actual turn identity and completion`)
+    }
+
+    const heartbeatConfig = await page!.evaluate(() => window.api.heartbeat.getConfig())
+    const heartbeatContent = await page!.evaluate(() => window.api.heartbeat.getContent())
+    try {
+      for (const cancel of [false, true]) {
+        const requestCount = modelServer.requests.length
+        const closedCount = modelServer.closedStalls()
+        await page!.evaluate(
+          async ({ workspace, cancel }) => {
+            await window.api.heartbeat.saveConfig({
+              enabled: false,
+              workDir: workspace,
+              modelId: "custom:mods-model-fixture",
+              prompt: `[mods-heartbeat] ${cancel ? "[stall]" : ""} 请返回一次简短回答`
+            })
+            await window.api.heartbeat.saveContent("- 检查本地轮次回调")
+            await window.api.heartbeat.runNow()
+          },
+          { workspace, cancel }
+        )
+        let heartbeatThread = ""
+        await until(async () => {
+          heartbeatThread =
+            (await page!.evaluate(() => window.api.threads.list())).find(
+              (thread) => thread.metadata?.isHeartbeat === true
+            )?.thread_id ?? ""
+          return !!heartbeatThread && modelServer!.requests.length > requestCount
+        }, "heartbeat reaches the actual provider")
+        if (cancel) {
+          const running = await backgroundFacts(heartbeatThread)
+          assert.equal(typeof running.active, "string")
+          assert.equal(await backgroundCommand(heartbeatThread, "abort"), "已请求停止当前轮次。")
+          await until(
+            async () => modelServer!.closedStalls() === closedCount + 1,
+            "heartbeat SDK abort closes its provider socket"
+          )
+        }
+        await until(
+          async () =>
+            !(await page!.evaluate(() => window.api.heartbeat.isRunning())) &&
+            (await page!.evaluate((id) => window.api.mods.turnNotices(id), heartbeatThread))
+              .length === (cancel ? 2 : 1),
+          "heartbeat completion follows physical settlement"
+        )
+        const facts = await backgroundFacts(heartbeatThread)
+        assert.equal(facts.active, null)
+        assert.equal(facts.starts, cancel ? 2 : 1)
+        assert.equal(facts.completions, cancel ? 2 : 1)
+        assert.equal(facts.last.reason, cancel ? "aborted" : "answer")
+        assert.match(facts.last.answer, /SDK_MODEL_OK/)
+        assert.notEqual(facts.last.turnId, heartbeatThread)
+        if (!cancel)
+          assert.deepEqual(facts.last.usage, {
+            model: "mods-model-fixture",
+            input_tokens: 12,
+            output_tokens: 3,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0
+          })
+        assert.equal(modelServer.requests.length, requestCount + 1)
+        pass(`heartbeat ${cancel ? "abort" : "answer"} uses its actual graph and controller`)
+      }
+    } finally {
+      await page!.evaluate(
+        async ({ config, content }) => {
+          await window.api.heartbeat.cancel()
+          await window.api.heartbeat.saveContent(content)
+          await window.api.heartbeat.saveConfig(config)
+        },
+        { config: heartbeatConfig, content: heartbeatContent }
+      )
+    }
+
     const beforeTurnCancel = modelServer.requests.length
     const beforeClosedStalls = modelServer.closedStalls()
     await functionComposer.fill("[mods-turn-cancel] [stall] 请等待停止。")

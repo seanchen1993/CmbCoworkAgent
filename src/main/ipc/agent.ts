@@ -160,7 +160,7 @@ import {
   isWorkflowPlumbingTranscriptContent,
   neutralizeWorkflowPlumbingUserText
 } from "../../shared/checkpoint-transcript"
-import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
+import { isCoordinatorWorkerStreamChunk, isMainTurnMessageStream } from "../agent/main-turn-stream"
 import {
   CONTEXT_COMPACTION_EVENT_TYPE,
   isContextCompactionStreamPayload,
@@ -3649,37 +3649,6 @@ function asPlainRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-function messageStreamMetadata(
-  mode: string,
-  payload: unknown
-): Record<string, unknown> | undefined {
-  if (mode !== "messages" || !Array.isArray(payload)) return undefined
-  return asPlainRecord(payload[1])
-}
-
-function isCoordinatorWorkerStreamChunk(mode: string, payload: unknown, threadId: string): boolean {
-  const metadata = messageStreamMetadata(mode, payload)
-  if (!metadata) return false
-  if (threadId.includes("__worker__")) return false
-
-  const workerThreadPrefix = `${threadId}__worker__`
-  const valuesToCheck = [
-    metadata.langgraph_checkpoint_ns,
-    metadata.checkpoint_ns,
-    metadata.thread_id,
-    metadata.langgraph_thread_id,
-    asPlainRecord(metadata.configurable)?.thread_id
-  ]
-
-  if (
-    valuesToCheck.some((value) => typeof value === "string" && value.includes(workerThreadPrefix))
-  ) {
-    return true
-  }
-
-  return false
-}
-
 function setSerializedMessageIdentity(
   payload: unknown,
   identity: { stableId: string; providerSourceId: string; providerOccurrence: number }
@@ -3707,22 +3676,7 @@ function shouldSkipMainTranscriptStreamPayload(
   payload: unknown,
   threadId: string
 ): boolean {
-  if (mode !== "messages") return true
-  if (isContextCompactionStreamPayload(mode, payload)) return true
-  if (Array.isArray(payload) && isSerializedSummarizationMessage(payload[0])) return true
-  if (isCoordinatorWorkerStreamChunk(mode, payload, threadId)) return true
-  const metadata = messageStreamMetadata(mode, payload)
-  const checkpointNs =
-    typeof metadata?.langgraph_checkpoint_ns === "string"
-      ? metadata.langgraph_checkpoint_ns
-      : typeof metadata?.checkpoint_ns === "string"
-        ? metadata.checkpoint_ns
-        : ""
-  // Deep-agent/subagent interiors are scoped under tools namespaces. Normal
-  // visible tool results are re-persisted by the renderer's filtered transcript
-  // flush, so the main process intentionally stays conservative here.
-  if (checkpointNs.includes("tools:")) return true
-  return false
+  return !isMainTurnMessageStream(mode, payload, threadId)
 }
 
 const STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS = 250

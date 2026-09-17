@@ -2286,6 +2286,7 @@ function assembleDeepAgent(
     registrySubagentSpecs = [],
     modRuntimeAuthority,
     modSessionModel,
+    modTurnRunId,
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
     // read-only cmdlets (Get-Content, …) aren't false-blocked. "unknown" =
@@ -3181,7 +3182,7 @@ function assembleDeepAgent(
               modManager,
               modRuntimeAuthority,
               modSessionModel,
-              currentRunMessageQueueOwnerToken
+              modTurnRunId
             )
           ]
         : [])
@@ -4578,6 +4579,8 @@ export interface CreateAgentRuntimeOptions {
   /** Physical foreground run token allowed to drain the current-run steer queue.
    * Doubles as the turn-completion gate's run key (same physical run). */
   currentRunMessageQueueOwnerToken?: string
+  /** Physical Mods observation owner, independent of foreground steering and sandbox ACLs. */
+  modTurnRunId?: string
   /** Notice sink for turn-completion-gate recoveries (empty reply retried, …). */
   onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
   /** Ordinary-path todo completion gate. Defaults to enabled. */
@@ -7095,6 +7098,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     onFailureFuseNotice,
     modRuntimeAuthority,
     modSessionModel: customConfig.model,
+    modTurnRunId: options.modTurnRunId ?? options.currentRunMessageQueueOwnerToken,
     onContextCompaction,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure

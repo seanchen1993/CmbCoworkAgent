@@ -12,11 +12,11 @@ const object = (value: unknown): Record<string, unknown> | undefined =>
 
 /** Consume complete, actual model responses; do not count history, streaming fragments or UI notices. */
 export class FunctionTurnObservation {
-  private readonly seen = new Set<string>()
-  private readonly seenObjects = new WeakSet<object>()
+  private readonly seen = new Map<string, number>()
+  private readonly seenObjects = new WeakMap<object, number>()
+  private readonly usage = new Map<number, FunctionTurnUsage>()
   private count = 0
-  private total?: FunctionTurnUsage
-  private incompleteUsage = false
+  private usageOverflow = false
   private response?: { content: unknown }
   private partial?: { id: string; text: string }
   private overflow = false
@@ -58,14 +58,16 @@ export class FunctionTurnObservation {
     this.response = value
     this.partial = undefined
     this.overflow = false
-    if (value.id ? this.seen.has(value.id) : this.seenObjects.has(value)) return
-    if (this.count >= 10000) {
-      this.incompleteUsage = true
-      return
+    let key = value.id ? this.seen.get(value.id) : this.seenObjects.get(value)
+    if (key === undefined) {
+      if (this.count >= 10000) {
+        this.usageOverflow = true
+        return
+      }
+      key = this.count++
+      if (value.id) this.seen.set(value.id, key)
+      else this.seenObjects.set(value, key)
     }
-    if (value.id) this.seen.add(value.id)
-    else this.seenObjects.add(value)
-    this.count++
     const metadata = object(value.response_metadata)
     const model = metadata?.model_name ?? metadata?.model
     const normalized = !!value.usage_metadata
@@ -77,30 +79,22 @@ export class FunctionTurnObservation {
       !usage ||
       usage.inputTokens === undefined ||
       usage.outputTokens === undefined
-    ) {
-      this.incompleteUsage = true
+    )
       return
-    }
     const read = usage.cacheReadTokens ?? 0
     const created = usage.cacheCreationTokens ?? 0
     const input = usage.inputTokens - (normalized ? read + created : 0)
     const values = [input, usage.outputTokens, read, created]
-    if (values.some((count) => !Number.isSafeInteger(count) || count < 0)) {
-      this.incompleteUsage = true
-      return
-    }
-    const next: FunctionTurnUsage = {
+    if (values.some((count) => !Number.isSafeInteger(count) || count < 0)) return
+    // Frozen fzn/gUe/Ryt replaces valid usage for an existing response identity.
+    // Missing usage contributes nothing and does not erase an earlier valid observation.
+    this.usage.set(key, {
       model,
-      input_tokens: (this.total?.input_tokens ?? 0) + input,
-      output_tokens: (this.total?.output_tokens ?? 0) + usage.outputTokens,
-      cache_read_input_tokens: (this.total?.cache_read_input_tokens ?? 0) + read,
-      cache_creation_input_tokens: (this.total?.cache_creation_input_tokens ?? 0) + created
-    }
-    if (
-      Object.values(next).some((count) => typeof count === "number" && !Number.isSafeInteger(count))
-    )
-      this.incompleteUsage = true
-    this.total = next
+      input_tokens: input,
+      output_tokens: usage.outputTokens,
+      cache_read_input_tokens: read,
+      cache_creation_input_tokens: created
+    })
   }
 
   snapshot(): { answer: string; usage?: FunctionTurnUsage } {
@@ -116,9 +110,28 @@ export class FunctionTurnObservation {
               .map((block) => block!.text)
               .join("")
           : ""
-    return {
-      answer: this.partial?.text ?? answer,
-      ...(!this.incompleteUsage && this.total ? { usage: { ...this.total } } : {})
+    let total: FunctionTurnUsage | undefined
+    if (!this.usageOverflow) {
+      for (const value of this.usage.values()) {
+        total = {
+          model: value.model,
+          input_tokens: (total?.input_tokens ?? 0) + value.input_tokens,
+          output_tokens: (total?.output_tokens ?? 0) + value.output_tokens,
+          cache_read_input_tokens:
+            (total?.cache_read_input_tokens ?? 0) + value.cache_read_input_tokens,
+          cache_creation_input_tokens:
+            (total?.cache_creation_input_tokens ?? 0) + value.cache_creation_input_tokens
+        }
+        if (
+          Object.values(total).some(
+            (value) => typeof value === "number" && !Number.isSafeInteger(value)
+          )
+        ) {
+          total = undefined
+          break
+        }
+      }
     }
+    return { answer: this.partial?.text ?? answer, ...(total ? { usage: total } : {}) }
   }
 }
