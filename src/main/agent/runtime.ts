@@ -1,5 +1,6 @@
 import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
+import { createFunctionSessionViewMiddleware } from "./mods-session-view"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
@@ -2284,6 +2285,7 @@ function assembleDeepAgent(
     managedExecution = false,
     registrySubagentSpecs = [],
     modRuntimeAuthority,
+    modSessionModel,
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
     // read-only cmdlets (Get-Content, …) aren't false-blocked. "unknown" =
@@ -3169,7 +3171,13 @@ function assembleDeepAgent(
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
       ...customMiddleware,
       ...outputStyleTurnReminderMiddleware,
-      ...systemPromptPreviewCaptureMiddleware
+      ...systemPromptPreviewCaptureMiddleware,
+      ...(!metadataOnly &&
+      modRuntimeAuthority?.agentId === "main" &&
+      typeof modSessionModel === "string" &&
+      modManager?.isActive(modRuntimeAuthority.workspace)
+        ? [createFunctionSessionViewMiddleware(modManager, modRuntimeAuthority, modSessionModel)]
+        : [])
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
@@ -7079,6 +7087,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolHookMiddleware,
     onFailureFuseNotice,
     modRuntimeAuthority,
+    modSessionModel: customConfig.model,
     onContextCompaction,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure

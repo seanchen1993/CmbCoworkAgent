@@ -262,13 +262,15 @@ export function stopRuntime(): void {
   for (const client of manager.clients.values()) client.stop("MODS_TEST_CRASH")
 }
 
-export async function disabledReadBenchmark(scope: Scope): Promise<unknown> {
+export async function disabledReadBenchmark(scope: Scope, iterations = 500): Promise<unknown> {
+  if (!Number.isSafeInteger(iterations) || iterations < 100 || iterations > 10000)
+    throw new Error("Invalid disabled-read benchmark size")
   const manager = getModsManager()!
   if (manager.isActive(scope.workspace)) throw new Error("Expected disabled Mods")
   const samples = { baseline: [] as number[], disabled: [] as number[] }
   try {
     // Interleave order to reduce cache, GC and temperature bias on the same real read path.
-    for (let index = 0; index < 600; index++) {
+    for (let index = 0; index < iterations + 100; index++) {
       const arms =
         index % 2 ? (["disabled", "baseline"] as const) : (["baseline", "disabled"] as const)
       for (const arm of arms) {
@@ -283,7 +285,14 @@ export async function disabledReadBenchmark(scope: Scope): Promise<unknown> {
     const result = Object.fromEntries(
       Object.entries(samples).map(([arm, times]) => {
         times.sort((a, b) => a - b)
-        return [arm, { iterations: times.length, medianMs: times[250], p95Ms: times[475] }]
+        return [
+          arm,
+          {
+            iterations: times.length,
+            medianMs: times[Math.floor(iterations / 2)],
+            p95Ms: times[Math.floor(iterations * 0.95)]
+          }
+        ]
       })
     )
     return {

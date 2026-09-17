@@ -1456,6 +1456,42 @@ async function main(): Promise<void> {
         mcpConnector
       )
     }
+    const requestsBeforeSession = modelServer.requests.length
+    const auditBeforeSession = (
+      await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+    ).map((row) => row.callId)
+    await functionComposer.fill("/claw-session ")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+          (job) =>
+            job.command === "claw-session" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("仓库：无 Git 仓库")
+        ),
+      "cold session SDK reads the real workspace without running a model"
+    )
+    const sessionText = (
+      await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)
+    ).find((job) => job.command === "claw-session" && job.state === "succeeded")!.result!.text
+    assert.ok(sessionText.includes(registryThread))
+    assert.ok(sessionText.toLowerCase().includes(workspace.toLowerCase()))
+    assert.ok(sessionText.includes("模型：gpt-4"))
+    assert.ok(sessionText.includes("用户轮次：0"))
+    assert.ok(sessionText.includes("消息：0"))
+    assert.equal(modelServer.requests.length, requestsBeforeSession)
+    assert.deepEqual(
+      (await page!.evaluate((id) => window.api.mods.audit(id), registryThread)).map(
+        (row) => row.callId
+      ),
+      auditBeforeSession
+    )
+    await page!.screenshot({ path: join(artifacts, "function-session-info.png") })
+    pass(
+      "cold session SDK reports the actual workspace and repository without tool or model execution"
+    )
+
     const requestsBeforeCatalog = modelServer.requests.length
     const auditBeforeCatalog = (
       await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
@@ -1583,6 +1619,27 @@ async function main(): Promise<void> {
     pass(
       "cold model prompt advertises custom schema, executes the registered tool and records protected publication"
     )
+    const priorSessionJobs = new Set(
+      (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map((job) => job.id)
+    )
+    const afterRunRequests = modelServer.requests.length
+    await functionComposer.fill("/claw-session ")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+          (job) =>
+            !priorSessionJobs.has(job.id) &&
+            job.command === "claw-session" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("REGISTERED_TOOL_OK") &&
+            job.result.text.includes("用户轮次：1")
+        ),
+      "session SDK reads the real completed transcript and prompt count"
+    )
+    assert.equal(modelServer.requests.length, afterRunRequests)
+    await page!.screenshot({ path: join(artifacts, "function-session-transcript.png") })
+    pass("session SDK reports actual model transcript and turns without another model request")
     await functionComposer.fill("/claw-tools ")
     await functionComposer.press("Enter")
     await until(

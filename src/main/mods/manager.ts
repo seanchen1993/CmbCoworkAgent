@@ -107,10 +107,75 @@ interface StoredCard {
 
 export class ModsManager {
   private readonly runtimeAuthorities = new ModRuntimeAuthorities()
-  private readonly functionCatalogQueries = new Set<{ threadId: string; release(): void }>()
+  private readonly functionSessions = new WeakMap<
+    ModRuntimeAuthority,
+    {
+      model: string
+      messages?: readonly unknown[]
+    }
+  >()
 
-  private invalidateFunctionCatalogQueries(threadId?: string): void {
-    for (const query of this.functionCatalogQueries)
+  bindFunctionSession(authority: ModRuntimeAuthority, model: string): void {
+    authority.assertLive()
+    if (authority.agentId !== "main" || this.runtimeAuthorities.get(authority) !== authority)
+      throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
+    this.functionSessions.set(authority, { model })
+  }
+
+  updateFunctionSessionMessages(
+    authority: ModRuntimeAuthority,
+    messages: readonly unknown[]
+  ): void {
+    authority.assertLive()
+    const view = this.functionSessions.get(authority)
+    if (!view || this.runtimeAuthorities.get(authority) !== authority)
+      throw new ModError("MODS_SESSION_UNAVAILABLE")
+    // Graph message reducers replace the array; retain that exact engine snapshot.
+    view.messages = messages
+  }
+
+  /** Claude's session view is the main conversation, even during a shared child tool call. */
+  captureFunctionSession(workspace: string, threadId: string) {
+    workspace = this.workspaceKey(workspace)
+    const caller = this.functionRuntimeScope(workspace, threadId)
+    const mainScope = { workspace, threadId, agentId: "main" }
+    const authority = this.runtimeAuthorities.get(mainScope)
+    const view = authority && this.functionSessions.get(authority)
+    const epoch = this.config(workspace).epoch
+    let live = true
+    const query = {
+      threadId,
+      release: () => {
+        live = false
+        this.functionReadQueries.delete(query)
+      }
+    }
+    const assertLive = () => {
+      caller.assertLive()
+      if (
+        !live ||
+        this.runtimeAuthorities.get(mainScope) !== authority ||
+        (authority && this.functionSessions.get(authority) !== view) ||
+        this.config(workspace).epoch !== epoch
+      )
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+      authority?.assertLive()
+    }
+    assertLive()
+    if (this.functionReadQueries.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
+    this.functionReadQueries.add(query)
+    return {
+      model: view?.model,
+      messages: view?.messages,
+      bound: !!authority,
+      assertLive,
+      release: query.release
+    }
+  }
+  private readonly functionReadQueries = new Set<{ threadId: string; release(): void }>()
+
+  private invalidateFunctionReads(threadId?: string): void {
+    for (const query of this.functionReadQueries)
       if (!threadId || query.threadId === threadId) query.release()
   }
 
@@ -142,7 +207,7 @@ export class ModsManager {
   }
 
   closeFunctionThread(threadId: string): void {
-    this.invalidateFunctionCatalogQueries(threadId)
+    this.invalidateFunctionReads(threadId)
     this.runtimeAuthorities.closeThread(threadId)
     this.functionLifecycle?.closeThread(threadId)
     for (const [key, binding] of this.bindings)
@@ -225,7 +290,7 @@ export class ModsManager {
       threadId,
       release: () => {
         live = false
-        this.functionCatalogQueries.delete(query)
+        this.functionReadQueries.delete(query)
       }
     }
     const assertLive = () => {
@@ -243,8 +308,8 @@ export class ModsManager {
     }
     assertLive()
     const tools = catalog ? this.functionToolCatalog(workspace, threadId, agentId) : undefined
-    if (this.functionCatalogQueries.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
-    this.functionCatalogQueries.add(query)
+    if (this.functionReadQueries.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
+    this.functionReadQueries.add(query)
     return { tools, assertLive, release: query.release }
   }
 
@@ -601,7 +666,7 @@ export class ModsManager {
   }
 
   createRuntimeAuthority(binding: ModThreadBinding) {
-    this.invalidateFunctionCatalogQueries(binding.threadId)
+    this.invalidateFunctionReads(binding.threadId)
     const scope = { ...binding, workspace: this.workspaceKey(binding.workspace) }
     const instance = this.runtimeAuthorities.create(scope, binding.signal)
     this.functionToolCatalogs.delete(
@@ -1920,7 +1985,7 @@ export class ModsManager {
   }
 
   close(): void {
-    this.invalidateFunctionCatalogQueries()
+    this.invalidateFunctionReads()
     this.runtimeAuthorities.close()
     this.functionLifecycle?.close()
     this.functionToolCatalogs.clear()

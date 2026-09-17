@@ -1,3 +1,4 @@
+import { queryFunctionSessionRead } from "../mods/v2/session-read-host"
 import { queryFunctionToolCatalog } from "../mods/v2/tool-catalog-host"
 import { app, dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { join } from "node:path"
@@ -138,6 +139,19 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         manager.assertFunctionToolNameAvailable(workspace, threadId, name)
       },
       registeredTool: (...args) => registeredTools.call(...args),
+      readSession: (workspace, threadId, method, signal) =>
+        queryFunctionSessionRead(
+          manager,
+          assertStandaloneThread,
+          () => {
+            if (writableThreadScope(threadId) !== workspace)
+              throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          },
+          workspace,
+          threadId,
+          method,
+          signal
+        ),
       listTools: async (workspace, threadId, signal) => {
         signal.throwIfAborted()
         if (writableThreadScope(threadId) !== workspace)

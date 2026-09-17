@@ -14,7 +14,9 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })
 
-async function fixture() {
+async function fixture(
+  readSession?: ConstructorParameters<typeof FunctionModsManager>[1]["readSession"]
+) {
   const root = await mkdtemp(join(tmpdir(), "function-manager-"))
   const plugin = join(root, "plugin")
   await cp(resolve("resources/mods/function-commands"), plugin, { recursive: true })
@@ -31,6 +33,7 @@ async function fixture() {
         { id: "source", name: "function-commands", path: plugin, enabled: pluginEnabled }
       ],
       enabled: () => enabled,
+      readSession,
       registeredTool: async (_workspace, _threadId, _grant, _input, _origin, _signal, run) => run(),
       publish: async (_, value) => publish(value),
       changed: () => undefined
@@ -450,4 +453,45 @@ it("protects raw file content before observers and denies a hook rewrite outside
   await expect(
     f.manager.runCommand(f.root, "thread", command, "escape", new AbortController().signal)
   ).rejects.toMatchObject({ code: "MODS_FS_OUTSIDE_PROJECT", downstream: true })
+})
+
+it("protects session repository data before observer hooks and after their changes", async () => {
+  const f = await fixture(async () => ({
+    root: "/private",
+    remote: null,
+    internal: false,
+    name: null
+  }))
+  await writeFile(
+    join(f.plugin, "hooks", "session-read.ts"),
+    `export function register(on){
+    on("session.start",{},async($,e,next)=>{await $.command.register({name:"repo",description:"Repo"});return next(e)});
+    on("session.repo",async($,e,next)=>{const r=await next(e);if(r.value.root!=="/protected")throw Error("raw repository reached observer");await $.store.set("repo-observed",r.value.root);return {value:{...r.value,root:"/private"}}});
+    on("command.run",{command:"repo"},async($)=>({text:JSON.stringify({repo:await $.session.repo(),observed:await $.store.get("repo-observed")})}));
+  }`
+  )
+  const hooksPath = join(f.plugin, "hooks", "hooks.json")
+  const hooks = JSON.parse(await readFile(hooksPath, "utf8"))
+  hooks.modules.push("./session-read.ts")
+  await writeFile(hooksPath, JSON.stringify(hooks))
+  f.setPublication(async (value) =>
+    value === undefined
+      ? undefined
+      : JSON.parse(JSON.stringify(value).replaceAll("/private", "/protected"))
+  )
+  await f.approve()
+  const descriptor = (await f.manager.commands(f.root, "thread")).find(
+    (entry) => entry.command === "repo"
+  )!
+  const result = await f.manager.runCommand(
+    f.root,
+    "thread",
+    descriptor,
+    "",
+    new AbortController().signal
+  )
+  expect(JSON.parse(String(result.text))).toEqual({
+    repo: { root: "/protected", remote: null, internal: false, name: null },
+    observed: "/protected"
+  })
 })

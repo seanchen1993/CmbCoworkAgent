@@ -1,3 +1,4 @@
+import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import { ModFunctionError, isModObject } from "../../../shared/mods/v2/contracts"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionCommand } from "../../../shared/mods/v2/commands"
@@ -57,6 +58,7 @@ export interface FunctionSessionHost {
   threadId: string
   workspace: string
   cwd?(): string
+  readSession?(method: FunctionSessionReadMethod, signal: AbortSignal): Promise<ModJson>
   assertLive(plugin?: FunctionPlugin): void
   uiChanged?(): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>

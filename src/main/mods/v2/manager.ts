@@ -1,3 +1,4 @@
+import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { randomInt } from "node:crypto"
@@ -56,6 +57,12 @@ interface FunctionManagerHost {
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
   changed(threadId: string): void
   assertThread?(workspace: string, threadId: string): void
+  readSession?(
+    workspace: string,
+    threadId: string,
+    method: FunctionSessionReadMethod,
+    signal: AbortSignal
+  ): Promise<ModJson>
   fileScope?(workspace: string, threadId: string): FunctionFileScope
   listTools?(workspace: string, threadId: string, signal: AbortSignal): Promise<FunctionToolInfo[]>
   filterTools?(workspace: string, threadId: string, tools: FunctionToolInfo[]): FunctionToolInfo[]
@@ -323,6 +330,15 @@ export class FunctionModsManager {
           threadId,
           cwd: () => this.host.fileScope?.(workspace, threadId).workspace ?? workspace,
           assertLive,
+          readSession: async (method, signal) => {
+            assertLive()
+            if (!this.host.readSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
+            const value = await this.host.readSession(workspace, threadId, method, signal)
+            assertLive()
+            const result = await this.host.publish(workspace, value, signal)
+            assertLive()
+            return result
+          },
           listTools: this.host.listTools
             ? (signal) => this.host.listTools!(workspace, threadId, signal)
             : undefined,

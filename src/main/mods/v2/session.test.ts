@@ -400,3 +400,145 @@ it("executes the identical SDK fixture used in Claude's plugin test against the 
     next: "undefined"
   })
 })
+
+it("projects repository SDK operations and returns no first-party authorization", async () => {
+  const calls: string[] = []
+  const value = await session(
+    `
+    on("session.start",async($,e,next)=>{await $.command.register({name:"repo",description:"Repo"});return next(e)});
+    on("session.repo",async($,e,next)=>{const r=await next({...e,cwd:"/forged"});return {value:r.value===null?null:{...r.value,root:"view:"+r.value.root}}});
+    on("command.run",{command:"repo"},async($)=>({text:JSON.stringify({repo:await $.session.repo(),auth:await $.session.authorize()})}));
+  `,
+    {
+      readSession: async (method) => {
+        calls.push(method)
+        return { root: "/real", remote: null, internal: false, name: null }
+      }
+    }
+  )
+  expect(JSON.parse(String((await value.run("repo", "")).text))).toEqual({
+    repo: { root: "view:/real", remote: null, internal: false, name: null },
+    auth: null
+  })
+  expect(calls).toEqual(["session.repo"])
+})
+
+it("honors repository operation vetoes without reading Git", async () => {
+  let calls = 0
+  const value = await session(
+    `
+    on("session.start",async($,e,next)=>{await $.command.register({name:"repo",description:"Repo"});return next(e)});
+    on("session.repo",()=>({deny:"no repository disclosure"}));
+    on("command.run",{command:"repo"},async($)=>{try{await $.session.repo()}catch(e){return {text:e.message}}});
+  `,
+    {
+      readSession: async () => {
+        calls++
+        return null
+      }
+    }
+  )
+  expect((await value.run("repo", "")).text).toBe("no repository disclosure")
+  expect(calls).toBe(0)
+})
+
+it("runs the identical session metadata fixture used in Claude's plugin test", async () => {
+  const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/session-read"))
+  for (const repo of [
+    null,
+    "deny",
+    { root: "/root", remote: "git@example.invalid:team/repo.git", internal: false, name: null }
+  ]) {
+    const guest = await FunctionGuestRuntime.create(compiled.code, compiled.options)
+    const plugins = [
+      {
+        name: compiled.name,
+        root: compiled.root,
+        tier: "user" as const,
+        guest,
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+    ] as ConstructorParameters<typeof FunctionSession>[0][number][]
+    if (repo === "deny")
+      plugins.push({
+        name: "test-lower",
+        root: "/root",
+        tier: "append",
+        capabilities: [],
+        guest: await FunctionGuestRuntime.create(
+          'globalThis.__cmbFunctionMod={register(on){on("session.repo",()=>({deny:"metadata denied"}))}}'
+        )
+      })
+    let calls = 0
+    const value = new FunctionSession(plugins, {
+      threadId: "thread",
+      workspace: "/root",
+      assertLive: () => {},
+      publish: async (value) => value,
+      readSession: async () => {
+        calls++
+        return repo === "deny" ? null : repo
+      }
+    })
+    sessions.push(value)
+    const answer = await value.run("session-probe", "")
+    if (repo === "deny") {
+      expect(answer.text).toContain("caught:")
+      expect(calls).toBe(0)
+    } else
+      expect(JSON.parse(String(answer.text))).toEqual({
+        repo: repo && typeof repo === "object" ? { ...repo, root: "view:/root" } : null,
+        auth: null
+      })
+  }
+})
+
+it("runs the identical session state fixture used in Claude's plugin test", async () => {
+  const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/session-state"))
+  for (const mode of ["data", "empty", "deny"]) {
+    const guest = await FunctionGuestRuntime.create(compiled.code, compiled.options)
+    const plugins = [
+      {
+        name: "session-state",
+        root: compiled.root,
+        tier: "user" as const,
+        guest,
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+    ] as ConstructorParameters<typeof FunctionSession>[0][number][]
+    if (mode === "deny")
+      plugins.push({
+        name: "test-lower",
+        root: "/root",
+        tier: "append",
+        capabilities: [],
+        guest: await FunctionGuestRuntime.create(
+          'globalThis.__cmbFunctionMod={register(on){on("session.model",()=>({deny:"state denied"}))}}'
+        )
+      })
+    const messages = mode === "data" ? [{ role: "user", text: "prompt", toolUses: [] }] : []
+    const value = new FunctionSession(plugins, {
+      threadId: "thread",
+      workspace: "/root",
+      assertLive: () => undefined,
+      publish: async (value) => value,
+      readSession: async (method) =>
+        method === "session.model"
+          ? "actual"
+          : method === "session.turns"
+            ? mode === "data"
+              ? 2
+              : 0
+            : messages
+    })
+    sessions.push(value)
+    const answer = await value.run("session-state", "")
+    if (mode === "deny") expect(answer.text).toContain("caught:")
+    else
+      expect(JSON.parse(String(answer.text))).toEqual({
+        model: "view:actual",
+        turns: mode === "data" ? 2 : 0,
+        messages
+      })
+  }
+})

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
-  "date": "2026-09-17",
-  "codeBaseline": "51dbec50",
+  "date": "2026-09-18",
+  "codeBaseline": "052f11c5",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -10,7 +10,7 @@
     "source": "https://github.com/anthropics/claude-code/blob/b782847db9a18667f00918ea341197f201b22bb4/mods/types/claude-code.d.ts",
     "runtimePreviouslyVerified": "2.1.272",
     "runtime273Verified": true,
-    "runtime273VerificationScope": "39 permission-query/command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor/tool-SDK-envelope/model-completion-operation/engine-tool-ingress/tool-registration-operation/MCP-operation conformance cases in real plugin test; not full API or product parity"
+    "runtime273VerificationScope": "45 session-metadata/session-state/permission-query/command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor/tool-SDK-envelope/model-completion-operation/engine-tool-ingress/tool-registration-operation/MCP-operation conformance cases in real plugin test; not full API or product parity"
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
@@ -41,6 +41,11 @@
       "session.cwd",
       "session.surface",
       "session.surfaces",
+      "session.model",
+      "session.messages",
+      "session.turns",
+      "session.repo",
+      "session.authorize",
       "clock.now",
       "clock.sleep",
       "store.get",
@@ -124,7 +129,21 @@
         "OAuth/reconnect parity and remote-provider qualification pending"
       ],
       "upstreamConformance": 3,
-      "fullParity": false,
+      "sessionRead": {
+      "revision": "desktop-session-read-v19",
+      "design": "mods-v2-session-read-2026-09-18.md",
+      "scope": "actual main-graph model/messages/turns; exact bounded read-only checkpoint worker; live Git metadata; absent first-party authorization returns null",
+      "limits": [
+        "main conversation even for shared child callers",
+        "newest 4096 eligible messages; 100000 source messages; 1 MiB raw row/output; node/depth budgets",
+        "oversized or malformed exact reads reject instead of using UI previews",
+        "usage/compact/turn lifecycle remain pending"
+      ],
+      "upstreamConformanceAdded": 6,
+      "validation": "62 focused + 473 Mods + 37 process + 49 Electron E2E pass; full 3487: 3456 pass, 26 unchanged baseline failures, 5 skipped; standalone 74/81 with 7 unchanged failures; subsequent hardening 38 focused + Node/Web pass, no new lint issues; disabled-read first +22.15% retained, isolated 5x1000 per arm P95 changes +4.66/-2.44/-4.81/+1.87/+2.17%, full performance gate pending",
+      "fullParity": false
+    },
+    "fullParity": false,
       "routingDesign": "mods-v2-mcp-tool-routing-2026-09-17.md",
       "registeredDesign": "mods-v2-registered-mcp-2026-09-17.md"
     },

@@ -19,6 +19,7 @@
 `/claw-brief` 调用自定义项目概览工具；也可以发送普通消息“请调用项目概览工具”。
 模型是否选用工具取决于已配置模型。首次发消息前就可用 `/claw-tools` 查看当前会话工具摘要，
 用 `/claw-tools read_file` 查看某个工具的完整说明；包括当前已注册工具。
+`/claw-session` 查看主模型、用户轮次、消息数量、最近回复及 Git 仓库；查询不会调用模型。
 
 自建插件用已有的本地插件安装入口安装，随后在函数插件区域授权。
 
@@ -59,7 +60,7 @@ export function register(on) {
 
 ## SDK 事件和返回值
 
-当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces`、
+当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces/model/messages/turns/repo/authorize`、
 `clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`，以及 `$.plugin.name/root` 元数据。
 上述 SDK 操作同样经过事件链。另已接入有限的桌面 Pane：`ui.open/close`、
 同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call/register/list/check`、`model.complete`，范围见下文。
