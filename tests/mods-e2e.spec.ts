@@ -2049,6 +2049,14 @@ async function main(): Promise<void> {
     pass(
       "registered tool, native SDK read and model completion share the real turn and parent receipts across utilityProcess"
     )
+    let beforeChildTurns: Record<string, unknown>
+    await until(async () => {
+      beforeChildTurns = await inspectTurn()
+      return beforeChildTurns.active === null
+    }, "prior main turn has completed before child qualification")
+    const beforeChildNotices = (
+      await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)
+    ).length
     const beforeChild = modelServer.requests.length
     await functionComposer.fill("[mods-child] 请通过 Explore 子代理调用注册工具。")
     await functionComposer.press("Enter")
@@ -2094,7 +2102,8 @@ async function main(): Promise<void> {
     assert.equal(sdkReceipts[0].toolId, "host:read_file")
     for (const row of [registeredReceipt, ...sdkReceipts]) {
       assert.equal(row.identity?.agentId, "mods-child-task")
-      assert.equal(row.identity?.turnId, taskReceipt.identity.turnId)
+      assert.equal(row.identity?.turnId, registeredReceipt.identity.turnId)
+      assert.notEqual(row.identity?.turnId, taskReceipt.identity.turnId)
       assert.equal(row.status, "succeeded")
       assert.equal(row.publication, "published")
     }
@@ -2104,6 +2113,96 @@ async function main(): Promise<void> {
     await page!.screenshot({ path: join(artifacts, "function-child-authority.png") })
     pass(
       "real Explore task uses scoped registered tools and file SDK across utilityProcess with protected parent/child receipts"
+    )
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)).length ===
+        beforeChildNotices + 1,
+      "child completion does not append a main-turn notice"
+    )
+    const childTurnFacts = await inspectTurn()
+    assert.equal(childTurnFacts.starts, Number(beforeChildTurns!.starts) + 1)
+    assert.equal(childTurnFacts.completions, Number(beforeChildTurns!.completions) + 1)
+    assert.equal(childTurnFacts.childCompletions, Number(beforeChildTurns!.childCompletions) + 1)
+    const { durationMs: childDuration, ...completedChildEvent } =
+      childTurnFacts.lastChild as Record<string, unknown>
+    assert.ok(Number(childDuration) > 0)
+    assert.deepEqual(completedChildEvent, {
+      agentId: "mods-child-task",
+      turnId: registeredReceipt.identity.turnId,
+      answer: "MODS_CHILD_WORKER_OK",
+      reason: "answer",
+      usage: {
+        model: "mods-model-fixture",
+        input_tokens: 24,
+        output_tokens: 6,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0
+      }
+    })
+    assert.deepEqual((childTurnFacts.last as { usage: unknown }).usage, {
+      model: "mods-model-fixture",
+      input_tokens: 24,
+      output_tokens: 6,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0
+    })
+    pass(
+      "shared child completion owns a distinct turn, actual usage and no main start or UI notice"
+    )
+
+    const beforeChildAbortRequests = modelServer.requests.length
+    const beforeChildAbortClosed = modelServer.closedStalls()
+    await functionComposer.fill("[mods-child] [child-stall] 请等待子代理完成，稍后停止。")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        modelServer!.requests
+          .slice(beforeChildAbortRequests)
+          .some(
+            (request) =>
+              request.messages.at(-1)?.role === "tool" &&
+              JSON.stringify(request.messages).includes("[mods-child-worker] [stall]")
+          ),
+      "child is streaming through its actual provider connection"
+    )
+    assert.equal(typeof (await inspectTurn()).active, "string")
+    assert.equal(await backgroundCommand(registryThread, "abort"), "已请求停止当前轮次。")
+    await until(
+      async () => modelServer!.closedStalls() === beforeChildAbortClosed + 1,
+      "parent stop cancels the actual shared child provider stream"
+    )
+    let abortedChildFacts: Record<string, unknown>
+    await until(async () => {
+      abortedChildFacts = await inspectTurn()
+      return (
+        abortedChildFacts.active === null &&
+        Number(abortedChildFacts.childCompletions) === Number(childTurnFacts.childCompletions) + 1
+      )
+    }, "aborted child completes independently of parent settlement")
+    const abortedChild = abortedChildFacts!.lastChild as {
+      turnId: string
+      reason: string
+      answer: string
+      usage: unknown
+    }
+    assert.equal(abortedChild.reason, "aborted")
+    assert.equal(abortedChild.answer, "MODS_CHILD_PARTIAL")
+    assert.notEqual(abortedChild.turnId, registeredReceipt.identity.turnId)
+    assert.notEqual(abortedChild.turnId, (abortedChildFacts!.last as { turnId: string }).turnId)
+    assert.equal((abortedChildFacts!.last as { reason: string }).reason, "aborted")
+    assert.deepEqual(abortedChild.usage, {
+      model: "mods-model-fixture",
+      input_tokens: 12,
+      output_tokens: 3,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0
+    })
+    assert.equal(abortedChildFacts!.starts, Number(childTurnFacts.starts) + 1)
+    assert.equal(abortedChildFacts!.completions, Number(childTurnFacts.completions) + 1)
+    await page!.screenshot({ path: join(artifacts, "function-child-turn.png") })
+    pass(
+      "shared child cancellation retains its real partial answer without borrowing the main turn identity"
     )
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     for (const path of ["secret.txt", "../outside.txt"]) {

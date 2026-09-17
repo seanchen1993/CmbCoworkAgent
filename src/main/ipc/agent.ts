@@ -160,7 +160,11 @@ import {
   isWorkflowPlumbingTranscriptContent,
   neutralizeWorkflowPlumbingUserText
 } from "../../shared/checkpoint-transcript"
-import { isCoordinatorWorkerStreamChunk, isMainTurnMessageStream } from "../agent/main-turn-stream"
+import {
+  childTurnStreamOwner,
+  isCoordinatorWorkerStreamChunk,
+  isMainTurnMessageStream
+} from "../agent/main-turn-stream"
 import {
   CONTEXT_COMPACTION_EVENT_TYPE,
   isContextCompactionStreamPayload,
@@ -4161,6 +4165,15 @@ function persistAndForwardPhysicalRunStreamChunk(
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
   const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
+  const child = childTurnStreamOwner(mode, payload)
+  if (child)
+    getModsManager()?.functionTurns.observeChildStream(
+      threadId,
+      runToken,
+      child,
+      payload,
+      streamPayloadContentMode(payload)
+    )
   if (!shouldSkipMainTranscriptStreamPayload(mode, payload, threadId))
     getModsManager()?.functionTurns.observeStream(
       threadId,

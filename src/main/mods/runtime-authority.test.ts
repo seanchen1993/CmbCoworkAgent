@@ -8,7 +8,7 @@ import { withFunctionExecution } from "./v2/execution-context"
 import { ProjectFunctionFiles } from "./v2/file-access"
 import { FunctionRegisteredTools } from "./v2/registered-tools"
 import { functionCallAuthority, withFunctionAgentExecution } from "./v2/host-call"
-import { modCallContext } from "./context"
+import { getModCallContext, modCallContext } from "./context"
 import type { ModRuntimeAuthority } from "./runtime-instance"
 import {
   createDeepAgent,
@@ -25,6 +25,12 @@ import { FunctionGuestRuntime } from "./v2/guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES } from "./v2/session"
 import { currentFunctionExecution } from "./v2/execution-context"
 import { functionSdkToolInput } from "./v2/tool-sdk"
+import type { FunctionTurnComplete } from "../../shared/mods/v2/turn"
+import {
+  claimLocalThreadRunLease,
+  getLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../agent/thread-run-lease"
 
 vi.mock("electron", () => ({
   app: { getPath: () => tmpdir(), getName: () => "test", getVersion: () => "0" },
@@ -620,11 +626,12 @@ it("keeps named registered MCP calls on the real shared child and native receipt
     const read = audit.find((row) => row.toolId === "host:read_file")!
     expect(inner.identity?.parentCallId).toBe(outer.identity?.callId)
     expect(read.identity?.parentCallId).toBe(inner.identity?.callId)
+    expect(outer.identity?.turnId).not.toBe(authority.turnId)
     for (const row of audit)
       expect(row).toMatchObject({
         status: "succeeded",
         publication: "published",
-        identity: { agentId: "worker", turnId: "turn", modId: "function:demo" }
+        identity: { agentId: "worker", turnId: outer.identity!.turnId, modId: "function:demo" }
       })
     expect(physical).not.toHaveBeenCalled()
     authority.assertLive()
@@ -758,7 +765,18 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
       }
     }
   )
+  const childCompletions: FunctionTurnComplete[] = []
+  const turnStarts = vi.fn(async () => {})
   f.manager.attachFunctions({
+    turnStart: turnStarts,
+    turnComplete: async (_workspace, _threadId, input) => {
+      expect(getLocalThreadRunLease("thread")?.runId).toBe("parent-graph")
+      expect(currentFunctionExecution()?.runtimeAuthority).toBeUndefined()
+      expect(getModCallContext()).toBeUndefined()
+      expect(functionCallAuthority(f.scope.workspace, "thread")).toBeUndefined()
+      childCompletions.push(input)
+      return { text: "ignored child decoration" }
+    },
     invalidate: () => {
       void session.close()
     },
@@ -813,9 +831,17 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
                   }
             ]
           })
+      message.id = `${child ? "child" : "main"}-${done ? "answer" : "tool"}`
+      message.response_metadata = { model_name: child ? "child-provider" : "main-provider" }
+      message.usage_metadata = {
+        input_tokens: child ? 5 : 100,
+        output_tokens: 3,
+        total_tokens: child ? 8 : 103
+      }
       return { generations: [{ text: done ? "done" : "", message }] }
     }
   }
+  claimLocalThreadRunLease({ threadId: "thread", runId: "parent-graph", owner: "desktop" })
   try {
     const agent = createDeepAgent({
       model: new Model({}),
@@ -823,6 +849,7 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
       tools: [],
       threadId: "thread",
       modRuntimeAuthority: runtimeAuthority,
+      modTurnRunId: "parent-graph",
       mainTodosEnabled: false,
       includeGeneralPurposeSubagent: false,
       registrySubagentSpecs: [
@@ -895,14 +922,119 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
     const custom = audit.find((row) => row.identity?.toolCallId === "inspect-child")!
     expect(task.identity).toMatchObject({ agentId: "main" })
     expect(custom.identity?.parentCallId).toBe(task.identity!.callId)
+    expect(custom.identity?.turnId).not.toBe(task.identity?.turnId)
+    await vi.waitFor(() => expect(childCompletions).toHaveLength(1))
+    expect(turnStarts).not.toHaveBeenCalled()
+    expect(childCompletions[0]).toMatchObject({
+      agentId: "task-child",
+      turnId: custom.identity!.turnId,
+      reason: "answer",
+      answer: "inspected",
+      isAborted: false,
+      usage: {
+        model: "child-provider",
+        input_tokens: 10,
+        output_tokens: 6,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0
+      }
+    })
     expect(audit.filter((row) => row.identity?.agentId === "task-child")).toHaveLength(2)
     expect(() => f.manager.functionToolCatalog(f.workspace, "thread", "task-child")).toThrow(
       "MODS_TOOL_CONTEXT_REQUIRED"
     )
   } finally {
+    releaseLocalThreadRunLease("thread", "desktop", "parent-graph")
     await session.close()
   }
 })
+
+it.each(["error", "cancel"])(
+  "reports a real shared graph's %s even when the main graph can recover",
+  async (ending) => {
+    const f = fixture()
+    const parent = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+    const completions: FunctionTurnComplete[] = []
+    f.manager.attachFunctions({
+      invalidate: () => {},
+      closeThread: () => {},
+      close: () => {},
+      turnComplete: async (_workspace, _thread, input) => {
+        completions.push(input)
+        return { text: input.answer }
+      }
+    })
+    let childCalls = 0
+    class Model extends FakeChatModel {
+      bindTools() {
+        return this
+      }
+      async _generate(messages: BaseMessage[]) {
+        if (currentFunctionExecution()?.agentId === "failing-child") {
+          childCalls++
+          if (ending === "cancel") {
+            f.controller.abort()
+            f.controller.signal.throwIfAborted()
+          }
+          throw new Error("controlled child model failure")
+        }
+        const message = ToolMessage.isInstance(messages.at(-1))
+          ? new AIMessage("parent recovered")
+          : new AIMessage({
+              content: "",
+              tool_calls: [
+                {
+                  name: "task",
+                  id: "failing-child",
+                  type: "tool_call",
+                  args: { subagent_type: "Explore", description: "Inspect" }
+                }
+              ]
+            })
+        return { generations: [{ message, text: String(message.content) }] }
+      }
+    }
+    const agent = createDeepAgent({
+      model: new Model({}),
+      backend: f.sandbox,
+      tools: [],
+      threadId: "thread",
+      modRuntimeAuthority: parent,
+      modTurnRunId: "physical",
+      mainTodosEnabled: false,
+      includeGeneralPurposeSubagent: false,
+      registrySubagentSpecs: [
+        { name: "Explore", description: "Read", systemPrompt: "Inspect", shellAccess: "read_only" }
+      ],
+      toolHookMiddleware: createToolHookMiddleware({
+        workspacePath: f.scope.workspace,
+        threadId: "thread",
+        hookTurnId: parent.turnId,
+        runtimeAuthority: parent,
+        hookScope: createHookScope(),
+        resolveHooksForContext: () => []
+      }),
+      summarizationTrigger: { type: "messages", value: 200 }
+    })
+    const result = await agent
+      .invoke(
+        { messages: [{ role: "user", content: "Inspect" }] },
+        { recursionLimit: 12, signal: f.controller.signal }
+      )
+      .catch((error: unknown) => error)
+    expect(childCalls).toBe(1)
+    if (ending === "cancel") expect(result).toBeInstanceOf(Error)
+    await vi.waitFor(() => expect(completions).toHaveLength(1))
+    expect(completions[0]).toMatchObject({
+      agentId: "failing-child",
+      answer: "",
+      reason: ending === "cancel" ? "aborted" : "error",
+      isAborted: ending === "cancel"
+    })
+    expect(completions[0].turnId).not.toBe(parent.turnId)
+    expect(completions[0].usage).toBeUndefined()
+  }
+)
 
 it("clears inherited renderer ownership for an id-less task while assigning a fresh private agent", async () => {
   const seen: Array<{ metadata: unknown; configurable: unknown }> = []

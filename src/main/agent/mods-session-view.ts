@@ -2,6 +2,17 @@ import { createMiddleware } from "langchain"
 import type { ModsManager } from "../mods/manager"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 
+/** A shared graph resolves its own private invocation; concurrent children never borrow main state. */
+export function createFunctionChildTurnMiddleware(manager: ModsManager) {
+  return createMiddleware({
+    name: "functionChildTurn",
+    afterModel: (state) => {
+      manager.observeSharedAgentTurn(state.messages.at(-1))
+      return undefined
+    }
+  })
+}
+
 /** Observe actual main-graph state without changing its messages or routing decisions. */
 export function createFunctionSessionViewMiddleware(
   manager: ModsManager,

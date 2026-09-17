@@ -41,6 +41,19 @@ export async function startModsModelServer() {
     ) {
       const child = userPrompt.includes("[mods-child-worker]")
       const completed = body.messages?.at(-1)?.role === "tool"
+      if (child && completed && userPrompt.includes("[stall]")) {
+        event([
+          {
+            index: 0,
+            delta: { role: "assistant", content: "MODS_CHILD_PARTIAL" },
+            finish_reason: null
+          }
+        ])
+        response.on("close", () => {
+          closedStalls++
+        })
+        return
+      }
       event([
         {
           index: 0,
@@ -59,7 +72,7 @@ export async function startModsModelServer() {
                           name: "task",
                           arguments: JSON.stringify({
                             subagent_type: "Explore",
-                            description: "[mods-child-worker] Inspect using the registered probe"
+                            description: `[mods-child-worker] ${userPrompt.includes("[child-stall]") ? "[stall]" : ""} Inspect using the registered probe`
                           })
                         }
                   }

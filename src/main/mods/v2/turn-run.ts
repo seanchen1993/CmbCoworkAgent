@@ -1,5 +1,5 @@
 import { assertLocalThreadRunLease, type LocalThreadRunOwner } from "../../agent/thread-run-lease"
-import { isMainTurnMessageStream } from "../../agent/main-turn-stream"
+import { childTurnStreamOwner, isMainTurnMessageStream } from "../../agent/main-turn-stream"
 import { streamPayloadContentMode } from "../../ipc/stream-transcript-payload"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { getModsManager, type ModsManager } from "../manager"
@@ -30,6 +30,15 @@ export class FunctionTurnRun {
 
   observeStream(mode: string, payload: unknown): void {
     if (this.ended || !this.manager) return
+    const child = childTurnStreamOwner(mode, payload)
+    if (child)
+      this.manager.functionTurns.observeChildStream(
+        this.binding.threadId,
+        this.binding.runId,
+        child,
+        payload,
+        streamPayloadContentMode(payload)
+      )
     if (!isMainTurnMessageStream(mode, payload, this.binding.threadId)) return
     this.manager.functionTurns.observeStream(
       this.binding.threadId,

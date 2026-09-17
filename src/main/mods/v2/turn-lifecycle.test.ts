@@ -62,6 +62,133 @@ function fixture() {
 }
 
 describe("function turn lifecycle", () => {
+  it("completes an independent child while its main turn still owns the thread", async () => {
+    const f = fixture()
+    f.busy.add("thread")
+    await f.lifecycle.start(f.binding())
+    const child = f.lifecycle.startChild({
+      ...f.binding("child-run", "child-turn"),
+      agentId: "worker",
+      parentRunId: "run"
+    })
+    child.observe(
+      new AIMessage({
+        id: "child-response",
+        content: "child answer",
+        response_metadata: { model_name: "child-model" },
+        usage_metadata: { input_tokens: 3, output_tokens: 1, total_tokens: 4 }
+      })
+    )
+    f.advance()
+    child.finish("answer")
+    child.finish("error")
+    await tick()
+    expect(f.starts).toEqual(["turn"])
+    expect(f.ends).toEqual([
+      {
+        turnId: "child-turn",
+        agentId: "worker",
+        answer: "child answer",
+        reason: "answer",
+        isAborted: false,
+        durationMs: 20,
+        usage: {
+          model: "child-model",
+          input_tokens: 3,
+          output_tokens: 1,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0
+        }
+      }
+    ])
+    expect(f.lifecycle.stats).toEqual({ entries: 1, running: 1 })
+    expect(() => f.lifecycle.abort("/workspace", "thread", "child-turn")).toThrow(
+      "MODS_TURN_SCOPE_CHANGED"
+    )
+    f.lifecycle.abort("/workspace", "thread", "turn")
+    f.lifecycle.finish("thread", "run", { reason: "answer" })
+    f.busy.delete("thread")
+    f.idle()
+    await tick()
+    expect(f.ends[1]).toMatchObject({ turnId: "turn", reason: "aborted", answer: "" })
+    expect(f.ends[1].usage).toBeUndefined()
+    expect(f.lifecycle.stats).toEqual({ entries: 0, running: 0 })
+    f.lifecycle.close()
+  })
+
+  it("attributes child partial output only to its current physical owner", async () => {
+    const f = fixture()
+    const binding = f.binding("child", "child-turn")
+    const child = f.lifecycle.startChild({ ...binding, agentId: "worker", parentRunId: "run" })
+    const payload = (content: string) => [{ type: "ai", id: "response", content }]
+    f.lifecycle.observeChildStream("thread", "old-run", "worker", payload("stale"), "delta")
+    f.lifecycle.observeChildStream("thread", "run", "other-worker", payload("other"), "delta")
+    f.lifecycle.observeChildStream("thread", "run", "worker", payload("partial"), "delta")
+    binding.cancel()
+    child.finish("error")
+    await tick()
+    expect(f.ends[0]).toMatchObject({
+      agentId: "worker",
+      turnId: "child-turn",
+      answer: "partial",
+      reason: "aborted"
+    })
+    f.lifecycle.observeChildStream("thread", "run", "worker", payload("late"), "delta")
+    expect(f.lifecycle.stats).toEqual({ entries: 0, running: 0 })
+    f.lifecycle.close()
+  })
+
+  it("old child settlement cannot clear a replacement using the same agent id", async () => {
+    const f = fixture()
+    const old = f.lifecycle.startChild({
+      ...f.binding("old", "old"),
+      agentId: "worker",
+      parentRunId: "run"
+    })
+    const current = f.lifecycle.startChild({
+      ...f.binding("new", "new"),
+      agentId: "worker",
+      parentRunId: "run"
+    })
+    old.finish("error")
+    f.lifecycle.observeChildStream(
+      "thread",
+      "run",
+      "worker",
+      [{ type: "ai", id: "r", content: "new answer" }],
+      "delta"
+    )
+    current.finish("answer")
+    await tick()
+    expect(f.ends.map((event) => [event.turnId, event.answer])).toEqual([
+      ["old", ""],
+      ["new", "new answer"]
+    ])
+    f.lifecycle.close()
+  })
+
+  it("shares the main/child capacity bound and invalidates pending child callbacks", async () => {
+    const f = fixture()
+    const children = Array.from({ length: 100 }, (_, index) =>
+      f.lifecycle.startChild({
+        ...f.binding(`run-${index}`, `turn-${index}`),
+        agentId: `worker-${index}`
+      })
+    )
+    await expect(f.lifecycle.start(f.binding())).rejects.toThrow("MODS_TURN_CAPACITY")
+    expect(() => f.lifecycle.startChild({ ...f.binding(), agentId: "overflow" })).toThrow(
+      "MODS_TURN_CAPACITY"
+    )
+    children[0].finish("answer")
+    f.lifecycle.invalidate("/workspace", "thread")
+    children[1].observe(new AIMessage("late"))
+    children[1].finish("error")
+    await tick()
+    expect(f.ends).toEqual([])
+    expect(f.lifecycle.stats).toEqual({ entries: 0, running: 0 })
+    f.lifecycle.close()
+  })
+
   it("bounds pending turns, ignores detached streams and releases overflowed observations", async () => {
     const f = fixture()
     f.busy.add("thread")
