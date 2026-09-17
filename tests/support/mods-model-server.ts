@@ -35,6 +35,31 @@ export async function startModsModelServer() {
     const userPrompt = JSON.stringify(
       body.messages?.findLast((message: { role: string }) => message.role === "user")?.content
     )
+    if (Array.isArray(body.tools) && userPrompt?.includes("[mods-foundation]")) {
+      const completed = body.messages?.at(-1)?.role === "tool"
+      event([
+        {
+          index: 0,
+          delta: completed
+            ? { role: "assistant", content: "HOST_FOUNDATION_OK" }
+            : {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "foundation-model",
+                    type: "function",
+                    function: { name: "mcp__host-foundation__probe", arguments: "{}" }
+                  }
+                ]
+              },
+          finish_reason: completed ? "stop" : "tool_calls"
+        }
+      ])
+      event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
     if (Array.isArray(body.tools) && userPrompt?.includes("[mods-registered")) {
       const removed = userPrompt.includes("[mods-registered-removed]")
       const invalid = userPrompt.includes("[mods-registered-invalid]")

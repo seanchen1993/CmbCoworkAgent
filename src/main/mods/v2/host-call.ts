@@ -1,0 +1,112 @@
+import { AsyncLocalStorage } from "node:async_hooks"
+import { randomUUID } from "node:crypto"
+import type { ModControlStore, ModGrant } from "../control-store"
+import { getModCallContext } from "../context"
+import type { ModIdentity } from "../../../shared/mods/types"
+import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { functionExecutionScope } from "./execution-context"
+
+const calls = new AsyncLocalStorage<{ identity: ModIdentity; active: boolean }>()
+
+/** Host identities never come from guest arguments; nested calls retain their real owner. */
+export function functionCallIdentity(
+  workspace: string,
+  threadId: string,
+  grant: ModGrant,
+  options: Pick<ModIdentity, "origin"> & { toolCallId?: string; fallbackTurnId: string }
+): ModIdentity {
+  const scope = functionExecutionScope(workspace, threadId)
+  const current = calls.getStore()
+  if (current && !current.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+  const parent = current?.identity ?? getModCallContext()?.identity
+  if (
+    parent &&
+    (parent.workspace !== workspace ||
+      parent.threadId !== threadId ||
+      (scope && parent.agentId !== (scope.agentId ?? "main")) ||
+      (scope?.turnId && parent.turnId !== scope.turnId))
+  )
+    throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+  return {
+    workspace,
+    threadId,
+    turnId: scope?.turnId ?? parent?.turnId ?? options.fallbackTurnId,
+    agentId: scope?.agentId ?? parent?.agentId ?? "main",
+    callId: randomUUID(),
+    ...(parent ? { parentCallId: parent.callId } : {}),
+    ...(options.toolCallId ? { toolCallId: options.toolCallId } : {}),
+    origin: options.origin,
+    modId: grant.modId,
+    grantEpoch: grant.epoch
+  }
+}
+
+export function assertFunctionGrant(
+  store: ModControlStore,
+  workspace: string,
+  threadId: string,
+  grant: ModGrant,
+  signal: AbortSignal
+): void {
+  signal.throwIfAborted()
+  functionExecutionScope(workspace, threadId)
+  if (grant.workspace !== workspace || !grant.modId.startsWith("function:"))
+    throw new ModFunctionError("MODS_GRANT_REVOKED")
+  store.assertGrant(grant)
+}
+
+interface FunctionHostCall<T, R> {
+  store: Pick<ModControlStore, "settle" | "blockPublication">
+  identity: ModIdentity
+  assertLive(): void
+  admit(): Promise<void>
+  // Must atomically reserve the receipt (and any capability-specific budget), or throw.
+  claim(): void
+  invoke(): Promise<T>
+  status(value: T): "succeeded" | "failed"
+  recordResult?(value: T): void
+  publish(value: T): Promise<R>
+}
+
+/**
+ * One lifecycle for guest tools and SDK model completions. Authority is rechecked at every
+ * asynchronous boundary. Execution facts settle before accounting, validation or publication;
+ * a lost response stays unknown and is never replayed by this boundary.
+ */
+export async function runFunctionHostCall<T, R>(call: FunctionHostCall<T, R>): Promise<R> {
+  const scope = { identity: call.identity, active: true }
+  let claimed = false,
+    started = false,
+    settled = false
+  try {
+    call.assertLive()
+    await call.admit()
+    call.assertLive()
+    call.claim()
+    claimed = true
+    call.assertLive()
+    let result: T
+    try {
+      started = true
+      result = await calls.run(scope, call.invoke)
+    } finally {
+      // Detached continuations cannot inherit a completed call as fresh host authority.
+      scope.active = false
+    }
+    call.store.settle(call.identity.callId, call.status(result))
+    settled = true
+    call.recordResult?.(result)
+    call.assertLive()
+    const published = await call.publish(result)
+    call.assertLive()
+    return published
+  } catch (error) {
+    if (claimed) {
+      if (!settled) call.store.settle(call.identity.callId, started ? "unknown" : "not_started")
+      call.store.blockPublication(call.identity.callId)
+    }
+    throw error
+  } finally {
+    scope.active = false
+  }
+}

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-17",
-  "codeBaseline": "1ff9a16efd726cf479a2982bf723a05f9d7ac3a8",
+  "codeBaseline": "aa97b145",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -24,6 +24,13 @@
     "clientLimitations": ["synchronous render and callbacks only", "static literal module and approved relative imports only", "eight active Client VMs per session; sixteen timers and 256 controls per Client", "minimum timer interval 16ms; busy ticks coalesce", "desktop cell dimensions estimated at 8x24 pixels", "upstream descriptor conformance verified; full upstream event lifecycle comparison pending"],
     "unitPrototypeOnly": ["turn.step", "model stream boundary"],
     "evidence": "mods-v2-implementation-2026-09-16.md",
+    "hostFoundation": {
+      "revision": "desktop-host-call-v11",
+      "design": "mods-v2-host-foundation-2026-09-17.md",
+      "scope": "shared model/custom-tool admission, receipt and publication lifecycle; host-owned agent/turn/parent identity; queued continuation provenance; native SDK receipt alignment",
+      "nativeAgentLimit": "function SDK native calls remain main-agent only; child calls cannot borrow the main backend",
+      "notImplemented": ["declarative permission query adapters", "tool.check", "MCP SDK", "cross-plugin authority delegation"]
+    },
     "fullParity": false
   },
   "meaning": {

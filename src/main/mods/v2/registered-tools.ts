@@ -1,9 +1,8 @@
-import { randomUUID } from "node:crypto"
 import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModIdentity, ModObject } from "../../../shared/mods/types"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { ModError } from "../errors"
-import { functionExecutionTurn } from "./execution-context"
+import { assertFunctionGrant, functionCallIdentity, runFunctionHostCall } from "./host-call"
 
 interface RegisteredToolHost {
   assertScope(workspace: string, threadId: string): void
@@ -27,50 +26,31 @@ export class FunctionRegisteredTools {
     signal: AbortSignal,
     run: () => Promise<ModObject>
   ): Promise<ModObject> {
-    const identity: ModIdentity = {
-      workspace,
-      threadId,
-      turnId: functionExecutionTurn(workspace, threadId) ?? `function-tool:${threadId}`,
-      callId: randomUUID(),
+    const identity = functionCallIdentity(workspace, threadId, grant, {
+      fallbackTurnId: `function-tool:${threadId}`,
       toolCallId: String(input.tool_use_id),
-      agentId: typeof input.agentId === "string" ? input.agentId : "main",
-      origin,
-      modId: grant.modId,
-      grantEpoch: grant.epoch
-    }
+      origin
+    })
+    if ((input.agentId ?? "main") !== identity.agentId)
+      throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
     const target = `function:${input.tool}`
     const assertLive = () => {
-      signal.throwIfAborted()
+      assertFunctionGrant(this.store, workspace, threadId, grant, signal)
       this.host.assertScope(workspace, threadId)
-      if (grant.workspace !== workspace || !grant.modId.startsWith("function:"))
-        throw new ModFunctionError("MODS_GRANT_REVOKED")
-      this.store.assertGrant(grant)
     }
-    let claimed = false,
-      started = false,
-      settled = false
     try {
-      assertLive()
-      await this.host.admit(identity, target, input, signal)
-      assertLive()
-      this.store.claim(identity.callId, target, input, identity)
-      claimed = true
-      started = true
-      const result = await run()
-      this.store.settle(
-        identity.callId,
-        typeof result.deny === "string" || result.isError === true ? "failed" : "succeeded"
-      )
-      settled = true
-      assertLive()
-      const published = await this.host.publish(identity, result, signal)
-      assertLive()
-      return published
+      return await runFunctionHostCall({
+        store: this.store,
+        identity,
+        assertLive,
+        admit: () => this.host.admit(identity, target, input, signal),
+        claim: () => this.store.claim(identity.callId, target, input, identity),
+        invoke: run,
+        status: (result) =>
+          typeof result.deny === "string" || result.isError === true ? "failed" : "succeeded",
+        publish: (result) => this.host.publish(identity, result, signal)
+      })
     } catch (error) {
-      if (claimed) {
-        if (!settled) this.store.settle(identity.callId, started ? "unknown" : "failed")
-        this.store.blockPublication(identity.callId)
-      }
       if (signal.aborted) throw new ModFunctionError("MODS_CANCELLED", "MODS_CANCELLED", true)
       if (error instanceof ModError || error instanceof ModFunctionError) throw error
       throw new ModFunctionError("MODS_REGISTERED_TOOL_FAILED", "MODS_REGISTERED_TOOL_FAILED", true)

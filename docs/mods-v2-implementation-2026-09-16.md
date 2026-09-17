@@ -457,6 +457,60 @@ backend 包装及配置/项目键查询代码与父提交逐段摘要相同。�
 2.695 ms，增加 1.77%；前两轮的 11.09% 和 12.37% 仍保留，不能用最后一轮覆盖
 多轮波动。第一次成功的完整测量另存 `tool-registry-e2e-first-success.json`。
 
+## 宿主调用基础与嵌套模型输出隔离（2026-09-17）
+
+基线 `aa97b145`，继续在 `C:\ai\CmbCoworkAgent-mods-v2` / `codex/mods-v2` 实施。
+先复核实际权限入口，再补底层；本批没有开放一个仅凭静态工具名称返回 allow 的
+`tool.check`。文件、命令和 MCP 的实际审批路径继续由宿主拥有。
+详细约束及后续接入顺序见 [宿主调用基础复核](mods-v2-host-foundation-2026-09-17.md)。
+
+`host-call.ts` 统一模型 SDK 和自定义工具的准入、预约、执行、结算和发布流程。
+保留真实轮次、代理及父子调用编号，调用仍绑定自己的插件授权；作用域结束后不能
+默认为 main 或重新获得写权限。队列通过宿主异步上下文绑定保留原始来源，并在启动时
+复核调用方是否仍有效。原生 SDK 复用既有引擎，修正原先没有账本记录的父编号，让实际
+执行与最终发布引用同一条记录；子代理不能借用 main 后端，审批返回后仍需复核作用域。
+
+实际执行先结算，再处理用量、结果校验和发布。模型已返回但用量写入失败时保留执行
+成功事实并阻断发布；失去回复保持 unknown，不自动重放。没有新增数据库迁移。
+宿主修订提升到 `desktop-host-call-v11`，旧快照授权需重新批准。
+
+截图检视发现并修复了一个实际输出通道问题：自定义工具内部的 `model.complete`
+继承 LangChain 外层流回调，使原始 token 进入主聊天，尽管 SDK 返回值已经过滤。
+现在整个内部流读取在独立 LangChain 上下文中执行，清除外层回调、graph 配置和 trace
+继承，同时保留本工程的授权、取消及调用账本上下文。新增真实 HTTP / utilityProcess /
+SQLite / React 场景，核对内部原文没有出现在父流事件、界面、持久消息和下次模型请求中。
+
+最终验证（代码冻结后完成）：
+
+| 检查 | 结果与证据 |
+| --- | --- |
+| 全仓 Vitest | 3337 项：3306 通过、26 失败、5 跳过；26 项均与既有基线同名、同原因，无新增失败。`vitest-host-foundation-full-final.json`、`host-foundation-failure-comparison-final.json` |
+| Mods 相关测试 | 从上述完整报告核对 45 个文件、333/333 通过；覆盖队列身份、跨作用域拒绝、撤权、审批等待、用量写入失败及嵌套流观察者 |
+| 独立回归脚本 | 81 项：73 通过、8 个既有问题；7 项失败原因相同，另 1 项仍为 workflow-worktree 的 180 秒超时。`host-foundation-standalone-comparison.json` |
+| 跨进程 | 34/34 通过，runtimes/frames/replies/pending/calls 均归零。`host-foundation-process.txt` |
+| Electron E2E | 33 组通过；新增自定义工具 → 原生读取 → 模型总结的完整父子调用与输出检查。`host-foundation-e2e-stream-final.txt`；普通构建已恢复，测试入口不存在 |
+| 类型与规范 | Node/Web 类型检查通过，全部改动代码的 ESLint 为 0 错误/0 告警；`host-foundation-types-final.txt`、`host-foundation-lint.txt` |
+
+验证日志默认位于 `output/mods-v2-validation/`，E2E JSON 和截图位于
+`output/mods-validation/e2e/`。本批保留首轮夹具初始化顺序失败，以及截图发现问题前的
+输出证据；最终报告对应的 17 个 TS/mjs 文件在冻结后没有变化。
+中途校验曾遇到模块缓存与新断言不同步，已在冻结代码后完整重跑，最终结果以上表为准。
+
+性能对照新增 `node tests/run-function-host-performance.mjs aa97b145`，从 Git 读取基线
+供 bundler 使用，不切换工作树；采用四轮 ABBA/BAAB、每组预热，各版本累计 800 次。
+真实注册工具宿主边界加 SQLite 的最终 P50 为 9.135 → 9.097 ms，P95 为
+9.784 → 9.761 ms（-0.23%）；前一轮 P95 为 9.867 → 9.752 ms（-1.16%）。
+基线与当前 bundle 哈希不同，两轮当前 bundle 哈希相同。该测量不包含 VM、策略进程、
+工具 I/O 或模型服务。最终跨进程注册工具测量 P50 0.917 / P95 1.471 ms，同样不包含
+SQLite 和输出过滤，不能与上述宿主测量相加当作完整应用数据。
+
+实际读取的禁用路径三轮 P95 差异为 +2.69%、+5.39%、+0.05%，每轮每组预热 100 次、
+采样 500 次并交替顺序。保留超过 5% 门槛的结果；整体验收尚未通过，仍需解释波动并完成
+长时压力检查。局部性能对照通过不代表整套 Mods 的性能已经验收。
+
+`tool.check`、MCP SDK、子代理工具绑定和跨插件权限委托仍未完成；本批交付的是已接入真实
+执行链的基础修复，完整 Claude Mods 对齐状态仍为 false。
+
 ## 后续集成与验收
 
 基础批 standalone 回归 81 项中 72 通过、9 失败；9 个失败与 v1 对照基线一致。

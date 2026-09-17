@@ -16,6 +16,7 @@ import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
 import { _electron, type ElectronApplication, type Page } from "playwright"
 import { startModsModelServer } from "./support/mods-model-server"
+import AdmZip from "adm-zip"
 
 const root = resolve(__dirname, "..")
 const localRequire = createRequire(join(root, "package.json"))
@@ -597,6 +598,23 @@ async function main(): Promise<void> {
         ) === true,
       "function plugin approved through React"
     )
+    const foundationZip = new AdmZip()
+    foundationZip.addLocalFolder(join(root, "tests/fixtures/mods-v2/host-foundation"))
+    const installed = await page!.evaluate(
+      (bytes) =>
+        window.api.plugins.install(new Uint8Array(bytes).buffer, "host-foundation.zip", "local"),
+      [...foundationZip.toBuffer()]
+    )
+    assert.equal(installed.success, true, installed.error)
+    const foundationMod = (
+      await page!.evaluate((id) => window.api.mods.status(id), threadId)
+    ).functionMods!.find((mod) => mod.name === "host-foundation")!
+    assert.ok(foundationMod?.digest)
+    // Approve fixtures before measuring session state: grants deliberately invalidate all VMs.
+    await page!.evaluate(
+      ({ id, pluginId, digest }) => window.api.mods.approveFunction(id, pluginId, digest),
+      { id: threadId, pluginId: foundationMod.pluginId, digest: foundationMod.digest }
+    )
     await page!.screenshot({ path: join(artifacts, "function-grant.png") })
     await page!.getByRole("button", { name: "返回会话", exact: true }).click()
     await page!.getByText("Mods E2E", { exact: true }).first().click()
@@ -1019,6 +1037,52 @@ async function main(): Promise<void> {
       0
     )
     pass("model schema violations produce tool errors before the custom handler executes")
+    const beforeFoundation = modelServer.requests.length
+    await functionComposer.fill("[mods-foundation] 请读取项目备注并用自定义工具总结。")
+    await functionComposer.press("Enter")
+    await page!.getByText("HOST_FOUNDATION_OK", { exact: true }).first().waitFor({ timeout: 30000 })
+    const foundationRequests = modelServer.requests.slice(beforeFoundation)
+    const nestedCompletion = foundationRequests.find((request) => !Array.isArray(request.tools))!
+    assert.ok(nestedCompletion, "registered guest calls the real configured model client")
+    assert.match(JSON.stringify(nestedCompletion.messages), /REDACTED/)
+    assert.doesNotMatch(JSON.stringify(foundationRequests), /sk-private-fixture/)
+    const foundationAudit = await page!.evaluate((id) => window.api.mods.audit(id), registryThread)
+    const foundationParent = foundationAudit.find(
+      (row) => row.identity?.toolCallId === "foundation-model"
+    )!
+    assert.ok(foundationParent?.identity)
+    const children = foundationAudit.filter(
+      (row) => row.identity?.parentCallId === foundationParent.identity!.callId
+    )
+    assert.deepEqual(children.map((row) => row.toolId).sort(), ["host:read_file", "model.complete"])
+    for (const row of [foundationParent, ...children]) {
+      assert.equal(row.status, "succeeded")
+      assert.equal(row.publication, "published")
+      assert.equal(row.identity?.turnId, foundationParent.identity.turnId)
+      assert.equal(row.identity?.agentId, "main")
+    }
+    assert.equal(
+      children.find((row) => row.toolId === "model.complete")?.modelUsage?.outputTokenLimit,
+      64
+    )
+    assert.doesNotMatch(
+      await page!.locator("body").innerText(),
+      /sk-private-fixture/,
+      "nested provider tokens must never bypass protection through the parent agent stream"
+    )
+    const foundationMessages = await page!.evaluate(
+      (id) => window.api.threads.getMessages(id),
+      registryThread
+    )
+    assert.doesNotMatch(
+      JSON.stringify(foundationMessages),
+      /sk-private-fixture/,
+      "nested provider tokens must not enter persisted conversation messages"
+    )
+    await page!.screenshot({ path: join(artifacts, "function-host-foundation.png") })
+    pass(
+      "registered tool, native SDK read and model completion share the real turn and parent receipts across utilityProcess"
+    )
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     for (const path of ["secret.txt", "../outside.txt"]) {
       await functionComposer.fill(`/claw-files ${path}`)

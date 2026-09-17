@@ -12,6 +12,8 @@ import {
   type FunctionModelReply
 } from "./model-sdk"
 import type { ModIdentity, ModObject } from "../../../shared/mods/types"
+import { withFunctionExecution } from "./execution-context"
+import { FunctionRegisteredTools } from "./registered-tools"
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -128,6 +130,82 @@ it("keeps the persisted budget across service reload and does not call the provi
   ).rejects.toThrow("MODS_MODEL_BUDGET")
   expect(f.host.invoke).toHaveBeenCalledTimes(8)
   expect(f.store.audit(f.folder)).toHaveLength(8)
+})
+
+it("keeps nested model usage in the real tool turn and links the actual provider receipt", async () => {
+  const f = fixture()
+  const tools = new FunctionRegisteredTools(f.store, {
+    assertScope: () => {},
+    admit: async () => {},
+    publish: async (_identity, value) => value
+  })
+  const consumer = f.store.grant(f.folder, "function:consumer", "snapshot", true)
+  await withFunctionExecution(
+    {
+      workspace: f.folder,
+      threadId: "thread",
+      turnId: "real-turn",
+      agentId: "main",
+      leased: true,
+      immediate: false,
+      userInitiated: false
+    },
+    () =>
+      tools.call(
+        f.folder,
+        "thread",
+        consumer,
+        { tool: "mcp__consumer__answer", tool_use_id: "model-tool" },
+        "model",
+        new AbortController().signal,
+        async () => ({ result: await f.call() })
+      )
+  )
+  const audit = f.store.audit(f.folder)
+  const parent = audit.find((row) => row.toolId.startsWith("function:"))!
+  const model = audit.find((row) => row.toolId === "model.complete")!
+  expect(model.identity).toMatchObject({
+    parentCallId: parent.identity!.callId,
+    turnId: "real-turn",
+    agentId: "main",
+    modId: f.grant.modId,
+    origin: "mod"
+  })
+  expect(parent.identity?.modId).toBe(consumer.modId)
+  expect(f.store.turnSummary(f.folder, "thread", "real-turn")).toMatchObject({ succeeded: 2 })
+})
+
+it("retains a completed provider call if usage accounting fails and blocks its output", async () => {
+  const f = fixture()
+  vi.spyOn(f.store, "recordFunctionModelUsage").mockImplementation(() => {
+    throw Error("database")
+  })
+  await expect(f.call()).rejects.toThrow(/^MODS_MODEL_FAILED$/)
+  expect(f.host.invoke).toHaveBeenCalledOnce()
+  expect(f.host.publish).not.toHaveBeenCalled()
+  expect(f.store.audit(f.folder)[0]).toMatchObject({ status: "succeeded", publication: "blocked" })
+})
+
+it("preserves the calling agent and denies a mismatched scope before model resolution", async () => {
+  const f = fixture()
+  const scope = {
+    workspace: f.folder,
+    threadId: "thread",
+    turnId: "worker-turn",
+    agentId: "worker",
+    leased: true,
+    immediate: false,
+    userInitiated: false
+  }
+  await withFunctionExecution(scope, () => f.call())
+  expect(f.store.audit(f.folder)[0].identity).toMatchObject({
+    turnId: "worker-turn",
+    agentId: "worker"
+  })
+  await expect(
+    withFunctionExecution({ ...scope, threadId: "other" }, () => f.call())
+  ).rejects.toThrow("MODS_CALL_SCOPE_CHANGED")
+  expect(f.host.resolve).toHaveBeenCalledOnce()
 })
 
 it("bounds concurrent calls and keeps slots until an aborted provider settles", async () => {

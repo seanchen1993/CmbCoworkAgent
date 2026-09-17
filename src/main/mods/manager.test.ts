@@ -39,6 +39,8 @@ import {
 } from "./manager"
 import { DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { withScopedModMcp, withRawModMcp } from "./adapters"
+import { withFunctionExecution } from "./v2/execution-context"
+import { FunctionRegisteredTools } from "./v2/registered-tools"
 
 const cleanup: Array<() => void> = []
 afterEach(() => {
@@ -226,6 +228,8 @@ describe("project Mods lifecycle and UI authority", () => {
       expect.any(AbortSignal)
     )
     expect(f.executions).toEqual([args])
+    const native = f.manager.store.audit(workspace).find((row) => row.toolId === "host:execute")!
+    expect(native.identity?.parentCallId).toBeUndefined()
     await expect(
       f.manager.invokeFunctionTool(
         workspace,
@@ -265,6 +269,96 @@ describe("project Mods lifecycle and UI authority", () => {
       )
     ).rejects.toThrow("MODS_GRANT_REVOKED")
     expect(f.executions).toEqual([args])
+  })
+  it("links nested SDK tools to their real parent and never borrows the main binding for a worker", async () => {
+    const f = await fixture()
+    await f.enable()
+    const workspace = f.manager.workspaceKey(f.root)
+    const grant = f.manager.store.grant(workspace, "function:sdk", "snapshot", true)
+    const signal = new AbortController().signal
+    const scope = {
+      workspace,
+      threadId: "thread",
+      turnId: "actual-turn",
+      leased: true,
+      immediate: false,
+      userInitiated: true
+    }
+    const invoke = () =>
+      f.manager.invokeFunctionTool(
+        workspace,
+        "thread",
+        grant,
+        "host:execute",
+        { command: "echo nested" },
+        signal,
+        false,
+        true
+      )
+    const tools = new FunctionRegisteredTools(f.manager.store, {
+      assertScope: () => {},
+      admit: async () => {},
+      publish: async (_identity, value) => value
+    })
+    await withFunctionExecution(scope, () =>
+      tools.call(
+        workspace,
+        "thread",
+        grant,
+        { tool: "mcp__sdk__nested", tool_use_id: "model-call" },
+        "model",
+        signal,
+        invoke
+      )
+    )
+    const audit = f.manager.store.audit(workspace)
+    const parent = audit.find((row) => row.toolId === "function:mcp__sdk__nested")!
+    const native = audit.find((row) => row.toolId === "host:execute")!
+    expect(native.identity).toMatchObject({
+      parentCallId: parent.identity!.callId,
+      turnId: "actual-turn",
+      agentId: "main"
+    })
+    expect(audit).toHaveLength(2)
+    await expect(withFunctionExecution({ ...scope, agentId: "worker" }, invoke)).rejects.toThrow(
+      "MODS_TOOL_AGENT_UNAVAILABLE"
+    )
+    expect(f.executions).toHaveLength(1)
+    expect(f.confirm).toHaveBeenCalledOnce()
+  })
+  it("rechecks the live function scope after native approval before allowing a side effect", async () => {
+    const f = await fixture()
+    await f.enable()
+    const workspace = f.manager.workspaceKey(f.root)
+    const grant = f.manager.store.grant(workspace, "function:sdk", "snapshot", true)
+    let approve!: (value: boolean) => void
+    f.confirm.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          approve = resolve
+        })
+    )
+    let operation!: Promise<unknown>
+    await withFunctionExecution(
+      { workspace, threadId: "thread", leased: true, immediate: false, userInitiated: true },
+      async () => {
+        operation = f.manager.invokeFunctionTool(
+          workspace,
+          "thread",
+          grant,
+          "host:execute",
+          { command: "echo expired" },
+          new AbortController().signal,
+          false,
+          true
+        )
+        await expect.poll(() => f.confirm.mock.calls.length).toBe(1)
+      }
+    )
+    const rejected = expect(operation).rejects.toThrow("MODS_CALL_SCOPE_EXPIRED")
+    approve(true)
+    await rejected
+    expect(f.executions).toEqual([])
   })
   it("consumes the MCP scoped route once before entering the raw service", async () => {
     const f = await fixture()

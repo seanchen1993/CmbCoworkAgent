@@ -4,6 +4,7 @@ import type { ModIdentity, ModObject } from "../../../shared/mods/types"
 import type { ResolvedModelConfig } from "../../models/registry"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { ModError } from "../errors"
+import { assertFunctionGrant, functionCallIdentity, runFunctionHostCall } from "./host-call"
 import {
   functionModelRequest,
   validateFunctionModelText,
@@ -49,17 +50,11 @@ export class FunctionModels {
     const timeout = setTimeout(() => timer.abort(), 60000)
     const signal = AbortSignal.any([callerSignal, timer.signal])
     const assertLive = (): void => {
-      signal.throwIfAborted()
+      assertFunctionGrant(this.store, workspace, threadId, grant, signal)
       this.host.assertScope(workspace, threadId)
-      if (grant.workspace !== workspace || !grant.modId.startsWith("function:"))
-        throw new ModFunctionError("MODS_GRANT_REVOKED")
-      this.store.assertGrant(grant)
     }
     const key = JSON.stringify([workspace, grant.modId])
     let reserved = false
-    let callId: string | undefined
-    let started = false
-    let settled = false
     try {
       assertLive()
       if (this.pending >= 4 || (this.active.get(key) ?? 0) >= 2)
@@ -70,36 +65,35 @@ export class FunctionModels {
       const config = await this.host.resolve(request.model)
       assertLive()
       const maxTokens = Math.min(request.maxTokens ?? 256, config.maxOutputTokens ?? 4096)
-      const identity: ModIdentity = {
-        workspace,
-        threadId,
-        callId: randomUUID(),
-        turnId: `function-model:${randomUUID()}`,
-        agentId: "main",
-        origin: "mod",
-        modId: grant.modId,
-        grantEpoch: grant.epoch
-      }
+      const identity = functionCallIdentity(workspace, threadId, grant, {
+        fallbackTurnId: `function-model:${randomUUID()}`,
+        origin: "mod"
+      })
       const finalInput = { ...input, model: config.ref, maxTokens }
-      await this.host.admit(identity, finalInput, signal)
-      assertLive()
-      this.store.claimFunctionModel(identity, input, finalInput, config.ref, maxTokens)
-      callId = identity.callId
-      started = true
-      const result = await this.host.invoke(config, { ...request, maxTokens }, signal)
-      this.store.recordFunctionModelUsage(callId, result.inputTokens, result.outputTokens)
-      this.store.settle(callId, "succeeded")
-      settled = true
-      assertLive()
-      validateFunctionModelText(result.text)
-      // Complete provider text is protected before any guest after-hook can observe it.
-      const published = await this.host.publish(identity, result.text, signal)
-      assertLive()
-      validateFunctionModelText(published)
-      return published
+      return await runFunctionHostCall({
+        store: this.store,
+        identity,
+        assertLive,
+        admit: () => this.host.admit(identity, finalInput, signal),
+        claim: () =>
+          this.store.claimFunctionModel(identity, input, finalInput, config.ref, maxTokens),
+        invoke: () => this.host.invoke(config, { ...request, maxTokens }, signal),
+        status: () => "succeeded",
+        recordResult: (result) =>
+          this.store.recordFunctionModelUsage(
+            identity.callId,
+            result.inputTokens,
+            result.outputTokens
+          ),
+        publish: async (result) => {
+          validateFunctionModelText(result.text)
+          // Complete provider text is protected before any guest after-hook can observe it.
+          const published = await this.host.publish(identity, result.text, signal)
+          validateFunctionModelText(published)
+          return published
+        }
+      })
     } catch (error) {
-      if (callId && !settled) this.store.settle(callId, started ? "unknown" : "failed")
-      if (callId) this.store.blockPublication(callId)
       if (signal.aborted)
         throw new ModFunctionError(timer.signal.aborted ? "MODS_MODEL_TIMEOUT" : "MODS_CANCELLED")
       if (error instanceof ModFunctionError || error instanceof ModError) throw error

@@ -1,4 +1,4 @@
-import { AsyncLocalStorage } from "node:async_hooks"
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks"
 import type { ModCommandQueue } from "../command-queue"
 import { classifyModTool } from "../engine"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
@@ -17,16 +17,26 @@ interface FunctionExecution {
 
 const context = new AsyncLocalStorage<FunctionExecution>()
 
+/** An inherited but expired scope must never silently become the main agent. */
+export function functionExecutionScope(
+  workspace: string,
+  threadId: string
+): Readonly<FunctionExecution> | undefined {
+  const scope = context.getStore()
+  if (scope && !scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+  if (scope && (scope.workspace !== workspace || scope.threadId !== threadId))
+    throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+  return scope
+}
+
 export function functionExecutionAgent(): string {
   const scope = context.getStore()
-  return scope?.active ? (scope.agentId ?? "main") : "main"
+  if (scope && !scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
+  return scope?.agentId ?? "main"
 }
 
 export function functionExecutionTurn(workspace: string, threadId: string): string | undefined {
-  const scope = context.getStore()
-  return scope?.active && scope.workspace === workspace && scope.threadId === threadId
-    ? scope.turnId
-    : undefined
+  return functionExecutionScope(workspace, threadId)?.turnId
 }
 
 export function isFunctionUserAction(workspace: string, threadId: string): boolean {
@@ -62,10 +72,7 @@ export async function scheduleFunctionTool(
   run: (signal: AbortSignal, readOnly: boolean, userInitiated: boolean) => Promise<ModObject>
 ): Promise<ModObject> {
   signal.throwIfAborted()
-  const inherited = context.getStore()
-  const scope = inherited?.active ? inherited : undefined
-  if (scope && (scope.workspace !== workspace || scope.threadId !== threadId))
-    throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+  const scope = functionExecutionScope(workspace, threadId)
   const read = classifyModTool(toolId) === "read"
   const userInitiated = scope?.userInitiated === true
   if (!read && (!userInitiated || scope?.immediate))
@@ -77,13 +84,22 @@ export async function scheduleFunctionTool(
     workspace,
     threadId,
     toolId,
-    async (jobSignal) => {
+    AsyncResource.bind(async (jobSignal: AbortSignal) => {
+      if (scope && !scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
       result = await withFunctionExecution(
-        { workspace, threadId, leased: true, immediate: false, userInitiated },
+        {
+          workspace,
+          threadId,
+          agentId: scope?.agentId,
+          turnId: scope?.turnId,
+          leased: true,
+          immediate: false,
+          userInitiated
+        },
         () => run(jobSignal, false, userInitiated)
       )
       return { text: typeof result.text === "string" ? result.text : "" }
-    },
+    }),
     { signal }
   ).completion
   return result

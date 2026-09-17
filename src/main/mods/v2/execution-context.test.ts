@@ -6,8 +6,11 @@ import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agen
 import {
   scheduleFunctionTool,
   withFunctionExecution,
-  functionExecutionAgent
+  functionExecutionAgent,
+  functionExecutionScope
 } from "./execution-context"
+import { scheduleFunctionCommand } from "./command-scheduler"
+import { functionCallIdentity, runFunctionHostCall } from "./host-call"
 
 const cleanups: Array<() => void> = []
 afterEach(() => cleanups.splice(0).forEach((fn) => fn()))
@@ -94,9 +97,89 @@ it("permits immediate reads with a held model lease but cannot retain authority 
     const gate = new Promise<void>((r) => {
       continueLater = r
     })
-    delayed = gate.then(() => f.call("host:write_file"))
+    delayed = gate.then(() => {
+      expect(() => functionExecutionAgent()).toThrow("MODS_CALL_SCOPE_EXPIRED")
+      return f.call("host:write_file")
+    })
   })
-  const rejection = expect(delayed).rejects.toThrow("MODS_WRITE_REQUIRES_USER_ACTION")
+  const rejection = expect(delayed).rejects.toThrow("MODS_CALL_SCOPE_EXPIRED")
   continueLater()
   await rejection
+})
+
+it.each(["tool", "command"])(
+  "preserves agent and turn when a queued %s starts in another async context",
+  async (kind) => {
+    const f = fixture()
+    const grant = {
+      workspace: f.scope.workspace,
+      modId: "function:probe",
+      digest: "snapshot",
+      epoch: 1,
+      enabled: true
+    }
+    claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "model" })
+    const run = vi.fn(async () => {
+      expect(functionExecutionScope(f.scope.workspace, f.threadId)).toMatchObject({
+        agentId: "worker",
+        turnId: "worker-turn",
+        userInitiated: false,
+        leased: true
+      })
+      expect(
+        functionCallIdentity(f.scope.workspace, f.threadId, grant, {
+          origin: "mod",
+          fallbackTurnId: "fallback"
+        }).parentCallId
+      ).toBe("actual-parent")
+      return { result: "done" }
+    })
+    const scope = { ...f.scope, agentId: "worker", turnId: "worker-turn", userInitiated: false }
+    const pending = withFunctionExecution(scope, () =>
+      runFunctionHostCall({
+        store: { settle: () => {}, blockPublication: () => {} },
+        identity: {
+          ...functionCallIdentity(f.scope.workspace, f.threadId, grant, {
+            origin: "mod",
+            fallbackTurnId: "fallback"
+          }),
+          callId: "actual-parent"
+        },
+        assertLive: () => {},
+        admit: async () => {},
+        claim: () => {},
+        status: () => "succeeded",
+        publish: async (value) => value,
+        invoke: () =>
+          kind === "tool"
+            ? f.call("host:read_file", run)
+            : scheduleFunctionCommand(
+                f.queue,
+                f.scope.workspace,
+                f.threadId,
+                { name: "probe", description: "Probe", plugin: "probe" },
+                new AbortController().signal,
+                run
+              )
+      })
+    )
+    await expect.poll(() => [...f.jobs.values()][0]?.state).toBe("queued")
+    releaseLocalThreadRunLease(f.threadId, "desktop", "model")
+    await pending
+    expect(run).toHaveBeenCalledOnce()
+  }
+)
+
+it("does not renew an abandoned caller's write authority when its queued job finally starts", async () => {
+  const f = fixture()
+  claimLocalThreadRunLease({ threadId: f.threadId, owner: "desktop", runId: "model" })
+  const run = vi.fn(async () => ({ result: "done" }))
+  let pending!: Promise<unknown>
+  await withFunctionExecution(f.scope, async () => {
+    pending = f.call("host:write_file", run)
+  })
+  const rejected = expect(pending).rejects.toThrow("MODS_CALL_SCOPE_EXPIRED")
+  releaseLocalThreadRunLease(f.threadId, "desktop", "model")
+  await rejected
+  expect(run).not.toHaveBeenCalled()
 })

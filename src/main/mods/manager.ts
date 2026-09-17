@@ -25,6 +25,8 @@ import { getModCallContext, modCallContext } from "./context"
 import { ManagedModPolicy, DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { orderApprovedMods } from "./order"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../shared/mods/v2/tools"
+import { assertFunctionGrant, functionCallIdentity } from "./v2/host-call"
+import { functionExecutionScope } from "./v2/execution-context"
 
 export interface ModPluginSource {
   id: string
@@ -402,8 +404,13 @@ export class ModsManager {
       !grant.modId.startsWith("function:")
     )
       throw new ModError("MODS_GRANT_REVOKED")
-    this.store.assertGrant(grant)
-    signal.throwIfAborted()
+    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    const identity = functionCallIdentity(workspace, threadId, grant, {
+      origin: "mod",
+      fallbackTurnId: this.bindings.get(`${threadId}:main`)?.turnId ?? `function-tool:${threadId}`
+    })
+    // Child agents must never inherit the main agent's backend or approval context.
+    if (identity.agentId !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
     const saved = this.bindings.get(`${threadId}:main`)
     if (!saved?.invokeTool || saved.workspace !== workspace)
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
@@ -415,17 +422,7 @@ export class ModsManager {
     binding.signal.throwIfAborted()
     if (classifyModTool(toolId) !== "read" && (binding.readOnly || !userInitiated))
       throw new ModError("MODS_WRITE_REQUIRES_USER_ACTION")
-    const identity: ModIdentity = {
-      callId: randomUUID(),
-      workspace,
-      threadId,
-      turnId: binding.turnId,
-      agentId: "main",
-      origin: "mod",
-      modId: grant.modId,
-      grantEpoch: grant.epoch
-    }
-    const request = this.request(binding, identity, toolId, args, userInitiated)
+    const request = this.request(binding, identity, toolId, args, userInitiated, true)
     const actual = await request.invokeTool!(toolId, args, grant, userInitiated)
     request.assertScope?.()
     this.store.assertGrant(grant)
@@ -525,10 +522,13 @@ export class ModsManager {
     identity: ModIdentity,
     toolId: string,
     args: Record<string, unknown>,
-    userInitiated = false
+    userInitiated = false,
+    capabilityRoot = false
   ): ModDispatchRequest {
     const epoch = this.config(binding.workspace).epoch
     const assertEpoch = (): void => {
+      if (identity.modId?.startsWith("function:"))
+        functionExecutionScope(binding.workspace, binding.threadId)
       if (this.config(binding.workspace).epoch !== epoch) throw new ModError("MODS_SCOPE_CHANGED")
       if (binding.signal?.aborted) throw new ModError("MODS_CANCELLED")
       if (identity.modId) {
@@ -618,14 +618,16 @@ export class ModsManager {
             ? (id: string, args: ModObject) => mcp.invoke(id.slice(4), args)
             : binding.invokeTool
         if (!invoke) throw new ModError("MODS_TOOL_UNAVAILABLE")
-        const childIdentity: ModIdentity = {
-          ...identity,
-          callId: randomUUID(),
-          parentCallId: identity.callId,
-          origin: "mod",
-          modId: grant.modId,
-          grantEpoch: grant.epoch
-        }
+        const childIdentity: ModIdentity = capabilityRoot
+          ? identity
+          : {
+              ...identity,
+              callId: randomUUID(),
+              parentCallId: identity.callId,
+              origin: "mod",
+              modId: grant.modId,
+              grantEpoch: grant.epoch
+            }
         return modCallContext.run(
           {
             identity: childIdentity,
