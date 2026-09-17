@@ -1187,6 +1187,63 @@ async function main(): Promise<void> {
       pass(
         "cold command to registered tool to MCP retains the real parent turn, owner and execution receipt"
       )
+      await functionComposer.fill(
+        '/claw-mcp {"server":"Mods SDK fixture","tool":"mods_route","args":{"text":"named"}}'
+      )
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+            (job) =>
+              job.command === "claw-mcp" &&
+              job.state === "succeeded" &&
+              job.result?.text.includes("named:function-commands:rewritten")
+          ),
+        "named MCP SDK enters tool hooks and permits a nested native read"
+      )
+      await functionComposer.fill("/foundation-mcp-direct ")
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+            (job) =>
+              job.command === "foundation-mcp-direct" &&
+              job.state === "succeeded" &&
+              job.result?.text.includes("direct:host-foundation:rewritten")
+          ),
+        "direct MCP tool call uses the same hook and scoped name"
+      )
+      const directJob = (
+        await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)
+      ).find((job) => job.command === "foundation-mcp-direct")!
+      const directResult = JSON.parse(directJob.result!.text)
+      assert.equal(directResult.permission.decision, "ask")
+      assert.ok(Array.isArray(directResult.answer.result))
+      assert.doesNotMatch(directJob.result!.text, /sk-mcp-fixture/)
+      const beforeRouteDeny = readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8")
+      assert.equal(
+        beforeRouteDeny,
+        "echo\nerror\necho\necho\nroute:named:function-commands:rewritten\nroute:direct:host-foundation:rewritten\n"
+      )
+      await functionComposer.fill(
+        '/claw-mcp {"server":"Mods SDK fixture","tool":"mods_route","args":{"text":"deny"}}'
+      )
+      await functionComposer.press("Enter")
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).some(
+            (job) =>
+              job.command === "claw-mcp" &&
+              job.state === "succeeded" &&
+              job.result?.text.includes("MCP route fixture denied")
+          ),
+        "tool-hook denial rejects the named MCP SDK promise"
+      )
+      assert.equal(readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8"), beforeRouteDeny)
+      assert.equal(modelServer.requests.length, requestsBeforeMcp)
+      pass(
+        "named and direct MCP SDK calls share tool hooks, final arguments, scoped permission and nested native reads without a model"
+      )
       await app.evaluate(({ dialog }, id) => {
         const original = dialog.showMessageBox
         dialog.showMessageBox = (async (...args: unknown[]) => {
@@ -1212,10 +1269,7 @@ async function main(): Promise<void> {
           ),
         "connection settings changed during approval block transport"
       )
-      assert.equal(
-        readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8"),
-        "echo\nerror\necho\necho\n"
-      )
+      assert.equal(readFileSync(join(workspace, "mcp-sdk-counter.txt"), "utf8"), beforeRouteDeny)
       assert.equal(modelServer.requests.length, requestsBeforeMcp)
       pass(
         "deleting MCP configuration during real approval cannot reuse a cached connection or repeat a side effect"

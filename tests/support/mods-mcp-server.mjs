@@ -2,11 +2,23 @@
 import { appendFileSync } from "node:fs"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+import { z } from "zod"
 
 const counter = process.argv[2]
 if (!counter) throw Error("Counter path required")
 const marker = "sk-mcp-fixture-sensitive-123456789"
 const server = new McpServer({ name: "mods-protocol-fixture", version: "1.0.0" })
+server.registerTool(
+  "mods_route",
+  { description: "Verify the final tool-hook arguments", inputSchema: { text: z.string() } },
+  async ({ text }) => {
+    appendFileSync(counter, `route:${text}\n`)
+    return {
+      content: [{ type: "text", text: `${text} ${marker}` }],
+      structuredContent: { text }
+    }
+  }
+)
 server.registerTool(
   "mods_echo",
   { description: "Return fixture fields", inputSchema: {} },

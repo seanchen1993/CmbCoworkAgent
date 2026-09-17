@@ -388,7 +388,13 @@ describe("project Mods lifecycle and UI authority", () => {
         await beforeModToolExecution(() => getModCallContext()?.assertMcpTool?.(tool))
         return actual()
       })
-    const bind = () => f.manager.bindMcp(scope, invoke, async () => [tool])
+    const bind = () =>
+      f.manager.bindMcp(
+        scope,
+        invoke,
+        async () => [tool],
+        () => [structuredClone(tool)]
+      )
     const release = bind()
     const controller = new AbortController()
     const call = (userInitiated = true) =>
@@ -445,6 +451,78 @@ describe("project Mods lifecycle and UI authority", () => {
     expect(f.actual).not.toHaveBeenCalled()
     expect(f.confirm).not.toHaveBeenCalled()
     expect(f.executions).toEqual([])
+  })
+
+  it("routes exact scoped SDK names to the real MCP provider and approves only the tool arguments", async () => {
+    const f = await mcpFixture()
+    f.tool.canonicalToolId = f.tool.toolId
+    f.tool.toolId = "mcp__send"
+    expect(
+      await withFunctionExecution(f.scope, () =>
+        f.manager.invokeFunctionMcpTool(
+          f.workspace,
+          "thread",
+          f.grant,
+          { tool: "mcp__send", tool_use_id: "guest-id", agentId: "guest-agent", text: "final" },
+          f.controller.signal,
+          false,
+          true
+        )
+      )
+    ).toEqual({ result: [{ type: "text", text: "delivered" }], text: "delivered" })
+    expect(f.confirm).toHaveBeenCalledWith(
+      "thread",
+      "function:mcp",
+      `mcp:${f.tool.capabilityId}`,
+      { text: "final" },
+      expect.anything()
+    )
+    expect(f.actual).toHaveBeenCalledOnce()
+    expect(f.manager.store.audit(f.workspace)).toHaveLength(1)
+  })
+
+  it("resolves names without receipts and rejects schema changes between lookup and tool-hook continuation", async () => {
+    const f = await mcpFixture()
+    const input = { server: "mail", tool: "send", args: { text: "before" } }
+    const selected = await f.manager.resolveFunctionMcp(
+      f.workspace,
+      "thread",
+      f.grant,
+      input,
+      f.controller.signal
+    )
+    expect(selected.name).toBe(f.tool.toolId)
+    expect(f.actual).not.toHaveBeenCalled()
+    expect(f.confirm).not.toHaveBeenCalled()
+    expect(f.manager.store.audit(f.workspace)).toEqual([])
+    f.tool.inputSchema = { type: "object", properties: { changed: { type: "boolean" } } }
+    await expect(
+      f.manager.invokeFunctionMcp(
+        f.workspace,
+        "thread",
+        f.grant,
+        input,
+        f.controller.signal,
+        false,
+        true,
+        String(selected.fingerprint)
+      )
+    ).rejects.toThrow("MODS_MCP_TOOL_CHANGED")
+    expect(f.actual).not.toHaveBeenCalled()
+    expect(f.confirm).not.toHaveBeenCalled()
+  })
+
+  it("reads only the current MCP scope for permission metadata and refuses a removed live turn", async () => {
+    const f = await mcpFixture()
+    await withFunctionExecution(f.scope, async () => {
+      expect(f.manager.peekFunctionMcpTools(f.workspace, "thread")).toEqual([f.tool])
+      f.release()
+      expect(() => f.manager.peekFunctionMcpTools(f.workspace, "thread")).toThrow(
+        "MCP_CONTEXT_REQUIRED"
+      )
+    })
+    expect(f.manager.peekFunctionMcpTools(f.workspace, "thread")).toBeUndefined()
+    expect(f.actual).not.toHaveBeenCalled()
   })
 
   it.each(["replace", "schema", "connection", "revoke", "cancel"])(

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-17",
-  "codeBaseline": "2002fe64",
+  "codeBaseline": "721f51af",
   "upstream": {
     "versionInDeclaration": "2.1.273",
     "revision": "b782847db9a18667f00918ea341197f201b22bb4",
@@ -14,7 +14,7 @@
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
-    "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, main-agent custom tool registration/discovery, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete",
+    "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, main-agent custom tool registration/discovery, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete; MCP tool.call routing and scoped permission metadata",
     "desktopEvents": [
       "session.start",
       "command.run",
@@ -77,7 +77,7 @@
       "native CMB tool names/arguments/results; Claude built-in Read/Bash schemas pending",
       "SDK supports read_file/write_file/edit_file/ls/glob/grep/execute/task_output and registered guest tools; model ingress retains actual adapter schemas",
       "SDK writes require live user action and shared thread lease; model hooks do not grant that authority; actual native writes retain host approval",
-      "MCP named SDK is main-agent user-action only with final approval; $.tool.call MCP-name routing pending; tool.check supports native permissions and fresh cached MCP metadata",
+      "MCP named SDK and exact scoped/canonical tool.call names are main-agent user-action only with final approval; tool.check uses current scoped or cold valid cached metadata",
       "tool.register exposes mcp__plugin__name tools to the main agent only; restricted subagents reject them",
       "tool.list is main-agent only and uses the latest model tool metadata snapshot plus current registered entries; before first model request it fails with MODS_TOOL_CONTEXT_REQUIRED",
       "JSON Schema bounded subset; refs, regex, format and other unsupported keywords explicitly rejected; see authoring guide",
@@ -104,10 +104,13 @@
       "desktop cell dimensions estimated at 8x24 pixels",
       "upstream descriptor conformance verified; full upstream event lifecycle comparison pending"
     ],
-    "unitPrototypeOnly": ["turn.step", "model stream boundary"],
+    "unitPrototypeOnly": [
+      "turn.step",
+      "model stream boundary"
+    ],
     "evidence": "mods-v2-implementation-2026-09-16.md",
     "mcpSdk": {
-      "revision": "desktop-mcp-call-v12",
+      "revision": "desktop-mcp-tool-routing-v14",
       "design": "mods-v2-mcp-sdk-2026-09-17.md",
       "signature": "$.mcp.call(server, tool, args?) -> { content, isError, structuredContent? }",
       "scope": "connected configured providers, fresh plain-project command scope without model traffic, original protected MCP content blocks, scoped classic hooks and raw transport",
@@ -118,10 +121,11 @@
         "cold command MCP calls serialize per thread, at most 16 pending, preserving a registered parent's turn",
         "actual MCP server schema validation; no guest registered-schema substitution",
         "D01 mandatory policy and final approval differ from upstream no-prompt grant",
-        "tool.call MCP names, OAuth/reconnect parity, remote-provider qualification and complete scoped permission catalog pending"
+        "MCP SDK calls to guest registered tools, OAuth/reconnect parity and remote-provider qualification pending"
       ],
       "upstreamConformance": 3,
-      "fullParity": false
+      "fullParity": false,
+      "routingDesign": "mods-v2-mcp-tool-routing-2026-09-17.md"
     },
     "toolPermission": {
       "revision": "desktop-tool-permission-v13",
@@ -135,19 +139,31 @@
         "main-agent SDK only",
         "D01 mandatory ask/deny cannot be relaxed",
         "cold MCP query cannot discover or reconnect",
-        "complete scoped MCP aliases and Claude built-in schemas pending"
+        "Claude built-in schemas and child-agent authority pending"
       ],
       "upstreamConformance": 3,
       "fullParity": false
     },
     "hostFoundation": {
-      "revision": "desktop-mcp-call-v12",
+      "revision": "desktop-mcp-tool-routing-v14",
       "design": "mods-v2-host-foundation-2026-09-17.md",
       "scope": "shared model/custom-tool admission, receipt and publication lifecycle; host-owned agent/turn/parent identity; queued continuation provenance; native SDK receipt alignment",
       "nativeAgentLimit": "function SDK native calls remain main-agent only; child calls cannot borrow the main backend",
-      "notImplemented": ["complete scoped MCP query aliases", "cross-plugin authority delegation"]
+      "notImplemented": [
+        "child-agent execution realms",
+        "cross-plugin authority delegation"
+      ]
     },
-    "fullParity": false
+    "fullParity": false,
+    "mcpToolRouting": {
+      "revision": "desktop-mcp-tool-routing-v14",
+      "design": "mods-v2-mcp-tool-routing-2026-09-17.md",
+      "upstream": "Static 2.1.273 Ecr -> JZ -> engine tool chain; local runtime SHA-256 19654006672b6da7c945115eea99ca10051796016df563a65b3f0c7d72720ef0",
+      "scope": "named MCP SDK dispatches tool.call; direct MCP tool.call resolves exact scoped/canonical names; rechecks provider/schema/connection fingerprint; scoped permission metadata uses shared alias projection",
+      "lifecycle": "temporary discovery binding released before guest hooks; each actual continuation acquires its own binding and final approval",
+      "evidence": "Electron protocol fixture with a real stdio server and native reads; not upstream live-server conformance",
+      "fullParity": false
+    }
   },
   "meaning": {
     "planned-adapter": "A design commitment, not a claim of current implementation or source-level conformance.",

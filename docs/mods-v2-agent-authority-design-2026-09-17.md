@@ -19,9 +19,11 @@
 ## 必须先实现的宿主契约
 
 1. **授权项目与执行目录分别表达。** 隔离工作树里的代理仍属于原项目，但执行根不同。
-   当前 ModIdentity.workspace 同时参与 grant、查询和实际路径检查；不能直接把工作树
-   伪装成父目录，或为缺失授权创建默认 grant。宿主需明确父项目授权域、实际工作区以及
-   各自的不可变身份，查询和执行使用同一受限目录。
+   `createAgentRuntime` 已以 workspacePath 表示授权项目，fileRoot 表示隔离目录；问题在
+   LocalSandbox 的 Mods 绑定仍使用 workingDir 作为 workspace。绑定应显式保留授权项目，
+   增加执行目录，不能从 projectDir、父线程或目录结构猜测授权域，也不能补默认 grant。
+   session.cwd、文件 SDK 的路径归一化与实际读取必须使用同一执行目录；授权、状态和
+   输出策略继续归属原项目。目录或绑定实例更换使旧调用失效。
 2. **实际代理权限记录。** 由创建代理的宿主入口提供允许/禁用工具、shellAccess、
    工作树范围、信号和实例代次；SDK 不能传入或改写这些值。目录仅是展示元数据，不能
    充当此权限记录。授权、绑定、规则和实例存活分别复核。
@@ -33,6 +35,12 @@
    身份、输出保护、费用预算和实际父记录。归因不授予写权限。
 5. **最后开放注册工具。** 模型目录、调用入口与内部 SDK 三者一致后才向子代理公布
    可执行工具。跨插件调用同时核验消费者和提供者，调用者 origin 与所有者 grant 分开。
+
+2026-09-17 追加入口复核：`createRuntimeToolDenylistMiddleware` 和 filesystemAccess
+的工具清单还需要进入宿主 SDK 准入，不能只在模型 middleware 隐藏或拒绝工具。
+LocalSandbox 构造绑定后才设置 readOnlyShellEnforced，因此只在构造时复制 readOnly
+也不足以表达最终权限；由运行时给出完整的初始权限，并在查询和执行时继续复核实际后端。
+工具 Hook 的上下文必须使用已解析的实例 agentId，不能重新使用 options.agentId。
 
 ## 回归门槛
 

@@ -1,6 +1,7 @@
 import { LocalSandbox } from "../../agent/local-sandbox"
 import { getWindowsSandboxMode } from "../../storage"
 import { getGlobalMcpCapabilityService } from "../../mcp/capability-service"
+import { scopedMcpTools } from "../../mcp/scoped-tools"
 import type { ModsManager } from "../manager"
 import type { ModGrant } from "../control-store"
 import type { ModObject } from "../../../shared/mods/types"
@@ -38,7 +39,17 @@ export async function queryFunctionToolPermission(
       return { decision: "deny", reason: modErrorCode(error) }
     }
   } else {
-    const tools = getGlobalMcpCapabilityService().peekTools?.()
+    let tools
+    try {
+      tools = manager.peekFunctionMcpTools(workspace, threadId)
+      if (tools === undefined) {
+        assertPlainThread(threadId)
+        const cached = getGlobalMcpCapabilityService().peekTools?.()
+        tools = cached ? scopedMcpTools(cached, new Set()) : null
+      }
+    } catch (error) {
+      return { decision: "deny", reason: modErrorCode(error) }
+    }
     if (!tools) return { decision: "deny", reason: "MODS_TOOL_CONTEXT_REQUIRED" }
     const matches = tools.filter((tool) => tool.toolId === name || tool.canonicalToolId === name)
     if (matches.length !== 1)

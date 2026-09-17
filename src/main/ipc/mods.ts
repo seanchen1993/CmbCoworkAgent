@@ -27,7 +27,10 @@ import {
   withFunctionExecution,
   functionExecutionAgent
 } from "../mods/v2/execution-context"
-import { functionToolTarget } from "../mods/v2/tool-sdk"
+import { functionSdkToolInput } from "../mods/v2/tool-sdk"
+import type { FunctionMcpToolDispatch } from "../mods/v2/mcp-sdk"
+import { routeFunctionMcp } from "../mods/v2/mcp-tool-routing"
+import type { ModGrant } from "../mods/control-store"
 import { randomUUID } from "node:crypto"
 import { FunctionModels } from "../mods/v2/models"
 import { invokeFunctionModel, resolveFunctionModel } from "../mods/v2/model-provider"
@@ -145,49 +148,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           registered
         )
       },
-      callMcp: (workspace, threadId, grant, input, signal) =>
-        scheduleFunctionTool(
-          queue,
-          workspace,
-          threadId,
-          "mcp:call",
-          signal,
-          async (operationSignal, readOnly, userInitiated) => {
-            if (writableThreadScope(threadId) !== workspace)
-              throw new ModError("MODS_CALL_SCOPE_CHANGED")
-            manager.store.assertGrant(grant)
-            const execution = functionExecutionScope(workspace, threadId)
-            if ((execution?.agentId ?? "main") !== "main")
-              throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
-            if (execution?.turnId)
-              return manager.invokeFunctionMcp(
-                workspace,
-                threadId,
-                grant,
-                input,
-                operationSignal,
-                readOnly,
-                userInitiated
-              )
-            assertStandaloneThread(threadId)
-            const turnId = functionCallTurn(workspace, threadId) ?? `function-mcp:${randomUUID()}`
-            return withFunctionMcpCommand(workspace, threadId, turnId, operationSignal, () =>
-              withFunctionExecution(
-                { workspace, threadId, turnId, leased: true, immediate: readOnly, userInitiated },
-                () =>
-                  manager.invokeFunctionMcp(
-                    workspace,
-                    threadId,
-                    grant,
-                    input,
-                    operationSignal,
-                    readOnly,
-                    userInitiated
-                  )
-              )
-            )
-          }
-        ),
+      callMcp,
       enabled: (workspace) => manager.isEnabled(workspace),
       publish: (workspace, value, signal) => manager.publish(workspace, value, undefined, signal),
       assertThread: (workspace, threadId) => {
@@ -195,7 +156,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
       },
       callTool: (workspace, threadId, grant, input, signal) => {
-        const { target, args } = functionToolTarget(input)
+        const { target, args } = functionSdkToolInput(input)
+        if (target === "mcp:call") return callMcp(workspace, threadId, grant, input, signal)
         return scheduleFunctionTool(
           queue,
           workspace,
@@ -248,6 +210,91 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     const owner = window()
     if (owner && !owner.isDestroyed()) owner.webContents.send("mods:jobs-changed", { threadId })
   })
+
+  function callMcp(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal,
+    dispatch?: FunctionMcpToolDispatch
+  ): Promise<ModObject> {
+    if (!dispatch)
+      return withMcpBinding(
+        workspace,
+        threadId,
+        grant,
+        signal,
+        (operationSignal, readOnly, userInitiated) =>
+          manager.invokeFunctionMcpTool(
+            workspace,
+            threadId,
+            grant,
+            input,
+            operationSignal,
+            readOnly,
+            userInitiated
+          )
+      )
+    return routeFunctionMcp(input, signal, dispatch, {
+      resolve: (value, lookupSignal) =>
+        withMcpBinding(workspace, threadId, grant, lookupSignal, (operationSignal) =>
+          manager.resolveFunctionMcp(workspace, threadId, grant, value, operationSignal)
+        ),
+      invoke: (value, callSignal, fingerprint) =>
+        withMcpBinding(
+          workspace,
+          threadId,
+          grant,
+          callSignal,
+          (operationSignal, readOnly, userInitiated) =>
+            manager.invokeFunctionMcp(
+              workspace,
+              threadId,
+              grant,
+              value,
+              operationSignal,
+              readOnly,
+              userInitiated,
+              fingerprint
+            )
+        )
+    })
+  }
+
+  function withMcpBinding(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    signal: AbortSignal,
+    run: (signal: AbortSignal, readOnly: boolean, userInitiated: boolean) => Promise<ModObject>
+  ): Promise<ModObject> {
+    return scheduleFunctionTool(
+      queue,
+      workspace,
+      threadId,
+      "mcp:call",
+      signal,
+      async (operationSignal, readOnly, userInitiated) => {
+        if (writableThreadScope(threadId) !== workspace)
+          throw new ModError("MODS_CALL_SCOPE_CHANGED")
+        manager.store.assertGrant(grant)
+        const execution = functionExecutionScope(workspace, threadId)
+        if ((execution?.agentId ?? "main") !== "main")
+          throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+        const invoke = () => run(operationSignal, readOnly, userInitiated)
+        if (execution?.turnId) return invoke()
+        assertStandaloneThread(threadId)
+        const turnId = functionCallTurn(workspace, threadId) ?? `function-mcp:${randomUUID()}`
+        return withFunctionMcpCommand(workspace, threadId, turnId, operationSignal, () =>
+          withFunctionExecution(
+            { workspace, threadId, turnId, leased: true, immediate: readOnly, userInitiated },
+            invoke
+          )
+        )
+      }
+    )
+  }
   manager.attachFunctions({
     hasToolCheck: (workspace, threadId) => functions.hasToolCheck(workspace, threadId),
     toolCheck: (binding, input, core, origin) =>

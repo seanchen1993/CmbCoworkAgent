@@ -1,7 +1,12 @@
 export function register(on) {
+  let mcpRouteName
   on("session.start", async ($, e, next) => {
     await $.tool.register({ name: "probe", description: "Read a project note and summarize it" })
     await $.command.register({ name: "foundation-mcp", description: "Nested MCP identity probe" })
+    await $.command.register({
+      name: "foundation-mcp-direct",
+      description: "Direct MCP tool probe"
+    })
     await $.command.register({
       name: "foundation-native",
       description: "Concurrent native identity probe"
@@ -14,6 +19,20 @@ export function register(on) {
   on("command.run", { command: "foundation-native" }, async ($) => ({
     text: JSON.stringify(await $.tool.call({ tool: "mcp__host-foundation__probe", mode: "native" }))
   }))
+  on("command.run", { command: "foundation-mcp-direct" }, async ($) => ({
+    text: JSON.stringify({
+      permission: await $.tool.check({ tool: mcpRouteName, input: { text: "direct" } }),
+      answer: await $.tool.call({ tool: mcpRouteName, text: "direct" })
+    })
+  }))
+  on("tool.call", async ($, e, next) => {
+    if (!e.tool.endsWith("__mods_route")) return next(e)
+    mcpRouteName = e.tool
+    if (e.text === "deny") return { deny: "MCP route fixture denied" }
+    const note = await $.tool.call({ tool: "read_file", file_path: "secret.txt" })
+    if (!note.text.includes("[REDACTED]")) throw Error("Unprotected native read")
+    return next({ ...e, text: `${e.text}:${next.origin.plugin}:rewritten` })
+  })
   on("tool.check", (_, e, next) => {
     if (e.tool === "mcp__function-commands__project_brief" && e.input.limit === 13)
       return {

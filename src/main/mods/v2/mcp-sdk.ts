@@ -51,6 +51,63 @@ export function resolveFunctionMcpTool(
   return JSON.parse(JSON.stringify(matches[0])) as McpCapabilityTool
 }
 
+/** Exact names from the active scoped catalog, never split a guest name into provider authority. */
+export function resolveFunctionMcpToolName(
+  tools: readonly McpCapabilityTool[],
+  name: string
+): McpCapabilityTool {
+  const matches = tools.filter((tool) => tool.toolId === name || tool.canonicalToolId === name)
+  if (!matches.length) throw new ModFunctionError("MODS_MCP_TOOL_UNAVAILABLE")
+  if (matches.length !== 1) throw new ModFunctionError("MODS_MCP_TOOL_AMBIGUOUS")
+  return structuredClone(matches[0])
+}
+
+export type FunctionMcpToolDispatch = (
+  input: ModObject,
+  signal: AbortSignal,
+  core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>
+) => Promise<ModObject>
+
+export function functionMcpToolResult(value: ModObject): ModObject {
+  validateFunctionMcpResult(value)
+  return {
+    result: value.content,
+    text: (value.content as ModObject[])
+      .filter((block) => block.type === "text" && typeof block.text === "string")
+      .map((block) => block.text)
+      .join("\n"),
+    ...(value.isError === true ? { isError: true } : {})
+  }
+}
+
+/** Refs preserve protected host blocks/schema output within one MCP SDK dispatch only. */
+export class FunctionMcpToolResults {
+  private readonly values: ModObject[] = []
+
+  add(value: ModObject): ModObject {
+    const ref = this.values.push(value) - 1
+    return { ...functionMcpToolResult(value), ref }
+  }
+
+  resolve(answer: ModObject): ModObject {
+    if (typeof answer.deny === "string")
+      throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+    if (answer.ref !== undefined) {
+      if (!Number.isSafeInteger(answer.ref) || !this.values[Number(answer.ref)])
+        throw new ModFunctionError("MODS_TOOL_RESULT_REF")
+      return this.values[Number(answer.ref)]
+    }
+    const value = {
+      content: Array.isArray(answer.result)
+        ? answer.result
+        : [{ type: "text", text: typeof answer.text === "string" ? answer.text : "" }],
+      isError: answer.isError === true || this.values.at(-1)?.isError === true
+    }
+    validateFunctionMcpResult(value)
+    return value
+  }
+}
+
 export function functionMcpToolFingerprint(tool: McpCapabilityTool): string {
   return encodeModJson({
     capabilityId: tool.capabilityId,

@@ -39,8 +39,11 @@ import {
   functionMcpInput,
   functionMcpResult,
   functionMcpToolFingerprint,
-  resolveFunctionMcpTool
+  functionMcpToolResult,
+  resolveFunctionMcpTool,
+  resolveFunctionMcpToolName
 } from "./v2/mcp-sdk"
+import { functionSdkToolInput } from "./v2/tool-sdk"
 
 export interface ModPluginSource {
   id: string
@@ -182,6 +185,7 @@ export class ModsManager {
       binding: ModThreadBinding
       assertLive(): void
       listTools?: () => Promise<McpCapabilityTool[]>
+      peekTools?: () => McpCapabilityTool[] | null
       invoke: (id: string, args: ModObject) => Promise<unknown>
     }
   >()
@@ -632,7 +636,8 @@ export class ModsManager {
     input: ModObject,
     signal: AbortSignal,
     readOnly: boolean,
-    userInitiated: boolean
+    userInitiated: boolean,
+    expectedFingerprint?: string
   ): Promise<ModObject> {
     try {
       return await this.callFunctionMcp(
@@ -642,12 +647,77 @@ export class ModsManager {
         input,
         signal,
         readOnly,
-        userInitiated
+        userInitiated,
+        { expectedFingerprint }
       )
     } catch (error) {
       if (signal.aborted) throw new ModError("MODS_CANCELLED")
+      if (error instanceof ModPermissionError) throw error
       throw new ModError(modErrorCode(error))
     }
+  }
+
+  async invokeFunctionMcpTool(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal,
+    readOnly: boolean,
+    userInitiated: boolean
+  ): Promise<ModObject> {
+    const { target, args } = functionSdkToolInput(input)
+    if (target !== "mcp:call") throw new ModError("MODS_MCP_TOOL_UNAVAILABLE")
+    return functionMcpToolResult(
+      await this.callFunctionMcp(
+        workspace,
+        threadId,
+        grant,
+        { args },
+        signal,
+        readOnly,
+        userInitiated,
+        { toolName: String(input.tool) }
+      )
+    )
+  }
+
+  async resolveFunctionMcp(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject> {
+    workspace = this.workspaceKey(workspace)
+    input = functionMcpInput(input)
+    const mcp = this.functionMcpBinding(workspace, threadId, grant, signal)
+    const tool = resolveFunctionMcpTool(
+      await mcp.listTools!(),
+      String(input.server),
+      String(input.tool)
+    )
+    mcp.assertLive()
+    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    return { name: tool.toolId, fingerprint: functionMcpToolFingerprint(tool) }
+  }
+
+  private functionMcpBinding(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    signal: AbortSignal
+  ) {
+    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    if (!this.isEnabled(workspace)) throw new ModError("MODS_DISABLED")
+    const scope = functionExecutionScope(workspace, threadId)
+    if ((scope?.agentId ?? "main") !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+    const mcp = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId }))
+    if (!mcp?.listTools) throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
+    mcp.assertLive()
+    const turn = functionCallTurn(workspace, threadId)
+    if (turn && turn !== mcp.binding.turnId) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    return mcp
   }
 
   private async callFunctionMcp(
@@ -657,25 +727,20 @@ export class ModsManager {
     input: ModObject,
     signal: AbortSignal,
     readOnly: boolean,
-    userInitiated: boolean
+    userInitiated: boolean,
+    route: { toolName?: string; expectedFingerprint?: string } = {}
   ): Promise<ModObject> {
     workspace = this.workspaceKey(workspace)
-    input = functionMcpInput(input)
-    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
-    const scope = functionExecutionScope(workspace, threadId)
-    if ((scope?.agentId ?? "main") !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
-    const mcp = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId }))
-    if (!mcp?.listTools) throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
-    mcp.assertLive()
-    const turn = functionCallTurn(workspace, threadId)
-    if (turn && turn !== mcp.binding.turnId) throw new ModError("MODS_CALL_SCOPE_CHANGED")
-    const tool = resolveFunctionMcpTool(
-      await mcp.listTools(),
-      String(input.server),
-      String(input.tool)
-    )
+    if (!route.toolName) input = functionMcpInput(input)
+    const mcp = this.functionMcpBinding(workspace, threadId, grant, signal)
+    const available = await mcp.listTools!()
+    const tool = route.toolName
+      ? resolveFunctionMcpToolName(available, route.toolName)
+      : resolveFunctionMcpTool(available, String(input.server), String(input.tool))
     mcp.assertLive()
     const fingerprint = functionMcpToolFingerprint(tool)
+    if (route.expectedFingerprint && route.expectedFingerprint !== fingerprint)
+      throw new ModError("MODS_MCP_TOOL_CHANGED")
     const binding = {
       ...mcp.binding,
       permissionToolName: tool.toolId,
@@ -777,13 +842,15 @@ export class ModsManager {
   bindMcp(
     binding: ModThreadBinding,
     invoke: (id: string, args: ModObject) => Promise<unknown>,
-    listTools?: () => Promise<McpCapabilityTool[]>
+    listTools?: () => Promise<McpCapabilityTool[]>,
+    peekTools?: () => McpCapabilityTool[] | null
   ): () => void {
     const key = this.mcpBindingKey(binding)
     const entry = {
       binding: { ...binding, workspace: this.workspaceKey(binding.workspace) },
       invoke,
       listTools,
+      peekTools,
       assertLive: () => {
         if (this.mcpBindings.get(key) !== entry) throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
         binding.signal?.throwIfAborted()
@@ -795,6 +862,24 @@ export class ModsManager {
     return () => {
       if (this.mcpBindings.get(key) === entry) this.mcpBindings.delete(key)
     }
+  }
+
+  peekFunctionMcpTools(
+    workspace: string,
+    threadId: string
+  ): McpCapabilityTool[] | null | undefined {
+    const agentId = functionCallAgent(workspace, threadId)
+    if (agentId !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+    const scope = functionExecutionScope(workspace, threadId)
+    const entry = this.mcpBindings.get(this.mcpBindingKey({ workspace, threadId, agentId }))
+    if (!entry) {
+      if (scope?.turnId) throw new ModError("MODS_MCP_CONTEXT_REQUIRED")
+      return undefined
+    }
+    entry.assertLive()
+    const turnId = functionCallTurn(workspace, threadId)
+    if (turnId && turnId !== entry.binding.turnId) throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    return entry.peekTools?.() ?? null
   }
 
   private client(workspace: string): ModRuntimeClient {

@@ -22,6 +22,22 @@ export function isNativeFunctionTool(name: string): boolean {
   return Object.hasOwn(tools, name)
 }
 
+export function isMcpFunctionTool(name: string): boolean {
+  return /^mcp__[a-zA-Z0-9_-]+$/.test(name) && name.length <= 256
+}
+
+/** MCP schemas belong to the active host adapter; the VM boundary only bounds the data. */
+export function functionSdkToolInput(input: ModObject): { target: string; args: ModObject } {
+  if (typeof input.tool !== "string" || !isMcpFunctionTool(input.tool))
+    return functionToolTarget(input)
+  const args = { ...input }
+  delete args.tool
+  delete args.tool_use_id
+  delete args.agentId
+  if (encodeModJson(args).length > 16000) throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
+  return { target: "mcp:call", args }
+}
+
 export function functionToolTarget(input: ModObject): { target: string; args: ModObject } {
   const spec =
     typeof input.tool === "string" && Object.hasOwn(tools, input.tool)

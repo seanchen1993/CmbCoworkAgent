@@ -24,6 +24,7 @@ const grant = {
 } as ModGrant
 const plain = vi.fn()
 const manager = {
+  peekFunctionMcpTools: vi.fn<ModsManager["peekFunctionMcpTools"]>(),
   queryFunctionTool: vi.fn<ModsManager["queryFunctionTool"]>(
     async (_w, _t, _g, tool, args, _signal, fallback) => fallback(tool, args)
   )
@@ -43,6 +44,7 @@ beforeEach(() => {
   probe.mockReturnValue(query)
   query.mockResolvedValue({ decision: "allow" })
   peek.mockReturnValue(null)
+  manager.peekFunctionMcpTools.mockReturnValue(undefined)
 })
 
 it("uses only an inert native probe with the current sandbox mode", async () => {
@@ -70,7 +72,11 @@ it("resolves cached MCP metadata exactly and denies ambiguous aliases without pr
   const tool = {
     toolId: "mcp__server__tool",
     canonicalToolId: "mcp__canonical",
-    capabilityId: "server/tool"
+    capabilityId: "server/tool",
+    providerKey: "connector:server",
+    toolName: "tool",
+    visibility: "eager",
+    sourceKind: "connector"
   } as McpCapabilityTool
   peek.mockReturnValue([tool])
   expect(await call("mcp__canonical", { value: 1 })).toEqual({ decision: "allow" })
@@ -84,10 +90,30 @@ it("resolves cached MCP metadata exactly and denies ambiguous aliases without pr
     expect.any(Function)
   )
   peek.mockReturnValue([tool, { ...tool, capabilityId: "other/tool" }])
-  expect(await call("mcp__server__tool")).toEqual({
+  expect(await call("mcp__canonical")).toEqual({
     decision: "deny",
     reason: "MODS_TOOL_AMBIGUOUS"
   })
   expect(discover).not.toHaveBeenCalled()
   expect(probe).not.toHaveBeenCalled()
+})
+
+it("uses the active scope's aliases exclusively and cannot recover stale context from a global cache", async () => {
+  manager.peekFunctionMcpTools.mockReturnValue([
+    {
+      toolId: "mcp__echo",
+      canonicalToolId: "mcp__scoped__echo",
+      capabilityId: "scope/tool"
+    } as McpCapabilityTool
+  ])
+  expect(await call("mcp__echo")).toEqual({ decision: "allow" })
+  expect(manager.queryFunctionTool.mock.calls.at(-1)?.[3]).toBe("mcp:scope/tool")
+  expect(peek).not.toHaveBeenCalled()
+  expect(plain).not.toHaveBeenCalled()
+  manager.peekFunctionMcpTools.mockReturnValue(null)
+  expect(await call("mcp__echo")).toEqual({
+    decision: "deny",
+    reason: "MODS_TOOL_CONTEXT_REQUIRED"
+  })
+  expect(peek).not.toHaveBeenCalled()
 })
