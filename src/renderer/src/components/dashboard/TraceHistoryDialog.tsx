@@ -9,8 +9,10 @@ import {
   Clock,
   Code2,
   Coins,
+  Copy,
   Cpu,
   Download,
+  Fingerprint,
   Gauge,
   Hash,
   Info,
@@ -22,6 +24,7 @@ import {
   Timer,
   Wrench
 } from "lucide-react"
+import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -454,11 +457,62 @@ function traceDisplayClass(trace: DashboardTraceDetail): string {
   return "border-border bg-background text-muted-foreground"
 }
 
+/**
+ * 复制完整 ID。列表里 threadId / traceId 都是截断显示的，而排查线上问题时几乎
+ * 一定要拿完整值去 ES 里查，肉眼抄不出来。
+ */
+function CopyIdButton({
+  value,
+  label,
+  className
+}: {
+  value: string
+  label: string
+  className?: string
+}): React.JSX.Element {
+  const handleCopy = async (event: React.MouseEvent): Promise<void> => {
+    // 这些按钮嵌在可点击的卡片里，不拦住会顺手切换选中项。
+    event.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(value)
+      toast.success(`已复制${label}`)
+    } catch {
+      toast.error("复制失败")
+    }
+  }
+  return (
+    // 本文件的 Tooltip 都各自带 Provider（见 InfoHint / SkillCodeStat）——
+    // ui/tooltip 的 Tooltip 是裸 Radix Root，没有 Provider 祖先会直接抛错。
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              "shrink-0 text-muted-foreground/60 transition-colors hover:text-foreground",
+              className
+            )}
+            onClick={(event) => void handleCopy(event)}
+            aria-label={`复制${label}`}
+          >
+            <Copy className="size-3" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top">
+          <span className="font-mono text-[10px]">{value}</span>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 function inferredToolCount(trace: DashboardTraceDetail): number {
   if (trace.totalToolCalls > 0) return trace.totalToolCalls
   const metadataToolCount = (trace.nodes ?? []).reduce((count, node) => {
     const names = node.metadata?.toolNames
-    return count + (Array.isArray(names) ? names.filter((name) => typeof name === "string").length : 0)
+    return (
+      count + (Array.isArray(names) ? names.filter((name) => typeof name === "string").length : 0)
+    )
   }, 0)
   return metadataToolCount || trace.totalToolCalls
 }
@@ -673,6 +727,7 @@ function TraceThreadGroupCard({
             <span className="truncate text-[11px] font-semibold text-foreground">
               Root Thread {group.threadId.slice(0, 10)}
             </span>
+            <CopyIdButton value={group.threadId} label="threadId" />
             <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
               {group.traces.length} 条
             </Badge>
@@ -682,9 +737,12 @@ function TraceThreadGroupCard({
               </Badge>
             )}
             {group.rootTraceId && (
-              <span className="truncate text-[10px] font-mono text-muted-foreground/50">
-                root {shortTraceId(group.rootTraceId)}
-              </span>
+              <>
+                <span className="truncate text-[10px] font-mono text-muted-foreground/50">
+                  root {shortTraceId(group.rootTraceId)}
+                </span>
+                <CopyIdButton value={group.rootTraceId} label="traceId" />
+              </>
             )}
           </div>
           <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground/60">
@@ -1213,13 +1271,37 @@ export function TraceExplorer({
                     </p>
                   </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-2 px-4 py-2.5">
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
                   <Tag className="size-3.5 shrink-0 text-muted-foreground" />
                   <div>
                     <p className="text-[10px] text-muted-foreground">APP 版本</p>
                     <p className="whitespace-nowrap text-[12px] font-semibold">
                       {metricAppVersionLabel}
                     </p>
+                  </div>
+                </div>
+                {/* 排查线上问题基本都要拿这两个 ID 去 ES 查，放在指标条末尾，
+                    不用回左侧列表里翻当前选中的是哪一条。 */}
+                <div className="flex shrink-0 items-center gap-2 px-4 py-2.5">
+                  <Fingerprint className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <p className="text-[10px] text-muted-foreground">ID</p>
+                    <div className="flex items-center gap-2">
+                      {metricMode === "thread" && selectedThreadGroup ? (
+                        <span className="inline-flex items-center gap-1">
+                          <span className="whitespace-nowrap font-mono text-[11px]">
+                            thread {selectedThreadGroup.threadId.slice(0, 8)}
+                          </span>
+                          <CopyIdButton value={selectedThreadGroup.threadId} label="threadId" />
+                        </span>
+                      ) : null}
+                      <span className="inline-flex items-center gap-1">
+                        <span className="whitespace-nowrap font-mono text-[11px]">
+                          trace {shortTraceId(selectedTrace.traceId)}
+                        </span>
+                        <CopyIdButton value={selectedTrace.traceId} label="traceId" />
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
