@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import type { DashboardProjectModeProject, DashboardProjectModeTopUser } from "./use-dashboard"
+import type {
+  DashboardCodeStats,
+  DashboardProjectModeProject,
+  DashboardProjectModeTopUser
+} from "./use-dashboard"
 import {
   buildProjectModeProjectExportRows,
   buildProjectModeProjectExportSummaryRows,
@@ -70,6 +74,52 @@ describe("project-mode Excel export", () => {
     const constraintIndex = PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否加载项目约束")
     expect(constraintIndex).toBe(PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("项目状态") - 1)
     expect(row[constraintIndex]).toBe("是")
+  })
+
+  it("compares Harness vs VibeCoding adopted lines with 未归因 kept out of the share", () => {
+    const adopted = (adoptedLines: number): DashboardCodeStats =>
+      ({ adoptedLines }) as DashboardCodeStats
+    const project = {
+      projectId: "project-2",
+      name: "采纳行数对比",
+      lifecycleStatus: "active",
+      features: [],
+      topSkills: [],
+      codeStats: null,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 4, codeStats: adopted(750) },
+        vibecoding: { conversationCount: 3, codeStats: adopted(250) },
+        unattributed: { conversationCount: 5, codeStats: adopted(400) }
+      }
+    } as unknown as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row).toHaveLength(PROJECT_MODE_PROJECT_EXPORT_HEADER.length)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Harness采纳行数")]).toBe(750)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("VibeCoding采纳行数")]).toBe(250)
+    // 750 / (750 + 250)，未归因的 400 行不进分母。
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Harness采纳行数占比")]).toBe("75.00%")
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("未归因采纳行数")]).toBe(400)
+  })
+
+  it("leaves the Harness share blank when neither bucket adopted any line", () => {
+    const project = {
+      projectId: "project-3",
+      name: "无采纳",
+      lifecycleStatus: "active",
+      features: [],
+      topSkills: [],
+      codeStats: null,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as unknown as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Harness采纳行数")]).toBe(0)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Harness采纳行数占比")]).toBe("—")
   })
 
   it("reports active and archived totals when the worksheet is capped", () => {

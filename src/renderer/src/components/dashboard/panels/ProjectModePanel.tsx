@@ -1036,6 +1036,68 @@ function ProjectStageAdoptionRates({
   )
 }
 
+/** 两桶内占比：分母只取 Harness + VibeCoding 合计；合计为 0 时没有占比可言。 */
+function bucketLineShare(lines: number, comparedLines: number): number | null {
+  return comparedLines > 0 ? lines / comparedLines : null
+}
+
+/**
+ * Harness vs VibeCoding 采纳行数对比，与采纳率列同一组 stage×skill 分桶。
+ *
+ * 占比分母只取这两桶之和，未归因桶不参与：它装的是没有 harnessNodeStatus 的历史/未开
+ * 阶段事件，摊进分母会把对比稀释成「历史数据占比」。被排除的行数写在 title 里备查。
+ *
+ * 采纳行数是 `adoptedLines`，即已与 commit 配对测量过的生成行；两桶同口径，所以对比
+ * 公平，但绝对值低于实际写进仓库的行数。
+ */
+function ProjectStageAdoptedLines({
+  buckets
+}: {
+  buckets: DashboardStageBuckets
+}): React.JSX.Element {
+  const unattributedLines = buckets.unattributed.codeStats?.adoptedLines ?? 0
+  const rows: Array<{
+    bucket: StageBucket
+    shortLabel: string
+    dot: string
+    lines: number
+  }> = [
+    {
+      bucket: "plugin_constrained",
+      shortLabel: "Harness",
+      dot: "bg-emerald-500",
+      lines: buckets.pluginConstrained.codeStats?.adoptedLines ?? 0
+    },
+    {
+      bucket: "vibecoding",
+      shortLabel: "VibeCoding",
+      dot: "bg-violet-500",
+      lines: buckets.vibecoding.codeStats?.adoptedLines ?? 0
+    }
+  ]
+  const comparedLines = rows.reduce((acc, row) => acc + row.lines, 0)
+  return (
+    <div className="flex flex-col items-end gap-0.5 whitespace-nowrap">
+      {rows.map(({ bucket, shortLabel, dot, lines }) => {
+        const share = formatPercent(bucketLineShare(lines, comparedLines))
+        return (
+          <span
+            key={bucket}
+            className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"
+            title={`${STAGE_BUCKET_LABELS[bucket]}：采纳 ${formatNumber(lines)} 行，占两桶合计 ${formatNumber(comparedLines)} 行的 ${share}。未归因另有 ${formatNumber(unattributedLines)} 行，不计入分母。`}
+          >
+            <span className={`size-1.5 rounded-full ${dot}`} />
+            <span>{shortLabel}</span>
+            <span className="font-medium text-foreground">{formatLineCount(lines)}</span>
+            <span>行</span>
+            <span>{share}</span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
 /** 流程阶段三桶分行展示（插件约束（Harness）/ VibeCoding / 未归因），与状态细分同款紧凑口径。空则不渲染。 */
 function StageBucketRows({
   buckets,
@@ -1470,6 +1532,9 @@ function ProjectRow({
           <ProjectStageAdoptionRates buckets={project.stageBuckets} />
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
+          <ProjectStageAdoptedLines buckets={project.stageBuckets} />
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
           {project.systemConstraintReads || project.hookExecutions ? (
             <OperationalTelemetry
               constraint={project.systemConstraintReads}
@@ -1851,7 +1916,7 @@ function ProjectListSection({
   const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
   const pageData = projectPages[tab]
   const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
-  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 16 : 15
+  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 17 : 16
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
@@ -1986,7 +2051,7 @@ function ProjectListSection({
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
             项目、插件、项目状态、特性数为当前状态；对话数、DEV 阶段轮次数、DEV
             关联特性数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
-            流程采纳率、系统约束读取与运行时 Hook
+            流程采纳率与采纳行数对比、系统约束读取与运行时 Hook
             按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
           </p>
         </>
@@ -2151,6 +2216,12 @@ function ProjectListSection({
                 title="按流程阶段归因拆分的总量口径提交采纳率"
               >
                 Harness / VibeCoding 采纳率
+              </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="按流程阶段归因拆分的采纳行数对比。占比分母为 Harness + VibeCoding 两桶之和，不含未归因；采纳行数仅统计已与 commit 配对测量过的生成行"
+              >
+                Harness / VibeCoding 采纳行数
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
