@@ -136,6 +136,17 @@ it("keeps usage bounded and omits totals that exceed exact integer capacity", ()
   expect(oversized.snapshot()).toEqual({ answer: "answer" })
 })
 
+it("keeps explicit refusal facts independent from mutable returned snapshots", () => {
+  const view = new FunctionTurnObservation()
+  view.observe(
+    new AIMessage({ content: "Refused", additional_kwargs: { refusal: "Provider explanation" } })
+  )
+  const first = view.snapshot()
+  expect(first.refusal).toEqual({ category: null, explanation: "Provider explanation" })
+  first.refusal!.explanation = "changed"
+  expect(view.snapshot().refusal?.explanation).toBe("Provider explanation")
+})
+
 it("retains an interrupted visible text stream, replaces snapshots, and excludes reasoning", () => {
   const view = new FunctionTurnObservation()
   const part = (id: string, content: unknown) => [

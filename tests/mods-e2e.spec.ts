@@ -1730,17 +1730,19 @@ async function main(): Promise<void> {
         active: string | null
         starts: number
         completions: number
-        last: { turnId: string; answer: string; reason: string; usage?: unknown }
+        last: { turnId: string; answer: string; reason: string; usage?: unknown; refusal?: unknown }
       }
-    for (const cancel of [false, true]) {
+    for (const outcome of ["answer", "aborted", "refusal"]) {
+      const cancel = outcome === "aborted"
+      const refusal = outcome === "refusal"
       const requestCount = modelServer.requests.length
       const closedCount = modelServer.closedStalls()
       const task = await page!.evaluate(
-        async ({ workspace, cancel }) => {
+        async ({ workspace, cancel, refusal }) => {
           const task = await window.api.scheduledTasks.create({
-            name: `Mods scheduled ${cancel ? "cancel" : "answer"}`,
+            name: `Mods scheduled ${refusal ? "refusal" : cancel ? "cancel" : "answer"}`,
             description: "isolated lifecycle qualification",
-            prompt: `[mods-scheduled] ${cancel ? "[stall]" : ""} 请返回一次简短回答`,
+            prompt: `[mods-scheduled] ${refusal ? "[mods-refusal]" : cancel ? "[stall]" : ""} 请返回一次简短回答`,
             taskType: "action",
             modelId: "custom:mods-model-fixture",
             workDir: workspace,
@@ -1750,7 +1752,7 @@ async function main(): Promise<void> {
           await window.api.scheduledTasks.runNow(task.id)
           return task
         },
-        { workspace, cancel }
+        { workspace, cancel, refusal }
       )
       let scheduledThread = ""
       await until(async () => {
@@ -1780,8 +1782,23 @@ async function main(): Promise<void> {
       assert.equal(facts.active, null)
       assert.equal(facts.starts, 1)
       assert.equal(facts.completions, 1)
-      assert.equal(facts.last.reason, cancel ? "aborted" : "answer")
-      assert.match(facts.last.answer, /SDK_MODEL_OK/)
+      assert.equal(facts.last.reason, outcome)
+      assert.match(facts.last.answer, refusal ? /MODS_PROVIDER_REFUSED/ : /SDK_MODEL_OK/)
+      if (refusal) {
+        assert.deepEqual(facts.last.refusal, {
+          category: null,
+          explanation: "MODS_PROVIDER_REFUSED"
+        })
+        assert.equal(
+          await page!.evaluate(
+            async (id) =>
+              (await window.api.scheduledTasks.list()).find((task) => task.id === id)
+                ?.lastRunStatus,
+            task.id
+          ),
+          "error"
+        )
+      }
       const messages = await page!.evaluate(
         (id) => window.api.threads.getMessages(id),
         scheduledThread
@@ -1798,27 +1815,29 @@ async function main(): Promise<void> {
       assert.equal(modelServer.requests.length, requestCount + 1)
       await page!.evaluate((id) => window.api.scheduledTasks.delete(id), task.id)
       await page!.evaluate((id) => window.api.threads.delete(id), scheduledThread)
-      pass(`scheduled ${cancel ? "abort" : "answer"} reports actual turn identity and completion`)
+      pass(`scheduled ${outcome} reports actual turn identity and completion`)
     }
 
     const heartbeatConfig = await page!.evaluate(() => window.api.heartbeat.getConfig())
     const heartbeatContent = await page!.evaluate(() => window.api.heartbeat.getContent())
     try {
-      for (const cancel of [false, true]) {
+      for (const [index, outcome] of ["answer", "aborted", "refusal"].entries()) {
+        const cancel = outcome === "aborted"
+        const refusal = outcome === "refusal"
         const requestCount = modelServer.requests.length
         const closedCount = modelServer.closedStalls()
         await page!.evaluate(
-          async ({ workspace, cancel }) => {
+          async ({ workspace, cancel, refusal }) => {
             await window.api.heartbeat.saveConfig({
               enabled: false,
               workDir: workspace,
               modelId: "custom:mods-model-fixture",
-              prompt: `[mods-heartbeat] ${cancel ? "[stall]" : ""} 请返回一次简短回答`
+              prompt: `[mods-heartbeat] ${refusal ? "[mods-refusal]" : cancel ? "[stall]" : ""} 请返回一次简短回答`
             })
             await window.api.heartbeat.saveContent("- 检查本地轮次回调")
             await window.api.heartbeat.runNow()
           },
-          { workspace, cancel }
+          { workspace, cancel, refusal }
         )
         let heartbeatThread = ""
         await until(async () => {
@@ -1841,15 +1860,26 @@ async function main(): Promise<void> {
           async () =>
             !(await page!.evaluate(() => window.api.heartbeat.isRunning())) &&
             (await page!.evaluate((id) => window.api.mods.turnNotices(id), heartbeatThread))
-              .length === (cancel ? 2 : 1),
+              .length ===
+              index + 1,
           "heartbeat completion follows physical settlement"
         )
         const facts = await backgroundFacts(heartbeatThread)
         assert.equal(facts.active, null)
-        assert.equal(facts.starts, cancel ? 2 : 1)
-        assert.equal(facts.completions, cancel ? 2 : 1)
-        assert.equal(facts.last.reason, cancel ? "aborted" : "answer")
-        assert.match(facts.last.answer, /SDK_MODEL_OK/)
+        assert.equal(facts.starts, index + 1)
+        assert.equal(facts.completions, index + 1)
+        assert.equal(facts.last.reason, outcome)
+        assert.match(facts.last.answer, refusal ? /MODS_PROVIDER_REFUSED/ : /SDK_MODEL_OK/)
+        if (refusal) {
+          assert.deepEqual(facts.last.refusal, {
+            category: null,
+            explanation: "MODS_PROVIDER_REFUSED"
+          })
+          assert.equal(
+            (await page!.evaluate(() => window.api.heartbeat.getConfig())).lastRunStatus,
+            "error"
+          )
+        }
         assert.notEqual(facts.last.turnId, heartbeatThread)
         if (!cancel)
           assert.deepEqual(facts.last.usage, {
@@ -1860,7 +1890,7 @@ async function main(): Promise<void> {
             cache_creation_input_tokens: 0
           })
         assert.equal(modelServer.requests.length, requestCount + 1)
-        pass(`heartbeat ${cancel ? "abort" : "answer"} uses its actual graph and controller`)
+        pass(`heartbeat ${outcome} uses its actual graph and controller`)
       }
     } finally {
       await page!.evaluate(
@@ -2204,6 +2234,63 @@ async function main(): Promise<void> {
     pass(
       "shared child cancellation retains its real partial answer without borrowing the main turn identity"
     )
+    await functionComposer.fill("[mods-child] [child-refusal] 请记录子代理结果。")
+    await functionComposer.press("Enter")
+    let refusedChildFacts: Record<string, unknown>
+    await until(async () => {
+      refusedChildFacts = await inspectTurn()
+      return (
+        refusedChildFacts.active === null &&
+        Number(refusedChildFacts.childCompletions) ===
+          Number(abortedChildFacts!.childCompletions) + 1
+      )
+    }, "real child refusal completes without changing the parent's answer")
+    assert.equal((refusedChildFacts!.last as { reason: string }).reason, "answer")
+    assert.equal((refusedChildFacts!.lastChild as { reason: string }).reason, "refusal")
+    assert.deepEqual((refusedChildFacts!.lastChild as { refusal: unknown }).refusal, {
+      category: null,
+      explanation: "MODS_CHILD_REFUSED"
+    })
+    pass("real shared child refusal is attributed independently from its parent's answer")
+
+    for (const [marker, refusal, answer] of [
+      ["", { category: null, explanation: "MODS_PROVIDER_REFUSED" }, "MODS_PROVIDER_REFUSED"],
+      ["[content-filter]", { category: null, explanation: null }, ""],
+      ["[refusal-details]", { category: "fixture", explanation: "MODS_PROVIDER_POLICY" }, ""]
+    ] as const) {
+      const before = await inspectTurn()
+      const requestCount = modelServer.requests.length
+      await functionComposer.fill(`[mods-refusal] ${marker} 验证明确的提供商终态。`)
+      await functionComposer.press("Enter")
+      let refused: Record<string, unknown>
+      await until(async () => {
+        refused = await inspectTurn()
+        return (
+          refused.active === null && Number(refused.completions) === Number(before.completions) + 1
+        )
+      }, "provider refusal completes without synthetic recovery")
+      const facts = refused!.last as {
+        reason: string
+        refusal: unknown
+        answer: string
+        usage: unknown
+      }
+      assert.equal(facts.reason, "refusal")
+      assert.deepEqual(facts.refusal, refusal)
+      assert.equal(facts.answer, answer)
+      assert.deepEqual(facts.usage, {
+        model: "mods-model-fixture",
+        input_tokens: 12,
+        output_tokens: 3,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0
+      })
+      assert.equal(modelServer.requests.length, requestCount + 1)
+      pass(
+        `actual provider refusal ${marker || "text"} retains metadata and usage with no recovery request`
+      )
+    }
+    await page!.screenshot({ path: join(artifacts, "function-turn-refusal.png") })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     for (const path of ["secret.txt", "../outside.txt"]) {
       await functionComposer.fill(`/claw-files ${path}`)

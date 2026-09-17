@@ -37,6 +37,10 @@ import { executeImInboxScheduledTask } from "./im/inbox-scheduler"
 import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 import { ScheduledTranscript } from "./scheduled-transcript"
 import { FunctionTurnRun } from "../mods/v2/turn-run"
+import {
+  assertNoTurnModelRefusal,
+  clearTurnCompletionGateState
+} from "../agent/turn-completion-integrity"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 import {
   clearTrustedToolFilePreviewSourcesForThread,
@@ -440,6 +444,7 @@ async function executeTask(taskId: string): Promise<void> {
     }
 
     if (!abortController.signal.aborted) {
+      assertNoTurnModelRefusal(threadId, schedulerRunId)
       updateScheduledTaskRunResult(taskId, "ok", null)
       recordRun(taskId, task.name, startedAt, "ok", null)
 
@@ -571,6 +576,7 @@ async function executeTask(taskId: string): Promise<void> {
     }
     if (leaseAcquired) {
       functionTurn?.finish(taskError ? "error" : "answer")
+      clearTurnCompletionGateState(threadId, schedulerRunId)
       releaseLocalThreadRunLease(threadId, "scheduler", schedulerRunId)
     }
     runningTasks.delete(taskId)

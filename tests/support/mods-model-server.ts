@@ -35,12 +35,48 @@ export async function startModsModelServer() {
     const userPrompt = JSON.stringify(
       body.messages?.findLast((message: { role: string }) => message.role === "user")?.content
     )
+    if (userPrompt?.includes("[mods-refusal]")) {
+      const kind = userPrompt.includes("[content-filter]")
+        ? "content_filter"
+        : userPrompt.includes("[refusal-details]")
+          ? "refusal"
+          : "stop"
+      event([
+        {
+          index: 0,
+          delta: {
+            role: "assistant",
+            content: null,
+            ...(kind === "stop" ? { refusal: "MODS_PROVIDER_REFUSED" } : {})
+          },
+          finish_reason: kind,
+          ...(kind === "refusal"
+            ? { stop_details: { category: "fixture", explanation: "MODS_PROVIDER_POLICY" } }
+            : {})
+        }
+      ])
+      event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
     if (
       Array.isArray(body.tools) &&
       (userPrompt?.includes("[mods-child]") || userPrompt?.includes("[mods-child-worker]"))
     ) {
       const child = userPrompt.includes("[mods-child-worker]")
       const completed = body.messages?.at(-1)?.role === "tool"
+      if (child && completed && userPrompt.includes("[child-refusal]")) {
+        event([
+          {
+            index: 0,
+            delta: { role: "assistant", refusal: "MODS_CHILD_REFUSED" },
+            finish_reason: "stop"
+          }
+        ])
+        event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
+        response.end("data: [DONE]\n\n")
+        return
+      }
       if (child && completed && userPrompt.includes("[stall]")) {
         event([
           {
@@ -72,7 +108,7 @@ export async function startModsModelServer() {
                           name: "task",
                           arguments: JSON.stringify({
                             subagent_type: "Explore",
-                            description: `[mods-child-worker] ${userPrompt.includes("[child-stall]") ? "[stall]" : ""} Inspect using the registered probe`
+                            description: `[mods-child-worker] ${userPrompt.includes("[child-stall]") ? "[stall]" : ""} ${userPrompt.includes("[child-refusal]") ? "[child-refusal]" : ""} Inspect using the registered probe`
                           })
                         }
                   }

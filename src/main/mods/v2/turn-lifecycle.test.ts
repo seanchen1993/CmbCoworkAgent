@@ -62,6 +62,67 @@ function fixture() {
 }
 
 describe("function turn lifecycle", () => {
+  it.each(["answer", "error", "aborted"] as const)(
+    "keeps refusal ahead of %s except for explicit cancellation",
+    async (reason) => {
+      const f = fixture()
+      await f.lifecycle.start(f.binding())
+      f.lifecycle.observe(
+        "thread",
+        "run",
+        new AIMessage({
+          content: "Provider refused",
+          response_metadata: {
+            stop_reason: "refusal",
+            stop_details: { category: "policy", explanation: "Provider explanation" }
+          }
+        })
+      )
+      f.lifecycle.finish("thread", "run", { reason })
+      await tick()
+      expect(f.ends[0]).toMatchObject({
+        reason: reason === "aborted" ? "aborted" : "refusal",
+        answer: "Provider refused",
+        isAborted: reason === "aborted"
+      })
+      if (reason === "aborted") expect(f.ends[0]).not.toHaveProperty("refusal")
+      else
+        expect(f.ends[0]).toHaveProperty("refusal", {
+          category: "policy",
+          explanation: "Provider explanation"
+        })
+      f.lifecycle.close()
+    }
+  )
+
+  it("reports a child's explicit refusal separately from its parent's answer", async () => {
+    const f = fixture()
+    f.busy.add("thread")
+    await f.lifecycle.start(f.binding())
+    const child = f.lifecycle.startChild({
+      ...f.binding("child-run", "child-turn"),
+      agentId: "child"
+    })
+    child.observe(
+      new AIMessage({ content: "", response_metadata: { finish_reason: "content_filter" } })
+    )
+    child.finish("answer")
+    await tick()
+    expect(f.ends[0]).toMatchObject({
+      agentId: "child",
+      reason: "refusal",
+      refusal: { category: null, explanation: null }
+    })
+    f.lifecycle.observe("thread", "run", new AIMessage("Parent answer"))
+    f.lifecycle.finish("thread", "run", { reason: "answer" })
+    f.busy.delete("thread")
+    f.idle()
+    await tick()
+    expect(f.ends[1]).toMatchObject({ answer: "Parent answer", reason: "answer" })
+    expect(f.ends[1]).not.toHaveProperty("refusal")
+    f.lifecycle.close()
+  })
+
   it("completes an independent child while its main turn still owns the thread", async () => {
     const f = fixture()
     f.busy.add("thread")

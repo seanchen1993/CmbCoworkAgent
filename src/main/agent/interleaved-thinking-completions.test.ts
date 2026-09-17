@@ -3,6 +3,13 @@ import type { ChatGenerationChunk } from "@langchain/core/outputs"
 import { describe, expect, it, vi } from "vitest"
 import { ChatOpenAI } from "@langchain/openai"
 import { createAgent } from "langchain"
+import { MemorySaver } from "@langchain/langgraph"
+import { readModelRefusal } from "./model-refusal"
+import {
+  createTurnCompletionGateMiddleware,
+  clearTurnCompletionGateState,
+  readTurnCompletionGateReport
+} from "./turn-completion-integrity"
 
 import {
   InterleavedThinkingChatOpenAICompletions,
@@ -35,6 +42,142 @@ const completionClasses = [
   InterleavedThinkingChatOpenAICompletions,
   ReasoningDisplayChatOpenAICompletions
 ]
+
+describe.each(completionClasses)("explicit refusal through %s", (Model) => {
+  it.each(["text", "reasoning-text", "content_filter", "refusal"])(
+    "preserves %s in a real streamed graph and checkpoint without retry",
+    async (kind) => {
+      const threadId = `refusal-${Model.name}-${kind}`
+      const request = vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                const deltas = kind.endsWith("text")
+                  ? [
+                      {
+                        role: "assistant",
+                        refusal: "Request ",
+                        ...(kind === "reasoning-text" ? { reasoning_content: "hidden" } : {})
+                      },
+                      { refusal: "refused" }
+                    ]
+                  : [{ role: "assistant", content: "" }]
+                for (const delta of deltas) controller.enqueue(sse(chunk("refused", delta)))
+                const terminal = chunk("refused", {}, kind.endsWith("text") ? "stop" : kind)
+                if (kind === "refusal")
+                  Object.assign(terminal.choices[0], {
+                    stop_details: { category: "provider-category", explanation: "Provider reason" }
+                  })
+                controller.enqueue(sse(terminal))
+                controller.enqueue(
+                  sse({
+                    ...chunk("refused", {}),
+                    choices: [],
+                    usage: {
+                      prompt_tokens: 4,
+                      completion_tokens: 2,
+                      total_tokens: 6
+                    }
+                  })
+                )
+                controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+                controller.close()
+              }
+            }),
+            { headers: { "content-type": "text/event-stream" } }
+          )
+      )
+      const fields = {
+        model: "alias",
+        apiKey: "test",
+        maxRetries: 0,
+        configuration: {
+          baseURL: "https://example.test/v1",
+          fetch: request
+        }
+      }
+      const recovery = vi.fn()
+      const agent = createAgent({
+        model: new ChatOpenAI({ ...fields, completions: new Model(fields) } as never),
+        tools: [],
+        checkpointer: new MemorySaver(),
+        middleware: [
+          createTurnCompletionGateMiddleware({ ownerRunToken: "run", onRecovery: recovery })
+        ]
+      })
+      const config = { configurable: { thread_id: threadId } }
+      try {
+        let final: AIMessage | undefined
+        for await (const [mode, state] of await agent.stream(
+          { messages: [new HumanMessage("test")] },
+          {
+            ...config,
+            streamMode: ["messages", "values"]
+          }
+        ))
+          if (mode === "values") final = state.messages.at(-1) as AIMessage
+        const expected =
+          kind === "refusal"
+            ? { category: "provider-category", explanation: "Provider reason" }
+            : { category: null, explanation: kind.endsWith("text") ? "Request refused" : null }
+        expect(readModelRefusal(final)).toEqual(expected)
+        const checkpoint = (await agent.getState(config)) as unknown as {
+          values: { messages: AIMessage[] }
+        }
+        expect(readModelRefusal(checkpoint.values.messages.at(-1))).toEqual(expected)
+        if (kind.endsWith("text")) expect(final?.content).toContain("Request refused")
+        else expect(final?.content).toBe("")
+        expect(final?.usage_metadata?.input_tokens).toBe(4)
+        expect(readTurnCompletionGateReport(threadId, "run")?.refusal).toEqual(expected)
+        expect(request).toHaveBeenCalledOnce()
+        expect(recovery).not.toHaveBeenCalled()
+      } finally {
+        clearTurnCompletionGateState(threadId, "run")
+      }
+    }
+  )
+
+  it.each([false, true])(
+    "keeps non-streamed refusal text and explicit metadata with reasoning %s",
+    async (reasoning) => {
+      const model = new Model({
+        model: "alias",
+        apiKey: "test",
+        maxRetries: 0,
+        configuration: {
+          baseURL: "https://example.test/v1",
+          fetch: async () =>
+            new Response(
+              JSON.stringify({
+                id: "refused",
+                object: "chat.completion",
+                created: 1,
+                model: "actual",
+                choices: [
+                  {
+                    index: 0,
+                    message: {
+                      role: "assistant",
+                      content: null,
+                      refusal: "Request refused",
+                      ...(reasoning ? { reasoning_content: "hidden" } : {})
+                    },
+                    finish_reason: "stop"
+                  }
+                ],
+                usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 }
+              }),
+              { headers: { "content-type": "application/json" } }
+            )
+        }
+      })
+      const answer = await model.invoke("test")
+      expect(answer.content).toContain("Request refused")
+      expect(readModelRefusal(answer)).toEqual({ category: null, explanation: "Request refused" })
+    }
+  )
+})
 
 it("preserves actual provider model and usage through graph-triggered streaming invoke", async () => {
   const fields = {

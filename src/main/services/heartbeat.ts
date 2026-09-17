@@ -35,6 +35,10 @@ import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 import { withThreadRunMutationLock } from "../ipc/thread-run-mutation-lock"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 import { FunctionTurnRun } from "../mods/v2/turn-run"
+import {
+  assertNoTurnModelRefusal,
+  clearTurnCompletionGateState
+} from "../agent/turn-completion-integrity"
 
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 // A cleared timeout may already have a callback queued in the event loop. Each
@@ -522,6 +526,7 @@ async function executeHeartbeat(): Promise<void> {
     }
 
     controller.signal.throwIfAborted()
+    assertNoTurnModelRefusal(threadId, heartbeatRunId)
     broadcastToChannel(channel, { type: "done" })
 
     const stripped = stripHeartbeatToken(fullReply)
@@ -622,6 +627,7 @@ async function executeHeartbeat(): Promise<void> {
     }
     if (leaseAcquired) {
       functionTurn?.finish(completionSucceeded ? "answer" : "error")
+      clearTurnCompletionGateState(threadId, heartbeatRunId)
       releaseLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)
     }
     running = false

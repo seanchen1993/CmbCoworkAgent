@@ -3165,6 +3165,7 @@ function assembleDeepAgent(
       // prompt this gate would add. See turn-completion-integrity.ts.
       createTurnCompletionGateMiddleware({
         ownerRunToken: currentRunMessageQueueOwnerToken,
+        observationRunToken: modTurnRunId,
         todoGateEnabled: mainTodosEnabled && turnCompletionTodoGateEnabled,
         onRecovery: onTurnCompletionRecovery
       }),

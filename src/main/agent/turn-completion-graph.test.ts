@@ -120,6 +120,25 @@ afterEach(() => {
 })
 
 describe("turn completion gate inside the real agent graph", () => {
+  it.each([false, true])(
+    "ends a refusal before dispatching provider tool calls (bystander %s)",
+    async (withBystander) => {
+      const { model } = await runGraph(
+        [
+          scriptedAi("", { finish_reason: "content_filter" }, [
+            { name: "read_file", args: { file_path: "a.ts" }, id: "refused-call" }
+          ])
+        ],
+        { withBystander }
+      )
+      expect(model.calls).toHaveLength(1)
+      expect(readTurnCompletionGateReport(THREAD, RUN)?.refusal).toEqual({
+        category: null,
+        explanation: null
+      })
+    }
+  )
+
   it("recovers a leaked DSML tail and executes only the subsequent structured tool call", async () => {
     const { model, final } = await runGraph([
       scriptedAi(

@@ -232,7 +232,6 @@ export class FunctionTurnLifecycle {
   private finishEntry(entry: TurnEntry, result: TurnEnding): void {
     if (!entry || entry.terminal) return
     const { threadId, runId } = entry.binding
-    const reason = entry.binding.signal.aborted ? "aborted" : result.reason
     let observation: ReturnType<FunctionTurnObservation["snapshot"]>
     try {
       observation = entry.observation.snapshot()
@@ -243,14 +242,21 @@ export class FunctionTurnLifecycle {
       this.host.error(error)
       return
     }
+    const { refusal, ...facts } = observation
+    const ending =
+      entry.binding.signal.aborted || result.reason === "aborted"
+        ? { reason: "aborted" as const }
+        : refusal
+          ? { reason: "refusal" as const, refusal }
+          : { reason: result.reason }
     entry.terminal = {
-      ...observation,
+      ...facts,
       ...result,
-      reason,
+      ...ending,
       turnId: entry.binding.turnId,
       ...("agentId" in entry.binding ? { agentId: entry.binding.agentId } : {}),
       durationMs: Math.max(0, this.now() - entry.startedAt),
-      isAborted: reason === "aborted"
+      isAborted: ending.reason === "aborted"
     }
     this.clearActive(entry)
     if ("agentId" in entry.binding) this.dispatch(entry, false)

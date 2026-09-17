@@ -26,6 +26,7 @@ export function register(on) {
         agentId: e.agentId,
         turnId: e.turnId,
         reason: e.reason,
+        refusal: e.refusal,
         answer: e.answer,
         durationMs: e.durationMs,
         usage: e.usage
@@ -37,6 +38,7 @@ export function register(on) {
     last = {
       turnId: e.turnId,
       reason: e.reason,
+      refusal: e.refusal,
       answer: e.answer,
       durationMs: e.durationMs,
       usage: e.usage

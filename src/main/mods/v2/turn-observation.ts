@@ -4,6 +4,7 @@ import { normalizeTraceTokenUsage } from "../../agent/trace/token-usage"
 import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../../shared/message-role-collision"
 import { MODS_MAX_BYTES } from "../../../shared/mods/validation"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { readModelRefusal, type ModelRefusal } from "../../agent/model-refusal"
 
 const object = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -20,6 +21,7 @@ export class FunctionTurnObservation {
   private response?: { content: unknown }
   private partial?: { id: string; text: string }
   private overflow = false
+  private refusal?: ModelRefusal
 
   observeStream(payload: unknown, mode: "delta" | "snapshot"): void {
     if (!Array.isArray(payload)) return
@@ -55,6 +57,7 @@ export class FunctionTurnObservation {
 
   observe(value: unknown): void {
     if (!BaseMessage.isInstance(value) || !isAIMessage(value)) return
+    this.refusal = readModelRefusal(value) ?? this.refusal
     this.response = value
     this.partial = undefined
     this.overflow = false
@@ -97,7 +100,7 @@ export class FunctionTurnObservation {
     })
   }
 
-  snapshot(): { answer: string; usage?: FunctionTurnUsage } {
+  snapshot(): { answer: string; usage?: FunctionTurnUsage; refusal?: ModelRefusal } {
     if (this.overflow) throw new ModFunctionError("MODS_JSON_SIZE")
     const content = this.response?.content
     const answer =
@@ -132,6 +135,10 @@ export class FunctionTurnObservation {
         }
       }
     }
-    return { answer: this.partial?.text ?? answer, ...(total ? { usage: total } : {}) }
+    return {
+      answer: this.partial?.text ?? answer,
+      ...(total ? { usage: total } : {}),
+      ...(this.refusal ? { refusal: { ...this.refusal } } : {})
+    }
   }
 }
