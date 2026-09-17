@@ -12729,14 +12729,25 @@ async function fetchProjectModeUsage(
       },
       by_tool_all: { terms: { field: "toolNames", size: 20 } },
       by_tool_all_full: { terms: { field: "toolNames", size: 1000 } },
+      // 插件维度的对话数与三桶同口径：主动触发的主 Agent root trace，与项目列表
+      // 的「对话数」一致。不收进 filter 的话，一次用户轮次派出的每个子代理都会
+      // 各记一次对话，插件之间的对比就成了「谁更爱派子代理」。
       by_adapter: {
         terms: { field: "harnessAdapterName", size: 200 },
         aggs: {
           by_version: {
             terms: { field: "harnessAdapterVersion", size: 50 },
-            aggs: stageBucketTraceAggs()
+            aggs: {
+              main_agent_conversations: {
+                filter: projectModeMainAgentConversationFilter(),
+                aggs: stageBucketTraceAggs()
+              }
+            }
           },
-          ...stageBucketTraceAggs()
+          main_agent_conversations: {
+            filter: projectModeMainAgentConversationFilter(),
+            aggs: stageBucketTraceAggs()
+          }
         }
       }
     }
@@ -12761,28 +12772,30 @@ async function fetchProjectModeUsage(
       const rawVersions = asRecord(b.by_version).buckets
       const versions = Array.isArray(rawVersions) ? rawVersions : []
       if (versions.length === 0) {
+        const mainAgent = asRecord(b.main_agent_conversations)
         adapters.set(adapterKey(name), {
           name,
           version: undefined,
           projectCount: 0,
           featureCount: 0,
-          conversationCount: asNumber(b.doc_count),
+          conversationCount: asNumber(mainAgent.doc_count),
           codeStats: null,
-          stageBuckets: buildStageBuckets(parseStageBucketConversations(b), undefined)
+          stageBuckets: buildStageBuckets(parseStageBucketConversations(mainAgent), undefined)
         })
         continue
       }
       for (const vb of versions) {
         const v = asRecord(vb)
         const version = asOptionalString(v.key)
+        const mainAgent = asRecord(v.main_agent_conversations)
         adapters.set(adapterKey(name, version), {
           name,
           version,
           projectCount: 0,
           featureCount: 0,
-          conversationCount: asNumber(v.doc_count),
+          conversationCount: asNumber(mainAgent.doc_count),
           codeStats: null,
-          stageBuckets: buildStageBuckets(parseStageBucketConversations(v), undefined)
+          stageBuckets: buildStageBuckets(parseStageBucketConversations(mainAgent), undefined)
         })
       }
     }
@@ -12944,13 +12957,16 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
-          // 对话数、疑似技术细节补充、DEV 阶段轮次数与 DEV 关联特性数共用同一口径：
-          // 主动触发的主 Agent root trace。DEV 两项此前挂在 by_project 下（与该
-          // filter 平级），把定时任务、心跳等后台触发和子 Agent trace 一并计入了，
-          // 与同一行的「对话数」对不上；现在一起收进 filter 内。
+          // 对话数、疑似技术细节补充、DEV 阶段轮次数、DEV 关联特性数与 stage×skill
+          // 三桶共用同一口径：主动触发的主 Agent root trace。这几项此前挂在
+          // by_project 下（与该 filter 平级），把定时任务、心跳等后台触发和子 Agent
+          // trace 一并计入了，与同一行的「对话数」对不上；现在一起收进 filter 内。
+          // 三桶尤其明显：一次用户轮次派出 10 个 Task 子代理就会被记成 11 次对话，
+          // 让「VibeCoding 对话远多于 Harness」看起来像结论，其实是口径差。
           main_agent_conversations: {
             filter: projectModeMainAgentConversationFilter(),
             aggs: {
+              ...stageBucketTraceAggs(),
               ...(includeSuspectedTechnicalDetail
                 ? {
                     suspected_technical_detail_supplements: {
@@ -12973,8 +12989,7 @@ async function fetchProjectModePageUsage(
             }
           },
           skills: { terms: { field: "usedSkills", size: 100 } },
-          skill_source: { terms: { field: "skillSource", size: 100 } },
-          ...stageBucketTraceAggs()
+          skill_source: { terms: { field: "skillSource", size: 100 } }
         }
       }
     }
@@ -13016,7 +13031,7 @@ async function fetchProjectModePageUsage(
       key,
       combineSkillCountBuckets(asRecord(b.skills).buckets, asRecord(b.skill_source).buckets, 10)
     )
-    perProjectStageConversations.set(key, parseStageBucketConversations(b))
+    perProjectStageConversations.set(key, parseStageBucketConversations(mainAgentConversations))
   }
 
   return {
@@ -14043,7 +14058,11 @@ async function fetchProjectModeTraces(
     ...(normalizedNodeName ? [harnessNodeNameTraceFilterClause(normalizedNodeName)] : []),
     ...(normalizedNodeStatus ? [{ term: { harnessNodeStatus: normalizedNodeStatus } }] : []),
     ...(stageBucket ? [stageBucketTraceFilterClause(stageBucket)] : []),
-    ...(triggerScope === "active" ? [buildChatTriggeredTraceFilter()] : [])
+    // "active" must list exactly the conversations the panel counted, so it uses
+    // the full main-Agent filter (chat-triggered *and* root) rather than the
+    // trigger half alone — otherwise clicking through a bucket showing 3 opened
+    // a list of 38, most of them sub-agent traces. "all" stays unscoped.
+    ...(triggerScope === "active" ? [projectModeMainAgentConversationFilter()] : [])
   ]
 
   if (traceViewMode === "thread") {
@@ -14564,6 +14583,11 @@ async function fetchProjectModeFeatureNodes(
           timeRangeFilter("startedAt", range),
           { term: { harnessProjectId: normalizedProjectId } },
           { term: { harnessFeatureSlug: normalizedFeatureSlug } },
+          // 阶段细分里的每一个对话数（阶段总数、状态细分、stage×skill 三桶）都走
+          // 项目列表「对话数」的口径：主动触发的主 Agent root trace。少了这条，
+          // 子代理 trace 会各记一次对话，同一行的「3 对话 523 行 vs 38 对话 296 行」
+          // 读起来就像 VibeCoding 压倒性占优，其实分母里多的全是子代理。
+          projectModeMainAgentConversationFilter(),
           ...(traceAccessFilter ? [traceAccessFilter] : [])
         ]
       }
@@ -14767,9 +14791,17 @@ async function fetchPluginAggregate(
         }
       },
       aggs: {
-        conversation_count: { value_count: { field: "traceId" } },
-        project_count: { cardinality: { field: "harnessProjectId" } },
-        ...traceNodeStatusAgg()
+        // 对话数与阶段细分同项目列表口径：主动触发的主 Agent root trace。
+        // project_count 留在外层不收窄：它回答「这个插件被多少项目用过」，
+        // 按项目存在性算，不该受轮次归属影响。
+        main_agent_conversations: {
+          filter: projectModeMainAgentConversationFilter(),
+          aggs: {
+            conversation_count: { value_count: { field: "traceId" } },
+            ...traceNodeStatusAgg()
+          }
+        },
+        project_count: { cardinality: { field: "harnessProjectId" } }
       }
     }) as Promise<EsSearchResponse>,
     fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, adapterEventFilters),
@@ -14777,9 +14809,10 @@ async function fetchPluginAggregate(
   ])
 
   const traceAggs = asRecord(traceRaw.aggregations)
-  const conversationCount = asNumber(asRecord(traceAggs.conversation_count).value)
+  const mainAgentTraceAggs = asRecord(traceAggs.main_agent_conversations)
+  const conversationCount = asNumber(asRecord(mainAgentTraceAggs.conversation_count).value)
   const projectCount = asNumber(asRecord(traceAggs.project_count).value)
-  const traceParsed = parseTraceNodeBuckets(traceAggs)
+  const traceParsed = parseTraceNodeBuckets(mainAgentTraceAggs)
   const codeStats = overallCodeRaw ? normalizeCodeStatsFromAggs(overallCodeRaw) : null
   const codeParsed = parseCodeNodeBuckets(asRecord(nodeCodeRaw).aggregations)
   const byNode = buildFeatureNodeBreakdown(traceParsed, codeParsed)

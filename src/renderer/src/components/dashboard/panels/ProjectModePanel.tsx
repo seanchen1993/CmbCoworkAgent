@@ -951,6 +951,10 @@ function StageBucketCaliberHint(): React.JSX.Element {
         </div>
       ))}
       <div className="opacity-80">每格依次为「对话数 · 生成行数 · 总量口径提交采纳率」。</div>
+      <div className="opacity-80">
+        对话数与列表「对话数」同口径，仅统计主动触发的主 Agent 轮次，不含子 Agent；
+        生成行数则统计全部产出，含子 Agent 写入的代码。
+      </div>
     </div>
   )
 }
