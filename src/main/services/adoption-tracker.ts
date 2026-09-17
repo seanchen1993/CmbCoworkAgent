@@ -71,6 +71,7 @@ import {
   closeAdoptionIndex,
   commitAdoptionMeasurements,
   deleteAdoptLineDetailsOlderThan,
+  deleteThreadActiveSkillsOlderThan,
   enqueueCommitJob,
   enqueueEventOutbox,
   enqueueEventOutboxBatch,
@@ -180,6 +181,10 @@ const INDEX_MEASURED_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
 // get a window that is genuinely 14 days rather than being silently truncated by
 // the cap. 10000 rows is still a tiny sql.js file loaded fully into memory.
 const INDEX_MAX_ROWS = 10000 // hard row cap (oldest measured dropped first)
+// Sticky skill sets are keyed by thread and only matter for code a thread may
+// still generate, so they outlive the gen rows by a wide margin — a thread
+// resumed after a holiday must not silently lose its attribution.
+const THREAD_ACTIVE_SKILLS_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
 const INDEX_VACUUM_EVERY_N_SWEEPS = 12 // VACUUM cadence (12 × 5min = 1h)
 
 const CODE_EXTENSIONS = new Set<string>([
@@ -1152,7 +1157,16 @@ async function enforceRetention(): Promise<void> {
   } catch {
     // ignore
   }
-  // 5. Belt-and-suspenders row cap — protects against a single-day generation
+  // 5. Drop sticky skill sets for threads nobody has touched in a long while.
+  //    Kept on its own, much longer window than the gen rows: this set has to
+  //    survive a thread being resumed after a holiday, and a row is only a few
+  //    hundred bytes.
+  try {
+    deleteThreadActiveSkillsOlderThan(Date.now() - THREAD_ACTIVE_SKILLS_RETENTION_MS)
+  } catch {
+    // ignore
+  }
+  // 6. Belt-and-suspenders row cap — protects against a single-day generation
   //    spree blowing up the sqlite file.
   try {
     trimToRowCap(INDEX_MAX_ROWS)

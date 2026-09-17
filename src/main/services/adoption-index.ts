@@ -222,7 +222,9 @@ function fsyncCurrentPrimarySnapshot(path: string): boolean {
   try {
     // FlushFileBuffers requires a writable descriptor on Windows.
     fileDescriptor = openSync(path, "r+")
-    if (!sameSnapshotIdentity(snapshotIdentityFromDescriptor(fileDescriptor), primarySnapshotIdentity)) {
+    if (
+      !sameSnapshotIdentity(snapshotIdentityFromDescriptor(fileDescriptor), primarySnapshotIdentity)
+    ) {
       return false
     }
     fsyncFileBestEffort(fileDescriptor)
@@ -275,7 +277,8 @@ function saveRetryDelay(attempt: number): number {
 
 function warnSaveFailure(message: string, error: unknown): void {
   const now = Date.now()
-  if (lastSaveFailureLogAt !== 0 && now - lastSaveFailureLogAt < SAVE_FAILURE_LOG_INTERVAL_MS) return
+  if (lastSaveFailureLogAt !== 0 && now - lastSaveFailureLogAt < SAVE_FAILURE_LOG_INTERVAL_MS)
+    return
   lastSaveFailureLogAt = now
   console.warn(message, error)
 }
@@ -738,6 +741,25 @@ export async function initializeAdoptionIndex(): Promise<boolean> {
          ON commit_jobs(status, next_attempt_at, created_at)`
     )
 
+    // Sticky per-thread active skills for code-generation attribution. Lives
+    // here rather than in memory alone because a thread routinely spans an app
+    // restart (work stops for the night, resumes the next morning): with an
+    // in-memory-only set, every generation between the restart and the next
+    // SKILL.md read lost its skill attribution and was misfiled as vibecoding.
+    // See proposal-window.ts for the supersede/merge policy this table stores.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS thread_active_skills (
+        thread_id TEXT PRIMARY KEY,
+        skills_json TEXT NOT NULL,
+        skill_source_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `)
+    db.run(
+      `CREATE INDEX IF NOT EXISTS idx_thread_active_skills_updated_at
+         ON thread_active_skills(updated_at)`
+    )
+
     scheduleSave()
     console.log("[AdoptionIndex] initialized at", dbPath)
     return true
@@ -978,6 +1000,78 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
     return stmt.getAsObject() as unknown as GenIndexRow
   } finally {
     stmt.free()
+  }
+}
+
+/** A thread's persisted sticky active-skill set. */
+export interface ThreadActiveSkillsRow {
+  skills: string[]
+  skillSource: string[]
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (typeof value !== "string" || !value) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Persist a thread's active-skill set, replacing any prior row. Callers own the
+ * supersede-vs-merge decision (see proposal-window.ts); this only stores it.
+ */
+export function upsertThreadActiveSkills(
+  threadId: string,
+  skills: string[],
+  skillSource: string[]
+): void {
+  if (!db || !threadId) return
+  try {
+    db.run(
+      `INSERT OR REPLACE INTO thread_active_skills
+         (thread_id, skills_json, skill_source_json, updated_at)
+       VALUES (?, ?, ?, ?)`,
+      [threadId, JSON.stringify(skills), JSON.stringify(skillSource), Date.now()]
+    )
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] upsertThreadActiveSkills failed:", e)
+  }
+}
+
+/** Read back a thread's persisted active-skill set, or null when it has none. */
+export function getThreadActiveSkillsRow(threadId: string): ThreadActiveSkillsRow | null {
+  if (!db || !threadId) return null
+  const stmt = db.prepare(
+    `SELECT skills_json, skill_source_json FROM thread_active_skills WHERE thread_id = ?`
+  )
+  stmt.bind([threadId])
+  try {
+    if (!stmt.step()) return null
+    const row = stmt.getAsObject() as { skills_json?: unknown; skill_source_json?: unknown }
+    const skills = parseStringArray(row.skills_json)
+    if (skills.length === 0) return null
+    return { skills, skillSource: parseStringArray(row.skill_source_json) }
+  } catch (e) {
+    console.warn("[AdoptionIndex] getThreadActiveSkillsRow failed:", e)
+    return null
+  } finally {
+    stmt.free()
+  }
+}
+
+/** Retention for the sticky-skill table: drop rows untouched since `cutoff`. */
+export function deleteThreadActiveSkillsOlderThan(cutoff: number): void {
+  if (!db) return
+  try {
+    db.run(`DELETE FROM thread_active_skills WHERE updated_at < ?`, [cutoff])
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] deleteThreadActiveSkillsOlderThan failed:", e)
   }
 }
 
