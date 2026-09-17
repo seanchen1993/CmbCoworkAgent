@@ -20,7 +20,7 @@ import { ModRuntimeClient } from "./runtime-client"
 import { ModEngine, classifyModTool, type ApprovedMod, type ModDispatchRequest } from "./engine"
 import { ModError, modErrorCode } from "./errors"
 import { validateModRegistrations } from "./registrations"
-import { filterModData } from "./publication"
+import { filterModData, projectModResult } from "./publication"
 import { getModCallContext, modCallContext } from "./context"
 import { ManagedModPolicy, DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { orderApprovedMods } from "./order"
@@ -331,7 +331,67 @@ export class ModsManager {
 
   needsCommandBinding(threadId: string): boolean {
     const binding = this.bindings.get(`${threadId}:main`)
-    return !binding || binding.commandOnly === true
+    return !binding || binding.commandOnly === true || binding.signal?.aborted === true
+  }
+
+  /** Function SDK calls reuse native tool authority, execution receipts and final-argument approval. */
+  async invokeFunctionTool(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    toolId: string,
+    args: ModObject,
+    signal: AbortSignal,
+    readOnly: boolean,
+    userInitiated: boolean
+  ): Promise<ModObject> {
+    workspace = this.workspaceKey(workspace)
+    if (
+      !this.isEnabled(workspace) ||
+      grant.workspace !== workspace ||
+      !grant.modId.startsWith("function:")
+    )
+      throw new ModError("MODS_GRANT_REVOKED")
+    this.store.assertGrant(grant)
+    signal.throwIfAborted()
+    const saved = this.bindings.get(`${threadId}:main`)
+    if (!saved?.invokeTool || saved.workspace !== workspace)
+      throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
+    const binding = {
+      ...saved,
+      readOnly: readOnly || saved.readOnly === true,
+      signal: saved.signal ? AbortSignal.any([signal, saved.signal]) : signal
+    }
+    binding.signal.throwIfAborted()
+    if (classifyModTool(toolId) !== "read" && (binding.readOnly || !userInitiated))
+      throw new ModError("MODS_WRITE_REQUIRES_USER_ACTION")
+    const identity: ModIdentity = {
+      callId: randomUUID(),
+      workspace,
+      threadId,
+      turnId: binding.turnId,
+      agentId: "main",
+      origin: "mod",
+      modId: grant.modId,
+      grantEpoch: grant.epoch
+    }
+    const request = this.request(binding, identity, toolId, args, userInitiated)
+    const actual = await request.invokeTool!(toolId, args, grant, userInitiated)
+    request.assertScope?.()
+    this.store.assertGrant(grant)
+    const published = await this.publish(workspace, actual, identity.callId, binding.signal)
+    request.assertScope?.()
+    const result = filterModData(published, false)
+    const text = projectModResult(published).text
+    const failed =
+      !!result &&
+      typeof result === "object" &&
+      !Array.isArray(result) &&
+      (result.isError === true ||
+        result.status === "error" ||
+        typeof result.error === "string" ||
+        (typeof result.exitCode === "number" && result.exitCode !== 0))
+    return { result, text, ...(failed ? { isError: true } : {}) }
   }
 
   bindMcp(

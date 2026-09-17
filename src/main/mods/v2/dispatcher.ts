@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { ModError } from "../errors"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { normalizeFunctionInput } from "../../../shared/mods/v2/pinned-input"
@@ -124,7 +125,9 @@ export class FunctionDispatcher {
         } catch (error) {
           entry.outcome = "rejected"
           throw new ModFunctionError(
-            error instanceof ModFunctionError ? error.code : "MODS_DOWNSTREAM_REJECTED",
+            error instanceof ModFunctionError || error instanceof ModError
+              ? error.code
+              : "MODS_DOWNSTREAM_REJECTED",
             error instanceof Error ? error.message : "MODS_CORE_ERROR",
             true
           )

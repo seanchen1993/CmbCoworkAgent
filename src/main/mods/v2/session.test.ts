@@ -3,8 +3,73 @@ import { resolve } from "node:path"
 import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
+import { AsyncLocalStorage } from "node:async_hooks"
+import { ModError } from "../errors"
 
 const sessions: FunctionSession[] = []
+it("runs SDK tool hooks with pinned identity, independent next calls and retained host scope", async () => {
+  const context = new AsyncLocalStorage<string>(),
+    calls: unknown[] = []
+  const s = await session(
+    `
+    on("session.start",async($,e,next)=>{await $.command.register({name:"tools",description:"Tools"});return next(e)});
+    on("command.run",{command:"tools"},async($)=>{
+      const result=await $.tool.call({tool:"read_file",file_path:"first",tool_use_id:"forged",agentId:"forged"});
+      return {text:JSON.stringify(result)};
+    });
+    on("tool.call",{tool:"read_file"},async($,e,next)=>{
+      await next({...e,file_path:"second"});
+      const result=await next({...e,file_path:"third"});
+      return {...result,context:[next.origin.plugin]};
+    });
+  `,
+    {
+      callTool: async (plugin, input) => {
+        calls.push({ plugin: plugin.name, ...input, scope: context.getStore() })
+        return { result: input.file_path, text: String(input.file_path) }
+      }
+    }
+  )
+  const result = await context.run("owned", () => s.run("tools", ""))
+  expect(JSON.parse(String(result.text))).toEqual({
+    result: "third",
+    text: "third",
+    context: ["demo"]
+  })
+  expect(calls).toHaveLength(2)
+  for (const call of calls) {
+    expect(call).toMatchObject({ plugin: "demo", tool: "read_file", scope: "owned" })
+    expect(call).not.toHaveProperty("agentId")
+    expect(call).not.toHaveProperty("tool_use_id", "forged")
+  }
+})
+
+it("lets a tool hook deny before core and preserves a host refusal without repeating execution", async () => {
+  let calls = 0
+  const s = await session(
+    `
+    on("session.start",async($,e,next)=>{await $.command.register({name:"tools",description:"Tools"});return next(e)});
+    on("command.run",{command:"tools"},async($,e)=>{
+      const result=await $.tool.call({tool:"read_file",file_path:e.args});return {text:JSON.stringify(result)};
+    });
+    on("tool.call",{file_path:"deny"},()=>({deny:"not allowed"}));
+    on("tool.call",{file_path:"fail"},async($,e,next)=>{await next(e);return {result:"fake"}});
+  `,
+    {
+      callTool: async () => {
+        calls++
+        throw new ModError("MODS_USER_REJECTED")
+      }
+    }
+  )
+  expect(JSON.parse(String((await s.run("tools", "deny")).text))).toEqual({ deny: "not allowed" })
+  expect(calls).toBe(0)
+  await expect(s.run("tools", "fail")).rejects.toMatchObject({
+    code: "MODS_USER_REJECTED",
+    downstream: true
+  })
+  expect(calls).toBe(1)
+})
 async function session(
   body: string,
   host: Partial<FunctionSessionHost> = {},

@@ -127,7 +127,7 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
                 函数插件（{status.functionMods!.length}）
               </summary>
               <p className="text-xs text-muted-foreground mt-2">
-                当前开放自定义命令、会话基本信息、时钟、插件独立存储和项目文件只读访问。面板和模型能力仍在接入。
+                可定制命令、项目偏好、交互面板和 Client 组件，并调用本工程的原生工具。
                 授权绑定以下版本，源码变化后需要重新授权。
               </p>
               <div className="mt-2 space-y-2">
@@ -151,7 +151,8 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
                       </span>
                     </div>
                     <p className="text-xs">
-                      允许注册和执行命令、读取当前项目的文件与会话标识、使用时钟、保存项目偏好，以及打开交互面板。
+                      允许注册命令、读取项目文件与会话标识、保存偏好、打开交互组件，以及调用原生工具。
+                      写文件和执行命令仍需批准最终参数；即时查询命令不能执行写操作。
                     </p>
                     <p className="text-xs font-mono break-all">
                       版本摘要：{mod.digest ?? mod.error}

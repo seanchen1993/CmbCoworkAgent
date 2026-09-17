@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { ModCommandDescriptor } from "../../../../shared/mods/types"
-import { parseModCommandInput } from "../../../../shared/mods/command-input"
 import { parseFunctionCommandInput } from "../../../../shared/mods/v2/command-input"
 import type { SlashCommandItem } from "./useSlashCommands"
+import { mayBeModCommand, resolveModSubmission } from "./mod-submission"
 
 export function useModCommands(threadId: string) {
   const [commands, setCommands] = useState<ModCommandDescriptor[]>([])
   const submitting = useRef(false)
+  const currentThread = useRef(threadId)
+  currentThread.current = threadId
   useEffect(() => {
+    currentThread.current = threadId
     let live = true
     let sequence = 0
     setCommands([])
@@ -33,6 +36,7 @@ export function useModCommands(threadId: string) {
     })
     return () => {
       live = false
+      if (currentThread.current === threadId) currentThread.current = ""
       stop()
       stopJobs()
       window.removeEventListener("focus", refresh)
@@ -59,34 +63,25 @@ export function useModCommands(threadId: string) {
         })),
     [commands]
   )
-  async function submit(text: string): Promise<boolean> {
-    const direct = parseFunctionCommandInput(text, commands)
-    if (direct) {
-      if (submitting.current) return true
-      submitting.current = true
-      try {
-        await window.api.mods.enqueue(threadId, direct.descriptor, { text: direct.args })
-      } finally {
-        submitting.current = false
-      }
-      return true
-    }
-    const parsed = parseModCommandInput(text)
-    if (!parsed) return false
+  async function submit(text: string, beforeSubmit?: () => void): Promise<boolean> {
+    if (!mayBeModCommand(text)) return false
     if (submitting.current) return true
-    const descriptor = commands.find((entry) => entry.command === parsed.command)
-    if (!descriptor) throw new Error("此命令尚未授权或已变更，请在项目 Mods 设置中检查权限。")
     submitting.current = true
     try {
-      await window.api.mods.enqueue(threadId, descriptor, parsed.args)
+      const parsed = await resolveModSubmission(text, () => window.api.mods.commands(threadId))
+      if (currentThread.current !== threadId) throw new Error("会话已切换，请重新提交命令。")
+      if (!parsed) return false
+      beforeSubmit?.()
+      await window.api.mods.enqueue(threadId, parsed.descriptor, parsed.args)
+      return true
     } finally {
       submitting.current = false
     }
-    return true
   }
   return {
     items,
     submit,
+    mayHandle: mayBeModCommand,
     handles: (text: string) => parseFunctionCommandInput(text, commands) !== null
   }
 }

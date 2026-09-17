@@ -3,7 +3,7 @@
  * Native confirmation is answered by the test; no external model/API is used.
  */
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
@@ -636,6 +636,97 @@ async function main(): Promise<void> {
     await page!.screenshot({ path: join(artifacts, "function-command.png") })
     pass(
       "standard function plugin grants, direct text commands, persistent state and immediate queries work through production UI"
+    )
+    const toolConfirmationsBefore = await app.evaluate(
+      () => (globalThis as unknown as { modsConfirmations: unknown[] }).modsConfirmations.length
+    )
+    await functionComposer.fill("/claw-tool-write E2E SDK body")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+          (job) => job.command === "claw-tool-write" && job.state === "succeeded"
+        ),
+      "function SDK write completes"
+    )
+    assert.equal(
+      readFileSync(join(workspace, "mods-sdk-note.txt"), "utf8"),
+      "# Claw Mods 记录\n\nE2E SDK body\n"
+    )
+    const toolConfirmations = await app.evaluate(
+      () =>
+        (globalThis as unknown as { modsConfirmations: Array<{ message: string; detail: string }> })
+          .modsConfirmations
+    )
+    assert(toolConfirmations.length > toolConfirmationsBefore)
+    assert(
+      toolConfirmations
+        .slice(toolConfirmationsBefore)
+        .some(
+          (c) =>
+            c.message.includes("function:function-commands") && c.detail.includes("Claw Mods 记录")
+        )
+    )
+    await functionComposer.fill("/claw-tool-read mods-sdk-note.txt")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+          (job) =>
+            job.command === "claw-tool-read" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("E2E SDK body") === true
+        ),
+      "function SDK reads real written file"
+    )
+    pass(
+      "function tool SDK executes a real queued write, approves hook-rewritten final input, and reads through native adapters"
+    )
+    // Native write_file creates a file; editing an existing file uses edit_file.
+    // Preserve the warm-session artifact and give the cold create its own destination.
+    renameSync(join(workspace, "mods-sdk-note.txt"), join(workspace, "warm-sdk-note.txt"))
+    const coldFunctionId = await page!.evaluate(async (workspace) => {
+      const thread = await window.api.threads.create({
+        title: "Function SDK cold start",
+        workspacePath: workspace,
+        agentMode: "normal"
+      })
+      const id =
+        (thread as unknown as { thread_id: string }).thread_id ??
+        (thread as unknown as { id: string }).id
+      await window.api.workspace.set(id, workspace)
+      return id
+    }, workspace)
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Function SDK cold start", { exact: true }).first().click()
+    await functionComposer.fill("/claw-tool-write COLD SDK body")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), coldFunctionId)).some(
+          (job) => job.command === "claw-tool-write" && job.state === "succeeded"
+        ),
+      "cold function SDK write completes"
+    )
+    assert.equal(
+      readFileSync(join(workspace, "mods-sdk-note.txt"), "utf8"),
+      "# Claw Mods 记录\n\nCOLD SDK body\n"
+    )
+    await functionComposer.fill("/claw-tool-read mods-sdk-note.txt")
+    await functionComposer.press("Enter")
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), coldFunctionId)).some(
+          (job) =>
+            job.command === "claw-tool-read" &&
+            job.state === "succeeded" &&
+            job.result?.text.includes("COLD SDK body") === true
+        ),
+      "cold function SDK read rebinds expired command context"
+    )
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    pass(
+      "function SDK creates and refreshes native tool context in a cold session with no model turn"
     )
     for (const path of ["secret.txt", "../outside.txt"]) {
       await functionComposer.fill(`/claw-files ${path}`)

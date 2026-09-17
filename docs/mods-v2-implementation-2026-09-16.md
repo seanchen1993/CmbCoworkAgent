@@ -248,6 +248,44 @@ Client 消息存储使用内存夹具，这些数字不代表真实模型或完�
 完整回归仍非全绿；报告 `vitest-client-full.json`、`client-failure-comparison.json`、
 `client-browser-rerun.json` 保留原始结果。
 
+## 原生工具 SDK 与冷启动路由（2026-09-17）
+
+`$.tool.call` 已接入宿主原生工具、最终参数审批、共享会话租约和持久执行记录。
+插件可以拦截 SDK 发起的 `tool.call`、改写普通参数、拒绝或显式多次 next；宿主身份字段
+不能由插件指定。用户命令或真实控件交互可请求写入，即时命令和后台回调不能获取写权限。
+跨 utilityProcess 的回调保留宿主调用作用域，作用域结束后异步延续不能继续持有写权限。
+普通项目冷会话按需创建原生工具上下文；过期上下文刷新，继承项目沙箱配置。
+
+当前支持 CMB 原生工具名和参数，尚未把 Claude 的 Read/Bash 等名称与结果全部映射；
+也尚未把正常模型发起的工具调用接入 v2 hook。`tool.register` 和 MCP SDK 仍待实现。
+示例 `/claw-tool-write` 创建记录，`/claw-tool-read` 读取；原生 write_file 不覆盖已有文件。
+
+检视与 E2E 发现并修复：冷启动命令表未加载时，直接命令可能误送给模型。
+提交路径现在先从宿主核对命令表；查询失败明确报错。菜单缓存仅供展示，不能决定执行路由。
+失败报告 `tool-e2e-cold-first-failure.txt` 和截图保留；另一次用例错误地复用创建目标，
+宿主正确拒绝覆盖，测试现保留原文件并为冷启动创建提供独立目标。
+
+同一工具 SDK 夹具在官方 2.1.273 `plugin test` 通过，累计 30 个对照场景。
+官方 testing facade 实测保留测试传入的身份字段，与生产声明中“丢弃调用者指定身份”
+有差异；因此该夹具只证明结果包装、来源和拒绝规则。身份保护由本工程回归覆盖，
+不能把 testing facade 结果当作上游真实工具身份链的完整证明。
+
+已通过的专项包括 Mods 257 项、工具与调度 11 项、冷启动路由/契约 33 项、跨进程 31 项。
+完整 Node/Web 类型检查通过。跨进程工具夹具验证 AsyncLocalStorage 作用域；卸载后计数归零。
+两层 hook P95 5.92 ms、Client P95 3.62 ms、含 SQLite 的 Pane P95 9.68 ms。
+相对 Client 批的运行时 ABBA 对照，每侧 900 次：复跑 P50 增幅 2.61%、P95 增幅 3.61%；
+首轮 P50 增幅 11.14%、P95 下降 17.20%，两轮原始报告均保留，不能据此宣称完整应用
+性能已满足 5% 门禁。报告 `tool-process.txt`、`tool-performance.txt` 及
+`tool-performance-first-comparison.txt`。
+
+最终 Electron E2E 24 组通过；普通构建已恢复，测试入口未留在输出包中。
+定向 ESLint 0 错误，ChatContainer 保留 30 条已有告警；斜杠命令、goal 路由与提交锁
+三个 standalone 套件通过。全量 Vitest 3263 项：3226 通过、32 失败、5 跳过。
+26 个失败与项目读取批基线同名同因；额外的 Git/迁移 5 项在单 worker 复跑中通过。
+浏览器录制用例第一次复跑仍失败，进一步单独运行该用例通过（726 ms）。
+这些结果不能改写为全量全绿。报告 `vitest-tool-full.json`、`tool-failure-comparison.json`、
+`tool-flake-rerun.json`、`tool-browser-detail.txt`、`tool-e2e-final.txt` 均保留。
+
 ## 后续集成与验收
 
 基础批 standalone 回归 81 项中 72 通过、9 失败；9 个失败与 v1 对照基线一致。

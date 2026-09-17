@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { AsyncResource } from "node:async_hooks"
 import {
   getQuickJS,
   type QuickJSContext,
@@ -169,7 +170,7 @@ export class FunctionGuestRuntime {
       const cancel = (): void => this.cancel(token)
       const frame: InvocationFrame = {
         id: token,
-        host,
+        host: AsyncResource.bind(host),
         controller: new AbortController(),
         expiresAt: Date.now() + Math.min(Math.max(timeoutMs, 1), 120_000),
         resolve,

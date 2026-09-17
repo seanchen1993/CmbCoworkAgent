@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { join, resolve } from "node:path"
 import { app } from "electron"
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
@@ -217,6 +218,45 @@ void app.whenReady().then(async () => {
     checks.push(
       "same official SDK conformance fixture through utilityProcess and the production session"
     )
+
+    const toolPlugin = await compileFunctionPlugin(join(root, "tests/fixtures/mods-v2/tool-sdk"))
+    const toolContext = new AsyncLocalStorage<string>()
+    const toolSession = new FunctionSession(
+      [
+        {
+          name: toolPlugin.name,
+          root: toolPlugin.root,
+          tier: "user",
+          guest: await client.load(toolPlugin.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      {
+        workspace: root,
+        threadId: "tools",
+        assertLive: () => undefined,
+        publish: async (v) => v,
+        callTool: async (_, input) => {
+          assert.equal(toolContext.getStore(), "tool authority")
+          assert.notEqual(input.tool_use_id, "forged")
+          assert.equal(input.agentId, undefined)
+          return { result: input.file_path, text: input.file_path }
+        }
+      }
+    )
+    const toolAnswer = await toolContext.run("tool authority", () =>
+      toolSession.run("tool-probe", "input")
+    )
+    assert.deepEqual(JSON.parse(String(toolAnswer.text)), {
+      result: "rewritten",
+      text: "rewritten",
+      context: ["tool-sdk"]
+    })
+    assert.deepEqual(JSON.parse(String((await toolSession.run("tool-probe", "deny")).text)), {
+      deny: "No read"
+    })
+    await toolSession.close()
+    checks.push("tool SDK contract and host authority survive real utilityProcess callbacks")
 
     temporaryProject = await realpath(await mkdtemp(join(tmpdir(), "function-process-files-")))
     await mkdir(join(temporaryProject, "fixture"))
@@ -528,6 +568,7 @@ void app.whenReady().then(async () => {
     await rm(temporaryProject, { recursive: true, force: true })
     app.exit(0)
   } catch (error) {
+    console.error("Last completed process checks:", checks.slice(-3))
     console.error(error)
     client.stop()
     paneStore?.close()

@@ -4,7 +4,12 @@ import { randomInt } from "node:crypto"
 import { ProjectFunctionFiles } from "./file-access"
 import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModPluginSource } from "../manager"
-import type { ModCommandDescriptor, ModJson, ModProjection } from "../../../shared/mods/types"
+import type {
+  ModCommandDescriptor,
+  ModJson,
+  ModProjection,
+  ModObject
+} from "../../../shared/mods/types"
 import type { FunctionPluginStatus } from "../../../shared/mods/v2/commands"
 import { ModFunctionError, type FunctionGuest } from "../../../shared/mods/v2/contracts"
 import { FunctionRuntimeClient } from "./runtime-client"
@@ -44,6 +49,13 @@ interface FunctionManagerHost {
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
   changed(threadId: string): void
   assertThread?(workspace: string, threadId: string): void
+  callTool?(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject>
   scheduleCommand?(
     workspace: string,
     threadId: string,
@@ -266,6 +278,14 @@ export class FunctionModsManager {
           workspace,
           threadId,
           assertLive,
+          callTool: async (plugin, input, signal) => {
+            assertLive(plugin)
+            if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
+            const grant = current.snapshots.get(plugin.name)!.grant
+            const result = await this.host.callTool(workspace, threadId, grant, input, signal)
+            assertLive(plugin)
+            return result
+          },
           uiChanged: () => this.host.changed(threadId),
           loadClient: async (name, module) => {
             const snapshot = current.snapshots.get(name)

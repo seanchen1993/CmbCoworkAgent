@@ -1,6 +1,7 @@
 import type { ModObject } from "../../../shared/mods/types"
 import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import type { ModCommandQueue } from "../command-queue"
+import { isFunctionUserAction, withFunctionExecution } from "./execution-context"
 
 /** Keep the SDK result intact while the existing job ledger stores its text projection. */
 export async function scheduleFunctionCommand(
@@ -12,12 +13,22 @@ export async function scheduleFunctionCommand(
   run: (signal: AbortSignal) => Promise<ModObject>
 ): Promise<ModObject> {
   let answer!: ModObject
+  const userInitiated = isFunctionUserAction(workspace, threadId)
   await queue.enqueue(
     workspace,
     threadId,
     command.name,
     async (jobSignal) => {
-      answer = await run(jobSignal)
+      answer = await withFunctionExecution(
+        {
+          workspace,
+          threadId,
+          leased: !command.immediate,
+          immediate: command.immediate === true,
+          userInitiated
+        },
+        () => run(jobSignal)
+      )
       return { text: typeof answer.text === "string" ? answer.text : "" }
     },
     { immediate: command.immediate === true, signal }

@@ -16,12 +16,18 @@ import {
   validatePaneArgs
 } from "../../../shared/mods/v2/ui"
 import { FunctionPanes, type FunctionUiDispatch } from "./panes"
-export const SESSION_CAPABILITIES = [...BASIC_CAPABILITIES, ...FUNCTION_UI_CAPABILITIES]
+export const SESSION_CAPABILITIES = [
+  ...BASIC_CAPABILITIES,
+  ...FUNCTION_UI_CAPABILITIES,
+  "tool.call"
+]
 import type { FunctionStateAccess } from "./state-store"
 import { FILE_CAPABILITIES, type FunctionFileAccess } from "./file-access"
 import { resolve } from "node:path"
 import { FunctionClients } from "./clients"
 import type { FunctionGuest } from "../../../shared/mods/v2/contracts"
+import { randomUUID } from "node:crypto"
+import { functionToolTarget, validateFunctionToolResult } from "./tool-sdk"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -29,6 +35,7 @@ export interface FunctionSessionHost {
   assertLive(plugin?: FunctionPlugin): void
   uiChanged?(): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
+  callTool?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
   scheduleCommand?(
     command: FunctionCommand,
     signal: AbortSignal,
@@ -222,6 +229,7 @@ export class FunctionSession {
       signal: scopedSignal,
       operation: isOperation,
       ...(event === "command.run" ||
+      event === "tool.call" ||
       ["ui.press", "ui.input", "ui.select", "ui.message"].includes(event)
         ? { timeoutMs: 120000 }
         : {}),
@@ -234,6 +242,7 @@ export class FunctionSession {
           : value,
       validateInput: (name, value) => {
         validateBasicInput(name, value)
+        if (name === "tool.call") functionToolTarget(value)
         if (name === "ui.open") validatePaneArgs(value)
         if (
           (name === "ui.input" || name === "ui.select") &&
@@ -244,6 +253,7 @@ export class FunctionSession {
           throw new ModFunctionError("MODS_COMMAND_ARGS")
       },
       validateResult: (name, value) => {
+        if (name === "tool.call") return validateFunctionToolResult(value)
         if (name === "ui.render") return validateFunctionTree(value)
         if (isOperation) {
           if (!isModObject(value)) throw new ModFunctionError("MODS_OPERATION_RESULT")
@@ -310,6 +320,31 @@ export class FunctionSession {
     this.assertLive(plugin)
     if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
     const args = raw
+    if (method === "tool.call") {
+      if (!isModObject(args[0]) || args.length !== 1)
+        throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
+      const input = { ...args[0] }
+      delete input.tool_use_id
+      delete input.agentId
+      functionToolTarget(input)
+      const result = await this.dispatch(
+        "tool.call",
+        { ...input, tool_use_id: randomUUID() },
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        undefined,
+        turnHeld ?? "tool.call",
+        {
+          core: (e, signal) => {
+            this.assertLive(plugin)
+            if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
+            return this.host.callTool(plugin, e, signal)
+          }
+        }
+      )
+      return result
+    }
     if (method === "ui.invalidate") {
       if (args[0] !== "ui.render") throw new ModFunctionError("MODS_UI_INVALIDATE_UNAVAILABLE")
       this.panes.invalidate()

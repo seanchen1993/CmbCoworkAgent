@@ -19,6 +19,7 @@ it("passes plain arguments, including multiline text, without requiring JSON", (
     args: "Alice\nBob"
   })
   expect(parseFunctionCommandInput("/hello", [descriptor])?.args).toBe("")
+  expect(parseFunctionCommandInput("/hello\nAlice\nBob", [descriptor])?.args).toBe("Alice\nBob")
 })
 it("leaves unregistered, legacy and normal prompts to their existing handlers", () => {
   expect(parseFunctionCommandInput("/other args", [descriptor])).toBeNull()

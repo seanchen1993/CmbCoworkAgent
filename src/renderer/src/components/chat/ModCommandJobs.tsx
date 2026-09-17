@@ -11,7 +11,9 @@ const labels = {
   unknown: "结果待核查"
 }
 const errorMessages: Record<string, string> = {
-  MODS_TOOL_UNAVAILABLE: "请先在本会话运行一次任务以建立工具上下文，再重新发起命令。",
+  MODS_TOOL_UNAVAILABLE: "当前会话未提供该工具，请检查插件使用的工具名称和会话配置。",
+  MODS_TOOL_ARGUMENTS: "工具参数不符合当前接口，请检查插件的工具调用。",
+  MODS_WRITE_REQUIRES_USER_ACTION: "写操作需要由普通命令或交互动作发起，即时查询不能写入。",
   MODS_FS_OUTSIDE_PROJECT: "无法读取项目目录之外的文件。请使用本项目内的路径。",
   MODS_FS_ROOT_CHANGED: "项目目录已变更，请重新打开项目后再试。",
   MODS_FS_NOT_FOUND: "文件不存在，请检查路径。",

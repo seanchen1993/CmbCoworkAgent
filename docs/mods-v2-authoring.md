@@ -59,7 +59,7 @@ export function register(on) {
 当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces`、
 `clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`，以及 `$.plugin.name/root` 元数据。
 上述 SDK 操作同样经过事件链。另已接入有限的桌面 Pane：`ui.open/close`、
-同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，范围见下文。
+同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call`，范围见下文。
 
 普通操作 hook 返回 `{ value }` 或 `{ deny }`，调用 SDK 得到拆出的值；
 `command.run` 是引擎事件，返回 `{ text }`。例如：
@@ -161,11 +161,11 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 它不是授权，也不证明所用宿主能力全部已经接入。`inspect` 输出相同范围的检查报告。
 
 当前尚不能用这一入口交付官方完整 diff、`engine.create` 能力提供方、
-模型/工具/网络 SDK、文件写入与祖先指令读取、配置表单或完整 classic 事件。这些保持在后续实施项中。
+模型/网络 SDK、MCP SDK、`fs.write` 与祖先指令读取、配置表单或完整 classic 事件。这些保持在后续实施项中。
 命令文本以桌面结果区呈现；终端的显示宽度与布局不能等同于 Electron 窗口尺寸。
 
 运行中最多保留 6 个函数会话，每个会话最多 8 个插件；单命令参数上限为 32000 字符。
-普通命令等待会话执行租约，`immediate: true` 命令可立即运行；当前开放的能力不包含外部写操作。
+普通命令等待会话执行租约，`immediate: true` 命令可立即运行，只能调用只读工具。
 基础 hook 的超时、CPU、内存和递归预算仍受宿主限制。
 命令及 UI 动作最多等待 120 秒；每段 JS 的 CPU/内存预算不变。删除会话会取消排队任务、
 释放 VM，并使旧会话描述符失效。内置 `/claw-board` 的“查看项目文件”演示面板调用命令。
@@ -210,3 +210,30 @@ export default function Counter(props = { label: "计数" }, surface) {
 Client 元素与 Pane 共用明确的属性白名单。超预算只停止该组件；它不加载任意脚本、网络资源
 或尚未批准的模块。已验证官方 Client 描述符契约；自身生命周期和 React E2E 的通过不等于
 所有上游 Client 行为已经完成对照。
+
+## 调用工程工具
+
+`$.tool.call({ tool, ...args })` 已接入生产原生工具，返回 `{ result, text, isError? }` 或
+hook 给出的 `{ deny }`。例如 `/claw-tool-read README.md` 读取文本；
+`/claw-tool-write 一条记录` 经批准写入项目的 `mods-sdk-note.txt`，示例 hook 会先添加标题。
+授权对话框展示的是 hook 和宿主处理后的最终参数。普通新建项目会话可以直接使用，无须先问模型。
+
+```ts
+on("tool.call", { tool: "write_file", file_path: "notes.md" }, async ($, e, next) => {
+  return next({ ...e, content: `# 项目记录\n${e.content}` })
+})
+// 已注册命令或用户发起的面板回调内：
+const answer = await $.tool.call({ tool: "write_file", file_path: "notes.md", content: "检查完成" })
+```
+
+当前可调用 `read_file/write_file/edit_file/ls/glob/grep/execute/task_output`，名称、参数、
+`result` 使用本工程原生工具格式；还不是 Claude 的 `Read/Bash` 等内置工具 schema。
+只允许相应适配器已支持的字段，未支持的后台执行选项明确拒绝。输入最多 16000 字符；
+这不是 `fs.write` 的实现。插件工具注册及对模型原生调用的 v2 拦截仍待接入。
+
+SDK 发起的 `tool.call` 经过函数 hook 链，允许改写普通参数、拒绝、短路及有界多次 `next`；
+工具名称和调用身份不能改写。每次进入真正的工具核心都重新做范围检查、审批和执行记录，
+后置异常不会重复执行。原生工具的输出先过宿主策略，再交给观察它的函数 hook。
+普通命令复用已有会话租约，面板工具操作排队等待；即时命令允许读，拒绝写。
+自动回调不能沿用已经结束的用户动作权限。取消、关闭或撤权向等待和执行中的调用传播。
+工作流等特殊会话仍要求已有的相应工具上下文，不自动降级到普通项目沙箱。

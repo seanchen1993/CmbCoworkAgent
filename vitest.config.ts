@@ -45,6 +45,7 @@ export default defineConfig({
       "src/renderer/src/lib/workspace-file-preview-cache.test.ts",
       "src/renderer/src/features/mentions/at-file-mention-index.test.ts",
       "src/renderer/src/features/mentions/atFileAttachments.test.ts",
+      "src/renderer/src/features/slash-commands/mod-submission.test.ts",
       "src/renderer/src/app-route-isolation.test.ts",
       "src/renderer/src/components/panels/right-panel-skill-projection.test.ts",
       "src/renderer/src/components/panels/right-panel-render-window.test.ts",

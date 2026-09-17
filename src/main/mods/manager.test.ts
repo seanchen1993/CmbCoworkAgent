@@ -171,6 +171,73 @@ async function fixture(deployment?: ManagedModDeployment) {
 }
 
 describe("project Mods lifecycle and UI authority", () => {
+  it("executes a function SDK write through final-input approval and refuses stale or read-only calls", async () => {
+    const f = await fixture()
+    await f.enable()
+    const workspace = f.manager.workspaceKey(f.root)
+    const grant = f.manager.store.grant(workspace, "function:sdk", "snapshot", true)
+    const signal = new AbortController().signal
+    const args = { command: "echo function" }
+    expect(
+      await f.manager.invokeFunctionTool(
+        workspace,
+        "thread",
+        grant,
+        "host:execute",
+        args,
+        signal,
+        false,
+        true
+      )
+    ).toMatchObject({ result: { output: "verified", exitCode: 0 } })
+    expect(f.confirm).toHaveBeenCalledWith(
+      "thread",
+      "function:sdk",
+      "host:execute",
+      args,
+      expect.any(AbortSignal)
+    )
+    expect(f.executions).toEqual([args])
+    await expect(
+      f.manager.invokeFunctionTool(
+        workspace,
+        "thread",
+        grant,
+        "host:execute",
+        args,
+        signal,
+        true,
+        true
+      )
+    ).rejects.toThrow("MODS_WRITE_REQUIRES_USER_ACTION")
+    f.confirm.mockResolvedValueOnce(false)
+    await expect(
+      f.manager.invokeFunctionTool(
+        workspace,
+        "thread",
+        grant,
+        "host:execute",
+        args,
+        signal,
+        false,
+        true
+      )
+    ).rejects.toThrow("MODS_USER_REJECTED")
+    f.manager.store.grant(workspace, "function:sdk", "snapshot", false)
+    await expect(
+      f.manager.invokeFunctionTool(
+        workspace,
+        "thread",
+        grant,
+        "host:execute",
+        args,
+        signal,
+        false,
+        true
+      )
+    ).rejects.toThrow("MODS_GRANT_REVOKED")
+    expect(f.executions).toEqual([args])
+  })
   it("consumes the MCP scoped route once before entering the raw service", async () => {
     const f = await fixture()
     await f.enable()
