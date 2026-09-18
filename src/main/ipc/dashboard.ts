@@ -188,16 +188,27 @@ function enforceDashboardIpcByteLimit<T>(label: string, value: T, byteLimit: num
   throw error
 }
 
+/**
+ * 沿 cause 链拼出可排查的原因串。
+ *
+ * 只看一层不够：节点级失败是 `DASHBOARD_ES_NODE_UNAVAILABLE fetch failed`，而
+ * 「fetch failed」本身还是泛化的，连接被拒、DNS 失败、TLS 握手失败、超时在这一层
+ * 长得一模一样，真正的区别（ECONNREFUSED / ETIMEDOUT / …）在它自己的 cause 里。
+ */
 function getErrorDetail(error: Error): string {
-  const cause = error.cause
-  if (!cause || typeof cause !== "object") return error.message
-
-  const causeRecord = cause as Record<string, unknown>
-  const causeMessage = typeof causeRecord.message === "string" ? causeRecord.message : ""
-  const causeCode = typeof causeRecord.code === "string" ? causeRecord.code : ""
-  const causeDetail = [causeCode, causeMessage].filter(Boolean).join(" ")
-
-  return causeDetail ? `${error.message}: ${causeDetail}` : error.message
+  const parts: string[] = []
+  const seen = new Set<unknown>()
+  let current: unknown = error.cause
+  while (current && typeof current === "object" && !seen.has(current) && parts.length < 4) {
+    seen.add(current)
+    const record = current as Record<string, unknown>
+    const message = typeof record.message === "string" ? record.message : ""
+    const code = typeof record.code === "string" ? record.code : ""
+    const part = [code, message].filter(Boolean).join(" ")
+    if (part) parts.push(part)
+    current = record.cause
+  }
+  return parts.length > 0 ? `${error.message}: ${parts.join(" <- ")}` : error.message
 }
 
 function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error {
