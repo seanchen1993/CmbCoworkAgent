@@ -1,4 +1,4 @@
-# 当前上下文用量与压缩边界（v26）
+# 当前上下文用量与压缩边界（v26 / v27 复核）
 
 从 `d0c7d84f` 在 `codex/mods-v2` 实现 `$.session.usage()` 基础读取及示例命令展示；v26 在此基础上
 接入显式 `$.session.compact({ instructions? })` 的原生控制器、真实请求 breakdown 和同线程提交边界。
@@ -61,16 +61,16 @@ provider tokenizer；最近 provider response 的 `apiUsage` 单独返回，不�
 Node/Web 类型复查通过。
 新增测试空方法的规范问题已改为测试桩，29 个源码文件最终规范复核无新增诊断，保留 1 个原有 any。
 
-本批重新执行的单 worker 全量 Vitest 为 3595 通过、40 失败、5 跳过并有 1 个异步错误；失败集中在既有 git/browser/
-trace/legacy 测试的环境时序与 5 秒限制，聚焦变更套件未出现新增失败，日志为 `v26-vitest-full-final.txt`。Mods v2 function 目录
-现为 50 个文件、364/364 通过；并发作用域的 resolver 归属修正后，原先 3 项 `async-scope` identity 失败已清零。
-完整 Mods v2 与 shared Mods v2 目录为 50 个文件、364/364 通过；manager 专项 18/18、async-scope 16/16 通过。
-跨进程函数回归 37/37 通过，pending/runtimes/frames/replies/calls 均为 0。桌面 E2E 通过至 57 个真实场景后在既有
-deadline 的插件设置按钮等待处超时，日志为 `v26-e2e.txt`，因此不宣称全流程 E2E 全绿。
+本轮单 worker 全量 Vitest 为 3610 通过、26 失败、5 跳过，未出现 unhandled error；失败数与仓库已知 v25 基线一致，
+日志为 `v27-vitest-full.txt`。失败仍集中在既有 browser/git/renderer source snapshot 等环境或历史断言，Mods v2 聚焦套件
+没有新增失败。完整 Mods v2 与 shared Mods v2 目录为 50 个文件、364/364 通过；manager 专项 18/18、async-scope 16/16
+通过。跨进程函数回归 37/37 通过，pending/runtimes/frames/replies/calls 均为 0。桌面 E2E 已完成 64 个真实场景，
+其中新增 summary/full 用量 breakdown 场景通过，结果记录在 `output/mods-validation/e2e/result.json`。
 主机 ABBA 性能回检 800 次：P95 9.6805ms，相比基线 9.6214ms 为 +0.61%；函数进程性能 900 次 P95 6.7516ms，
 相比基线下降 0.56%。usage breakdown 及 live read 各 1000 次的本地 P95 分别为 0.0309ms 和 0.0022ms，记录在
 `v26-usage-breakdown-performance.json`。完整 5×1000、长时间空闲和两小时稳定性门禁仍未满足。
 失败日志和修正过程保留在 `output/mods-v2-validation/v26-*`，不覆盖历史记录。
 
 显式压缩的外部结果已收敛为 Claude Code 形状，内部归档指针不会泄露；archive rollback 后的重复提交会重新
-stage 新归档。继续补齐真实桌面 E2E、全量稳定性门禁，以及 B3–B8 剩余能力和最终发布验收。
+stage 新归档。summary/full 的真实桌面 usage 回归已补齐；compact 的 host/runtime/restart/rollback 路径仍由聚焦回归
+覆盖。动态 MCP、memory、skills、agents 分类和完整性能稳定性门禁仍属于后续 B3–B8 / 发布验收范围。

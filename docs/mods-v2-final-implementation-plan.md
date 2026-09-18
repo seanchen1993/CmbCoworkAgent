@@ -1,6 +1,6 @@
 # Mods v2 最终对齐实施计划
 
-**版本：** v26
+**版本：** v27
 
 **日期：** 2026-09-18
 
@@ -10,10 +10,11 @@
 
 本文档用于指导 Mods v2 后续实现、代码检视和最终验收。后续开发不得修改 UAT 工作区 `C:\ai\CmbCoworkAgent`，所有改动先在本分支完成并验证。
 
-> **v26 复核更新（2026-09-18）**：`session.usage` 的 `summary/full` 已接入不同的本地/详细估算路径；
+> **v27 复核更新（2026-09-18）**：`session.usage` 的 `summary/full` 已接入不同的本地/详细估算路径；
 > `session.compact` 的外部结果已收敛为 `{ messages, tokensBefore?, tokensAfter? }` 或 `{ skip }`，内部归档指针仍保留在
 > checkpoint；归档 rollback 后可重新 staging；Mods v2 + shared 目录当前 364/364 通过，跨进程函数回归 37/37 通过。
-> 全量 Vitest 和桌面 E2E 仍按本文档门禁执行，不能因为聚焦套件通过而标记最终完成。
+> 单 worker 全量 Vitest 为 3610 通过、26 失败、5 跳过且无 unhandled error，失败数与已知基线一致；桌面 E2E 为 64/64，
+> 新增 usage summary/full 已覆盖。动态 breakdown 来源、B3–B8 和完整性能门禁仍未完成，不能标记最终 full parity。
 
 ## 1. 最终目标
 
@@ -58,7 +59,7 @@
 1. breakdown 的动态 MCP、memory、skills、agents 分类仍保持 omission，尚未达到完整 upstream parity。
 2. 显式压缩的历史归档指针和重启恢复语义仍需补齐更多真实重启验证。
 3. 显式压缩与 checkpoint 并发更新的一致性仍需继续加固。
-4. v26 全量 Vitest、standalone UAT、E2E 和性能回检仍未全部达到发布门禁。
+4. standalone UAT、完整性能回检和更长稳定性门禁仍未全部达到发布门禁。
 5. 本轮 source/doc 修复提交前仍需完成最终检视和验证记录。
 
 ## 3. 历史调研、设计和反编译参考材料

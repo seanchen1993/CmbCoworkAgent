@@ -5,6 +5,16 @@ export function register(on) {
       description: "查看会话模型、上下文用量、轮次、最近回复与 Git 仓库",
       immediate: true
     })
+    await $.command.register({
+      name: "claw-usage-summary",
+      description: "查看当前上下文的快速 breakdown",
+      immediate: true
+    })
+    await $.command.register({
+      name: "claw-usage-full",
+      description: "查看当前上下文的详细 breakdown",
+      immediate: true
+    })
     return next(e)
   })
   on("command.run", { command: "claw-session" }, async ($) => {
@@ -25,4 +35,10 @@ export function register(on) {
       ].join("\n")
     }
   })
+  on("command.run", { command: "claw-usage-summary" }, async ($) => ({
+    text: JSON.stringify(await $.session.usage({ breakdown: "summary", columns: 60 }))
+  }))
+  on("command.run", { command: "claw-usage-full" }, async ($) => ({
+    text: JSON.stringify(await $.session.usage({ breakdown: "full", columns: 60 }))
+  }))
 }

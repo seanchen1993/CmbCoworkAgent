@@ -133,7 +133,7 @@
         "cancellation receipt only allows protected publication; expired runtime and adapters remain unusable"
       ],
       "upstreamConformanceAdded": 4,
-      "validation": "663 focused regressions + Node/Web + 37 process checks + 63 Electron E2E pass; notices verified adjacent to real message across reload and cleared on revocation; child task refusal receipt failed and FAILED badge visually confirmed; 22 changed source files lint has no new diagnostics; disabled-read P95 -4.02%, no-op 1000 P95 8.7600ms, pending 0; full performance gate pending",
+      "validation": "663 focused regressions + Node/Web + 37 process checks + 64 Electron E2E pass; notices verified adjacent to real message across reload and cleared on revocation; child task refusal receipt failed and FAILED badge visually confirmed; summary/full usage breakdown exercised in the desktop flow; 22 changed source files lint has no new diagnostics; disabled-read and no-op performance records retained; full performance gate pending",
       "fullParity": false
     },
     "evidence": "mods-v2-implementation-2026-09-16.md",
@@ -167,7 +167,7 @@
         "usage breakdown requires a bound live model request; compact is desktop-live and checkpoint/archive mutation is serialized; desktop turn lifecycle is tracked separately"
       ],
       "upstreamConformanceAdded": 6,
-      "validation": "Mods v2 plus shared Mods v2 focused suite 364/364; manager 18/18, async-scope 16/16 and process E2E 37/37 pass; prior full v26 run recorded 3595 pass, 40 failures, 5 skipped and one unrelated async error under single-worker timing; desktop E2E passed 57 scenarios before the existing deadline; full performance gate pending",
+      "validation": "Mods v2 plus shared Mods v2 focused suite 364/364; manager 18/18, async-scope 16/16 and process E2E 37/37 pass; v27 single-worker full Vitest recorded 3610 pass, 26 failures, 5 skipped and no unhandled error, matching the known baseline; desktop E2E passed 64 scenarios including summary/full usage; full performance gate pending",
       "fullParity": false
     },
     "contextUsage": {
@@ -181,7 +181,7 @@
         "100000 scanned messages, 1 MiB cold row; cancellation and scope/config invalidation enforced"
       ],
       "upstreamConformanceAdded": 4,
-      "validation": "focused controller, SDK, host, checkpoint, archive-compensation, summary/full breakdown, occupied-lease and archive-retry tests pass; Mods v2 plus shared Mods v2 suite 364/364 and process E2E 37/37 pass; full process/E2E stability and usage-breakdown 1000-sample performance records remain in output/mods-v2-validation/v26-*",
+      "validation": "focused controller, SDK, host, checkpoint, archive-compensation, summary/full breakdown, occupied-lease and archive-retry tests pass; Mods v2 plus shared Mods v2 suite 364/364, process E2E 37/37 and desktop E2E 64/64 pass; v27 full Vitest is 3610/26/5 with no unhandled error; usage-breakdown 1000-sample records remain in output/mods-v2-validation/v26-*",
       "fullParity": false
     },
     "toolPermission": {

@@ -6,7 +6,7 @@
 
 ## 结论
 
-本提交已经完成了主要实现骨架，不能标记为最终完成。聚焦功能通过，但全量测试和桌面 E2E 没有通过，且仍有两个直接影响 Claude Code 对齐度的实现问题需要修复。
+本轮已完成此前指出的 summary/full 计数、compact 外部契约和 archive retry 修正；聚焦套件、进程回归、类型检查、构建和桌面 E2E 均通过。仍不能标记为完整 upstream parity，因为动态分类、部分 B3–B8 能力和完整性能门禁尚未完成。
 
 ## 已确认通过
 
@@ -18,40 +18,34 @@
 - 本次复跑的 manager、session-read-host、context-usage、summarization 四个文件：115/115 通过。
 - 生产构建记录通过。
 - breakdown 1000 次本地性能记录：P95 0.0309ms；live read P95 0.0022ms。
+- 桌面 E2E：64/64 个真实场景通过，包含 summary/full usage breakdown。
 
 ## 未通过的验收门槛
 
 ### 全量 Vitest
 
-`output/mods-v2-validation/v26-vitest-full-final.txt` 记录：
+`output/mods-v2-validation/v27-vitest-full.txt` 记录：
 
 ```text
-3595 passed, 40 failed, 5 skipped, 1 unhandled error
+3610 passed, 26 failed, 5 skipped, no unhandled error
 ```
 
-仓库此前的 v25 说明基线为 26 个失败；归档 JSON `output/mods-v2-validation/vitest-full.json` 实际记录 27 个失败。因此本次全量运行不能作为绿灯，至少需要重新区分：
-
-- 历史环境/时序失败；
-- 本次新增的 13～14 个失败；
-- Mods 变更是否造成任何真实回归。
-
-当前新增失败主要包含全量并发下的 manager、git、workflow、parser、trace 超时，不能仅凭“聚焦测试通过”就宣布全量回归无问题。
+失败数与已知 v25 基线的 26 个失败相同，失败集中在 browser/git/renderer source snapshot 等既有环境或历史断言。
+Mods v2 与 shared Mods v2 聚焦套件为 364/364，通过结果未出现新增 Mods 回归；因此全量结果已完成基线对照，但仍不是全仓库绿灯。
 
 ### 桌面 E2E
 
-`output/mods-v2-validation/v26-e2e.txt` 记录 57 个场景通过，随后在
-`tests/mods-e2e.spec.ts:2562` 等待“插件”按钮时触发 deadline。更重要的是，当前 E2E 文件中没有检索到 `session.compact` 或 `breakdown` 的真实桌面场景，因此新增能力尚未获得端到端证明。
+最终桌面 E2E 运行通过 64 个真实场景，结果记录在 `output/mods-validation/e2e/result.json`；新增
+`session.usage({ breakdown: "summary" })` 与 `session.usage({ breakdown: "full" })` 场景验证两种计数路径返回不同
+breakdown。`session.compact` 的 host/runtime、skip、lease、重启和 archive retry 仍由聚焦回归覆盖，本批未把挂起的
+长耗时 compact 操作伪装成桌面绿灯。
 
-## 必须修复的对齐问题
+## 已修复的对齐问题
 
-### 1. `summary` 和 `full` 当前实际返回同一套计算
+### 1. `summary` 和 `full` 已使用不同计算路径
 
-`src/main/agent/context-usage.ts:113-130` 接收了 `detail`，但后续没有使用它；
-`src/main/mods/v2/session-read-host.ts:86-95` 只是转发参数。因此：
-
-- `session.usage({ breakdown: "summary" })` 和 `session.usage({ breakdown: "full" })` 的分类和估算逻辑相同。
-- Claude Code 反编译产物中，summary 使用本地摘要计数，full 可以使用更完整的上下文计数路径。
-- 后续实现至少要明确两种模式的字段和计数差异，并为两种模式分别增加回归测试。
+`summary` 使用有界本地序列化估算，`full` 使用 system prompt、system tools 和 LangChain messages 的详细 estimator；
+两种模式均保留 `estimated: true`，provider `apiUsage` 单独返回。回归测试和桌面 E2E 已验证两种 breakdown 数值不同。
 
 参考：
 
@@ -61,45 +55,28 @@ output/claude-code-2.1.273-analysis/formatted/chunk-hr43png0.js
 
 `uhs`/`dhs` 对 `summary` 与 `full` 的分支就是该差异的证据。
 
-### 2. `session.compact` 对插件暴露了 Claude Code 没有的 `filePath`
+### 2. `session.compact` 已移除外部 `filePath`
 
-`src/main/agent/runtime.ts:7218-7223` 将内部归档路径放入外部结果；
-`src/main/mods/v2/basic-sdk.ts:145-153` 也为其增加了公开校验。
+runtime 现在只向 SDK 返回 `{ messages, tokensBefore?, tokensAfter? }` 或 `{ skip }`；内部归档路径仍保存在
+checkpoint 的 `SummarizationEvent.filePath`，并由恢复逻辑使用。basic SDK 会拒绝任何外部 `filePath` 字段。
 
-冻结的 Claude Code 2.1.273 行为是：
+## 仍需关注的状态与能力边界
 
-```text
-{ messages, tokensBefore?, tokensAfter? }
-```
+- archive rollback 后清理 `commitPromise` 并重试的回归已通过；flush 失败的保守指针策略仍需在更长时间和更多重启组合下继续观察。
+- `projectContextBreakdown` 仍省略动态 MCP、memory、skills、agents；这是明确的能力差异，兼容矩阵保持 `fullParity: false`。
+- 完整 5×1000、长时间空闲和两小时稳定性性能门禁尚未完成。
 
-或：
+## 后续工作
 
-```text
-{ skip }
-```
-
-归档路径可以继续保存在 checkpoint 的内部 `SummarizationEvent.filePath`，但不应作为 SDK 结果字段返回，否则使用方式和结果契约不一致。需要删除外部 `filePath`，保留内部恢复信息，并同步测试和文档。
-
-## 需要继续验证的状态一致性问题
-
-- `CmbCompactionPlan.commitArchive()` 在归档已提交后，如果 checkpoint 更新失败并执行 `rollbackArchive()`，内部已解析的 `commitPromise` 仍可能保留旧 Promise；同一个 plan 被重试时可能得到已删除的旧路径，而不是重新 staging。应增加“失败后同一 plan 重试”的测试并清理该状态。
-- flush 失败时保留归档指针是合理的保守策略，但必须增加重启恢复测试，证明 checkpoint 和归档指针不会形成悬空或旧摘要复活。
-- `projectContextBreakdown` 将动态 MCP、memory、skills、agents 省略，这属于当前明确的能力差异；不能在兼容矩阵中把它描述成完整 upstream parity。
-
-## 下一步顺序
-
-1. 先修复 `summary/full` 分支和 compact 外部结果契约。
-2. 增加 breakdown summary/full、compact 外部结果、archive retry、flush failure、restart recovery 测试。
-3. 增加真实桌面 E2E：usage summary、usage full、compact success、compact skip、active lease rejection、restart recovery。
-
-4. 在单 worker 和受控并发两种方式重新跑全量 Vitest，生成新的差异清单。
-5. 修复或隔离新增的 manager/全量时序失败后，再重新跑 E2E 和性能门禁。
-6. 最后更新兼容性矩阵和最终交付文档，只有所有门槛满足后才标记完成。
+1. 继续补齐动态 MCP、memory、skills、agents breakdown 及 B3–B8 的 planned-adapter 能力。
+2. 完成 standalone UAT、全量性能矩阵、长时间稳定性和更完整的 compact 重启组合。
+3. 保持全量 Vitest 的 26 个已知失败基线，不把环境/历史断言误报为 Mods 回归；新增 Mods 变更仍以 364/364、37/37 和 64/64 为发布前回归门槛。
+4. 所有剩余能力和性能门禁完成后，再把兼容矩阵状态改为完整 parity。
 
 ## 修复进度（本轮）
 
-已完成前三项代码修正：`summary` 现在走本地序列化估算、`full` 走详细 estimator；`session.compact` 不再把内部
-`filePath` 放入插件结果；archive rollback 会清空已完成 promise，下一次提交会重新生成归档。新增回归覆盖了
-summary/full 数值差异和 rollback 后 retry；并修复了 guest Promise 外部 resolve 的异步 scope 归属。Mods v2 与
-shared Mods v2 目录 364/364、跨进程函数回归 37/37、类型检查和构建均通过。真实桌面 E2E 与全量套件仍需
-单独复跑，不能由这些聚焦结果代替。
+已完成此前指出的三项代码修正：`summary` 走本地序列化估算、`full` 走详细 estimator；`session.compact` 不再把
+内部 `filePath` 放入插件结果；archive rollback 会清空已完成 promise，下一次提交会重新生成归档。新增回归覆盖
+summary/full 数值差异、rollback 后 retry 和 guest Promise 外部 resolve 的异步 scope 归属。当前 Mods v2 与 shared
+Mods v2 为 364/364、跨进程函数回归 37/37、桌面 E2E 64/64，类型检查和构建均通过；全量 Vitest 为 3610/26/5，
+无 unhandled error。

@@ -1642,6 +1642,37 @@ async function main(): Promise<void> {
     assert.equal(modelServer.requests.length, afterRunRequests)
     await page!.screenshot({ path: join(artifacts, "function-session-transcript.png") })
     pass("session SDK reports actual model transcript and turns without another model request")
+    const usageJob = async (command: string): Promise<Record<string, unknown>> => {
+      const before = new Set(
+        (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).map(
+          (job) => job.id
+        )
+      )
+      await functionComposer.fill(`/${command} `)
+      await functionComposer.press("Enter")
+      let text: string | undefined
+      await until(async () => {
+        const job = (await page!.evaluate((id) => window.api.mods.jobs(id), registryThread)).find(
+          (candidate) =>
+            !before.has(candidate.id) &&
+            candidate.command === command &&
+            candidate.state === "succeeded"
+        )
+        text = job?.result?.text
+        return typeof text === "string"
+      }, `${command} returns a context breakdown`)
+      return JSON.parse(text!) as Record<string, unknown>
+    }
+    const summaryUsage = await usageJob("claw-usage-summary")
+    const fullUsage = await usageJob("claw-usage-full")
+    const summaryBreakdown = (summaryUsage.context as { breakdown: { totalTokens: number } }).breakdown
+    const fullBreakdown = (fullUsage.context as { breakdown: { totalTokens: number } }).breakdown
+    assert.notEqual(summaryBreakdown.totalTokens, fullBreakdown.totalTokens)
+    assert.ok(
+      JSON.stringify(summaryBreakdown).includes('"estimated":true') &&
+        JSON.stringify(fullBreakdown).includes('"estimated":true')
+    )
+    pass("session usage exposes distinct summary and full context breakdowns")
     await until(
       async () =>
         (await page!.evaluate((id) => window.api.mods.turnNotices(id), registryThread)).some(
