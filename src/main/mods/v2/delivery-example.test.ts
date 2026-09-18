@@ -46,7 +46,7 @@ function completion(overrides: Partial<FunctionTurnComplete> = {}): FunctionTurn
   return {
     turnId: randomUUID(), answer: "任务回复", durationMs: 4200,
     reason: "answer", isAborted: false, ...overrides
-  }
+  } as FunctionTurnComplete
 }
 
 function control(pane: FunctionPaneSnapshot, key: string, kind: FunctionUiAction["kind"], value?: string) {
