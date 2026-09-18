@@ -2134,7 +2134,7 @@ function ProjectListSection({
         <table
           className={cn(
             "w-full table-fixed text-xs",
-            showSuspectedTechnicalDetailMetric ? "min-w-[2410px]" : "min-w-[2270px]"
+            showSuspectedTechnicalDetailMetric ? "min-w-[2610px]" : "min-w-[2470px]"
           )}
         >
           {/*
@@ -2143,6 +2143,11 @@ function ProjectListSection({
            * width, so Chromium may collapse the department/action columns before
            * the horizontal scroller is needed. The fixed grid makes overflow land
            * on the existing scroll container instead of turning text vertical.
+           *
+           * 这里的 <col> 个数必须和表头单元格个数一一对应，见 project-mode-table-columns
+           * 的用例。少一个 col 不会报错，但从缺口那一列起后面全部左移一格：列宽对不上
+           * 内容，nowrap 的表头会溢出盖住右边的列，最后一列只能分到剩下的零头。加列时
+           * 记得同步这里、tableColumnCount 和上面的 min-w。
            */}
           <colgroup>
             <col className="w-[300px]" />
@@ -2155,7 +2160,8 @@ function ProjectListSection({
             <col className="w-[160px]" />
             <col className="w-[160px]" />
             <col className="w-[142px]" />
-            <col className="w-[178px]" />
+            <col className="w-[190px]" />
+            <col className="w-[202px]" />
             <col className="w-[190px]" />
             <col className="w-[110px]" />
             <col className="w-[210px]" />
