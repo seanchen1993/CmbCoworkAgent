@@ -71,16 +71,6 @@ import {
 } from "@/components/ui/dialog"
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TabbedPanel } from "@/components/tabs"
@@ -232,11 +222,7 @@ const deletedProjectCompatibility: HarnessBoardCompatibility = {
 }
 const harnessProjectCreateInputClassName =
   "bg-background text-foreground placeholder:text-muted-foreground/45"
-const harnessProjectCreateSelectClassName =
-  "min-w-0 overflow-hidden bg-background text-foreground data-[placeholder]:text-muted-foreground/45 [&>span]:min-w-0 [&>span]:truncate"
 const harnessDialogContentClassName = "z-[60]"
-const harnessDialogSelectContentClassName =
-  "z-[70] w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]"
 const harnessProjectPopoverContentClassName =
   "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-[70] origin-[var(--radix-popover-content-transform-origin)] w-[var(--radix-popover-trigger-width)] rounded-md border p-0 shadow-md outline-none"
 const harnessNamePattern = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
@@ -2163,19 +2149,118 @@ function AdapterOptionHeader({
   )
 }
 
-function AdapterSelectedValue({
-  adapter
+function AdapterPicker({
+  registry,
+  value,
+  installingPluginNames,
+  onInstallPlugin,
+  onValueChange
 }: {
-  adapter: HarnessAdapterRegistryItem | null
+  registry: ProjectModeAdapterItem[]
+  value: string
+  installingPluginNames: Set<string>
+  onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
+  onValueChange: (value: string) => void
 }): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState("")
+  const searchRef = useRef<HTMLInputElement>(null)
+  const resultsRef = useRef<HTMLDivElement>(null)
+  const selectedAdapter = findSelectedAdapter(registry, value)
+  const keyword = query.trim().toLocaleLowerCase()
+  const filteredRegistry = registry.filter((adapter) =>
+    [adapter.name, adapter.description, normalizeAdapterCategory(adapter.category)].some((text) =>
+      text?.toLocaleLowerCase().includes(keyword)
+    )
+  )
+
   return (
-    <SelectValue placeholder={ADAPTER_SELECT_PLACEHOLDER}>
-      {adapter ? (
-        <span className="block min-w-0 truncate text-left">
-          <AdapterOptionHeader adapter={adapter} />
-        </span>
-      ) : undefined}
-    </SelectValue>
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen)
+        if (!nextOpen) setQuery("")
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          aria-label={
+            selectedAdapter
+              ? `选择插件，当前：${formatAdapterSelectLabel(selectedAdapter)}`
+              : "选择插件"
+          }
+          className="h-9 w-full min-w-0 justify-between gap-2 bg-background px-3 font-normal"
+        >
+          <span className={cn("min-w-0 truncate", !selectedAdapter && "text-muted-foreground/45")}>
+            {selectedAdapter
+              ? formatAdapterSelectLabel(selectedAdapter)
+              : ADAPTER_SELECT_PLACEHOLDER}
+          </span>
+          <ChevronDown className="size-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        aria-label="选择插件"
+        align="start"
+        className="z-[70] flex max-h-[min(24rem,var(--radix-popover-content-available-height))] w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-2rem)] flex-col overflow-hidden p-0"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          searchRef.current?.focus()
+        }}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || !["ArrowDown", "ArrowUp"].includes(event.key)) return
+          const buttons = Array.from(
+            resultsRef.current?.querySelectorAll<HTMLButtonElement>(
+              "[data-adapter-option]:not(:disabled)"
+            ) ?? []
+          )
+          const index = buttons.indexOf(event.target as HTMLButtonElement)
+          if (event.target !== searchRef.current && index === -1) return
+          event.preventDefault()
+          const nextIndex = event.key === "ArrowDown" ? index + 1 : index - 1
+          if (nextIndex < 0) searchRef.current?.focus()
+          else buttons[Math.min(nextIndex, buttons.length - 1)]?.focus()
+        }}
+      >
+        <div className="shrink-0 border-b p-2">
+          <Input
+            ref={searchRef}
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value)
+              resultsRef.current?.scrollTo({ top: 0 })
+            }}
+            aria-label="搜索插件"
+            placeholder="搜索插件名称、描述或分类"
+            className={harnessProjectCreateInputClassName}
+          />
+        </div>
+        <div ref={resultsRef} className="min-h-0 overflow-y-auto overscroll-y-contain p-1">
+          {filteredRegistry.length ? (
+            <AdapterSelectGroups
+              registry={filteredRegistry}
+              selectedId={value}
+              installingPluginNames={installingPluginNames}
+              onInstallPlugin={(adapter) => {
+                searchRef.current?.focus()
+                return onInstallPlugin(adapter)
+              }}
+              onSelect={(adapterId) => {
+                onValueChange(adapterId)
+                setOpen(false)
+                setQuery("")
+              }}
+            />
+          ) : (
+            <div role="status" className="px-3 py-6 text-center text-sm text-muted-foreground">
+              未找到匹配的插件
+            </div>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -2198,13 +2283,8 @@ function AdapterInstallButton({
       disabled={installing}
       onMouseDown={(event) => {
         event.preventDefault()
-        event.stopPropagation()
       }}
-      onClick={(event) => {
-        event.preventDefault()
-        event.stopPropagation()
-        void onInstallPlugin(adapter)
-      }}
+      onClick={() => void onInstallPlugin(adapter)}
     >
       {installing ? (
         <Loader2 className="size-3.5 animate-spin" />
@@ -2218,10 +2298,14 @@ function AdapterInstallButton({
 
 function AdapterSelectItem({
   adapter,
+  selectedId,
+  onSelect,
   installingPluginNames,
   onInstallPlugin
 }: {
   adapter: HarnessAdapterRegistryItem
+  selectedId: string
+  onSelect: (adapterId: string) => void
   installingPluginNames: Set<string>
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
 }): React.JSX.Element {
@@ -2229,7 +2313,7 @@ function AdapterSelectItem({
   if (adapter.boardCompatibility.status === "missing-plugin") {
     return (
       <div
-        key={adapter.id}
+        role="listitem"
         className="flex min-w-0 items-start justify-between gap-3 rounded-sm px-2 py-2 pl-4 pr-2 text-sm"
       >
         <span className="flex min-w-0 flex-1 flex-col gap-1">
@@ -2259,22 +2343,26 @@ function AdapterSelectItem({
   }
 
   return (
-    <SelectItem
-      key={adapter.id}
-      value={adapter.id}
-      textValue={formatAdapterSelectText(adapter)}
+    <button
+      type="button"
+      aria-label={formatAdapterSelectText(adapter)}
+      role="option"
+      data-adapter-option
+      aria-selected={selectedId === adapter.id}
       disabled={!adapter.boardCompatibility.compatible}
-      className="group py-2 pl-4 pr-10"
+      onClick={() => onSelect(adapter.id)}
+      className="group relative flex w-full min-w-0 rounded-sm py-2 pl-4 pr-10 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
     >
-      <span className="flex min-w-0 max-w-[calc(var(--radix-select-trigger-width)-3rem)] flex-col gap-1">
+      {selectedId === adapter.id && <Check className="absolute right-3 top-3 size-4" />}
+      <span className="flex min-w-0 w-full flex-col gap-1">
         <AdapterOptionHeader adapter={adapter} />
         <AdapterPublisherInfo
           adapter={adapter}
-          className="group-focus:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
+          className="group-focus:text-accent-foreground group-hover:text-accent-foreground"
         />
         {adapter.description && (
           <span
-            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground group-focus:text-accent-foreground group-data-[highlighted]:text-accent-foreground"
+            className="line-clamp-2 whitespace-normal break-words text-xs leading-5 text-muted-foreground group-focus:text-accent-foreground group-hover:text-accent-foreground"
             title={adapter.description}
           >
             {adapter.description}
@@ -2286,16 +2374,20 @@ function AdapterSelectItem({
           </span>
         )}
       </span>
-    </SelectItem>
+    </button>
   )
 }
 
 function AdapterSelectGroups({
   registry,
+  selectedId,
+  onSelect,
   installingPluginNames,
   onInstallPlugin
 }: {
   registry: ProjectModeAdapterItem[]
+  selectedId: string
+  onSelect: (adapterId: string) => void
   installingPluginNames: Set<string>
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
 }): React.JSX.Element {
@@ -2323,25 +2415,35 @@ function AdapterSelectGroups({
           <div className="px-2 pb-1 pt-2 text-xs font-semibold text-foreground">
             {section.label}
           </div>
-          {section.groups.map((group, groupIndex) => (
-            <Fragment key={group.category}>
-              <SelectGroup>
-                <SelectLabel className="px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
-                  {group.category}
-                </SelectLabel>
-                {group.adapters.map((adapter) => (
-                  <AdapterSelectItem
-                    key={adapter.id}
-                    adapter={adapter}
-                    installingPluginNames={installingPluginNames}
-                    onInstallPlugin={onInstallPlugin}
-                  />
-                ))}
-              </SelectGroup>
-              {groupIndex < section.groups.length - 1 && <SelectSeparator />}
-            </Fragment>
-          ))}
-          {sectionIndex < sections.length - 1 && <SelectSeparator className="my-1" />}
+          <div
+            role={section.key === "installed" ? "listbox" : undefined}
+            aria-label={section.label}
+          >
+            {section.groups.map((group, groupIndex) => (
+              <Fragment key={group.category}>
+                <div
+                  role={section.key === "installed" ? "group" : "list"}
+                  aria-label={group.category}
+                >
+                  <div className="px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
+                    {group.category}
+                  </div>
+                  {group.adapters.map((adapter) => (
+                    <AdapterSelectItem
+                      key={adapter.id}
+                      adapter={adapter}
+                      selectedId={selectedId}
+                      onSelect={onSelect}
+                      installingPluginNames={installingPluginNames}
+                      onInstallPlugin={onInstallPlugin}
+                    />
+                  ))}
+                </div>
+                {groupIndex < section.groups.length - 1 && <div className="my-1 h-px bg-border" />}
+              </Fragment>
+            ))}
+          </div>
+          {sectionIndex < sections.length - 1 && <div className="my-1 h-px bg-border" />}
         </Fragment>
       ))}
     </>
@@ -2958,27 +3060,15 @@ function ProjectFormDialog({
             <section className="rounded-md border border-border bg-muted/30 p-3">
               <div className="mb-3 text-sm font-semibold">插件配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <Select
+                <AdapterPicker
                   value={form.adapterId}
+                  registry={registry}
+                  installingPluginNames={installingPluginNames}
+                  onInstallPlugin={onInstallPlugin}
                   onValueChange={(adapterId) =>
                     onChange({ ...form, adapterId, adapterType: "plugin" })
                   }
-                >
-                  <SelectTrigger className={harnessProjectCreateSelectClassName}>
-                    <AdapterSelectedValue adapter={selectedAdapter} />
-                  </SelectTrigger>
-                  <SelectContent
-                    className={harnessDialogSelectContentClassName}
-                    showScrollButtons={false}
-                    viewportClassName="overscroll-y-none"
-                  >
-                    <AdapterSelectGroups
-                      registry={registry}
-                      installingPluginNames={installingPluginNames}
-                      onInstallPlugin={onInstallPlugin}
-                    />
-                  </SelectContent>
-                </Select>
+                />
                 {selectedAdapterMessage && (
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
@@ -3220,27 +3310,15 @@ function ProjectEditDialog({
             <section className="rounded-md border border-border bg-muted/30 p-3">
               <div className="mb-3 text-sm font-semibold">插件配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <Select
+                <AdapterPicker
                   value={form.adapterId}
+                  registry={registry}
+                  installingPluginNames={installingPluginNames}
+                  onInstallPlugin={onInstallPlugin}
                   onValueChange={(adapterId) =>
                     onChange({ ...form, adapterId, adapterType: "plugin" })
                   }
-                >
-                  <SelectTrigger className={harnessProjectCreateSelectClassName}>
-                    <AdapterSelectedValue adapter={selectedAdapter} />
-                  </SelectTrigger>
-                  <SelectContent
-                    className={harnessDialogSelectContentClassName}
-                    showScrollButtons={false}
-                    viewportClassName="overscroll-y-none"
-                  >
-                    <AdapterSelectGroups
-                      registry={registry}
-                      installingPluginNames={installingPluginNames}
-                      onInstallPlugin={onInstallPlugin}
-                    />
-                  </SelectContent>
-                </Select>
+                />
                 {selectedAdapterMessage && (
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
