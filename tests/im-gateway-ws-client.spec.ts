@@ -89,10 +89,13 @@ async function main(): Promise<void> {
   let mismatchNextPermit = false
   let missingRobotHelloCount = 0
   const cardFrames: string[] = []
+  const receiptAcks: string[] = []
+  let receiptSocket: WebSocket | null = null
   let defaultRouteExtensionHelloCount = 0
   server.on("connection", (connected, request) => {
     socket = connected
     const connectionAuthorization = String(request.headers.authorization ?? "")
+    if (connectionAuthorization === "Bearer receipt-token") receiptSocket = connected
     authorization = connectionAuthorization
     connected.on("message", (raw) => {
       const envelope = JSON.parse(String(raw)) as Envelope
@@ -188,6 +191,8 @@ async function main(): Promise<void> {
             })
           )
         }, 150)
+      } else if (envelope.type === "CARD_RECEIPT_ACK") {
+        receiptAcks.push(String(envelope.payload.receiptId ?? ""))
       } else if (envelope.type === "CARD_UPDATE") {
         cardFrames.push("CARD_UPDATE")
         connected.send(
@@ -603,6 +608,114 @@ async function main(): Promise<void> {
     "the update must reach the gateway, and only after the send"
   )
   overlappingClient.stop()
+
+  // A receipt this desktop cannot parse is permanent: the same bytes will not
+  // become readable, and the gateway redelivers without a cap. Acknowledging it
+  // is what stops a desktop one version behind a new card kind from retrying
+  // the same frame every five minutes forever.
+  const receiptClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws/desktop`,
+    token: () => "receipt-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined,
+    onCardReceipt: async () => {
+      handledReceipts += 1
+    }
+  })
+  let handledReceipts = 0
+  receiptClient.start()
+  await waitFor(
+    () => receiptClient.getStatus().connectionState === "online",
+    "the receipt client to come online"
+  )
+  assert(receiptSocket, "the receipt client must have a server-side socket")
+  const pushReceipt = (receipt: Record<string, unknown>): void => {
+    receiptSocket?.send(
+      JSON.stringify({
+        schemaVersion: 1,
+        type: "CARD_RECEIPT",
+        messageId: `msg-${receiptAcks.length}-${Math.random()}`,
+        sentAt: new Date().toISOString(),
+        payload: { receipt }
+      })
+    )
+  }
+
+  // A kind this desktop does not know is NOT unreadable: it only chooses the
+  // wording of a closing card, so the click is still applied. This is the
+  // property that keeps a desktop one version behind a new card kind working,
+  // and it is pinned here because the discard path below looks like a place
+  // someone would later "tidy" it into.
+  pushReceipt({
+    schemaVersion: 1,
+    receiptId: "receipt-future-kind",
+    interactionId: "interaction-0",
+    tag: "tag-0",
+    kind: "a_kind_from_the_future",
+    principalId: "opaque-principal",
+    conversationKey: "conversation-1",
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await waitFor(() => handledReceipts === 1, "the unknown-kind receipt to be routed")
+  assert(
+    !receiptAcks.includes("receipt-future-kind"),
+    "an unknown kind must be routed and answered, never discarded"
+  )
+
+  // Structurally invalid is the permanent case: a receipt with no tag cannot be
+  // matched to a card by any version, so redelivering it only burns a delivery
+  // slot every five minutes for the life of the row.
+  pushReceipt({
+    schemaVersion: 1,
+    receiptId: "receipt-unreadable",
+    interactionId: "interaction-1",
+    principalId: "opaque-principal",
+    conversationKey: "conversation-1",
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await waitFor(() => receiptAcks.includes("receipt-unreadable"), "the unreadable receipt ack")
+  assert.equal(handledReceipts, 1, "an unreadable receipt must never reach the router")
+
+  // Someone else's receipt is a different case: not ours to retire, and the
+  // gateway would refuse the acknowledgement anyway. It must be left to be
+  // redelivered to the desktop it belongs to.
+  pushReceipt({
+    schemaVersion: 1,
+    receiptId: "receipt-not-ours",
+    interactionId: "interaction-2",
+    tag: "tag-2",
+    kind: "approval",
+    principalId: "somebody-else",
+    conversationKey: "conversation-1",
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  // A readable receipt after it proves the connection is still carrying frames,
+  // so the absence of the ack above is a decision and not a dropped socket.
+  pushReceipt({
+    schemaVersion: 1,
+    receiptId: "receipt-ours",
+    interactionId: "interaction-3",
+    tag: "tag-3",
+    kind: "approval",
+    principalId: "opaque-principal",
+    conversationKey: "conversation-1",
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await waitFor(() => handledReceipts === 2, "the readable receipt to be routed")
+  assert(
+    !receiptAcks.includes("receipt-not-ours"),
+    "a receipt for another principal must not be acknowledged away"
+  )
+  assert.equal(
+    receiptClient.getStatus().connectionState,
+    "online",
+    "neither receipt may drop the session"
+  )
+  receiptClient.stop()
 
   await new Promise<void>((resolve) => server.close(() => resolve()))
   console.log("im-gateway-ws-client.spec.ts passed")

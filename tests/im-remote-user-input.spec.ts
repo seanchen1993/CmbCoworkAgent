@@ -109,12 +109,19 @@ async function createContext(
     })(),
     () => clock.now
   )
+  const cardSends = { accept: true, sent: 0, cards: [] as Array<{ tag: string; json: string }> }
   const cards = new ImCardPublisher({
     interactions: cardInteractions,
     createIdempotencyKey: () => `card-idem-${cardUpdates.length}`,
     gateway: {
       isAuthenticated: () => true,
-      sendCard: async () => ({ state: "accepted" }) as const,
+      sendCard: async (card: { tag: string; content: unknown }) => {
+        cardSends.sent += 1
+        cardSends.cards.push({ tag: card.tag, json: JSON.stringify(card.content) })
+        return cardSends.accept
+          ? ({ state: "accepted" } as const)
+          : ({ state: "rejected", reasonCode: "CARD_REJECTED" } as const)
+      },
       updateCard: async (update) => {
         cardUpdates.push({ interactionId: update.interactionId, content: [...update.content] })
         return { state: "accepted" } as const
@@ -188,8 +195,17 @@ async function createContext(
   }
 
   async function publish(request: UserInputRequest): Promise<void> {
+    // Waiting on the outbox alone would hang whenever the card lands, since a
+    // delivered card sends no notice. Waiting on the interaction store instead
+    // races the other way: the interaction is registered before the send and
+    // removed again when it is refused. The send attempt is the one event that
+    // happens on both paths.
+    const before = cardSends.sent
     emit(request)
-    await waitFor(() => deliveryText(request.requestId).length > 0, "user-input prompt")
+    await waitFor(() => cardSends.sent > before, "the card attempt")
+    if (!cardSends.accept) {
+      await waitFor(() => deliveryText(request.requestId).length > 0, "the fallback notice")
+    }
   }
 
   return {
@@ -208,6 +224,8 @@ async function createContext(
     sendPendingCount: () => sendPendingCount,
     cardUpdates,
     cardInteractions,
+    cardSends,
+    cardJson: () => cardSends.cards.map((card) => card.json).join("\n"),
     removePending: (threadId = "thread-1") => {
       const removed = pending.get(threadId)
       if (!removed) return
@@ -217,17 +235,61 @@ async function createContext(
   }
 }
 
+/**
+ * The notice shortens only when the card is actually there.
+ *
+ * This is the safety boundary of publishing the card first: a card the platform
+ * refused must leave the reader the whole question, because a run waiting on an
+ * answer has no timeout and the short code alone cannot be acted on.
+ */
+async function testARefusedCardStillDeliversTheWholeQuestion(): Promise<void> {
+  const context = await createContext()
+  try {
+    context.cardSends.accept = false
+    const request = userInputRequest({ requestId: "request-no-card" })
+    await context.publish(request)
+    const text = context.deliveryText(request.requestId)
+    assert(!text.includes("详情见上方卡片"), text)
+    assert(text.includes("导出格式用哪种？"), text)
+    assert(text.includes("1. CSV (Recommended) — 兼容性最好。"), text)
+    assert(text.includes("/回答 A1B2C3 <编号>"), text)
+    // And the refused card is not retained, so a click can never arrive for it.
+    assert.equal(context.cardInteractions.list().length, 0)
+
+    // The question is still answerable by exactly the code that was printed.
+    assert.equal(
+      await context.service.resolveAnswer({
+        argument: "A1B2C3 1",
+        principalId: ROUTE.principalId,
+        conversationKey: ROUTE.conversationKey
+      }),
+      "已从招乎提交回答，任务将继续执行。"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
   const context = await createContext()
   try {
     const request = userInputRequest({ requestId: "request-option" })
     await context.publish(request)
-    const text = context.deliveryText(request.requestId)
-    assert(text.includes("【会话：桌面会话】需要你确认"))
-    assert(text.includes("导出格式用哪种？"))
-    assert(text.includes("1. CSV (Recommended) — 兼容性最好。"))
-    assert(text.includes("/回答 A1B2C3 <编号>"))
-    assert.equal(context.sendPendingCount(), 1)
+    // The card landed, so it is the only message: no notice follows it at all.
+    assert.equal(context.deliveryText(request.requestId), "", "a delivered card sends no notice")
+    // Everything a reader needs is therefore in the card, the short code
+    // included — it is the only way to answer when the buttons do not work.
+    assert.equal(context.cardInteractions.list().length, 1)
+    assert.equal(context.sendPendingCount(), 0, "nothing was queued to drain")
+    // Everything a reader needs is therefore in the card: the question, the
+    // options, and the submit button. The short code is deliberately not among
+    // them — a delivered card is answered by pressing it.
+    const card = context.cardJson()
+    assert(card.includes("导出格式用哪种？"), card)
+    assert(card.includes("CSV"), card)
+    assert(!card.includes("A1B2C3"), card)
 
     assert.equal(
       await context.service.resolveAnswer({
@@ -428,6 +490,9 @@ async function testConcurrentThreadsUseIndependentCodes(): Promise<void> {
     const requests = threadIds.map((threadId, index) =>
       userInputRequest({ requestId: `request-concurrent-${index + 1}`, threadId })
     )
+    // Cards off: this is about the codes being independent per thread, and a
+    // delivered card no longer prints one. The notice is where they appear.
+    context.cardSends.accept = false
     await Promise.all(requests.map((request) => context.publish(request)))
 
     const codes = requests.map(
@@ -491,6 +556,7 @@ async function testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled(): Promis
 
 async function main(): Promise<void> {
   await testPromptAndSingleUseOptionAnswer()
+  await testARefusedCardStillDeliversTheWholeQuestion()
   await testMultipleQuestionsRotateCodeAndAcceptCustomText()
   await testLongWaitDesktopRaceAndExplicitCommand()
   await testDisabledRobotDoesNotPublish()

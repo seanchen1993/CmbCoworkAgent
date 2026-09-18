@@ -96,11 +96,13 @@ export class ImCardPublisher {
    */
   async publish(input: {
     kind: ImCardInteractionKind
-    threadId: string
+    /** Null only for a card that gates no run; then `expiresAt` is required. */
+    threadId: string | null
     principalId: string
     conversationKey: string
     requestRef: string
     targetLabel: string
+    expiresAt?: number
     build: (tag: string) => CardComponent[]
   }): Promise<ImCardInteraction | null> {
     if (!this.dependencies.gateway.isAuthenticated()) return null
@@ -108,7 +110,7 @@ export class ImCardPublisher {
     // adding another. Doing it here keeps the store self-maintaining rather than
     // depending on a timer nobody would notice had stopped.
     try {
-      this.dependencies.interactions.pruneThreads(this.dependencies.isThreadLive)
+      this.dependencies.interactions.prune(this.dependencies.isThreadLive)
     } catch (error) {
       this.dependencies.warn("Zhaohu card retention sweep failed.", error)
     }
@@ -122,7 +124,8 @@ export class ImCardPublisher {
       principalId: input.principalId,
       conversationKey: input.conversationKey,
       requestRef: input.requestRef,
-      targetLabel: input.targetLabel
+      targetLabel: input.targetLabel,
+      ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt })
     })
     try {
       const card: RemoteImCardSendV1 = {

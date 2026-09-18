@@ -58,17 +58,49 @@ function contentComponent(lines: ReadonlyArray<string>, model = 0): CardComponen
   }
 }
 
-/** InnerKV.title 最多显示 9 个字符，超出客户端截断。 */
+/**
+ * InnerKV.title 最多显示 9 个字符，超出客户端截断。
+ *
+ * `value` is a list of InnerContent objects, never a list of bare strings. The
+ * field is typed only as `List` in the spec, so the shape has to be read off
+ * the worked example — and getting it wrong is not a degraded row, it is a
+ * blank card: the client abandons the whole component array and renders an
+ * empty bubble, while the send API still answers code=0 with a message id.
+ * Every card here carries a kv, so that silently cost us all five of them.
+ */
 function kvComponent(pairs: ReadonlyArray<{ title: string; value: string }>): CardComponent {
   return {
     type: "kv",
-    list: pairs.map((pair) => ({ title: pair.title, value: [pair.value] }))
+    list: pairs.map((pair) => ({
+      title: kvTitle(pair.title),
+      value: [{ content: pair.value }]
+    }))
   }
 }
 
-function separatorComponent(): CardComponent {
-  return { type: "separate" }
+/**
+ * The client renders key and value flush against each other, so the separator
+ * has to live in the key — 「已答题要」 is what a bare key looks like. The spec's
+ * own example writes `"title": "时间："`, colon included, which is the same
+ * convention arrived at from the other direction.
+ *
+ * Applied here rather than at the four call sites so a new row cannot forget
+ * it. Headers reach this from model output, so a key that already ends in a
+ * colon keeps the one it has instead of collecting a second.
+ */
+function kvTitle(title: string): string {
+  return /[：:]$/u.test(title) ? title : `${title}：`
 }
+
+/**
+ * The kv key naming where a card came from.
+ *
+ * Not 「会话」: the value is a reply prefix, and those name their own kind —
+ * 「会话：重构登录」, 「收件箱」, 「特性：xxx」. Pairing them with 「会话」 read as
+ * 「会话 会话：重构登录」 for threads and was simply wrong for the other two.
+ * 「来源」 is the one key that stays true for every prefix shape.
+ */
+const KV_SOURCE_TITLE = "来源"
 
 export interface ApprovalCardInput {
   /** Where this gate came from — the reader must never have to guess. */
@@ -77,7 +109,6 @@ export interface ApprovalCardInput {
   detail: string
   tag: string
   allowedDecisions: ReadonlyArray<"approve" | "reject">
-  fallbackCommands: string
 }
 
 /**
@@ -113,7 +144,7 @@ export function buildApprovalCard(input: ApprovalCardInput): CardComponent[] {
     titleComponent("需要批准"),
     statusComponent("待处理", STATUS_STYLE.orange),
     kvComponent([
-      { title: "会话", value: input.targetLabel },
+      { title: KV_SOURCE_TITLE, value: input.targetLabel },
       { title: "操作", value: input.operation }
     ]),
     contentComponent(input.detail.split("\n").filter((line) => line.length > 0))
@@ -125,8 +156,6 @@ export function buildApprovalCard(input: ApprovalCardInput): CardComponent[] {
       list: buttons
     })
   }
-  components.push(separatorComponent())
-  components.push(contentComponent([`按钮失效时可回复：${input.fallbackCommands}`], 1))
   return components
 }
 
@@ -157,7 +186,7 @@ export function buildResolvedCard(input: ResolvedCardInput): CardComponent[] {
     titleComponent("需要批准"),
     statusComponent(input.outcome, style),
     kvComponent([
-      { title: "会话", value: input.targetLabel },
+      { title: KV_SOURCE_TITLE, value: input.targetLabel },
       { title: "操作", value: input.operation }
     ])
   ]
@@ -182,7 +211,6 @@ export interface QuestionCardInput {
   targetLabel: string
   questions: ReadonlyArray<QuestionCardQuestion>
   tag: string
-  fallbackCommand: string
 }
 
 /** listSelector selectModel: 1-自定义选项 2-会话人员 3-搜索 */
@@ -218,7 +246,7 @@ const MULTI_SUBMIT_UNLIMITED = 1
  * it. Fixed rather than derived: ids need only be unique within one message,
  * and a question card carries exactly one form.
  */
-const QUESTION_FORM_COMPONENT_ID = "question-form"
+const FORM_COMPONENT_ID = "interaction-form"
 
 /**
  * The free-text box holds prose, so it opens taller than one line. Both sets
@@ -241,7 +269,7 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
   const components: CardComponent[] = [
     titleComponent("需要你的选择"),
     statusComponent("待回答", STATUS_STYLE.orange),
-    kvComponent([{ title: "会话", value: input.targetLabel }])
+    kvComponent([{ title: KV_SOURCE_TITLE, value: input.targetLabel }])
   ]
 
   const answered = input.questions.filter((question) => question.answered)
@@ -289,7 +317,7 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
   if (controls.length > 0) {
     components.push({
       type: "interactive",
-      id: QUESTION_FORM_COMPONENT_ID,
+      id: FORM_COMPONENT_ID,
       inputControlArray: controls,
       submitStatus: 0,
       multiSubmit: MULTI_SUBMIT_UNLIMITED,
@@ -300,8 +328,6 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
     })
   }
 
-  components.push(separatorComponent())
-  components.push(contentComponent([`也可以回复：${input.fallbackCommand}`], 1))
   return components
 }
 
@@ -315,7 +341,7 @@ export function buildAnsweredCard(input: AnsweredCardInput): CardComponent[] {
   const components: CardComponent[] = [
     titleComponent("需要你的选择"),
     statusComponent(input.outcome, STATUS_STYLE.green),
-    kvComponent([{ title: "会话", value: input.targetLabel }])
+    kvComponent([{ title: KV_SOURCE_TITLE, value: input.targetLabel }])
   ]
   if (input.answers.length > 0) {
     components.push(
@@ -325,17 +351,139 @@ export function buildAnsweredCard(input: AnsweredCardInput): CardComponent[] {
   return components
 }
 
+/** The card title for each kind, so an expired card still names what it was. */
+const CARD_TITLE: Record<ImCardInteractionKind, string> = {
+  approval: "需要批准",
+  user_input: "需要你的选择",
+  target_bind: "切换会话"
+}
+
 /** Marks a card whose request is gone — a click from deep in the history. */
 export function buildExpiredCard(
   kind: ImCardInteractionKind,
   targetLabel: string
 ): CardComponent[] {
   return [
-    titleComponent(kind === "approval" ? "需要批准" : "需要你的选择"),
+    titleComponent(CARD_TITLE[kind] ?? CARD_TITLE.approval),
     statusComponent("已失效", STATUS_STYLE.black),
-    kvComponent([{ title: "会话", value: targetLabel }]),
+    kvComponent([{ title: KV_SOURCE_TITLE, value: targetLabel }]),
     contentComponent(["该请求已经结束，这张卡片不再接受操作。"], 1)
   ]
+}
+
+/**
+ * 「跟随特性配置」 as an explicit option rather than an empty value.
+ *
+ * The typed path expresses it by omitting the word, but a form cannot show an
+ * absence — and an option whose value is the empty string is the one shape a
+ * receipt cannot distinguish from 「nothing selected」. So the default is a real
+ * value the resolver maps back to omission.
+ */
+export const TARGET_BIND_MODE_INHERIT = "inherit"
+
+/** feedbackKey for the two controls on a target-bind card. */
+export const TARGET_BIND_TARGET_KEY = "target"
+export const TARGET_BIND_MODE_KEY = "mode"
+
+export interface TargetBindCardTarget {
+  /** 1-based, and the same number the text list prints. */
+  index: number
+  label: string
+  /** 「普通会话」「项目会话」「特性，可创建新会话」 */
+  kindLabel: string
+}
+
+export interface TargetBindCardInput {
+  /** What the conversation is bound to right now, for the reader's bearings. */
+  currentLabel: string
+  targets: ReadonlyArray<TargetBindCardTarget>
+  /** Offered only when the list contains something that creates a session. */
+  modeChoices: ReadonlyArray<{ label: string; value: string }>
+  tag: string
+}
+
+/**
+ * The numbered list from `/会话`, as a form.
+ *
+ * The option values are the same 1-based indexes the text list prints, so a
+ * submit and a typed `/绑定 <编号>` reach the identical selection-context
+ * lookup. Nothing here can name a target the list did not already authorize.
+ */
+export function buildTargetBindCard(input: TargetBindCardInput): CardComponent[] {
+  const components: CardComponent[] = [
+    titleComponent(CARD_TITLE.target_bind),
+    statusComponent("待选择", STATUS_STYLE.orange),
+    kvComponent([{ title: "当前", value: input.currentLabel }])
+  ]
+
+  const controls: CardComponent[] = [
+    {
+      subType: "listSelector",
+      title: "切换到",
+      promptText: "选择一个会话或特性",
+      feedbackKey: TARGET_BIND_TARGET_KEY,
+      required: true,
+      selectModel: LIST_SELECT_CUSTOM_OPTIONS,
+      isMultiple: false,
+      optionArray: input.targets.map((target) => ({
+        text: `${target.index}. ${target.label}（${target.kindLabel}）`,
+        value: String(target.index)
+      }))
+    }
+  ]
+
+  // Only when something in the list can create a session. On an existing
+  // session a mode word is refused by the typed path, and offering a control
+  // whose every use is an error is worse than not offering it.
+  if (input.modeChoices.length > 0) {
+    controls.push({
+      subType: "listSelector",
+      title: "新建会话模式",
+      promptText: "仅在特性下新建会话时生效，已有会话请忽略",
+      feedbackKey: TARGET_BIND_MODE_KEY,
+      required: false,
+      selectModel: LIST_SELECT_CUSTOM_OPTIONS,
+      isMultiple: false,
+      optionArray: input.modeChoices.map((choice) => ({
+        text: choice.label,
+        value: choice.value
+      }))
+    })
+  }
+
+  components.push({
+    type: "interactive",
+    id: FORM_COMPONENT_ID,
+    inputControlArray: controls,
+    submitStatus: 0,
+    multiSubmit: MULTI_SUBMIT_UNLIMITED,
+    submitButton: {
+      submitText: "切换",
+      actionLink: cardReceiptActionLink(input.tag)
+    }
+  })
+
+  return components
+}
+
+export interface BoundCardInput {
+  /** Where the conversation ended up — the same label the text reply names. */
+  targetLabel: string
+  outcome: string
+  detail?: string
+}
+
+/** The terminal card that replaces a live target list once something bound. */
+export function buildBoundCard(input: BoundCardInput): CardComponent[] {
+  const components: CardComponent[] = [
+    titleComponent(CARD_TITLE.target_bind),
+    statusComponent(input.outcome, STATUS_STYLE.green),
+    kvComponent([{ title: "当前", value: input.targetLabel }])
+  ]
+  if (input.detail) {
+    components.push(contentComponent([input.detail], 1))
+  }
+  return components
 }
 
 export { BUTTON_STATUS_DISABLED, BUTTON_STATUS_SELECTED }

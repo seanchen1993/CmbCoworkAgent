@@ -23,9 +23,17 @@ import {
   type RemoteImCardUpdateV1
 } from "../src/shared/im-gateway-contract"
 import {
+  buildAnsweredCard,
   buildApprovalCard,
+  buildExpiredCard,
   buildQuestionCard,
-  QUESTION_OTHER_SUFFIX
+  buildResolvedCard,
+  buildTargetBindCard,
+  QUESTION_OTHER_SUFFIX,
+  TARGET_BIND_MODE_INHERIT,
+  TARGET_BIND_MODE_KEY,
+  TARGET_BIND_TARGET_KEY,
+  type CardComponent
 } from "../src/main/services/im/card-builder"
 import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
 import { ImCardPublisher } from "../src/main/services/im/card-publisher"
@@ -211,8 +219,13 @@ async function testTheCardCarriesTheSameGateAsTheShortCode(): Promise<void> {
     // whose task asked is exactly what the text prefix prevents.
     assert.ok(rendered.includes("快捷支付"), "the card names its thread")
     assert.ok(rendered.includes("config.ts"), "the card names the file")
-    // The short code stays on the card: the buttons can fail, the code cannot.
-    assert.ok(rendered.includes("/批准 A1B2C3"), "the card keeps the short code")
+    // The code is deliberately absent: a delivered card is answered by pressing
+    // it, and the notice that carries the code is only sent when the card is
+    // not. Both places printing it is what made one gate read as two messages.
+    assert.ok(!rendered.includes("A1B2C3"), `the delivered card carries no short code: ${rendered}`)
+    // What it must keep is the decision the click applies — the tag is the
+    // capability, and it is still what routes a press back to this gate.
+    assert.ok(rendered.includes(`${card.tag}:approve`), "the card keeps its decision tags")
 
     const receipt: RemoteImCardReceiptV1 = {
       schemaVersion: 1,
@@ -390,8 +403,16 @@ async function testAnUnsendableCardLeavesTheShortCodeWorking(): Promise<void> {
     context.gateway.accept = false
     const decisions = context.register(approvalRequest(context.root))
     await waitFor(() => context.gateway.sent.length === 1, "the attempted card")
-    // The gate is still answerable: no interaction is retained, the text notice
-    // with its short code was queued before the card was ever attempted.
+    // The card is attempted first now, so the notice it falls back to arrives
+    // after it — which is the whole point of waiting for the outbox here rather
+    // than reading it the moment the send is observed.
+    await waitFor(
+      () =>
+        context.events.listOutbox().some((row) => row.deliveryId === "approval-request:req-1"),
+      "the fallback notice"
+    )
+    // The gate is still answerable: no interaction is retained, and the refused
+    // card earned the full notice rather than the shortened one.
     assert.equal(context.interactions.list().length, 0, "a refused card is not retained")
     assert.equal(decisions.length, 0, "nothing was decided by the failure")
     const text = context.events
@@ -400,6 +421,13 @@ async function testAnUnsendableCardLeavesTheShortCodeWorking(): Promise<void> {
       .map((row) => row.content)
       .join("\n")
     assert.ok(text.includes("/批准 A1B2C3"), "the short code still reached the reader")
+    // Not just the code: with no card to read, the notice has to carry what is
+    // being approved, or the reader can only answer blind.
+    assert.ok(text.includes("config.ts"), `the refused card must fall back to the detail: ${text}`)
+    assert.ok(
+      !text.includes("详情见上方卡片"),
+      `a card that was refused must not be pointed at: ${text}`
+    )
     console.log("PASS testAnUnsendableCardLeavesTheShortCodeWorking")
   } finally {
     await context.dispose()
@@ -492,6 +520,171 @@ function testARefusedSubmitLeavesTheFormUsable(): void {
     )
   }
   console.log("PASS testARefusedSubmitLeavesTheFormUsable")
+}
+
+/**
+ * A kv row's `value` is a list of objects, never a list of strings.
+ *
+ * This is pinned because getting it wrong fails silently in the worst way: the
+ * send API answers code=0 with a message id, the gateway records the card as
+ * SENT, and the client renders an empty bubble — no error anywhere in our logs
+ * or the platform's. Every card builder emits a kv, so one wrong helper blanked
+ * all five at once. Verified against the real client: a string list renders
+ * nothing, an object list renders the row.
+ */
+function testEveryKvRowIsShapedTheWayTheClientParses(): void {
+  const cards: Array<[string, CardComponent[]]> = [
+    [
+      "approval",
+      buildApprovalCard({
+        targetLabel: "会话：你好",
+        operation: "写文件",
+        detail: "src/a.ts",
+        tag: "tag",
+        allowedDecisions: ["approve", "reject"],
+        fallbackCommands: "/批准 ABC123 或 /拒绝 ABC123"
+      })
+    ],
+    [
+      "resolved",
+      buildResolvedCard({
+        targetLabel: "会话：你好",
+        operation: "写文件",
+        outcome: "已批准",
+        outcomeStyle: "approved"
+      })
+    ],
+    [
+      "question",
+      buildQuestionCard({
+        targetLabel: "会话：你好",
+        tag: "tag",
+        fallbackCommand: "/回答 ABC123 <编号>",
+        questions: [
+          {
+            key: "q0",
+            header: "标题",
+            question: "问题？",
+            options: [{ label: "甲" }, { label: "乙" }]
+          },
+          // A header that already ends in a colon must not collect a second —
+          // these come from model output, not from a fixed vocabulary.
+          { key: "q1", header: "已答：", question: "问题？", options: [], answered: true }
+        ]
+      })
+    ],
+    [
+      "answered",
+      buildAnsweredCard({
+        targetLabel: "会话：你好",
+        answers: [{ header: "标题", answer: "甲" }],
+        outcome: "已回答"
+      })
+    ],
+    ["expired", buildExpiredCard("approval", "会话：你好")]
+  ]
+
+  for (const [name, components] of cards) {
+    const kvComponents = components.filter((component) => component.type === "kv")
+    assert.ok(kvComponents.length > 0, `${name} card is expected to carry a kv component`)
+    for (const kv of kvComponents) {
+      const rows = kv.list as ReadonlyArray<{ title: unknown; value: unknown }>
+      assert.ok(Array.isArray(rows) && rows.length > 0, `${name}: kv.list must be a non-empty array`)
+      for (const row of rows) {
+        assert.equal(typeof row.title, "string", `${name}: kv row title must be a string`)
+        // The client puts nothing between key and value, so the key carries the
+        // separator — without it the row reads 「已答题要」. Exactly one colon:
+        // a header that already ends in one must not collect a second.
+        assert.match(
+          row.title as string,
+          /[^：:][：:]$/u,
+          `${name}: kv row title must end in exactly one colon`
+        )
+        assert.ok(Array.isArray(row.value), `${name}: kv row value must be an array`)
+        for (const entry of row.value as unknown[]) {
+          assert.ok(
+            entry !== null && typeof entry === "object" && !Array.isArray(entry),
+            `${name}: kv value entries must be objects — a bare string blanks the whole card`
+          )
+          assert.equal(
+            typeof (entry as { content?: unknown }).content,
+            "string",
+            `${name}: kv value entries must carry a string content`
+          )
+        }
+      }
+    }
+  }
+  console.log("PASS testEveryKvRowIsShapedTheWayTheClientParses")
+}
+
+/**
+ * The target list's option values are the numbers the text list prints.
+ *
+ * That equality is the whole safety story for this card: a submit is resolved
+ * by handing the value to the same selection context `/绑定 <编号>` uses, so a
+ * value that is anything other than the printed index would either bind the
+ * wrong target or fail. Nothing else about the card is authorization.
+ */
+function testTheTargetListOffersExactlyThePrintedNumbers(): void {
+  const targets = [
+    { index: 1, label: "重构登录", kindLabel: "普通会话" },
+    { index: 2, label: "支付/对账", kindLabel: "项目会话" },
+    { index: 3, label: "支付 / 收银台", kindLabel: "特性，可创建新会话" }
+  ]
+  const components = buildTargetBindCard({
+    currentLabel: "收件箱",
+    targets,
+    modeChoices: [
+      { label: "跟随特性配置", value: TARGET_BIND_MODE_INHERIT },
+      { label: "Team", value: "team" }
+    ],
+    tag: "tag",
+    fallbackCommand: "/绑定 <编号>"
+  })
+
+  const interactive = components.find((component) => component.type === "interactive")
+  assert.ok(interactive, "the target list renders an interactive component")
+  const controls = interactive.inputControlArray as ReadonlyArray<Record<string, unknown>>
+  const target = controls.find((control) => control.feedbackKey === TARGET_BIND_TARGET_KEY)
+  assert.ok(target, "the form must carry the target control")
+
+  const options = target.optionArray as ReadonlyArray<{ text: string; value: string }>
+  assert.deepEqual(
+    options.map((option) => option.value),
+    ["1", "2", "3"],
+    "option values are the printed 1-based indexes, never grant ids or array offsets"
+  )
+  for (const [position, option] of options.entries()) {
+    assert.ok(
+      option.text.startsWith(`${position + 1}. `),
+      `option text must show the same number it submits: ${option.text}`
+    )
+  }
+
+  // Picking a target is the point of the card, so it is the one required
+  // control; a submit with nothing chosen would otherwise reach the desktop
+  // only to be refused there.
+  assert.equal(target.required, true, "the target control must be required")
+
+  const mode = controls.find((control) => control.feedbackKey === TARGET_BIND_MODE_KEY)
+  assert.ok(mode, "the mode control is offered when the list can create a session")
+  assert.equal(mode.required, false, "a mode must stay optional — omitting it is meaningful")
+
+  // Nothing in the list creates a session, so a mode control would be a field
+  // whose every use the typed path refuses.
+  const withoutFeature = buildTargetBindCard({
+    currentLabel: "收件箱",
+    targets: targets.slice(0, 2),
+    modeChoices: [],
+    tag: "tag",
+    fallbackCommand: "/绑定 <编号>"
+  })
+  const plainControls = (
+    withoutFeature.find((component) => component.type === "interactive") as Record<string, unknown>
+  ).inputControlArray as ReadonlyArray<Record<string, unknown>>
+  assert.equal(plainControls.length, 1, "no session can be created, so no mode is offered")
+  console.log("PASS testTheTargetListOffersExactlyThePrintedNumbers")
 }
 
 function testEveryBuiltCardSatisfiesTheContract(): void {
@@ -947,6 +1140,8 @@ async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<vo
 
 async function main(): Promise<void> {
   testEveryBuiltCardSatisfiesTheContract()
+  testEveryKvRowIsShapedTheWayTheClientParses()
+  testTheTargetListOffersExactlyThePrintedNumbers()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
   testARefusedSubmitLeavesTheFormUsable()
   await testTheCardCarriesTheSameGateAsTheShortCode()
