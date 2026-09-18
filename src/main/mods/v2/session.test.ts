@@ -541,6 +541,33 @@ it("passes usage arguments through operation hooks without fabricating cost or r
   expect(calls).toEqual([["session.usage", { columns: 60 }]])
 })
 
+it("passes compact instructions through operation hooks and publishes the host result", async () => {
+  const calls: unknown[] = []
+  const value = await session(
+    `
+    on("session.start",async($,e,next)=>{await $.command.register({name:"compact",description:"Compact"});return next(e)});
+    on("session.compact",async($,e,next)=>next({...e,instructions:"rewritten"}));
+    on("command.run",{command:"compact"},async($)=>({text:JSON.stringify(await $.session.compact({instructions:"original"}))}));
+  `,
+    {
+      compactSession: async (instructions) => {
+        calls.push(instructions)
+        return {
+          messages: [{ role: "user", text: "summary", toolUses: [] }],
+          tokensBefore: 400,
+          tokensAfter: 90
+        }
+      }
+    }
+  )
+  expect(JSON.parse(String((await value.run("compact", "")).text))).toEqual({
+    messages: [{ role: "user", text: "summary", toolUses: [] }],
+    tokensBefore: 400,
+    tokensAfter: 90
+  })
+  expect(calls).toEqual(["rewritten"])
+})
+
 it("runs the identical usage operation fixture used in Claude's plugin test", async () => {
   const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/session-usage"))
   for (const mode of ["data", "empty", "deny"]) {

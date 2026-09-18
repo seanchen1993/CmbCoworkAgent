@@ -3,9 +3,10 @@ import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import { ModsManager } from "../manager"
-import { queryFunctionSessionRead } from "./session-read-host"
-import { AIMessage, HumanMessage } from "@langchain/core/messages"
+import { compactFunctionSession, queryFunctionSessionRead } from "./session-read-host"
+import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
 
 const read = vi.hoisted(() => vi.fn())
 vi.mock("./session-repo", () => ({ readFunctionSessionRepo: read }))
@@ -122,7 +123,7 @@ it("reads the actual main model and messages inside a shared child without openi
   f.manager.bindFunctionSession(instance.authority, "actual-main-model", 1000)
   f.manager.updateFunctionSessionMessages(instance.authority, [new HumanMessage("actual prompt")])
   const cold = vi.fn()
-  const query = (method: FunctionSessionReadMethod) =>
+  const query = (method: FunctionSessionReadMethod, usageArgs = {}) =>
     queryFunctionSessionRead(
       f.manager,
       f.plain,
@@ -131,7 +132,8 @@ it("reads the actual main model and messages inside a shared child without openi
       "thread",
       method,
       f.controller.signal,
-      cold
+      cold,
+      usageArgs
     )
   expect(await query("session.model")).toBe("actual-main-model")
   expect(await query("session.turns")).toBe(1)
@@ -160,10 +162,138 @@ it("reads the actual main model and messages inside a shared child without openi
     context: { window: 1000, tokens: 250, percent: 25 },
     rateLimits: []
   })
+  f.manager.updateFunctionSessionRequest(instance.authority, {
+    systemMessage: new SystemMessage("system"),
+    tools: [{ name: "inspect", description: "Inspect", input_schema: {} }]
+  })
+  const breakdown = (await query("session.usage", { breakdown: "full", columns: 60 })) as {
+    context: { breakdown?: { model: string; apiUsage: unknown; categories: unknown[] } }
+  }
+  expect(breakdown.context.breakdown).toMatchObject({
+    model: "actual-main-model",
+    apiUsage: {
+      input_tokens: 250,
+      output_tokens: 10
+    }
+  })
+  expect(breakdown.context.breakdown?.categories).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ name: "System prompt" }),
+      expect.objectContaining({ name: "System tools" }),
+      expect.objectContaining({ name: "Messages" })
+    ])
+  )
   f.manager.updateFunctionSessionMessages(instance.authority, [], {
     _summarizationEvent: { usageStartIndex: 1 }
   })
   expect(await query("session.usage")).toEqual({ context: { window: 1000 }, rateLimits: [] })
+})
+
+it("rejects non-positive or non-integral breakdown columns at the host boundary", async () => {
+  const f = fixture()
+  await expect(
+    queryFunctionSessionRead(
+      f.manager,
+      f.plain,
+      f.workspace,
+      f.realm,
+      "thread",
+      "session.usage",
+      f.controller.signal,
+      undefined,
+      { breakdown: "summary", columns: 0 }
+    )
+  ).rejects.toThrow("MODS_SESSION_USAGE_ARGUMENT")
+})
+
+it("compacts the live main session through its bound controller", async () => {
+  const f = fixture()
+  const binding = { workspace: f.manager.workspaceKey(f.realm), threadId: "thread", turnId: "turn" }
+  const instance = f.manager.createRuntimeAuthority(binding)
+  cleanup.push(instance.release)
+  cleanup.push(f.manager.bindThread({ ...binding, runtimeAuthority: instance.authority }))
+  const compact = vi.fn(async (instructions: string, messages: readonly unknown[]) => ({
+    messages: messages.length,
+    tokensBefore: instructions.length,
+    tokensAfter: 20
+  }))
+  f.manager.bindFunctionSession(instance.authority, "model", 1000, compact)
+  f.manager.updateFunctionSessionMessages(instance.authority, [new HumanMessage("prompt")])
+  await expect(
+    compactFunctionSession(
+      f.manager,
+      f.plain,
+      f.workspace,
+      f.realm,
+      "thread",
+      "Keep the user goal.",
+      f.controller.signal
+    )
+  ).resolves.toEqual({ messages: 1, tokensBefore: "Keep the user goal.".length, tokensAfter: 20 })
+  expect(compact).toHaveBeenCalledWith(
+    "Keep the user goal.",
+    expect.arrayContaining([expect.any(HumanMessage)]),
+    {},
+    expect.any(AbortSignal)
+  )
+})
+
+it("rejects compact while the thread run lease is occupied", async () => {
+  const f = fixture()
+  const binding = { workspace: f.manager.workspaceKey(f.realm), threadId: "thread", turnId: "turn" }
+  const instance = f.manager.createRuntimeAuthority(binding)
+  cleanup.push(instance.release)
+  cleanup.push(f.manager.bindThread({ ...binding, runtimeAuthority: instance.authority }))
+  f.manager.bindFunctionSession(instance.authority, "model", 1000, async () => ({
+    messages: [{ role: "user", text: "summary", toolUses: [] }]
+  }))
+  f.manager.updateFunctionSessionMessages(instance.authority, [new HumanMessage("prompt")])
+  const lease = claimLocalThreadRunLease({ threadId: "thread", owner: "desktop", runId: "run" })
+  expect(lease.acquired).toBe(true)
+  try {
+    await expect(
+      compactFunctionSession(
+        f.manager,
+        f.plain,
+        f.workspace,
+        f.realm,
+        "thread",
+        "",
+        f.controller.signal
+      )
+    ).rejects.toThrow("MODS_CONTEXT_COMPACTION_ACTIVE")
+  } finally {
+    releaseLocalThreadRunLease("thread", "desktop", "run")
+  }
+})
+
+it("does not publish a compact result after the live authority is revoked", async () => {
+  const f = fixture()
+  const binding = { workspace: f.manager.workspaceKey(f.realm), threadId: "thread", turnId: "turn" }
+  const instance = f.manager.createRuntimeAuthority(binding)
+  cleanup.push(instance.release)
+  cleanup.push(f.manager.bindThread({ ...binding, runtimeAuthority: instance.authority }))
+  let finish!: () => void
+  f.manager.bindFunctionSession(instance.authority, "model", 1000, async () => {
+    await new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    return { messages: [{ role: "user", text: "summary", toolUses: [] }] }
+  })
+  f.manager.updateFunctionSessionMessages(instance.authority, [new HumanMessage("prompt")])
+  const pending = compactFunctionSession(
+    f.manager,
+    f.plain,
+    f.workspace,
+    f.realm,
+    "thread",
+    "Keep it.",
+    f.controller.signal
+  )
+  const rejected = expect(pending).rejects.toThrow("MODS_CALL_SCOPE_CHANGED")
+  f.manager.closeFunctionThread("thread")
+  finish()
+  await rejected
 })
 
 it("invalidates a pending cold read on close and on a new runtime even when the adapter is still absent", async () => {

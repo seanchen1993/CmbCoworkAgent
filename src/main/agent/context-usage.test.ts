@@ -7,6 +7,7 @@ import {
   readContextResponseUsage,
   readLiveContextUsage,
   projectContextUsage,
+  projectContextBreakdown,
   withCompactedContext
 } from "./context-usage"
 
@@ -118,6 +119,39 @@ it("omits unavailable and zero readings, clamps percentages and rejects invalid 
     expect(() => projectContextUsage(value)).toThrow("CONTEXT_WINDOW_UNAVAILABLE")
   }
   expect(() => projectContextUsage(0)).toThrow("CONTEXT_WINDOW_UNAVAILABLE")
+})
+
+it("projects system, tools, messages, provider usage and a bounded grid without inventing dynamic sections", () => {
+  const result = projectContextBreakdown({
+    detail: "full",
+    columns: 60,
+    model: "actual-model",
+    window: 1_000,
+    systemMessage: "system instructions",
+    tools: [{ name: "inspect", description: "Inspect a file", input_schema: {} }],
+    messages: [
+      new HumanMessage("read this"),
+      new AIMessage({
+        content: [{ type: "tool_use", id: "call-1", name: "inspect", input: {} }],
+        usage_metadata: { input_tokens: 100, output_tokens: 4, total_tokens: 104 }
+      })
+    ],
+    apiUsage: {
+      input_tokens: 100,
+      output_tokens: 4,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0
+    }
+  })
+  expect(result.model).toBe("actual-model")
+  expect(result.apiUsage?.input_tokens).toBe(100)
+  expect(result.categories.map((category) => category.name)).toEqual(
+    expect.arrayContaining(["System prompt", "System tools", "Messages", "Free space"])
+  )
+  expect(result.categories.some((category) => category.name === "MCP tools")).toBe(false)
+  expect(result.messageBreakdown.toolCallTokens).toBeGreaterThan(0)
+  expect(result.gridRows).toHaveLength(5)
+  expect(result.gridRows[0]).toHaveLength(5)
 })
 
 it("yields long scans and invalidates a revoked or cancelled in-flight read", async () => {

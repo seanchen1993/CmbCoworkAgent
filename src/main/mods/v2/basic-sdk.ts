@@ -21,6 +21,7 @@ export const SESSION_CAPABILITIES = [
   "session.messages",
   "session.turns",
   "session.usage",
+  "session.compact",
   "session.authorize",
   "clock.now",
   "clock.sleep",
@@ -33,6 +34,11 @@ export const SESSION_CAPABILITIES = [
 
 /** SDK positional arguments become the same structured input a hook receives in Claude. */
 export function basicSdkInput(method: string, args: ModJson[]): ModObject {
+  if (method === "session.compact") {
+    if (args[0] === undefined) return {}
+    if (!isModObject(args[0])) throw new ModFunctionError("MODS_CONTEXT_COMPACTION_INSTRUCTIONS")
+    return args[0]
+  }
   if (method === "session.usage") {
     if (args[0] === undefined) return {}
     if (!isModObject(args[0])) throw new ModFunctionError("MODS_SESSION_USAGE_ARGUMENT")
@@ -51,6 +57,12 @@ export function basicSdkInput(method: string, args: ModJson[]): ModObject {
 }
 
 export function validateBasicInput(name: string, value: ModObject): void {
+  if (
+    name === "session.compact" &&
+    (value.instructions !== undefined &&
+      (typeof value.instructions !== "string" || value.instructions.length > 32000))
+  )
+    throw new ModFunctionError("MODS_CONTEXT_COMPACTION_INSTRUCTIONS")
   if (
     name === "session.usage" &&
     ((value.breakdown !== undefined &&
@@ -95,9 +107,129 @@ export function validateBasicInput(name: string, value: ModObject): void {
 }
 
 export function validateBasicResult(name: string, value: ModJson | undefined): void {
+  if (name === "session.compact") {
+    const count = (candidate: unknown): candidate is number =>
+      typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
+    const messagesValid = (candidate: unknown): boolean =>
+      Array.isArray(candidate) &&
+      candidate.length > 0 &&
+      candidate.length <= 4096 &&
+      candidate.every(
+        (entry) =>
+          isModObject(entry) &&
+          (entry.role === "user" || entry.role === "assistant") &&
+          typeof entry.text === "string" &&
+          Array.isArray(entry.toolUses) &&
+          entry.toolUses.every(
+            (call) =>
+              isModObject(call) &&
+              typeof call.tool_use_id === "string" &&
+              typeof call.tool === "string" &&
+              isModObject(call.input) &&
+              (call.text === undefined || typeof call.text === "string") &&
+              (call.isError === undefined || call.isError === true)
+          ) &&
+          (entry.toolResults === undefined ||
+            (entry.role === "user" &&
+              Array.isArray(entry.toolResults) &&
+              entry.toolResults.every(
+                (result) =>
+                  isModObject(result) &&
+                  typeof result.tool_use_id === "string" &&
+                  typeof result.text === "string" &&
+                  typeof result.isError === "boolean"
+              )))
+      )
+    if (
+      !isModObject(value) ||
+      (value.skip !== undefined
+        ? typeof value.skip !== "string" || value.skip.length === 0 || value.messages !== undefined
+        : !messagesValid(value.messages)) ||
+      (value.tokensBefore !== undefined && !count(value.tokensBefore)) ||
+      (value.tokensAfter !== undefined && !count(value.tokensAfter)) ||
+      (value.filePath !== undefined &&
+        (typeof value.filePath !== "string" || value.filePath.length === 0))
+    )
+      throw new ModFunctionError("MODS_SDK_RESULT", `MODS_SDK_RESULT: ${name}`)
+    return
+  }
   if (name === "session.usage") {
     const count = (value: unknown): value is number =>
       typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    const breakdownValid = (candidate: unknown): boolean => {
+      if (!isModObject(candidate)) return false
+      const categoryValid = (row: unknown): boolean =>
+        isModObject(row) &&
+        typeof row.name === "string" &&
+        count(row.tokens) &&
+        typeof row.color === "string" &&
+        typeof row.isDeferred === "boolean" &&
+        typeof row.estimated === "boolean" &&
+        ["used", "free", "buffer", "deferred"].includes(String(row.kind))
+      const squareValid = (square: unknown): boolean =>
+        isModObject(square) &&
+        typeof square.color === "string" &&
+        typeof square.isFilled === "boolean" &&
+        typeof square.categoryName === "string" &&
+        count(square.tokens) &&
+        typeof square.percentage === "number" &&
+        Number.isFinite(square.percentage) &&
+        square.percentage >= 0 &&
+        typeof square.squareFullness === "number" &&
+        Number.isFinite(square.squareFullness) &&
+        square.squareFullness >= 0 &&
+        square.squareFullness <= 1
+      const messageBreakdown = isModObject(candidate.messageBreakdown)
+        ? candidate.messageBreakdown
+        : undefined
+      const apiUsage =
+        candidate.apiUsage === null ||
+        (isModObject(candidate.apiUsage) &&
+          count(candidate.apiUsage.input_tokens) &&
+          count(candidate.apiUsage.output_tokens) &&
+          count(candidate.apiUsage.cache_creation_input_tokens) &&
+          count(candidate.apiUsage.cache_read_input_tokens))
+      return (
+        Array.isArray(candidate.categories) &&
+        candidate.categories.every(categoryValid) &&
+        count(candidate.totalTokens) &&
+        count(candidate.maxTokens) &&
+        candidate.maxTokens > 0 &&
+        count(candidate.rawMaxTokens) &&
+        candidate.rawMaxTokens > 0 &&
+        candidate.autocompactSource === "auto" &&
+        typeof candidate.percentage === "number" &&
+        Number.isFinite(candidate.percentage) &&
+        candidate.percentage >= 0 &&
+        Array.isArray(candidate.gridRows) &&
+        candidate.gridRows.every((row) => Array.isArray(row) && row.every(squareValid)) &&
+        typeof candidate.model === "string" &&
+        typeof candidate.estimated === "boolean" &&
+        messageBreakdown !== undefined &&
+        [
+          "toolCallTokens",
+          "toolResultTokens",
+          "attachmentTokens",
+          "assistantMessageTokens",
+          "userMessageTokens",
+          "redirectedContextTokens",
+          "unattributedTokens"
+        ].every((key) => count(messageBreakdown[key])) &&
+        Array.isArray(messageBreakdown.toolCallsByType) &&
+        messageBreakdown.toolCallsByType.every(
+          (entry) =>
+            isModObject(entry) &&
+            typeof entry.name === "string" &&
+            count(entry.callTokens) &&
+            count(entry.resultTokens)
+        ) &&
+        Array.isArray(messageBreakdown.attachmentsByType) &&
+        messageBreakdown.attachmentsByType.every(
+          (entry) => isModObject(entry) && typeof entry.name === "string" && count(entry.tokens)
+        ) &&
+        apiUsage
+      )
+    }
     if (
       !isModObject(value) ||
       !isModObject(value.context) ||
@@ -106,6 +238,7 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
       (value.context.tokens !== undefined && !count(value.context.tokens)) ||
       (value.context.percent !== undefined &&
         (!count(value.context.percent) || value.context.percent > 100)) ||
+      (value.context.breakdown !== undefined && !breakdownValid(value.context.breakdown)) ||
       !Array.isArray(value.rateLimits) ||
       value.rateLimits.some(
         (limit) =>
@@ -225,6 +358,7 @@ export async function runBasicSdk(
       signal: AbortSignal,
       usageArgs?: FunctionSessionUsageArgs
     ): Promise<ModJson>
+    compactSession?(instructions: string, signal: AbortSignal): Promise<ModJson>
     files?: FunctionFileAccess
   }
 ): Promise<ModJson | undefined> {
@@ -260,6 +394,13 @@ export async function runBasicSdk(
     return method === "session.usage"
       ? context.readSession(method, signal, input as FunctionSessionUsageArgs)
       : context.readSession(method, signal)
+  }
+  if (method === "session.compact") {
+    if (!context.compactSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
+    return context.compactSession(
+      typeof input.instructions === "string" ? input.instructions : "",
+      signal
+    )
   }
   if (method === "session.id") return context.threadId
   if (method === "session.cwd") return context.workspace

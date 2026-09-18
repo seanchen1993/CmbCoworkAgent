@@ -47,7 +47,8 @@ it("observes real model/tool/final graph states and preserves completion recover
     bindFunctionSession: vi.fn(),
     updateFunctionSessionMessages: vi.fn((_authority, messages: readonly unknown[]) => {
       current = messages
-    })
+    }),
+    updateFunctionSessionRequest: vi.fn()
   }
   const model = new ScriptedModel([
     new AIMessage({ content: "", response_metadata: { finish_reason: "stop" } }),
@@ -125,7 +126,8 @@ it("observes the private compaction boundary through real graph middleware state
         observedMessages = messages
         observedState = state
       }
-    )
+    ),
+    updateFunctionSessionRequest: vi.fn()
   }
   try {
     const agent = createAgent({

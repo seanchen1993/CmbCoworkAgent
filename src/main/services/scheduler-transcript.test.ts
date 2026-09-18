@@ -148,7 +148,8 @@ it.each(["answer", "cancel", "error"])(
       functionTurns: lifecycle,
       releaseExpiredRuntimeBindings: vi.fn(),
       bindFunctionSession: vi.fn(),
-      updateFunctionSessionMessages: vi.fn()
+      updateFunctionSessionMessages: vi.fn(),
+      updateFunctionSessionRequest: vi.fn()
     }
     fixture.manager = manager
     let runtimeOptions: CreateAgentRuntimeOptions | undefined

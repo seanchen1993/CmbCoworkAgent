@@ -12,6 +12,15 @@ import { ModError } from "../mods/errors"
 import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
 import type { FunctionToolInfo } from "../../shared/mods/v2/tools"
 import { currentFunctionExecution } from "../mods/v2/execution-context"
+import { getLocalThreadRunLease } from "./thread-run-lease"
+import {
+  captureThreadMutationLease,
+  withThreadMutationLeaseLock
+} from "../ipc/thread-run-mutation-lock"
+import type { ModJson } from "../../shared/mods/types"
+import { encodeModJson, parseModJson } from "../../shared/mods/validation"
+import { isModJson } from "../../shared/mods/v2/contracts"
+import { projectFunctionSessionMessages } from "../mods/v2/session-transcript"
 import { recordSuccessfulToolExample } from "../mcp/tool-example-store"
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // Runtime: agent lifecycle and middleware orchestration
@@ -48,7 +57,11 @@ import {
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
-import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
+import {
+  createCmbContextController,
+  createCmbSummarizationMiddleware,
+  type CmbContextController
+} from "./context-summarization-middleware"
 import {
   createTurnCompletionGateMiddleware,
   type TurnCompletionRecoveryCallback
@@ -114,7 +127,7 @@ import {
   humanInTheLoopMiddleware,
   tool as lcTool
 } from "langchain"
-import { HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { BaseMessage, HumanMessage, RemoveMessage, ToolMessage } from "@langchain/core/messages"
 import { Runnable, RunnableLambda } from "@langchain/core/runnables"
 import { Command, isGraphBubbleUp } from "@langchain/langgraph"
 import { z } from "zod"
@@ -2295,6 +2308,7 @@ function assembleDeepAgent(
     registrySubagentSpecs = [],
     modRuntimeAuthority,
     modSessionModel,
+    modSessionCompact,
     modTurnRunId,
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
@@ -2437,6 +2451,7 @@ function assembleDeepAgent(
       fallbackModel: configureContextCompactionModel(summarizationFallbackModel)
     })
   }
+  const mainSummarizationController = createCmbContextController(mainSummarizationOptions)
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3002,7 +3017,7 @@ function assembleDeepAgent(
   // common exit so general-purpose, registry, and custom string-prompt agents
   // receive the same guidance exactly once. Opaque Runnable agents own their
   // prompt assembly and cannot be safely rewritten here.
-  const availableSubagents = unresolvedSubagents.map((subagent: any) => {
+  const availableSubagents = unresolvedSubagents.map((subagent) => {
     if (
       Runnable.isRunnable(subagent) ||
       !subagent ||
@@ -3177,7 +3192,7 @@ function assembleDeepAgent(
       // and BEFORE humanInTheLoop (a steered message must never race a pending
       // tool-approval interrupt). See createCurrentRunMessageQueueMiddleware.
       createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken),
-      createCmbSummarizationMiddleware(mainSummarizationOptions),
+      mainSummarizationController.middleware,
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
       // invalid_tool_calls into normalized tool_calls (the guard middleware above
@@ -3203,7 +3218,17 @@ function assembleDeepAgent(
               modRuntimeAuthority,
               modSessionModel,
               modTurnRunId,
-              summarizationMaxInputTokens
+              summarizationMaxInputTokens,
+              modSessionCompact
+                ? (instructions, messages, state, signal) =>
+                    modSessionCompact(
+                      mainSummarizationController,
+                      instructions,
+                      messages,
+                      state,
+                      signal
+                    )
+                : undefined
             )
           ]
         : [])
@@ -7054,6 +7079,151 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     ? resolvedProjectContextPrompt
     : combinedAgentsPrompt
 
+  const runtimeAgentRef: { current?: DeepAgent } = {}
+  const stableMessageFingerprint = (value: unknown): string => {
+    const seen = new WeakSet<object>()
+    const visit = (candidate: unknown): string => {
+      if (candidate === null) return "null"
+      if (typeof candidate === "string") return JSON.stringify(candidate)
+      if (typeof candidate === "number" || typeof candidate === "boolean") return String(candidate)
+      if (typeof candidate === "bigint") return `${candidate.toString()}n`
+      if (typeof candidate !== "object") return String(candidate)
+      if (BaseMessage.isInstance(candidate))
+        return visit({
+          type: candidate.getType(),
+          id: candidate.id,
+          content: candidate.content,
+          additional_kwargs: candidate.additional_kwargs,
+          response_metadata: candidate.response_metadata,
+          tool_calls: (candidate as BaseMessage & { tool_calls?: unknown[] }).tool_calls,
+          invalid_tool_calls: (candidate as BaseMessage & { invalid_tool_calls?: unknown[] })
+            .invalid_tool_calls
+        })
+      if (seen.has(candidate)) return "[Circular]"
+      seen.add(candidate)
+      if (Array.isArray(candidate)) return `[${candidate.map(visit).join(",")}]`
+      const record = candidate as Record<string, unknown>
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${visit(record[key])}`)
+        .join(",")}}`
+    }
+    return visit(value)
+  }
+  const compactMainSession = async (
+    controller: CmbContextController,
+    instructions: string,
+    messages: readonly unknown[],
+    state: { _summarizationEvent?: unknown },
+    signal: AbortSignal
+  ): Promise<ModJson> => {
+    signal.throwIfAborted()
+    if (getLocalThreadRunLease(threadId))
+      throw new ModError("MODS_CONTEXT_COMPACTION_ACTIVE")
+    const agentToUpdate = runtimeAgentRef.current
+    if (!agentToUpdate) throw new ModError("MODS_SESSION_UNAVAILABLE")
+    const lease = captureThreadMutationLease(threadId)
+    if (!lease) throw new ModError("MODS_SESSION_UNAVAILABLE")
+    const config = { configurable: { thread_id: threadId } }
+    const beforePrepare = (await agentToUpdate.getState(config)) as unknown as {
+      values?: { messages?: readonly unknown[] }
+      config?: { configurable?: { checkpoint_id?: string } }
+    }
+    const expectedCheckpointId = beforePrepare.config?.configurable?.checkpoint_id
+    if (!Array.isArray(beforePrepare.values?.messages)) throw new ModError("MODS_CONTEXT_CHANGED")
+    const liveMessages = messages.filter(
+      (message): message is BaseMessage => BaseMessage.isInstance(message)
+    )
+    if (liveMessages.length !== messages.length) throw new ModError("MODS_CONTEXT_CHANGED")
+    const plan = await controller.prepareLatest(
+      liveMessages,
+      state,
+      instructions,
+      signal
+    )
+    if ("skip" in plan) return { skip: plan.skip } as ModJson
+    signal.throwIfAborted()
+    return withThreadMutationLeaseLock(lease, async () => {
+      if (getLocalThreadRunLease(threadId))
+        throw new ModError("MODS_CONTEXT_COMPACTION_ACTIVE")
+      const current = (await agentToUpdate.getState(config)) as unknown as {
+        values?: { messages?: readonly unknown[] }
+        config?: { configurable?: { checkpoint_id?: string } }
+      }
+      const currentMessages = current.values?.messages
+      if (
+        !Array.isArray(currentMessages) ||
+        stableMessageFingerprint(currentMessages) !== stableMessageFingerprint(messages) ||
+        (expectedCheckpointId !== undefined &&
+          current.config?.configurable?.checkpoint_id !== expectedCheckpointId)
+      )
+        throw new ModError("MODS_CONTEXT_CHANGED")
+      modRuntimeAuthority?.assertLive()
+      const committed = plan.commitArchive ? await plan.commitArchive(signal) : undefined
+      const messagesToCommit = committed?.messages ?? plan.messages
+      const updateToCommit = committed?.update ?? plan.update
+      let checkpointUpdated = false
+      try {
+        signal.throwIfAborted()
+        await agentToUpdate.updateState(
+          config,
+          {
+            messages: [new RemoveMessage({ id: "__remove_all__" }), ...messagesToCommit],
+            ...updateToCommit
+          },
+          "model_request"
+        )
+        checkpointUpdated = true
+        signal.throwIfAborted()
+        await checkpointer.flushStrict()
+        modRuntimeAuthority?.assertLive()
+      } catch (error) {
+        // updateState can fail before a checkpoint is durable. Compensate the
+        // staged archive in that case; a flush failure keeps the pointer because
+        // SQLite may already have committed the checkpoint before WAL syncing.
+        if (committed && plan.rollbackArchive && !checkpointUpdated) {
+          try {
+            await plan.rollbackArchive(signal)
+          } catch {
+            // Preserve the original mutation error; the archive path is never
+            // reported as a successful result below.
+          }
+        }
+        throw error
+      }
+      const compactManager = getModsManager()
+      if (compactManager && modRuntimeAuthority) {
+        compactManager.updateFunctionSessionMessages(
+          modRuntimeAuthority,
+          messagesToCommit,
+          { _summarizationEvent: updateToCommit._summarizationEvent }
+        )
+        const currentSession = compactManager.captureFunctionSession(workspacePath, threadId)
+        try {
+          currentSession.assertLive()
+          if (currentSession.request) {
+            compactManager.updateFunctionSessionRequest(modRuntimeAuthority, {
+              ...currentSession.request,
+              messages: messagesToCommit
+            })
+          }
+        } finally {
+          currentSession.release()
+        }
+      }
+      const projectedMessages = parseModJson(
+        encodeModJson(projectFunctionSessionMessages(messagesToCommit))
+      )
+      if (!isModJson(projectedMessages)) throw new ModError("MODS_SDK_RESULT")
+      return {
+        messages: projectedMessages,
+        tokensBefore: plan.estimatedTokensBefore,
+        tokensAfter: plan.estimatedTokensAfter,
+        ...(committed ? { filePath: committed.filePath } : {})
+      }
+    })
+  }
+
   const agent = createDeepAgent({
     model,
     summarizationModel: contextCompactionModel,
@@ -7119,6 +7289,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     onFailureFuseNotice,
     modRuntimeAuthority,
     modSessionModel: customConfig.model,
+    modSessionCompact: compactMainSession,
     modTurnRunId: options.modTurnRunId ?? options.currentRunMessageQueueOwnerToken,
     onContextCompaction,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
@@ -7181,6 +7352,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       return failureFuseDecision
     }
   })
+  runtimeAgentRef.current = agent
 
   console.log("[Runtime] Agent created with skills parameter:", mainSkillSources)
   console.log(

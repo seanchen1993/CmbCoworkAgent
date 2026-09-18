@@ -79,6 +79,12 @@ interface FunctionManagerHost {
     signal: AbortSignal,
     usageArgs?: import("../../../shared/mods/v2/session").FunctionSessionUsageArgs
   ): Promise<ModJson>
+  compactSession?(
+    workspace: string,
+    threadId: string,
+    instructions: string,
+    signal: AbortSignal
+  ): Promise<ModJson>
   fileScope?(workspace: string, threadId: string): FunctionFileScope
   listTools?(workspace: string, threadId: string, signal: AbortSignal): Promise<FunctionToolInfo[]>
   filterTools?(workspace: string, threadId: string, tools: FunctionToolInfo[]): FunctionToolInfo[]
@@ -368,6 +374,15 @@ export class FunctionModsManager {
               signal,
               usageArgs
             )
+            assertLive()
+            const result = await this.host.publish(workspace, value, signal)
+            assertLive()
+            return result
+          },
+          compactSession: async (instructions, signal) => {
+            assertLive()
+            if (!this.host.compactSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
+            const value = await this.host.compactSession(workspace, threadId, instructions, signal)
             assertLive()
             const result = await this.host.publish(workspace, value, signal)
             assertLive()

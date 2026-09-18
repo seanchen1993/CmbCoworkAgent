@@ -4,6 +4,14 @@ import { SummarizationEventSchema } from "./context-summarization-middleware"
 import { currentCompactedContextStart } from "./context-usage"
 import type { ModsManager } from "../mods/manager"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
+import type { ModJson } from "../../shared/mods/types"
+
+export type FunctionSessionCompactor = (
+  instructions: string,
+  messages: readonly unknown[],
+  state: { _summarizationEvent?: unknown },
+  signal: AbortSignal
+) => Promise<ModJson>
 
 /** A shared graph resolves its own private invocation; concurrent children never borrow main state. */
 export function createFunctionChildTurnMiddleware(manager: ModsManager) {
@@ -22,9 +30,11 @@ export function createFunctionSessionViewMiddleware(
   authority: ModRuntimeAuthority,
   model: string,
   runId?: string,
-  contextWindow?: number
+  contextWindow?: number,
+  compact?: FunctionSessionCompactor
 ) {
-  manager.bindFunctionSession(authority, model, contextWindow)
+  if (compact) manager.bindFunctionSession(authority, model, contextWindow, compact)
+  else manager.bindFunctionSession(authority, model, contextWindow)
   const capture = (
     state: { messages: readonly unknown[]; _summarizationEvent?: unknown },
     pendingStartIndex?: number
@@ -33,7 +43,7 @@ export function createFunctionSessionViewMiddleware(
       _summarizationEvent:
         pendingStartIndex === undefined
           ? state._summarizationEvent
-          : { usageStartIndex: pendingStartIndex }
+          : { ...(state._summarizationEvent ?? {}), usageStartIndex: pendingStartIndex }
     })
   }
   return createMiddleware({
@@ -54,6 +64,11 @@ export function createFunctionSessionViewMiddleware(
     },
     wrapModelCall: async (request, handler) => {
       capture(request.state, currentCompactedContextStart())
+      manager.updateFunctionSessionRequest(authority, {
+        messages: request.messages,
+        systemMessage: request.systemMessage,
+        tools: request.tools
+      })
       return handler(request)
     },
     wrapToolCall: async (request, handler) => {

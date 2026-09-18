@@ -23,8 +23,68 @@ export interface FunctionSessionUsageArgs {
   columns?: number
 }
 
+export type FunctionSessionContextCategoryKind = "used" | "free" | "buffer" | "deferred"
+
+export type FunctionSessionContextCategory = ModObject & {
+  name: string
+  tokens: number
+  color: string
+  isDeferred: boolean
+  kind: FunctionSessionContextCategoryKind
+  /** LangChain and JSON token counts are estimates, never provider billing data. */
+  estimated: boolean
+}
+
+export type FunctionSessionContextGridSquare = ModObject & {
+  color: string
+  isFilled: boolean
+  categoryName: string
+  tokens: number
+  percentage: number
+  squareFullness: number
+}
+
+export type FunctionSessionApiUsage = ModObject & {
+  input_tokens: number
+  output_tokens: number
+  cache_creation_input_tokens: number
+  cache_read_input_tokens: number
+}
+
+export type FunctionSessionMessageBreakdown = ModObject & {
+  toolCallTokens: number
+  toolResultTokens: number
+  attachmentTokens: number
+  assistantMessageTokens: number
+  userMessageTokens: number
+  redirectedContextTokens: number
+  unattributedTokens: number
+  toolCallsByType: Array<{ name: string; callTokens: number; resultTokens: number }>
+  attachmentsByType: Array<{ name: string; tokens: number }>
+}
+
+export type FunctionSessionContextBreakdown = ModObject & {
+  categories: FunctionSessionContextCategory[]
+  totalTokens: number
+  maxTokens: number
+  rawMaxTokens: number
+  autocompactSource: "auto"
+  percentage: number
+  gridRows: FunctionSessionContextGridSquare[][]
+  model: string
+  messageBreakdown: FunctionSessionMessageBreakdown
+  apiUsage: FunctionSessionApiUsage | null
+  /** True when any context category uses the local estimator. */
+  estimated: boolean
+}
+
 export interface FunctionSessionUsage {
-  context: { window: number; tokens?: number; percent?: number }
+  context: {
+    window: number
+    tokens?: number
+    percent?: number
+    breakdown?: FunctionSessionContextBreakdown
+  }
   rateLimits: Array<{ kind: string; percentUsed: number; resetsAt?: string }>
   cost?: { usd: number }
 }

@@ -21,6 +21,7 @@ import {
 } from "../../shared/checkpoint-transcript"
 import {
   createCmbSummarizationMiddleware,
+  createCmbContextController,
   isCmbContextOverflow,
   SUMMARIZATION_STATE_OWNER_KEY
 } from "./context-summarization-middleware"
@@ -145,6 +146,102 @@ function largeToolResult(start: string, end: string): string {
   return `${start}\n${"x".repeat(23_900)}\n${end}`
 }
 
+it("prepares explicit compaction without invoking the outer model or archiving", async () => {
+  const writes: string[] = []
+  const controller = createCmbContextController({
+    model: new FakeListChatModel({ responses: [validSummary("manual compaction")] }),
+    backend: {
+      write: async (_path: string, content?: string) => {
+        writes.push(content ?? "")
+        return { path: _path }
+      },
+      downloadFiles: async () => []
+    } as never,
+    maxInputTokens: 32_000
+  })
+  const plan = await controller.prepare(
+    {
+      messages: [
+        new HumanMessage("MANUAL_COMPACT_ORIGINAL"),
+        new AIMessage("MANUAL_COMPACT_PROGRESS"),
+        new HumanMessage("MANUAL_COMPACT_LATEST")
+      ],
+      state: {}
+    },
+    "Keep the latest user intent and exact file paths.",
+    new AbortController().signal
+  )
+  expect("skip" in plan).toBe(false)
+  if ("skip" in plan) return
+  expect(plan.messages).toHaveLength(1)
+  expect(plan.messages[0].additional_kwargs).toMatchObject({ lc_source: "summarization" })
+  expect(plan.update._summarizationEvent.filePath).toBeNull()
+  expect(plan.summaryAttempts).toBe(1)
+  expect(writes).toEqual([])
+  expect(plan.commitArchive).toBeDefined()
+  const committed = await plan.commitArchive!(new AbortController().signal)
+  expect(committed.filePath).toContain("/conversation_history/")
+  expect(committed.update._summarizationEvent.filePath).toBe(committed.filePath)
+  expect(writes).toHaveLength(1)
+  await plan.commitArchive!(new AbortController().signal)
+  expect(writes).toHaveLength(1)
+})
+
+it("stages an explicit archive once and exposes compensation for a failed checkpoint", async () => {
+  const write = vi.fn(async (path: string) => ({ path }))
+  const remove = vi.fn(async () => ({}))
+  const controller = createCmbContextController({
+    model: new FakeListChatModel({ responses: [validSummary("compensation summary")] }),
+    backend: { write, removeInternalArtifact: remove, downloadFiles: async () => [] } as never,
+    maxInputTokens: 32_000
+  })
+  const plan = await controller.prepare(
+    { messages: [new HumanMessage("archive me")], state: {} },
+    "Keep the request.",
+    new AbortController().signal
+  )
+  if ("skip" in plan) throw Error("expected a compaction plan")
+  const committed = await plan.commitArchive!(new AbortController().signal)
+  await plan.commitArchive!(new AbortController().signal)
+  expect(write).toHaveBeenCalledTimes(1)
+  await plan.rollbackArchive!(new AbortController().signal)
+  expect(remove).toHaveBeenCalledWith(committed.filePath)
+})
+
+it("removes an explicit archive when cancellation arrives during archive staging", async () => {
+  let releaseWrite!: () => void
+  let markWriteStarted!: () => void
+  const writeStarted = new Promise<void>((resolve) => {
+    markWriteStarted = resolve
+  })
+  const write = vi.fn(async () => {
+    markWriteStarted()
+    await new Promise<void>((release) => {
+      releaseWrite = release
+    })
+    return { path: "/conversation_history/compact-cancelled.md" }
+  })
+  const remove = vi.fn(async () => ({}))
+  const controller = createCmbContextController({
+    model: new FakeListChatModel({ responses: [validSummary("cancelled archive")] }),
+    backend: { write, removeInternalArtifact: remove, downloadFiles: async () => [] } as never,
+    maxInputTokens: 32_000
+  })
+  const plan = await controller.prepare(
+    { messages: [new HumanMessage("archive cancellation")], state: {} },
+    "Keep the request.",
+    new AbortController().signal
+  )
+  if ("skip" in plan) throw Error("expected a compaction plan")
+  const abort = new AbortController()
+  const pending = plan.commitArchive!(abort.signal)
+  await writeStarted
+  abort.abort()
+  releaseWrite()
+  await expect(pending).rejects.toMatchObject({ name: "AbortError" })
+  expect(remove).toHaveBeenCalledTimes(1)
+})
+
 function realFailureShapeMessages(): SummaryRequest["messages"] {
   const toolCalls = [1, 2, 3, 4].map((index) => ({
     name: "read_file",
@@ -227,7 +324,8 @@ describe("CmbCowork context compaction middleware", () => {
       ) {
         observedMessages = messages
         observedState = state
-      }
+      },
+      updateFunctionSessionRequest: vi.fn()
     }
     class Model extends FakeChatModel {
       bindTools() {

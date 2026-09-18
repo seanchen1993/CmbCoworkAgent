@@ -4837,6 +4837,20 @@ export class LocalSandbox
     }
   }
 
+  /** Remove a staged application artifact during a failed checkpoint commit. */
+  async removeInternalArtifact(filePath: string): Promise<WriteResult> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return { error: `Invalid internal artifact path: ${filePath}` }
+    return this.withFileLock(resolvedPath, async () => {
+      try {
+        await fs.rm(resolvedPath, { force: true })
+        return {}
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    })
+  }
+
   /** Append to an app-managed artifact under the same path and symlink checks. */
   async appendInternalArtifact(filePath: string, content: string): Promise<WriteResult> {
     const resolvedPath = await this.validateInternalArtifactPath(filePath)

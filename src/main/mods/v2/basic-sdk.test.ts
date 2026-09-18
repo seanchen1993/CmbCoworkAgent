@@ -1,5 +1,5 @@
 import { expect, it } from "vitest"
-import { basicSdkInput, validateBasicInput, validateBasicResult } from "./basic-sdk"
+import { basicSdkInput, runBasicSdk, validateBasicInput, validateBasicResult } from "./basic-sdk"
 import type { ModObject } from "../../../shared/mods/types"
 
 it("preserves usage options and rejects invalid breakdowns and grid widths", () => {
@@ -46,4 +46,36 @@ it("distinguishes unknown usage from fabricated or invalid numeric readings", ()
       cost: { usd: -1 }
     })
   ).toThrow("MODS_SDK_RESULT")
+})
+
+it("routes session.compact through the host mutation boundary", async () => {
+  const calls: Array<{ instructions: string; aborted: boolean }> = []
+  const signal = new AbortController().signal
+  const result = await runBasicSdk("session.compact", { instructions: "Keep API decisions." }, {
+    threadId: "thread",
+    workspace: "/workspace",
+    plugin: "example",
+    registry: new Map(),
+    signal,
+    compactSession: async (instructions, receivedSignal) => {
+      calls.push({ instructions, aborted: receivedSignal.aborted })
+      return {
+        messages: [{ role: "user", text: "summary", toolUses: [] }],
+        tokensBefore: 1200,
+        tokensAfter: 240
+      }
+    }
+  })
+  expect(result).toEqual({
+    messages: [{ role: "user", text: "summary", toolUses: [] }],
+    tokensBefore: 1200,
+    tokensAfter: 240
+  })
+  expect(calls).toEqual([{ instructions: "Keep API decisions.", aborted: false }])
+  expect(() => validateBasicInput("session.compact", { instructions: "x".repeat(32001) })).toThrow(
+    "MODS_CONTEXT_COMPACTION_INSTRUCTIONS"
+  )
+  expect(() => validateBasicResult("session.compact", { messages: [] })).toThrow(
+    "MODS_SDK_RESULT"
+  )
 })

@@ -63,6 +63,7 @@
     ],
     "partialDesktopSdk": [
       "session.usage",
+      "session.compact",
       "ui.open",
       "ui.close",
       "ui.resolve",
@@ -163,24 +164,24 @@
         "main conversation even for shared child callers",
         "newest 4096 eligible messages; 100000 source messages; 1 MiB raw row/output; node/depth budgets",
         "oversized or malformed exact reads reject instead of using UI previews",
-        "usage base reads are tracked separately; breakdown/compact remain pending; desktop turn lifecycle is tracked separately"
+        "usage breakdown requires a bound live model request; compact is desktop-live and checkpoint/archive mutation is serialized; desktop turn lifecycle is tracked separately"
       ],
       "upstreamConformanceAdded": 6,
-      "validation": "62 focused + 473 Mods + 37 process + 49 Electron E2E pass; full 3487: 3456 pass, 26 unchanged baseline failures, 5 skipped; standalone 74/81 with 7 unchanged failures; subsequent hardening 38 focused + Node/Web pass, no new lint issues; disabled-read first +22.15% retained, isolated 5x1000 per arm P95 changes +4.66/-2.44/-4.81/+1.87/+2.17%, full performance gate pending",
+      "validation": "100 focused session/usage/compaction tests pass; manager 18/18 and process E2E 37/37 pass; full v26 run recorded 3595 pass, 40 failures, 5 skipped and one unrelated async error under single-worker timing; desktop E2E passed 57 scenarios before the existing deadline; v26 ABBA host P95 +0.61% and function-process P95 -0.56%; full performance gate pending",
       "fullParity": false
     },
     "contextUsage": {
-      "revision": "desktop-context-usage-v25",
+      "revision": "desktop-context-compaction-v26",
       "design": "mods-v2-context-usage-2026-09-18.md",
       "scope": "actual main live window plus exact read-only checkpoint worker; latest valid response input including cache, never turn accumulation; durable and in-flight native compaction boundaries",
       "limits": [
-        "breakdown and explicit compact remain pending",
+        "breakdown is available from a bound live model request with estimated system/tools/messages categories and separate provider apiUsage; dynamic MCP/memory/skills/agents sources remain omitted; explicit compact publishes a staged archive pointer with checkpoint compensation",
         "unknown or zero input omits tokens/percent; legacy compaction boundary remains unknown until a new response",
         "no real cost ledger or subscription rate-limit reading; cost omitted and rateLimits empty",
         "100000 scanned messages, 1 MiB cold row; cancellation and scope/config invalidation enforced"
       ],
-      "upstreamConformanceAdded": 3,
-      "validation": "839 focused regressions, Node/Web types, 37 process checks and final 63 Electron E2E pass; frozen upstream fixture 3/3 pass; full Vitest 3630: 3599 pass, 26 unchanged baseline failures, 5 skipped, no changed failures; standalone completed 70 before its known 180s workflow-driver hang with 65 pass and 5 unchanged failures; final E2E no-op 1000 P95 8.6033ms, pending 0, disabled-read comparison +5.27%; explicit breakdown/compact and full performance gate remain pending",
+      "upstreamConformanceAdded": 4,
+      "validation": "focused controller, SDK, host, checkpoint, archive-compensation and occupied-lease tests pass; full process E2E and usage-breakdown 1000-sample performance records are retained in output/mods-v2-validation/v26-*",
       "fullParity": false
     },
     "toolPermission": {
@@ -300,7 +301,7 @@
     {"name":"attribution.text","target":"planned-adapter","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},
     {"name":"session.start","target":"planned-adapter","batch":"B3","acceptance":["A04"],"differences":["D06"]},
     {"name":"session.receive","target":"planned-adapter","batch":"B3","acceptance":["A04"],"differences":["D01"]},
-    {"name":"session.compact","target":"planned-adapter","batch":"B6","acceptance":["A04","A10","A11"],"differences":["D05"]},
+    {"name":"session.compact","target":"desktop-live-adapter","batch":"B6","acceptance":["A04","A10","A11"],"differences":["D05"]},
     {"name":"session.attach","target":"planned-adapter","batch":"B3","acceptance":["A04"],"differences":["D03"]},
     {"name":"session.detach","target":"planned-adapter","batch":"B3","acceptance":["A04"],"differences":["D03"]},
     {"name":"plugin.register","target":"planned-adapter","batch":"B4","acceptance":["A03","A07"],"differences":["D01","D08"]},
@@ -325,7 +326,7 @@
     {"name":"session.surface","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},
     {"name":"session.surfaces","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},
     {"name":"session.authorize","target":"conditional-empty","batch":"B3","acceptance":["A03","A05"],"differences":["D04"],"note":"No Anthropic first-party credential is presumed; return the upstream empty result, never a CMB credential."},
-    {"name":"session.usage","target":"planned-adapter","batch":"B6","acceptance":["A05","A10"],"differences":["D04","D05"]},
+    {"name":"session.usage","target":"live-context-adapter","batch":"B6","acceptance":["A05","A10"],"differences":["D04","D05"],"note":"breakdown is estimated from the captured live request; provider apiUsage remains separate and unavailable dynamic sources are omitted"},
     {"name":"turn.abort","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D02"]},
     {"name":"tool.list","target":"planned-adapter","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02"]},
     {"name":"tool.register","target":"planned-adapter","batch":"B4","acceptance":["A03","A05"],"differences":["D01","D02"]},
@@ -402,7 +403,7 @@
     {"namespace":"model","members":[{"name":"model.complete","target":"planned-adapter","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"]},{"name":"model.fork","target":"planned-adapter","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"]},{"name":"model.classify","target":"planned-adapter","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"]}]},
     {"namespace":"audio","members":[{"name":"audio.play","target":"planned-adapter","batch":"B5","acceptance":["A05","A08"],"differences":["D01","D03"]},{"name":"audio.speak","target":"planned-adapter","batch":"B5","acceptance":["A05","A08"],"differences":["D01","D03"]}]},
     {"namespace":"mcp","members":[{"name":"mcp.call","target":"planned-adapter","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02"]}]},
-    {"namespace":"session","members":[{"name":"session.messages","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.cwd","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.model","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.turns","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.id","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.repo","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.surfaces","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},{"name":"session.surface","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},{"name":"session.usage","target":"planned-adapter","batch":"B6","acceptance":["A05","A10"],"differences":["D04","D05"]},{"name":"session.compact","target":"planned-adapter","batch":"B6","acceptance":["A04","A10","A11"],"differences":["D05"]},{"name":"session.authorize","target":"conditional-empty","batch":"B3","acceptance":["A03","A05"],"differences":["D04"],"note":"No Anthropic first-party credential is presumed; return the upstream empty result, never a CMB credential."}]},
+    {"namespace":"session","members":[{"name":"session.messages","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.cwd","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.model","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.turns","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.id","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.repo","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.surfaces","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},{"name":"session.surface","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},{"name":"session.usage","target":"live-context-adapter","batch":"B6","acceptance":["A05","A10"],"differences":["D04","D05"],"note":"breakdown is estimated from the captured live request; provider apiUsage remains separate and unavailable dynamic sources are omitted"},{"name":"session.compact","target":"desktop-live-adapter","batch":"B6","acceptance":["A04","A10","A11"],"differences":["D05"]},{"name":"session.authorize","target":"conditional-empty","batch":"B3","acceptance":["A03","A05"],"differences":["D04"],"note":"No Anthropic first-party credential is presumed; return the upstream empty result, never a CMB credential."}]},
     {"namespace":"turn","members":[{"name":"turn.abort","target":"planned-adapter","batch":"B3","acceptance":["A04","A05"],"differences":["D02"]}]},
     {"namespace":"prompt","members":[{"name":"prompt.submit","target":"planned-adapter","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},{"name":"prompt.fill","target":"planned-adapter","batch":"B5","acceptance":["A08","A09"],"differences":[]},{"name":"prompt.suggest","target":"planned-adapter","batch":"B5","acceptance":["A08"],"differences":[]}]},
     {"namespace":"tool","members":[{"name":"tool.list","target":"planned-adapter","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02"]},{"name":"tool.call","target":"planned-adapter","batch":"B2","acceptance":["A03","A05"],"differences":["D01","D02"]},{"name":"tool.check","target":"planned-adapter","batch":"B3","acceptance":["A03","A05"],"differences":["D01"]},{"name":"tool.register","target":"planned-adapter","batch":"B4","acceptance":["A03","A05"],"differences":["D01","D02"]}]},

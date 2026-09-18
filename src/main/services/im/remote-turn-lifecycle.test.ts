@@ -147,7 +147,8 @@ it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision", "ref
       functionTurns: lifecycle,
       releaseExpiredRuntimeBindings: vi.fn(),
       bindFunctionSession: vi.fn(),
-      updateFunctionSessionMessages: vi.fn()
+      updateFunctionSessionMessages: vi.fn(),
+      updateFunctionSessionRequest: vi.fn()
     }
     fixture.manager = manager
     fixture.revision = ending === "revision"

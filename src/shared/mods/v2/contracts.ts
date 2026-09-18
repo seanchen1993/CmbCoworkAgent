@@ -3,7 +3,7 @@ import type { ModJson, ModObject } from "../types"
 export const MODS_V2_API = "cmb.mods/v2" as const
 export const CLAUDE_MODS_PROFILE = "claude-code/2.1.273" as const
 /** Bump when expanding host authority so an old digest grant cannot silently gain capabilities. */
-export const FUNCTION_HOST_REVISION = "desktop-context-usage-v25" as const
+export const FUNCTION_HOST_REVISION = "desktop-context-compaction-v26" as const
 export const MOD_TIERS = ["prepend", "user", "append", "builtin", "core"] as const
 export type ModTier = (typeof MOD_TIERS)[number]
 
@@ -89,6 +89,14 @@ export class ModFunctionError extends Error {
 
 export function isModObject(value: unknown): value is ModObject {
   return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+export function isModJson(value: unknown): value is ModJson {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true
+  if (typeof value === "number") return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every((entry) => isModJson(entry))
+  if (!isModObject(value)) return false
+  return Object.values(value).every((entry) => isModJson(entry))
 }
 
 /** No regular expressions execute on the host while matching plugin event patterns. */

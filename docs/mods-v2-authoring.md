@@ -20,10 +20,15 @@
 模型是否选用工具取决于已配置模型。首次发消息前就可用 `/claw-tools` 查看当前会话工具摘要，
 用 `/claw-tools read_file` 查看某个工具的完整说明；包括当前已注册工具。
 `/claw-session` 查看主模型、用户轮次、消息数量、当前上下文占用、最近回复及 Git 仓库；查询不会调用模型。
-`await $.session.usage()` 返回 `{ context: { window, tokens?, percent? }, rateLimits, cost? }`。
+`await $.session.usage()` 返回 `{ context: { window, tokens?, percent?, breakdown? }, rateLimits, cost? }`。
 上下文占用取当前压缩窗口内最近一次有效模型响应的输入用量（包含缓存），与本轮累计用量分开。
 新会话或刚压缩后尚无实际读数时省略 `tokens/percent`；没有价格账本时省略 `cost`，没有限额读数时返回空列表。
-上下文明细 `breakdown` 和显式 `session.compact()` 仍在后续批次实现。
+`await $.session.compact({ instructions? })` 请求桌面主会话做一次显式压缩，返回
+`{ messages: FunctionSessionMessage[], tokensBefore?, tokensAfter? }` 或 `{ skip }`。压缩经过同一套摘要质量检查和上下文预算计算，只有在同线程
+检查点未变化且持久化成功后才返回结果；活动中的主回合、已撤销会话或无绑定主图会拒绝。准备阶段不调用
+外层会话模型，也不伪造用户/助手消息。归档写入使用独立的显式压缩文件路径；checkpoint 写入失败会在具备内部归档删除能力时补偿清理。
+`session.usage({ breakdown: "summary" | "full", columns })` 只在有真实 live 模型请求时可用，返回 system prompt、system tools、messages、unattributed 和 free space 分类、估算标记、消息明细及独立的 provider `apiUsage`。
+无法确认的 MCP、memory、skills 或 agents 数据会省略，不填充静态数值；没有有效 live request 时返回 `MODS_CONTEXT_BREAKDOWN_UNAVAILABLE`。
 `/claw-turn` 查看本会话的轮次事件，`/claw-turn abort` 停止正在执行的主轮次；结束时会显示插件附加说明。
 
 自建插件用已有的本地插件安装入口安装，随后在函数插件区域授权。
@@ -65,7 +70,7 @@ export function register(on) {
 
 ## SDK 事件和返回值
 
-当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces/model/messages/turns/repo/authorize`、
+当前生产会话开放：`command.register/list/run`、`session.id/cwd/surface/surfaces/model/messages/turns/repo/usage/compact/authorize`、
 `clock.now/sleep`、`store.get/set/delete/keys`、`fs.read/list/exists/stat`、`turn.abort`，以及 `$.plugin.name/root` 元数据。
 上述 SDK 操作同样经过事件链。另已接入有限的桌面 Pane：`ui.open/close`、
 同步元素表 `ui.resolve` 与 `ui.invalidate("ui.render")`，以及 `tool.call/register/list/check`、`model.complete`，范围见下文。

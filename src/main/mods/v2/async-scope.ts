@@ -36,12 +36,14 @@ export const FUNCTION_ASYNC_SCOPE = String.raw`
   globalThis.Promise = class Promise extends NativePromise {
     constructor(executor) {
       if (typeof executor !== "function") throw TypeError("executor");
-      const origin = asyncScope;
       let settled = false;
       super((resolve, reject) => executor(value => {
         if (settled) return;
         settled = true;
-        try { resolve(scopedResult(value, origin)); } catch (error) { reject(error); }
+        // The resolver's call site owns a foreign thenable's assimilation
+        // scope. A promise created in A but resolved in B must continue in B;
+        // resolving outside a guest scope must not resurrect A.
+        try { resolve(scopedResult(value, asyncScope)); } catch (error) { reject(error); }
       }, error => {
         if (settled) return;
         settled = true;
