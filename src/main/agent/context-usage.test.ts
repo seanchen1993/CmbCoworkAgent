@@ -154,6 +154,22 @@ it("projects system, tools, messages, provider usage and a bounded grid without 
   expect(result.gridRows[0]).toHaveLength(5)
 })
 
+it("keeps summary breakdowns cheap while full breakdowns use the detailed estimator", () => {
+  const input = {
+    columns: 80,
+    model: "actual-model",
+    window: 100_000,
+    systemMessage: "system instructions ".repeat(40),
+    tools: [{ name: "inspect", description: "Inspect a file ".repeat(40), input_schema: {} }],
+    messages: [new HumanMessage("message payload ".repeat(40)), new AIMessage("assistant")]
+  } as const
+  const summary = projectContextBreakdown({ ...input, detail: "summary" })
+  const full = projectContextBreakdown({ ...input, detail: "full" })
+  expect(summary.totalTokens).not.toBe(full.totalTokens)
+  expect(summary.estimated).toBe(true)
+  expect(full.estimated).toBe(true)
+})
+
 it("yields long scans and invalidates a revoked or cancelled in-flight read", async () => {
   const messages = Array.from({ length: 1000 }, () => new HumanMessage("no usage"))
   const controller = new AbortController()

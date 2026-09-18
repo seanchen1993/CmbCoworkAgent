@@ -167,7 +167,7 @@
         "usage breakdown requires a bound live model request; compact is desktop-live and checkpoint/archive mutation is serialized; desktop turn lifecycle is tracked separately"
       ],
       "upstreamConformanceAdded": 6,
-      "validation": "100 focused session/usage/compaction tests pass; manager 18/18 and process E2E 37/37 pass; full v26 run recorded 3595 pass, 40 failures, 5 skipped and one unrelated async error under single-worker timing; desktop E2E passed 57 scenarios before the existing deadline; v26 ABBA host P95 +0.61% and function-process P95 -0.56%; full performance gate pending",
+      "validation": "Mods v2 plus shared Mods v2 focused suite 364/364; manager 18/18, async-scope 16/16 and process E2E 37/37 pass; prior full v26 run recorded 3595 pass, 40 failures, 5 skipped and one unrelated async error under single-worker timing; desktop E2E passed 57 scenarios before the existing deadline; full performance gate pending",
       "fullParity": false
     },
     "contextUsage": {
@@ -181,7 +181,7 @@
         "100000 scanned messages, 1 MiB cold row; cancellation and scope/config invalidation enforced"
       ],
       "upstreamConformanceAdded": 4,
-      "validation": "focused controller, SDK, host, checkpoint, archive-compensation and occupied-lease tests pass; full process E2E and usage-breakdown 1000-sample performance records are retained in output/mods-v2-validation/v26-*",
+      "validation": "focused controller, SDK, host, checkpoint, archive-compensation, summary/full breakdown, occupied-lease and archive-retry tests pass; Mods v2 plus shared Mods v2 suite 364/364 and process E2E 37/37 pass; full process/E2E stability and usage-breakdown 1000-sample performance records remain in output/mods-v2-validation/v26-*",
       "fullParity": false
     },
     "toolPermission": {

@@ -147,8 +147,7 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
         : !messagesValid(value.messages)) ||
       (value.tokensBefore !== undefined && !count(value.tokensBefore)) ||
       (value.tokensAfter !== undefined && !count(value.tokensAfter)) ||
-      (value.filePath !== undefined &&
-        (typeof value.filePath !== "string" || value.filePath.length === 0))
+      Object.hasOwn(value, "filePath")
     )
       throw new ModFunctionError("MODS_SDK_RESULT", `MODS_SDK_RESULT: ${name}`)
     return

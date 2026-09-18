@@ -206,6 +206,9 @@ it("stages an explicit archive once and exposes compensation for a failed checkp
   expect(write).toHaveBeenCalledTimes(1)
   await plan.rollbackArchive!(new AbortController().signal)
   expect(remove).toHaveBeenCalledWith(committed.filePath)
+  const retried = await plan.commitArchive!(new AbortController().signal)
+  expect(retried.filePath).not.toBe(committed.filePath)
+  expect(write).toHaveBeenCalledTimes(2)
 })
 
 it("removes an explicit archive when cancellation arrives during archive staging", async () => {

@@ -7218,8 +7218,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       return {
         messages: projectedMessages,
         tokensBefore: plan.estimatedTokensBefore,
-        tokensAfter: plan.estimatedTokensAfter,
-        ...(committed ? { filePath: committed.filePath } : {})
+        tokensAfter: plan.estimatedTokensAfter
       }
     })
   }

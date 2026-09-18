@@ -26,7 +26,8 @@
 `await $.session.compact({ instructions? })` 请求桌面主会话做一次显式压缩，返回
 `{ messages: FunctionSessionMessage[], tokensBefore?, tokensAfter? }` 或 `{ skip }`。压缩经过同一套摘要质量检查和上下文预算计算，只有在同线程
 检查点未变化且持久化成功后才返回结果；活动中的主回合、已撤销会话或无绑定主图会拒绝。准备阶段不调用
-外层会话模型，也不伪造用户/助手消息。归档写入使用独立的显式压缩文件路径；checkpoint 写入失败会在具备内部归档删除能力时补偿清理。
+外层会话模型，也不伪造用户/助手消息。归档写入使用独立的显式压缩文件路径，但路径只保存在内部
+`SummarizationEvent`，不作为插件结果字段返回；checkpoint 写入失败会在具备内部归档删除能力时补偿清理。
 `session.usage({ breakdown: "summary" | "full", columns })` 只在有真实 live 模型请求时可用，返回 system prompt、system tools、messages、unattributed 和 free space 分类、估算标记、消息明细及独立的 provider `apiUsage`。
 无法确认的 MCP、memory、skills 或 agents 数据会省略，不填充静态数值；没有有效 live request 时返回 `MODS_CONTEXT_BREAKDOWN_UNAVAILABLE`。
 `/claw-turn` 查看本会话的轮次事件，`/claw-turn abort` 停止正在执行的主轮次；结束时会显示插件附加说明。

@@ -10,6 +10,11 @@
 
 本文档用于指导 Mods v2 后续实现、代码检视和最终验收。后续开发不得修改 UAT 工作区 `C:\ai\CmbCoworkAgent`，所有改动先在本分支完成并验证。
 
+> **v26 复核更新（2026-09-18）**：`session.usage` 的 `summary/full` 已接入不同的本地/详细估算路径；
+> `session.compact` 的外部结果已收敛为 `{ messages, tokensBefore?, tokensAfter? }` 或 `{ skip }`，内部归档指针仍保留在
+> checkpoint；归档 rollback 后可重新 staging；Mods v2 + shared 目录当前 364/364 通过，跨进程函数回归 37/37 通过。
+> 全量 Vitest 和桌面 E2E 仍按本文档门禁执行，不能因为聚焦套件通过而标记最终完成。
+
 ## 1. 最终目标
 
 让本工程的 Mods 模块具备与 Claude Code 当前 Function Hooks / Mods 会话能力一致的使用模型：
@@ -42,7 +47,7 @@
 ### 2.2 当前验证结果
 
 - TypeScript 类型检查通过。
-- Mods v2 目录聚焦测试通过：347 个测试。
+- Mods v2 与 shared Mods v2 目录聚焦测试通过：364 个测试。
 - DeepAgents 压缩相关测试通过：78 个测试。
 - Electron 构建通过。
 - 修改文件的 quiet ESLint 通过。
@@ -50,11 +55,11 @@
 
 ### 2.3 当前未完成项
 
-1. `session.usage({ breakdown: "summary" | "full" })` 仍未实现。
-2. 显式压缩的历史归档指针和重启恢复语义仍需补齐。
-3. 显式压缩与 checkpoint 并发更新的一致性仍需进一步加固。
-4. v26 尚未重新执行全量 Vitest、standalone UAT、E2E 和性能回检。
-5. 当前 v26 改动尚未提交。
+1. breakdown 的动态 MCP、memory、skills、agents 分类仍保持 omission，尚未达到完整 upstream parity。
+2. 显式压缩的历史归档指针和重启恢复语义仍需补齐更多真实重启验证。
+3. 显式压缩与 checkpoint 并发更新的一致性仍需继续加固。
+4. v26 全量 Vitest、standalone UAT、E2E 和性能回检仍未全部达到发布门禁。
+5. 本轮 source/doc 修复提交前仍需完成最终检视和验证记录。
 
 ## 3. 历史调研、设计和反编译参考材料
 
@@ -240,7 +245,7 @@ output/mods-v2-validation/v26-rejected-draft.patch
 - 明确 `prepare` 阶段与 `commit` 阶段的边界。
 - 准备阶段只生成压缩计划，不写 archive、不更新 checkpoint。
 - 提交阶段按固定顺序写入归档和 checkpoint。
-- 返回真实 `filePath` 或等价归档标识。
+- 内部保留真实归档 `filePath` 或等价归档标识，但插件结果不暴露该字段。
 - 归档失败时保持 checkpoint 原子性，不能返回虚假的成功结果。
 - 重启后恢复压缩摘要、usageStartIndex 和归档指针。
 - 验证 `skip` 完全无副作用。

@@ -52,8 +52,9 @@ tokensAfter? }`。活动线程租约、取消、运行时替换和快照变化�
 可压缩桌面会话。
 
 `session.usage({ breakdown: "summary" | "full", columns })` 读取 FunctionSessionView 捕获的最新真实模型请求，
-使用 LangChain estimator 计算 system prompt、system tools 和 LangChain messages，未知可序列化块进入
-`Unattributed`。分类和消息明细标记 `estimated: true`；最近 provider response 的 `apiUsage` 单独返回，不能与估算值混为精确账单。
+`summary` 使用有界的本地序列化估算，`full` 使用 LangChain estimator 计算 system prompt、system tools 和
+LangChain messages；未知可序列化块进入 `Unattributed`。两种视图都标记 `estimated: true`，因为当前工程没有
+provider tokenizer；最近 provider response 的 `apiUsage` 单独返回，不能与估算值混为精确账单。
 未知的 MCP、memory、skills、agents 等动态来源保持 omission。没有真实模型请求、请求被撤销或 live scope 失效时明确返回 unavailable。
 
 截至本批，聚焦压缩、usage、host 和 session 回归为 100 项通过（包含归档补偿、breakdown 参数和 authority 撤销路径）；
@@ -63,7 +64,7 @@ Node/Web 类型复查通过。
 本批重新执行的单 worker 全量 Vitest 为 3595 通过、40 失败、5 跳过并有 1 个异步错误；失败集中在既有 git/browser/
 trace/legacy 测试的环境时序与 5 秒限制，聚焦变更套件未出现新增失败，日志为 `v26-vitest-full-final.txt`。Mods v2 function 目录
 现为 50 个文件、364/364 通过；并发作用域的 resolver 归属修正后，原先 3 项 `async-scope` identity 失败已清零。
-完整 Mods v2 目录为 69 个文件、536/536 通过；manager 专项 18/18 通过。
+完整 Mods v2 与 shared Mods v2 目录为 50 个文件、364/364 通过；manager 专项 18/18、async-scope 16/16 通过。
 跨进程函数回归 37/37 通过，pending/runtimes/frames/replies/calls 均为 0。桌面 E2E 通过至 57 个真实场景后在既有
 deadline 的插件设置按钮等待处超时，日志为 `v26-e2e.txt`，因此不宣称全流程 E2E 全绿。
 主机 ABBA 性能回检 800 次：P95 9.6805ms，相比基线 9.6214ms 为 +0.61%；函数进程性能 900 次 P95 6.7516ms，
@@ -71,4 +72,5 @@ deadline 的插件设置按钮等待处超时，日志为 `v26-e2e.txt`，因此
 `v26-usage-breakdown-performance.json`。完整 5×1000、长时间空闲和两小时稳定性门禁仍未满足。
 失败日志和修正过程保留在 `output/mods-v2-validation/v26-*`，不覆盖历史记录。
 
-继续补齐上下文明细、显式压缩，以及 B3–B8 剩余能力和最终发布验收。
+显式压缩的外部结果已收敛为 Claude Code 形状，内部归档指针不会泄露；archive rollback 后的重复提交会重新
+stage 新归档。继续补齐真实桌面 E2E、全量稳定性门禁，以及 B3–B8 剩余能力和最终发布验收。

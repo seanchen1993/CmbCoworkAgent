@@ -13,7 +13,7 @@
 - 工作区为 `C:\ai\CmbCoworkAgent-mods-v2`，分支为 `codex/mods-v2`，工作树清洁。
 - `npx tsc --noEmit -p tsconfig.node.json --composite false` 通过。
 - 修改 TypeScript 文件的 `eslint --no-cache --quiet` 通过。
-- Mods v2 聚焦记录：69 个文件、536/536 通过。
+- 复核时的历史记录为 Mods v2 69 个文件、536/536；本轮修正后 Mods v2 与 shared Mods v2 目录为 50 个文件、364/364。
 - manager 专项：18/18 通过。
 - 本次复跑的 manager、session-read-host、context-usage、summarization 四个文件：115/115 通过。
 - 生产构建记录通过。
@@ -91,7 +91,15 @@ output/claude-code-2.1.273-analysis/formatted/chunk-hr43png0.js
 1. 先修复 `summary/full` 分支和 compact 外部结果契约。
 2. 增加 breakdown summary/full、compact 外部结果、archive retry、flush failure、restart recovery 测试。
 3. 增加真实桌面 E2E：usage summary、usage full、compact success、compact skip、active lease rejection、restart recovery。
+
 4. 在单 worker 和受控并发两种方式重新跑全量 Vitest，生成新的差异清单。
 5. 修复或隔离新增的 manager/全量时序失败后，再重新跑 E2E 和性能门禁。
 6. 最后更新兼容性矩阵和最终交付文档，只有所有门槛满足后才标记完成。
 
+## 修复进度（本轮）
+
+已完成前三项代码修正：`summary` 现在走本地序列化估算、`full` 走详细 estimator；`session.compact` 不再把内部
+`filePath` 放入插件结果；archive rollback 会清空已完成 promise，下一次提交会重新生成归档。新增回归覆盖了
+summary/full 数值差异和 rollback 后 retry；并修复了 guest Promise 外部 resolve 的异步 scope 归属。Mods v2 与
+shared Mods v2 目录 364/364、跨进程函数回归 37/37、类型检查和构建均通过。真实桌面 E2E 与全量套件仍需
+单独复跑，不能由这些聚焦结果代替。

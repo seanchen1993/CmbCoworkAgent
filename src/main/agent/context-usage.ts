@@ -52,6 +52,25 @@ const safeTokenCount = (messages: readonly unknown[], tools?: readonly unknown[]
   return { tokens: Math.ceil(serialized / 4), estimated: true }
 }
 
+/**
+ * The summary view is intentionally a cheap local projection.  The full view
+ * uses LangChain's request estimator above, while summary only serializes the
+ * captured values.  Keeping the two paths separate mirrors the native
+ * adapter's fast (`uhs`) and detailed (`dhs`) branches without pretending that
+ * the local process has provider tokenizer access.
+ */
+const summaryTokenCount = (
+  messages: readonly unknown[],
+  tools?: readonly unknown[]
+): CountResult => {
+  try {
+    const serialized = JSON.stringify({ messages, tools: tools ?? [] })
+    return { tokens: Math.ceil(serialized.length / 4), estimated: true }
+  } catch {
+    return { tokens: 0, estimated: true }
+  }
+}
+
 const countOne = (value: unknown): CountResult => safeTokenCount([value])
 
 function blockType(value: unknown): string | undefined {
@@ -120,15 +139,24 @@ export function projectContextBreakdown(input: {
   messages: readonly unknown[]
   apiUsage?: ContextResponseUsage
 }): FunctionSessionContextBreakdown {
+  const countContext = (messages: readonly unknown[], tools?: readonly unknown[]): CountResult =>
+    input.detail === "summary"
+      ? summaryTokenCount(messages, tools)
+      : safeTokenCount(messages, tools)
+  const countContextOne = (value: unknown): CountResult => countContext([value])
   const systemValue = input.systemMessage
     ? SystemMessage.isInstance(input.systemMessage)
-      ? countOne(input.systemMessage)
+      ? countContextOne(input.systemMessage)
       : typeof input.systemMessage === "string"
-      ? { tokens: Math.ceil(input.systemMessage.length / 4), estimated: true }
-        : { tokens: 0, estimated: true }
+      ? input.detail === "summary"
+        ? countContextOne(input.systemMessage)
+        : countOne(new SystemMessage({ content: input.systemMessage }))
+      : countContextOne(input.systemMessage)
     : { tokens: 0, estimated: true }
-  const toolsValue = input.tools?.length ? safeTokenCount([], input.tools) : { tokens: 0, estimated: true }
-  const messageValue = safeTokenCount(
+  const toolsValue = input.tools?.length
+    ? countContext([], input.tools)
+    : { tokens: 0, estimated: true }
+  const messageValue = countContext(
     input.messages.filter((message): message is BaseMessage => BaseMessage.isInstance(message))
   )
   const categories: FunctionSessionContextBreakdown["categories"] = []
@@ -161,7 +189,7 @@ export function projectContextBreakdown(input: {
     })
   const unattributedTokens = input.messages
     .filter((message) => !BaseMessage.isInstance(message))
-    .reduce<number>((sum, message: unknown) => sum + countOne(message).tokens, 0)
+    .reduce<number>((sum, message: unknown) => sum + countContextOne(message).tokens, 0)
   if (unattributedTokens > 0)
     categories.push({
       name: "Unattributed",
@@ -198,7 +226,7 @@ export function projectContextBreakdown(input: {
   const toolCallTotals = new Map<string, { callTokens: number; resultTokens: number }>()
   const attachments = new Map<string, number>()
   for (const message of input.messages) {
-    const counted = countOne(message)
+    const counted = countContextOne(message)
     const type = BaseMessage.isInstance(message) ? message.getType() : undefined
     if (type === "tool") messageBreakdown.toolResultTokens += counted.tokens
     else if (type === "ai") messageBreakdown.assistantMessageTokens += counted.tokens
@@ -210,7 +238,7 @@ export function projectContextBreakdown(input: {
     if (Array.isArray(rawToolCalls))
       for (const call of rawToolCalls) {
         const name = String(object(call)?.name ?? "unknown")
-        const tokens = countOne(call).tokens
+        const tokens = countContextOne(call).tokens
         const prior = toolCallTotals.get(name) ?? { callTokens: 0, resultTokens: 0 }
         prior.callTokens += tokens
         toolCallTotals.set(name, prior)
@@ -222,20 +250,20 @@ export function projectContextBreakdown(input: {
       const kind = blockType(block)
       if (kind === "tool_use" || kind === "tool_call") {
         const name = String(object(block)?.name ?? "unknown")
-        const tokens = countOne(block).tokens
+        const tokens = countContextOne(block).tokens
         const prior = toolCallTotals.get(name) ?? { callTokens: 0, resultTokens: 0 }
         prior.callTokens += tokens
         toolCallTotals.set(name, prior)
         messageBreakdown.toolCallTokens += tokens
       } else if (kind === "tool_result") {
         const name = String(object(block)?.name ?? object(block)?.tool_use_id ?? "unknown")
-        const tokens = countOne(block).tokens
+        const tokens = countContextOne(block).tokens
         const prior = toolCallTotals.get(name) ?? { callTokens: 0, resultTokens: 0 }
         prior.resultTokens += tokens
         toolCallTotals.set(name, prior)
         messageBreakdown.toolResultTokens += tokens
       } else if (kind === "image_url" || kind === "image" || kind === "audio" || kind === "file") {
-        const tokens = countOne(block).tokens
+        const tokens = countContextOne(block).tokens
         attachments.set(kind, (attachments.get(kind) ?? 0) + tokens)
         messageBreakdown.attachmentTokens += tokens
       }

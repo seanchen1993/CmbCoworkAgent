@@ -167,7 +167,9 @@ it("reads the actual main model and messages inside a shared child without openi
     tools: [{ name: "inspect", description: "Inspect", input_schema: {} }]
   })
   const breakdown = (await query("session.usage", { breakdown: "full", columns: 60 })) as {
-    context: { breakdown?: { model: string; apiUsage: unknown; categories: unknown[] } }
+    context: {
+      breakdown?: { model: string; apiUsage: unknown; categories: unknown[]; totalTokens: number }
+    }
   }
   expect(breakdown.context.breakdown).toMatchObject({
     model: "actual-main-model",
@@ -183,6 +185,10 @@ it("reads the actual main model and messages inside a shared child without openi
       expect.objectContaining({ name: "Messages" })
     ])
   )
+  const summary = (await query("session.usage", { breakdown: "summary", columns: 60 })) as {
+    context: { breakdown?: { totalTokens: number } }
+  }
+  expect(summary.context.breakdown?.totalTokens).not.toBe(breakdown.context.breakdown?.totalTokens)
   f.manager.updateFunctionSessionMessages(instance.authority, [], {
     _summarizationEvent: { usageStartIndex: 1 }
   })

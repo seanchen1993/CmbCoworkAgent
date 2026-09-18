@@ -36,14 +36,16 @@ export const FUNCTION_ASYNC_SCOPE = String.raw`
   globalThis.Promise = class Promise extends NativePromise {
     constructor(executor) {
       if (typeof executor !== "function") throw TypeError("executor");
+      const promiseScope = asyncScope;
       let settled = false;
       super((resolve, reject) => executor(value => {
         if (settled) return;
         settled = true;
-        // The resolver's call site owns a foreign thenable's assimilation
-        // scope. A promise created in A but resolved in B must continue in B;
-        // resolving outside a guest scope must not resurrect A.
-        try { resolve(scopedResult(value, asyncScope)); } catch (error) { reject(error); }
+        // Promise resolution adopts foreign thenables in the context where the
+        // promise was created. This matches Node AsyncLocalStorage when a
+        // promise created in A is resolved by a callback running in B (or
+        // outside a guest scope).
+        try { resolve(scopedResult(value, promiseScope)); } catch (error) { reject(error); }
       }, error => {
         if (settled) return;
         settled = true;

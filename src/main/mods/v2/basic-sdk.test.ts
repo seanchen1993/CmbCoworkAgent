@@ -78,4 +78,10 @@ it("routes session.compact through the host mutation boundary", async () => {
   expect(() => validateBasicResult("session.compact", { messages: [] })).toThrow(
     "MODS_SDK_RESULT"
   )
+  expect(() =>
+    validateBasicResult("session.compact", {
+      messages: [{ role: "user", text: "summary", toolUses: [] }],
+      filePath: "/conversation_history/internal-only.md"
+    })
+  ).toThrow("MODS_SDK_RESULT")
 })
