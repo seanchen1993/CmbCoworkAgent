@@ -46,10 +46,10 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
     <section className="border-b p-4 space-y-3 text-sm" data-mods-settings>
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="font-medium">项目 Mods（试验）</div>
+          <div className="font-medium">Function Mods</div>
           <p className="text-xs text-muted-foreground">
-            为项目启用工具增强、上下文和交互卡片。安装后需单独授权。此处权限仅适用于 Mods；插件中的
-            Shell Hooks 和 MCP 服务仍使用各自权限。
+            这里管理已安装插件提供的函数扩展运行能力。Plugin 负责安装、更新和启停；Function Mods
+            负责事件、命令、工具和交互能力。安装插件请进入“插件”，授权后再在这里控制项目级运行状态。
           </p>
         </div>
         <Button
@@ -63,7 +63,7 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
             })
           }
         >
-          安装示范插件
+          安装示范 Mods
         </Button>
       </div>
       {!threadId && <p className="text-muted-foreground">打开项目会话后配置权限。</p>}
@@ -124,10 +124,10 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
           {(status.functionMods?.length ?? 0) > 0 && (
             <details open>
               <summary className="cursor-pointer">
-                函数插件（{status.functionMods!.length}）
+                Function Mods（{status.functionMods!.length}）
               </summary>
               <p className="text-xs text-muted-foreground mt-2">
-                可定制命令、项目偏好、交互面板和 Client
+                该插件提供命令、项目偏好、交互面板和 Client
                 组件，调整模型使用工具的行为，调用已配置的模型。
                 授权绑定以下版本，源码变化后需要重新授权。
               </p>
