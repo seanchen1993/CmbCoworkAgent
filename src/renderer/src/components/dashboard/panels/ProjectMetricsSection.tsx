@@ -279,14 +279,14 @@ function SummaryComparison({
     },
     {
       label: "平均发起 ST 耗时",
-      hint: "ST 发起时间 - 立项时间",
+      hint: "ST 发起日期 - 立项日期",
       read: (group) => group.avgTestLeadDays,
       sample: "testLead",
       formatter: formatDays
     },
     {
       label: "平均特性上线耗时",
-      hint: "首次实施日期 - 特性审批通过时间",
+      hint: "项目首次上线日期 - 特性审批通过日期",
       read: (group) => group.avgDeliveryDays,
       sample: "delivery",
       formatter: formatDays
@@ -576,7 +576,7 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
           label="特性上线耗时"
           dates={[
             { label: "特性审批通过时间", value: item.approvedDate },
-            { label: "首次实施日期", value: item.firstOnlineDate }
+            { label: "项目首次上线日期", value: item.firstOnlineDate }
           ]}
         />
       </td>
