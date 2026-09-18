@@ -2283,13 +2283,15 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
     input.name,
     input.projectCode,
     input.projectDir,
-    input.description,
     input.systemId,
     input.systemName,
     input.workspacePath
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
-    throw new Error("Project name, code, description, system and workspace are required")
+    throw new Error("Project name, code, system and workspace are required")
+  }
+  if (typeof input.description !== "string") {
+    throw new Error("Project description must be a string")
   }
   validateHarnessName(input.projectCode, "项目编号")
   validateHarnessName(input.projectDir, "项目文件夹")
@@ -2302,13 +2304,15 @@ function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput):
     input.name,
     input.projectCode,
     input.projectDir,
-    input.description,
     input.systemId,
     input.systemName,
     input.workspacePath
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
-    throw new Error("Project name, code, description, system and workspace are required")
+    throw new Error("Project name, code, system and workspace are required")
+  }
+  if (typeof input.description !== "string") {
+    throw new Error("Project description must be a string")
   }
   validateHarnessName(input.projectCode, "项目编号")
   validateHarnessName(input.projectDir, "项目文件夹")
@@ -2352,7 +2356,7 @@ function validateProjectDirUnique(
       item.projectId !== excludeProjectId
   )
   if (duplicate) {
-    throw new Error(`项目根路径下已有文件夹：${trimmedProjectDir}`)
+    throw new Error(`插件工作目录下已有文件夹：${trimmedProjectDir}`)
   }
 }
 

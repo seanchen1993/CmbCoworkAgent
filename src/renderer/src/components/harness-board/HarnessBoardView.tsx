@@ -1,6 +1,7 @@
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
+import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
 import {
   Fragment,
   startTransition,
@@ -993,7 +994,6 @@ function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boole
     form.name,
     form.projectCode,
     form.projectDir,
-    form.description,
     form.systemId,
     form.systemName,
     form.workspacePath
@@ -1424,48 +1424,6 @@ function groupStageNodes(nodes: HarnessRunNode[]): StageNodeGroup[] {
   }
 
   return groups
-}
-
-function ProjectWorkspacePathTip(): React.JSX.Element {
-  return (
-    <TooltipProvider delayDuration={150}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label="项目工作区提示"
-            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <Info className="size-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="z-[70] max-w-72">
-          项目产物路径，非代码仓库
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  )
-}
-
-function ProjectDirTip(): React.JSX.Element {
-  return (
-    <TooltipProvider delayDuration={150}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label="项目文件夹说明"
-            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <Info className="size-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="z-[70] max-w-72">
-          保存项目文档、详细设计等插件运行产物
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  )
 }
 
 function SessionWorkspacePathTip(): React.JSX.Element {
@@ -2398,6 +2356,7 @@ function EnterpriseProjectSearchInput({
   onValueChange,
   onSelect,
   ariaInvalid,
+  autoFocus,
   portalContainer
 }: {
   value: string
@@ -2407,6 +2366,7 @@ function EnterpriseProjectSearchInput({
   onValueChange: (value: string) => void
   onSelect: (project: HarnessEnterpriseProjectSearchItem) => void
   ariaInvalid?: boolean
+  autoFocus?: boolean
   portalContainer?: HTMLElement | null
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
@@ -2484,6 +2444,7 @@ function EnterpriseProjectSearchInput({
     >
       <PopoverAnchor asChild>
         <Input
+          autoFocus={autoFocus}
           value={value}
           onChange={(event) => {
             const nextValue = normalizeValue
@@ -2832,8 +2793,8 @@ function ProjectFormDialog({
   onOpenChange,
   onChange,
   onInstallPlugin,
-  onPickWorkspace,
   onPickSessionWorkspace,
+  onPickWorkspace,
   onSubmit
 }: {
   open: boolean
@@ -2851,8 +2812,14 @@ function ProjectFormDialog({
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
+  const projectDirEditedRef = useRef(false)
+  useEffect(() => {
+    if (!open) projectDirEditedRef.current = false
+  }, [open])
+  const projectDirError =
+    getHarnessNameError("项目文件夹", form.projectDir) ??
+    getTextLengthError("项目文件夹", form.projectDir, PROJECT_DIR_MAX_CHARS)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
-  const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
   const projectNameLengthError = getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS)
   const projectCodeLengthError = getTextLengthError(
     "项目编号",
@@ -2864,19 +2831,9 @@ function ProjectFormDialog({
     form.description,
     PROJECT_DESCRIPTION_MAX_CHARS
   )
-  const projectDirLengthError = getTextLengthError(
-    "项目文件夹",
-    form.projectDir,
-    PROJECT_DIR_MAX_CHARS
-  )
   const projectCodeValidationError = projectCodeError ?? projectCodeLengthError
-  const projectDirValidationError = projectDirError ?? projectDirLengthError
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
   const selectedAdapterMessage = boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
-  const projectRootPath = form.workspacePath.trim()
-  const projectDir = form.projectDir.trim()
-  const projectCreatePathHint =
-    projectRootPath && projectDir ? `将在 ${projectRootPath} 下创建文件夹: ${projectDir}` : ""
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -2894,7 +2851,112 @@ function ProjectFormDialog({
         <div className="min-h-0 overflow-y-auto py-1 pr-1">
           <div className="grid gap-4">
             <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">选择插件</div>
+              <div className="mb-3 text-sm font-semibold">项目信息</div>
+              <div className="grid grid-cols-2 items-start gap-3">
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  <span className="flex items-center justify-between gap-2">
+                    <span>项目编号 *</span>
+                    <LeanProjectLinkStatus
+                      linked={form.projectFromLean}
+                      error={verification.error}
+                    />
+                  </span>
+                  <EnterpriseProjectSearchInput
+                    autoFocus
+                    value={form.projectCode}
+                    searchField="code"
+                    searchLabel="项目编号"
+                    normalizeValue={sanitizeHarnessNameInput}
+                    onValueChange={(projectCode) => onChange({ ...form, projectCode })}
+                    onSelect={(project) => {
+                      onChange({
+                        ...form,
+                        name: project.projectName,
+                        projectCode: project.projectCode,
+                        systemId: project.systemId || form.systemId,
+                        systemName: project.systemName || form.systemName,
+                        projectDir: !projectDirEditedRef.current
+                          ? sanitizeProjectDirFromProjectName(project.projectName)
+                          : form.projectDir
+                      })
+                    }}
+                    portalContainer={dialogPortalContainer}
+                    ariaInvalid={projectCodeValidationError ? true : undefined}
+                  />
+                  {projectCodeValidationError && (
+                    <span className="text-status-critical">{projectCodeValidationError}</span>
+                  )}
+                </label>
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  项目名称 *
+                  <EnterpriseProjectSearchInput
+                    value={form.name}
+                    searchField="name"
+                    searchLabel="项目名称"
+                    onValueChange={(name) => {
+                      onChange({
+                        ...form,
+                        name,
+                        projectDir: !projectDirEditedRef.current
+                          ? sanitizeProjectDirFromProjectName(name)
+                          : form.projectDir
+                      })
+                    }}
+                    onSelect={(project) => {
+                      onChange({
+                        ...form,
+                        name: project.projectName,
+                        projectCode: project.projectCode,
+                        systemId: project.systemId || form.systemId,
+                        systemName: project.systemName || form.systemName,
+                        projectDir: !projectDirEditedRef.current
+                          ? sanitizeProjectDirFromProjectName(project.projectName)
+                          : form.projectDir
+                      })
+                    }}
+                    portalContainer={dialogPortalContainer}
+                    ariaInvalid={projectNameLengthError ? true : undefined}
+                  />
+                  {projectNameLengthError && (
+                    <span className="text-status-critical">{projectNameLengthError}</span>
+                  )}
+                </label>
+                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  项目描述
+                  <Input
+                    value={form.description}
+                    onChange={(event) => onChange({ ...form, description: event.target.value })}
+                    placeholder="请输入"
+                    className={harnessProjectCreateInputClassName}
+                    aria-invalid={projectDescriptionLengthError ? true : undefined}
+                  />
+                  {projectDescriptionLengthError && (
+                    <span className="text-status-critical">{projectDescriptionLengthError}</span>
+                  )}
+                </label>
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  系统编号 *
+                  <Input
+                    value={form.systemId}
+                    onChange={(event) => onChange({ ...form, systemId: event.target.value })}
+                    placeholder="请输入"
+                    className={harnessProjectCreateInputClassName}
+                  />
+                </label>
+                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                  系统名称 *
+                  <Input
+                    value={form.systemName}
+                    onChange={(event) => onChange({ ...form, systemName: event.target.value })}
+                    placeholder="请输入"
+                    className={harnessProjectCreateInputClassName}
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="rounded-md border border-border bg-muted/30 p-3">
+              <div className="mb-3 text-sm font-semibold">插件配置</div>
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 <Select
                   value={form.adapterId}
@@ -2921,219 +2983,56 @@ function ProjectFormDialog({
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
               </label>
-            </section>
-
-            <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">项目信息</div>
-              <div className="grid grid-cols-2 items-start gap-3">
-                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  <span className="flex items-center justify-between gap-2">
-                    <span>项目编号 *</span>
-                    <LeanProjectLinkStatus
-                      linked={form.projectFromLean}
-                      error={verification.error}
-                    />
-                  </span>
-                  <EnterpriseProjectSearchInput
-                    value={form.projectCode}
-                    searchField="code"
-                    searchLabel="项目编号"
-                    normalizeValue={sanitizeHarnessNameInput}
-                    onValueChange={(projectCode) => onChange({ ...form, projectCode })}
-                    onSelect={(project) => {
-                      const shouldSyncProjectDir =
-                        !form.projectDir ||
-                        form.projectDir === sanitizeProjectDirFromProjectName(form.name)
-                      onChange({
-                        ...form,
-                        name: project.projectName,
-                        projectCode: project.projectCode,
-                        systemId: project.systemId || form.systemId,
-                        systemName: project.systemName || form.systemName,
-                        projectDir: shouldSyncProjectDir
-                          ? sanitizeProjectDirFromProjectName(project.projectName)
-                          : form.projectDir
-                      })
-                    }}
-                    portalContainer={dialogPortalContainer}
-                    ariaInvalid={projectCodeValidationError ? true : undefined}
-                  />
-                  {projectCodeValidationError && (
-                    <span className="text-status-critical">{projectCodeValidationError}</span>
-                  )}
-                </label>
-                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  项目名称 *
-                  <EnterpriseProjectSearchInput
-                    value={form.name}
-                    searchField="name"
-                    searchLabel="项目名称"
-                    onValueChange={(name) => {
-                      const shouldSyncProjectDir =
-                        !form.projectDir ||
-                        form.projectDir === sanitizeProjectDirFromProjectName(form.name)
-                      onChange({
-                        ...form,
-                        name,
-                        projectDir: shouldSyncProjectDir
-                          ? sanitizeProjectDirFromProjectName(name)
-                          : form.projectDir
-                      })
-                    }}
-                    onSelect={(project) => {
-                      const shouldSyncProjectDir =
-                        !form.projectDir ||
-                        form.projectDir === sanitizeProjectDirFromProjectName(form.name)
-                      onChange({
-                        ...form,
-                        name: project.projectName,
-                        projectCode: project.projectCode,
-                        systemId: project.systemId || form.systemId,
-                        systemName: project.systemName || form.systemName,
-                        projectDir: shouldSyncProjectDir
-                          ? sanitizeProjectDirFromProjectName(project.projectName)
-                          : form.projectDir
-                      })
-                    }}
-                    portalContainer={dialogPortalContainer}
-                    ariaInvalid={projectNameLengthError ? true : undefined}
-                  />
-                  {projectNameLengthError && (
-                    <span className="text-status-critical">{projectNameLengthError}</span>
-                  )}
-                </label>
-                <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  项目描述 *
-                  <Input
-                    value={form.description}
-                    onChange={(event) => onChange({ ...form, description: event.target.value })}
-                    placeholder="请输入"
-                    className={harnessProjectCreateInputClassName}
-                    aria-invalid={projectDescriptionLengthError ? true : undefined}
-                  />
-                  {projectDescriptionLengthError && (
-                    <span className="text-status-critical">{projectDescriptionLengthError}</span>
-                  )}
-                </label>
-              </div>
-            </section>
-
-            <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">主办系统</div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  系统编号 *
-                  <Input
-                    value={form.systemId}
-                    onChange={(event) => onChange({ ...form, systemId: event.target.value })}
-                    placeholder="请输入"
-                    className={harnessProjectCreateInputClassName}
-                  />
-                </label>
-                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  系统名称 *
-                  <Input
-                    value={form.systemName}
-                    onChange={(event) => onChange({ ...form, systemName: event.target.value })}
-                    placeholder="请输入"
-                    className={harnessProjectCreateInputClassName}
-                  />
-                </label>
-              </div>
-            </section>
-
-            <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">工作区配置</div>
-              <div className="grid gap-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                    <div className="flex items-center gap-1.5">
-                      <span>项目根路径 *</span>
-                      <ProjectWorkspacePathTip />
-                    </div>
-                    <div className="flex min-w-0 gap-2">
-                      <Input
-                        value={form.workspacePath}
-                        readOnly
-                        placeholder="请选择项目根路径"
-                        className={harnessProjectCreateInputClassName}
-                      />
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="shrink-0 gap-2"
-                        onClick={onPickWorkspace}
-                      >
-                        <FolderOpen className="size-4" />
-                        选择
-                      </Button>
-                    </div>
-                  </div>
-                  <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                    <span className="flex items-center gap-1.5">
-                      <span>项目文件夹 *</span>
-                      <ProjectDirTip />
-                    </span>
-                    <Input
-                      value={form.projectDir}
-                      onChange={(event) =>
-                        onChange({
-                          ...form,
-                          projectDir: sanitizeHarnessNameInput(event.target.value)
-                        })
-                      }
-                      placeholder="请输入"
-                      className={harnessProjectCreateInputClassName}
-                      aria-invalid={projectDirValidationError ? true : undefined}
-                    />
-                    {projectDirValidationError && (
-                      <span className="text-status-critical">{projectDirValidationError}</span>
-                    )}
-                  </label>
+              <ProjectWorkspaceField
+                workspacePath={form.workspacePath}
+                projectDir={form.projectDir}
+                error={projectDirError}
+                onPickWorkspace={onPickWorkspace}
+                onProjectDirChange={(value) => {
+                  const projectDir = sanitizeHarnessNameInput(value)
+                  projectDirEditedRef.current = Boolean(projectDir.trim())
+                  onChange({ ...form, projectDir })
+                }}
+              />
+              {form.workspacePath.trim() && form.projectDir.trim() && (
+                <p className="mt-1.5 break-all text-xs leading-relaxed text-muted-foreground">
+                  将在 {resolveProjectRootPath(form)} 路径下创建本项目的插件工作目录。
+                </p>
+              )}
+              <div className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <span>会话工作区路径</span>
+                  <SessionWorkspacePathTip />
                 </div>
-                <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  <div className="flex items-center gap-1.5">
-                    <span>会话工作区路径</span>
-                    <SessionWorkspacePathTip />
-                  </div>
-                  <div className="flex min-w-0 gap-2">
-                    <Input
-                      value={form.sessionWorkspacePath ?? ""}
-                      readOnly
-                      placeholder="未配置"
-                      className={harnessProjectCreateInputClassName}
-                    />
-                    {(form.sessionWorkspacePath ?? "").trim() && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        className="shrink-0 gap-2"
-                        onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
-                      >
-                        <Trash2 className="size-4" />
-                        清空
-                      </Button>
-                    )}
+                <div className="flex min-w-0 gap-2">
+                  <Input
+                    value={form.sessionWorkspacePath ?? ""}
+                    readOnly
+                    placeholder="未配置"
+                    className={harnessProjectCreateInputClassName}
+                  />
+                  {(form.sessionWorkspacePath ?? "").trim() && (
                     <Button
                       type="button"
-                      variant="secondary"
+                      variant="ghost"
                       className="shrink-0 gap-2"
-                      onClick={onPickSessionWorkspace}
+                      onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
                     >
-                      <FolderOpen className="size-4" />
-                      选择
+                      <Trash2 className="size-4" />
+                      清空
                     </Button>
-                  </div>
+                  )}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="shrink-0 gap-2"
+                    onClick={onPickSessionWorkspace}
+                  >
+                    <FolderOpen className="size-4" />
+                    选择
+                  </Button>
                 </div>
               </div>
-              {projectCreatePathHint && (
-                <div
-                  className="mt-3 max-w-full break-all text-xs leading-relaxed text-muted-foreground"
-                  title={projectCreatePathHint}
-                >
-                  {projectCreatePathHint}
-                </div>
-              )}
             </section>
 
             {error && (
@@ -3197,7 +3096,6 @@ function ProjectEditDialog({
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
   const projectCodeError = getHarnessNameError("项目编号", form.projectCode)
-  const projectDirError = getHarnessNameError("项目文件夹", form.projectDir)
   const projectNameLengthError = getTextLengthError("项目名称", form.name, PROJECT_NAME_MAX_CHARS)
   const projectCodeLengthError = getTextLengthError(
     "项目编号",
@@ -3229,36 +3127,6 @@ function ProjectEditDialog({
         <div className="min-h-0 overflow-y-auto py-1 pr-1">
           <div className="grid gap-4">
             <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">选择插件</div>
-              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <Select
-                  value={form.adapterId}
-                  onValueChange={(adapterId) =>
-                    onChange({ ...form, adapterId, adapterType: "plugin" })
-                  }
-                >
-                  <SelectTrigger className={harnessProjectCreateSelectClassName}>
-                    <AdapterSelectedValue adapter={selectedAdapter} />
-                  </SelectTrigger>
-                  <SelectContent
-                    className={harnessDialogSelectContentClassName}
-                    showScrollButtons={false}
-                    viewportClassName="overscroll-y-none"
-                  >
-                    <AdapterSelectGroups
-                      registry={registry}
-                      installingPluginNames={installingPluginNames}
-                      onInstallPlugin={onInstallPlugin}
-                    />
-                  </SelectContent>
-                </Select>
-                {selectedAdapterMessage && (
-                  <span className="text-status-warning">{selectedAdapterMessage}</span>
-                )}
-              </label>
-            </section>
-
-            <section className="rounded-md border border-border bg-muted/30 p-3">
               <div className="mb-3 text-sm font-semibold">项目信息</div>
               <div className="grid grid-cols-2 items-start gap-3">
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
@@ -3270,6 +3138,7 @@ function ProjectEditDialog({
                     />
                   </span>
                   <EnterpriseProjectSearchInput
+                    autoFocus
                     value={form.projectCode}
                     searchField="code"
                     searchLabel="项目编号"
@@ -3315,7 +3184,7 @@ function ProjectEditDialog({
                   )}
                 </label>
                 <label className="col-span-2 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  项目描述 *
+                  项目描述
                   <Input
                     value={form.description}
                     onChange={(event) => onChange({ ...form, description: event.target.value })}
@@ -3327,12 +3196,6 @@ function ProjectEditDialog({
                     <span className="text-status-critical">{projectDescriptionLengthError}</span>
                   )}
                 </label>
-              </div>
-            </section>
-
-            <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">主办系统</div>
-              <div className="grid grid-cols-2 gap-3">
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   系统编号 *
                   <Input
@@ -3355,74 +3218,71 @@ function ProjectEditDialog({
             </section>
 
             <section className="rounded-md border border-border bg-muted/30 p-3">
-              <div className="mb-3 text-sm font-semibold">工作区配置</div>
-              <div className="grid gap-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                    <div className="flex items-center gap-1.5">
-                      <span>项目根路径 *</span>
-                      <ProjectWorkspacePathTip />
-                    </div>
-                    <Input
-                      value={form.workspacePath}
-                      readOnly
-                      aria-readonly="true"
-                      placeholder="请选择项目根路径"
-                      className="bg-muted text-muted-foreground"
+              <div className="mb-3 text-sm font-semibold">插件配置</div>
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <Select
+                  value={form.adapterId}
+                  onValueChange={(adapterId) =>
+                    onChange({ ...form, adapterId, adapterType: "plugin" })
+                  }
+                >
+                  <SelectTrigger className={harnessProjectCreateSelectClassName}>
+                    <AdapterSelectedValue adapter={selectedAdapter} />
+                  </SelectTrigger>
+                  <SelectContent
+                    className={harnessDialogSelectContentClassName}
+                    showScrollButtons={false}
+                    viewportClassName="overscroll-y-none"
+                  >
+                    <AdapterSelectGroups
+                      registry={registry}
+                      installingPluginNames={installingPluginNames}
+                      onInstallPlugin={onInstallPlugin}
                     />
-                  </div>
-                  <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                    <div className="flex items-center gap-1.5">
-                      <label htmlFor="harness-edit-project-dir">项目文件夹 *</label>
-                      <ProjectDirTip />
-                    </div>
-                    <Input
-                      id="harness-edit-project-dir"
-                      value={form.projectDir}
-                      readOnly
-                      aria-readonly="true"
-                      placeholder="项目文件夹"
-                      className="bg-muted text-muted-foreground"
-                      aria-invalid={projectDirError ? true : undefined}
-                    />
-                    {projectDirError && (
-                      <span className="text-status-critical">{projectDirError}</span>
-                    )}
-                  </div>
+                  </SelectContent>
+                </Select>
+                {selectedAdapterMessage && (
+                  <span className="text-status-warning">{selectedAdapterMessage}</span>
+                )}
+              </label>
+              <ProjectWorkspaceField
+                workspacePath={form.workspacePath}
+                projectDir={form.projectDir}
+                readOnly
+                error={getHarnessNameError("项目文件夹", form.projectDir)}
+              />
+              <div className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <span>会话工作区路径</span>
+                  <SessionWorkspacePathTip />
                 </div>
-                <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  <div className="flex items-center gap-1.5">
-                    <span>会话工作区路径</span>
-                    <SessionWorkspacePathTip />
-                  </div>
-                  <div className="flex min-w-0 gap-2">
-                    <Input
-                      value={form.sessionWorkspacePath ?? ""}
-                      readOnly
-                      placeholder="未配置"
-                      className={harnessProjectCreateInputClassName}
-                    />
-                    {(form.sessionWorkspacePath ?? "").trim() && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        className="shrink-0 gap-2"
-                        onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
-                      >
-                        <Trash2 className="size-4" />
-                        清空
-                      </Button>
-                    )}
+                <div className="flex min-w-0 gap-2">
+                  <Input
+                    value={form.sessionWorkspacePath ?? ""}
+                    readOnly
+                    placeholder="未配置"
+                    className={harnessProjectCreateInputClassName}
+                  />
+                  {(form.sessionWorkspacePath ?? "").trim() && (
                     <Button
                       type="button"
-                      variant="secondary"
+                      variant="ghost"
                       className="shrink-0 gap-2"
-                      onClick={onPickSessionWorkspace}
+                      onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
                     >
-                      <FolderOpen className="size-4" />
-                      选择
+                      <Trash2 className="size-4" />
+                      清空
                     </Button>
-                  </div>
+                  )}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="shrink-0 gap-2"
+                    onClick={onPickSessionWorkspace}
+                  >
+                    <FolderOpen className="size-4" />
+                    选择
+                  </Button>
                 </div>
               </div>
             </section>
