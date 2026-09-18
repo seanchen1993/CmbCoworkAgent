@@ -109,6 +109,7 @@ import {
   threadListPreviewSourceIncludes,
   resolveModelCallCount
 } from "./dashboard-trace-thread-list"
+import { resolveTokenTotal } from "./dashboard-token-totals"
 import {
   buildChatTriggeredTraceFilter,
   mainAgentConversationAggs,
@@ -3452,9 +3453,10 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
     typeof bucket.key === "string" ? bucket.key : asString(key.sap_id, asString(source.sapId))
   const totalInputTokens = asNumber(asRecord(bucket.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(bucket.total_output_tokens).value)
-  const totalTokens = asNumber(
+  const totalTokens = resolveTokenTotal(
     asRecord(bucket.total_tokens).value,
-    totalInputTokens + totalOutputTokens
+    totalInputTokens,
+    totalOutputTokens
   )
   return {
     sapId,
@@ -4131,9 +4133,10 @@ async function fetchUserDetail(
   const userInfo = getLatestHitSource(aggs, "latest_user_info")
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
-  const totalTokens = asNumber(
+  const totalTokens = resolveTokenTotal(
     asRecord(aggs.total_tokens).value,
-    totalInputTokens + totalOutputTokens
+    totalInputTokens,
+    totalOutputTokens
   )
   // 统计指标：调用次数取自全量聚合。
   const totalCalls = asNumber(asRecord(aggs.total_calls).value)
@@ -12625,9 +12628,10 @@ async function fetchProjectModeUsage(
 
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
   const totalOutputTokens = asNumber(asRecord(aggs.total_output_tokens).value)
-  const totalTokens = asNumber(
+  const totalTokens = resolveTokenTotal(
     asRecord(aggs.total_tokens).value,
-    totalInputTokens + totalOutputTokens
+    totalInputTokens,
+    totalOutputTokens
   )
 
   const adapters = new Map<string, ProjectModeAdapterView>()
@@ -13731,7 +13735,11 @@ async function fetchDashboardEfficiency(
     compute: buildComputeEfficiency({
       totalInputTokens: asNumber(asRecord(traceAggs.total_input_tokens).value),
       totalOutputTokens: asNumber(asRecord(traceAggs.total_output_tokens).value),
-      totalTokens: asNumber(asRecord(traceAggs.total_tokens).value),
+      totalTokens: resolveTokenTotal(
+        asRecord(traceAggs.total_tokens).value,
+        asNumber(asRecord(traceAggs.total_input_tokens).value),
+        asNumber(asRecord(traceAggs.total_output_tokens).value)
+      ),
       cacheReadTokens: asNumber(asRecord(traceAggs.cache_read_tokens).value),
       pushedAdoptedLines: overall.pushedAdoptedLines,
       traceCount: asNumber(asRecord(traceAggs.trace_count).value),
