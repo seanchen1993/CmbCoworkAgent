@@ -2557,22 +2557,33 @@ function EnterpriseProjectSearchInput({
   )
 }
 
-function LeanProjectLinkStatus({ linked }: { linked: boolean }): React.JSX.Element {
+function LeanProjectLinkStatus({
+  linked,
+  error
+}: {
+  linked: boolean
+  error: string | null
+}): React.JSX.Element {
+  const showLinked = linked && !error
   const status = (
     <span
+      role={error ? "alert" : undefined}
       className={cn(
         "inline-flex shrink-0 items-center gap-1.5 text-[11px] font-normal",
-        linked ? "text-status-nominal" : "text-status-warning"
+        showLinked ? "text-status-nominal" : "text-status-warning"
       )}
     >
       <span
-        className={cn("size-2 rounded-full", linked ? "bg-status-nominal" : "bg-status-warning")}
+        className={cn(
+          "size-2 rounded-full",
+          showLinked ? "bg-status-nominal" : "bg-status-warning"
+        )}
       />
-      {linked ? "已关联精益项目" : "未关联精益项目"}
+      {error ?? (linked ? "已关联精益项目" : "未关联精益项目")}
     </span>
   )
 
-  if (linked) return status
+  if (linked || error) return status
   return (
     <span className="inline-flex shrink-0 items-center gap-1">
       {status}
@@ -2596,12 +2607,28 @@ function LeanProjectLinkStatus({ linked }: { linked: boolean }): React.JSX.Eleme
   )
 }
 
+interface EnterpriseProjectCodeVerification {
+  pending: boolean
+  error: string | null
+}
+
 function useEnterpriseProjectCodeVerification(
   enabled: boolean,
   projectCode: string,
   onVerified: (linked: boolean) => void
-): void {
+): EnterpriseProjectCodeVerification {
   const requestIdRef = useRef(0)
+  const [verification, setVerification] = useState({
+    enabled,
+    projectCode,
+    pending: true,
+    error: null as string | null
+  })
+  const matchesCurrentInput =
+    verification.enabled === enabled && verification.projectCode === projectCode
+  if (!matchesCurrentInput) {
+    setVerification({ enabled, projectCode, pending: true, error: null })
+  }
 
   useEffect(() => {
     requestIdRef.current += 1
@@ -2618,15 +2645,28 @@ function useEnterpriseProjectCodeVerification(
       window.api.harnessBoard
         .verifyEnterpriseProjectCode(normalizedProjectCode)
         .then((linked) => {
-          if (requestIdRef.current === requestId) onVerified(linked)
+          if (requestIdRef.current !== requestId) return
+          onVerified(linked)
+          setVerification({ enabled, projectCode, pending: false, error: null })
         })
         .catch(() => {
-          // 查询失败时保留现有状态，避免临时网络异常错误清除关联关系。
+          if (requestIdRef.current !== requestId) return
+          // 查询失败时保留现有状态，并允许用户继续保存。
+          setVerification({ enabled, projectCode, pending: false, error: "关联精益项目失败" })
         })
     }, ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS)
 
-    return () => window.clearTimeout(timer)
+    return () => {
+      window.clearTimeout(timer)
+      requestIdRef.current += 1
+    }
   }, [enabled, onVerified, projectCode])
+
+  // 编号变化的当次渲染就阻止保存，覆盖 effect 执行前和防抖等待期间。
+  return {
+    pending: enabled && !!projectCode.trim() && (!matchesCurrentInput || verification.pending),
+    error: enabled && matchesCurrentInput ? verification.error : null
+  }
 }
 
 function DeployUnitSearchInput({
@@ -2787,6 +2827,7 @@ function ProjectFormDialog({
   registry,
   installingPluginNames,
   error,
+  verification,
   onOpenChange,
   onChange,
   onInstallPlugin,
@@ -2800,6 +2841,7 @@ function ProjectFormDialog({
   registry: ProjectModeAdapterItem[]
   installingPluginNames: Set<string>
   error: string | null
+  verification: EnterpriseProjectCodeVerification
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectCreateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
@@ -2886,7 +2928,10 @@ function ProjectFormDialog({
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   <span className="flex items-center justify-between gap-2">
                     <span>项目编号 *</span>
-                    <LeanProjectLinkStatus linked={form.projectFromLean} />
+                    <LeanProjectLinkStatus
+                      linked={form.projectFromLean}
+                      error={verification.error}
+                    />
                   </span>
                   <EnterpriseProjectSearchInput
                     value={form.projectCode}
@@ -3105,6 +3150,7 @@ function ProjectFormDialog({
             onClick={onSubmit}
             disabled={
               creating ||
+              verification.pending ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
               metadataLengthInvalid(form, { validateProjectDir: true }) ||
@@ -3128,6 +3174,7 @@ function ProjectEditDialog({
   registry,
   installingPluginNames,
   error,
+  verification,
   onOpenChange,
   onChange,
   onInstallPlugin,
@@ -3140,6 +3187,7 @@ function ProjectEditDialog({
   registry: ProjectModeAdapterItem[]
   installingPluginNames: Set<string>
   error: string | null
+  verification: EnterpriseProjectCodeVerification
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
@@ -3215,7 +3263,10 @@ function ProjectEditDialog({
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                   <span className="flex items-center justify-between gap-2">
                     <span>项目编号 *</span>
-                    <LeanProjectLinkStatus linked={form.projectFromLean} />
+                    <LeanProjectLinkStatus
+                      linked={form.projectFromLean}
+                      error={verification.error}
+                    />
                   </span>
                   <EnterpriseProjectSearchInput
                     value={form.projectCode}
@@ -3390,6 +3441,7 @@ function ProjectEditDialog({
             onClick={onSubmit}
             disabled={
               saving ||
+              verification.pending ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
               metadataLengthInvalid(form)
@@ -8470,12 +8522,12 @@ export function HarnessBoardView({
       current.projectFromLean === linked ? current : { ...current, projectFromLean: linked }
     )
   }, [])
-  useEnterpriseProjectCodeVerification(
+  const createProjectVerification = useEnterpriseProjectCodeVerification(
     dialogOpen,
     form.projectCode,
     handleCreateProjectLinkVerified
   )
-  useEnterpriseProjectCodeVerification(
+  const editProjectVerification = useEnterpriseProjectCodeVerification(
     editingProject !== null,
     editForm.projectCode,
     handleEditProjectLinkVerified
@@ -9959,6 +10011,7 @@ export function HarnessBoardView({
   }
 
   const handleSubmit = async (): Promise<void> => {
+    if (creating || createProjectVerification.pending) return
     setFormError(null)
     if (metadataRequiredMissing(form)) {
       setFormError("所有字段均为必填")
@@ -10027,7 +10080,7 @@ export function HarnessBoardView({
   )
 
   const handleSubmitEdit = async (): Promise<void> => {
-    if (!editingProject) return
+    if (!editingProject || savingEdit || editProjectVerification.pending) return
     setEditError(null)
     if (metadataRequiredMissing(editForm)) {
       setEditError("所有字段均为必填")
@@ -10051,6 +10104,9 @@ export function HarnessBoardView({
       detailsByProjectIdRef.current = nextDetails
       setDetailsByProjectId(nextDetails)
       await loadProjects({ force: true })
+      if (selectedProjectIdRef.current === projectId) {
+        await loadProjectDetail(projectId)
+      }
     } catch (error) {
       setEditError(cleanIpcError(error))
     } finally {
@@ -11787,6 +11843,7 @@ export function HarnessBoardView({
           registry={projectDialogAdapterRegistry}
           installingPluginNames={updatingPluginNames}
           error={editError}
+          verification={editProjectVerification}
           onOpenChange={handleEditDialogOpenChange}
           onChange={setEditForm}
           onInstallPlugin={handleInstallMarketPlugin}
@@ -12118,6 +12175,7 @@ export function HarnessBoardView({
         registry={projectDialogAdapterRegistry}
         installingPluginNames={updatingPluginNames}
         error={formError}
+        verification={createProjectVerification}
         onOpenChange={handleCreateDialogOpenChange}
         onChange={setForm}
         onInstallPlugin={handleInstallMarketPlugin}
@@ -12132,6 +12190,7 @@ export function HarnessBoardView({
         registry={projectDialogAdapterRegistry}
         installingPluginNames={updatingPluginNames}
         error={editError}
+        verification={editProjectVerification}
         onOpenChange={handleEditDialogOpenChange}
         onChange={setEditForm}
         onInstallPlugin={handleInstallMarketPlugin}

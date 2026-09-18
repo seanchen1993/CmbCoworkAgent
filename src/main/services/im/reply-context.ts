@@ -63,11 +63,13 @@ export function imProjectModeReplyPrefix(input: {
   switched?: boolean
 }): string {
   return [
-    withSwitchNotice("【项目模式】", input.switched === true),
+    withSwitchNotice("【项目模式会话返回】", input.switched === true),
     `项目：【${readableLabel(input.projectName, "未知")}】`,
     `特性：【${readableLabel(input.featureName, "未知")}】`,
     `当前阶段：${readableLabel(input.nodeName, "未知")}`,
-    `阶段状态：${readableLabel(input.nodeStatus, "未知")}`
+    `阶段状态：${readableLabel(input.nodeStatus, "未知")}`,
+    `模型返回：`,
+    ""
   ].join("\n")
 }
 
