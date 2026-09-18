@@ -56,50 +56,96 @@ async function run(events: Event[]) {
 }
 
 describe("Electron stream snapshot regression", () => {
-  it("keeps each actual runtime provider-ID cycle live before done", async () => {
-    const transport = new ElectronIPCTransport() as unknown as {
-      convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
-    }
-    const events: Event[] = []
-    for (const packet of recordedProviderStream)
-      events.push(...transport.convertToSDKEvents(packet, "test", "normal"))
-    const { frames } = await run(events)
-    const merger = createLiveStreamMessageMerger()
-    const live = frames.reduce((messages, frame) => {
-      const next = merger(messages, frame as LiveStreamMessage[])
-      const assistants = next.filter((message) => message.type === "ai")
-      const stage = assistants.some((message) => message.content === "hahaha done")
-        ? 3
-        : assistants.some((message) => message.content === "checking-2")
-          ? 2
-          : 1
-      if (stage >= 2) {
-        expect(assistants.slice(0, stage - 1).map((message) => message.content)).toEqual(
-          ["checking-1", "checking-2"].slice(0, stage - 1)
-        )
-        for (const [index, assistant] of assistants.slice(0, stage - 1).entries()) {
-          expect(assistant.tool_calls?.map((call) => call.id)).toEqual([
-            `call-local-741-${index + 1}`
-          ])
-          expect(assistant.tool_calls?.[0].args).toEqual({ file_path: "/workspace/evidence.txt" })
-        }
+  it.each(["normal", "coordinator"])(
+    "keeps mixed plain values identities in %s mode",
+    async (mode) => {
+      const transport = new ElectronIPCTransport() as unknown as {
+        convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
       }
-      return next
-    }, [] as LiveStreamMessage[])
-    const assistants = live.filter((message) => message.type === "ai")
-    expect(assistants.map((message) => message.content)).toEqual([
-      "checking-1",
-      "checking-2",
-      "hahaha done"
-    ])
-    for (const [index, assistant] of assistants.entries()) {
-      expect(assistant.tool_calls?.map((call) => call.id) ?? []).toEqual(
-        index < 2 ? [`call-local-741-${index + 1}`] : []
+      const plain = (type: string, id: string, content: string, extra = {}) => ({
+        kwargs: {
+          type,
+          id,
+          content,
+          ...extra,
+          additional_kwargs: {
+            cmb_internal_provider_source_id: id,
+            cmb_internal_provider_occurrence: 1
+          }
+        }
+      })
+      const messages = [
+        plain("system", "system", "instructions"),
+        plain("human", "user", "request"),
+        plain("ai", "first", "First"),
+        plain("tool", "tool", "result", { tool_call_id: "call", name: "read_file" }),
+        plain("ai", "second", "Second")
+      ]
+      const events = transport.convertToSDKEvents(
+        { type: "stream", mode: "values", data: { messages } },
+        "test",
+        mode
       )
-      if (index < 2)
-        expect(assistant.tool_calls?.[0].args).toEqual({ file_path: "/workspace/evidence.txt" })
+      const { stream } = await run(events)
+      expect(
+        stream.messages
+          .filter((message) => message.type === "ai")
+          .map((message) => [message.id, message.content])
+      ).toEqual([
+        ["first", "First"],
+        ["second", "Second"]
+      ])
+      expect(stream.messages.find((message) => message.id === "tool")?.type).toBe("tool")
     }
-  })
+  )
+
+  it.each(["normal", "coordinator"])(
+    "keeps each actual runtime provider-ID cycle live before done in %s mode",
+    async (mode) => {
+      const transport = new ElectronIPCTransport() as unknown as {
+        convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
+      }
+      const events: Event[] = []
+      for (const packet of recordedProviderStream)
+        events.push(...transport.convertToSDKEvents(packet, "test", mode))
+      const { frames } = await run(events)
+      const merger = createLiveStreamMessageMerger()
+      const live = frames.reduce((messages, frame) => {
+        const next = merger(messages, frame as LiveStreamMessage[])
+        const assistants = next.filter((message) => message.type === "ai")
+        const stage = assistants.some((message) => message.content === "hahaha done")
+          ? 3
+          : assistants.some((message) => message.content === "checking-2")
+            ? 2
+            : 1
+        if (stage >= 2) {
+          expect(assistants.slice(0, stage - 1).map((message) => message.content)).toEqual(
+            ["checking-1", "checking-2"].slice(0, stage - 1)
+          )
+          for (const [index, assistant] of assistants.slice(0, stage - 1).entries()) {
+            expect(assistant.tool_calls?.map((call) => call.id)).toEqual([
+              `call-local-741-${index + 1}`
+            ])
+            expect(assistant.tool_calls?.[0].args).toEqual({ file_path: "/workspace/evidence.txt" })
+          }
+        }
+        return next
+      }, [] as LiveStreamMessage[])
+      const assistants = live.filter((message) => message.type === "ai")
+      expect(assistants.map((message) => message.content)).toEqual([
+        "checking-1",
+        "checking-2",
+        "hahaha done"
+      ])
+      for (const [index, assistant] of assistants.entries()) {
+        expect(assistant.tool_calls?.map((call) => call.id) ?? []).toEqual(
+          index < 2 ? [`call-local-741-${index + 1}`] : []
+        )
+        if (index < 2)
+          expect(assistant.tool_calls?.[0].args).toEqual({ file_path: "/workspace/evidence.txt" })
+      }
+    }
+  )
   it("prefers explicit occurrences over execution scopes and resets scope state on retry", async () => {
     const transport = new ElectronIPCTransport() as unknown as {
       convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]

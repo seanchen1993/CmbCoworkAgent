@@ -1,3 +1,4 @@
+import { resolveWorkerSnapshotContent } from "@/lib/worker-message-content"
 import {
   useCallback,
   useEffect,
@@ -28,6 +29,7 @@ import {
   isCompleteWorkerSnapshotCoveringHistory,
   mergeWorkerCheckpointSparseContent,
   normalizeWorkerMessagesAfterHistory,
+  preserveWorkerHistoryMessageIdentities,
   MAX_WORKER_HISTORY_MESSAGES
 } from "@/lib/worker-checkpoint-history"
 import type { Message } from "@/types"
@@ -304,13 +306,10 @@ function workerTurnKeys(
 }
 
 function relativeWorkerTurnKeys(messages: readonly Message[], turnOffset: number): string[] {
-  let currentTurn = turnOffset
-  return messages.map((message) => {
-    if (message.role === "user") currentTurn += 1
-    return currentTurn > 0
-      ? `__cmb-worker-turn-${currentTurn}__`
-      : WORKER_PRE_USER_TURN_KEY
-  })
+  return workerTurnKeys(
+    messages,
+    turnOffset > 0 ? `__cmb-worker-turn-${turnOffset}__` : WORKER_PRE_USER_TURN_KEY
+  )
 }
 
 function workerTurnSignatureKey(turnKey: string, signature: string | undefined): string | undefined {
@@ -435,8 +434,11 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
   const normalizedBaseMessages = normalizeCompleteMessageIds(baseMessages)
   const normalizedLiveMessages = normalizeAppendedMessageIds(
     normalizedBaseMessages,
-    normalizeCompleteMessageIds(
-      normalizeMessageRoleCollisionIds(normalizedBaseMessages, liveMessages)
+    preserveWorkerHistoryMessageIdentities(
+      normalizedBaseMessages,
+      normalizeCompleteMessageIds(
+        normalizeMessageRoleCollisionIds(normalizedBaseMessages, liveMessages)
+      )
     ),
     { splitAssistantAfterTool: true }
   )
@@ -872,6 +874,8 @@ function resolveWorkerPanelContent(
   incomingMessage: Message,
   incomingDefinesRepeatedOccurrence: boolean = false
 ): Message["content"] {
+  const snapshotContent = resolveWorkerSnapshotContent(existingMessage, incomingMessage)
+  if (snapshotContent !== undefined) return snapshotContent
   if (incomingDefinesRepeatedOccurrence) return incomingMessage.content ?? ""
 
   if (isWorkerNonSnapshotMessageId(existingMessage.id) && existingMessage.id === incomingMessage.id) {
