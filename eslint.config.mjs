@@ -17,6 +17,8 @@ export default defineConfig(
       "**/.vite",
       "**/dist",
       "**/out",
+      // Ignored validation artifacts, downloaded runtimes and unpacked installers.
+      "output/**",
       // Runtime conversations, generated workflow scripts, caches and traces.
       // They are user data rather than repository source; scanning them makes
       // lint time and output grow with application usage.

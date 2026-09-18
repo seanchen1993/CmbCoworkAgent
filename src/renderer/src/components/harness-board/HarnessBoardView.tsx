@@ -117,7 +117,6 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { toast } from "sonner"
-import noSignalVideoUrl from "@/assets/harness-board/no-signal.mp4"
 import { marketApi, type MarketItem } from "../../api/market"
 import { formatTopUserOrgName } from "@/components/dashboard/use-dashboard"
 import { UpdateVersionTooltip } from "@/components/customize/MarketPanel/MarketUpdateBadge"
@@ -7418,16 +7417,6 @@ function FeatureDetailPage({
             <section
               className={cn(harnessSurfaceClassName, "isolate relative mb-4 overflow-hidden p-4")}
             >
-              <video
-                aria-hidden="true"
-                autoPlay
-                className="pointer-events-none absolute -top-8 right-0 z-0 h-auto w-[340px] max-w-[78%] object-contain opacity-40 saturate-125 motion-reduce:hidden"
-                loop
-                muted
-                playsInline
-                preload="metadata"
-                src={noSignalVideoUrl}
-              />
               <div
                 aria-hidden="true"
                 className="pointer-events-none absolute -right-20 -top-24 z-[1] size-60 rounded-full bg-status-info/10 blur-3xl"

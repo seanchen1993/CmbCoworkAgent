@@ -287,14 +287,16 @@ describe("Harness adapter detail worker", () => {
     expect(large.byteLength).toBeGreaterThan(8 * 1024 * 1024)
 
     let ticks = 0
-    const ticker = setInterval(() => {
+    // A real worker can finish before Windows' timer granularity reaches 1 ms.
+    // The check phase measures event-loop progress without a minimum wall time.
+    const ticker = setImmediate(() => {
       ticks += 1
-    }, 1)
+    })
     try {
       const result = await client.parse(large, [makeProjectInput()])
       expect(result.projects["project-a"]?.runs).toHaveLength(2)
     } finally {
-      clearInterval(ticker)
+      clearImmediate(ticker)
     }
     expect(ticks).toBeGreaterThan(0)
     expect(client.getDiagnostics().lastStats).toMatchObject({

@@ -1,4 +1,9 @@
 import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { useModCommands } from "../../features/slash-commands/useModCommands"
+import { ModCommandJobs } from "./ModCommandJobs"
+import { FunctionPanes } from "./FunctionPanes"
+import { useFunctionTurnNotices } from "@/lib/use-function-turn-notices"
+import { ModCards } from "./ModCards"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
@@ -1654,6 +1659,7 @@ export function ChatContainer({
   readOnlyReason = null,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
+  const functionTurnNotices = useFunctionTurnNotices(threadId)
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
   )
@@ -4996,11 +5002,14 @@ export function ChatContainer({
     threadMessages.length
   ])
 
+  const modCommands = useModCommands(threadId)
+  const isModCommandInput = modCommands.handles(input.trim())
   const slash = useSlashCommands({
     input,
     skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null,
-    browserSelected: selectedBuiltinBrowser
+    browserSelected: selectedBuiltinBrowser,
+    modCommands: modCommands.items
   })
   const loadMoreWorkspaceMentionFiles = useCallback(
     async (signal: AbortSignal) => {
@@ -5421,6 +5430,22 @@ export function ChatContainer({
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
     if (readOnly) return
     if (contextReminderPending) return
+    if (modCommands.mayHandle(trimmedInput)) {
+      if (historyLoading) return
+      try {
+        const handled = await modCommands.submit(trimmedInput, () => {
+          if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
+            throw new Error("Mods 命令接收文本参数，请先移除附件、技能和浏览器选择。")
+        })
+        if (handled) {
+          setInput("")
+          return
+        }
+      } catch (error) {
+        setError(error instanceof Error ? error.message : "Mods 命令提交失败")
+        return
+      }
+    }
     // A plain (non-/goal) message submitted while the thread is busy — running,
     // or a tool approval is pending — is parked in the draft queue instead of
     // being blocked (running) or interrupting the run (approval). Every /goal
@@ -7896,6 +7921,7 @@ export function ChatContainer({
                     />
                   )}
                   <ChatMessageVirtualList
+                    functionTurnNotices={functionTurnNotices}
                     messageAttempts={streamData.messageAttempts}
                     searchReveal={searchOpen ? searchReveal : null}
                     messages={displayMessages}
@@ -8300,6 +8326,9 @@ export function ChatContainer({
               )}
             >
               <GitChangeNotice threadId={threadId} />
+              <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
+              <ModCommandJobs key={threadId} threadId={threadId} />
+              <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
                   visible={chatScrollUiState.mode === "detached"}
@@ -8968,11 +8997,11 @@ export function ChatContainer({
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
                           {isLoading ? (
                             <>
-                              {canSubmitGoalCommandWhileLoading && (
+                              {(canSubmitGoalCommandWhileLoading || isModCommandInput) && (
                                 <button
                                   type="submit"
-                                  disabled={goalSendButtonDisabledWhileLoading}
-                                  aria-label="发送 goal 命令"
+                                  disabled={isModCommandInput ? slash.mode.kind === "slash" : goalSendButtonDisabledWhileLoading}
+                                  aria-label={isModCommandInput ? "执行 Mods 命令" : "发送 goal 命令"}
                                   className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
                                   <ArrowUp className="size-5" strokeWidth={1.75} />

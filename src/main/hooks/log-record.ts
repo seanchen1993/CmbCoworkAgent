@@ -1,4 +1,5 @@
 import { getHookLoggingConfig } from "../storage"
+import { protectCurrentModData } from "../mods/adapters"
 import {
   redactAndTruncateSensitiveText,
   redactLogValue,
@@ -197,7 +198,7 @@ function buildExecutedEnvelope(
       )
     }
   }
-  return envelope
+  return protectCurrentModData(envelope)
 }
 
 function buildSkippedEnvelope(

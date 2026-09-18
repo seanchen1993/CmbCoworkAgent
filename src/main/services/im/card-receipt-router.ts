@@ -1,6 +1,7 @@
 import type { RemoteImCardReceiptV1 } from "../../../shared/im-gateway-contract"
 import { buildExpiredCard } from "./card-builder"
 import { imCardPublisher, type ImCardPublisher } from "./card-publisher"
+import type { ImCommandRouter } from "./command-router"
 import { imEventStore, type ImEventStore } from "./event-store"
 import { imRemoteApprovalService, type ImRemoteApprovalService } from "./remote-approval-service"
 import {
@@ -27,6 +28,8 @@ import { buildImProactiveReplies } from "./reply-segmentation"
 
 type ReplyDrainer = Pick<ImReplyClient, "sendPending">
 
+type TargetBindResolver = Pick<ImCommandRouter, "resolveTargetBindCard">
+
 /** Enough to cover any plausible burst of redeliveries, and bounded. */
 const MAX_REMEMBERED_RECEIPTS = 512
 
@@ -41,6 +44,7 @@ interface CardReceiptDependencies {
 export class ImCardReceiptRouter {
   private readonly dependencies: CardReceiptDependencies
   private replyDrainer: ReplyDrainer | null = null
+  private commands: TargetBindResolver | null = null
   /**
    * A platform retry must not apply the same click twice.
    *
@@ -67,6 +71,21 @@ export class ImCardReceiptRouter {
     this.replyDrainer = replyDrainer
     return () => {
       if (this.replyDrainer === replyDrainer) this.replyDrainer = null
+    }
+  }
+
+  /**
+   * Registered rather than imported as a singleton.
+   *
+   * The command router is built per service with the live turn queue behind
+   * `getCurrentEventId`, so a module-level instance would be a different object
+   * whose default answers null — and a card bind would then never report that a
+   * task was still running, where the typed path does.
+   */
+  registerCommandRouter(commands: TargetBindResolver): () => void {
+    this.commands = commands
+    return () => {
+      if (this.commands === commands) this.commands = null
     }
   }
 
@@ -157,6 +176,21 @@ export class ImCardReceiptRouter {
         decision: suffix,
         principalId: receipt.principalId,
         conversationKey: interaction.conversationKey
+      })
+    }
+
+    if (interaction.kind === "target_bind") {
+      const commands = this.commands
+      // Only while a service is up. The card can outlive one — it is published
+      // on request, not on a run — and a click landing in that window has to
+      // say so rather than silently doing nothing.
+      if (!commands) {
+        return "内置机器人正在重连，切换没有生效。请稍后重试，或回复 /绑定 <编号>。"
+      }
+      return commands.resolveTargetBindCard({
+        principalId: receipt.principalId,
+        conversationKey: interaction.conversationKey,
+        feedback: receipt.feedback
       })
     }
 

@@ -6,6 +6,7 @@ import {
 import { deleteThread as dbDeleteThread } from "../db"
 import { deleteProjectThreadDataDirectory } from "../agent/context-history-path"
 import { retireThreadCheckpointers } from "../agent/runtime"
+import { getModsManager } from "../mods/manager"
 import {
   clearTrustedToolFilePreviewSourcesForThread,
   collectTrustedToolFilePreviewScopeKeysForThread
@@ -25,6 +26,9 @@ export const HEARTBEAT_THREAD_ID = "heartbeat"
 export async function resetHeartbeatSessionForWorkspaceChange(
   previousWorkDir: string
 ): Promise<void> {
+  // Revoke old project callbacks before asynchronous retirement. Like an aborted
+  // runtime, this authority cannot be restored if filesystem cleanup later fails.
+  getModsManager()?.closeFunctionThread(HEARTBEAT_THREAD_ID)
   await retireThreadCheckpointers(HEARTBEAT_THREAD_ID)
 
   // Retire hot-sweeps the live parent checkpoint. These cold sweeps also remove

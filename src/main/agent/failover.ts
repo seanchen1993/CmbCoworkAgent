@@ -300,6 +300,23 @@ function hasRetryableStatusInMessage(message: string): boolean {
  * models equally (auth, bad request, user cancellation).
  */
 export function isRetryableApiError(error: unknown): boolean {
+  const chain: unknown[] = []
+  const seen = new Set<unknown>()
+  let current = error
+  while (current && !seen.has(current)) {
+    if (chain.length >= 64) return false
+    chain.push(current)
+    seen.add(current)
+    current = asErrorLike(current)?.cause
+  }
+  // LangChain preserves provider failures in cause. Cancellation and errors
+  // affecting every model take precedence over a retry-looking outer wrapper.
+  if (chain.some(isAbortLikeError)) return false
+  if (chain.some((entry) => NON_RETRYABLE_STATUS_CODES.has(getStatusCode(entry) ?? 0))) return false
+  return chain.some(isRetryableApiErrorEntry)
+}
+
+function isRetryableApiErrorEntry(error: unknown): boolean {
   if (!error) return false
 
   // AbortError — user cancelled, not retryable
@@ -503,8 +520,7 @@ export function extractErrorDetail(
       statusLabel: "Harness 仓库上下文超限",
       hint: "请减少发布单元；框架模式最多 64 个，插件注入模式最多 512 个。",
       reason:
-        deployUnitContextLimitMessage ??
-        "Harness 发布单元上下文超过安全上限，已阻止不完整执行。",
+        deployUnitContextLimitMessage ?? "Harness 发布单元上下文超过安全上限，已阻止不完整执行。",
       providerMessage: deployUnitContextLimitMessage
     }
   }
@@ -537,10 +553,7 @@ export function extractErrorDetail(
       providerMessage: harnessContextMessage
     }
   }
-  const localStorageError = findErrorWithCode(
-    error,
-    "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED"
-  )
+  const localStorageError = findErrorWithCode(error, "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED")
   if (localStorageError) {
     const localStorageMessage = cleanProviderMessage(localStorageError)
     return {

@@ -266,7 +266,8 @@ export async function runCompletionHooksWithRevision({
   revisionPromptPrefix,
   runPostSkillUseHooks,
   runStopHooks,
-  onStopHooksFired
+  onStopHooksFired,
+  hasTerminalModelRefusal
 }: {
   threadId: string
   workspacePath?: string
@@ -296,10 +297,14 @@ export async function runCompletionHooksWithRevision({
   runPostSkillUseHooks?: () => Promise<HookResult | null>
   runStopHooks?: () => Promise<HookResult | null>
   onStopHooksFired?: () => void
+  hasTerminalModelRefusal?: () => boolean
 }): Promise<CompletionHookOutcome> {
   let postSkillRevisionCount = 0
   let stopRevisionCount = 0
   while (!abortSignal.aborted) {
+    // A provider terminal is not a completion defect to revise. The transport
+    // records the refusal separately; no hook may automatically restart it.
+    if (hasTerminalModelRefusal?.()) return "passed"
     const postSkillResult = await (runPostSkillUseHooks
       ? runPostSkillUseHooks()
       : runPostSkillUseHooksForActivatedSkills({

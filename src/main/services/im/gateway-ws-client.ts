@@ -386,6 +386,36 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     )
   }
 
+  /**
+   * Retires a receipt this desktop can never read.
+   *
+   * The id is taken from the payload that just failed validation, which is the
+   * only place it exists. That is safe because the gateway verifies the
+   * acknowledging principal owns the receipt: an id that is malformed or
+   * someone else's is refused there rather than retiring anything.
+   */
+  private async discardUnreadableReceipt(
+    payload: Record<string, unknown>,
+    error: unknown
+  ): Promise<void> {
+    const receiptId = nonEmptyString(record(payload.receipt)?.receiptId)
+    console.warn(
+      "[IM Gateway] card-receipt:unreadable",
+      error instanceof Error ? error.message : "unknown",
+      receiptId ? "discarding" : "no receiptId to discard"
+    )
+    if (!receiptId) return
+    try {
+      await this.acknowledgeCardReceipt(receiptId)
+    } catch (ackError) {
+      // The next delivery tries again; nothing here is worth failing over.
+      console.warn(
+        "[IM Gateway] card-receipt:discard-failed",
+        ackError instanceof Error ? ackError.message : "unknown"
+      )
+    }
+  }
+
   submitReply(reply: RemoteImReplyV1): Promise<ImReplySubmissionResult> {
     const principalId = this.status.principalId
     if (
@@ -731,11 +761,26 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         // also could not recover: the receipt is redelivered until it is
         // acknowledged, so a single unreadable one would cycle the connection
         // for as long as it existed.
+        let receipt: RemoteImCardReceiptV1
         try {
           if (!messageId) throw new ImGatewayProtocolError("CARD_RECEIPT missing messageId")
           assertOnlyKeys(payload, ["receipt"], "CARD_RECEIPT payload")
-          const receipt = record(payload.receipt) as unknown
-          assertRemoteImCardReceiptV1(receipt)
+          const candidate = record(payload.receipt) as unknown
+          assertRemoteImCardReceiptV1(candidate)
+          receipt = candidate
+        } catch (error) {
+          // Failing the contract is permanent: the same bytes will not parse on
+          // the next delivery, and the gateway redelivers without a cap. Left
+          // unacknowledged this becomes a receipt retried every five minutes for
+          // the life of the row — which is what a desktop one version behind a
+          // new card kind would do to itself. Acknowledge it and drop it.
+          await this.discardUnreadableReceipt(payload, error)
+          return
+        }
+        try {
+          // Deliberately not acknowledged: a receipt addressed to someone else
+          // is not this desktop's to retire, and the gateway refuses the
+          // acknowledgement anyway. Redelivery is the correct outcome.
           if (!this.status.principalId || receipt.principalId !== this.status.principalId) {
             throw new ImGatewayProtocolError("CARD_RECEIPT principal does not match WELCOME")
           }
