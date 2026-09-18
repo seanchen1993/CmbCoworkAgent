@@ -56,7 +56,132 @@
 4. v26 尚未重新执行全量 Vitest、standalone UAT、E2E 和性能回检。
 5. 当前 v26 改动尚未提交。
 
-## 3. 分批实施计划
+## 3. 历史调研、设计和反编译参考材料
+
+新会话开始实现前，先按下面顺序阅读。所有路径均相对于
+`C:\ai\CmbCoworkAgent-mods-v2`，历史产物只作为设计证据，不能直接复制实现。
+
+### 3.1 用户提供的原始架构文档
+
+```text
+C:\Users\87624\xwechat\_files\wxid_amfml3ktb7tu21\_a7a4\msg\file\2026-09\EXTERNAL.Function.Hooks.Core.Architecture.pdf
+```
+
+重点关注：Function Hooks 的分层、宿主 authority、hook registration、调用链、取消和生命周期语义。
+
+### 3.2 总体目标与早期方案
+
+```text
+docs/mods-v2-parity-design-2026-09-16.md
+docs/mods-v2-implementation-2026-09-16.md
+docs/mods-v2-final-implementation-plan.md
+docs/mods-implementation-progress.md
+docs/mods-completion-worklog.md
+output/mods-insight-2026-09-17/mods-insight-final-target.txt
+```
+
+阅读目的：了解为什么要做 Mods、目标使用方式、已放弃的方案、批次边界以及“对齐 Claude Code”具体指什么。
+
+### 3.3 Host、authority 和运行时基础
+
+```text
+docs/mods-v2-host-foundation-2026-09-17.md
+docs/mods-v2-agent-authority-design-2026-09-17.md
+docs/mods-v2-runtime-authority-2026-09-17.md
+docs/mods-v2-agent-instances-2026-09-17.md
+docs/mods-v2-turn-lifecycle-2026-09-18.md
+docs/mods-v2-background-turns-2026-09-18.md
+docs/mods-v2-child-turns-2026-09-18.md
+docs/mods-v2-turn-presentation-2026-09-18.md
+docs/mods-v2-refusal-turns-2026-09-18.md
+```
+
+阅读目的：理解 authority、generation、lease、主 agent 与子 agent 隔离、后台 turn、取消和 turn completion 的已有约束。后续 compact 或 usage 实现不能绕过这些边界。
+
+### 3.4 Session、工具和 SDK 设计
+
+```text
+docs/mods-v2-session-read-2026-09-18.md
+docs/mods-v2-authoring.md
+docs/mods-v2-context-usage-2026-09-18.md
+docs/mods-v2-tool-catalog-2026-09-17.md
+docs/mods-v2-tool-permission-2026-09-17.md
+docs/mods-v2-mcp-sdk-2026-09-17.md
+docs/mods-v2-mcp-tool-routing-2026-09-17.md
+docs/mods-v2-registered-mcp-2026-09-17.md
+docs/mods-v2-compatibility-matrix.json
+```
+
+阅读目的：保持 session read、tool routing、MCP、权限、SDK 输入输出和兼容性矩阵的一致性，避免新增能力破坏既有 contract。
+
+### 3.5 Claude Code 反编译产物
+
+反编译版本固定为 Claude Code 2.1.273：
+
+```text
+output/claude-code-2.1.273-analysis/manifest.json
+output/claude-code-2.1.273-analysis/formatted/chunk-hr43png0.js
+output/claude-code-2.1.273-analysis/extracted/chunk-c5xn880r.js
+output/claude-code-2.1.273-analysis/extracted/chunk-x1btkhgs.js
+output/claude-code-2.1.273-analysis/extract_bun.py
+output/claude-reference/node_modules/@anthropic-ai/claude-code/sdk-tools.d.ts
+```
+
+重点检索位置：
+
+- `session.compact` 的输入校验、active-turn 拒绝、返回的 `messages/tokensBefore/tokensAfter/skip`。
+- `session.usage` 的 `breakdown`、`columns`、`contextData`、`Dyn`、`Fyn`、`War`。
+- `contextData` 的 categories、messages、system prompt、system tools、MCP tools、agents、memory、skills、API usage 计算。
+- host session bound、live read、context window 和 rate limit 的缺省语义。
+
+反编译产物是行为依据，不是可直接拷贝的源码。无法从本工程运行时确认的 Claude Code 字段必须保持 omission 或明确 unavailable，禁止填充虚假数据。
+
+### 3.6 压缩控制器专项研究
+
+```text
+output/mods-v2-validation/context-controller-research.md
+output/mods-v2-validation/claude-code-2.1.273.d.ts
+output/mods-v2-validation/claude-conformance.txt
+output/mods-v2-validation/claude-sdk-conformance.txt
+output/mods-v2-validation/claude-state-conformance.txt
+output/mods-v2-validation/usage-full-comparison.txt
+output/mods-v2-validation/usage-standalone-comparison.json
+output/mods-v2-validation/session-read-standalone-comparison.json
+```
+
+这组材料已经冻结了以下结论：
+
+- compact 必须区分 prepare 和 commit。
+- prepare 阶段不产生 archive 或 checkpoint 副作用。
+- active main turn 期间拒绝 compact。
+- compact 的返回消息是实际投影的消息数组，不是消息数量。
+- usage breakdown 应来自真实 context data，不能用静态常量模拟。
+
+### 3.7 历史验证产物
+
+```text
+output/mods-v2-validation/vitest-full.txt
+output/mods-v2-validation/vitest-full.json
+output/mods-v2-validation/usage-e2e-final-result.json
+output/mods-v2-validation/session-read-standalone-final.txt
+output/mods-v2-validation/host-foundation-standalone.txt
+output/mods-v2-validation/host-foundation-performance-final.txt
+output/mods-v2-validation/background-final-tests.txt
+output/mods-v2-validation/child-final-tests.txt
+output/mods-v2-validation/turn-full-first.txt
+```
+
+这些文件用于比较历史基线、失败数量、standalone 结果和性能趋势。执行新验证时不要覆盖旧产物，使用带批次和日期的新文件名。
+
+### 3.8 禁止直接应用的临时产物
+
+```text
+output/mods-v2-validation/v26-rejected-draft.patch
+```
+
+该 patch 是被拒绝的实验实现，只能用于了解错误方向，不能应用或恢复。它错误地把 usage 归因于单一 Messages 类别。
+
+## 4. 分批实施计划
 
 ### 批次 0：基线冻结与代码检视
 
@@ -207,7 +332,7 @@
 feat(mods): align session compaction and context breakdown
 ```
 
-## 4. 关键设计约束
+## 5. 关键设计约束
 
 ### 4.1 不伪造上下文数据
 
@@ -236,11 +361,10 @@ capture latest request
 
 新增类型和返回字段应尽量保持 Claude Code 的字段名称和语义。对于本工程暂时无法支持的字段，使用明确的 unavailable 或 omission，不创建本地私有字段冒充 Claude Code 行为。
 
-## 5. 新会话接续指令
+## 6. 新会话接续指令
 
 新会话开始时执行：
 
 ```text
 继续 C:\ai\CmbCoworkAgent-mods-v2 的 codex/mods-v2 分支。不要丢弃未提交改动。阅读 docs/mods-v2-final-implementation-plan.md，从批次 1 开始实现 session.usage breakdown，然后按批次 2 到 6 完成归档一致性、并发检视、全量测试、E2E、性能回检和最终提交。
 ```
-
