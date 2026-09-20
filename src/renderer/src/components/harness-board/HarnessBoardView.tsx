@@ -47,6 +47,8 @@ import {
   MoreHorizontal,
   PauseCircle,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   RefreshCcw,
   RefreshCw,
@@ -115,6 +117,7 @@ import {
   takeHarnessSidebarProjectLookupBatch
 } from "@/lib/harness-sidebar-project-lookup"
 import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
+import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import {
@@ -240,6 +243,8 @@ const PROJECT_DESCRIPTION_MAX_CHARS = 100
 const PROJECT_DIR_MAX_CHARS = 30
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
+const PINNED_HARNESS_PROJECTS_STORAGE_KEY = "harness:pinnedProjects"
+const PINNED_HARNESS_FEATURES_STORAGE_KEY = "harness:pinnedFeatures"
 const SYSTEM_CONSTRAINT_UPDATE_KIND = "system-constraints-update"
 const FEATURE_SESSION_INITIAL_VISIBLE_COUNT = 5
 const FEATURE_SESSION_VISIBLE_INCREMENT = 8
@@ -7765,6 +7770,8 @@ function FeatureDetailPage({
 function ProjectFeatureSidebar({
   groups,
   collapsedKeys,
+  pinnedProjectIds,
+  pinnedFeatureKeys,
   allCollapsed,
   creatingSessionKey,
   threadsById,
@@ -7782,6 +7789,8 @@ function ProjectFeatureSidebar({
   scrollTopRef,
   scrollIntentRef,
   onToggleCollapse,
+  onToggleProjectPin,
+  onToggleFeaturePin,
   onToggleAll,
   onCreateSession,
   onSelectProjectSession,
@@ -7799,6 +7808,8 @@ function ProjectFeatureSidebar({
 }: {
   groups: ProjectSessionProjectGroup[]
   collapsedKeys: Set<string>
+  pinnedProjectIds: Set<string>
+  pinnedFeatureKeys: Set<string>
   allCollapsed: boolean
   creatingSessionKey: string | null
   threadsById: Map<string, Thread>
@@ -7816,6 +7827,8 @@ function ProjectFeatureSidebar({
   scrollTopRef: MutableRefObject<number>
   scrollIntentRef: MutableRefObject<ProjectSidebarScrollIntent>
   onToggleCollapse: (key: string) => void
+  onToggleProjectPin: (projectId: string) => void
+  onToggleFeaturePin: (featureKey: string) => void
   onToggleAll: () => void
   onCreateSession: (project: ProjectFeatureSidebarProject, slug: string) => void
   onSelectProjectSession: (projectId: string, threadId: string, deleted?: boolean) => void
@@ -8106,6 +8119,7 @@ function ProjectFeatureSidebar({
               )
             const projectArchived = group.project.lifecycle.status === "archived"
             const projectDeleted = group.deleted === true
+            const projectPinned = !projectDeleted && pinnedProjectIds.has(group.project.projectId)
             const groupSessionCount =
               group.projectSessions.length +
               group.featureGroups.reduce(
@@ -8154,7 +8168,11 @@ function ProjectFeatureSidebar({
                       )}
                     </button>
                     <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                      <Workflow className="size-4 shrink-0 text-muted-foreground" />
+                      {projectPinned ? (
+                        <Pin className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                      ) : (
+                        <Workflow className="size-4 shrink-0 text-muted-foreground" />
+                      )}
                       <span
                         className="min-w-0 flex-1 truncate text-xs font-semibold"
                         title={group.project.name}
@@ -8187,7 +8205,28 @@ function ProjectFeatureSidebar({
                     <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                       {groupSessionCount}
                     </span>
-                    <span className="pointer-events-none absolute right-0 flex items-center justify-end opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                    <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                      {!projectDeleted && (
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className={cn(
+                            "size-6 shrink-0 opacity-70 hover:bg-accent/20",
+                            projectPinned && "text-primary opacity-100"
+                          )}
+                          title={projectPinned ? "取消置顶项目" : "置顶项目"}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onToggleProjectPin(group.project.projectId)
+                          }}
+                        >
+                          {projectPinned ? (
+                            <PinOff className="size-3" />
+                          ) : (
+                            <Pin className="size-3" />
+                          )}
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="icon-sm"
@@ -8254,6 +8293,8 @@ function ProjectFeatureSidebar({
                     })()}
                     {group.featureGroups.map((featureGroup) => {
                       const featureCollapsed = collapsedKeys.has(featureGroup.key)
+                      const featurePinned =
+                        !projectDeleted && pinnedFeatureKeys.has(featureGroup.key)
                       const featureSelected =
                         selectedFeature?.projectId === group.project.projectId &&
                         selectedFeature.slug === featureGroup.slug
@@ -8302,7 +8343,11 @@ function ProjectFeatureSidebar({
                                 <ChevronDown className="size-3.5" />
                               )}
                             </button>
-                            <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+                            {featurePinned ? (
+                              <Pin className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                            ) : (
+                              <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+                            )}
                             <span
                               className="min-w-0 flex-1 truncate text-xs font-medium"
                               title={featureGroup.title}
@@ -8312,29 +8357,50 @@ function ProjectFeatureSidebar({
                             {hasUnreadFeatureSession && (
                               <span className="size-2 rounded-full bg-status-info shrink-0" />
                             )}
-                            <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
+                            <span className="relative ml-auto flex h-6 w-20 shrink-0 items-center justify-end overflow-hidden">
                               <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                                 {featureGroup.sessions.length}
                               </span>
                               <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
                                 {!projectDeleted && (
-                                  <Button
-                                    variant="ghost"
-                                    size="icon-sm"
-                                    className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
-                                    title="新增会话"
-                                    disabled={creatingSession}
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      void onCreateSession(group.project, featureGroup.slug)
-                                    }}
-                                  >
-                                    {creatingSession ? (
-                                      <Loader2 className="size-3 animate-spin" />
-                                    ) : (
-                                      <Plus className="size-3" />
-                                    )}
-                                  </Button>
+                                  <>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon-sm"
+                                      className={cn(
+                                        "size-6 shrink-0 opacity-70 hover:bg-accent/20",
+                                        featurePinned && "text-primary opacity-100"
+                                      )}
+                                      title={featurePinned ? "取消置顶特性" : "置顶特性"}
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        onToggleFeaturePin(featureGroup.key)
+                                      }}
+                                    >
+                                      {featurePinned ? (
+                                        <PinOff className="size-3" />
+                                      ) : (
+                                        <Pin className="size-3" />
+                                      )}
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon-sm"
+                                      className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
+                                      title="新增会话"
+                                      disabled={creatingSession}
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        void onCreateSession(group.project, featureGroup.slug)
+                                      }}
+                                    >
+                                      {creatingSession ? (
+                                        <Loader2 className="size-3 animate-spin" />
+                                      ) : (
+                                        <Plus className="size-3" />
+                                      )}
+                                    </Button>
+                                  </>
                                 )}
                                 <Button
                                   variant="ghost"
@@ -8623,6 +8689,12 @@ export function HarnessBoardView({
   const allThreadStates = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
   const [collapsedFeatureKeys, setCollapsedFeatureKeys] = useState<Set<string>>(new Set())
+  const [pinnedProjectIds, setPinnedProjectIds] = useState<Set<string>>(() =>
+    readStoredStringSet(PINNED_HARNESS_PROJECTS_STORAGE_KEY)
+  )
+  const [pinnedFeatureKeys, setPinnedFeatureKeys] = useState<Set<string>>(() =>
+    readStoredStringSet(PINNED_HARNESS_FEATURES_STORAGE_KEY)
+  )
   const [unreadIds, setUnreadIds] = useState<Set<string>>(() => {
     try {
       const arr = JSON.parse(localStorage.getItem(THREAD_UNREAD_STORAGE_KEY) || "[]")
@@ -11137,8 +11209,8 @@ export function HarnessBoardView({
       sessionsBySlug: Map<string, HarnessSessionBinding[]>,
       section: ProjectFeatureSessionGroupSection,
       deleted = false
-    ): ProjectFeatureSessionGroup[] =>
-      Array.from(sessionsBySlug.entries())
+    ): ProjectFeatureSessionGroup[] => {
+      const featureGroups = Array.from(sessionsBySlug.entries())
         .map(([slug, sessions]) => ({
           key: `feature:${project.projectId}:${slug}`,
           project,
@@ -11157,6 +11229,11 @@ export function HarnessBoardView({
           if (aOrder !== bOrder) return aOrder - bOrder
           return a.slug.localeCompare(b.slug, "zh-CN")
         })
+      return sortPinnedFirst(
+        featureGroups,
+        (featureGroup) => !featureGroup.deleted && pinnedFeatureKeys.has(featureGroup.key)
+      )
+    }
 
     for (const project of sidebarProjects) {
       const sessionsBySlug = new Map<string, HarnessSessionBinding[]>()
@@ -11215,10 +11292,15 @@ export function HarnessBoardView({
       })
     }
 
-    return groups
+    return sortPinnedFirst(
+      groups,
+      (group) => !group.deleted && pinnedProjectIds.has(group.project.projectId)
+    )
   }, [
     detailsByProjectId,
     harnessSessionIndex,
+    pinnedFeatureKeys,
+    pinnedProjectIds,
     resolvedSidebarProjectIds,
     sidebarProjects,
     threadsById
@@ -11266,6 +11348,18 @@ export function HarnessBoardView({
   const allFeatureGroupsCollapsed =
     projectSidebarGroups.length > 0 &&
     projectSidebarGroups.every((group) => collapsedFeatureKeys.has(group.key))
+
+  const togglePinnedProject = useCallback((projectId: string): void => {
+    setPinnedProjectIds((current) =>
+      toggleStoredStringSet(current, projectId, PINNED_HARNESS_PROJECTS_STORAGE_KEY)
+    )
+  }, [])
+
+  const togglePinnedFeature = useCallback((featureKey: string): void => {
+    setPinnedFeatureKeys((current) =>
+      toggleStoredStringSet(current, featureKey, PINNED_HARNESS_FEATURES_STORAGE_KEY)
+    )
+  }, [])
 
   const toggleAllFeatureGroups = useCallback(() => {
     setCollapsedFeatureKeys((current) => {
@@ -11659,6 +11753,8 @@ export function HarnessBoardView({
           <ProjectFeatureSidebar
             groups={projectSidebarGroups}
             collapsedKeys={collapsedFeatureKeys}
+            pinnedProjectIds={pinnedProjectIds}
+            pinnedFeatureKeys={pinnedFeatureKeys}
             allCollapsed={allFeatureGroupsCollapsed}
             creatingSessionKey={creatingSidebarSessionKey}
             threadsById={threadsById}
@@ -11683,6 +11779,8 @@ export function HarnessBoardView({
                 return next
               })
             }
+            onToggleProjectPin={togglePinnedProject}
+            onToggleFeaturePin={togglePinnedFeature}
             onToggleAll={toggleAllFeatureGroups}
             onCreateSession={(project, slug) => {
               void handleCreateSidebarSession(project, slug)
