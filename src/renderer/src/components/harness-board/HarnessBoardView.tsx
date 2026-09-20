@@ -3686,29 +3686,27 @@ function FeatureCreateDialog({
         </div>
       </div>
       <div className="max-h-72 overflow-auto rounded-md border border-border bg-background px-3 py-2">
-        {!usesDeployUnitWorkspace && (
-          <div className={rowClassName}>
-            <span className="col-start-2 min-w-0 truncate">会话工作区 *</span>
-            <Input
-              ref={workspaceInputRef}
-              readOnly
-              value={workspacePath}
-              title={workspacePath}
-              placeholder="选择会话工作区文件夹"
-              aria-label="会话工作区"
-              aria-required="true"
-              disabled={creating}
-              className="min-w-0 cursor-pointer border-border bg-transparent px-2 text-sm font-normal shadow-none hover:bg-background-interactive focus-visible:ring-2"
-              onClick={pickWorkspace}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault()
-                  pickWorkspace()
-                }
-              }}
-            />
-          </div>
-        )}
+        <div className={rowClassName}>
+          <span className="col-start-2 min-w-0 truncate">会话工作区 *</span>
+          <Input
+            ref={workspaceInputRef}
+            readOnly
+            value={workspacePath}
+            title={workspacePath}
+            placeholder="选择主要代码仓库路径"
+            aria-label="会话工作区"
+            aria-required="true"
+            disabled={creating || usesDeployUnitWorkspace}
+            className="min-w-0 cursor-pointer border-border bg-transparent px-2 text-sm font-normal shadow-none hover:bg-background-interactive focus-visible:ring-2"
+            onClick={pickWorkspace}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault()
+                pickWorkspace()
+              }
+            }}
+          />
+        </div>
         {deployUnitMappingsLoading ? (
           <div className="flex min-h-20 items-center justify-center text-sm text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" />
@@ -3935,7 +3933,7 @@ function FeatureCreateDialog({
                         </span>
                       </TooltipTrigger>
                       <TooltipContent side="top" className="z-[70] max-w-72 text-xs leading-5">
-                        选择后将会在上下文注入选中的发布单元约束，并将对应代码库路径提供给大模型
+                        默认会话工作区必选，用于特性内开启新会话、开启托管模式、招乎发起新会话的默认路径。发布单元可选，用于在上下文注入对应的系统约束，并将对应代码库路径提供给大模型。已选中的发布单元路径可以作为会话工作区路径。
                       </TooltipContent>
                     </Tooltip>
                   </span>
