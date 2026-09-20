@@ -728,6 +728,8 @@ export interface DashboardProjectModeProjectPageData {
 export interface DashboardProjectModeProjectPageOptions {
   upperOrgLv1?: string | string[] | null
   fromLeanOnly?: boolean | null
+  /** 仅统计创建时间落在所选时间范围内的项目；范围走同一次调用的 range 参数。 */
+  createdInRangeOnly?: boolean | null
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
@@ -2298,6 +2300,9 @@ export function useDashboard() {
   const [selectedOrgLv1List, setSelectedOrgLv1List] = useState<string[]>([])
   // 项目运营概览「仅精益项目」全局开关：仅统计绑定了企业（精益）项目的项目。
   const [fromLeanProjectsOnly, setFromLeanProjectsOnly] = useState(false)
+  // 项目运营概览「仅本期新建」全局开关：仅统计创建时间落在当前所选时间范围内的项目。
+  // 和「仅精益项目」互相独立，可叠加。
+  const [createdInRangeProjectsOnly, setCreatedInRangeProjectsOnly] = useState(false)
   const [loading, setLoading] = useState(false)
   const [userStatsLoading, setUserStatsLoading] = useState(false)
   const [skillEvalLoading, setSkillEvalLoading] = useState(false)
@@ -2472,11 +2477,17 @@ export function useDashboard() {
   }, [])
 
   const fetchProjectMode = useCallback(
-    async (r: TimeRange, g: Granularity, orgList: string[], leanOnly = false) => {
+    async (
+      r: TimeRange,
+      g: Granularity,
+      orgList: string[],
+      leanOnly = false,
+      createdInRangeOnly = false
+    ) => {
       const id = ++projectModeFetchIdRef.current
       setProjectModeLoading(true)
       setProjectModeError(null)
-      // 时间/组织/精益口径变了：source 候选会变，回到「全部来源」并作废在途的换数请求。
+      // 时间/组织/精益/新建口径变了：source 候选会变，回到「全部来源」并作废在途的换数请求。
       projectModeCodeStatsFetchIdRef.current += 1
       setProjectModeCodeSource(null)
       setProjectModeCodeStatsOverride(null)
@@ -2494,7 +2505,8 @@ export function useDashboard() {
       try {
         const result = await window.api.dashboard.projectMode(r, g, {
           upperOrgLv1: orgList,
-          fromLeanOnly: leanOnly
+          fromLeanOnly: leanOnly,
+          createdInRangeOnly
         })
         if (id !== projectModeFetchIdRef.current) return
         if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
@@ -2538,7 +2550,11 @@ export function useDashboard() {
       try {
         const result = await window.api.dashboard.projectModeCodeStats(
           range,
-          { upperOrgLv1: selectedOrgLv1List, fromLeanOnly: fromLeanProjectsOnly },
+          {
+            upperOrgLv1: selectedOrgLv1List,
+            fromLeanOnly: fromLeanProjectsOnly,
+            createdInRangeOnly: createdInRangeProjectsOnly
+          },
           source
         )
         if (id !== projectModeCodeStatsFetchIdRef.current) return
@@ -2552,7 +2568,7 @@ export function useDashboard() {
         if (id === projectModeCodeStatsFetchIdRef.current) setProjectModeCodeStatsLoading(false)
       }
     },
-    [range, selectedOrgLv1List, fromLeanProjectsOnly]
+    [range, selectedOrgLv1List, fromLeanProjectsOnly, createdInRangeProjectsOnly]
   )
 
   const fetchProjectModeProjectPage = useCallback(
@@ -2575,6 +2591,7 @@ export function useDashboard() {
         const result = await window.api.dashboard.projectModeProjects(range, {
           upperOrgLv1: selectedOrgLv1List,
           fromLeanOnly: fromLeanProjectsOnly,
+          createdInRangeOnly: createdInRangeProjectsOnly,
           status,
           page,
           pageSize,
@@ -2602,7 +2619,7 @@ export function useDashboard() {
         }
       }
     },
-    [range, selectedOrgLv1List, fromLeanProjectsOnly]
+    [range, selectedOrgLv1List, fromLeanProjectsOnly, createdInRangeProjectsOnly]
   )
 
   const fetchSkillEvalPage = useCallback(
@@ -2843,6 +2860,8 @@ export function useDashboard() {
     selectedOrgLv1List,
     fromLeanProjectsOnly,
     setFromLeanProjectsOnly,
+    createdInRangeProjectsOnly,
+    setCreatedInRangeProjectsOnly,
     orgOptions,
     loading,
     userStatsLoading,

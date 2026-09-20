@@ -2743,6 +2743,8 @@ export function DashboardView(): React.JSX.Element {
     selectedOrgLv1List,
     fromLeanProjectsOnly,
     setFromLeanProjectsOnly,
+    createdInRangeProjectsOnly,
+    setCreatedInRangeProjectsOnly,
     orgOptions,
     loading,
     userStatsLoading,
@@ -3114,10 +3116,17 @@ export function DashboardView(): React.JSX.Element {
     skillEvalScopeOptions
   ])
 
-  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选 /「仅精益项目」开关变化时重拉。
+  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选 /「仅精益项目」/「仅本期新建」
+  // 开关变化时重拉。
   useEffect(() => {
     if (activeMainTab !== "project-mode" || !projectModeAllowed) return
-    void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
+    void fetchProjectMode(
+      range,
+      granularity,
+      selectedOrgLv1List,
+      fromLeanProjectsOnly,
+      createdInRangeProjectsOnly
+    )
   }, [
     activeMainTab,
     fetchProjectMode,
@@ -3125,7 +3134,8 @@ export function DashboardView(): React.JSX.Element {
     projectModeAllowed,
     range,
     selectedOrgLv1List,
-    fromLeanProjectsOnly
+    fromLeanProjectsOnly,
+    createdInRangeProjectsOnly
   ])
 
   // 研发效能 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
@@ -3702,7 +3712,13 @@ export function DashboardView(): React.JSX.Element {
       clearSkillEval()
     }
     if (activeMainTab === "project-mode") {
-      void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
+      void fetchProjectMode(
+        range,
+        granularity,
+        selectedOrgLv1List,
+        fromLeanProjectsOnly,
+        createdInRangeProjectsOnly
+      )
     }
     if (activeMainTab === "efficiency") {
       void fetchEfficiency(range, selectedOrgLv1List)
@@ -3717,7 +3733,8 @@ export function DashboardView(): React.JSX.Element {
     range,
     refresh,
     selectedOrgLv1List,
-    fromLeanProjectsOnly
+    fromLeanProjectsOnly,
+    createdInRangeProjectsOnly
   ])
 
   const handleProjectOpenTraces = useCallback(
@@ -4773,7 +4790,8 @@ export function DashboardView(): React.JSX.Element {
     try {
       const exportDataResult = await window.api.dashboard.projectModeExportData(range, {
         upperOrgLv1: selectedOrgLv1List,
-        fromLeanOnly: fromLeanProjectsOnly
+        fromLeanOnly: fromLeanProjectsOnly,
+        createdInRangeOnly: createdInRangeProjectsOnly
       })
       if (!exportDataResult.success || !exportDataResult.data) {
         throw new Error(exportDataResult.error ?? "获取项目导出明细失败")
@@ -4979,6 +4997,7 @@ export function DashboardView(): React.JSX.Element {
     range,
     selectedOrgLv1List,
     fromLeanProjectsOnly,
+    createdInRangeProjectsOnly,
     marketSkillMap,
     skillUploaderProfiles
   ])
@@ -5216,6 +5235,17 @@ export function DashboardView(): React.JSX.Element {
                     >
                       <Filter className="size-3.5" />
                       仅精益项目
+                    </Button>
+                    <Button
+                      variant={createdInRangeProjectsOnly ? "default" : "outline"}
+                      size="sm"
+                      className="gap-1.5 text-xs"
+                      onClick={() => setCreatedInRangeProjectsOnly((v) => !v)}
+                      disabled={projectModeLoading}
+                      title="仅统计创建时间落在当前所选时间范围内的项目"
+                    >
+                      <Filter className="size-3.5" />
+                      仅本期新建
                     </Button>
                     <Button
                       variant="outline"
