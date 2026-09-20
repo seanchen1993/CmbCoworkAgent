@@ -132,7 +132,9 @@ describe("项目列表的列宽网格", () => {
       { label: "Harness / VibeCoding 采纳率", min: 189 },
       { label: "Harness / VibeCoding 采纳行数", min: 201 },
       { label: "系统约束 / 运行时 Hook", min: 180 },
-      { label: "托管运行次数", min: 96 }
+      { label: "托管运行次数", min: 96 },
+      { label: "工具 / 模型调用", min: 107 },
+      { label: "Token / 请求问答", min: 117 }
     ]
     const widths = readColumnWidths()
 
