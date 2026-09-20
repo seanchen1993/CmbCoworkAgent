@@ -10,6 +10,7 @@ import {
   HeartPulse,
   Loader2,
   Network,
+  Palette,
   Plug,
   Puzzle,
   Sparkles,
@@ -30,6 +31,9 @@ import { cn } from "@/lib/utils"
 
 const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
 const GeneralPanel = lazy(() => import("./GeneralPanel").then((m) => ({ default: m.GeneralPanel })))
+const AppearancePanel = lazy(() =>
+  import("./AppearancePanel").then((m) => ({ default: m.AppearancePanel }))
+)
 const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
 const ScheduledPanel = lazy(() =>
   import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
@@ -63,6 +67,7 @@ const ExpertTeamPanel = lazy(() =>
 
 type CustomizeTab =
   | "general"
+  | "appearance"
   | "skills"
   | "connectors"
   | "plugins"
@@ -102,6 +107,7 @@ const MENU_GROUPS: MenuGroup[] = [
     label: "基础功能",
     items: [
       { tab: "general", label: "通用", icon: Settings2 },
+      { tab: "appearance", label: "外观", icon: Palette },
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
@@ -166,8 +172,7 @@ export function CustomizeView(): React.JSX.Element {
     pendingEvolution,
     currentThreadId,
     threads
-  } =
-    useAppStore()
+  } = useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     customizeInitialTab === "commitPolicy"
       ? "skills"
@@ -278,6 +283,8 @@ export function CustomizeView(): React.JSX.Element {
       <Suspense fallback={<CustomizePanelFallback />}>
         {activeTab === "general" ? (
           <GeneralPanel targetSection={customizeInitialSection} />
+        ) : activeTab === "appearance" ? (
+          <AppearancePanel />
         ) : activeTab === "skills" ? (
           <SkillsPanel />
         ) : activeTab === "connectors" ? (
