@@ -60,6 +60,7 @@ export function assertHarnessProjectFieldBudgets(value: unknown): void {
   }
   for (const [label, field] of [
     ["Harness project system constraint timestamp", value.systemConstraintFirstLoadedAt],
+    ["Harness project managed run timestamp", value.managedRunFirstStartedAt],
     ["Harness project create timestamp", lifecycle.createAt],
     ["Harness project update timestamp", lifecycle.updateAt]
   ] as const) {

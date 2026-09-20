@@ -514,6 +514,11 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
     128,
     "Harness project system constraint timestamp"
   )
+  const managedRunFirstStartedAt = boundedStoredText(
+    value.managedRunFirstStartedAt,
+    128,
+    "Harness project managed run timestamp"
+  )
   const updatedAt = boundedStoredText(
     lifecycle.updateAt,
     128,
@@ -567,6 +572,7 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
       ),
     ...(sessionWorkspacePath ? { sessionWorkspacePath } : {}),
     ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
+    ...(managedRunFirstStartedAt ? { managedRunFirstStartedAt } : {}),
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
@@ -1045,6 +1051,9 @@ function toProjectListItem(
       : {}),
     ...(project.systemConstraintFirstLoadedAt
       ? { systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt }
+      : {}),
+    ...(project.managedRunFirstStartedAt
+      ? { managedRunFirstStartedAt: project.managedRunFirstStartedAt }
       : {}),
     harnessAdapter: {
       id: plugin?.id ?? adapterId,

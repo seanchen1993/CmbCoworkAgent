@@ -131,7 +131,8 @@ describe("项目列表的列宽网格", () => {
     const required: Array<{ label: string; min: number }> = [
       { label: "Harness / VibeCoding 采纳率", min: 189 },
       { label: "Harness / VibeCoding 采纳行数", min: 201 },
-      { label: "系统约束 / 运行时 Hook", min: 180 }
+      { label: "系统约束 / 运行时 Hook", min: 180 },
+      { label: "托管运行次数", min: 96 }
     ]
     const widths = readColumnWidths()
 

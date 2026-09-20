@@ -9,7 +9,7 @@ import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
 import { emitAppAttention } from "../app-attention-events"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
 import { managedBizRetryService } from "./biz-retry-service"
-import { readHarnessFeatureMetadata } from "./service"
+import { markHarnessProjectManagedRunStarted, readHarnessFeatureMetadata } from "./service"
 import { hasPendingHumanGateForThread, interruptHumanGatesForRun } from "./human-gate-service"
 import { inspectHarnessManagedFeatureStatus } from "./managed-feature-status"
 import {
@@ -776,6 +776,8 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     // createRun 之前的校验（工作区缺失、已有活跃运行）走的是 throw，不会走到这里，
     // 所以这条只统计真正开起来的托管运行。
     reportManagedRunStarted(created)
+    // 看板「托管运行」标签读的是项目元数据上的单调标记，不是事件，这样丢事件不影响标签。
+    void markHarnessProjectManagedRunStarted(created.projectId)
     publishManagedRunChanged(lastRunSummary(created))
     try {
       await inspectAndLaunch(created, input.delivery, sourceEvent)

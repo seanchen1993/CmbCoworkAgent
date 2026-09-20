@@ -651,6 +651,10 @@ export interface DashboardProjectModeProject {
   compatible?: boolean
   compatibilityStatus?: string
   systemConstraintEverLoadedSuccessfully?: boolean
+  /** 是否至少开启过一次托管运行。终身事实，不随时间范围变化。 */
+  managedRunEverStarted?: boolean
+  /** 所选时间范围内开启的托管运行次数。与上面那个标记不同源，可能标记为真而次数为 0。 */
+  managedRunCount?: number
   featureCount: number
   conversationCount: number
   /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
