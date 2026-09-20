@@ -72,8 +72,55 @@ describe("project-mode Excel export", () => {
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("系统约束有效读取次数")]).toBe(9)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("运行时 Hook 触发次数")]).toBe(13)
     const constraintIndex = PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否加载项目约束")
-    expect(constraintIndex).toBe(PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("项目状态") - 1)
+    const managedRunIndex = PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否开启过托管运行")
+    // 两个终身标记并排放在「项目状态」之前，和项目列表里两个徽章挨着是一个意思。
+    expect(managedRunIndex).toBe(constraintIndex + 1)
+    expect(managedRunIndex).toBe(PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("项目状态") - 1)
     expect(row[constraintIndex]).toBe("是")
+  })
+
+  it("导出里托管的标记和次数是两个独立的列", () => {
+    // 标记是终身的，次数按所选时间范围统计，两者不同源。「是 / 0」是合法组合，表示这个
+    // 项目跑过托管但不在当前范围内，导出不能把它折成一个字段。
+    const project = {
+      projectId: "p-managed",
+      name: "托管项目",
+      featureCount: 1,
+      conversationCount: 0,
+      devStageConversationCount: 0,
+      devAssociatedFeatureCount: 0,
+      managedRunEverStarted: true,
+      managedRunCount: 0,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否开启过托管运行")]).toBe("是")
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("托管运行次数")]).toBe(0)
+  })
+
+  it("没跑过托管的项目导出「否」和 0", () => {
+    const project = {
+      projectId: "p-plain",
+      name: "普通项目",
+      featureCount: 1,
+      conversationCount: 0,
+      devStageConversationCount: 0,
+      devAssociatedFeatureCount: 0,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否开启过托管运行")]).toBe("否")
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("托管运行次数")]).toBe(0)
   })
 
   it("compares Harness vs VibeCoding adopted lines with 未归因 kept out of the share", () => {

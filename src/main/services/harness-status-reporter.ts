@@ -196,6 +196,10 @@ async function buildProjectDoc(
     // its complete system-constraint set, the project keeps this marker.
     systemConstraintEverLoadedSuccessfully: Boolean(project.systemConstraintFirstLoadedAt),
     systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt,
+    // 同款单调标记：项目是否至少开启过一次托管运行。随快照每轮重新 upsert，所以丢事件
+    // 不影响它；「托管运行次数」是另一条路，按时间范围聚合 harness.managed_run.started。
+    managedRunEverStarted: Boolean(project.managedRunFirstStartedAt),
+    managedRunFirstStartedAt: project.managedRunFirstStartedAt,
     featureCount: features.length,
     features,
     ...(detail?.error ? { error: detail.error } : {})

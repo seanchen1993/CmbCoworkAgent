@@ -43,6 +43,11 @@ import {
 } from "./dashboard-code-stats"
 import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
+  buildProjectModeManagedRunAggs,
+  buildProjectModeManagedRunFilters,
+  parseProjectModeManagedRunCount
+} from "./project-mode-managed-run-metrics"
+import {
   buildProjectModeOperationalAggs,
   parseProjectModeOperationalStats,
   type ProjectModeConstraintFileStat,
@@ -8880,6 +8885,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       compatible: true,
       compatibilityStatus: "compatible",
       systemConstraintEverLoadedSuccessfully: true,
+      managedRunEverStarted: true,
+      managedRunCount: 7,
       featureCount: 3,
       conversationCount: 128,
       hasError: false,
@@ -8938,6 +8945,9 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       compatible: false,
       compatibilityStatus: "outdated",
       systemConstraintEverLoadedSuccessfully: false,
+      // 标签亮着但当期次数为 0：跑过托管，只是不在当前时间范围内。真实数据里会出现。
+      managedRunEverStarted: true,
+      managedRunCount: 0,
       featureCount: 2,
       conversationCount: 47,
       hasError: false,
@@ -8983,6 +8993,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       compatible: true,
       compatibilityStatus: "compatible",
       systemConstraintEverLoadedSuccessfully: false,
+      managedRunEverStarted: false,
+      managedRunCount: 0,
       featureCount: 1,
       conversationCount: 0,
       hasError: true,
@@ -9009,6 +9021,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       compatible: true,
       compatibilityStatus: "compatible",
       systemConstraintEverLoadedSuccessfully: true,
+      managedRunEverStarted: true,
+      managedRunCount: 2,
       featureCount: 1,
       conversationCount: 12,
       hasError: false,
@@ -9048,6 +9062,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       compatible: true,
       compatibilityStatus: "compatible",
       systemConstraintEverLoadedSuccessfully: i % 2 === 0,
+      managedRunEverStarted: i % 3 === 0,
+      managedRunCount: i % 3 === 0 ? i % 5 : 0,
       featureCount: (i % 3) + 1,
       conversationCount: (i * 7) % 90,
       hasError: false,
@@ -11146,6 +11162,10 @@ interface ProjectModeProjectView {
   compatibilityStatus?: string
   /** Whether at least one feature session has loaded its complete system-constraint set. */
   systemConstraintEverLoadedSuccessfully?: boolean
+  /** 是否至少开启过一次托管运行。快照上的单调标记，终身事实，不随时间范围变化。 */
+  managedRunEverStarted?: boolean
+  /** 所选时间范围内开启的托管运行次数。与上面那个标记不同源，可能标记为真而次数为 0。 */
+  managedRunCount: number
   featureCount: number
   conversationCount: number
   /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
@@ -11714,6 +11734,10 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
       typeof props.systemConstraintEverLoadedSuccessfully === "boolean"
         ? props.systemConstraintEverLoadedSuccessfully
         : undefined,
+    managedRunEverStarted:
+      typeof props.managedRunEverStarted === "boolean" ? props.managedRunEverStarted : undefined,
+    // 快照自己不带次数，等 enrichProjectModeProjectViews 按时间范围聚合事件填进来。
+    managedRunCount: 0,
     featureCount: asNumber(props.featureCount, features.length),
     conversationCount: 0,
     devStageConversationCount: 0,
@@ -13221,6 +13245,7 @@ async function fetchProjectModeProjectMetrics(
   byProjectStage: Map<string, Record<StageBucket, DashboardCodeStats>>
   operationalByProject: Map<string, ProjectModeOperationalStats>
   operationalByFeature: Map<string, ProjectModeOperationalStats>
+  managedRunCountByProject: Map<string, number>
 }> {
   if (projectIds.length === 0) {
     return {
@@ -13228,7 +13253,8 @@ async function fetchProjectModeProjectMetrics(
       byFeature: new Map(),
       byProjectStage: new Map(),
       operationalByProject: new Map(),
-      operationalByFeature: new Map()
+      operationalByFeature: new Map(),
+      managedRunCountByProject: new Map()
     }
   }
 
@@ -13256,6 +13282,11 @@ async function fetchProjectModeProjectMetrics(
     { terms: { "properties.harnessProjectId": scopedProjectIds } },
     ...extraFilters
   ]
+  const managedRunFilters = buildProjectModeManagedRunFilters(
+    scopedProjectIds,
+    timeRangeFilter("eventTime", range),
+    extraFilters
+  )
   const projectOperationalAggs = buildProjectModeOperationalAggs(constraintFilters, hookFilters, {
     dedupeConstraintTraces: true,
     constraintFileLimit: 20,
@@ -13274,7 +13305,8 @@ async function fetchProjectModeProjectMetrics(
           { bool: { filter: codeGenFilters } },
           { bool: { filter: codeAdoptFilters } },
           { bool: { filter: constraintFilters } },
-          { bool: { filter: hookFilters } }
+          { bool: { filter: hookFilters } },
+          { bool: { filter: managedRunFilters } }
         ],
         minimum_should_match: 1
       }
@@ -13285,6 +13317,7 @@ async function fetchProjectModeProjectMetrics(
         aggs: {
           ...perBucketAggs,
           ...projectOperationalAggs,
+          ...buildProjectModeManagedRunAggs(managedRunFilters),
           by_feature: {
             terms: {
               field: "properties.harnessFeatureSlug",
@@ -13304,6 +13337,7 @@ async function fetchProjectModeProjectMetrics(
   const byProjectStage = new Map<string, Record<StageBucket, DashboardCodeStats>>()
   const operationalByProject = new Map<string, ProjectModeOperationalStats>()
   const operationalByFeature = new Map<string, ProjectModeOperationalStats>()
+  const managedRunCountByProject = new Map<string, number>()
   if (Array.isArray(projectBuckets)) {
     for (const bucket of projectBuckets) {
       const b = asRecord(bucket)
@@ -13317,6 +13351,7 @@ async function fetchProjectModeProjectMetrics(
         byProjectStage.set(projectId, parseStageBucketCodeStats(b))
       }
       operationalByProject.set(projectId, parseProjectModeOperationalStats(b))
+      managedRunCountByProject.set(projectId, parseProjectModeManagedRunCount(b))
       const featureBuckets = asRecord(b.by_feature).buckets
       if (!Array.isArray(featureBuckets)) continue
       for (const featureBucket of featureBuckets) {
@@ -13339,7 +13374,8 @@ async function fetchProjectModeProjectMetrics(
     byFeature,
     byProjectStage,
     operationalByProject,
-    operationalByFeature
+    operationalByFeature,
+    managedRunCountByProject
   }
 }
 
@@ -13374,6 +13410,7 @@ async function enrichProjectModeProjectViews(
     systemConstraintReads:
       code.operationalByProject.get(project.projectId)?.systemConstraintReads ?? null,
     hookExecutions: code.operationalByProject.get(project.projectId)?.hookExecutions ?? null,
+    managedRunCount: code.managedRunCountByProject.get(project.projectId) ?? 0,
     stageBuckets: buildStageBuckets(
       usage.perProjectStageConversations.get(project.projectId),
       code.byProjectStage.get(project.projectId)

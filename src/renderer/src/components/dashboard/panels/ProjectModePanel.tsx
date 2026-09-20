@@ -1421,7 +1421,9 @@ function ProjectRow({
                   {project.name}
                 </span>
               </div>
-              {(project.systemName || project.systemConstraintEverLoadedSuccessfully) && (
+              {(project.systemName ||
+                project.systemConstraintEverLoadedSuccessfully ||
+                project.managedRunEverStarted) && (
                 <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
                   {project.systemName && (
                     <span className="min-w-0 truncate" title={project.systemName}>
@@ -1435,6 +1437,15 @@ function ProjectRow({
                       title="该项目至少有一次会话完整加载系统约束"
                     >
                       约束加载
+                    </Badge>
+                  )}
+                  {project.managedRunEverStarted && (
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 border-primary/40 bg-primary/10 px-1.5 py-0 text-[10px] font-medium text-primary normal-case tracking-normal"
+                      title="该项目至少开启过一次托管运行。这是终身标记，不受所选时间范围影响，所以可能标签亮着而「托管运行次数」为 0"
+                    >
+                      托管运行
                     </Badge>
                   )}
                 </div>
@@ -1549,6 +1560,15 @@ function ProjectRow({
               detailScope={{ projectId: project.projectId }}
               triggerVariant="table"
             />
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          {project.managedRunCount && project.managedRunCount > 0 ? (
+            <span className="font-medium text-foreground">
+              {formatNumber(project.managedRunCount)}
+            </span>
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
@@ -1920,7 +1940,7 @@ function ProjectListSection({
   const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
   const pageData = projectPages[tab]
   const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
-  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 17 : 16
+  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 18 : 17
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
@@ -2134,7 +2154,7 @@ function ProjectListSection({
         <table
           className={cn(
             "w-full table-fixed text-xs",
-            showSuspectedTechnicalDetailMetric ? "min-w-[2610px]" : "min-w-[2470px]"
+            showSuspectedTechnicalDetailMetric ? "min-w-[2720px]" : "min-w-[2580px]"
           )}
         >
           {/*
@@ -2163,6 +2183,7 @@ function ProjectListSection({
             <col className="w-[190px]" />
             <col className="w-[202px]" />
             <col className="w-[190px]" />
+            <col className="w-[110px]" />
             <col className="w-[110px]" />
             <col className="w-[210px]" />
             <col className="w-[140px]" />
@@ -2238,6 +2259,12 @@ function ProjectListSection({
                 title="所选时间范围内，插件系统约束文件的有效读取次数与项目模式运行时 Hook 触发次数"
               >
                 系统约束 / 运行时 Hook
+              </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="所选时间范围内开启的托管运行次数。项目名旁的「托管运行」标签是终身标记，不受时间范围影响，所以可能标签亮着而这里是 0"
+              >
+                托管运行次数
               </th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>

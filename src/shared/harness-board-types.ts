@@ -225,6 +225,8 @@ export interface HarnessProjectMetadata {
   sessionWorkspacePath?: string
   /** First feature-session run whose complete system-constraint set loaded successfully. */
   systemConstraintFirstLoadedAt?: string
+  /** 该项目第一次开启托管运行的时间。与上面那个约束标记同样是单调的，只写一次。 */
+  managedRunFirstStartedAt?: string
   "harness-adapter": HarnessAdapterSnapshot
   creator?: HarnessProjectCreatorMetadata
   lifecycle: {
@@ -476,6 +478,7 @@ export interface HarnessProjectListItem {
   workspacePath: string
   sessionWorkspacePath?: string
   systemConstraintFirstLoadedAt?: string
+  managedRunFirstStartedAt?: string
   harnessAdapter: {
     id: string
     name: string
