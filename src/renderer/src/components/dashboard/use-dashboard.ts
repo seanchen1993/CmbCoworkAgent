@@ -655,6 +655,16 @@ export interface DashboardProjectModeProject {
   managedRunEverStarted?: boolean
   /** 所选时间范围内开启的托管运行次数。与上面那个标记不同源，可能标记为真而次数为 0。 */
   managedRunCount?: number
+  /** 运行开销四项，与「对话数」同口径（主动触发的主 Agent root trace）。 */
+  runCost?: {
+    toolCalls: number
+    modelCalls: number
+    totalTokens: number
+    userInputRequests: number
+    userInputRequestDocs: number
+  }
+  /** false 表示这段时间混着没有 userInputRequestCount 字段的老 trace，问答数是下限。 */
+  userInputRequestCountComplete?: boolean
   featureCount: number
   conversationCount: number
   /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */

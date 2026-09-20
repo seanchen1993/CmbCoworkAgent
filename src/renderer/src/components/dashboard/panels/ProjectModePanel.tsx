@@ -1040,6 +1040,49 @@ function ProjectStageAdoptionRates({
   )
 }
 
+/** 后端没回 runCost 时的零值（老版本主进程、或快照阶段还没 enrich 完）。 */
+const EMPTY_RUN_COST = {
+  toolCalls: 0,
+  modelCalls: 0,
+  totalTokens: 0,
+  userInputRequests: 0,
+  userInputRequestDocs: 0
+} as const
+
+/**
+ * 运行开销单元格：两行「标签 + 数值」，和隔壁「系统约束 / 运行时 Hook」同款排版。
+ *
+ * incomplete 标记用的是 `~` 前缀而不是变色或图标：这一列是右对齐的等宽数字，
+ * 加图标会破坏对齐，变色在浅色主题下又太弱。`~` 直接长在数字前面，一眼能看出
+ * 「这是个下限」，鼠标悬停有完整说明。
+ */
+function RunCostPair({
+  rows
+}: {
+  rows: Array<{ label: string; value: string; incomplete?: boolean }>
+}): React.JSX.Element {
+  return (
+    <div className="flex flex-col items-end gap-0.5">
+      {rows.map(({ label, value, incomplete }) => (
+        <span
+          key={label}
+          className="inline-flex items-center gap-1.5 whitespace-nowrap text-[10px] text-muted-foreground"
+          title={
+            incomplete
+              ? `${label}：所选时间范围内包含没有该统计字段的历史会话，这里显示的是下限`
+              : undefined
+          }
+        >
+          <span className="font-medium text-foreground/80">{label}</span>
+          <span className={incomplete ? "text-muted-foreground" : "font-medium text-foreground"}>
+            {incomplete ? `~${value}` : value}
+          </span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
 /** 两桶内占比：分母只取 Harness + VibeCoding 合计；合计为 0 时没有占比可言。 */
 function bucketLineShare(lines: number, comparedLines: number): number | null {
   return comparedLines > 0 ? lines / comparedLines : null
@@ -1398,6 +1441,7 @@ function ProjectRow({
   const creatorId = project.creatorSapId || project.creatorYstId || ""
   const creatorDepartment = formatProjectCreatorDepartment(project)
   const createdAt = formatProjectCreatedAt(project.lifecycleCreatedAt)
+  const runCost = project.runCost ?? EMPTY_RUN_COST
 
   return (
     <>
@@ -1572,6 +1616,28 @@ function ProjectRow({
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          <RunCostPair
+            rows={[
+              { label: "工具", value: formatNumber(runCost.toolCalls) },
+              { label: "模型", value: formatNumber(runCost.modelCalls) }
+            ]}
+          />
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          <RunCostPair
+            rows={[
+              { label: "Token", value: formatCompact(runCost.totalTokens) },
+              {
+                label: "问答",
+                value: formatNumber(runCost.userInputRequests),
+                // 老 trace 没有 userInputRequestCount 字段，sum 把它们当 0 算进来了，
+                // 所以这个数是下限。标出来，别让人把下限当真值读。
+                incomplete: project.userInputRequestCountComplete === false
+              }
+            ]}
+          />
         </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
@@ -1940,7 +2006,7 @@ function ProjectListSection({
   const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
   const pageData = projectPages[tab]
   const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
-  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 18 : 17
+  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 20 : 19
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
@@ -2154,7 +2220,7 @@ function ProjectListSection({
         <table
           className={cn(
             "w-full table-fixed text-xs",
-            showSuspectedTechnicalDetailMetric ? "min-w-[2720px]" : "min-w-[2580px]"
+            showSuspectedTechnicalDetailMetric ? "min-w-[2960px]" : "min-w-[2820px]"
           )}
         >
           {/*
@@ -2184,6 +2250,8 @@ function ProjectListSection({
             <col className="w-[202px]" />
             <col className="w-[190px]" />
             <col className="w-[110px]" />
+            <col className="w-[120px]" />
+            <col className="w-[120px]" />
             <col className="w-[110px]" />
             <col className="w-[210px]" />
             <col className="w-[140px]" />
@@ -2265,6 +2333,18 @@ function ProjectListSection({
                 title="所选时间范围内开启的托管运行次数。项目名旁的「托管运行」标签是终身标记，不受时间范围影响，所以可能标签亮着而这里是 0"
               >
                 托管运行次数
+              </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="所选时间范围内的工具调用总次数与模型调用总次数。与同一行的「对话数」同口径：只统计主动触发的主 Agent 轮次，不含定时任务、心跳与子 Agent"
+              >
+                工具 / 模型调用
+              </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="所选时间范围内消耗的 Token 总量，以及 Agent 调用 request_user_input 向用户提问的次数。与「对话数」同口径"
+              >
+                Token / 请求问答
               </th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>

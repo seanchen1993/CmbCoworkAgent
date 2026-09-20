@@ -103,6 +103,90 @@ describe("project-mode Excel export", () => {
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("托管运行次数")]).toBe(0)
   })
 
+  it("运行开销四项按原始数字导出，不做单位压缩", () => {
+    // 界面上 Token 会压成 3.9M，导出不能这么干——拿去算数会丢精度。
+    const project = {
+      projectId: "p-cost",
+      name: "开销项目",
+      featureCount: 1,
+      conversationCount: 128,
+      devStageConversationCount: 0,
+      devAssociatedFeatureCount: 0,
+      runCost: {
+        toolCalls: 4821,
+        modelCalls: 612,
+        totalTokens: 3_940_000,
+        userInputRequests: 37,
+        userInputRequestDocs: 128
+      },
+      userInputRequestCountComplete: true,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("工具调用次数")]).toBe(4821)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("模型调用次数")]).toBe(612)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Token 总量")]).toBe(3_940_000)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求用户回答次数")]).toBe(37)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求用户回答次数是否完整")]).toBe("是")
+  })
+
+  it("问答数不完整时单开一列标注，数字本身保持可计算", () => {
+    // 界面用 ~ 前缀表达下限，导出不能这样——那会把整列变成字符串，没法求和。
+    const project = {
+      projectId: "p-partial",
+      name: "老数据项目",
+      featureCount: 1,
+      conversationCount: 52,
+      devStageConversationCount: 0,
+      devAssociatedFeatureCount: 0,
+      runCost: {
+        toolCalls: 1503,
+        modelCalls: 208,
+        totalTokens: 1_120_000,
+        userInputRequests: 9,
+        userInputRequestDocs: 20
+      },
+      userInputRequestCountComplete: false,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求用户回答次数")]).toBe(9)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求用户回答次数是否完整")]).toBe(
+      "否（下限）"
+    )
+  })
+
+  it("后端没回 runCost 时四项都是 0，不是 undefined", () => {
+    const project = {
+      projectId: "p-old",
+      name: "旧主进程",
+      featureCount: 1,
+      conversationCount: 0,
+      devStageConversationCount: 0,
+      devAssociatedFeatureCount: 0,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    for (const column of ["工具调用次数", "模型调用次数", "Token 总量", "请求用户回答次数"]) {
+      expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf(column)], column).toBe(0)
+    }
+  })
+
   it("没跑过托管的项目导出「否」和 0", () => {
     const project = {
       projectId: "p-plain",

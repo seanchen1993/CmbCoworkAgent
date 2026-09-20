@@ -54,6 +54,13 @@ import {
   parseProjectModeManagedRunCount
 } from "./project-mode-managed-run-metrics"
 import {
+  buildProjectModeRunCostAggs,
+  parseProjectModeRunCost,
+  EMPTY_PROJECT_MODE_RUN_COST,
+  isUserInputRequestCountComplete,
+  type ProjectModeRunCost
+} from "./project-mode-run-cost-metrics"
+import {
   buildProjectModeOperationalAggs,
   parseProjectModeOperationalStats,
   type ProjectModeConstraintFileStat,
@@ -8918,6 +8925,14 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemConstraintEverLoadedSuccessfully: true,
       managedRunEverStarted: true,
       managedRunCount: 7,
+      runCost: {
+        toolCalls: 4821,
+        modelCalls: 612,
+        totalTokens: 3_940_000,
+        userInputRequests: 37,
+        userInputRequestDocs: 128
+      },
+      userInputRequestCountComplete: true,
       featureCount: 3,
       conversationCount: 128,
       hasError: false,
@@ -8981,6 +8996,15 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       // 标签亮着但当期次数为 0：跑过托管，只是不在当前时间范围内。真实数据里会出现。
       managedRunEverStarted: true,
       managedRunCount: 0,
+      // 覆盖度不足的样例：52 轮里只有 20 轮带 userInputRequestCount，展示的是下限。
+      runCost: {
+        toolCalls: 1503,
+        modelCalls: 208,
+        totalTokens: 1_120_000,
+        userInputRequests: 9,
+        userInputRequestDocs: 20
+      },
+      userInputRequestCountComplete: false,
       featureCount: 2,
       conversationCount: 47,
       hasError: false,
@@ -9030,6 +9054,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemConstraintEverLoadedSuccessfully: false,
       managedRunEverStarted: false,
       managedRunCount: 0,
+      runCost: EMPTY_PROJECT_MODE_RUN_COST,
+      userInputRequestCountComplete: true,
       featureCount: 1,
       conversationCount: 0,
       hasError: true,
@@ -9060,6 +9086,15 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemConstraintEverLoadedSuccessfully: true,
       managedRunEverStarted: true,
       managedRunCount: 2,
+      runCost: {
+        toolCalls: 96,
+        modelCalls: 18,
+        totalTokens: 84_300,
+        userInputRequests: 0,
+        userInputRequestDocs: 11
+      },
+      // 11 轮全带字段、值全是 0：这是「确实没问过用户」，不是数据缺失。
+      userInputRequestCountComplete: true,
       featureCount: 1,
       conversationCount: 12,
       hasError: false,
@@ -9103,6 +9138,14 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemConstraintEverLoadedSuccessfully: i % 2 === 0,
       managedRunEverStarted: i % 3 === 0,
       managedRunCount: i % 3 === 0 ? i % 5 : 0,
+      runCost: {
+        toolCalls: (i % 7) * 140,
+        modelCalls: (i % 7) * 19,
+        totalTokens: (i % 7) * 96_000,
+        userInputRequests: i % 4,
+        userInputRequestDocs: (i % 5) + 1
+      },
+      userInputRequestCountComplete: i % 5 !== 0,
       featureCount: (i % 3) + 1,
       conversationCount: (i * 7) % 90,
       hasError: false,
@@ -11209,6 +11252,10 @@ interface ProjectModeProjectView {
   managedRunEverStarted?: boolean
   /** 所选时间范围内开启的托管运行次数。与上面那个标记不同源，可能标记为真而次数为 0。 */
   managedRunCount: number
+  /** 运行开销四项：工具调用、模型调用、Token、请求用户回答。与「对话数」同口径。 */
+  runCost: ProjectModeRunCost
+  /** false 表示「请求用户回答次数」这段时间里混着没该字段的老 trace，展示的是下限。 */
+  userInputRequestCountComplete: boolean
   featureCount: number
   conversationCount: number
   /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
@@ -11782,6 +11829,9 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
       typeof props.managedRunEverStarted === "boolean" ? props.managedRunEverStarted : undefined,
     // 快照自己不带次数，等 enrichProjectModeProjectViews 按时间范围聚合事件填进来。
     managedRunCount: 0,
+    // 同理：运行开销来自 trace 聚合，快照这一层拿不到，先给零值占位。
+    runCost: EMPTY_PROJECT_MODE_RUN_COST,
+    userInputRequestCountComplete: true,
     featureCount: asNumber(props.featureCount, features.length),
     conversationCount: 0,
     devStageConversationCount: 0,
@@ -12863,6 +12913,7 @@ async function fetchProjectModePageUsage(
   perProjectDevAssociatedFeatures: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
   perProjectStageConversations: Map<string, Record<StageBucket, number>>
+  perProjectRunCost: Map<string, ProjectModeRunCost>
 }> {
   const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   const perProject = new Map<string, number>()
@@ -12871,6 +12922,7 @@ async function fetchProjectModePageUsage(
   const perProjectDevAssociatedFeatures = new Map<string, number>()
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
   const perProjectStageConversations = new Map<string, Record<StageBucket, number>>()
+  const perProjectRunCost = new Map<string, ProjectModeRunCost>()
   if (projectIds.length === 0) {
     return {
       perProject,
@@ -12878,7 +12930,8 @@ async function fetchProjectModePageUsage(
       perProjectDevStage,
       perProjectDevAssociatedFeatures,
       perProjectSkills,
-      perProjectStageConversations
+      perProjectStageConversations,
+      perProjectRunCost
     }
   }
 
@@ -12905,6 +12958,9 @@ async function fetchProjectModePageUsage(
           // 让「VibeCoding 对话远多于 Harness」看起来像结论，其实是口径差。
           ...mainAgentConversationAggs({
             ...stageBucketTraceAggs(),
+            // 运行开销四项必须和「对话数」同在这个 filter 里。挂到外面去的话，同一行会
+            // 出现「对话数 5、模型调用数却含着 50 个子 Agent 的调用」，看着像 bug。
+            ...buildProjectModeRunCostAggs(),
             ...(includeSuspectedTechnicalDetail
               ? {
                   suspected_technical_detail_supplements: {
@@ -12940,7 +12996,8 @@ async function fetchProjectModePageUsage(
       perProjectDevStage,
       perProjectDevAssociatedFeatures,
       perProjectSkills,
-      perProjectStageConversations
+      perProjectStageConversations,
+      perProjectRunCost
     }
   }
 
@@ -12969,6 +13026,7 @@ async function fetchProjectModePageUsage(
       combineSkillCountBuckets(asRecord(b.skills).buckets, asRecord(b.skill_source).buckets, 10)
     )
     perProjectStageConversations.set(key, parseStageBucketConversations(mainAgentConversations))
+    perProjectRunCost.set(key, parseProjectModeRunCost(mainAgentConversations))
   }
 
   return {
@@ -12977,7 +13035,8 @@ async function fetchProjectModePageUsage(
     perProjectDevStage,
     perProjectDevAssociatedFeatures,
     perProjectSkills,
-    perProjectStageConversations
+    perProjectStageConversations,
+    perProjectRunCost
   }
 }
 
@@ -13455,6 +13514,13 @@ async function enrichProjectModeProjectViews(
       code.operationalByProject.get(project.projectId)?.systemConstraintReads ?? null,
     hookExecutions: code.operationalByProject.get(project.projectId)?.hookExecutions ?? null,
     managedRunCount: code.managedRunCountByProject.get(project.projectId) ?? 0,
+    runCost: usage.perProjectRunCost.get(project.projectId) ?? EMPTY_PROJECT_MODE_RUN_COST,
+    // 「请求用户回答次数」是后加的字段，老 trace 上没有。轮次数比带字段的文档数多，说明
+    // 这段时间混着老数据，展示的是下限而不是真值，界面要标出来。
+    userInputRequestCountComplete: isUserInputRequestCountComplete(
+      usage.perProjectRunCost.get(project.projectId) ?? EMPTY_PROJECT_MODE_RUN_COST,
+      usage.perProject.get(project.projectId) ?? 0
+    ),
     stageBuckets: buildStageBuckets(
       usage.perProjectStageConversations.get(project.projectId),
       code.byProjectStage.get(project.projectId)
