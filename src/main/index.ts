@@ -1,3 +1,4 @@
+import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
 import { registerNotificationHandlers } from "./ipc/notifications"
@@ -1094,7 +1095,15 @@ if (browserNativeMessagingHostLaunch) {
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
-    await initializeHarnessManagedRunProjectDirectories()
+    let harnessConfigAvailable = false
+    try {
+      await initializeHarnessConfigV2(getOpenworkDir())
+      harnessConfigAvailable = true
+    } catch (error) {
+      // The project-mode readers surface this error; unrelated app features remain available.
+      console.error("[HarnessBoard] Configuration initialization failed:", error)
+    }
+    if (harnessConfigAvailable) await initializeHarnessManagedRunProjectDirectories()
     configureManagedRunProjectDirectories({
       resolveProjectDirectory: getHarnessProjectRootPath,
       listProjectDirectories: listHarnessManagedRunProjectDirectories
@@ -1104,7 +1113,7 @@ if (browserNativeMessagingHostLaunch) {
     // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
     // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
     // configured.
-    startHarnessStatusReporter()
+    if (harnessConfigAvailable) startHarnessStatusReporter()
 
     // Initialize database
     await initializeDatabase()
@@ -1112,9 +1121,11 @@ if (browserNativeMessagingHostLaunch) {
     await notificationService.recover()
     // 回填「托管运行」标签：磁盘上已有托管记录的项目，在本次升级之前跑过但没有标记。
     // 标记是单调的，重复写是空操作，所以每次启动都跑一遍也没关系。不 await，不挡启动。
-    const { projectIdsWithRuns } = recoverManagedRunsAtStartup()
-    for (const projectId of projectIdsWithRuns) {
-      void markHarnessProjectManagedRunStarted(projectId).catch(() => undefined)
+    if (harnessConfigAvailable) {
+      const { projectIdsWithRuns } = recoverManagedRunsAtStartup()
+      for (const projectId of projectIdsWithRuns) {
+        void markHarnessProjectManagedRunStarted(projectId).catch(() => undefined)
+      }
     }
     cleanupLegacySkillEvalRecords()
 

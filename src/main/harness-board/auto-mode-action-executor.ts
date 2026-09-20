@@ -334,16 +334,19 @@ export async function createManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<{ threadId: string; thread: Thread }> {
   const titleSource = input.nextAction.userMessage?.trim() ?? ""
-  const thread = await createThreadService({
-    workspacePath: input.workspacePath,
-    ...(titleSource ? { title: generateTitle(titleSource) } : {}),
-    harnessFeature: {
-      projectId: input.projectId,
-      slug: input.featureId,
-      source: HARNESS_SOURCE,
-      runId: input.runId,
-      nodeId: input.nodeId
-    }
-  })
+  const thread = await createThreadService(
+    {
+      workspacePath: input.workspacePath,
+      ...(titleSource ? { title: generateTitle(titleSource) } : {}),
+      harnessFeature: {
+        projectId: input.projectId,
+        slug: input.featureId,
+        source: HARNESS_SOURCE,
+        runId: input.runId,
+        nodeId: input.nodeId
+      }
+    },
+    { managedWorkspace: true }
+  )
   return { threadId: thread.thread_id, thread }
 }

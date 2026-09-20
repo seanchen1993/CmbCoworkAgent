@@ -4,6 +4,7 @@ import { createThread as dbCreateThread } from "../db"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import {
   buildHarnessFeatureAgentContext,
+  requireHarnessFeatureWorkspace,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
 } from "../harness-board/service"
 import { getOpenworkDir } from "../storage"
@@ -16,7 +17,10 @@ const settingsStore = new Store({
   cwd: getOpenworkDir()
 })
 
-export async function createThreadService(metadata?: Record<string, unknown>): Promise<Thread> {
+export async function createThreadService(
+  metadata?: Record<string, unknown>,
+  options: { managedWorkspace?: boolean } = {}
+): Promise<Thread> {
   const threadId = uuid()
   const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
   const harnessFeatureMetadata =
@@ -30,6 +34,13 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
       ...harnessFeatureMetadata,
       requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
     }
+  }
+
+  if (harnessFeatureMetadata && !options.managedWorkspace) {
+    const { projectId, slug } = harnessFeatureMetadata
+    if (typeof projectId !== "string" || typeof slug !== "string")
+      throw new Error("特性会话标识无效")
+    nextMetadata.workspacePath = await requireHarnessFeatureWorkspace(projectId, slug)
   }
 
   const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
