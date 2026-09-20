@@ -94,7 +94,7 @@ export function RepositoryPathsField({
       <div className="grid grid-cols-[minmax(0,5fr)_minmax(0,5fr)_4.5rem] gap-3 text-xs font-medium text-muted-foreground">
         <span className="flex min-w-0 items-center gap-1">
           <span>代码仓库路径</span>
-          <span className="tabular-nums">{mapping.repositoryPaths.length}</span>
+          <span className="tabular-nums">已配置：{mapping.repositoryPaths.length}个</span>
           <TooltipProvider delayDuration={150}>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -107,7 +107,7 @@ export function RepositoryPathsField({
                 </button>
               </TooltipTrigger>
               <TooltipContent side="top" className="z-[70] max-w-72">
-                支持添加同一代码仓库的多个文件夹路径，用于不同特性的开发
+                支持添加同一代码仓库的多个文件夹路径，用于不同特性的并行开发
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -178,7 +178,7 @@ export function RepositoryPathsField({
               onClick={() => void pick()}
             >
               <Plus className="size-4" />
-              为当前发布单元添加更多代码仓库路径副本
+              添加同一代码仓库的副本
             </Button>
           </div>
           <div className="min-h-0 max-h-72 space-y-2 overflow-y-auto p-2">
