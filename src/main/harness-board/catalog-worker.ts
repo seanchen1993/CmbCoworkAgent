@@ -55,13 +55,10 @@ workerPort.on("message", (request: HarnessCatalogWorkerRequest) => {
         request.projectIds,
         request.maxResponseBytes,
         new Int32Array(request.cancelBuffer),
-        request.featureSlug &&
-          request.featureBindingStorePath &&
-          request.deployUnitMappingStorePath
+        request.featureSlug && request.featureBindingStorePath
           ? {
               featureSlug: request.featureSlug,
-              featureBindingStorePath: request.featureBindingStorePath,
-              deployUnitMappingStorePath: request.deployUnitMappingStorePath
+              featureBindingStorePath: request.featureBindingStorePath
             }
           : undefined,
         request.leanTokenStorePath

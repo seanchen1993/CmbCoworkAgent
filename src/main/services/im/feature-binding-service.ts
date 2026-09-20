@@ -7,7 +7,11 @@ import { getAgentModeFromMetadata, type AgentMode } from "../../agent/coordinato
 import type { createThreadService } from "../thread-service"
 import { isFeatureGateEnabled } from "../../feature-gates"
 import { defaultThreadTitle } from "../title-generator"
-import { getHarnessProjectDetail, listHarnessProjects } from "../../harness-board/service"
+import {
+  getHarnessProjectDetail,
+  listHarnessProjects,
+  requireHarnessFeatureWorkspace
+} from "../../harness-board/service"
 import { getBuiltinRobotSettings } from "../../storage"
 import { FEATURE_GATES } from "../../../shared/feature-gates"
 import {
@@ -77,6 +81,7 @@ interface FeatureBindingDependencies {
   projectModeEnabled: () => Promise<boolean>
   listProjects: typeof listHarnessProjects
   getProjectDetail: typeof getHarnessProjectDetail
+  getFeatureWorkspace: typeof requireHarnessFeatureWorkspace
   createThread: typeof createThreadService
   createId: () => string
 }
@@ -113,6 +118,7 @@ export class ImFeatureBindingService {
         (async () => (await isFeatureGateEnabled(FEATURE_GATES.projectMode)).enabled),
       listProjects: dependencies.listProjects ?? listHarnessProjects,
       getProjectDetail: dependencies.getProjectDetail ?? getHarnessProjectDetail,
+      getFeatureWorkspace: dependencies.getFeatureWorkspace ?? requireHarnessFeatureWorkspace,
       // Imported lazily on purpose. thread-service reaches into the IPC layer
       // (models, recent-workspace, electron-store); a static edge from an IM
       // service pulls all of that into the IM module graph and reorders
@@ -157,7 +163,8 @@ export class ImFeatureBindingService {
   // the plugin context when they actually consume its prompt and agent config.
   async validateFeature(
     projectId: string,
-    featureSlug: string
+    featureSlug: string,
+    existingWorkspacePath?: string
   ): Promise<ImFeatureValidationResult> {
     if (!settingsAllowFeatures(this.dependencies)) {
       return {
@@ -215,14 +222,24 @@ export class ImFeatureBindingService {
       }
     }
 
-    const workspacePath =
-      existingDirectory(detail.project.sessionWorkspacePath) ??
-      existingDirectory(detail.project.projectRootPath)
+    let workspacePath: string | null
+    try {
+      workspacePath = existingDirectory(
+        existingWorkspacePath ??
+          (await this.dependencies.getFeatureWorkspace(projectId, featureSlug))
+      )
+    } catch (error) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_WORKSPACE_UNAVAILABLE",
+        message: error instanceof Error ? error.message : "请先在桌面配置特性会话工作区。"
+      }
+    }
     if (!workspacePath) {
       return {
         valid: false,
         reasonCode: "REMOTE_WORKSPACE_UNAVAILABLE",
-        message: "无法安全解析 Feature 工作区，请先在桌面配置或创建一次 Feature 会话。"
+        message: "会话工作区不存在或不是文件夹。"
       }
     }
 
@@ -267,7 +284,11 @@ export class ImFeatureBindingService {
         message: "Project Mode 会话工作区不可用。"
       }
     }
-    const validation = await this.validateFeature(feature.projectId, feature.slug)
+    const validation = await this.validateFeature(
+      feature.projectId,
+      feature.slug,
+      normalizedWorkspace
+    )
     if (!validation.valid) return validation
     return { ...validation, workspacePath: normalizedWorkspace }
   }
@@ -373,13 +394,17 @@ export async function validateImFeatureTarget(
       message: "远程 Feature Thread 与 binding 不一致。"
     }
   }
-  const validation = await service.validateFeature(target.projectId, target.featureSlug)
+  const validation = await service.validateExistingFeatureThread(metadata, target.workspacePath)
   if (!validation.valid) return validation
-  if (existingDirectory(target.workspacePath) !== validation.workspacePath) {
+  if (
+    existingDirectory(
+      typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+    ) !== validation.workspacePath
+  ) {
     return {
       valid: false,
       reasonCode: "REMOTE_WORKSPACE_UNAVAILABLE",
-      message: "Feature 工作区已变化，请重新绑定。"
+      message: "会话工作区与绑定不一致，请重新绑定。"
     }
   }
   return validation

@@ -120,6 +120,7 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
@@ -2918,11 +2919,11 @@ interface CustomAPI {
     }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
-    getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
+    getDeployUnitMappings: () => Promise<HarnessDeployUnitConfig[]>
     getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
     saveDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ) => Promise<HarnessDeployUnitMapping[]>
+      mappings: HarnessDeployUnitConfig[]
+    ) => Promise<HarnessDeployUnitConfig[]>
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>

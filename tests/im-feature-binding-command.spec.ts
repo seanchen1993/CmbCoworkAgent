@@ -148,6 +148,7 @@ async function createContext() {
   }
   let id = 0
   const featureService = new ImFeatureBindingService({
+    getFeatureWorkspace: async () => root,
     conversationState: conversations,
     getSettings: () => ({ enabled: true, remoteAccess: "inbox-and-features" }),
     projectModeEnabled: async () => true,
@@ -166,8 +167,7 @@ async function createContext() {
           projectId: "project-secret-id",
           name: "支付平台",
           projectRootPath: root,
-          workspacePath: "/must-not-leak",
-          sessionWorkspacePath: root
+          workspacePath: "/must-not-leak"
         },
         projectState: { label: "active", uiKind: "active" },
         runs: [

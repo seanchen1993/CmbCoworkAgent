@@ -154,6 +154,7 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
@@ -4357,17 +4358,17 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
-    getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
+    getDeployUnitMappings: (): Promise<HarnessDeployUnitConfig[]> =>
       ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
-        HarnessDeployUnitMapping[]
+        HarnessDeployUnitConfig[]
       >,
     getLeanTokenConfig: (): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke("harnessBoard:getLeanTokenConfig") as Promise<HarnessLeanTokenConfig>,
     saveDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ): Promise<HarnessDeployUnitMapping[]> =>
+      mappings: HarnessDeployUnitConfig[]
+    ): Promise<HarnessDeployUnitConfig[]> =>
       ipcRenderer.invoke("harnessBoard:saveDeployUnitMappings", mappings) as Promise<
-        HarnessDeployUnitMapping[]
+        HarnessDeployUnitConfig[]
       >,
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke(

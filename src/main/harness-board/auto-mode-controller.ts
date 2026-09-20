@@ -1,3 +1,4 @@
+import { requireHarnessFeatureWorkspace } from "./service"
 import type { ManagedBizRetryDecisionInput, ManagedHumanGateDecisionInput, ManagedHumanGateConflictInput } from "./notification-operation-types"
 import { harnessNotifications } from "./notifications"
 import { BrowserWindow } from "electron"
@@ -752,6 +753,8 @@ async function inspectAndLaunch(
 
 export async function startManagedRun(input: ManagedRunStartRequest): Promise<ManagedRunSummary> {
   return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
+    // The persisted workspace is a configuration gate. A user-confirmed override remains valid.
+    await requireHarnessFeatureWorkspace(input.projectId, input.featureId)
     const workspacePath = typeof input.workspacePath === "string" ? input.workspacePath.trim() : ""
     if (!workspacePath) {
       throw new Error("请选择本次托管使用的会话工作区")
