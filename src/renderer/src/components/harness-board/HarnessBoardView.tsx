@@ -2155,7 +2155,9 @@ function AdapterPicker({
         <PopoverPrimitive.Content
           aria-label="选择插件"
           align="start"
+          side="bottom"
           sideOffset={4}
+          avoidCollisions={false}
           collisionPadding={16}
           className={cn(
             harnessProjectPopoverContentClassName,
@@ -2899,7 +2901,7 @@ function ProjectFormDialog({
         ref={setDialogPortalContainer}
         className={cn(
           harnessDialogContentClassName,
-          "grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-visible"
+          "top-[calc(50%-1rem)] grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-visible"
         )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
@@ -3128,7 +3130,7 @@ function ProjectEditDialog({
         ref={setDialogPortalContainer}
         className={cn(
           harnessDialogContentClassName,
-          "grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-visible"
+          "top-[calc(50%-1rem)] grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-visible"
         )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
