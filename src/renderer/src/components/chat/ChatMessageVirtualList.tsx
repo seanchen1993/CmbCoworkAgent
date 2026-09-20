@@ -15,6 +15,9 @@ import {
 import type { HITLRequest, Message, ToolCallState } from "@/types"
 import { HookLogChip } from "./HookLogViews"
 import { MessageBubble } from "./MessageBubble"
+import { FunctionTurnNotices } from "./FunctionTurnNotices"
+import type { FunctionTurnNotice } from "../../../../shared/mods/v2/turn"
+import { placeFunctionTurnNotices } from "../../../../shared/mods/v2/turn-notice-placement"
 import { ChatSearchContext } from "./ChatSearchContext"
 import { ReasoningExpansionContext, ReasoningExpansionStore } from "./reasoning-expansion-context"
 import { subscribeToMessageDiscard, type MessageAttempts } from "@/lib/message-discard-events"
@@ -38,6 +41,7 @@ export interface ChatToolResultInfo {
 
 export const CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD = 100
 const DETACHED_HOOK_LOG_WINDOW_SIZE = 80
+const EMPTY_FUNCTION_NOTICES: readonly FunctionTurnNotice[] = []
 
 export type ChatMessageVirtualInitialLocation = FlatIndexLocationWithAlign | number
 
@@ -94,6 +98,7 @@ export function resolveChatScrollVirtualRangeSnapshot(
 }
 
 export interface ChatMessageVirtualListProps {
+  functionTurnNotices?: readonly FunctionTurnNotice[]
   messageAttempts?: MessageAttempts
   searchReveal?: ChatSearchReveal | null
   messages: Message[]
@@ -346,6 +351,7 @@ const chatVirtualListComponents = {
 }
 
 export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList({
+  functionTurnNotices = EMPTY_FUNCTION_NOTICES,
   messageAttempts,
   messages,
   visibleMessageIndexes,
@@ -389,6 +395,16 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   onAtBottomStateChange,
   footer
 }: ChatMessageVirtualListProps): React.JSX.Element | null {
+  const turnNoticePlacements = useMemo(
+    () =>
+      placeFunctionTurnNotices(
+        messages,
+        visibleMessageIndexes,
+        functionTurnNotices,
+        historyGapBeforeMessageId
+      ),
+    [messages, visibleMessageIndexes, functionTurnNotices, historyGapBeforeMessageId]
+  )
   const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
   const reasoningExpansion = useMemo<{
     threadId: string
@@ -517,6 +533,10 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
             assistantDurationMs={assistantDurationMsById.get(message.id)}
             userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
           />
+          <FunctionTurnNotices
+            notices={turnNoticePlacements.get(message.id)}
+            anchorMessageId={message.id}
+          />
         </>
       )
     },
@@ -548,6 +568,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       threadId,
       toolCallStates,
       toolResults,
+      turnNoticePlacements,
       userSendTimeLabelById,
       searchReveal,
       visibleMessageIndexes

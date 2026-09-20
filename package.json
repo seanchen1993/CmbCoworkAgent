@@ -85,7 +85,11 @@
     "env:decrypt": "node scripts/env-crypt.mjs decrypt-file .env",
     "env:encrypt:quick": "git add --renormalize .env && git show :.env | head -n 1",
     "env:decrypt:quick": "rm -f .env && git checkout -- .env",
-    "env:filter:disable": "git config --local --unset filter.envcrypt.clean; git config --local --unset filter.envcrypt.smudge; git config --local --unset filter.envcrypt.required"
+    "env:filter:disable": "git config --local --unset filter.envcrypt.clean; git config --local --unset filter.envcrypt.smudge; git config --local --unset filter.envcrypt.required",
+    "test:mods": "vitest run src/main/mods src/shared/mods src/main/agent/codex-sandbox-binary.test.ts src/main/agent/local-sandbox-background-settlement.test.ts src/main/agent/tool-orchestrator.test.ts src/main/mcp/langchain-tool.test.ts src/main/mcp/invocation-retry.test.ts",
+    "test:mods:e2e": "node tests/run-mods-e2e.mjs",
+    "test:mods:function": "vitest run src/main/mods/v2 src/shared/mods/v2",
+    "test:mods:function:process": "node tests/run-function-mods-process.mjs"
   },
   "build": {
     "appId": "com.cmbdevclaw.com",
@@ -100,6 +104,9 @@
       "package.json"
     ],
     "asarUnpack": [
+      "node_modules/@jitl/**/*.wasm",
+      "node_modules/@esbuild/**",
+      "node_modules/esbuild/**",
       "out/main/pty-host.js",
       "node_modules/node-pty/**"
     ],
@@ -142,9 +149,11 @@
         ]
       }
     ],
-    "electronVersion": "39.8.0"
+    "electronVersion": "39.8.10"
   },
   "dependencies": {
+    "esbuild": "0.25.12",
+    "quickjs-emscripten": "0.32.0",
     "@fontsource/inter": "^5.2.8",
     "@fontsource/rajdhani": "^5.2.7",
     "@langchain/core": "^1.1.29",
@@ -227,7 +236,7 @@
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.1.1",
-    "electron": "^39.8.9",
+    "electron": "39.8.10",
     "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "eslint": "^9.39.1",

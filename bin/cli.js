@@ -28,6 +28,8 @@ Usage:
   openwork              Launch the application
   openwork --version    Show version
   openwork --help       Show this help
+  openwork plugin check <directory>    Validate a function-hooks plugin
+  openwork plugin inspect <directory>  Inspect its profile, digest and registrations
 `)
   process.exit(0)
 }
@@ -36,14 +38,21 @@ Usage:
 const electron = require("electron")
 
 // Launch electron with our main process
-const mainPath = path.join(__dirname, "..", "out", "main", "index.js")
+const pluginCommand = args[0] === "plugin"
+const mainPath = path.join(
+  __dirname,
+  "..",
+  "out",
+  "main",
+  pluginCommand ? "mods-cli.js" : "index.js"
+)
 
-const child = spawn(electron, [mainPath, ...args], {
+const child = spawn(electron, [mainPath, ...(pluginCommand ? args.slice(1) : args)], {
+  windowsHide: true,
   stdio: "inherit"
 })
 
 // Forward signals to child process
-// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
 function forwardSignal(signal) {
   if (child.pid) {
     process.kill(child.pid, signal)

@@ -46,6 +46,7 @@ export function persistStandardTurnUserMessage(input: {
 }
 
 export interface StandardTurnStreamOptions {
+  onStreamChunk?(mode: string, payload: unknown): void
   /** Anchors attribution and trace recording to this turn in a whole-thread snapshot. */
   userMessageId?: string
   /** Injectable for tests; built from threadId + trace when omitted. */
@@ -72,6 +73,7 @@ export class StandardTurnStreamConsumer {
    * reports as having used no model at all.
    */
   private readonly traceRecorder?: TurnTraceRecorder
+  private readonly onStreamChunk?: StandardTurnStreamOptions["onStreamChunk"]
 
   constructor(
     private readonly threadId: string,
@@ -79,6 +81,7 @@ export class StandardTurnStreamConsumer {
     trace?: TraceCollector,
     options: StandardTurnStreamOptions = {}
   ) {
+    this.onStreamChunk = options.onStreamChunk
     this.attribution =
       options.attribution ??
       (trace
@@ -116,6 +119,7 @@ export class StandardTurnStreamConsumer {
       if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
       const [mode, data] = chunk as [string, unknown]
       const serialized = JSON.parse(JSON.stringify(data)) as unknown
+      this.onStreamChunk?.(mode, serialized)
       this.attribution?.onStreamChunk(mode, serialized)
       this.traceRecorder?.onStreamChunk(mode, serialized)
       for (const event of this.converter.processChunk(mode, serialized)) {

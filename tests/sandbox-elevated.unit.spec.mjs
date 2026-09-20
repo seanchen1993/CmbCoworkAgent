@@ -394,7 +394,7 @@ test("sandbox cache roots canonicalize workspace symlinks asynchronously", () =>
   )
   const constructorSection = sectionBetween(
     localSandboxSource,
-    "constructor(options: LocalSandboxOptions = {})",
+    "constructor(options: LocalSandboxOptions = {}",
     "    // Redirect deepagents' virtual eviction paths"
   )
   const executeWindowsSection = sectionBetween(
@@ -420,8 +420,8 @@ test("sandbox cache roots canonicalize workspace symlinks asynchronously", () =>
   )
   assert.match(
     constructorSection,
-    /this\._sandboxCacheRoot = LocalSandbox\.buildSandboxCacheRootFromCanonical[\s\S]*this\._sandboxCacheRootPromise = LocalSandbox\.buildSandboxCacheRoot/,
-    "constructor should keep a synchronous fallback while precomputing the canonical cache root"
+    /this\._sandboxCacheRoot = LocalSandbox\.buildSandboxCacheRootFromCanonical[\s\S]*this\._sandboxCacheRootPromise =\s*mode === permissionProbe\s*\? Promise\.resolve\(this\._sandboxCacheRoot\)\s*: LocalSandbox\.buildSandboxCacheRoot/,
+    "normal construction should precompute canonical roots while the inert permission probe uses the fallback"
   )
   assert.match(
     executeWindowsSection,
@@ -498,7 +498,7 @@ test("elevated command routing avoids unconditional Python lookup waits", () => 
   const preferUnelevatedSection = sectionBetween(
     localSandboxSource,
     "private static async shouldPreferUnelevated(",
-    "  constructor(options: LocalSandboxOptions = {})"
+    "  constructor(options: LocalSandboxOptions = {}"
   )
   const barePythonIndex = preferUnelevatedSection.indexOf("const isBarePythonCommand")
   const resolvePythonIndex = preferUnelevatedSection.indexOf(

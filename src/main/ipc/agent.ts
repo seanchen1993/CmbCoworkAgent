@@ -1,5 +1,7 @@
+import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
+import { getModsManager } from "../mods/manager"
 import {
   StopHookContextCollector,
   STOP_HOOK_REVISION_PROMPT_PREFIX,
@@ -158,7 +160,11 @@ import {
   isWorkflowPlumbingTranscriptContent,
   neutralizeWorkflowPlumbingUserText
 } from "../../shared/checkpoint-transcript"
-import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
+import {
+  childTurnStreamOwner,
+  isCoordinatorWorkerStreamChunk,
+  isMainTurnMessageStream
+} from "../agent/main-turn-stream"
 import {
   CONTEXT_COMPACTION_EVENT_TYPE,
   isContextCompactionStreamPayload,
@@ -1033,7 +1039,7 @@ function sendDesktopForeignOwnerBusy(
   channel: string,
   lease: LocalThreadRunLease
 ): void {
-  const sourceLabel = lease.owner === "im" ? "招乎远程任务" : "定时任务"
+  const sourceLabel = lease.owner === "im" ? "招乎远程任务" : lease.owner === "mods" ? "Mods 命令" : "定时任务"
   safeSendToWindow(window, channel, {
     type: "error",
     error: "THREAD_RUN_OWNED_BY_ANOTHER_SOURCE",
@@ -1178,6 +1184,35 @@ export async function cancelAndWaitForAgentThreadRun(
   controller.abort()
   if (window && channel) safeSendToWindow(window, channel, { type: "done" })
   return waitForReplacedRunToSettle(threadId)
+}
+
+function cancelFunctionAgentTurn(
+  threadId: string,
+  runToken: string,
+  controller: AbortController,
+  window: BrowserWindow | null,
+  channel: string
+): void {
+  throwIfPhysicalStreamRunIsInactive(threadId, runToken, controller.signal)
+  try {
+    LocalSandbox.cancelBackgroundTasks(threadId)
+  } catch (error) {
+    console.warn("[Agent] Failed to cancel background tasks for function turn:", error)
+  }
+  try {
+    flushPendingStreamTranscriptMessages(threadId, runToken)
+  } catch (error) {
+    console.warn("[Agent] Failed to flush function turn transcript:", error)
+  }
+  // Keep the controller registered until settlement; a new message must await cleanup.
+  controller.abort()
+  try {
+    handleAutoModeAgentCancelled(threadId)
+  } catch (error) {
+    console.warn("[Agent] Failed to pause auto mode after function turn cancellation:", error)
+  }
+  // SDK cancellation has no local stop-button handler to complete the renderer stream.
+  if (window) safeSendToWindow(window, channel, { type: "done" })
 }
 
 async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" | "timed_out"> {
@@ -1870,6 +1905,7 @@ function releaseAbandonedContinuationTurnState(
 }
 
 interface PhysicalAgentRunSettlementOptions {
+  functionTurnReason?: "answer" | "error"
   kind: "invoke" | "resume" | "interrupt"
   threadId: string
   runToken: string
@@ -1888,6 +1924,7 @@ interface PhysicalAgentRunSettlementOptions {
 }
 
 async function settlePhysicalAgentRun({
+  functionTurnReason,
   kind,
   threadId,
   runToken,
@@ -1950,6 +1987,26 @@ async function settlePhysicalAgentRun({
         run: cleanupNotificationSkills
       },
       ...criticalBeforeReleasePhases,
+      {
+        name: "settle-function-turn-facts",
+        run: () => {
+          const turns = getModsManager()?.functionTurns
+          if (functionTurnReason || controller.signal.aborted || turnStateShouldDispose)
+            turns?.finish(threadId, runToken, {
+              reason: functionTurnReason ?? (controller.signal.aborted ? "aborted" : "error")
+            })
+          else turns?.suspend(threadId, runToken)
+        }
+      },
+      {
+        name: "render-mod-turn-summary",
+        shouldRun: terminalRunOwnsSharedResources,
+        run: () => getModsManager()?.finishTurn(threadId)
+      },
+      {
+        name: "release-expired-mod-runtime-bindings",
+        run: () => getModsManager()?.releaseExpiredRuntimeBindings(threadId)
+      },
       {
         name: "release-active-controller",
         run: () => {
@@ -3214,13 +3271,6 @@ function buildNormalModeGuardMessage(state: NormalModeGuardState): string {
   )
 }
 
-function shouldDisableNormalModeSubagents(
-  agentMode: AgentMode,
-  metadata: Record<string, unknown>
-): boolean {
-  return agentMode === "normal" && metadata.subagentsEnabled === false
-}
-
 function getRequestedOutputStyle(metadata: Record<string, unknown>): AgentOutputStyle {
   return resolveThreadOutputStyle(metadata)
 }
@@ -3603,37 +3653,6 @@ function asPlainRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-function messageStreamMetadata(
-  mode: string,
-  payload: unknown
-): Record<string, unknown> | undefined {
-  if (mode !== "messages" || !Array.isArray(payload)) return undefined
-  return asPlainRecord(payload[1])
-}
-
-function isCoordinatorWorkerStreamChunk(mode: string, payload: unknown, threadId: string): boolean {
-  const metadata = messageStreamMetadata(mode, payload)
-  if (!metadata) return false
-  if (threadId.includes("__worker__")) return false
-
-  const workerThreadPrefix = `${threadId}__worker__`
-  const valuesToCheck = [
-    metadata.langgraph_checkpoint_ns,
-    metadata.checkpoint_ns,
-    metadata.thread_id,
-    metadata.langgraph_thread_id,
-    asPlainRecord(metadata.configurable)?.thread_id
-  ]
-
-  if (
-    valuesToCheck.some((value) => typeof value === "string" && value.includes(workerThreadPrefix))
-  ) {
-    return true
-  }
-
-  return false
-}
-
 function setSerializedMessageIdentity(
   payload: unknown,
   identity: { stableId: string; providerSourceId: string; providerOccurrence: number }
@@ -3661,22 +3680,7 @@ function shouldSkipMainTranscriptStreamPayload(
   payload: unknown,
   threadId: string
 ): boolean {
-  if (mode !== "messages") return true
-  if (isContextCompactionStreamPayload(mode, payload)) return true
-  if (Array.isArray(payload) && isSerializedSummarizationMessage(payload[0])) return true
-  if (isCoordinatorWorkerStreamChunk(mode, payload, threadId)) return true
-  const metadata = messageStreamMetadata(mode, payload)
-  const checkpointNs =
-    typeof metadata?.langgraph_checkpoint_ns === "string"
-      ? metadata.langgraph_checkpoint_ns
-      : typeof metadata?.checkpoint_ns === "string"
-        ? metadata.checkpoint_ns
-        : ""
-  // Deep-agent/subagent interiors are scoped under tools namespaces. Normal
-  // visible tool results are re-persisted by the renderer's filtered transcript
-  // flush, so the main process intentionally stays conservative here.
-  if (checkpointNs.includes("tools:")) return true
-  return false
+  return !isMainTurnMessageStream(mode, payload, threadId)
 }
 
 const STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS = 250
@@ -4161,6 +4165,22 @@ function persistAndForwardPhysicalRunStreamChunk(
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
   const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
+  const child = childTurnStreamOwner(mode, payload)
+  if (child)
+    getModsManager()?.functionTurns.observeChildStream(
+      threadId,
+      runToken,
+      child,
+      payload,
+      streamPayloadContentMode(payload)
+    )
+  if (!shouldSkipMainTranscriptStreamPayload(mode, payload, threadId))
+    getModsManager()?.functionTurns.observeStream(
+      threadId,
+      runToken,
+      payload,
+      streamPayloadContentMode(payload)
+    )
   if (mode === "values") {
     // Graph values are the ordered authority for final fields. Persist them at
     // the active-run fence so delayed renderer echoes cannot restore old text,
@@ -7898,16 +7918,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
-              enableRequestUserInput: true,
+              ...foregroundToolPolicy(effectiveAgentMode, metadata),
               allowDeferredUserInputRenderer: runExecutionContext.source === "im",
               interactionWaitHooks:
                 runExecutionContext.source === "im"
                   ? runExecutionContext.interactionWaitHooks
                   : undefined,
               extraSystemPrompt: runExecutionContext.extraSystemPrompt,
-              noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
               traceContext: runtimeTraceContext,
               soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -7944,6 +7962,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             try {
               soloTaskTraceManager?.setModelId(candidateId)
               agent = await invokeRuntimeFactory.create(candidateId)
+              if (workspacePath)
+                await getModsManager()?.startFunctionTurn({
+                  workspace: workspacePath,
+                  threadId,
+                  runId: runToken,
+                  turnId: ensureTurnId(turnState, threadId, "invoke"),
+                  text: effectiveMessage,
+                  signal: abortController.signal,
+                  cancel: () =>
+                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
+                  assertCurrent: () =>
+                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                })
               throwIfInvokeAborted()
               // First attempt sends the message; subsequent attempts resume from checkpoint
               const input = isFirstAttempt ? { messages: humanMessages } : null
@@ -8731,6 +8762,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!abortController.signal.aborted) {
             while (!abortController.signal.aborted) {
               const completionOutcome = await runCompletionHooksWithRevision({
+                hasTerminalModelRefusal: () =>
+                  !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
                 threadId,
                 workspacePath: workspacePath ?? undefined,
                 turnId: turnState.turnId,
@@ -8776,6 +8809,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
               })
               throwIfInvokeAborted()
+              if (readTurnCompletionGateReport(threadId, runToken)?.refusal) {
+                pauseActiveGoalForRuntimeStop("Model provider refused the request.")
+                break
+              }
 
               if (completionOutcome === "failed") {
                 clearCoordinatorNotificationSelectedSkillsOnExit = true
@@ -9826,6 +9863,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // catch's documented halt semantics; the run stays re-discoverable.
           await settlePhysicalAgentRun({
             kind: "invoke",
+            functionTurnReason: autoModeTerminal
+              ? autoModeTerminal.outcome === "success"
+                ? "answer"
+                : "error"
+              : undefined,
             threadId,
             runToken,
             controller: abortController,
@@ -10772,10 +10814,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
+              ...foregroundToolPolicy(resumeAgentMode, metadata),
               agentMode: resumeAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(resumeAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -10806,6 +10846,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (abortController.signal.aborted) break
             try {
               const resumeAgent = await resumeRuntimeFactory.create(candidateId)
+              if (workspacePath)
+                await getModsManager()?.startFunctionTurn({
+                  workspace: workspacePath,
+                  threadId,
+                  runId: runToken,
+                  turnId: ensureTurnId(turnState, threadId, "resume"),
+                  text: "",
+                  signal: abortController.signal,
+                  cancel: () =>
+                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
+                  assertCurrent: () =>
+                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                })
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
               resumeStream = await resumeAgent.stream(
                 new Command({ resume: resumeValue }),
@@ -11057,6 +11110,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
+              hasTerminalModelRefusal: () =>
+                !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,
               workspacePath: workspacePath ?? undefined,
               turnId: turnState.turnId,
@@ -11285,6 +11340,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           clearTurnCompletionGateState(threadId, runToken)
           await settlePhysicalAgentRun({
             kind: "resume",
+            functionTurnReason: resumeAutoModeTerminal
+              ? resumeAutoModeTerminal.outcome === "success"
+                ? "answer"
+                : "error"
+              : undefined,
             threadId,
             runToken,
             controller: abortController,
@@ -11920,10 +11980,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
+              ...foregroundToolPolicy(interruptAgentMode, metadata),
               agentMode: interruptAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(interruptAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -11954,6 +12012,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (abortController.signal.aborted) break
             try {
               const intAgent = await interruptRuntimeFactory.create(candidateId)
+              if (workspacePath)
+                await getModsManager()?.startFunctionTurn({
+                  workspace: workspacePath,
+                  threadId,
+                  runId: runToken,
+                  turnId: ensureTurnId(turnState, threadId, "interrupt"),
+                  text: "",
+                  signal: abortController.signal,
+                  cancel: () =>
+                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
+                  assertCurrent: () =>
+                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                })
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
               intStream = await intAgent.stream(null, interruptStreamConfig)
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
@@ -12191,6 +12262,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
+              hasTerminalModelRefusal: () =>
+                !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,
               workspacePath: workspacePath ?? undefined,
               turnId: turnState.turnId,
@@ -12433,6 +12506,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         clearTurnCompletionGateState(threadId, runToken)
         await settlePhysicalAgentRun({
           kind: "interrupt",
+          functionTurnReason: interruptAutoModeTerminal
+            ? interruptAutoModeTerminal.outcome === "success"
+              ? "answer"
+              : "error"
+            : undefined,
           threadId,
           runToken,
           controller: abortController,

@@ -9,6 +9,7 @@ import { createHash } from "crypto"
 import type { ReviewDecision } from "../types"
 import { getApprovalRules, addApprovalRule } from "../storage"
 import { matchesApprovalPattern } from "./exec-policy"
+import { getModCallContext } from "../mods/context"
 
 export class ApprovalStore {
   /** Session-level cache (cleared when the process restarts) */
@@ -23,7 +24,8 @@ export class ApprovalStore {
    */
   makeKey(command: string, cwd: string, sandboxMode: string): string {
     // Normalise whitespace before hashing
-    const normalised = `${command.trim()}|${cwd}|${sandboxMode}`
+    const modScope = getModCallContext()?.approvalFingerprint
+    const normalised = `${command.trim()}|${cwd}|${sandboxMode}${modScope ? `|mod:${modScope}` : ""}`
     return createHash("sha256").update(normalised).digest("hex").slice(0, 32)
   }
 
@@ -58,6 +60,26 @@ export class ApprovalStore {
     // "approved" (one-shot) is not cached
   }
 
+  /** Read exactly the rules used by execution, without consuming or storing an approval. */
+  peekApproval(
+    key: string,
+    command: string,
+    allowPermanentMatch = true
+  ): { decision: ReviewDecision; rule?: string } | null {
+    const sessionHit = this.sessionCache.get(key)
+    if (sessionHit === "approved_session" || sessionHit === "approved")
+      return { decision: sessionHit }
+    if (allowPermanentMatch && !getModCallContext()?.approvalFingerprint) {
+      for (const [rule, decision] of this.permanentRules)
+        if (
+          matchesApprovalPattern(rule, command) &&
+          (decision === "approved_permanent" || decision === "approved")
+        )
+          return { decision, rule }
+    }
+    return null
+  }
+
   /**
    * High-level helper: check cache first, and if no cached approval exists,
    * call `fetchApproval` to ask the user.  Caches the result appropriately.
@@ -72,27 +94,13 @@ export class ApprovalStore {
       commandForPatternMatch?: string
     }
   ): Promise<ReviewDecision> {
-    const allowPermanentMatch = options?.allowPermanentMatch ?? true
-    const allowPermanentStore = options?.allowPermanentStore ?? true
+    const modScoped = Boolean(getModCallContext()?.approvalFingerprint)
+    const allowPermanentMatch = !modScoped && (options?.allowPermanentMatch ?? true)
+    const allowPermanentStore = !modScoped && (options?.allowPermanentStore ?? true)
     const commandForPatternMatch = options?.commandForPatternMatch ?? patternKey
 
-    // 1. Check session cache
-    const sessionHit = this.sessionCache.get(key)
-    if (sessionHit === "approved_session" || sessionHit === "approved") {
-      return sessionHit
-    }
-
-    // 2. Check permanent rules by pattern
-    if (allowPermanentMatch) {
-      for (const [rulePattern, decision] of this.permanentRules) {
-        if (
-          matchesApprovalPattern(rulePattern, commandForPatternMatch) &&
-          (decision === "approved_permanent" || decision === "approved")
-        ) {
-          return decision
-        }
-      }
-    }
+    const cached = this.peekApproval(key, commandForPatternMatch, allowPermanentMatch)
+    if (cached) return cached.decision
 
     // 3. Ask the user
     const decision = await fetchApproval()

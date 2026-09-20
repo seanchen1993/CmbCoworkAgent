@@ -1,0 +1,5 @@
+{
+  "name": "my-delivery-claw",
+  "version": "1.0.0",
+  "description": "给 Claw 起名字、设置项目交付提醒，并在每次主轮次结束后显示专属交付卡。"
+}

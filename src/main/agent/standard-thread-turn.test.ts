@@ -67,10 +67,15 @@ describe("getHarnessAgentContext", () => {
     const runtimeOptions = prepareStandardThreadRuntimeFactory({
       source: "desktop",
       runLease: { owner: "desktop", runId: "run-1" },
-      baseOptions: { threadId: "thread-1" } as Omit<CreateAgentRuntimeOptions, "modelId">,
+      baseOptions: { threadId: "thread-1", modTurnRunId: "untrusted-run" } as Omit<
+        CreateAgentRuntimeOptions,
+        "modelId"
+      >,
       harnessContext: context
     }).optionsForModel()
     expect(runtimeOptions.requestUserInputConfig).toEqual(requestUserInputConfig)
+    expect(runtimeOptions.modTurnRunId).toBe("run-1")
+    expect(runtimeOptions.currentRunMessageQueueOwnerToken).toBeUndefined()
   })
 
   it("blocks a Harness turn when its critical context cannot be built", async () => {
@@ -157,5 +162,4 @@ describe("getHarnessAgentContext", () => {
       reason: expect.stringContaining("received 65")
     })
   })
-
 })
