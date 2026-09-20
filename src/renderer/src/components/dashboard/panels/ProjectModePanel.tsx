@@ -1565,9 +1565,9 @@ function ProjectRow({
           )}
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          {project.managedRunCount && project.managedRunCount > 0 ? (
+          {(project.managedRunCount ?? 0) > 0 ? (
             <span className="font-medium text-foreground">
-              {formatNumber(project.managedRunCount)}
+              {formatNumber(project.managedRunCount ?? 0)}
             </span>
           ) : (
             <span className="text-muted-foreground">—</span>
