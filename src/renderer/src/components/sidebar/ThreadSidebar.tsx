@@ -73,6 +73,7 @@ import {
 import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
 import type { Thread } from "@/types"
 import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
+import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
 
 const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
 const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
@@ -114,16 +115,6 @@ function getWorkspaceName(path: string | null): string {
   if (!path) return "未关联工作区"
   const segments = path.split(/[\\/]/).filter(Boolean)
   return segments.at(-1) || path
-}
-
-function readStoredStringSet(key: string): Set<string> {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(key) || "[]")
-    if (!Array.isArray(parsed)) return new Set()
-    return new Set(parsed.filter((value): value is string => typeof value === "string"))
-  } catch {
-    return new Set()
-  }
 }
 
 function readStoredStringRecord(key: string): Record<string, string> {
@@ -672,10 +663,6 @@ export function ThreadSidebar(): React.JSX.Element {
     localStorage.setItem(COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([...keys]))
   }, [])
 
-  const persistPinnedProjects = useCallback((keys: Set<string>) => {
-    localStorage.setItem(PINNED_PROJECTS_STORAGE_KEY, JSON.stringify([...keys]))
-  }, [])
-
   const persistProjectNameOverrides = useCallback((names: Record<string, string>) => {
     localStorage.setItem(PROJECT_NAME_OVERRIDES_STORAGE_KEY, JSON.stringify(names))
   }, [])
@@ -776,13 +763,7 @@ export function ThreadSidebar(): React.JSX.Element {
       }
     }
 
-    const pinned: ThreadProject[] = []
-    const regular: ThreadProject[] = []
-    for (const project of projectMap.values()) {
-      if (project.isPinned) pinned.push(project)
-      else regular.push(project)
-    }
-    return [...pinned, ...regular]
+    return sortPinnedFirst(projectMap.values(), (project) => project.isPinned)
   }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads])
 
   const currentThread = useMemo(() => {
@@ -910,21 +891,11 @@ export function ThreadSidebar(): React.JSX.Element {
     setEditingTitle(currentTitle || "")
   }
 
-  const toggleProjectPin = useCallback(
-    (projectKey: string) => {
-      setPinnedProjectKeys((prev) => {
-        const next = new Set(prev)
-        if (next.has(projectKey)) {
-          next.delete(projectKey)
-        } else {
-          next.add(projectKey)
-        }
-        persistPinnedProjects(next)
-        return next
-      })
-    },
-    [persistPinnedProjects]
-  )
+  const toggleProjectPin = useCallback((projectKey: string) => {
+    setPinnedProjectKeys((prev) =>
+      toggleStoredStringSet(prev, projectKey, PINNED_PROJECTS_STORAGE_KEY)
+    )
+  }, [])
 
   const closeProjectRenameDialog = useCallback(() => {
     setProjectToRename(null)
