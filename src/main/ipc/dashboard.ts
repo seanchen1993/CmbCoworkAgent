@@ -61,6 +61,13 @@ import {
   type ProjectModeRunCost
 } from "./project-mode-run-cost-metrics"
 import {
+  buildProjectModeStageAnalysisAggs,
+  emptyProjectModeStageMetrics,
+  parseProjectModeStageAnalysis,
+  type ProjectModeStageAnalysis,
+  type ProjectModeStageRow
+} from "./project-mode-stage-analysis"
+import {
   buildProjectModeOperationalAggs,
   parseProjectModeOperationalStats,
   type ProjectModeConstraintFileStat,
@@ -140,6 +147,7 @@ import {
   stageBucketTraceFilterClause
 } from "./dashboard-stage-buckets"
 import {
+  extractHarnessNodeGroup,
   STAGE_BUCKET_LABELS,
   STAGE_DONE_LABEL,
   STAGE_IN_PROGRESS_LABEL,
@@ -8804,6 +8812,78 @@ function makeMockFeatureOperationalStats(
 }
 
 /** DEV mock for the lazy detail endpoint; deliberately long enough to exercise both scroll areas. */
+/**
+ * DEV mock：阶段耗时分析。
+ *
+ * 数字刻意造成「总耗时排名 ≠ 平均耗时排名」，这正是这个弹窗要回答的问题——DEV 阶段
+ * 总耗时最高只是因为轮次最多，而评审阶段单轮最慢。mock 要是把两个排名造成一致的，
+ * 本地就看不出为什么需要同时展示这两列。
+ */
+function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAnalysis {
+  const stage = (
+    nodeName: string,
+    conversationCount: number,
+    avgDurationMs: number,
+    p95DurationMs: number,
+    tools: Array<[string, number]>
+  ): ProjectModeStageRow => ({
+    nodeName,
+    group: extractHarnessNodeGroup(nodeName),
+    metrics: {
+      conversationCount,
+      totalDurationMs: conversationCount * avgDurationMs,
+      avgDurationMs,
+      p95DurationMs,
+      runCost: {
+        toolCalls: conversationCount * 9,
+        modelCalls: conversationCount * 2,
+        totalTokens: conversationCount * 31_000,
+        userInputRequests: Math.floor(conversationCount / 8),
+        userInputRequestDocs: conversationCount
+      }
+    },
+    topTools: tools.map(([tool, count]) => ({ tool, count }))
+  })
+
+  const stages = [
+    stage("dev-编码实现", 142, 21_400, 68_000, [
+      ["edit_file", 96],
+      ["bash", 74],
+      ["grep", 41]
+    ]),
+    // 轮次少但单轮最慢：总耗时排第三，平均耗时排第一。
+    stage("review-代码评审", 18, 47_900, 132_000, [
+      ["read_file", 22],
+      ["grep", 15]
+    ]),
+    stage("plan-方案设计", 46, 24_800, 71_000, [
+      ["read_file", 38],
+      ["web_search", 9]
+    ]),
+    stage("test-测试验证", 37, 15_200, 44_000, [
+      ["bash", 52],
+      ["edit_file", 18]
+    ]),
+    stage(STAGE_BUCKET_LABELS.unattributed, 12, 9_800, 26_000, [["read_file", 7]])
+  ].sort((a, b) => b.metrics.totalDurationMs - a.metrics.totalDurationMs)
+
+  const total = stages.reduce((acc, item) => {
+    acc.conversationCount += item.metrics.conversationCount
+    acc.totalDurationMs += item.metrics.totalDurationMs
+    acc.runCost.toolCalls += item.metrics.runCost.toolCalls
+    acc.runCost.modelCalls += item.metrics.runCost.modelCalls
+    acc.runCost.totalTokens += item.metrics.runCost.totalTokens
+    acc.runCost.userInputRequests += item.metrics.runCost.userInputRequests
+    acc.runCost.userInputRequestDocs += item.metrics.runCost.userInputRequestDocs
+    return acc
+  }, emptyProjectModeStageMetrics())
+  total.avgDurationMs =
+    total.conversationCount > 0 ? Math.round(total.totalDurationMs / total.conversationCount) : 0
+  total.p95DurationMs = 96_000
+
+  return { projectId, total, stages }
+}
+
 function makeMockProjectModeOperationalDetails(
   scope: ProjectModeOperationalDetailScope
 ): ProjectModeOperationalDetails {
@@ -14359,6 +14439,51 @@ async function fetchProjectModeOperationalDetails(
 }
 
 /**
+ * 单项目的阶段耗时分析，供项目列表的二级弹窗使用。
+ *
+ * 走 trace 索引而不是 event 索引：耗时、Token、模型调用都只在 trace 上。聚合收在
+ * mainAgentConversationAggs 里，和项目列表那一行的「对话数」同口径，否则弹窗里的
+ * 轮次数会和列表对不上。
+ */
+async function fetchProjectModeStageAnalysis(
+  projectId: string,
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<ProjectModeStageAnalysis> {
+  const access = requireDashboardProjectModeAccess()
+  const normalizedProjectId = typeof projectId === "string" ? projectId.trim() : ""
+  if (!normalizedProjectId) {
+    return { projectId: "", total: emptyProjectModeStageMetrics(), stages: [] }
+  }
+
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const body = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { term: { harnessProjectId: normalizedProjectId } },
+          ...(orgFilterClause ? [orgFilterClause] : [])
+        ]
+      }
+    },
+    aggs: mainAgentConversationAggs(
+      buildProjectModeStageAnalysisAggs(
+        UNATTRIBUTED_NODE_NAME,
+        PROJECT_MODE_FEATURE_SLUG_LIMIT,
+        FILTERED_TOOL_EXCLUDES
+      )
+    )
+  }
+  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  return parseProjectModeStageAnalysis(
+    normalizedProjectId,
+    readMainAgentConversations(asRecord(raw.aggregations))
+  )
+}
+
+/**
  * Trace filter clause scoping to one stage by name. The 未归因 stage is the
  * terms-agg `missing` bucket, so it matches docs *without* a harnessNodeName
  * rather than a literal value — mirror that here with `must_not exists`.
@@ -15237,6 +15362,24 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     },
     (projectId, featureSlug) =>
       `dashboard:projectModeFeatureNodes:${projectId.slice(0, 128)}:${featureSlug.slice(0, 128)}`
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectModeStageAnalysis",
+    async (_, projectId: string, range: TimeRange, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectModeStageAnalysis(projectId ?? "") }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchProjectModeStageAnalysis(projectId, range, opts) }
+      } catch (e) {
+        logDashboardRequestError("projectModeStageAnalysis", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    (projectId) => `dashboard:projectModeStageAnalysis:${String(projectId ?? "").slice(0, 128)}`
   )
 
   registerLatestDashboardHandler(

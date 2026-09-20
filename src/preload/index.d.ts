@@ -961,6 +961,32 @@ interface DashboardProjectModeOperationalDetails {
   hookEvents: Array<{ event: string; count: number }>
 }
 
+interface DashboardProjectModeStageMetrics {
+  conversationCount: number
+  /** 归属到该阶段的 Agent 忙碌总时长，不是阶段的墙钟周期。 */
+  totalDurationMs: number
+  avgDurationMs: number
+  p95DurationMs: number
+  runCost: {
+    toolCalls: number
+    modelCalls: number
+    totalTokens: number
+    userInputRequests: number
+    userInputRequestDocs: number
+  }
+}
+
+interface DashboardProjectModeStageAnalysis {
+  projectId: string
+  total: DashboardProjectModeStageMetrics
+  stages: Array<{
+    nodeName: string
+    group: string | null
+    metrics: DashboardProjectModeStageMetrics
+    topTools: Array<{ tool: string; count: number }>
+  }>
+}
+
 interface DashboardProjectModeFeatureNode {
   nodeName: string
   conversationCount: number
@@ -2690,6 +2716,15 @@ interface CustomAPI {
     ) => Promise<{
       success: boolean
       data?: DashboardProjectModeOperationalDetails
+      error?: string
+    }>
+    projectModeStageAnalysis: (
+      projectId: string,
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: DashboardProjectModeStageAnalysis
       error?: string
     }>
     pluginAggregate: (

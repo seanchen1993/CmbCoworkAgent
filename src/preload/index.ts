@@ -4030,6 +4030,12 @@ const api = {
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeOperationalDetails", scope, range, opts),
+    projectModeStageAnalysis: (
+      projectId: string,
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeStageAnalysis", projectId, range, opts),
     pluginAggregate: (
       adapterName: string,
       range: { from: string; to: string }

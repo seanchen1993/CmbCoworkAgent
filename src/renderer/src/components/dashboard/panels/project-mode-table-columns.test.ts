@@ -134,7 +134,9 @@ describe("项目列表的列宽网格", () => {
       { label: "系统约束 / 运行时 Hook", min: 180 },
       { label: "托管运行次数", min: 96 },
       { label: "工具 / 模型调用", min: 107 },
-      { label: "Token / 请求问答", min: 117 }
+      { label: "Token / 请求问答", min: 117 },
+      // 操作列塞了两个上下排列的按钮，宽度由较长的「阶段耗时」决定。
+      { label: "操作", min: 90 }
     ]
     const widths = readColumnWidths()
 
