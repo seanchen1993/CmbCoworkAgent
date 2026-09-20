@@ -408,17 +408,28 @@ async function ensureWorkflowApproved(
   // which files / fan-out size) and are part of the approval identity, so changing
   // them re-prompts — and the user must be able to SEE what changed, not just get
   // re-prompted blindly.
-  const argsPreview = ((): string => {
+  const serializedArgs = ((): string | null => {
     if (args === undefined) return "(none)"
     if (args === null) return "null"
-    let s: string
     try {
-      s = JSON.stringify(args)
+      const encoded = JSON.stringify(args)
+      return typeof encoded === "string" ? encoded : null
     } catch {
-      s = String(args)
+      return null
     }
-    return s.length > 800 ? `${s.slice(0, 800)}\n…` : s
   })()
+  const argsPreviewSource = serializedArgs ?? String(args)
+  const argsPreview =
+    argsPreviewSource.length > 800
+      ? `${argsPreviewSource.slice(0, 800)}\n…`
+      : argsPreviewSource
+  // Keep the compact desktop preview, but also carry the complete serialized
+  // value for remote review. If serialization is impossible, omit it so the
+  // HTTP approval policy fails closed and only exposes reject.
+  const argsReview =
+    serializedArgs !== null && Buffer.byteLength(serializedArgs, "utf8") <= MAX_WORKFLOW_SCRIPT_BYTES
+      ? serializedArgs
+      : undefined
   const decision = await approvalStore.withCachedApproval(
     key,
     patternKey,
@@ -440,6 +451,7 @@ async function ensureWorkflowApproved(
             // MAX_WORKFLOW_SCRIPT_BYTES (512 KiB) upstream; the renderer card scrolls.
             scriptPreview: script,
             argsPreview,
+            ...(argsReview === undefined ? {} : { argsReview }),
             tokenBudget
           }
         },

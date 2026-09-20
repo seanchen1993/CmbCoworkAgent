@@ -2,6 +2,7 @@ import type { ApprovalDecision, ApprovalDecisionType, ApprovalRequest } from "..
 
 export type ApprovalDecisionSource =
   | { kind: "desktop"; webContentsId: number }
+  | { kind: "http" }
   | {
       kind: "im"
       principalId: string
@@ -107,7 +108,7 @@ export class ApprovalDecisionBroker {
     ) {
       return { accepted: false, reasonCode: "APPROVAL_TOOL_CALL_MISMATCH" }
     }
-    if (input.source.kind === "im") {
+    if (input.source.kind === "im" || input.source.kind === "http") {
       if (decision.type !== "approve" && decision.type !== "reject") {
         return { accepted: false, reasonCode: "REMOTE_APPROVAL_DECISION_UNSUPPORTED" }
       }

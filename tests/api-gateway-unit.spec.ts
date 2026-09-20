@@ -22,6 +22,13 @@ import {
   isThreadSandboxDisabled
 } from "../src/main/agent/api-run-flags"
 import { createOpenAiStreamEncoder } from "../src/main/api/openai-stream"
+import { ApprovalDecisionBroker } from "../src/main/agent/approval-decision-broker"
+import {
+  buildApiThreadRuntime,
+  remoteAllowedApprovalActions,
+  serializePendingApproval
+} from "../src/main/api/thread-runtime"
+import type { ApprovalDecision, ApprovalRequest } from "../src/main/types"
 
 let passed = 0
 function assert(cond: unknown, msg: string): void {
@@ -140,7 +147,11 @@ console.log("PASS yolo override + sandbox flags")
 // ── OpenAI-compatible stream encoder ────────────────────────────────────────
 {
   const enc = createOpenAiStreamEncoder("54d3-28cb", 1700000000)
-  const msg = (id: string, kwargs: Record<string, unknown>, meta: Record<string, unknown> = {}) => ({
+  const msg = (
+    id: string,
+    kwargs: Record<string, unknown>,
+    meta: Record<string, unknown> = {}
+  ) => ({
     type: "stream",
     mode: "messages",
     data: [{ lc: 1, type: "constructor", id: ["langchain_core", "messages", id], kwargs }, meta]
@@ -208,5 +219,251 @@ console.log("PASS yolo override + sandbox flags")
   assert(blocks.choices[0].delta.content === "块", "array content flattened to text")
 }
 console.log("PASS openai stream encoder")
+
+function approvalRequest(input: {
+  id: string
+  operation?: ApprovalRequest["operation"]
+  toolName?: string
+  allowed?: ApprovalRequest["allowed_approval_types"]
+  args?: Record<string, unknown>
+}): ApprovalRequest {
+  return {
+    id: input.id,
+    tool_call: {
+      id: `tool-${input.id}`,
+      name: input.toolName ?? input.operation ?? "unknown",
+      args: input.args ?? {}
+    },
+    allowed_decisions: ["approve", "reject"],
+    safety_level: "needs_approval",
+    operation: input.operation,
+    cwd: "/workspace",
+    allowed_approval_types: input.allowed ?? ["approve", "reject"]
+  }
+}
+
+// ── live thread state and remote approval policy ────────────────────────────
+{
+  const inactive = {
+    foreground: false,
+    workflow: false,
+    coordinator: false,
+    background_shell: false,
+    active: false
+  }
+  const active = {
+    foreground: true,
+    workflow: false,
+    coordinator: false,
+    background_shell: false,
+    active: true
+  }
+  const writeRequest = approvalRequest({ id: "write", operation: "write_file" })
+  const gitRequest = approvalRequest({ id: "git", operation: "git_commit" })
+  const workflowScript = "export default async function ({ agent }) {\n  await agent('review')\n}\n"
+  const workflowRequest = approvalRequest({
+    id: "workflow",
+    toolName: "workflow",
+    args: {
+      name: "remote review",
+      description: "review the workspace",
+      phases: ["inspect", "report"],
+      argsPreview: '{"target":"src"}',
+      argsReview: '{"target":"src"}',
+      tokenBudget: 12000,
+      scriptPreview: workflowScript
+    }
+  })
+  const incompleteWorkflowRequest = approvalRequest({
+    id: "workflow-incomplete",
+    toolName: "workflow",
+    args: { name: "hidden script" }
+  })
+  const truncatedWorkflowRequest = approvalRequest({
+    id: "workflow-truncated-args",
+    toolName: "workflow",
+    args: {
+      name: "hidden args tail",
+      description: "review the workspace",
+      phases: ["inspect"],
+      argsPreview: `${"x".repeat(800)}\n…`,
+      tokenBudget: 12000,
+      scriptPreview: workflowScript
+    }
+  })
+  const longArgs = JSON.stringify({ target: "src", policy: "x".repeat(1200) })
+  const longArgsWorkflowRequest = approvalRequest({
+    id: "workflow-long-args",
+    toolName: "workflow",
+    args: {
+      name: "full long args",
+      description: "review all workflow arguments",
+      phases: ["inspect"],
+      argsPreview: `${longArgs.slice(0, 800)}\n…`,
+      argsReview: longArgs,
+      tokenBudget: 12000,
+      scriptPreview: workflowScript
+    }
+  })
+  const nestedCommandRequest = approvalRequest({ id: "execute", toolName: "shell" })
+  nestedCommandRequest.tool_call.args = { command: "npm test" }
+
+  assert(
+    remoteAllowedApprovalActions(writeRequest).join(",") === "approve,reject",
+    "ordinary file approval supports remote approve/reject"
+  )
+  assert(
+    remoteAllowedApprovalActions(workflowRequest).join(",") === "approve,reject",
+    "fully reviewable workflow supports remote approve/reject"
+  )
+  assert(
+    remoteAllowedApprovalActions(incompleteWorkflowRequest).join(",") === "reject",
+    "workflow without complete review material fails closed for remote approve"
+  )
+  assert(
+    remoteAllowedApprovalActions(truncatedWorkflowRequest).join(",") === "reject",
+    "workflow with only a truncated args preview fails closed for remote approve"
+  )
+  assert(
+    remoteAllowedApprovalActions(longArgsWorkflowRequest).join(",") === "approve,reject",
+    "workflow with complete long args remains remotely approvable"
+  )
+  assert(
+    remoteAllowedApprovalActions(nestedCommandRequest).join(",") === "approve,reject",
+    "nested command identifies an execute approval"
+  )
+  assert(
+    remoteAllowedApprovalActions(gitRequest).join(",") === "reject",
+    "git approval requires desktop while remote rejection stays available"
+  )
+
+  const serializedWorkflow = serializePendingApproval({
+    request: workflowRequest,
+    runtimeThreadId: "thread-1"
+  })
+  assert(
+    serializedWorkflow.workflow_review?.script === workflowScript,
+    "full workflow script returned"
+  )
+  assert(
+    serializedWorkflow.workflow_review?.name === "remote review" &&
+      serializedWorkflow.workflow_review?.phases.join(",") === "inspect,report",
+    "workflow identity and phases returned"
+  )
+  assert(
+    serializedWorkflow.workflow_review?.args === '{"target":"src"}' &&
+      serializedWorkflow.workflow_review.args_bytes === Buffer.byteLength('{"target":"src"}') &&
+      serializedWorkflow.workflow_review.args_sha256.length === 64 &&
+      serializedWorkflow.workflow_review?.token_budget === 12000,
+    "full workflow args, integrity metadata, and token budget returned"
+  )
+  assert(
+    serializedWorkflow.workflow_review?.script_bytes === Buffer.byteLength(workflowScript) &&
+      serializedWorkflow.workflow_review.script_sha256.length === 64,
+    "workflow script integrity metadata returned"
+  )
+  const serializedLongArgsWorkflow = serializePendingApproval({
+    request: longArgsWorkflowRequest,
+    runtimeThreadId: "thread-1"
+  })
+  assert(
+    serializedLongArgsWorkflow.workflow_review?.args === longArgs &&
+      serializedLongArgsWorkflow.workflow_review.args_bytes === Buffer.byteLength(longArgs) &&
+      serializedLongArgsWorkflow.workflow_review.args_sha256.length === 64,
+    "long workflow args are returned in full with integrity metadata"
+  )
+  const serializedIncompleteWorkflow = serializePendingApproval({
+    request: incompleteWorkflowRequest,
+    runtimeThreadId: "thread-1"
+  })
+  assert(
+    serializedIncompleteWorkflow.workflow_review === undefined &&
+      serializedIncompleteWorkflow.remote_allowed_actions.join(",") === "reject",
+    "incomplete workflow response cannot be remotely approved"
+  )
+
+  const pending = serializePendingApproval({ request: writeRequest, runtimeThreadId: "thread-1" })
+  const waiting = buildApiThreadRuntime({
+    activity: active,
+    messageCount: 1,
+    pendingApprovals: [pending]
+  })
+  assert(waiting.state === "awaiting_approval", "approval state has priority over active run")
+  assert(waiting.is_waiting_approval && !waiting.is_generating, "waiting flags are unambiguous")
+
+  const generating = buildApiThreadRuntime({
+    activity: active,
+    messageCount: 1,
+    pendingApprovals: []
+  })
+  assert(generating.state === "generating" && generating.is_generating, "active run is generating")
+
+  const backgroundGenerating = buildApiThreadRuntime({
+    activity: { ...inactive, background_shell: true, active: true },
+    messageCount: 1,
+    pendingApprovals: []
+  })
+  assert(
+    backgroundGenerating.state === "generating" &&
+      backgroundGenerating.activity.background_shell,
+    "thread-owned background shell task remains generating after foreground completion"
+  )
+
+  const notStarted = buildApiThreadRuntime({
+    activity: inactive,
+    messageCount: 0,
+    pendingApprovals: []
+  })
+  assert(notStarted.state === "not_started", "empty inactive thread has not started")
+
+  const finished = buildApiThreadRuntime({
+    activity: inactive,
+    messageCount: 2,
+    pendingApprovals: []
+  })
+  assert(finished.state === "finished" && finished.is_finished, "settled thread is finished")
+  assert(
+    Object.keys(finished.state_definitions).length === 4,
+    "response carries definitions for every runtime state"
+  )
+}
+console.log("PASS thread runtime state + approval policy")
+
+// ── HTTP decisions retain the broker's one-shot remote restrictions ─────────
+{
+  const broker = new ApprovalDecisionBroker()
+  const request = approvalRequest({
+    id: "approval-http",
+    operation: "execute",
+    allowed: ["approve", "approve_session", "reject"]
+  })
+  const resolved: ApprovalDecision[] = []
+  broker.register({
+    request,
+    threadId: "thread-1",
+    runtimeThreadId: "thread-1",
+    resolve: (decision) => resolved.push(decision)
+  })
+  const unsupported = broker.decide({
+    source: { kind: "http" },
+    requestId: request.id,
+    decision: { type: "approve_session", tool_call_id: request.tool_call.id }
+  })
+  assert(
+    !unsupported.accepted && unsupported.reasonCode === "REMOTE_APPROVAL_DECISION_UNSUPPORTED",
+    "HTTP cannot grant session-wide approval"
+  )
+  assert(broker.get(request.id) !== null, "rejected decision does not consume approval")
+
+  const accepted = broker.decide({
+    source: { kind: "http" },
+    requestId: request.id,
+    decision: { type: "approve", tool_call_id: request.tool_call.id }
+  })
+  assert(accepted.accepted, "HTTP one-shot approval is accepted")
+  assert(resolved.length === 1 && resolved[0].type === "approve", "resolver receives HTTP decision")
+  assert(broker.get(request.id) === null, "accepted HTTP decision consumes approval once")
+}
+console.log("PASS HTTP approval broker restrictions")
 
 console.log(`\nAll api-gateway unit checks passed (${passed} assertions).`)
