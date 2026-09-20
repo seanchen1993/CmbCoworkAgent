@@ -833,9 +833,18 @@ interface DashboardProjectModeProjectPageData {
   truncated: boolean
 }
 
-interface DashboardProjectModeProjectPageOptions {
+/**
+ * 项目运营概览的三个全局筛选口径。总览、代码指标换数、项目列表、导出共用同一组，
+ * 任何一处漏传都会让那块数据和其它块对不上。
+ */
+interface DashboardProjectModeFilterOptions {
   upperOrgLv1?: string | string[] | null
   fromLeanOnly?: boolean | null
+  /** 仅统计创建时间落在 range 内的项目；比较用的范围走同一次调用的 range 参数。 */
+  createdInRangeOnly?: boolean | null
+}
+
+interface DashboardProjectModeProjectPageOptions extends DashboardProjectModeFilterOptions {
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
@@ -2631,11 +2640,11 @@ interface CustomAPI {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: DashboardProjectModeFilterOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
     projectModeCodeStats: (
       range: { from: string; to: string },
-      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      opts: DashboardProjectModeFilterOptions | undefined,
       source: string | null
     ) => Promise<{
       success: boolean
@@ -2662,7 +2671,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardProjectModeProjectPageData; error?: string }>
     projectModeExportData: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: DashboardProjectModeFilterOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
     projectModeTraces: (
       projectId: string,

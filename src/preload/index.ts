@@ -3949,7 +3949,13 @@ const api = {
       ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
     projectModeCodeStats: (
       range: { from: string; to: string },
-      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      opts:
+        | {
+            upperOrgLv1?: string | string[] | null
+            fromLeanOnly?: boolean | null
+            createdInRangeOnly?: boolean | null
+          }
+        | undefined,
       source: string | null
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
@@ -3987,7 +3993,11 @@ const api = {
       ipcRenderer.invoke("dashboard:projectModeProjects", range, options),
     projectModeExportData: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        fromLeanOnly?: boolean | null
+        createdInRangeOnly?: boolean | null
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
     projectModeTraces: (

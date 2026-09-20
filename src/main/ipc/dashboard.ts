@@ -43,6 +43,12 @@ import {
 } from "./dashboard-code-stats"
 import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
+  matchesProjectModeCreatedAtRange,
+  projectModeNarrowingEnabled,
+  projectModeSnapshotFilterArgs,
+  projectModeSnapshotFilters
+} from "./project-mode-snapshot-filters"
+import {
   buildProjectModeManagedRunAggs,
   buildProjectModeManagedRunFilters,
   parseProjectModeManagedRunCount
@@ -920,6 +926,10 @@ interface OrgFilterOptions {
   // 仅统计绑定了企业（精益）项目的项目（snapshot.properties.projectFromLean === true）。
   // 全局开关；缺省/false 表示不筛选。
   fromLeanOnly?: boolean | null
+  // 仅统计创建时间（snapshot.properties.lifecycleCreatedAt）落在当前所选时间范围内的项目。
+  // 和 fromLeanOnly 同一形状的全局开关；缺省/false 表示不筛选。比较用的范围不在这里传，
+  // 由各入口自己的 range 参数带下去，避免同一个时间范围在两处各存一份。
+  createdInRangeOnly?: boolean | null
 }
 
 type UserStatsOptions = OrgFilterOptions
@@ -8865,6 +8875,25 @@ function mergeMockOperationalStats(
   }
 }
 
+/**
+ * DEV mock 的项目创建时间。刻意锚在所选范围上、而不是写死日期：写死的话换个时间范围
+ * （或者过几个月再跑）所有 mock 项目就会一起掉到范围外，「仅本期新建」打开后列表直接空掉，
+ * 看不出开关到底生效没有。
+ *
+ * fraction 取 [0,1] 落在范围内部；传负数则落在范围开始之前，用来造「范围外」的项目。
+ */
+function mockProjectCreatedAt(range: TimeRange, fraction: number): string {
+  const from = Date.parse(range.from)
+  const to = Date.parse(range.to)
+  if (!Number.isFinite(from) || !Number.isFinite(to)) {
+    return new Date(Date.UTC(2026, 5, 1, 2, 0, 0)).toISOString()
+  }
+  const span = Math.max(to - from, 1)
+  // 范围外的点至少推到下界前一整天，免得范围极短时算出来还在界内。
+  const offset = fraction >= 0 ? span * fraction : fraction * Math.max(span, 24 * 60 * 60 * 1000)
+  return new Date(from + offset).toISOString()
+}
+
 function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): DashboardProjectModeData {
   // stageBuckets is derived from each draft's totals after assembly (see below).
   const projectDrafts: Array<
@@ -8881,6 +8910,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       workspacePath: "/Users/demo/projects/cmbCowork",
       adapterName: "claude-code",
       adapterVersion: "1.4.2",
+      // 范围内新建：打开「仅本期新建」后应当留下。
+      lifecycleCreatedAt: mockProjectCreatedAt(range, 0.1),
       lifecycleStatus: "active",
       compatible: true,
       compatibilityStatus: "compatible",
@@ -8941,6 +8972,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       workspacePath: "/Users/demo/projects/payment-core",
       adapterName: "claude-code",
       adapterVersion: "1.4.0",
+      // 范围之前就建好的老项目：打开「仅本期新建」后应当消失。
+      lifecycleCreatedAt: mockProjectCreatedAt(range, -30),
       lifecycleStatus: "active",
       compatible: false,
       compatibilityStatus: "outdated",
@@ -8989,6 +9022,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemName: "风险管理平台",
       adapterName: "codex",
       adapterVersion: "0.9.1",
+      // 范围内新建。
+      lifecycleCreatedAt: mockProjectCreatedAt(range, 0.6),
       lifecycleStatus: "paused",
       compatible: true,
       compatibilityStatus: "compatible",
@@ -9017,6 +9052,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemName: "统一门户",
       adapterName: "claude-code",
       adapterVersion: "1.3.5",
+      // 归档的老项目，范围之前建的：「仅本期新建」下「已归档」页签也应当跟着变空。
+      lifecycleCreatedAt: mockProjectCreatedAt(range, -120),
       lifecycleStatus: "archived",
       compatible: true,
       compatibilityStatus: "compatible",
@@ -9049,7 +9086,6 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       ]
     }
   ]
-  void range
   // 额外填充若干进行中项目，便于在 DEV 模式演示项目列表的分页/搜索交互。
   for (let i = 1; i <= 12; i++) {
     projectDrafts.push({
@@ -9058,6 +9094,9 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       systemName: "示例平台",
       adapterName: "claude-code",
       adapterVersion: "1.4.2",
+      // 奇偶交替落在范围内 / 范围外，打开「仅本期新建」时列表会明显变短而不是全空或没变化。
+      lifecycleCreatedAt:
+        i % 2 === 0 ? mockProjectCreatedAt(range, (i % 10) / 10) : mockProjectCreatedAt(range, -i),
       lifecycleStatus: "active",
       compatible: true,
       compatibilityStatus: "compatible",
@@ -9162,17 +9201,24 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
   // DEV：把偶数下标的 mock 项目视为「精益项目」，让「仅精益项目」开关在无 ES 时也能可见地筛选。
   const leanOnly = opts?.fromLeanOnly === true
+  // 「仅本期新建」在 mock 里走和 ES 路径同一个口径函数，fixture 的创建时间是按 range 造的，
+  // 所以本地打开开关能真的看见列表变短。
+  const createdInRangeOnly = opts?.createdInRangeOnly === true
   const orgProjects = allProjects.filter((_, i) =>
     mockProjectMatchesOrg(mockProjectOrgAt(i), selectedOrgs)
   )
   const projects = allProjects.filter(
-    (_, i) => mockProjectMatchesOrg(mockProjectOrgAt(i), selectedOrgs) && (!leanOnly || i % 2 === 0)
+    (project, i) =>
+      mockProjectMatchesOrg(mockProjectOrgAt(i), selectedOrgs) &&
+      (!leanOnly || i % 2 === 0) &&
+      matchesProjectModeCreatedAtRange(project.lifecycleCreatedAt, createdInRangeOnly, range)
   )
-  // 写死的聚合块（token/工具/技能/采纳明细/漏斗）不是从项目列表算出来的，真实 ES 路径会按精益 id 集
-  // 过滤这些块；mock 没有明细，故用「精益项目占比」整体缩放，让开关在 dev 里整屏联动而非只动计数卡片。
-  const leanScale = orgProjects.length > 0 ? projects.length / orgProjects.length : 1
-  // 聚合块（token/工具/技能/采纳明细等）按室权重缩放，与其它面板口径一致；叠加精益占比。
-  const aggScale = getMockOrgScale(opts) * leanScale
+  // 写死的聚合块（token/工具/技能/采纳明细/漏斗）不是从项目列表算出来的，真实 ES 路径会按命中的
+  // 项目 id 集过滤这些块；mock 没有明细，故用「命中项目占比」整体缩放，让开关在 dev 里整屏联动
+  // 而非只动计数卡片。
+  const narrowedScale = orgProjects.length > 0 ? projects.length / orgProjects.length : 1
+  // 聚合块（token/工具/技能/采纳明细等）按室权重缩放，与其它面板口径一致；叠加开关占比。
+  const aggScale = getMockOrgScale(opts) * narrowedScale
   const featureCount = projects.reduce((sum, p) => sum + p.featureCount, 0)
   const conversationCount = projects.reduce((sum, p) => sum + p.conversationCount, 0)
   const activeProjectCount = projects.filter((p) => p.conversationCount > 0).length
@@ -11042,9 +11088,6 @@ function makeMockProjectModeProjectCommits(
 // Project Mode (Harness Board) dashboard
 // ─────────────────────────────────────────────────────────
 
-/** Event name written by HarnessStatusReporter for project snapshots. */
-const HARNESS_PROJECT_SNAPSHOT_EVENT = "harness.project.snapshot"
-
 /**
  * ES 默认 index.max_result_window。基于 from+size 的深翻页一旦 from+size 超过它就会
  * 报 "Result window is too large"，所以翻页深度必须按 pageSize 钳制在此窗口内。
@@ -11373,8 +11416,9 @@ interface DashboardProjectModeData {
   projectPage: ProjectModeProjectPageData
   projects: ProjectModeProjectView[]
   /**
-   * 「仅精益项目」开关下，精益项目 id 集超过 PROJECT_MODE_PROJECT_ID_LIMIT 被截断，
-   * 遥测汇总（对话/代码等）可能不完整。开关关闭时恒为 false。
+   * 收窄开关（「仅精益项目」/「仅本期新建」）下，命中的项目 id 集超过
+   * PROJECT_MODE_PROJECT_ID_LIMIT 被截断，遥测汇总（对话/代码等）可能不完整。
+   * 两个开关都关闭时恒为 false。名字沿用 leanTruncated 是为了不动已发布的 IPC 字段。
    */
   leanTruncated: boolean
   /**
@@ -11754,19 +11798,6 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
   }
 }
 
-/** Snapshot-index filter: snapshot event + optional LV1 org（快照顶层带 upperOrgLv1）。 */
-function projectModeSnapshotFilters(
-  orgFilterClause: Record<string, unknown> | null,
-  fromLeanOnly = false
-): Record<string, unknown>[] {
-  return [
-    { term: { eventName: HARNESS_PROJECT_SNAPSHOT_EVENT } },
-    ...(orgFilterClause ? [orgFilterClause] : []),
-    // 「仅精益项目」全局开关：快照当前状态字段，self-healing，无需回填历史。
-    ...(fromLeanOnly ? [{ term: { "properties.projectFromLean": true } }] : [])
-  ]
-}
-
 type ProjectModeSnapshotAdapterCount = {
   name: string
   version?: string
@@ -11839,6 +11870,7 @@ function buildProjectModeAdapterShare(
  * （每项目一条），故 cardinality / sum 即为去重后的口径。
  */
 async function fetchProjectModeSnapshotAggs(
+  range: TimeRange,
   opts: OrgFilterOptions | undefined,
   access: DashboardAccessContext
 ): Promise<ProjectModeSnapshotAggs> {
@@ -11849,7 +11881,12 @@ async function fetchProjectModeSnapshotAggs(
     size: 0,
     track_total_hits: false,
     query: {
-      bool: { filter: projectModeSnapshotFilters(orgFilterClause, opts?.fromLeanOnly === true) }
+      bool: {
+        filter: projectModeSnapshotFilters(
+          orgFilterClause,
+          ...projectModeSnapshotFilterArgs(opts, range)
+        )
+      }
     },
     aggs: {
       project_count: projectCountAgg,
@@ -12029,6 +12066,7 @@ function buildProjectModeCreatorOrgSearchFilter(
  * org filtering.
  */
 function buildProjectModeProjectListFilters(
+  range: TimeRange,
   options: ProjectModeProjectPageOptions | undefined,
   access: DashboardAccessContext
 ): {
@@ -12076,7 +12114,10 @@ function buildProjectModeProjectListFilters(
   const creatorOrgSearchFilter = buildProjectModeCreatorOrgSearchFilter(creatorOrgKeyword)
 
   const filters = [
-    ...projectModeSnapshotFilters(orgFilterClause, options?.fromLeanOnly === true),
+    ...projectModeSnapshotFilters(
+      orgFilterClause,
+      ...projectModeSnapshotFilterArgs(options, range)
+    ),
     ...statusFilter,
     ...keywordFilter,
     ...adapterFilter,
@@ -12088,6 +12129,7 @@ function buildProjectModeProjectListFilters(
 }
 
 async function fetchProjectModeProjectPageHits(
+  range: TimeRange,
   options: ProjectModeProjectPageOptions | undefined,
   access: DashboardAccessContext
 ): Promise<{
@@ -12103,7 +12145,7 @@ async function fetchProjectModeProjectPageHits(
   truncated: boolean
 }> {
   const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
-    buildProjectModeProjectListFilters(options, access)
+    buildProjectModeProjectListFilters(range, options, access)
   const pageSize = clampLimit(options?.pageSize, 10, 100)
   const maxPage = Math.max(1, Math.floor(ES_MAX_RESULT_WINDOW / pageSize))
   const page = clampLimit(options?.page, 1, maxPage)
@@ -12263,12 +12305,13 @@ async function fetchProjectModeExportSnapshotGroup(
  * totals are returned separately so a truncated workbook remains explicit.
  */
 async function fetchProjectModeExportSnapshotProjects(
+  range: TimeRange,
   opts: OrgFilterOptions | undefined,
   access: DashboardAccessContext
 ): Promise<ProjectModeExportSnapshotResult> {
   const filters = projectModeSnapshotFilters(
     buildProjectModeOrgFilter(opts, access),
-    opts?.fromLeanOnly === true
+    ...projectModeSnapshotFilterArgs(opts, range)
   )
   const active = await fetchProjectModeExportSnapshotGroup(
     filters,
@@ -12292,17 +12335,18 @@ async function fetchProjectModeExportSnapshotProjects(
 }
 
 /**
- * Resolve every matching project id only when the lean-project filter needs to
- * scope the full user analysis. This is intentionally independent from the
+ * Resolve every matching project id only when a narrowing filter（仅精益项目 / 仅本期新建）
+ * needs to scope the full user analysis. This is intentionally independent from the
  * 2,000-row project worksheet limit.
  */
 async function fetchProjectModeExportProjectIds(
+  range: TimeRange,
   opts: OrgFilterOptions | undefined,
   access: DashboardAccessContext
 ): Promise<string[]> {
   const filters = projectModeSnapshotFilters(
     buildProjectModeOrgFilter(opts, access),
-    opts?.fromLeanOnly === true
+    ...projectModeSnapshotFilterArgs(opts, range)
   )
   const projectIds: string[] = []
   const seenCursors = new Set<string>()
@@ -12465,7 +12509,7 @@ async function fetchProjectModeProjectPageMetricSorted(
   truncated: boolean
 }> {
   const { filters, status, keyword, adapterName, creatorKeyword, creatorOrgKeyword } =
-    buildProjectModeProjectListFilters(options, access)
+    buildProjectModeProjectListFilters(range, options, access)
   const pageSize = clampLimit(options?.pageSize, 10, 100)
   const { ids: allIds, truncated } = await fetchProjectModeFilteredProjectIds(filters)
   const total = allIds.length
@@ -13442,7 +13486,7 @@ async function fetchProjectModeProjectPage(
   // sorts (active tab only) rank the full set first, then page.
   const sliced = metricSort
     ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
-    : await fetchProjectModeProjectPageHits(options, access)
+    : await fetchProjectModeProjectPageHits(range, options, access)
   return {
     ...sliced,
     sortBy,
@@ -13460,15 +13504,16 @@ async function fetchProjectModeExportData(
   opts?: OrgFilterOptions
 ): Promise<ProjectModeExportData> {
   const access = requireDashboardProjectModeAccess()
-  const snapshotResult = await fetchProjectModeExportSnapshotProjects(opts, access)
+  const snapshotResult = await fetchProjectModeExportSnapshotProjects(range, opts, access)
   const snapshots = snapshotResult.projects
-  const leanProjectIds =
-    opts?.fromLeanOnly === true
-      ? snapshotResult.truncated
-        ? await fetchProjectModeExportProjectIds(opts, access)
-        : snapshots.map((project) => project.projectId)
-      : undefined
-  const usersPromise = fetchProjectModeExportUsers(range, opts, access, leanProjectIds)
+  // 两个收窄开关任一打开，用户分析表就得跟着圈到同一批项目上，否则导出里「项目」表已经
+  // 筛过、「用户」表还是全量，两张表对不上。
+  const scopedProjectIds = projectModeNarrowingEnabled(opts)
+    ? snapshotResult.truncated
+      ? await fetchProjectModeExportProjectIds(range, opts, access)
+      : snapshots.map((project) => project.projectId)
+    : undefined
+  const usersPromise = fetchProjectModeExportUsers(range, opts, access, scopedProjectIds)
   const projectsPromise = (async (): Promise<ProjectModeProjectView[]> => {
     const projects: ProjectModeProjectView[] = []
     for (
@@ -13796,25 +13841,30 @@ async function fetchProjectMode(
 ): Promise<DashboardProjectModeData> {
   const access = requireDashboardProjectModeAccess()
 
-  // 「仅精益项目」：先从自愈快照解析精益项目 id 集（projectFromLean 的唯一真源），仅用于圈定
-  // 遥测汇总（trace / code）；快照聚合与项目列表各自按 projectFromLean term 直接过滤，无需 id 集。
+  // 「仅精益项目」/「仅本期新建」：这两个条件都只存在于自愈快照上（projectFromLean、
+  // lifecycleCreatedAt），trace / code 事件里没有，所以先把命中的项目 id 集解析出来，用于圈定
+  // 遥测汇总；快照聚合与项目列表自己就在快照上，直接按条件过滤即可，不需要 id 集。两个开关
+  // 同时打开时，这里拿到的天然是交集——条件都拼在同一个 filter 数组里。
   // id 集超过 PROJECT_MODE_PROJECT_ID_LIMIT 时截断，leanTruncated 透传给前端做守卫提示。空集表示
-  // 无精益项目 → 遥测 terms IN [] 命中 0 条，汇总为 0（语义正确）。
-  let leanProjectIds: string[] | undefined
+  // 没有项目命中 → 遥测 terms IN [] 命中 0 条，汇总为 0（语义正确）。
+  let scopedProjectIds: string[] | undefined
   let leanTruncated = false
-  if (opts?.fromLeanOnly === true) {
+  if (projectModeNarrowingEnabled(opts)) {
     const resolved = await fetchProjectModeFilteredProjectIds(
-      projectModeSnapshotFilters(buildProjectModeOrgFilter(opts, access), true)
+      projectModeSnapshotFilters(
+        buildProjectModeOrgFilter(opts, access),
+        ...projectModeSnapshotFilterArgs(opts, range)
+      )
     )
-    leanProjectIds = resolved.ids
+    scopedProjectIds = resolved.ids
     leanTruncated = resolved.truncated
   }
 
   // 总览与列表解耦：快照口径走 size:0 聚合、不回拉文档；列表第一页走 ES 分页。四条并行。
   const [snap, usage, code, projectPage] = await Promise.all([
-    fetchProjectModeSnapshotAggs(opts, access),
-    fetchProjectModeUsage(range, opts, access, leanProjectIds),
-    fetchProjectModeAggregateCodeStats(range, opts, access, leanProjectIds),
+    fetchProjectModeSnapshotAggs(range, opts, access),
+    fetchProjectModeUsage(range, opts, access, scopedProjectIds),
+    fetchProjectModeAggregateCodeStats(range, opts, access, scopedProjectIds),
     fetchProjectModeProjectPage(
       range,
       {
@@ -13898,7 +13948,7 @@ async function fetchProjectMode(
 
 /**
  * 「生产效能代码指标」按 source 局部换数：只重算两个子模块的整体 / Skill 代码采纳，
- * 不碰项目列表、对话数等其它维度。沿用 fetchProjectMode 的 org / 精益口径，叠加 source。
+ * 不碰项目列表、对话数等其它维度。沿用 fetchProjectMode 的 org / 精益 / 新建口径，叠加 source。
  */
 async function fetchProjectModeCodeStatsBySource(
   range: TimeRange,
@@ -13906,15 +13956,25 @@ async function fetchProjectModeCodeStatsBySource(
   source: string | null | undefined
 ): Promise<{ codeStats: DashboardCodeStats; skillCodeStats: DashboardCodeStats }> {
   const access = requireDashboardProjectModeAccess()
-  // 与 fetchProjectMode 一致：仅精益项目时先解析精益项目 id 集，用于圈定 code 事件。
-  let leanProjectIds: string[] | undefined
-  if (opts?.fromLeanOnly === true) {
+  // 与 fetchProjectMode 一致：开关收窄时先解析命中的项目 id 集，用于圈定 code 事件。
+  // 这里换的是同一块数，口径必须跟着走，否则切 source 会把开关的效果抹掉。
+  let scopedProjectIds: string[] | undefined
+  if (projectModeNarrowingEnabled(opts)) {
     const resolved = await fetchProjectModeFilteredProjectIds(
-      projectModeSnapshotFilters(buildProjectModeOrgFilter(opts, access), true)
+      projectModeSnapshotFilters(
+        buildProjectModeOrgFilter(opts, access),
+        ...projectModeSnapshotFilterArgs(opts, range)
+      )
     )
-    leanProjectIds = resolved.ids
+    scopedProjectIds = resolved.ids
   }
-  const code = await fetchProjectModeAggregateCodeStats(range, opts, access, leanProjectIds, source)
+  const code = await fetchProjectModeAggregateCodeStats(
+    range,
+    opts,
+    access,
+    scopedProjectIds,
+    source
+  )
   return { codeStats: code.overall, skillCodeStats: code.skillOverall }
 }
 
