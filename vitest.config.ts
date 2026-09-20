@@ -23,6 +23,7 @@ export default defineConfig({
       "src/renderer/src/components/dashboard/active-user-export.test.ts",
       "src/renderer/src/components/dashboard/project-mode-export.test.ts",
       "src/renderer/src/components/dashboard/panels/project-mode-table-columns.test.ts",
+      "src/renderer/src/components/dashboard/project-stage-analysis-view.test.ts",
       "src/renderer/src/components/dashboard/thread-traces-response.test.ts",
       "src/renderer/src/components/update/release-notes.test.ts",
       "src/renderer/src/components/trace/TraceConversation.test.ts",

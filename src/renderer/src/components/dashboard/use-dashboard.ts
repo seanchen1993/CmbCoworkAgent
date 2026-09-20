@@ -544,6 +544,47 @@ export type DashboardProjectModeOperationalDetailsLoader = (
   scope: DashboardProjectModeOperationalDetailScope
 ) => Promise<DashboardProjectModeOperationalDetails>
 
+export interface DashboardProjectModeStageMetrics {
+  /** 主动触发的主 Agent 轮次数，与项目列表那一行的「对话数」同口径。 */
+  conversationCount: number
+  /**
+   * 归属到该阶段的 Agent 忙碌总时长。
+   *
+   * 不是「这个阶段花了多久」：trace 上的阶段是「这轮对话开始时特性处在哪一步」，
+   * 一个阶段可能跨三天而 Agent 只跑了 20 分钟。界面必须写明，否则会被当成阶段周期读。
+   */
+  totalDurationMs: number
+  avgDurationMs: number
+  p95DurationMs: number
+  runCost: {
+    toolCalls: number
+    modelCalls: number
+    totalTokens: number
+    userInputRequests: number
+    userInputRequestDocs: number
+  }
+}
+
+export interface DashboardProjectModeStageRow {
+  /** 原始 harnessNodeName，形如 `dev-编码实现`。 */
+  nodeName: string
+  /** 阶段大类，取不到时为 null（未归因桶就是这种）。 */
+  group: string | null
+  metrics: DashboardProjectModeStageMetrics
+  /** 口径与「Tool 使用」模块一致。 */
+  topTools: Array<{ tool: string; count: number }>
+}
+
+export interface DashboardProjectModeStageAnalysis {
+  projectId: string
+  total: DashboardProjectModeStageMetrics
+  stages: DashboardProjectModeStageRow[]
+}
+
+export type DashboardProjectModeStageAnalysisLoader = (
+  projectId: string
+) => Promise<DashboardProjectModeStageAnalysis>
+
 /** Per-stage (workflow node) breakdown of a feature: conversations + code adoption. */
 export interface DashboardProjectModeFeatureNode {
   /** Human-readable stage name (group-label, e.g. "Dev-代码实现"); no raw node id. */

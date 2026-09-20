@@ -5,6 +5,7 @@ import {
   Layers,
   Activity,
   MessagesSquare,
+  Timer,
   ArrowDownToLine,
   ArrowUpFromLine,
   ArrowUp,
@@ -67,6 +68,8 @@ import type {
   DashboardProjectModeOperationalDetailScope,
   DashboardProjectModeOperationalDetails,
   DashboardProjectModeOperationalDetailsLoader,
+  DashboardProjectModeStageAnalysis,
+  DashboardProjectModeStageAnalysisLoader,
   DashboardProjectModeOrgDistributionItem,
   DashboardProjectModeProject,
   DashboardProjectModeProjectCounts,
@@ -82,6 +85,7 @@ import type {
   DashboardStageBucketStat
 } from "../use-dashboard"
 import { formatTopUserOrgName } from "../use-dashboard"
+import { ProjectStageAnalysisDialog } from "../ProjectStageAnalysisDialog"
 import {
   STAGE_BUCKET_HINTS,
   STAGE_BUCKET_LABELS,
@@ -1398,6 +1402,7 @@ function ProjectRow({
   onOpenTraces,
   onOpenFeatureCommits,
   onOpenProjectCommits,
+  onOpenStageAnalysis,
   loadFeatureNodes,
   loadOperationalDetails
 }: {
@@ -1413,6 +1418,7 @@ function ProjectRow({
   ) => void
   onOpenFeatureCommits: (feature: DashboardProjectModeFeature) => void
   onOpenProjectCommits: (pushedOnly?: boolean) => void
+  onOpenStageAnalysis: () => void
   loadFeatureNodes: (
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
@@ -1650,18 +1656,32 @@ function ProjectRow({
           {createdAt}
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-right">
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-            disabled={project.conversationCount === 0}
-            onClick={(event) => {
-              event.stopPropagation()
-              onOpenTraces()
-            }}
-          >
-            <MessagesSquare className="size-3.5 shrink-0" />
-            查看对话
-          </button>
+          <div className="flex flex-col items-end gap-1">
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+              disabled={project.conversationCount === 0}
+              onClick={(event) => {
+                event.stopPropagation()
+                onOpenTraces()
+              }}
+            >
+              <MessagesSquare className="size-3.5 shrink-0" />
+              查看对话
+            </button>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+              disabled={project.conversationCount === 0}
+              onClick={(event) => {
+                event.stopPropagation()
+                onOpenStageAnalysis()
+              }}
+            >
+              <Timer className="size-3.5 shrink-0" />
+              阶段耗时
+            </button>
+          </div>
         </td>
       </tr>
       {expanded && (
@@ -1927,6 +1947,7 @@ function ProjectListSection({
   onOpenProjectCommits,
   loadFeatureNodes,
   loadOperationalDetails,
+  loadStageAnalysis,
   lockedAdapterName
 }: {
   projectCounts?: DashboardProjectModeProjectCounts
@@ -1965,6 +1986,8 @@ function ProjectListSection({
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
   loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
+  /** 不传则不显示「阶段耗时」入口（插件「项目数」弹窗等嵌入场景用不到）。 */
+  loadStageAnalysis?: DashboardProjectModeStageAnalysisLoader
   /** 嵌入模式：锁定到该插件名（隐藏标题与插件下拉，强制按此插件过滤）。用于插件「项目数」弹窗。 */
   lockedAdapterName?: string
 }): React.JSX.Element {
@@ -1975,6 +1998,45 @@ function ProjectListSection({
   const [departmentQuery, setDepartmentQuery] = useState("")
   const [adapterName, setAdapterName] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  // 阶段耗时弹窗：懒加载，每次打开重新拉（时间范围/室筛选变了结果就该变）。
+  const [stageAnalysisProject, setStageAnalysisProject] =
+    useState<DashboardProjectModeProject | null>(null)
+  const [stageAnalysis, setStageAnalysis] = useState<DashboardProjectModeStageAnalysis | null>(null)
+  const [stageAnalysisLoading, setStageAnalysisLoading] = useState(false)
+  const [stageAnalysisError, setStageAnalysisError] = useState<string | null>(null)
+
+  const openStageAnalysis = useCallback(
+    (project: DashboardProjectModeProject) => {
+      if (!loadStageAnalysis) return
+      setStageAnalysisProject(project)
+      setStageAnalysis(null)
+      setStageAnalysisError(null)
+      setStageAnalysisLoading(true)
+      const requestedProjectId = project.projectId
+      void loadStageAnalysis(requestedProjectId)
+        .then((data) => {
+          // 请求飞行期间用户可能已经点开了另一个项目，迟到的响应不能覆盖当前的。
+          setStageAnalysisProject((current) => {
+            if (current?.projectId === requestedProjectId) {
+              setStageAnalysis(data)
+              setStageAnalysisLoading(false)
+            }
+            return current
+          })
+        })
+        .catch((error: unknown) => {
+          setStageAnalysisProject((current) => {
+            if (current?.projectId === requestedProjectId) {
+              setStageAnalysisError(error instanceof Error ? error.message : String(error))
+              setStageAnalysisLoading(false)
+            }
+            return current
+          })
+        })
+    },
+    [loadStageAnalysis]
+  )
+
   // null = 用所在 tab 的默认排序；非空 = 用户显式选择。
   const [sortBy, setSortBy] = useState<DashboardProjectModeProjectSortKey | null>(null)
   const [sortOrder, setSortOrder] = useState<DashboardProjectModeProjectSortOrder>("desc")
@@ -2374,6 +2436,7 @@ function ProjectListSection({
                 }
                 onOpenFeatureCommits={(feature) => onOpenFeatureCommits(project, feature)}
                 onOpenProjectCommits={(pushedOnly) => onOpenProjectCommits(project, pushedOnly)}
+                onOpenStageAnalysis={() => openStageAnalysis(project)}
                 loadFeatureNodes={(feature) => loadFeatureNodes(project, feature)}
                 loadOperationalDetails={loadOperationalDetails}
               />
@@ -2443,6 +2506,23 @@ function ProjectListSection({
           </div>
         )}
       </div>
+      {stageAnalysisProject ? (
+        <ProjectStageAnalysisDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) {
+              setStageAnalysisProject(null)
+              setStageAnalysis(null)
+              setStageAnalysisError(null)
+              setStageAnalysisLoading(false)
+            }
+          }}
+          projectName={stageAnalysisProject.name}
+          analysis={stageAnalysis}
+          loading={stageAnalysisLoading}
+          error={stageAnalysisError}
+        />
+      ) : null}
     </section>
   )
 }
@@ -3156,6 +3236,7 @@ export function ProjectModePanel({
   onOpenProjectCommits,
   loadFeatureNodes,
   loadOperationalDetails,
+  loadStageAnalysis,
   loadPluginAggregate,
   fetchAdapterProjectPage,
   onSkillClick,
@@ -3212,6 +3293,7 @@ export function ProjectModePanel({
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
   loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
+  loadStageAnalysis: DashboardProjectModeStageAnalysisLoader
   loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
   /** 插件「项目数」弹窗复用项目列表所需的分页拉取器（按当前时间范围，调用方注入插件名/版本）。 */
   fetchAdapterProjectPage: (
@@ -3540,6 +3622,7 @@ export function ProjectModePanel({
         onOpenProjectCommits={onOpenProjectCommits}
         loadFeatureNodes={loadFeatureNodes}
         loadOperationalDetails={loadOperationalDetails}
+        loadStageAnalysis={loadStageAnalysis}
       />
 
       {/* Adapter (plugin) distribution — 紧随项目列表之后 */}
