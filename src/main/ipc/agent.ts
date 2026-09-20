@@ -958,6 +958,27 @@ export function hasActiveAgentRun(threadId: string): boolean {
   return activeRuns.has(threadId)
 }
 
+/** Read-only activity snapshot used by the local HTTP thread status endpoint. */
+export function getAgentThreadActivity(threadId: string): {
+  foreground: boolean
+  workflow: boolean
+  coordinator: boolean
+  background_shell: boolean
+  active: boolean
+} {
+  const foreground = activeRuns.has(threadId)
+  const workflow = workflowRunManager.isActive(threadId)
+  const coordinator = coordinatorWorkerManager.hasRunningWorkersForThread(threadId)
+  const backgroundShell = LocalSandbox.hasActiveBackgroundTasks(threadId)
+  return {
+    foreground,
+    workflow,
+    coordinator,
+    background_shell: backgroundShell,
+    active: foreground || workflow || coordinator || backgroundShell
+  }
+}
+
 export function hasAnyActiveAgentTasks(): boolean {
   return (
     activeRuns.size > 0 ||

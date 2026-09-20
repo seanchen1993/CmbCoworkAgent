@@ -19,13 +19,15 @@ import {
  *   GET  /v1/threads/:id/messages       -> Message[]
  *   POST /v1/threads/:id/messages       -> text/event-stream           (body: { message, modelId? })
  *   POST /v1/threads/:id/cancel         -> { aborted: boolean }
+ *   POST /v1/threads/:id/approvals/:approvalId/decision
+ *                                      -> resolve one pending approval
  *
  * Built on Node's http module (no framework) to keep the dependency/attack
- * surface small. Every non-health request requires a bearer token.
+ * surface small. Non-health requests use optional token auth when configured.
  *
- * SECURITY: API threads run with ALL tool approvals bypassed — a message can make
- * the agent read/write files and execute arbitrary code on this machine. The
- * gateway is opt-in (CMB_API_ENABLED) and token-gated by default. See config.ts.
+ * SECURITY: API threads default to normal desktop approvals, but callers may
+ * explicitly enable yolo. The gateway is network reachable and open unless an
+ * optional CMB_API_TOKEN is configured. See config.ts.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "http"
@@ -34,8 +36,10 @@ import { registerAgentStreamSink } from "../agent/agent-stream-sinks"
 import {
   apiCreateThread,
   apiGetThread,
+  apiGetThreadRuntime,
   apiGetThreadMessages,
   apiCancelThread,
+  apiDecideThreadApproval,
   runApiAgentTurn
 } from "./agent-bridge"
 import { readApiGatewayConfig, apiGatewayStartBlockReason, type ApiGatewayConfig } from "./config"
@@ -87,20 +91,33 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(text)
 }
 
+function sendApiFailure(res: ServerResponse, error: unknown): void {
+  const failure = apiProjectError(error)
+  if (failure.status >= 500) {
+    sendJson(res, 500, { error: "internal_error" })
+    return
+  }
+  sendJson(res, failure.status, { error: failure.error, message: failure.message })
+}
+
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
+    let tooLarge = false
     req.on("data", (chunk: Buffer) => {
+      if (tooLarge) return
       size += chunk.length
       if (size > MAX_BODY_BYTES) {
-        reject(new Error("Request body too large"))
-        req.destroy()
+        tooLarge = true
+        chunks.length = 0
+        reject(new ApiInputError(413, "payload_too_large", "Request body too large"))
         return
       }
       chunks.push(chunk)
     })
     req.on("end", () => {
+      if (tooLarge) return
       if (chunks.length === 0) {
         resolve(undefined)
         return
@@ -235,8 +252,7 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
           : await apiCreateFeature(projectId, body)
       sendJson(res, method === "PUT" ? 200 : 201, result)
     } catch (error) {
-      const failure = apiProjectError(error)
-      sendJson(res, failure.status, { error: failure.error, message: failure.message })
+      sendApiFailure(res, error)
     }
     return
   }
@@ -267,8 +283,7 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
         )
       }
     } catch (error) {
-      const failure = apiProjectError(error)
-      sendJson(res, failure.status, { error: failure.error, message: failure.message })
+      sendApiFailure(res, error)
       return
     }
     const body = input as {
@@ -294,6 +309,32 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
     return
   }
 
+  const approvalMatch = path.match(/^\/v1\/threads\/([^/]+)\/approvals\/([^/]+)\/decision$/)
+  if (method === "POST" && approvalMatch) {
+    const threadId = decodeURIComponent(approvalMatch[1])
+    const approvalId = decodeURIComponent(approvalMatch[2])
+    if (!apiGetThread(threadId)) {
+      sendJson(res, 404, { error: "thread_not_found" })
+      return
+    }
+    try {
+      const body = requireObject(await readJsonBody(req))
+      const action = body.action
+      if (action !== "approve" && action !== "reject") {
+        throw new ApiInputError(400, "invalid_approval_action", "action 必须是 approve 或 reject")
+      }
+      const result = apiDecideThreadApproval(threadId, approvalId, action)
+      if (!result.accepted) {
+        sendJson(res, result.status, { error: result.error, message: result.message })
+        return
+      }
+      sendJson(res, 200, result)
+    } catch (error) {
+      sendApiFailure(res, error)
+    }
+    return
+  }
+
   const threadMatch = path.match(/^\/v1\/threads\/([^/]+)(\/messages|\/cancel)?$/)
   if (threadMatch) {
     const threadId = decodeURIComponent(threadMatch[1])
@@ -305,7 +346,7 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
         sendJson(res, 404, { error: "thread_not_found" })
         return
       }
-      sendJson(res, 200, thread)
+      sendJson(res, 200, { ...thread, runtime: apiGetThreadRuntime(threadId) })
       return
     }
 
@@ -323,10 +364,14 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
         sendJson(res, 404, { error: "thread_not_found" })
         return
       }
-      const body = (await readJsonBody(req).catch(() => null)) as {
-        message?: unknown
-        modelId?: unknown
-      } | null
+      let body: { message?: unknown; modelId?: unknown } | null
+      try {
+        const value = await readJsonBody(req)
+        body = value && typeof value === "object" && !Array.isArray(value) ? value : null
+      } catch (error) {
+        sendApiFailure(res, error)
+        return
+      }
       const message = typeof body?.message === "string" ? body.message : ""
       if (!message.trim()) {
         sendJson(res, 400, { error: "message_required" })
@@ -349,6 +394,22 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
   sendJson(res, 404, { error: "not_found" })
 }
 
+/** Production request handler, also exposed for route-level tests on an ephemeral port. */
+export function createApiGatewayRequestHandler(
+  config: ApiGatewayConfig
+): (req: IncomingMessage, res: ServerResponse) => void {
+  return (req, res) => {
+    route(req, res, config).catch((error) => {
+      console.error("[ApiGateway] request error:", error)
+      if (!res.headersSent) {
+        sendApiFailure(res, error)
+      } else if (!res.writableEnded) {
+        res.end()
+      }
+    })
+  }
+}
+
 /**
  * Start the HTTP API gateway if enabled and its security preconditions are met.
  * Returns true when the server started listening. Safe to call once at startup.
@@ -362,13 +423,7 @@ export function startApiGateway(): boolean {
     return false
   }
 
-  server = createServer((req, res) => {
-    route(req, res, config).catch((err) => {
-      console.error("[ApiGateway] request error:", err)
-      if (!res.headersSent) sendJson(res, 500, { error: "internal_error" })
-      else if (!res.writableEnded) res.end()
-    })
-  })
+  server = createServer(createApiGatewayRequestHandler(config))
 
   server.on("error", (err) => {
     console.error("[ApiGateway] server error:", err)

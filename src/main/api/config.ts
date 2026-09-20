@@ -12,9 +12,9 @@
  *  - A token is OPTIONAL. If CMB_API_TOKEN is set, every request must carry it
  *    (Authorization: Bearer <token>); if unset, the gateway runs OPEN (no auth).
  *
- * WARNING: with no token, anyone who can reach the port can drive the agent —
- * API threads bypass all tool approvals (arbitrary code/file access on this
- * machine). The startup log states which mode is active.
+ * WARNING: with no token, anyone who can reach the port can drive the agent and
+ * remotely resolve supported one-shot tool approvals (including command/file
+ * operations). The startup log states which mode is active.
  */
 
 export interface ApiGatewayConfig {

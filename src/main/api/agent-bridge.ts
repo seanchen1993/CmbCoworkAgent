@@ -18,11 +18,19 @@ import { notifyRenderer } from "../renderer-notifications"
 import { BrowserWindow } from "electron"
 import { v4 as uuid } from "uuid"
 import { createThreadService } from "../services/thread-service"
-import { abortAgentRunForApi } from "../ipc/agent"
+import { abortAgentRunForApi, getAgentThreadActivity } from "../ipc/agent"
 import { createBrowserWindowAgentRunDelivery, startAgentRun } from "../agent/agent-run-service"
+import { approvalDecisionBroker } from "../agent/approval-decision-broker"
 import { setThreadYoloOverride, setThreadSandboxDisabled } from "../agent/api-run-flags"
-import { getThread, getThreadMessages } from "../db"
+import { getThread, getThreadMessageCount, getThreadMessages } from "../db"
 import type { Thread } from "../types"
+import {
+  buildApiThreadRuntime,
+  remoteAllowedApprovalActions,
+  serializePendingApproval,
+  type ApiRemoteApprovalAction,
+  type ApiThreadRuntime
+} from "./thread-runtime"
 
 let hiddenCarrier: BrowserWindow | null = null
 
@@ -127,6 +135,102 @@ export function apiGetThreadMessages(threadId: string): unknown {
     if (ta !== tb) return ta - tb
     return String(a.id ?? "").localeCompare(String(b.id ?? ""))
   })
+}
+
+/** Return the live execution and approval state for a persisted thread. */
+export function apiGetThreadRuntime(threadId: string): ApiThreadRuntime {
+  const pendingApprovals = approvalDecisionBroker
+    .list(threadId)
+    .map((registration) => serializePendingApproval(registration))
+  return buildApiThreadRuntime({
+    activity: getAgentThreadActivity(threadId),
+    messageCount: getThreadMessageCount(threadId),
+    pendingApprovals
+  })
+}
+
+export type ApiApprovalDecisionResult =
+  | {
+      accepted: true
+      thread_id: string
+      approval_id: string
+      action: ApiRemoteApprovalAction
+    }
+  | {
+      accepted: false
+      status: number
+      error: string
+      message: string
+    }
+
+/** Resolve one pending approval without bypassing operation-specific restrictions. */
+export function apiDecideThreadApproval(
+  threadId: string,
+  approvalId: string,
+  action: ApiRemoteApprovalAction
+): ApiApprovalDecisionResult {
+  const registration = approvalDecisionBroker.get(approvalId)
+  if (!registration) {
+    return {
+      accepted: false,
+      status: 404,
+      error: "approval_not_found",
+      message: "审批不存在、已处理或已失效"
+    }
+  }
+  if (registration.threadId !== threadId) {
+    return {
+      accepted: false,
+      status: 409,
+      error: "approval_thread_mismatch",
+      message: "审批不属于指定会话"
+    }
+  }
+  if (!registration.request.allowed_approval_types.includes(action)) {
+    return {
+      accepted: false,
+      status: 422,
+      error: "approval_action_not_allowed",
+      message: "当前审批不允许该操作"
+    }
+  }
+  if (!remoteAllowedApprovalActions(registration.request).includes(action)) {
+    return {
+      accepted: false,
+      status: action === "approve" ? 409 : 422,
+      error: action === "approve" ? "desktop_action_required" : "approval_action_not_allowed",
+      message: action === "approve" ? "该操作的批准需要在桌面端完成" : "当前审批不允许该操作"
+    }
+  }
+
+  const result = approvalDecisionBroker.decide({
+    source: { kind: "http" },
+    requestId: approvalId,
+    decision: {
+      type: action,
+      tool_call_id: registration.request.tool_call?.id ?? registration.request.id
+    }
+  })
+  if (!result.accepted) {
+    const approvalMissing = result.reasonCode === "APPROVAL_NOT_FOUND"
+    return {
+      accepted: false,
+      status: approvalMissing ? 404 : 422,
+      error: approvalMissing ? "approval_not_found" : "approval_action_not_allowed",
+      message: approvalMissing ? "审批不存在、已处理或已失效" : "审批决定未被接受"
+    }
+  }
+
+  notifyRenderer(`approval:resolved:${threadId}`, {
+    requestId: approvalId,
+    decision: action
+  })
+  return {
+    accepted: true,
+    thread_id: threadId,
+    approval_id: approvalId,
+    action
+  }
 }
 
 /**

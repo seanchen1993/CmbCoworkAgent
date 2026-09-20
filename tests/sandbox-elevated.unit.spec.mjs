@@ -2028,7 +2028,7 @@ test("workflow approval card surfaces the tokenBudget value (#7)", () => {
   // budget cap, not just a vague "consumes tokens" note.
   assert.match(
     workflowToolSource,
-    /argsPreview,\s*\n\s*tokenBudget/,
+    /argsPreview,[\s\S]*?argsReview[\s\S]*?tokenBudget/,
     "approval card args include tokenBudget"
   )
   assert.match(
@@ -2115,6 +2115,19 @@ test("workflow approval card shows the FULL script (no truncation)", () => {
     workflowToolSource,
     /script\.length > 20_000/,
     "approval no longer truncates the script preview"
+  )
+})
+
+test("workflow approval carries complete serialized args for remote review", () => {
+  assert.match(
+    workflowToolSource,
+    /const serializedArgs = [\s\S]*?JSON\.stringify\(args\)/,
+    "workflow serializes the complete args before creating the compact preview"
+  )
+  assert.match(
+    workflowToolSource,
+    /argsPreview,[\s\S]*?\{ argsReview \}/,
+    "approval carries complete args separately from the compact desktop preview"
   )
 })
 
