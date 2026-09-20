@@ -1,4 +1,5 @@
 import { managedRunStore, type ManagedRunStore } from "./managed-run-store"
+import { reportManagedRunEnded } from "./managed-run-telemetry"
 
 const APP_RECOVERY_FAILURE_REASON = "应用重启导致托管运行中断，请重新开始托管"
 
@@ -60,6 +61,9 @@ export function recoverManagedRunsAtStartup(
         reasonCode: "app_interrupted",
         summary: APP_RECOVERY_FAILURE_REASON
       })
+      // 这条路径不经过 markTerminal，上报要单独补。少了它，被应用重启打断的托管运行
+      // 在看板上就只有开始没有结束。
+      reportManagedRunEnded(persisted, "failed", "app_interrupted")
       failedRunIds.push(persisted.runId)
     } catch (error) {
       corruptRunCount += 1
