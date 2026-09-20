@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import { readFileSync } from "fs"
 import type { Message } from "../types"
 import {
+  readStreamTranscriptReasoning,
   resolveStreamTranscriptFlush,
   type QueuedStreamTranscriptMessage,
   type StreamTranscriptAssistantIdentity
@@ -58,6 +59,42 @@ function longTranscript(): Message[] {
 }
 
 describe("stream transcript flush identity cache", () => {
+  it("does not confuse missing reasoning with an explicit empty field", () => {
+    const metadata = { cmb_stream_message_reasoning_mode: "snapshot" }
+    expect(
+      readStreamTranscriptReasoning([{ kwargs: { additional_kwargs: {} } }, metadata], "snapshot")
+    ).toEqual({})
+    expect(
+      readStreamTranscriptReasoning(
+        [{ kwargs: { additional_kwargs: { reasoning_content: "" } } }, metadata],
+        "snapshot"
+      )
+    ).toEqual({ reasoning: "", reasoning_mode: "snapshot" })
+  })
+
+  it("retains replacement authority when a flush begins with a snapshot", () => {
+    const result = resolveStreamTranscriptFlush({
+      queuedMessages: [
+        queuedMessage({ id: "a", role: "assistant", content: "", streamContentMode: "snapshot" }),
+        queuedMessage({ id: "a", role: "assistant", content: "tail" })
+      ],
+      loadBaselineMessages: () => []
+    })
+    expect(result.messages).toMatchObject([{ content: "tail", content_mode: "snapshot" }])
+  })
+
+  it("retains an empty replacement followed by a delta within one flush", () => {
+    const result = resolveStreamTranscriptFlush({
+      queuedMessages: [
+        queuedMessage({ id: "a", role: "assistant", content: "draft" }),
+        queuedMessage({ id: "a", role: "assistant", content: "", streamContentMode: "snapshot" }),
+        queuedMessage({ id: "a", role: "assistant", content: "tail" })
+      ],
+      loadBaselineMessages: () => []
+    })
+    expect(result.messages).toMatchObject([{ content: "tail", content_mode: "snapshot" }])
+  })
+
   it("never falls through from a rejected suffix append to full upsert", () => {
     const source = readFileSync(new URL("./agent.ts", import.meta.url), "utf8")
     const start = source.indexOf("if (resolved.appendTextDelta")
@@ -294,5 +331,52 @@ describe("stream transcript flush identity cache", () => {
     })
     expect(terminalSnapshot.appendTextDelta).toBeUndefined()
     expect(terminalSnapshot.messages[0].content).toBe(completeText)
+  })
+})
+it("keeps a tool clear authoritative when text-only deltas follow in the same flush", () => {
+  const result = resolveStreamTranscriptFlush({
+    queuedMessages: [
+      queuedMessage({
+        id: "same",
+        role: "assistant",
+        content: "",
+        tool_calls: [],
+        tool_calls_mode: "snapshot"
+      }),
+      queuedMessage({ id: "same", role: "assistant", content: " tail" })
+    ],
+    loadBaselineMessages: () => []
+  })
+  expect(result.messages).toHaveLength(1)
+  expect(result.messages[0]).toMatchObject({
+    tool_calls: [],
+    tool_calls_mode: "snapshot",
+    content: " tail"
+  })
+})
+it("continues trusted tool updates after a snapshot while preserving authority", () => {
+  const result = resolveStreamTranscriptFlush({
+    queuedMessages: [
+      queuedMessage({
+        id: "same",
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "c", name: "echo", args: { value: 1 } }],
+        tool_calls_mode: "snapshot"
+      }),
+      queuedMessage({
+        id: "same",
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "c", name: "echo", args: { value: 2 } }],
+        tool_calls_mode: "delta"
+      }),
+      queuedMessage({ id: "same", role: "assistant", content: "tail" })
+    ],
+    loadBaselineMessages: () => []
+  })
+  expect(result.messages[0]).toMatchObject({
+    tool_calls_mode: "snapshot",
+    tool_calls: [{ id: "c", args: { value: 2 } }]
   })
 })

@@ -1,5 +1,11 @@
 import { HumanMessage } from "@langchain/core/messages"
 import { randomUUID } from "node:crypto"
+import { FunctionTurnRun } from "../../mods/v2/turn-run"
+import {
+  assertNoTurnModelRefusal,
+  clearTurnCompletionGateState,
+  readTurnCompletionGateReport
+} from "../../agent/turn-completion-integrity"
 import { getAgentGraphRecursionLimit } from "../../../shared/agent-runtime-limits"
 import {
   closeCheckpointer,
@@ -7,6 +13,7 @@ import {
   type DeepAgent,
   type RuntimeInteractionWaitHooks
 } from "../../agent/runtime"
+import { parseGoalSlashCommand } from "../../agent/goals/slash"
 import {
   createStandardTurnTrace,
   getHarnessAgentContext,
@@ -18,6 +25,13 @@ import {
   type HarnessAgentContext,
   type RemoteTurnPolicy
 } from "../../agent/standard-thread-turn"
+import {
+  adaptCoordinatorSkillUseForWorkerDelegation,
+  extractCoordinatorSelectedSkill,
+  getAgentModeFromMetadata,
+  type AgentMode,
+  type CoordinatorSelectedSkill
+} from "../../agent/coordinator-mode"
 import {
   claimLocalThreadRunLease,
   getLocalThreadRunLease,
@@ -52,6 +66,7 @@ import {
 import { DEFAULT_IM_CHANNEL_ID, type RemoteImAckV1 } from "../../../shared/im-gateway-contract"
 import {
   imRemoteCapabilityGuard,
+  metadataMatchesTarget,
   type ImRemoteCapabilityDecision,
   type ImRemoteCapabilityGuard
 } from "./capability-guard"
@@ -62,14 +77,38 @@ import {
   type ImExecutionPermitResult,
   type ImGatewayClientPort
 } from "./gateway-client"
-import { imTargetReplyPrefix } from "./reply-context"
+import {
+  imProjectModeReplyPrefix,
+  imTargetReplyPrefix,
+  SWITCHED_TARGET_MARK
+} from "./reply-context"
 import { buildImEventReplies, buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
+import {
+  resolveImProjectModeReplyContext,
+  type ImProjectModeReplyContext
+} from "./project-reply-context"
 import {
   imRemoteInteractionRouteRegistry,
   type ImRemoteInteractionRouteRegistry
 } from "./remote-interaction-route"
 import { ImReplyClient } from "./reply-client"
 import { trackEvent } from "../event-reporter"
+import type { SkillUseBlockMetadata } from "../../../shared/skill-use-block"
+import {
+  ImSkillCommandError,
+  imSkillCommandService,
+  neutralizeImSkillUseMarkers
+} from "./skill-command"
+import { ImGoalRunBridge } from "./goal-runner"
+import {
+  ImCompletionHookRejectedError,
+  ImPreparedPromptRejectedError,
+  ImTurnIncompleteError
+} from "./turn-failures"
+import {
+  executeRemoteStandardTurnOnDesktopRunBody,
+  withImInboxRuntimePolicy
+} from "./desktop-run-bridge"
 
 const IM_INBOX_BLOCKED_TOOLS = [
   "execute",
@@ -88,8 +127,6 @@ The current user message arrived through the managed enterprise IM robot. Treat 
 
 const MAX_COMPLETION_HOOK_REVISIONS = 2
 const COMPLETION_HOOK_REVISION_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
-const DEFAULT_WAITING_DESKTOP_TTL_MS = 10 * 60 * 1_000
-
 export type ImRemoteRunDisposition =
   | "completed"
   | "failed"
@@ -105,6 +142,19 @@ export interface ImRemoteTurnExecutionInput {
   signal: AbortSignal
   capability: Extract<ImRemoteCapabilityDecision, { allowed: true }>
   interactionWaitHooks?: RuntimeInteractionWaitHooks
+  onDetachedResultAvailable?: (signal: ImDetachedResultSignal) => void
+}
+
+export interface ImDetachedResultSignal {
+  kind: "coordinator" | "workflow"
+  threadId: string
+  runId?: string
+}
+
+export interface ImDetachedResultNotice extends ImDetachedResultSignal {
+  conversationKey: string
+  principalId: string
+  targetSnapshot: NonNullable<ImEventRecord["targetSnapshot"]>
 }
 
 export interface PreparedRemoteStandardTurnInput {
@@ -121,6 +171,27 @@ export interface PreparedRemoteStandardTurnInput {
   signal: AbortSignal
   remotePolicy?: RemoteTurnPolicy
   interactionWaitHooks?: RuntimeInteractionWaitHooks
+  explicitSkill?: SkillUseBlockMetadata
+  agentMode?: AgentMode
+  /** Trusted plumbing turn used to fold detached Team/Workflow results back into the thread. */
+  internalNotificationTurn?: boolean
+  /** Internal notification turns are checkpoint-only and must not create a synthetic user bubble. */
+  persistUserMessage?: boolean
+  /** Detached-result reporting must not auto-commit unrelated foreground workspace edits. */
+  disableAutoCommit?: boolean
+  coordinatorTurnPrompt?: string
+  coordinatorNotificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
+  onCoordinatorNotificationAction?: (notificationIds: string[]) => void
+  onDetachedResultAvailable?: (signal: ImDetachedResultSignal) => void
+  /**
+   * Re-checks this turn's authorization against the thread state the run body
+   * resolves. The capability guard validated a target snapshot before the turn
+   * was prepared; the thread can be repointed or rebound in between.
+   */
+  verifyResolvedThread?: (resolved: {
+    workspacePath: string | undefined
+    metadata: Record<string, unknown>
+  }) => string | null
 }
 
 export interface ImRemoteRunnerDependencies {
@@ -138,8 +209,9 @@ export interface ImRemoteRunnerDependencies {
   notifyThreadChanged: () => void
   createRunId: () => string
   permitRenewIntervalMs: number
-  waitingDesktopTtlMs: number
   setThreadLifecycle: (event: ImEventRecord, state: ImRemoteThreadLifecycleState) => Promise<void>
+  onDetachedResultAvailable?: (notice: ImDetachedResultNotice) => void
+  goalRuns: ImGoalRunBridge
 }
 
 export type ImRemoteThreadLifecycleState =
@@ -148,14 +220,6 @@ export type ImRemoteThreadLifecycleState =
   | "failed"
   | "rejected"
   | "outcome_unknown"
-
-class ImPreparedPromptRejectedError extends Error {
-  readonly reasonCode = "REMOTE_PROMPT_BLOCKED"
-}
-
-class ImCompletionHookRejectedError extends Error {
-  readonly reasonCode = "REMOTE_COMPLETION_HOOK_BLOCKED"
-}
 
 function acknowledgementForTerminal(event: ImEventRecord): RemoteImAckV1 {
   const common = { eventId: event.eventId, leaseId: event.leaseId }
@@ -181,11 +245,23 @@ function abortLike(error: unknown, signal: AbortSignal): boolean {
   )
 }
 
-function failureReply(reasonCode: string, retryable: boolean, eventId: string): string {
+function failureReply(
+  reasonCode: string,
+  retryable: boolean,
+  eventId: string,
+  detail?: string
+): string {
   const code = eventShortCode(eventId)
   if (reasonCode === "REMOTE_PROMPT_BLOCKED") return "这条消息被本机 Hook 策略拦截，未执行。"
   if (reasonCode === "REMOTE_COMPLETION_HOOK_BLOCKED") {
     return `本机 Hook 未允许本轮结果完成。事件短码：${code}。请在桌面查看详情。`
+  }
+  // An incomplete turn that wrote nothing gets the reason itself: it is the
+  // only thing the user has to go on, it is already written for them
+  // (describeTurnCompletionFailure), and a bare short code would hide that the
+  // model never produced a valid answer.
+  if (reasonCode === "REMOTE_TURN_INCOMPLETE") {
+    return `${detail ?? "本轮未完成。"}\n事件短码：${code}。请在桌面查看详情。`
   }
   return retryable
     ? `处理失败，可稍后重试。事件短码：${code}。`
@@ -274,10 +350,22 @@ export async function executePreparedRemoteStandardTurn(
     runOwner,
     source,
     routingTaskSource,
-    signal,
+    signal: parentSignal,
     remotePolicy,
-    interactionWaitHooks
+    interactionWaitHooks,
+    explicitSkill,
+    agentMode: requestedAgentMode,
+    internalNotificationTurn = false,
+    persistUserMessage = true,
+    disableAutoCommit = false,
+    coordinatorTurnPrompt,
+    coordinatorNotificationSelectedSkills,
+    onCoordinatorNotificationAction,
+    onDetachedResultAvailable
   } = input
+  const localAbortController = new AbortController()
+  const signal = AbortSignal.any([parentSignal, localAbortController.signal])
+  const agentMode = requestedAgentMode ?? getAgentModeFromMetadata(metadata)
   const channel = `scheduler:stream:${threadId}`
   const hookScope = createPersistentThreadHookScope(threadId)
   const skillUseTracker = createSkillUseTracker()
@@ -299,37 +387,51 @@ export async function executePreparedRemoteStandardTurn(
       ...(harnessFeature ? { harnessFeature } : {})
     }
   })
-  tracer.setExecutionMode("normal")
+  tracer.setExecutionMode(agentMode)
   // Skill attribution feeds the adoption statistics: recordGen runs inside the
   // sandbox tools for every path, but reads usedSkills/skillSource off this
   // thread's adoption context, which only this recorder populates.
   const attribution = new TurnAttributionRecorder({ threadId, tracer, userMessageId })
 
-  persistStandardTurnUserMessage({
-    threadId,
-    messageId: userMessageId,
-    content: rawMessage
-  })
-  const preparedPrompt = await prepareStandardUserPrompt({
-    rawMessage,
-    initialModelInput: rawMessage,
-    threadId,
-    workspacePath,
-    turnState: { hookScope, skillUseTracker, skillHookKeys, turnId: userMessageId },
-    harnessAgentContext: harnessContext,
-    onHookResult,
-    onHookSkippedFactory,
-    onExplicitSkillActivated: (skill) => attribution.onExplicitSkillActivated(skill),
-    isPreparationCurrent: () => !signal.aborted
-  })
-  if (!preparedPrompt.accepted) {
-    await tracer.finish("cancelled", preparedPrompt.reason)
-    throw new ImPreparedPromptRejectedError(preparedPrompt.reason)
+  if (persistUserMessage) {
+    persistStandardTurnUserMessage({
+      threadId,
+      messageId: userMessageId,
+      content: rawMessage
+    })
+  }
+  let modelPrompt = rawMessage
+  if (!internalNotificationTurn) {
+    const preparedPrompt = await prepareStandardUserPrompt({
+      rawMessage,
+      initialModelInput: rawMessage,
+      trustedExplicitSkill: explicitSkill,
+      allowExplicitSkillFromMessage: source !== "im",
+      threadId,
+      workspacePath,
+      turnState: { hookScope, skillUseTracker, skillHookKeys, turnId: userMessageId },
+      harnessAgentContext: harnessContext,
+      onHookResult,
+      onHookSkippedFactory,
+      onExplicitSkillActivated: (skill) => attribution.onExplicitSkillActivated(skill),
+      isPreparationCurrent: () => !signal.aborted
+    })
+    if (!preparedPrompt.accepted) {
+      await tracer.finish("cancelled", preparedPrompt.reason)
+      throw new ImPreparedPromptRejectedError(preparedPrompt.reason)
+    }
+    modelPrompt = preparedPrompt.content
+  }
+
+  let coordinatorSelectedSkill: CoordinatorSelectedSkill | undefined
+  if (agentMode === "coordinator") {
+    coordinatorSelectedSkill = extractCoordinatorSelectedSkill(modelPrompt) ?? undefined
+    modelPrompt = adaptCoordinatorSkillUseForWorkerDelegation(modelPrompt)
   }
 
   const routing = await resolveStandardTurnRouting({
     taskSource: routingTaskSource,
-    message: preparedPrompt.content,
+    message: modelPrompt,
     threadId,
     requestedModelId: typeof metadata.model === "string" ? metadata.model : undefined
   })
@@ -338,11 +440,23 @@ export async function executePreparedRemoteStandardTurn(
     if (routing.result.routingTrace) tracer.setRoutingTrace(routing.result.routingTrace)
   }
 
-  const snapshot = await startAgentGitSnapshot(threadId, workspacePath).catch(() => null)
+  const snapshot = disableAutoCommit
+    ? null
+    : await startAgentGitSnapshot(threadId, workspacePath).catch(() => null)
   const releasePin = pinCheckpointer(threadId)
   let agent: DeepAgent | null = null
   let completionSucceeded = false
   let terminalError: unknown = null
+  const functionTurn = new FunctionTurnRun({
+    workspace: workspacePath,
+    threadId,
+    runId,
+    turnId: userMessageId,
+    text: rawMessage,
+    owner: runOwner,
+    signal,
+    cancel: () => localAbortController.abort()
+  })
   updateThread(threadId, { status: "busy" })
   notifyRemoteThreadChanged()
   mirrorStandardTurnStreamToRenderer(threadId, { type: "started" })
@@ -350,7 +464,7 @@ export async function executePreparedRemoteStandardTurn(
     threadId,
     (streamEvent) => mirrorStandardTurnStreamToRenderer(threadId, streamEvent),
     tracer,
-    { attribution }
+    { attribution, onStreamChunk: (mode, payload) => functionTurn.observeStream(mode, payload) }
   )
 
   try {
@@ -361,7 +475,19 @@ export async function executePreparedRemoteStandardTurn(
         threadId,
         workspacePath,
         abortSignal: signal,
-        agentMode: "normal",
+        agentMode,
+        // Both sources here are managed transports — this function exists for
+        // turns whose lifecycle the transport owns and delivers back over its
+        // own channel. A workflow or a worker started from one of them is owed
+        // to it, and defaulting to the desktop left the summary to a scheduler
+        // that correctly refuses to run it.
+        backgroundNotificationOwner: "managed",
+        disableSubagents: agentMode === "normal" && metadata.subagentsEnabled === false,
+        coordinatorSelectedSkill,
+        coordinatorExplicitSelectedSkill: coordinatorSelectedSkill,
+        coordinatorTurnPrompt,
+        coordinatorNotificationSelectedSkills,
+        onCoordinatorNotificationAction,
         traceContext: tracer.getTraceContext(),
         hookTurnId: userMessageId,
         hookScope,
@@ -378,8 +504,27 @@ export async function executePreparedRemoteStandardTurn(
           metadata
         }),
         extraSystemPrompt: IM_UNTRUSTED_INPUT_CONTEXT,
-        autoApproveFileEdits: targetKind === "inbox",
-        onFileMutation: (filePath) => recordAgentTouchedFile(threadId, workspacePath, filePath)
+        onFileMutation: (filePath) => recordAgentTouchedFile(threadId, workspacePath, filePath),
+        onCoordinatorWorkerEvent: (event) => {
+          if (event.stream) return
+          mirrorStandardTurnStreamToRenderer(threadId, {
+            type: "custom",
+            data: {
+              type: "coordinator_workers",
+              ...(event.workers ? { workers: event.workers } : { worker: event.worker }),
+              ...(event.notification ? { notification: event.notification } : {}),
+              // The main-process IM pump owns this result. Keep the existing desktop
+              // view updated without racing the renderer's notification submitter.
+              suppressNotificationAutoRun: true
+            }
+          })
+          if (event.notification && event.suppressNotificationAutoRun !== true) {
+            onDetachedResultAvailable?.({ kind: "coordinator", threadId })
+          }
+        },
+        onWorkflowLaunched: (workflowRunId) => {
+          onDetachedResultAvailable?.({ kind: "workflow", threadId, runId: workflowRunId })
+        }
       }),
       harnessContext,
       remotePolicy
@@ -391,6 +536,7 @@ export async function executePreparedRemoteStandardTurn(
       const modelId = candidates[index]
       try {
         agent = await runtimeFactory.create(modelId)
+        await functionTurn.start()
         if (modelId) {
           tracer.setModelId(modelId)
           // Fallback name until the API reports its own: config.model is the
@@ -401,7 +547,7 @@ export async function executePreparedRemoteStandardTurn(
         const stream = await agent.stream(
           index === 0
             ? {
-                messages: [new HumanMessage({ id: userMessageId, content: preparedPrompt.content })]
+                messages: [new HumanMessage({ id: userMessageId, content: modelPrompt })]
               }
             : null,
           {
@@ -412,6 +558,7 @@ export async function executePreparedRemoteStandardTurn(
           }
         )
         await streamConsumer.consume(stream, signal)
+        signal.throwIfAborted()
         lastError = undefined
         break
       } catch (error) {
@@ -423,73 +570,81 @@ export async function executePreparedRemoteStandardTurn(
     }
     if (lastError) throw lastError
     if (!agent) throw new Error("No IM runtime could be created")
+    assertNoTurnModelRefusal(threadId, runId)
 
     let revision = 0
-    const completion = await runCompletionHooksWithRevision({
-      threadId,
-      workspacePath,
-      turnId: userMessageId,
-      pluginOutputDir: harnessContext.pluginOutputDir,
-      systemId: harnessContext.systemId,
-      ...getHarnessHookContext(harnessContext),
-      abortSignal: signal,
-      getStopContext: () => ({
-        userMessage: rawMessage,
-        assistantResponse: streamConsumer.getFinalAssistantText(),
-        toolCalls: streamConsumer.getToolNames(),
-        usedSkills: skillUseTracker.getUsedSkillNames()
-      }),
-      hookScope,
-      skillUseTracker,
-      runRevision: async (revisionPrompt) => {
-        revision += 1
-        const stream = await agent!.stream(
-          {
-            messages: [
-              new HumanMessage({
-                id: `${userMessageId}:revision:${revision}`,
-                content: revisionPrompt
-              })
-            ]
+    const completion = internalNotificationTurn
+      ? "passed"
+      : await runCompletionHooksWithRevision({
+          hasTerminalModelRefusal: () => !!readTurnCompletionGateReport(threadId, runId)?.refusal,
+          threadId,
+          workspacePath,
+          turnId: userMessageId,
+          pluginOutputDir: harnessContext.pluginOutputDir,
+          systemId: harnessContext.systemId,
+          ...getHarnessHookContext(harnessContext),
+          abortSignal: signal,
+          getStopContext: () => ({
+            userMessage: rawMessage,
+            assistantResponse: streamConsumer.getFinalAssistantText(),
+            toolCalls: streamConsumer.getToolNames(),
+            usedSkills: skillUseTracker.getUsedSkillNames()
+          }),
+          hookScope,
+          skillUseTracker,
+          runRevision: async (revisionPrompt) => {
+            revision += 1
+            const stream = await agent!.stream(
+              {
+                messages: [
+                  new HumanMessage({
+                    id: `${userMessageId}:revision:${revision}`,
+                    content: revisionPrompt
+                  })
+                ]
+              },
+              {
+                configurable: { thread_id: threadId },
+                signal,
+                streamMode: ["messages", "values"],
+                recursionLimit: getAgentGraphRecursionLimit()
+              }
+            )
+            await streamConsumer.consume(stream, signal)
           },
-          {
-            configurable: { thread_id: threadId },
-            signal,
-            streamMode: ["messages", "values"],
-            recursionLimit: getAgentGraphRecursionLimit()
-          }
-        )
-        await streamConsumer.consume(stream, signal)
-      },
-      sendNotice: (message) =>
-        mirrorStandardTurnStreamToRenderer(threadId, {
-          type: "custom",
-          data: { type: "hook_notice", message }
-        }),
-      sendError: (message) =>
-        mirrorStandardTurnStreamToRenderer(threadId, {
-          type: "custom",
-          data: { type: "hook_notice", message }
-        }),
-      onHookResult,
-      onHookSkippedFactory,
-      maxRevisionAttempts: MAX_COMPLETION_HOOK_REVISIONS,
-      revisionPromptPrefix: COMPLETION_HOOK_REVISION_PREFIX
-    })
+          sendNotice: (message) =>
+            mirrorStandardTurnStreamToRenderer(threadId, {
+              type: "custom",
+              data: { type: "hook_notice", message }
+            }),
+          sendError: (message) =>
+            mirrorStandardTurnStreamToRenderer(threadId, {
+              type: "custom",
+              data: { type: "hook_notice", message }
+            }),
+          onHookResult,
+          onHookSkippedFactory,
+          maxRevisionAttempts: MAX_COMPLETION_HOOK_REVISIONS,
+          revisionPromptPrefix: COMPLETION_HOOK_REVISION_PREFIX
+        })
     if (completion !== "passed") {
       throw new ImCompletionHookRejectedError(`Completion hooks ended with ${completion}`)
     }
 
     await streamConsumer.flush()
+    assertNoTurnModelRefusal(threadId, runId)
     const finalText = streamConsumer.getFinalAssistantText().trim() || "处理完成。"
     attribution.sync()
     await tracer.finish("success")
-    await maybeAutoCommitAfterAgentRun({
-      threadId,
-      workspacePath,
-      userPrompt: rawMessage,
-      snapshot
-    }).catch((error) => console.warn("[IM] Auto-commit finalize failed:", error))
+    if (!disableAutoCommit) {
+      await maybeAutoCommitAfterAgentRun({
+        threadId,
+        workspacePath,
+        userPrompt: rawMessage,
+        snapshot
+      }).catch((error) => console.warn("[IM] Auto-commit finalize failed:", error))
+    }
+    signal.throwIfAborted()
     completionSucceeded = true
     return finalText
   } catch (error) {
@@ -502,6 +657,8 @@ export async function executePreparedRemoteStandardTurn(
     }
     throw error
   } finally {
+    functionTurn.finish(completionSucceeded ? "answer" : "error")
+    clearTurnCompletionGateState(threadId, runId)
     if (!completionSucceeded) discardAgentAutoCommitTracking(threadId)
     releasePin()
     await closeCheckpointer(threadId).catch(() => undefined)
@@ -522,11 +679,72 @@ export async function executePreparedRemoteStandardTurn(
   }
 }
 
-async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput): Promise<string> {
-  const { event, capability, runId, signal, interactionWaitHooks } = input
+async function executePreparedImStandardTurn(
+  input: ImRemoteTurnExecutionInput,
+  goalRuns: ImGoalRunBridge
+): Promise<string> {
+  const { event, capability, runId, signal, interactionWaitHooks, onDetachedResultAvailable } =
+    input
   const { target, metadata, workspacePath } = capability
-  return executePreparedRemoteStandardTurn({
-    rawMessage: event.messageText,
+  const escapedSlashCommand = event.messageText.trimStart().startsWith("//")
+  const directGoalCommand =
+    !escapedSlashCommand && parseGoalSlashCommand(event.messageText).type !== "none"
+  // Built-in control syntax owns /goal even if an installed skill has the same
+  // display name. A same-named skill remains addressable through /技能 <短码>.
+  const preparedMessage = directGoalCommand
+    ? ({
+        kind: "ordinary",
+        visibleText: neutralizeImSkillUseMarkers(event.messageText),
+        explicitSkill: undefined
+      } as const)
+    : await imSkillCommandService.prepareForExecution({
+        message: event.messageText,
+        target
+      })
+  const agentMode = getAgentModeFromMetadata(metadata)
+  const remotePolicy =
+    target.kind === "inbox"
+      ? createImInboxRemotePolicy({ allowRequestUserInput: true })
+      : agentMode === "normal" && metadata.subagentsEnabled === false
+        ? { disableSubagents: true }
+        : undefined
+  // The capability guard validated this target before the turn was prepared;
+  // title reads, event bookkeeping and skill preparation all happen in between,
+  // and the thread can be repointed or rebound in that window. Built once here
+  // so both branches enter the run body under the same authorization.
+  const verifyResolvedThread = (resolved: {
+    workspacePath: string | undefined
+    metadata: Record<string, unknown>
+  }): string | null =>
+    metadataMatchesTarget(resolved.metadata, target, event)
+      ? null
+      : `Run was authorized for ${target.kind} target ${target.targetId} in ${target.workspacePath}, but the thread no longer matches that binding`
+
+  if (
+    directGoalCommand ||
+    goalRuns.shouldUseGoalPipeline(target.threadId, preparedMessage.visibleText, {
+      ignoreSlashCommand: escapedSlashCommand
+    })
+  ) {
+    return goalRuns.run({
+      threadId: target.threadId,
+      target,
+      metadata,
+      prepared: escapedSlashCommand
+        ? { ...preparedMessage, visibleText: `\u200B${preparedMessage.visibleText}` }
+        : preparedMessage,
+      runId,
+      signal,
+      userMessageId: `im:${event.eventId}:user`,
+      agentMode,
+      remotePolicy,
+      interactionWaitHooks,
+      onDetachedResultAvailable,
+      verifyResolvedThread
+    })
+  }
+  const turn: PreparedRemoteStandardTurnInput = {
+    rawMessage: preparedMessage.visibleText,
     userMessageId: `im:${event.eventId}:user`,
     threadId: target.threadId,
     targetKind: target.kind,
@@ -537,11 +755,25 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
     source: "im",
     routingTaskSource: "chat",
     signal,
-    remotePolicy:
-      target.kind === "inbox"
-        ? createImInboxRemotePolicy({ allowRequestUserInput: true })
-        : undefined,
-    interactionWaitHooks
+    agentMode,
+    explicitSkill: preparedMessage.explicitSkill?.use,
+    remotePolicy,
+    interactionWaitHooks,
+    onDetachedResultAvailable,
+    verifyResolvedThread
+  }
+  // The run body derives its own runtime options and knows nothing about
+  // targetKind, so the two inbox-only ones move onto the policy it does read.
+  return executeRemoteStandardTurnOnDesktopRunBody({
+    ...turn,
+    remotePolicy: withImInboxRuntimePolicy(remotePolicy, {
+      targetKind: target.kind,
+      imDeliveryContext: resolveImInboxDeliveryContextForRuntime({
+        threadId: target.threadId,
+        targetKind: target.kind,
+        metadata
+      })
+    })
   })
 }
 
@@ -552,6 +784,7 @@ export class ImRemoteRunner {
   constructor(dependencies: Partial<ImRemoteRunnerDependencies> = {}) {
     const gateway = dependencies.gateway ?? unavailableImGatewayClient
     const eventStore = dependencies.eventStore ?? imEventStore
+    const goalRuns = dependencies.goalRuns ?? new ImGoalRunBridge()
     this.dependencies = {
       gateway,
       eventStore,
@@ -559,7 +792,8 @@ export class ImRemoteRunner {
       conversationState: dependencies.conversationState ?? imConversationStateStore,
       capabilityGuard: dependencies.capabilityGuard ?? imRemoteCapabilityGuard,
       replyClient: dependencies.replyClient ?? new ImReplyClient(gateway, eventStore),
-      executeTurn: dependencies.executeTurn ?? executePreparedImStandardTurn,
+      executeTurn:
+        dependencies.executeTurn ?? ((input) => executePreparedImStandardTurn(input, goalRuns)),
       getThread: dependencies.getThread ?? getThread,
       getThreadMessages: dependencies.getThreadMessages ?? getThreadMessages,
       updateThread: dependencies.updateThread ?? updateThread,
@@ -567,8 +801,9 @@ export class ImRemoteRunner {
       notifyThreadChanged: dependencies.notifyThreadChanged ?? notifyRemoteThreadChanged,
       createRunId: dependencies.createRunId ?? randomUUID,
       permitRenewIntervalMs: dependencies.permitRenewIntervalMs ?? 30_000,
-      waitingDesktopTtlMs: dependencies.waitingDesktopTtlMs ?? DEFAULT_WAITING_DESKTOP_TTL_MS,
-      setThreadLifecycle: dependencies.setThreadLifecycle ?? setRemoteThreadLifecycle
+      setThreadLifecycle: dependencies.setThreadLifecycle ?? setRemoteThreadLifecycle,
+      onDetachedResultAvailable: dependencies.onDetachedResultAvailable,
+      goalRuns
     }
   }
 
@@ -580,21 +815,45 @@ export class ImRemoteRunner {
   }
 
   async invoke(event: ImEventRecord, queueSignal: AbortSignal): Promise<ImRemoteRunDisposition> {
-    if (!this.dependencies.gateway.isAuthenticated()) return "deferred_gateway"
-
-    const permit = await this.dependencies.gateway.acquireExecutionPermit(event)
-    if (permit.status !== "granted" || !permit.leaseId || !permit.expiresAt) {
-      return "deferred_gateway"
+    if (!this.dependencies.gateway.isAuthenticated()) {
+      return this.defer(event, "deferred_gateway", "gateway is not authenticated")
     }
-    await this.recordPermit(event, permit)
 
     const runId = this.dependencies.createRunId()
     const target = event.targetSnapshot
     if (!target) {
       return this.finalizeRejected(event, "REMOTE_TARGET_INVALID", "消息没有可执行目标。")
     }
+
+    // Look before acquiring. A permit cannot be handed back — the gateway port
+    // offers acquire and renew and nothing else — and nothing renews one until
+    // the run itself starts, further down. So taking a permit and only then
+    // discovering the Thread is busy strands it: a desktop turn holds that
+    // Thread for minutes, and by the time the lease is released the permit
+    // this event is carrying has long expired.
+    //
+    // The claim below is still the authority; this only keeps the common case
+    // (a desktop turn in progress) from spending a permit it cannot use. A
+    // Thread that goes busy inside the window between the two behaves exactly
+    // as it did before.
+    if (getLocalThreadRunLease(target.threadId)) {
+      return this.defer(event, "deferred_thread_busy", "Thread is busy before permit acquisition")
+    }
+
+    const permit = await this.dependencies.gateway.acquireExecutionPermit(event)
+    if (permit.status !== "granted" || !permit.leaseId || !permit.expiresAt) {
+      return this.defer(
+        event,
+        "deferred_gateway",
+        `permit ${permit.status}${permit.reasonCode ? `: ${permit.reasonCode}` : ""}`
+      )
+    }
+    await this.recordPermit(event, permit)
+
     const claim = claimLocalThreadRunLease({ threadId: target.threadId, owner: "im", runId })
-    if (!claim.acquired) return "deferred_thread_busy"
+    if (!claim.acquired) {
+      return this.defer(event, "deferred_thread_busy", "Thread went busy after permit acquisition")
+    }
     const unregisterInteractionRoute = this.dependencies.interactionRoutes.register({
       eventId: event.eventId,
       principalId: event.principalId,
@@ -607,11 +866,9 @@ export class ImRemoteRunner {
     const abortFromQueue = (): void => executionAbort.abort(queueSignal.reason)
     queueSignal.addEventListener("abort", abortFromQueue, { once: true })
     let permitRevokedReason: string | null = null
-    let waitingTimeoutReason: string | null = null
     const interactionFailure: {
       current: { reasonCode: string; message: string } | null
     } = { current: null }
-    let waitingTimer: ReturnType<typeof setTimeout> | undefined
     const activeInteractions = new Set<string>()
     let interactionMutation = Promise.resolve()
     const serializeInteractionMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -656,10 +913,6 @@ export class ImRemoteRunner {
                   }
                 )
               })
-            const waitingMinutes = Math.max(
-              1,
-              Math.ceil(this.dependencies.waitingDesktopTtlMs / 60_000)
-            )
             await this.dependencies.eventStore
               .enqueueProactiveReplies(
                 buildImProactiveReplies({
@@ -667,8 +920,8 @@ export class ImRemoteRunner {
                   conversationKey: waiting.conversationKey,
                   text:
                     interaction.kind === "user_input"
-                      ? `任务需要补充输入，问题与 /回答 指令将发送到当前招乎会话；也可在 ${waitingMinutes} 分钟内到对应桌面会话处理。`
-                      : `任务正在等待桌面确认；如已开启远程审批，也可在 ${waitingMinutes} 分钟内通过招乎审批指令处理。`,
+                      ? "任务需要补充输入，问题与 /回答 指令将发送到当前招乎会话；也可到对应桌面会话处理。本轮会一直等你回答。"
+                      : "任务正在等待桌面确认；如已开启远程审批，也可随时通过招乎审批指令处理。本轮会一直等你决定。",
                   prefix: this.targetPrefixForEvent(waiting)
                 })
               )
@@ -708,10 +961,23 @@ export class ImRemoteRunner {
                 reason: error instanceof Error ? error.message : String(error)
               })
             })
-            waitingTimer = setTimeout(() => {
-              waitingTimeoutReason = "REMOTE_INTERACTION_TIMEOUT"
-              abortExecution(new DOMException("Remote desktop interaction timed out", "AbortError"))
-            }, this.dependencies.waitingDesktopTtlMs)
+            // No clock is armed here, for either kind of wait.
+            //
+            // The desktop sets no answer deadline: an approval is never
+            // auto-rejected (APPROVAL_TIMEOUT_MS is null in runtime.ts), and a
+            // question only expires when the model or a Harness project asks
+            // for it via autoResolutionMs — a per-request choice that still
+            // works, and resolves the request instead of killing the run.
+            // Arriving over IM is not a reason to be stricter: the person is
+            // on a phone, away from the desk, which is exactly when a deadline
+            // they cannot meet does the most damage — the run is cancelled and
+            // the short code they were sent dies with it.
+            //
+            // The wait ends on the things that make it pointless rather than
+            // on elapsed time: permit revocation or the desktop going offline
+            // (both abort from the renewal loop), a queue abort, or the user
+            // stopping the run. Until one of those, the thread stays busy and
+            // further IM messages on it defer as THREAD_BUSY.
           } catch (error) {
             interactionFailure.current = {
               reasonCode: "REMOTE_WAIT_STATE_FAILED",
@@ -765,10 +1031,6 @@ export class ImRemoteRunner {
                 reason: error instanceof Error ? error.message : String(error)
               })
             })
-            if (waitingTimer) {
-              clearTimeout(waitingTimer)
-              waitingTimer = undefined
-            }
           } catch (error) {
             if (!permitRevokedReason && !interactionFailure.current) {
               interactionFailure.current = {
@@ -834,12 +1096,26 @@ export class ImRemoteRunner {
       await this.generateFirstMessageTitle(latest, decision)
       const begun = await this.dependencies.eventStore.beginExecution(latest.eventId, runId)
       await this.dependencies.setThreadLifecycle(begun, "active")
+      const projectReplyContext = await resolveImProjectModeReplyContext({
+        metadata: decision.metadata,
+        target
+      })
       const result = await this.dependencies.executeTurn({
         event: this.dependencies.eventStore.getEvent(latest.eventId) ?? latest,
         runId,
         signal: executionAbort.signal,
         capability: decision,
-        interactionWaitHooks
+        interactionWaitHooks,
+        onDetachedResultAvailable: this.dependencies.onDetachedResultAvailable
+          ? (signal) => {
+              this.dependencies.onDetachedResultAvailable?.({
+                ...signal,
+                conversationKey: event.conversationKey,
+                principalId: event.principalId,
+                targetSnapshot: target
+              })
+            }
+          : undefined
       })
       if (executionAbort.signal.aborted) {
         throw executionAbort.signal.reason ?? new DOMException("IM run aborted", "AbortError")
@@ -848,7 +1124,7 @@ export class ImRemoteRunner {
       const replies = buildImEventReplies({
         event: executing,
         text: result,
-        prefix: this.targetPrefixForEvent(executing)
+        prefix: this.terminalPrefixForEvent(executing, projectReplyContext)
       })
       const completed = await this.dependencies.eventStore.completeEvent(
         executing.eventId,
@@ -867,7 +1143,7 @@ export class ImRemoteRunner {
           replies: buildImEventReplies({
             event: latest,
             text: reply,
-            prefix: this.targetPrefixForEvent(latest)
+            prefix: this.terminalPrefixForEvent(latest)
           }),
           resultText: reply,
           reasonCode: permitRevokedReason,
@@ -875,23 +1151,6 @@ export class ImRemoteRunner {
         })
         await this.deliverAndAcknowledge(terminal)
         return "outcome_unknown"
-      }
-      if (waitingTimeoutReason) {
-        const reply = "等待桌面确认或补充输入已超时，本轮已取消；会话授权保持不变。"
-        const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
-          eventId: event.eventId,
-          state: "cancelled",
-          replies: buildImEventReplies({
-            event: latest,
-            text: reply,
-            prefix: this.targetPrefixForEvent(latest)
-          }),
-          resultText: reply,
-          reasonCode: waitingTimeoutReason,
-          retryable: false
-        })
-        await this.deliverAndAcknowledge(terminal)
-        return "cancelled"
       }
       const interactionRejected = interactionFailure.current
       if (interactionRejected) {
@@ -901,7 +1160,7 @@ export class ImRemoteRunner {
           replies: buildImEventReplies({
             event: latest,
             text: interactionRejected.message,
-            prefix: this.targetPrefixForEvent(latest)
+            prefix: this.terminalPrefixForEvent(latest)
           }),
           resultText: interactionRejected.message,
           reasonCode: interactionRejected.reasonCode,
@@ -918,7 +1177,7 @@ export class ImRemoteRunner {
           replies: buildImEventReplies({
             event: latest,
             text: reply,
-            prefix: this.targetPrefixForEvent(latest)
+            prefix: this.terminalPrefixForEvent(latest)
           }),
           resultText: reply,
           reasonCode: "REMOTE_EVENT_CANCELLED",
@@ -929,23 +1188,36 @@ export class ImRemoteRunner {
       }
 
       const reasonCode =
-        error instanceof ImPreparedPromptRejectedError ||
-        error instanceof ImCompletionHookRejectedError
+        error instanceof ImSkillCommandError
           ? error.reasonCode
-          : "REMOTE_RUNTIME_FAILED"
+          : error instanceof ImPreparedPromptRejectedError ||
+              error instanceof ImCompletionHookRejectedError ||
+              error instanceof ImTurnIncompleteError
+            ? error.reasonCode
+            : "REMOTE_RUNTIME_FAILED"
       const retryable =
+        !(error instanceof ImSkillCommandError) &&
         !(error instanceof ImPreparedPromptRejectedError) &&
         !(error instanceof ImCompletionHookRejectedError) &&
+        !(error instanceof ImTurnIncompleteError) &&
         isRetryableApiError(error)
       console.error("[IM] Standard turn failed:", error)
-      const reply = failureReply(reasonCode, retryable, event.eventId)
+      const reply =
+        error instanceof ImSkillCommandError
+          ? error.publicReply
+          : failureReply(
+              reasonCode,
+              retryable,
+              event.eventId,
+              error instanceof ImTurnIncompleteError ? error.message : undefined
+            )
       const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
         eventId: event.eventId,
         state: "failed",
         replies: buildImEventReplies({
           event: latest,
           text: reply,
-          prefix: this.targetPrefixForEvent(latest)
+          prefix: this.terminalPrefixForEvent(latest)
         }),
         resultText: reply,
         reasonCode,
@@ -958,11 +1230,35 @@ export class ImRemoteRunner {
         this.activePermitRevocations.delete(event.eventId)
       }
       clearInterval(renewTimer)
-      if (waitingTimer) clearTimeout(waitingTimer)
       queueSignal.removeEventListener("abort", abortFromQueue)
       unregisterInteractionRoute()
       releaseLocalThreadRunLease(target.threadId, "im", runId)
     }
+  }
+
+  /**
+   * Records why a turn did not start, and leaves the event queued.
+   *
+   * Deferrals used to return silently, which is why a message that never ran
+   * was indistinguishable from one that was never received. What wakes an
+   * event depends on which of these it was: "deferred_thread_busy" is woken by
+   * the Thread's lease release, while "deferred_gateway" waits for the gateway
+   * to come back online (resumeQueued) or for the next inbound message — so
+   * the distinction is the first thing anyone needs when a message goes quiet.
+   */
+  private defer(
+    event: ImEventRecord,
+    disposition: Extract<ImRemoteRunDisposition, `deferred_${string}`>,
+    reason: string
+  ): ImRemoteRunDisposition {
+    console.log("[IM] Turn deferred, event stays queued:", {
+      eventId: event.eventId,
+      shortCode: eventShortCode(event.eventId),
+      threadId: event.targetSnapshot?.threadId,
+      disposition,
+      reason
+    })
+    return disposition
   }
 
   private async recordPermit(
@@ -988,7 +1284,7 @@ export class ImRemoteRunner {
       replies: buildImEventReplies({
         event,
         text: message,
-        prefix: this.targetPrefixForEvent(event)
+        prefix: this.terminalPrefixForEvent(event)
       }),
       resultText: message,
       reasonCode,
@@ -1071,7 +1367,42 @@ export class ImRemoteRunner {
     return Boolean(title?.startsWith("Thread ") || / · 远程会话 \d+$/u.test(title ?? ""))
   }
 
-  private targetPrefixForEvent(event: ImEventRecord): string | undefined {
+  /**
+   * Prefix for a turn's LAST reply, with the way back when it is not the
+   * session the person is currently bound to.
+   *
+   * The mark alone says the target is not the bound one, but not what that
+   * typed under this message goes to whatever is bound now, not to the session
+   * that produced it. The name is the one already printed in the prefix, and
+   * /切换 takes exactly that, so the instruction needs nothing the reader has
+   * to look up. Numbers are deliberately not offered — /会话 numbering expires
+   * in five minutes and is rebuilt by every /会话, so a number printed here
+   * would be stale or point somewhere else by the time it is read.
+   *
+   * Only the terminal reply carries it. Mid-turn notices (waiting for
+   * approval, asking a question) are already long, and the turn is not over.
+   */
+  private terminalPrefixForEvent(
+    event: ImEventRecord,
+    projectContext?: ImProjectModeReplyContext | null
+  ): string | undefined {
+    const prefix = this.targetPrefixForEvent(event, projectContext)
+    if (!prefix || !prefix.includes(SWITCHED_TARGET_MARK)) return prefix
+    const snapshot = event.targetSnapshot
+    if (!snapshot || snapshot.kind !== "thread") return prefix
+    // A deleted Thread cannot be switched back to; say nothing rather than
+    // point at it. A revoked grant still reaches /切换, which explains itself.
+    const thread = this.dependencies.getThread(snapshot.threadId)
+    if (!thread) return prefix
+    const name = (thread.title?.trim() || snapshot.title || "").trim()
+    if (!name) return prefix
+    return [prefix, `回复不会发到这个会话。要继续它，请发送 /切换 ${name}`].join("\n")
+  }
+
+  private targetPrefixForEvent(
+    event: ImEventRecord,
+    projectContext?: ImProjectModeReplyContext | null
+  ): string | undefined {
     const snapshot = event.targetSnapshot
     if (!snapshot) return undefined
     const threadTitle =
@@ -1080,11 +1411,16 @@ export class ImRemoteRunner {
         : undefined
     try {
       const active = this.dependencies.conversationState.getActiveTarget(event.conversationKey)
+      const switched = Boolean(active && active.targetId !== snapshot.targetId)
+      if (projectContext) {
+        return imProjectModeReplyPrefix({ ...projectContext, switched })
+      }
       return imTargetReplyPrefix(snapshot, {
-        switched: Boolean(active && active.targetId !== snapshot.targetId),
+        switched,
         threadTitle
       })
     } catch {
+      if (projectContext) return imProjectModeReplyPrefix(projectContext)
       return imTargetReplyPrefix(snapshot, { threadTitle })
     }
   }

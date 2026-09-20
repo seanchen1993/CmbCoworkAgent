@@ -1,0 +1,222 @@
+import type { BrowserWindow } from "electron"
+import type { AgentRunDelivery } from "./agent-run-service"
+import { broadcastToRenderers, mirrorStandardTurnStreamToRenderer } from "./renderer-stream-mirror"
+import { StreamConverter, type SchedulerRendererEvent } from "./stream-converter"
+
+/**
+ * Synthetic window id for runs that no desktop window owns.
+ *
+ * Electron allocates BrowserWindow ids as positive integers, so a negative id
+ * can never collide with a real one. The run body uses `window.id` only as a
+ * Map key (coordinator worker restore / update binding / stream focus) and
+ * never resolves an id back to a window, so an id that matches no stored entry
+ * simply reads as "this run has no focused worker" — which is exactly right for
+ * a run with no desktop viewer.
+ */
+export const MANAGED_TRANSPORT_WINDOW_ID = -1
+
+/**
+ * Whether this run's window is the shim rather than a real desktop window.
+ *
+ * Ask this, not `source === "desktop"`, before doing anything to the window
+ * itself. Those used to mean the same thing because only a renderer's own
+ * invoke carried a window; the main-process summary scheduler broke that — it is
+ * a desktop-owned run by every other measure, and it has no window at all.
+ */
+export function isManagedTransportWindow(window: { id: number }): boolean {
+  return window.id === MANAGED_TRANSPORT_WINDOW_ID
+}
+
+const AGENT_STREAM_PREFIX = "agent:stream:"
+/**
+ * Ambient sub-channel for a coordinator's internal summary turn.
+ *
+ * It exists to keep those frames out of the renderer's foreground listener, and
+ * used to have a subscriber because the page submitted that turn itself. It no
+ * longer does — the main-process scheduler owns the decision — so a summary
+ * published here reached nobody at all: no content, no error, and not even the
+ * `done` that closes the page's loading state. The turn ran, cost tokens, and
+ * showed up only on the next history reload.
+ *
+ * A request-scoped channel (`…:request:<id>`) still belongs to a listener the
+ * renderer opened for its own invoke and is left alone.
+ */
+const COORDINATOR_INTERNAL_SUFFIX = ":coordinator-internal"
+
+/**
+ * The run body publishes on `agent:stream:<threadId>`, whose only subscribers
+ * are the per-request listeners the renderer opens when *it* invokes. A managed
+ * transport's run has no such listener, so its stream would reach nobody.
+ *
+ * Thread ids are `[A-Za-z0-9_-]+`, so a colon after the id marks a narrower
+ * sub-channel. The coordinator-internal one is ambient and belongs to this
+ * thread's standing background stream; anything else is a specific renderer
+ * subscription and is forwarded untouched.
+ */
+function baseStreamThreadId(channel: string): string | null {
+  if (!channel.startsWith(AGENT_STREAM_PREFIX)) return null
+  let threadId = channel.slice(AGENT_STREAM_PREFIX.length)
+  if (threadId.endsWith(COORDINATOR_INTERNAL_SUFFIX)) {
+    threadId = threadId.slice(0, -COORDINATOR_INTERNAL_SUFFIX.length)
+  }
+  if (!threadId || threadId.includes(":")) return null
+  return threadId
+}
+
+interface DesktopStreamEnvelope {
+  type?: string
+  mode?: string
+  data?: unknown
+  error?: unknown
+  valuesSnapshotKind?: "full" | "append" | "tail"
+}
+
+/**
+ * Desktop stream events carry raw LangGraph frames; the standing renderer
+ * listener for background runs consumes converted SchedulerRendererEvents. The
+ * `values` frames have already been projected to the current turn by
+ * sanitizeStreamDataForRenderer, so they are converted as a turn scope — the
+ * renderer merges those instead of replacing durable history with one turn.
+ */
+function toRendererEvents(converter: StreamConverter, payload: unknown): SchedulerRendererEvent[] {
+  if (!payload || typeof payload !== "object") return []
+  const envelope = payload as DesktopStreamEnvelope
+
+  if (envelope.type === "stream" && typeof envelope.mode === "string") {
+    return converter.processChunk(envelope.mode, envelope.data, {
+      valuesSnapshotScope: "turn",
+      ...(envelope.valuesSnapshotKind ? { valuesSnapshotKind: envelope.valuesSnapshotKind } : {})
+    })
+  }
+  if (envelope.type === "done") return [{ type: "done" }]
+  if (envelope.type === "error") {
+    return [{ type: "error", error: String(envelope.error ?? "Agent run failed") }]
+  }
+  if (envelope.type === "custom") {
+    return [{ type: "custom", data: (envelope.data ?? {}) as Record<string, unknown> }]
+  }
+  return []
+}
+
+/**
+ * Last line of defence behind tests/agent-window-surface.spec.ts.
+ *
+ * That guard reads agent.ts for `window.<member>`, so an aliased access
+ * (`const w = delivery.window; w.focus()`) slips past it. Without this the
+ * failure would surface in production as "w.focus is not a function", on the
+ * managed path only, with nothing pointing at why this window is different.
+ *
+ * Symbols and inherited object keys are left alone: Node probes objects with
+ * `Symbol.toPrimitive`, `util.inspect.custom` and `then`, and throwing on those
+ * would break logging and awaiting rather than reveal a real mistake.
+ */
+function explainUnsupportedWindowMembers<T extends object>(shim: T): T {
+  return new Proxy(shim, {
+    get(target, property, receiver) {
+      if (typeof property !== "string" || property in target || property === "then") {
+        return Reflect.get(target, property, receiver)
+      }
+      throw new Error(
+        `A managed transport run reached BrowserWindow.${property}, which its window shim does ` +
+          `not implement (it has ${Object.keys(target).join(", ")}). Route the call through ` +
+          `AgentRunDelivery.send / AgentRunExecutionContext, or add the member in ` +
+          `src/main/agent/managed-transport-delivery.ts if a managed run can genuinely serve it.`
+      )
+    }
+  })
+}
+
+/**
+ * Paints a managed transport's user message in an open Thread right away.
+ *
+ * The desktop renderer draws the user's bubble the moment they press Enter. A
+ * run started from IM has no such local echo, and nothing else fills the gap:
+ * the run body persists the message to the transcript, but `threads:changed`
+ * only reloads the sidebar list, and `started` only raises a loading flag
+ * (thread-context.tsx). The bubble therefore first appears when the turn ends
+ * and the renderer reloads history — so a viewer watches the assistant answer
+ * a question that is not on screen yet.
+ *
+ * The id must be the one the run body persists under, which is also the id it
+ * puts on the HumanMessage. The values snapshot that carries that message
+ * later then merges onto this row instead of adding a second bubble, and the
+ * post-run history reload matches it too.
+ *
+ * A turn that dies before the run body persists anything leaves this row
+ * showing until the terminal history reload drops it. That window is narrow —
+ * persistence happens before the authorization fence and before prompt
+ * hooks — and showing what the user sent beside the failure beats showing the
+ * failure alone.
+ */
+export function announceManagedTurnUserMessage(
+  threadId: string,
+  message: { id: string; content: string },
+  mirror: typeof mirrorStandardTurnStreamToRenderer = mirrorStandardTurnStreamToRenderer
+): void {
+  if (!message.content.trim()) return
+  mirror(threadId, {
+    type: "turn-messages",
+    messages: [{ id: message.id, role: "user", content: message.content }]
+  })
+}
+
+export interface ManagedTransportDeliveryDependencies {
+  mirror: typeof mirrorStandardTurnStreamToRenderer
+  broadcast: typeof broadcastToRenderers
+}
+
+/**
+ * Delivery for runs that no desktop window owns — an IM message, a scheduled
+ * turn, any managed transport.
+ *
+ * It is used whether or not a window happens to be open: targeting one window
+ * would tie a transport's run to whoever had the app focused, and the standing
+ * renderer subscription for these runs is thread-scoped, not window-scoped.
+ * `isAvailable()` is therefore always true — a run's ability to proceed does
+ * not depend on anyone watching it.
+ */
+export function createManagedTransportAgentRunDelivery(
+  dependencies: Partial<ManagedTransportDeliveryDependencies> = {}
+): AgentRunDelivery {
+  const mirror = dependencies.mirror ?? mirrorStandardTurnStreamToRenderer
+  const broadcast = dependencies.broadcast ?? broadcastToRenderers
+  // One converter per run: it carries per-turn state across frames.
+  const converter = new StreamConverter()
+  const startedThreads = new Set<string>()
+
+  const forward = (channel: string, payload: unknown): void => {
+    const threadId = baseStreamThreadId(channel)
+    if (threadId === null) {
+      broadcast(channel, payload)
+      return
+    }
+    if (!startedThreads.has(threadId)) {
+      startedThreads.add(threadId)
+      // Opens the renderer's loading state before the runtime exists, matching
+      // what the transport used to emit for itself.
+      mirror(threadId, { type: "started" })
+    }
+    for (const event of toRendererEvents(converter, payload)) mirror(threadId, event)
+  }
+
+  const managedWindow = explainUnsupportedWindowMembers({
+    id: MANAGED_TRANSPORT_WINDOW_ID,
+    isDestroyed: (): boolean => false,
+    webContents: explainUnsupportedWindowMembers({
+      send: (channel: string, payload: unknown): void => forward(channel, payload),
+      isDestroyed: (): boolean => false
+    })
+  })
+
+  return {
+    window: managedWindow as BrowserWindow,
+    send: (channel, payload) => forward(channel, payload),
+    finish: (threadId) => {
+      // Abort paths may only notify the IM result collector, without sending
+      // a stream terminal. Close after cleanup even if an earlier done was sent:
+      // cleanup custom events can have reopened the renderer's loading state.
+      if (startedThreads.has(threadId)) mirror(threadId, { type: "done" })
+    },
+    isAvailable: () => true
+  }
+}

@@ -22,6 +22,8 @@ import {
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
 import { mergeStreamToolCallArgs } from "../../shared/stream-tool-call-chunks"
+import { readStreamTranscriptReasoning } from "../ipc/stream-transcript-flush"
+import { isInternalNotificationMessage } from "../../shared/checkpoint-transcript"
 
 // ---------------------------------------------------------------------------
 // Standardised event types broadcast from scheduler → renderer
@@ -33,6 +35,8 @@ export type SchedulerEvent =
       id: string
       content: string
       reasoning?: string
+      contentMode?: StreamMessageWireMode
+      reasoningMode?: StreamMessageWireMode
       toolCalls?: unknown[]
       /**
        * When present, this delta is subagent-interior (its checkpoint_ns matched
@@ -244,28 +248,36 @@ function convertValuesMessages(
   messages: readonly SerializedMsg[],
   messageIndexOffset: number
 ): Extract<SchedulerEvent, { type: "turn-messages" }>["messages"] {
-  return messages.map((message, index) => {
-    const kwargs = (message.kwargs || {}) as Record<string, unknown>
-    const className = getClassName(message)
+  // Filtered after mapping, so an internal turn does not shift the fallback ids
+  // of the messages around it. Transcript hydration drops these too; a live view
+  // that kept them showed the notification prompt as a user bubble until the
+  // next reload silently removed it.
+  return messages
+    .map((message, index) => {
+      const kwargs = (message.kwargs || {}) as Record<string, unknown>
+      const className = getClassName(message)
 
-    let role: "user" | "assistant" | "tool" | "system" = "assistant"
-    if (className.includes("Human")) role = "user"
-    else if (className.includes("Tool")) role = "tool"
-    else if (className.includes("System")) role = "system"
+      let role: "user" | "assistant" | "tool" | "system" = "assistant"
+      if (className.includes("Human")) role = "user"
+      else if (className.includes("Tool")) role = "tool"
+      else if (className.includes("System")) role = "system"
 
-    const reasoning = role === "assistant" ? extractVisibleReasoning(kwargs) : ""
-    return {
-      id: (kwargs.id as string) || `msg-${messageIndexOffset + index}`,
-      role,
-      content: extractContent(kwargs.content ?? message.content),
-      ...(reasoning ? { reasoning } : {}),
-      tool_calls: kwargs.tool_calls as unknown[] | undefined,
-      ...(role === "tool" && kwargs.tool_call_id
-        ? { tool_call_id: kwargs.tool_call_id as string }
-        : {}),
-      ...(role === "tool" && kwargs.name ? { name: kwargs.name as string } : {})
-    }
-  })
+      const reasoning = role === "assistant" ? extractVisibleReasoning(kwargs) : ""
+      return {
+        id: (kwargs.id as string) || `msg-${messageIndexOffset + index}`,
+        role,
+        content: extractContent(kwargs.content ?? message.content),
+        ...(reasoning ? { reasoning } : {}),
+        tool_calls: kwargs.tool_calls as unknown[] | undefined,
+        ...(role === "tool" && kwargs.tool_call_id
+          ? { tool_call_id: kwargs.tool_call_id as string }
+          : {}),
+        ...(role === "tool" && kwargs.name ? { name: kwargs.name as string } : {}),
+        internalNotification: isInternalNotificationMessage(message)
+      }
+    })
+    .filter((message) => !message.internalNotification)
+    .map(({ internalNotification: _internalNotification, ...message }) => message)
 }
 
 const SUBAGENT_NAME_MAP: Record<string, string> = {
@@ -431,12 +443,19 @@ export class StreamConverter {
     }
 
     if (className.includes("AI")) {
-      const content = extractContent(kwargs.content ?? msgChunk.content)
-      const reasoning = extractVisibleReasoning(kwargs)
+      const rawContent = kwargs.content ?? msgChunk.content
+      const content = extractContent(rawContent)
+      const contentPresent = typeof rawContent === "string" || Array.isArray(rawContent)
       const contentWireMode = readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY])
       const reasoningWireMode = readStreamMessageWireMode(
         metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]
       )
+      const reasoningUpdate = readStreamTranscriptReasoning(
+        data as unknown[],
+        reasoningWireMode ?? "delta",
+        Number.POSITIVE_INFINITY
+      )
+      const reasoning = reasoningUpdate.reasoning ?? ""
       const msgId = kwargs.id as string | undefined
       if (!msgId) return events
 
@@ -444,7 +463,10 @@ export class StreamConverter {
         kwargs.tool_calls,
         kwargs.tool_call_chunks
       )
-      const hasSnapshotUpdate = contentWireMode === "snapshot" || reasoningWireMode === "snapshot"
+      const contentSnapshot = contentWireMode === "snapshot" && contentPresent
+      const reasoningSnapshot =
+        reasoningWireMode === "snapshot" && reasoningUpdate.reasoning !== undefined
+      const hasSnapshotUpdate = contentSnapshot || reasoningSnapshot
       if (hasSnapshotUpdate && !subagentId) {
         events.push({
           type: "custom",
@@ -453,33 +475,45 @@ export class StreamConverter {
             assistantMessage: {
               id: msgId,
               type: "ai",
-              ...(contentWireMode === "snapshot" ? { content } : {}),
-              ...(reasoningWireMode === "snapshot" ? { reasoning } : {})
+              ...(contentSnapshot ? { content } : {}),
+              ...(reasoningSnapshot ? { reasoning } : {})
             }
           }
         })
       }
-      const deltaContent = contentWireMode === "snapshot" ? "" : content
-      const deltaReasoning = reasoningWireMode === "snapshot" ? "" : reasoning
-      if (deltaContent || deltaReasoning || toolCalls.length) {
+      const deltaContent = contentSnapshot && !subagentId ? "" : content
+      const deltaReasoning = reasoningSnapshot && !subagentId ? "" : reasoning
+      if (deltaContent || deltaReasoning || toolCalls.length || (subagentId && hasSnapshotUpdate)) {
         events.push({
           type: "message-delta",
           id: msgId,
           content: deltaContent,
-          ...(deltaReasoning ? { reasoning: deltaReasoning } : {}),
+          ...(deltaReasoning || (subagentId && reasoningSnapshot)
+            ? { reasoning: deltaReasoning }
+            : {}),
+          ...(contentWireMode && contentPresent && (subagentId || !contentSnapshot)
+            ? { contentMode: contentWireMode }
+            : {}),
+          ...(reasoningWireMode &&
+          reasoningUpdate.reasoning !== undefined &&
+          (subagentId || !reasoningSnapshot)
+            ? { reasoningMode: reasoningWireMode }
+            : {}),
           ...(toolCalls.length ? { toolCalls } : {}),
           ...(subagentId ? { subagentId } : {})
         })
       }
 
       if (subagentId) {
-        if (content) {
+        if (content || contentSnapshot) {
           const previousAssistant = this.subagentLatestAssistantByExecutionId.get(subagentId)
           this.subagentLatestAssistantByExecutionId.set(subagentId, {
             messageId: msgId,
             content:
-              previousAssistant?.messageId === msgId
-                ? mergeStreamingReasoning(previousAssistant.content, content)
+              previousAssistant?.messageId === msgId && !contentSnapshot
+                ? contentWireMode === "delta"
+                  ? previousAssistant.content + content
+                  : mergeStreamingReasoning(previousAssistant.content, content)
                 : content
           })
         }

@@ -8,6 +8,34 @@ import {
 
 export const MAX_WORKER_HISTORY_MESSAGES = 500
 
+/** Both inputs are complete-ID normalized. A scoped message replay is the same
+ * worker turn even when a corrected assistant prevents whole-history matching.
+ */
+export function preserveWorkerHistoryMessageIdentities(
+  historyMessages: readonly Message[],
+  messages: readonly Message[]
+): Message[] {
+  const historyById = new Map(historyMessages.map((message) => [message.id, message]))
+  return messages.map((message) => {
+    if (!message.worker_snapshot_identity || !/^worker-turn-.+-[1-9]\d*::/.test(message.id))
+      return message
+    const history = historyById.get(message.id)
+    if (
+      !history ||
+      history.role !== message.role ||
+      (message.role === "tool" && history.tool_call_id !== message.tool_call_id) ||
+      getMessageProviderSourceId(history) !== getMessageProviderSourceId(message) ||
+      (getMessageProviderOccurrence(history) ?? 1) !== (getMessageProviderOccurrence(message) ?? 1)
+    )
+      return message
+    return {
+      ...message,
+      provider_source_id: getMessageProviderSourceId(history),
+      provider_occurrence: getMessageProviderOccurrence(history) ?? 1
+    }
+  })
+}
+
 export function hasVisibleWorkerMessageContent(message: Message): boolean {
   if (typeof message.content === "string") return message.content.length > 0
   return Array.isArray(message.content) && message.content.length > 0
@@ -26,6 +54,12 @@ export function mergeWorkerCheckpointSparseContent(
   historyMessage: Message,
   liveMessage: Message
 ): Message["content"] {
+  if (
+    liveMessage.worker_content_source === "snapshot" &&
+    !hasVisibleWorkerMessageContent(liveMessage)
+  ) {
+    return liveMessage.content
+  }
   if (!hasVisibleWorkerMessageContent(liveMessage)) return historyMessage.content
   if (
     Array.isArray(historyMessage.content) &&

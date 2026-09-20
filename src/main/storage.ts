@@ -382,6 +382,11 @@ export function getThreadCheckpointPath(threadId: string): string {
   return threadCheckpointPath(directory, threadId)
 }
 
+/** Read-only discovery must not create directories or register a new durable artifact. */
+export function peekThreadCheckpointPath(threadId: string): string {
+  return threadCheckpointPath(join(OPENWORK_DIR, "threads"), threadId)
+}
+
 export function deleteThreadCheckpoint(threadId: string): void {
   // Checkpoints are durable sqlite files: the live .sqlite plus .bak/.tmp
   // sidecars that openRecoveredSqliteDatabase can restore from. Deleting only
@@ -3403,8 +3408,7 @@ const DEFAULT_BUILTIN_ROBOT_SETTINGS: import("./types").BuiltinRobotSettings = {
   enabled: true,
   gatewayUrl: null,
   remoteAccess: "inbox-only",
-  remoteApprovalEnabled: true,
-  waitingDesktopTtlMinutes: 10
+  remoteApprovalEnabled: true
 }
 
 export function getBuiltinRobotSettings(): import("./types").BuiltinRobotSettings {
@@ -3426,13 +3430,7 @@ export function getBuiltinRobotSettings(): import("./types").BuiltinRobotSetting
       remoteApprovalEnabled:
         typeof value.remoteApprovalEnabled === "boolean"
           ? value.remoteApprovalEnabled
-          : DEFAULT_BUILTIN_ROBOT_SETTINGS.remoteApprovalEnabled,
-      waitingDesktopTtlMinutes:
-        Number.isSafeInteger(value.waitingDesktopTtlMinutes) &&
-        Number(value.waitingDesktopTtlMinutes) >= 1 &&
-        Number(value.waitingDesktopTtlMinutes) <= 60
-          ? Number(value.waitingDesktopTtlMinutes)
-          : DEFAULT_BUILTIN_ROBOT_SETTINGS.waitingDesktopTtlMinutes
+          : DEFAULT_BUILTIN_ROBOT_SETTINGS.remoteApprovalEnabled
     }
   } catch {
     return { ...DEFAULT_BUILTIN_ROBOT_SETTINGS }
@@ -3459,13 +3457,7 @@ export function saveBuiltinRobotSettings(
     remoteApprovalEnabled:
       typeof updates.remoteApprovalEnabled === "boolean"
         ? updates.remoteApprovalEnabled
-        : current.remoteApprovalEnabled,
-    waitingDesktopTtlMinutes:
-      Number.isSafeInteger(updates.waitingDesktopTtlMinutes) &&
-      Number(updates.waitingDesktopTtlMinutes) >= 1 &&
-      Number(updates.waitingDesktopTtlMinutes) <= 60
-        ? Number(updates.waitingDesktopTtlMinutes)
-        : current.waitingDesktopTtlMinutes
+        : current.remoteApprovalEnabled
   }
   writeFileSync(BUILTIN_ROBOT_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf-8")
   return next

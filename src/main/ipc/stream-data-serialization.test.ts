@@ -13,6 +13,78 @@ import {
 } from "../../shared/stream-message-wire-mode"
 
 describe("stream data serialization", () => {
+  it.each([
+    ["哈", "哈", "，你好"],
+    ["a", "ab", "abc"],
+    ["\n", "\n", "text"]
+  ])("preserves overlapping initial delta chunks: %j", (...parts) => {
+    const serialize = createStreamDataSerializer()
+    const projected = parts.map(
+      (content) =>
+        serialize("messages", [new AIMessageChunk({ id: "repeated", content }), {}]).data as [
+          { kwargs: { content: string } },
+          Record<string, unknown>
+        ]
+    )
+    expect(projected.map(([message]) => message.kwargs.content).join("")).toBe(parts.join(""))
+    expect(
+      projected.every(([, metadata]) => metadata[STREAM_MESSAGE_CONTENT_MODE_KEY] === "delta")
+    ).toBe(true)
+  })
+
+  it("preserves a correction outside the former text sample positions", () => {
+    const serialize = createStreamDataSerializer()
+    const first = "a".repeat(400)
+    const second = first + "b".repeat(400)
+    const corrected = second.slice(0, 100) + "Z" + second.slice(101) + "end"
+    let received = ""
+    for (const content of [first, second, corrected]) {
+      const [message, metadata] = serialize("messages", [
+        new AIMessageChunk({ id: "corrected", content }),
+        { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "snapshot" }
+      ]).data as [{ kwargs: { content: string } }, Record<string, unknown>]
+      received =
+        metadata[STREAM_MESSAGE_CONTENT_MODE_KEY] === "snapshot"
+          ? message.kwargs.content
+          : received + message.kwargs.content
+    }
+    expect(received).toBe(corrected)
+  })
+
+  it.each(["tail", "append", "same-array"])(
+    "retains a tool result replaced outside the former message samples (%s)",
+    (update) => {
+      const serialize = createStreamDataSerializer()
+      const accumulator = createSerializedValuesMessageAccumulator()
+      const messages = [
+        new HumanMessage({ id: "user", content: "prompt" }),
+        ...Array.from(
+          { length: 99 },
+          (_, index) =>
+            new ToolMessage({
+              id: `tool-${index}`,
+              tool_call_id: `call-${index}`,
+              content: "old result"
+            })
+        ),
+        new AIMessage({ id: "tail", content: "answer" })
+      ]
+      accumulator.update(serialize("values", { messages }))
+      const next = update === "same-array" ? messages : messages.slice()
+      next[6] = new ToolMessage({ id: "tool-5", tool_call_id: "call-5", content: "corrected" })
+      if (update === "append") next.push(new AIMessage({ id: "new", content: "new answer" }))
+      else next[next.length - 1] = new AIMessage({ id: "tail", content: "answer plus" })
+      const frame = serialize("values", { messages: next })
+      expect(frame.valuesSnapshotKind).toBe("full")
+      const restored = accumulator.update(frame).messages as Array<{
+        kwargs: { id: string; content: string }
+      }>
+      expect(restored.find((message) => message.kwargs.id === "tool-5")?.kwargs.content).toBe(
+        "corrected"
+      )
+    }
+  )
+
   it("projects values history before JSON serialization and preserves absolute indexes", () => {
     let historyPrefixVisited = false
     const poisonedHistoryMessage = {
@@ -251,11 +323,14 @@ describe("stream data serialization", () => {
     expect(tail.valuesMessageIndexOffset).toBe(100)
   })
 
-  it("projects 1,000 cumulative provider frames with linear wire and comparison work", () => {
+  it("projects declared cumulative frames with linear wire bytes and input-bounded comparisons", () => {
     let comparedCharacters = 0
+    let inputCharacters = 0
     const serializeForRun = createStreamDataSerializer({
+      messageChunkModes: { content: "snapshot", reasoning: "snapshot", tool_args: "snapshot" },
       onMessageProjection: (observation) => {
         comparedCharacters += observation.comparedCharacters
+        inputCharacters += observation.inputCharacters
       }
     })
     const contentDeltas: string[] = []
@@ -304,9 +379,10 @@ describe("stream data serialization", () => {
       toolArgDeltas.push(message.kwargs.tool_call_chunks[0].args)
       expect(message.kwargs).not.toHaveProperty("tool_calls")
       expect(message.kwargs).not.toHaveProperty("invalid_tool_calls")
-      expect(metadata[STREAM_MESSAGE_CONTENT_MODE_KEY]).toBe("delta")
-      expect(metadata[STREAM_MESSAGE_REASONING_MODE_KEY]).toBe("delta")
-      expect(message.kwargs.tool_call_chunks[0][STREAM_TOOL_CALL_ARGS_MODE_KEY]).toBe("delta")
+      const expectedMode = frame === 0 ? "snapshot" : "delta"
+      expect(metadata[STREAM_MESSAGE_CONTENT_MODE_KEY]).toBe(expectedMode)
+      expect(metadata[STREAM_MESSAGE_REASONING_MODE_KEY]).toBe(expectedMode)
+      expect(message.kwargs.tool_call_chunks[0][STREAM_TOOL_CALL_ARGS_MODE_KEY]).toBe(expectedMode)
     }
 
     expect(contentDeltas.join("")).toBe(cumulativeContent)
@@ -315,11 +391,15 @@ describe("stream data serialization", () => {
     const finalCharacters =
       cumulativeContent.length + cumulativeReasoning.length + cumulativeToolArgs.length
     expect(wireCharacters).toBeLessThan(finalCharacters * 8)
-    expect(comparedCharacters).toBeLessThan(finalCharacters * 2)
+    // Exact comparison must examine the actual received snapshots. Wire bytes
+    // remain linear in final output; CPU cannot be bounded by sampling text.
+    expect(comparedCharacters).toBeLessThan(inputCharacters)
   })
 
   it("preserves delta repeats and falls back to snapshots on cumulative rewrites", () => {
-    const serializeForRun = createStreamDataSerializer()
+    const serializeForRun = createStreamDataSerializer({
+      messageChunkModes: { content: "snapshot" }
+    })
     const frame = (content: string) =>
       serializeForRun("messages", [
         {
@@ -327,10 +407,7 @@ describe("stream data serialization", () => {
           kwargs: { id: "rewrite-main", content, additional_kwargs: {} }
         },
         { langgraph_node: "agent" }
-      ]).data as [
-        { kwargs: { content: string } },
-        Record<string, unknown>
-      ]
+      ]).data as [{ kwargs: { content: string } }, Record<string, unknown>]
 
     expect(frame("prefix-")[0].kwargs.content).toBe("prefix-")
     expect(frame("prefix-growing")[0].kwargs.content).toBe("growing")

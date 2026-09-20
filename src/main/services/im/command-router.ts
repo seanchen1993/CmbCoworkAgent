@@ -1,4 +1,15 @@
+import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getLocalThreadRunLease } from "../../agent/thread-run-lease"
+import { getThread } from "../../db"
+import {
+  buildBoundCard,
+  buildTargetBindCard,
+  TARGET_BIND_MODE_INHERIT,
+  TARGET_BIND_MODE_KEY,
+  TARGET_BIND_TARGET_KEY
+} from "./card-builder"
+import { imCardPublisher, type ImCardPublisher } from "./card-publisher"
+import type { ImFeatureSessionMode } from "./feature-binding-service"
 import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
 import { hasPendingUserInputForThread } from "../user-input"
 import {
@@ -17,6 +28,7 @@ import {
 import {
   ImRemoteAccessError,
   imRemoteAccessService,
+  type ImAuthorizedRemoteTarget,
   type ImRemoteAccessService
 } from "./remote-access-service"
 import { imRemoteApprovalService, type ImRemoteApprovalService } from "./remote-approval-service"
@@ -24,12 +36,9 @@ import {
   imRemoteUserInputService,
   type ImRemoteUserInputService
 } from "./remote-user-input-service"
-import { imHumanGateService, type ImHumanGateService } from "./human-gate-service"
-import {
-  imManagedBizRetryService,
-  type ImManagedBizRetryService,
-  type ManagedBizRetryChoice
-} from "./managed-biz-retry-service"
+import { imHumanGateAdapter, type ImHumanGateAdapter } from "./human-gate-adapter"
+import { imBizRetryAdapter, type ImBizRetryAdapter } from "./biz-retry-adapter"
+import type { ManagedBizRetryChoice } from "../../../shared/harness-notifications"
 
 export type ImCommandName =
   | "help"
@@ -47,6 +56,7 @@ export type ImCommandName =
   | "managed_stop"
   | "managed_continue"
   | "managed_new_thread"
+  | "switch_target"
   | "retired"
 
 export interface ParsedImCommand {
@@ -69,9 +79,10 @@ const COMMANDS = new Map<string, ImCommandName>([
   ["回答", "answer"],
   ["门禁批准", "human_gate_approve"],
   ["门禁拒绝", "human_gate_reject"],
-  ["托管停止", "managed_stop"],
-  ["托管继续当前会话", "managed_continue"],
-  ["托管开启新会话", "managed_new_thread"]
+  ["停止托管运行", "managed_stop"],
+  ["在当前会话继续托管", "managed_continue"],
+  ["开启新会话继续托管", "managed_new_thread"],
+  ["切换", "switch_target"]
 ])
 
 export function parseImCommand(message: string): ParsedImCommand | null {
@@ -90,17 +101,72 @@ interface ImCommandRouterDependencies {
   access: ImRemoteAccessService
   approvals: Pick<ImRemoteApprovalService, "resolveCode">
   userInputs: Pick<ImRemoteUserInputService, "resolveAnswer">
-  humanGates: Pick<ImHumanGateService, "resolveCode">
-  managedBizRetries: Pick<ImManagedBizRetryService, "resolveCode">
+  humanGates: Pick<ImHumanGateAdapter, "resolveCode">
+  managedBizRetries: Pick<ImBizRetryAdapter, "resolveCode">
   selections: ImSelectionContextStore
   abortCurrent: (conversationKey: string, threadId?: string) => boolean
   getCurrentEventId: (conversationKey: string, threadId?: string) => string | null
+  getThread: typeof getThread
+  cards: ImCardPublisher
+  warn: (message: string, error?: unknown) => void
+}
+
+/**
+ * What a person types in Zhaohu, and the session it produces.
+ *
+ * These are the Feature's own words (agent_team shortened to Team), not the
+ * thread's — a person choosing here is choosing the shape of the work, and the
+ * Feature is the thing they can see. Solo and Multi are both agentMode
+ * "normal" and differ only in whether subagents exist, which is why the map
+ * carries a pair: naming the mode alone would let Solo become Multi, since
+ * thread-service defaults subagentsEnabled to true when nobody stated it.
+ *
+ * Omitting the word entirely is different from every entry here — that is what
+ * lets the Feature's configuration decide. With no configuration either, the
+ * shared path lands on normal + subagents, which is Multi.
+ */
+const BIND_SESSION_MODES = new Map<string, ImFeatureSessionMode>([
+  ["solo", { agentMode: "normal", subagentsEnabled: false }],
+  ["multi", { agentMode: "normal", subagentsEnabled: true }],
+  ["team", { agentMode: "coordinator" }],
+  ["workflow", { agentMode: "workflow" }]
+])
+
+const BIND_SESSION_MODE_CHOICES = "Solo / Multi / Team / Workflow"
+
+/**
+ * The same choices as a form, with the omission made selectable.
+ *
+ * Built from BIND_SESSION_MODES rather than written out again, so a mode added
+ * to the typed path cannot quietly go missing from the card.
+ */
+const TARGET_BIND_MODE_CHOICES: ReadonlyArray<{ label: string; value: string }> = [
+  { label: "跟随特性配置", value: TARGET_BIND_MODE_INHERIT },
+  ...[...BIND_SESSION_MODES.keys()].map((word) => ({
+    label: word.charAt(0).toUpperCase() + word.slice(1),
+    value: word
+  }))
+]
+
+/** Names a session the way the person who created it asked for it. */
+function bindSessionModeLabel(
+  metadata: string | Record<string, unknown> | null | undefined
+): string {
+  const parsed = parseStandardThreadMetadata(metadata)
+  if (parsed.agentMode === "coordinator") return "Team"
+  if (parsed.agentMode === "workflow") return "Workflow"
+  return parsed.metadata.subagentsEnabled === false ? "Solo" : "Multi"
 }
 
 function positiveIndex(argument: string): number | null {
   if (!/^\d+$/u.test(argument)) return null
   const value = Number(argument)
   return Number.isSafeInteger(value) && value > 0 ? value : null
+}
+
+/** Compares names the way a person retypes them: case and spacing forgiven. */
+function normalizeTargetName(value: string): string {
+  return value.replace(/\s+/gu, " ").trim().toLowerCase()
 }
 
 function targetLabel(target: ImTargetSnapshot): string {
@@ -120,11 +186,15 @@ export class ImCommandRouter {
       access: dependencies.access ?? imRemoteAccessService,
       approvals: dependencies.approvals ?? imRemoteApprovalService,
       userInputs: dependencies.userInputs ?? imRemoteUserInputService,
-      humanGates: dependencies.humanGates ?? imHumanGateService,
-      managedBizRetries: dependencies.managedBizRetries ?? imManagedBizRetryService,
+      humanGates: dependencies.humanGates ?? imHumanGateAdapter,
+      managedBizRetries: dependencies.managedBizRetries ?? imBizRetryAdapter,
       selections: dependencies.selections ?? imSelectionContextStore,
       abortCurrent: dependencies.abortCurrent ?? (() => false),
-      getCurrentEventId: dependencies.getCurrentEventId ?? (() => null)
+      getCurrentEventId: dependencies.getCurrentEventId ?? (() => null),
+      getThread: dependencies.getThread ?? getThread,
+      cards: dependencies.cards ?? imCardPublisher,
+      warn:
+        dependencies.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
     }
   }
 
@@ -165,6 +235,8 @@ export class ImCommandRouter {
           return await this.resolveManagedBizRetry(input, "continue")
         case "managed_new_thread":
           return await this.resolveManagedBizRetry(input, "new_thread")
+        case "switch_target":
+          return await this.switchToNamedTarget(input, input.command.argument)
         case "retired":
           return "/项目 和 /功能 已合并为 /会话，请发送 /会话 查看已在桌面授权的目标。"
       }
@@ -205,19 +277,25 @@ export class ImCommandRouter {
   private helpText(): string {
     return [
       "可用指令：",
-      "/会话 — 查看已在桌面授权的会话与 Feature",
-      "/绑定 <编号> — 切换到已有会话，或在 Feature 下创建会话",
+      "/会话 — 查看已在桌面授权的会话与特性",
+      `/绑定 <编号> [${BIND_SESSION_MODE_CHOICES}] — 切换到已有会话，或在特性下创建会话（模式仅用于新建，省略则跟随特性配置）`,
+      "/切换 <会话名称> — 按名称切回某个会话，名称就是回复开头【】里的那个",
       "/收件箱 — 切回默认聊天",
+      "/技能 — 查看当前会话可用技能",
+      "/<技能名> <任务> 或 /技能 <技能名或短码> <任务> — 指定技能执行",
+      "/goal <目标> — 启动长期任务",
+      "/goal 或 /goal status|pause|resume|clear — 查看或控制当前 Goal",
       "/当前 — 查看目标、运行和队列状态",
       "/停止 — 只停止当前由 IM 发起的任务",
       "/批准 <审批短码> — 一次性批准工具调用（需在桌面设置中开启）",
       "/拒绝 <审批短码> — 拒绝工具调用（需在桌面设置中开启）",
-      "/回答 <输入短码> <编号> — 回答 Agent 的补充问题",
+      "/回答 <输入短码> <编号> — 回答 Agent 的补充问题；自定义回答使用“其他 <内容>”",
       "/门禁批准 <短码> — 批准 Human Gate",
       "/门禁拒绝 <短码> — 拒绝 Human Gate",
-      "/托管停止 <短码> — 停止待决策的托管运行",
-      "/托管继续当前会话 <短码> <消息> — 在当前托管会话继续执行",
-      "/托管开启新会话 <短码> — 创建新的托管会话",
+      "/停止托管运行 <短码> — 停止待决策的托管运行",
+      "/在当前会话继续托管 <短码> <消息> — 在当前托管会话继续执行",
+      "/开启新会话继续托管 <短码> — 创建新的托管会话",
+      "//<文本> — 将以 / 开头的内容作为普通消息发送",
       "/重试 <事件短码> — 显式重试结果未知的事件"
     ].join("\n")
   }
@@ -233,7 +311,7 @@ export class ImCommandRouter {
     if (targets.length === 0) {
       return "当前没有已授权的会话或 Feature。请先在桌面打开“接入招乎”。"
     }
-    await this.dependencies.selections.create(
+    const selection = await this.dependencies.selections.create(
       input.conversationKey,
       "remote_target",
       targets.map((target) => ({
@@ -244,6 +322,15 @@ export class ImCommandRouter {
         grantVersion: target.grantVersion
       }))
     )
+    // After the selection, so a card can never outlive the numbering it renders.
+    const card = await this.publishTargetBindCard(input, targets, selection.expiresAt)
+    // A control event must finalize with at least one reply segment — the event
+    // store refuses an empty outbox with OUTBOX_INCOMPLETE, and a command that
+    // never finalizes is redelivered when its 90-second lease expires, which
+    // republishes this card forever. So the card replaces the numbered list,
+    // never the answer itself.
+    if (card) return "可切换的目标见上方卡片，选好点「切换」即可。"
+
     return [
       "可用目标：",
       ...targets.map((target, index) =>
@@ -251,7 +338,14 @@ export class ImCommandRouter {
           ? `${index + 1}. ${target.label}（${target.sessionKind === "project" ? "项目会话" : "普通会话"}）`
           : `${index + 1}. ${target.label}（特性，可创建新会话）`
       ),
-      "发送 /绑定 <编号> 切换。"
+      "发送 /绑定 <编号> 切换。",
+      // Only where it applies. The mode is a creation-time choice, so a list
+      // with no Feature in it has nothing to say about one.
+      ...(targets.some((target) => target.kind === "feature_grant")
+        ? [
+            `在特性下新建会话可指定模式：/绑定 <编号> ${BIND_SESSION_MODE_CHOICES}，省略则跟随特性配置。`
+          ]
+        : [])
     ].join("\n")
   }
 
@@ -259,8 +353,29 @@ export class ImCommandRouter {
     input: Parameters<ImCommandRouter["handle"]>[0],
     argument: string
   ): Promise<string> {
-    const index = positiveIndex(argument)
-    if (!index) return "用法：/绑定 <编号>。请先发送 /会话。"
+    const [indexText = "", ...modeWords] = argument.split(/\s+/u).filter(Boolean)
+    const index = positiveIndex(indexText)
+    if (!index) return `用法：/绑定 <编号> [${BIND_SESSION_MODE_CHOICES}]。请先发送 /会话。`
+    const requestedModeWord = modeWords.join(" ").toLowerCase()
+    const requestedMode = requestedModeWord ? BIND_SESSION_MODES.get(requestedModeWord) : undefined
+    if (requestedModeWord && !requestedMode) {
+      return `模式无效。可选：${BIND_SESSION_MODE_CHOICES}。`
+    }
+    return this.bindSelectedTarget(input, index, requestedMode)
+  }
+
+  /**
+   * The one place a target actually gets bound.
+   *
+   * Both `/绑定 <编号>` and a card submit land here with an index into the same
+   * selection context, so neither can reach a target the other could not. The
+   * card adds no authority: it is the numbered list, rendered.
+   */
+  private async bindSelectedTarget(
+    input: Parameters<ImCommandRouter["handle"]>[0],
+    index: number,
+    requestedMode: ImFeatureSessionMode | undefined
+  ): Promise<string> {
     const selected = await this.dependencies.selections.select(
       input.conversationKey,
       "remote_target",
@@ -281,6 +396,14 @@ export class ImCommandRouter {
       conversationKey: input.conversationKey
     }
     const createsFeatureThread = selected.targetKind === "feature_grant"
+    // Only the Feature branch creates a session, so only it has a mode to
+    // choose. On an existing session the same argument would mean "change what
+    // this thread already is", which is a different operation with different
+    // risk — its checkpoints and any running turn were produced under the old
+    // mode — and it is not offered here.
+    if (requestedMode && !createsFeatureThread) {
+      return "模式只能在特性下新建会话时指定；已存在的会话请在桌面切换模式。"
+    }
     const target =
       selected.targetKind === "thread_grant"
         ? await this.dependencies.access.bindThreadGrant({
@@ -291,7 +414,8 @@ export class ImCommandRouter {
         : await this.dependencies.access.bindFeatureGrant({
             route,
             grantId: selected.grantId,
-            grantVersion
+            grantVersion,
+            ...(requestedMode ? { sessionMode: requestedMode } : {})
           })
     const currentEventId = this.dependencies.getCurrentEventId(
       input.conversationKey,
@@ -301,15 +425,106 @@ export class ImCommandRouter {
       currentEventId && previous?.kind !== "inbox" && previous?.targetId !== target.targetId
     )
     if (createsFeatureThread) {
+      // Report what the thread actually is, not what was requested: with no
+      // mode word the Feature decided, and a reader cannot see that anywhere
+      // else from Zhaohu.
+      const mode = bindSessionModeLabel(this.dependencies.getThread(target.threadId)?.metadata)
+      await this.closeTargetBindCard(input.conversationKey, "已切换")
       return [
-        `已在【${selected.label}】下新建会话并切换。`,
+        `已在【${selected.label}】下新建 ${mode} 会话并切换。`,
         switchedDuringRun
           ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将发送到新会话。`
           : "后续普通消息将发送到这个新会话。"
       ].join("\n")
     }
+    await this.closeTargetBindCard(input.conversationKey, "已切换")
     return [
       `已绑定并切换到【${targetLabel(target)}】。`,
+      switchedDuringRun
+        ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将发送到当前会话。`
+        : "后续普通消息将发送到这个会话。"
+    ].join("\n")
+  }
+
+  /**
+   * Switches back to a session by the name the reply prefix already shows.
+   *
+   * Deliberately not by number: /会话 numbering lives in a 5-minute selection
+   * context that every /会话 rebuilds, so a number printed in a background
+   * reply is stale or meaningless by the time anyone reads it. The name in
+   * 【会话：X】 is on screen, does not expire, and cannot drift onto a
+   * different target.
+   *
+   * Only existing sessions are matched. A Feature entry would CREATE a session
+   * rather than return to one, and "switch" must never mean "start something
+   * new" — /绑定 stays the command that creates.
+   */
+  private async switchToNamedTarget(
+    input: Parameters<ImCommandRouter["handle"]>[0],
+    argument: string
+  ): Promise<string> {
+    const query = normalizeTargetName(argument)
+    if (!query) return "用法：/切换 <会话名称>。名称就是回复开头【】里的那个。"
+    const route = { principalId: input.principalId, conversationKey: input.conversationKey }
+    const targets = await this.dependencies.access.listAuthorizedTargets(route)
+    const sessions = targets.filter(
+      (target): target is Extract<ImAuthorizedRemoteTarget, { kind: "thread_grant" }> =>
+        target.kind === "thread_grant"
+    )
+    const exact = sessions.filter((target) => normalizeTargetName(target.label) === query)
+    const matches =
+      exact.length > 0
+        ? exact
+        : sessions.filter((target) => normalizeTargetName(target.label).includes(query))
+
+    if (matches.length === 0) {
+      const feature = targets.find(
+        (target) =>
+          target.kind === "feature_grant" && normalizeTargetName(target.label).includes(query)
+      )
+      return feature
+        ? `【${feature.label}】是特性，不是会话；在它下面新建会话请发送 /会话 后用 /绑定 <编号>。`
+        : `没有找到可切换的会话「${argument.trim()}」。它可能已在桌面关闭远程访问；请发送 /会话 查看当前可用目标。`
+    }
+
+    if (matches.length > 1) {
+      // Renumbering here is safe in a way it would not be inside a background
+      // reply: the person just asked for this list, so the numbers they are
+      // about to use are the ones they are looking at.
+      await this.dependencies.selections.create(
+        input.conversationKey,
+        "remote_target",
+        matches.map((target) => ({
+          id: target.grantId,
+          label: target.label,
+          targetKind: target.kind,
+          grantId: target.grantId,
+          grantVersion: target.grantVersion
+        }))
+      )
+      return [
+        `有 ${matches.length} 个会话叫这个名字：`,
+        ...matches.map((target, index) => `${index + 1}. ${target.label}`),
+        "发送 /绑定 <编号> 选择。"
+      ].join("\n")
+    }
+
+    const [selected] = matches
+    const previous = this.selectedTarget(input.conversationKey)
+    const target = await this.dependencies.access.bindThreadGrant({
+      route,
+      grantId: selected.grantId,
+      grantVersion: selected.grantVersion
+    })
+    const currentEventId = this.dependencies.getCurrentEventId(
+      input.conversationKey,
+      previous?.threadId
+    )
+    const switchedDuringRun = Boolean(
+      currentEventId && previous?.kind !== "inbox" && previous?.targetId !== target.targetId
+    )
+    return [
+      `已切换到【${targetLabel(target)}】。`,
       switchedDuringRun
         ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将发送到当前会话。`
         : "后续普通消息将发送到这个会话。"
@@ -352,7 +567,7 @@ export class ImCommandRouter {
         : "无"
     return [
       `当前目标：【${targetLabel(target)}】${selected?.state === "active" ? "" : "（授权不可用，请重新绑定或切回收件箱）"}`,
-      `运行状态：${runningEventId ? "IM 任务执行中" : lease?.owner === "desktop" ? "桌面任务执行中" : lease?.owner === "scheduler" ? "定时任务执行中" : "空闲"}`,
+      `运行状态：${runningEventId ? "IM 任务执行中" : lease?.owner === "desktop" ? "桌面任务执行中" : lease?.owner === "scheduler" ? "定时任务执行中" : lease?.owner === "mods" ? "Mods 命令执行中" : "空闲"}`,
       `排队消息：${queued}`,
       `桌面交互：${interaction}`
     ].join("\n")
@@ -365,6 +580,7 @@ export class ImCommandRouter {
     }
     const lease = target ? getLocalThreadRunLease(target.threadId) : undefined
     if (lease?.owner === "desktop") return "当前是桌面任务，请在桌面停止。"
+    if (lease?.owner === "mods") return "当前是 Mods 命令，请在桌面的命令面板停止。"
     if (lease?.owner === "scheduler") return "当前是定时任务，不能通过 IM 跨来源停止。"
     return "当前没有正在执行的 IM 任务。"
   }
@@ -417,7 +633,7 @@ export class ImCommandRouter {
     const message = match?.[2]?.trim()
     if (choice !== "continue" && message) {
       return Promise.resolve(
-        choice === "new_thread" ? "托管开启新会话不支持附加消息。" : "用法：/托管停止 <短码>。"
+        choice === "new_thread" ? "托管开启新会话不支持附加消息。" : "用法：/停止托管运行 <短码>。"
       )
     }
     return this.dependencies.managedBizRetries.resolveCode({
@@ -432,4 +648,129 @@ export class ImCommandRouter {
   private selectedTarget(conversationKey: string): ImTargetSnapshot | null {
     return this.dependencies.conversations.getSelectedTarget(conversationKey)?.snapshot ?? null
   }
+
+  /**
+   * Renders the numbered list as a form, and never lets that fail loudly.
+   *
+   * Returns whether the card was accepted, because for this one card that
+   * decides what the text says: the caller prints the full numbered list only
+   * when the card is not there to carry it. A failure here is always a warning
+   * and never a throw — the list still goes out either way.
+   */
+  private async publishTargetBindCard(
+    input: { conversationKey: string; principalId: string },
+    targets: ReadonlyArray<ImAuthorizedRemoteTarget>,
+    expiresAt: number
+  ): Promise<boolean> {
+    try {
+      const current = this.selectedTarget(input.conversationKey)
+      const createsSession = targets.some((target) => target.kind === "feature_grant")
+      const interaction = await this.dependencies.cards.publish({
+        kind: "target_bind",
+        // No run is waiting on this card, so it has no thread to be retained
+        // by. It lives exactly as long as the numbering it renders.
+        threadId: null,
+        expiresAt,
+        principalId: input.principalId,
+        conversationKey: input.conversationKey,
+        // One live list per conversation, so the conversation identifies it.
+        requestRef: targetBindRequestRef(input.conversationKey),
+        targetLabel: current ? targetLabel(current) : "收件箱",
+        build: (tag) =>
+          buildTargetBindCard({
+            currentLabel: current ? targetLabel(current) : "收件箱",
+            targets: targets.map((target, index) => ({
+              index: index + 1,
+              label: target.label,
+              kindLabel:
+                target.kind === "thread_grant"
+                  ? target.sessionKind === "project"
+                    ? "项目会话"
+                    : "普通会话"
+                  : "特性，可创建新会话"
+            })),
+            modeChoices: createsSession ? TARGET_BIND_MODE_CHOICES : [],
+            tag
+          })
+      })
+      return interaction !== null
+    } catch (error) {
+      this.dependencies.warn("Zhaohu target list card could not be published.", error)
+      return false
+    }
+  }
+
+  /**
+   * Replaces a live target list with where the conversation actually ended up.
+   *
+   * Called from the one bind path, so a typed `/绑定` closes the card exactly
+   * as a submit does — otherwise the list would sit there looking live after
+   * the switch it offers has already happened.
+   */
+  private async closeTargetBindCard(conversationKey: string, outcome: string): Promise<void> {
+    try {
+      const interaction = this.dependencies.cards.interactions.findByRequestRef(
+        targetBindRequestRef(conversationKey)
+      )
+      if (!interaction) return
+      const current = this.selectedTarget(conversationKey)
+      await this.dependencies.cards.resolve(
+        interaction.interactionId,
+        buildBoundCard({
+          targetLabel: current ? targetLabel(current) : "收件箱",
+          outcome,
+          detail: "这张列表已经用过，如需再切换请重新发送 /会话。"
+        })
+      )
+      this.dependencies.cards.interactions.release(interaction.interactionId)
+    } catch (error) {
+      this.dependencies.warn("Zhaohu target list card could not be closed.", error)
+    }
+  }
+
+  /**
+   * Turns a card submit into the same bind a typed `/绑定 <编号>` performs.
+   *
+   * The index is validated by the selection context exactly as the typed path
+   * validates it, so a receipt carrying a number that was never on the list is
+   * refused there rather than here.
+   */
+  async resolveTargetBindCard(input: {
+    principalId: string
+    conversationKey: string
+    feedback: ReadonlyArray<{ key: string; value: string }>
+  }): Promise<string> {
+    const entry = (key: string): string =>
+      input.feedback.find((item) => item.key === key)?.value.trim() ?? ""
+    const index = positiveIndex(entry(TARGET_BIND_TARGET_KEY))
+    if (!index) return "请先在卡片里选择一个会话，再点「切换」。"
+
+    // The typed path expresses 「跟随特性配置」 by omitting the word, so the
+    // card's explicit default is normalized back to that omission here — once,
+    // rather than at both the lookup and the validity check, where the two
+    // could drift apart and 「inherit」 would start reading as an invalid mode.
+    const modeValue = entry(TARGET_BIND_MODE_KEY)
+    const modeWord = modeValue === TARGET_BIND_MODE_INHERIT ? "" : modeValue.toLowerCase()
+    const requestedMode = modeWord ? BIND_SESSION_MODES.get(modeWord) : undefined
+    if (modeWord && !requestedMode) {
+      return `模式无效。可选：${BIND_SESSION_MODE_CHOICES}。`
+    }
+
+    try {
+      return await this.bindSelectedTarget(
+        { command: { name: "bind", argument: "" }, ...input },
+        index,
+        requestedMode
+      )
+    } catch (error) {
+      if (error instanceof ImSelectionContextError) return error.message
+      if (error instanceof ImRemoteAccessError) return error.message
+      throw error
+    }
+  }
+}
+
+/** One live target list per conversation, so the key is the conversation. */
+function targetBindRequestRef(conversationKey: string): string {
+  return `target-bind:${conversationKey}`
 }

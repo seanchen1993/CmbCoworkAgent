@@ -5081,23 +5081,29 @@ async function testCoordinatorValuesModeDoesNotDuplicateRepeatedSnapshots(): Pro
     messageEvents(convertCoordinator(transport, snapshot)).length === 2,
     "first coordinator values snapshot should surface current-turn tool messages"
   )
-  const repeatedEvents = messageEvents(convertCoordinator(transport, snapshot))
+  const repeated = convertCoordinator(transport, snapshot)
   assert(
-    repeatedEvents.length === 1,
-    "repeated coordinator values snapshots should only update the assistant message"
+    messageEvents(repeated).length === 0,
+    "repeated complete tools must not enter SDK delta concatenation"
   )
-  const repeatedData = repeatedEvents[0]?.data as Array<{
-    id?: string
-    type?: string
-    content?: string
-  }>
+  const snapshots = customEvents(repeated, "coordinator_ai_snapshot_message")
+  const assistant = (
+    snapshots[0] as {
+      assistantMessage?: {
+        id?: string
+        content?: string
+        tool_calls?: Array<{ args?: unknown }>
+      }
+    }
+  ).assistantMessage
   assert(
-    repeatedData?.[0]?.id === "duplicate-values-ai" && repeatedData?.[0]?.type === "ai",
-    "repeated coordinator values snapshots should not duplicate already emitted tool messages"
+    snapshots.length === 1 && assistant?.id === "duplicate-values-ai",
+    "repeated values must replace the same assistant snapshot"
   )
+  assert(assistant?.content === "", "repeated values must retain the empty assistant body")
   assert(
-    repeatedData?.[0]?.content === "",
-    "repeated coordinator values snapshots should not append duplicate assistant text"
+    JSON.stringify(assistant?.tool_calls?.[0]?.args) === JSON.stringify({ file_path: "README.md" }),
+    "repeated complete tool arguments must remain exact"
   )
 }
 

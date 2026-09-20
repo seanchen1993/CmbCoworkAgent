@@ -1,6 +1,8 @@
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer"
+import { ModCards } from "./ModCards"
 import { StreamingMarkdown } from "./StreamingMarkdown"
+import { useReasoningExpansion } from "./reasoning-expansion-context"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
 import { parseGoalNoticeText } from "../../../../shared/goal-notice-presentation"
 import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
@@ -50,10 +52,7 @@ import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
 import { isImRemoteControlTranscriptMessageId } from "../../../../shared/im-remote-transcript"
 import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
-import {
-  normalizeVisibleReasoningText,
-  shouldAutoCollapseReasoning
-} from "@/lib/message-display-visibility"
+import { normalizeVisibleReasoningText } from "@/lib/message-display-visibility"
 import {
   areMessageRenderFieldsEqual,
   areMessageToolRenderInputsEqual
@@ -305,10 +304,14 @@ function getSystemNoticePresentation(text: string): {
   }
 }
 
-function GoalNoticeBody({ text }: { text: string }): React.JSX.Element {
+function GoalNoticeBody({ text, threadId }: { text: string; threadId?: string }): React.JSX.Element {
   const parsed = parseGoalNoticeText(text)
   if (!parsed) {
-    return <StreamingMarkdown isStreaming={false}>{text}</StreamingMarkdown>
+    return (
+      <StreamingMarkdown isStreaming={false} threadId={threadId}>
+        {text}
+      </StreamingMarkdown>
+    )
   }
 
   return (
@@ -362,6 +365,8 @@ interface ToolResultInfo {
 }
 
 interface MessageBubbleProps {
+  messageGeneration?: number
+  messageRevision?: number
   searchLocation?: import("../../../../shared/chat-search-types").ChatSearchLocation
   message: Message
   previousMessage?: Message | null
@@ -390,6 +395,8 @@ interface MessageBubbleProps {
 const USER_MESSAGE_COLLAPSED_MAX_PX = 260
 
 function MessageBubbleImpl({
+  messageGeneration = 0,
+  messageRevision = 0,
   message,
   previousMessage,
   isStreaming = true,
@@ -418,13 +425,10 @@ function MessageBubbleImpl({
   const [likedMessageId, setLikedMessageId] = useState<string | null>(null)
   const [dislikedMessageId, setDislikedMessageId] = useState<string | null>(null)
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
-  const [reasoningOpen, setReasoningOpen] = useState(false)
   // 超长用户消息折叠:默认收起,测量到内容超过阈值才显示"显示更多/收起"。
   const [userContentExpanded, setUserContentExpanded] = useState(false)
   const [userContentOverflow, setUserContentOverflow] = useState(false)
   const userContentRef = useRef<HTMLDivElement>(null)
-  const autoOpenedReasoningForMessageRef = useRef<string | null>(null)
-  const autoCollapsedReasoningForMessageRef = useRef<string | null>(null)
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
@@ -466,6 +470,16 @@ function MessageBubbleImpl({
   }, [displayMessageContent, isUser])
   const hasVisibleAssistantContent = visibleAssistantContentText.trim().length > 0
   const hasToolCalls = Boolean(message.tool_calls?.length)
+  // Resolve this before the first paint: mounting a collapsed row and opening it in an effect
+  // makes Virtuoso briefly measure the wrong height, especially for long reasoning messages.
+  const [reasoningOpen, toggleReasoning] = useReasoningExpansion(
+    `${threadId}:${message.role}:${message.id}`,
+    Boolean(reasoningText),
+    Boolean(isStreaming),
+    hasVisibleAssistantContent || hasToolCalls,
+    messageGeneration,
+    messageRevision
+  )
 
   // 测量用户消息内容高度,超过阈值才启用折叠。气泡宽度是 max-w-[80%],会随窗口/
   // 侧栏开合变化,因此除内容变化外还用 ResizeObserver 在宽度变化时重测——否则窄时
@@ -484,28 +498,6 @@ function MessageBubbleImpl({
     observer.observe(el)
     return () => observer.disconnect()
   }, [message.role, message.content])
-
-  useEffect(() => {
-    if (!isStreaming || !reasoningText) return
-    if (autoOpenedReasoningForMessageRef.current === message.id) return
-    autoOpenedReasoningForMessageRef.current = message.id
-    setReasoningOpen(true)
-  }, [isStreaming, message.id, reasoningText])
-
-  useEffect(() => {
-    if (
-      !shouldAutoCollapseReasoning({
-        isStreaming,
-        reasoningText,
-        hasVisibleAssistantContent,
-        hasToolCalls
-      })
-    )
-      return
-    if (autoCollapsedReasoningForMessageRef.current === message.id) return
-    autoCollapsedReasoningForMessageRef.current = message.id
-    setReasoningOpen(false)
-  }, [hasToolCalls, hasVisibleAssistantContent, isStreaming, message.id, reasoningText])
 
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
   const shouldShowMessageHead =
@@ -578,7 +570,7 @@ function MessageBubbleImpl({
               data-chat-search-text
               className="liquid-glass-notice__body min-w-0 text-[15px] leading-7 [&_p]:my-0 [&_strong]:font-semibold"
             >
-              <GoalNoticeBody text={notice.text} />
+              <GoalNoticeBody text={notice.text} threadId={threadId} />
             </div>
           </div>
         </div>
@@ -673,9 +665,15 @@ function MessageBubbleImpl({
           </div>
         )
       }
-      return <StreamingMarkdown isStreaming={isStreaming}
-        searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
-      >{displayContent}</StreamingMarkdown>
+      return (
+        <StreamingMarkdown
+          isStreaming={isStreaming}
+          threadId={threadId}
+          searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
+        >
+          {displayContent}
+        </StreamingMarkdown>
+      )
     }
 
     // Handle content blocks
@@ -704,8 +702,13 @@ function MessageBubbleImpl({
             )
           }
           return (
-            <StreamingMarkdown key={index} isStreaming={isStreaming} searchBlockIndex={index}
-              searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}>
+            <StreamingMarkdown
+              key={index}
+              isStreaming={isStreaming}
+              threadId={threadId}
+              searchBlockIndex={index}
+              searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}
+            >
               {displayText}
             </StreamingMarkdown>
           )
@@ -926,7 +929,7 @@ function MessageBubbleImpl({
           <div className="px-3">
             <button
               type="button"
-              onClick={() => setReasoningOpen((open) => !open)}
+              onClick={toggleReasoning}
               className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-muted/35 px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
               aria-expanded={reasoningOpen}
             >
@@ -942,7 +945,7 @@ function MessageBubbleImpl({
                 data-chat-search-ignore
                 className="mt-2 rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-sm text-muted-foreground"
               >
-                <StreamingMarkdown isStreaming={Boolean(isStreaming)}>
+                <StreamingMarkdown isStreaming={Boolean(isStreaming)} threadId={threadId}>
                   {reasoningText}
                 </StreamingMarkdown>
               </div>
@@ -1139,6 +1142,7 @@ function MessageBubbleImpl({
                       />
                     </div>
                   )}
+                  <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
                 </div>
               )
             })}
@@ -1296,6 +1300,8 @@ function areMessageBubblePropsEqual(
     previous.onForkFromMessage === next.onForkFromMessage &&
     previous.forkingMessageId === next.forkingMessageId &&
     previous.threadId === next.threadId &&
+    previous.messageGeneration === next.messageGeneration &&
+    previous.messageRevision === next.messageRevision &&
     previous.isLoading === next.isLoading &&
     previous.hasUserAfterHead === next.hasUserAfterHead &&
     previous.assistantDurationMs === next.assistantDurationMs &&

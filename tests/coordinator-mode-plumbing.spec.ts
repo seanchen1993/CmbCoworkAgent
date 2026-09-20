@@ -11,6 +11,7 @@
 
 import { readFile } from "fs/promises"
 import { join, resolve } from "path"
+import { isCoordinatorWorkerStreamChunk } from "../src/main/agent/main-turn-stream"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
 
@@ -631,6 +632,146 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "electron transport supplies the trusted internal coordinator notification prompt"
   )
 
+  // The decision to run a follow-up summary is no longer the renderer's. It used
+  // to be, and this block guarded it here; the assertions below follow it to the
+  // main-process scheduler rather than being dropped. What is genuinely gone —
+  // the retry budgets, the attempt counters and the retry-on-idle handoffs — was
+  // state for deciding something the page no longer decides, and has no
+  // equivalent to assert: the scheduler waits on the run lease instead.
+  const notificationScheduler = await readProjectFile(
+    "src/main/agent/pending-notification-scheduler.ts"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "isCoordinatorModeForcedForMetadata",
+    "the scheduler scopes the environment coordinator override before dropping a summary"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "isCoordinatorModeForcedByEnvironment()",
+    "the scheduler resolves the mode the run body would run, not just the persisted one"
+  )
+  assertIncludes(
+    notificationScheduler,
+    'agentMode: "coordinator"',
+    "the scheduler auto-runs notification turns in coordinator mode"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "coordinatorInternalNotification: true",
+    "the scheduler marks auto notification turns as trusted internal coordinator work"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "onLocalThreadRunLeaseReleased(",
+    "a summary deferred for a busy thread waits on the lease that blocked it"
+  )
+  // Both kinds of completion used to be relayed by whichever renderer heard
+  // about them, and with no open window that is nobody — so a task that
+  // finished while the app sat in the tray waited for the next hydrate.
+  assertIncludes(
+    notificationScheduler,
+    "onWorkflowNotificationBroadcast(",
+    "a finished workflow wakes the scheduler without needing a window to relay it"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "onCoordinatorNotificationEnqueued(",
+    "and so does a finished coordinator worker"
+  )
+  assertSourceOrder(
+    notificationScheduler,
+    "onCoordinatorNotificationEnqueued(",
+    "this.unsubscribeCoordinatorNotification?.()",
+    "and every subscription start() takes is given back by stop()"
+  )
+  assertIncludes(
+    notificationScheduler,
+    'hasAutoRunnableNotifications(threadId, { owner: "desktop" })',
+    "the scheduler only claims coordinator results the desktop launched"
+  )
+  assertMatches(
+    notificationScheduler,
+    /findPendingNotificationAsync\(workspacePath, threadId, \{\s*owner: "desktop"\s*\}\)/,
+    "the scheduler peeks at a workflow notification it owns and leaves the claim to the run body"
+  )
+  assertIncludes(
+    notificationScheduler,
+    "onRunTerminated:",
+    "a summary that reported a failure and returned normally is not counted as delivered"
+  )
+
+  const notificationPump = await readProjectFile(
+    "src/main/services/im/remote-mode-notification-pump.ts"
+  )
+  assertIncludes(
+    notificationPump,
+    'owner: "managed"',
+    "the Zhaohu pump only restores coordinator results its own transport launched"
+  )
+  assertMatches(
+    notificationPump,
+    /drainNotifications\(notice\.threadId, \{ owner: "managed" \}\)/,
+    "the Zhaohu pump takes only its own results off the queue, not the desktop's"
+  )
+  assertMatches(
+    notificationPump,
+    /claimPendingNotificationAsync\(\s*decision\.workspacePath,\s*notice\.threadId,\s*\{ owner: "managed" \}\s*\)/,
+    "the Zhaohu pump claims only a workflow run its own transport started"
+  )
+  assertMatches(
+    notificationPump,
+    /findPendingNotificationAsync\(\s*decision\.workspacePath,\s*notice\.threadId,\s*\{ owner: "managed" \}\s*\)/,
+    "and asks whether there is another one for itself, not for the desktop"
+  )
+
+  // A Team worker started from Zhaohu runs on the desktop run body, and it
+  // normally finishes long after the turn that launched it — that is what makes
+  // its result detached. Telling the transport was behind the same active-run
+  // gate as the renderer frames, so it fired only in the case where the
+  // transport had no need to know; nothing else wakes it for a worker result.
+  // That was survivable while the desktop summarised everything, and became a
+  // dead end the moment the scheduler started leaving managed results alone.
+  const invokeWorkerEvent = agentIpc.slice(
+    agentIpc.indexOf("const onCoordinatorWorkerEvent = (event: {"),
+    agentIpc.indexOf("const onCoordinatorNotificationAction = (notificationIds: string[])")
+  )
+  assertIncludes(
+    invokeWorkerEvent,
+    "notifyManagedDetachedResult(runExecutionContext",
+    "the invoke path tells a managed transport that a worker result is waiting"
+  )
+  assertSourceOrder(
+    invokeWorkerEvent,
+    "notifyManagedDetachedResult(runExecutionContext",
+    "if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return",
+    "and does it before the active-run gate, since a detached result outlives its run"
+  )
+
+  const builtinRobotIpc = await readProjectFile("src/main/ipc/builtin-robot.ts")
+  assertIncludes(
+    builtinRobotIpc,
+    "cancelActiveAgentRun(threadId)",
+    "stop reaches a desktop-owned background run instead of stopping at IM's queue"
+  )
+  assertMatches(
+    builtinRobotIpc,
+    /if \(!cancelled && lease\?\.owner === "desktop"\)/,
+    "cancellation is dispatched on the lease that records who owns the run"
+  )
+  assertIncludes(
+    builtinRobotIpc,
+    "pendingNotificationScheduler.suppressAfterStop(threadId)",
+    "a cancelled summary does not start again the moment its own lease is released"
+  )
+
+  const remoteRunner = await readProjectFile("src/main/services/im/remote-runner.ts")
+  assertIncludes(
+    remoteRunner,
+    'backgroundNotificationOwner: "managed"',
+    "background work a Zhaohu turn launches is owed back to Zhaohu, including from a summary turn"
+  )
+
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
   assertIncludes(
     threadContext,
@@ -644,33 +785,8 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "isCoordinatorModeMetadata(thread?.metadata)",
-    "thread context treats legacy coordinator metadata as coordinator mode"
-  )
-  assertIncludes(
-    threadContext,
     "environmentCoordinatorThreadIdsRef.current.has(threadId)",
     "thread context allows environment-forced coordinator notification turns without persisting metadata"
-  )
-  assertIncludes(
-    threadContext,
-    "window.api.agent.isCoordinatorModeForced(threadId)",
-    "thread context scopes the coordinator override before dropping cold-start notifications"
-  )
-  assertIncludes(
-    threadContext,
-    "isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode",
-    "thread context suppresses auto notification turns only for explicitly normal threads"
-  )
-  assertIncludes(
-    threadContext,
-    'agent_mode: "coordinator"',
-    "thread context auto-runs notification turns in coordinator mode"
-  )
-  assertIncludes(
-    threadContext,
-    "coordinator_internal_notification: true",
-    "thread context marks auto notification turns as trusted internal coordinator work"
   )
   assertIncludes(
     threadContext,
@@ -687,44 +803,11 @@ async function testRendererSendsAgentMode(): Promise<void> {
     /const messageId =\s*msg\.kwargs\?\.id \?\? \(typeof msg\.id === "string" \? msg\.id : `msg-\$\{index\}`\)/,
     "thread context uses LangChain message kwargs.id before serialized class-path ids"
   )
-  assertIncludes(
-    threadContext,
-    "if (!streamData?.stream)",
-    "thread context retries notification auto-run until the stream exists"
-  )
-  assertIncludes(
-    threadContext,
-    "wasLoading && loadingStates[threadId] === false",
-    "thread context checks pending notifications when a busy stream becomes idle"
-  )
-  assertIncludes(
-    threadContext,
-    "const coordinatorNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})",
-    "thread context tracks notification turns that were deferred because the stream was still busy or missing"
-  )
-  assertIncludes(
-    threadContext,
-    "coordinatorNotificationRetryOnIdleRef.current[threadId] = true",
-    "thread context marks pending notifications for a retry-on-idle handoff when the stream is unavailable or still loading"
-  )
-  assertIncludes(
-    threadContext,
-    "(coordinatorNotificationAttemptsRef.current[threadId] ?? 0) > 0 ||",
-    "thread context reschedules coordinator notification on idle when an attempt is outstanding or a busy-deferred retry is pending"
-  )
-  // #2: workflow notifications get the SAME retry-on-idle handoff as coordinator,
-  // so a foreground turn longer than the bounded retry budget doesn't strand the
-  // workflow completion turn until the next hydrate.
-  assertIncludes(
-    threadContext,
-    "workflowNotificationRetryOnIdleRef.current[threadId] = true",
-    "thread context defers a busy workflow notification to a retry-on-idle handoff"
-  )
-  assertIncludes(
-    threadContext,
-    "if (workflowNotificationRetryOnIdleRef.current[threadId]) {",
-    "thread context reschedules a deferred workflow notification when the thread goes idle"
-  )
+  // The renderer's own busy check read this thread's stream, which says nothing
+  // about a run driven from Zhaohu — the reason the same completion was
+  // summarised twice. Its replacement is asserted on the scheduler above: a
+  // deferred summary waits on the run lease, which is the only signal that can
+  // change the answer for either surface.
   assertIncludes(
     threadContext,
     "const hasRunningWorker = workers.some(",
@@ -745,11 +828,6 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "if (!initializedThreadsRef.current.has(threadId)) return false",
     "thread context does not keep polling cold threads whose coordinator notifications cannot auto-run yet"
   )
-  assertMatches(
-    threadContext,
-    /if \(isThreadMetadataExplicitNormalMode\(threadId\) && !isEnvironmentCoordinatorMode\) \{\s*delete coordinatorNotificationAttemptsRef\.current\[threadId\][\s\S]*?return\s*\}/,
-    "thread context lets unresolved terminal notifications drop out of the periodic refresh loop when explicit normal mode suppresses coordinator auto-runs"
-  )
   assertIncludes(
     threadContext,
     "hasPendingTerminalNotification",
@@ -764,11 +842,6 @@ async function testRendererSendsAgentMode(): Promise<void> {
     threadContext,
     "worker.suppress_notification_auto_run !== true",
     "thread context ignores user-suppressed terminal worker notifications in both unresolved polling and terminal refresh scheduling"
-  )
-  assertIncludes(
-    threadContext,
-    "delete coordinatorNotificationAttemptsRef.current[threadId]",
-    "thread context clears coordinator notification retry counters after success, no-pending, and retry exhaustion"
   )
   assertIncludes(
     threadContext,
@@ -882,6 +955,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
 
 async function testMainResolvesAndPersistsMode(): Promise<void> {
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
+  const stopContext = await readProjectFile("src/main/ipc/stop-hook-context.ts")
   const prefixCommitHelper = await readProjectFile(
     "src/main/services/initial-coordinator-prefix-commit.ts"
   )
@@ -889,8 +963,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
   const standardThreadTurn = await readProjectFile("src/main/agent/standard-thread-turn.ts")
   assertIncludes(
-    agentIpc,
-    'return agentMode === "normal" && metadata.subagentsEnabled === false',
+    await readProjectFile("src/main/agent/foreground-tool-policy.ts"),
+    'disableSubagents: agentMode === "normal" && metadata.subagentsEnabled === false',
     "main process disables task subagents only for explicitly persisted Solo threads"
   )
   assertNotIncludes(
@@ -910,7 +984,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertOccurrenceCount(
     agentIpc,
-    "disableSubagents: shouldDisableNormalModeSubagents(",
+    "...foregroundToolPolicy(",
     3,
     "invoke, resume, and interrupt runtime factories preserve the Solo/Multi policy across failovers"
   )
@@ -1314,10 +1388,20 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     /const parsedCoordinatorSelectedSkill =\s+extractCoordinatorSelectedSkill\(effectiveMessage\) \?\? undefined/,
     "agent invoke extracts structured selected skill metadata before prompt adaptation"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "await prepareQueuedCoordinatorNotificationsForPrompt(threadId",
+    /await prepareQueuedCoordinatorNotificationsForPrompt\(\s*threadId/,
     "agent invoke derives selected skill context from the current drained notifications"
+  )
+  assertMatches(
+    agentIpc,
+    /prepareQueuedCoordinatorNotificationsForPrompt\(\s*threadId,\s*isCoordinatorNotificationTurn \? backgroundNotificationOwner : undefined/,
+    "an automatic summary drains only the results its own surface owes, while a user turn takes the queue"
+  )
+  assertMatches(
+    agentIpc,
+    /claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
+    "a workflow summary claims a run its own surface owes, not whichever is newest"
   )
   assertIncludes(
     agentIpc,
@@ -1632,12 +1716,12 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "agent IPC persists a trusted marker on internal coordinator notification HumanMessages"
   )
   assertIncludes(
-    agentIpc,
+    stopContext,
     "isCoordinatorInternalNotificationMessage(msgChunk)",
     "agent Stop hook context ignores trusted internal coordinator notification messages"
   )
   assertIncludes(
-    agentIpc,
+    stopContext,
     "lastUserIndex = i\n        break",
     "agent Stop hook values context treats internal coordinator notification messages as the current-turn boundary"
   )
@@ -1787,7 +1871,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "drainNotifications(threadId)",
+    "drainNotifications(threadId, { owner })",
     "agent IPC drains worker notifications into next coordinator turn"
   )
   assertIncludes(
@@ -1949,7 +2033,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "agent IPC persists hook-augmented prompts with the safe visible user message"
   )
   assertIncludes(
-    agentIpc,
+    stopContext,
     "getCoordinatorVisibleUserMessage(msg)",
     "agent IPC uses visible user message metadata when collecting Stop hook context"
   )
@@ -2040,10 +2124,37 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "} = serializeForRun(mode, data)",
     "agent IPC filters async worker chunks before serializing payloads for renderer forwarding"
   )
+  const streamHelper = await readProjectFile("src/main/agent/main-turn-stream.ts")
   assertIncludes(
     agentIpc,
-    "messageStreamMetadata(mode, payload)",
-    "agent IPC detects async worker chunks from stream metadata, not message content"
+    'from "../agent/main-turn-stream"',
+    "agent IPC uses the shared stream attribution helper"
+  )
+  assertIncludes(
+    streamHelper,
+    "const value = metadata(mode, payload)",
+    "stream attribution reads host metadata before classifying coordinator workers"
+  )
+  assertIncludes(
+    streamHelper,
+    "value.langgraph_checkpoint_ns",
+    "stream attribution checks checkpoint namespace metadata"
+  )
+  assert(
+    isCoordinatorWorkerStreamChunk(
+      "messages",
+      [{ content: "main__worker__spoofed" }, { thread_id: "main__worker__actual" }],
+      "main"
+    ),
+    "shared stream attribution must use host metadata rather than message content"
+  )
+  assert(
+    !isCoordinatorWorkerStreamChunk(
+      "messages",
+      [{ content: "main__worker__actual" }, { thread_id: "main" }],
+      "main"
+    ),
+    "message content alone must not classify a coordinator worker stream"
   )
   assertNotIncludes(
     agentIpc,
@@ -2339,9 +2450,12 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   // The session export drops ONLY the new workflow notification plumbing.
   // Coordinator export keeps its HEAD behavior verbatim — this feature must not
   // alter what an existing coordinator session exports.
-  assertIncludes(
+  // Matched loosely on the call, not on the whole condition: the guard grew a
+  // `!complete &&` and the exact-text form then failed for a reason that had
+  // nothing to do with the property it guards.
+  assertMatches(
     threadsIpc,
-    "if (isWorkflowPlumbingTranscriptContent(rawContent)) return []",
+    /if \((?:[^)]*&&\s*)?isWorkflowPlumbingTranscriptContent\(rawContent\)\) return \[\]/,
     "session export filters workflow plumbing messages"
   )
   // Guard against regressing coordinator: the export filter must NOT match
@@ -3337,11 +3451,7 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
   const subagentContext = await readProjectFile("src/main/hooks/subagent-context.ts")
 
-  assertIncludes(
-    runtime,
-    "agentId?: string",
-    "runtime accepts an optional hook agent identity"
-  )
+  assertIncludes(runtime, "agentId?: string", "runtime accepts an optional hook agent identity")
   assertIncludes(
     runtime,
     "rootDir: fileRoot,\n    agentId,",
@@ -3370,7 +3480,7 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertIncludes(
     workflowSubagent,
-    'const agentId = `${request.runId}:agent:${request.agentIndex}`',
+    "const agentId = `${request.runId}:agent:${request.agentIndex}`",
     "workflow leaves derive a stable run-scoped agent id"
   )
   assertIncludes(

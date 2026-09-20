@@ -82,6 +82,9 @@ const interrupt = sliceBetween(
 const cancel = sliceBetween(agentIpc, "// Handle cancellation", "\n}\n", "agent:cancel handler")
 
 function testForegroundHandlerInventory(): void {
+  const foregroundPolicy = read("src/main/agent/foreground-tool-policy.ts")
+  assertIncludes(foregroundPolicy, "enableRequestUserInput: true", "foreground structured input")
+  assertIncludes(foregroundPolicy, "noSkillEvolutionTool: true", "foreground skill policy")
   assertIncludes(invoke, '"agent:invoke"', "invoke IPC remains registered")
   assertIncludes(resume, '"agent:resume"', "resume IPC remains registered")
   assertIncludes(interrupt, 'ipcMain.on("agent:interrupt"', "interrupt IPC remains registered")
@@ -139,7 +142,8 @@ function testFreshTurnGoalAndTranscriptSemantics(): void {
     invoke,
     [
       "flushPendingStreamTranscriptMessagesForThread(threadId, { throwOnError: true })",
-      "const leaseClaim = claimDesktopThreadRunLease(threadId, nextInvokeRunToken)",
+      "const leaseClaim = runExecutionContext.localRunLease",
+      ": claimDesktopThreadRunLease(threadId, nextInvokeRunToken)",
       "setCurrentRunMessageQueueOwner(threadId, nextInvokeRunToken)",
       "const nextTurnState = getOrCreateTurnState(",
       "resetTurnStateForNewInvoke(",
@@ -239,7 +243,7 @@ function testRoutingRuntimeCheckpointAndAutoCommit(): void {
   for (const expected of [
     "currentRunMessageQueueOwnerToken: runToken",
     "abortSignal: abortController.signal",
-    "enableRequestUserInput: true",
+    "...foregroundToolPolicy(",
     "agentMode: effectiveAgentMode",
     "traceContext: runtimeTraceContext",
     "hookTurnId: turnState.turnId",
@@ -288,7 +292,7 @@ function testResumeAndInterruptContinueTheSameLogicalTurn(): void {
       `${label} ownership and TurnState continuity`
     )
     assertNotIncludes(handler, "resetTurnStateForNewInvoke(", `${label} does not start a new turn`)
-    assertIncludes(handler, "enableRequestUserInput: true", `${label} retains structured input`)
+    assertIncludes(handler, "...foregroundToolPolicy(", `${label} retains structured input`)
     assertIncludes(
       handler,
       "harnessContext: harnessAgentContext",
@@ -409,7 +413,7 @@ function testApprovalAndStructuredInputRemainDesktopManaged(): void {
   )
   assertOccurrences(
     invoke,
-    "enableRequestUserInput: true",
+    "...foregroundToolPolicy(",
     1,
     "the invoke Runtime factory retains request_user_input for every model variant"
   )

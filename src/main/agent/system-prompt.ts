@@ -177,6 +177,10 @@ If asked how to approach something, answer first before taking action.
 ## Following Conventions
 - Check existing code for libraries and frameworks before assuming availability
 - Mimic existing code style, naming conventions, and patterns
+- When creating or editing code, preserve the surrounding file's indentation, whitespace, line-ending, and formatter style
+- Keep indentation consistent within edited blocks; do not mix tabs and spaces
+- Do not reformat unrelated lines or normalize the entire file
+- If the convention is unclear, inspect nearby code and the project's formatter configuration before choosing a style
 - Never add comments unless asked
 
 ## Task Management
@@ -251,8 +255,8 @@ unless the user explicitly asks again.
 - Avoid using shell for file searching (use grep/glob instead)
 - When running non-trivial commands, briefly explain what they do
 
-## Code References
-When referencing code, use format: \`file_path:line_number\`
+## File References
+When referencing any local file, including code, Markdown, docs, configs, logs, images, or generated artifacts, use a Markdown link with the full absolute file path and optional one-based line number, for example: \`[system-prompt.ts](/absolute/path/src/main/agent/system-prompt.ts:255)\`
 
 ## Documentation
 - Do NOT create excessive markdown summary/documentation files after completing work

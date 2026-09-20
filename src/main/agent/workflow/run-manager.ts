@@ -27,6 +27,7 @@ import { runWorkflowSubagent, type WorkflowSubagentDeps } from "./subagent"
 import {
   type ParsedWorkflowScript,
   type PersistedWorkflowRun,
+  type WorkflowNotificationOwner,
   type WorkflowProgressEvent,
   type WorkflowSubagentResult,
   type WorkflowWorktreeIsolationBoundary,
@@ -70,6 +71,11 @@ export interface WorkflowLaunchRequest {
   existingWorktrees?: PersistedWorkflowRun["worktrees"]
   /** True when this launch reuses a prior runId, even if it has no replayable journal. */
   resumed?: boolean
+  /**
+   * Which side summarises this run when it finishes. Supplied by the run body
+   * that launched it, because only it knows whether a renderer is driving.
+   */
+  notificationOwner?: WorkflowNotificationOwner
   resumeNote?: string
   /** Registry snapshot whose fingerprint was approved for this exact launch. */
   agentProfiles?: readonly AgentProfile[]
@@ -108,16 +114,57 @@ export interface WorkflowChannelPayload {
   type: "workflow_progress" | "workflow_notification"
   workflowEvent?: WorkflowProgressEvent
   runId?: string
+  /**
+   * Travels with every notification so the renderer decides from the signal
+   * itself. Asking afterwards would race: the answer has to be identical for a
+   * live broadcast, a re-notify, and a hydrate hours later.
+   */
+  notificationOwner?: WorkflowNotificationOwner
+}
+
+/**
+ * Main-process listeners for "a completed run is waiting to be reported".
+ *
+ * The broadcast below reaches renderers, which is where this signal used to be
+ * acted on — the page received it and asked for the summary. The page no longer
+ * decides that, and a broadcast to no open window reaches nobody, so a workflow
+ * that finished with the app closed to the tray waited for the next hydrate
+ * instead of being summarised. Listeners registered here are told regardless.
+ */
+const workflowNotificationListeners = new Set<(threadId: string) => void>()
+
+export function onWorkflowNotificationBroadcast(
+  listener: (threadId: string) => void
+): () => void {
+  workflowNotificationListeners.add(listener)
+  return () => {
+    workflowNotificationListeners.delete(listener)
+  }
 }
 
 function broadcast(threadId: string, payload: WorkflowChannelPayload): void {
-  const channel = `${WORKFLOW_EVENTS_CHANNEL_PREFIX}${threadId}`
-  for (const window of BrowserWindow.getAllWindows()) {
-    try {
-      if (!window.isDestroyed()) window.webContents.send(channel, payload)
-    } catch (error) {
-      console.warn("[Workflow] Broadcast failed:", error)
+  // Main-process listeners first: they are what acts on a completed run now, so
+  // they must not be skipped by anything that goes wrong on the way to a window.
+  if (payload.type === "workflow_notification") {
+    for (const listener of workflowNotificationListeners) {
+      try {
+        listener(threadId)
+      } catch (error) {
+        console.warn("[Workflow] Notification listener failed:", error)
+      }
     }
+  }
+  const channel = `${WORKFLOW_EVENTS_CHANNEL_PREFIX}${threadId}`
+  try {
+    for (const window of BrowserWindow.getAllWindows()) {
+      try {
+        if (!window.isDestroyed()) window.webContents.send(channel, payload)
+      } catch (error) {
+        console.warn("[Workflow] Broadcast failed:", error)
+      }
+    }
+  } catch (error) {
+    console.warn("[Workflow] Broadcast could not reach any window:", error)
   }
 }
 
@@ -346,9 +393,7 @@ const RENOTIFY_CACHE_MAX_ENTRIES = 1_024
 let rejectedWorkspaceKeyResolutions = 0
 let rejectedThreadTransitions = 0
 let totalPendingThreadTransitions = 0
-let beforeWorkspaceKeyResolutionForTest:
-  | ((path: string) => void | Promise<void>)
-  | undefined
+let beforeWorkspaceKeyResolutionForTest: ((path: string) => void | Promise<void>) | undefined
 
 function evictWorkspaceKeyCache(): void {
   for (const key of workspaceKeyCache.keys()) {
@@ -464,10 +509,7 @@ class WorkflowRunManager {
   >()
   private shuttingDown = false
   /** Per-run count of auto re-reports after a failed notification turn (E). */
-  private readonly renotifyAttempts = new Map<
-    string,
-    { threadId: string; attempts: number }
-  >()
+  private readonly renotifyAttempts = new Map<string, { threadId: string; attempts: number }>()
   /**
    * runIds whose completion notification turn is in flight THIS process. Kept in
    * memory and NEVER persisted: the durable `delivered` flag is only set on a
@@ -478,6 +520,12 @@ class WorkflowRunManager {
    * empty after a restart, which is exactly what allows the crash re-report.
    */
   private readonly inFlightNotifications = new Set<string>()
+  /**
+   * runId to summary owner, for the paths that re-broadcast a notification
+   * without the run in hand. Populated at launch and whenever a run is loaded
+   * from disk, so it survives a restart the same way the persisted field does.
+   */
+  private readonly notificationOwners = new Map<string, WorkflowNotificationOwner>()
   /**
    * Completed runs whose FINAL persist failed (disk full / permissions): an
    * in-memory snapshot of the true terminal state, so the completion notification
@@ -636,9 +684,7 @@ class WorkflowRunManager {
   }
 
   /** In-memory ownership fence for a workflow agent currently using a checkout. */
-  activeManagedWorktreeOwner(
-    directory: string
-  ): { threadId: string; runId: string } | undefined {
+  activeManagedWorktreeOwner(directory: string): { threadId: string; runId: string } | undefined {
     for (const run of this.active.values()) {
       if (run.worktrees.ownsWorktreeDirectory(directory)) {
         return { threadId: run.threadId, runId: run.runId }
@@ -1065,6 +1111,7 @@ class WorkflowRunManager {
       logs: [],
       journal: request.resumeJournal ?? [],
       resumed: request.resumed === true,
+      notificationOwner: request.notificationOwner ?? "desktop",
       stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
       startedAt: now,
       updatedAt: now
@@ -1130,6 +1177,7 @@ class WorkflowRunManager {
         }
       })
     }
+    this.notificationOwners.set(request.runId, request.notificationOwner ?? "desktop")
     this.active.set(request.threadId, entry)
     entry.settled = (async () => {
       try {
@@ -1348,7 +1396,11 @@ class WorkflowRunManager {
             threadId: request.threadId,
             key: `workflow:${request.runId}`
           })
-          broadcast(request.threadId, { type: "workflow_notification", runId: request.runId })
+          broadcast(request.threadId, {
+            type: "workflow_notification",
+            runId: request.runId,
+            notificationOwner: runStore.state.notificationOwner ?? "desktop"
+          })
         } else if (entry.userCancelled) {
           // Mark the cancelled run delivered too: otherwise a later hydrate's
           // findUndeliveredTerminalRun would resurface this aborted run as a
@@ -1462,25 +1514,44 @@ class WorkflowRunManager {
     // Don't hand out a run already being reported by an in-flight turn this
     // process — otherwise a concurrent invoke could double-report it.
     if (run && this.inFlightNotifications.has(run.runId)) return null
+    if (run) this.rememberNotificationOwner(run)
     return run
   }
 
-  /** Async production lookup backed by runs.index's pending set. */
+  /** Keeps renotify's answer correct for a run this process did not launch. */
+  private rememberNotificationOwner(run: PersistedWorkflowRun): void {
+    this.notificationOwners.set(run.runId, run.notificationOwner ?? "desktop")
+  }
+
+  /**
+   * Async production lookup backed by runs.index's pending set.
+   *
+   * `owner` filters rather than just checking the newest: the scan returns
+   * newest-first, so a run owed to the other surface would otherwise stand in
+   * front of an older one this caller does own and block it indefinitely.
+   */
   async findPendingNotificationAsync(
     workspacePath: string,
-    threadId: string
+    threadId: string,
+    options: { owner?: WorkflowNotificationOwner } = {}
   ): Promise<PersistedWorkflowRun | null> {
+    const ownedByCaller = (run: PersistedWorkflowRun): boolean =>
+      options.owner === undefined || (run.notificationOwner ?? "desktop") === options.owner
     for (const snapshot of this.flushFailedRuns.values()) {
       if (
         snapshot.threadId === threadId &&
         !snapshot.notificationDelivered &&
-        !this.inFlightNotifications.has(snapshot.runId)
+        !this.inFlightNotifications.has(snapshot.runId) &&
+        ownedByCaller(snapshot)
       ) {
         return snapshot
       }
     }
-    const run = await findUndeliveredTerminalRunAsync(workspacePath, threadId)
-    if (run && this.inFlightNotifications.has(run.runId)) return null
+    const run = await findUndeliveredTerminalRunAsync(workspacePath, threadId, (candidate) => {
+      if (this.inFlightNotifications.has(candidate.runId)) return false
+      return ownedByCaller(candidate)
+    })
+    if (run) this.rememberNotificationOwner(run)
     return run
   }
 
@@ -1490,9 +1561,10 @@ class WorkflowRunManager {
    * the same event-loop turn. */
   async claimPendingNotificationAsync(
     workspacePath: string,
-    threadId: string
+    threadId: string,
+    options: { owner?: WorkflowNotificationOwner } = {}
   ): Promise<PersistedWorkflowRun | null> {
-    const run = await this.findPendingNotificationAsync(workspacePath, threadId)
+    const run = await this.findPendingNotificationAsync(workspacePath, threadId, options)
     if (!run || this.inFlightNotifications.has(run.runId)) return null
     this.inFlightNotifications.add(run.runId)
     return run
@@ -1509,15 +1581,24 @@ class WorkflowRunManager {
    */
   kickNextPendingNotification(workspacePath: string, threadId: string): void {
     const next = this.findPendingNotification(workspacePath, threadId)
-    if (next) broadcast(threadId, { type: "workflow_notification", runId: next.runId })
+    if (next) {
+      broadcast(threadId, {
+        type: "workflow_notification",
+        runId: next.runId,
+        notificationOwner: next.notificationOwner ?? "desktop"
+      })
+    }
   }
 
-  async kickNextPendingNotificationAsync(
-    workspacePath: string,
-    threadId: string
-  ): Promise<void> {
+  async kickNextPendingNotificationAsync(workspacePath: string, threadId: string): Promise<void> {
     const next = await this.findPendingNotificationAsync(workspacePath, threadId)
-    if (next) broadcast(threadId, { type: "workflow_notification", runId: next.runId })
+    if (next) {
+      broadcast(threadId, {
+        type: "workflow_notification",
+        runId: next.runId,
+        notificationOwner: next.notificationOwner ?? "desktop"
+      })
+    }
   }
 
   /** Marks a run's notification turn as in flight (in-memory, not persisted). */
@@ -1752,8 +1833,20 @@ class WorkflowRunManager {
       // thrown away.
       return false
     }
-    broadcast(threadId, { type: "workflow_notification", runId })
+    broadcast(threadId, {
+      type: "workflow_notification",
+      runId,
+      notificationOwner: this.notificationOwnerFor(runId)
+    })
     return true
+  }
+
+  /**
+   * The owner recorded at launch, defaulting to desktop for runs persisted
+   * before the field existed — which is what those runs were.
+   */
+  notificationOwnerFor(runId: string): WorkflowNotificationOwner {
+    return this.notificationOwners.get(runId) ?? "desktop"
   }
 
   /**
@@ -1789,19 +1882,13 @@ class WorkflowRunManager {
 
 export const workflowRunManager = new WorkflowRunManager()
 
-async function persistScriptFile(
-  dir: string,
-  path: string,
-  script: string
-): Promise<void> {
+async function persistScriptFile(dir: string, path: string, script: string): Promise<void> {
   try {
     await mkdir(dir, { recursive: true })
     await writeFile(path, script)
   } catch (error) {
     console.warn("[Workflow] Failed to persist script file:", error)
     const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(
-      `Could not persist the editable workflow script at ${path}: ${detail}`
-    )
+    throw new Error(`Could not persist the editable workflow script at ${path}: ${detail}`)
   }
 }

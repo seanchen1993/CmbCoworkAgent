@@ -16,9 +16,9 @@ import {
 import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
 import {
   buildStreamPanelMessageWindow,
-  createStreamPanelMessageProjector,
   shiftStreamPanelMessageWindowEnd
 } from "@/lib/stream-panel-message-window"
+import { createWorkflowAgentMessageProjector } from "@/lib/workflow-agent-message-projection"
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
 
@@ -72,8 +72,7 @@ function statusBadge(status: string | undefined): { label: string; className: st
     default:
       return {
         label: "历史快照",
-        className:
-          "border-border bg-background-interactive/70 text-muted-foreground"
+        className: "border-border bg-background-interactive/70 text-muted-foreground"
       }
   }
 }
@@ -129,9 +128,7 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
   const focusAgentIndex = workflowAgentFocusView?.agentIndex
   const messageWindowFocusKey = `${focusThreadId ?? ""}\u0000${focusRunId ?? ""}\u0000${focusAgentIndex ?? -1}`
   const messageWindowEnd =
-    messageWindowSelection.focusKey === messageWindowFocusKey
-      ? messageWindowSelection.end
-      : null
+    messageWindowSelection.focusKey === messageWindowFocusKey ? messageWindowSelection.end : null
   useEffect(() => {
     if (focusThreadId == null || focusRunId == null || focusAgentIndex == null) return
     if (!isRunning) return
@@ -249,15 +246,14 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
         : [],
     [transport, focusSnapshot, workflowAgentFocusView]
   )
-  const [projectMessages] = useState(createStreamPanelMessageProjector)
-  const messageProjection = useMemo(
-    () => projectMessages(convertedMessages, isRunning),
-    [convertedMessages, isRunning, projectMessages]
+  const [projectMessages] = useState(createWorkflowAgentMessageProjector)
+  const fullMessages = useMemo(
+    () => projectMessages(convertedMessages, messageWindowFocusKey),
+    [convertedMessages, messageWindowFocusKey, projectMessages]
   )
-  const fullMessages = messageProjection.messages
   const messageWindow = useMemo(
     () => buildStreamPanelMessageWindow(fullMessages, messageWindowEnd),
-    [fullMessages, messageProjection.contentVersion, messageWindowEnd]
+    [fullMessages, messageWindowEnd]
   )
   const isTailWindow = messageWindow.end >= fullMessages.length
   const messages = messageWindow.messages
@@ -324,11 +320,7 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
       isAtBottomRef.current = false
       setMessageWindowSelection({
         focusKey: messageWindowFocusKey,
-        end: shiftStreamPanelMessageWindowEnd(
-          messageWindow.end,
-          fullMessages.length,
-          direction
-        )
+        end: shiftStreamPanelMessageWindowEnd(messageWindow.end, fullMessages.length, direction)
       })
     },
     [fullMessages.length, getScrollViewport, messageWindow.end, messageWindowFocusKey]

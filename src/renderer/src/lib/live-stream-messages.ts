@@ -421,7 +421,9 @@ export function createLiveStreamMessageIdNormalizer(): LiveStreamMessageIdNormal
   let previousMappingReusable = false
 
   return (previous, incoming, baselineKey = previous) => {
-    const incomingIdentities = incoming.map(getLiveStreamMessageNormalizationIdentity)
+    // Array.map skips holes. Materialize them as null identities so a malformed
+    // runtime frame cannot be cached as a dense, position-preserving mapping.
+    const incomingIdentities = Array.from(incoming, getLiveStreamMessageNormalizationIdentity)
     const canReuseMapping =
       previousMappingReusable &&
       baselineKey === previousBaselineKey &&
@@ -493,7 +495,7 @@ export function createLiveStreamCumulativeFrameProjector(): LiveStreamCumulative
     baselineKey: unknown
   ): LiveStreamCumulativeFrameProjection => {
     const normalized = normalizeCompleteFrame()
-    const identities = incoming.map(getLiveStreamMessageNormalizationIdentity)
+    const identities = Array.from(incoming, getLiveStreamMessageNormalizationIdentity)
     const cacheable =
       normalized.length === incoming.length && identities.every((identity) => identity !== null)
     previousBaselineKey = cacheable ? baselineKey : unsetBaselineKey
@@ -1097,10 +1099,14 @@ export function replaceLiveStreamMessageId(
   providerOccurrenceOverride?: number
 ): LiveStreamMessage[] {
   if (!fromId || !toId || fromId === toId) return messages
-  const sourceIndex = messages.findIndex((message) => message.id === fromId)
+  const sourceIndex = messages.findIndex(
+    (message) => hasLiveStreamMessageId(message) && message.id === fromId
+  )
   if (sourceIndex < 0) return messages
 
-  const targetIndex = messages.findIndex((message) => message.id === toId)
+  const targetIndex = messages.findIndex(
+    (message) => hasLiveStreamMessageId(message) && message.id === toId
+  )
   const originalSource = messages[sourceIndex] as LiveStreamMessage & { id: string }
   const providerSourceId = getMessageProviderSourceId(originalSource)
   const providerOccurrence = getMessageProviderOccurrence(originalSource)
@@ -1125,6 +1131,7 @@ export function replaceLiveStreamMessageId(
   const insertionIndex = targetIndex >= 0 ? Math.min(sourceIndex, targetIndex) : sourceIndex
 
   return messages.flatMap((message, index) => {
+    if (!hasLiveStreamMessageId(message)) return []
     if (index === insertionIndex) return [canonical]
     if (message.id === fromId || message.id === toId) return []
     return [message]
@@ -1155,10 +1162,16 @@ export function applyLiveStreamMessageIdAliases(
   return result
 }
 
-function hasLiveStreamMessageId(message: LiveStreamMessage): message is LiveStreamMessage & {
+function hasLiveStreamMessageId(message: unknown): message is LiveStreamMessage & {
   id: string
 } {
-  return typeof message.id === "string" && message.id.length > 0
+  return (
+    message !== null &&
+    typeof message === "object" &&
+    "id" in message &&
+    typeof message.id === "string" &&
+    message.id.length > 0
+  )
 }
 
 function hasUsefulStreamContent(content: LiveStreamMessage["content"]): boolean {

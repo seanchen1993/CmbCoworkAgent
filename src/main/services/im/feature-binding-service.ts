@@ -3,16 +3,11 @@ import { existsSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { HARNESS_SOURCE, type HarnessFeatureSummary } from "../../../shared/harness-board-types"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
-import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
-import { getThread, createThread } from "../../db"
+import { getAgentModeFromMetadata, type AgentMode } from "../../agent/coordinator-mode"
+import type { createThreadService } from "../thread-service"
 import { isFeatureGateEnabled } from "../../feature-gates"
 import { defaultThreadTitle } from "../title-generator"
-import {
-  buildHarnessFeatureAgentContext,
-  getHarnessProjectDetail,
-  getHarnessRunDetail,
-  listHarnessProjects
-} from "../../harness-board/service"
+import { getHarnessProjectDetail, listHarnessProjects } from "../../harness-board/service"
 import { getBuiltinRobotSettings } from "../../storage"
 import { FEATURE_GATES } from "../../../shared/feature-gates"
 import {
@@ -42,8 +37,24 @@ export type ImFeatureValidationResult =
     }
   | { valid: false; reasonCode: string; message: string }
 
+/**
+ * A session's shape, as a person picks it in Zhaohu.
+ *
+ * Two fields rather than one because normal mode carries a second axis: the
+ * Feature vocabulary's solo and multi are both agentMode "normal" and differ
+ * only in whether subagents exist (thread-service.ts). Naming just the mode
+ * would let solo silently become multi, since thread-service defaults
+ * subagentsEnabled to true whenever it was not stated.
+ */
+export interface ImFeatureSessionMode {
+  agentMode: AgentMode
+  subagentsEnabled?: boolean
+}
+
 export interface ImCreatedFeatureThread {
   threadId: string
+  /** Whatever the shared creation path settled on — requested, inherited or default. */
+  agentMode: AgentMode
   title: string
   workspacePath: string
   projectId: string
@@ -66,10 +77,7 @@ interface FeatureBindingDependencies {
   projectModeEnabled: () => Promise<boolean>
   listProjects: typeof listHarnessProjects
   getProjectDetail: typeof getHarnessProjectDetail
-  getRunDetail: typeof getHarnessRunDetail
-  buildFeatureContext: typeof buildHarnessFeatureAgentContext
-  getThread: typeof getThread
-  createThread: typeof createThread
+  createThread: typeof createThreadService
   createId: () => string
 }
 
@@ -105,10 +113,14 @@ export class ImFeatureBindingService {
         (async () => (await isFeatureGateEnabled(FEATURE_GATES.projectMode)).enabled),
       listProjects: dependencies.listProjects ?? listHarnessProjects,
       getProjectDetail: dependencies.getProjectDetail ?? getHarnessProjectDetail,
-      getRunDetail: dependencies.getRunDetail ?? getHarnessRunDetail,
-      buildFeatureContext: dependencies.buildFeatureContext ?? buildHarnessFeatureAgentContext,
-      getThread: dependencies.getThread ?? getThread,
-      createThread: dependencies.createThread ?? createThread,
+      // Imported lazily on purpose. thread-service reaches into the IPC layer
+      // (models, recent-workspace, electron-store); a static edge from an IM
+      // service pulls all of that into the IM module graph and reorders
+      // initialization, which is how remote-access-service ends up being read
+      // before it exists.
+      createThread:
+        dependencies.createThread ??
+        (async (metadata) => (await import("../thread-service")).createThreadService(metadata)),
       createId: dependencies.createId ?? randomUUID
     }
   }
@@ -141,6 +153,8 @@ export class ImFeatureBindingService {
     }))
   }
 
+  // Validate current access eligibility only. Thread creation and execution load
+  // the plugin context when they actually consume its prompt and agent config.
   async validateFeature(
     projectId: string,
     featureSlug: string
@@ -176,10 +190,8 @@ export class ImFeatureBindingService {
     }
 
     let detail: Awaited<ReturnType<typeof getHarnessProjectDetail>>
-    let runDetail: Awaited<ReturnType<typeof getHarnessRunDetail>>
     try {
       detail = await this.dependencies.getProjectDetail(projectId)
-      runDetail = await this.dependencies.getRunDetail(projectId, featureSlug)
     } catch {
       return {
         valid: false,
@@ -203,18 +215,8 @@ export class ImFeatureBindingService {
       }
     }
 
-    const sessionWorkspaceCandidates = runDetail.sessions
-      .slice()
-      .sort((left, right) => right.lastActiveAt.localeCompare(left.lastActiveAt))
-      .map((session) =>
-        existingDirectory(
-          parseStandardThreadMetadata(this.dependencies.getThread(session.threadId)?.metadata)
-            .workspacePath
-        )
-      )
     const workspacePath =
       existingDirectory(detail.project.sessionWorkspacePath) ??
-      sessionWorkspaceCandidates.find((candidate): candidate is string => Boolean(candidate)) ??
       existingDirectory(detail.project.projectRootPath)
     if (!workspacePath) {
       return {
@@ -224,17 +226,6 @@ export class ImFeatureBindingService {
       }
     }
 
-    const harnessContext = await this.dependencies.buildFeatureContext(
-      { harnessFeature: { projectId, slug: featureSlug, source: HARNESS_SOURCE } },
-      { workspacePath }
-    )
-    if (!harnessContext) {
-      return {
-        valid: false,
-        reasonCode: "REMOTE_HARNESS_CONTEXT_UNAVAILABLE",
-        message: "Feature 的插件或系统约束上下文无法加载。"
-      }
-    }
     return {
       valid: true,
       project: { id: projectId, name: project.name.trim() || projectId },
@@ -278,25 +269,30 @@ export class ImFeatureBindingService {
     }
     const validation = await this.validateFeature(feature.projectId, feature.slug)
     if (!validation.valid) return validation
-    const harnessContext = await this.dependencies.buildFeatureContext(metadata, {
-      workspacePath: normalizedWorkspace
-    })
-    if (!harnessContext) {
-      return {
-        valid: false,
-        reasonCode: "REMOTE_HARNESS_CONTEXT_UNAVAILABLE",
-        message: "Project Mode 会话的插件或系统约束上下文无法加载。"
-      }
-    }
     return { ...validation, workspacePath: normalizedWorkspace }
   }
 
+  /**
+   * Creates the Feature's session through the shared path (createThreadService),
+   * not the raw row writer.
+   *
+   * That path maps the Feature's own configured mode onto the thread — solo and
+   * multi to normal, agent_team to coordinator, workflow to workflow — but only
+   * when the caller does not name a mode itself (thread-service.ts checks
+   * hasOwnProperty). This used to pass agentMode: "normal" unconditionally, so
+   * the same Feature produced a workflow session on the desktop and an ordinary
+   * one from Zhaohu.
+   *
+   * `sessionMode` is therefore passed through only when a person asked for it,
+   * and its absence is what lets the Feature decide.
+   */
   async createFeatureThread(input: {
     conversationKey: string
     principalId: string
     projectId: string
     featureSlug: string
     targetId: string
+    sessionMode?: ImFeatureSessionMode
   }): Promise<ImCreatedFeatureThread> {
     this.dependencies.conversationState.assertConversationOwner(
       input.conversationKey,
@@ -305,12 +301,18 @@ export class ImFeatureBindingService {
     const validation = await this.validateFeature(input.projectId, input.featureSlug)
     if (!validation.valid) throw new ImFeatureBindingError(validation.message)
 
-    const threadId = this.dependencies.createId()
     const title = defaultThreadTitle()
-    this.dependencies.createThread(threadId, {
+    const thread = await this.dependencies.createThread({
       title,
       workspacePath: validation.workspacePath,
-      agentMode: "normal",
+      ...(input.sessionMode
+        ? {
+            agentMode: input.sessionMode.agentMode,
+            ...(input.sessionMode.subagentsEnabled === undefined
+              ? {}
+              : { subagentsEnabled: input.sessionMode.subagentsEnabled })
+          }
+        : {}),
       targetKind: "feature",
       remoteThread: true,
       remoteReadOnly: false,
@@ -328,7 +330,8 @@ export class ImFeatureBindingService {
       }
     })
     return {
-      threadId,
+      threadId: thread.thread_id,
+      agentMode: getAgentModeFromMetadata(thread.metadata ?? {}),
       title,
       workspacePath: validation.workspacePath,
       projectId: input.projectId,

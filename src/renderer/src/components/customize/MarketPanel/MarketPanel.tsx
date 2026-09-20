@@ -1601,7 +1601,7 @@ export function MarketPanel(): React.JSX.Element {
 
       if (response.success) {
         console.log(`Successfully updated and installed ${item.name}`)
-        if (activeTab === "orgSkill") {
+        if (activeTab === "skill" || activeTab === "orgSkill") {
           marketInstalledSourceStorage.addName(itemName, activeTab)
           marketInstalledSourceStorage.addName(item.chinese_name || "", activeTab)
         }
@@ -2353,7 +2353,7 @@ export function MarketPanel(): React.JSX.Element {
         if (downloadToLocal) {
           toast.success(`「${item.name}」已保存到本地。`)
         } else {
-          if (activeTab === "orgSkill") {
+          if (activeTab === "skill" || activeTab === "orgSkill") {
             marketInstalledSourceStorage.addName(itemName, activeTab)
             marketInstalledSourceStorage.addName(item.chinese_name || "", activeTab)
           }

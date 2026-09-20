@@ -1,7 +1,8 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import initSqlJs from "sql.js"
 import { ApprovalDecisionBroker } from "../src/main/agent/approval-decision-broker"
 import type { ThreadRow } from "../src/main/db"
@@ -60,7 +61,12 @@ async function waitFor(check: () => boolean, label: string): Promise<void> {
   throw new Error(`Timed out waiting for ${label}`)
 }
 
-async function createContext(options: { remoteApprovalEnabled?: boolean } = {}) {
+async function createContext(
+  options: {
+    remoteApprovalEnabled?: boolean
+    agentMode?: "normal" | "coordinator" | "workflow"
+  } = {}
+) {
   const root = await mkdtemp(join(tmpdir(), "cmb-im-approval-"))
   const SQL = await initSqlJs()
   const database = new SQL.Database()
@@ -96,7 +102,7 @@ async function createContext(options: { remoteApprovalEnabled?: boolean } = {}) 
     title: "桌面会话",
     status: "idle",
     thread_values: null,
-    metadata: JSON.stringify({ workspacePath: root, agentMode: "normal" })
+    metadata: JSON.stringify({ workspacePath: root, agentMode: options.agentMode ?? "normal" })
   }
   const broker = new ApprovalDecisionBroker()
   const generatedCodes = ["A1B2C3", "D4E5F6", "012ABC", "789DEF", "AAA111"]
@@ -115,10 +121,8 @@ async function createContext(options: { remoteApprovalEnabled?: boolean } = {}) 
       enabled: true,
       gatewayUrl: null,
       remoteAccess: "inbox-only",
-      remoteApprovalEnabled: options.remoteApprovalEnabled !== false,
-      waitingDesktopTtlMinutes: 10
+      remoteApprovalEnabled: options.remoteApprovalEnabled !== false
     }),
-    now: () => clock.now,
     createCode: () => generatedCodes.shift() ?? "ABC123",
     warn: (_message, error) => warnings.push(error)
   })
@@ -195,6 +199,149 @@ async function testDefaultOffDoesNotPublishOrResolve(): Promise<void> {
   }
 }
 
+function workflowRequest(input: {
+  id: string
+  cwd: string
+  script?: string
+  tokenBudget?: number
+}): ApprovalRequest {
+  return {
+    id: input.id,
+    tool_call: {
+      id: `tool-${input.id}`,
+      name: "workflow",
+      args: {
+        name: "workflow-smoke-test",
+        description: "最小可用的 workflow 冒烟测试：3 个并行 agent + 汇总",
+        phases: ["Fan-out", "Synthesize"],
+        ...(input.script === undefined ? {} : { scriptPreview: input.script }),
+        argsPreview: "(none)",
+        ...(input.tokenBudget === undefined ? {} : { tokenBudget: input.tokenBudget })
+      },
+      metadata: null,
+      status: "pending",
+      thread_values: null,
+      title: null
+    },
+    allowed_decisions: ["approve", "reject"],
+    safety_level: "needs_approval",
+    cwd: input.cwd,
+    // Mirrors the real request: the desktop offers a session-wide allow too.
+    allowed_approval_types: ["approve", "approve_session", "reject"]
+  } as ApprovalRequest
+}
+
+async function testAWorkflowLaunchIsApprovableWithItsWholeScript(): Promise<void> {
+  const context = await createContext()
+  try {
+    const script = [
+      "export const meta = {",
+      "  name: 'workflow-smoke-test',",
+      "  phases: [{ title: 'Fan-out' }, { title: 'Synthesize' }]",
+      "}",
+      "await Promise.all([agent('a'), agent('b'), agent('c')])"
+    ].join("\n")
+    const workflow = workflowRequest({ id: "request-workflow", cwd: context.root, script })
+    const decisions = context.register(workflow)
+    await waitFor(() => context.deliveryText(workflow.id).includes("A1B2C3"), "workflow approval")
+    const text = context.deliveryText(workflow.id)
+
+    assert(text.includes("运行工作流：workflow-smoke-test"))
+    assert(text.includes("阶段（2）：Fan-out → Synthesize"))
+    assert(text.includes("Token 预算上限：未设置（无上限）"))
+    assert(text.includes("将在后台启动多个子代理"))
+    // The WHOLE script, not a description of it. This is a security gate: a
+    // hidden tail is where the dangerous part would live.
+    assert(text.includes(script), `the full script must reach the approver:\n${text}`)
+    assert(!text.includes(IM_REPLY_TRUNCATION_NOTICE))
+    assert(text.includes("/批准 A1B2C3"))
+
+    const result = await context.service.resolveCode({
+      code: "A1B2C3",
+      decision: "approve",
+      ...ROUTE
+    })
+    assert(result.includes("一次性批准"))
+    // approve, never approve_session — a remote yes covers this launch only,
+    // even though the desktop card offers 本会话允许 for the same request.
+    assert.deepEqual(decisions, [{ type: "approve", tool_call_id: workflow.tool_call.id }])
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testAWorkflowNobodyCanReadStaysOnTheDesktop(): Promise<void> {
+  const context = await createContext()
+  try {
+    // No script to audit: approving would be authorizing sub-agents to write
+    // files and run commands sight unseen.
+    const scriptless = workflowRequest({ id: "request-workflow-blind", cwd: context.root })
+    context.register(scriptless)
+    await waitFor(
+      () => context.deliveryText(scriptless.id).length > 0,
+      "scriptless workflow notice"
+    )
+    const blindText = context.deliveryText(scriptless.id)
+    assert(blindText.includes("需要在桌面确认"))
+    assert(!/[A-F0-9]{6}/u.test(blindText), "a workflow with no script must carry no code")
+    // A different reason from the one above, and it must read as one.
+    assert(blindText.includes("没有附带可审阅的脚本"))
+    assert(!blindText.includes("内容过长"))
+    assert(blindText.includes("本轮会一直等待，请到桌面确认。"))
+
+    // Too long to send: the reply would be truncated, so the fallback fires for
+    // the same reason — a script that cannot be shown in full cannot be
+    // audited in full. Real scripts run to 512 KiB, well past the 8 × 2800
+    // character reply ceiling, so this is the common case, not a corner.
+    const huge = workflowRequest({
+      id: "request-workflow-huge",
+      cwd: context.root,
+      script: `// ${"x".repeat(30_000)}`
+    })
+    context.register(huge)
+    await waitFor(() => context.deliveryText(huge.id).length > 0, "huge workflow notice")
+    const hugeText = context.deliveryText(huge.id)
+    assert(!/[A-F0-9]{6}/u.test(hugeText), "a truncated workflow must carry no code")
+    // Name what is waiting: "操作 workflow 无法展示" told a reader neither which
+    // workflow nor whether the feature simply does not exist here.
+    assert(hugeText.includes("workflow-smoke-test"))
+    assert(hugeText.includes("内容过长"))
+    // And that it is blocking. No wait expires any more, so this turn really
+    // does sit there until someone opens the desktop.
+    assert(hugeText.includes("本轮会一直等待，请到桌面确认。"))
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+function testNoRemoteCodePromiseSurvivesAsCopyOnly(): void {
+  // The bug this pins: the deadlines were removed from both services, the
+  // wait notice and the user-input prompt were reworded, and the approval
+  // prompt was not — so it kept telling people "短码 10 分钟内单次有效" about a
+  // code that no longer expires. Behaviour and copy are changed by different
+  // edits; only a check that reads both files at once catches the one you
+  // forgot.
+  const root = resolve(__dirname, "..")
+  for (const file of [
+    "src/main/services/im/remote-approval-service.ts",
+    "src/main/services/im/remote-user-input-service.ts",
+    "src/main/services/im/remote-runner.ts"
+  ]) {
+    const offending = readFileSync(join(root, file), "utf8")
+      .split("\n")
+      .filter((line) => /\d+\s*分钟/u.test(line) && !line.trimStart().startsWith("*"))
+    assert.deepEqual(
+      offending,
+      [],
+      `${file} still tells a remote user their code or turn expires:\n${offending.join("\n")}`
+    )
+  }
+}
+
 async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
   const context = await createContext()
   try {
@@ -213,6 +360,11 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
     assert(text.includes("写入文件：src/billing.ts"))
     assert(text.includes("/批准 A1B2C3"))
     assert(text.includes("/拒绝 A1B2C3"))
+    // The prompt is the only thing the person holding it can go on. It must not
+    // promise a window nothing enforces — someone who reads "10 分钟" and gets
+    // back an hour later will assume the code is dead and never try it.
+    assert(!/\d+\s*分钟/u.test(text), `the approval prompt must not promise a deadline: ${text}`)
+    assert(text.includes("短码单次有效"))
     assert(!text.includes(context.root), "approval text must not leak the absolute workspace path")
     assert.equal(context.sendPendingCount(), 1)
 
@@ -238,7 +390,7 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
     assert.deepEqual(context.desktopAuditNotices, ["approve:写入文件 src/billing.ts"])
     assert.equal(
       await context.service.resolveCode({ code: "A1B2C3", decision: "approve", ...ROUTE }),
-      "审批短码不存在、已过期或已使用。"
+      "审批短码不存在、已使用，或该审批已不在等待中。"
     )
     assert.equal(decisions.length, 1)
   } finally {
@@ -248,7 +400,7 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
   }
 }
 
-async function testAllowedDecisionAndExpiryRemainFailClosed(): Promise<void> {
+async function testAllowedDecisionsFailClosedAndCodesOutliveTheClock(): Promise<void> {
   const context = await createContext()
   try {
     const rejectOnly = approvalRequest({
@@ -279,20 +431,49 @@ async function testAllowedDecisionAndExpiryRemainFailClosed(): Promise<void> {
     )
     assert.deepEqual(decisions, [{ type: "reject", tool_call_id: rejectOnly.tool_call.id }])
 
-    const expiring = approvalRequest({
-      id: "request-expiring",
+    // A code carries no deadline. An approval is a safety gate the runtime
+    // never times out, so the notification someone is holding must still be
+    // answerable when they get back to it — otherwise the only way to answer a
+    // Zhaohu approval is to stop being remote and walk to the desktop, which
+    // is the whole thing remote approval exists to avoid.
+    const lingering = approvalRequest({
+      id: "request-lingering",
       operation: "write_file",
       cwd: context.root,
-      filePath: join(context.root, "expires.ts")
+      filePath: join(context.root, "lingering.ts")
     })
-    const expiringDecisions = context.register(expiring)
-    await waitFor(() => context.deliveryText(expiring.id).includes("D4E5F6"), "expiring approval")
-    context.clock.now += 10 * 60_000 + 1
-    assert.equal(
-      await context.service.resolveCode({ code: "D4E5F6", decision: "approve", ...ROUTE }),
-      "审批短码不存在、已过期或已使用。"
+    const lingeringDecisions = context.register(lingering)
+    await waitFor(() => context.deliveryText(lingering.id).includes("D4E5F6"), "lingering approval")
+    context.clock.now += 6 * 60 * 60_000
+    assert(
+      (
+        await context.service.resolveCode({ code: "D4E5F6", decision: "approve", ...ROUTE })
+      ).includes("一次性批准"),
+      "hours later the code must still answer the request it was issued for"
     )
-    assert.equal(expiringDecisions.length, 0)
+    assert.deepEqual(lingeringDecisions, [
+      { type: "approve", tool_call_id: lingering.tool_call.id }
+    ])
+
+    // What still ends a code is its request no longer waiting — decided on the
+    // desktop, or the run cancelled. Without that, codes would pile up for
+    // gates nobody can answer any more.
+    const decidedOnDesktop = approvalRequest({
+      id: "request-decided-on-desktop",
+      operation: "write_file",
+      cwd: context.root,
+      filePath: join(context.root, "desktop.ts")
+    })
+    context.register(decidedOnDesktop)
+    await waitFor(
+      () => context.deliveryText(decidedOnDesktop.id).includes("012ABC"),
+      "desktop-decided approval"
+    )
+    context.broker.unregister(decidedOnDesktop.id)
+    assert.equal(
+      await context.service.resolveCode({ code: "012ABC", decision: "approve", ...ROUTE }),
+      "审批短码不存在、已使用，或该审批已不在等待中。"
+    )
   } finally {
     context.service.dispose()
     context.database.close()
@@ -384,6 +565,12 @@ async function testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly(
     const gitText = context.deliveryText(git.id)
     assert(gitText.includes("需要在桌面确认"))
     assert(!/[A-F0-9]{6}/u.test(gitText))
+    // "This kind of operation is not supported here" must not be worded like
+    // "this particular one was too big to show" — they call for different
+    // reactions, and they used to share one sentence.
+    assert(gitText.includes("这类操作（git_commit）不支持从招乎批准。"))
+    assert(!gitText.includes("内容过长"))
+    assert(gitText.includes("本轮会一直等待，请到桌面确认。"))
 
     const outsidePath = join(tmpdir(), "must-not-leak", "outside.ts")
     const outside = approvalRequest({
@@ -420,9 +607,7 @@ async function testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly(
       ...ROUTE
     })
     assert(approvalResult.includes("一次性批准"))
-    assert.deepEqual(executeDecisions, [
-      { type: "approve", tool_call_id: execute.tool_call.id }
-    ])
+    assert.deepEqual(executeDecisions, [{ type: "approve", tool_call_id: execute.tool_call.id }])
   } finally {
     context.service.dispose()
     context.database.close()
@@ -564,16 +749,50 @@ async function testBrokerPreservesDesktopDecisionSurfaceAndCommandIsExplicit(): 
   assert.deepEqual(calls, [{ code: "D4E5F6", decision: "reject", ...ROUTE }])
 }
 
+async function testAdvancedModesCanPublishAndResolve(): Promise<void> {
+  for (const agentMode of ["coordinator", "workflow"] as const) {
+    const context = await createContext({ agentMode })
+    try {
+      const request = approvalRequest({
+        id: `request-${agentMode}`,
+        operation: "write_file",
+        cwd: context.root,
+        filePath: join(context.root, `${agentMode}.ts`)
+      })
+      const decisions = context.register(request)
+      await waitFor(() => context.deliveryText(request.id).includes("A1B2C3"), agentMode)
+      assert(
+        (
+          await context.service.resolveCode({
+            code: "A1B2C3",
+            decision: "approve",
+            ...ROUTE
+          })
+        ).includes("一次性批准")
+      )
+      assert.deepEqual(decisions, [{ type: "approve", tool_call_id: request.tool_call.id }])
+    } finally {
+      context.service.dispose()
+      context.database.close()
+      await rm(context.root, { recursive: true, force: true })
+    }
+  }
+}
+
 async function main(): Promise<void> {
   await testDefaultOffDoesNotPublishOrResolve()
+  testNoRemoteCodePromiseSurvivesAsCopyOnly()
   await testWorkspaceApprovalIsSingleUseAndAudited()
-  await testAllowedDecisionAndExpiryRemainFailClosed()
+  await testAWorkflowLaunchIsApprovableWithItsWholeScript()
+  await testAWorkflowNobodyCanReadStaysOnTheDesktop()
+  await testAllowedDecisionsFailClosedAndCodesOutliveTheClock()
   await testAuditFlushFailureNeverResumesRuntime()
   await testDesktopDecisionWinsAuditFlushRace()
   await testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly()
   await testCommandInsideToolArgsIsRecognized()
   await testConcurrentCodesPointToExactlyOneRequest()
   await testBrokerPreservesDesktopDecisionSurfaceAndCommandIsExplicit()
+  await testAdvancedModesCanPublishAndResolve()
   console.log("IM remote approval tests passed")
 }
 

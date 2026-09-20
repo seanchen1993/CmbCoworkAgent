@@ -261,8 +261,14 @@ function testDesktopEntrypointsUseNarrowCompletionSeam(): void {
         /scheduleDesktopTurnCompletion\(threadId, runToken, desktopCompletionCursor\)/gu
       ) ?? []
     ).length,
-    3,
-    "invoke, resume and interrupt share one narrow completion observer"
+    2,
+    "resume and interrupt use the desktop completion observer directly"
+  )
+  assert(
+    source.includes(
+      "deliverManagedAgentRunCompletion(\n                runExecutionContext,\n                threadId,\n                runToken,\n                desktopCompletionCursor"
+    ) && source.includes("scheduleDesktopTurnCompletion(threadId, runToken, cursor)"),
+    "invoke routes through the managed completion seam, which preserves desktop observation by default"
   )
   assert(
     source.includes('invokeFinalOutcome === "success" && !isInternalNotificationTurn'),

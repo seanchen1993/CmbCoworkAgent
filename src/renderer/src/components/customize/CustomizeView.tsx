@@ -10,6 +10,7 @@ import {
   HeartPulse,
   Loader2,
   Network,
+  Palette,
   Plug,
   Puzzle,
   Sparkles,
@@ -30,6 +31,9 @@ import { cn } from "@/lib/utils"
 
 const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
 const GeneralPanel = lazy(() => import("./GeneralPanel").then((m) => ({ default: m.GeneralPanel })))
+const AppearancePanel = lazy(() =>
+  import("./AppearancePanel").then((m) => ({ default: m.AppearancePanel }))
+)
 const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
 const ScheduledPanel = lazy(() =>
   import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
@@ -40,6 +44,7 @@ const HeartbeatPanel = lazy(() =>
   import("./HeartbeatPanel").then((m) => ({ default: m.HeartbeatPanel }))
 )
 const PluginsPanel = lazy(() => import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel })))
+const ModsPanel = lazy(() => import("./ModsPanel").then((m) => ({ default: m.ModsPanel })))
 const MarketPanel = lazy(() => import("./MarketPanel").then((m) => ({ default: m.MarketPanel })))
 const SandboxPanel = lazy(() => import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel })))
 const EvolutionPanel = lazy(() =>
@@ -63,6 +68,7 @@ const ExpertTeamPanel = lazy(() =>
 
 type CustomizeTab =
   | "general"
+  | "appearance"
   | "skills"
   | "connectors"
   | "plugins"
@@ -102,6 +108,7 @@ const MENU_GROUPS: MenuGroup[] = [
     label: "基础功能",
     items: [
       { tab: "general", label: "通用", icon: Settings2 },
+      { tab: "appearance", label: "外观", icon: Palette },
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
@@ -166,8 +173,7 @@ export function CustomizeView(): React.JSX.Element {
     pendingEvolution,
     currentThreadId,
     threads
-  } =
-    useAppStore()
+  } = useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     customizeInitialTab === "commitPolicy"
       ? "skills"
@@ -235,6 +241,7 @@ export function CustomizeView(): React.JSX.Element {
             variant="ghost"
             size="sm"
             className="h-7 w-9 p-0"
+            aria-label="返回会话"
             onClick={() => setShowCustomizeView(false)}
           >
             <ArrowLeft className="size-6" strokeWidth={1} />
@@ -278,12 +285,19 @@ export function CustomizeView(): React.JSX.Element {
       <Suspense fallback={<CustomizePanelFallback />}>
         {activeTab === "general" ? (
           <GeneralPanel targetSection={customizeInitialSection} />
+        ) : activeTab === "appearance" ? (
+          <AppearancePanel />
         ) : activeTab === "skills" ? (
           <SkillsPanel />
         ) : activeTab === "connectors" ? (
           <McpPanel />
         ) : activeTab === "plugins" ? (
-          <PluginsPanel />
+          <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
+            <ModsPanel threadId={currentThreadId} />
+            <div className="flex flex-1 min-h-0">
+              <PluginsPanel />
+            </div>
+          </div>
         ) : activeTab === "scheduled" ? (
           <ScheduledPanel />
         ) : activeTab === "heartbeat" ? (

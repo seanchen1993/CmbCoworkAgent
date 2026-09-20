@@ -1,12 +1,28 @@
+import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
+import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
+import { getModsManager } from "../mods/manager"
+import {
+  StopHookContextCollector,
+  STOP_HOOK_REVISION_PROMPT_PREFIX,
+  type SerializedHookMessage
+} from "./stop-hook-context"
+import { persistedMessageFromStreamPayload, streamPayloadContentMode } from "./stream-transcript-payload"
+import {
+  selectStreamTranscriptValueSnapshots,
+  rememberSelectedStreamTranscriptValueSnapshots,
+  getSelectedStreamTranscriptValueSnapshots,
+  getStreamTranscriptValueLocalOccurrence
+} from "./stream-transcript-values"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { nowIsoLocal } from "../util/local-time"
+import { StreamAssistantText } from "./stream-assistant-text"
 import { AsyncKeyedLock } from "./async-keyed-lock"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import {
   createSerializedValuesMessageAccumulator,
   createStreamDataSerializer,
-  sanitizeStreamDataForRenderer,
-  serializedMessageClassName
+  sanitizeStreamDataForRenderer
 } from "./stream-data-serialization"
 import {
   classifyPhysicalStreamRunFailure,
@@ -31,6 +47,11 @@ import {
 } from "../agent/post-run-memory-maintenance"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+// The renderer composer emits this richer variant (description, when_to_use,
+// allowed_tools); skill-lifecycle/marker has a name+path-only twin under the
+// same tag. Match the composer so a remote turn persists what a desktop turn
+// would have.
+import { formatSkillUseBlock as formatComposerSkillUseBlock } from "../../shared/skill-use-block"
 import { resolveThreadOutputStyle, type AgentOutputStyle } from "../../shared/agent-output-style"
 import {
   areForcedCoordinatorRequestsAllowed,
@@ -67,6 +88,7 @@ import {
   flushStrict,
   getThreadCore,
   getThreadMessageIdentityContext,
+  getThreadMessageProviderOccurrencesBeforeUser,
   getThreadMessagesByIds,
   getThread,
   updateThread,
@@ -138,36 +160,30 @@ import {
   isWorkflowPlumbingTranscriptContent,
   neutralizeWorkflowPlumbingUserText
 } from "../../shared/checkpoint-transcript"
-import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
+import {
+  childTurnStreamOwner,
+  isCoordinatorWorkerStreamChunk,
+  isMainTurnMessageStream
+} from "../agent/main-turn-stream"
 import {
   CONTEXT_COMPACTION_EVENT_TYPE,
   isContextCompactionStreamPayload,
   type ContextCompactionLifecycleEvent
 } from "../../shared/context-compaction-events"
 import {
-  extractVisibleReasoning,
   isTraceReasoningTruncated,
-  mergeStreamingReasoning,
   truncateReasoningForTrace
 } from "../../shared/model-reasoning"
 import {
   getMessageProviderOccurrence,
   getMessageProviderSourceId,
-  getMessageProviderTupleFromMetadata,
   MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
 } from "../../shared/message-role-collision"
 import {
   accumulateStreamToolCallChunks,
-  streamToolCallContentModeFromMessageMode,
-  type StreamToolCallAccumulatorState,
-  type StreamToolCallChunk
+  type StreamToolCallAccumulatorState
 } from "../../shared/stream-tool-call-chunks"
-import {
-  readStreamMessageWireMode,
-  STREAM_MESSAGE_CONTENT_MODE_KEY,
-  STREAM_TOOL_CALL_ARGS_MODE_KEY
-} from "../../shared/stream-message-wire-mode"
 import {
   resolveStreamTranscriptFlush,
   readStreamTranscriptReasoning,
@@ -264,7 +280,8 @@ import {
 } from "../agent/workflow/notification"
 import {
   COORDINATOR_NOTIFICATION_PROMPT_PREFIX,
-  INTERNAL_NOTIFICATION_TRIGGER_SOURCE
+  INTERNAL_NOTIFICATION_TRIGGER_SOURCE,
+  type BackgroundNotificationOwner
 } from "../../shared/internal-notification-turn"
 import {
   coordinatorWorkerManager,
@@ -312,10 +329,7 @@ import {
 import { formatSkillUseBlock, parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
 import type { SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
 import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
-import {
-  runCompletionHooksWithRevision,
-  type StopHookContext
-} from "../agent/skill-lifecycle/completion-hooks"
+import { runCompletionHooksWithRevision } from "../agent/skill-lifecycle/completion-hooks"
 import {
   discardAgentAutoCommitTracking,
   maybeAutoCommitAfterAgentRun,
@@ -328,12 +342,11 @@ import {
   buildGoalStartPrompt,
   displayGoalObjective,
   displayGoalPausedReason,
-  GoalManager,
   isGoalBoundaryStillCurrent,
   validateGoalText
 } from "../agent/goals/goal-manager"
 import { buildGoalContinuationPromptFromHookContexts } from "../agent/goals/internal-prompt"
-import { SqlGoalStore } from "../agent/goals/goal-store"
+import { goalManager, goalStore } from "../agent/goals/runtime"
 import {
   extractGoalTransportAttachmentNames,
   extractGoalTransportPayload,
@@ -419,12 +432,16 @@ import { emitAppAttention } from "../app-attention-events"
 import { finishTraceInBackground } from "../agent/trace/collector"
 import {
   createBrowserWindowAgentRunDelivery,
+  registerActiveAgentRunCanceller,
   registerActiveAgentRunInspector,
+  registerAgentGoalControlImplementation,
   registerAgentRunImplementation,
   startAgentRun,
-  type AgentRunDelivery
+  type AgentRunDelivery,
+  type AgentRunExecutionContext
 } from "../agent/agent-run-service"
 import { forwardAgentStreamToSinks } from "../agent/agent-stream-sinks"
+import { isManagedTransportWindow } from "../agent/managed-transport-delivery"
 
 function withHarnessStageInvalidation(
   callback: HookResultCallback,
@@ -445,7 +462,6 @@ function withHarnessStageInvalidation(
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
-const MAX_STOP_CONTEXT_TEXT_CHARS = 40_000
 const MAX_POST_RUN_ASSISTANT_TEXT_CHARS = 60_000
 const MAX_PENDING_MEMORY_TURNS = 12
 const MAX_PENDING_MEMORY_CHARACTERS = 80_000
@@ -478,7 +494,6 @@ function formatTurnCompletionRecoveryNotice(input: {
     : `模型未给出有效结果（${input.detail}），已请求模型重新作答（${input.attempt}/${input.maxAttempts}）。`
 }
 
-const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 const SYSTEM_PROMPT_PREVIEW_IDS_ENV = "VITE_SYSTEM_PROMPT_PREVIEW_YST_IDS"
 const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
   import.meta.env?.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED
@@ -525,8 +540,7 @@ function releaseWorkflowNotification(runId: string, runToken: string): boolean {
 const streamChannelByRunController = new WeakMap<AbortController, string>()
 
 let agentTaskShutdownStarted = false
-const goalStore = new SqlGoalStore()
-const goalManager = new GoalManager(goalStore)
+const agentRunExecutionContextStorage = new AsyncLocalStorage<AgentRunExecutionContext>()
 // Deferred-delivery background evidence (see GoalBackgroundEvidenceStash): a
 // notification turn that delivers result A but defers (B still pending) parks
 // A's evidence here so the eventual evaluation sees every delivered batch, not
@@ -1026,7 +1040,7 @@ function sendDesktopForeignOwnerBusy(
   channel: string,
   lease: LocalThreadRunLease
 ): void {
-  const sourceLabel = lease.owner === "im" ? "招乎远程任务" : "定时任务"
+  const sourceLabel = lease.owner === "im" ? "招乎远程任务" : lease.owner === "mods" ? "Mods 命令" : "定时任务"
   safeSendToWindow(window, channel, {
     type: "error",
     error: "THREAD_RUN_OWNED_BY_ANOTHER_SOURCE",
@@ -1037,13 +1051,59 @@ function sendDesktopForeignOwnerBusy(
   safeSendToWindow(window, channel, { type: "done" })
 }
 
+/**
+ * Ends an automatic follow-up turn that another source is already running.
+ *
+ * An auto-notification is the app talking to itself: nobody asked for it, and a
+ * duplicate is expected whenever two schedulers observe the same completion. It
+ * closes the stream with no error, because the busy notice is written for a
+ * person who just acted — showing it for a turn they never requested reports a
+ * fault on a conversation they only had open.
+ *
+ * The lease is still respected: this yields, it never preempts.
+ */
+function yieldInternalNotificationForForeignOwner(
+  window: BrowserWindow,
+  channel: string,
+  threadId: string,
+  lease: LocalThreadRunLease,
+  kind: "coordinator" | "workflow"
+): void {
+  console.log("[Agent] Internal notification yielded to another source:", {
+    threadId,
+    kind,
+    owner: lease.owner,
+    runId: lease.runId,
+    reason: "thread_run_owned_by_another_source"
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+}
+
 function rejectDesktopRunForForeignOwner(
   threadId: string,
   window: BrowserWindow,
-  channel: string
+  channel: string,
+  context: AgentRunExecutionContext = { source: "desktop" },
+  internalNotificationKind?: "coordinator" | "workflow"
 ): boolean {
   const lease = getLocalThreadRunLease(threadId)
-  if (!lease || lease.owner === "desktop") return false
+  if (!lease) return false
+  if (context.allowForeignOwnerGoalControl) return false
+  const managedLease = context.localRunLease
+  if (managedLease && lease.owner === managedLease.owner && lease.runId === managedLease.runId) {
+    return false
+  }
+  if (!managedLease && lease.owner === "desktop") return false
+  if (internalNotificationKind) {
+    yieldInternalNotificationForForeignOwner(
+      window,
+      channel,
+      threadId,
+      lease,
+      internalNotificationKind
+    )
+    return true
+  }
   sendDesktopForeignOwnerBusy(window, channel, lease)
   return true
 }
@@ -1078,6 +1138,22 @@ function claimDesktopThreadRunLease(threadId: string, runId: string): LocalThrea
   })
 }
 
+function claimAgentThreadRunLease(
+  threadId: string,
+  runId: string,
+  context: AgentRunExecutionContext = { source: "desktop" }
+): LocalThreadRunLeaseClaim {
+  const managedLease = context.localRunLease
+  if (managedLease) {
+    return claimLocalThreadRunLease({
+      threadId,
+      owner: managedLease.owner,
+      runId: managedLease.runId
+    })
+  }
+  return claimDesktopThreadRunLease(threadId, runId)
+}
+
 export function isActiveAgentRunAborting(threadId: string): boolean {
   return activeRuns.get(threadId)?.signal.aborted === true
 }
@@ -1109,6 +1185,35 @@ export async function cancelAndWaitForAgentThreadRun(
   controller.abort()
   if (window && channel) safeSendToWindow(window, channel, { type: "done" })
   return waitForReplacedRunToSettle(threadId)
+}
+
+function cancelFunctionAgentTurn(
+  threadId: string,
+  runToken: string,
+  controller: AbortController,
+  window: BrowserWindow | null,
+  channel: string
+): void {
+  throwIfPhysicalStreamRunIsInactive(threadId, runToken, controller.signal)
+  try {
+    LocalSandbox.cancelBackgroundTasks(threadId)
+  } catch (error) {
+    console.warn("[Agent] Failed to cancel background tasks for function turn:", error)
+  }
+  try {
+    flushPendingStreamTranscriptMessages(threadId, runToken)
+  } catch (error) {
+    console.warn("[Agent] Failed to flush function turn transcript:", error)
+  }
+  // Keep the controller registered until settlement; a new message must await cleanup.
+  controller.abort()
+  try {
+    handleAutoModeAgentCancelled(threadId)
+  } catch (error) {
+    console.warn("[Agent] Failed to pause auto mode after function turn cancellation:", error)
+  }
+  // SDK cancellation has no local stop-button handler to complete the renderer stream.
+  if (window) safeSendToWindow(window, channel, { type: "done" })
 }
 
 async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" | "timed_out"> {
@@ -1331,6 +1436,11 @@ function emitGoalNotice(
     console.warn("[Goal] failed to persist goal notice:", error)
   }
   const payload = { message, goalId, activeWindowId, eventId, createdAt }
+  try {
+    agentRunExecutionContextStorage.getStore()?.onGoalNotice?.(payload)
+  } catch (error) {
+    console.warn("[Goal] managed transport notice callback failed:", error)
+  }
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
     safeSendToWindow(window, channel, {
       type: "custom",
@@ -1470,6 +1580,51 @@ function handleGoalNonStartingControlCommand(params: {
   }
 
   return { handled: false, terminatedCurrentRun: false }
+}
+
+async function executeAgentGoalControl(
+  request: { threadId: string; message: string },
+  delivery: AgentRunDelivery,
+  context: AgentRunExecutionContext
+): Promise<GoalControlResult> {
+  const { threadId, message } = request
+  return agentRunExecutionContextStorage.run(context, () =>
+    withThreadRunMutationLock(threadId, async () => {
+      // Possibly a managed transport's shim; see AgentRunDelivery.window.
+      const window = delivery.window
+      const activeController = activeRuns.get(threadId)
+      const channel = activeController
+        ? (streamChannelByRunController.get(activeController) ?? `agent:stream:${threadId}`)
+        : `agent:stream:${threadId}`
+      // Choose the active request channel under the same lock used by run
+      // replacement. A terminating goal command must abort and complete the
+      // same physical request, never a predecessor or queued successor.
+      lastFetchErrorByChannel.delete(channel)
+      lastFailoverByChannel.delete(channel)
+      const goalCommand = parseGoalSlashCommand(message)
+      const result = handleGoalNonStartingControlCommand({
+        threadId,
+        command: goalCommand,
+        originalMessage: message,
+        window,
+        channel,
+        sendDone: false,
+        sendDoneForTerminatingControl: true
+      })
+      if (!result.handled) {
+        return {
+          ...result,
+          notice: emitGoalNotice(
+            window,
+            channel,
+            threadId,
+            "该 /goal 命令需要在当前运行结束后发送。"
+          )
+        }
+      }
+      return result
+    })
+  )
 }
 
 function pauseActiveGoalAfterBoundary(
@@ -1758,6 +1913,7 @@ function releaseAbandonedContinuationTurnState(
 }
 
 interface PhysicalAgentRunSettlementOptions {
+  functionTurnReason?: "answer" | "error"
   kind: "invoke" | "resume" | "interrupt"
   threadId: string
   runToken: string
@@ -1771,9 +1927,12 @@ interface PhysicalAgentRunSettlementOptions {
   disposeTurnState: () => void
   criticalBeforeReleasePhases?: readonly RunSettlementPhase[]
   beforeNotificationPhases?: readonly RunSettlementPhase[]
+  runOwner?: LocalThreadRunLease["owner"]
+  releaseRunLease?: boolean
 }
 
 async function settlePhysicalAgentRun({
+  functionTurnReason,
   kind,
   threadId,
   runToken,
@@ -1786,7 +1945,9 @@ async function settlePhysicalAgentRun({
   turnStateShouldDispose,
   disposeTurnState,
   criticalBeforeReleasePhases = [],
-  beforeNotificationPhases = []
+  beforeNotificationPhases = [],
+  runOwner = "desktop",
+  releaseRunLease = true
 }: PhysicalAgentRunSettlementOptions): Promise<void> {
   let transcriptFlushSucceeded = false
   let notificationSettlement = Promise.resolve()
@@ -1835,6 +1996,26 @@ async function settlePhysicalAgentRun({
       },
       ...criticalBeforeReleasePhases,
       {
+        name: "settle-function-turn-facts",
+        run: () => {
+          const turns = getModsManager()?.functionTurns
+          if (functionTurnReason || controller.signal.aborted || turnStateShouldDispose)
+            turns?.finish(threadId, runToken, {
+              reason: functionTurnReason ?? (controller.signal.aborted ? "aborted" : "error")
+            })
+          else turns?.suspend(threadId, runToken)
+        }
+      },
+      {
+        name: "render-mod-turn-summary",
+        shouldRun: terminalRunOwnsSharedResources,
+        run: () => getModsManager()?.finishTurn(threadId)
+      },
+      {
+        name: "release-expired-mod-runtime-bindings",
+        run: () => getModsManager()?.releaseExpiredRuntimeBindings(threadId)
+      },
+      {
         name: "release-active-controller",
         run: () => {
           if (activeRuns.get(threadId) === controller) activeRuns.delete(threadId)
@@ -1859,8 +2040,7 @@ async function settlePhysicalAgentRun({
       },
       {
         name: "dispose-turn-state",
-        shouldRun: () =>
-          turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken),
+        shouldRun: () => turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken),
         run: disposeTurnState
       },
       {
@@ -1870,7 +2050,8 @@ async function settlePhysicalAgentRun({
       },
       {
         name: "release-local-thread-run-lease",
-        run: () => releaseLocalThreadRunLease(threadId, "desktop", runToken)
+        shouldRun: () => releaseRunLease,
+        run: () => releaseLocalThreadRunLease(threadId, runOwner, runToken)
       }
     ],
     resolveSettlement,
@@ -2310,6 +2491,16 @@ function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
   return segments.join("；")
 }
 
+/**
+ * Every renderer send in this file funnels through here. That is why a managed
+ * transport can get away with a four-member window shim (see
+ * AgentRunDelivery.window): `webContents.send` is the only sending member this
+ * file ever touches.
+ *
+ * If you need a new renderer message, route it through here or through
+ * AgentRunDelivery.send. Reaching for another BrowserWindow member instead
+ * compiles fine and then throws on the IM path.
+ */
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
   const prefix = "agent:stream:"
   if (channel.startsWith(prefix)) {
@@ -2959,8 +3150,18 @@ function getActiveOrPersistedCoordinatorNotificationSelectedSkills(
   return parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
 }
 
+/**
+ * @param owner restricts the drain to results this surface owes a summary for.
+ * Passed only by an automatic summary turn: two of those can be pending on one
+ * thread at once, and whichever won the run lease used to consume both — so a
+ * Zhaohu result was reported into a desktop turn its reader never sees. A turn
+ * the user started takes everything, deliberately: the person is looking at the
+ * thread, and it is also the only path that can surface a managed result whose
+ * conversation is no longer connected.
+ */
 async function prepareQueuedCoordinatorNotificationsForPrompt(
   threadId: string,
+  owner: BackgroundNotificationOwner | undefined,
   onDeferred?: () => void
 ): Promise<{
   queuedNotifications: CoordinatorTurnNotification[]
@@ -2968,7 +3169,7 @@ async function prepareQueuedCoordinatorNotificationsForPrompt(
   notificationSelectedSkills: Record<string, CoordinatorSelectedSkill | undefined>
 }> {
   const queuedNotifications = toCoordinatorTurnNotifications(
-    coordinatorWorkerManager.drainNotifications(threadId)
+    coordinatorWorkerManager.drainNotifications(threadId, { owner })
   )
   try {
     const { promptNotifications, deferredNotifications } =
@@ -3081,13 +3282,6 @@ function buildNormalModeGuardMessage(state: NormalModeGuardState): string {
   return (
     "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切换到 Solo 或 Multi。" + suffix
   )
-}
-
-function shouldDisableNormalModeSubagents(
-  agentMode: AgentMode,
-  metadata: Record<string, unknown>
-): boolean {
-  return agentMode === "normal" && metadata.subagentsEnabled === false
 }
 
 function getRequestedOutputStyle(metadata: Record<string, unknown>): AgentOutputStyle {
@@ -3243,6 +3437,15 @@ function sendAutoCommitResult(
   })
 }
 
+/**
+ * The one place in this file that needs a REAL BrowserWindow: Electron
+ * validates the parent window of a modal and rejects a managed transport's
+ * shim. Callers must gate this on a desktop-owned run (canPromptModal); a
+ * managed run declines auto-commit instead of prompting nobody.
+ *
+ * Any new Electron dialog here needs the same gate —
+ * tests/agent-window-surface.spec.ts fails on an ungated one.
+ */
 async function confirmAutoCommit(
   window: BrowserWindow,
   result: AgentAutoCommitResult
@@ -3266,7 +3469,8 @@ async function finalizeAutoCommit({
   userPrompt,
   snapshot,
   window,
-  channel
+  channel,
+  canPromptModal
 }: {
   threadId: string
   workspacePath: string | undefined
@@ -3274,6 +3478,13 @@ async function finalizeAutoCommit({
   snapshot: AgentGitSnapshot | null
   window: BrowserWindow
   channel: string
+  /**
+   * Only a real desktop window can host `dialog.showMessageBox`. A headless
+   * delivery (IM and other managed transports) has no window to parent a modal
+   * to, so "ask" mode declines instead of prompting — the run must not block on
+   * a dialog nobody can see.
+   */
+  canPromptModal: boolean
 }): Promise<void> {
   // Skip auto-commit while a background workflow is ACTIVE on this WORKSPACE: it
   // writes to the tree asynchronously, so a dirty-diff commit here could sweep its
@@ -3354,7 +3565,7 @@ async function finalizeAutoCommit({
       workspacePath,
       userPrompt,
       snapshot,
-      confirm: (preview) => confirmAutoCommit(window, preview)
+      ...(canPromptModal ? { confirm: (preview) => confirmAutoCommit(window, preview) } : {})
     })
     // Telemetry: the existing `git.commit.created` (triggeredBy=agent-auto) only
     // fires on success. Emit an attempt event so skip / user-cancel / fail are also
@@ -3429,25 +3640,6 @@ async function beginAutoCommitTracking(
   }
 }
 
-interface SerializedHookMessage {
-  id?: string[]
-  content?: unknown
-  additional_kwargs?: Record<string, unknown>
-  kwargs?: {
-    id?: string
-    type?: string
-    content?: unknown
-    name?: string
-    tool_call_id?: string
-    additional_kwargs?: Record<string, unknown>
-    tool_calls?: Array<{
-      id?: string
-      name?: string
-      args?: Record<string, unknown>
-    }>
-  }
-}
-
 interface SerializedValuesSideEffectMessage extends SerializedHookMessage {
   kwargs?: SerializedHookMessage["kwargs"] & {
     usage_metadata?: unknown
@@ -3462,21 +3654,6 @@ interface SerializedValuesSideEffectMessage extends SerializedHookMessage {
   }
 }
 
-function isCoordinatorInternalNotificationMessage(
-  message: SerializedHookMessage | undefined
-): boolean {
-  const additionalKwargs = message?.additional_kwargs ?? message?.kwargs?.additional_kwargs
-  return additionalKwargs?.[COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY] === true
-}
-
-function getCoordinatorVisibleUserMessage(
-  message: SerializedHookMessage | undefined
-): string | undefined {
-  const additionalKwargs = message?.additional_kwargs ?? message?.kwargs?.additional_kwargs
-  const visible = additionalKwargs?.[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]
-  return typeof visible === "string" && visible.trim() ? visible : undefined
-}
-
 function extractSerializedValuesMessages(payload: unknown): unknown[] {
   if (!payload || typeof payload !== "object") return []
   const messages = (payload as { messages?: unknown }).messages
@@ -3487,84 +3664,6 @@ function asPlainRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined
-}
-
-function messageStreamMetadata(
-  mode: string,
-  payload: unknown
-): Record<string, unknown> | undefined {
-  if (mode !== "messages" || !Array.isArray(payload)) return undefined
-  return asPlainRecord(payload[1])
-}
-
-function isCoordinatorWorkerStreamChunk(mode: string, payload: unknown, threadId: string): boolean {
-  const metadata = messageStreamMetadata(mode, payload)
-  if (!metadata) return false
-  if (threadId.includes("__worker__")) return false
-
-  const workerThreadPrefix = `${threadId}__worker__`
-  const valuesToCheck = [
-    metadata.langgraph_checkpoint_ns,
-    metadata.checkpoint_ns,
-    metadata.thread_id,
-    metadata.langgraph_thread_id,
-    asPlainRecord(metadata.configurable)?.thread_id
-  ]
-
-  if (
-    valuesToCheck.some((value) => typeof value === "string" && value.includes(workerThreadPrefix))
-  ) {
-    return true
-  }
-
-  return false
-}
-
-function extractPersistedMessageContent(content: unknown): Message["content"] {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-  const blocks = content.filter((block) => {
-    if (!block || typeof block !== "object" || Array.isArray(block)) return false
-    const type = (block as { type?: unknown }).type
-    return type === "text" || type === "image" || type === "tool_use" || type === "tool_result"
-  })
-  return blocks.length > 0 ? (blocks as Message["content"]) : ""
-}
-
-function getSerializedMessageRole(msgChunk: unknown): Message["role"] | null {
-  if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
-  const record = msgChunk as { id?: unknown; type?: unknown; kwargs?: Record<string, unknown> }
-  const kwargs = asPlainRecord(record.kwargs) ?? {}
-  const className = serializedMessageClassName(msgChunk)
-  const type = kwargs.type ?? record.type
-
-  if (className.includes("HumanMessage") || type === "human" || type === "user") return "user"
-  if (className.includes("ToolMessage") || type === "tool") return "tool"
-  if (className.includes("SystemMessage") || type === "system") return "system"
-  if (className.includes("AIMessage") || type === "ai" || type === "assistant") {
-    return "assistant"
-  }
-  return null
-}
-
-function serializedMessageId(msgChunk: unknown): string | null {
-  if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
-  const record = msgChunk as { id?: unknown; kwargs?: Record<string, unknown> }
-  const kwargs = asPlainRecord(record.kwargs) ?? {}
-  if (typeof kwargs.id === "string" && kwargs.id.trim()) return kwargs.id.trim()
-  if (typeof record.id === "string" && record.id.trim()) return record.id.trim()
-  return null
-}
-
-function streamPayloadContentMode(
-  payload: unknown
-): QueuedStreamTranscriptMessage["streamContentMode"] {
-  if (!Array.isArray(payload)) return "delta"
-  const metadata = asPlainRecord(payload[1])
-  const wireMode = readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY])
-  if (wireMode) return wireMode
-  const className = serializedMessageClassName(payload[0])
-  return className && !className.endsWith("Chunk") ? "snapshot" : "delta"
 }
 
 function setSerializedMessageIdentity(
@@ -3594,90 +3693,7 @@ function shouldSkipMainTranscriptStreamPayload(
   payload: unknown,
   threadId: string
 ): boolean {
-  if (mode !== "messages") return true
-  if (isContextCompactionStreamPayload(mode, payload)) return true
-  if (Array.isArray(payload) && isSerializedSummarizationMessage(payload[0])) return true
-  if (isCoordinatorWorkerStreamChunk(mode, payload, threadId)) return true
-  const metadata = messageStreamMetadata(mode, payload)
-  const checkpointNs =
-    typeof metadata?.langgraph_checkpoint_ns === "string"
-      ? metadata.langgraph_checkpoint_ns
-      : typeof metadata?.checkpoint_ns === "string"
-        ? metadata.checkpoint_ns
-        : ""
-  // Deep-agent/subagent interiors are scoped under tools namespaces. Normal
-  // visible tool results are re-persisted by the renderer's filtered transcript
-  // flush, so the main process intentionally stays conservative here.
-  if (checkpointNs.includes("tools:")) return true
-  return false
-}
-
-function persistedMessageFromStreamPayload(payload: unknown): QueuedStreamTranscriptMessage | null {
-  if (!Array.isArray(payload)) return null
-  const [msgChunk] = payload
-  if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
-  const role = getSerializedMessageRole(msgChunk)
-  if (!role || role === "user") return null
-  const id = serializedMessageId(msgChunk)
-  if (!id) return null
-
-  const record = msgChunk as { content?: unknown; kwargs?: Record<string, unknown> }
-  const kwargs = asPlainRecord(record.kwargs) ?? {}
-  const content = extractPersistedMessageContent(kwargs.content ?? record.content)
-  const toolCalls = Array.isArray(kwargs.tool_calls)
-    ? (kwargs.tool_calls as Message["tool_calls"])
-    : undefined
-  const streamContentMode = streamPayloadContentMode(payload)
-  const reasoningUpdate =
-    role === "assistant" ? readStreamTranscriptReasoning(payload, streamContentMode) : {}
-  const streamToolCallContentMode = streamToolCallContentModeFromMessageMode(streamContentMode)
-  const streamToolCallChunks: StreamToolCallChunk[] = Array.isArray(kwargs.tool_call_chunks)
-    ? kwargs.tool_call_chunks.flatMap((value) => {
-        const chunk = asPlainRecord(value)
-        if (!chunk) return []
-        const id = typeof chunk.id === "string" && chunk.id ? chunk.id : undefined
-        const name = typeof chunk.name === "string" && chunk.name ? chunk.name : undefined
-        const args = typeof chunk.args === "string" ? chunk.args : undefined
-        const index = typeof chunk.index === "number" ? chunk.index : undefined
-        if (!id && !name && args === undefined && index === undefined) return []
-        const wireMode = readStreamMessageWireMode(chunk[STREAM_TOOL_CALL_ARGS_MODE_KEY])
-        return [{ id, name, args, index, contentMode: wireMode ?? streamToolCallContentMode }]
-      })
-    : []
-  if (
-    role !== "tool" &&
-    !reasoningUpdate.reasoning &&
-    (typeof content === "string" ? content.length === 0 : content.length === 0) &&
-    (!toolCalls || toolCalls.length === 0) &&
-    streamToolCallChunks.length === 0
-  ) {
-    return null
-  }
-
-  const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : undefined
-  const name = typeof kwargs.name === "string" ? kwargs.name : undefined
-  const status = typeof kwargs.status === "string" ? kwargs.status : undefined
-  const additionalKwargs = asPlainRecord(kwargs.additional_kwargs)
-  const providerTuple = getMessageProviderTupleFromMetadata(additionalKwargs)
-  const isError =
-    kwargs.is_error === true || additionalKwargs?.is_error === true || status === "error"
-
-  const message: QueuedStreamTranscriptMessage = {
-    id,
-    ...providerTuple,
-    role,
-    content,
-    ...reasoningUpdate,
-    ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-    ...(role === "tool" && toolCallId ? { tool_call_id: toolCallId } : {}),
-    ...(role === "tool" && name ? { name } : {}),
-    ...(role === "tool" && status ? { status } : {}),
-    ...(role === "tool" && isError ? { is_error: true } : {}),
-    created_at: new Date(),
-    streamContentMode,
-    streamToolCallChunks
-  }
-  return message
+  return !isMainTurnMessageStream(mode, payload, threadId)
 }
 
 const STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS = 250
@@ -3717,37 +3733,91 @@ function messageContentToText(content: Message["content"]): string {
     .join("\n")
 }
 
-function scheduleDesktopTurnCompletion(threadId: string, runToken: string, cursor: number): void {
+function prepareFinalAssistantCandidate(
+  threadId: string,
+  runToken: string,
+  cursor: number
+): StreamAssistantCandidate | undefined {
   let candidate: StreamAssistantCandidate | undefined
   try {
     flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
     const latest = latestStreamAssistantCandidate.get(threadId)
-    if (!latest || latest.revision <= cursor) return
+    if (!latest || latest.revision <= cursor) return undefined
     candidate = { ...latest }
   } catch (error) {
-    console.warn("[IM] Failed to prepare desktop completion observation:", error)
-    return
+    console.warn("[Agent] Failed to prepare final assistant observation:", error)
+    return undefined
   }
+  return candidate
+}
+
+async function readFinalAssistantCandidate(
+  threadId: string,
+  candidate: StreamAssistantCandidate
+): Promise<{ messageId: string; finalText: string } | null> {
+  await flushStrict()
+  const message = getThreadMessagesByIds(threadId, [candidate.messageId])[0]
+  if (!message || message.role !== "assistant" || message.tool_calls?.length) return null
+  const finalText = messageContentToText(message.content).trim()
+  return finalText ? { messageId: message.id, finalText } : null
+}
+
+function scheduleDesktopTurnCompletion(threadId: string, runToken: string, cursor: number): void {
+  const candidate = prepareFinalAssistantCandidate(threadId, runToken, cursor)
+  if (!candidate) return
 
   void (async () => {
     try {
       // The delivery id is derived only after the final assistant row is on
       // disk. This side task never feeds failure back into agent:invoke.
-      await flushStrict()
-      const message = getThreadMessagesByIds(threadId, [candidate!.messageId])[0]
-      if (!message || message.role !== "assistant" || message.tool_calls?.length) return
-      const finalText = messageContentToText(message.content).trim()
-      if (!finalText) return
+      const result = await readFinalAssistantCandidate(threadId, candidate)
+      if (!result) return
       await imDesktopCompletionObserver.observe({
         source: "desktop",
         threadId,
-        finalAssistantMessageId: message.id,
-        finalText
+        finalAssistantMessageId: result.messageId,
+        finalText: result.finalText
       })
     } catch (error) {
       console.warn("[IM] Desktop completion observation failed without affecting the turn:", error)
     }
   })()
+}
+
+async function deliverManagedAgentRunCompletion(
+  context: AgentRunExecutionContext,
+  threadId: string,
+  runToken: string,
+  cursor: number
+): Promise<void> {
+  const callback = context.onFinalAssistant
+  if (!callback) {
+    scheduleDesktopTurnCompletion(threadId, runToken, cursor)
+    return
+  }
+  const candidate = prepareFinalAssistantCandidate(threadId, runToken, cursor)
+  if (!candidate) return
+  const result = await readFinalAssistantCandidate(threadId, candidate)
+  if (result) await callback(result)
+}
+
+function notifyManagedAgentRunCancelled(context: AgentRunExecutionContext): void {
+  try {
+    context.onRunCancelled?.()
+  } catch (error) {
+    console.warn("[Agent] Managed run cancellation callback failed:", error)
+  }
+}
+
+function notifyManagedDetachedResult(
+  context: AgentRunExecutionContext,
+  signal: { kind: "coordinator" | "workflow"; threadId: string; runId?: string }
+): void {
+  try {
+    context.onDetachedResultAvailable?.(signal)
+  } catch (error) {
+    console.warn("[Agent] Managed detached-result callback failed:", error)
+  }
 }
 
 const streamTranscriptToolCallAccumulators = new Map<
@@ -3768,6 +3838,14 @@ function hydrateStreamTranscriptToolCalls(
 ): void {
   if (message.role !== "assistant") return
   const runKey = pendingStreamTranscriptKey(threadId, runToken)
+  if (message.tool_calls_mode === "snapshot") {
+    // Values already contain complete tool arguments. Do not seed the next
+    // model invocation's chunk accumulator with a completed cycle's tools.
+    const previous = streamTranscriptToolCallAccumulators.get(runKey)
+    previous?.delete(message.id)
+    if (message.provider_source_id) previous?.delete(message.provider_source_id)
+    return
+  }
   let byMessageId = streamTranscriptToolCallAccumulators.get(runKey)
   if (!byMessageId) {
     byMessageId = new Map()
@@ -4089,7 +4167,8 @@ function persistAndForwardPhysicalRunStreamChunk(
   mode: string,
   payload: unknown,
   valuesMessageIndexOffset = 0,
-  valuesSnapshotKind: "full" | "append" | "tail" = "full"
+  valuesSnapshotKind: "full" | "append" | "tail" = "full",
+  completeValuesMessages?: readonly unknown[]
 ): string | null {
   // This fence deliberately sits immediately beside persistence and renderer
   // forwarding. A provider callback may resume after any earlier await even
@@ -4099,6 +4178,47 @@ function persistAndForwardPhysicalRunStreamChunk(
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
   const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
+  const child = childTurnStreamOwner(mode, payload)
+  if (child)
+    getModsManager()?.functionTurns.observeChildStream(
+      threadId,
+      runToken,
+      child,
+      payload,
+      streamPayloadContentMode(payload)
+    )
+  if (!shouldSkipMainTranscriptStreamPayload(mode, payload, threadId))
+    getModsManager()?.functionTurns.observeStream(
+      threadId,
+      runToken,
+      payload,
+      streamPayloadContentMode(payload)
+    )
+  if (mode === "values") {
+    // Graph values are the ordered authority for final fields. Persist them at
+    // the active-run fence so delayed renderer echoes cannot restore old text,
+    // and values-only finals do not depend on an unmarked renderer writeback.
+    const snapshots = selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
+      completeMessages: completeValuesMessages,
+      loadBaselineMessages: (selectors) =>
+        getThreadMessageIdentityContext(
+          threadId,
+          selectors.map((message) => ({
+            messageId: message.id,
+            providerSourceId: getMessageProviderSourceId(message),
+            providerOccurrence: getMessageProviderOccurrence(message),
+            role: message.role as Message["role"]
+          }))
+        ),
+      loadPreviousTurnOccurrences: (userMessageId, sourceIds) =>
+        getThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, sourceIds)
+    })
+    rememberSelectedStreamTranscriptValueSnapshots(payload, snapshots)
+    for (const snapshot of snapshots) {
+      persistStreamTranscriptChunk(threadId, runToken, "messages", snapshot, { deferFlush: true })
+    }
+    flushPendingStreamTranscriptMessages(threadId, runToken)
+  }
   safeSendToWindow(window, channel, {
     type: "stream",
     mode,
@@ -4136,12 +4256,6 @@ function persistVisibleUserTranscriptMessage(
     console.warn("[Agent] Failed to persist user transcript message:", error)
     return false
   }
-}
-
-function trimStopContextText(text: string): string {
-  const trimmed = text.trim()
-  if (trimmed.length <= MAX_STOP_CONTEXT_TEXT_CHARS) return trimmed
-  return `${trimmed.slice(0, MAX_STOP_CONTEXT_TEXT_CHARS)}\n...(truncated)`
 }
 
 function trimPostRunAssistantText(text: string): string {
@@ -4336,188 +4450,6 @@ function runCoalescedMemoryMaintenance(
 ): void {
   if (!batch) return
   memoryMaintenanceCoalescer.enqueue(scopeKey, batch, mergeMemoryMaintenanceBatches, operation)
-}
-
-function extractStopContextText(raw: unknown): string {
-  if (typeof raw === "string") return raw
-  if (!Array.isArray(raw)) return ""
-  return raw
-    .map((block) => {
-      if (typeof block === "string") return block
-      if (!block || typeof block !== "object") return ""
-      const item = block as { type?: string; text?: string; content?: string }
-      if (typeof item.text === "string") return item.text
-      if (typeof item.content === "string") return item.content
-      return ""
-    })
-    .filter(Boolean)
-    .join("")
-}
-
-function isStopHookRevisionPrompt(text: string): boolean {
-  return text.trimStart().startsWith(STOP_HOOK_REVISION_PROMPT_PREFIX)
-}
-
-function stopContextRole(
-  className: string,
-  kwargs: SerializedHookMessage["kwargs"]
-): "user" | "assistant" | "tool" | "system" | "unknown" {
-  if (className.includes("Human")) return "user"
-  if (className.includes("AI")) return "assistant"
-  if (className.includes("Tool")) return "tool"
-  if (className.includes("System")) return "system"
-  if (kwargs?.type === "human") return "user"
-  if (kwargs?.type === "ai") return "assistant"
-  if (kwargs?.type === "tool") return "tool"
-  if (kwargs?.type === "system") return "system"
-  return "unknown"
-}
-
-class StopHookContextCollector {
-  private userMessage?: string
-  private assistantText = ""
-  private latestFinalAssistantResponse = ""
-  private readonly countedAiMessageIds = new Set<string>()
-  private readonly toolCallCounter = new ToolCallCounter()
-  private readonly skillUsageDetector = new SkillUsageDetector()
-
-  constructor(userMessage?: string) {
-    if (userMessage) this.userMessage = userMessage
-  }
-
-  processStreamChunk(mode: string, payload: unknown): void {
-    try {
-      if (mode === "messages") {
-        this.processMessagePayload(payload)
-        return
-      }
-      if (mode === "values") {
-        this.processValuesPayload(payload)
-      }
-    } catch (error) {
-      console.warn("[Hooks] Failed to collect Stop hook context:", error)
-    }
-  }
-
-  snapshot(overrides: StopHookContext = {}): StopHookContext {
-    const context: StopHookContext = {}
-    const userMessage = overrides.userMessage ?? this.userMessage
-    const assistantResponse =
-      overrides.assistantResponse ??
-      (this.latestFinalAssistantResponse || this.assistantText.trim())
-    const toolCalls =
-      overrides.toolCalls && overrides.toolCalls.length > 0
-        ? overrides.toolCalls
-        : this.toolCallCounter.getNames()
-    const usedSkills =
-      overrides.usedSkills && overrides.usedSkills.length > 0
-        ? overrides.usedSkills
-        : this.skillUsageDetector.getUsedSkillNames()
-
-    if (userMessage) context.userMessage = trimStopContextText(userMessage)
-    if (assistantResponse) context.assistantResponse = trimStopContextText(assistantResponse)
-    if (toolCalls.length > 0) context.toolCalls = toolCalls
-    if (usedSkills.length > 0) context.usedSkills = usedSkills
-    return context
-  }
-
-  private processMessagePayload(payload: unknown): void {
-    const [msgChunk] = payload as [SerializedHookMessage]
-    if (!msgChunk) return
-    if (isCoordinatorInternalNotificationMessage(msgChunk)) return
-    const kwargs = msgChunk.kwargs || {}
-    const classId = Array.isArray(msgChunk.id) ? msgChunk.id : []
-    const className = classId[classId.length - 1] || ""
-    const role = stopContextRole(className, kwargs)
-    const visibleUserMessage = getCoordinatorVisibleUserMessage(msgChunk)
-    const text = visibleUserMessage ?? extractStopContextText(kwargs.content ?? msgChunk.content)
-
-    if (role === "user" && text.trim() && !isStopHookRevisionPrompt(text)) {
-      this.userMessage = text.trim()
-    }
-    if (role === "assistant") {
-      if (text && this.assistantText.length <= MAX_STOP_CONTEXT_TEXT_CHARS) {
-        const remaining = MAX_STOP_CONTEXT_TEXT_CHARS + 1 - this.assistantText.length
-        this.assistantText += text.slice(0, remaining)
-      }
-      this.observeToolCalls(kwargs.tool_calls, kwargs.id ?? "")
-    }
-  }
-
-  private processValuesPayload(payload: unknown): void {
-    const state = payload as {
-      skillsMetadata?: Array<{ name?: string; path?: string }>
-      messages?: SerializedHookMessage[]
-    }
-    if (Array.isArray(state.skillsMetadata) && state.skillsMetadata.length > 0) {
-      this.skillUsageDetector.onSkillsMetadata(state.skillsMetadata)
-    }
-    if (!Array.isArray(state.messages)) return
-
-    let lastUserIndex = -1
-    for (let i = state.messages.length - 1; i >= 0; i--) {
-      const msg = state.messages[i]
-      if (isCoordinatorInternalNotificationMessage(msg)) {
-        lastUserIndex = i
-        break
-      }
-      const kwargs = msg?.kwargs || {}
-      const classId = Array.isArray(msg?.id) ? msg.id : []
-      const className = classId[classId.length - 1] || ""
-      if (stopContextRole(className, kwargs) !== "user") continue
-      const visibleUserMessage = getCoordinatorVisibleUserMessage(msg)
-      const text = (
-        visibleUserMessage ?? extractStopContextText(kwargs.content ?? msg.content)
-      ).trim()
-      if (text && !isStopHookRevisionPrompt(text)) {
-        this.userMessage = text
-        lastUserIndex = i
-        break
-      }
-    }
-
-    const finalResponses: string[] = []
-    const startIndex = lastUserIndex >= 0 ? lastUserIndex + 1 : 0
-    for (let i = startIndex; i < state.messages.length; i++) {
-      const msg = state.messages[i]
-      const kwargs = msg?.kwargs || {}
-      const classId = Array.isArray(msg?.id) ? msg.id : []
-      const className = classId[classId.length - 1] || ""
-      const role = stopContextRole(className, kwargs)
-      if (role !== "assistant") continue
-
-      const aiMessageId = typeof kwargs.id === "string" ? kwargs.id : ""
-      this.observeToolCalls(kwargs.tool_calls, aiMessageId)
-      if (Array.isArray(kwargs.tool_calls) && kwargs.tool_calls.length > 0) continue
-
-      const text = extractStopContextText(kwargs.content ?? msg.content).trim()
-      if (text) finalResponses.push(text)
-    }
-
-    if (finalResponses.length > 0) {
-      this.latestFinalAssistantResponse = finalResponses[finalResponses.length - 1]
-    }
-  }
-
-  private observeToolCalls(
-    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> | undefined,
-    aiMessageId: string
-  ): void {
-    if (!Array.isArray(toolCalls) || toolCalls.length === 0) return
-    if (aiMessageId && this.countedAiMessageIds.has(aiMessageId)) return
-    if (aiMessageId) this.countedAiMessageIds.add(aiMessageId)
-
-    for (let index = 0; index < toolCalls.length; index++) {
-      const toolCall = toolCalls[index]
-      this.toolCallCounter.register(toolCall, aiMessageId, index)
-      if (toolCall.name !== "read_file") continue
-      const readPathRaw =
-        (typeof toolCall.args?.path === "string" && toolCall.args.path) ||
-        (typeof toolCall.args?.file_path === "string" && toolCall.args.file_path) ||
-        ""
-      if (readPathRaw) this.skillUsageDetector.onReadFilePath(readPathRaw)
-    }
-  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -5768,50 +5700,52 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "agent:goal-control",
     async (event, { threadId, message }: { threadId: string; message: string }) => {
-      return withThreadRunMutationLock(threadId, async () => {
-        const window = BrowserWindow.fromWebContents(event.sender)
-        const activeController = activeRuns.get(threadId)
-        const channel = activeController
-          ? (streamChannelByRunController.get(activeController) ?? `agent:stream:${threadId}`)
-          : `agent:stream:${threadId}`
-        // Choose the active request channel under the same lock used by run
-        // replacement. A terminating goal command must abort and complete the
-        // same physical request, never a predecessor or queued successor.
-        lastFetchErrorByChannel.delete(channel)
-        lastFailoverByChannel.delete(channel)
-        const goalCommand = parseGoalSlashCommand(message)
-        const result = handleGoalNonStartingControlCommand({
-          threadId,
-          command: goalCommand,
-          originalMessage: message,
-          window,
-          channel,
-          sendDone: false,
-          sendDoneForTerminatingControl: true
-        })
-        if (!result.handled) {
-          return {
-            ...result,
-            notice: emitGoalNotice(
-              window,
-              channel,
-              threadId,
-              "该 /goal 命令需要在当前运行结束后发送。"
-            )
-          }
-        }
-        return result
-      })
+      const window = BrowserWindow.fromWebContents(event.sender)
+      if (!window) throw new Error("Agent goal control window is unavailable")
+      return executeAgentGoalControl(
+        { threadId, message },
+        createBrowserWindowAgentRunDelivery(window),
+        { source: "desktop" }
+      )
     }
   )
 
   // Handle agent invocation with streaming. The transport-neutral run body is
   // registered here; the IPC listener below is only an adapter into this path.
   registerActiveAgentRunInspector(hasActiveAgentRun)
+  // Same abort the Stop button's ordinary path takes; exposed so a caller that
+  // only knows "this thread has a background run" can reach it without owning
+  // the stream. See cancelActiveAgentRun.
+  registerActiveAgentRunCanceller((threadId) => {
+    const controller = activeRuns.get(threadId)
+    if (!controller) return false
+    LocalSandbox.cancelBackgroundTasks(threadId)
+    const activeRunToken = turnStates.get(threadId)?.runToken
+    if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
+    controller.abort()
+    handleAutoModeAgentCancelled(threadId)
+    return true
+  })
+  registerAgentGoalControlImplementation(executeAgentGoalControl)
 
-  registerAgentRunImplementation(
-    async (
-      {
+  registerAgentRunImplementation((request, delivery, incomingRunExecutionContext) => {
+    // onRunTerminated is contracted to fire exactly once per run, and this body
+    // returns from dozens of places — Goal command handling alone has a dozen
+    // early returns before the main try block. Deduplicating and defaulting
+    // around the whole implementation is the only placement that actually
+    // holds: a managed caller has no stream to fall back on, so an unreported
+    // run reaches it as an unexplained "no reply".
+    let terminalReported = false
+    const runExecutionContext: AgentRunExecutionContext = {
+      ...incomingRunExecutionContext,
+      onRunTerminated: (terminal) => {
+        if (terminalReported) return
+        terminalReported = true
+        incomingRunExecutionContext.onRunTerminated?.(terminal)
+      }
+    }
+    return agentRunExecutionContextStorage.run(runExecutionContext, async () => {
+      const {
         threadId,
         message,
         modelId,
@@ -5820,9 +5754,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         agentMode: requestedAgentMode,
         managedExecution,
         coordinatorInternalNotification
-      }: AgentInvokeParams,
-      delivery
-    ) => {
+      }: AgentInvokeParams = request
+      if (!managedExecution && managedBizRetryService.blocksThread(threadId)) {
+        const error = "请在决策入口操作"
+        delivery.send(
+          resolveAgentStreamRequestChannel(`agent:stream:${threadId}`, streamRequestId),
+          { type: "error", error }
+        )
+        runExecutionContext.onRunTerminated?.({
+          outcome: "error",
+          code: "human_decision_pending",
+          message: error
+        })
+        return
+      }
       // Freeze a mode/workspace snapshot from the durable thread BEFORE anything
       // can patch it: workflow-notification detection and forced-coordinator
       // gating must see the state the request was prepared against, not a later
@@ -5838,6 +5783,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       )
       const initialInvokeWorkspacePath = initialInvokeParsedMetadata.workspacePath
       const baseChannel = `agent:stream:${threadId}`
+      // May be a managed transport's shim rather than a real window — only
+      // id / isDestroyed / webContents.send / webContents.isDestroyed exist on
+      // it. See AgentRunDelivery.window before using anything else.
       const window = delivery.window
 
       console.log("[Agent] Received invoke request:", {
@@ -5868,8 +5816,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         : baseChannel
       const channel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
       if (rejectAgentStartDuringShutdown(window, channel)) return
-      if (rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)) return
-      if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
+      if (
+        runExecutionContext.source === "desktop" &&
+        rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)
+      ) {
+        return
+      }
+      if (
+        rejectDesktopRunForForeignOwner(
+          threadId,
+          window,
+          channel,
+          runExecutionContext,
+          isTrustedCoordinatorNotificationInvoke
+            ? "coordinator"
+            : isWorkflowNotificationInvoke
+              ? "workflow"
+              : undefined
+        )
+      ) {
+        return
+      }
       let modelInputMessage = message
       let routingMessage = message
       let rootUserPrompt = message
@@ -5905,17 +5872,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               channel,
               sendDone: true
             })
-            if (controlResult.handled) return
+            if (controlResult.handled) {
+              runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
+              return
+            }
 
             if (goalCommand.type === "resume") {
               const currentGoal = goalManager.get(threadId)
               if (currentGoal?.status === "active" && activeRuns.has(threadId)) {
                 emitGoalNotice(window, channel, threadId, "Goal 正在进行中，无需 resume。")
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
               if (!currentGoal) {
                 emitGoalNotice(window, channel, threadId, "没有可继续的 goal。")
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5926,6 +5898,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 已完成，不能 resume。清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5936,6 +5909,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5967,6 +5941,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 状态已变化，请重新发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5986,6 +5961,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 状态已变化，请重新发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -5996,6 +5972,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 已完成，不能 resume。清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6006,6 +5983,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后发送 /goal resume。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6022,6 +6000,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   goal ? `Goal 当前状态：${goal.status}。` : "没有可继续的 goal。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6051,6 +6030,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后再设置新的 goal。暂停请发送 /goal pause，清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6084,6 +6064,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "Goal 状态已变化，请重新发送 /goal <目标>。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6094,6 +6075,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   threadId,
                   "当前线程正在运行，稍后再设置新的 goal。暂停请发送 /goal pause，清除请发送 /goal clear。"
                 )
+                runExecutionContext.onRunTerminated?.({ outcome: "success", code: "normal" })
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
@@ -6161,7 +6143,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           normalSubagentsEnabled: initialInvokeMetadata.subagentsEnabled !== false,
           threadIncarnation: captureThreadIncarnation(initialInvokeThread)
         }
-        const nextInvokeRunToken = uuid()
+        const nextInvokeRunToken = runExecutionContext.localRunLease?.runId ?? uuid()
         const replacement = await withThreadRunMutationLock(threadId, () =>
           withActiveRunReplacementLock(threadId, async () => {
             if (rejectAgentStartDuringShutdown(window, channel)) {
@@ -6191,7 +6173,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               closePhysicalStreamRunBeforeSetupPublication(window, channel, error)
               return { prePublicationFailure: true as const }
             }
-            const leaseClaim = claimDesktopThreadRunLease(threadId, nextInvokeRunToken)
+            const leaseClaim = runExecutionContext.localRunLease
+              ? claimAgentThreadRunLease(threadId, nextInvokeRunToken, runExecutionContext)
+              : claimDesktopThreadRunLease(threadId, nextInvokeRunToken)
             if (!leaseClaim.acquired) {
               return { leaseConflict: leaseClaim.conflict }
             }
@@ -6216,7 +6200,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             predecessorSettlement = await waitForReplacedRunToSettle(threadId)
             if (rejectAgentStartDuringShutdown(window, channel)) {
               clearCurrentRunMessageQueue(threadId, nextInvokeRunToken)
-              releaseLocalThreadRunLease(threadId, "desktop", nextInvokeRunToken)
+              if (!runExecutionContext.localRunLease?.managedExternally) {
+                releaseLocalThreadRunLease(
+                  threadId,
+                  runExecutionContext.localRunLease?.owner ?? "desktop",
+                  nextInvokeRunToken
+                )
+              }
               return { startRejectedDuringShutdown: true as const }
             }
 
@@ -6287,6 +6277,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           activeRunSettledPromise,
           resolveActiveRunSettled
         } = replacement
+        const externalSignal = runExecutionContext.signal
+        const abortFromExternalSignal = (): void => {
+          if (!abortController.signal.aborted) abortController.abort(externalSignal?.reason)
+        }
+        if (externalSignal?.aborted) {
+          abortFromExternalSignal()
+        } else {
+          externalSignal?.addEventListener("abort", abortFromExternalSignal, { once: true })
+        }
+        const removeExternalAbortSubscription = (): void => {
+          externalSignal?.removeEventListener("abort", abortFromExternalSignal)
+        }
         const physicalStreamRunSetupGuard = createPhysicalStreamRunSetupGuard({
           isActive: () => isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
           ownsLease: () => ownsPhysicalStreamRunLease(threadId, runToken, abortController),
@@ -6305,11 +6307,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         })
         pendingPhysicalStreamRunSetupGuard = physicalStreamRunSetupGuard
+        physicalStreamRunSetupGuard.addCleanup(removeExternalAbortSubscription)
         physicalStreamRunSetupGuard.addCleanup((_wasActive, wasOwner) => {
           if (!wasOwner) return
           revokeSandboxAclsForRun(runToken)
           discardAgentAutoCommitTracking(threadId)
-          releaseLocalThreadRunLease(threadId, "desktop", runToken)
+          if (!runExecutionContext.localRunLease?.managedExternally) {
+            releaseLocalThreadRunLease(
+              threadId,
+              runExecutionContext.localRunLease?.owner ?? "desktop",
+              runToken
+            )
+          }
           if (shouldDisposeTurnState(threadId, runToken)) {
             disposeTurnRuntimeState(threadId, turnState)
           }
@@ -6344,6 +6353,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const durableRuntimeTail = durableRuntimeTailSetup.value
         let userTranscriptMessagePersisted = false
         let visibleTranscriptUserMessage = message
+        // A managed transport resolves its skill out of band (trustedExplicitSkill)
+        // and hands us prose whose own markers were already neutralized, so the
+        // transcript would carry no record that a skill was chosen at all — the
+        // desktop draws its chip from a block inside the message text, which the
+        // renderer composer appends before submitting.
+        //
+        // Append the same block here so both paths render identically. Order is
+        // load-bearing twice over: the parser only accepts a block at the very
+        // end (anything after it is treated as prose), and appending ours after
+        // the neutralized text is what keeps a remote sender from forging one —
+        // theirs is defanged upstream, and only this one is ever added.
+        if (runExecutionContext.trustedExplicitSkill) {
+          visibleTranscriptUserMessage = [
+            visibleTranscriptUserMessage.trimEnd(),
+            formatComposerSkillUseBlock(runExecutionContext.trustedExplicitSkill)
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+        }
         let prefixedCoordinatorModeCommitted = false
 
         // A coordinator prefix is both a mode transition request and the first
@@ -6451,7 +6479,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           flushPendingStreamTranscriptMessages(threadId, runToken)
           abortController.abort()
         }
-        const removeWindowClosedSubscription = subscribeWindowClosed(window, onWindowClosed)
+        // Asks whether there is a window to watch, not who owns the run. Those
+        // used to be the same question — only a renderer's invoke was "desktop"
+        // and it always brought a real window. The main-process summary
+        // scheduler is a desktop-owned run with no window at all, and this
+        // subscription reached straight past the shim into BrowserWindow.once.
+        const removeWindowClosedSubscription =
+          runExecutionContext.source === "desktop" && !isManagedTransportWindow(window)
+            ? subscribeWindowClosed(window, onWindowClosed)
+            : () => undefined
         physicalStreamRunSetupGuard.addCleanup(() => {
           removeWindowClosedSubscription()
         })
@@ -6494,7 +6530,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         })
         const skillUsageDetector = new SkillUsageDetector()
         const toolCallCounter = new ToolCallCounter()
-        let assistantText = ""
+        const assistantText = new StreamAssistantText()
+        const currentTurnAssistantText = new StreamAssistantText()
         const fileWritePaths: string[] = []
         let drainedCoordinatorNotifications: CoordinatorTurnNotification[] = []
         let coordinatorNotificationsConsumed = false
@@ -6634,6 +6671,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           suppressNotificationAutoRun?: boolean
           stream?: { mode: "messages" | "values"; data: unknown }
         }): void => {
+          // Ahead of the active-run gate, deliberately. A background worker
+          // normally finishes *after* the turn that launched it — that is what
+          // makes its result detached — so gating this told the transport only
+          // in the rare case where it had no need to be told. Nothing else
+          // wakes that transport for a worker result, and once the desktop
+          // scheduler started correctly leaving managed results alone, a Team
+          // worker started from Zhaohu was summarised by nobody at all.
+          if (event.notification && event.suppressNotificationAutoRun !== true) {
+            notifyManagedDetachedResult(runExecutionContext, {
+              kind: "coordinator",
+              threadId
+            })
+          }
           if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
           if (event.stream) {
             sendCoordinatorWorkerStream(
@@ -6645,13 +6695,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             return
           }
+          const managedByExternalTransport =
+            runExecutionContext.source === "im" &&
+            Boolean(runExecutionContext.onDetachedResultAvailable)
+          const suppressNotificationAutoRun = managedByExternalTransport
+            ? true
+            : event.suppressNotificationAutoRun
           if (event.workers) {
             sendCoordinatorWorkers(
               window,
               channel,
               event.workers,
               event.notification,
-              event.suppressNotificationAutoRun
+              suppressNotificationAutoRun
             )
           } else {
             sendCoordinatorWorkerDelta(
@@ -6659,7 +6715,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               channel,
               event.worker,
               event.notification,
-              event.suppressNotificationAutoRun
+              suppressNotificationAutoRun
             )
           }
         }
@@ -6771,7 +6827,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         ): SkillProposalWindowContext => {
           appendSkillProposalWindowTurn(threadId, {
             userMessage: message,
-            assistantText,
+            assistantText: assistantText.text,
             toolCallNames: toolCallCounter.getNames(),
             toolCallCount: toolCallCounter.getCount(),
             status,
@@ -6800,17 +6856,44 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // High-water mark of input tokens — hoisted for catch/finally access
         let highWaterInputTokens = 0
         let autoModeTerminal: AutoModeTerminal | undefined
+        // Recorded on every background task this turn launches — a workflow or a
+        // coordinator worker — so the answer survives to a restart, when the run
+        // that made it is gone, and it is also what an automatic summary drains
+        // by. Explicit when the caller had to tell it apart from the lease; the
+        // lease's answer otherwise.
+        const backgroundNotificationOwner: BackgroundNotificationOwner =
+          runExecutionContext.backgroundNotificationOwner ??
+          (runExecutionContext.localRunLease?.managedExternally ? "managed" : "desktop")
         const workflowLaunchedRunIds = new Set<string>()
         const onWorkflowLaunched = (runId: string): void => {
           const normalized = runId.trim()
-          if (normalized) workflowLaunchedRunIds.add(normalized)
+          if (!normalized) return
+          workflowLaunchedRunIds.add(normalized)
+          notifyManagedDetachedResult(runExecutionContext, {
+            kind: "workflow",
+            threadId,
+            runId: normalized
+          })
         }
         const markAutoModeTerminal = (
           outcome: AgentTurnEndEvent["outcome"],
           code: AutoModeTerminalCode,
-          terminalMessage?: string
+          terminalMessage?: string,
+          terminalError?: unknown
         ): void => {
           autoModeTerminal = createAutoModeTerminal(outcome, code, terminalMessage)
+          // Failures are reported to the renderer and then swallowed, so this
+          // run resolves normally either way. A managed transport has no stream
+          // to read: without this it can only infer failure from "no final
+          // text", collapsing a retryable provider blip and a hook halt into
+          // one generic error. The original error travels along so the caller
+          // keeps its own retry policy.
+          runExecutionContext.onRunTerminated?.({
+            outcome,
+            code,
+            ...(terminalMessage ? { message: terminalMessage } : {}),
+            ...(terminalError !== undefined ? { error: terminalError } : {})
+          })
         }
         // Actual model used after failover — hoisted for catch/finally routing feedback
         let usedModelId: string | undefined
@@ -6893,6 +6976,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.log("[Agent] Thread metadata:", metadata)
 
           const workspacePath = parsedThreadMetadata.workspacePath
+          // A managed transport authorized this run against a target — its
+          // workspace, grant, feature binding and delivery context — and then
+          // did async work before it started. The thread may have been
+          // repointed or rebound since. Only the caller knows what it
+          // authorized, so it re-checks; this file has no concept of a grant.
+          const authorizationRefusal = runExecutionContext.verifyResolvedThread?.({
+            workspacePath,
+            metadata
+          })
+          if (authorizationRefusal) throw new Error(authorizationRefusal)
           sessionWorkspacePath = workspacePath ?? undefined
           const harnessAgentContext = await getHarnessAgentContext(metadata, {
             workspacePath,
@@ -6960,9 +7053,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
           if (matchesWorkflowNotificationPrompt && parsedThreadMetadata.agentMode === "workflow") {
+            // Scoped to this turn's owner. The trigger only ever arrives from an
+            // automatic summary, and two of those can be pending on one thread:
+            // claiming whatever was newest let a desktop turn report a run owed
+            // to Zhaohu, whose reader then never heard about it.
             const pendingWorkflowRun = await workflowRunManager.claimPendingNotificationAsync(
               workspacePath,
-              threadId
+              threadId,
+              { owner: backgroundNotificationOwner }
             )
             if (!pendingWorkflowRun) {
               console.log("[Workflow] Ignoring stale workflow notification trigger", { threadId })
@@ -7074,6 +7172,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             prepareStandardUserPrompt({
               rawMessage,
               initialModelInput,
+              trustedExplicitSkill: runExecutionContext.trustedExplicitSkill,
+              allowExplicitSkillFromMessage:
+                runExecutionContext.source === "desktop" ||
+                runExecutionContext.allowTrustedTransportSkillMarker === true,
               threadId,
               workspacePath,
               turnState,
@@ -7099,6 +7201,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             throwIfInvokeAborted()
             if (!preparedPrompt.accepted) {
               if (preparedPrompt.blockedBy === "explicit_skill") {
+                // Distinct from a completion (Stop) hook halt: this input never
+                // reached the model, and IM tells the user so.
+                runExecutionContext.onRunTerminated?.({
+                  outcome: "error",
+                  code: "prompt_blocked",
+                  message: preparedPrompt.reason
+                })
+                markAutoModeTerminal("error", "hook_halt", preparedPrompt.reason)
                 pauseActiveGoalForRuntimeStop(preparedPrompt.reason)
                 safeSendToWindow(window, channel, {
                   type: "error",
@@ -7107,6 +7217,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 finishTraceInBackground(tracer, "error", preparedPrompt.reason, "Agent")
                 turnStateShouldDispose = true
               } else if (preparedPrompt.blockedBy === "user_prompt_submit") {
+                runExecutionContext.onRunTerminated?.({
+                  outcome: "error",
+                  code: "prompt_blocked",
+                  message: "UserPromptSubmit hook stopped the turn"
+                })
+                markAutoModeTerminal(
+                  "error",
+                  "hook_halt",
+                  "UserPromptSubmit hook stopped the turn"
+                )
                 pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped the turn.")
                 sendHookBlocked(
                   "UserPromptSubmit",
@@ -7259,12 +7379,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 error: errorMessage
               })
               sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
-              finishTraceInBackground(
-                tracer,
-                "error",
-                "COORDINATOR_NORMAL_MODE_BLOCKED",
-                "Agent"
-              )
+              finishTraceInBackground(tracer, "error", "COORDINATOR_NORMAL_MODE_BLOCKED", "Agent")
               return
             }
           }
@@ -7444,12 +7559,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 error: buildNormalModeGuardMessage(blockedNormalModeGuardState)
               })
               sendCoordinatorWorkers(window, channel, blockedNormalModeGuardState.workers)
-              finishTraceInBackground(
-                tracer,
-                "error",
-                "COORDINATOR_NORMAL_MODE_BLOCKED",
-                "Agent"
-              )
+              finishTraceInBackground(tracer, "error", "COORDINATOR_NORMAL_MODE_BLOCKED", "Agent")
               return
             }
           }
@@ -7491,12 +7601,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 error: errorMessage
               })
               sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
-              finishTraceInBackground(
-                tracer,
-                "error",
-                "COORDINATOR_NORMAL_MODE_BLOCKED",
-                "Agent"
-              )
+              finishTraceInBackground(tracer, "error", "COORDINATOR_NORMAL_MODE_BLOCKED", "Agent")
               return
             }
           }
@@ -7571,13 +7676,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               queuedNotifications: notifications,
               promptNotifications,
               notificationSelectedSkills
-            } = await prepareQueuedCoordinatorNotificationsForPrompt(threadId, () => {
-              if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
-              safeSendToWindow(window, channel, {
-                type: "custom",
-                data: { type: "coordinator_notification_deferred" }
-              })
-            })
+            } = await prepareQueuedCoordinatorNotificationsForPrompt(
+              threadId,
+              isCoordinatorNotificationTurn ? backgroundNotificationOwner : undefined,
+              () => {
+                if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
+                safeSendToWindow(window, channel, {
+                  type: "custom",
+                  data: { type: "coordinator_notification_deferred" }
+                })
+              }
+            )
             throwIfInvokeAborted()
             drainedCoordinatorNotifications = promptNotifications
             coordinatorNotificationsConsumed = promptNotifications.length === 0
@@ -7793,6 +7902,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
+            // Centralized product budget (agent-runtime-limits). Hardcoding it
+            // here made one logical turn's budget depend on which entry point
+            // resumed it, and left the IM path below the limit it used to get.
             recursionLimit: getAgentGraphRecursionLimit()
           }
 
@@ -7803,8 +7915,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           lastFailoverByChannel.set(channel, failoverAttempts)
           const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
           const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({
-            source: "desktop",
-            runLease: { owner: "desktop", runId: runToken },
+            source: runExecutionContext.source,
+            runLease: {
+              owner: runExecutionContext.localRunLease?.owner ?? "desktop",
+              runId: runToken
+            },
             baseOptions: () => ({
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
@@ -7816,10 +7931,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
+              ...foregroundToolPolicy(effectiveAgentMode, metadata),
+              allowDeferredUserInputRenderer: runExecutionContext.source === "im",
+              interactionWaitHooks:
+                runExecutionContext.source === "im"
+                  ? runExecutionContext.interactionWaitHooks
+                  : undefined,
+              extraSystemPrompt: runExecutionContext.extraSystemPrompt,
               agentMode: effectiveAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
               traceContext: runtimeTraceContext,
               soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -7840,9 +7959,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,
               onWorkflowLaunched,
+              backgroundNotificationOwner,
               onTurnCompletionRecovery: sendTurnCompletionNotice
             }),
-            harnessContext: harnessAgentContext
+            harnessContext: harnessAgentContext,
+            remotePolicy: runExecutionContext.remotePolicy
           })
           usedModelId = effectiveModelId
           const isFirstAttempt = true
@@ -7854,6 +7975,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             try {
               soloTaskTraceManager?.setModelId(candidateId)
               agent = await invokeRuntimeFactory.create(candidateId)
+              if (workspacePath)
+                await getModsManager()?.startFunctionTurn({
+                  workspace: workspacePath,
+                  threadId,
+                  runId: runToken,
+                  turnId: ensureTurnId(turnState, threadId, "invoke"),
+                  text: effectiveMessage,
+                  signal: abortController.signal,
+                  cancel: () =>
+                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
+                  assertCurrent: () =>
+                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                })
               throwIfInvokeAborted()
               // First attempt sends the message; subsequent attempts resume from checkpoint
               const input = isFirstAttempt ? { messages: humanMessages } : null
@@ -7989,7 +8123,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             mode: string,
             payload: unknown,
             valuesMessageIndexOffset: number,
-            valuesSnapshotKind: "full" | "append" | "tail"
+            valuesSnapshotKind: "full" | "append" | "tail",
+            completeValuesMessages?: readonly unknown[]
           ): string | null => {
             return persistAndForwardPhysicalRunStreamChunk(
               window,
@@ -8000,7 +8135,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               mode,
               payload,
               valuesMessageIndexOffset,
-              valuesSnapshotKind
+              valuesSnapshotKind,
+              completeValuesMessages
             )
           }
 
@@ -8039,11 +8175,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const isCapturedSoloTaskMessage =
                 isAI && soloTaskTraceManager?.hasCapturedTask(soloTaskOwnerId) === true
 
+              const textUpdated = assistantText.processMessage(payload)
+              currentTurnAssistantText.processMessage(payload)
+              if (textUpdated) lastFinalText = undefined
               if (!isAI) return
 
               const rawContent = kwargs.content ?? msgChunk.content
               const visibleText = extractTextBlocks(rawContent)
-              if (visibleText) assistantText += visibleText
 
               // Tool-call extraction — deduped by message ID.
               const toolCalls = kwargs.tool_calls as
@@ -8055,16 +8193,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 | undefined
               const msgId = (kwargs.id as string) || ""
               const premergedReasoning = getPremergedStreamSideEffectReasoning(payload)
-              const streamedReasoning = extractVisibleReasoning(kwargs, MAX_TRACE_CONTENT + 1)
+              const reasoningUpdate = readStreamTranscriptReasoning(
+                payload as unknown[], streamPayloadContentMode(payload), MAX_TRACE_CONTENT + 1
+              )
               if (msgId && premergedReasoning !== undefined) {
                 _reasoningByAiMessageId.set(msgId, premergedReasoning)
-              } else if (msgId && streamedReasoning) {
+              } else if (msgId && reasoningUpdate.reasoning !== undefined) {
                 const existingReasoning = _reasoningByAiMessageId.get(msgId) ?? ""
-                const reasoning = className.includes("AIMessageChunk")
-                  ? isTraceReasoningTruncated(existingReasoning)
+                const reasoning = reasoningUpdate.reasoning_mode === "snapshot"
+                  ? reasoningUpdate.reasoning
+                  : isTraceReasoningTruncated(existingReasoning)
                     ? existingReasoning
-                    : mergeStreamingReasoning(existingReasoning, streamedReasoning)
-                  : streamedReasoning
+                    : existingReasoning + reasoningUpdate.reasoning
                 _reasoningByAiMessageId.set(
                   msgId,
                   truncateReasoningForTrace(reasoning, MAX_TRACE_CONTENT)
@@ -8120,9 +8260,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             valuesSnapshotKind: "full" | "append" | "tail" = "full"
           ): void => {
             try {
-              const state = payload as {
-                skillsMetadata?: Array<{ name?: string; path?: string }>
-                messages?: SerializedValuesSideEffectMessage[]
+              const state = {
+                ...(payload as {
+                  skillsMetadata?: Array<{ name?: string; path?: string }>
+                  messages?: SerializedValuesSideEffectMessage[]
+                })
               }
               const skillsMetadata = Array.isArray(state.skillsMetadata) ? state.skillsMetadata : []
               if (skillsMetadata.length > 0) {
@@ -8136,8 +8278,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const messagesForSideEffects =
                 valuesSnapshotKind === "full"
                   ? incomingMessages
-                  : [...valuesSideEffectTail, ...incomingMessages]
+                  : valuesSnapshotKind === "tail"
+                    ? [...valuesSideEffectTail.slice(0, -1), ...incomingMessages]
+                    : [...valuesSideEffectTail, ...incomingMessages]
               state.messages = messagesForSideEffects
+              const normalizedValueSnapshots =
+                getSelectedStreamTranscriptValueSnapshots(payload) ??
+                selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
+                  completeMessages: messagesForSideEffects
+                })
+              for (const tuple of normalizedValueSnapshots) {
+                const snapshot = tuple[0] as SerializedValuesSideEffectMessage
+                const className = Array.isArray(snapshot.id) ? snapshot.id.at(-1) ?? "" : ""
+                if (!className.includes("AI") && snapshot.kwargs?.type !== "ai") continue
+                const localOccurrence = getStreamTranscriptValueLocalOccurrence(tuple)
+                assistantText.applySnapshot(snapshot, undefined, localOccurrence)
+                currentTurnAssistantText.applySnapshot(snapshot, undefined, localOccurrence)
+              }
 
               const turnPromptCandidates = [
                 currentTurnUserMessageForEvidence,
@@ -8294,20 +8451,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
               }
 
-              const finalMsgs = state.messages.slice(valuesStartIndex).filter((m) => {
-                const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
-                const kw = m.kwargs || {}
-                const isAiMessage = cn.includes("AI") || kw.type === "ai"
-                return (
-                  isAiMessage &&
-                  (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
-                )
-              })
+              const finalMsgs = normalizedValueSnapshots
+                .map((tuple) => tuple[0] as SerializedValuesSideEffectMessage)
+                .filter((m) => {
+                  const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
+                  const kw = m.kwargs || {}
+                  return cn.includes("AI") || kw.type === "ai"
+                })
               const last = finalMsgs[finalMsgs.length - 1]
               if (last) {
                 const kw = last.kwargs || {}
                 const text = extractTextBlocks(kw.content).trim()
-                if (text) lastFinalText = text
+                if (Array.isArray(kw.tool_calls) && kw.tool_calls.length > 0) {
+                  lastFinalText = undefined
+                } else if (typeof kw.content === "string" || Array.isArray(kw.content)) {
+                  lastFinalText = text
+                }
               }
 
               if (valuesSnapshotKind === "full") {
@@ -8339,12 +8498,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
           }
 
-          let lastFinalText = ""
-          let currentTurnAssistantStart = 0
+          let lastFinalText: string | undefined
           const getCurrentAssistantResponse = (): string =>
             getCurrentTurnAssistantResponse({
-              assistantText,
-              currentTurnAssistantStart,
+              assistantText: currentTurnAssistantText.text,
+              currentTurnAssistantStart: 0,
               lastFinalText
             })
 
@@ -8429,7 +8587,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   mode,
                   serialized,
                   valuesMessageIndexOffset,
-                  valuesSnapshotKind
+                  valuesSnapshotKind,
+                  mode === "values" ? latestValuesSnapshot.messages : undefined
                 )
                 if (messageId) inFlightStreamMessageIds.add(messageId)
                 if (mode === "messages") {
@@ -8616,6 +8775,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!abortController.signal.aborted) {
             while (!abortController.signal.aborted) {
               const completionOutcome = await runCompletionHooksWithRevision({
+                hasTerminalModelRefusal: () =>
+                  !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
                 threadId,
                 workspacePath: workspacePath ?? undefined,
                 turnId: turnState.turnId,
@@ -8661,6 +8822,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
               })
               throwIfInvokeAborted()
+              if (readTurnCompletionGateReport(threadId, runToken)?.refusal) {
+                pauseActiveGoalForRuntimeStop("Model provider refused the request.")
+                break
+              }
 
               if (completionOutcome === "failed") {
                 clearCoordinatorNotificationSelectedSkillsOnExit = true
@@ -9006,10 +9171,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
               modelInputMessage = goalContinuationInput
               currentTurnUserMessageForEvidence = goalContinuationInput
-              currentTurnAssistantStart = assistantText.length
+              currentTurnAssistantText.reset()
+              assistantText.beginSegment()
               currentTurnToolCallStart = toolCallCounter.getCount()
               currentTurnEvidenceStart = goalEvidenceBuffer.getCount()
-              lastFinalText = ""
+              lastFinalText = undefined
               sendGoalNotice(outcome.notice)
               const continued = await consumeGoalContinuationWithFailover(
                 goalContinuationInput,
@@ -9121,7 +9287,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   : rootUserPrompt,
                 snapshot: autoCommit.snapshot,
                 window,
-                channel
+                channel,
+                // Same two questions as the window-close subscription above:
+                // a desktop-owned run is not necessarily one with a window to
+                // hang a modal on.
+                canPromptModal:
+                  runExecutionContext.source === "desktop" && !isManagedTransportWindow(window)
               })
               await markLatestForkBoundaryBestEffort({
                 threadId,
@@ -9132,8 +9303,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             throwIfInvokeAborted()
-            if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
-              scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            if (invokeFinalOutcome === "success") {
+              // Team/Workflow notification turns are normally claimed by the
+              // main-process IM pump. If the renderer won that durable claim first,
+              // observe its final assistant row as a fallback so an authorized IM
+              // route still receives the detached result. The observer is a no-op
+              // for threads without an active remote grant.
+              await deliverManagedAgentRunCompletion(
+                runExecutionContext,
+                threadId,
+                runToken,
+                desktopCompletionCursor
+              )
             }
             turnStateShouldDispose = true
             if (!autoModeTerminal) {
@@ -9151,7 +9332,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 key: `agent:${threadId}:${turnState.turnId}`
               })
             }
-            const postRunAssistantText = trimPostRunAssistantText(assistantText)
+            const postRunAssistantText = trimPostRunAssistantText(assistantText.text)
             if (invokeFinalOutcome === "success") {
               notifyIfBackground(
                 "✅ 任务完成",
@@ -9312,8 +9493,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                           isPathInsideAnyDirectory(filePath, memoryDirectoryPaths, workspacePath)
                         )
                     )
-                    const directMemoryTurnCount =
-                      memoryBatch.turns.length - turnsToSummarize.length
+                    const directMemoryTurnCount = memoryBatch.turns.length - turnsToSummarize.length
 
                     const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
                       const memRoutingResult = await resolveModel({
@@ -9450,6 +9630,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               console.warn("[Agent] Failed to schedule memory maintenance:", error)
             }
           } else {
+            notifyManagedAgentRunCancelled(runExecutionContext)
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
             finishTraceInBackground(tracer, "cancelled", undefined, "Agent")
@@ -9500,7 +9681,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "hook_halt", error.reason)
+            markAutoModeTerminal("error", "hook_halt", error.reason, error)
             return
           }
           const actionStationarityHalt = getActionStationarityHaltError(error)
@@ -9530,7 +9711,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "failure_fuse", actionStationarityHalt.decision.reason)
+            markAutoModeTerminal("error", "failure_fuse", actionStationarityHalt.decision.reason, error)
             return
           }
           const failureFuseHalt = getFailureFuseHaltError(error)
@@ -9540,12 +9721,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             pauseActiveGoalForRuntimeStop(failureFuseHalt.decision.reason)
             sendFailureFuseHalt(window, channel, failureFuseHalt)
             syncUsedSkillsContext()
-            finishTraceInBackground(
-              tracer,
-              "cancelled",
-              failureFuseHalt.decision.reason,
-              "Agent"
-            )
+            finishTraceInBackground(tracer, "cancelled", failureFuseHalt.decision.reason, "Agent")
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -9557,7 +9733,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "failure_fuse", failureFuseHalt.decision.reason)
+            markAutoModeTerminal("error", "failure_fuse", failureFuseHalt.decision.reason, error)
             return
           }
           // Ignore abort-related errors (expected when stream is cancelled)
@@ -9656,9 +9832,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
               })
             }
-            markAutoModeTerminal("error", "provider_error", errMsg)
+            markAutoModeTerminal("error", "provider_error", errMsg, error)
             turnStateShouldDispose = true
           } else {
+            notifyManagedAgentRunCancelled(runExecutionContext)
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
             finishTraceInBackground(tracer, "cancelled", undefined, "Agent")
@@ -9699,11 +9876,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // catch's documented halt semantics; the run stays re-discoverable.
           await settlePhysicalAgentRun({
             kind: "invoke",
+            functionTurnReason: autoModeTerminal
+              ? autoModeTerminal.outcome === "success"
+                ? "answer"
+                : "error"
+              : undefined,
             threadId,
             runToken,
             controller: abortController,
             settledPromise: activeRunSettledPromise,
             resolveSettlement: resolveActiveRunSettled,
+            runOwner: runExecutionContext.localRunLease?.owner ?? "desktop",
+            releaseRunLease: !runExecutionContext.localRunLease?.managedExternally,
             criticalBeforeReleasePhases: [
               {
                 name: "settle-managed-workflow-handoff",
@@ -9757,9 +9941,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     const contextModelId =
                       usedModelId ?? invokeRoutingResult?.resolvedModelId ?? modelId
                     const maxTokens = (
-                      contextModelId
-                        ? getModelConfigByRef(contextModelId)
-                        : getDefaultModelConfig()
+                      contextModelId ? getModelConfigByRef(contextModelId) : getDefaultModelConfig()
                     )?.maxTokens
                     if (
                       highWaterInputTokens > 0 &&
@@ -9815,7 +9997,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   )
               }
             ],
-            removeWindowListener: removeWindowClosedSubscription,
+            removeWindowListener: () => {
+              removeWindowClosedSubscription()
+              removeExternalAbortSubscription()
+            },
             settleNotifications: () => settleDrainedCoordinatorNotifications("restore"),
             cleanupNotificationSkills: () => {
               if (!clearCoordinatorNotificationSelectedSkillsOnExit) return
@@ -9859,8 +10044,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard?.abandon()
         pendingPhysicalStreamRunSetupGuard = undefined
       }
-    }
-  )
+    }).finally(() => {
+      // Nothing classified this run: an early return, or a throw before the
+      // main body ever started. Reporting `unknown` lets a managed caller tell
+      // "ended without a reply" from "never reported".
+      runExecutionContext.onRunTerminated?.({ outcome: "unknown", code: "unknown" })
+    })
+  })
 
   // Transport adapter for renderer-originated agent invocations.
   ipcMain.on("agent:invoke", (event, request: AgentInvokeParams) => {
@@ -10594,6 +10784,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             configurable: { thread_id: threadId },
             signal: abortController.signal,
             streamMode: ["messages", "values"] as ("messages" | "values")[],
+            // Centralized product budget (agent-runtime-limits). Hardcoding it
+            // here made one logical turn's budget depend on which entry point
+            // resumed it, and left the IM path below the limit it used to get.
             recursionLimit: getAgentGraphRecursionLimit()
           }
 
@@ -10634,10 +10827,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
+              ...foregroundToolPolicy(resumeAgentMode, metadata),
               agentMode: resumeAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(resumeAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -10668,6 +10859,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (abortController.signal.aborted) break
             try {
               const resumeAgent = await resumeRuntimeFactory.create(candidateId)
+              if (workspacePath)
+                await getModsManager()?.startFunctionTurn({
+                  workspace: workspacePath,
+                  threadId,
+                  runId: runToken,
+                  turnId: ensureTurnId(turnState, threadId, "resume"),
+                  text: "",
+                  signal: abortController.signal,
+                  cancel: () =>
+                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
+                  assertCurrent: () =>
+                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                })
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
               resumeStream = await resumeAgent.stream(
                 new Command({ resume: resumeValue }),
@@ -10819,7 +11023,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   mode,
                   serialized,
                   valuesMessageIndexOffset,
-                  valuesSnapshotKind
+                  valuesSnapshotKind,
+                  mode === "values" ? latestValuesSnapshot.messages : undefined
                 )
                 if (messageId) resumeInFlightMessageIds.add(messageId)
                 if (mode === "messages") {
@@ -10918,6 +11123,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
+              hasTerminalModelRefusal: () =>
+                !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,
               workspacePath: workspacePath ?? undefined,
               turnId: turnState.turnId,
@@ -10996,7 +11203,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
                 snapshot: autoCommit.snapshot,
                 window,
-                channel
+                channel,
+                // resume / interrupt are desktop-only IPC entries: the window here
+                // always comes from BrowserWindow.fromWebContents(event.sender).
+                canPromptModal: true
               })
               await markLatestForkBoundaryBestEffort({
                 threadId,
@@ -11143,6 +11353,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           clearTurnCompletionGateState(threadId, runToken)
           await settlePhysicalAgentRun({
             kind: "resume",
+            functionTurnReason: resumeAutoModeTerminal
+              ? resumeAutoModeTerminal.outcome === "success"
+                ? "answer"
+                : "error"
+              : undefined,
             threadId,
             runToken,
             controller: abortController,
@@ -11778,10 +11993,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
               coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
+              ...foregroundToolPolicy(interruptAgentMode, metadata),
               agentMode: interruptAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(interruptAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -11812,6 +12025,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (abortController.signal.aborted) break
             try {
               const intAgent = await interruptRuntimeFactory.create(candidateId)
+              if (workspacePath)
+                await getModsManager()?.startFunctionTurn({
+                  workspace: workspacePath,
+                  threadId,
+                  runId: runToken,
+                  turnId: ensureTurnId(turnState, threadId, "interrupt"),
+                  text: "",
+                  signal: abortController.signal,
+                  cancel: () =>
+                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
+                  assertCurrent: () =>
+                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
+                })
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
               intStream = await intAgent.stream(null, interruptStreamConfig)
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
@@ -11956,7 +12182,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   mode,
                   serialized,
                   valuesMessageIndexOffset,
-                  valuesSnapshotKind
+                  valuesSnapshotKind,
+                  mode === "values" ? latestValuesSnapshot.messages : undefined
                 )
                 if (messageId) intInFlightMessageIds.add(messageId)
                 if (mode === "messages") {
@@ -12048,6 +12275,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
+              hasTerminalModelRefusal: () =>
+                !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,
               workspacePath: workspacePath ?? undefined,
               turnId: turnState.turnId,
@@ -12126,7 +12355,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 userPrompt: stopContextCollector.snapshot().userMessage ?? "continue agent task",
                 snapshot: autoCommit.snapshot,
                 window,
-                channel
+                channel,
+                // resume / interrupt are desktop-only IPC entries: the window here
+                // always comes from BrowserWindow.fromWebContents(event.sender).
+                canPromptModal: true
               })
               await markLatestForkBoundaryBestEffort({
                 threadId,
@@ -12287,6 +12519,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         clearTurnCompletionGateState(threadId, runToken)
         await settlePhysicalAgentRun({
           kind: "interrupt",
+          functionTurnReason: interruptAutoModeTerminal
+            ? interruptAutoModeTerminal.outcome === "success"
+              ? "answer"
+              : "error"
+            : undefined,
           threadId,
           runToken,
           controller: abortController,

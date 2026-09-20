@@ -118,6 +118,20 @@ async function testNullBuffer(): Promise<void> {
   assert(detail.skills.length === 0 && detail.hookCount === 0, "null buffer: expected empty detail")
 }
 
+async function testFunctionModules(): Promise<void> {
+  const zip = new AdmZip()
+  zip.addFile(".claude-plugin/plugin.json", Buffer.from(manifest("function-only")))
+  zip.addFile("hooks/hooks.json", Buffer.from(JSON.stringify({ modules: ["./register.ts"] })))
+  zip.addFile(
+    "hooks/register.ts",
+    Buffer.from("throw Error('inspection must not execute me'); export function register(on) {}")
+  )
+  const detail = await inspectPluginZip(toArrayBuffer(zip.toBuffer()))
+  assert(detail.modCount === 1, "function-only: expected one compiled module package")
+  assert(detail.hookCount === 0, "function-only: must not masquerade as a shell hook")
+  assert(detail.manifest?.name === "function-only", "function-only: manifest is preserved")
+}
+
 async function main(): Promise<void> {
   const before = countInspectTempDirs()
 
@@ -126,12 +140,10 @@ async function main(): Promise<void> {
   await testEmptyGarbageZip()
   await testPathTraversalRejected()
   await testNullBuffer()
+  await testFunctionModules()
 
   const after = countInspectTempDirs()
-  assert(
-    after <= before,
-    `temp cleanup: leftover inspect dirs (before=${before}, after=${after})`
-  )
+  assert(after <= before, `temp cleanup: leftover inspect dirs (before=${before}, after=${after})`)
 
   console.log("plugin-inspect-zip.spec.ts: all assertions passed ✓")
 }

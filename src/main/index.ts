@@ -1,3 +1,6 @@
+import { initializeNotificationRuntime } from "./notification-runtime"
+import { notificationService } from "./services/notification-service"
+import { registerNotificationHandlers } from "./ipc/notifications"
 import {
   app,
   BrowserWindow,
@@ -36,6 +39,7 @@ if (process.platform === "linux") {
 import { join } from "path"
 import { pathToFileURL } from "url"
 import { existsSync, rmSync } from "fs"
+import { pendingNotificationScheduler } from "./agent/pending-notification-scheduler"
 import {
   writeMainLog,
   writeRendererLog,
@@ -56,6 +60,8 @@ import {
 } from "./main-log-forwarding"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
+import { createNativeClosePrompt } from "./native-close-prompt"
+import { shouldBlockEmbeddedNavigation } from "./html-preview-navigation"
 import {
   clearAppAttention,
   disposeAppTray,
@@ -104,8 +110,10 @@ const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursi
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
 const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
+const nativeClosePrompt = createNativeClosePrompt()
 const mainLogForwardingGate = createMainLogForwardingGate()
 let mainWindow: BrowserWindow | null = null
+let mainWindowUnresponsive = false
 const trustedMainRendererUrl = resolveTrustedRendererUrl(
   app.isPackaged
     ? pathToFileURL(join(__dirname, "../renderer/index.html")).href
@@ -354,6 +362,7 @@ import { closeMemoryCatalogWorker } from "./memory-catalog/client"
 import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
+import { registerModsHandlers } from "./ipc/mods"
 import { registerPluginFileHandlers } from "./ipc/plugin-files"
 import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
@@ -369,7 +378,6 @@ import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
-import { recoverHumanGatesAtStartup } from "./harness-board/human-gate-service"
 import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
 import {
   getHarnessProjectRootPath,
@@ -460,6 +468,7 @@ import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
 import { builtinRobotManager } from "./services/im/manager"
+import { createManagedTransportAgentRunDelivery } from "./agent/managed-transport-delivery"
 import {
   configurePetWindow,
   createPetWindow,
@@ -503,7 +512,6 @@ function disposeBrowserServiceForMainWindow(reason: string): void {
   disposeBuiltinBrowserForMainWindowEvent({
     browserService,
     isAppQuitting: isAppQuitting(),
-    logPrefix: MAIN_BROWSER_LOG_PREFIX,
     reason
   })
 }
@@ -645,8 +653,27 @@ function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBeha
   return savedBehavior
 }
 
+function requestNativeWindowCloseChoice(window: BrowserWindow): void {
+  clearCloseToTrayPromptState()
+  void nativeClosePrompt
+    .request({
+      isAvailable: () => !window.isDestroyed() && mainWindow === window && !isAppQuitting(),
+      hasActiveRuns: hasActiveForegroundRuns,
+      hasTray: isAppTrayAvailable,
+      show: (options) => dialog.showMessageBox(window, options),
+      minimize: () => hideMainWindowToTray(window),
+      quit: () => app.quit()
+    })
+    .catch((error) => console.error("[Main] Native close prompt failed:", error))
+}
+
 function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
-  if (window.isDestroyed() || window.webContents.isDestroyed()) return
+  if (window.isDestroyed()) return
+  if (nativeClosePrompt.isOpen) return
+  if (window.webContents.isDestroyed() || window.webContents.isCrashed() || mainWindowUnresponsive) {
+    requestNativeWindowCloseChoice(window)
+    return
+  }
   if (closeToTrayPromptOpen) {
     window.focus()
     return
@@ -670,6 +697,7 @@ function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayProm
         mainWindow.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
       }
       clearCloseToTrayPromptState()
+      requestNativeWindowCloseChoice(window)
     }
   }, CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS)
   window.focus()
@@ -685,6 +713,7 @@ function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayProm
 }
 
 function createWindow(): void {
+  mainWindowUnresponsive = false
   const devWindowIcon = process.platform === "win32" && isDev ? getDevWindowsIconPath() : undefined
 
   mainWindow = new BrowserWindow({
@@ -715,17 +744,33 @@ function createWindow(): void {
   mainWindow.on("blur", showPendingAppAttention)
 
   mainWindow.on("unresponsive", () => {
+    mainWindowUnresponsive = true
     mainLogForwardingGate.disableForLifecycle()
     console.warn("[Main] BrowserWindow became unresponsive")
   })
 
+  /** One recovery per window: see the render-process-gone handler below. */
+  let rendererRecovered = false
+
   mainWindow.on("responsive", () => {
+    mainWindowUnresponsive = false
     console.info("[Main] BrowserWindow recovered responsiveness")
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: "deny" }
+  })
+
+  // CSP blocks subresources, but does not block a scripted iframe's own location changes.
+  // Only the trusted app frame may initiate a new embedded document. The built-in browser
+  // has separate webContents and keeps its own navigation policy.
+  const previewWebContents = mainWindow.webContents
+  previewWebContents.on("will-frame-navigate", (event) => {
+    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
+  })
+  previewWebContents.on("will-redirect", (event) => {
+    if (shouldBlockEmbeddedNavigation(event, previewWebContents.mainFrame)) event.preventDefault()
   })
 
   // Every new top-level document must opt in again from its trusted main frame.
@@ -785,14 +830,37 @@ function createWindow(): void {
 
   mainWindow.webContents.on("did-start-loading", () => {
     mainLogForwardingGate.disableForLifecycle()
+    nativeClosePrompt.cancel()
     clearCloseToTrayPromptState()
   })
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     mainLogForwardingGate.disableForLifecycle()
+    const hadClosePrompt = closeToTrayPromptOpen
     clearCloseToTrayPromptState()
+    if (hadClosePrompt && mainWindow) requestNativeWindowCloseChoice(mainWindow)
     disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
+
+    // Reload once. A dead renderer leaves the window blank with no way back,
+    // and the process is gone so nothing in it can offer one. `reason` is the
+    // part worth keeping: "oom" and "crashed" look identical on screen and
+    // point at completely different causes.
+    //
+    // Once, not always: a fault that recurs on load would otherwise reload
+    // forever, and each cycle costs the log line that identifies it. A window
+    // that has already been recovered stays blank until the user restarts.
+    if (rendererRecovered) {
+      console.error(
+        `[Main] Renderer process gone again (${details.reason}); not reloading a second time`
+      )
+      return
+    }
+    rendererRecovered = true
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      console.warn(`[Main] Reloading the renderer after ${details.reason}`)
+      mainWindow.webContents.reload()
+    }
   })
 
   mainWindow.webContents.on("did-finish-load", () => {
@@ -849,6 +917,7 @@ function createWindow(): void {
   })
 
   mainWindow.on("closed", () => {
+    nativeClosePrompt.cancel()
     mainLogForwardingGate.disableForLifecycle()
     console.warn("[Main] Main window closed", {
       platform: process.platform,
@@ -1041,7 +1110,8 @@ if (browserNativeMessagingHostLaunch) {
 
     // Initialize database
     await initializeDatabase()
-    await recoverHumanGatesAtStartup()
+    initializeNotificationRuntime()
+    await notificationService.recover()
     recoverManagedRunsAtStartup()
     cleanupLegacySkillEvalRecords()
 
@@ -1068,6 +1138,7 @@ if (browserNativeMessagingHostLaunch) {
     registerTaskMmdHandlers(ipcMain)
     registerGitHandlers()
     registerPluginHandlers(ipcMain)
+    registerModsHandlers(ipcMain, () => mainWindow)
     registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)
     registerOptimizerHandlers(ipcMain)
@@ -1080,6 +1151,7 @@ if (browserNativeMessagingHostLaunch) {
     registerDashboardHandlers(ipcMain)
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
+    registerNotificationHandlers(ipcMain)
     registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
@@ -1428,6 +1500,16 @@ if (browserNativeMessagingHostLaunch) {
 
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
+    // An IM turn must not depend on someone having the desktop open, and must
+    // not be tied to whichever window happened to be focused when it arrived.
+    // The managed delivery broadcasts on the thread-scoped channel the renderer
+    // subscribes to for background runs, so an open session renders it live and
+    // a closed one simply misses nothing.
+    builtinRobotManager.setAgentRunDeliveryResolver(() => createManagedTransportAgentRunDelivery())
+    // Wakes summaries deferred while their thread was busy. Without it one
+    // parked behind a foreground turn waits for the next hydrate rather than
+    // for the moment the thread actually goes idle.
+    pendingNotificationScheduler.start()
     setAppAttentionHandler(requestAppAttention)
     await initializeAppTray({
       getMainWindow: () => mainWindow,
@@ -1568,10 +1650,7 @@ if (browserNativeMessagingHostLaunch) {
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)
-    const disposeBuiltinBrowserAfterAppCleanup = beginBuiltinBrowserAppQuitCleanup(
-      browserService,
-      MAIN_BROWSER_LOG_PREFIX
-    )
+    const disposeBuiltinBrowserAfterAppCleanup = beginBuiltinBrowserAppQuitCleanup(browserService)
     browserService = null
     disposeAllTerminals()
     LocalSandbox.killAll()

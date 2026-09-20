@@ -1,3 +1,6 @@
+import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { useHarnessNotifications } from "@/lib/harness-notifications"
+import { BizRetryNotice } from "./BizRetryNotice"
 import {
   defaultWorkflowTemplateId,
   requiredWorkflowNodeIds,
@@ -128,7 +131,6 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { toast } from "sonner"
-import noSignalVideoUrl from "@/assets/harness-board/no-signal.mp4"
 import { marketApi, type MarketItem } from "../../api/market"
 import { formatTopUserOrgName } from "@/components/dashboard/use-dashboard"
 import { UpdateVersionTooltip } from "@/components/customize/MarketPanel/MarketUpdateBadge"
@@ -2549,6 +2551,118 @@ function EnterpriseProjectSearchInput({
   )
 }
 
+function LeanProjectLinkStatus({
+  linked,
+  error
+}: {
+  linked: boolean
+  error: string | null
+}): React.JSX.Element {
+  const showLinked = linked && !error
+  const status = (
+    <span
+      role={error ? "alert" : undefined}
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1.5 text-[11px] font-normal",
+        showLinked ? "text-status-nominal" : "text-status-warning"
+      )}
+    >
+      <span
+        className={cn(
+          "size-2 rounded-full",
+          showLinked ? "bg-status-nominal" : "bg-status-warning"
+        )}
+      />
+      {error ?? (linked ? "已关联精益项目" : "未关联精益项目")}
+    </span>
+  )
+
+  if (linked || error) return status
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1">
+      {status}
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label="未关联精益项目说明"
+              className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <Info className="size-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="z-[70] max-w-72">
+            代码生成和 Token 消耗将不会被关联到对应的精益项目。
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </span>
+  )
+}
+
+interface EnterpriseProjectCodeVerification {
+  pending: boolean
+  error: string | null
+}
+
+function useEnterpriseProjectCodeVerification(
+  enabled: boolean,
+  projectCode: string,
+  onVerified: (linked: boolean) => void
+): EnterpriseProjectCodeVerification {
+  const requestIdRef = useRef(0)
+  const [verification, setVerification] = useState({
+    enabled,
+    projectCode,
+    pending: true,
+    error: null as string | null
+  })
+  const matchesCurrentInput =
+    verification.enabled === enabled && verification.projectCode === projectCode
+  if (!matchesCurrentInput) {
+    setVerification({ enabled, projectCode, pending: true, error: null })
+  }
+
+  useEffect(() => {
+    requestIdRef.current += 1
+    const requestId = requestIdRef.current
+    if (!enabled) return
+
+    const normalizedProjectCode = projectCode.trim()
+    if (!normalizedProjectCode) {
+      onVerified(false)
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      window.api.harnessBoard
+        .verifyEnterpriseProjectCode(normalizedProjectCode)
+        .then((linked) => {
+          if (requestIdRef.current !== requestId) return
+          onVerified(linked)
+          setVerification({ enabled, projectCode, pending: false, error: null })
+        })
+        .catch(() => {
+          if (requestIdRef.current !== requestId) return
+          // 查询失败时保留现有状态，并允许用户继续保存。
+          setVerification({ enabled, projectCode, pending: false, error: "关联精益项目失败" })
+        })
+    }, ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS)
+
+    return () => {
+      window.clearTimeout(timer)
+      requestIdRef.current += 1
+    }
+  }, [enabled, onVerified, projectCode])
+
+  // 编号变化的当次渲染就阻止保存，覆盖 effect 执行前和防抖等待期间。
+  return {
+    pending: enabled && !!projectCode.trim() && (!matchesCurrentInput || verification.pending),
+    error: enabled && matchesCurrentInput ? verification.error : null
+  }
+}
+
 function DeployUnitSearchInput({
   value,
   onValueChange,
@@ -2707,6 +2821,7 @@ function ProjectFormDialog({
   registry,
   installingPluginNames,
   error,
+  verification,
   onOpenChange,
   onChange,
   onInstallPlugin,
@@ -2720,6 +2835,7 @@ function ProjectFormDialog({
   registry: ProjectModeAdapterItem[]
   installingPluginNames: Set<string>
   error: string | null
+  verification: EnterpriseProjectCodeVerification
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectCreateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
@@ -2804,15 +2920,19 @@ function ProjectFormDialog({
               <div className="mb-3 text-sm font-semibold">项目信息</div>
               <div className="grid grid-cols-2 items-start gap-3">
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  项目编号 *
+                  <span className="flex items-center justify-between gap-2">
+                    <span>项目编号 *</span>
+                    <LeanProjectLinkStatus
+                      linked={form.projectFromLean}
+                      error={verification.error}
+                    />
+                  </span>
                   <EnterpriseProjectSearchInput
                     value={form.projectCode}
                     searchField="code"
                     searchLabel="项目编号"
                     normalizeValue={sanitizeHarnessNameInput}
-                    onValueChange={(projectCode) =>
-                      onChange({ ...form, projectCode, projectFromLean: false })
-                    }
+                    onValueChange={(projectCode) => onChange({ ...form, projectCode })}
                     onSelect={(project) => {
                       const shouldSyncProjectDir =
                         !form.projectDir ||
@@ -2821,7 +2941,6 @@ function ProjectFormDialog({
                         ...form,
                         name: project.projectName,
                         projectCode: project.projectCode,
-                        projectFromLean: true,
                         systemId: project.systemId || form.systemId,
                         systemName: project.systemName || form.systemName,
                         projectDir: shouldSyncProjectDir
@@ -2849,7 +2968,6 @@ function ProjectFormDialog({
                       onChange({
                         ...form,
                         name,
-                        projectFromLean: false,
                         projectDir: shouldSyncProjectDir
                           ? sanitizeProjectDirFromProjectName(name)
                           : form.projectDir
@@ -2863,7 +2981,6 @@ function ProjectFormDialog({
                         ...form,
                         name: project.projectName,
                         projectCode: project.projectCode,
-                        projectFromLean: true,
                         systemId: project.systemId || form.systemId,
                         systemName: project.systemName || form.systemName,
                         projectDir: shouldSyncProjectDir
@@ -3027,6 +3144,7 @@ function ProjectFormDialog({
             onClick={onSubmit}
             disabled={
               creating ||
+              verification.pending ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
               metadataLengthInvalid(form, { validateProjectDir: true }) ||
@@ -3050,6 +3168,7 @@ function ProjectEditDialog({
   registry,
   installingPluginNames,
   error,
+  verification,
   onOpenChange,
   onChange,
   onInstallPlugin,
@@ -3062,6 +3181,7 @@ function ProjectEditDialog({
   registry: ProjectModeAdapterItem[]
   installingPluginNames: Set<string>
   error: string | null
+  verification: EnterpriseProjectCodeVerification
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
@@ -3135,21 +3255,24 @@ function ProjectEditDialog({
               <div className="mb-3 text-sm font-semibold">项目信息</div>
               <div className="grid grid-cols-2 items-start gap-3">
                 <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  项目编号 *
+                  <span className="flex items-center justify-between gap-2">
+                    <span>项目编号 *</span>
+                    <LeanProjectLinkStatus
+                      linked={form.projectFromLean}
+                      error={verification.error}
+                    />
+                  </span>
                   <EnterpriseProjectSearchInput
                     value={form.projectCode}
                     searchField="code"
                     searchLabel="项目编号"
                     normalizeValue={sanitizeHarnessNameInput}
-                    onValueChange={(projectCode) =>
-                      onChange({ ...form, projectCode, projectFromLean: false })
-                    }
+                    onValueChange={(projectCode) => onChange({ ...form, projectCode })}
                     onSelect={(project) =>
                       onChange({
                         ...form,
                         name: project.projectName,
                         projectCode: project.projectCode,
-                        projectFromLean: true,
                         systemId: project.systemId || form.systemId,
                         systemName: project.systemName || form.systemName
                       })
@@ -3167,13 +3290,12 @@ function ProjectEditDialog({
                     value={form.name}
                     searchField="name"
                     searchLabel="项目名称"
-                    onValueChange={(name) => onChange({ ...form, name, projectFromLean: false })}
+                    onValueChange={(name) => onChange({ ...form, name })}
                     onSelect={(project) =>
                       onChange({
                         ...form,
                         name: project.projectName,
                         projectCode: project.projectCode,
-                        projectFromLean: true,
                         systemId: project.systemId || form.systemId,
                         systemName: project.systemName || form.systemName
                       })
@@ -3313,6 +3435,7 @@ function ProjectEditDialog({
             onClick={onSubmit}
             disabled={
               saving ||
+              verification.pending ||
               metadataRequiredMissing(form) ||
               metadataNameInvalid(form) ||
               metadataLengthInvalid(form)
@@ -4297,14 +4420,23 @@ function ProjectActionMenu({
 }
 
 function FeatureCard({
+  projectId,
   run,
   workflowNodes,
   onOpen
 }: {
+  projectId: string
   run: HarnessFeatureSummary
   workflowNodes: Array<{ id: string; label: string }>
   onOpen: () => void
 }): React.JSX.Element {
+  const pendingDecision = useHarnessNotifications().some(
+    (item) =>
+      (item.type === "human_gate" || item.type === "biz_retry") &&
+      item.status === "pending" &&
+      item.projectId === projectId &&
+      item.featureId === run.slug
+  )
   const progressIndex = progressIndexFromCurrentNodeId(
     workflowNodes,
     run.currentNodeId,
@@ -4330,9 +4462,12 @@ function FeatureCard({
           <div className="mt-1 truncate text-[11px] text-muted-foreground">{run.slug}</div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
-          {managedRunStatus && <StatusPill status={managedRunStatus} />}
+          {pendingDecision ? (
+            <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
+          ) : (
+            managedRunStatus && <StatusPill status={managedRunStatus} />
+          )}
           <StatusPill status={run.overallStatus} />
-          {run.humanGate && <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />}
         </div>
       </div>
       <ProgressBar progressIndex={progressIndex} totalNodes={totalNodes} />
@@ -4399,6 +4534,7 @@ function ProjectCard({
   onProjectVisible: (project: HarnessProjectListItem) => void
   onOpenProject: (projectId: string) => void
 }): React.JSX.Element {
+  const notifications = useHarnessNotifications()
   const cardRef = useRef<HTMLElement | null>(null)
   const projectCode = project.projectCode.trim()
   const runs = detail?.runs ?? []
@@ -4444,7 +4580,16 @@ function ProjectCard({
       run.overallStatus.uiKind === "blocked" ||
       run.overallStatus.uiKind === "error"
   ).length
-  const pendingHumanGateCount = runs.filter((run) => Boolean(run.humanGate)).length
+  const pendingDecisionCount = new Set(
+    notifications
+      .filter(
+        (item) =>
+          item.kind === "decision" &&
+          item.status === "pending" &&
+          item.projectId === project.projectId
+      )
+      .map((item) => item.featureId)
+  ).size
   const projectStatus = pluginCompatibilityMessage
     ? pluginCompatibilityStatus
     : detail?.projectState
@@ -4555,7 +4700,7 @@ function ProjectCard({
               <div className="min-w-0 text-[11px] text-muted-foreground">
                 待确认
                 <strong className="mt-0.5 block text-sm text-status-warning">
-                  {loading || !detail ? "-" : pendingHumanGateCount}
+                  {loading || !detail ? "-" : pendingDecisionCount}
                 </strong>
               </div>
             </div>
@@ -6084,6 +6229,7 @@ function ProjectDetailPage({
                         <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pr-2">
                           {runs.map((run) => (
                             <FeatureCard
+                              projectId={project.projectId}
                               key={run.slug}
                               run={run}
                               workflowNodes={workflowForProjectRun(detail, run).nodes}
@@ -6184,7 +6330,6 @@ function RemoteFeatureAccessPanel({
   onOpenThread: (threadId: string) => void
 }): React.JSX.Element {
   const [remoteAccess, setRemoteAccess] = useState<BuiltinRobotRemoteAccessOverview | null>(null)
-  const [busy, setBusy] = useState(false)
   const threads = useAppStore((state) => state.threads)
 
   useEffect(() => {
@@ -6219,7 +6364,8 @@ function RemoteFeatureAccessPanel({
   const featureGrant = remoteAccess?.featureGrants.find(
     (grant) => grant.projectId === projectId && grant.featureSlug === featureSlug
   )
-  const enabled = featureGrant?.state === "active"
+  const enabled = featureImManagementEnabled && featureGrant?.state === "active"
+  const busy = updatingFeatureImManagement || projectInteractionDisabled
   const relatedSessions =
     remoteAccess?.threadGrants.filter((grant) => {
       if (grant.state !== "active") return false
@@ -6231,32 +6377,9 @@ function RemoteFeatureAccessPanel({
       const binding = harnessFeature as Record<string, unknown>
       return binding.projectId === projectId && binding.slug === featureSlug
     }) ?? []
-  const remoteCreationText = enabled
-    ? "已允许从招乎在此 Feature 下新建会话"
-    : "尚未开放从招乎新建会话"
   const featureImAvailabilityText = featureImManagementAvailable
     ? "招乎已连接并完成登录验证"
     : (featureImUnavailableReason ?? "招乎当前不可用")
-
-  const toggleFeatureCreation = async (nextEnabled: boolean): Promise<void> => {
-    if (busy || (!nextEnabled && !enabled) || (nextEnabled && !featureImManagementAvailable)) return
-    setBusy(true)
-    try {
-      const next = await window.api.builtinRobot.setFeatureRemoteAccess(
-        projectId,
-        featureSlug,
-        nextEnabled
-      )
-      setRemoteAccess(next)
-      toast.success(
-        nextEnabled ? "已允许从招乎在此 Feature 下新建会话" : "已关闭此 Feature 的远程新建会话权限"
-      )
-    } catch (error) {
-      toast.error(cleanIpcError(error))
-    } finally {
-      setBusy(false)
-    }
-  }
 
   return (
     <section className="rounded-md border border-border bg-background">
@@ -6280,58 +6403,22 @@ function RemoteFeatureAccessPanel({
       </div>
       <div className="space-y-3 p-3">
         <div className="flex min-w-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-1.5 text-sm font-semibold">
-            <span className="truncate">通过招乎管理特性</span>
-            <TooltipProvider delayDuration={150}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    aria-label="查看通过招乎管理特性的说明"
-                  >
-                    <Info className="size-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
-                  创建的新会话将自动接入招乎，托管模式决策和需要人工审批推进的阶段也可经由招乎审批。
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          </div>
+          <span className="truncate text-sm font-semibold">通过招乎管理特性</span>
           <Switch
             aria-label="通过招乎管理特性"
-            checked={featureImManagementEnabled}
-            disabled={
-              updatingFeatureImManagement ||
-              projectInteractionDisabled ||
-              (!featureImManagementEnabled && !featureImManagementAvailable)
-            }
+            checked={enabled}
+            disabled={busy || (!enabled && !featureImManagementAvailable)}
             onCheckedChange={onFeatureImManagementChange}
           />
         </div>
         <p className="text-xs leading-5 text-muted-foreground">
-          {featureImManagementEnabled
-            ? "后续创建的特性顶层会话将自动接入招乎"
-            : "关闭只影响后续会话，不撤销已有会话授权"}
+          {enabled
+            ? "关闭后已经接入招乎的会话不受影响，可在会话中单独管理接入状态"
+            : "打开后创建会话将自动接入招乎，也可从招乎发起新会话"}
         </p>
-      </div>
-      <div className="space-y-3 border-t border-border p-3">
-        <div className="flex min-w-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
-            <span className="truncate">从招乎发起新会话</span>
-          </div>
-          <Switch
-            aria-label="允许从招乎在此 Feature 下新建会话"
-            checked={enabled}
-            disabled={busy || (!enabled && !featureImManagementAvailable)}
-            onCheckedChange={(checked) => void toggleFeatureCreation(checked)}
-          />
-        </div>
-        <p className="text-xs leading-5 text-muted-foreground">{remoteCreationText}</p>
         {relatedSessions.length === 0 ? (
           <p className="rounded border border-dashed px-2.5 py-3 text-xs text-muted-foreground">
-            当前没有已接入的会话。打开上方开关后，可在招乎通过 /会话 选择此 Feature 并新建会话。
+            当前没有已接入的会话。打开上方开关后，可在招乎通过 /会话 选择此特性并新建会话。
           </p>
         ) : (
           <div className="max-h-72 space-y-2 overflow-y-auto">
@@ -6353,9 +6440,6 @@ function RemoteFeatureAccessPanel({
             ))}
           </div>
         )}
-        <p className="text-[11px] leading-4 text-muted-foreground">
-          此开关只控制新建权限；关闭后，下方已经接入的会话仍由各自的会话开关管理。
-        </p>
       </div>
     </section>
   )
@@ -6374,6 +6458,7 @@ function FeatureDetailPage({
   onBackToProject,
   onEditDeployUnits,
   onRefresh,
+  onFeatureImManagementSaved,
   onActiveSessionChange,
   onSessionViewChange,
   onActiveSessionThreadChange,
@@ -6390,6 +6475,7 @@ function FeatureDetailPage({
   onBackToProject: () => void
   onEditDeployUnits: () => void
   onRefresh: () => void | Promise<void>
+  onFeatureImManagementSaved: (projectId: string, featureId: string, enabled: boolean) => void
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
   onActiveSessionThreadChange?: (threadId: string | null) => void
@@ -6489,6 +6575,14 @@ function FeatureDetailPage({
   const [updatingManagedRun, setUpdatingManagedRun] = useState(false)
   const [updatingFeatureImManagement, setUpdatingFeatureImManagement] = useState(false)
   const [featureImRobotStatus, setFeatureImRobotStatus] = useState<BuiltinRobotStatus | null>(null)
+  const notifications = useHarnessNotifications()
+  const pendingHumanGate = projectHumanGate(notifications.find(
+    (item) =>
+      item.type === "human_gate" &&
+      item.status === "pending" &&
+      item.projectId === detail?.project.projectId &&
+      item.featureId === detail?.run.slug
+  ))
   const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
     null
   )
@@ -6659,6 +6753,71 @@ function FeatureDetailPage({
     threadsById
   ])
 
+  const setCombinedFeatureImManagement = useCallback(
+    async (enabled: boolean): Promise<void> => {
+      if (!detail) return
+      const projectId = detail.project.projectId
+      const featureId = detail.run.slug
+      const previousManagementEnabled = detail.run.imManagementEnabled === true
+      const remoteAccess = await window.api.builtinRobot.getRemoteAccess()
+      const previousRemoteCreationEnabled = remoteAccess.featureGrants.some(
+        (grant) =>
+          grant.projectId === projectId &&
+          grant.featureSlug === featureId &&
+          grant.state === "active"
+      )
+      let managementChanged = false
+      let remoteCreationChanged = false
+      try {
+        if (enabled) {
+          if (!previousRemoteCreationEnabled) {
+            await window.api.builtinRobot.setFeatureRemoteAccess(projectId, featureId, true)
+            remoteCreationChanged = true
+          }
+          if (!previousManagementEnabled) {
+            await window.api.harnessBoard.setFeatureImManagement({
+              projectId,
+              featureId,
+              enabled: true
+            })
+            managementChanged = true
+          }
+        } else {
+          if (previousManagementEnabled) {
+            await window.api.harnessBoard.setFeatureImManagement({
+              projectId,
+              featureId,
+              enabled: false
+            })
+            managementChanged = true
+          }
+          if (previousRemoteCreationEnabled) {
+            await window.api.builtinRobot.setFeatureRemoteAccess(projectId, featureId, false)
+            remoteCreationChanged = true
+          }
+        }
+      } catch (error) {
+        if (managementChanged) {
+          await window.api.harnessBoard
+            .setFeatureImManagement({
+              projectId,
+              featureId,
+              enabled: previousManagementEnabled
+            })
+            .catch(() => undefined)
+        }
+        if (remoteCreationChanged) {
+          await window.api.builtinRobot
+            .setFeatureRemoteAccess(projectId, featureId, previousRemoteCreationEnabled)
+            .catch(() => undefined)
+        }
+        throw error
+      }
+      onFeatureImManagementSaved(projectId, featureId, enabled)
+    },
+    [detail, onFeatureImManagementSaved]
+  )
+
   const handleFeatureImManagementChange = useCallback(
     async (enabled: boolean): Promise<void> => {
       if (!detail || updatingFeatureImManagement) return
@@ -6675,20 +6834,17 @@ function FeatureDetailPage({
             throw new Error(status.lastError || "统一机器人尚未连接或登录验证尚未完成")
           }
         }
-        await window.api.harnessBoard.setFeatureImManagement({
-          projectId: detail.project.projectId,
-          featureId: detail.run.slug,
-          enabled
-        })
-        await onRefresh()
-        toast.success(enabled ? "后续特性会话将接入招乎" : "后续会话将不再发送消息到招乎")
+        await setCombinedFeatureImManagement(enabled)
+        toast.success(
+          enabled ? "已开启通过招乎管理特性" : "已关闭通过招乎管理特性，已有会话授权不受影响"
+        )
       } catch (error) {
         toast.error(cleanIpcError(error))
       } finally {
         setUpdatingFeatureImManagement(false)
       }
     },
-    [detail, onRefresh, updatingFeatureImManagement]
+    [detail, setCombinedFeatureImManagement, updatingFeatureImManagement]
   )
 
   const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
@@ -6697,6 +6853,8 @@ function FeatureDetailPage({
     try {
       const workspacePath = normalizeWorkspacePath(await window.api.workspace.select())
       if (workspacePath) setManagedRunWorkspacePath(workspacePath)
+    } catch (error) {
+      toast.error(cleanIpcError(error))
     } finally {
       setPickingManagedRunWorkspace(false)
     }
@@ -6720,6 +6878,7 @@ function FeatureDetailPage({
       const defaultWorkspacePath = latestSessionWorkspacePath ?? configuredWorkspacePath
       setManagedRunWorkspacePath(defaultWorkspacePath ?? "")
       setManagedRunImEnabled(featureImManagementAvailable)
+      setPickingManagedRunWorkspace(false)
       setManagedRunDialogOpen(true)
     } catch (error) {
       toast.error(cleanIpcError(error))
@@ -6759,11 +6918,7 @@ function FeatureDetailPage({
         if (shouldStart) {
           const confirmedWorkspacePath = normalizeWorkspacePath(workspacePath)
           if (!confirmedWorkspacePath) throw new Error("请选择本次托管使用的会话工作区")
-          await window.api.harnessBoard.setFeatureImManagement({
-            projectId: detail.project.projectId,
-            featureId: detail.run.slug,
-            enabled: enableImManagement
-          })
+          await setCombinedFeatureImManagement(enableImManagement)
           const startedRun = await window.api.harnessBoard.startManagedRun({
             projectId: detail.project.projectId,
             featureId: detail.run.slug,
@@ -6783,9 +6938,9 @@ function FeatureDetailPage({
         }
         await onRefresh()
         if (!shouldStart) {
-          toast.success("已停止托管")
+          toast.success("托管运行已停止")
         } else if (startStatus === "running") {
-          toast.success("已开始托管")
+          toast.success("托管运行已开始")
         } else if (startStatus === "completed") {
           toast.success("特性已完成，无需继续托管")
         } else {
@@ -6800,7 +6955,13 @@ function FeatureDetailPage({
         setUpdatingManagedRun(false)
       }
     },
-    [detail, onRefresh, projectInteractionDisabled, updatingManagedRun]
+    [
+      detail,
+      onRefresh,
+      projectInteractionDisabled,
+      setCombinedFeatureImManagement,
+      updatingManagedRun
+    ]
   )
 
   const handleConfirmManagedRun = useCallback(async (): Promise<void> => {
@@ -6821,19 +6982,14 @@ function FeatureDetailPage({
 
   const handleHumanGateDecision = useCallback(
     async (decision: "approve" | "reject"): Promise<void> => {
-      const humanGate = detail?.run.humanGate
+      const humanGate = pendingHumanGate
       if (!humanGate || humanGateDecisionBusy) return
       setHumanGateDecisionBusy(decision)
       try {
-        const input = {
-          projectId: humanGate.projectId,
-          featureId: humanGate.featureId,
-          gateId: humanGate.gateId
-        }
-        const changed =
-          decision === "approve"
-            ? await window.api.harnessBoard.approveHumanGate(input)
-            : await window.api.harnessBoard.rejectHumanGate(input)
+        const { applied: changed } = await window.api.appNotifications.decide({
+          notificationId: humanGate.gateId,
+          action: decision
+        })
         if (!changed) throw new Error("Human Gate 已发生变化，请刷新后重试")
         await onRefresh()
       } catch (error) {
@@ -6842,7 +6998,7 @@ function FeatureDetailPage({
         setHumanGateDecisionBusy(null)
       }
     },
-    [detail, humanGateDecisionBusy, onRefresh]
+    [pendingHumanGate, humanGateDecisionBusy, onRefresh]
   )
 
   const canSkipNode = useCallback(
@@ -7242,14 +7398,19 @@ function FeatureDetailPage({
       ) : (
         <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2">
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            {detail.run.humanGate && (
+            <BizRetryNotice
+              projectId={detail.project.projectId}
+              featureId={detail.run.slug}
+              onViewThread={handleHookSessionSelect}
+            />
+            {pendingHumanGate && (
               <section className="mb-4 flex flex-col gap-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm sm:flex-row sm:items-center">
                 <div className="flex min-w-0 flex-1 items-start gap-3">
                   <PauseCircle className="mt-0.5 size-5 shrink-0 text-status-warning" />
                   <div className="min-w-0">
                     <div className="text-sm font-semibold">需要人工确认</div>
                     <p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground">
-                      {detail.run.humanGate.message}
+                      {pendingHumanGate.message}
                     </p>
                   </div>
                 </div>
@@ -7264,7 +7425,7 @@ function FeatureDetailPage({
                     {humanGateDecisionBusy === "reject" && (
                       <Loader2 className="size-4 animate-spin" />
                     )}
-                    拒绝并终止
+                    拒绝并终止本次托管运行
                   </Button>
                   <Button
                     type="button"
@@ -7283,16 +7444,6 @@ function FeatureDetailPage({
             <section
               className={cn(harnessSurfaceClassName, "isolate relative mb-4 overflow-hidden p-4")}
             >
-              <video
-                aria-hidden="true"
-                autoPlay
-                className="pointer-events-none absolute -top-8 right-0 z-0 h-auto w-[340px] max-w-[78%] object-contain opacity-40 saturate-125 motion-reduce:hidden"
-                loop
-                muted
-                playsInline
-                preload="metadata"
-                src={noSignalVideoUrl}
-              />
               <div
                 aria-hidden="true"
                 className="pointer-events-none absolute -right-20 -top-24 z-[1] size-60 rounded-full bg-status-info/10 blur-3xl"
@@ -7478,7 +7629,10 @@ function FeatureDetailPage({
           if (!updatingManagedRun) setManagedRunDialogOpen(open)
         }}
       >
-        <DialogContent className={harnessDialogContentClassName}>
+        <DialogContent
+          className={harnessDialogContentClassName}
+          onPointerDownOutside={preventHarnessDialogOutsideClose}
+        >
           <DialogHeader>
             <DialogTitle>开启托管运行</DialogTitle>
           </DialogHeader>
@@ -7525,7 +7679,25 @@ function FeatureDetailPage({
             </div>
             <div className="mt-2 flex items-start justify-between gap-4 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
               <div>
-                <div className="text-sm font-medium">通过招乎管理托管运行</div>
+                <div className="flex items-center gap-1.5 text-sm font-medium">
+                  <span>通过招乎管理托管运行</span>
+                  <TooltipProvider delayDuration={150}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          aria-label="查看通过招乎管理托管运行的说明"
+                        >
+                          <Info className="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="z-[70] max-w-80 text-xs leading-5">
+                        托管模式需要人工介入的决策可经由招乎审批
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
                 <div className="mt-1 text-xs text-muted-foreground">
                   {featureImUnavailableReason
                     ? featureImUnavailableReason
@@ -7554,7 +7726,9 @@ function FeatureDetailPage({
             <Button
               type="button"
               onClick={() => void handleConfirmManagedRun()}
-              disabled={!managedRunWorkspacePath.trim() || updatingManagedRun}
+              disabled={
+                !managedRunWorkspacePath.trim() || updatingManagedRun || pickingManagedRunWorkspace
+              }
             >
               {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
               确认并开启托管
@@ -8320,6 +8494,26 @@ export function HarnessBoardView({
   )
   const [savingEdit, setSavingEdit] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
+  const handleCreateProjectLinkVerified = useCallback((linked: boolean): void => {
+    setForm((current) =>
+      current.projectFromLean === linked ? current : { ...current, projectFromLean: linked }
+    )
+  }, [])
+  const handleEditProjectLinkVerified = useCallback((linked: boolean): void => {
+    setEditForm((current) =>
+      current.projectFromLean === linked ? current : { ...current, projectFromLean: linked }
+    )
+  }, [])
+  const createProjectVerification = useEnterpriseProjectCodeVerification(
+    dialogOpen,
+    form.projectCode,
+    handleCreateProjectLinkVerified
+  )
+  const editProjectVerification = useEnterpriseProjectCodeVerification(
+    editingProject !== null,
+    editForm.projectCode,
+    handleEditProjectLinkVerified
+  )
   const [archivingProjectId, setArchivingProjectId] = useState<string | null>(null)
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null)
   const [pendingProjectAction, setPendingProjectAction] = useState<PendingProjectAction>(null)
@@ -9671,31 +9865,20 @@ export function HarnessBoardView({
     })
   }, [loadProjectDetail, patchCachedProjectRuns])
 
-  useEffect(() => {
-    return window.api.harnessBoard.onHumanGateChanged((event) => {
-      patchCachedProjectRuns(event.projectId, (run) => {
-        if (run.slug !== event.featureId) return run
-        const nextRun = { ...run }
-        if (event.humanGate) nextRun.humanGate = event.humanGate
-        else delete nextRun.humanGate
-        return nextRun
-      })
 
-      setRunDetail((currentDetail) => {
-        if (
-          !currentDetail ||
-          currentDetail.project.projectId !== event.projectId ||
-          currentDetail.run.slug !== event.featureId
-        ) {
-          return currentDetail
+  const handleFeatureImManagementSaved = useCallback(
+    (projectId: string, featureId: string, enabled: boolean): void => {
+      // Both local settings have been saved. Updating this field does not need
+      // another feature_status / project_status round trip.
+      setRunDetail((current) => {
+        if (!current || current.project.projectId !== projectId || current.run.slug !== featureId) {
+          return current
         }
-        const nextRun = { ...currentDetail.run }
-        if (event.humanGate) nextRun.humanGate = event.humanGate
-        else delete nextRun.humanGate
-        return { ...currentDetail, run: nextRun }
+        return { ...current, run: { ...current.run, imManagementEnabled: enabled } }
       })
-    })
-  }, [patchCachedProjectRuns])
+    },
+    []
+  )
 
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {
@@ -9825,6 +10008,7 @@ export function HarnessBoardView({
   }
 
   const handleSubmit = async (): Promise<void> => {
+    if (creating || createProjectVerification.pending) return
     setFormError(null)
     if (metadataRequiredMissing(form)) {
       setFormError("所有字段均为必填")
@@ -9893,7 +10077,7 @@ export function HarnessBoardView({
   )
 
   const handleSubmitEdit = async (): Promise<void> => {
-    if (!editingProject) return
+    if (!editingProject || savingEdit || editProjectVerification.pending) return
     setEditError(null)
     if (metadataRequiredMissing(editForm)) {
       setEditError("所有字段均为必填")
@@ -9917,6 +10101,9 @@ export function HarnessBoardView({
       detailsByProjectIdRef.current = nextDetails
       setDetailsByProjectId(nextDetails)
       await loadProjects({ force: true })
+      if (selectedProjectIdRef.current === projectId) {
+        await loadProjectDetail(projectId)
+      }
     } catch (error) {
       setEditError(cleanIpcError(error))
     } finally {
@@ -11536,6 +11723,7 @@ export function HarnessBoardView({
           onBackToProject={handleBackToProject}
           onEditDeployUnits={openFeatureDeployUnitEditDialog}
           onRefresh={refreshSelectedRunDetail}
+          onFeatureImManagementSaved={handleFeatureImManagementSaved}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
           onActiveSessionThreadChange={onActiveSessionThreadChange}
@@ -11652,6 +11840,7 @@ export function HarnessBoardView({
           registry={projectDialogAdapterRegistry}
           installingPluginNames={updatingPluginNames}
           error={editError}
+          verification={editProjectVerification}
           onOpenChange={handleEditDialogOpenChange}
           onChange={setEditForm}
           onInstallPlugin={handleInstallMarketPlugin}
@@ -11983,6 +12172,7 @@ export function HarnessBoardView({
         registry={projectDialogAdapterRegistry}
         installingPluginNames={updatingPluginNames}
         error={formError}
+        verification={createProjectVerification}
         onOpenChange={handleCreateDialogOpenChange}
         onChange={setForm}
         onInstallPlugin={handleInstallMarketPlugin}
@@ -11997,6 +12187,7 @@ export function HarnessBoardView({
         registry={projectDialogAdapterRegistry}
         installingPluginNames={updatingPluginNames}
         error={editError}
+        verification={editProjectVerification}
         onOpenChange={handleEditDialogOpenChange}
         onChange={setEditForm}
         onInstallPlugin={handleInstallMarketPlugin}

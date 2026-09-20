@@ -1,5 +1,4 @@
 import {
-  extractVisibleReasoning,
   isTraceReasoningTruncated,
   mergeStreamingReasoning,
   truncateReasoningForTrace
@@ -10,6 +9,7 @@ import {
   STREAM_MESSAGE_REASONING_MODE_KEY,
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
+import { readStreamTranscriptReasoning } from "./stream-transcript-flush"
 
 interface PlainRecord {
   [key: string]: unknown
@@ -26,6 +26,7 @@ interface AiReasoningObservation {
   id: string
   reasoning: string
   mode: StreamMessageWireMode
+  explicitDelta: boolean
 }
 
 interface BufferedAggregate {
@@ -196,12 +197,17 @@ function analyzeAiReasoningObservation(
   const className = typeof classId.at(-1) === "string" ? classId.at(-1)! : ""
   const id = typeof kwargs?.id === "string" ? kwargs.id.trim() : ""
   if (!id || (!className.includes("AI") && kwargs?.type !== "ai")) return undefined
-  const reasoning = extractVisibleReasoning(kwargs, reasoningLimit + 1)
   const metadata = asRecord(payload[1])
-  const mode =
-    readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]) ??
-    (className.includes("AIMessageChunk") ? "delta" : "snapshot")
-  return reasoning ? { id, reasoning, mode } : undefined
+  const fallbackMode = className.includes("AIMessageChunk") ? "delta" : "snapshot"
+  const update = readStreamTranscriptReasoning(payload, fallbackMode, reasoningLimit + 1)
+  if (update.reasoning === undefined) return undefined
+  return {
+    id,
+    reasoning: update.reasoning,
+    mode: update.reasoning_mode ?? fallbackMode,
+    explicitDelta:
+      readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]) === "delta"
+  }
 }
 
 function materializeAggregate(entry: BufferedAggregate): unknown[] {
@@ -213,9 +219,7 @@ function materializeAggregate(entry: BufferedAggregate): unknown[] {
       ...message,
       kwargs: {
         ...kwargs,
-        content: entry.textBlocks
-          .concat(entry.pendingBlockParts, entry.pendingTextParts)
-          .join("")
+        content: entry.textBlocks.concat(entry.pendingBlockParts, entry.pendingTextParts).join("")
       }
     },
     ...metadata
@@ -233,10 +237,7 @@ function flushPendingTextBlock(entry: BufferedAggregate): void {
   entry.pendingBlockChars += block.length
   entry.pendingTextParts = []
   entry.pendingTextChars = 0
-  if (
-    entry.pendingBlockParts.length >= 128 ||
-    entry.pendingBlockChars >= MAX_PENDING_TEXT_CHARS
-  ) {
+  if (entry.pendingBlockParts.length >= 128 || entry.pendingBlockChars >= MAX_PENDING_TEXT_CHARS) {
     entry.textBlocks.push(entry.pendingBlockParts.join(""))
     entry.pendingBlockParts = []
     entry.pendingBlockChars = 0
@@ -285,17 +286,18 @@ export function createStreamMessageSideEffectBuffer(
 
   const observeReasoning = (observation: AiReasoningObservation): string => {
     const existing =
-      predictedReasoningById.get(observation.id) ??
-      options.getReasoningSeed?.(observation.id) ??
-      ""
-    const next = observation.mode === "delta"
-      ? isTraceReasoningTruncated(existing)
-        ? existing
-        : truncateReasoningForTrace(
-            mergeStreamingReasoning(existing, observation.reasoning),
-            reasoningLimit
-          )
-      : truncateReasoningForTrace(observation.reasoning, reasoningLimit)
+      predictedReasoningById.get(observation.id) ?? options.getReasoningSeed?.(observation.id) ?? ""
+    const next =
+      observation.mode === "delta"
+        ? isTraceReasoningTruncated(existing)
+          ? existing
+          : truncateReasoningForTrace(
+              observation.explicitDelta
+                ? existing + observation.reasoning
+                : mergeStreamingReasoning(existing, observation.reasoning),
+              reasoningLimit
+            )
+        : truncateReasoningForTrace(observation.reasoning, reasoningLimit)
     predictedReasoningById.set(observation.id, next)
     return next
   }
@@ -303,9 +305,14 @@ export function createStreamMessageSideEffectBuffer(
   return {
     push(payload) {
       const observation = analyzeAiReasoningObservation(payload, reasoningLimit)
-      if (observation) observeReasoning(observation)
+      const observedReasoning = observation ? observeReasoning(observation) : undefined
       const candidate = analyzeMergeableAiChunk(payload)
       if (!candidate) {
+        // Snapshot/tool lifecycle payloads stay FIFO but need the same exact
+        // reasoning projection as aggregates, including an explicit clear.
+        if (observedReasoning !== undefined && payload && typeof payload === "object") {
+          premergedReasoningByPayload.set(payload, observedReasoning)
+        }
         entries.push({ kind: "payload", payload })
         return
       }

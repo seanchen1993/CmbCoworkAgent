@@ -6207,6 +6207,10 @@ interface AdvFeatureMetrics {
   imCompleted: number
   imCancelled: number
   imError: number
+  imReplied: number
+  imPushed: number
+  imCards: number
+  imSendFailed: number
   hookTotal: number
   hookBlocked: number
   codeExec: number
@@ -6219,7 +6223,8 @@ function assembleAdvancedFeatureCards(
 ): AdvancedFeaturesResult {
   const hbTotal = m.hbActionable + m.hbSilent + m.hbError + m.hbCancelled
   const memTotal = m.memSearch + m.memGet + m.memWrite
-  const imTotal = m.imCompleted + m.imCancelled + m.imError
+  const imInbound = m.imCompleted + m.imCancelled + m.imError
+  const imOutbound = m.imReplied + m.imPushed + m.imCards
   const progTotal = m.codeExec + m.savedTool
 
   return {
@@ -6272,13 +6277,26 @@ function assembleAdvancedFeatureCards(
       {
         key: "im",
         label: "内置统一机器人",
-        value: imTotal,
-        valueLabel: "处理消息数",
-        hint: `成功完成 ${m.imCompleted} 条`,
+        // Both directions. The inbound half alone read as the whole of the
+        // robot's traffic, and it is the smaller half — every answered message
+        // sends at least one back, and background results are pushed without
+        // anyone having asked.
+        value: imInbound + imOutbound,
+        valueLabel: "消息往来",
+        // The outbound figure counts what was attempted, so the exceptions are
+        // named here rather than left for a reader to subtract.
+        hint:
+          `收到 ${imInbound} 条 · 发出 ${imOutbound} 条` +
+          (m.imSendFailed > 0 ? `(异常 ${m.imSendFailed})` : ""),
         items: [
+          { label: "收到", count: imInbound, tone: "neutral" },
           { label: "已完成", count: m.imCompleted, tone: "good" },
-          { label: "取消", count: m.imCancelled, tone: "warn" },
-          { label: "错误/未知", count: m.imError, tone: "bad" }
+          { label: "回复", count: m.imReplied, tone: "neutral" },
+          { label: "主动推送", count: m.imPushed, tone: "good" },
+          { label: "审批/提问", count: m.imCards, tone: "neutral" },
+          // Covers both a send that failed outright and one the gateway never
+          // confirmed — "异常" claims neither more nor less than is known.
+          { label: "异常", count: m.imSendFailed, tone: "bad" }
         ]
       },
       {
@@ -6340,6 +6358,16 @@ async function fetchAdvancedFeatures(
       im: {
         filter: { term: { eventName: "im.event.processed" } },
         aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
+      },
+      // Outbound. Split by kind so "answered what it was asked" and "pushed a
+      // background result back on its own" stay distinguishable, and by outcome
+      // so a send that never landed is not counted as one that did.
+      im_out: {
+        filter: { term: { eventName: "im.message.delivered" } },
+        aggs: {
+          by_kind: { terms: { field: "properties.kind", size: 10 } },
+          by_outcome: { terms: { field: "properties.outcome", size: 10 } }
+        }
       },
       hooks: {
         filter: { term: { eventName: "hook.executed" } },
@@ -6420,6 +6448,10 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     imCompleted: k(12),
     imCancelled: k(2),
     imError: k(1),
+    imReplied: k(18),
+    imPushed: k(5),
+    imCards: k(3),
+    imSendFailed: k(1),
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),

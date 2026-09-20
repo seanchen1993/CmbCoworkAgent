@@ -1158,6 +1158,23 @@ test("recorded script flow", async ({ page }) => {
     expect(script.slice(installedMarker)).toContain("return RECORDER_FRAME_CHANNEL_ID")
   })
 
+  it("falls back to the last hover selector for transient tooltip click selectors", () => {
+    const script = buildPlaywrightScriptRecorderInjectionScript("frame-channel-1")
+    const mouseMoveListener = script.indexOf(
+      'document.addEventListener("mousemove", rememberHoveredActionSelector, true)'
+    )
+    const actionSelectorFallback = script.indexOf("function selectorForRecorderAction")
+    const actionSelectorUsage = script.indexOf("const selector = selectorForRecorderAction(action)")
+
+    expect(script).toContain("let lastHoveredActionSelector = \"\"")
+    expect(script).toContain("function rememberHoveredActionSelector(event)")
+    expect(script).toContain("injectedScript.generateSelector(target")
+    expect(script).toContain("isTransientActionSelector(selector)")
+    expect(script).toContain("return lastHoveredActionSelector")
+    expect(mouseMoveListener).toBeGreaterThan(actionSelectorFallback)
+    expect(actionSelectorFallback).toBeLessThan(actionSelectorUsage)
+  })
+
   it("uses the injected frame channel when Electron reports a same-process iframe as root", async () => {
     startScriptRecording({ threadId: "thread-1" })
 
