@@ -2101,12 +2101,14 @@ function AdapterPicker({
   registry,
   value,
   installingPluginNames,
+  portalContainer,
   onInstallPlugin,
   onValueChange
 }: {
   registry: ProjectModeAdapterItem[]
   value: string
   installingPluginNames: Set<string>
+  portalContainer?: HTMLElement | null
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
   onValueChange: (value: string) => void
 }): React.JSX.Element {
@@ -2139,7 +2141,7 @@ function AdapterPicker({
               ? `选择插件，当前：${formatAdapterSelectLabel(selectedAdapter)}`
               : "选择插件"
           }
-          className="h-9 w-full min-w-0 justify-between gap-2 bg-background px-3 font-normal"
+          className="h-9 w-full min-w-0 justify-between gap-2 bg-background px-3 font-normal text-foreground"
         >
           <span className={cn("min-w-0 truncate", !selectedAdapter && "text-muted-foreground/45")}>
             {selectedAdapter
@@ -2149,65 +2151,73 @@ function AdapterPicker({
           <ChevronDown className="size-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent
-        aria-label="选择插件"
-        align="start"
-        className="z-[70] flex max-h-[min(24rem,var(--radix-popover-content-available-height))] w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-2rem)] flex-col overflow-hidden p-0"
-        onOpenAutoFocus={(event) => {
-          event.preventDefault()
-          searchRef.current?.focus()
-        }}
-        onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing || !["ArrowDown", "ArrowUp"].includes(event.key)) return
-          const buttons = Array.from(
-            resultsRef.current?.querySelectorAll<HTMLButtonElement>(
-              "[data-adapter-option]:not(:disabled)"
-            ) ?? []
-          )
-          const index = buttons.indexOf(event.target as HTMLButtonElement)
-          if (event.target !== searchRef.current && index === -1) return
-          event.preventDefault()
-          const nextIndex = event.key === "ArrowDown" ? index + 1 : index - 1
-          if (nextIndex < 0) searchRef.current?.focus()
-          else buttons[Math.min(nextIndex, buttons.length - 1)]?.focus()
-        }}
-      >
-        <div className="shrink-0 border-b p-2">
-          <Input
-            ref={searchRef}
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value)
-              resultsRef.current?.scrollTo({ top: 0 })
-            }}
-            aria-label="搜索插件"
-            placeholder="搜索插件名称、描述或分类"
-            className={harnessProjectCreateInputClassName}
-          />
-        </div>
-        <div ref={resultsRef} className="min-h-0 overflow-y-auto overscroll-y-contain p-1">
-          {filteredRegistry.length ? (
-            <AdapterSelectGroups
-              registry={filteredRegistry}
-              selectedId={value}
-              installingPluginNames={installingPluginNames}
-              onInstallPlugin={(adapter) => {
-                searchRef.current?.focus()
-                return onInstallPlugin(adapter)
-              }}
-              onSelect={(adapterId) => {
-                onValueChange(adapterId)
-                setOpen(false)
-                setQuery("")
-              }}
-            />
-          ) : (
-            <div role="status" className="px-3 py-6 text-center text-sm text-muted-foreground">
-              未找到匹配的插件
-            </div>
+      <PopoverPrimitive.Portal container={portalContainer ?? undefined}>
+        <PopoverPrimitive.Content
+          aria-label="选择插件"
+          align="start"
+          sideOffset={4}
+          collisionPadding={16}
+          className={cn(
+            harnessProjectPopoverContentClassName,
+            "flex max-h-[min(24rem,var(--radix-popover-content-available-height))] max-w-[calc(100vw-2rem)] flex-col overflow-hidden"
           )}
-        </div>
-      </PopoverContent>
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            searchRef.current?.focus()
+          }}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || !["ArrowDown", "ArrowUp"].includes(event.key))
+              return
+            const buttons = Array.from(
+              resultsRef.current?.querySelectorAll<HTMLButtonElement>(
+                "[data-adapter-option]:not(:disabled)"
+              ) ?? []
+            )
+            const index = buttons.indexOf(event.target as HTMLButtonElement)
+            if (event.target !== searchRef.current && index === -1) return
+            event.preventDefault()
+            const nextIndex = event.key === "ArrowDown" ? index + 1 : index - 1
+            if (nextIndex < 0) searchRef.current?.focus()
+            else buttons[Math.min(nextIndex, buttons.length - 1)]?.focus()
+          }}
+        >
+          <div className="shrink-0 border-b p-2">
+            <Input
+              ref={searchRef}
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value)
+                resultsRef.current?.scrollTo({ top: 0 })
+              }}
+              aria-label="搜索插件"
+              placeholder="搜索插件名称、描述或分类"
+              className={harnessProjectCreateInputClassName}
+            />
+          </div>
+          <div ref={resultsRef} className="min-h-0 overflow-y-auto overscroll-y-contain p-1">
+            {filteredRegistry.length ? (
+              <AdapterSelectGroups
+                registry={filteredRegistry}
+                selectedId={value}
+                installingPluginNames={installingPluginNames}
+                onInstallPlugin={(adapter) => {
+                  searchRef.current?.focus()
+                  return onInstallPlugin(adapter)
+                }}
+                onSelect={(adapterId) => {
+                  onValueChange(adapterId)
+                  setOpen(false)
+                  setQuery("")
+                }}
+              />
+            ) : (
+              <div role="status" className="px-3 py-6 text-center text-sm text-muted-foreground">
+                未找到匹配的插件
+              </div>
+            )}
+          </div>
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
     </Popover>
   )
 }
@@ -2889,7 +2899,7 @@ function ProjectFormDialog({
         ref={setDialogPortalContainer}
         className={cn(
           harnessDialogContentClassName,
-          "top-8 grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] translate-y-0 overflow-visible"
+          "grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-visible"
         )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
@@ -3010,6 +3020,7 @@ function ProjectFormDialog({
                   value={form.adapterId}
                   registry={registry}
                   installingPluginNames={installingPluginNames}
+                  portalContainer={dialogPortalContainer}
                   onInstallPlugin={onInstallPlugin}
                   onValueChange={(adapterId) =>
                     onChange({ ...form, adapterId, adapterType: "plugin" })
@@ -3117,7 +3128,7 @@ function ProjectEditDialog({
         ref={setDialogPortalContainer}
         className={cn(
           harnessDialogContentClassName,
-          "top-8 grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] translate-y-0 overflow-visible"
+          "grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-visible"
         )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
@@ -3224,6 +3235,7 @@ function ProjectEditDialog({
                   value={form.adapterId}
                   registry={registry}
                   installingPluginNames={installingPluginNames}
+                  portalContainer={dialogPortalContainer}
                   onInstallPlugin={onInstallPlugin}
                   onValueChange={(adapterId) =>
                     onChange({ ...form, adapterId, adapterType: "plugin" })
@@ -3687,7 +3699,7 @@ function FeatureCreateDialog({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          <div className="text-xs text-muted-foreground">已选择 {selectedDeployUnitCount} 个</div>
+          <div className="text-xs text-muted-foreground">已选择 {selectedDeployUnitCount} 个发布单元</div>
         </div>
       </div>
       <div className="max-h-72 overflow-auto rounded-md border border-border bg-background px-3 py-2">
@@ -3702,7 +3714,10 @@ function FeatureCreateDialog({
             aria-label="会话工作区"
             aria-required="true"
             disabled={creating || usesDeployUnitWorkspace}
-            className="min-w-0 cursor-pointer border-border bg-transparent px-2 text-sm font-normal shadow-none hover:bg-background-interactive focus-visible:ring-2"
+            className={cn(
+              "min-w-0 cursor-pointer border-border bg-transparent px-2 text-sm font-normal shadow-none hover:bg-background-interactive focus-visible:ring-2",
+              workspacePath && "truncate text-left [direction:rtl]"
+            )}
             onClick={pickWorkspace}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
@@ -3776,7 +3791,12 @@ function FeatureCreateDialog({
                         className="h-9 min-w-0 flex-1 justify-start gap-2 px-2 font-normal"
                         title={mapping.localRepoPath}
                       >
-                        <span className="min-w-0 flex-1 truncate text-left text-sm">
+                        <span
+                          className={cn(
+                            "min-w-0 flex-1 truncate text-left text-sm",
+                            mapping.localRepoPath && "[direction:rtl]"
+                          )}
+                        >
                           {mapping.localRepoPath || "暂无代码库路径"}
                         </span>
                         <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
@@ -3938,7 +3958,7 @@ function FeatureCreateDialog({
                         </span>
                       </TooltipTrigger>
                       <TooltipContent side="top" className="z-[70] max-w-72 text-xs leading-5">
-                        默认会话工作区必选，用于特性内开启新会话、开启托管模式、招乎发起新会话的默认路径。发布单元可选，用于在上下文注入对应的系统约束，并将对应代码库路径提供给大模型。已选中的发布单元路径可以作为会话工作区路径。
+                        会话工作区必选，用于特性内开启新会话、开启托管模式、招乎发起新会话的默认路径。发布单元可选，用于在上下文注入对应的系统约束，并将对应代码库路径提供给大模型。已选中的发布单元路径可以作为会话工作区路径。
                       </TooltipContent>
                     </Tooltip>
                   </span>
@@ -7671,28 +7691,22 @@ function FeatureDetailPage({
                 </Tooltip>
               </TooltipProvider>
             </div>
-            <div className="flex min-w-0 gap-2">
-              <Input
-                value={managedRunWorkspacePath}
-                readOnly
-                placeholder="请选择文件夹"
-                className="min-w-0 flex-1"
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                className="shrink-0 gap-2"
-                onClick={() => void handlePickManagedRunWorkspace()}
-                disabled={pickingManagedRunWorkspace || updatingManagedRun}
-              >
-                {pickingManagedRunWorkspace ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <FolderOpen className="size-4" />
-                )}
-                选择文件夹
-              </Button>
-            </div>
+            <Input
+              value={managedRunWorkspacePath}
+              readOnly
+              title={managedRunWorkspacePath}
+              placeholder="请选择文件夹"
+              aria-label="会话工作区"
+              disabled={pickingManagedRunWorkspace || updatingManagedRun}
+              className="min-w-0 cursor-pointer text-foreground"
+              onClick={() => void handlePickManagedRunWorkspace()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault()
+                  void handlePickManagedRunWorkspace()
+                }
+              }}
+            />
             <label className="mt-2 grid gap-2 text-sm font-medium">
               启动会话的初始用户消息
               <textarea
