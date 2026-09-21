@@ -87,14 +87,42 @@ interface HookSnapshotFile {
   blobFile?: string
 }
 
+/**
+ * A ready snapshot must stay consumable after its working tree is gone.
+ *
+ * Script-driven flows create a linked worktree, commit in it, merge, then
+ * `git worktree remove` — often within seconds, and typically while the app
+ * isn't even running. Consumption is not synchronous with any of that, so by
+ * the time we get here `gitRoot` is frequently a path that no longer exists.
+ * Running git with a deleted cwd fails at spawn (ENOENT), which is why the
+ * commit's reachability in the shared object store does not save us.
+ *
+ * So schemaVersion 2 captures everything the consumer needs at hook time and
+ * records the common dir as an escape hatch for the one thing that still needs
+ * a live repo (verifying the commit object). Fields below marked "v2" are
+ * absent on snapshots written by older hook helpers; every read falls back to
+ * live git, which still works whenever the worktree survived.
+ */
 interface HookSnapshotMeta {
   schemaVersion?: number
   snapshotId: string
   gitRoot: string
+  /** v2. `rev-parse --git-common-dir`, absolute: the shared `.git` of the
+   *  repository this worktree belongs to, which outlives the worktree. */
+  gitCommonDir?: string
   branch?: string
   commitSha?: string
   /** ISO timestamp written by the post-commit hook (≈ commit creation time). */
   committedAt?: string
+  /** v2. Committer date in epoch ms, from the commit object itself. Preferred
+   *  over `committedAt`, which is only the hook's own wall clock. */
+  commitTimeMs?: number
+  /** v2. `git show --numstat` of the commit, captured by the post-commit hook. */
+  filesChanged?: number
+  insertions?: number
+  deletions?: number
+  /** v2. `git remote get-url origin`; "" when the repo has no origin. */
+  remoteUrl?: string
   files?: HookSnapshotFile[]
 }
 
@@ -288,6 +316,14 @@ async function registerGitHookRepo(gitRoot: string): Promise<void> {
       })
     }
   })
+}
+
+/** Drop a registration entirely (directory gone, nothing left in its bucket). */
+async function forgetRegisteredGitHookRepo(gitRoot: string): Promise<void> {
+  const key = normalizePathForKey(resolvePath(gitRoot))
+  await updateRegisteredRepos((repos) =>
+    repos.filter((repo) => normalizePathForKey(repo.gitRoot) !== key)
+  )
 }
 
 async function disableRegisteredGitHookRepo(gitRoot: string): Promise<void> {
@@ -711,6 +747,60 @@ function getGitPath(gitRoot, name) {
   return path.isAbsolute(raw) || /^[A-Za-z]:[\\\\/]/.test(raw) ? raw : path.resolve(gitRoot, raw)
 }
 
+// The repository's shared .git directory. For a linked worktree this points at
+// the MAIN checkout's .git, which survives \`git worktree remove\` — it is the
+// only handle the consumer has left once this worktree is deleted.
+function getGitCommonDir(gitRoot) {
+  try {
+    const raw = runGit(["rev-parse", "--git-common-dir"], { cwd: gitRoot }).trim()
+    if (!raw) return ""
+    return path.isAbsolute(raw) || /^[A-Za-z]:[\\\\/]/.test(raw) ? raw : path.resolve(gitRoot, raw)
+  } catch {
+    return ""
+  }
+}
+
+function getRemoteUrl(gitRoot) {
+  try {
+    return runGit(["remote", "get-url", "origin"], { cwd: gitRoot }).trim()
+  } catch {
+    return ""
+  }
+}
+
+function getCommitTimeMs(gitRoot, sha) {
+  try {
+    const seconds = Number(runGit(["show", "-s", "--format=%ct", sha], { cwd: gitRoot }).trim())
+    return Number.isFinite(seconds) ? seconds * 1000 : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Line counts over the WHOLE commit, not just the code files we snapshot: this
+// feeds the event's filesChanged/insertions/deletions, which must match what
+// \`git show --numstat\` reports for the commit.
+function getCommitStats(gitRoot, sha) {
+  try {
+    const output = runGit(["show", "--numstat", "--format=", sha], { cwd: gitRoot })
+    let fileCount = 0
+    let additions = 0
+    let deletions = 0
+    for (const line of output.split("\\n")) {
+      const parts = line.trim().split("\\t")
+      if (parts.length < 3) continue
+      fileCount += 1
+      const added = Number.parseInt(parts[0], 10)
+      const deleted = Number.parseInt(parts[1], 10)
+      if (Number.isFinite(added)) additions += added
+      if (Number.isFinite(deleted)) deletions += deleted
+    }
+    return { filesChanged: fileCount, insertions: additions, deletions: deletions }
+  } catch {
+    return undefined
+  }
+}
+
 function repoKey(gitRoot) {
   return crypto.createHash("sha1").update(gitRoot.trim().replace(/\\\\/g, "/").toLowerCase()).digest("hex")
 }
@@ -791,9 +881,10 @@ function capturePreCommit() {
   }
 
   const meta = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     snapshotId,
     gitRoot,
+    gitCommonDir: getGitCommonDir(gitRoot),
     branch: getBranch(gitRoot),
     createdAt: new Date().toISOString(),
     files
@@ -822,6 +913,19 @@ function promotePostCommit() {
   meta.commitSha = runGit(["rev-parse", "HEAD"], { cwd: gitRoot }).trim()
   meta.branch = meta.branch || getBranch(gitRoot)
   meta.committedAt = new Date().toISOString()
+  // Everything below is captured HERE, while the working tree still exists,
+  // precisely so the consumer never has to come back to it. Three extra
+  // plumbing calls next to the rev-parse we already run.
+  meta.gitCommonDir = meta.gitCommonDir || getGitCommonDir(gitRoot)
+  meta.remoteUrl = getRemoteUrl(gitRoot)
+  const commitTimeMs = getCommitTimeMs(gitRoot, meta.commitSha)
+  if (commitTimeMs !== undefined) meta.commitTimeMs = commitTimeMs
+  const stats = getCommitStats(gitRoot, meta.commitSha)
+  if (stats) {
+    meta.filesChanged = stats.filesChanged
+    meta.insertions = stats.insertions
+    meta.deletions = stats.deletions
+  }
   fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8")
   ensureDir(path.dirname(readyDir))
   fs.renameSync(pendingDir, readyDir)
@@ -883,9 +987,30 @@ main()
 async function ensureHookHelper(): Promise<string> {
   const helperPath = getHookHelperPath()
   await ensureDir(dirname(helperPath))
-  await writeFile(helperPath, buildHookHelperScript(), "utf-8")
-  await chmod(helperPath, 0o755).catch(() => undefined)
+  // Write-then-rename: installed hooks invoke this file from other processes,
+  // and a plain writeFile truncates first — a commit landing inside that window
+  // would run a half-written script. Rename is atomic on the same filesystem.
+  const stagingPath = `${helperPath}.${process.pid}.tmp`
+  await writeFile(stagingPath, buildHookHelperScript(), "utf-8")
+  await chmod(stagingPath, 0o755).catch(() => undefined)
+  await rename(stagingPath, helperPath)
   return helperPath
+}
+
+/**
+ * Bring the on-disk helper up to date with this build.
+ *
+ * The helper is rewritten only by installGitHooks, which autoInstall skips for
+ * repos whose hooks are already installed — so without this, a user who never
+ * triggers a fresh install keeps running whatever helper version first landed
+ * on their machine, and never starts recording the v2 snapshot fields.
+ */
+export async function refreshGitHookHelper(): Promise<void> {
+  try {
+    await ensureHookHelper()
+  } catch (e) {
+    console.warn("[GitHook] helper refresh failed:", e)
+  }
 }
 
 async function nextBackupPath(basePath: string): Promise<string> {
@@ -1167,6 +1292,36 @@ async function getRemoteUrl(gitRoot: string, remoteName = "origin"): Promise<str
   }
 }
 
+/**
+ * A directory where git can still run for this snapshot's repository.
+ *
+ * Prefers the original work tree (it is the only place that resolves a bare
+ * `HEAD`, and it is what a surviving worktree should keep using). Falls back to
+ * the recorded common dir when that work tree is gone: the main checkout for a
+ * removed linked worktree, which still holds the commit as long as some ref
+ * reaches it. `dirname(commonDir)` is the main work tree for the usual
+ * `<repo>/.git` layout; the common dir itself works for the rest (bare repos,
+ * `.git` files pointing elsewhere), since git recognizes a git dir as cwd.
+ *
+ * Returns null when neither survives — then the commit genuinely cannot be
+ * verified any more and the snapshot stays in `ready` for a later attempt.
+ */
+async function resolveSnapshotGitCwd(meta: HookSnapshotMeta): Promise<string | null> {
+  if (meta.gitRoot && (await pathExists(meta.gitRoot))) return meta.gitRoot
+  const commonDir = meta.gitCommonDir?.trim()
+  if (!commonDir) return null
+  const parent = dirname(commonDir)
+  if (parent && parent !== commonDir && (await pathExists(parent))) {
+    try {
+      await runGit(parent, ["rev-parse", "--git-dir"], { timeoutMs: GIT_EXEC_TIMEOUT_MS })
+      return parent
+    } catch {
+      // Not a work tree (bare repo, relocated git dir) — use the git dir itself.
+    }
+  }
+  return (await pathExists(commonDir)) ? commonDir : null
+}
+
 async function processReadyCommitSnapshot(repoDir: string, name: string): Promise<void> {
   const snapshotDir = join(repoDir, "ready", name)
   const meta = await readJsonFile<HookSnapshotMeta>(join(snapshotDir, "meta.json"))
@@ -1205,17 +1360,26 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     }
   }
 
+  // Where git can still run for this repo — the work tree if it survived, the
+  // main checkout behind the common dir if this was a worktree that got removed.
+  const gitCwd = await resolveSnapshotGitCwd(meta)
+
   // Upper bound on eligible gen rows = commit creation time. The ready snapshot
   // can be processed long after the commit (sync cadence), so without this the
   // pending-gen set read here could include generations made *after* the commit
-  // and vacuum them into it. Prefer the committer date; fall back to the
-  // post-commit hook's timestamp.
+  // and vacuum them into it. The hook records the committer date at commit time
+  // (v2); older snapshots fall back to live git, then to the hook's wall clock.
   const committedAtMs = meta.committedAt ? Date.parse(meta.committedAt) : NaN
   const commitTimeMs =
-    (await getCommitTimeMs(meta.gitRoot, meta.commitSha)) ??
+    meta.commitTimeMs ??
+    (gitCwd ? await getCommitTimeMs(gitCwd, meta.commitSha) : undefined) ??
     (Number.isFinite(committedAtMs) ? committedAtMs : undefined)
 
-  const existingJobStatus = await getCommitMeasurementStatus(meta.gitRoot, meta.commitSha)
+  const existingJobStatus = await getCommitMeasurementStatus(
+    meta.gitRoot,
+    meta.commitSha,
+    gitCwd ?? undefined
+  )
   if (
     !existingJobStatus &&
     (snapshots.length === 0 || !hasPendingGenerationsForCommit(snapshots, commitTimeMs))
@@ -1233,7 +1397,8 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     snapshots,
     meta.commitSha,
     commitTimeMs,
-    meta.gitRoot
+    meta.gitRoot,
+    gitCwd ?? undefined
   )
   if (!measurementCompleted) {
     console.warn(
@@ -1242,11 +1407,26 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     return
   }
 
+  // v2 snapshots carry all of this from hook time. Only reach for live git on
+  // older snapshots, and only when something is still there to ask — the
+  // helpers below swallow their errors and return 0/"" on failure, so calling
+  // them against a deleted work tree would silently emit a zeroed event, which
+  // reads on the dashboard as a real commit that changed nothing.
   const gitRoot = meta.gitRoot
+  const needsLiveStats = meta.filesChanged === undefined
+  const needsLiveRemote = meta.remoteUrl === undefined
   const [stats, branch, remoteUrl] = await Promise.all([
-    getCommitStats(gitRoot, meta.commitSha),
-    getCurrentBranch(gitRoot),
-    getRemoteUrl(gitRoot, "origin")
+    needsLiveStats && gitCwd
+      ? getCommitStats(gitCwd, meta.commitSha)
+      : Promise.resolve({
+          fileCount: meta.filesChanged ?? 0,
+          additions: meta.insertions ?? 0,
+          deletions: meta.deletions ?? 0
+        }),
+    meta.branch ? Promise.resolve(meta.branch) : gitCwd ? getCurrentBranch(gitCwd) : Promise.resolve(""),
+    needsLiveRemote && gitCwd
+      ? getRemoteUrl(gitCwd, "origin")
+      : Promise.resolve(meta.remoteUrl ?? "")
   ])
   const remoteInfo = parseGitRemoteInfo(remoteUrl)
   trackEvent("git.commit.created", "git", {
@@ -1972,10 +2152,20 @@ async function reconcilePushesForRepo(gitRoot: string): Promise<void> {
 
 export async function syncGitHookEvents(workspacePath: string): Promise<GitHookSyncResult> {
   const gitRoot = await resolveGitRoot(workspacePath)
-  if (!gitRoot) return "unavailable"
 
-  const repoDir = getRepoEventsDir(gitRoot)
-  const key = normalizePathForKey(gitRoot)
+  // A registered root whose directory is gone — the usual end state of a
+  // script-driven worktree. `rev-parse` cannot run there, but its bucket may
+  // still hold ready snapshots, and a v2 snapshot knows its own common dir, so
+  // it can be drained without the work tree. The bucket key is the root the
+  // hook resolved at commit time, which is the spelling repos.json stores.
+  const orphanedRoot = gitRoot ? null : resolvePath(workspacePath)
+  const bucketRoot = gitRoot ?? orphanedRoot
+  if (!bucketRoot) return "unavailable"
+
+  const repoDir = getRepoEventsDir(bucketRoot)
+  if (!gitRoot && !(await pathExists(repoDir))) return "unavailable"
+
+  const key = normalizePathForKey(bucketRoot)
   if (syncInFlight.has(key)) {
     syncPending.add(key)
     return "busy"
@@ -2003,30 +2193,34 @@ export async function syncGitHookEvents(workspacePath: string): Promise<GitHookS
       }
     }
 
-    // Hook-independent backstop: detect & measure external commits whose
-    // pre-commit/post-commit hooks never fired (e.g. IntelliJ IDEA 2026). This
-    // runs even when no events dir exists yet — that is exactly the gap it fills.
-    try {
-      await reconcileCommitsForRepo(gitRoot)
-    } catch (e) {
-      console.warn("[GitHook] failed to reconcile commits:", e)
-    }
+    // Both backstops below walk refs in a live repository, so they have nothing
+    // to do for an orphaned root. Draining its bucket above is the whole job.
+    if (gitRoot) {
+      // Hook-independent backstop: detect & measure external commits whose
+      // pre-commit/post-commit hooks never fired (e.g. IntelliJ IDEA 2026). This
+      // runs even when no events dir exists yet — that is exactly the gap it fills.
+      try {
+        await reconcileCommitsForRepo(gitRoot)
+      } catch (e) {
+        console.warn("[GitHook] failed to reconcile commits:", e)
+      }
 
-    // Hook-independent backstop for the adoption "pushed" flag: detect commits
-    // that have reached the remote (refs/remotes/origin/*) but were never marked
-    // pushed — covers external pushes and in-app pushes whose background marking
-    // failed (no-upstream snapshot, ES indexing race, app closed mid-retry).
-    try {
-      await reconcilePushesForRepo(gitRoot)
-    } catch (e) {
-      console.warn("[GitHook] failed to reconcile pushes:", e)
+      // Hook-independent backstop for the adoption "pushed" flag: detect commits
+      // that have reached the remote (refs/remotes/origin/*) but were never marked
+      // pushed — covers external pushes and in-app pushes whose background marking
+      // failed (no-upstream snapshot, ES indexing race, app closed mid-retry).
+      try {
+        await reconcilePushesForRepo(gitRoot)
+      } catch (e) {
+        console.warn("[GitHook] failed to reconcile pushes:", e)
+      }
     }
     return "synced"
   } finally {
     syncInFlight.delete(key)
     if (syncPending.delete(key)) {
       const timer = setTimeout(() => {
-        void syncGitHookEvents(gitRoot).catch((e) => {
+        void syncGitHookEvents(bucketRoot).catch((e) => {
           console.warn("[GitHook] pending sync failed:", e)
         })
       }, 100)
@@ -2079,7 +2273,16 @@ export async function syncRegisteredGitHookEvents(): Promise<void> {
       if (result === "synced") {
         await markRegisteredRepoSynced(repo.gitRoot)
       } else if (result === "unavailable") {
-        await markRegisteredRepoSyncFailed(repo.gitRoot, "Git 仓库不可用")
+        // "unavailable" now means the root is unusable AND its bucket is gone,
+        // so there is nothing left to drain. A script-driven flow registers one
+        // throwaway worktree per run, and keeping those forever would make every
+        // sweep spawn a doomed git per dead path. Drop it; a live repo that
+        // re-appears re-registers on the next agent write.
+        if (!(await pathExists(repo.gitRoot))) {
+          await forgetRegisteredGitHookRepo(repo.gitRoot)
+        } else {
+          await markRegisteredRepoSyncFailed(repo.gitRoot, "Git 仓库不可用")
+        }
       }
     } catch (e) {
       console.warn("[GitHook] failed to sync registered repo:", repo.gitRoot, e)
@@ -2090,6 +2293,7 @@ export async function syncRegisteredGitHookEvents(): Promise<void> {
 
 export function startRegisteredGitHookEventSync(): void {
   if (registeredSyncTimer) return
+  void refreshGitHookHelper()
   void syncRegisteredGitHookEvents().catch((e) => {
     console.warn("[GitHook] registered repo sync failed:", e)
   })
