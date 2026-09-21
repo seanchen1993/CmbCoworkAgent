@@ -42,6 +42,8 @@ describe("运行开销的读取", () => {
       run_cost_tool_calls: { value: 1234 },
       run_cost_model_calls: { value: 89 },
       run_cost_total_tokens: { value: 456_700 },
+      run_cost_input_tokens: { value: 379_100 },
+      run_cost_output_tokens: { value: 59_400 },
       run_cost_user_input_requests: { value: 12 },
       run_cost_user_input_docs: { value: 40 }
     })
@@ -49,7 +51,10 @@ describe("运行开销的读取", () => {
     expect(runCost).toEqual({
       toolCalls: 1234,
       modelCalls: 89,
+      // 输入+输出 < 总量：差额是缓存读取与创建，这不是对不上，是三个不同的量。
       totalTokens: 456_700,
+      inputTokens: 379_100,
+      outputTokens: 59_400,
       userInputRequests: 12,
       userInputRequestDocs: 40
     })
@@ -109,5 +114,27 @@ describe("请求用户回答次数的覆盖度", () => {
       userInputRequestDocs: 0
     }
     expect(isUserInputRequestCountComplete(noField, 40)).toBe(false)
+  })
+})
+
+describe("输入 / 输出 Token", () => {
+  it("两项各自独立聚合，字段名指向 trace 上的标量", () => {
+    const aggs = buildProjectModeRunCostAggs() as Record<string, { sum?: { field: string } }>
+    expect(aggs.run_cost_input_tokens.sum?.field).toBe("totalInputTokens")
+    expect(aggs.run_cost_output_tokens.sum?.field).toBe("totalOutputTokens")
+    // 总量仍然单独取：它还含缓存读取与创建，不是输入+输出。
+    expect(aggs.run_cost_total_tokens.sum?.field).toBe("totalTokens")
+  })
+
+  it("缺字段时按 0 读，不影响其他项", () => {
+    // 这两个字段比 totalTokens 晚，老 trace 上没有；ES 的 sum 对缺失字段返回 0。
+    const runCost = parseProjectModeRunCost({
+      run_cost_total_tokens: { value: 900 },
+      run_cost_tool_calls: { value: 5 }
+    })
+    expect(runCost.totalTokens).toBe(900)
+    expect(runCost.toolCalls).toBe(5)
+    expect(runCost.inputTokens).toBe(0)
+    expect(runCost.outputTokens).toBe(0)
   })
 })

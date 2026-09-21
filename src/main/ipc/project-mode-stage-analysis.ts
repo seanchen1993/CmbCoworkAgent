@@ -1,6 +1,7 @@
 import {
   buildProjectModeRunCostAggs,
-  parseProjectModeRunCost
+  parseProjectModeRunCost,
+  EMPTY_PROJECT_MODE_RUN_COST
 } from "./project-mode-run-cost-metrics"
 import type { ProjectModeRunCost } from "./project-mode-run-cost-metrics"
 import { extractHarnessNodeGroup } from "../../shared/harness-stage-bucket"
@@ -43,21 +44,6 @@ function asText(value: unknown): string {
   return typeof value === "string" ? value : ""
 }
 
-/** 每阶段展示的工具排行条数。弹窗是给人看的，不是给人翻的。 */
-export const STAGE_TOP_TOOL_LIMIT = 8
-
-/**
- * 工具种类数的统计上限。
- *
- * 用同一个 terms 聚合多取一些桶、再在解析时切出前 8 条，而不是另起一个
- * cardinality：cardinality 不支持 exclude，算出来会把被过滤掉的内置工具也计进去，
- * 于是「共 N 种」和下面列出的徽章不是一个口径，反而更误导。
- *
- * 30 是按实际工具数取的：排除内置工具后，一个阶段能用到的自定义 / MCP 工具通常
- * 十几个。真超过就显示「30+ 种」，因为此时精确值已经不影响判断了。
- */
-export const STAGE_TOOL_VARIETY_LIMIT = 30
-
 /** P95：分辨「整体都慢」和「少数几轮拖长了」。 */
 const DURATION_PERCENTS = [95] as const
 
@@ -72,24 +58,12 @@ export interface ProjectModeStageMetrics {
   runCost: ProjectModeRunCost
 }
 
-export interface ProjectModeStageToolCount {
-  tool: string
-  /** 口径与「Tool 使用」模块完全一致，未做去重语义的修正。 */
-  count: number
-}
-
 export interface ProjectModeStageRow {
   /** 原始 harnessNodeName，形如 `dev-编码实现`；无阶段归属的轮次落在未归因桶。 */
   nodeName: string
   /** 阶段大类（`${group}-${label}` 里的 group），取不到时为 null。 */
   group: string | null
   metrics: ProjectModeStageMetrics
-  /** 调用次数最高的若干个，最多 STAGE_TOP_TOOL_LIMIT 条。 */
-  topTools: ProjectModeStageToolCount[]
-  /** 该阶段用到的工具种类数，与 topTools 同口径（同样排除了内置工具）。 */
-  toolVariety: number
-  /** 种类数触到统计上限，真实值只多不少，展示成「30+ 种」。 */
-  toolVarietyTruncated: boolean
 }
 
 export interface ProjectModeStageAnalysis {
@@ -105,13 +79,7 @@ function emptyMetrics(): ProjectModeStageMetrics {
     totalDurationMs: 0,
     avgDurationMs: 0,
     p95DurationMs: 0,
-    runCost: {
-      toolCalls: 0,
-      modelCalls: 0,
-      totalTokens: 0,
-      userInputRequests: 0,
-      userInputRequestDocs: 0
-    }
+    runCost: { ...EMPTY_PROJECT_MODE_RUN_COST }
   }
 }
 
@@ -141,8 +109,7 @@ function metricsAggs(): Record<string, unknown> {
  */
 export function buildProjectModeStageAnalysisAggs(
   unattributedNodeName: string,
-  nodeLimit: number,
-  toolExcludes: readonly string[]
+  nodeLimit: number
 ): Record<string, unknown> {
   return {
     ...metricsAggs(),
@@ -152,16 +119,7 @@ export function buildProjectModeStageAnalysisAggs(
         size: Math.max(1, nodeLimit),
         missing: unattributedNodeName
       },
-      aggs: {
-        ...metricsAggs(),
-        by_tool: {
-          terms: {
-            field: "toolNames",
-            size: STAGE_TOOL_VARIETY_LIMIT,
-            exclude: [...toolExcludes]
-          }
-        }
-      }
+      aggs: metricsAggs()
     }
   }
 }
@@ -180,37 +138,12 @@ function parseMetrics(container: unknown): ProjectModeStageMetrics {
   }
 }
 
-function parseStageTools(container: unknown): {
-  topTools: ProjectModeStageToolCount[]
-  toolVariety: number
-  toolVarietyTruncated: boolean
-} {
-  const buckets = asRecord(asRecord(container).by_tool).buckets
-  if (!Array.isArray(buckets)) {
-    return { topTools: [], toolVariety: 0, toolVarietyTruncated: false }
-  }
-  const tools = buckets
-    .map((entry) => {
-      const bucket = asRecord(entry)
-      return { tool: asText(bucket.key), count: asCount(bucket.doc_count) }
-    })
-    .filter((item) => item.tool.length > 0)
-  return {
-    // 只展示前几条，但种类数按拿回来的全部桶算，这样「共 N 种」能告诉人下面
-    // 那几个徽章不是全部。
-    topTools: tools.slice(0, STAGE_TOP_TOOL_LIMIT),
-    toolVariety: tools.length,
-    toolVarietyTruncated: tools.length >= STAGE_TOOL_VARIETY_LIMIT
-  }
-}
-
 /**
  * 解析成弹窗要的形状，阶段按「归属到该阶段的总忙碌时长」倒序——弹窗是用来找「慢在
  * 哪」的，最吃时间的排最前面。
  *
- * 注意各阶段之和不一定等于 total：工具排行做了 size 截断，而 total 没有；另外
- * by_node 的 terms 也有 size 上限，阶段特别多时尾部会被截掉。两个数不一致时以
- * total 为准。
+ * 注意各阶段之和不一定等于 total：by_node 的 terms 有 size 上限，阶段特别多时尾部
+ * 会被截掉，而 total 没有截断。两个数不一致时以 total 为准。
  */
 export function parseProjectModeStageAnalysis(
   projectId: string,
@@ -226,8 +159,7 @@ export function parseProjectModeStageAnalysis(
           return {
             nodeName,
             group: extractHarnessNodeGroup(nodeName),
-            metrics: parseMetrics(bucket),
-            ...parseStageTools(bucket)
+            metrics: parseMetrics(bucket)
           }
         })
         .filter((stage) => stage.nodeName.length > 0)

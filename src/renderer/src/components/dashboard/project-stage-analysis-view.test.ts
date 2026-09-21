@@ -24,13 +24,12 @@ function stage(
         toolCalls: 0,
         modelCalls: 0,
         totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
         userInputRequests: 0,
         userInputRequestDocs: 0
       }
-    },
-    topTools: [],
-    toolVariety: 0,
-    toolVarietyTruncated: false
+    }
   }
 }
 

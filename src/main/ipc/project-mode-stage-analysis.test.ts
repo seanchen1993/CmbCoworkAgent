@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   buildProjectModeStageAnalysisAggs,
-  parseProjectModeStageAnalysis,
-  STAGE_TOOL_VARIETY_LIMIT,
-  STAGE_TOP_TOOL_LIMIT
+  parseProjectModeStageAnalysis
 } from "./project-mode-stage-analysis"
 
 /**
@@ -26,7 +24,6 @@ function nodeBucket(
     sum: number
     avg: number
     p95: number
-    tools?: Array<[string, number]>
   }
 ): Record<string, unknown> {
   return {
@@ -38,15 +35,12 @@ function nodeBucket(
     run_cost_model_calls: { value: 10 },
     run_cost_total_tokens: { value: 1000 },
     run_cost_user_input_requests: { value: 1 },
-    run_cost_user_input_docs: { value: options.docCount },
-    by_tool: {
-      buckets: (options.tools ?? []).map(([tool, count]) => ({ key: tool, doc_count: count }))
-    }
+    run_cost_user_input_docs: { value: options.docCount }
   }
 }
 
 describe("阶段分析的聚合条件", () => {
-  const aggs = buildProjectModeStageAnalysisAggs(UNATTRIBUTED, 50, ["execute", "read_file"])
+  const aggs = buildProjectModeStageAnalysisAggs(UNATTRIBUTED, 50)
 
   it("按 harnessNodeName 拆阶段，没有阶段归属的落进未归因桶", () => {
     const byNode = (aggs.by_node as { terms: { field: string; size: number; missing: string } })
@@ -69,25 +63,23 @@ describe("阶段分析的聚合条件", () => {
     }
   })
 
-  it("工具排行沿用 Tool 使用模块的过滤与字段", () => {
-    const byTool = (
-      (aggs.by_node as { aggs: Record<string, { terms: Record<string, unknown> }> }).aggs
-        .by_tool as { terms: Record<string, unknown> }
-    ).terms
-    expect(byTool.field).toBe("toolNames")
-    // size 取的是种类数统计上限，不是展示条数：同一个聚合既喂徽章也喂「共 N 种」，
-    // 多取一些桶才能知道有没有列全，解析时再切到 STAGE_TOP_TOOL_LIMIT。
-    expect(byTool.size).toBe(STAGE_TOOL_VARIETY_LIMIT)
-    expect(STAGE_TOOL_VARIETY_LIMIT).toBeGreaterThan(STAGE_TOP_TOOL_LIMIT)
-    expect(byTool.exclude).toEqual(["execute", "read_file"])
-  })
-
-  it("运行开销四项也按阶段拆", () => {
+  it("运行开销各项也按阶段拆，Token 含输入与输出", () => {
     const stageAggs = (aggs.by_node as { aggs: Record<string, unknown> }).aggs
     expect(stageAggs).toHaveProperty("run_cost_tool_calls")
     expect(stageAggs).toHaveProperty("run_cost_model_calls")
     expect(stageAggs).toHaveProperty("run_cost_total_tokens")
+    // 输入/输出分开统计，弹窗那两列直接读这两个；总量留着是因为它还含缓存。
+    expect(stageAggs).toHaveProperty("run_cost_input_tokens")
+    expect(stageAggs).toHaveProperty("run_cost_output_tokens")
     expect(stageAggs).toHaveProperty("run_cost_user_input_requests")
+  })
+
+  it("不再按工具分桶", () => {
+    // 这一列曾经存在，但两个数都错：terms 的 doc_count 是「多少轮用过」而不是调用
+    // 次数，而 exclude 又把 read_file / edit_file 这些大头全过滤掉了，于是「562 次
+    // 调用」旁边只列得出一个「6」。拿不到每工具调用次数之前，不如不展示。
+    const stageAggs = (aggs.by_node as { aggs: Record<string, unknown> }).aggs
+    expect(stageAggs).not.toHaveProperty("by_tool")
   })
 })
 
@@ -164,103 +156,5 @@ describe("阶段分析的解析", () => {
     expect(parseProjectModeStageAnalysis("p1", { by_node: { buckets: "坏数据" } }).stages).toEqual(
       []
     )
-  })
-
-  it("工具排行按桶原样带出，key 为空的桶丢掉", () => {
-    const parsed = parseProjectModeStageAnalysis("p1", {
-      doc_count: 5,
-      by_node: {
-        buckets: [
-          nodeBucket("dev-编码实现", {
-            docCount: 5,
-            sum: 10,
-            avg: 2,
-            p95: 3,
-            tools: [
-              ["edit_file", 12],
-              ["", 99],
-              ["bash", 7]
-            ]
-          })
-        ]
-      }
-    })
-
-    expect(parsed.stages[0].topTools).toEqual([
-      { tool: "edit_file", count: 12 },
-      { tool: "bash", count: 7 }
-    ])
-  })
-})
-
-/**
- * 「共 N 种」存在的理由：徽章只列前几个，而截断本身在界面上是看不出来的。
- * 所以种类数必须和徽章同口径（同一个 terms 聚合、同一套 exclude），否则这个数
- * 会把被过滤掉的内置工具也算进去，比不显示更误导。
- */
-describe("阶段的工具种类数", () => {
-  function stageWithTools(count: number): ReturnType<typeof parseProjectModeStageAnalysis> {
-    const tools: Array<[string, number]> = Array.from({ length: count }, (_, index) => [
-      `tool_${index}`,
-      count - index
-    ])
-    return parseProjectModeStageAnalysis("p1", {
-      doc_count: 5,
-      by_node: {
-        buckets: [nodeBucket("dev-编码实现", { docCount: 5, sum: 10, avg: 2, p95: 3, tools })]
-      }
-    })
-  }
-
-  it("徽章只留前 STAGE_TOP_TOOL_LIMIT 条，种类数是拿回来的全部", () => {
-    const stage = stageWithTools(20).stages[0]
-    expect(stage.topTools).toHaveLength(STAGE_TOP_TOOL_LIMIT)
-    expect(stage.toolVariety).toBe(20)
-    expect(stage.toolVarietyTruncated).toBe(false)
-  })
-
-  it("没超过展示条数时，种类数与徽章条数相等（界面据此不显示）", () => {
-    const stage = stageWithTools(3).stages[0]
-    expect(stage.topTools).toHaveLength(3)
-    expect(stage.toolVariety).toBe(3)
-  })
-
-  it("触到统计上限时标记为截断，展示成 N+ 种", () => {
-    const stage = stageWithTools(STAGE_TOOL_VARIETY_LIMIT).stages[0]
-    expect(stage.toolVariety).toBe(STAGE_TOOL_VARIETY_LIMIT)
-    expect(stage.toolVarietyTruncated).toBe(true)
-  })
-
-  it("key 为空的桶不计入种类数", () => {
-    // 空 key 的桶已经被徽章过滤掉了，种类数必须用同一套过滤，否则会多算一种。
-    const stage = parseProjectModeStageAnalysis("p1", {
-      doc_count: 5,
-      by_node: {
-        buckets: [
-          nodeBucket("dev-编码实现", {
-            docCount: 5,
-            sum: 10,
-            avg: 2,
-            p95: 3,
-            tools: [
-              ["edit_file", 12],
-              ["", 99],
-              ["bash", 7]
-            ]
-          })
-        ]
-      }
-    }).stages[0]
-    expect(stage.topTools).toHaveLength(2)
-    expect(stage.toolVariety).toBe(2)
-  })
-
-  it("聚合缺失时种类数为 0", () => {
-    const stage = parseProjectModeStageAnalysis("p1", {
-      doc_count: 0,
-      by_node: { buckets: [nodeBucket("dev-编码实现", { docCount: 0, sum: 0, avg: 0, p95: 0 })] }
-    }).stages[0]
-    expect(stage.toolVariety).toBe(0)
-    expect(stage.toolVarietyTruncated).toBe(false)
   })
 })
