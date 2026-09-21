@@ -3576,6 +3576,7 @@ function FeatureCreateDialog({
   onSubmit: () => void
 }): React.JSX.Element {
   const [pathPickerId, setPathPickerId] = useState<string | null>(null)
+  const [dialogContentElement, setDialogContentElement] = useState<HTMLDivElement | null>(null)
   const workspaceInputRef = useRef<HTMLInputElement>(null)
   const dialogTitleRef = useRef<HTMLHeadingElement>(null)
   const editing = mode === "edit"
@@ -3706,7 +3707,14 @@ function FeatureCreateDialog({
       </div>
       <div className="max-h-72 overflow-auto rounded-md border border-border bg-background px-3 py-2">
         <div className={rowClassName}>
-          <span className="col-start-2 min-w-0 truncate">会话工作区 *</span>
+          <input
+            type="checkbox"
+            checked
+            disabled
+            aria-label="会话工作区必填"
+            className="size-4 shrink-0 accent-muted-foreground"
+          />
+          <span className="col-start-2 min-w-0 truncate">会话工作区</span>
           <Input
             ref={workspaceInputRef}
             readOnly
@@ -3806,9 +3814,11 @@ function FeatureCreateDialog({
                     </PopoverTrigger>
                     <PopoverContent
                       align="start"
-                      className="z-[70] w-[min(40rem,calc(100vw-4rem))] bg-background p-1"
+                      sideOffset={6}
+                      portalContainer={dialogContentElement}
+                      className="z-[70] w-[min(28rem,calc(100vw-4rem))] rounded-md border border-border bg-background p-1.5 shadow-lg"
                     >
-                      <div className="max-h-64 overflow-y-auto">
+                      <div className="max-h-64 space-y-0.5 overflow-y-auto">
                         {paths.map((path) => {
                           return (
                             <Button
@@ -3816,15 +3826,20 @@ function FeatureCreateDialog({
                               type="button"
                               variant="ghost"
                               disabled={creating}
-                              className="grid h-10 w-full grid-cols-[minmax(0,7fr)_minmax(0,3fr)] gap-3 px-2 text-left font-normal"
+                              className={cn(
+                                "flex h-auto min-h-12 w-full flex-col items-start justify-center gap-1 rounded-sm px-2.5 py-2 text-left font-normal",
+                                path === mapping.localRepoPath && "bg-muted/70"
+                              )}
                               title={path}
                               onClick={() => {
                                 onSelectPath({ ...mapping, localRepoPath: path })
                                 setPathPickerId(null)
                               }}
                             >
-                              <span className="truncate text-xs">{path}</span>
-                              <RepositoryBranchHint path={path} />
+                              <span className="w-full truncate text-sm">{path}</span>
+                              <span className="w-full">
+                                <RepositoryBranchHint path={path} />
+                              </span>
                             </Button>
                           )
                         })}
@@ -3860,7 +3875,7 @@ function FeatureCreateDialog({
                         disabled={creating || !mapping.localRepoPath}
                         aria-pressed={isWorkspace}
                         className={cn(
-                          "h-7 w-28 shrink-0 gap-1 rounded-full border px-2 text-xs font-medium shadow-none",
+                          "h-7 w-28 shrink-0 rounded-full border px-2 text-xs font-medium shadow-none",
                           isWorkspace
                             ? "border-primary bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground"
                             : "border-primary/30 bg-primary/10 text-primary hover:border-primary/50 hover:bg-primary/20 hover:text-primary"
@@ -3873,12 +3888,6 @@ function FeatureCreateDialog({
                           )
                         }
                       >
-                        <span
-                          aria-hidden="true"
-                          className="inline-flex size-3 shrink-0 items-center justify-center rounded-[2px] border border-current"
-                        >
-                          {isWorkspace && <Check className="size-2.5" />}
-                        </span>
                         作为会话工作区
                       </Button>
                     )}
@@ -3896,10 +3905,11 @@ function FeatureCreateDialog({
   return (
     <Dialog open={project !== null} onOpenChange={onOpenChange}>
       <DialogContent
+        ref={setDialogContentElement}
         style={layoutStyle}
         className={cn(
           harnessDialogContentClassName,
-          "max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] overflow-x-hidden overflow-y-auto transition-[width] duration-150 motion-reduce:transition-none",
+          "max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] grid-rows-[auto_minmax(0,1fr)] overflow-visible transition-[width] duration-150 motion-reduce:transition-none",
           "w-[calc(48rem+var(--feature-extra-width))]"
         )}
         onOpenAutoFocus={(event) => {
@@ -3916,7 +3926,7 @@ function FeatureCreateDialog({
           </DialogTitle>
         </DialogHeader>
         <form
-          className="grid min-w-0 gap-4 py-1"
+          className="grid min-h-0 min-w-0 gap-4 overflow-x-hidden overflow-y-auto py-1"
           onSubmit={(event) => {
             event.preventDefault()
             if (syncingPublicConstraints || !workspacePath.trim()) return
@@ -4052,7 +4062,7 @@ function ProjectModeSettingsPanel({
   leanTokenSaving: boolean
   leanTokenDirty: boolean
   leanTokenError: string | null
-  onAdd: () => void
+  onAdd: () => string
   onRemove: (index: number) => void
   onChange: (index: number, mapping: HarnessDeployUnitConfig) => void
   onSave: () => void
@@ -4061,6 +4071,12 @@ function ProjectModeSettingsPanel({
   onOpenLeanToken: () => void
 }): React.JSX.Element {
   const [replacingLeanToken, setReplacingLeanToken] = useState(false)
+  const [selectedMappingId, setSelectedMappingId] = useState<string | null>(null)
+  const selectedMappingIndex = Math.max(
+    0,
+    mappings.findIndex((mapping) => mapping.deployUnitIdMapping === selectedMappingId)
+  )
+  const selectedMapping = mappings[selectedMappingIndex]
   const hasStoredLeanToken = leanToken.length > 0
   const showStoredLeanTokenMask = hasStoredLeanToken && !leanTokenDirty && !replacingLeanToken
   const leanTokenInputValue = showStoredLeanTokenMask
@@ -4074,9 +4090,9 @@ function ProjectModeSettingsPanel({
       <section className="rounded-md border border-border bg-background shadow-sm">
         <div className="flex min-w-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-foreground">本地工程配置</h2>
+            <h2 className="text-sm font-semibold text-foreground">发布单元及仓库配置</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              为每个发布单元配置可选的本地工程目录，用于选择开发路径及加载系统约束。
+              配置发布单元以及对应的本地代码仓库，用于加载系统约束、将发布单元作为会话工作区
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -4084,7 +4100,7 @@ function ProjectModeSettingsPanel({
               type="button"
               size="sm"
               className="gap-2"
-              onClick={onAdd}
+              onClick={() => setSelectedMappingId(onAdd())}
               variant="outline"
               disabled={loading || saving}
             >
@@ -4128,90 +4144,124 @@ function ProjectModeSettingsPanel({
               </div>
             </div>
           ) : (
-            <div className="divide-y divide-border">
-              {mappings.map((mapping, index) => (
+            <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(13rem,1fr)_minmax(0,3fr)]">
+              <div className="min-w-0 rounded-md border border-border bg-muted/20">
                 <div
-                  key={mapping.deployUnitIdMapping}
-                  className="min-w-0 space-y-3 py-4 first:pt-0 last:pb-0"
+                  className="max-h-[26rem] overflow-y-auto p-1.5"
+                  role="list"
+                  aria-label="发布单元列表"
                 >
-                  <div className="grid grid-cols-[minmax(0,5fr)_minmax(0,2fr)_minmax(0,3fr)_4.5rem] items-start gap-3">
-                    <div className="contents">
-                      <div className="min-w-0 space-y-1.5">
-                        <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                          <span>发布单元</span>
-                          <ReleaseUnitIdTip />
-                        </div>
-                        <fieldset disabled={saving} className="min-w-0">
-                          <DeployUnitSearchInput
-                            value={mapping.deployUnitId}
-                            onValueChange={(deployUnitId) =>
-                              onChange(index, { ...mapping, deployUnitId })
-                            }
-                            onSelect={(deployUnit) =>
-                              onChange(index, {
-                                ...mapping,
-                                deployUnitId: deployUnit.deployUnit,
-                                description: deployUnit.deployUnitName
-                              })
-                            }
-                          />
-                        </fieldset>
-                      </div>
-                      <label className="col-span-2 grid min-w-0 gap-1.5 text-xs font-medium text-muted-foreground">
-                        <span className="flex items-center gap-1">
-                          <span>代码仓库描述</span>
-                          <TooltipProvider delayDuration={150}>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  aria-label="代码仓库描述提示"
-                                  className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                >
-                                  <Info className="size-3.5" />
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent side="top" className="z-[70] max-w-72">
-                                将提供给大模型
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
+                  {mappings.map((mapping, index) => (
+                    <div
+                      key={mapping.deployUnitIdMapping}
+                      className={`flex min-w-0 items-center gap-1 border-l-2 ${index === selectedMappingIndex ? "border-primary bg-muted/60" : "border-transparent hover:bg-muted/40"}`}
+                      role="listitem"
+                    >
+                      <button
+                        type="button"
+                        className={`min-w-0 flex-1 px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${index === selectedMappingIndex ? "text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                        aria-current={index === selectedMappingIndex ? "true" : undefined}
+                        onClick={() => setSelectedMappingId(mapping.deployUnitIdMapping)}
+                      >
+                        <span
+                          className="block truncate text-sm font-medium"
+                          title={mapping.deployUnitId || "未命名发布单元"}
+                        >
+                          {mapping.deployUnitId || "未命名发布单元"}
                         </span>
-                        <Input
-                          value={mapping.description || ""}
-                          disabled={saving}
-                          onChange={(event) =>
-                            onChange(index, { ...mapping, description: event.target.value })
-                          }
-                          placeholder="请输入描述（选填）"
-                          className={harnessProjectCreateInputClassName}
-                        />
-                      </label>
-                    </div>
-                    <div className="mt-5 flex items-center justify-end gap-2">
+                      </button>
                       <Button
                         type="button"
                         variant="ghost"
                         size="icon"
                         className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
                         disabled={saving}
-                        onClick={() => onRemove(index)}
+                        onClick={() => {
+                          if (
+                            selectedMapping?.deployUnitIdMapping === mapping.deployUnitIdMapping
+                          ) {
+                            setSelectedMappingId(
+                              mappings[index + 1]?.deployUnitIdMapping ??
+                                mappings[index - 1]?.deployUnitIdMapping ??
+                                null
+                            )
+                          }
+                          onRemove(index)
+                        }}
                         title="移除发布单元配置"
                         aria-label={`移除发布单元配置：${mapping.deployUnitId || "未命名"}`}
                       >
                         <Trash2 className="size-4" />
                       </Button>
                     </div>
-                  </div>
-                  <div className="min-w-0">
-                    <RepositoryPathsField
-                      mapping={mapping}
-                      onChange={(value) => onChange(index, value)}
-                      disabled={saving}
-                    />
-                  </div>
+                  ))}
                 </div>
-              ))}
+              </div>
+              {selectedMapping && (
+                <div key={selectedMapping.deployUnitIdMapping} className="min-w-0 space-y-5">
+                  <div className="grid min-w-0 gap-3 xl:grid-cols-2">
+                    <div className="min-w-0 space-y-1.5">
+                      <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                        <span>发布单元</span>
+                        <ReleaseUnitIdTip />
+                      </div>
+                      <fieldset disabled={saving} className="min-w-0">
+                        <DeployUnitSearchInput
+                          value={selectedMapping.deployUnitId}
+                          onValueChange={(deployUnitId) =>
+                            onChange(selectedMappingIndex, { ...selectedMapping, deployUnitId })
+                          }
+                          onSelect={(deployUnit) =>
+                            onChange(selectedMappingIndex, {
+                              ...selectedMapping,
+                              deployUnitId: deployUnit.deployUnit,
+                              description: deployUnit.deployUnitName
+                            })
+                          }
+                        />
+                      </fieldset>
+                    </div>
+                    <label className="grid min-w-0 gap-1.5 text-xs font-medium text-muted-foreground">
+                      <span className="flex items-center gap-1">
+                        <span>代码仓库描述</span>
+                        <TooltipProvider delayDuration={150}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                aria-label="代码仓库描述提示"
+                                className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              >
+                                <Info className="size-3.5" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="z-[70] max-w-72">
+                              将提供给大模型
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      </span>
+                      <Input
+                        value={selectedMapping.description || ""}
+                        disabled={saving}
+                        onChange={(event) =>
+                          onChange(selectedMappingIndex, {
+                            ...selectedMapping,
+                            description: event.target.value
+                          })
+                        }
+                        placeholder="请输入描述（选填）"
+                        className={harnessProjectCreateInputClassName}
+                      />
+                    </label>
+                  </div>
+                  <RepositoryPathsField
+                    mapping={selectedMapping}
+                    onChange={(value) => onChange(selectedMappingIndex, value)}
+                    disabled={saving}
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -9033,10 +9083,12 @@ export function HarnessBoardView({
     }
   }, [knowledgeDialogOpen, loadLeanTokenConfig, projectModeTab, selectedProjectId])
 
-  const handleAddDeployUnitMapping = useCallback((): void => {
-    setDeployUnitMappings((current) => [...current, createEmptyDeployUnitMapping()])
+  const handleAddDeployUnitMapping = useCallback((): string => {
+    const mapping = createEmptyDeployUnitMapping()
+    setDeployUnitMappings((current) => [...current, mapping])
     setDeployUnitMappingsDirty(true)
     setDeployUnitMappingsError(null)
+    return mapping.deployUnitIdMapping
   }, [])
 
   const handleRemoveDeployUnitMapping = useCallback((index: number): void => {
