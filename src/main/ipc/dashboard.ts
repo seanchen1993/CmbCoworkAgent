@@ -64,7 +64,6 @@ import {
   buildProjectModeStageAnalysisAggs,
   emptyProjectModeStageMetrics,
   parseProjectModeStageAnalysis,
-  STAGE_TOP_TOOL_LIMIT,
   type ProjectModeStageAnalysis,
   type ProjectModeStageRow
 } from "./project-mode-stage-analysis"
@@ -8825,8 +8824,7 @@ function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAn
     nodeName: string,
     conversationCount: number,
     avgDurationMs: number,
-    p95DurationMs: number,
-    tools: Array<[string, number]>
+    p95DurationMs: number
   ): ProjectModeStageRow => ({
     nodeName,
     group: extractHarnessNodeGroup(nodeName),
@@ -8839,35 +8837,21 @@ function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAn
         toolCalls: conversationCount * 9,
         modelCalls: conversationCount * 2,
         totalTokens: conversationCount * 31_000,
+        inputTokens: conversationCount * 26_000,
+        outputTokens: conversationCount * 4_200,
         userInputRequests: Math.floor(conversationCount / 8),
         userInputRequestDocs: conversationCount
       }
-    },
-    topTools: tools.slice(0, STAGE_TOP_TOOL_LIMIT).map(([tool, count]) => ({ tool, count })),
-    toolVariety: tools.length,
-    toolVarietyTruncated: false
+    }
   })
 
   const stages = [
-    stage("dev-编码实现", 142, 21_400, 68_000, [
-      ["edit_file", 96],
-      ["bash", 74],
-      ["grep", 41]
-    ]),
+    stage("dev-编码实现", 142, 21_400, 68_000),
     // 轮次少但单轮最慢：总耗时排第三，平均耗时排第一。
-    stage("review-代码评审", 18, 47_900, 132_000, [
-      ["read_file", 22],
-      ["grep", 15]
-    ]),
-    stage("plan-方案设计", 46, 24_800, 71_000, [
-      ["read_file", 38],
-      ["web_search", 9]
-    ]),
-    stage("test-测试验证", 37, 15_200, 44_000, [
-      ["bash", 52],
-      ["edit_file", 18]
-    ]),
-    stage(STAGE_BUCKET_LABELS.unattributed, 12, 9_800, 26_000, [["read_file", 7]])
+    stage("review-代码评审", 18, 47_900, 132_000),
+    stage("plan-方案设计", 46, 24_800, 71_000),
+    stage("test-测试验证", 37, 15_200, 44_000),
+    stage(STAGE_BUCKET_LABELS.unattributed, 12, 9_800, 26_000)
   ].sort((a, b) => b.metrics.totalDurationMs - a.metrics.totalDurationMs)
 
   const total = stages.reduce((acc, item) => {
@@ -8876,6 +8860,8 @@ function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAn
     acc.runCost.toolCalls += item.metrics.runCost.toolCalls
     acc.runCost.modelCalls += item.metrics.runCost.modelCalls
     acc.runCost.totalTokens += item.metrics.runCost.totalTokens
+    acc.runCost.inputTokens += item.metrics.runCost.inputTokens
+    acc.runCost.outputTokens += item.metrics.runCost.outputTokens
     acc.runCost.userInputRequests += item.metrics.runCost.userInputRequests
     acc.runCost.userInputRequestDocs += item.metrics.runCost.userInputRequestDocs
     return acc
@@ -9012,6 +8998,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
         toolCalls: 4821,
         modelCalls: 612,
         totalTokens: 3_940_000,
+        inputTokens: 3_270_000,
+        outputTokens: 512_000,
         userInputRequests: 37,
         userInputRequestDocs: 128
       },
@@ -9084,6 +9072,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
         toolCalls: 1503,
         modelCalls: 208,
         totalTokens: 1_120_000,
+        inputTokens: 929_000,
+        outputTokens: 146_000,
         userInputRequests: 9,
         userInputRequestDocs: 20
       },
@@ -9173,6 +9163,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
         toolCalls: 96,
         modelCalls: 18,
         totalTokens: 84_300,
+        inputTokens: 69_900,
+        outputTokens: 11_000,
         userInputRequests: 0,
         userInputRequestDocs: 11
       },
@@ -9225,6 +9217,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
         toolCalls: (i % 7) * 140,
         modelCalls: (i % 7) * 19,
         totalTokens: (i % 7) * 96_000,
+        inputTokens: (i % 7) * 79_000,
+        outputTokens: (i % 7) * 12_500,
         userInputRequests: i % 4,
         userInputRequestDocs: (i % 5) + 1
       },
@@ -14472,11 +14466,7 @@ async function fetchProjectModeStageAnalysis(
       }
     },
     aggs: mainAgentConversationAggs(
-      buildProjectModeStageAnalysisAggs(
-        UNATTRIBUTED_NODE_NAME,
-        PROJECT_MODE_FEATURE_SLUG_LIMIT,
-        FILTERED_TOOL_EXCLUDES
-      )
+      buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT)
     )
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse

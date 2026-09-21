@@ -112,43 +112,15 @@ function StageRow({
       </td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtDuration(metrics.p95DurationMs)}</td>
       <td className="px-3 py-2 text-right tabular-nums">
-        {fmtTokens(metrics.runCost.totalTokens)}
+        {fmtTokens(metrics.runCost.inputTokens)}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        {fmtTokens(metrics.runCost.outputTokens)}
       </td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtCount(metrics.runCost.modelCalls)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtCount(metrics.runCost.toolCalls)}</td>
       <td className="px-3 py-2 text-right tabular-nums">
         {fmtCount(metrics.runCost.userInputRequests)}
-      </td>
-      <td className="px-3 py-2">
-        {stage.topTools.length === 0 ? (
-          <span className="text-muted-foreground">—</span>
-        ) : (
-          <>
-            <div className="flex flex-wrap gap-1">
-              {stage.topTools.map((tool) => (
-                <span
-                  key={tool.tool}
-                  className="rounded border border-border bg-muted/40 px-1.5 py-0 font-mono text-[10px] text-muted-foreground"
-                >
-                  {tool.tool}
-                  <span className="ml-1 tabular-nums text-foreground/70">
-                    {fmtCount(tool.count)}
-                  </span>
-                </span>
-              ))}
-            </div>
-            {/*
-              只在真的没列全时才出现。列表已经完整时再写一遍「共 3 种」是噪音，
-              而列表被截断却不说，读的人会把这几个徽章当成全部。
-            */}
-            {stage.toolVariety > stage.topTools.length ? (
-              <div className="mt-1 text-[10px] text-muted-foreground tabular-nums">
-                共 {fmtCount(stage.toolVariety)}
-                {stage.toolVarietyTruncated ? "+" : ""} 种
-              </div>
-            ) : null}
-          </>
-        )}
       </td>
     </tr>
   )
@@ -237,11 +209,11 @@ export function ProjectStageAnalysisDialog({
                   <col className="w-[96px]" />
                   <col className="w-[96px]" />
                   <col className="w-[96px]" />
-                  <col className="w-[84px]" />
+                  <col className="w-[96px]" />
+                  <col className="w-[96px]" />
                   <col className="w-[84px]" />
                   <col className="w-[84px]" />
                   <col className="w-[72px]" />
-                  <col className="w-[280px]" />
                 </colgroup>
                 <thead className="sticky top-0 bg-muted/60 backdrop-blur">
                   <tr className="whitespace-nowrap border-b border-border text-muted-foreground">
@@ -260,16 +232,21 @@ export function ProjectStageAnalysisDialog({
                     >
                       P95
                     </th>
-                    <th className="px-3 py-2 text-right font-medium">Token</th>
+                    <th
+                      className="px-3 py-2 text-right font-medium"
+                      title="送进模型的 token，不含缓存读取"
+                    >
+                      输入 Token
+                    </th>
+                    <th
+                      className="px-3 py-2 text-right font-medium"
+                      title="模型生成的 token。它和输入之和不等于总量，总量还含缓存"
+                    >
+                      输出 Token
+                    </th>
                     <th className="px-3 py-2 text-right font-medium">模型调用</th>
                     <th className="px-3 py-2 text-right font-medium">工具调用</th>
                     <th className="px-3 py-2 text-right font-medium">问答</th>
-                    <th
-                      className="px-3 py-2 text-left font-medium"
-                      title="口径与「Tool 使用」模块一致"
-                    >
-                      常用工具
-                    </th>
                   </tr>
                 </thead>
                 <tbody>

@@ -970,7 +970,10 @@ interface DashboardProjectModeStageMetrics {
   runCost: {
     toolCalls: number
     modelCalls: number
+    /** 总量，含缓存读取与创建，所以不等于 inputTokens + outputTokens。 */
     totalTokens: number
+    inputTokens: number
+    outputTokens: number
     userInputRequests: number
     userInputRequestDocs: number
   }
@@ -983,11 +986,6 @@ interface DashboardProjectModeStageAnalysis {
     nodeName: string
     group: string | null
     metrics: DashboardProjectModeStageMetrics
-    topTools: Array<{ tool: string; count: number }>
-    /** 该阶段用到的工具种类数，与 topTools 同口径。 */
-    toolVariety: number
-    /** 种类数触到统计上限，真实值只多不少。 */
-    toolVarietyTruncated: boolean
   }>
 }
 
