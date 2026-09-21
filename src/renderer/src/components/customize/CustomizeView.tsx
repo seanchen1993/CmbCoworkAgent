@@ -72,6 +72,7 @@ type CustomizeTab =
   | "skills"
   | "connectors"
   | "plugins"
+  | "mods"
   | "scheduled"
   | "heartbeat"
   | "memory"
@@ -112,6 +113,7 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
+      { tab: "mods", label: "Function Mods", icon: Webhook },
       { tab: "scheduled", label: "定时任务", icon: Clock },
       { tab: "market", label: "应用市场", icon: ShoppingBag },
       { tab: "sandbox", label: "沙盒环境", icon: Shield }
@@ -292,11 +294,12 @@ export function CustomizeView(): React.JSX.Element {
         ) : activeTab === "connectors" ? (
           <McpPanel />
         ) : activeTab === "plugins" ? (
-          <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
+          <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
+            <PluginsPanel />
+          </div>
+        ) : activeTab === "mods" ? (
+          <div className="flex flex-1 min-w-0 min-h-0 overflow-y-auto">
             <ModsPanel threadId={currentThreadId} />
-            <div className="flex flex-1 min-h-0">
-              <PluginsPanel />
-            </div>
           </div>
         ) : activeTab === "scheduled" ? (
           <ScheduledPanel />

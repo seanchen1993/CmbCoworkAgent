@@ -46,7 +46,7 @@ function completion(overrides: Partial<FunctionTurnComplete> = {}): FunctionTurn
   return {
     turnId: randomUUID(), answer: "任务回复", durationMs: 4200,
     reason: "answer", isAborted: false, ...overrides
-  }
+  } as FunctionTurnComplete
 }
 
 function control(pane: FunctionPaneSnapshot, key: string, kind: FunctionUiAction["kind"], value?: string) {
@@ -67,11 +67,14 @@ function control(pane: FunctionPaneSnapshot, key: string, kind: FunctionUiAction
 
 it("loads the installable plugin and keeps bounded settings across runtime recreation", async () => {
   const { session, state } = await fixture()
-  await session.run("my-claw", "name 招银研发搭子")
-  await session.run("my-claw", "rule 检查异常处理，列出没有运行的测试。")
+  const named = await session.run("my-claw", "name 招银研发搭子")
+  expect(named.text).toContain("招银研发搭子 · 当前预览")
+  const ruled = await session.run("my-claw", "rule 检查异常处理，列出没有运行的测试。")
+  expect(ruled.text).toContain("检查异常处理，列出没有运行的测试。")
   expect((await session.run("my-claw", "name " + "x".repeat(31))).text).toContain("1–30")
   expect(state.get("name")).toBe("招银研发搭子")
   expect((await session.run("my-claw", "preview")).text).toContain("预览（未执行任务）")
+  expect((await session.run("my-claw", "status")).text).toContain("当前状态")
   expect(state.has("last-report")).toBe(false)
   await session.close()
   const restored = await fixture(state)

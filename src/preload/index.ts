@@ -3046,6 +3046,12 @@ const api = {
     }
   },
   mods: {
+    globalEnabled: (): Promise<boolean> => ipcRenderer.invoke("mods:global-enabled"),
+    configureGlobal: (enabled: boolean): Promise<boolean> =>
+      ipcRenderer.invoke("mods:configure-global", enabled),
+    functionUnlocked: (): Promise<boolean> => ipcRenderer.invoke("mods:function-unlocked"),
+    unlockFunction: (password: string): Promise<boolean> =>
+      ipcRenderer.invoke("mods:unlock-function", password),
     turnNotices: (
       threadId: string
     ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
@@ -3099,15 +3105,16 @@ const api = {
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      requireMods?: boolean
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
       }>,
-    installFromDir: (): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:installFromDir") as Promise<{
+    installFromDir: (requireMods?: boolean): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
+      ipcRenderer.invoke("plugins:installFromDir", requireMods) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
