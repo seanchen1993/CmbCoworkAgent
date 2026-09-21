@@ -3939,7 +3939,7 @@ function FeatureCreateDialog({
               value={featureName}
               onChange={(event) => onChange(sanitizeHarnessNameInput(event.target.value))}
               placeholder="请输入特性名称"
-              className="bg-background"
+              className="bg-background shadow-none focus-visible:border-ring focus-visible:ring-0"
               autoFocus={!editing}
               disabled={creating || editing}
               aria-invalid={featureNameError ? true : undefined}
