@@ -8,6 +8,7 @@ import {
 import type { HookConfig, HookEvent, HookResult } from "../../hooks/types"
 import type { SkillUseTracker } from "./tracker"
 import { markHarnessStageAttributionDirty } from "../../services/harness-stage-attribution"
+import { parseCompletionGateDecision, type CompletionGate } from "./completion-gate"
 
 export type StopHookContext = NonNullable<HookContext["stopContext"]>
 
@@ -267,6 +268,7 @@ export async function runCompletionHooksWithRevision({
   runPostSkillUseHooks,
   runStopHooks,
   onStopHooksFired,
+  completionGate,
   hasTerminalModelRefusal
 }: {
   threadId: string
@@ -297,10 +299,19 @@ export async function runCompletionHooksWithRevision({
   runPostSkillUseHooks?: () => Promise<HookResult | null>
   runStopHooks?: () => Promise<HookResult | null>
   onStopHooksFired?: () => void
+  completionGate?: CompletionGate
   hasTerminalModelRefusal?: () => boolean
 }): Promise<CompletionHookOutcome> {
   let postSkillRevisionCount = 0
   let stopRevisionCount = 0
+  let gateRevisionCount = 0
+  if (!Number.isSafeInteger(maxRevisionAttempts) || maxRevisionAttempts < 0) {
+    sendError("Invalid completion revision budget")
+    return "failed"
+  }
+  const usedBudget = (): number => postSkillRevisionCount + stopRevisionCount + gateRevisionCount
+  const budgetExhausted = (count: number): boolean =>
+    (completionGate ? usedBudget() : count) >= maxRevisionAttempts
   while (!abortSignal.aborted) {
     // A provider terminal is not a completion defect to revise. The transport
     // records the refusal separately; no hook may automatically restart it.
@@ -329,6 +340,8 @@ export async function runCompletionHooksWithRevision({
           onHookSkippedFactory
         }))
     markHarnessStageAttributionDirty(harnessProjectId, featureId)
+    if (abortSignal.aborted) return "failed"
+    if (hasTerminalModelRefusal?.()) return "passed"
 
     // continue:false short-circuits — halt the turn immediately, no revision.
     if (postSkillResult && shouldPreventContinuation(postSkillResult)) {
@@ -347,7 +360,7 @@ export async function runCompletionHooksWithRevision({
         postSkillResult,
         "PostSkillUse hook requested revision"
       )
-      if (postSkillRevisionCount >= maxRevisionAttempts) {
+      if (budgetExhausted(postSkillRevisionCount)) {
         sendError(
           `PostSkillUse hook blocked completion after ${maxRevisionAttempts} revision attempts: ${reason}`
         )
@@ -421,6 +434,8 @@ export async function runCompletionHooksWithRevision({
           return null
         }))
     markHarnessStageAttributionDirty(harnessProjectId, featureId)
+    if (abortSignal.aborted) return "failed"
+    if (hasTerminalModelRefusal?.()) return "passed"
 
     if (stopResult && shouldPreventContinuation(stopResult)) {
       if (stopResult.systemMessage) sendNotice(stopResult.systemMessage)
@@ -429,11 +444,47 @@ export async function runCompletionHooksWithRevision({
       return "halted"
     }
 
-    if (!stopResult || !shouldRequestRevision(stopResult)) return "passed"
+    if (!stopResult || !shouldRequestRevision(stopResult)) {
+      if (!completionGate) return "passed"
+      let decision
+      try {
+        decision = parseCompletionGateDecision(
+          await completionGate({
+            signal: abortSignal,
+            revisionAttempts: usedBudget(),
+            maxRevisionAttempts
+          })
+        )
+      } catch {
+        if (!abortSignal.aborted) sendError("Completion gate failed; completion was not approved")
+        return "failed"
+      }
+      if (abortSignal.aborted) return "failed"
+      if (hasTerminalModelRefusal?.()) return "passed"
+      if (decision.decision === "pass") return "passed"
+      if (decision.decision === "block" || budgetExhausted(gateRevisionCount)) {
+        sendError(`Completion gate blocked completion: ${decision.reason}`)
+        return "failed"
+      }
+      gateRevisionCount += 1
+      sendNotice(
+        `Completion gate requested revision (${usedBudget()}/${maxRevisionAttempts}): ${decision.reason}`
+      )
+      await runRevision(
+        buildCompletionRevisionPrompt({
+          result: { exitCode: 0, stdout: "", stderr: "", blocked: true, reason: decision.reason },
+          attempt: usedBudget(),
+          maxRevisionAttempts,
+          hookLabel: "CompletionGate",
+          revisionPromptPrefix
+        })
+      )
+      continue
+    }
     if (stopResult.systemMessage) sendNotice(stopResult.systemMessage)
 
     const reason = getCompletionHookBlockReason(stopResult, "Stop hook requested revision")
-    if (stopRevisionCount >= maxRevisionAttempts) {
+    if (budgetExhausted(stopRevisionCount)) {
       sendError(
         `Stop hook blocked completion after ${maxRevisionAttempts} revision attempts: ${reason}`
       )
