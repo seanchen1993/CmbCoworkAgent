@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react"
-import { ChevronDown, Info, Plus, Trash2 } from "lucide-react"
+import { Info, Plus, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { HarnessDeployUnitConfig } from "../../../../shared/harness-board-types"
 
@@ -75,6 +74,7 @@ export function RepositoryPathsField({
     try {
       const localRepoPath = await window.api.workspace.select()
       if (!localRepoPath) return
+      if (mapping.repositoryPaths.some((entry) => entry.localRepoPath === localRepoPath)) return
       setError(null)
       onChange({
         ...mapping,
@@ -88,13 +88,13 @@ export function RepositoryPathsField({
       setError("选择目录失败，请重试")
     }
   }
-  const firstPath = mapping.repositoryPaths[0]
   return (
     <div className="min-w-0 space-y-1.5">
-      <div className="grid grid-cols-[minmax(0,5fr)_minmax(0,5fr)_4.5rem] gap-3 text-xs font-medium text-muted-foreground">
+      <div className="flex items-center justify-between gap-3">
         <span className="flex min-w-0 items-center gap-1">
-          <span>代码仓库路径</span>
-          <span className="tabular-nums">已配置：{mapping.repositoryPaths.length}个</span>
+          <span className="text-xs font-medium text-muted-foreground">
+            代码仓库路径（{mapping.repositoryPaths.length}）
+          </span>
           <TooltipProvider delayDuration={150}>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -112,127 +112,63 @@ export function RepositoryPathsField({
             </Tooltip>
           </TooltipProvider>
         </span>
-        <span>Git 分支</span>
-      </div>
-      <Popover>
-        <PopoverAnchor asChild>
-          <div className="grid min-w-0 grid-cols-[minmax(0,5fr)_minmax(0,5fr)_4.5rem] items-center gap-3">
-            <div className="relative min-w-0">
-              <Input
-                readOnly
-                value={firstPath?.localRepoPath ?? ""}
-                placeholder="添加工程目录"
-                title={firstPath?.localRepoPath}
-                aria-label="选择代码仓库路径"
-                disabled={disabled}
-                onClick={() => void pick(firstPath?.pathId)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault()
-                    void pick(firstPath?.pathId)
-                  }
-                }}
-                className="h-9 min-w-0 cursor-pointer truncate bg-background pr-10 placeholder:text-muted-foreground/45"
-              />
-              <PopoverTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  disabled={disabled}
-                  aria-label="展开代码仓库路径"
-                  title={`展开全部 ${mapping.repositoryPaths.length} 个路径`}
-                  className="group absolute right-0.5 top-0.5 size-8 text-muted-foreground hover:text-foreground"
-                >
-                  <ChevronDown className="size-4 transition-transform group-data-[state=open]:rotate-180" />
-                </Button>
-              </PopoverTrigger>
-            </div>
-            {firstPath ? (
-              <RepositoryBranchHint path={firstPath.localRepoPath} compact />
-            ) : (
-              <Input
-                readOnly
-                value=""
-                aria-label="Git 分支"
-                className="h-9 cursor-default border-border/50 bg-muted/50 text-muted-foreground shadow-none focus-visible:ring-0"
-              />
-            )}
-          </div>
-        </PopoverAnchor>
-        <PopoverContent
-          align="start"
-          side="bottom"
-          sideOffset={-36}
-          avoidCollisions={false}
-          className="flex max-h-[var(--radix-popover-content-available-height)] w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-sm border-input bg-background p-0 text-foreground"
-          aria-label="工程目录管理"
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 shrink-0 gap-1.5"
+          disabled={disabled || mapping.repositoryPaths.length >= 10}
+          onClick={() => void pick()}
         >
-          <div className="shrink-0 border-b border-border p-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="w-full justify-start gap-2"
-              disabled={disabled}
-              onClick={() => void pick()}
+          <Plus className="size-4" />
+          添加
+        </Button>
+      </div>
+      <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+        {mapping.repositoryPaths.length === 0 ? (
+          <p className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+            暂无路径
+          </p>
+        ) : (
+          mapping.repositoryPaths.map((entry) => (
+            <div
+              key={entry.pathId}
+              className="grid grid-cols-[minmax(0,5fr)_minmax(0,5fr)_2rem] items-center gap-3"
             >
-              <Plus className="size-4" />
-              添加同一代码仓库的副本
-            </Button>
-          </div>
-          <div className="min-h-0 max-h-72 space-y-2 overflow-y-auto p-2">
-            {firstPath ? (
-              <>
-                {mapping.repositoryPaths.map((entry) => (
-                  <div
-                    key={entry.pathId}
-                    className="grid grid-cols-[minmax(0,5fr)_minmax(0,5fr)_4.5rem] items-center gap-3"
-                  >
-                    <Input
-                      readOnly
-                      value={entry.localRepoPath}
-                      title={entry.localRepoPath}
-                      aria-label="选择代码仓库路径"
-                      disabled={disabled}
-                      className="h-9 min-w-0 cursor-pointer truncate bg-background text-sm"
-                      onClick={() => void pick(entry.pathId)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault()
-                          void pick(entry.pathId)
-                        }
-                      }}
-                    />
-                    <RepositoryBranchHint path={entry.localRepoPath} compact />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
-                      title="移除工程目录"
-                      aria-label={`移除工程目录：${entry.localRepoPath}`}
-                      disabled={disabled}
-                      onClick={() =>
-                        onChange({
-                          ...mapping,
-                          repositoryPaths: mapping.repositoryPaths.filter(
-                            (item) => item.pathId !== entry.pathId
-                          )
-                        })
-                      }
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
-                  </div>
-                ))}
-              </>
-            ) : (
-              <p className="py-2 text-center text-xs text-muted-foreground">暂无工程目录</p>
-            )}
-          </div>
-        </PopoverContent>
-      </Popover>
+              <button
+                type="button"
+                title={entry.localRepoPath}
+                aria-label={`更换代码仓库路径：${entry.localRepoPath}`}
+                disabled={disabled}
+                className="h-9 min-w-0 rounded-sm border border-input bg-background px-3 text-left text-sm transition-colors hover:border-foreground/30 focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void pick(entry.pathId)}
+              >
+                <span className="block truncate">{entry.localRepoPath}</span>
+              </button>
+              <RepositoryBranchHint path={entry.localRepoPath} compact />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                title="移除工程目录"
+                aria-label={`移除工程目录：${entry.localRepoPath}`}
+                disabled={disabled}
+                onClick={() =>
+                  onChange({
+                    ...mapping,
+                    repositoryPaths: mapping.repositoryPaths.filter(
+                      (item) => item.pathId !== entry.pathId
+                    )
+                  })
+                }
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </div>
+          ))
+        )}
+      </div>
       {error && (
         <p role="alert" className="text-xs text-destructive">
           {error}
