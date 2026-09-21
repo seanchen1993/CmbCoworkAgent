@@ -44,11 +44,11 @@ function reportCardDelivered(
 /**
  * Publishes interaction cards, and never lets one fail loudly.
  *
- * Every caller has already queued the durable text notice with its short code
- * before reaching here. A card that cannot be built, sent or updated therefore
- * costs the reader a nicer affordance and nothing else — so this module reports
- * failure by returning null and logging, never by throwing into a gate's
- * publication path where it could strand a run that waits forever.
+ * Callers retain a durable text notice with its short code as a fallback. A
+ * card that cannot be built, sent or updated therefore costs the reader a nicer
+ * affordance and nothing else — so this module reports failure by returning
+ * null and logging, never by throwing into a gate's publication path where it
+ * could strand a run that waits forever.
  */
 
 type CardWarn = (message: string, error?: unknown) => void

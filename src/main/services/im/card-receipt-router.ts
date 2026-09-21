@@ -1,5 +1,5 @@
 import type { RemoteImCardReceiptV1 } from "../../../shared/im-gateway-contract"
-import { buildExpiredCard } from "./card-builder"
+import { BIZ_RETRY_CHOICE_KEY, BIZ_RETRY_MESSAGE_KEY, buildExpiredCard } from "./card-builder"
 import { imCardPublisher, type ImCardPublisher } from "./card-publisher"
 import type { ImCommandRouter } from "./command-router"
 import { imEventStore, type ImEventStore } from "./event-store"
@@ -10,6 +10,8 @@ import {
 } from "./remote-user-input-service"
 import type { ImReplyClient } from "./reply-client"
 import { buildImProactiveReplies } from "./reply-segmentation"
+import { imHumanGateAdapter, type ImHumanGateAdapter } from "./human-gate-adapter"
+import { imBizRetryAdapter, type ImBizRetryAdapter } from "./biz-retry-adapter"
 
 /**
  * Turns a Zhaohu card click into the same decision a typed command would make.
@@ -37,6 +39,8 @@ interface CardReceiptDependencies {
   cards: ImCardPublisher
   approvals: Pick<ImRemoteApprovalService, "resolveCardClick">
   userInput: Pick<ImRemoteUserInputService, "resolveCardAnswers">
+  humanGates: Pick<ImHumanGateAdapter, "resolveCardDecision">
+  managedBizRetries: Pick<ImBizRetryAdapter, "resolveCardDecision">
   events: Pick<ImEventStore, "enqueueProactiveReplies">
   warn: (message: string, error?: unknown) => void
 }
@@ -62,6 +66,8 @@ export class ImCardReceiptRouter {
       cards: overrides.cards ?? imCardPublisher,
       approvals: overrides.approvals ?? imRemoteApprovalService,
       userInput: overrides.userInput ?? imRemoteUserInputService,
+      humanGates: overrides.humanGates ?? imHumanGateAdapter,
+      managedBizRetries: overrides.managedBizRetries ?? imBizRetryAdapter,
       events: overrides.events ?? imEventStore,
       warn: overrides.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
     }
@@ -191,6 +197,35 @@ export class ImCardReceiptRouter {
         principalId: receipt.principalId,
         conversationKey: interaction.conversationKey,
         feedback: receipt.feedback
+      })
+    }
+
+    if (interaction.kind === "human_gate") {
+      if (suffix !== "approve" && suffix !== "reject") {
+        return "无法识别这次 Human Gate 决策，请使用消息里的短码。"
+      }
+      return this.dependencies.humanGates.resolveCardDecision({
+        notificationId: interaction.requestRef,
+        decision: suffix
+      })
+    }
+
+    if (interaction.kind === "biz_retry") {
+      const feedback = new Map(receipt.feedback.map((entry) => [entry.key, entry.value]))
+      const choice = feedback.get(BIZ_RETRY_CHOICE_KEY)?.trim()
+      if (choice !== "continue" && choice !== "new_thread" && choice !== "stop") {
+        return "请选择如何继续托管运行。"
+      }
+      const message = feedback.get(BIZ_RETRY_MESSAGE_KEY)?.trim()
+      if (choice !== "continue" && message) {
+        return "附加消息仅支持“在当前会话继续托管”，请清空消息后重新提交。"
+      }
+      return this.dependencies.managedBizRetries.resolveCardDecision({
+        notificationId: interaction.requestRef,
+        choice,
+        ...(choice === "continue" && message ? { message } : {}),
+        principalId: interaction.principalId,
+        conversationKey: interaction.conversationKey
       })
     }
 

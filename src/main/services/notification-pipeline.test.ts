@@ -8,12 +8,17 @@ const dependencies = vi.hoisted(() => ({
   database: undefined as NativeSqliteAdapter | undefined,
   enqueue: vi.fn(),
   grant: vi.fn(),
-  conversation: vi.fn()
+  conversation: vi.fn(),
+  cardAccepted: false,
+  threadMessages: [] as Array<{ role: string; content: string }>,
+  cardInteractions: new Map<string, Record<string, unknown>>(),
+  cardPublish: vi.fn(),
+  cardResolveDetached: vi.fn()
 }))
 vi.mock("../db", () => ({
   getDb: () => dependencies.database,
   getThread: () => ({ title: "Thread" }),
-  getThreadMessages: () => []
+  getThreadMessages: () => dependencies.threadMessages
 }))
 vi.mock("./im/event-store", () => ({
   imEventStore: { enqueueProactiveReplies: dependencies.enqueue }
@@ -27,6 +32,15 @@ vi.mock("./im/remote-access-service", () => ({
 vi.mock("./im/conversation-state", () => ({
   imConversationStateStore: {
     getConversation: dependencies.conversation
+  }
+}))
+vi.mock("./im/card-publisher", () => ({
+  imCardPublisher: {
+    publish: dependencies.cardPublish,
+    resolveDetached: dependencies.cardResolveDetached,
+    interactions: {
+      findByRequestRef: (requestRef: string) => dependencies.cardInteractions.get(requestRef)
+    }
   }
 }))
 
@@ -52,6 +66,37 @@ beforeEach(async () => {
     conversationKey: "chat"
   })
   dependencies.conversation.mockReturnValue({ state: "active", principalId: "user" })
+  dependencies.cardAccepted = false
+  dependencies.threadMessages.length = 0
+  dependencies.cardInteractions.clear()
+  dependencies.cardPublish.mockImplementation(
+    async (input: {
+      kind: string
+      threadId: string
+      principalId: string
+      conversationKey: string
+      requestRef: string
+      targetLabel: string
+      build: (tag: string) => unknown
+    }) => {
+      if (!dependencies.cardAccepted) return null
+      const interaction = {
+        interactionId: `card-${input.requestRef}`,
+        tag: "t".repeat(32),
+        kind: input.kind,
+        threadId: input.threadId,
+        principalId: input.principalId,
+        conversationKey: input.conversationKey,
+        requestRef: input.requestRef,
+        targetLabel: input.targetLabel,
+        cardVersion: 1,
+        createdAt: Date.now(),
+        content: input.build("t".repeat(32))
+      }
+      dependencies.cardInteractions.set(input.requestRef, interaction)
+      return interaction
+    }
+  )
   const lifecycle = await import("./notification-service")
   service = lifecycle.notificationService
   observe = lifecycle.onNotificationChanged
@@ -414,6 +459,102 @@ for (const source of ["human_gate", "biz_retry"] as const) {
       await resolve(code)
       expect(handler).toHaveBeenCalledTimes(1)
       expect(service.get("message")?.channel).toBe("desktop")
+    })
+    it("publishes a card and reflects an APP decision back into its terminal state", async () => {
+      dependencies.cardAccepted = true
+      const gate = await import("./im/human-gate-adapter")
+      const retry = await import("./im/biz-retry-adapter")
+      gate.initializeImHumanGateChannel()
+      retry.initializeImBizRetryChannel()
+      actions.registerNotificationActions(source, async (notification, input, origin) => ({
+        applied: service.finish(notification.notificationId, {
+          status: "resolved",
+          reasonCode: "user_decision",
+          result: "done",
+          action: input.action,
+          channel: origin.channel
+        }),
+        message: "done"
+      }))
+      create(source, "card-message")
+      await vi.waitFor(() => expect(dependencies.cardPublish).toHaveBeenCalledTimes(1))
+      expect(dependencies.enqueue).not.toHaveBeenCalled()
+
+      await actions.decideNotification(
+        {
+          notificationId: "card-message",
+          action: source === "human_gate" ? "approve" : "continue"
+        },
+        { channel: "desktop" }
+      )
+
+      expect(dependencies.cardResolveDetached).toHaveBeenCalledTimes(1)
+      const rendered = JSON.stringify(dependencies.cardResolveDetached.mock.calls[0]?.[1])
+      expect(rendered).toContain("APP")
+      expect(rendered).not.toContain("interactive")
+    })
+    if (source === "biz_retry") {
+      it("uses the text reply truncation strategy for the card's assistant message", async () => {
+        dependencies.cardAccepted = true
+        dependencies.threadMessages.push({
+          role: "assistant",
+          content: `${"开".repeat(4_000)}${"尾".repeat(4_000)}`
+        })
+        const retry = await import("./im/biz-retry-adapter")
+        const { IM_REPLY_TRUNCATION_NOTICE } = await import("./im/reply-segmentation")
+        retry.initializeImBizRetryChannel()
+
+        create("biz_retry", "truncated-card")
+        await vi.waitFor(() => expect(dependencies.cardPublish).toHaveBeenCalledTimes(1))
+
+        const interaction = dependencies.cardInteractions.get("truncated-card")
+        const components = interaction?.content as Array<Record<string, unknown>>
+        const rendered = components
+          .filter((component) => component.type === "content")
+          .flatMap((component) => component.list as Array<{ content: string }>)
+          .map((item) => item.content)
+          .join("\n")
+        expect(rendered).toContain(IM_REPLY_TRUNCATION_NOTICE)
+        expect(rendered).toContain("开".repeat(300))
+        expect(rendered).toContain("尾".repeat(300))
+        expect(rendered).not.toContain("开".repeat(4_000))
+      })
+    }
+    it("closes a card accepted after its notification already ended", async () => {
+      dependencies.cardAccepted = true
+      const gate = await import("./im/human-gate-adapter")
+      const retry = await import("./im/biz-retry-adapter")
+      create(source, "stale-card-message")
+      service.finish("stale-card-message", {
+        status: "resolved",
+        reasonCode: "user_decision",
+        result: "done",
+        action: source === "human_gate" ? "approve" : "continue",
+        channel: "desktop"
+      })
+
+      if (source === "human_gate") {
+        await gate.imHumanGateAdapter.publish({
+          gateId: "stale-card-message",
+          status: "pending",
+          projectId: "project",
+          featureId: "feature",
+          sourceThreadId: "thread",
+          hookId: "hook",
+          message: "请确认",
+          createdAt: "2026-09-13 08:00:00"
+        })
+      } else {
+        const { projectHarnessNotification } = await import("../../shared/harness-notifications")
+        const notification = projectHarnessNotification(service.get("stale-card-message"))
+        expect(notification).toBeDefined()
+        await retry.imBizRetryAdapter.publish(notification!)
+      }
+
+      expect(dependencies.cardResolveDetached).toHaveBeenCalledTimes(1)
+      const rendered = JSON.stringify(dependencies.cardResolveDetached.mock.calls[0]?.[1])
+      expect(rendered).toContain("APP")
+      expect(rendered).not.toContain("interactive")
     })
     it("IM completion removes the APP pending message and rejects repeated IM/APP decisions", async () => {
       const { onNotificationProjectionChanged } = await import("./notification-read-model")

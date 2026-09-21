@@ -351,11 +351,158 @@ export function buildAnsweredCard(input: AnsweredCardInput): CardComponent[] {
   return components
 }
 
+export interface HarnessDecisionCardContext {
+  projectName: string
+  featureName: string
+  threadTitle: string
+}
+
+function harnessDecisionContext(context: HarnessDecisionCardContext): CardComponent {
+  return kvComponent([
+    { title: "项目", value: context.projectName },
+    { title: "特性", value: context.featureName },
+    { title: "来源", value: context.threadTitle }
+  ])
+}
+
+export interface HumanGateCardInput extends HarnessDecisionCardContext {
+  message: string
+  tag: string
+}
+
+export function buildHumanGateCard(input: HumanGateCardInput): CardComponent[] {
+  return [
+    titleComponent("项目模式需要审批"),
+    statusComponent("待处理", STATUS_STYLE.orange),
+    harnessDecisionContext(input),
+    contentComponent(input.message.split("\n").filter((line) => line.length > 0)),
+    {
+      type: "exclusionOperate",
+      style: EXCLUSION_STYLE_ACCEPT_REJECT,
+      list: [
+        {
+          content: "批准推进",
+          action: BUTTON_ACTION_FEEDBACK,
+          tag: `${input.tag}:approve`,
+          style: 1,
+          status: BUTTON_STATUS_NORMAL,
+          disable: 0
+        },
+        {
+          content: "拒绝",
+          action: BUTTON_ACTION_FEEDBACK,
+          tag: `${input.tag}:reject`,
+          style: 2,
+          status: BUTTON_STATUS_NORMAL,
+          disable: 0
+        }
+      ]
+    }
+  ]
+}
+
+export const BIZ_RETRY_CHOICE_KEY = "choice"
+export const BIZ_RETRY_MESSAGE_KEY = "message"
+
+export interface BizRetryCardInput extends HarnessDecisionCardContext {
+  reason: string
+  stageName: string
+  stageStatus: string
+  contextUsage: string
+  assistantTail: string
+  nextActionText: string
+  tag: string
+}
+
+export function buildBizRetryCard(input: BizRetryCardInput): CardComponent[] {
+  return [
+    titleComponent("托管运行需要介入"),
+    statusComponent("待选择", STATUS_STYLE.orange),
+    harnessDecisionContext(input),
+    kvComponent([
+      { title: "当前阶段", value: input.stageName },
+      { title: "阶段状态", value: input.stageStatus },
+      { title: "上下文", value: input.contextUsage }
+    ]),
+    contentComponent(
+      [
+        `触发原因：${input.reason}`,
+        "模型返回：",
+        input.assistantTail || "（无可展示内容）",
+        input.nextActionText
+      ].flatMap((value) => value.split("\n"))
+    ),
+    {
+      type: "interactive",
+      id: FORM_COMPONENT_ID,
+      inputControlArray: [
+        {
+          subType: "listSelector",
+          title: "操作",
+          promptText: "选择如何继续托管运行",
+          feedbackKey: BIZ_RETRY_CHOICE_KEY,
+          required: true,
+          selectModel: LIST_SELECT_CUSTOM_OPTIONS,
+          isMultiple: false,
+          optionArray: [
+            { text: "在当前会话继续托管", value: "continue" },
+            { text: "开启新会话继续托管", value: "new_thread" },
+            { text: "停止托管运行", value: "stop" }
+          ]
+        },
+        {
+          subType: "inputBox",
+          title: "继续消息",
+          promptText: "仅在当前会话继续时生效；不填则继续当前任务",
+          feedbackKey: BIZ_RETRY_MESSAGE_KEY,
+          required: false,
+          minLine: OTHER_INPUT_MIN_LINE,
+          maxLine: OTHER_INPUT_MAX_LINE,
+          fixLine: OTHER_INPUT_FIX_LINE
+        }
+      ],
+      submitStatus: 0,
+      multiSubmit: MULTI_SUBMIT_UNLIMITED,
+      submitButton: {
+        submitText: "确认操作",
+        actionLink: cardReceiptActionLink(input.tag)
+      }
+    }
+  ]
+}
+
+export interface HarnessDecisionResolvedCardInput extends HarnessDecisionCardContext {
+  kind: "human_gate" | "biz_retry"
+  outcome: string
+  outcomeStyle: "approved" | "rejected" | "neutral"
+  detail?: string
+}
+
+export function buildHarnessDecisionResolvedCard(
+  input: HarnessDecisionResolvedCardInput
+): CardComponent[] {
+  const style =
+    input.outcomeStyle === "approved"
+      ? STATUS_STYLE.green
+      : input.outcomeStyle === "rejected"
+        ? STATUS_STYLE.red
+        : STATUS_STYLE.black
+  const components: CardComponent[] = [
+    titleComponent(input.kind === "human_gate" ? "项目模式需要审批" : "托管运行需要介入"),
+    statusComponent(input.outcome, style),
+    harnessDecisionContext(input)
+  ]
+  if (input.detail) components.push(contentComponent(input.detail.split("\n")))
+  return components
+}
+
 /** The card title for each kind, so an expired card still names what it was. */
 const CARD_TITLE: Record<ImCardInteractionKind, string> = {
   approval: "需要批准",
   user_input: "需要你的选择",
-  target_bind: "切换会话"
+  target_bind: "切换会话",
+  human_gate: "项目模式需要审批",
+  biz_retry: "托管运行需要介入"
 }
 
 /** Marks a card whose request is gone — a click from deep in the history. */
