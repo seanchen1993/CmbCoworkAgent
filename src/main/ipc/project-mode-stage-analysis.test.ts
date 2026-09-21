@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   buildProjectModeStageAnalysisAggs,
   parseProjectModeStageAnalysis,
+  STAGE_TOOL_VARIETY_LIMIT,
   STAGE_TOP_TOOL_LIMIT
 } from "./project-mode-stage-analysis"
 
@@ -74,7 +75,10 @@ describe("阶段分析的聚合条件", () => {
         .by_tool as { terms: Record<string, unknown> }
     ).terms
     expect(byTool.field).toBe("toolNames")
-    expect(byTool.size).toBe(STAGE_TOP_TOOL_LIMIT)
+    // size 取的是种类数统计上限，不是展示条数：同一个聚合既喂徽章也喂「共 N 种」，
+    // 多取一些桶才能知道有没有列全，解析时再切到 STAGE_TOP_TOOL_LIMIT。
+    expect(byTool.size).toBe(STAGE_TOOL_VARIETY_LIMIT)
+    expect(STAGE_TOOL_VARIETY_LIMIT).toBeGreaterThan(STAGE_TOP_TOOL_LIMIT)
     expect(byTool.exclude).toEqual(["execute", "read_file"])
   })
 
@@ -186,5 +190,77 @@ describe("阶段分析的解析", () => {
       { tool: "edit_file", count: 12 },
       { tool: "bash", count: 7 }
     ])
+  })
+})
+
+/**
+ * 「共 N 种」存在的理由：徽章只列前几个，而截断本身在界面上是看不出来的。
+ * 所以种类数必须和徽章同口径（同一个 terms 聚合、同一套 exclude），否则这个数
+ * 会把被过滤掉的内置工具也算进去，比不显示更误导。
+ */
+describe("阶段的工具种类数", () => {
+  function stageWithTools(count: number): ReturnType<typeof parseProjectModeStageAnalysis> {
+    const tools: Array<[string, number]> = Array.from({ length: count }, (_, index) => [
+      `tool_${index}`,
+      count - index
+    ])
+    return parseProjectModeStageAnalysis("p1", {
+      doc_count: 5,
+      by_node: {
+        buckets: [nodeBucket("dev-编码实现", { docCount: 5, sum: 10, avg: 2, p95: 3, tools })]
+      }
+    })
+  }
+
+  it("徽章只留前 STAGE_TOP_TOOL_LIMIT 条，种类数是拿回来的全部", () => {
+    const stage = stageWithTools(20).stages[0]
+    expect(stage.topTools).toHaveLength(STAGE_TOP_TOOL_LIMIT)
+    expect(stage.toolVariety).toBe(20)
+    expect(stage.toolVarietyTruncated).toBe(false)
+  })
+
+  it("没超过展示条数时，种类数与徽章条数相等（界面据此不显示）", () => {
+    const stage = stageWithTools(3).stages[0]
+    expect(stage.topTools).toHaveLength(3)
+    expect(stage.toolVariety).toBe(3)
+  })
+
+  it("触到统计上限时标记为截断，展示成 N+ 种", () => {
+    const stage = stageWithTools(STAGE_TOOL_VARIETY_LIMIT).stages[0]
+    expect(stage.toolVariety).toBe(STAGE_TOOL_VARIETY_LIMIT)
+    expect(stage.toolVarietyTruncated).toBe(true)
+  })
+
+  it("key 为空的桶不计入种类数", () => {
+    // 空 key 的桶已经被徽章过滤掉了，种类数必须用同一套过滤，否则会多算一种。
+    const stage = parseProjectModeStageAnalysis("p1", {
+      doc_count: 5,
+      by_node: {
+        buckets: [
+          nodeBucket("dev-编码实现", {
+            docCount: 5,
+            sum: 10,
+            avg: 2,
+            p95: 3,
+            tools: [
+              ["edit_file", 12],
+              ["", 99],
+              ["bash", 7]
+            ]
+          })
+        ]
+      }
+    }).stages[0]
+    expect(stage.topTools).toHaveLength(2)
+    expect(stage.toolVariety).toBe(2)
+  })
+
+  it("聚合缺失时种类数为 0", () => {
+    const stage = parseProjectModeStageAnalysis("p1", {
+      doc_count: 0,
+      by_node: { buckets: [nodeBucket("dev-编码实现", { docCount: 0, sum: 0, avg: 0, p95: 0 })] }
+    }).stages[0]
+    expect(stage.toolVariety).toBe(0)
+    expect(stage.toolVarietyTruncated).toBe(false)
   })
 })

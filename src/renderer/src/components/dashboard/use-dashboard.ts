@@ -571,8 +571,12 @@ export interface DashboardProjectModeStageRow {
   /** 阶段大类，取不到时为 null（未归因桶就是这种）。 */
   group: string | null
   metrics: DashboardProjectModeStageMetrics
-  /** 口径与「Tool 使用」模块一致。 */
+  /** 口径与「Tool 使用」模块一致，只取调用次数最高的几个。 */
   topTools: Array<{ tool: string; count: number }>
+  /** 该阶段用到的工具种类数，与 topTools 同口径；大于 topTools 长度即说明被截断了。 */
+  toolVariety: number
+  /** 种类数触到统计上限，真实值只多不少。 */
+  toolVarietyTruncated: boolean
 }
 
 export interface DashboardProjectModeStageAnalysis {

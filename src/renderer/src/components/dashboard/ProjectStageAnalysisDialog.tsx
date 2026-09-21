@@ -123,17 +123,31 @@ function StageRow({
         {stage.topTools.length === 0 ? (
           <span className="text-muted-foreground">—</span>
         ) : (
-          <div className="flex flex-wrap gap-1">
-            {stage.topTools.map((tool) => (
-              <span
-                key={tool.tool}
-                className="rounded border border-border bg-muted/40 px-1.5 py-0 font-mono text-[10px] text-muted-foreground"
-              >
-                {tool.tool}
-                <span className="ml-1 tabular-nums text-foreground/70">{fmtCount(tool.count)}</span>
-              </span>
-            ))}
-          </div>
+          <>
+            <div className="flex flex-wrap gap-1">
+              {stage.topTools.map((tool) => (
+                <span
+                  key={tool.tool}
+                  className="rounded border border-border bg-muted/40 px-1.5 py-0 font-mono text-[10px] text-muted-foreground"
+                >
+                  {tool.tool}
+                  <span className="ml-1 tabular-nums text-foreground/70">
+                    {fmtCount(tool.count)}
+                  </span>
+                </span>
+              ))}
+            </div>
+            {/*
+              只在真的没列全时才出现。列表已经完整时再写一遍「共 3 种」是噪音，
+              而列表被截断却不说，读的人会把这几个徽章当成全部。
+            */}
+            {stage.toolVariety > stage.topTools.length ? (
+              <div className="mt-1 text-[10px] text-muted-foreground tabular-nums">
+                共 {fmtCount(stage.toolVariety)}
+                {stage.toolVarietyTruncated ? "+" : ""} 种
+              </div>
+            ) : null}
+          </>
         )}
       </td>
     </tr>
