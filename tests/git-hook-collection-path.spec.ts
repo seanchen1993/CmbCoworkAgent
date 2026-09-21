@@ -138,8 +138,16 @@ async function listDirs(dir: string): Promise<string[]> {
 async function readReadySnapshot(repo: string): Promise<{
   name: string
   meta: {
+    schemaVersion?: number
     commitSha?: string
     gitRoot?: string
+    gitCommonDir?: string
+    branch?: string
+    commitTimeMs?: number
+    filesChanged?: number
+    insertions?: number
+    deletions?: number
+    remoteUrl?: string
     files?: Array<{ absPath: string; relPath?: string; blobFile?: string; deleted?: boolean }>
   }
 }> {
@@ -215,6 +223,112 @@ async function testExternalCommandCommitWithCodeGenIsCollectedByHook(): Promise<
       assert(remainingReady.length === 0, "sync should consume ready code_gen snapshots")
       assert(processed.length === 1, "external command snapshot with code_gen should be processed")
       assert(skipped.length === 0, "external command snapshot with code_gen should not be skipped")
+    })
+  })
+}
+
+/**
+ * The script-driven worktree flow: create a linked worktree, generate + commit
+ * in it, merge, delete the worktree — then consume the snapshot afterwards.
+ *
+ * Consumption is never synchronous with any of that (2-minute sweep, and the
+ * app may not even be running), so by the time we get here the work tree is
+ * gone. Every git call the consumer used to make ran with that path as cwd and
+ * failed at spawn with ENOENT, which is why merging first does not help on its
+ * own: the commit stays perfectly reachable while the process cannot start.
+ *
+ * So this locks two things down:
+ *  - the hook records commit stats / branch / remote / committer date at commit
+ *    time, while the work tree still exists;
+ *  - consumption completes through the recorded common dir, so the snapshot
+ *    reaches `processed` instead of being stuck in `ready` forever.
+ */
+async function testWorktreeCommitIsCollectedAfterWorktreeRemoval(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    await initializeAdoptionTracker()
+    await withTempRepo("git-hook-worktree", async (repo) => {
+      const status = await installGitHooks(repo)
+      assert(status.state === "installed", `expected installed hook, got ${status.state}`)
+
+      const worktreeParent = await mkdtemp(join(tmpdir(), "git-hook-worktree-wt-"))
+      const worktree = join(await realpath(worktreeParent), "wt")
+      await git(repo, ["worktree", "add", "-q", "-b", "feat", worktree])
+
+      try {
+        const filePath = join(worktree, "generated.ts")
+        const generatedContent = "export const worktreeValue = 1\n"
+        recordGen({
+          threadId: "worktree-test-thread",
+          workspacePath: worktree,
+          filePath,
+          tool: "write_file",
+          generatedContent
+        })
+        await sleep(250)
+
+        await writeFile(filePath, generatedContent)
+        await git(worktree, ["add", "generated.ts"])
+        await git(worktree, ["commit", "-q", "-m", "worktree commit with codegen"])
+        const sha = await git(worktree, ["rev-parse", "HEAD"])
+
+        // Captured at commit time — this is what makes the snapshot survive.
+        const snapshot = await readReadySnapshot(worktree)
+        assert(
+          snapshot.meta.schemaVersion === 2,
+          `expected schemaVersion 2, got ${snapshot.meta.schemaVersion}`
+        )
+        assert(
+          normalizePathForAssert(snapshot.meta.gitCommonDir || "") ===
+            normalizePathForAssert(join(repo, ".git")),
+          `gitCommonDir should be the main repo's .git, got ${snapshot.meta.gitCommonDir}`
+        )
+        assert(snapshot.meta.branch === "feat", `expected branch feat, got ${snapshot.meta.branch}`)
+        assert(
+          snapshot.meta.filesChanged === 1 && snapshot.meta.insertions === 1,
+          `expected 1 file / 1 insertion, got ${snapshot.meta.filesChanged}/${snapshot.meta.insertions}`
+        )
+        assert(
+          typeof snapshot.meta.commitTimeMs === "number" && snapshot.meta.commitTimeMs > 0,
+          `expected a committer date, got ${snapshot.meta.commitTimeMs}`
+        )
+        // Defined-but-empty, not undefined: that is what tells the consumer the
+        // hook already answered this question and it must not ask live git.
+        assert(
+          snapshot.meta.remoteUrl === "",
+          `repo has no origin, expected "", got ${JSON.stringify(snapshot.meta.remoteUrl)}`
+        )
+
+        // Merge, then delete the work tree — the guaranteed order in the flow
+        // this covers. The branch (and therefore the commit) stays reachable.
+        await git(repo, ["merge", "--no-ff", "-q", "-m", "merge feat", "feat"])
+        await git(repo, ["worktree", "remove", "--force", worktree])
+        assert(!existsSync(worktree), "work tree should be gone before consumption")
+
+        await syncGitHookEvents(worktree)
+        await sleep(250)
+
+        const remainingReady = await listDirs(join(repoEventsDir(worktree), "ready"))
+        const processed = await listDirs(join(repoEventsDir(worktree), "processed"))
+        const skipped = await listDirs(join(repoEventsDir(worktree), "skipped"))
+        assert(
+          remainingReady.length === 0,
+          `deleted work tree must not strand its snapshot in ready (${remainingReady.length} left)`
+        )
+        assert(processed.length === 1, `snapshot should be processed, got ${processed.length}`)
+        assert(skipped.length === 0, `snapshot should not be skipped, got ${skipped.length}`)
+
+        const processedShas = JSON.parse(
+          await readFile(join(repoEventsDir(worktree), "processed-commits.json"), "utf-8")
+        ) as string[]
+        assert(processedShas.includes(sha), `processed set should contain ${sha}`)
+        assert(
+          findPendingGensForFile(filePath, 0).length === 0,
+          "the pending gen should have been measured against the worktree commit"
+        )
+      } finally {
+        await cleanupRepoEvents(worktree).catch(() => undefined)
+        await removeTempDir(worktreeParent).catch(() => undefined)
+      }
     })
   })
 }
@@ -373,6 +487,8 @@ async function run(): Promise<void> {
     console.log("PASS external command commit without code_gen is skipped")
     await testExternalCommandCommitWithCodeGenIsCollectedByHook()
     console.log("PASS external command commit with code_gen is collected through Git hook")
+    await testWorktreeCommitIsCollectedAfterWorktreeRemoval()
+    console.log("PASS worktree commit is collected after the worktree is merged and removed")
     await testGitPanelPathSkipsHookAndUsesDirectStagedCapture()
     console.log("PASS Git Panel collection path skips hook and uses direct staged capture")
     await testCoreHooksPathInWorkspaceIsNotModified()

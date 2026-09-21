@@ -2308,48 +2308,65 @@ interface ResolvedCommitIdentity {
   jobId: string
 }
 
+async function gitIdentityOutput(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+    windowsHide: true
+  })
+  return stdout.trim()
+}
+
+/**
+ * `gitCwd` is a fallback directory to run git in when `repoPath` no longer
+ * exists — in practice the main checkout behind a removed linked worktree.
+ *
+ * The two cannot be collapsed. Attribution is keyed by absolute file path
+ * (see the shell-file-ops note below), and those paths were recorded under the
+ * ORIGINAL root, so the identity has to keep reporting that root even once git
+ * has to run somewhere else. Using the fallback for both would rebuild every
+ * path under the main checkout and silently match nothing.
+ */
 async function resolveCommitIdentity(
   snapshots: StagedSnapshot[],
   commitSha?: string,
   commitTimeMs?: number,
-  repoPath?: string
+  repoPath?: string,
+  gitCwd?: string
 ): Promise<ResolvedCommitIdentity | null> {
   const cwd = repoPath || (snapshots[0]?.absPath ? dirname(snapshots[0].absPath) : "")
-  if (!cwd) return null
+  if (!cwd && !gitCwd) return null
   try {
-    const root = (
-      await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
-        cwd,
-        encoding: "utf-8",
-        timeout: 5000,
-        maxBuffer: 1024 * 1024,
-        windowsHide: true
-      })
-    ).stdout.trim()
+    let root = ""
+    let execCwd = ""
+    if (cwd) {
+      try {
+        root = await gitIdentityOutput(cwd, ["rev-parse", "--show-toplevel"])
+        execCwd = root
+      } catch {
+        // Work tree gone (removed worktree, deleted checkout) — try the fallback.
+      }
+    }
+    if (!root) {
+      // Without an explicit sha the fallback would resolve the FALLBACK repo's
+      // HEAD, attributing an unrelated commit. Refuse instead.
+      if (!gitCwd || !repoPath || !commitSha?.trim()) return null
+      // Already canonical: callers pass the root git itself reported earlier.
+      root = resolvePath(repoPath)
+      execCwd = gitCwd
+    }
     const requestedSha = commitSha?.trim() || "HEAD"
-    const sha = (
-      await execFileAsync("git", ["rev-parse", "--verify", `${requestedSha}^{commit}`], {
-        cwd: root,
-        encoding: "utf-8",
-        timeout: 5000,
-        maxBuffer: 1024 * 1024,
-        windowsHide: true
-      })
-    ).stdout.trim()
+    const sha = await gitIdentityOutput(execCwd, [
+      "rev-parse",
+      "--verify",
+      `${requestedSha}^{commit}`
+    ])
     if (!root || !/^[0-9a-f]{40,64}$/i.test(sha)) return null
     let resolvedCommitTimeMs = commitTimeMs
     if (typeof resolvedCommitTimeMs !== "number" || !Number.isFinite(resolvedCommitTimeMs)) {
-      const seconds = Number(
-        (
-          await execFileAsync("git", ["show", "-s", "--format=%ct", sha], {
-            cwd: root,
-            encoding: "utf-8",
-            timeout: 5000,
-            maxBuffer: 1024 * 1024,
-            windowsHide: true
-          })
-        ).stdout.trim()
-      )
+      const seconds = Number(await gitIdentityOutput(execCwd, ["show", "-s", "--format=%ct", sha]))
       resolvedCommitTimeMs = Number.isFinite(seconds) ? seconds * 1000 : undefined
     }
     const normalizedRoot = resolvePath(root)
@@ -2372,10 +2389,11 @@ async function resolveCommitIdentity(
  * adoption commit from an unrelated commit that never had a code_gen match. */
 export async function getCommitMeasurementStatus(
   repoPath: string,
-  commitSha: string
+  commitSha: string,
+  gitCwd?: string
 ): Promise<CommitJobStatus | null> {
   if (!initialized) return null
-  const identity = await resolveCommitIdentity([], commitSha, undefined, repoPath)
+  const identity = await resolveCommitIdentity([], commitSha, undefined, repoPath, gitCwd)
   if (!identity) return null
   return getCommitJob(identity.jobId)?.status ?? null
 }
@@ -2510,13 +2528,14 @@ export async function measureForCommit(
   snapshots: StagedSnapshot[],
   commitSha?: string,
   commitTimeMs?: number,
-  repoPath?: string
+  repoPath?: string,
+  gitCwd?: string
 ): Promise<boolean> {
   if (!initialized) {
     console.warn("[AdoptionTracker] measureForCommit skipped — tracker not initialized")
     return false
   }
-  const identity = await resolveCommitIdentity(snapshots, commitSha, commitTimeMs, repoPath)
+  const identity = await resolveCommitIdentity(snapshots, commitSha, commitTimeMs, repoPath, gitCwd)
   if (!identity) {
     console.warn("[AdoptionTracker] measureForCommit skipped — commit identity unavailable")
     return false
