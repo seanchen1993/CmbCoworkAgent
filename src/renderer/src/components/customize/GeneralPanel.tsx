@@ -24,6 +24,9 @@ import {
   AGENT_GRAPH_RECURSION_LIMIT_DEFAULT,
   AGENT_GRAPH_RECURSION_LIMIT_MAX,
   AGENT_GRAPH_RECURSION_LIMIT_MIN,
+  AGENT_TOOL_STRATEGY_DEFAULT,
+  isAgentToolStrategy,
+  type AgentToolStrategy,
   isAgentGraphRecursionLimit,
   isWorkflowWorktreeRemoveTimeoutMinutes,
   isWorkflowWorktreeTimeoutMinutes,
@@ -46,6 +49,8 @@ export function GeneralPanel({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [recursionLimit, setRecursionLimit] = useState<number | null>(null)
+  const [toolStrategy, setToolStrategy] = useState<AgentToolStrategy>(AGENT_TOOL_STRATEGY_DEFAULT)
+  const [toolStrategySaving, setToolStrategySaving] = useState(false)
   const [recursionLimitDraft, setRecursionLimitDraft] = useState("")
   const [worktreeTimeoutMinutes, setWorktreeTimeoutMinutes] = useState<number | null>(null)
   const [worktreeTimeoutDraft, setWorktreeTimeoutDraft] = useState("")
@@ -100,6 +105,7 @@ export function GeneralPanel({
     setWorktreeSettingsError(null)
     try {
       const settings = await window.electron.getAgentRuntimeSettings()
+      setToolStrategy(settings.toolStrategy ?? AGENT_TOOL_STRATEGY_DEFAULT)
       setRecursionLimit(settings.recursionLimit)
       setRecursionLimitDraft(String(settings.recursionLimit))
       setWorktreeTimeoutMinutes(settings.workflowWorktreeTimeoutMinutes)
@@ -118,6 +124,32 @@ export function GeneralPanel({
   useEffect(() => {
     void loadRuntimeSettings()
   }, [loadRuntimeSettings])
+
+  const handleToolStrategyChange = useCallback(
+    async (value: string): Promise<void> => {
+      if (
+        !isAgentToolStrategy(value) ||
+        value === toolStrategy ||
+        runtimeSettingsLoading ||
+        toolStrategySaving
+      )
+        return
+      setToolStrategySaving(true)
+      setRuntimeSettingsError(null)
+      try {
+        const settings = await window.electron.setAgentToolStrategy(value)
+        // Keep the last saved selection until persistence succeeds.
+        setToolStrategy(settings.toolStrategy)
+        toast.success("工具使用策略已保存，对新启动或重新创建的 Agent 运行生效")
+      } catch (saveError) {
+        console.error("[GeneralPanel] Failed to save tool strategy:", saveError)
+        setRuntimeSettingsError("工具使用策略保存失败，原设置未改变，请重试。")
+      } finally {
+        setToolStrategySaving(false)
+      }
+    },
+    [toolStrategy, runtimeSettingsLoading, toolStrategySaving]
+  )
 
   useEffect(() => {
     return window.electron.onWindowCloseBehaviorChanged((behavior) => {
@@ -316,6 +348,63 @@ export function GeneralPanel({
         >
           <div className="border-b border-border/60 bg-muted/35 px-5 py-4">
             <h2 className="text-sm font-semibold text-foreground">任务运行</h2>
+          </div>
+          <div className="flex flex-col gap-4 border-b border-border/60 px-5 py-5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3 sm:pr-8">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-background/80 text-muted-foreground shadow-sm ring-1 ring-border/60">
+                <Settings2 className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-foreground">工具使用策略</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  选择 Agent 读取、搜索和修改文件的方式。
+                </p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  下次运行生效，当前任务不受影响。
+                </p>
+              </div>
+            </div>
+            <div className="flex w-full shrink-0 items-center gap-2 sm:w-[250px]">
+              <Select
+                value={toolStrategy}
+                disabled={runtimeSettingsLoading || toolStrategySaving || recursionLimit === null}
+                onValueChange={(value) => void handleToolStrategyChange(value)}
+              >
+                <SelectTrigger aria-label="工具使用策略" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="w-[320px] max-w-[calc(100vw-2rem)]" align="end">
+                  <SelectItem
+                    value="standard"
+                    itemText="标准（默认）"
+                    className="flex-col items-start gap-1 py-2.5"
+                  >
+                    <span className="text-xs leading-5 text-muted-foreground">
+                      保持原有习惯，优先使用文件工具。
+                    </span>
+                  </SelectItem>
+                  <SelectItem
+                    value="shell-first"
+                    itemText="命令行优先"
+                    className="flex-col items-start gap-1 py-2.5"
+                  >
+                    <span className="text-xs leading-5 text-muted-foreground">
+                      普通文本尽量用命令行，必要时用文件工具。
+                    </span>
+                  </SelectItem>
+                  <SelectItem
+                    value="shell-first-relaxed"
+                    itemText="命令行优先（宽松）"
+                    className="flex-col items-start gap-1 py-2.5"
+                  >
+                    <span className="text-xs leading-5 text-muted-foreground">
+                      文件工具更简单或可靠时，可直接使用。
+                    </span>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              {toolStrategySaving && <Loader2 className="size-4 shrink-0 animate-spin" />}
+            </div>
           </div>
           <div className="flex flex-col gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-start gap-3 sm:pr-8">
