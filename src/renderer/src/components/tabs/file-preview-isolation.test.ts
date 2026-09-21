@@ -195,6 +195,15 @@ describe("persisted active file preview isolation", () => {
     }
   })
 
+  it("keeps collapsed resource drawers from inheriting standard right-panel state", () => {
+    expect(resourcePanelOverlay).toContain("if (!standardRightPanelMounted) return")
+    expect(resourcePanelOverlay).toContain("setOpen(false)")
+    expect(resourcePanelOverlay).toContain("clearPreviewRequest()")
+    expect(resourcePanelOverlay).toMatch(
+      /if \(standardRightPanelMounted\) \{\s*setOpen\(false\)\s*setRightModule\(nextMode\)/
+    )
+  })
+
   it("defers ambiguous POSIX path intent until main applies the authoritative boundary", () => {
     expect(tabbedPanel).toContain('workspacePathKind="relative"')
     expect(rightPanel).toContain("workspacePathKind={previewFileSource.workspacePathKind}")
