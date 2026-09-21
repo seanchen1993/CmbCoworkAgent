@@ -2853,6 +2853,7 @@ export class LocalSandbox
       ...(this.harnessProjectId && !context.harnessProjectId
         ? { harnessProjectId: this.harnessProjectId }
         : {}),
+      ...(this.pluginId && !context.harnessAdapterId ? { harnessAdapterId: this.pluginId } : {}),
       ...(this.harnessAdapterName && !context.harnessAdapterName
         ? { harnessAdapterName: this.harnessAdapterName }
         : {}),

@@ -21,6 +21,7 @@ interface StartedSession {
   pluginWorkspace?: string
   featureId?: string
   harnessProjectId?: string
+  harnessAdapterId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   harnessNodeName?: string
@@ -52,6 +53,7 @@ export async function fireSessionStartOnce(
     | "pluginWorkspace"
     | "featureId"
     | "harnessProjectId"
+    | "harnessAdapterId"
     | "harnessAdapterName"
     | "harnessAdapterVersion"
     | "harnessNodeName"
@@ -69,6 +71,7 @@ export async function fireSessionStartOnce(
       pluginWorkspace: harnessContext?.pluginWorkspace ?? existing.pluginWorkspace,
       featureId: harnessContext?.featureId ?? existing.featureId,
       harnessProjectId: harnessContext?.harnessProjectId ?? existing.harnessProjectId,
+      harnessAdapterId: harnessContext?.harnessAdapterId ?? existing.harnessAdapterId,
       harnessAdapterName: harnessContext?.harnessAdapterName ?? existing.harnessAdapterName,
       harnessAdapterVersion:
         harnessContext?.harnessAdapterVersion ?? existing.harnessAdapterVersion,
@@ -87,6 +90,7 @@ export async function fireSessionStartOnce(
     pluginWorkspace: harnessContext?.pluginWorkspace,
     featureId: harnessContext?.featureId,
     harnessProjectId: harnessContext?.harnessProjectId,
+    harnessAdapterId: harnessContext?.harnessAdapterId,
     harnessAdapterName: harnessContext?.harnessAdapterName,
     harnessAdapterVersion: harnessContext?.harnessAdapterVersion,
     harnessNodeName: harnessContext?.harnessNodeName,
@@ -207,6 +211,7 @@ export async function fireSessionEnd(
     pluginWorkspace: started.pluginWorkspace,
     featureId: started.featureId,
     harnessProjectId: started.harnessProjectId,
+    harnessAdapterId: started.harnessAdapterId,
     harnessAdapterName: started.harnessAdapterName,
     harnessAdapterVersion: started.harnessAdapterVersion,
     harnessNodeName: started.harnessNodeName,
@@ -251,6 +256,7 @@ export async function fireSessionEndAll(
         pluginWorkspace: session.pluginWorkspace,
         featureId: session.featureId,
         harnessProjectId: session.harnessProjectId,
+        harnessAdapterId: session.harnessAdapterId,
         harnessAdapterName: session.harnessAdapterName,
         harnessAdapterVersion: session.harnessAdapterVersion,
         harnessNodeName: session.harnessNodeName,

@@ -4970,7 +4970,8 @@ export function ChatContainer({
       nextSkill = selectSkillForSlashName(
         enabledSkillsForSlash,
         slashSkill,
-        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin
+        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin,
+        isProjectModeAgentContext
       )
     }
 
@@ -4982,6 +4983,7 @@ export function ChatContainer({
     harnessFeatureBinding,
     historyLoading,
     input,
+    isProjectModeAgentContext,
     pendingHarnessNextAction,
     selectedSkill,
     setInput,

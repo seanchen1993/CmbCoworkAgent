@@ -14,9 +14,13 @@ import { getHarnessProjectAdapterSnapshot } from "./service"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { formatSkillUseBlock } from "../../shared/skill-use-block"
 import {
+  isSkillOwnedByBoundPlugin,
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../shared/skill-visibility"
+import {
   AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
   HARNESS_SOURCE,
-  type HarnessAdapterSnapshot,
   type ManagedAutoSendStreamStartEvent,
   type ManagedRunSessionAction
 } from "../../shared/harness-board-types"
@@ -68,25 +72,8 @@ function parseThreadMetadata(threadId: string): Record<string, unknown> {
   }
 }
 
-function normalizePluginIdentity(value: string | null | undefined): string {
-  return normalizeSkillId(value ?? "")
-}
-
 function isPluginSkill(skill: SkillMetadata): boolean {
   return Boolean(skill.pluginId?.trim() || skill.pluginName?.trim())
-}
-
-function isPreferredPluginSkill(
-  skill: SkillMetadata,
-  preferredPlugin: HarnessAdapterSnapshot | null
-): boolean {
-  if (!preferredPlugin) return false
-  const preferredId = normalizePluginIdentity(preferredPlugin.id)
-  const preferredName = normalizePluginIdentity(preferredPlugin.name)
-  return Boolean(
-    (preferredId && normalizePluginIdentity(skill.pluginId) === preferredId) ||
-    (preferredName && normalizePluginIdentity(skill.pluginName) === preferredName)
-  )
 }
 
 function isLocalSkillDisabled(
@@ -112,13 +99,18 @@ async function resolveHarnessSkill(
   const [localSkills, pluginSkills] = await Promise.all([listAllSkills(), listPluginSkills()])
   const disabledSkillIds = new Set(getDisabledSkills().map(normalizeSkillId))
   const preferredPlugin = await getHarnessProjectAdapterSnapshot(projectId)
+  const visibilityScope: ProjectModeSkillScope = {
+    projectMode: true,
+    boundPluginId: preferredPlugin?.id,
+    boundPluginName: preferredPlugin?.name
+  }
   const matches = [...localSkills, ...pluginSkills].filter((skill) => {
     if (normalizeSkillId(skill.name) !== normalizedSlashSkill) return false
     if (isLocalSkillDisabled(skill, disabledSkillIds)) return false
-    return !isPluginSkill(skill) || isPreferredPluginSkill(skill, preferredPlugin)
+    return isSkillVisibleForProjectMode(skill, visibilityScope)
   })
   return (
-    matches.find((skill) => isPreferredPluginSkill(skill, preferredPlugin)) ?? matches[0] ?? null
+    matches.find((skill) => isSkillOwnedByBoundPlugin(skill, visibilityScope)) ?? matches[0] ?? null
   )
 }
 
