@@ -1,6 +1,12 @@
 import { readFileSync } from "fs"
 import { resolve } from "path"
 import { describe, expect, it } from "vitest"
+import ts from "typescript"
+import {
+  configureAgentToolStrategy,
+  getAgentToolStrategy,
+  isAgentToolStrategy
+} from "./agent-runtime-limits"
 
 const readRepositoryFile = (path: string): string =>
   readFileSync(resolve(process.cwd(), path), "utf8")
@@ -22,6 +28,74 @@ describe("agent runtime settings integration", () => {
   const customizeView = readRepositoryFile(
     "src/renderer/src/components/customize/CustomizeView.tsx"
   )
+
+  it("validates the actual tool-strategy IPC handler and restricts it to the main window", () => {
+    const registration = sourceBetween(
+      mainProcess,
+      "ipcMain.handle(\n      AGENT_TOOL_STRATEGY_SET_CHANNEL,",
+      "ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL"
+    )
+    let handler: (event: { sender: { id: number } }, value: unknown) => unknown
+    let persisted: unknown
+    const compiled = ts.transpile(registration, { target: ts.ScriptTarget.ES2022 })
+    new Function(
+      "ipcMain",
+      "AGENT_TOOL_STRATEGY_SET_CHANNEL",
+      "mainWindow",
+      "isAgentToolStrategy",
+      "setStoredAgentToolStrategy",
+      "configureAgentToolStrategy",
+      "getAgentGraphRecursionLimit",
+      "getWorkflowWorktreeTimeoutMinutes",
+      "getWorkflowWorktreeRemoveTimeoutMinutes",
+      compiled
+    )(
+      {
+        handle: (_channel: string, fn: typeof handler) => {
+          handler = fn
+        }
+      },
+      "app:set-agent-tool-strategy",
+      { isDestroyed: () => false, webContents: { id: 7 } },
+      isAgentToolStrategy,
+      (value: unknown) => {
+        persisted = value
+        return value
+      },
+      configureAgentToolStrategy,
+      () => 2000,
+      () => 3,
+      () => 1
+    )
+    try {
+      expect(() => handler!({ sender: { id: 8 } }, "shell-first")).toThrow("main window")
+      expect(() => handler!({ sender: { id: 7 } }, "bogus")).toThrow("Invalid")
+      expect(persisted).toBeUndefined()
+      expect(getAgentToolStrategy()).toBe("standard")
+      expect(handler!({ sender: { id: 7 } }, "shell-first")).toEqual({
+        toolStrategy: "shell-first",
+        recursionLimit: 2000,
+        workflowWorktreeTimeoutMinutes: 3,
+        workflowWorktreeRemoveTimeoutMinutes: 1
+      })
+      expect(persisted).toBe("shell-first")
+      expect(getAgentToolStrategy()).toBe("shell-first")
+    } finally {
+      configureAgentToolStrategy("standard")
+    }
+    const runtimeHandlers = sourceBetween(
+      mainProcess,
+      "ipcMain.handle(AGENT_RUNTIME_SETTINGS_GET_CHANNEL",
+      "ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL"
+    )
+    expect(runtimeHandlers.match(/toolStrategy: getAgentToolStrategy\(\)/g)).toHaveLength(4)
+    expect(preload).toContain("setAgentToolStrategy: (value: AgentToolStrategy)")
+    expect(preloadTypes).toContain("setAgentToolStrategy: (value: AgentToolStrategy)")
+    expect(generalPanel).toContain("当前运行不热切换")
+    expect(generalPanel.indexOf("await window.electron.setAgentToolStrategy(value)")).toBeLessThan(
+      generalPanel.indexOf("setToolStrategy(settings.toolStrategy)")
+    )
+  })
 
   it("validates unknown renderer input before persisting or applying it", () => {
     expect(mainProcess).toContain("(event, value: unknown): AgentRuntimeSettings")
