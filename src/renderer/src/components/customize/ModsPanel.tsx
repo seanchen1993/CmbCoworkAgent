@@ -6,16 +6,25 @@ import { ModsAudit } from "./ModsAudit"
 
 export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.Element {
   const [status, setStatus] = useState<ModWorkspaceStatus | null>(null)
+  const [globalEnabled, setGlobalEnabled] = useState(false)
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
   const refresh = useCallback(async () => {
-    if (!threadId) return
-    setStatus(await window.api.mods.status(threadId))
+    setGlobalEnabled(await window.api.mods.globalEnabled())
+    if (threadId) setStatus(await window.api.mods.status(threadId))
   }, [threadId])
   useEffect(() => {
     let live = true
     setStatus(null)
     setError("")
+    window.api.mods.globalEnabled().then(
+      (value) => {
+        if (live) setGlobalEnabled(value)
+      },
+      () => {
+        if (live) setError("无法读取 Mods 总开关状态。")
+      }
+    )
     if (threadId)
       window.api.mods.status(threadId).then(
         (value) => {
@@ -66,6 +75,25 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
           安装示范 Mods
         </Button>
       </div>
+      <div className="rounded border p-3 space-y-1">
+        <label className="flex items-center gap-2 font-medium">
+          <input
+            type="checkbox"
+            checked={globalEnabled}
+            disabled={busy}
+            onChange={(event) =>
+              void run(async () => {
+                const value = await window.api.mods.configureGlobal(event.target.checked)
+                setGlobalEnabled(value)
+              })
+            }
+          />
+          启用 Mods 功能（应用级）
+        </label>
+        <p className="text-xs text-muted-foreground">
+          默认关闭。关闭时不会加载或拦截 Mods 运行时；插件安装、Skills、MCP 配置和普通聊天不受影响。
+        </p>
+      </div>
       {!threadId && <p className="text-muted-foreground">打开项目会话后配置权限。</p>}
       {error && (
         <p role="alert" className="text-destructive break-all">
@@ -87,7 +115,7 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
               <input
                 type="checkbox"
                 checked={status.enabled}
-                disabled={busy}
+                disabled={busy || !globalEnabled}
                 onChange={(event) =>
                   void run(() =>
                     window.api.mods.configure(threadId, event.target.checked, status.outputPolicy)
@@ -100,7 +128,7 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
               <input
                 type="checkbox"
                 checked={status.outputPolicy}
-                disabled={busy || status.policy?.required}
+                disabled={busy || !globalEnabled || status.policy?.required}
                 onChange={(event) =>
                   void run(() =>
                     window.api.mods.configure(threadId, status.enabled, event.target.checked)

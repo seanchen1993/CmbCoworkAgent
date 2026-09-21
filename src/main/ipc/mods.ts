@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { writeFile } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { getThreadCore } from "../db"
-import { getOpenworkDir, getPlugins } from "../storage"
+import { getModsGlobalEnabled, getOpenworkDir, getPlugins, setModsGlobalEnabled } from "../storage"
 import { ModsManager, setModsManager, setModsUnavailable } from "../mods/manager"
 import { ModError, modErrorCode } from "../mods/errors"
 import { installPluginFromDir } from "./plugins"
@@ -65,7 +65,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       },
       (threadId) => window()?.webContents.send("mods:cards-changed", { threadId }),
       join(__dirname, "mod-host.js"),
-      readManagedModDeployment(join(__dirname, "../resources/mods-policy.json"))
+      readManagedModDeployment(join(__dirname, "../resources/mods-policy.json")),
+      getModsGlobalEnabled
     )
   } catch (error) {
     const code = error instanceof ModError ? modErrorCode(error) : "MODS_CONTROL_RECOVERY_REQUIRED"
@@ -74,12 +75,21 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       trusted(event)
       return {
         workspace: "",
+        globalEnabled: false,
         enabled: false,
         outputPolicy: true,
         mods: [],
         diagnostics: [],
         recovery: code
       }
+    })
+    ipcMain.handle("mods:global-enabled", (event) => {
+      trusted(event)
+      return false
+    })
+    ipcMain.handle("mods:configure-global", (event) => {
+      trusted(event)
+      throw new ModError(code)
     })
     return
   }
@@ -381,6 +391,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           functions.interceptTool(binding.workspace, binding.threadId, input, binding.signal, core)
       ),
     invalidate: (workspace) => functions.invalidate(workspace),
+    invalidateAll: () => functions.invalidateAll(),
     closeThread: (threadId) => {
       functions.closeThread(threadId)
       queue.closeThread(threadId)
@@ -651,6 +662,17 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   ipcMain.handle("mods:status", async (event, threadId: string) => {
     const workspace = scope(event, threadId)
     return { ...(await manager.status(workspace)), functionMods: await functions.status(workspace) }
+  })
+  ipcMain.handle("mods:global-enabled", (event) => {
+    trusted(event)
+    return getModsGlobalEnabled()
+  })
+  ipcMain.handle("mods:configure-global", (event, enabled: boolean) => {
+    trusted(event)
+    if (typeof enabled !== "boolean") throw new ModError("MODS_SETTINGS_INVALID")
+    const value = setModsGlobalEnabled(enabled)
+    manager.invalidateAll()
+    return value
   })
   ipcMain.handle(
     "mods:approve-function",

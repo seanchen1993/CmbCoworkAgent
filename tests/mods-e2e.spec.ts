@@ -120,6 +120,10 @@ async function main(): Promise<void> {
     }, "production preload")
     await page!.addInitScript("window.__name = value => value")
     console.log("STEP preload ready")
+    assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
+    await page!.evaluate(() => window.api.mods.configureGlobal(true))
+    assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), true)
+    pass("Mods application switch defaults to off and requires explicit opt-in")
     const threadId = await page!.evaluate(async (workspace) => {
       const thread = await window.api.threads.create({
         title: "Mods E2E",

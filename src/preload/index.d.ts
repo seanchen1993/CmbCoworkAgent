@@ -973,6 +973,8 @@ interface DashboardPluginAggregate {
 
 interface CustomAPI {
   mods: {
+    globalEnabled(): Promise<boolean>
+    configureGlobal(enabled: boolean): Promise<boolean>
     turnNotices(threadId: string): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]>
     panes(threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]>
     paneAct(

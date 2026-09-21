@@ -3045,6 +3045,8 @@ const api = {
     }
   },
   mods: {
+    globalEnabled: (): Promise<boolean> => ipcRenderer.invoke("mods:global-enabled"),
+    configureGlobal: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke("mods:configure-global", enabled),
     turnNotices: (
       threadId: string
     ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
