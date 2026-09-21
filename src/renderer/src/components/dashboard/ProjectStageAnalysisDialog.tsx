@@ -168,15 +168,12 @@ export function ProjectStageAnalysisDialog({
         </DialogHeader>
 
         {/*
-          口径说明放在最显眼的位置，不折叠也不塞进 tooltip。
-          这里的耗时是 Agent 忙碌时长，不是阶段的墙钟周期——两者能差一个数量级，
-          读错了整个分析的结论就反了。
+          口径说明放在最显眼的位置，不折叠也不塞进 tooltip：这里的耗时是 Agent 忙碌
+          时长，不是阶段的墙钟周期，两者能差一个数量级，读错了结论就反了。
         */}
         <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
           耗时统计的是 <span className="font-medium text-foreground">Agent 实际工作时长</span>
           （每轮对话从发起到结束），按该轮开始时特性所处的阶段归属。
-          <span className="font-medium text-foreground">不是阶段的实际周期</span>
-          ——一个阶段可能跨好几天，而其中 Agent 只跑了几十分钟。
           轮次口径与项目列表的「对话数」一致：只统计主动触发的主 Agent 会话。
         </div>
 
