@@ -21,7 +21,8 @@
  */
 
 import { execFileSync } from "child_process"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs"
+import { createHash } from "crypto"
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs"
 import { readFile, readdir } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -45,9 +46,17 @@ vi.mock("./event-reporter", () => ({
   trackEvent: vi.fn()
 }))
 
-import { getCommitMeasurementStatus } from "./adoption-tracker"
+import {
+  getCommitMeasurementStatus,
+  hasPendingGenerationsForCommit,
+  measureForCommit
+} from "./adoption-tracker"
 import { trackEvent } from "./event-reporter"
-import { markInAppCommitProcessed, syncGitHookEvents } from "./git-hook-service"
+import {
+  markInAppCommitProcessed,
+  syncGitHookEvents,
+  syncRegisteredGitHookEvents
+} from "./git-hook-service"
 
 const tempRoots: string[] = [openworkDir]
 
@@ -239,5 +248,317 @@ describe("reconcile backstop vs in-app commits", () => {
     expect(commitEvents()).toHaveLength(0)
     // The overlay hit must repair the on-disk processed set.
     expect(await readProcessedSet(markedDir as string)).toContain(sha)
+  })
+})
+
+/**
+ * Snapshot schema compatibility.
+ *
+ * The hook helper and the app upgrade independently: the helper lives in the
+ * user's data dir and is rewritten on app start, so there is always a window
+ * where a v1 snapshot (no commit stats, no common dir) is read by a v2-aware
+ * app — and, after a rollback, the reverse. Neither may lose the event.
+ *
+ * v1 keeps the old behaviour exactly: ask live git, using the snapshot's own
+ * gitRoot. v2 reads what the hook recorded and never goes back to the repo,
+ * which is what lets a removed worktree still report real numbers instead of
+ * a silently zeroed event.
+ */
+describe("ready snapshot schema compatibility", () => {
+  function repoEventsDir(gitRoot: string): string {
+    const key = createHash("sha1")
+      .update(gitRoot.trim().replace(/\\/g, "/").toLowerCase())
+      .digest("hex")
+    return join(eventsDir, key)
+  }
+
+  /** Drop a ready snapshot straight into the bucket, as the hook helper would. */
+  function writeReadySnapshot(
+    gitRoot: string,
+    meta: Record<string, unknown>,
+    files: Array<{ relPath: string; content: string }>
+  ): void {
+    const dir = join(repoEventsDir(gitRoot), "ready", `snap-${Math.random().toString(16).slice(2)}`)
+    mkdirSync(join(dir, "files"), { recursive: true })
+    const entries = files.map((file, index) => {
+      const blobFile = `files/${String(index).padStart(4, "0")}.blob`
+      writeFileSync(join(dir, blobFile), file.content)
+      return {
+        absPath: join(gitRoot, file.relPath),
+        relPath: file.relPath,
+        status: "A",
+        deleted: false,
+        blobFile
+      }
+    })
+    writeFileSync(join(dir, "meta.json"), JSON.stringify({ ...meta, gitRoot, files: entries }))
+  }
+
+  function lastCommitEvent(): Record<string, unknown> | undefined {
+    const calls = vi
+      .mocked(trackEvent)
+      .mock.calls.filter(([eventName]) => eventName === "git.commit.created")
+    return calls.at(-1)?.[2] as Record<string, unknown> | undefined
+  }
+
+  /** Force the emit path: a durable job stands in for a real measurement. */
+  async function syncWithDurableJob(path: string): Promise<void> {
+    vi.mocked(getCommitMeasurementStatus).mockResolvedValue("completed")
+    try {
+      await syncGitHookEvents(path)
+    } finally {
+      vi.mocked(getCommitMeasurementStatus).mockResolvedValue(null)
+    }
+  }
+
+  it("still consumes a v1 snapshot by asking live git", async () => {
+    vi.mocked(trackEvent).mockClear()
+    const { repoRoot } = makeRepo()
+    // Bucket keys come from `rev-parse --show-toplevel`, which resolves symlinks
+    // (/var → /private/var on macOS). Use the same spelling the hook would.
+    const root = git(repoRoot, "rev-parse", "--show-toplevel")
+    writeFileSync(join(repoRoot, "v1.ts"), "export const a = 1\nexport const b = 2\n")
+    git(repoRoot, "add", ".")
+    git(repoRoot, "commit", "-q", "-m", "v1 commit")
+    const sha = git(repoRoot, "rev-parse", "HEAD")
+
+    // Exactly what the old helper wrote: no stats, no remote, no common dir.
+    writeReadySnapshot(
+      root,
+      { schemaVersion: 1, snapshotId: "v1", commitSha: sha, branch: "v1-branch" },
+      [{ relPath: "v1.ts", content: "export const a = 1\n" }]
+    )
+
+    await syncWithDurableJob(root)
+
+    const event = lastCommitEvent()
+    expect(event?.commitSha).toBe(sha)
+    expect(event?.triggeredBy).toBe("external-hook")
+    expect(event?.branch).toBe("v1-branch")
+    // The whole point of the v1 path: numbers still come from the repository.
+    expect(event?.filesChanged).toBe(1)
+    expect(event?.insertions).toBe(2)
+    expect(await readdir(join(repoEventsDir(root), "ready"))).toHaveLength(0)
+  })
+
+  it("reports a v2 snapshot's recorded stats after its worktree is removed", async () => {
+    vi.mocked(trackEvent).mockClear()
+    const { repoRoot } = makeRepo()
+    const worktree = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-wt-")), "wt")
+    git(repoRoot, "worktree", "add", "-q", "-b", "feat", worktree)
+    writeFileSync(join(worktree, "w.ts"), "export const w = 1\n")
+    git(worktree, "add", ".")
+    git(worktree, "commit", "-q", "-m", "worktree commit")
+    const sha = git(worktree, "rev-parse", "HEAD")
+    // Capture both the way the hook would, while the worktree still exists.
+    const wtRoot = git(worktree, "rev-parse", "--show-toplevel")
+    const commonDir = git(worktree, "rev-parse", "--git-common-dir")
+
+    writeReadySnapshot(
+      wtRoot,
+      {
+        schemaVersion: 2,
+        snapshotId: "v2",
+        commitSha: sha,
+        branch: "feat",
+        gitCommonDir: commonDir,
+        commitTimeMs: Date.now(),
+        filesChanged: 1,
+        insertions: 1,
+        deletions: 0,
+        remoteUrl: ""
+      },
+      [{ relPath: "w.ts", content: "export const w = 1\n" }]
+    )
+
+    git(repoRoot, "merge", "--no-ff", "-q", "-m", "merge feat", "feat")
+    git(repoRoot, "worktree", "remove", "--force", worktree)
+    expect(existsSync(worktree)).toBe(false)
+
+    await syncWithDurableJob(wtRoot)
+
+    const event = lastCommitEvent()
+    expect(event?.commitSha).toBe(sha)
+    // repoPath stays the worktree: adoption rows are keyed on paths under it.
+    expect(event?.repoPath).toBe(wtRoot)
+    expect(event?.branch).toBe("feat")
+    expect(event?.filesChanged).toBe(1)
+    expect(event?.insertions).toBe(1)
+    expect(await readdir(join(repoEventsDir(wtRoot), "ready"))).toHaveLength(0)
+  })
+
+  it("never borrows the main checkout's branch for a removed worktree", async () => {
+    // The branch is per-work-tree, unlike the commit stats and the remote. If
+    // the common-dir fallback were allowed to answer it, a commit made on the
+    // worktree's branch would be reported under whatever the main checkout
+    // happens to have checked out — a wrong value is worse than an empty one.
+    vi.mocked(trackEvent).mockClear()
+    const { repoRoot } = makeRepo()
+    git(repoRoot, "checkout", "-q", "-b", "main-side")
+    const worktree = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-wt-detached-")), "wt")
+    git(repoRoot, "worktree", "add", "-q", "--detach", worktree)
+    writeFileSync(join(worktree, "d.ts"), "export const d = 1\n")
+    git(worktree, "add", ".")
+    git(worktree, "commit", "-q", "-m", "detached commit")
+    const sha = git(worktree, "rev-parse", "HEAD")
+    const wtRoot = git(worktree, "rev-parse", "--show-toplevel")
+    const commonDir = git(worktree, "rev-parse", "--git-common-dir")
+
+    // Detached HEAD at pre-commit time, so the hook recorded no branch.
+    writeReadySnapshot(
+      wtRoot,
+      {
+        schemaVersion: 2,
+        snapshotId: "v2-detached",
+        commitSha: sha,
+        branch: "",
+        gitCommonDir: commonDir,
+        commitTimeMs: Date.now(),
+        filesChanged: 1,
+        insertions: 1,
+        deletions: 0,
+        remoteUrl: ""
+      },
+      [{ relPath: "d.ts", content: "export const d = 1\n" }]
+    )
+
+    git(repoRoot, "merge", "--no-ff", "-q", "-m", "merge detached", sha)
+    git(repoRoot, "worktree", "remove", "--force", worktree)
+
+    await syncWithDurableJob(wtRoot)
+
+    const event = lastCommitEvent()
+    expect(event?.commitSha).toBe(sha)
+    expect(event?.branch).toBe("")
+    expect(event?.branch).not.toBe("main-side")
+  })
+
+  it("leaves an unreadable snapshot's handling unchanged", async () => {
+    vi.mocked(trackEvent).mockClear()
+    const { repoRoot } = makeRepo()
+    const root = git(repoRoot, "rev-parse", "--show-toplevel")
+    const dir = join(repoEventsDir(root), "ready", "broken")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "meta.json"), "{ not json")
+
+    await syncGitHookEvents(root)
+
+    expect(await readdir(join(repoEventsDir(root), "ready"))).toHaveLength(0)
+    expect(await readdir(join(repoEventsDir(root), "skipped"))).toContain("broken")
+    expect(
+      vi.mocked(trackEvent).mock.calls.filter(([name]) => name === "git.commit.created")
+    ).toHaveLength(0)
+  })
+})
+
+/**
+ * Registered-repo housekeeping.
+ *
+ * A script-driven flow registers one throwaway worktree per run, so dead
+ * entries must not accumulate — every sweep would spawn a doomed git for each.
+ * But the drop has to be narrow: it may only happen once the directory is gone
+ * AND its bucket holds nothing, or an unconsumed snapshot would be stranded.
+ */
+describe("registered repo housekeeping", () => {
+  async function registeredRoots(): Promise<string[]> {
+    const raw = await readFile(join(openworkDir, "git-hooks", "repos.json"), "utf-8").catch(
+      () => "[]"
+    )
+    return (JSON.parse(raw) as Array<{ gitRoot: string }>).map((repo) => repo.gitRoot)
+  }
+
+  async function register(gitRoot: string): Promise<void> {
+    const path = join(openworkDir, "git-hooks", "repos.json")
+    const current = await readFile(path, "utf-8").catch(() => "[]")
+    const repos = JSON.parse(current) as unknown[]
+    repos.push({ gitRoot, enabled: true, registeredAt: "now", updatedAt: "now" })
+    mkdirSync(join(openworkDir, "git-hooks"), { recursive: true })
+    writeFileSync(path, JSON.stringify(repos))
+  }
+
+  it("drops a registration whose directory is gone and bucket is empty", async () => {
+    const { repoRoot } = makeRepo()
+    const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-gone-")), "removed")
+    await register(repoRoot)
+    await register(gone)
+
+    await syncRegisteredGitHookEvents()
+
+    const roots = await registeredRoots()
+    expect(roots).toContain(repoRoot)
+    expect(roots).not.toContain(gone)
+  })
+
+  it("keeps a registration whose directory is gone while its bucket still has work", async () => {
+    const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-gone-kept-")), "removed")
+    const key = createHash("sha1").update(gone.toLowerCase()).digest("hex")
+    // A bucket that exists makes the sweep "synced", not "unavailable" — the
+    // entry must survive so the snapshot inside still gets a chance.
+    mkdirSync(join(eventsDir, key, "ready"), { recursive: true })
+    await register(gone)
+
+    await syncRegisteredGitHookEvents()
+
+    expect(await registeredRoots()).toContain(gone)
+  })
+})
+
+/**
+ * A snapshot whose whole repository is gone has nothing to run git in. Inside
+ * the attribution window it must be retried (the repo may come back); past it
+ * there is no generation left to match, so retrying forever is how the orphaned
+ * backlog built up in the first place.
+ */
+describe("snapshots whose repository disappeared entirely", () => {
+  function bucketFor(gitRoot: string): string {
+    const key = createHash("sha1")
+      .update(gitRoot.trim().replace(/\\/g, "/").toLowerCase())
+      .digest("hex")
+    return join(eventsDir, key)
+  }
+
+  function writeOrphan(gitRoot: string, committedAt: string): void {
+    const dir = join(bucketFor(gitRoot), "ready", `orphan-${Math.random().toString(16).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "meta.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        snapshotId: "orphan",
+        gitRoot,
+        commitSha: "b".repeat(40),
+        committedAt,
+        files: [{ absPath: join(gitRoot, "x.ts"), relPath: "x.ts", deleted: true }]
+      })
+    )
+  }
+
+  it("retires one that is past the attribution window", async () => {
+    const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-orphan-old-")), "removed")
+    writeOrphan(gone, new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString())
+
+    await syncGitHookEvents(gone)
+
+    expect(await readdir(join(bucketFor(gone), "ready"))).toHaveLength(0)
+    expect(await readdir(join(bucketFor(gone), "skipped"))).toHaveLength(1)
+  })
+
+  it("keeps retrying one that is still inside the window", async () => {
+    const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-orphan-new-")), "removed")
+    writeOrphan(gone, new Date(Date.now() - 3600 * 1000).toISOString())
+
+    // It has to get past the "no pending code_gen" gate to reach the retry
+    // decision at all, and measurement cannot complete with no repo to ask.
+    vi.mocked(hasPendingGenerationsForCommit).mockReturnValue(true)
+    vi.mocked(measureForCommit).mockResolvedValue(false)
+    try {
+      await syncGitHookEvents(gone)
+    } finally {
+      vi.mocked(hasPendingGenerationsForCommit).mockReturnValue(false)
+      vi.mocked(measureForCommit).mockResolvedValue(true)
+    }
+
+    // Still in ready: a repository can come back (remount, restore, re-clone).
+    expect(await readdir(join(bucketFor(gone), "ready"))).toHaveLength(1)
   })
 })
