@@ -1364,6 +1364,27 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
   // main checkout behind the common dir if this was a worktree that got removed.
   const gitCwd = await resolveSnapshotGitCwd(meta)
 
+  // Nothing left to run git in (whole repository deleted, or a v1 snapshot
+  // whose worktree is gone and that therefore recorded no common dir). Past the
+  // attribution window such a snapshot can never match a generation again, so
+  // retrying it every sweep just burns git spawns forever — exactly how the
+  // orphaned backlog accumulated. Retire it instead; inside the window keep
+  // retrying, because the repository may still be remounted or restored.
+  if (!gitCwd) {
+    const snapshotAtMs = meta.commitTimeMs ?? Date.parse(meta.committedAt ?? "")
+    const expired =
+      Number.isFinite(snapshotAtMs) && Date.now() - snapshotAtMs > COMMIT_RECONCILE_MAX_AGE_MS
+    if (expired) {
+      console.log(
+        `[GitHook] retiring snapshot whose repository is gone: commitSha=${meta.commitSha} repo=${meta.gitRoot}`
+      )
+      processed.add(meta.commitSha)
+      await saveProcessedCommitSet(repoDir, processed)
+      await moveEventDir(snapshotDir, join(repoDir, "skipped"), name)
+      return
+    }
+  }
+
   // Upper bound on eligible gen rows = commit creation time. The ready snapshot
   // can be processed long after the commit (sync cadence), so without this the
   // pending-gen set read here could include generations made *after* the commit
@@ -1415,6 +1436,11 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
   const gitRoot = meta.gitRoot
   const needsLiveStats = meta.filesChanged === undefined
   const needsLiveRemote = meta.remoteUrl === undefined
+  // The branch is the one thing here that is per-work-tree, so the common-dir
+  // fallback must NOT answer it: asking the main checkout would report ITS
+  // current branch for a commit made on the worktree's branch. Only the
+  // original work tree may answer, and "" is the honest result when it is gone.
+  const branchCwd = meta.gitRoot && (await pathExists(meta.gitRoot)) ? meta.gitRoot : null
   const [stats, branch, remoteUrl] = await Promise.all([
     needsLiveStats && gitCwd
       ? getCommitStats(gitCwd, meta.commitSha)
@@ -1423,7 +1449,13 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
           additions: meta.insertions ?? 0,
           deletions: meta.deletions ?? 0
         }),
-    meta.branch ? Promise.resolve(meta.branch) : gitCwd ? getCurrentBranch(gitCwd) : Promise.resolve(""),
+    meta.branch
+      ? Promise.resolve(meta.branch)
+      : branchCwd
+        ? getCurrentBranch(branchCwd)
+        : Promise.resolve(""),
+    // remote and commit stats are repository-level, so the main checkout is a
+    // correct place to ask them for a removed worktree's commit.
     needsLiveRemote && gitCwd
       ? getRemoteUrl(gitCwd, "origin")
       : Promise.resolve(meta.remoteUrl ?? "")

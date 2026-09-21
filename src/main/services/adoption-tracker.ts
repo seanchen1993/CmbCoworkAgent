@@ -2352,7 +2352,14 @@ async function resolveCommitIdentity(
     if (!root) {
       // Without an explicit sha the fallback would resolve the FALLBACK repo's
       // HEAD, attributing an unrelated commit. Refuse instead.
-      if (!gitCwd || !repoPath || !commitSha?.trim()) return null
+      if (!gitCwd || !repoPath || !commitSha?.trim()) {
+        // Callers with no fallback used to reach this through the outer catch,
+        // which logged. Keep the log so a vanished repo is still diagnosable.
+        console.warn(
+          `[AdoptionTracker] failed to resolve commit identity: repo unavailable at ${cwd}`
+        )
+        return null
+      }
       // Already canonical: callers pass the root git itself reported earlier.
       root = resolvePath(repoPath)
       execCwd = gitCwd
