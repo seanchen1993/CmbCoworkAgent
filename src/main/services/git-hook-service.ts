@@ -175,8 +175,8 @@ const repoPushCursor = new Map<string, Record<string, string>>()
 // ref SHAs. Unchanged between sweeps ⇒ no fetch/push happened, so the
 // `git for-each-ref` probe is skipped (0 git spawns when idle).
 const repoRemoteRefsSig = new Map<string, string>()
-// Normalized workspace path → git root from `rev-parse --show-toplevel`. Stable
-// for an app run, so a registered repo spawns git once then reuses it every sweep.
+// Normalized workspace path → git root from `rev-parse --show-toplevel`.
+// Reuse it while the root exists, without spawning git again on idle sweeps.
 const gitRootCache = new Map<string, string>()
 let registeredSyncTimer: ReturnType<typeof setInterval> | null = null
 let registeredRepoWriteQueue: Promise<void> = Promise.resolve()
@@ -222,6 +222,23 @@ async function pathExists(path: string): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === "ENOENT" || code === "ENOTDIR"
+}
+
+// Retirement needs confirmed absence. Permission/sharing errors must leave the
+// registration available for a later sweep, especially on Windows/network drives.
+async function isPathMissing(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return false
+  } catch (error) {
+    if (isMissingPathError(error)) return true
+    throw error
   }
 }
 
@@ -281,13 +298,17 @@ async function saveRegisteredRepos(repos: RegisteredGitHookRepo[]): Promise<void
 }
 
 async function updateRegisteredRepos(
-  updater: (repos: RegisteredGitHookRepo[]) => RegisteredGitHookRepo[] | void
+  updater: (
+    repos: RegisteredGitHookRepo[]
+  ) => RegisteredGitHookRepo[] | void | Promise<RegisteredGitHookRepo[] | void>
 ): Promise<void> {
-  const run = registeredRepoWriteQueue.catch(() => undefined).then(async () => {
-    const repos = await readRegisteredRepos()
-    const nextRepos = updater(repos) ?? repos
-    await saveRegisteredRepos(nextRepos)
-  })
+  const run = registeredRepoWriteQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const repos = await readRegisteredRepos()
+      const nextRepos = (await updater(repos)) ?? repos
+      await saveRegisteredRepos(nextRepos)
+    })
   registeredRepoWriteQueue = run.catch(() => undefined)
   await run
 }
@@ -426,6 +447,9 @@ async function resolveGitRoot(workspacePath: string): Promise<string | null> {
   if (!workspace) return null
   const cacheKey = normalizePathForKey(workspace)
   const cached = gitRootCache.get(cacheKey)
+  // A script may remove a worktree after we cached it. A stat keeps the idle
+  // path free of git spawns and lets the caller drain the orphaned bucket.
+  if (await isPathMissing(cached ?? workspace)) return null
   if (cached) return cached
   try {
     const gitRoot = await runGit(workspace, ["rev-parse", "--show-toplevel"])
@@ -1327,6 +1351,50 @@ async function getRemoteUrl(gitRoot: string, remoteName = "origin"): Promise<str
 }
 
 /**
+ * Whether a bucket still holds anything a sweep could act on.
+ *
+ * Only `ready` and `push-intents` count. `processed`/`skipped` are archives and
+ * `processed-commits.json` is a dedup ledger — they stay forever by design.
+ * `pending` is a pre-commit snapshot the post-commit hook never promoted; it
+ * carries no commitSha and only the hook can promote it, so for a repository
+ * that is gone it can never become work.
+ */
+async function hasPendingHookWork(repoDir: string): Promise<boolean> {
+  for (const sub of ["ready", "push-intents"]) {
+    const entries = await readdir(join(repoDir, sub)).catch((error: unknown) => {
+      if (isMissingPathError(error)) return [] as string[]
+      throw error
+    })
+    if (entries.length > 0) return true
+  }
+  return false
+}
+
+/**
+ * Drop the caches of repositories whose retirement was actually persisted.
+ *
+ * gitRootCache is keyed by the input path rather than the resolved root. Clear
+ * its aliases and the reconciler cursors together so a reused path starts fresh.
+ */
+function forgetRepoCaches(gitRoots: string[]): void {
+  if (gitRoots.length === 0) return
+  const keys = new Set(gitRoots.map(normalizePathForKey))
+  // Walk input aliases once for the entire batch, not once per retired root.
+  for (const [input, cached] of gitRootCache) {
+    if (keys.has(input) || keys.has(normalizePathForKey(cached))) gitRootCache.delete(input)
+  }
+  for (const key of keys) {
+    repoCommitCursor.delete(key)
+    repoPushCursor.delete(key)
+    repoRemoteRefsSig.delete(key)
+    reflogPathCache.delete(key)
+    inAppProcessedOverlay.delete(key)
+    // A recreated path must register immediately, even within the old TTL.
+    autoInstallLastCheckedAt.delete(key)
+  }
+}
+
+/**
  * A directory where git can still run for this snapshot's repository.
  *
  * Prefers the original work tree (it is the only place that resolves a bare
@@ -1340,44 +1408,6 @@ async function getRemoteUrl(gitRoot: string, remoteName = "origin"): Promise<str
  * Returns null when neither survives — then the commit genuinely cannot be
  * verified any more and the snapshot stays in `ready` for a later attempt.
  */
-/**
- * Whether a bucket still holds anything a sweep could act on.
- *
- * Only `ready` and `push-intents` count. `processed`/`skipped` are archives and
- * `processed-commits.json` is a dedup ledger — they stay forever by design.
- * `pending` is a pre-commit snapshot the post-commit hook never promoted; it
- * carries no commitSha and only the hook can promote it, so for a repository
- * that is gone it can never become work.
- */
-async function hasPendingHookWork(repoDir: string): Promise<boolean> {
-  for (const sub of ["ready", "push-intents"]) {
-    const entries = await readdir(join(repoDir, sub)).catch(() => [] as string[])
-    if (entries.length > 0) return true
-  }
-  return false
-}
-
-/**
- * Drop every in-memory trace of a repository we just retired.
- *
- * gitRootCache is keyed by the INPUT path rather than the resolved root, and a
- * stale hit there is what makes a dead path look alive: `resolveGitRoot` would
- * keep returning the cached root, the sweep would take the live branch, and
- * both reconcilers would spawn doomed git processes every pass.
- */
-function forgetRepoCaches(gitRoot: string): void {
-  const key = normalizePathForKey(gitRoot)
-  for (const [input, cached] of gitRootCache) {
-    if (normalizePathForKey(cached) === key) gitRootCache.delete(input)
-  }
-  gitRootCache.delete(key)
-  repoCommitCursor.delete(key)
-  repoPushCursor.delete(key)
-  repoRemoteRefsSig.delete(key)
-  reflogPathCache.delete(key)
-  inAppProcessedOverlay.delete(key)
-}
-
 async function resolveSnapshotGitCwd(meta: HookSnapshotMeta): Promise<string | null> {
   if (meta.gitRoot && (await pathExists(meta.gitRoot))) return meta.gitRoot
   const commonDir = meta.gitCommonDir?.trim()
@@ -2349,11 +2379,12 @@ export async function syncGitHookEvents(workspacePath: string): Promise<GitHookS
   }
 }
 
-type RepoSweepOutcome =
+type RepoSweepOutcome = { observedUpdatedAt: string } & (
   | { kind: "synced" }
   | { kind: "failed"; error: string }
   /** Directory gone and nothing left in its bucket — retire the registration. */
   | { kind: "forget" }
+)
 
 /**
  * Apply a whole sweep's outcomes in ONE registry update.
@@ -2363,66 +2394,81 @@ type RepoSweepOutcome =
  * full rewrites of a file that itself grows with N. The script-driven flow
  * registers a throwaway worktree per run, so N is exactly the number that grows.
  *
- * Batching keeps the concurrency guarantee: the update still runs inside the
- * write queue and re-reads there, so a repository registered mid-sweep is
- * preserved (we only touch keys we have an outcome for).
+ * Re-read inside the write queue and discard outcomes for changed records.
+ * A path can be re-registered, recreated, or receive a final hook event while
+ * other repositories are being scanned, so recheck before retiring it.
  */
-async function applyRepoSweepOutcomes(outcomes: Map<string, RepoSweepOutcome>): Promise<void> {
-  if (outcomes.size === 0) return
+async function applyRepoSweepOutcomes(outcomes: Map<string, RepoSweepOutcome>): Promise<string[]> {
+  if (outcomes.size === 0) return []
   const now = nowIsoLocal()
-  await updateRegisteredRepos((repos) =>
-    repos.flatMap((repo) => {
+  const retired: string[] = []
+  await updateRegisteredRepos(async (repos) => {
+    const nextRepos: RegisteredGitHookRepo[] = []
+    for (const repo of repos) {
       const outcome = outcomes.get(normalizePathForKey(repo.gitRoot))
-      if (!outcome) return [repo]
-      if (outcome.kind === "forget") return []
-      if (outcome.kind === "synced") {
-        return [
-          {
-            ...repo,
-            lastSyncedAt: now,
-            lastErrorAt: undefined,
-            lastError: undefined,
-            updatedAt: now
-          }
-        ]
+      if (!outcome || !repo.enabled || repo.updatedAt !== outcome.observedUpdatedAt) {
+        nextRepos.push(repo)
+      } else if (outcome.kind === "forget") {
+        if (
+          (await isPathMissing(repo.gitRoot)) &&
+          !(await hasPendingHookWork(getRepoEventsDir(repo.gitRoot)))
+        ) {
+          retired.push(repo.gitRoot)
+        } else {
+          nextRepos.push(repo)
+        }
+      } else if (outcome.kind === "synced") {
+        nextRepos.push({
+          ...repo,
+          lastSyncedAt: now,
+          lastErrorAt: undefined,
+          lastError: undefined,
+          updatedAt: now
+        })
+      } else {
+        nextRepos.push({ ...repo, lastErrorAt: now, lastError: outcome.error, updatedAt: now })
       }
-      return [{ ...repo, lastErrorAt: now, lastError: outcome.error, updatedAt: now }]
-    })
-  )
+    }
+    return nextRepos
+  })
+  return retired
 }
 
 export async function syncRegisteredGitHookEvents(): Promise<void> {
   const repos = await readRegisteredRepos()
   const outcomes = new Map<string, RepoSweepOutcome>()
-  const retired: string[] = []
   for (const repo of repos) {
     if (!repo.enabled || !repo.gitRoot) continue
     const key = normalizePathForKey(resolvePath(repo.gitRoot))
+    const observedUpdatedAt = repo.updatedAt
     try {
       const result = await syncGitHookEvents(repo.gitRoot)
       if (result === "synced") {
-        outcomes.set(key, { kind: "synced" })
+        outcomes.set(key, { kind: "synced", observedUpdatedAt })
       } else if (result === "unavailable") {
         // The directory is gone AND its bucket holds nothing a sweep could act
         // on. A script-driven flow registers one throwaway worktree per run, so
         // keeping these would make every sweep spawn a doomed git per dead path.
         // A repository that comes back re-registers on the next agent write.
-        if (!(await pathExists(repo.gitRoot))) {
-          outcomes.set(key, { kind: "forget" })
-          retired.push(repo.gitRoot)
+        if (await isPathMissing(repo.gitRoot)) {
+          outcomes.set(key, { kind: "forget", observedUpdatedAt })
         } else {
-          outcomes.set(key, { kind: "failed", error: "Git 仓库不可用" })
+          outcomes.set(key, { kind: "failed", error: "Git 仓库不可用", observedUpdatedAt })
         }
       }
     } catch (e) {
       console.warn("[GitHook] failed to sync registered repo:", repo.gitRoot, e)
-      outcomes.set(key, { kind: "failed", error: e instanceof Error ? e.message : String(e) })
+      outcomes.set(key, {
+        kind: "failed",
+        error: e instanceof Error ? e.message : String(e),
+        observedUpdatedAt
+      })
     }
   }
-  await applyRepoSweepOutcomes(outcomes)
+  const retired = await applyRepoSweepOutcomes(outcomes)
   // Only after the registry write succeeds — a cleared cache plus a surviving
   // registration would just re-resolve the path on the next sweep.
-  for (const gitRoot of retired) forgetRepoCaches(resolvePath(gitRoot))
+  forgetRepoCaches(retired.map((gitRoot) => resolvePath(gitRoot)))
   if (retired.length > 0) {
     console.log(`[GitHook] retired ${retired.length} registered repo(s) whose directory is gone`)
   }

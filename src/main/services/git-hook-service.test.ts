@@ -27,11 +27,12 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync
 } from "fs"
-import { readFile, readdir } from "fs/promises"
+import { readFile, readdir, stat } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import { afterAll, describe, expect, it, vi } from "vitest"
@@ -59,6 +60,8 @@ vi.mock("fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs/promises")>()
   return {
     ...actual,
+    readdir: vi.fn(actual.readdir),
+    stat: vi.fn(actual.stat),
     writeFile: async (path: unknown, data: unknown, ...rest: unknown[]) => {
       if (String(path).endsWith("repos.json")) {
         reposWrites.count += 1
@@ -76,8 +79,10 @@ import {
 } from "./adoption-tracker"
 import { trackEvent } from "./event-reporter"
 import {
+  getGitHookStatus,
   installGitHooks,
   markInAppCommitProcessed,
+  scheduleAutoInstallGitHooksForPath,
   syncGitHookEvents,
   syncRegisteredGitHookEvents
 } from "./git-hook-service"
@@ -365,7 +370,7 @@ describe("ready snapshot schema compatibility", () => {
     expect(await readdir(join(repoEventsDir(root), "ready"))).toHaveLength(0)
   })
 
-  it("reports a v2 snapshot's recorded stats after its worktree is removed", async () => {
+  it.each([false, true])("reports a removed worktree's v2 snapshot (cached=%s)", async (cached) => {
     vi.mocked(trackEvent).mockClear()
     const { repoRoot } = makeRepo()
     const worktree = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-wt-")), "wt")
@@ -377,6 +382,7 @@ describe("ready snapshot schema compatibility", () => {
     // Capture both the way the hook would, while the worktree still exists.
     const wtRoot = git(worktree, "rev-parse", "--show-toplevel")
     const commonDir = git(worktree, "rev-parse", "--git-common-dir")
+    if (cached) await syncGitHookEvents(wtRoot)
 
     writeReadySnapshot(
       wtRoot,
@@ -472,6 +478,215 @@ describe("ready snapshot schema compatibility", () => {
     expect(
       vi.mocked(trackEvent).mock.calls.filter(([name]) => name === "git.commit.created")
     ).toHaveLength(0)
+  })
+})
+
+describe("失效注册清理的缓存和并发保护", () => {
+  const registryPath = join(openworkDir, "git-hooks", "repos.json")
+  const oldUpdatedAt = "2026-01-01T00:00:00.000+08:00"
+
+  function writeRegistry(roots: string[]): void {
+    mkdirSync(join(openworkDir, "git-hooks"), { recursive: true })
+    writeFileSync(
+      registryPath,
+      JSON.stringify(
+        roots.map((gitRoot) => ({
+          gitRoot,
+          enabled: true,
+          registeredAt: oldUpdatedAt,
+          updatedAt: oldUpdatedAt
+        }))
+      )
+    )
+  }
+
+  function readRegistry(): Array<{ gitRoot: string; updatedAt: string; lastError?: string }> {
+    return JSON.parse(readFileSync(registryPath, "utf-8"))
+  }
+
+  function bucketFor(root: string): string {
+    const key = createHash("sha1").update(root.replace(/\\/g, "/").toLowerCase()).digest("hex")
+    return join(eventsDir, key)
+  }
+
+  function missingRoot(): string {
+    const parent = realpathSync(mkdtempSync(join(tmpdir(), "cmbdevclaw-reused-")))
+    tempRoots.push(parent)
+    return join(parent, "wt")
+  }
+
+  function recreate(root: string): void {
+    mkdirSync(root, { recursive: true })
+    git(root, "init", "-q")
+    writeFileSync(join(root, "generated.ts"), "export const fresh = 1\n")
+  }
+
+  async function autoRegister(root: string): Promise<void> {
+    scheduleAutoInstallGitHooksForPath(root, "generated.ts")
+    await vi.waitFor(
+      async () => {
+        const registered = readRegistry().find((repo) => repo.gitRoot === root)
+        expect(registered).toBeDefined()
+        expect(registered?.updatedAt).not.toBe(oldUpdatedAt)
+        expect((await getGitHookStatus(root)).installed).toBe(true)
+      },
+      { timeout: 3000 }
+    )
+  }
+
+  // Hold the second repository after the first has produced a forget outcome.
+  // This makes the race deterministic without sleeps or private service exports.
+  async function duringPausedSweep(slowRoot: string, action: () => Promise<void>): Promise<void> {
+    const readyPath = join(bucketFor(slowRoot), "ready")
+    mkdirSync(readyPath, { recursive: true })
+    const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises")
+    let release!: () => void
+    let reached!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const blocked = new Promise<void>((resolve) => {
+      reached = resolve
+    })
+    let gated = false
+    vi.mocked(readdir).mockImplementation(async (...args) => {
+      if (String(args[0]) === readyPath && !gated) {
+        gated = true
+        reached()
+        await barrier
+      }
+      return actual.readdir(...args)
+    })
+    const sweep = syncRegisteredGitHookEvents()
+    try {
+      await Promise.race([
+        blocked,
+        sweep.then(() => {
+          throw new Error("sweep finished before reaching the barrier")
+        })
+      ])
+      await action()
+    } finally {
+      release()
+      try {
+        await sweep
+      } finally {
+        vi.mocked(readdir).mockImplementation(actual.readdir)
+      }
+    }
+  }
+
+  it("清理已缓存且已消费完的 worktree，下一轮不再写注册表", async () => {
+    const { repoRoot } = makeRepo()
+    const worktree = missingRoot()
+    git(repoRoot, "worktree", "add", "-q", "--detach", worktree)
+    const root = git(worktree, "rev-parse", "--show-toplevel")
+    writeRegistry([root])
+    await syncRegisteredGitHookEvents()
+    mkdirSync(join(bucketFor(root), "processed", "snapshot"), { recursive: true })
+    writeFileSync(join(bucketFor(root), "processed-commits.json"), JSON.stringify(["a".repeat(40)]))
+    git(repoRoot, "worktree", "remove", "--force", worktree)
+
+    reposWrites.count = 0
+    await syncRegisteredGitHookEvents()
+    expect(readRegistry()).toEqual([])
+    expect(reposWrites.count).toBe(1)
+    await syncRegisteredGitHookEvents()
+    expect(reposWrites.count).toBe(1)
+    expect(existsSync(join(bucketFor(root), "processed", "snapshot"))).toBe(true)
+  })
+
+  it.each([false, true])("保留扫描期间同路径的新注册（再次删除=%s）", async (removeAgain) => {
+    const root = missingRoot()
+    const slow = git(makeRepo().repoRoot, "rev-parse", "--show-toplevel")
+    writeRegistry([root, slow])
+    let updatedAt: string | undefined
+    await duringPausedSweep(slow, async () => {
+      recreate(root)
+      await autoRegister(root)
+      updatedAt = readRegistry().find((repo) => repo.gitRoot === root)?.updatedAt
+      if (removeAgain) rmSync(root, { recursive: true, force: true })
+    })
+
+    expect(readRegistry().find((repo) => repo.gitRoot === root)?.updatedAt).toBe(updatedAt)
+    expect(readRegistry().map((repo) => repo.gitRoot)).toContain(root)
+  })
+
+  it("保留扫描期间恢复但尚未重新注册的目录", async () => {
+    const root = missingRoot()
+    const slow = git(makeRepo().repoRoot, "rev-parse", "--show-toplevel")
+    writeRegistry([root, slow])
+    await duringPausedSweep(slow, async () => {
+      recreate(root)
+    })
+
+    expect(readRegistry().map((repo) => repo.gitRoot)).toContain(root)
+  })
+
+  it.each(["ready", "push-intents"])("保留扫描期间收到 %s 事件的注册", async (subdir) => {
+    const root = missingRoot()
+    const slow = git(makeRepo().repoRoot, "rev-parse", "--show-toplevel")
+    writeRegistry([root, slow])
+    await duringPausedSweep(slow, async () => {
+      const dir = join(bucketFor(root), subdir)
+      mkdirSync(dir, { recursive: true })
+      if (subdir === "ready") mkdirSync(join(dir, "late-snapshot"))
+      else writeFileSync(join(dir, "late-push.json"), "{}")
+    })
+
+    expect(readRegistry().map((repo) => repo.gitRoot)).toContain(root)
+  })
+
+  it("清理后立即重建的路径可重新注册，不受旧的安装 TTL 阻挡", async () => {
+    const root = missingRoot()
+    writeRegistry([])
+    recreate(root)
+    await autoRegister(root)
+    await syncRegisteredGitHookEvents()
+    rmSync(root, { recursive: true, force: true })
+    await syncRegisteredGitHookEvents()
+    expect(readRegistry()).toEqual([])
+
+    recreate(root)
+    await autoRegister(root)
+    expect(readRegistry().map((repo) => repo.gitRoot)).toContain(root)
+  })
+
+  it.each(["EACCES", "EBUSY"])("目录检查遇到 %s 时保留注册并记录失败", async (code) => {
+    const root = git(makeRepo().repoRoot, "rev-parse", "--show-toplevel")
+    writeRegistry([root])
+    await syncRegisteredGitHookEvents()
+    const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises")
+    vi.mocked(stat).mockImplementation(async (...args) => {
+      if (String(args[0]) === root) throw Object.assign(new Error(code), { code })
+      return actual.stat(...args)
+    })
+    try {
+      await syncRegisteredGitHookEvents()
+      expect(readRegistry()).toEqual([expect.objectContaining({ gitRoot: root, lastError: code })])
+    } finally {
+      vi.mocked(stat).mockImplementation(actual.stat)
+    }
+  })
+
+  it("事件目录读取失败时不把待处理队列当作空队列", async () => {
+    const root = missingRoot()
+    writeRegistry([root])
+    const readyPath = join(bucketFor(root), "ready")
+    const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises")
+    vi.mocked(readdir).mockImplementation(async (...args) => {
+      if (String(args[0]) === readyPath)
+        throw Object.assign(new Error("EACCES"), { code: "EACCES" })
+      return actual.readdir(...args)
+    })
+    try {
+      await syncRegisteredGitHookEvents()
+      expect(readRegistry()).toEqual([
+        expect.objectContaining({ gitRoot: root, lastError: "EACCES" })
+      ])
+    } finally {
+      vi.mocked(readdir).mockImplementation(actual.readdir)
+    }
   })
 })
 

@@ -27,6 +27,7 @@ let findPendingGensForFile!: AdoptionIndexModule["findPendingGensForFile"]
 let CMBDEVCLAW_INTERNAL_GIT_ENV!: GitHookServiceModule["CMBDEVCLAW_INTERNAL_GIT_ENV"]
 let installGitHooks!: GitHookServiceModule["installGitHooks"]
 let syncGitHookEvents!: GitHookServiceModule["syncGitHookEvents"]
+let syncRegisteredGitHookEvents!: GitHookServiceModule["syncRegisteredGitHookEvents"]
 let uninstallGitHooks!: GitHookServiceModule["uninstallGitHooks"]
 
 const execFileAsync = promisify(execFile)
@@ -267,6 +268,16 @@ async function testWorktreeCommitIsCollectedAfterWorktreeRemoval(): Promise<void
         await sleep(250)
 
         await writeFile(filePath, generatedContent)
+        // Start from a registered, already-synced worktree so the root and
+        // reconciler caches are warm when the script removes it later.
+        const registryPath = join(testDataRoot, "git-hooks", "repos.json")
+        const registered = JSON.parse(await readFile(registryPath, "utf-8").catch(() => "[]"))
+        const root = await git(worktree, ["rev-parse", "--show-toplevel"])
+        const now = new Date().toISOString()
+        registered.push({ gitRoot: root, enabled: true, registeredAt: now, updatedAt: now })
+        await writeFile(registryPath, JSON.stringify(registered))
+        await syncRegisteredGitHookEvents()
+
         await git(worktree, ["add", "generated.ts"])
         await git(worktree, ["commit", "-q", "-m", "worktree commit with codegen"])
         const sha = await git(worktree, ["rev-parse", "HEAD"])
@@ -304,7 +315,7 @@ async function testWorktreeCommitIsCollectedAfterWorktreeRemoval(): Promise<void
         await git(repo, ["worktree", "remove", "--force", worktree])
         assert(!existsSync(worktree), "work tree should be gone before consumption")
 
-        await syncGitHookEvents(worktree)
+        await syncRegisteredGitHookEvents()
         await sleep(250)
 
         const remainingReady = await listDirs(join(repoEventsDir(worktree), "ready"))
@@ -324,6 +335,17 @@ async function testWorktreeCommitIsCollectedAfterWorktreeRemoval(): Promise<void
         assert(
           findPendingGensForFile(filePath, 0).length === 0,
           "the pending gen should have been measured against the worktree commit"
+        )
+
+        await syncRegisteredGitHookEvents()
+        const remainingRepos = JSON.parse(await readFile(registryPath, "utf-8")) as Array<{
+          gitRoot: string
+        }>
+        assert(
+          !remainingRepos.some(
+            (entry) => normalizePathForAssert(entry.gitRoot) === normalizePathForAssert(root)
+          ),
+          "the removed worktree should retire after its ready snapshot was consumed"
         )
       } finally {
         await cleanupRepoEvents(worktree).catch(() => undefined)
@@ -563,6 +585,7 @@ async function run(): Promise<void> {
       CMBDEVCLAW_INTERNAL_GIT_ENV,
       installGitHooks,
       syncGitHookEvents,
+      syncRegisteredGitHookEvents,
       uninstallGitHooks
     } = gitHookService)
 
