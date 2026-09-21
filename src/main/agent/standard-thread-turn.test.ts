@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const harnessServiceMocks = vi.hoisted(() => ({
   buildHarnessFeatureAgentContext: vi.fn(),
+  getHarnessProjectAdapterSnapshot: vi.fn(),
   readHarnessFeatureMetadata: vi.fn(),
   resolveHarnessFeatureCurrentStage: vi.fn()
 }))
@@ -15,6 +16,7 @@ import {
   HARNESS_AGENT_CONTEXT_UNAVAILABLE,
   HarnessAgentContextUnavailableError,
   getHarnessAgentContext,
+  getHarnessHookContext,
   prepareStandardThreadRuntimeFactory
 } from "./standard-thread-turn"
 import { extractErrorDetail } from "./failover"
@@ -107,6 +109,28 @@ describe("getHarnessAgentContext", () => {
     harnessServiceMocks.buildHarnessFeatureAgentContext.mockResolvedValue(null)
 
     await expect(getHarnessAgentContext({})).resolves.toEqual({})
+  })
+
+  it("resolves the bound adapter for a project session without a feature", async () => {
+    harnessServiceMocks.readHarnessFeatureMetadata.mockReturnValue(null)
+    harnessServiceMocks.buildHarnessFeatureAgentContext.mockResolvedValue(null)
+    harnessServiceMocks.getHarnessProjectAdapterSnapshot.mockResolvedValue({
+      id: "plugin-v3",
+      name: "Kanban V3",
+      version: "3.0.0",
+      type: "plugin"
+    })
+
+    const context = await getHarnessAgentContext({
+      harnessProjectSession: { projectId: "project-1", kind: "chat" }
+    })
+    expect(context).toMatchObject({
+      isHarnessProjectSession: true,
+      harnessProjectId: "project-1",
+      pluginId: "plugin-v3",
+      pluginName: "Kanban V3"
+    })
+    expect(getHarnessHookContext(context).harnessAdapterId).toBe("plugin-v3")
   })
 
   it("keeps complete Harness context when optional current-stage attribution fails", async () => {

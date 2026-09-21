@@ -1,5 +1,10 @@
 import type { SkillMetadata } from "../../types"
 import { isSkillDisabled, normalizeSkillId } from "../../lib/skill-ids"
+import {
+  isSkillOwnedByBoundPlugin,
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../../../shared/skill-visibility"
 
 function normalizeSkillName(value: string): string {
   return normalizeSkillId(value)
@@ -23,34 +28,40 @@ function hasPreferredPlugin(preferredPlugin?: PreferredPlugin | null): boolean {
   )
 }
 
-function isPluginSkill(skill: SkillMetadata): boolean {
-  return Boolean(skill.pluginId?.trim() || skill.pluginName?.trim())
+function toProjectModeSkillScope(
+  preferredPlugin: PreferredPlugin | null | undefined,
+  projectMode: boolean
+): ProjectModeSkillScope {
+  if (typeof preferredPlugin === "string") {
+    return { projectMode, boundPluginName: preferredPlugin }
+  }
+  return {
+    projectMode,
+    boundPluginId: preferredPlugin?.id,
+    boundPluginName: preferredPlugin?.name
+  }
 }
 
-export function isPreferredPluginSkill(skill: SkillMetadata, preferredPlugin?: PreferredPlugin | null): boolean {
+export function isPreferredPluginSkill(
+  skill: SkillMetadata,
+  preferredPlugin?: PreferredPlugin | null
+): boolean {
   if (!preferredPlugin) return false
-  if (typeof preferredPlugin === "string") {
-    return normalizePluginName(skill.pluginName) === normalizePluginName(preferredPlugin)
-  }
-  const preferredId = normalizePluginId(preferredPlugin.id)
-  const preferredName = normalizePluginName(preferredPlugin.name)
-  return Boolean(
-    (preferredId && normalizePluginId(skill.pluginId) === preferredId) ||
-      (preferredName && normalizePluginName(skill.pluginName) === preferredName)
-  )
+  return isSkillOwnedByBoundPlugin(skill, toProjectModeSkillScope(preferredPlugin, true))
 }
 
 export function selectSkillForSlashName(
   skills: SkillMetadata[],
   slashSkill: string,
-  preferredPlugin?: PreferredPlugin | null
+  preferredPlugin?: PreferredPlugin | null,
+  projectMode = hasPreferredPlugin(preferredPlugin)
 ): SkillMetadata | null {
   const normalizedSlashSkill = normalizeSkillName(slashSkill)
   if (!normalizedSlashSkill) return null
+  const visibilityScope = toProjectModeSkillScope(preferredPlugin, projectMode)
   const matches = skills.filter((skill) => {
     if (normalizeSkillName(skill.name) !== normalizedSlashSkill) return false
-    if (!hasPreferredPlugin(preferredPlugin)) return true
-    return !isPluginSkill(skill) || isPreferredPluginSkill(skill, preferredPlugin)
+    return isSkillVisibleForProjectMode(skill, visibilityScope)
   })
   if (matches.length === 0) return null
   return matches.find((skill) => isPreferredPluginSkill(skill, preferredPlugin)) ?? matches[0]
@@ -64,29 +75,24 @@ export function selectSkillForSlashName(
  * The selected skill is later serialized with its absolute SKILL.md path, so
  * runtime routing does not have to guess by name.
  *
- * When `preferredPlugin` is set, project-mode chat surfaces only expose
- * standalone skills and skills owned by the bound plugin.
+ * When `projectMode` is enabled, only project-mode plugin skills owned by the
+ * bound plugin are exposed; non-project plugin skills remain available.
  */
 export function mergeChatSkills(
   localSkills: SkillMetadata[],
   pluginSkills: SkillMetadata[],
   disabledSkillIds: ReadonlySet<string>,
-  preferredPlugin?: PreferredPlugin | null
+  preferredPlugin?: PreferredPlugin | null,
+  projectMode = hasPreferredPlugin(preferredPlugin)
 ): SkillMetadata[] {
-  const hasProjectPlugin = hasPreferredPlugin(preferredPlugin)
+  const visibilityScope = toProjectModeSkillScope(preferredPlugin, projectMode)
   const visibleLocalSkills = localSkills
   const enabledVisibleLocalSkills = visibleLocalSkills.filter(
     (skill) => !isSkillDisabled(skill, disabledSkillIds)
   )
 
-  // Conversation mode: list every enabled standalone skill and every enabled
-  // plugin skill. Same-name rows are disambiguated by source labels in the UI.
-  if (!hasProjectPlugin) {
-    return [...enabledVisibleLocalSkills, ...pluginSkills]
-  }
-
-  const boundPluginSkills = pluginSkills.filter((skill) =>
-    isPreferredPluginSkill(skill, preferredPlugin)
+  const visiblePluginSkills = pluginSkills.filter((skill) =>
+    isSkillVisibleForProjectMode(skill, visibilityScope)
   )
-  return [...enabledVisibleLocalSkills, ...boundPluginSkills]
+  return [...enabledVisibleLocalSkills, ...visiblePluginSkills]
 }
