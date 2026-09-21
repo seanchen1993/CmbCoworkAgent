@@ -43,8 +43,20 @@ function asText(value: unknown): string {
   return typeof value === "string" ? value : ""
 }
 
-/** 每阶段回带的工具排行条数。弹窗是给人看的，不是给人翻的。 */
+/** 每阶段展示的工具排行条数。弹窗是给人看的，不是给人翻的。 */
 export const STAGE_TOP_TOOL_LIMIT = 8
+
+/**
+ * 工具种类数的统计上限。
+ *
+ * 用同一个 terms 聚合多取一些桶、再在解析时切出前 8 条，而不是另起一个
+ * cardinality：cardinality 不支持 exclude，算出来会把被过滤掉的内置工具也计进去，
+ * 于是「共 N 种」和下面列出的徽章不是一个口径，反而更误导。
+ *
+ * 30 是按实际工具数取的：排除内置工具后，一个阶段能用到的自定义 / MCP 工具通常
+ * 十几个。真超过就显示「30+ 种」，因为此时精确值已经不影响判断了。
+ */
+export const STAGE_TOOL_VARIETY_LIMIT = 30
 
 /** P95：分辨「整体都慢」和「少数几轮拖长了」。 */
 const DURATION_PERCENTS = [95] as const
@@ -72,7 +84,12 @@ export interface ProjectModeStageRow {
   /** 阶段大类（`${group}-${label}` 里的 group），取不到时为 null。 */
   group: string | null
   metrics: ProjectModeStageMetrics
+  /** 调用次数最高的若干个，最多 STAGE_TOP_TOOL_LIMIT 条。 */
   topTools: ProjectModeStageToolCount[]
+  /** 该阶段用到的工具种类数，与 topTools 同口径（同样排除了内置工具）。 */
+  toolVariety: number
+  /** 种类数触到统计上限，真实值只多不少，展示成「30+ 种」。 */
+  toolVarietyTruncated: boolean
 }
 
 export interface ProjectModeStageAnalysis {
@@ -140,7 +157,7 @@ export function buildProjectModeStageAnalysisAggs(
         by_tool: {
           terms: {
             field: "toolNames",
-            size: STAGE_TOP_TOOL_LIMIT,
+            size: STAGE_TOOL_VARIETY_LIMIT,
             exclude: [...toolExcludes]
           }
         }
@@ -163,15 +180,28 @@ function parseMetrics(container: unknown): ProjectModeStageMetrics {
   }
 }
 
-function parseTopTools(container: unknown): ProjectModeStageToolCount[] {
+function parseStageTools(container: unknown): {
+  topTools: ProjectModeStageToolCount[]
+  toolVariety: number
+  toolVarietyTruncated: boolean
+} {
   const buckets = asRecord(asRecord(container).by_tool).buckets
-  if (!Array.isArray(buckets)) return []
-  return buckets
+  if (!Array.isArray(buckets)) {
+    return { topTools: [], toolVariety: 0, toolVarietyTruncated: false }
+  }
+  const tools = buckets
     .map((entry) => {
       const bucket = asRecord(entry)
       return { tool: asText(bucket.key), count: asCount(bucket.doc_count) }
     })
     .filter((item) => item.tool.length > 0)
+  return {
+    // 只展示前几条，但种类数按拿回来的全部桶算，这样「共 N 种」能告诉人下面
+    // 那几个徽章不是全部。
+    topTools: tools.slice(0, STAGE_TOP_TOOL_LIMIT),
+    toolVariety: tools.length,
+    toolVarietyTruncated: tools.length >= STAGE_TOOL_VARIETY_LIMIT
+  }
 }
 
 /**
@@ -197,7 +227,7 @@ export function parseProjectModeStageAnalysis(
             nodeName,
             group: extractHarnessNodeGroup(nodeName),
             metrics: parseMetrics(bucket),
-            topTools: parseTopTools(bucket)
+            ...parseStageTools(bucket)
           }
         })
         .filter((stage) => stage.nodeName.length > 0)

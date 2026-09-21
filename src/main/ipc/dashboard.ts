@@ -64,6 +64,7 @@ import {
   buildProjectModeStageAnalysisAggs,
   emptyProjectModeStageMetrics,
   parseProjectModeStageAnalysis,
+  STAGE_TOP_TOOL_LIMIT,
   type ProjectModeStageAnalysis,
   type ProjectModeStageRow
 } from "./project-mode-stage-analysis"
@@ -8842,7 +8843,9 @@ function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAn
         userInputRequestDocs: conversationCount
       }
     },
-    topTools: tools.map(([tool, count]) => ({ tool, count }))
+    topTools: tools.slice(0, STAGE_TOP_TOOL_LIMIT).map(([tool, count]) => ({ tool, count })),
+    toolVariety: tools.length,
+    toolVarietyTruncated: false
   })
 
   const stages = [

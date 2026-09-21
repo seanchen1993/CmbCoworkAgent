@@ -28,7 +28,9 @@ function stage(
         userInputRequestDocs: 0
       }
     },
-    topTools: []
+    topTools: [],
+    toolVariety: 0,
+    toolVarietyTruncated: false
   }
 }
 
