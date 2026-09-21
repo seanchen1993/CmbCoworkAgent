@@ -165,7 +165,7 @@ describe("Harness catalog reader", () => {
     expect(cached.stats.responseBytes).toBeLessThanOrEqual(HARNESS_CATALOG_MAX_RESPONSE_BYTES)
   }, 20_000)
 
-  it("projects selected feature deploy units in the worker and refreshes mapping snapshots", async () => {
+  it("preserves feature snapshots instead of applying global mapping changes", async () => {
     const paths = await makeCatalog(1)
     const root = join(paths.projects, "..")
     const featureBindingStorePath = join(root, "harness-board-features.json")
@@ -173,7 +173,7 @@ describe("Harness catalog reader", () => {
     writeFileSync(
       featureBindingStorePath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         bindings: [
           {
             projectId: "project-0",
@@ -209,14 +209,14 @@ describe("Harness catalog reader", () => {
       ["project-0"],
       undefined,
       undefined,
-      { featureSlug: "feature-a", featureBindingStorePath, deployUnitMappingStorePath }
+      { featureSlug: "feature-a", featureBindingStorePath }
     )
 
     expect(result.projects["project-0"]?.selectedDeployUnits).toEqual([
       {
         deployUnitIdMapping: "mapping-a",
-        deployUnitId: "current-id",
-        localRepoPath: "C:/current"
+        deployUnitId: "snapshot-id",
+        localRepoPath: "C:/snapshot"
       }
     ])
     expect(result.projects["project-0"]?.sessionContextInjectionSource).toBe("cmbdevclaw")
@@ -251,7 +251,7 @@ describe("Harness catalog reader", () => {
     writeFileSync(
       featureBindingStorePath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         bindings: [
           {
             projectId: "project-0",
@@ -275,8 +275,7 @@ describe("Harness catalog reader", () => {
       undefined,
       {
         featureSlug: "feature-many",
-        featureBindingStorePath,
-        deployUnitMappingStorePath
+        featureBindingStorePath
       }
     )
 
@@ -285,8 +284,8 @@ describe("Harness catalog reader", () => {
     expect(result.projects["project-0"]?.selectedDeployUnits).toHaveLength(selectedCount)
     expect(result.projects["project-0"]?.selectedDeployUnits?.at(-1)).toMatchObject({
       deployUnitIdMapping: "mapping-64",
-      deployUnitId: "current-64",
-      localRepoPath: "C:/current/64"
+      deployUnitId: "snapshot-64",
+      localRepoPath: "C:/snapshot/64"
     })
     expect(
       result.projects["project-0"]?.configSnapshot?.value?.supported_deploy_units
@@ -307,7 +306,7 @@ describe("Harness catalog reader", () => {
     writeFileSync(
       featureBindingStorePath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         bindings: [
           {
             projectId: "project-0",
@@ -332,8 +331,7 @@ describe("Harness catalog reader", () => {
         undefined,
         {
           featureSlug: "feature-oversized",
-          featureBindingStorePath,
-          deployUnitMappingStorePath
+          featureBindingStorePath
         }
       )
     ).toThrow(`Harness project context result exceeded ${HARNESS_CATALOG_MAX_RESPONSE_BYTES} bytes`)
@@ -355,7 +353,7 @@ describe("Harness catalog reader", () => {
     writeFileSync(
       featureBindingStorePath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         bindings: [
           {
             projectId: "project-0",
@@ -380,8 +378,7 @@ describe("Harness catalog reader", () => {
         undefined,
         {
           featureSlug: "feature-over-limit",
-          featureBindingStorePath,
-          deployUnitMappingStorePath
+          featureBindingStorePath
         }
       )
     expect(readOverLimitFeature).toThrow(
@@ -393,7 +390,7 @@ describe("Harness catalog reader", () => {
     writeFileSync(
       featureBindingStorePath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         bindings: [
           {
             projectId: "project-0",
@@ -420,7 +417,7 @@ describe("Harness catalog reader", () => {
     )
   })
 
-  it("fails closed when feature-binding or mapping stores cannot be read completely", async () => {
+  it("rejects corrupt feature snapshots without consulting the global store", async () => {
     const paths = await makeCatalog(1)
     const root = join(paths.projects, "..")
     const featureBindingStorePath = join(root, "harness-board-features.json")
@@ -434,8 +431,7 @@ describe("Harness catalog reader", () => {
         undefined,
         {
           featureSlug: "feature-integrity",
-          featureBindingStorePath,
-          deployUnitMappingStorePath
+          featureBindingStorePath
         }
       )
 
@@ -446,7 +442,7 @@ describe("Harness catalog reader", () => {
     writeFileSync(
       featureBindingStorePath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         bindings: [
           {
             projectId: "project-0",
@@ -465,7 +461,7 @@ describe("Harness catalog reader", () => {
     )
     writeFileSync(deployUnitMappingStorePath, "{invalid")
     resetHarnessCatalogReaderCacheForTests()
-    expect(readFeature).toThrow()
+    expect(readFeature).not.toThrow()
   })
 
   it("fails closed above 64 framework AGENTS workspaces instead of scanning an unbounded tail", async () => {
@@ -484,7 +480,7 @@ describe("Harness catalog reader", () => {
     writeFileSync(
       featureBindingStorePath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         bindings: [
           {
             projectId: "project-0",
@@ -509,8 +505,7 @@ describe("Harness catalog reader", () => {
         undefined,
         {
           featureSlug: "feature-framework-over-limit",
-          featureBindingStorePath,
-          deployUnitMappingStorePath
+          featureBindingStorePath
         }
       )
     ).toThrow(

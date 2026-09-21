@@ -1,3 +1,8 @@
+import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
+import {
+  resolveFeatureWorkspace,
+  MISSING_FEATURE_WORKSPACE
+} from "../../../../shared/harness-feature-workspace"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
@@ -86,6 +91,7 @@ import {
   createBoundedLatestTaskQueue,
   type BoundedTaskContext
 } from "@/components/harness-board/bounded-latest-task-queue"
+import { buildFeatureDeployUnitRows } from "@/lib/harness-feature-deploy-units"
 import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
 import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
@@ -168,6 +174,8 @@ import type {
 import {
   HARNESS_SOURCE,
   MANAGED_RUN_STATUS_LABELS,
+  type HarnessDeployUnitConfig,
+  type HarnessSessionWorkspace,
   type ManagedRunViewStatus
 } from "../../../../shared/harness-board-types"
 import {
@@ -299,8 +307,7 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
     description: "",
     systemId: "",
     systemName: "",
-    workspacePath: "",
-    sessionWorkspacePath: ""
+    workspacePath: ""
   }
 }
 
@@ -308,11 +315,11 @@ function createEmptyProjectForm(adapterId = ""): HarnessProjectCreateInput {
   return createEmptyProjectMetadataForm(adapterId)
 }
 
-function createEmptyDeployUnitMapping(): HarnessDeployUnitMapping {
+function createEmptyDeployUnitMapping(): HarnessDeployUnitConfig {
   return {
-    deployUnitIdMapping: "",
+    deployUnitIdMapping: crypto.randomUUID(),
     deployUnitId: "",
-    localRepoPath: "",
+    repositoryPaths: [],
     description: ""
   }
 }
@@ -322,24 +329,27 @@ function maskLeanToken(value: string): string {
   return `${value.slice(0, LEAN_TOKEN_VISIBLE_PREFIX_LENGTH)}${"*".repeat(value.length - LEAN_TOKEN_VISIBLE_PREFIX_LENGTH)}`
 }
 
-function buildDeployUnitMappingSavePayload(mappings: HarnessDeployUnitMapping[]): {
-  mappings: HarnessDeployUnitMapping[]
+function buildDeployUnitMappingSavePayload(mappings: HarnessDeployUnitConfig[]): {
+  mappings: HarnessDeployUnitConfig[]
   error: string | null
 } {
-  // Keep row-specific feedback in the renderer; the main process canonicalizes and assigns IDs.
+  // Keep row-specific feedback in the renderer; the main process validates the persisted entries.
   const seen = new Set<string>()
-  const payload: HarnessDeployUnitMapping[] = []
+  const payload: HarnessDeployUnitConfig[] = []
 
   for (let index = 0; index < mappings.length; index += 1) {
     const row = mappings[index]
     const deployUnitId = row.deployUnitId.trim()
-    const localRepoPath = row.localRepoPath.trim()
+    const repositoryPaths = row.repositoryPaths.map((entry) => ({
+      ...entry,
+      localRepoPath: entry.localRepoPath.trim()
+    }))
     const description = row.description?.trim() || ""
-    if (!deployUnitId && !localRepoPath && !description) continue
+    if (!deployUnitId && repositoryPaths.length === 0 && !description) continue
     if (!deployUnitId) {
       return { mappings: [], error: `第 ${index + 1} 行发布单元 ID 不能为空` }
     }
-    if (!localRepoPath) {
+    if (repositoryPaths.length === 0) {
       return { mappings: [], error: `第 ${index + 1} 行代码库路径不能为空` }
     }
     if (seen.has(deployUnitId)) {
@@ -349,7 +359,7 @@ function buildDeployUnitMappingSavePayload(mappings: HarnessDeployUnitMapping[])
     payload.push({
       deployUnitIdMapping: row.deployUnitIdMapping,
       deployUnitId,
-      localRepoPath,
+      repositoryPaths,
       ...(description ? { description } : {})
     })
   }
@@ -870,7 +880,6 @@ function createUnboundRunDetail(
       projectDir: detail.project.projectDir,
       systemId: detail.project.systemId,
       workspacePath: detail.project.workspacePath,
-      sessionWorkspacePath: detail.project.sessionWorkspacePath,
       projectRootPath: detail.project.projectRootPath
     },
     adapterSnapshot: {
@@ -912,44 +921,11 @@ function featureSessionKey(projectId: string, slug: string, threadId: string): s
   return `${projectId}\u0000${slug}\u0000${threadId}`
 }
 
-async function getLatestSessionWorkspacePath(
-  sessions: HarnessSessionBinding[],
-  threadsById: Map<string, Thread>,
-  threadStates: ThreadWorkspaceStateMap
-): Promise<string | null> {
-  const sortedSessions = [...sessions].sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
-
-  // First pass: check all sync sources (thread state + metadata) before making any IPC calls.
-  for (const session of sortedSessions) {
-    const statePath = normalizeWorkspacePath(threadStates[session.threadId]?.workspacePath)
-    if (statePath) return statePath
-
-    const metadataPath = getThreadWorkspacePath(threadsById.get(session.threadId))
-    if (metadataPath) return metadataPath
-  }
-
-  // Second pass: fall back to a single persisted workspace lookup for the latest session.
-  const latest = sortedSessions[0]
-  if (latest) {
-    try {
-      const persistedPath = normalizeWorkspacePath(await window.api.workspace.get(latest.threadId))
-      if (persistedPath) return persistedPath
-    } catch {
-      // Persisted workspace lookup is unavailable — return null.
-    }
-  }
-
-  return null
-}
-
 interface CreateHarnessSessionParams {
   projectId: string
   slug: string
   sessionWorkspacePath?: string | null
   nextAction?: HarnessWorkflowNextAction
-  sessions: HarnessSessionBinding[]
-  threadsById: Map<string, Thread>
-  threadStates: ThreadWorkspaceStateMap
   createThread: (
     config: {
       workspacePath: string | null
@@ -960,20 +936,10 @@ interface CreateHarnessSessionParams {
 }
 
 async function createHarnessSession(params: CreateHarnessSessionParams): Promise<Thread> {
-  const {
-    projectId,
-    slug,
-    sessionWorkspacePath,
-    nextAction,
-    sessions,
-    threadsById,
-    threadStates,
-    createThread
-  } = params
+  const { projectId, slug, sessionWorkspacePath, nextAction, createThread } = params
   const configuredWorkspacePath = normalizeWorkspacePath(sessionWorkspacePath)
-  const workspacePath =
-    configuredWorkspacePath ??
-    (await getLatestSessionWorkspacePath(sessions, threadsById, threadStates))
+  if (!configuredWorkspacePath) throw new Error(MISSING_FEATURE_WORKSPACE)
+  const workspacePath = configuredWorkspacePath
   return createHarnessFeatureThread({ projectId, slug, workspacePath, nextAction, createThread })
 }
 
@@ -1035,8 +1001,7 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     description: project.description,
     systemId: project.systemId,
     systemName: project.systemName,
-    workspacePath: project.workspacePath,
-    sessionWorkspacePath: project.sessionWorkspacePath ?? ""
+    workspacePath: project.workspacePath
   }
 }
 
@@ -1414,27 +1379,6 @@ function groupStageNodes(nodes: HarnessRunNode[]): StageNodeGroup[] {
   }
 
   return groups
-}
-
-function SessionWorkspacePathTip(): React.JSX.Element {
-  return (
-    <TooltipProvider delayDuration={150}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label="会话工作区提示"
-            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <Info className="size-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="z-[70] max-w-72">
-          当前项目会话默认工作区
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  )
 }
 
 function ReleaseUnitIdTip(): React.JSX.Element {
@@ -2157,12 +2101,14 @@ function AdapterPicker({
   registry,
   value,
   installingPluginNames,
+  portalContainer,
   onInstallPlugin,
   onValueChange
 }: {
   registry: ProjectModeAdapterItem[]
   value: string
   installingPluginNames: Set<string>
+  portalContainer?: HTMLElement | null
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
   onValueChange: (value: string) => void
 }): React.JSX.Element {
@@ -2195,7 +2141,7 @@ function AdapterPicker({
               ? `选择插件，当前：${formatAdapterSelectLabel(selectedAdapter)}`
               : "选择插件"
           }
-          className="h-9 w-full min-w-0 justify-between gap-2 bg-background px-3 font-normal"
+          className="h-9 w-full min-w-0 justify-between gap-2 bg-background px-3 font-normal text-foreground"
         >
           <span className={cn("min-w-0 truncate", !selectedAdapter && "text-muted-foreground/45")}>
             {selectedAdapter
@@ -2205,65 +2151,75 @@ function AdapterPicker({
           <ChevronDown className="size-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent
-        aria-label="选择插件"
-        align="start"
-        className="z-[70] flex max-h-[min(24rem,var(--radix-popover-content-available-height))] w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-2rem)] flex-col overflow-hidden p-0"
-        onOpenAutoFocus={(event) => {
-          event.preventDefault()
-          searchRef.current?.focus()
-        }}
-        onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing || !["ArrowDown", "ArrowUp"].includes(event.key)) return
-          const buttons = Array.from(
-            resultsRef.current?.querySelectorAll<HTMLButtonElement>(
-              "[data-adapter-option]:not(:disabled)"
-            ) ?? []
-          )
-          const index = buttons.indexOf(event.target as HTMLButtonElement)
-          if (event.target !== searchRef.current && index === -1) return
-          event.preventDefault()
-          const nextIndex = event.key === "ArrowDown" ? index + 1 : index - 1
-          if (nextIndex < 0) searchRef.current?.focus()
-          else buttons[Math.min(nextIndex, buttons.length - 1)]?.focus()
-        }}
-      >
-        <div className="shrink-0 border-b p-2">
-          <Input
-            ref={searchRef}
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value)
-              resultsRef.current?.scrollTo({ top: 0 })
-            }}
-            aria-label="搜索插件"
-            placeholder="搜索插件名称、描述或分类"
-            className={harnessProjectCreateInputClassName}
-          />
-        </div>
-        <div ref={resultsRef} className="min-h-0 overflow-y-auto overscroll-y-contain p-1">
-          {filteredRegistry.length ? (
-            <AdapterSelectGroups
-              registry={filteredRegistry}
-              selectedId={value}
-              installingPluginNames={installingPluginNames}
-              onInstallPlugin={(adapter) => {
-                searchRef.current?.focus()
-                return onInstallPlugin(adapter)
-              }}
-              onSelect={(adapterId) => {
-                onValueChange(adapterId)
-                setOpen(false)
-                setQuery("")
-              }}
-            />
-          ) : (
-            <div role="status" className="px-3 py-6 text-center text-sm text-muted-foreground">
-              未找到匹配的插件
-            </div>
+      <PopoverPrimitive.Portal container={portalContainer ?? undefined}>
+        <PopoverPrimitive.Content
+          aria-label="选择插件"
+          align="start"
+          side="bottom"
+          sideOffset={4}
+          avoidCollisions={false}
+          collisionPadding={16}
+          className={cn(
+            harnessProjectPopoverContentClassName,
+            "flex max-h-[min(24rem,var(--radix-popover-content-available-height))] max-w-[calc(100vw-2rem)] flex-col overflow-hidden"
           )}
-        </div>
-      </PopoverContent>
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            searchRef.current?.focus()
+          }}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || !["ArrowDown", "ArrowUp"].includes(event.key))
+              return
+            const buttons = Array.from(
+              resultsRef.current?.querySelectorAll<HTMLButtonElement>(
+                "[data-adapter-option]:not(:disabled)"
+              ) ?? []
+            )
+            const index = buttons.indexOf(event.target as HTMLButtonElement)
+            if (event.target !== searchRef.current && index === -1) return
+            event.preventDefault()
+            const nextIndex = event.key === "ArrowDown" ? index + 1 : index - 1
+            if (nextIndex < 0) searchRef.current?.focus()
+            else buttons[Math.min(nextIndex, buttons.length - 1)]?.focus()
+          }}
+        >
+          <div className="shrink-0 border-b p-2">
+            <Input
+              ref={searchRef}
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value)
+                resultsRef.current?.scrollTo({ top: 0 })
+              }}
+              aria-label="搜索插件"
+              placeholder="搜索插件名称、描述或分类"
+              className={harnessProjectCreateInputClassName}
+            />
+          </div>
+          <div ref={resultsRef} className="min-h-0 overflow-y-auto overscroll-y-contain p-1">
+            {filteredRegistry.length ? (
+              <AdapterSelectGroups
+                registry={filteredRegistry}
+                selectedId={value}
+                installingPluginNames={installingPluginNames}
+                onInstallPlugin={(adapter) => {
+                  searchRef.current?.focus()
+                  return onInstallPlugin(adapter)
+                }}
+                onSelect={(adapterId) => {
+                  onValueChange(adapterId)
+                  setOpen(false)
+                  setQuery("")
+                }}
+              />
+            ) : (
+              <div role="status" className="px-3 py-6 text-center text-sm text-muted-foreground">
+                未找到匹配的插件
+              </div>
+            )}
+          </div>
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
     </Popover>
   )
 }
@@ -2899,7 +2855,6 @@ function ProjectFormDialog({
   onOpenChange,
   onChange,
   onInstallPlugin,
-  onPickSessionWorkspace,
   onPickWorkspace,
   onSubmit
 }: {
@@ -2914,7 +2869,6 @@ function ProjectFormDialog({
   onChange: (form: HarnessProjectCreateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
   onPickWorkspace: () => void
-  onPickSessionWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
@@ -2947,7 +2901,7 @@ function ProjectFormDialog({
         ref={setDialogPortalContainer}
         className={cn(
           harnessDialogContentClassName,
-          "top-8 grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] translate-y-0 overflow-visible"
+          "top-[calc(50%-1rem)] grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-visible"
         )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
@@ -3068,6 +3022,7 @@ function ProjectFormDialog({
                   value={form.adapterId}
                   registry={registry}
                   installingPluginNames={installingPluginNames}
+                  portalContainer={dialogPortalContainer}
                   onInstallPlugin={onInstallPlugin}
                   onValueChange={(adapterId) =>
                     onChange({ ...form, adapterId, adapterType: "plugin" })
@@ -3093,40 +3048,6 @@ function ProjectFormDialog({
                   将在 {resolveProjectRootPath(form)} 路径下创建本项目的插件工作目录。
                 </p>
               )}
-              <div className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <div className="flex items-center gap-1.5">
-                  <span>会话工作区路径</span>
-                  <SessionWorkspacePathTip />
-                </div>
-                <div className="flex min-w-0 gap-2">
-                  <Input
-                    value={form.sessionWorkspacePath ?? ""}
-                    readOnly
-                    placeholder="未配置"
-                    className={harnessProjectCreateInputClassName}
-                  />
-                  {(form.sessionWorkspacePath ?? "").trim() && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className="shrink-0 gap-2"
-                      onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
-                    >
-                      <Trash2 className="size-4" />
-                      清空
-                    </Button>
-                  )}
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="shrink-0 gap-2"
-                    onClick={onPickSessionWorkspace}
-                  >
-                    <FolderOpen className="size-4" />
-                    选择
-                  </Button>
-                </div>
-              </div>
             </section>
 
             {error && (
@@ -3172,7 +3093,6 @@ function ProjectEditDialog({
   onOpenChange,
   onChange,
   onInstallPlugin,
-  onPickSessionWorkspace,
   onSubmit
 }: {
   open: boolean
@@ -3185,7 +3105,6 @@ function ProjectEditDialog({
   onOpenChange: (open: boolean) => void
   onChange: (form: HarnessProjectMetadataUpdateInput) => void
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
-  onPickSessionWorkspace: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const [dialogPortalContainer, setDialogPortalContainer] = useState<HTMLDivElement | null>(null)
@@ -3211,7 +3130,7 @@ function ProjectEditDialog({
         ref={setDialogPortalContainer}
         className={cn(
           harnessDialogContentClassName,
-          "top-8 grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] translate-y-0 overflow-visible"
+          "top-[calc(50%-1rem)] grid max-h-[calc(100vh-4rem)] max-w-3xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-visible"
         )}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
@@ -3318,6 +3237,7 @@ function ProjectEditDialog({
                   value={form.adapterId}
                   registry={registry}
                   installingPluginNames={installingPluginNames}
+                  portalContainer={dialogPortalContainer}
                   onInstallPlugin={onInstallPlugin}
                   onValueChange={(adapterId) =>
                     onChange({ ...form, adapterId, adapterType: "plugin" })
@@ -3333,40 +3253,6 @@ function ProjectEditDialog({
                 readOnly
                 error={getHarnessNameError("项目文件夹", form.projectDir)}
               />
-              <div className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
-                <div className="flex items-center gap-1.5">
-                  <span>会话工作区路径</span>
-                  <SessionWorkspacePathTip />
-                </div>
-                <div className="flex min-w-0 gap-2">
-                  <Input
-                    value={form.sessionWorkspacePath ?? ""}
-                    readOnly
-                    placeholder="未配置"
-                    className={harnessProjectCreateInputClassName}
-                  />
-                  {(form.sessionWorkspacePath ?? "").trim() && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className="shrink-0 gap-2"
-                      onClick={() => onChange({ ...form, sessionWorkspacePath: "" })}
-                    >
-                      <Trash2 className="size-4" />
-                      清空
-                    </Button>
-                  )}
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="shrink-0 gap-2"
-                    onClick={onPickSessionWorkspace}
-                  >
-                    <FolderOpen className="size-4" />
-                    选择
-                  </Button>
-                </div>
-              </div>
             </section>
 
             {error && (
@@ -3631,6 +3517,10 @@ function FeatureCreateTabTrigger({
 }
 
 function FeatureCreateDialog({
+  workspace,
+  onWorkspaceChange,
+  catalogUnits,
+  onSelectPath,
   mode,
   project,
   featureName,
@@ -3642,7 +3532,7 @@ function FeatureCreateDialog({
   localAgentmdDeployUnitMappings,
   publicConstraintsSyncAvailable,
   syncingPublicConstraints,
-  deployUnitMappings,
+  rows,
   deployUnitMappingsLoading,
   selectedDeployUnitIds,
   creating,
@@ -3656,6 +3546,10 @@ function FeatureCreateDialog({
   onSyncPublicConstraints,
   onSubmit
 }: {
+  workspace: HarnessSessionWorkspace
+  onWorkspaceChange: (value: HarnessSessionWorkspace) => void
+  catalogUnits: HarnessDeployUnitConfig[]
+  onSelectPath: (mapping: HarnessDeployUnitMapping) => void
   mode: "create" | "edit"
   project: HarnessProjectListItem | null
   featureName: string
@@ -3667,7 +3561,7 @@ function FeatureCreateDialog({
   localAgentmdDeployUnitMappings: string[]
   publicConstraintsSyncAvailable: boolean
   syncingPublicConstraints: boolean
-  deployUnitMappings: HarnessDeployUnitMapping[]
+  rows: HarnessDeployUnitMapping[]
   deployUnitMappingsLoading: boolean
   selectedDeployUnitIds: Set<string>
   creating: boolean
@@ -3681,6 +3575,10 @@ function FeatureCreateDialog({
   onSyncPublicConstraints: () => void
   onSubmit: () => void
 }): React.JSX.Element {
+  const [pathPickerId, setPathPickerId] = useState<string | null>(null)
+  const [dialogContentElement, setDialogContentElement] = useState<HTMLDivElement | null>(null)
+  const workspaceInputRef = useRef<HTMLInputElement>(null)
+  const dialogTitleRef = useRef<HTMLHeadingElement>(null)
   const editing = mode === "edit"
   const featureNameError = getHarnessNameError("特性名称", featureName)
   const selectedTemplate = selectedWorkflowTemplate(workflowConfig, workflowTemplate)
@@ -3690,9 +3588,19 @@ function FeatureCreateDialog({
   const agentsReadyDeployUnitIds = new Set(agentsReadyDeployUnits)
   const localAgentmdDeployUnitMappingIds = new Set(localAgentmdDeployUnitMappings)
   const supportsSessionContextInjection = project?.supportsSessionContextInjection === true
-  const selectableDeployUnitMappings = deployUnitMappings.filter((mapping) =>
-    mapping.deployUnitIdMapping.trim()
+  const selectableDeployUnitMappings = rows.filter((mapping) => mapping.deployUnitIdMapping.trim())
+  const needsWideDialog = selectableDeployUnitMappings.some(
+    (mapping) =>
+      selectedDeployUnitIds.has(mapping.deployUnitIdMapping) &&
+      ((supportsSessionContextInjection &&
+        agentsReadyDeployUnitIds.has(mapping.deployUnitId.trim())) ||
+        localAgentmdDeployUnitMappingIds.has(mapping.deployUnitIdMapping))
   )
+  // A second 7rem capsule plus the 0.5rem gap expands both the row and dialog by 7.5rem.
+  const layoutStyle = {
+    "--feature-actions-width": needsWideDialog ? "14.5rem" : "7rem",
+    "--feature-extra-width": needsWideDialog ? "7.5rem" : "0rem"
+  } as React.CSSProperties
   const selectedDeployUnitCount = selectableDeployUnitMappings.filter((mapping) =>
     selectedDeployUnitIds.has(mapping.deployUnitIdMapping)
   ).length
@@ -3702,6 +3610,28 @@ function FeatureCreateDialog({
     ? `由 ${sessionContextProviderName} 加载会话工作区及所选发布单元的系统约束`
     : "由 CMBDevClaw 加载会话工作区及所选发布单元的系统约束"
   const workflowTabDisabled = editing || (!workflowLoading && !workflowConfig)
+  const workspacePath =
+    resolveFeatureWorkspace(
+      workspace,
+      rows.filter((item) => selectedDeployUnitIds.has(item.deployUnitIdMapping))
+    ) ?? ""
+  const pickWorkspace = (): void => {
+    void window.api.workspace
+      .select()
+      .then((path) => {
+        if (path) onWorkspaceChange({ source: "directory", path })
+      })
+      .catch((error) => toast.error(cleanIpcError(error)))
+  }
+  const usesDeployUnitWorkspace =
+    workspace.source === "deployUnit" &&
+    selectableDeployUnitMappings.some(
+      (mapping) =>
+        selectedDeployUnitIds.has(mapping.deployUnitIdMapping) &&
+        mapping.deployUnitId === workspace.deployUnitId
+    )
+  const rowClassName =
+    "grid min-w-[calc(41.5rem+var(--feature-extra-width))] grid-cols-[1rem_minmax(0,1fr)_19rem_var(--feature-actions-width)] items-center gap-2 rounded-sm border border-transparent px-2 py-2 text-sm transition-colors hover:bg-muted/60"
   const defaultTab = "deploy-units"
   const workflowPanel = workflowLoading ? (
     <div className="flex min-h-32 items-center justify-center rounded-md border border-border bg-background text-sm text-muted-foreground">
@@ -3744,7 +3674,7 @@ function FeatureCreateDialog({
     </div>
   )
   const deployUnitPanel = (
-    <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
+    <section className="grid min-w-0 gap-3 rounded-md border border-border bg-muted/30 p-3">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <Button
@@ -3755,7 +3685,7 @@ function FeatureCreateDialog({
             disabled={creating}
             onClick={onOpenDeployUnitSettings}
           >
-            需要配置发布单元？
+            管理发布单元
           </Button>
           {publicConstraintsSyncAvailable && (
             <Button
@@ -3772,85 +3702,202 @@ function FeatureCreateDialog({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          <div className="text-xs text-muted-foreground">已选择 {selectedDeployUnitCount} 个</div>
+          <div className="text-xs text-muted-foreground">已选择 {selectedDeployUnitCount} 个发布单元</div>
         </div>
       </div>
-      {deployUnitMappingsLoading ? (
-        <div className="flex min-h-20 items-center justify-center text-sm text-muted-foreground">
-          <Loader2 className="mr-2 size-4 animate-spin" />
-          加载发布单元
+      <div className="max-h-72 overflow-auto rounded-md border border-border bg-background px-3 py-2">
+        <div className={rowClassName}>
+          <input
+            type="checkbox"
+            checked
+            disabled
+            aria-label="会话工作区必填"
+            className="size-4 shrink-0 accent-muted-foreground"
+          />
+          <span className="col-start-2 min-w-0 truncate">会话工作区</span>
+          <Input
+            ref={workspaceInputRef}
+            readOnly
+            value={workspacePath}
+            title={workspacePath}
+            placeholder="选择主要代码仓库路径"
+            aria-label="会话工作区"
+            aria-required="true"
+            disabled={creating || usesDeployUnitWorkspace}
+            className={cn(
+              "min-w-0 cursor-pointer border-border bg-transparent px-2 text-sm font-normal shadow-none hover:bg-background-interactive focus-visible:ring-2",
+              workspacePath && "truncate text-left [direction:rtl]"
+            )}
+            onClick={pickWorkspace}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault()
+                pickWorkspace()
+              }
+            }}
+          />
         </div>
-      ) : selectableDeployUnitMappings.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
-          没有已配置的发布单元
-        </div>
-      ) : (
-        <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-background px-3 py-2">
-          {selectableDeployUnitMappings.map((mapping) => {
-            const checked = selectedDeployUnitIds.has(mapping.deployUnitIdMapping)
-            const publicAgentmdSupported = agentsReadyDeployUnitIds.has(mapping.deployUnitId.trim())
-            const localAgentmdSupported = localAgentmdDeployUnitMappingIds.has(
-              mapping.deployUnitIdMapping
-            )
-            const showPublicAgentmdTag = supportsSessionContextInjection && publicAgentmdSupported
-            const showLocalAgentmdTag =
-              localAgentmdSupported && (!supportsSessionContextInjection || !publicAgentmdSupported)
-            return (
-              <label
-                key={mapping.deployUnitIdMapping}
-                className="flex min-w-0 cursor-pointer items-start gap-2 rounded-sm border border-transparent px-2 py-1.5 text-sm transition-colors hover:bg-muted/60"
-              >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  className="mt-0.5 size-4 shrink-0 accent-primary"
-                  onChange={(event) =>
-                    onDeployUnitToggle(mapping.deployUnitIdMapping, event.target.checked)
-                  }
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate text-foreground">
-                      {mapping.deployUnitId}
-                    </span>
-                    {showPublicAgentmdTag && (
+        {deployUnitMappingsLoading ? (
+          <div className="flex min-h-20 items-center justify-center text-sm text-muted-foreground">
+            <Loader2 className="mr-2 size-4 animate-spin" />
+            加载发布单元
+          </div>
+        ) : selectableDeployUnitMappings.length === 0 ? (
+          <div className="px-2 py-4 text-sm text-muted-foreground">没有已配置的发布单元</div>
+        ) : (
+          <>
+            {selectableDeployUnitMappings.map((mapping) => {
+              const checked = selectedDeployUnitIds.has(mapping.deployUnitIdMapping)
+              const candidate = catalogUnits.find(
+                (item) => item.deployUnitId.trim() === mapping.deployUnitId.trim()
+              )
+              const paths = [
+                ...new Set([
+                  mapping.localRepoPath,
+                  ...(candidate?.repositoryPaths.map((item) => item.localRepoPath) ?? [])
+                ])
+              ].filter(Boolean)
+              const isWorkspace =
+                checked &&
+                workspace.source === "deployUnit" &&
+                workspace.deployUnitId === mapping.deployUnitId
+              const constraintLabel =
+                supportsSessionContextInjection &&
+                agentsReadyDeployUnitIds.has(mapping.deployUnitId.trim())
+                  ? "公共系统约束"
+                  : localAgentmdDeployUnitMappingIds.has(mapping.deployUnitIdMapping)
+                    ? "本地系统约束"
+                    : ""
+              return (
+                <div key={mapping.deployUnitIdMapping} className={rowClassName}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={creating}
+                    aria-label={`选择发布单元 ${mapping.deployUnitId}`}
+                    className="size-4 shrink-0 accent-primary"
+                    onChange={(event) =>
+                      onDeployUnitToggle(mapping.deployUnitIdMapping, event.target.checked)
+                    }
+                  />
+                  <span
+                    className="flex min-w-0 items-center gap-2"
+                    title={[mapping.deployUnitId, mapping.description].filter(Boolean).join(" · ")}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{mapping.deployUnitId}</span>
+                  </span>
+                  <Popover
+                    open={pathPickerId === mapping.deployUnitIdMapping}
+                    onOpenChange={(open) =>
+                      setPathPickerId(open ? mapping.deployUnitIdMapping : null)
+                    }
+                  >
+                    <PopoverTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={creating || paths.length === 0}
+                        aria-label={`${mapping.deployUnitId}代码库路径`}
+                        className="h-9 min-w-0 flex-1 justify-start gap-2 px-2 font-normal"
+                        title={mapping.localRepoPath}
+                      >
+                        <span
+                          className={cn(
+                            "min-w-0 flex-1 truncate text-left text-sm",
+                            mapping.localRepoPath && "[direction:rtl]"
+                          )}
+                        >
+                          {mapping.localRepoPath || "暂无代码库路径"}
+                        </span>
+                        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      align="start"
+                      sideOffset={6}
+                      portalContainer={dialogContentElement}
+                      className="z-[70] w-[min(28rem,calc(100vw-4rem))] rounded-md border border-border bg-background p-1.5 shadow-lg"
+                    >
+                      <div className="max-h-64 space-y-0.5 overflow-y-auto">
+                        {paths.map((path) => {
+                          return (
+                            <Button
+                              key={path}
+                              type="button"
+                              variant="ghost"
+                              disabled={creating}
+                              className={cn(
+                                "flex h-auto min-h-12 w-full flex-col items-start justify-center gap-1 rounded-sm px-2.5 py-2 text-left font-normal",
+                                path === mapping.localRepoPath && "bg-muted/70"
+                              )}
+                              title={path}
+                              onClick={() => {
+                                onSelectPath({ ...mapping, localRepoPath: path })
+                                setPathPickerId(null)
+                              }}
+                            >
+                              <span className="w-full truncate text-sm">{path}</span>
+                              <span className="w-full">
+                                <RepositoryBranchHint path={path} />
+                              </span>
+                            </Button>
+                          )
+                        })}
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                  <span className="flex items-center justify-center gap-2">
+                    {constraintLabel && (
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <span className="inline-flex shrink-0 items-center gap-1 rounded border border-status-nominal/30 bg-status-nominal/10 px-1.5 py-0.5 text-[11px] font-medium text-status-nominal">
+                          <span
+                            tabIndex={0}
+                            className={cn(
+                              "inline-flex h-7 w-28 shrink-0 items-center justify-center gap-1 rounded-full border px-2 text-xs font-medium",
+                              constraintLabel === "公共系统约束"
+                                ? "border-status-nominal/30 bg-status-nominal/10 text-status-nominal"
+                                : "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-300"
+                            )}
+                            aria-label={constraintLabel}
+                          >
                             <CheckCircle2 className="size-3" />
-                            公共系统约束
+                            {constraintLabel}
                           </span>
                         </TooltipTrigger>
-                        <TooltipContent side="top" className="z-[70] max-w-72">
-                          由插件加载该发布单元的公共系统约束
-                        </TooltipContent>
+                        <TooltipContent className="z-[70]">{constraintLabel}</TooltipContent>
                       </Tooltip>
                     )}
-                    {showLocalAgentmdTag && (
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span className="inline-flex shrink-0 items-center gap-1 rounded border border-blue-500/30 bg-blue-500/10 px-1.5 py-0.5 text-[11px] font-medium text-blue-600 dark:text-blue-300">
-                            <CheckCircle2 className="size-3" />
-                            本地系统约束
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent side="top" className="z-[70] max-w-72">
-                          {supportsSessionContextInjection
-                            ? "由插件加载该路径下的 AGENTS.md"
-                            : "由 CMBDevClaw 加载该路径下的 AGENTS.md"}
-                        </TooltipContent>
-                      </Tooltip>
+                    {checked && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={creating || !mapping.localRepoPath}
+                        aria-pressed={isWorkspace}
+                        className={cn(
+                          "h-7 w-28 shrink-0 rounded-full border px-2 text-xs font-medium shadow-none",
+                          isWorkspace
+                            ? "border-primary bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground"
+                            : "border-primary/30 bg-primary/10 text-primary hover:border-primary/50 hover:bg-primary/20 hover:text-primary"
+                        )}
+                        onClick={() =>
+                          onWorkspaceChange(
+                            isWorkspace
+                              ? { source: "directory", path: "" }
+                              : { source: "deployUnit", deployUnitId: mapping.deployUnitId }
+                          )
+                        }
+                      >
+                        作为会话工作区
+                      </Button>
                     )}
                   </span>
-                  <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                    {mapping.localRepoPath}
-                  </span>
-                </span>
-              </label>
-            )
-          })}
-        </div>
-      )}
+                </div>
+              )
+            })}
+          </>
+        )}
+      </div>
       <div className="text-xs text-muted-foreground">{sessionContextStatusText}</div>
     </section>
   )
@@ -3858,20 +3905,31 @@ function FeatureCreateDialog({
   return (
     <Dialog open={project !== null} onOpenChange={onOpenChange}>
       <DialogContent
+        ref={setDialogContentElement}
+        style={layoutStyle}
         className={cn(
           harnessDialogContentClassName,
-          "max-h-[calc(100vh-2rem)] w-[min(42rem,calc(100vw-2rem))] max-w-2xl overflow-x-hidden overflow-y-auto"
+          "max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] grid-rows-[auto_minmax(0,1fr)] overflow-visible transition-[width] duration-150 motion-reduce:transition-none",
+          "w-[calc(48rem+var(--feature-extra-width))]"
         )}
+        onOpenAutoFocus={(event) => {
+          if (editing) {
+            event.preventDefault()
+            ;(workspaceInputRef.current ?? dialogTitleRef.current)?.focus({ preventScroll: true })
+          }
+        }}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
-          <DialogTitle>{editing ? "编辑绑定的发布单元" : "创建特性"}</DialogTitle>
+          <DialogTitle ref={dialogTitleRef} tabIndex={-1}>
+            {editing ? "编辑特性配置" : "创建特性"}
+          </DialogTitle>
         </DialogHeader>
         <form
-          className="grid min-w-0 gap-4 py-1"
+          className="grid min-h-0 min-w-0 gap-4 overflow-x-hidden overflow-y-auto py-1"
           onSubmit={(event) => {
             event.preventDefault()
-            if (syncingPublicConstraints) return
+            if (syncingPublicConstraints || !workspacePath.trim()) return
             onSubmit()
           }}
         >
@@ -3901,7 +3959,7 @@ function FeatureCreateDialog({
                   tooltip="插件暂不支持"
                 >
                   <span className="inline-flex min-w-0 items-center gap-1.5">
-                    <span className="truncate">选择要开发的发布单元</span>
+                    <span className="truncate">选择要开发的发布单元代码仓库</span>
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <span
@@ -3912,7 +3970,7 @@ function FeatureCreateDialog({
                         </span>
                       </TooltipTrigger>
                       <TooltipContent side="top" className="z-[70] max-w-72 text-xs leading-5">
-                        选择后将会在上下文注入选中的发布单元约束，并将对应代码库路径提供给大模型
+                        会话工作区必选，用于特性内开启新会话、开启托管模式、招乎发起新会话的默认路径。发布单元可选，用于在上下文注入对应的系统约束，并将对应代码库路径提供给大模型。已选中的发布单元路径可以作为会话工作区路径。
                       </TooltipContent>
                     </Tooltip>
                   </span>
@@ -3954,6 +4012,7 @@ function FeatureCreateDialog({
                 syncingPublicConstraints ||
                 (!editing && workflowLoading) ||
                 !featureName.trim() ||
+                !workspacePath.trim() ||
                 featureNameError !== null
               }
               className="gap-2"
@@ -3988,13 +4047,12 @@ function ProjectModeSettingsPanel({
   onAdd,
   onRemove,
   onChange,
-  onPickPath,
   onSave,
   onLeanTokenChange,
   onSaveLeanToken,
   onOpenLeanToken
 }: {
-  mappings: HarnessDeployUnitMapping[]
+  mappings: HarnessDeployUnitConfig[]
   loading: boolean
   saving: boolean
   dirty: boolean
@@ -4004,16 +4062,21 @@ function ProjectModeSettingsPanel({
   leanTokenSaving: boolean
   leanTokenDirty: boolean
   leanTokenError: string | null
-  onAdd: () => void
+  onAdd: () => string
   onRemove: (index: number) => void
-  onChange: (index: number, mapping: HarnessDeployUnitMapping) => void
-  onPickPath: (index: number) => void
+  onChange: (index: number, mapping: HarnessDeployUnitConfig) => void
   onSave: () => void
   onLeanTokenChange: (value: string) => void
   onSaveLeanToken: () => void
   onOpenLeanToken: () => void
 }): React.JSX.Element {
   const [replacingLeanToken, setReplacingLeanToken] = useState(false)
+  const [selectedMappingId, setSelectedMappingId] = useState<string | null>(null)
+  const selectedMappingIndex = Math.max(
+    0,
+    mappings.findIndex((mapping) => mapping.deployUnitIdMapping === selectedMappingId)
+  )
+  const selectedMapping = mappings[selectedMappingIndex]
   const hasStoredLeanToken = leanToken.length > 0
   const showStoredLeanTokenMask = hasStoredLeanToken && !leanTokenDirty && !replacingLeanToken
   const leanTokenInputValue = showStoredLeanTokenMask
@@ -4027,13 +4090,23 @@ function ProjectModeSettingsPanel({
       <section className="rounded-md border border-border bg-background shadow-sm">
         <div className="flex min-w-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-foreground">本地工程配置</h2>
+            <h2 className="text-sm font-semibold text-foreground">发布单元及仓库配置</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              配置本地工程路径以及对应的发布单元。该配置用于 1.注入公共系统约束
-              2.便捷选择代码工作路径
+              配置发布单元以及对应的本地代码仓库，用于加载系统约束、将发布单元作为会话工作区
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="gap-2"
+              onClick={() => setSelectedMappingId(onAdd())}
+              variant="outline"
+              disabled={loading || saving}
+            >
+              <Plus className="size-4" />
+              添加发布单元
+            </Button>
             <Button
               type="button"
               size="sm"
@@ -4069,77 +4142,126 @@ function ProjectModeSettingsPanel({
               <div className="mt-1 text-xs text-muted-foreground">
                 添加后即可在项目模式中选择对应代码库。
               </div>
-              <Button type="button" variant="secondary" className="mt-4 gap-2" onClick={onAdd}>
-                <Plus className="size-4" />
-                添加发布单元
-              </Button>
             </div>
           ) : (
-            <div className="space-y-3">
-              <div className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] gap-2 px-1 text-xs font-medium text-muted-foreground">
-                <div className="flex min-w-0 items-center gap-1">
-                  <span>发布单元</span>
-                  <ReleaseUnitIdTip />
-                </div>
-                <div>描述</div>
-                <div>本机代码库路径</div>
-                <div />
-              </div>
-              {mappings.map((mapping, index) => (
+            <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(13rem,1fr)_minmax(0,3fr)]">
+              <div className="min-w-0 rounded-md border border-border bg-muted/20">
                 <div
-                  key={index}
-                  className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] items-center gap-2"
+                  className="max-h-[26rem] overflow-y-auto p-1.5"
+                  role="list"
+                  aria-label="发布单元列表"
                 >
-                  <DeployUnitSearchInput
-                    value={mapping.deployUnitId}
-                    onValueChange={(deployUnitId) => onChange(index, { ...mapping, deployUnitId })}
-                    onSelect={(deployUnit) =>
-                      onChange(index, {
-                        ...mapping,
-                        deployUnitId: deployUnit.deployUnit,
-                        description: deployUnit.deployUnitName
-                      })
-                    }
-                  />
-                  <Input
-                    value={mapping.description || ""}
-                    onChange={(event) =>
-                      onChange(index, { ...mapping, description: event.target.value })
-                    }
-                    placeholder="请输入描述（选填）"
-                    className={harnessProjectCreateInputClassName}
-                  />
-                  <Input
-                    value={mapping.localRepoPath}
-                    readOnly
-                    placeholder="请选择本机代码库路径"
-                    className={harnessProjectCreateInputClassName}
-                    title={mapping.localRepoPath}
-                  />
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="gap-2"
-                    onClick={() => onPickPath(index)}
-                  >
-                    <FolderOpen className="size-4" />
-                    选择路径
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => onRemove(index)}
-                    title="删除映射"
-                  >
-                    <Trash2 className="size-4" />
-                  </Button>
+                  {mappings.map((mapping, index) => (
+                    <div
+                      key={mapping.deployUnitIdMapping}
+                      className={`flex min-w-0 items-center gap-1 border-l-2 ${index === selectedMappingIndex ? "border-primary bg-muted/60" : "border-transparent hover:bg-muted/40"}`}
+                      role="listitem"
+                    >
+                      <button
+                        type="button"
+                        className={`min-w-0 flex-1 px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${index === selectedMappingIndex ? "text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                        aria-current={index === selectedMappingIndex ? "true" : undefined}
+                        onClick={() => setSelectedMappingId(mapping.deployUnitIdMapping)}
+                      >
+                        <span
+                          className="block truncate text-sm font-medium"
+                          title={mapping.deployUnitId || "未命名发布单元"}
+                        >
+                          {mapping.deployUnitId || "未命名发布单元"}
+                        </span>
+                      </button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                        disabled={saving}
+                        onClick={() => {
+                          if (
+                            selectedMapping?.deployUnitIdMapping === mapping.deployUnitIdMapping
+                          ) {
+                            setSelectedMappingId(
+                              mappings[index + 1]?.deployUnitIdMapping ??
+                                mappings[index - 1]?.deployUnitIdMapping ??
+                                null
+                            )
+                          }
+                          onRemove(index)
+                        }}
+                        title="移除发布单元配置"
+                        aria-label={`移除发布单元配置：${mapping.deployUnitId || "未命名"}`}
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </div>
+                  ))}
                 </div>
-              ))}
-              <Button type="button" variant="outline" className="gap-2" onClick={onAdd}>
-                <Plus className="size-4" />
-                添加发布单元
-              </Button>
+              </div>
+              {selectedMapping && (
+                <div key={selectedMapping.deployUnitIdMapping} className="min-w-0 space-y-5">
+                  <div className="grid min-w-0 gap-3 xl:grid-cols-2">
+                    <div className="min-w-0 space-y-1.5">
+                      <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                        <span>发布单元</span>
+                        <ReleaseUnitIdTip />
+                      </div>
+                      <fieldset disabled={saving} className="min-w-0">
+                        <DeployUnitSearchInput
+                          value={selectedMapping.deployUnitId}
+                          onValueChange={(deployUnitId) =>
+                            onChange(selectedMappingIndex, { ...selectedMapping, deployUnitId })
+                          }
+                          onSelect={(deployUnit) =>
+                            onChange(selectedMappingIndex, {
+                              ...selectedMapping,
+                              deployUnitId: deployUnit.deployUnit,
+                              description: deployUnit.deployUnitName
+                            })
+                          }
+                        />
+                      </fieldset>
+                    </div>
+                    <label className="grid min-w-0 gap-1.5 text-xs font-medium text-muted-foreground">
+                      <span className="flex items-center gap-1">
+                        <span>代码仓库描述</span>
+                        <TooltipProvider delayDuration={150}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                aria-label="代码仓库描述提示"
+                                className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              >
+                                <Info className="size-3.5" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="z-[70] max-w-72">
+                              将提供给大模型
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      </span>
+                      <Input
+                        value={selectedMapping.description || ""}
+                        disabled={saving}
+                        onChange={(event) =>
+                          onChange(selectedMappingIndex, {
+                            ...selectedMapping,
+                            description: event.target.value
+                          })
+                        }
+                        placeholder="请输入描述（选填）"
+                        className={harnessProjectCreateInputClassName}
+                      />
+                    </label>
+                  </div>
+                  <RepositoryPathsField
+                    mapping={selectedMapping}
+                    onChange={(value) => onChange(selectedMappingIndex, value)}
+                    disabled={saving}
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -5991,7 +6113,7 @@ function ProjectDetailPage({
               onClick={() => onEditProject(project)}
             >
               <Pencil className="size-4" />
-              编辑项目信息
+              编辑项目配置
             </Button>
             <Button
               variant="ghost"
@@ -6690,11 +6812,8 @@ function FeatureDetailPage({
       const thread = await createHarnessSession({
         projectId: detail.project.projectId,
         slug: detail.run.slug,
-        sessionWorkspacePath: detail.project.sessionWorkspacePath,
+        sessionWorkspacePath: detail.run.resolvedSessionWorkspacePath,
         nextAction: getHarnessRunNextAction(detail),
-        sessions: detail.sessions,
-        threadsById,
-        threadStates: allThreadStates,
         createThread
       })
       setSelectedSessionState({ detailKey, threadId: thread.thread_id })
@@ -6706,14 +6825,12 @@ function FeatureDetailPage({
       setSessionBusy(null)
     }
   }, [
-    allThreadStates,
     createThread,
     detail,
     detailKey,
     onActiveSessionChange,
     projectInteractionDisabled,
-    sessionBusy,
-    threadsById
+    sessionBusy
   ])
 
   const setCombinedFeatureImManagement = useCallback(
@@ -6832,14 +6949,9 @@ function FeatureDetailPage({
         projectId: detail.project.projectId,
         featureId: detail.run.slug
       })
-      const latestSessionWorkspacePath = await getLatestSessionWorkspacePath(
-        detail.sessions,
-        threadsById,
-        allThreadStates
-      )
-      const configuredWorkspacePath = normalizeWorkspacePath(detail.project.sessionWorkspacePath)
-      const defaultWorkspacePath = latestSessionWorkspacePath ?? configuredWorkspacePath
-      setManagedRunWorkspacePath(defaultWorkspacePath ?? "")
+      const defaultWorkspacePath = normalizeWorkspacePath(detail.run.resolvedSessionWorkspacePath)
+      if (!defaultWorkspacePath) throw new Error(MISSING_FEATURE_WORKSPACE)
+      setManagedRunWorkspacePath(defaultWorkspacePath)
       const defaultUserMessage = getHarnessRunNextAction(detail)?.userMessage ?? ""
       managedRunDefaultUserMessageRef.current = defaultUserMessage
       setManagedRunUserMessage(defaultUserMessage)
@@ -6852,12 +6964,10 @@ function FeatureDetailPage({
       setOpeningManagedRunDialog(false)
     }
   }, [
-    allThreadStates,
     detail,
     featureImManagementAvailable,
     openingManagedRunDialog,
     projectInteractionDisabled,
-    threadsById,
     updatingManagedRun
   ])
 
@@ -7291,7 +7401,7 @@ function FeatureDetailPage({
                 disabled={loading || !detail || projectInteractionDisabled}
               >
                 <Pencil className="size-4" />
-                编辑绑定的发布单元
+                编辑特性配置
               </Button>
               <Button
                 type="button"
@@ -7633,28 +7743,22 @@ function FeatureDetailPage({
                 </Tooltip>
               </TooltipProvider>
             </div>
-            <div className="flex min-w-0 gap-2">
-              <Input
-                value={managedRunWorkspacePath}
-                readOnly
-                placeholder="请选择文件夹"
-                className="min-w-0 flex-1"
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                className="shrink-0 gap-2"
-                onClick={() => void handlePickManagedRunWorkspace()}
-                disabled={pickingManagedRunWorkspace || updatingManagedRun}
-              >
-                {pickingManagedRunWorkspace ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <FolderOpen className="size-4" />
-                )}
-                选择文件夹
-              </Button>
-            </div>
+            <Input
+              value={managedRunWorkspacePath}
+              readOnly
+              title={managedRunWorkspacePath}
+              placeholder="请选择文件夹"
+              aria-label="会话工作区"
+              disabled={pickingManagedRunWorkspace || updatingManagedRun}
+              className="min-w-0 cursor-pointer text-foreground"
+              onClick={() => void handlePickManagedRunWorkspace()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault()
+                  void handlePickManagedRunWorkspace()
+                }
+              }}
+            />
             <label className="mt-2 grid gap-2 text-sm font-medium">
               启动会话的初始用户消息
               <textarea
@@ -7792,11 +7896,7 @@ function ProjectFeatureSidebar({
   onToggleProjectPin: (projectId: string) => void
   onToggleFeaturePin: (featureKey: string) => void
   onToggleAll: () => void
-  onCreateSession: (
-    project: ProjectFeatureSidebarProject,
-    slug: string,
-    sessions: HarnessSessionBinding[]
-  ) => void
+  onCreateSession: (project: ProjectFeatureSidebarProject, slug: string) => void
   onSelectProjectSession: (projectId: string, threadId: string, deleted?: boolean) => void
   onSelectSession: (projectId: string, slug: string, threadId: string, deleted?: boolean) => void
   onRunFinished: (threadId: string) => void
@@ -8357,11 +8457,7 @@ function ProjectFeatureSidebar({
                                       disabled={creatingSession}
                                       onClick={(event) => {
                                         event.stopPropagation()
-                                        void onCreateSession(
-                                          group.project,
-                                          featureGroup.slug,
-                                          featureGroup.sessions
-                                        )
+                                        void onCreateSession(group.project, featureGroup.slug)
                                       }}
                                     >
                                       {creatingSession ? (
@@ -8573,6 +8669,13 @@ export function HarnessBoardView({
     null
   )
   const [featureName, setFeatureName] = useState("")
+  const [featureWorkspace, setFeatureWorkspace] = useState<HarnessSessionWorkspace>({
+    source: "directory",
+    path: ""
+  })
+  const [featureMappingDrafts, setFeatureMappingDrafts] = useState<
+    Record<string, HarnessDeployUnitMapping>
+  >({})
   const [featureError, setFeatureError] = useState<string | null>(null)
   const [featureWorkflowConfig, setFeatureWorkflowConfig] =
     useState<HarnessDynamicWorkflowConfig | null>(null)
@@ -8613,7 +8716,7 @@ export function HarnessBoardView({
   const [updatingFeatureDeployUnits, setUpdatingFeatureDeployUnits] = useState(false)
   const [updatingPluginNames, setUpdatingPluginNames] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [deployUnitMappings, setDeployUnitMappings] = useState<HarnessDeployUnitMapping[]>([])
+  const [deployUnitMappings, setDeployUnitMappings] = useState<HarnessDeployUnitConfig[]>([])
   const [deployUnitMappingsLoading, setDeployUnitMappingsLoading] = useState(true)
   const [deployUnitMappingsSaving, setDeployUnitMappingsSaving] = useState(false)
   const [deployUnitMappingsDirty, setDeployUnitMappingsDirty] = useState(false)
@@ -8725,7 +8828,7 @@ export function HarnessBoardView({
   const featureWorkflowRequestIdRef = useRef(0)
   const deployUnitMappingsRef = useRef(deployUnitMappings)
   const deployUnitMappingsLoadedRef = useRef(false)
-  const deployUnitMappingsLoadPromiseRef = useRef<Promise<HarnessDeployUnitMapping[]> | null>(null)
+  const deployUnitMappingsLoadPromiseRef = useRef<Promise<HarnessDeployUnitConfig[]> | null>(null)
   const leanTokenConfigRef = useRef(leanTokenConfig)
   const leanTokenLoadedRef = useRef(false)
   const leanTokenLoadPromiseRef = useRef<Promise<HarnessLeanTokenConfig> | null>(null)
@@ -8908,7 +9011,7 @@ export function HarnessBoardView({
     [persistUnread]
   )
 
-  const loadDeployUnitMappings = useCallback((): Promise<HarnessDeployUnitMapping[]> => {
+  const loadDeployUnitMappings = useCallback((): Promise<HarnessDeployUnitConfig[]> => {
     if (deployUnitMappingsLoadedRef.current) {
       return Promise.resolve(deployUnitMappingsRef.current)
     }
@@ -8980,10 +9083,12 @@ export function HarnessBoardView({
     }
   }, [knowledgeDialogOpen, loadLeanTokenConfig, projectModeTab, selectedProjectId])
 
-  const handleAddDeployUnitMapping = useCallback((): void => {
-    setDeployUnitMappings((current) => [...current, createEmptyDeployUnitMapping()])
+  const handleAddDeployUnitMapping = useCallback((): string => {
+    const mapping = createEmptyDeployUnitMapping()
+    setDeployUnitMappings((current) => [...current, mapping])
     setDeployUnitMappingsDirty(true)
     setDeployUnitMappingsError(null)
+    return mapping.deployUnitIdMapping
   }, [])
 
   const handleRemoveDeployUnitMapping = useCallback((index: number): void => {
@@ -8993,7 +9098,7 @@ export function HarnessBoardView({
   }, [])
 
   const handleChangeDeployUnitMapping = useCallback(
-    (index: number, mapping: HarnessDeployUnitMapping): void => {
+    (index: number, mapping: HarnessDeployUnitConfig): void => {
       setDeployUnitMappings((current) =>
         current.map((item, itemIndex) => (itemIndex === index ? mapping : item))
       )
@@ -9002,16 +9107,6 @@ export function HarnessBoardView({
     },
     []
   )
-
-  const handlePickDeployUnitRepoPath = useCallback(async (index: number): Promise<void> => {
-    const localRepoPath = await window.api.workspace.select()
-    if (!localRepoPath) return
-    setDeployUnitMappings((current) =>
-      current.map((item, itemIndex) => (itemIndex === index ? { ...item, localRepoPath } : item))
-    )
-    setDeployUnitMappingsDirty(true)
-    setDeployUnitMappingsError(null)
-  }, [])
 
   const handleLeanTokenChange = useCallback((value: string): void => {
     setLeanTokenConfig({ leanToken: value })
@@ -10034,20 +10129,6 @@ export function HarnessBoardView({
     }
   }
 
-  const handlePickSessionWorkspace = async (): Promise<void> => {
-    const sessionWorkspacePath = await window.api.workspace.select()
-    if (sessionWorkspacePath) {
-      setForm((current) => ({ ...current, sessionWorkspacePath }))
-    }
-  }
-
-  const handlePickEditSessionWorkspace = async (): Promise<void> => {
-    const sessionWorkspacePath = await window.api.workspace.select()
-    if (sessionWorkspacePath) {
-      setEditForm((current) => ({ ...current, sessionWorkspacePath }))
-    }
-  }
-
   const handleSubmit = async (): Promise<void> => {
     if (creating || createProjectVerification.pending) return
     setFormError(null)
@@ -10236,6 +10317,8 @@ export function HarnessBoardView({
         return
       }
       const requestId = ++featureWorkflowRequestIdRef.current
+      setFeatureWorkspace({ source: "directory", path: "" })
+      setFeatureMappingDrafts({})
       setFeatureDialogMode("create")
       setFeatureDialogProject(project)
       setFeatureName("")
@@ -10269,24 +10352,16 @@ export function HarnessBoardView({
           }
         })
       void refreshFeaturePublicConstraints(project.projectId, requestId)
-      void loadDeployUnitMappings()
-        .then((mappings) => window.api.harnessBoard.getLocalAgentmdDeployUnitMappings(mappings))
-        .then((deployUnitMappingIds) => {
-          if (requestId !== featureWorkflowRequestIdRef.current) return
-          setFeatureLocalAgentmdDeployUnitMappings(deployUnitMappingIds)
-        })
-        .catch(() => {
-          if (requestId !== featureWorkflowRequestIdRef.current) return
-          setFeatureLocalAgentmdDeployUnitMappings([])
-        })
     },
-    [loadDeployUnitMappings, refreshFeaturePublicConstraints]
+    [refreshFeaturePublicConstraints]
   )
 
   const handleFeatureDialogOpenChange = useCallback(
     (open: boolean): void => {
       if (!open && !creatingFeatureProjectId && !updatingFeatureDeployUnits) {
         featureWorkflowRequestIdRef.current += 1
+        setFeatureWorkspace({ source: "directory", path: "" })
+        setFeatureMappingDrafts({})
         setFeatureDialogMode("create")
         setFeatureDialogProject(null)
         setFeatureName("")
@@ -10346,8 +10421,57 @@ export function HarnessBoardView({
     [featureWorkflowConfig, featureWorkflowTemplate]
   )
 
+  const featureMappings = useMemo(
+    () => buildFeatureDeployUnitRows(deployUnitMappings, Object.values(featureMappingDrafts)),
+    [deployUnitMappings, featureMappingDrafts]
+  )
+  // Checkbox changes preserve the same paths; only changed inspection inputs need another IPC.
+  const featurePathInspectionKey = JSON.stringify(
+    featureMappings.map(({ deployUnitIdMapping, deployUnitId, localRepoPath }) => ({
+      deployUnitIdMapping,
+      deployUnitId,
+      localRepoPath
+    }))
+  )
+  useEffect(() => {
+    if (!featureDialogProject) return
+    let cancelled = false
+    setFeatureLocalAgentmdDeployUnitMappings([])
+    const mappings: HarnessDeployUnitMapping[] = JSON.parse(featurePathInspectionKey)
+    void window.api.harnessBoard
+      .getLocalAgentmdDeployUnitMappings(mappings)
+      .then((ids) => {
+        if (!cancelled) setFeatureLocalAgentmdDeployUnitMappings(ids)
+      })
+      .catch(() => {
+        if (!cancelled) setFeatureLocalAgentmdDeployUnitMappings([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [featurePathInspectionKey, featureDialogProject])
+
+  const handleSelectFeaturePath = useCallback((mapping: HarnessDeployUnitMapping): void => {
+    setFeatureMappingDrafts((current) => ({ ...current, [mapping.deployUnitIdMapping]: mapping }))
+  }, [])
+
   const handleDeployUnitToggle = useCallback(
     (deployUnitIdMapping: string, checked: boolean): void => {
+      const mapping = featureMappings.find(
+        (item) => item.deployUnitIdMapping === deployUnitIdMapping
+      )
+      if (checked) {
+        // Capture every selected unit's current draft, including an unchanged default path.
+        if (mapping) handleSelectFeaturePath(mapping)
+      } else if (
+        featureWorkspace.source === "deployUnit" &&
+        mapping?.deployUnitId === featureWorkspace.deployUnitId
+      ) {
+        setFeatureWorkspace({
+          source: "directory",
+          path: mapping.localRepoPath
+        })
+      }
       setSelectedDeployUnitIds((current) => {
         const next = new Set(current)
         if (checked) {
@@ -10358,7 +10482,7 @@ export function HarnessBoardView({
         return next
       })
     },
-    []
+    [featureMappings, featureWorkspace, handleSelectFeaturePath]
   )
 
   const handleSubmitFeature = useCallback(async (): Promise<void> => {
@@ -10375,9 +10499,18 @@ export function HarnessBoardView({
     }
     const supportsSessionContextInjection = featureDialogProject.supportsSessionContextInjection
     const sessionContextInjectionSource = supportsSessionContextInjection ? "plugin" : "cmbdevclaw"
-    const selectedDeployUnits = deployUnitMappings.filter((mapping) =>
+    const selectedDeployUnits = featureMappings.filter((mapping) =>
       selectedDeployUnitIds.has(mapping.deployUnitIdMapping)
     )
+    const missingPath = selectedDeployUnits.find((mapping) => !mapping.localRepoPath.trim())
+    if (missingPath) {
+      setFeatureError(`请为发布单元 ${missingPath.deployUnitId} 选择代码库路径`)
+      return
+    }
+    if (!resolveFeatureWorkspace(featureWorkspace, selectedDeployUnits)) {
+      setFeatureError(MISSING_FEATURE_WORKSPACE)
+      return
+    }
     const hasSelectedDeployUnits = selectedDeployUnits.length > 0
     if (hasSelectedDeployUnits && deployUnitMappingsDirty) {
       setFeatureError("发布单元路径配置尚未保存，请先保存后再创建特性")
@@ -10415,6 +10548,7 @@ export function HarnessBoardView({
       const result = await window.api.harnessBoard.createFeature({
         projectId: featureDialogProject.projectId,
         feature,
+        sessionWorkspace: featureWorkspace,
         sessionContextInjectionSource,
         ...(hasSelectedDeployUnits ? { selectedDeployUnits } : {}),
         ...workflowInput
@@ -10445,7 +10579,8 @@ export function HarnessBoardView({
     featureWorkflowTemplate,
     selectedWorkflowNodeIds,
     selectedDeployUnitIds,
-    deployUnitMappings,
+    featureMappings,
+    featureWorkspace,
     deployUnitMappingsDirty,
     loadProjectDetail
   ])
@@ -10702,6 +10837,17 @@ export function HarnessBoardView({
     if (!selectedProject || !runDetailWithSessions || selectedFeature?.deleted) return
 
     const requestId = ++featureWorkflowRequestIdRef.current
+    setFeatureWorkspace(
+      runDetailWithSessions.run.sessionWorkspace ?? { source: "directory", path: "" }
+    )
+    setFeatureMappingDrafts(
+      Object.fromEntries(
+        runDetailWithSessions.run.selectedDeployUnits.map((item) => [
+          item.deployUnitIdMapping,
+          item
+        ])
+      )
+    )
     setFeatureDialogMode("edit")
     setFeatureDialogProject(selectedProject)
     setFeatureName(runDetailWithSessions.run.slug)
@@ -10719,18 +10865,7 @@ export function HarnessBoardView({
     )
 
     void refreshFeaturePublicConstraints(selectedProject.projectId, requestId)
-    void loadDeployUnitMappings()
-      .then((mappings) => window.api.harnessBoard.getLocalAgentmdDeployUnitMappings(mappings))
-      .then((deployUnitMappingIds) => {
-        if (requestId !== featureWorkflowRequestIdRef.current) return
-        setFeatureLocalAgentmdDeployUnitMappings(deployUnitMappingIds)
-      })
-      .catch(() => {
-        if (requestId !== featureWorkflowRequestIdRef.current) return
-        setFeatureLocalAgentmdDeployUnitMappings([])
-      })
   }, [
-    loadDeployUnitMappings,
     refreshFeaturePublicConstraints,
     runDetailWithSessions,
     selectedFeature?.deleted,
@@ -10747,9 +10882,18 @@ export function HarnessBoardView({
       return
     }
 
-    const selectedDeployUnits = deployUnitMappings.filter((mapping) =>
+    const selectedDeployUnits = featureMappings.filter((mapping) =>
       selectedDeployUnitIds.has(mapping.deployUnitIdMapping)
     )
+    const missingPath = selectedDeployUnits.find((mapping) => !mapping.localRepoPath.trim())
+    if (missingPath) {
+      setFeatureError(`请为发布单元 ${missingPath.deployUnitId} 选择代码库路径`)
+      return
+    }
+    if (!resolveFeatureWorkspace(featureWorkspace, selectedDeployUnits)) {
+      setFeatureError(MISSING_FEATURE_WORKSPACE)
+      return
+    }
     if (selectedDeployUnits.length > 0 && deployUnitMappingsDirty) {
       setFeatureError("发布单元路径配置尚未保存，请先保存后再编辑绑定")
       return
@@ -10761,6 +10905,7 @@ export function HarnessBoardView({
       await window.api.harnessBoard.updateFeatureDeployUnits({
         projectId: selectedFeature.projectId,
         featureId: selectedFeature.slug,
+        sessionWorkspace: featureWorkspace,
         selectedDeployUnits
       })
       try {
@@ -10771,17 +10916,20 @@ export function HarnessBoardView({
       }
       featureWorkflowRequestIdRef.current += 1
       setFeatureDialogProject(null)
+      setFeatureWorkspace({ source: "directory", path: "" })
+      setFeatureMappingDrafts({})
       setFeatureDialogMode("create")
       setFeatureName("")
       setSelectedDeployUnitIds(new Set())
-      toast.success("已更新特性绑定的发布单元")
+      toast.success("已更新特性配置")
     } catch (error) {
       setFeatureError(cleanIpcError(error))
     } finally {
       setUpdatingFeatureDeployUnits(false)
     }
   }, [
-    deployUnitMappings,
+    featureMappings,
+    featureWorkspace,
     deployUnitMappingsDirty,
     featureDialogMode,
     featureDialogProject,
@@ -11540,11 +11688,7 @@ export function HarnessBoardView({
   }, [cleanupThread, deleteThread, finalizeThreadDeletions, markReadMany, threadGroupDeleteTarget])
 
   const handleCreateSidebarSession = useCallback(
-    async (
-      project: ProjectFeatureSidebarProject,
-      slug: string,
-      sessions: HarnessSessionBinding[]
-    ): Promise<void> => {
+    async (project: ProjectFeatureSidebarProject, slug: string): Promise<void> => {
       if (project.lifecycle.status === "deleted") return
       const key = `feature:${project.projectId}:${slug}`
       if (creatingSidebarSessionKey) return
@@ -11554,11 +11698,8 @@ export function HarnessBoardView({
         const thread = await createHarnessSession({
           projectId: project.projectId,
           slug,
-          sessionWorkspacePath: project.sessionWorkspacePath,
+          sessionWorkspacePath: latestRunDetail.run.resolvedSessionWorkspacePath,
           nextAction: getHarnessRunNextAction(latestRunDetail),
-          sessions,
-          threadsById,
-          threadStates: allThreadStates,
           createThread
         })
         skipRunDetailLoadForSessionRef.current = featureSessionKey(
@@ -11583,7 +11724,7 @@ export function HarnessBoardView({
         setCreatingSidebarSessionKey(null)
       }
     },
-    [allThreadStates, createThread, creatingSidebarSessionKey, markRead, selectThread, threadsById]
+    [createThread, creatingSidebarSessionKey, markRead, selectThread]
   )
 
   const sidebarDeleteDialog = (
@@ -11709,8 +11850,8 @@ export function HarnessBoardView({
             onToggleProjectPin={togglePinnedProject}
             onToggleFeaturePin={togglePinnedFeature}
             onToggleAll={toggleAllFeatureGroups}
-            onCreateSession={(project, slug, sessions) => {
-              void handleCreateSidebarSession(project, slug, sessions)
+            onCreateSession={(project, slug) => {
+              void handleCreateSidebarSession(project, slug)
             }}
             onSelectProjectSession={(projectId, threadId, deleted) => {
               openProjectSession(projectId, threadId, deleted)
@@ -11807,7 +11948,11 @@ export function HarnessBoardView({
           localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
           publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
           syncingPublicConstraints={featurePublicConstraintsSyncing}
-          deployUnitMappings={deployUnitMappings}
+          rows={featureMappings}
+          catalogUnits={deployUnitMappings}
+          workspace={featureWorkspace}
+          onWorkspaceChange={setFeatureWorkspace}
+          onSelectPath={handleSelectFeaturePath}
           deployUnitMappingsLoading={deployUnitMappingsLoading}
           selectedDeployUnitIds={selectedDeployUnitIds}
           creating={featureDialogSubmitting}
@@ -11886,7 +12031,11 @@ export function HarnessBoardView({
           localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
           publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
           syncingPublicConstraints={featurePublicConstraintsSyncing}
-          deployUnitMappings={deployUnitMappings}
+          rows={featureMappings}
+          catalogUnits={deployUnitMappings}
+          workspace={featureWorkspace}
+          onWorkspaceChange={setFeatureWorkspace}
+          onSelectPath={handleSelectFeaturePath}
           deployUnitMappingsLoading={deployUnitMappingsLoading}
           selectedDeployUnitIds={selectedDeployUnitIds}
           creating={featureDialogSubmitting}
@@ -11911,7 +12060,6 @@ export function HarnessBoardView({
           onOpenChange={handleEditDialogOpenChange}
           onChange={setEditForm}
           onInstallPlugin={handleInstallMarketPlugin}
-          onPickSessionWorkspace={() => void handlePickEditSessionWorkspace()}
           onSubmit={() => void handleSubmitEdit()}
         />
         <KnowledgeDialog
@@ -12176,7 +12324,6 @@ export function HarnessBoardView({
                 onAdd={handleAddDeployUnitMapping}
                 onRemove={handleRemoveDeployUnitMapping}
                 onChange={handleChangeDeployUnitMapping}
-                onPickPath={(index) => void handlePickDeployUnitRepoPath(index)}
                 onSave={() => void handleSaveDeployUnitMappings()}
                 onLeanTokenChange={handleLeanTokenChange}
                 onSaveLeanToken={() => void handleSaveLeanTokenConfig()}
@@ -12218,7 +12365,11 @@ export function HarnessBoardView({
         localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
         publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
         syncingPublicConstraints={featurePublicConstraintsSyncing}
-        deployUnitMappings={deployUnitMappings}
+        rows={featureMappings}
+        catalogUnits={deployUnitMappings}
+        workspace={featureWorkspace}
+        onWorkspaceChange={setFeatureWorkspace}
+        onSelectPath={handleSelectFeaturePath}
         deployUnitMappingsLoading={deployUnitMappingsLoading}
         selectedDeployUnitIds={selectedDeployUnitIds}
         creating={featureDialogSubmitting}
@@ -12244,7 +12395,6 @@ export function HarnessBoardView({
         onChange={setForm}
         onInstallPlugin={handleInstallMarketPlugin}
         onPickWorkspace={() => void handlePickWorkspace()}
-        onPickSessionWorkspace={() => void handlePickSessionWorkspace()}
         onSubmit={() => void handleSubmit()}
       />
       <ProjectEditDialog
@@ -12258,7 +12408,6 @@ export function HarnessBoardView({
         onOpenChange={handleEditDialogOpenChange}
         onChange={setEditForm}
         onInstallPlugin={handleInstallMarketPlugin}
-        onPickSessionWorkspace={() => void handlePickEditSessionWorkspace()}
         onSubmit={() => void handleSubmitEdit()}
       />
       <ProjectActionConfirmDialog

@@ -1,3 +1,4 @@
+import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
 import { initializeNotificationRuntime } from "./notification-runtime"
 import { notificationService } from "./services/notification-service"
 import { registerNotificationHandlers } from "./ipc/notifications"
@@ -1094,7 +1095,15 @@ if (browserNativeMessagingHostLaunch) {
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
-    await initializeHarnessManagedRunProjectDirectories()
+    let harnessConfigAvailable = false
+    try {
+      await initializeHarnessConfigV2(getOpenworkDir())
+      harnessConfigAvailable = true
+    } catch (error) {
+      // The project-mode readers surface this error; unrelated app features remain available.
+      console.error("[HarnessBoard] Configuration initialization failed:", error)
+    }
+    if (harnessConfigAvailable) await initializeHarnessManagedRunProjectDirectories()
     configureManagedRunProjectDirectories({
       resolveProjectDirectory: getHarnessProjectRootPath,
       listProjectDirectories: listHarnessManagedRunProjectDirectories
@@ -1104,13 +1113,13 @@ if (browserNativeMessagingHostLaunch) {
     // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
     // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
     // configured.
-    startHarnessStatusReporter()
+    if (harnessConfigAvailable) startHarnessStatusReporter()
 
     // Initialize database
     await initializeDatabase()
     initializeNotificationRuntime()
     await notificationService.recover()
-    recoverManagedRunsAtStartup()
+    if (harnessConfigAvailable) recoverManagedRunsAtStartup()
     cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)

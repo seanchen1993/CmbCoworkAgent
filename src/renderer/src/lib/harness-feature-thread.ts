@@ -1,3 +1,4 @@
+import { MISSING_FEATURE_WORKSPACE } from "../../../shared/harness-feature-workspace"
 import type { HarnessRunDetailViewModel, HarnessWorkflowNextAction, Thread } from "@/types"
 import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
@@ -63,5 +64,7 @@ export async function createHarnessFeatureThreadFromLatestRun(
   params: CreateHarnessFeatureThreadFromLatestRunParams
 ): Promise<Thread> {
   const runDetail = await window.api.harnessBoard.getRunDetail(params.projectId, params.slug)
-  return createHarnessFeatureThread({ ...params, runDetail })
+  const workspacePath = runDetail.run.resolvedSessionWorkspacePath
+  if (!workspacePath) throw new Error(MISSING_FEATURE_WORKSPACE)
+  return createHarnessFeatureThread({ ...params, workspacePath, runDetail })
 }

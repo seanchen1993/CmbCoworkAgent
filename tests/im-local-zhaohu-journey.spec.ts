@@ -163,6 +163,7 @@ async function createJourney() {
   }
 
   const featureService = new ImFeatureBindingService({
+    getFeatureWorkspace: async () => root,
     conversationState: conversations,
     getSettings: () => ({ enabled: true, remoteAccess: "inbox-and-features" }) as never,
     projectModeEnabled: async () => true,
@@ -180,8 +181,7 @@ async function createJourney() {
         project: {
           projectId: "project-pay",
           name: "支付平台",
-          projectRootPath: root,
-          sessionWorkspacePath: root
+          projectRootPath: root
         },
         projectState: { label: "active", uiKind: "active" },
         runs: [
