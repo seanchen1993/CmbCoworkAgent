@@ -2020,6 +2020,23 @@ export function setStoredDefaultModelId(modelId: string): void {
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
+const MODS_GLOBAL_ENABLED_KEY = "modsGlobalEnabled"
+
+/** Application-level safety switch for both legacy Mods and Function Mods. */
+export function getModsGlobalEnabled(): boolean {
+  try {
+    return getSettingsStore().get(MODS_GLOBAL_ENABLED_KEY, false) === true
+  } catch (error) {
+    console.warn("[Storage] Failed to load Mods global switch; using disabled:", error)
+    return false
+  }
+}
+
+export function setModsGlobalEnabled(enabled: boolean): boolean {
+  const normalized = Boolean(enabled)
+  getSettingsStore().set(MODS_GLOBAL_ENABLED_KEY, normalized)
+  return normalized
+}
 
 export function getGitChangeNoticeEnabled(): boolean {
   try {

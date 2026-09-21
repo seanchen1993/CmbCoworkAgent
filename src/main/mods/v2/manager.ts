@@ -269,6 +269,12 @@ export class FunctionModsManager {
     }
   }
 
+  /** Stop every Function Mods session when the application-level switch changes. */
+  invalidateAll(): void {
+    const workspaces = new Set([...this.sessions.values()].map((entry) => entry.workspace))
+    for (const workspace of workspaces) this.invalidate(workspace)
+  }
+
   closeThread(threadId: string): void {
     for (const [key, entry] of this.sessions) {
       if (entry.threadId !== threadId) continue
