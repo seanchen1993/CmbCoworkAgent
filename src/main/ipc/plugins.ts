@@ -807,10 +807,10 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
             rmSync(plugin.path, { recursive: true, force: true })
           }
           deletePluginStorage(id)
+          getModsManager()?.pluginsChanged()
           invalidateEnabledSkillsCache()
           await invalidateGlobalMcpCapabilityService("plugin:delete")
           notifyHooksChanged("plugin-deleted")
-          getModsManager()?.pluginsChanged()
           return { success: true }
         } catch (e) {
           return { success: false, error: e instanceof Error ? e.message : "删除失败" }

@@ -3,13 +3,41 @@ import type { ModWorkspaceStatus } from "../../../../shared/mods/types"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { ModsAudit } from "./ModsAudit"
+import { ModsSettingsGate } from "./ModsSettingsGate"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter
+} from "@/components/ui/dialog"
 
 export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.Element {
+  return (
+    <ModsSettingsGate>
+      <UnlockedModsPanel threadId={threadId} />
+    </ModsSettingsGate>
+  )
+}
+
+function UnlockedModsPanel({ threadId }: { threadId: string | null }): React.JSX.Element {
+  const [installed, setInstalled] = useState<Awaited<ReturnType<typeof window.api.plugins.list>>>(
+    []
+  )
+  const [deleteTarget, setDeleteTarget] = useState<{ pluginId: string; name: string } | null>(null)
   const [status, setStatus] = useState<ModWorkspaceStatus | null>(null)
   const [globalEnabled, setGlobalEnabled] = useState(false)
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  const installedMods = installed.filter(
+    (plugin) =>
+      (plugin.modCount ?? 0) > 0 ||
+      status?.functionMods?.some((mod) => mod.pluginId === plugin.id) ||
+      status?.mods.some((mod) => mod.pluginId === plugin.id)
+  )
   const refresh = useCallback(async () => {
+    setInstalled(await window.api.plugins.list())
     setGlobalEnabled(await window.api.mods.globalEnabled())
     if (threadId) setStatus(await window.api.mods.status(threadId))
   }, [threadId])
@@ -17,6 +45,14 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
     let live = true
     setStatus(null)
     setError("")
+    void window.api.plugins.list().then(
+      (values) => {
+        if (live) setInstalled(values)
+      },
+      () => {
+        if (live) setError("无法读取已安装的 Mods。")
+      }
+    )
     window.api.mods.globalEnabled().then(
       (value) => {
         if (live) setGlobalEnabled(value)
@@ -91,11 +127,83 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
           启用 Mods 功能（应用级）
         </label>
         <p className="text-xs text-muted-foreground">
-          默认关闭。关闭时不会加载或拦截 Mods 运行时；插件安装、Skills、MCP 配置和普通聊天不受影响。
+          默认关闭。解锁设置不会自动开启；开启后还需项目授权。
         </p>
       </div>
+      <div className="space-y-2" data-installed-mods>
+        <h3 className="font-medium">已安装的 Mods 插件</h3>
+        <p className="text-xs text-muted-foreground">
+          无需开启 Mods 或打开项目即可卸载。卸载作用于整个来源插件。
+        </p>
+        {installedMods.map((plugin) => (
+          <div
+            key={plugin.id}
+            className="flex items-center justify-between gap-3 rounded border p-3"
+            data-installed-mod-id={plugin.id}
+          >
+            <span>{plugin.name}</span>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setError("")
+                setDeleteTarget({ pluginId: plugin.id, name: plugin.name })
+              }}
+            >
+              卸载
+            </Button>
+          </div>
+        ))}
+        {installedMods.length === 0 && (
+          <p className="text-xs text-muted-foreground">尚未安装 Mods 插件。</p>
+        )}
+      </div>
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) setDeleteTarget(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>卸载 Mods 插件</DialogTitle>
+            <DialogDescription>
+              确认卸载「{deleteTarget?.name}」的整个来源插件？其中的 Mods、Skills、MCP 和 Hooks
+              会一并移除，相关 Mods 命令与面板停止运行；其他插件保留。审计记录和已保存的 Mods
+              数据不清除。
+            </DialogDescription>
+          </DialogHeader>
+          {error && (
+            <p role="alert" className="text-sm text-destructive">
+              {error}
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" disabled={busy} onClick={() => setDeleteTarget(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={busy || !deleteTarget}
+              onClick={() => {
+                if (!deleteTarget) return
+                const target = deleteTarget
+                void run(async () => {
+                  const result = await window.api.plugins.delete(target.pluginId)
+                  if (!result.success) throw new Error(result.error || "卸载失败")
+                  setDeleteTarget(null)
+                  useAppStore.getState().bumpPluginVersion()
+                })
+              }}
+            >
+              确认卸载
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {!threadId && <p className="text-muted-foreground">打开项目会话后配置权限。</p>}
-      {error && (
+      {error && !deleteTarget && (
         <p role="alert" className="text-destructive break-all">
           {error}
         </p>

@@ -8,6 +8,7 @@ import { getThreadCore } from "../db"
 import { getModsGlobalEnabled, getOpenworkDir, getPlugins, setModsGlobalEnabled } from "../storage"
 import { ModsManager, setModsManager, setModsUnavailable } from "../mods/manager"
 import { ModError, modErrorCode } from "../mods/errors"
+import { ModsSettingsAccess } from "../mods/settings-access"
 import { installPluginFromDir } from "./plugins"
 import { readManagedModDeployment } from "../mods/policy"
 import { ModCommandQueue } from "../mods/command-queue"
@@ -43,6 +44,7 @@ import { getGlobalMcpCapabilityService } from "../mcp/capability-service"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
+  const settingsAccess = new ModsSettingsAccess()
   try {
     manager = new ModsManager(
       join(getOpenworkDir(), "mods-control.sqlite"),
@@ -90,6 +92,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     ipcMain.handle("mods:configure-global", (event) => {
       trusted(event)
       throw new ModError(code)
+    })
+    ipcMain.handle("mods:function-unlocked", (event) => {
+      trusted(event)
+      return false
+    })
+    ipcMain.handle("mods:unlock-function", (event) => {
+      trusted(event)
+      return false
     })
     return
   }
@@ -670,14 +680,24 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   ipcMain.handle("mods:configure-global", (event, enabled: boolean) => {
     trusted(event)
     if (typeof enabled !== "boolean") throw new ModError("MODS_SETTINGS_INVALID")
+    if (enabled) settingsAccess.assertUnlocked(event.sender)
     const value = setModsGlobalEnabled(enabled)
     manager.invalidateAll()
     return value
+  })
+  ipcMain.handle("mods:function-unlocked", (event) => {
+    trusted(event)
+    return settingsAccess.isUnlocked(event.sender)
+  })
+  ipcMain.handle("mods:unlock-function", (event, password: string) => {
+    trusted(event)
+    return settingsAccess.unlock(event.sender, password)
   })
   ipcMain.handle(
     "mods:approve-function",
     (event, input: { threadId: string; pluginId: string; digest: string }) => {
       const workspace = scope(event, input?.threadId)
+      settingsAccess.assertUnlocked(event.sender)
       if (typeof input.pluginId !== "string" || !/^[a-f0-9]{64}$/.test(input.digest))
         throw new ModError("MODS_GRANT_INVALID")
       return functions.approve(workspace, input.pluginId, input.digest)
@@ -693,6 +713,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     "mods:configure",
     (event, input: { threadId: string; enabled: boolean; outputPolicy: boolean }) => {
       const workspace = scope(event, input?.threadId)
+      settingsAccess.assertUnlocked(event.sender)
       if (typeof input.enabled !== "boolean" || typeof input.outputPolicy !== "boolean")
         throw new ModError("MODS_SETTINGS_INVALID")
       manager.configure(workspace, input.enabled, input.outputPolicy)
@@ -702,6 +723,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     "mods:approve",
     (event, input: { threadId: string; pluginId: string; digest: string }) => {
       const workspace = scope(event, input?.threadId)
+      settingsAccess.assertUnlocked(event.sender)
       if (typeof input.pluginId !== "string" || !/^[a-f0-9]{64}$/.test(input.digest))
         throw new ModError("MODS_GRANT_INVALID")
       return manager.approve(workspace, input.pluginId, input.digest)
@@ -774,6 +796,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   })
   ipcMain.handle("mods:install-examples", async (event) => {
     trusted(event)
+    settingsAccess.assertUnlocked(event.sender)
     for (const name of ["project-quality", "company-output-policy", "function-commands"]) {
       const result = await installPluginFromDir(
         join(__dirname, "../resources/mods", name),

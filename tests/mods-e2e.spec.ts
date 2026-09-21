@@ -121,6 +121,11 @@ async function main(): Promise<void> {
     await page!.addInitScript("window.__name = value => value")
     console.log("STEP preload ready")
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
+    await assert.rejects(
+      page!.evaluate(() => window.api.mods.configureGlobal(true)),
+      /MODS_FUNCTION_LOCKED/
+    )
+    await page!.evaluate(() => window.api.mods.unlockFunction("admin123456"))
     await page!.evaluate(() => window.api.mods.configureGlobal(true))
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), true)
     pass("Mods application switch defaults to off and requires explicit opt-in")
@@ -226,7 +231,7 @@ async function main(): Promise<void> {
         "packaged cold session executes a real approved command and previews/exports its report without a model or test bridge"
       )
       await page!.getByRole("button", { name: "自定义", exact: true }).click()
-      await page!.getByRole("button", { name: "插件", exact: true }).click()
+      await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
       await page!.locator("[data-mods-settings]").waitFor()
       await page!.screenshot({ path: join(artifacts, "settings.png") })
       pass("packaged preload and React settings retain project grants after reload")
@@ -586,7 +591,7 @@ async function main(): Promise<void> {
     assert(!JSON.stringify(revokedCards).includes("actionId"))
     pass("revocation invalidates existing cards")
     await page!.getByRole("button", { name: "自定义", exact: true }).click()
-    await page!.getByRole("button", { name: "插件", exact: true }).click()
+    await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
     await page!.locator("[data-mods-settings]").waitFor()
     await page!.locator("[data-mods-audit] > summary").click()
     await page!.getByText("审计摘要", { exact: true }).first().waitFor()
@@ -2594,7 +2599,9 @@ async function main(): Promise<void> {
       .waitFor()
     pass("pane preferences survive renderer reload and complete application restart")
     await page!.getByRole("button", { name: "自定义", exact: true }).click()
-    await page!.getByRole("button", { name: "插件", exact: true }).click()
+    await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
+    await page!.getByLabel("输入管理口令解锁 Function Mods 设置").fill("admin123456")
+    await page!.getByRole("button", { name: "解锁设置", exact: true }).click()
     await page!
       .locator('[data-function-mod-id="function-commands"]')
       .getByRole("button", { name: "撤销权限", exact: true })

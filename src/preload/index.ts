@@ -3046,7 +3046,11 @@ const api = {
   },
   mods: {
     globalEnabled: (): Promise<boolean> => ipcRenderer.invoke("mods:global-enabled"),
-    configureGlobal: (enabled: boolean): Promise<boolean> => ipcRenderer.invoke("mods:configure-global", enabled),
+    configureGlobal: (enabled: boolean): Promise<boolean> =>
+      ipcRenderer.invoke("mods:configure-global", enabled),
+    functionUnlocked: (): Promise<boolean> => ipcRenderer.invoke("mods:function-unlocked"),
+    unlockFunction: (password: string): Promise<boolean> =>
+      ipcRenderer.invoke("mods:unlock-function", password),
     turnNotices: (
       threadId: string
     ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
