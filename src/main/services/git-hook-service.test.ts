@@ -22,7 +22,15 @@
 
 import { execFileSync } from "child_process"
 import { createHash } from "crypto"
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs"
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "fs"
 import { readFile, readdir } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -602,5 +610,42 @@ describe("concurrent hook helper installs", () => {
       name.endsWith(".tmp")
     )
     expect(leftovers).toEqual([])
+  })
+})
+
+/**
+ * Helper writes on Windows.
+ *
+ * Production runs on Windows, where replacing a file another process holds
+ * open fails outright (antivirus scanners and the very hook that is executing
+ * this script both hold handles). The mitigation is to not write at all in the
+ * steady state: every install and the startup refresh reach ensureHookHelper,
+ * and only a genuine version change may touch the file.
+ */
+describe("hook helper writes", () => {
+  const helperPath = join(openworkDir, "git-hooks", "cmbdevclaw-git-hook.cjs")
+
+  it("does not rewrite the helper when it is already current", async () => {
+    const first = makeRepo()
+    await installGitHooks(first.repoRoot)
+    const before = statSync(helperPath).mtimeMs
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const second = makeRepo()
+    await installGitHooks(second.repoRoot)
+    await installGitHooks(first.repoRoot)
+
+    expect(statSync(helperPath).mtimeMs).toBe(before)
+  })
+
+  it("still replaces a helper left over from an older build", async () => {
+    const { repoRoot } = makeRepo()
+    await installGitHooks(repoRoot)
+    const current = readFileSync(helperPath, "utf-8")
+
+    writeFileSync(helperPath, "// helper from an older build\n")
+    await installGitHooks(repoRoot)
+
+    expect(readFileSync(helperPath, "utf-8")).toBe(current)
   })
 })

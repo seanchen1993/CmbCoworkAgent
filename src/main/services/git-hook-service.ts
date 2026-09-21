@@ -984,8 +984,20 @@ main()
 `
 }
 
+/** Windows file locks (antivirus, a hook mid-read) surface as these. */
+const HELPER_WRITE_RETRY_CODES = ["EACCES", "EBUSY", "EPERM"]
+
 async function ensureHookHelper(): Promise<string> {
   const helperPath = getHookHelperPath()
+  const script = buildHookHelperScript()
+
+  // Don't touch the file when it is already this build's. Every install and the
+  // startup refresh land here, so on Windows — where replacing a file another
+  // process holds open fails outright, and where a hook is executing this exact
+  // file on every commit — the steady state has to be a read, not a write.
+  const current = await readFile(helperPath, "utf-8").catch(() => null)
+  if (current === script) return helperPath
+
   await ensureDir(dirname(helperPath))
   // Write-then-rename: installed hooks invoke this file from other processes,
   // and a plain writeFile truncates first — a commit landing inside that window
@@ -998,11 +1010,28 @@ async function ensureHookHelper(): Promise<string> {
   // silent collection gap for those repositories.
   const stagingPath = `${helperPath}.${process.pid}.${randomUUID()}.tmp`
   try {
-    await writeFile(stagingPath, buildHookHelperScript(), "utf-8")
+    await writeFile(stagingPath, script, "utf-8")
     await chmod(stagingPath, 0o755).catch(() => undefined)
-    await rename(stagingPath, helperPath)
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await rename(stagingPath, helperPath)
+        break
+      } catch (e) {
+        const code = e && typeof e === "object" && "code" in e ? String(e.code) : ""
+        if (attempt >= 5 || !HELPER_WRITE_RETRY_CODES.includes(code)) throw e
+        await new Promise<void>((resolve) => setTimeout(resolve, 5 * 2 ** attempt))
+      }
+    }
   } catch (e) {
     await rm(stagingPath, { force: true }).catch(() => undefined)
+    // An older helper that is still there beats no hooks at all: failing here
+    // aborts installGitHooks before installOneHook, so the repository would
+    // collect nothing. Degrade to the existing helper and let the next startup
+    // try the upgrade again.
+    if (await pathExists(helperPath)) {
+      console.warn("[GitHook] helper update failed, keeping the existing one:", e)
+      return helperPath
+    }
     throw e
   }
   return helperPath
