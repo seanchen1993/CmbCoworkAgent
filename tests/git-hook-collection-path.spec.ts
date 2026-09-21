@@ -333,6 +333,89 @@ async function testWorktreeCommitIsCollectedAfterWorktreeRemoval(): Promise<void
   })
 }
 
+/**
+ * The common-dir fallback must land in the RIGHT repository.
+ *
+ * `dirname(commonDir)` is the main work tree for the ordinary `<repo>/.git`
+ * layout, but a bare repository can sit inside another repository
+ * (`<outer>/inner.git`). Then the parent is a perfectly valid git repo — just
+ * not this one — so every commit verification fails against it and the
+ * snapshot sits in `ready` forever, which is the exact failure this whole
+ * change exists to remove.
+ */
+async function testCommonDirFallbackPicksTheRightRepository(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    await initializeAdoptionTracker()
+    const parentDir = await realpath(await mkdtemp(join(tmpdir(), "git-hook-nested-")))
+    const source = join(parentDir, "source")
+    const outer = join(parentDir, "outer")
+    const bare = join(outer, "inner.git")
+    const worktree = join(parentDir, "wt")
+    let resolvedWorktree = ""
+
+    try {
+      await mkdir(source, { recursive: true })
+      await initRepo(source)
+      // An ordinary repository that merely CONTAINS the bare one.
+      await mkdir(outer, { recursive: true })
+      await initRepo(outer)
+      await git(parentDir, ["clone", "-q", "--bare", source, bare])
+      await git(bare, ["worktree", "add", "-q", "-b", "feat", worktree])
+      await git(worktree, ["config", "user.email", "test@example.com"])
+      await git(worktree, ["config", "user.name", "Test"])
+
+      const status = await installGitHooks(worktree)
+      assert(status.state === "installed", `expected installed hook, got ${status.state}`)
+
+      const filePath = join(worktree, "nested.ts")
+      const generatedContent = "export const nestedValue = 1\n"
+      recordGen({
+        threadId: "nested-test-thread",
+        workspacePath: worktree,
+        filePath,
+        tool: "write_file",
+        generatedContent
+      })
+      await sleep(250)
+
+      await writeFile(filePath, generatedContent)
+      await git(worktree, ["add", "nested.ts"])
+      await git(worktree, ["commit", "-q", "-m", "nested bare worktree commit"])
+      resolvedWorktree = await git(worktree, ["rev-parse", "--show-toplevel"])
+
+      const snapshot = await readReadySnapshot(resolvedWorktree)
+      assert(
+        normalizePathForAssert(snapshot.meta.gitCommonDir || "") === normalizePathForAssert(bare),
+        `gitCommonDir should be the bare repo, got ${snapshot.meta.gitCommonDir}`
+      )
+
+      await git(bare, ["worktree", "remove", "--force", worktree])
+      assert(!existsSync(worktree), "work tree should be gone before consumption")
+
+      await syncGitHookEvents(resolvedWorktree)
+      await sleep(250)
+
+      const ready = await listDirs(join(repoEventsDir(resolvedWorktree), "ready"))
+      const processed = await listDirs(join(repoEventsDir(resolvedWorktree), "processed"))
+      assert(
+        ready.length === 0,
+        `snapshot must not be stranded when a sibling repo shadows the common dir (${ready.length} left)`
+      )
+      assert(processed.length === 1, `snapshot should be processed, got ${processed.length}`)
+      assert(
+        findPendingGensForFile(filePath, 0).length === 0,
+        "the pending gen should have been measured"
+      )
+    } finally {
+      await uninstallGitHooks(bare).catch(() => undefined)
+      if (resolvedWorktree) await cleanupRepoEvents(resolvedWorktree).catch(() => undefined)
+      await cleanupRepoEvents(source).catch(() => undefined)
+      await cleanupRepoEvents(outer).catch(() => undefined)
+      await removeTempDir(parentDir).catch(() => undefined)
+    }
+  })
+}
+
 async function testGitPanelPathSkipsHookAndUsesDirectStagedCapture(): Promise<void> {
   await withTempRepo("git-hook-panel", async (repo) => {
     const status = await installGitHooks(repo)
@@ -489,6 +572,8 @@ async function run(): Promise<void> {
     console.log("PASS external command commit with code_gen is collected through Git hook")
     await testWorktreeCommitIsCollectedAfterWorktreeRemoval()
     console.log("PASS worktree commit is collected after the worktree is merged and removed")
+    await testCommonDirFallbackPicksTheRightRepository()
+    console.log("PASS common dir fallback picks the right repository, not a containing one")
     await testGitPanelPathSkipsHookAndUsesDirectStagedCapture()
     console.log("PASS Git Panel collection path skips hook and uses direct staged capture")
     await testCoreHooksPathInWorkspaceIsNotModified()

@@ -53,6 +53,7 @@ import {
 } from "./adoption-tracker"
 import { trackEvent } from "./event-reporter"
 import {
+  installGitHooks,
   markInAppCommitProcessed,
   syncGitHookEvents,
   syncRegisteredGitHookEvents
@@ -560,5 +561,46 @@ describe("snapshots whose repository disappeared entirely", () => {
 
     // Still in ready: a repository can come back (remount, restore, re-clone).
     expect(await readdir(join(bucketFor(gone), "ready"))).toHaveLength(1)
+  })
+})
+
+/**
+ * The hook helper is one shared file, written by every install and by the
+ * startup refresh. Those all run concurrently in a single process — one install
+ * per registered repository, plus the refresh — so the staging file each write
+ * goes through must be unique per call. When it is not, the first rename moves
+ * the file out from under the others, they throw before reaching
+ * installOneHook, and those repositories silently end up with no hooks at all.
+ */
+describe("concurrent hook helper installs", () => {
+  it("installs every repository when many install at once", async () => {
+    const repos = Array.from({ length: 20 }, () => {
+      const root = mkdtempSync(join(tmpdir(), "cmbdevclaw-parallel-"))
+      tempRoots.push(root)
+      git(root, "init", "-q")
+      return root
+    })
+
+    const results = await Promise.allSettled(repos.map((repo) => installGitHooks(repo)))
+
+    const rejected = results.filter((result) => result.status === "rejected")
+    expect(rejected.map((result) => String((result as PromiseRejectedResult).reason))).toEqual([])
+    const notInstalled = results
+      .map((result, index) =>
+        result.status === "fulfilled" && result.value.installed ? null : repos[index]
+      )
+      .filter(Boolean)
+    expect(notInstalled).toEqual([])
+
+    // And the surviving helper has to be a complete, runnable script — a
+    // truncated one would make every hook a silent no-op.
+    const helper = join(openworkDir, "git-hooks", "cmbdevclaw-git-hook.cjs")
+    execFileSync("node", ["--check", helper])
+
+    // No staging files left behind.
+    const leftovers = (await readdir(join(openworkDir, "git-hooks"))).filter((name) =>
+      name.endsWith(".tmp")
+    )
+    expect(leftovers).toEqual([])
   })
 })

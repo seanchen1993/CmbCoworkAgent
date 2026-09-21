@@ -990,10 +990,21 @@ async function ensureHookHelper(): Promise<string> {
   // Write-then-rename: installed hooks invoke this file from other processes,
   // and a plain writeFile truncates first — a commit landing inside that window
   // would run a half-written script. Rename is atomic on the same filesystem.
-  const stagingPath = `${helperPath}.${process.pid}.tmp`
-  await writeFile(stagingPath, buildHookHelperScript(), "utf-8")
-  await chmod(stagingPath, 0o755).catch(() => undefined)
-  await rename(stagingPath, helperPath)
+  //
+  // The staging name must be unique PER CALL, not per process: the startup
+  // refresh and one install per repository all run concurrently in the same
+  // process, and a shared name means the first rename pulls the file out from
+  // under the others. They then fail before installing their hooks, which is a
+  // silent collection gap for those repositories.
+  const stagingPath = `${helperPath}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    await writeFile(stagingPath, buildHookHelperScript(), "utf-8")
+    await chmod(stagingPath, 0o755).catch(() => undefined)
+    await rename(stagingPath, helperPath)
+  } catch (e) {
+    await rm(stagingPath, { force: true }).catch(() => undefined)
+    throw e
+  }
   return helperPath
 }
 
@@ -1310,16 +1321,29 @@ async function resolveSnapshotGitCwd(meta: HookSnapshotMeta): Promise<string | n
   if (meta.gitRoot && (await pathExists(meta.gitRoot))) return meta.gitRoot
   const commonDir = meta.gitCommonDir?.trim()
   if (!commonDir) return null
+  if (!(await pathExists(commonDir))) return null
   const parent = dirname(commonDir)
-  if (parent && parent !== commonDir && (await pathExists(parent))) {
+  if (parent && parent !== commonDir) {
     try {
-      await runGit(parent, ["rev-parse", "--git-dir"], { timeoutMs: GIT_EXEC_TIMEOUT_MS })
-      return parent
+      // "Is a git repository" is NOT enough: a bare repo can sit inside another
+      // repository (`<outer>/inner.git`), and then the parent answers as the
+      // OUTER repo — which does not contain this commit, so every verification
+      // would fail and the snapshot would sit in `ready` forever. Require the
+      // candidate to resolve back to the SAME common dir.
+      const resolved = resolveGitPath(
+        await runGit(parent, ["rev-parse", "--git-common-dir"], {
+          timeoutMs: GIT_EXEC_TIMEOUT_MS
+        }),
+        parent
+      )
+      if (normalizePathForKey(resolved) === normalizePathForKey(commonDir)) return parent
     } catch {
-      // Not a work tree (bare repo, relocated git dir) — use the git dir itself.
+      // Not a work tree at all (bare repo, relocated git dir).
     }
   }
-  return (await pathExists(commonDir)) ? commonDir : null
+  // The git dir itself is a valid cwd: git recognizes it and reads the object
+  // store and config from there, which covers everything the consumer asks.
+  return commonDir
 }
 
 async function processReadyCommitSnapshot(repoDir: string, name: string): Promise<void> {
