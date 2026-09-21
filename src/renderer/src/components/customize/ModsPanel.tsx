@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { ModWorkspaceStatus } from "../../../../shared/mods/types"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
@@ -13,6 +13,16 @@ import {
   DialogFooter
 } from "@/components/ui/dialog"
 
+async function readWorkspaceStatus(threadId: string | null): Promise<ModWorkspaceStatus | null> {
+  if (!threadId) return null
+  try {
+    return await window.api.mods.status(threadId)
+  } catch (error) {
+    if (String(error).includes("MODS_WORKSPACE_REQUIRED")) return null
+    throw error
+  }
+}
+
 export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.Element {
   return (
     <ModsSettingsGate>
@@ -22,6 +32,8 @@ export function ModsPanel({ threadId }: { threadId: string | null }): React.JSX.
 }
 
 function UnlockedModsPanel({ threadId }: { threadId: string | null }): React.JSX.Element {
+  const uploadInput = useRef<HTMLInputElement>(null)
+  const [notice, setNotice] = useState("")
   const [installed, setInstalled] = useState<Awaited<ReturnType<typeof window.api.plugins.list>>>(
     []
   )
@@ -39,7 +51,7 @@ function UnlockedModsPanel({ threadId }: { threadId: string | null }): React.JSX
   const refresh = useCallback(async () => {
     setInstalled(await window.api.plugins.list())
     setGlobalEnabled(await window.api.mods.globalEnabled())
-    if (threadId) setStatus(await window.api.mods.status(threadId))
+    setStatus(await readWorkspaceStatus(threadId))
   }, [threadId])
   useEffect(() => {
     let live = true
@@ -62,12 +74,12 @@ function UnlockedModsPanel({ threadId }: { threadId: string | null }): React.JSX
       }
     )
     if (threadId)
-      window.api.mods.status(threadId).then(
+      readWorkspaceStatus(threadId).then(
         (value) => {
           if (live) setStatus(value)
         },
         () => {
-          if (live) setError("请先为当前会话选择项目目录。")
+          if (live) setError("无法读取项目 Mods 状态，请重试。")
         }
       )
     return () => {
@@ -77,6 +89,7 @@ function UnlockedModsPanel({ threadId }: { threadId: string | null }): React.JSX
   async function run(action: () => Promise<unknown>): Promise<void> {
     setBusy(true)
     setError("")
+    setNotice("")
     try {
       await action()
       await refresh()
@@ -88,28 +101,89 @@ function UnlockedModsPanel({ threadId }: { threadId: string | null }): React.JSX
     }
   }
   return (
-    <section className="border-b p-4 space-y-3 text-sm" data-mods-settings>
-      <div className="flex items-center justify-between gap-3">
+    <section className="w-full border-b p-4 space-y-3 text-sm" data-mods-settings>
+      <div className="space-y-3">
         <div>
           <div className="font-medium">Function Mods</div>
           <p className="text-xs text-muted-foreground">
-            这里管理已安装插件提供的函数扩展运行能力。Plugin 负责安装、更新和启停；Function Mods
-            负责事件、命令、工具和交互能力。安装插件请进入“插件”，授权后再在这里控制项目级运行状态。
+            上传 ZIP 或选择本地文件夹安装 Mods 插件，在这里管理授权、运行状态和卸载。
+            安装不会自动开启 Mods；需要在项目中授权后使用。同名同作者插件会更新。
           </p>
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={busy}
-          onClick={() =>
-            void run(async () => {
-              await window.api.mods.installExamples()
-              useAppStore.getState().bumpPluginVersion()
-            })
-          }
-        >
-          安装示范 Mods
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <input
+            ref={uploadInput}
+            type="file"
+            accept=".zip"
+            aria-label="选择 Mods ZIP 文件"
+            className="hidden"
+            disabled={busy}
+            onChange={(event) => {
+              const file = event.target.files?.[0]
+              event.target.value = ""
+              if (!file) return
+              void run(async () => {
+                if (!file.name.toLowerCase().endsWith(".zip")) throw new Error("仅支持 .zip 文件")
+                const result = await window.api.plugins.install(
+                  await file.arrayBuffer(),
+                  file.name,
+                  "local",
+                  undefined,
+                  true
+                )
+                if (!result.success) throw new Error(result.error || "安装失败")
+                useAppStore.getState().bumpPluginVersion()
+                setNotice(
+                  `已安装 ${result.pluginName ?? "Mods 插件"}。安装未改变运行开关，请在项目中检查授权状态。`
+                )
+              })
+            }}
+          />
+          <Button size="sm" disabled={busy} onClick={() => uploadInput.current?.click()}>
+            上传 Mods（ZIP）
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                const result = await window.api.plugins.installFromDir(true)
+                if (!result.success) {
+                  if (result.error === "已取消") return
+                  throw new Error(result.error || "安装失败")
+                }
+                useAppStore.getState().bumpPluginVersion()
+                setNotice(
+                  `已安装 ${result.pluginName ?? "Mods 插件"}。安装未改变运行开关，请在项目中检查授权状态。`
+                )
+              })
+            }
+          >
+            从文件夹安装
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                await window.api.mods.installExamples()
+                useAppStore.getState().bumpPluginVersion()
+              })
+            }
+          >
+            安装示范 Mods
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          请选择包含插件清单、模块声明和源码的完整插件包；不能直接上传单个脚本。
+        </p>
+        {notice && (
+          <p role="status" className="text-sm text-muted-foreground">
+            {notice}
+          </p>
+        )}
       </div>
       <div className="rounded border p-3 space-y-1">
         <label className="flex items-center gap-2 font-medium">
@@ -202,7 +276,11 @@ function UnlockedModsPanel({ threadId }: { threadId: string | null }): React.JSX
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {!threadId && <p className="text-muted-foreground">打开项目会话后配置权限。</p>}
+      {!status && (
+        <p className="text-muted-foreground">
+          为当前会话选择项目目录后配置权限；安装和卸载无需项目目录。
+        </p>
+      )}
       {error && !deleteTarget && (
         <p role="alert" className="text-destructive break-all">
           {error}

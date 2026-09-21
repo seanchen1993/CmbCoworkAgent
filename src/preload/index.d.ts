@@ -2183,9 +2183,10 @@ interface CustomAPI {
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      requireMods?: boolean
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
-    installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
+    installFromDir: (requireMods?: boolean) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (
       id: string,
       options?: { version?: string | null }

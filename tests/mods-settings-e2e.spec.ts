@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
 import { _electron, type ElectronApplication, type Page } from "playwright"
+import AdmZip from "adm-zip"
 
 const root = resolve(__dirname, "..")
 const localRequire = createRequire(join(root, "package.json"))
@@ -93,6 +94,8 @@ async function main() {
     assert.equal(await page!.evaluate(() => window.api.mods.functionUnlocked()), false)
     assert(await page!.getByRole("checkbox", { name: "启用 Mods 功能（应用级）" }).isDisabled())
     assert(await page!.getByRole("button", { name: "安装示范 Mods" }).isDisabled())
+    assert(await page!.getByRole("button", { name: "上传 Mods（ZIP）" }).isDisabled())
+    assert(await page!.getByRole("button", { name: "从文件夹安装" }).isDisabled())
     assert.equal(await page!.locator("[data-installed-mods]").count(), 0)
     await page!.screenshot({ path: join(artifacts, "locked.png") })
     await assert.rejects(
@@ -112,8 +115,83 @@ async function main() {
     await page!.getByRole("button", { name: "解锁设置" }).click()
     await page!.locator("[data-installed-mods]").waitFor()
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
-    await page!.getByRole("button", { name: "安装示范 Mods" }).click()
     const getPlugins = () => page!.evaluate(() => window.api.plugins.list())
+    const input = page!.getByLabel("选择 Mods ZIP 文件")
+    await input.setInputFiles({
+      name: "broken.zip",
+      mimeType: "application/zip",
+      buffer: Buffer.from("broken")
+    })
+    await page!.getByRole("alert").waitFor()
+    assert.equal((await getPlugins()).length, 0)
+    const ordinary = new AdmZip()
+    ordinary.addFile("plugin.json", Buffer.from(JSON.stringify({ name: "ordinary-skill" })))
+    ordinary.addFile("skills/sample/SKILL.md", Buffer.from("# Sample"))
+    await input.setInputFiles({
+      name: "ordinary.zip",
+      mimeType: "application/zip",
+      buffer: ordinary.toBuffer()
+    })
+    await page!
+      .getByText("未检测到 Mods 模块，请选择包含 Mods 的插件包。普通插件请在“插件”页面安装。", {
+        exact: true
+      })
+      .waitFor()
+    assert.equal((await getPlugins()).length, 0)
+    const zip = new AdmZip()
+    zip.addLocalFolder(join(root, "resources/mods/function-commands"))
+    const upload = {
+      name: "function-commands.zip",
+      mimeType: "application/zip",
+      buffer: zip.toBuffer()
+    }
+    await input.setInputFiles(upload)
+    await page!.getByRole("status").waitFor()
+    const first = (await getPlugins())[0]
+    assert(first && first.name === "function-commands")
+    await input.setInputFiles(upload)
+    await page!.getByRole("status").waitFor()
+    assert.equal((await getPlugins()).length, 1)
+    assert.equal((await getPlugins())[0].id, first.id)
+    pass(
+      "ZIP upload rejects corrupt/non-Mod packages, installs and updates a Mod without duplicates"
+    )
+    await app!.evaluate(({ dialog }) => {
+      dialog.showOpenDialog = (async () => ({
+        canceled: true,
+        filePaths: []
+      })) as typeof dialog.showOpenDialog
+    })
+    await page!.getByRole("button", { name: "从文件夹安装" }).click()
+    await page!.waitForFunction(() => {
+      const button = [...document.querySelectorAll("button")].find(
+        (b) => b.textContent === "从文件夹安装"
+      )
+      return button && !button.disabled
+    })
+    assert.equal((await getPlugins()).length, 1)
+    await app!.evaluate(
+      ({ dialog }, path) => {
+        dialog.showOpenDialog = (async () => ({
+          canceled: false,
+          filePaths: [path]
+        })) as typeof dialog.showOpenDialog
+      },
+      join(root, "resources/mods/project-quality")
+    )
+    await page!.getByRole("button", { name: "从文件夹安装" }).click()
+    await page!.getByRole("status").waitFor()
+    assert.equal((await getPlugins()).length, 2)
+    assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
+    await page!.waitForFunction(() => {
+      const button = [...document.querySelectorAll("button")].find(
+        (b) => b.textContent === "从文件夹安装"
+      )
+      return button && !button.disabled
+    })
+    assert.equal(await page!.getByRole("alert").count(), 0)
+    await page!.screenshot({ path: join(artifacts, "upload-installed.png") })
+    pass("folder installation and cancel work while Mods remain off")
     await page!.locator("[data-installed-mod-id]").first().waitFor()
     const plugins = await getPlugins()
     const plugin = plugins.find((p) => p.name === "function-commands")!

@@ -39,9 +39,17 @@ export function ModsSettingsGate({ children }: { children: ReactNode }): React.J
           <input type="checkbox" checked={enabled} readOnly />
           启用 Mods 功能（应用级）
         </label>
-        <Button variant="outline" size="sm" disabled>
-          安装示范 Mods
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" disabled>
+            上传 Mods（ZIP）
+          </Button>
+          <Button variant="outline" size="sm" disabled>
+            从文件夹安装
+          </Button>
+          <Button variant="outline" size="sm" disabled>
+            安装示范 Mods
+          </Button>
+        </div>
         <p className="text-muted-foreground">项目授权与已安装 Mods 管理在解锁后可用。</p>
       </fieldset>
       <form
