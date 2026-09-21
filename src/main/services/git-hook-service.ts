@@ -768,25 +768,23 @@ function getRemoteUrl(gitRoot) {
   }
 }
 
-function getCommitTimeMs(gitRoot, sha) {
+// Committer date AND line counts in ONE call. This runs inside post-commit, so
+// the user is waiting on it — \`--format=%ct\` prints the timestamp on the first
+// line and the numstat rows follow, which saves a whole git spawn (~9ms) over
+// asking separately. Line counts cover the WHOLE commit, not just the code
+// files we snapshot, because they feed the event's filesChanged/insertions/
+// deletions and must match what \`git show --numstat\` reports.
+function getCommitMeta(gitRoot, sha) {
   try {
-    const seconds = Number(runGit(["show", "-s", "--format=%ct", sha], { cwd: gitRoot }).trim())
-    return Number.isFinite(seconds) ? seconds * 1000 : undefined
-  } catch {
-    return undefined
-  }
-}
-
-// Line counts over the WHOLE commit, not just the code files we snapshot: this
-// feeds the event's filesChanged/insertions/deletions, which must match what
-// \`git show --numstat\` reports for the commit.
-function getCommitStats(gitRoot, sha) {
-  try {
-    const output = runGit(["show", "--numstat", "--format=", sha], { cwd: gitRoot })
+    const output = runGit(["show", "--format=%ct", "--numstat", sha], { cwd: gitRoot })
+    const lines = output.split("\\n")
+    const seconds = Number((lines[0] || "").trim())
     let fileCount = 0
     let additions = 0
     let deletions = 0
-    for (const line of output.split("\\n")) {
+    for (const line of lines) {
+      // The timestamp and the blank separator have fewer than 3 fields, so the
+      // same guard that skips malformed rows skips them too.
       const parts = line.trim().split("\\t")
       if (parts.length < 3) continue
       fileCount += 1
@@ -795,7 +793,12 @@ function getCommitStats(gitRoot, sha) {
       if (Number.isFinite(added)) additions += added
       if (Number.isFinite(deleted)) deletions += deleted
     }
-    return { filesChanged: fileCount, insertions: additions, deletions: deletions }
+    return {
+      commitTimeMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined,
+      filesChanged: fileCount,
+      insertions: additions,
+      deletions: deletions
+    }
   } catch {
     return undefined
   }
@@ -918,13 +921,12 @@ function promotePostCommit() {
   // plumbing calls next to the rev-parse we already run.
   meta.gitCommonDir = meta.gitCommonDir || getGitCommonDir(gitRoot)
   meta.remoteUrl = getRemoteUrl(gitRoot)
-  const commitTimeMs = getCommitTimeMs(gitRoot, meta.commitSha)
-  if (commitTimeMs !== undefined) meta.commitTimeMs = commitTimeMs
-  const stats = getCommitStats(gitRoot, meta.commitSha)
-  if (stats) {
-    meta.filesChanged = stats.filesChanged
-    meta.insertions = stats.insertions
-    meta.deletions = stats.deletions
+  const commitMeta = getCommitMeta(gitRoot, meta.commitSha)
+  if (commitMeta) {
+    if (commitMeta.commitTimeMs !== undefined) meta.commitTimeMs = commitMeta.commitTimeMs
+    meta.filesChanged = commitMeta.filesChanged
+    meta.insertions = commitMeta.insertions
+    meta.deletions = commitMeta.deletions
   }
   fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8")
   ensureDir(path.dirname(readyDir))
