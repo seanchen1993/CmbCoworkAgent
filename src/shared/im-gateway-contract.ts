@@ -282,9 +282,9 @@ export function assertRemoteImReplyV1(value: unknown): asserts value is RemoteIm
  * Zhaohu custom-card interaction (V1).
  *
  * A card is an *enhancement* over the text + short-code channel, never a
- * replacement: an approval or question is always published as text first, and
- * a card that fails to render or send leaves that text as the working answer
- * path. Nothing here may become the only way to answer a gate.
+ * replacement: callers publish the card first and retain text plus short code
+ * as the fallback when the card is not accepted. Nothing here may become the
+ * only way to answer a gate.
  *
  * The card body is the platform's own component array. The gateway forwards it
  * verbatim, so the desktop owns every rendering decision and a new component
@@ -296,13 +296,18 @@ export const IM_CARD_MAX_COMPONENTS = 30
 /**
  * Interaction kinds the desktop can express as a card.
  *
- * `target_bind` is the odd one: approval and user_input each answer a run that
- * is blocked waiting, while this one renders a numbered list the reader asked
+ * Most kinds answer a run or project notification that is blocked waiting.
+ * `target_bind` is the odd one: it renders a numbered list the reader asked
  * for. It is still a card and not a menu — it performs exactly the one
  * `/绑定 <编号>` a typed message would, through the same selection context, and
  * is replaced by its outcome the moment either path binds.
  */
-export type ImCardInteractionKind = "approval" | "user_input" | "target_bind"
+export type ImCardInteractionKind =
+  | "approval"
+  | "user_input"
+  | "target_bind"
+  | "human_gate"
+  | "biz_retry"
 
 export interface RemoteImCardSendV1 {
   schemaVersion: typeof IM_GATEWAY_SCHEMA_VERSION
@@ -385,7 +390,9 @@ function requireComponentArray(
 const CARD_INTERACTION_KINDS = new Set<ImCardInteractionKind>([
   "approval",
   "user_input",
-  "target_bind"
+  "target_bind",
+  "human_gate",
+  "biz_retry"
 ])
 
 export function assertRemoteImCardSendV1(value: unknown): asserts value is RemoteImCardSendV1 {

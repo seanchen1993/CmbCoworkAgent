@@ -23,9 +23,14 @@ import {
   type RemoteImCardUpdateV1
 } from "../src/shared/im-gateway-contract"
 import {
+  BIZ_RETRY_CHOICE_KEY,
+  BIZ_RETRY_MESSAGE_KEY,
   buildAnsweredCard,
   buildApprovalCard,
+  buildBizRetryCard,
   buildExpiredCard,
+  buildHarnessDecisionResolvedCard,
+  buildHumanGateCard,
   buildQuestionCard,
   buildResolvedCard,
   buildTargetBindCard,
@@ -407,8 +412,7 @@ async function testAnUnsendableCardLeavesTheShortCodeWorking(): Promise<void> {
     // after it — which is the whole point of waiting for the outbox here rather
     // than reading it the moment the send is observed.
     await waitFor(
-      () =>
-        context.events.listOutbox().some((row) => row.deliveryId === "approval-request:req-1"),
+      () => context.events.listOutbox().some((row) => row.deliveryId === "approval-request:req-1"),
       "the fallback notice"
     )
     // The gate is still answerable: no interaction is retained, and the refused
@@ -581,6 +585,42 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
         outcome: "已回答"
       })
     ],
+    [
+      "human gate",
+      buildHumanGateCard({
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        message: "请检查阶段产物",
+        tag: "tag"
+      })
+    ],
+    [
+      "biz retry",
+      buildBizRetryCard({
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        reason: "业务状态未推进",
+        stageName: "开发",
+        stageStatus: "in_progress",
+        contextUsage: "42%",
+        assistantTail: "等待用户决定",
+        nextActionText: "可创建新会话继续",
+        tag: "tag"
+      })
+    ],
+    [
+      "harness resolved",
+      buildHarnessDecisionResolvedCard({
+        kind: "human_gate",
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        outcome: "已批准（APP）",
+        outcomeStyle: "approved"
+      })
+    ],
     ["expired", buildExpiredCard("approval", "会话：你好")]
   ]
 
@@ -589,7 +629,10 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
     assert.ok(kvComponents.length > 0, `${name} card is expected to carry a kv component`)
     for (const kv of kvComponents) {
       const rows = kv.list as ReadonlyArray<{ title: unknown; value: unknown }>
-      assert.ok(Array.isArray(rows) && rows.length > 0, `${name}: kv.list must be a non-empty array`)
+      assert.ok(
+        Array.isArray(rows) && rows.length > 0,
+        `${name}: kv.list must be a non-empty array`
+      )
       for (const row of rows) {
         assert.equal(typeof row.title, "string", `${name}: kv row title must be a string`)
         // The client puts nothing between key and value, so the key carries the
@@ -737,6 +780,44 @@ function testEveryBuiltCardSatisfiesTheContract(): void {
     }
   ])
 
+  for (const [kind, content] of [
+    [
+      "human_gate",
+      buildHumanGateCard({
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        message: "请检查阶段产物",
+        tag: "h".repeat(32)
+      })
+    ],
+    [
+      "biz_retry",
+      buildBizRetryCard({
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        reason: "业务状态未推进",
+        stageName: "开发",
+        stageStatus: "in_progress",
+        contextUsage: "42%",
+        assistantTail: "等待用户决定",
+        nextActionText: "可创建新会话继续",
+        tag: "i".repeat(32)
+      })
+    ]
+  ] as const) {
+    assertRemoteImCardSendV1({
+      schemaVersion: 1,
+      interactionId: `interaction-${kind}`,
+      conversationKey: ROUTE.conversationKey,
+      idempotencyKey: `idem-${kind}`,
+      tag: kind === "human_gate" ? "h".repeat(32) : "i".repeat(32),
+      kind,
+      content
+    })
+  }
+
   // Zhaohu 6.22 shows 30 controls, and the tool caps questions at 10 — two per
   // question, so the count is never the binding limit. Size is: 10 questions
   // with five fully-described options each is past the 15000-character cap.
@@ -750,7 +831,7 @@ function testEveryBuiltCardSatisfiesTheContract(): void {
           key: `q${index}`,
           header: "题".repeat(12),
           question: "问".repeat(500),
-          options: Array.from({ length: 5 }, (_ignored, option) => ({
+          options: Array.from({ length: 5 }, () => ({
             label: "选".repeat(80),
             description: "述".repeat(240)
           }))
@@ -760,6 +841,111 @@ function testEveryBuiltCardSatisfiesTheContract(): void {
     "the largest form the question tool can ask for must be refused locally, not sent"
   )
   console.log("PASS testEveryBuiltCardSatisfiesTheContract")
+}
+
+async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<void> {
+  const interactions = new ImCardInteractionStore(
+    (() => {
+      let sequence = 0
+      return () => `project-interaction-${++sequence}`
+    })()
+  )
+  const gateway = new RecordingGateway()
+  const cards = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions,
+    isThreadLive: () => true,
+    warn: () => undefined
+  })
+  const humanCalls: unknown[] = []
+  const bizCalls: unknown[] = []
+  const human = interactions.register({
+    kind: "human_gate",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "gate-1",
+    targetLabel: "特性：快捷支付"
+  })
+  const retry = interactions.register({
+    kind: "biz_retry",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "retry-1",
+    targetLabel: "特性：快捷支付"
+  })
+  const router = new ImCardReceiptRouter({
+    cards,
+    approvals: { resolveCardClick: async () => "unused" },
+    userInput: { resolveCardAnswers: async () => "unused" },
+    humanGates: {
+      resolveCardDecision: async (input) => {
+        humanCalls.push(input)
+        return "Human Gate 已批准。"
+      }
+    },
+    managedBizRetries: {
+      resolveCardDecision: async (input) => {
+        bizCalls.push(input)
+        return "已在当前托管会话继续执行。"
+      }
+    },
+    events: { enqueueProactiveReplies: async () => [] },
+    warn: () => undefined
+  })
+
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-human-gate",
+    interactionId: human.interactionId,
+    kind: "human_gate",
+    tag: `${human.tag}:approve`,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-biz-retry",
+    interactionId: retry.interactionId,
+    kind: "biz_retry",
+    tag: retry.tag,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [
+      { key: BIZ_RETRY_CHOICE_KEY, value: "continue" },
+      { key: BIZ_RETRY_MESSAGE_KEY, value: "继续修复测试" }
+    ],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-biz-retry-invalid-message",
+    interactionId: retry.interactionId,
+    kind: "biz_retry",
+    tag: retry.tag,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [
+      { key: BIZ_RETRY_CHOICE_KEY, value: "stop" },
+      { key: BIZ_RETRY_MESSAGE_KEY, value: "这条消息不能随停止操作提交" }
+    ],
+    occurredAt: new Date().toISOString()
+  })
+
+  assert.deepEqual(humanCalls, [{ notificationId: "gate-1", decision: "approve" }])
+  assert.deepEqual(bizCalls, [
+    {
+      notificationId: "retry-1",
+      choice: "continue",
+      message: "继续修复测试",
+      principalId: ROUTE.principalId,
+      conversationKey: ROUTE.conversationKey
+    }
+  ])
+  console.log("PASS testProjectDecisionReceiptsUseTheirExistingAdapters")
 }
 
 /**
@@ -1144,6 +1330,7 @@ async function main(): Promise<void> {
   testTheTargetListOffersExactlyThePrintedNumbers()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
   testARefusedSubmitLeavesTheFormUsable()
+  await testProjectDecisionReceiptsUseTheirExistingAdapters()
   await testTheCardCarriesTheSameGateAsTheShortCode()
   await testASecondClickFindsTheCodeAlreadySpent()
   await testAClickFromAnotherPrincipalIsRefused()

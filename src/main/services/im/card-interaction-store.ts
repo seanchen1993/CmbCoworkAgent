@@ -36,7 +36,7 @@ export interface ImCardInteraction {
   threadId: string | null
   principalId: string
   conversationKey: string
-  /** Approval request id, or the user-input session code. */
+  /** Stable identity of the request or notification this card answers. */
   requestRef: string
   targetLabel: string
   /** Monotonic; update-custom-card has no ordering guarantee of its own. */
