@@ -53,6 +53,21 @@ vi.mock("./code-adoption-push-updater", () => ({
 vi.mock("./event-reporter", () => ({
   trackEvent: vi.fn()
 }))
+// repos.json 的写入计数器：一轮扫描该只写一次，与仓库数无关。
+const reposWrites = { count: 0, bytes: 0 }
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>()
+  return {
+    ...actual,
+    writeFile: async (path: unknown, data: unknown, ...rest: unknown[]) => {
+      if (String(path).endsWith("repos.json")) {
+        reposWrites.count += 1
+        reposWrites.bytes += Buffer.byteLength(String(data))
+      }
+      return (actual.writeFile as (...a: unknown[]) => Promise<void>)(path, data, ...rest)
+    }
+  }
+})
 
 import {
   getCommitMeasurementStatus,
@@ -501,9 +516,11 @@ describe("registered repo housekeeping", () => {
   it("keeps a registration whose directory is gone while its bucket still has work", async () => {
     const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-gone-kept-")), "removed")
     const key = createHash("sha1").update(gone.toLowerCase()).digest("hex")
-    // A bucket that exists makes the sweep "synced", not "unavailable" — the
-    // entry must survive so the snapshot inside still gets a chance.
-    mkdirSync(join(eventsDir, key, "ready"), { recursive: true })
+    // An UNCONSUMED snapshot keeps the entry alive so it still gets its chance.
+    // An empty `ready` directory would not: the test is "is there work", not
+    // "does the bucket exist", precisely because a consumed bucket keeps its
+    // directories forever and could never be retired.
+    mkdirSync(join(eventsDir, key, "ready", "snap-1"), { recursive: true })
     await register(gone)
 
     await syncRegisteredGitHookEvents()
@@ -647,5 +664,87 @@ describe("hook helper writes", () => {
     await installGitHooks(repoRoot)
 
     expect(readFileSync(helperPath, "utf-8")).toBe(current)
+  })
+})
+
+/**
+ * 注册表是一整个文件读改写。以前每个仓库同步完都单独标记一次，N 个仓库就是 N 次
+ * 全量读 + N 次全量写，而文件大小本身也随 N 增长——脚本化流程每跑一次注册一个
+ * 临时 worktree，N 正好是会涨的那个数。
+ */
+describe("注册表扫描的写放大", () => {
+  it("一轮扫描只写一次 repos.json，与仓库数无关", async () => {
+    const reposPath = join(openworkDir, "git-hooks", "repos.json")
+    const repos = Array.from({ length: 12 }, () => makeRepo().repoRoot)
+    mkdirSync(join(openworkDir, "git-hooks"), { recursive: true })
+    writeFileSync(
+      reposPath,
+      JSON.stringify(
+        repos.map((gitRoot) => ({
+          gitRoot,
+          enabled: true,
+          registeredAt: "2026-09-21 00:00:00",
+          updatedAt: "2026-09-21 00:00:00"
+        }))
+      )
+    )
+
+    reposWrites.count = 0
+    reposWrites.bytes = 0
+    await syncRegisteredGitHookEvents()
+
+    expect(reposWrites.count).toBe(1)
+    // 每条都记上了同步时间，说明批量写没有漏掉任何一个仓库。
+    const saved = JSON.parse(await readFile(reposPath, "utf-8")) as Array<{
+      gitRoot: string
+      lastSyncedAt?: string
+    }>
+    expect(saved).toHaveLength(repos.length)
+    expect(saved.every((repo) => !!repo.lastSyncedAt)).toBe(true)
+  })
+
+  it("目录已删且桶里没有待处理事件的注册会被清掉", async () => {
+    const reposPath = join(openworkDir, "git-hooks", "repos.json")
+    const alive = makeRepo().repoRoot
+    const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-consumed-")), "removed")
+    // 消费完成的桶：只剩归档和去重账本，ready / push-intents 都是空的。
+    const key = createHash("sha1").update(gone.toLowerCase()).digest("hex")
+    mkdirSync(join(eventsDir, key, "processed", "snap-1"), { recursive: true })
+    writeFileSync(join(eventsDir, key, "processed-commits.json"), JSON.stringify(["a".repeat(40)]))
+    writeFileSync(
+      reposPath,
+      JSON.stringify(
+        [alive, gone].map((gitRoot) => ({
+          gitRoot,
+          enabled: true,
+          registeredAt: "x",
+          updatedAt: "x"
+        }))
+      )
+    )
+
+    await syncRegisteredGitHookEvents()
+
+    const saved = JSON.parse(await readFile(reposPath, "utf-8")) as Array<{ gitRoot: string }>
+    const roots = saved.map((repo) => repo.gitRoot)
+    expect(roots).toContain(alive)
+    // 以前这里判的是「事件目录存不存在」，而 processed/ 会永远留着，于是永远清不掉。
+    expect(roots).not.toContain(gone)
+  })
+
+  it("桶里还有 ready 快照时不清，哪怕目录已经删了", async () => {
+    const reposPath = join(openworkDir, "git-hooks", "repos.json")
+    const gone = join(mkdtempSync(join(tmpdir(), "cmbdevclaw-unconsumed-")), "removed")
+    const key = createHash("sha1").update(gone.toLowerCase()).digest("hex")
+    mkdirSync(join(eventsDir, key, "ready", "snap-1"), { recursive: true })
+    writeFileSync(
+      reposPath,
+      JSON.stringify([{ gitRoot: gone, enabled: true, registeredAt: "x", updatedAt: "x" }])
+    )
+
+    await syncRegisteredGitHookEvents()
+
+    const saved = JSON.parse(await readFile(reposPath, "utf-8")) as Array<{ gitRoot: string }>
+    expect(saved.map((repo) => repo.gitRoot)).toContain(gone)
   })
 })
