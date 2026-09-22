@@ -26,6 +26,8 @@ export const SESSION_CAPABILITIES = [
   "tool.check",
   "mcp.call",
   "model.complete",
+  "model.fork",
+  "model.classify",
   "turn.abort"
 ]
 import type { FunctionStateAccess } from "./state-store"
@@ -817,6 +819,31 @@ export class FunctionSession {
       if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
       if (typeof result.deny === "string")
         throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
+      return result.value
+    }
+    if (method === "model.fork" || method === "model.classify") {
+      if (args.length !== 1 || !isModObject(args[0]))
+        throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
+      const result = await this.dispatch(
+        method,
+        args[0],
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: async (input, signal) => {
+            this.assertLive(plugin)
+            if (!this.host.capability) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
+            const value = await this.host.capability(plugin, method, [input], signal)
+            if (value === undefined) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
+            return value
+          }
+        },
+        turnHeld
+      )
+      if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof result.deny === "string") throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
       return result.value
     }
     if (method === "model.complete") {
