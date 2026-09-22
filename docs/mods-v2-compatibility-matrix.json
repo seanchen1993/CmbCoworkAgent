@@ -113,7 +113,7 @@
       "eight active Client VMs per session; sixteen timers and 256 controls per Client",
       "minimum timer interval 16ms; busy ticks coalesce",
       "desktop cell dimensions estimated at 8x24 pixels",
-      "upstream descriptor conformance verified; full upstream event lifecycle comparison pending"
+      "upstream descriptor conformance verified; desktop Client focus and scroll lifecycle are adapted and covered by host/session/Electron tests; Pane and remaining upstream lifecycle details remain partial"
     ],
     "unitPrototypeOnly": [
       "turn.step",
@@ -271,7 +271,7 @@
     "sdkMethods": 63,
     "renderComponents": 14,
     "desktopElements": 9,
-    "clientSurfaceMembers": 9,
+    "clientSurfaceMembers": 11,
     "globalNames": 14
   },
   "engineEvents": [
@@ -283,8 +283,8 @@
     {"name":"ui.input","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":[]},
     {"name":"ui.select","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":[]},
     {"name":"ui.message","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D09"]},
-    {"name":"ui.scroll","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"ui.focus","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
+    {"name":"ui.scroll","target":"desktop-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client wheel events are normalized to bounded delta and scroll offsets; Pane/global scroll remains outside this adapter."},
+    {"name":"ui.focus","target":"desktop-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client root focus transitions are normalized to focused boolean events; nested focus and Pane focus remain partial."},
     {"name":"agent.offer","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A04","A10"],"differences":["D01","D05"]},
     {"name":"agent.spawn","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A04","A10"],"differences":["D01","D05"]},
     {"name":"prompt.submit","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},
@@ -399,7 +399,7 @@
   ],
   "sdk": [
     {"namespace":"plugin","members":[{"name":"plugin.name","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A03"],"differences":["D06"]},{"name":"plugin.root","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A03"],"differences":["D06"]}]},
-    {"namespace":"ui","members":[{"name":"ui.notice","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.invalidate","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.blit","target":"explicitly-unsupported","implementationStatus":"unsupported","batch":"B5","acceptance":["A01","A08"],"differences":["D03"],"note":"Terminal Raster is not a desktop surface capability; reject with a named error."},{"name":"ui.resolve","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.log","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.ask","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.toast","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.status","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.open","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.close","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.scroll","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.focus","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]}]},
+    {"namespace":"ui","members":[{"name":"ui.notice","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.invalidate","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.blit","target":"explicitly-unsupported","implementationStatus":"unsupported","batch":"B5","acceptance":["A01","A08"],"differences":["D03"],"note":"Terminal Raster is not a desktop surface capability; reject with a named error."},{"name":"ui.resolve","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.log","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.ask","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.toast","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.status","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.open","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.close","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.scroll","target":"desktop-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client wheel events are normalized to bounded delta and scroll offsets; Pane/global scroll remains outside this adapter."},{"name":"ui.focus","target":"desktop-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client root focus transitions are normalized to focused boolean events; nested focus and Pane focus remain partial."}]},
     {"namespace":"model","members":[{"name":"model.complete","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"]},{"name":"model.fork","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"]},{"name":"model.classify","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"]}]},
     {"namespace":"audio","members":[{"name":"audio.play","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A05","A08"],"differences":["D01","D03"]},{"name":"audio.speak","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A05","A08"],"differences":["D01","D03"]}]},
     {"namespace":"mcp","members":[{"name":"mcp.call","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02"]}]},
@@ -454,7 +454,9 @@
     {"name":"every","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
     {"name":"onPointer","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
     {"name":"onKey","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"post","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]}
+    {"name":"post","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
+    {"name":"onFocus","target":"desktop-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A02","A08"],"differences":["D09"],"note":"Host routes root focus transitions through ui.focus with bounded lifecycle data."},
+    {"name":"onScroll","target":"desktop-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A02","A08"],"differences":["D09"],"note":"Host routes wheel lifecycle data through ui.scroll with bounded deltas and offsets."}
   ],
   "globals": [
     {"name":"h","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A01","A02"],"differences":["D10"]},

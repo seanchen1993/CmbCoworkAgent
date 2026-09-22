@@ -38,7 +38,7 @@ export interface FunctionClientAction {
   pane: string
   instance: string
   intentId: string
-  kind: "press" | "change" | "submit" | "select" | "key" | "pointer" | "resize"
+  kind: "press" | "change" | "submit" | "select" | "key" | "pointer" | "resize" | "focus" | "scroll"
   handle?: number
   value?: ModJson
 }

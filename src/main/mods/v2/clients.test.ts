@@ -162,6 +162,18 @@ it("supports size, key, pointer, input, select and clock updates, then releases 
   expect(content(fresh.tree)).toContain("count:0")
 })
 
+it("routes focus and scroll lifecycle events through the host and guest surface", async () => {
+  const f = await fixture(`var __cmbSurfaceMod={default(props,s){
+    if(s.state===undefined){s.setState({focus:"none",scroll:0});s.onFocus(e=>s.setState({...s.state,focus:e.focused?"focused":"blurred"}));s.onScroll(e=>s.setState({...s.state,scroll:e.deltaY||0}))}
+    return s.elements.Text({children:"focus:"+s.state.focus+" scroll:"+s.state.scroll});
+  }}`)
+  let { client } = await f.snapshot()
+  await f.session.clients.act(action(client, "focus", { focused: true }))
+  client = (await f.snapshot()).client
+  await f.session.clients.act(action(client, "scroll", { deltaY: 4, deltaX: 0, top: 4, left: 0 }))
+  expect(content((await f.snapshot()).client.tree)).toContain("focus:focused scroll:4")
+})
+
 it("keeps redraws and timers alive after a click ends without retaining its write authority", async () => {
   const scopes: Array<{ userInitiated: boolean; leased: boolean; immediate: boolean }> = []
   const f = await fixture(undefined, async (value) => {

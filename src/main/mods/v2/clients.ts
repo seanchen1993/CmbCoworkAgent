@@ -384,7 +384,17 @@ export class FunctionClients {
       !/^[a-f0-9-]{36}$/.test(action.instance) ||
       typeof action.intentId !== "string" ||
       !/^[\w-]{16,100}$/.test(action.intentId) ||
-      !["press", "change", "submit", "select", "key", "pointer", "resize"].includes(action.kind)
+      ![
+        "press",
+        "change",
+        "submit",
+        "select",
+        "key",
+        "pointer",
+        "resize",
+        "focus",
+        "scroll"
+      ].includes(action.kind)
     )
       return Promise.reject(new ModFunctionError("MODS_CLIENT_ACTION"))
     const instance = [...this.instances.values()].find(
@@ -421,6 +431,44 @@ export class FunctionClients {
         await this.update(instance, {
           kind: "render"
         })
+        return
+      }
+      if (action.kind === "focus" || action.kind === "scroll") {
+        const value = action.value
+        if (!isModObject(value)) throw new ModFunctionError("MODS_CLIENT_ACTION")
+        if (action.kind === "focus") {
+          if (
+            typeof value.focused !== "boolean" ||
+            Object.keys(value).some((key) => key !== "focused")
+          )
+            throw new ModFunctionError("MODS_CLIENT_ACTION")
+        } else if (
+          ![value.deltaX, value.deltaY, value.top, value.left].every(
+            (number) =>
+              typeof number === "number" && Number.isFinite(number) && Math.abs(number) <= 100000
+          ) ||
+          Object.keys(value).some((key) => !["deltaX", "deltaY", "top", "left"].includes(key))
+        )
+          throw new ModFunctionError("MODS_CLIENT_ACTION")
+        const event = action.kind === "focus" ? "ui.focus" : "ui.scroll"
+        await this.host.control(
+          event,
+          {
+            surface: "desktop",
+            component: "Client",
+            requestId: instance.requestId,
+            plugin: instance.snapshot.plugin,
+            element: instance.snapshot.element,
+            ...(action.kind === "focus" ? { focused: value.focused } : { value })
+          },
+          async (input) => {
+            this.assert(instance)
+            const nextValue = action.kind === "focus" ? { focused: input.focused } : input.value
+            await this.update(instance, { kind: action.kind, value: nextValue })
+            return { element: instance.snapshot.element, value: nextValue }
+          },
+          instance.controller.signal
+        )
         return
       }
       if (action.kind === "key" || action.kind === "pointer") {

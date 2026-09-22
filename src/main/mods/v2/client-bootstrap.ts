@@ -5,7 +5,7 @@ export const CLIENT_BOOTSTRAP = String.raw`
   const callbacks=new Map(), timers=new Map();
   let previous=new Map();
   let sequence=0, owner, state, props, columns=0, rows=0, dirty=false, message;
-  let onKey, onPointer;
+  let onKey, onPointer, onFocus, onScroll;
   function children(value,depth=0) {
     if(depth>24)throw Error("MODS_UI_DEPTH");
     const out=[];
@@ -57,6 +57,8 @@ export const CLIENT_BOOTSTRAP = String.raw`
     },
     onKey(fn){if(typeof fn!=="function")throw Error("MODS_CLIENT_KEY");onKey=fn;return()=>{if(onKey===fn)onKey=undefined;}},
     onPointer(fn){if(typeof fn!=="function")throw Error("MODS_CLIENT_POINTER");onPointer=fn;return()=>{if(onPointer===fn)onPointer=undefined;}},
+    onFocus(fn){if(typeof fn!=="function")throw Error("MODS_CLIENT_FOCUS");onFocus=fn;return()=>{if(onFocus===fn)onFocus=undefined;}},
+    onScroll(fn){if(typeof fn!=="function")throw Error("MODS_CLIENT_SCROLL");onScroll=fn;return()=>{if(onScroll===fn)onScroll=undefined;}},
     post(data){message=data;}
   });
   const sync=value=>{if(value&&typeof value.then==="function")throw Error("MODS_CLIENT_ASYNC");};
@@ -73,6 +75,8 @@ export const CLIENT_BOOTSTRAP = String.raw`
         if(fn)sync(e.callback==="onPress"?fn(e.event):fn(e.event.value,e.event));
       } else if(e.kind==="key") {if(e.value.key!=="escape")sync(onKey?.(e.value));}
       else if(e.kind==="pointer")sync(onPointer?.(e.value));
+      else if(e.kind==="focus")sync(onFocus?.(e.value));
+      else if(e.kind==="scroll")sync(onScroll?.(e.value));
       else if(e.kind==="tick")sync(timers.get(e.handle)?.fn());
       else if(e.kind!=="frame")throw Error("MODS_CLIENT_EVENT");
       previous=new Map([...callbacks].map(([handle,record])=>[record.signature,handle]));

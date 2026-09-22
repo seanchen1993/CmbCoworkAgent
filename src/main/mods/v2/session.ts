@@ -519,7 +519,7 @@ export class FunctionSession {
       event === "tool.call" ||
       event === "model.complete" ||
       event === "mcp.call" ||
-      ["ui.press", "ui.input", "ui.select", "ui.message"].includes(event)
+      ["ui.press", "ui.input", "ui.select", "ui.focus", "ui.scroll", "ui.message"].includes(event)
         ? { timeoutMs: 120000 }
         : {}),
       ...(presentation?.generation ? { uiGeneration: presentation.generation } : {}),
@@ -548,6 +548,27 @@ export class FunctionSession {
         if (
           (name === "ui.input" || name === "ui.select") &&
           (typeof value.value !== "string" || value.value.length > 10000)
+        )
+          throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+        if (
+          name === "ui.focus" &&
+          (typeof value.focused !== "boolean" ||
+            Object.keys(value).some(
+              (key) =>
+                !["surface", "component", "requestId", "plugin", "element", "focused"].includes(key)
+            ))
+        )
+          throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+        if (
+          name === "ui.scroll" &&
+          (!isModObject(value.value) ||
+            Object.keys(value.value).some(
+              (key) => !["deltaX", "deltaY", "top", "left"].includes(key)
+            ) ||
+            [value.value.deltaX, value.value.deltaY, value.value.top, value.value.left].some(
+              (number) =>
+                typeof number !== "number" || !Number.isFinite(number) || Math.abs(number) > 100000
+            ))
         )
           throw new ModFunctionError("MODS_UI_ACTION_INVALID")
         if (name === "command.run" && (typeof value.args !== "string" || value.args.length > 32000))
@@ -584,9 +605,11 @@ export class FunctionSession {
         }
         if (!isModObject(value)) throw new ModFunctionError("MODS_EVENT_RESULT")
         if (
-          ["ui.press", "ui.input", "ui.select"].includes(name) &&
+          ["ui.press", "ui.input", "ui.select", "ui.focus", "ui.scroll"].includes(name) &&
           (typeof value.element !== "string" ||
-            (name !== "ui.press" && typeof value.value !== "string"))
+            (["ui.input", "ui.select"].includes(name) &&
+              (typeof value.value !== "string" || value.value.length > 10000)) ||
+            (["ui.focus", "ui.scroll"].includes(name) && !Object.hasOwn(value, "value")))
         )
           throw new ModFunctionError("MODS_UI_ACTION_RESULT")
         if (name === "command.run" && value.text !== undefined && typeof value.text !== "string")

@@ -142,11 +142,22 @@ export function FunctionClient({
       data-function-client={snapshot.element}
       tabIndex={0}
       onFocus={(event) => {
+        if (event.target !== event.currentTarget) return
         if (
           event.relatedTarget instanceof HTMLElement &&
           !event.currentTarget.contains(event.relatedTarget)
         )
           previousFocus.current = event.relatedTarget
+        void send("focus", { focused: true }).catch(() => {})
+      }}
+      onBlur={(event) => {
+        if (event.target !== event.currentTarget) return
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        )
+          return
+        void send("focus", { focused: false }).catch(() => {})
       }}
       className="min-w-0 rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
       style={{
@@ -159,6 +170,17 @@ export function FunctionClient({
       onPointerUp={(e) => pointer(e, "up")}
       onPointerEnter={(e) => pointer(e, "enter")}
       onPointerLeave={(e) => pointer(e, "leave")}
+      onWheel={(event) => {
+        if (snapshot.error) return
+        const clamp = (value: number): number =>
+          Number.isFinite(value) ? Math.max(-100000, Math.min(100000, value)) : 0
+        void send("scroll", {
+          deltaX: clamp(event.deltaX),
+          deltaY: clamp(event.deltaY),
+          top: clamp(event.currentTarget.scrollTop),
+          left: clamp(event.currentTarget.scrollLeft)
+        }).catch(() => {})
+      }}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.stopPropagation()
