@@ -492,6 +492,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       ),
     turnStep: (...args) => functions.turnStep(...args),
     offerAgent: (...args) => functions.offerAgent(...args),
+    classicEvent: (...args) => functions.classicEvent(...args),
     invalidate: (workspace) => functions.invalidate(workspace),
     invalidateAll: () => functions.invalidateAll(),
     closeThread: (threadId) => {

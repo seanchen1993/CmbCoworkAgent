@@ -46,3 +46,16 @@ it("rejects an agent.offer rewrite of pinned provider identity", async () => {
     await session.close()
   }
 })
+
+it("dispatches classic events through the same guest/session chain", async () => {
+  const { session } = await createSession(`var __cmbFunctionMod={register(on){
+    on("classic.PreToolUse", {toolName:"write_file"}, () => ({decision:"deny", reason:"read only"}))
+  }}`)
+  try {
+    await expect(session.classicEvent("classic.PreToolUse", {
+      toolName: "write_file", toolArgs: { path: "a.txt" }
+    })).resolves.toEqual({ decision: "deny", reason: "read only" })
+  } finally {
+    await session.close()
+  }
+})

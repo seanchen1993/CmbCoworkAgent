@@ -761,6 +761,30 @@ export class FunctionModsManager {
     return result
   }
 
+  async classicEvent(
+    workspace: string,
+    threadId: string,
+    event: string,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject> {
+    if (
+      !this.host.enabled(workspace) ||
+      this.sources().length === 0 ||
+      (!this.sessions.has(JSON.stringify([workspace, threadId])) &&
+        !(await this.status(workspace)).some((item) => item.state === "ready"))
+    )
+      return {}
+    const entry = await this.session(workspace, threadId)
+    if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    const safe = await this.host.publish(workspace, input, signal)
+    const result = await entry.session!.classicEvent(event, safe as ModObject, signal)
+    if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    return result
+  }
+
   async turnStart(
     workspace: string,
     threadId: string,

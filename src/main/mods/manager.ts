@@ -337,6 +337,13 @@ export class ModsManager {
       input: ModObject,
       signal: AbortSignal
     ): Promise<ModObject>
+    classicEvent?(
+      workspace: string,
+      threadId: string,
+      event: string,
+      input: ModObject,
+      signal: AbortSignal
+    ): Promise<ModObject>
   }
 
   attachFunctions(lifecycle: NonNullable<ModsManager["functionLifecycle"]>): void {
@@ -546,6 +553,17 @@ export class ModsManager {
     return (await this.functionLifecycle?.offerAgent?.(workspace, threadId, input, signal)) ?? {
       isOffered: true
     }
+  }
+
+  async classicEvent(
+    workspace: string,
+    threadId: string,
+    event: string,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject> {
+    if (!this.isEnabled(workspace)) return {}
+    return (await this.functionLifecycle?.classicEvent?.(workspace, threadId, event, input, signal)) ?? {}
   }
 
   isEnabled(workspace: string): boolean {

@@ -462,6 +462,28 @@ export class FunctionSession {
     return value
   }
 
+  async classicEvent(
+    event: string,
+    input: ModObject,
+    signal?: AbortSignal,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModJson> = async () => ({})
+  ): Promise<ModObject> {
+    await this.start()
+    if (!event.startsWith("classic.")) throw new ModFunctionError("MODS_CLASSIC_EVENT_INVALID")
+    const value = await this.dispatch(
+      event,
+      input,
+      signal,
+      undefined,
+      0,
+      undefined,
+      undefined,
+      { core }
+    )
+    if (!isModObject(value)) throw new ModFunctionError("MODS_CLASSIC_RESULT")
+    return value
+  }
+
   async registeredTools(): Promise<RegisteredFunctionTool[]> {
     await this.start()
     this.assertLive()
