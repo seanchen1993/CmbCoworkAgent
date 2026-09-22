@@ -962,6 +962,57 @@ async function main(): Promise<void> {
       })
       await window.api.models.setDefault("custom:mods-model-fixture")
     }, modelServer.url)
+    const lifecycleZip = new AdmZip()
+    lifecycleZip.addLocalFolder(join(root, "tests/fixtures/mods-v2/model-lifecycle"))
+    const lifecycleInstall = await page!.evaluate(
+      (bytes) =>
+        window.api.plugins.install(new Uint8Array(bytes).buffer, "model-lifecycle.zip", "local"),
+      [...lifecycleZip.toBuffer()]
+    )
+    assert.equal(lifecycleInstall.success, true, lifecycleInstall.error)
+    const lifecycleMod = (
+      await page!.evaluate((id) => window.api.mods.status(id), threadId)
+    ).functionMods!.find((mod) => mod.name === "model-lifecycle")!
+    assert.ok(lifecycleMod?.digest)
+    await page!.evaluate(
+      ({ id, pluginId, digest }) => window.api.mods.approveFunction(id, pluginId, digest),
+      { id: threadId, pluginId: lifecycleMod.pluginId, digest: lifecycleMod.digest! }
+    )
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    const lifecycleComposer = page!.locator("textarea.composer-textarea")
+    const lifecycleBefore = modelServer.requests.length
+    await lifecycleComposer.fill("[model-lifecycle] run the lifecycle probe")
+    await lifecycleComposer.press("Enter")
+    await page!.getByText("LIFECYCLE_TRANSFORMED", { exact: true }).first().waitFor({ timeout: 30000 })
+    const lifecycleRequests = modelServer.requests.slice(lifecycleBefore)
+    assert.ok(lifecycleRequests.some((request) => JSON.stringify(request.messages).includes("[lifecycle-fork]")))
+    assert.ok(lifecycleRequests.some((request) => JSON.stringify(request.messages).includes("[lifecycle-classify]")))
+    const lifecycleMessages = await page!.evaluate((id) => window.api.threads.getMessages(id), threadId)
+    assert.match(JSON.stringify(lifecycleMessages), /LIFECYCLE_TRANSFORMED/)
+    assert.doesNotMatch(JSON.stringify(lifecycleMessages), /LIFECYCLE_RAW/)
+    pass("production main-agent stream transforms before transcript publication and runs host-backed fork/classify")
+    const lifecycleRequestCount = modelServer.requests.length
+    await lifecycleComposer.fill("/lifecycle-pane")
+    await lifecycleComposer.press("Enter")
+    const lifecyclePane = page!.locator('[data-function-pane="lifecycle"]')
+    await lifecyclePane.waitFor({ state: "visible" })
+    const paneRequestCount = modelServer.requests.length
+    await lifecyclePane.focus()
+    await lifecyclePane.locator("div.overflow-auto").dispatchEvent("wheel", { deltaY: 18, deltaX: 0 })
+    await page!.getByText(/focus:1 focused:true scroll:1/).waitFor({ timeout: 30000 })
+    assert.equal(modelServer.requests.length, paneRequestCount)
+    assert.equal(modelServer.requests.length, lifecycleRequestCount)
+    pass("production Pane focus and bounded scroll events reach the real Function Mod without model calls")
+    await page!.evaluate(() => window.api.mods.configureGlobal(false))
+    const disabledRequestCount = modelServer.requests.length
+    await lifecycleComposer.fill("/lifecycle-pane")
+    await lifecycleComposer.press("Enter")
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    assert.equal(modelServer.requests.length, disabledRequestCount)
+    assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
+    await page!.evaluate(() => window.api.mods.configureGlobal(true))
+    pass("global Mods off comparison performs no extra model or Pane calls")
     await functionComposer.fill("/claw-ask 模型 SDK 协议回检")
     await functionComposer.press("Enter")
     await until(

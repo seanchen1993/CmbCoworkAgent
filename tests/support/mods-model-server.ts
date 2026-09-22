@@ -35,6 +35,51 @@ export async function startModsModelServer() {
     const userPrompt = JSON.stringify(
       body.messages?.findLast((message: { role: string }) => message.role === "user")?.content
     )
+    const lifecyclePrompt = JSON.stringify(body.messages)
+    if (lifecyclePrompt.includes("[lifecycle-fork]")) {
+      event([
+        { index: 0, delta: { role: "assistant", content: "LIFECYCLE_FORK" }, finish_reason: "stop" }
+      ])
+      event([], { prompt_tokens: 11, completion_tokens: 2, total_tokens: 13 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
+    if (lifecyclePrompt.includes("[lifecycle-classify]")) {
+      event([
+        { index: 0, delta: { role: "assistant", content: "ready" }, finish_reason: "stop" }
+      ])
+      event([], { prompt_tokens: 7, completion_tokens: 1, total_tokens: 8 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
+    if (Array.isArray(body.tools) && lifecyclePrompt.includes("[model-lifecycle]")) {
+      if (body.messages?.at(-1)?.role === "tool") {
+        event([
+          { index: 0, delta: { role: "assistant", content: "LIFECYCLE_RAW" }, finish_reason: "stop" }
+        ])
+      } else {
+        event([
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "model-lifecycle-probe",
+                  type: "function",
+                  function: { name: "mcp__model-lifecycle__probe", arguments: "{}" }
+                }
+              ]
+            },
+            finish_reason: "tool_calls"
+          }
+        ])
+      }
+      event([], { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
     if (userPrompt?.includes("[mods-refusal]")) {
       const kind = userPrompt.includes("[content-filter]")
         ? "content_filter"

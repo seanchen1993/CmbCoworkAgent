@@ -192,6 +192,8 @@ try:
         receipt = json.load(open(receipt_path, encoding='utf-8'))
         if receipt.get('feature') != feature or receipt.get('from') != old or receipt.get('to') != new:
             raise RuntimeError('AUTOBIZ_RECEIPT_MISMATCH')
+        if fingerprint(state_path) != receipt.get('stateFingerprint'):
+            raise RuntimeError('AUTOBIZ_STATE_CHANGED')
         print(json.dumps({**receipt, 'applied':False, 'duplicate':True}))
         raise SystemExit(0)
     update = load(os.path.join(source,'hooks','update_checkpoint.py'), 'mods_update')

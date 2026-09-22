@@ -28,10 +28,16 @@ export async function runProjectCheck(
   const command = kind === "unit-test"
     ? (process.platform === "win32" ? "npx.cmd" : "npx")
     : process.execPath
+  const executable = process.platform === "win32" && command.endsWith(".cmd")
+    ? (process.env.ComSpec || "cmd.exe")
+    : command
+  const executableArgs = executable === command
+    ? args
+    : ["/d", "/s", "/c", `${command} ${args.join(" ")}`]
   try {
     await access(packagePath)
     if (kind === "e2e") await access(join(root, "tests", "run-mods-e2e.mjs"))
-    const result = await execute(command, args, {
+    const result = await execute(executable, executableArgs, {
       cwd: root, encoding: "utf8", timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024,
       windowsHide: true, signal
     })
