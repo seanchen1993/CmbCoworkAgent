@@ -10,7 +10,7 @@ import {
   dispatchFunctionStream,
   type FunctionStreamOptions
 } from "../mods/v2/stream-dispatcher"
-import type { ModObject } from "../../shared/mods/types"
+import type { ModJson, ModObject } from "../../shared/mods/types"
 import { createModModelBoundary } from "./mods-model-boundary"
 
 const testAuthority = { turnId: "turn", assertLive: () => undefined } as never
@@ -230,7 +230,7 @@ it("retains a shared turn index through bindTools and rejects replaced authority
   authorities.close()
 })
 
-it("bounds host opaque frame retention", async () => {
+it("allows long incremental streams while bounding only retained opaque frames", async () => {
   const manager = {
     functionModelStream: vi.fn(
       (_authority: unknown, input: ModObject, core: FunctionStreamOptions["core"], signal: AbortSignal) =>
@@ -244,5 +244,30 @@ it("bounds host opaque frame retention", async () => {
     testAuthority,
     { turnId: "turn", model: "fixture" }
   )
-  await expect(model.invoke([new HumanMessage("bounded")])).rejects.toThrow("MODS_MODEL_STREAM_LIMIT")
+  await expect(model.invoke([new HumanMessage("bounded")])).resolves.toBeDefined()
+})
+
+it("bounds opaque frames retained by a buffering plugin", async () => {
+  const manager = {
+    functionModelStream: async (
+      _authority: unknown,
+      input: ModObject,
+      core: FunctionStreamOptions["core"],
+      signal: AbortSignal
+    ) => dispatchFunctionStream([], input, {
+      signal,
+      core: async function* (value, context) {
+        const buffered: ModJson[] = []
+        for await (const frame of core(value, context)) buffered.push(frame)
+        yield* buffered
+        return null
+      }
+    })
+  }
+  const model = createModModelBoundary(
+    new FakeStreamingChatModel({
+      chunks: Array.from({ length: 513 }, () => new AIMessageChunk({ content: "x" }))
+    }), manager, testAuthority, { turnId: "turn", model: "fixture" }
+  )
+  await expect(model.invoke([new HumanMessage("buffered")])).rejects.toThrow("MODS_MODEL_STREAM_LIMIT")
 })

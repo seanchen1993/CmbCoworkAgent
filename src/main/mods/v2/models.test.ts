@@ -483,3 +483,29 @@ it("rechecks the captured fork authority after provider completion and releases 
   expect(snapshot.release).toHaveBeenCalledOnce()
   expect(f.store.audit(f.folder)[0]).toMatchObject({ status: "unknown", publication: "blocked" })
 })
+
+it("rejects a fork whose captured runtime is replaced during output publication", async () => {
+  const f = fixture()
+  let live = true
+  const snapshot: FunctionModelForkSnapshot = {
+    model: "chosen",
+    messages: [{ role: "user", text: "context" }],
+    assertLive: () => {
+      if (!live) throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+    },
+    release: vi.fn()
+  }
+  Object.assign(f.host, {
+    captureForkSnapshot: () => snapshot,
+    invokeFork: async () => ({ text: "completed provider result" })
+  })
+  f.host.publish.mockImplementation(async (_identity, text) => {
+    live = false
+    return text
+  })
+  await expect(
+    f.models.fork(f.folder, "thread", f.grant, { prompt: "go" }, new AbortController().signal)
+  ).rejects.toThrow("MODS_CALL_SCOPE_CHANGED")
+  expect(snapshot.release).toHaveBeenCalledOnce()
+  expect(f.store.audit(f.folder)[0]).toMatchObject({ status: "succeeded", publication: "blocked" })
+})

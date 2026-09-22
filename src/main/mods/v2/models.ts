@@ -135,7 +135,8 @@ export class FunctionModels {
             inputTokens: reply.usage?.input_tokens,
             outputTokens: reply.usage?.output_tokens
           }
-        }
+        },
+        () => snapshot.assertLive?.()
       )
       return {
         text: result.text,
@@ -166,7 +167,8 @@ export class FunctionModels {
       config: ResolvedModelConfig,
       request: FunctionModelRequest,
       signal: AbortSignal
-    ) => Promise<FunctionModelReply>
+    ) => Promise<FunctionModelReply>,
+    assertCapturedScope?: () => void
   ): Promise<FunctionModelReply> {
     const timer = new AbortController()
     const timeout = setTimeout(() => timer.abort(), 60000)
@@ -174,6 +176,7 @@ export class FunctionModels {
     const assertLive = (): void => {
       assertFunctionGrant(this.store, workspace, threadId, grant, signal)
       this.host.assertScope(workspace, threadId)
+      assertCapturedScope?.()
     }
     const key = JSON.stringify([workspace, grant.modId])
     let reserved = false

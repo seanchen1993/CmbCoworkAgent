@@ -182,7 +182,8 @@ class ModAwareChatModel extends BaseChatModel {
           const item = await runProvider(() => raw.next())
           if (item.done) break
           assertActive()
-          if (sequence >= MAX_MODEL_FRAMES) throw new Error("MODS_MODEL_STREAM_LIMIT")
+          // Limit unconsumed host references, not the length of an ordinary streamed reply.
+          if (refs.size >= MAX_MODEL_FRAMES) throw new Error("MODS_MODEL_STREAM_LIMIT")
           const ref = `${authority.turnId}:${sequence++}`
           const message = item.value
           const text =
