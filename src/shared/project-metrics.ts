@@ -28,6 +28,7 @@ export interface ProjectMetricListOptions {
 
 export interface ProjectMetricSamples {
   bug: number
+  kenanIssue: number
   functionPoint: number
   defectDensity: number
   testLead: number
@@ -37,10 +38,17 @@ export interface ProjectMetricSamples {
   tokensPerLine: number
 }
 
+export interface ProjectMetricIssueCategoryCount {
+  category: string
+  count: number
+}
+
 export interface ProjectMetricSummaryGroup {
   developmentMode: ProjectMetricDevelopmentMode
   projectCount: number
   avgBugCount: number | null
+  avgKenanIssueCount: number | null
+  kenanIssueCategories: ProjectMetricIssueCategoryCount[]
   avgFuncPointCount: number | null
   defectDensityPer100Fp: number | null
   avgTestLeadDays: number | null
@@ -79,6 +87,8 @@ export interface ProjectMetricProjectItem {
   roomName: string
   groupName: string
   bugNum: number | null
+  kenanIssueCount: number | null
+  kenanIssueCategories: ProjectMetricIssueCategoryCount[]
   notAdjustFuns: number | null
   defectDensityPer100Fp: number | null
   pushedAdoptedLines: number | null

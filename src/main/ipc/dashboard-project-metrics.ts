@@ -1,5 +1,6 @@
 import type {
   ProjectMetricFilters,
+  ProjectMetricIssueCategoryCount,
   ProjectMetricListOptions,
   ProjectMetricProjectItem,
   ProjectMetricProjectsData,
@@ -47,6 +48,8 @@ interface FactProject {
   roomName: string
   groupName: string
   bugNum: number | null
+  kenanIssueCount: number | null
+  kenanIssueCategories: ProjectMetricIssueCategoryCount[]
   notAdjustFuns: number | null
   createDate: string | null
   firstStStartDate: string | null
@@ -82,6 +85,8 @@ const FACT_SOURCE_INCLUDES = [
   "roomName",
   "groupName",
   "bugNum",
+  "kenanIssueCount",
+  "kenanIssueCategoryCount",
   "notAdjustFuns",
   "createDate",
   "firstStStartDate",
@@ -310,6 +315,20 @@ function summaryAggs(): Record<string, unknown> {
   return {
     avg_bug_count: { avg: { field: "bugNum" } },
     bug_sample_count: { value_count: { field: "bugNum" } },
+    sum_kenan_issue_count: { sum: { field: "kenanIssueCount" } },
+    kenan_issue_categories: {
+      nested: { path: "kenanIssueCategoryCount" },
+      aggs: {
+        by_category: {
+          terms: {
+            field: "kenanIssueCategoryCount.category",
+            size: 1000,
+            order: { _key: "asc" }
+          },
+          aggs: { issue_count: { sum: { field: "kenanIssueCategoryCount.count" } } }
+        }
+      }
+    },
     avg_function_points: { avg: { field: "notAdjustFuns" } },
     function_point_sample_count: { value_count: { field: "notAdjustFuns" } },
     defect_density_valid: {
@@ -370,6 +389,16 @@ function parseFactProject(hit: EsHit): FactProject | null {
     roomName: asString(source.roomName),
     groupName: asString(source.groupName),
     bugNum: asNullableNumber(source.bugNum),
+    kenanIssueCount: asNullableNumber(source.kenanIssueCount),
+    kenanIssueCategories: (Array.isArray(source.kenanIssueCategoryCount)
+      ? source.kenanIssueCategoryCount
+      : []
+    )
+      .map((item) => {
+        const category = asRecord(item)
+        return { category: asString(category.category), count: asNumber(category.count) }
+      })
+      .filter((item) => item.category && item.count > 0),
     notAdjustFuns: asNullableNumber(source.notAdjustFuns),
     createDate: asNullableString(source.createDate),
     firstStStartDate: asNullableString(source.firstStStartDate),
@@ -422,10 +451,30 @@ function parseSummaryGroup(
   const delivery = nestedRecord(bucket, "delivery_valid")
   const testLeadSeconds = nullableAggValue(testLead, "avg_seconds")
   const deliverySeconds = nullableAggValue(delivery, "avg_seconds")
+  const projectCount = asNumber(bucket.doc_count)
+  const categories = nestedRecord(nestedRecord(bucket, "kenan_issue_categories"), "by_category")
+  if (asNumber(categories.sum_other_doc_count) > 0) {
+    throw new Error("非功能问题类别过多，类别汇总不完整")
+  }
+  const categoryBuckets = Array.isArray(categories.buckets) ? categories.buckets : []
   return {
     developmentMode,
-    projectCount: asNumber(bucket.doc_count),
+    projectCount,
     avgBugCount: nullableAggValue(bucket, "avg_bug_count"),
+    avgKenanIssueCount: ratio(
+      asNumber(nestedRecord(bucket, "sum_kenan_issue_count").value),
+      projectCount,
+      1
+    ),
+    kenanIssueCategories: categoryBuckets
+      .map((item) => {
+        const record = asRecord(item)
+        return {
+          category: asString(record.key),
+          count: asNumber(nestedRecord(record, "issue_count").value)
+        }
+      })
+      .filter((item) => item.category && item.count > 0),
     avgFuncPointCount: nullableAggValue(bucket, "avg_function_points"),
     defectDensityPer100Fp: ratio(densityBug, densityFp, 100),
     avgTestLeadDays: testLeadSeconds === null ? null : testLeadSeconds / 86_400,
@@ -437,6 +486,7 @@ function parseSummaryGroup(
     outputTokensPerAdoptedLine: developmentMode === "devclaw" ? 0 : null,
     samples: {
       bug: asNumber(nestedRecord(bucket, "bug_sample_count").value),
+      kenanIssue: projectCount,
       functionPoint: asNumber(nestedRecord(bucket, "function_point_sample_count").value),
       defectDensity: asNumber(density.doc_count),
       testLead: asNumber(testLead.doc_count),
@@ -1072,6 +1122,16 @@ export function makeMockProjectMetricSummary(
         developmentMode: "devclaw",
         projectCount: pluginSelected ? 18 : 42,
         avgBugCount: 6.4,
+        avgKenanIssueCount: 1.5,
+        kenanIssueCategories: pluginSelected
+          ? [
+              { category: "安全", count: 18 },
+              { category: "性能", count: 9 }
+            ]
+          : [
+              { category: "安全", count: 42 },
+              { category: "性能", count: 21 }
+            ],
         avgFuncPointCount: 112.8,
         defectDensityPer100Fp: 5.67,
         avgTestLeadDays: 24.6,
@@ -1083,6 +1143,7 @@ export function makeMockProjectMetricSummary(
         outputTokensPerAdoptedLine: 10.97,
         samples: {
           bug: pluginSelected ? 18 : 42,
+          kenanIssue: pluginSelected ? 18 : 42,
           functionPoint: pluginSelected ? 17 : 40,
           defectDensity: pluginSelected ? 17 : 39,
           testLead: pluginSelected ? 16 : 38,
@@ -1096,6 +1157,11 @@ export function makeMockProjectMetricSummary(
         developmentMode: "non_devclaw",
         projectCount: 136,
         avgBugCount: 8.9,
+        avgKenanIssueCount: 2,
+        kenanIssueCategories: [
+          { category: "安全", count: 180 },
+          { category: "性能", count: 92 }
+        ],
         avgFuncPointCount: 105.2,
         defectDensityPer100Fp: 8.46,
         avgTestLeadDays: 31.4,
@@ -1107,6 +1173,7 @@ export function makeMockProjectMetricSummary(
         outputTokensPerAdoptedLine: null,
         samples: {
           bug: 136,
+          kenanIssue: 136,
           functionPoint: 129,
           defectDensity: 126,
           testLead: 121,
@@ -1132,6 +1199,11 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     roomName: "零售基础客群经营开发室(成都)",
     groupName: "经营分析一组",
     bugNum: 6,
+    kenanIssueCount: 3,
+    kenanIssueCategories: [
+      { category: "安全", count: 2 },
+      { category: "性能", count: 1 }
+    ],
     notAdjustFuns: 348.12,
     defectDensityPer100Fp: 1.72,
     pushedAdoptedLines: 6000,
@@ -1156,6 +1228,8 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     roomName: "零售客户经营开发室",
     groupName: "经营分析二组",
     bugNum: 3,
+    kenanIssueCount: 1,
+    kenanIssueCategories: [{ category: "性能", count: 1 }],
     notAdjustFuns: 126.5,
     defectDensityPer100Fp: 2.37,
     pushedAdoptedLines: 3000,
@@ -1180,6 +1254,8 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     roomName: "渠道应用研发室",
     groupName: "渠道研发一组",
     bugNum: 9,
+    kenanIssueCount: 0,
+    kenanIssueCategories: [],
     notAdjustFuns: null,
     defectDensityPer100Fp: null,
     pushedAdoptedLines: null,
