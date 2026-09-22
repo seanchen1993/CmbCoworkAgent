@@ -16,6 +16,7 @@ Commits: `3edb9502`, `711a59a2`, `1296217e`, `773e6ff6`, `825339c1`
 - Context usage: **9 passed**.
 - Project checks, manager, validator, model-operation, compatibility matrix and tool registry focused tests: **all passed** (21 manager/project-check tests, 4 validator/compatibility/model tests, 11 schema/registry tests).
 - Node typecheck and changed-file ESLint: **passed**.
+- Electron Mods E2E after these changes: **66 passed, 0 failed** (`2026-09-22-host-checks-e2e.log`).
 
 ## Still open
 
