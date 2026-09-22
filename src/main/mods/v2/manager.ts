@@ -49,6 +49,7 @@ import {
   type CompletionEvidenceRecord
 } from "./completion-evidence"
 import { runAutobizValidator } from "./autobiz-validation"
+import { runProjectCheck, type ProjectCheckKind } from "./project-checks"
 
 interface Snapshot {
   compiled: CompiledFunctionPlugin
@@ -728,6 +729,27 @@ export class FunctionModsManager {
           const result = await entry.session!.checkCompletion(safe as ModObject, signal)
           signal.throwIfAborted()
           assertLive()
+          const projectPolicies = [...entry.snapshots.keys()]
+            .map((name) => policyFor(name))
+            .filter((policy): policy is NonNullable<typeof policy> =>
+              !!policy && policy.mode !== "off" && policy.checks.some((check) => check === "unit-test" || check === "e2e")
+            )
+          for (const kind of ["unit-test", "e2e"] as const) {
+            if (!projectPolicies.some((policy) => policy.checks.includes(kind))) continue
+            const check = await runProjectCheck(
+              this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
+              kind as ProjectCheckKind,
+              signal,
+              Math.min(...projectPolicies.map((policy) => policy.timeoutMs))
+            )
+            record("validator.result", check.passed ? "pass" : "block", { kind, passed: check.passed, exitCode: check.exitCode, outputFingerprint: check.outputFingerprint, ...(check.reason ? { reason: check.reason } : {}) })
+            if (!check.passed && projectPolicies.some((policy) => policy.mode === "check" || policy.mode === "repair")) {
+              const repairing = projectPolicies.some((policy) => policy.mode === "repair")
+              const decision = repairing && revisionAttempts < Math.max(...projectPolicies.map((policy) => policy.maxRepairs)) ? "revise" : "block"
+              record("check.result", decision, { reason: check.reason ?? `PROJECT_${kind.toUpperCase()}_FAILED`, source: "host-project-check", businessAccepted: false })
+              return { decision, reason: check.reason ?? `PROJECT_${kind.toUpperCase()}_FAILED` }
+            }
+          }
           const validatorPolicies = [...entry.snapshots.keys()]
             .map((name) => policyFor(name))
             .filter((policy): policy is NonNullable<typeof policy> =>
