@@ -3,6 +3,7 @@ import { access } from "node:fs/promises"
 import { promisify } from "node:util"
 import { join, resolve } from "node:path"
 import { AUTOBIZ_KANBAN_COMMIT, withPinnedAutobiz } from "./autobiz-source"
+import { runAutobizTransitionProcess } from "./autobiz-transition-process"
 export { AUTOBIZ_KANBAN_SOURCE, AUTOBIZ_KANBAN_COMMIT } from "./autobiz-source"
 
 const run = promisify(execFile)
@@ -115,6 +116,7 @@ export async function advanceAutobizCheckpoint(input: {
   idempotencyKey: string
   signal?: AbortSignal
   timeoutMs?: number
+  verifyEvidence?(): Promise<void>
 }): Promise<AutobizCheckpointTransition> {
   const script = `
 import hashlib, importlib.util, json, os, subprocess, sys
@@ -150,6 +152,8 @@ try:
     if actual != old: raise RuntimeError('AUTOBIZ_CHECKPOINT_CHANGED:'+str(actual))
     result = update.prepare_checkpoint_update(workspace=__import__('pathlib').Path(workspace), feature=feature, checkpoint=new)
     if not result.ok: raise RuntimeError('; '.join(result.errors))
+    print(json.dumps({'ready':True}), flush=True)
+    if sys.stdin.readline().strip() != 'commit': raise RuntimeError('AUTOBIZ_COMMIT_NOT_AUTHORIZED')
     if fingerprint(state_path) != before: raise RuntimeError('AUTOBIZ_STATE_CHANGED')
     state_store.write_state_records_preserving_raw(__import__('pathlib').Path(workspace), result.records, raw_records=result.raw_records)
     after = fingerprint(state_path)
@@ -165,8 +169,11 @@ except Exception as e:
 `
   const root = resolve(input.workspace)
   try {
-    const { stdout } = await withPinnedAutobiz(input.signal, (source) => run(PYTHON, ["-I", "-B", "-X", "utf8", "-c", script, source, root, input.feature, input.from, input.to, input.expectedStateFingerprint, input.idempotencyKey], {
-      cwd: source, encoding: "utf8", timeout: input.timeoutMs ?? 120_000, maxBuffer: 256 * 1024, windowsHide: true, signal: input.signal
+    const stdout = await withPinnedAutobiz(input.signal, (source) => runAutobizTransitionProcess({
+      command: PYTHON,
+      args: ["-I", "-B", "-X", "utf8", "-c", script, source, root, input.feature, input.from, input.to, input.expectedStateFingerprint, input.idempotencyKey],
+      cwd: source, timeoutMs: input.timeoutMs ?? 120_000, signal: input.signal,
+      verifyEvidence: input.verifyEvidence ?? (async () => { input.signal?.throwIfAborted() })
     }))
     return JSON.parse(stdout.trim().split(/\r?\n/).at(-1) || "") as AutobizCheckpointTransition
   } catch (error) {

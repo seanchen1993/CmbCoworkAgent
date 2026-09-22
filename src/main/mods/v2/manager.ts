@@ -665,11 +665,11 @@ export class FunctionModsManager {
       to: to as string,
       expectedStateFingerprint: stateFingerprint as string,
       idempotencyKey: idempotencyKey as string,
-      signal
+      signal,
+      verifyEvidence
     })
     this.host.assertThread?.(workspace, threadId)
     for (const snapshot of (this.sessions.get(JSON.stringify([workspace, threadId]))?.snapshots.values() ?? [])) this.store.assertGrant(snapshot.grant)
-    await verifyEvidence()
     if (!result.applied && !result.duplicate)
       throw new ModFunctionError(result.reason || "MODS_AUTOBIZ_TRANSITION_FAILED")
     this.store.saveCompletionEvidence({

@@ -299,3 +299,9 @@ C:\ai\CmbCoworkAgent-mods-v2\docs\mods-v2-compatibility-matrix.json
 
 
 本次最新提交：`b0bf4c78 docs(mods): record lifecycle e2e verification`。当前工作树干净。
+
+## Atomic transition authorization audit
+
+- Commit preparation now pauses before writing and requires a fresh host evidence callback followed by an explicit `commit` token.
+- If evidence changes or the host callback fails, state.json remains unchanged; regression coverage is in `autobiz-validation.test.ts`.
+- Focused validator + manager suites: 34/34 passed; Node/web typecheck and changed-file ESLint passed.

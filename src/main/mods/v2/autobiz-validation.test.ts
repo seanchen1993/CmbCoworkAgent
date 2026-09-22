@@ -74,6 +74,27 @@ async function featureFixture(record: Record<string, unknown> = {}) {
   return { root, directory }
 }
 
+it("does not write state when host evidence becomes invalid during checkpoint preparation", async () => {
+  const { root, directory } = await featureFixture()
+  await writeFile(join(directory, "REQUIREMENTS_EVAL.md"), "verdict: PASS\ncontract fixture only")
+  await withPinnedAutobiz(undefined, (source) => promisify(execFile)("python", [
+    "-I", "-B", "-c",
+    "import sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from board_core.state_store import check_or_fix_state_sync; check_or_fix_state_sync(Path(sys.argv[2]), fix=True)",
+    source, root
+  ], { windowsHide: true }))
+  const statePath = join(root, ".autobizdevops/state.json")
+  const before = await readFile(statePath)
+  const result = await advanceAutobizCheckpoint({
+    workspace: root, feature: "order-export", from: "requirements_eval_in_progress",
+    to: "requirements_eval_done", expectedStateFingerprint: createHash("sha256").update(before).digest("hex"),
+    idempotencyKey: "revoked-during-prepare",
+    verifyEvidence: async () => { throw Error("COMPLETION_EVIDENCE_STALE") }
+  })
+  expect(result.applied).toBe(false)
+  expect(result.reason).toContain("COMPLETION_EVIDENCE_STALE")
+  expect(await readFile(statePath)).toEqual(before)
+})
+
 it("uses compiled checkpoint skill even when the state tries to select another validator", async () => {
   const { root } = await featureFixture({ skill: "autodev-e2e", slug: "other" })
   const result = await runAutobizValidator(root, "order-export")
