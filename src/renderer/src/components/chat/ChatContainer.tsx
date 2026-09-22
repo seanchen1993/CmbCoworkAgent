@@ -9044,6 +9044,7 @@ export function ChatContainer({
                               <button
                                 type="submit"
                                 disabled={
+                                  !stream ||
                                   effectiveInputDisabled ||
                                   (!input.trim() &&
                                     !hasPendingFilePayload &&

@@ -1,3 +1,4 @@
+import { inspectFeature } from "./inspect.js"
 import { recordsFrom, stageFor } from "./core.js"
 
 async function readRows($) {
@@ -18,8 +19,7 @@ export function register(on) {
       const id = e.args.trim() || (rows.length === 1 ? rows[0].feature : "")
       const row = rows.find(item => item.feature === id)
       if (!row) return { text: "未找到 Feature，请传入 Feature ID。" }
-      const stage = stageFor(row)
-      return { text: `Feature：${row.feature}\n当前阶段：${stage.node.label} · ${row.checkpoint}\n原流程建议：${stage.next ? "/" + stage.next : "请在原看板确认"}\n详细产物证据请打开 /kanban 面板。` }
+      return { text: await inspectFeature($, row.feature) }
     } catch (error) {
       return { text: `无法检查：${error.message}` }
     }

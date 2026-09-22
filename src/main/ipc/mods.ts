@@ -372,6 +372,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     )
   }
   manager.attachFunctions({
+    completionGate: (...args) => functions.completionGate(...args),
     turnStart: (...args) => functions.turnStart(...args),
     turnComplete: (...args) => functions.turnComplete(...args),
     hasToolCheck: (workspace, threadId) => functions.hasToolCheck(workspace, threadId),

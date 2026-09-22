@@ -288,6 +288,11 @@ export class ModsManager {
     { tools: FunctionToolInfo[]; binding: ModThreadBinding }
   >()
   private functionLifecycle?: {
+    completionGate?(
+      workspace: string,
+      threadId: string,
+      context: () => ModObject
+    ): Promise<import("../agent/skill-lifecycle/completion-gate").CompletionGate | undefined>
     turnStart?(
       workspace: string,
       threadId: string,
@@ -504,6 +509,40 @@ export class ModsManager {
 
   isEnabled(workspace: string): boolean {
     return this.globalEnabled() && this.config(this.workspaceKey(workspace)).enabled
+  }
+
+  async createCompletionGate(workspace: string, threadId: string, context: () => ModObject) {
+    if (!this.isEnabled(workspace)) return undefined
+    const key = this.workspaceKey(workspace)
+    const gate = await this.functionLifecycle?.completionGate?.(key, threadId, context)
+    if (!gate) return undefined
+    const binding = this.bindings.get(`${threadId}:main`)
+    if (!binding || binding.workspace !== key || binding.turnId !== context().turnId)
+      throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
+    this.assertFunctionBinding(binding)
+    return (input: import("../agent/skill-lifecycle/completion-gate").CompletionGateInput) =>
+      withFunctionAgentExecution(
+        {
+          workspace: key,
+          threadId,
+          turnId: binding.turnId,
+          agentId: "main",
+          runtimeAuthority: binding.runtimeAuthority,
+          userInitiated: false,
+          leased: true,
+          immediate: false
+        },
+        async () => {
+          this.assertFunctionBinding(binding)
+          if (this.bindings.get(`${threadId}:main`) !== binding)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          const result = await gate(input)
+          this.assertFunctionBinding(binding)
+          if (this.bindings.get(`${threadId}:main`) !== binding)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          return result
+        }
+      )
   }
 
   isGloballyEnabled(): boolean {

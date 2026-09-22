@@ -8762,6 +8762,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!abortController.signal.aborted) {
             while (!abortController.signal.aborted) {
               const completionOutcome = await runCompletionHooksWithRevision({
+                enableModsCompletionGate: !isWorkflowNotificationTurn,
                 hasTerminalModelRefusal: () =>
                   !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
                 threadId,
@@ -11110,6 +11111,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
+              enableModsCompletionGate: true,
               hasTerminalModelRefusal: () =>
                 !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,
@@ -12262,6 +12264,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
+              enableModsCompletionGate: true,
               hasTerminalModelRefusal: () =>
                 !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,

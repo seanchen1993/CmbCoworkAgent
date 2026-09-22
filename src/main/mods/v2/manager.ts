@@ -1,4 +1,5 @@
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
+import type { CompletionGate } from "../../agent/skill-lifecycle/completion-gate"
 import type {
   FunctionTurnStart,
   FunctionTurnComplete,
@@ -627,6 +628,38 @@ export class FunctionModsManager {
     const entry = await this.session(workspace, threadId)
     const safe = await this.host.publish(workspace, input as unknown as ModJson, signal)
     await entry.session!.turnStart(safe as unknown as FunctionTurnStart, signal)
+  }
+
+  async completionGate(
+    workspace: string,
+    threadId: string,
+    context: () => ModObject
+  ): Promise<CompletionGate | undefined> {
+    const key = JSON.stringify([workspace, threadId])
+    const entry = this.sessions.get(key)
+    if (!entry || !this.host.enabled(workspace)) return undefined
+    await entry.loading
+    if (this.sessions.get(key) !== entry) throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    if (!entry.session!.hasCompletionGate()) return undefined
+    // Capture the exact generation; a revision cannot silently reload a revoked gate.
+    return async ({ signal, revisionAttempts, maxRevisionAttempts }) => {
+      if (this.sessions.get(key) !== entry || !this.host.enabled(workspace))
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      for (const snapshot of entry.snapshots.values()) this.store.assertGrant(snapshot.grant)
+      const safe = await this.host.publish(
+        workspace,
+        {
+          ...context(),
+          revisionAttempts,
+          maxRevisionAttempts
+        },
+        signal
+      )
+      const result = await entry.session!.checkCompletion(safe as ModObject, signal)
+      if (this.sessions.get(key) !== entry) throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      for (const snapshot of entry.snapshots.values()) this.store.assertGrant(snapshot.grant)
+      return result
+    }
   }
 
   async turnComplete(

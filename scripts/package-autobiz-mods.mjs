@@ -16,13 +16,13 @@ upstream.extractAllTo(plugin)
 cpSync(join(root, "examples/autobiz-kanban-mods"), plugin, { recursive: true })
 const manifest = JSON.parse(readFileSync(join(plugin, "plugin.json"), "utf8"))
 manifest.name = "AutobizDevOps_Plugin_Kanban_Mods"
-manifest.version = "1.1.0"
-manifest.description = "Autobiz 真实状态与产物检查、交互面板和轮次复查；保留原业务 Skills 与 Python 门禁。"
+manifest.version = "1.2.0"
+manifest.description = "Autobiz 状态、产物检查和可选的完成前单文件评审；保留原业务 Skills 与 Python 门禁。"
 writeFileSync(join(plugin, "plugin.json"), JSON.stringify(manifest, null, 2) + "\n")
 const classicHooks = readFileSync(join(plugin, "hooks/hooks.json"), "utf8")
 writeFileSync(join(plugin, "hooks/classic-hooks.json"), classicHooks)
 writeFileSync(join(plugin, "hooks/hooks.json"), JSON.stringify({
-  modules: ["./kanban/register.ts", "./kanban/pane.tsx", "./kanban/review.ts"]
+  modules: ["./kanban/register.ts", "./kanban/pane.tsx", "./kanban/review.ts", "./kanban/gate.ts"]
 }, null, 2) + "\n")
 execFileSync("python", [join(root, "scripts/export-autobiz-mods.py"), plugin, destination], {
   stdio: "inherit", windowsHide: true,

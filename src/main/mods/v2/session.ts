@@ -35,6 +35,10 @@ import { FunctionClients } from "./clients"
 import type { FunctionGuest, ModOrigin } from "../../../shared/mods/v2/contracts"
 import { randomUUID } from "node:crypto"
 import {
+  parseCompletionGateDecision,
+  type CompletionGateDecision
+} from "../../agent/skill-lifecycle/completion-gate"
+import {
   functionSdkToolInput,
   validateFunctionToolResult,
   validateModelToolInput
@@ -269,6 +273,75 @@ export class FunctionSession {
     await this.dispatch("turn.start", { ...input }, signal, undefined, 0, undefined, "turn.start", {
       core: async (value) => ({ turnId: value.turnId })
     })
+  }
+
+  hasCompletionGate(): boolean {
+    return this.plugins.some((plugin) =>
+      plugin.guest.registrations.some((registration) => registration.pattern === "completion.check")
+    )
+  }
+
+  /** CMB extension: independent votes, never the optional-hook recovery chain. */
+  async checkCompletion(input: ModObject, signal: AbortSignal): Promise<CompletionGateDecision> {
+    this.assertLive()
+    const scoped = AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])
+    const reasons: string[] = []
+    let blocked = false
+    for (const plugin of this.plugins) {
+      for (const registration of plugin.guest.registrations) {
+        if (registration.pattern !== "completion.check") continue
+        scoped.throwIfAborted()
+        this.assertLive(plugin)
+        // Matcher exceptions, invalid output and handler exceptions reject completion.
+        if (!(await plugin.guest.matches(registration.id, input))) continue
+        const answer = await plugin.guest.invoke(
+          registration.id,
+          input,
+          async (method, args, callSignal) => {
+            this.assertLive(plugin)
+            if (method === "next") return { value: { decision: "pass" } }
+            if (!plugin.capabilities.includes(method))
+              throw new ModFunctionError("MODS_CAPABILITY_DENIED")
+            const value = await this.capability(
+              plugin,
+              method,
+              args,
+              callSignal,
+              { event: "completion.check", registration: registration.id },
+              0,
+              "completion.check"
+            )
+            return value === undefined ? {} : { value }
+          },
+          {
+            event: "completion.check",
+            origin: { plugin: "engine", tier: "core" },
+            capabilities: plugin.capabilities,
+            plugin: { name: plugin.name, root: plugin.root },
+            signal: scoped,
+            timeoutMs: 120000
+          }
+        )
+        scoped.throwIfAborted()
+        this.assertLive(plugin)
+        const decision = parseCompletionGateDecision(answer.value)
+        if (decision.decision === "block") {
+          blocked = true
+          reasons.push(`${plugin.name}: ${decision.reason}`)
+          continue
+        }
+        if (decision.decision === "revise") reasons.push(`${plugin.name}: ${decision.reason}`)
+      }
+    }
+    scoped.throwIfAborted()
+    this.assertLive()
+    const result: ModObject = reasons.length
+      ? { decision: blocked ? "block" : "revise", reason: reasons.join("\n").slice(0, 8000) }
+      : { decision: "pass" }
+    const safe = await this.host.publish(result, scoped)
+    scoped.throwIfAborted()
+    this.assertLive(undefined, true)
+    return parseCompletionGateDecision(safe)
   }
 
   async turnComplete(

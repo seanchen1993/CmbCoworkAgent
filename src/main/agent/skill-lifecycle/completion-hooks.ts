@@ -269,6 +269,7 @@ export async function runCompletionHooksWithRevision({
   runStopHooks,
   onStopHooksFired,
   completionGate,
+  enableModsCompletionGate = false,
   hasTerminalModelRefusal
 }: {
   threadId: string
@@ -300,6 +301,7 @@ export async function runCompletionHooksWithRevision({
   runStopHooks?: () => Promise<HookResult | null>
   onStopHooksFired?: () => void
   completionGate?: CompletionGate
+  enableModsCompletionGate?: boolean
   hasTerminalModelRefusal?: () => boolean
 }): Promise<CompletionHookOutcome> {
   let postSkillRevisionCount = 0
@@ -310,6 +312,22 @@ export async function runCompletionHooksWithRevision({
     return "failed"
   }
   const usedBudget = (): number => postSkillRevisionCount + stopRevisionCount + gateRevisionCount
+  if (enableModsCompletionGate && !completionGate && workspacePath && !abortSignal.aborted) {
+    try {
+      const { getModsManager } = await import("../../mods/manager")
+      completionGate = await getModsManager()?.createCompletionGate(
+        workspacePath,
+        threadId,
+        () => ({
+          turnId: turnId ?? "",
+          answer: getStopContext().assistantResponse ?? ""
+        })
+      )
+    } catch {
+      sendError("Completion gate initialization failed; completion was not approved")
+      return "failed"
+    }
+  }
   const budgetExhausted = (count: number): boolean =>
     (completionGate ? usedBudget() : count) >= maxRevisionAttempts
   while (!abortSignal.aborted) {

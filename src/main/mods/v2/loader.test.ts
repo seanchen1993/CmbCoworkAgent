@@ -89,6 +89,17 @@ describe("function plugin snapshot loader", () => {
     })
   })
 
+  it("reports completion gates only for exact registrations, not wildcard observers", async () => {
+    const root = await plugin(`export function register(on) {
+      on("*", (_,e,next) => next(e))
+      on("completion.check", () => ({decision:"pass"}))
+    }`)
+    const report = await checkFunctionPlugin(root)
+    expect(report.valid).toBe(true)
+    expect(report.registrations[0].events).not.toContain("completion.check")
+    expect(report.registrations[1].events).toEqual(["completion.check"])
+  })
+
   it("resolves a custom hooks path relative to the package, then modules relative to hooks", async () => {
     const root = await plugin(
       "export function register(on){on('session.start',(_,e,next)=>next(e))}"

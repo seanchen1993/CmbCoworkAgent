@@ -10,6 +10,31 @@ import { randomUUID } from "node:crypto"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
 
 const cleanups: Array<() => Promise<void>> = []
+
+it("pins mandatory completion checks to the loaded grant and rejects revocation", async () => {
+  const f = await fixture()
+  await writeFile(
+    join(f.plugin, "hooks/gate.ts"),
+    `export function register(on) {
+    on("completion.check", () => ({decision:"revise",reason:"missing evidence"}))
+  }`
+  )
+  const hooksPath = join(f.plugin, "hooks/hooks.json")
+  const hooks = JSON.parse(await readFile(hooksPath, "utf8"))
+  hooks.modules.push("./gate.ts")
+  await writeFile(hooksPath, JSON.stringify(hooks))
+  const signal = new AbortController().signal
+  expect(await f.manager.completionGate(f.root, "thread", () => ({}))).toBeUndefined()
+  await f.approve()
+  await f.manager.turnStart(f.root, "thread", { turnId: "turn", text: "implement" }, signal)
+  const gate = await f.manager.completionGate(f.root, "thread", () => ({ turnId: "turn" }))
+  expect(gate).toBeDefined()
+  expect(await gate!({ signal, revisionAttempts: 0, maxRevisionAttempts: 2 })).toMatchObject({
+    decision: "revise"
+  })
+  f.manager.revoke(f.root, "function-commands")
+  await expect(gate!({ signal, revisionAttempts: 1, maxRevisionAttempts: 2 })).rejects.toThrow()
+})
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })

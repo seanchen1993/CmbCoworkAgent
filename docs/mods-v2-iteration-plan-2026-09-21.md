@@ -1,7 +1,7 @@
 # ModsV2 继续迭代：从扩展接口到研发闭环
 
 工作树：`C:\ai\CmbCoworkAgent-mods-v2`；分支：`codex/mods-v2`。
-起点：`d8da18d3`。禁止在 UAT 工作树编辑、提交或自动合并。
+起点：`423410cb`（已完成的第 1 批门禁基础）。禁止在 UAT 工作树编辑、提交或自动合并。
 
 ## 目标和事实
 
@@ -48,9 +48,11 @@
 - 第 1 批宿主回调基础已实现：`completion-gate.ts` 定义严格的 pass/revise/block 结果，接入原完成循环。
   取消后不接受迟到的通过结果，不触发后续修复；传统 halt 和模型 refusal 保持原有优先级。
   有门禁时各类修复共享预算；未传门禁时保留传统 Hook 各自计数行为。
-- 这不是用户可用的完整门禁：当前生产调用者尚未传入 `completionGate`。
-  下一批必须补 authority/generation 校验、超时取消、插件错误策略及真正的生产接入，不能仅注册同名事件。
-- 第 2–6 批尚未完成，不应宣称已经能够自动评审修复或完成端到端对齐。
+- 第 2 批已完成桌面生产桥接：经过授权且已加载的 Function Mod 可注册精确的 CMB `completion.check`，
+  复用原 Agent 修复循环；覆盖桌面三条 agent IPC 完成路径，工作流通知轮次明确跳过。
+- Autobiz 示例已接入 `off/report/check/repair` 四种模式，配置持久化，旧文件证据在模型调用后会失效，
+  撤权、替换、取消、格式错误和共享预算均有测试；当前仍是单文件模型检查，不执行真实 validator、不推进 checkpoint。
+- 第 3–6 批尚未完成，不应宣称完成端到端 Autobiz 验收或完整 Claude Code parity。
 
 ### 第 1 批验证记录
 
@@ -59,4 +61,9 @@
 - Node TypeScript 检查、修改代码 ESLint 通过。
 - 执行 `npm test`：Vitest 3631 通过、52 失败、5 跳过，21 个测试文件失败；未进入后续 standalone suites。
   日志：`output/mods-iteration-test-20260921.log`（本地、不提交）。失败原因尚未完成隔离基线对照，不能认定全部与本批无关。
-- 尚未执行本业务闭环的性能与桌面 E2E；这两项必须在生产桥接后补齐。
+- Node 22：完成门禁、Autobiz 示例、Mods 生命周期和 loader 定向回归 `103/103` 通过；
+  异步上下文回归 `16/16` 通过。
+- 桌面 Mods E2E：全量生产 E2E 通过，并新增“Function Mod 请求主 Agent 修复后再次检查”的真实链路断言；
+  日志为 `output/mods-completion-e2e.log`，耗时约 151 秒。
+- `npm run typecheck:node` 通过；修改文件 ESLint 无错误（示例脚本仍可能有格式警告）。
+

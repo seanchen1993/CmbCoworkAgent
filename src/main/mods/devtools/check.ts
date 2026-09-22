@@ -13,7 +13,11 @@ export async function checkFunctionPlugin(
   try {
     const registrations = guest.registrations.map((registration) => ({
       ...registration,
-      events: CLAUDE_EVENT_NAMES.filter((name) => matchesEventPattern(registration.pattern, name))
+      events: [...CLAUDE_EVENT_NAMES, "completion.check"].filter((name) =>
+        name === "completion.check"
+          ? registration.pattern === name
+          : matchesEventPattern(registration.pattern, name)
+      )
     }))
     const unknown = registrations.filter((row) => row.events.length === 0).map((row) => row.pattern)
     return {

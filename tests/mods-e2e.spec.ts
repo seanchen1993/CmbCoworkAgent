@@ -69,13 +69,14 @@ Object.assign(env, {
   NO_PROXY: "127.0.0.1,localhost"
 })
 const checks: string[] = []
+const startedAt = Date.now()
 const timings: Record<string, unknown> = {}
 let app: ElectronApplication | undefined
 let page: Page | undefined
 let modelServer: Awaited<ReturnType<typeof startModsModelServer>> | undefined
 const pass = (name: string) => {
   checks.push(name)
-  console.log(`PASS ${name}`)
+  console.log(`PASS [${Date.now() - startedAt}ms] ${name}`)
 }
 async function until(check: () => Promise<boolean>, label: string): Promise<void> {
   const deadline = Date.now() + 30_000
@@ -89,7 +90,7 @@ async function main(): Promise<void> {
   const watchdog = setTimeout(() => {
     console.error("E2E deadline exceeded")
     void app?.close()
-  }, 120_000)
+  }, 240_000)
   try {
     console.log("STEP launch")
     app = await _electron.launch({
@@ -119,6 +120,8 @@ async function main(): Promise<void> {
       return false
     }, "production preload")
     await page!.addInitScript("window.__name = value => value")
+    // Bound each UI action separately so an actual stalled control reports its locator.
+    page!.setDefaultTimeout(15_000)
     console.log("STEP preload ready")
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
     await assert.rejects(
@@ -2553,6 +2556,7 @@ async function main(): Promise<void> {
       return false
     }, "production preload after process restart")
     await page!.addInitScript("window.__name = value => value")
+    page!.setDefaultTimeout(15_000)
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     assert.equal(
       await page!.evaluate(
@@ -2670,6 +2674,43 @@ async function main(): Promise<void> {
       "renderer reload preserves function state; revoking a digest removes commands and rejects stale execution"
     )
     assert.deepEqual(await page!.evaluate((id) => window.api.mods.panes(id), threadId), [])
+    const gateZip = new AdmZip()
+    gateZip.addFile("plugin.json", Buffer.from(JSON.stringify({ name: "completion-gate-e2e", version: "1.0.0" })))
+    gateZip.addFile("hooks/hooks.json", Buffer.from(JSON.stringify({ modules: ["./gate.ts"] })))
+    gateZip.addFile("hooks/gate.ts", Buffer.from(`export function register(on) {
+      let checks = 0
+      on("completion.check", ($, e) => {
+        checks++
+        return e.revisionAttempts === 0
+          ? { decision: "revise", reason: "COMPLETION_GATE_E2E_REPAIR: recheck the answer" }
+          : { decision: "pass" }
+      })
+      on("turn.complete", async ($, e, next) => {
+        const result = await next(e)
+        return { ...result, text: "COMPLETION_GATE_E2E:" + checks }
+      })
+    }`))
+    const gateInstall = await page!.evaluate(bytes =>
+      window.api.plugins.install(new Uint8Array(bytes).buffer, "completion-gate-e2e.zip", "local"),
+      [...gateZip.toBuffer()])
+    assert.equal(gateInstall.success, true, gateInstall.error)
+    const gateStatus = (await page!.evaluate(id => window.api.mods.status(id), registryThread))
+      .functionMods!.find(mod => mod.name === "completion-gate-e2e")!
+    assert.ok(gateStatus?.digest)
+    await page!.evaluate(({ id, pluginId, digest }) =>
+      window.api.mods.approveFunction(id, pluginId, digest),
+      { id: registryThread, pluginId: gateStatus.pluginId, digest: gateStatus.digest! })
+    const beforeGate = modelServer.requests.length
+    await page!.locator("textarea.composer-textarea").fill("请再次确认当前结果。[completion-gate-e2e]")
+    await page!.locator("form").filter({ has: page!.locator("textarea.composer-textarea") })
+      .locator('button[type="submit"]').click()
+    await until(async () => (await page!.evaluate(id => window.api.mods.turnNotices(id), registryThread))
+      .some(notice => notice.text === "COMPLETION_GATE_E2E:2"), "mandatory gate revises and checks again before completion")
+    const gateRequests = modelServer.requests.slice(beforeGate)
+    assert.ok(gateRequests.length >= 2)
+    assert.ok(gateRequests.some(request => JSON.stringify(request.messages).includes("COMPLETION_GATE_E2E_REPAIR")))
+    await page!.screenshot({ path: join(artifacts, "completion-gate-repair.png") })
+    pass("installed Function Mod requests a real agent revision and rechecks before completion")
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})

@@ -40,7 +40,7 @@ import {
 import type { ModThreadBinding } from "./manager"
 import { DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { withScopedModMcp, withRawModMcp } from "./adapters"
-import { withFunctionExecution } from "./v2/execution-context"
+import { currentFunctionExecution, withFunctionExecution } from "./v2/execution-context"
 import { FunctionRegisteredTools } from "./v2/registered-tools"
 import { getModCallContext } from "./context"
 import type { McpCapabilityTool } from "../mcp/capability-types"
@@ -222,6 +222,38 @@ async function fixture(
 }
 
 describe("project Mods lifecycle and UI authority", () => {
+  it("binds completion checks to the live main turn and rejects replacement during a check", async () => {
+    const f = await fixture()
+    f.manager.configure(f.root, true, false)
+    const controller = new AbortController()
+    const scope = { ...f.scope, signal: controller.signal }
+    const runtime = f.manager.createRuntimeAuthority(scope)
+    f.manager.bindThread({ ...scope, runtimeAuthority: runtime.authority })
+    let replace = false
+    const check = vi.fn(async () => {
+      expect(currentFunctionExecution()).toMatchObject({
+        threadId: "thread", turnId: "turn", agentId: "main", leased: true,
+        runtimeAuthority: runtime.authority
+      })
+      if (replace) f.manager.bindThread({ ...scope, runtimeAuthority: runtime.authority })
+      return { decision: "pass" }
+    })
+    f.manager.attachFunctions({
+      invalidate: () => {}, closeThread: () => {}, close: () => {},
+      completionGate: async () => check
+    })
+    await expect(f.manager.createCompletionGate(f.root, "thread", () => ({ turnId: "other" })))
+      .rejects.toThrow("MODS_THREAD_CONTEXT_REQUIRED")
+    const gate = await f.manager.createCompletionGate(f.root, "thread", () => ({ turnId: "turn" }))
+    const input = { signal: controller.signal, revisionAttempts: 0, maxRevisionAttempts: 2 }
+    expect(await gate!(input)).toEqual({ decision: "pass" })
+    replace = true
+    await expect(gate!(input)).rejects.toThrow("MODS_THREAD_CONTEXT_EXPIRED")
+    expect(check).toHaveBeenCalledTimes(2)
+    await expect(gate!(input)).rejects.toThrow("MODS_THREAD_CONTEXT_EXPIRED")
+    expect(check).toHaveBeenCalledTimes(2)
+  })
+
   it("honors the application switch and falls through to the native path when disabled", async () => {
     let globalEnabled = true
     const f = await fixture(undefined, () => globalEnabled)

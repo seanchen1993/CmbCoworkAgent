@@ -1,12 +1,17 @@
-import { recordsFrom, stageFor, formatReport, matchesArtifact } from "./core.js"
+import { recordsFrom, relativePath } from "./core.js"
+import { inspectFeature } from "./inspect.js"
 
 export function register(on) {
   let rows = []
   let selected = ""
   let text = "点击刷新读取项目状态。"
+  let reviewMode = "off"
+  let reviewTarget = ""
   const pane = "autobiz-kanban"
 
   async function refresh($) {
+    reviewMode = await $.store.get("review-mode") || "off"
+    reviewTarget = await $.store.get("review-target") || ""
     try {
       rows = recordsFrom(await $.fs.read(".autobizdevops/state.json"))
       selected = selected && rows.some(item => item.feature === selected) ? selected : rows[0]?.feature || ""
@@ -19,24 +24,8 @@ export function register(on) {
   }
 
   async function check($, id) {
-    const row = rows.find(item => item.feature === id)
-    if (!row) return "未选择 Feature。"
-    const stage = stageFor(row)
-    const base = `.autobizdevops/features/${row.feature}`
-    const entries = await $.fs.exists(base) ? await $.fs.list(base) : []
-    const files = entries.filter(entry => entry.kind === "file" && entry.size > 0).map(entry => entry.name)
-    for (const directory of entries.filter(entry => entry.kind === "dir")) {
-      const nested = await $.fs.list(`${base}/${directory.name}`)
-      for (const entry of nested)
-        if (entry.kind === "file" && entry.size > 0) files.push(`${directory.name}/${entry.name}`)
-    }
-    const evidence = ["inputs", "outputs"].flatMap(kind =>
-      (stage.node.artifacts?.[kind] || []).map(item => ({
-        path: item.path, required: item.required === true,
-        direction: kind === "inputs" ? "输入" : "输出",
-        present: files.some(file => matchesArtifact(item.path, file))
-      })))
-    return formatReport(row, stage, evidence)
+    try { return await inspectFeature($, id) }
+    catch (error) { return `无法检查：${error.message}` }
   }
 
   on("session.start", {}, async ($, e, next) => next(e))
@@ -46,9 +35,34 @@ export function register(on) {
     return { text }
   })
   on("ui.render", { component: "Pane", requestId: pane }, ($, e) => {
-    const { Box, Text, Select, Button } = $.ui.resolve(e)
+    const { Box, Text, Select, Button, Input } = $.ui.resolve(e)
     return <Box flexDirection="column" gap={1}>
       <Text bold>Autobiz · 项目交付看板</Text>
+      <Text>完成前自动单文件评审（开启会产生模型用量；不代替测试和业务验收）</Text>
+      <Select key="review-mode" value={reviewMode} options={[
+        { value: "off", label: "关闭" }, { value: "report", label: "仅报告" },
+        { value: "check", label: "有问题则阻止完成" }, { value: "repair", label: "自动修复并复检" }
+      ]} onSelect={async value => {
+        if (!["off", "report", "check", "repair"].includes(value)) return
+        await $.store.set("review-mode", value)
+        reviewMode = value
+        await $.ui.invalidate("ui.render")
+      }} />
+      <Input key="review-target" label="评审文件（项目相对路径）" value={reviewTarget}
+        onSubmit={async value => {
+          try {
+            relativePath(value)
+            await $.fs.read(value)
+            await $.store.set("review-target", value)
+            reviewTarget = value
+            text = `已保存评审范围：${value}`
+          } catch (error) { text = `未保存：${error.message}` }
+          await $.ui.invalidate("ui.render")
+        }} />
+      <Button key="review-last" label="最近自动评审结果" onPress={async () => {
+        text = (await $.store.get("review-result"))?.report || "尚无自动评审记录。"
+        await $.ui.invalidate("ui.render")
+      }} />
       {rows.length ? <Select key="feature" value={selected} options={rows.map(item => ({ value: item.feature, label: `${item.feature} · ${item.checkpoint}` }))} onSelect={async value => { selected = value; text = await check($, value); await $.ui.invalidate("ui.render") }} /> : <Text>请点击刷新。</Text>}
       <Button key="refresh" label="刷新真实状态" onPress={async () => refresh($)} />
       <Button key="check" label="检查当前阶段产物" onPress={async () => { text = await check($, selected); await $.ui.invalidate("ui.render") }} />
