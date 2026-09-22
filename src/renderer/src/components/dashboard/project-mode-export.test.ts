@@ -103,7 +103,7 @@ describe("project-mode Excel export", () => {
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("托管运行次数")]).toBe(0)
   })
 
-  it("运行开销四项按原始数字导出，不做单位压缩", () => {
+  it("运行开销各项按原始数字导出，不做单位压缩", () => {
     // 界面上 Token 会压成 3.9M，导出不能这么干——拿去算数会丢精度。
     const project = {
       projectId: "p-cost",
@@ -116,6 +116,8 @@ describe("project-mode Excel export", () => {
         toolCalls: 4821,
         modelCalls: 612,
         totalTokens: 3_940_000,
+        inputTokens: 3_210_000,
+        outputTokens: 498_000,
         userInputRequests: 37,
         userInputRequestDocs: 128
       },
@@ -131,42 +133,20 @@ describe("project-mode Excel export", () => {
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("工具调用次数")]).toBe(4821)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("模型调用次数")]).toBe(612)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Token 总量")]).toBe(3_940_000)
-    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求用户回答次数")]).toBe(37)
-    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求用户回答次数是否完整")]).toBe("是")
+    // 三个量各导一列：输入+输出 = 3.708M < 总量 3.94M，差额是缓存读取与创建。
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("输入 Token")]).toBe(3_210_000)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("输出 Token")]).toBe(498_000)
   })
 
-  it("问答数不完整时单开一列标注，数字本身保持可计算", () => {
-    // 界面用 ~ 前缀表达下限，导出不能这样——那会把整列变成字符串，没法求和。
-    const project = {
-      projectId: "p-partial",
-      name: "老数据项目",
-      featureCount: 1,
-      conversationCount: 52,
-      devStageConversationCount: 0,
-      devAssociatedFeatureCount: 0,
-      runCost: {
-        toolCalls: 1503,
-        modelCalls: 208,
-        totalTokens: 1_120_000,
-        userInputRequests: 9,
-        userInputRequestDocs: 20
-      },
-      userInputRequestCountComplete: false,
-      stageBuckets: {
-        pluginConstrained: { conversationCount: 0, codeStats: null },
-        vibecoding: { conversationCount: 0, codeStats: null },
-        unattributed: { conversationCount: 0, codeStats: null }
-      }
-    } as DashboardProjectModeProject
-
-    const [row] = buildProjectModeProjectExportRows([project])
-    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求用户回答次数")]).toBe(9)
-    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求用户回答次数是否完整")]).toBe(
-      "否（下限）"
-    )
+  it("不再导出请求用户回答次数", () => {
+    // `userInputRequestCount` 采集侧从未写入，索引里没有这个字段，sum 恒为 0。
+    // 导出里留一列恒 0 比界面上留一列更糟：它会被下载、粘进报表、当成真值参与计算。
+    // 等采集侧补上标量再加回来，连同那列「是否完整」的下限标注。
+    expect(PROJECT_MODE_PROJECT_EXPORT_HEADER).not.toContain("请求用户回答次数")
+    expect(PROJECT_MODE_PROJECT_EXPORT_HEADER).not.toContain("请求用户回答次数是否完整")
   })
 
-  it("后端没回 runCost 时四项都是 0，不是 undefined", () => {
+  it("后端没回 runCost 时各项都是 0，不是 undefined", () => {
     const project = {
       projectId: "p-old",
       name: "旧主进程",
@@ -182,7 +162,7 @@ describe("project-mode Excel export", () => {
     } as DashboardProjectModeProject
 
     const [row] = buildProjectModeProjectExportRows([project])
-    for (const column of ["工具调用次数", "模型调用次数", "Token 总量", "请求用户回答次数"]) {
+    for (const column of ["工具调用次数", "模型调用次数", "Token 总量", "输入 Token", "输出 Token"]) {
       expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf(column)], column).toBe(0)
     }
   })

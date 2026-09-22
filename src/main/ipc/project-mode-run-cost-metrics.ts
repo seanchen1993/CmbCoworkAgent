@@ -10,11 +10,27 @@ import { mainAgentConversationAggs } from "./dashboard-stage-buckets"
  *   totalTokens           —— 输入+输出+缓存
  *   totalInputTokens      —— 只算输入，不含缓存
  *   totalOutputTokens     —— 只算输出
- *   userInputRequestCount —— 本轮调用 request_user_input 的次数
+ *   userInputRequestCount —— 本轮调用 request_user_input 的次数。**索引里没有这个字段**，见下。
  *
- * 后两个字段是后加的，一度只能从 `_raw` 算。但会话记录列表（`_raw` 被刻意排除的预览
- * 路径）照样能正确显示它们，走的是 `asNumber(source.userInputRequestCount)`——这说明
- * 索引里确实有，可以聚合。
+ * ── userInputRequestCount 目前取不到值 ─────────────────────────
+ *
+ * 这个字段采集侧从未写入：`AgentTrace` 上没有它，`src/main/agent/` 下也没有任何赋值。
+ * 它只以两种形式存在——看板读 `_raw` 时现算的 `countUserInputRequests(nodes)`（数
+ * trace 树里的 request_user_input 工具节点），以及这里这个聚合字段名。所以 sum 恒为 0，
+ * value_count 也恒为 0，界面上的列已经撤掉。
+ *
+ * 原先这段注释写的是「会话记录列表（`_raw` 被排除的预览路径）照样能正确显示它们，说明
+ * 索引里确实有」。这个推断不成立：预览路径走的是 `asNumber(source.userInputRequestCount)`，
+ * 缺字段时返回 0，不抛错也不留空，看起来就像正常显示了，而 0 对「问答次数」又是个合理
+ * 的值，于是没人发现。
+ *
+ * 对照 `modelCallCount` 可以看清区别：客户端送的是 `totalModelCalls`，服务端存成
+ * `modelCallCount`，**客户端送了原料**所以服务端派生得出来。用户提问次数没有对应的原料
+ * 标量，服务端手里只有一份去重过的 `toolNames` 名字数组（客户端 standard-turn-stream
+ * 用的是 Set，同一轮调五次只留一个名字），能回答「用没用过」，回答不了「用了几次」。
+ *
+ * 聚合和覆盖度探针都保留着：等采集侧补上这个标量，恢复展示只需要改界面，而那之后老 trace
+ * 仍然没有该字段，正需要探针把「下限」标出来。
  *
  * ── 为什么每个 sum 都配一个 value_count ──────────────────────────
  *
