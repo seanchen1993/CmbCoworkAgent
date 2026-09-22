@@ -46,6 +46,7 @@ import {
   validateModelToolInput
 } from "./tool-sdk"
 import { functionModelRequest, validateFunctionModelText } from "./model-sdk"
+import { functionModelClassifyRequest, functionModelForkRequest } from "./model-operations"
 import { FunctionToolRegistry, functionToolSpec } from "./tool-registry"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
 import {
@@ -58,6 +59,7 @@ import { functionToolCheckInput, validateToolCheckResult } from "./tool-check"
 import { constrainToolPermission, type ToolPermissionResult } from "../../../shared/tool-permission"
 import { validateRegisteredToolInput } from "./tool-schema"
 import { functionCallAgent, withFunctionAgentExecution } from "./host-call"
+import { dispatchFunctionStream, type FunctionStreamOptions, type ModHookStream } from "./stream-dispatcher"
 import { currentFunctionExecution, assertFunctionPublicationScope } from "./execution-context"
 import { functionMcpToolName } from "./mcp-names"
 import type {
@@ -65,7 +67,11 @@ import type {
   FunctionTurnComplete,
   FunctionTurnResult
 } from "../../../shared/mods/v2/turn"
-import { validateFunctionTurnInput, validateFunctionTurnResult } from "./turn-contract"
+import {
+  validateFunctionTurnInput,
+  validateFunctionTurnResult,
+  validateFunctionTurnStepInput
+} from "./turn-contract"
 import { FunctionTurnAbortBudget } from "./turn-lifecycle"
 
 export interface FunctionSessionHost {
@@ -368,6 +374,23 @@ export class FunctionSession {
     )) as unknown as FunctionTurnResult
   }
 
+  /** The host-owned main-model boundary. Hooks only receive normalized, published chunks. */
+  async turnStep(
+    input: ModObject,
+    core: FunctionStreamOptions["core"],
+    signal?: AbortSignal
+  ): Promise<ModHookStream> {
+    await this.start()
+    this.assertLive()
+    const scoped = signal ? AbortSignal.any([signal, this.controller.signal]) : this.controller.signal
+    validateFunctionTurnStepInput(input)
+    return dispatchFunctionStream(this.plugins, input, {
+      signal: scoped,
+      core,
+      validateInput: validateFunctionTurnStepInput
+    })
+  }
+
   async run(command: string, args: string, signal?: AbortSignal): Promise<ModObject> {
     await this.start()
     this.assertLive()
@@ -454,7 +477,7 @@ export class FunctionSession {
       assertRegistered()
       const result = (await this.dispatch(
         "tool.call",
-        input,
+        input as unknown as ModObject,
         scoped,
         skip,
         depth,
@@ -518,6 +541,8 @@ export class FunctionSession {
       ...(event === "command.run" ||
       event === "tool.call" ||
       event === "model.complete" ||
+      event === "model.classify" ||
+      event === "model.fork" ||
       event === "mcp.call" ||
       ["ui.press", "ui.input", "ui.select", "ui.focus", "ui.scroll", "ui.message"].includes(event)
         ? { timeoutMs: 120000 }
@@ -542,6 +567,8 @@ export class FunctionSession {
           } else functionSdkToolInput(value)
         }
         if (name === "model.complete") functionModelRequest(value)
+        if (name === "model.classify") functionModelClassifyRequest(value)
+        if (name === "model.fork") functionModelForkRequest(value)
         if (name === "mcp.call") functionMcpInput(value)
         if (name === "tool.check") functionToolCheckInput(value, true)
         if (name === "ui.open") validatePaneArgs(value)
@@ -583,6 +610,19 @@ export class FunctionSession {
           if (!isModObject(value)) throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (typeof value.deny === "string") return
           if (name === "model.complete") return validateFunctionModelText(value.value)
+          if (
+            name === "model.classify" &&
+            value.value !== null &&
+            value.value !== undefined &&
+            typeof value.value !== "string"
+          )
+            throw new ModFunctionError("MODS_MODEL_RESULT_LIMIT")
+          if (
+            name === "model.fork" &&
+            value.value !== null &&
+            (!isModObject(value.value) || typeof value.value.text !== "string")
+          )
+            throw new ModFunctionError("MODS_MODEL_RESULT_LIMIT")
           if (name === "mcp.call") return validateFunctionMcpResult(value.value)
           if (
             name === "tool.register" &&
@@ -740,7 +780,7 @@ export class FunctionSession {
       const input = functionMcpInput({ server: args[0], tool: args[1], args: args[2] ?? {} })
       const result = await this.dispatch(
         method,
-        input,
+        input as unknown as ModObject,
         callSignal,
         { plugin: plugin.name, registration: source.registration },
         depth + 1,
@@ -809,7 +849,7 @@ export class FunctionSession {
       const input = method === "tool.register" ? functionToolSpec(args[0] as ModObject) : {}
       const result = await this.dispatch(
         method,
-        input,
+        input as unknown as ModObject,
         callSignal,
         { plugin: plugin.name, registration: source.registration },
         depth + 1,
@@ -845,11 +885,31 @@ export class FunctionSession {
       return result.value
     }
     if (method === "model.fork" || method === "model.classify") {
-      if (args.length !== 1 || !isModObject(args[0]))
-        throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
+      const input =
+        method === "model.fork"
+          ? args.length === 1 && isModObject(args[0])
+            ? functionModelForkRequest(args[0])
+            : (() => {
+                throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
+              })()
+          : (() => {
+              if (
+                args.length < 2 ||
+                args.length > 3 ||
+                typeof args[0] !== "string" ||
+                !Array.isArray(args[1]) ||
+                (args[2] !== undefined && !isModObject(args[2]))
+              )
+                throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
+              return functionModelClassifyRequest({
+                text: args[0],
+                labels: args[1],
+                ...(args[2] === undefined ? {} : { options: args[2] })
+              })
+            })()
       const result = await this.dispatch(
         method,
-        args[0],
+        input as unknown as ModObject,
         callSignal,
         { plugin: plugin.name, registration: source.registration },
         depth + 1,
@@ -859,6 +919,7 @@ export class FunctionSession {
             this.assertLive(plugin)
             if (!this.host.capability) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
             const value = await this.host.capability(plugin, method, [input], signal)
+            if (value === undefined && method === "model.classify") return null
             if (value === undefined) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
             return value
           }
@@ -867,7 +928,7 @@ export class FunctionSession {
       )
       if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
       if (typeof result.deny === "string") throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
-      return result.value
+      return method === "model.classify" && result.value === null ? undefined : result.value
     }
     if (method === "model.complete") {
       if (args.length !== 1 || !isModObject(args[0]))

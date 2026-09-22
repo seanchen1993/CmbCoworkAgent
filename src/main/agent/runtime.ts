@@ -5,6 +5,10 @@ import {
   createFunctionChildTurnMiddleware,
   createFunctionSessionViewMiddleware
 } from "./mods-session-view"
+import {
+  createModModelBoundary,
+  type FunctionModelStreamHost
+} from "./mods-model-boundary"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
@@ -3112,8 +3116,32 @@ function assembleDeepAgent(
     ? [createOutputStyleTurnReminderMiddleware(effectiveOutputStyle)]
     : []
 
+  // Install the function-mod stream boundary only on the real main runtime.
+  // Metadata/catalogue assembly and child agents retain their original model;
+  // the host authority and generation are what make this wrapper eligible.
+  const modelForAgent =
+    !metadataOnly &&
+    modRuntimeAuthority?.agentId === "main" &&
+    modManager?.isActive(modRuntimeAuthority.workspace) &&
+    typeof (modManager as unknown as Partial<FunctionModelStreamHost>).functionModelStream ===
+      "function" &&
+    model &&
+    typeof model === "object" &&
+    typeof (model as { stream?: unknown }).stream === "function"
+      ? createModModelBoundary(
+          model,
+          modManager as unknown as FunctionModelStreamHost,
+          modRuntimeAuthority,
+          {
+            turnId: modRuntimeAuthority.turnId,
+            model: typeof modSessionModel === "string" ? modSessionModel : "configured",
+            agentId: modRuntimeAuthority.agentId
+          }
+        )
+      : model
+
   const agentOptions = {
-    model,
+    model: modelForAgent,
     systemPrompt: finalSystemPrompt,
     tools,
     middleware: [

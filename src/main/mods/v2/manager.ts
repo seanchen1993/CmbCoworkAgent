@@ -51,6 +51,7 @@ import {
 } from "./completion-evidence"
 import { advanceAutobizCheckpoint, runAutobizValidator } from "./autobiz-validation"
 import { runProjectCheck, type ProjectCheckKind } from "./project-checks"
+import { dispatchFunctionStream, type FunctionStreamOptions, type ModHookStream } from "./stream-dispatcher"
 
 interface Snapshot {
   compiled: CompiledFunctionPlugin
@@ -142,6 +143,14 @@ interface FunctionManagerHost {
     input: ModObject,
     signal: AbortSignal
   ): Promise<string>
+  capability?(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    method: "model.fork" | "model.classify",
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModJson | undefined>
   scheduleCommand?(
     workspace: string,
     threadId: string,
@@ -443,6 +452,24 @@ export class FunctionModsManager {
             assertLive(plugin)
             return result
           },
+          capability: async (plugin, method, args, signal) => {
+            assertLive(plugin)
+            if (!this.host.capability)
+              throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
+            const grant = current.snapshots.get(plugin.name)!.grant
+            const input = args[0]
+            if (!isModObject(input)) throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
+            const result = await this.host.capability(
+              workspace,
+              threadId,
+              grant,
+              method as "model.fork" | "model.classify",
+              input,
+              signal
+            )
+            assertLive(plugin)
+            return result
+          },
           callTool: async (plugin, input, signal) => {
             assertLive(plugin)
             if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
@@ -715,6 +742,48 @@ export class FunctionModsManager {
     entry.completionProofs.clear()
     const safe = await this.host.publish(workspace, input as unknown as ModJson, signal)
     await entry.session!.turnStart(safe as unknown as FunctionTurnStart, signal)
+  }
+
+  async turnStep(
+    workspace: string,
+    threadId: string,
+    input: ModObject,
+    core: FunctionStreamOptions["core"],
+    signal: AbortSignal
+  ): Promise<ModHookStream> {
+    if (!this.host.enabled(workspace) || this.sources().length === 0)
+      return this.emptyStep(input, core, signal)
+    const entry = await this.session(workspace, threadId)
+    if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    const safe = await this.host.publish(workspace, input, signal)
+    const publish = this.host.publish.bind(this.host)
+    const assertEntry = (): void => {
+      signal.throwIfAborted()
+      this.host.assertThread?.(workspace, threadId)
+      if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    }
+    const protectedCore: FunctionStreamOptions["core"] = async function* (value, context) {
+      assertEntry()
+      const output = core(value, context)
+      while (true) {
+        const item = await output.next()
+        if (item.done)
+          return await publish(workspace, item.value ?? {}, context.signal)
+        assertEntry()
+        yield await publish(workspace, item.value, context.signal)
+      }
+    }
+    return entry.session!.turnStep(safe as ModObject, protectedCore, signal)
+  }
+
+  private emptyStep(
+    input: ModObject,
+    core: FunctionStreamOptions["core"],
+    signal: AbortSignal
+  ): ModHookStream {
+    return dispatchFunctionStream([], input, { signal, core })
   }
 
   async completionGate(

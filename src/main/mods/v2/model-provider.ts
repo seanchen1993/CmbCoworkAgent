@@ -1,4 +1,4 @@
-import { HumanMessage, SystemMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
 import type { ResolvedModelConfig } from "../../models/registry"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
@@ -7,6 +7,11 @@ import {
   type FunctionModelReply,
   type FunctionModelRequest
 } from "./model-sdk"
+import type {
+  FunctionModelForkReply,
+  FunctionModelForkRequest,
+  FunctionModelForkSnapshot
+} from "./model-operations"
 
 export async function resolveFunctionModel(name: string): Promise<ResolvedModelConfig> {
   const registry = await import("../../models/registry")
@@ -23,20 +28,29 @@ export async function invokeFunctionModel(
   request: FunctionModelRequest,
   signal: AbortSignal
 ): Promise<FunctionModelReply> {
-  const { getModelInstance } = await import("../../agent/runtime")
-  signal.throwIfAborted()
-  const model = getModelInstance(
-    { ...config, maxOutputTokens: request.maxTokens ?? 256 },
-    undefined,
-    1,
-    "function-completion"
-  )
   const messages = [
     new SystemMessage(
       `You are CMBDevClaw, a coding assistant.${request.system ? `\n\n${request.system}` : ""}`
     ),
     new HumanMessage(request.prompt)
   ]
+  return invokeFunctionMessages(config, messages, request.maxTokens ?? 256, signal)
+}
+
+async function invokeFunctionMessages(
+  config: ResolvedModelConfig,
+  messages: BaseMessage[],
+  maxTokens: number,
+  signal: AbortSignal
+): Promise<FunctionModelReply> {
+  const { getModelInstance } = await import("../../agent/runtime")
+  signal.throwIfAborted()
+  const model = getModelInstance(
+    { ...config, maxOutputTokens: maxTokens },
+    undefined,
+    1,
+    "function-completion"
+  )
   // A nested completion must not inherit the agent's stream callbacks, graph writer or trace
   // configuration. Keep the entire iterator in this scope, not just stream construction.
   // This only replaces LangChain's context; our grant/turn/call AsyncLocalStorage stays intact.
@@ -67,4 +81,34 @@ export async function invokeFunctionModel(
       }
     )
   )
+}
+
+/**
+ * Run a fork against a host-created, text-only session snapshot. Roles remain separate provider
+ * messages and no tool definitions enter the nested model request.
+ */
+export async function invokeFunctionFork(
+  config: ResolvedModelConfig,
+  request: FunctionModelForkRequest,
+  snapshot: FunctionModelForkSnapshot,
+  signal: AbortSignal
+): Promise<FunctionModelForkReply> {
+  if (!snapshot.messages.length && !snapshot.system)
+    throw new ModFunctionError("MODS_MODEL_UNAVAILABLE")
+  const messages: BaseMessage[] = []
+  if (snapshot.system) messages.push(new SystemMessage(snapshot.system))
+  for (const message of snapshot.messages) {
+    if (message.text.length > 32000) throw new ModFunctionError("MODS_MODEL_ARGUMENTS")
+    if (message.role === "system") messages.push(new SystemMessage(message.text))
+    else if (message.role === "assistant") messages.push(new AIMessage(message.text))
+    else messages.push(new HumanMessage(message.text))
+  }
+  messages.push(new HumanMessage(request.prompt))
+  const result = await invokeFunctionMessages(config, messages, request.maxTokens ?? 256, signal)
+  return {
+    text: result.text,
+    ...(result.inputTokens === undefined && result.outputTokens === undefined
+      ? {}
+      : { usage: { input_tokens: result.inputTokens, output_tokens: result.outputTokens } })
+  }
 }

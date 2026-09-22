@@ -14,6 +14,11 @@ import {
 import type { ModIdentity, ModObject } from "../../../shared/mods/types"
 import { withFunctionExecution } from "./execution-context"
 import { FunctionRegisteredTools } from "./registered-tools"
+import type {
+  FunctionModelForkReply,
+  FunctionModelForkRequest,
+  FunctionModelForkSnapshot
+} from "./model-operations"
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -327,4 +332,154 @@ it("expires a stalled request and records uncertain execution without retrying",
   expect(f.host.invoke).toHaveBeenCalledOnce()
   expect(f.store.audit(f.folder)[0]).toMatchObject({ status: "unknown", publication: "blocked" })
   expect(f.models.stats).toEqual({ pending: 0, scopes: 0 })
+})
+
+it("classifies with one fixed prompt and returns only an allowed label", async () => {
+  const f = fixture()
+  f.host.invoke.mockResolvedValue({ text: " green \n", inputTokens: 8, outputTokens: 1 })
+  await expect(
+    f.models.classify(
+      f.folder,
+      "thread",
+      f.grant,
+      { text: "pick a color", labels: ["red", "green"] },
+      new AbortController().signal
+    )
+  ).resolves.toBe("green")
+  expect(f.host.invoke).toHaveBeenCalledOnce()
+  expect(f.host.invoke.mock.calls[0][1].prompt).toContain("red")
+  expect(f.host.invoke.mock.calls[0][1].prompt).toContain("pick a color")
+})
+
+it("returns undefined for an out-of-set classification and rejects malformed labels", async () => {
+  const f = fixture()
+  f.host.invoke.mockResolvedValue({ text: "not-a-label" })
+  await expect(
+    f.models.classify(
+      f.folder,
+      "thread",
+      f.grant,
+      { text: "x", labels: ["yes", "no"] },
+      new AbortController().signal
+    )
+  ).resolves.toBeUndefined()
+  await expect(
+    f.models.classify(
+      f.folder,
+      "thread",
+      f.grant,
+      { text: "x", labels: ["yes", "yes"] },
+      new AbortController().signal
+    )
+  ).rejects.toThrow("MODS_MODEL_ARGUMENTS")
+})
+
+it("rejects failed or empty classifications and fewer than two labels", async () => {
+  const f = fixture()
+  const input = { text: "x", labels: ["yes", "no"] }
+  const call = () =>
+    f.models.classify(f.folder, "thread", f.grant, input, new AbortController().signal)
+  f.host.invoke.mockRejectedValue(Error("provider error"))
+  await expect(call()).rejects.toThrow("MODS_MODEL_FAILED")
+  f.host.invoke.mockResolvedValue({ text: " \n " })
+  await expect(call()).rejects.toThrow("MODS_MODEL_EMPTY")
+  await expect(
+    f.models.classify(
+      f.folder,
+      "thread",
+      f.grant,
+      { text: "x", labels: ["yes"] },
+      new AbortController().signal
+    )
+  ).rejects.toThrow("MODS_MODEL_ARGUMENTS")
+})
+
+it("forks only from a host snapshot and returns usage without tools or main-history writes", async () => {
+  const f = fixture()
+  const snapshot: FunctionModelForkSnapshot = {
+    messages: [{ role: "user", text: "existing context" }],
+    model: "chosen",
+    assertLive: vi.fn(),
+    release: vi.fn()
+  }
+  const capture = vi.fn(() => snapshot)
+  const invokeFork = vi.fn<
+    (
+      config: ResolvedModelConfig,
+      request: FunctionModelForkRequest,
+      snapshot: FunctionModelForkSnapshot,
+      signal: AbortSignal
+    ) => Promise<FunctionModelForkReply>
+  >(async () => ({ text: "fork answer", usage: { input_tokens: 11, output_tokens: 2 } }))
+  Object.assign(f.host, { captureForkSnapshot: capture, invokeFork })
+  await expect(
+    f.models.fork(
+      f.folder,
+      "thread",
+      f.grant,
+      { prompt: "summarize" },
+      new AbortController().signal
+    )
+  ).resolves.toEqual({ text: "fork answer", usage: { input_tokens: 11, output_tokens: 2 } })
+  expect(capture).toHaveBeenCalledWith(f.folder, "thread")
+  expect(invokeFork).toHaveBeenCalledOnce()
+  expect(invokeFork.mock.calls[0][2]).toEqual(snapshot)
+  expect(JSON.stringify(f.store.audit(f.folder))).not.toContain("existing context")
+  expect(snapshot.release).toHaveBeenCalledOnce()
+  await expect(
+    f.models.fork(
+      f.folder,
+      "thread",
+      f.grant,
+      { prompt: "hijack", model: "other" },
+      new AbortController().signal
+    )
+  ).rejects.toThrow("MODS_MODEL_ARGUMENTS")
+})
+
+it("returns null for a cold fork and propagates cancellation and authority loss", async () => {
+  const f = fixture()
+  const capture = vi.fn(() => null)
+  Object.assign(f.host, { captureForkSnapshot: capture })
+  await expect(
+    f.models.fork(f.folder, "thread", f.grant, { prompt: "cold" }, new AbortController().signal)
+  ).resolves.toBeNull()
+
+  const controller = new AbortController()
+  controller.abort()
+  await expect(
+    f.models.classify(
+      f.folder,
+      "thread",
+      f.grant,
+      { text: "x", labels: ["x", "y"] },
+      controller.signal
+    )
+  ).rejects.toThrow("MODS_CANCELLED")
+})
+
+it("rechecks the captured fork authority after provider completion and releases it", async () => {
+  const f = fixture()
+  let live = true
+  const snapshot: FunctionModelForkSnapshot = {
+    model: "chosen",
+    messages: [{ role: "user", text: "private context" }],
+    assertLive: vi.fn(() => {
+      if (!live) throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+    }),
+    release: vi.fn()
+  }
+  Object.assign(f.host, {
+    captureForkSnapshot: () => snapshot,
+    invokeFork: async () => {
+      live = false
+      return { text: "stale reply" }
+    }
+  })
+  await expect(
+    f.models.fork(f.folder, "thread", f.grant, { prompt: "go" }, new AbortController().signal)
+  ).rejects.toThrow("MODS_CALL_SCOPE_CHANGED")
+  expect(f.host.publish).not.toHaveBeenCalled()
+  expect(snapshot.release).toHaveBeenCalledOnce()
+  expect(f.store.audit(f.folder)[0]).toMatchObject({ status: "unknown", publication: "blocked" })
 })

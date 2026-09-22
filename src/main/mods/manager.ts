@@ -58,6 +58,7 @@ import {
   resolveFunctionMcpToolName
 } from "./v2/mcp-sdk"
 import { functionSdkToolInput, isNativeFunctionTool } from "./v2/tool-sdk"
+import type { FunctionStreamOptions, ModHookStream } from "./v2/stream-dispatcher"
 import { queryModRuntimeToolAccess, type ModRuntimeToolAccess } from "./runtime-tool-access"
 import {
   assertModRuntimeAuthority,
@@ -323,6 +324,13 @@ export class ModsManager {
       input: ModObject,
       core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>
     ): Promise<ModObject>
+    turnStep?(
+      workspace: string,
+      threadId: string,
+      input: ModObject,
+      core: FunctionStreamOptions["core"],
+      signal: AbortSignal
+    ): Promise<ModHookStream>
   }
 
   attachFunctions(lifecycle: NonNullable<ModsManager["functionLifecycle"]>): void {
@@ -505,6 +513,21 @@ export class ModsManager {
     workspace: string
   ): NonNullable<ModsManager["functionLifecycle"]>["toolCall"] {
     return this.isEnabled(workspace) ? this.functionLifecycle?.toolCall : undefined
+  }
+
+  /** Main-agent model streams enter the same host-owned FunctionSession boundary as hooks. */
+  functionModelStream(
+    authority: ModRuntimeAuthority,
+    input: ModObject,
+    core: FunctionStreamOptions["core"],
+    signal: AbortSignal
+  ): Promise<ModHookStream> {
+    authority.assertLive()
+    if (authority.agentId !== "main" || !this.isEnabled(authority.workspace))
+      throw new ModError("MODS_MODEL_OPERATION_UNSUPPORTED")
+    const lifecycle = this.functionLifecycle?.turnStep
+    if (!lifecycle) throw new ModError("MODS_MODEL_OPERATION_UNSUPPORTED")
+    return lifecycle(authority.workspace, authority.threadId, input, core, signal)
   }
 
   isEnabled(workspace: string): boolean {

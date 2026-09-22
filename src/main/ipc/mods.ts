@@ -21,7 +21,7 @@ import {
 } from "../mods/v2/execution-context"
 import { functionCallTurn } from "../mods/v2/host-call"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
-import type { ModCommandDescriptor, ModObject } from "../../shared/mods/types"
+import type { ModCommandDescriptor, ModJson, ModObject } from "../../shared/mods/types"
 import { resolveAgentModeFromMetadata } from "../../shared/agent-mode-metadata"
 import { FunctionModsManager } from "../mods/v2/manager"
 import { FunctionRuntimeClient } from "../mods/v2/runtime-client"
@@ -35,7 +35,12 @@ import { routeFunctionMcp } from "../mods/v2/mcp-tool-routing"
 import type { ModGrant } from "../mods/control-store"
 import { randomUUID } from "node:crypto"
 import { FunctionModels } from "../mods/v2/models"
-import { invokeFunctionModel, resolveFunctionModel } from "../mods/v2/model-provider"
+import {
+  invokeFunctionFork,
+  invokeFunctionModel,
+  resolveFunctionModel
+} from "../mods/v2/model-provider"
+import type { FunctionModelForkSnapshot } from "../mods/v2/model-operations"
 import { FunctionRegisteredTools } from "../mods/v2/registered-tools"
 import { queryFunctionToolPermission } from "../mods/v2/tool-permission-host"
 import { functionFileScope } from "../mods/v2/file-permission-host"
@@ -142,7 +147,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         )
       manager.store.publication(identity.callId, "", [], "published")
       return value
-    }
+    },
+    captureForkSnapshot: (workspace, threadId) => captureForkSnapshot(workspace, threadId),
+    invokeFork: (config, request, snapshot, signal) =>
+      invokeFunctionFork(config, request, snapshot, signal)
   })
   const functions = new FunctionModsManager(
     manager.store,
@@ -211,6 +219,16 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         )
       },
       completeModel: (...args) => models.complete(...args),
+      capability: async (workspace, threadId, grant, method, input, signal) => {
+        manager.store.assertGrant(grant)
+        if (method === "model.classify") {
+          const value = await models.classify(workspace, threadId, grant, input, signal)
+          return value ?? null
+        }
+        if (method === "model.fork")
+          return (await models.fork(workspace, threadId, grant, input, signal)) as unknown as ModJson
+        throw new ModError("MODS_MODEL_OPERATION_UNSUPPORTED")
+      },
       checkTool: (workspace, threadId, grant, input, signal, registered) => {
         if (writableThreadScope(threadId) !== workspace)
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
@@ -287,6 +305,77 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     const owner = window()
     if (owner && !owner.isDestroyed()) owner.webContents.send("mods:jobs-changed", { threadId })
   })
+
+  function captureForkSnapshot(
+    workspace: string,
+    threadId: string
+  ): FunctionModelForkSnapshot | null {
+    const captured = manager.captureFunctionSession(workspace, threadId)
+    let handedOff = false
+    try {
+      captured.assertLive()
+      if (!captured.bound || !captured.messages?.length || !captured.model) return null
+      const messages: Array<FunctionModelForkSnapshot["messages"][number]> = []
+      let bytes = 0
+      for (const raw of captured.messages) {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue
+        const value = raw as Record<string, unknown>
+        const rawRole =
+          typeof value.role === "string"
+            ? value.role
+            : typeof value.type === "string"
+              ? value.type
+              : typeof (value._getType as (() => string) | undefined) === "function"
+                ? (value._getType as () => string)()
+                : ""
+        const role =
+          rawRole === "human" ? "user" : rawRole === "ai" ? "assistant" : rawRole
+        if (role !== "system" && role !== "user" && role !== "assistant") continue
+        const content = value.content
+        const text =
+          typeof content === "string"
+            ? content
+            : Array.isArray(content)
+              ? content
+                  .filter(
+                    (part): part is { type: "text"; text: string } =>
+                      !!part &&
+                      typeof part === "object" &&
+                      !Array.isArray(part) &&
+                      (part as Record<string, unknown>).type === "text" &&
+                      typeof (part as Record<string, unknown>).text === "string"
+                  )
+                  .map((part) => part.text)
+                  .join("")
+              : ""
+        if (!text) continue
+        bytes += Buffer.byteLength(text, "utf8")
+        if (bytes > 64000 || messages.length >= 256) break
+        messages.push({ role, text })
+      }
+      if (messages.length === 0) return null
+      const system = captured.request?.systemMessage
+      const systemText =
+        typeof system === "string"
+          ? system
+          : system && typeof system === "object" && "content" in system
+            ? typeof (system as { content?: unknown }).content === "string"
+              ? (system as { content: string }).content
+              : undefined
+            : undefined
+      const snapshot: FunctionModelForkSnapshot = {
+        messages,
+        model: captured.model,
+        ...(systemText ? { system: systemText.slice(0, 16000) } : {}),
+        assertLive: captured.assertLive,
+        release: captured.release
+      }
+      handedOff = true
+      return snapshot
+    } finally {
+      if (!handedOff) captured.release()
+    }
+  }
 
   function callMcp(
     workspace: string,
@@ -401,6 +490,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         () =>
           functions.interceptTool(binding.workspace, binding.threadId, input, binding.signal, core)
       ),
+    turnStep: (...args) => functions.turnStep(...args),
     invalidate: (workspace) => functions.invalidate(workspace),
     invalidateAll: () => functions.invalidateAll(),
     closeThread: (threadId) => {
