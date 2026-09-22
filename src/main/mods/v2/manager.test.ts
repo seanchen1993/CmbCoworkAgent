@@ -35,6 +35,32 @@ it("pins mandatory completion checks to the loaded grant and rejects revocation"
   f.manager.revoke(f.root, "function-commands")
   await expect(gate!({ signal, revisionAttempts: 1, maxRevisionAttempts: 2 })).rejects.toThrow()
 })
+
+it("records host-owned evidence and blocks a stale pass after a concurrent file change", async () => {
+  const f = await fixture()
+  await f.approve()
+  await writeFile(
+    join(f.plugin, "hooks/gate.ts"),
+    `export function register(on) { on("completion.check", async ($) => { await $.clock.sleep(20); return {decision:"pass"} }) }`
+  )
+  const hooksPath = join(f.plugin, "hooks/hooks.json")
+  const hooks = JSON.parse(await readFile(hooksPath, "utf8"))
+  hooks.modules.push("./gate.ts")
+  await writeFile(hooksPath, JSON.stringify(hooks))
+  f.manager.invalidate(f.root)
+  await f.approve()
+  await f.manager.turnStart(f.root, "thread", { turnId: "turn", text: "implement" }, new AbortController().signal)
+  const gate = await f.manager.completionGate(f.root, "thread", () => ({ turnId: "turn", runId: "run" }))
+  expect(gate).toBeDefined()
+  f.setPublication(async (value) => {
+    if (value && !Array.isArray(value) && typeof value === "object" && value.evidenceId)
+      await writeFile(join(f.root, "concurrent.ts"), "changed")
+    return value
+  })
+  const check = gate!({ signal: new AbortController().signal, revisionAttempts: 0, maxRevisionAttempts: 2 })
+  expect(await check).toMatchObject({ decision: "block", reason: "COMPLETION_EVIDENCE_STALE" })
+  expect(f.control.completionEvidence(f.root, "thread").some((row) => row.phase === "invalidated")).toBe(true)
+})
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })

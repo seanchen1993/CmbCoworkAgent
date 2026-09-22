@@ -580,6 +580,7 @@ export async function executePreparedRemoteStandardTurn(
           threadId,
           workspacePath,
           turnId: userMessageId,
+          runId,
           pluginOutputDir: harnessContext.pluginOutputDir,
           systemId: harnessContext.systemId,
           ...getHarnessHookContext(harnessContext),

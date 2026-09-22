@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { ModControlStore } from "./control-store"
+import type { CompletionEvidenceRecord } from "./v2/completion-evidence"
 
 const folders: string[] = []
 const stores: ModControlStore[] = []
@@ -27,6 +28,43 @@ afterEach(() => {
 })
 
 describe("Mod durable control store", () => {
+  it("persists completion evidence with an idempotent event key", () => {
+    const { store, file } = fixture()
+    const record = {
+      id: "evidence-1",
+      idempotencyKey: "same-event",
+      workspace: "project",
+      threadId: "thread",
+      turnId: "turn",
+      runId: "run",
+      phase: "check.started",
+      status: "running",
+      binding: {
+        workspace: "project",
+        threadId: "thread",
+        turnId: "turn",
+        runId: "run",
+        pluginDigests: { p: "d" },
+        runtimeGeneration: 1,
+        diffFingerprint: "diff",
+        requirementVersion: "req",
+        configFingerprint: "config",
+        files: []
+      },
+      at: Date.now()
+    } satisfies CompletionEvidenceRecord
+    store.saveCompletionEvidence(record)
+    store.saveCompletionEvidence({ ...record, id: "other-id", status: "pass" })
+    expect(store.completionEvidence("project", "thread")).toEqual([record])
+    store.close()
+    stores.pop()
+    const reopened = new ModControlStore(file)
+    stores.push(reopened)
+    expect(reopened.completionEvidence("project", "thread")[0]).toMatchObject({
+      phase: "check.started",
+      status: "interrupted"
+    })
+  })
   it("keeps model reservations, unknown usage and per-plugin budgets across backups and restart", () => {
     const { store, file } = fixture()
     const identity = {
@@ -89,7 +127,7 @@ describe("Mod durable control store", () => {
     stores.pop()
     const migrated = new ModControlStore(file)
     stores.push(migrated)
-    expect(migrated.getSetting("schema")).toBe("6")
+    expect(migrated.getSetting("schema")).toBe("7")
     expect(migrated.read("legacy", "count")).toBe(7)
     migrated.functionState.set("plugin", "pref", { theme: "dark" })
     const backup = join(dirname(file), "function-backup.sqlite")

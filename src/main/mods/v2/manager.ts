@@ -9,7 +9,8 @@ import { FunctionTurnNotices } from "./turn-notices"
 import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { randomInt } from "node:crypto"
+import { randomInt, randomUUID } from "node:crypto"
+import { parseCompletionPolicy } from "../../../shared/mods/v2/completion-policy"
 import { ProjectFunctionFiles, type FunctionFileScope } from "./file-access"
 import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModPluginSource } from "../manager"
@@ -40,6 +41,14 @@ import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
 import type { ToolPermissionResult } from "../../../shared/tool-permission"
 import type { ModOrigin } from "../../../shared/mods/v2/contracts"
+import {
+  bindingFingerprint,
+  captureCompletionBinding,
+  sameCompletionBinding,
+  type CompletionEvidenceBinding,
+  type CompletionEvidenceRecord
+} from "./completion-evidence"
+import { runAutobizValidator } from "./autobiz-validation"
 
 interface Snapshot {
   compiled: CompiledFunctionPlugin
@@ -641,27 +650,122 @@ export class FunctionModsManager {
     await entry.loading
     if (this.sessions.get(key) !== entry) throw new ModFunctionError("MODS_SCOPE_CHANGED")
     if (!entry.session!.hasCompletionGate()) return undefined
-    // Capture the exact generation; a revision cannot silently reload a revoked gate.
-    return async ({ signal, revisionAttempts, maxRevisionAttempts }) => {
+    const first = context()
+    const turnId = typeof first.turnId === "string" ? first.turnId : ""
+    const runId = typeof first.runId === "string" ? first.runId : undefined
+    const assertLive = (): void => {
       if (this.sessions.get(key) !== entry || !this.host.enabled(workspace))
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      this.host.assertThread?.(workspace, threadId)
       for (const snapshot of entry.snapshots.values()) this.store.assertGrant(snapshot.grant)
-      const safe = await this.host.publish(
-        workspace,
-        {
-          ...context(),
-          revisionAttempts,
-          maxRevisionAttempts
-        },
-        signal
-      )
-      const result = await entry.session!.checkCompletion(safe as ModObject, signal)
-      if (this.sessions.get(key) !== entry) throw new ModFunctionError("MODS_SCOPE_CHANGED")
-      for (const snapshot of entry.snapshots.values()) this.store.assertGrant(snapshot.grant)
-      return result
+    }
+    const configuration = (): ModObject => Object.fromEntries(
+      [...entry.snapshots.keys()].sort().map((name) => {
+        const namespace = JSON.stringify([workspace, name])
+        return [name, Object.fromEntries(["review-mode", "review-target", "completion-config"].map(
+          (key) => [key, this.store.functionState.get(namespace, key) ?? null]))]
+      })
+    )
+    const configured = [...entry.snapshots.keys()].map((name) => {
+      const raw = this.store.functionState.get(JSON.stringify([workspace, name]), "completion-config")
+      if (raw === undefined || raw === null) return null
+      try { return parseCompletionPolicy(raw) } catch { throw new ModFunctionError("MODS_COMPLETION_CONFIG_INVALID") }
+    })
+    // An explicitly persisted off policy removes the gate. Legacy plugins without this
+    // setting retain their existing completion hook behavior.
+    if (configured.length > 0 && configured.every((policy) => policy?.mode === "off")) return undefined
+    const policyFor = (name: string) => {
+      const raw = this.store.functionState.get(JSON.stringify([workspace, name]), "completion-config")
+      if (raw === undefined || raw === null) return undefined
+      return parseCompletionPolicy(raw)
+    }
+    const initialConfig = JSON.stringify(configuration())
+    const capture = async (signal: AbortSignal): Promise<CompletionEvidenceBinding> => {
+      assertLive()
+      const scope = this.host.fileScope?.(workspace, threadId)
+      const pluginDigests: Record<string, string> = {}
+      for (const [name, snapshot] of entry.snapshots) {
+        const current = await compileFunctionPlugin(snapshot.compiled.root)
+        if (current.digest !== snapshot.compiled.digest) throw Error("MODS_PLUGIN_CHANGED")
+        pluginDigests[name] = current.digest
+      }
+      const config = configuration()
+      if (JSON.stringify(config) !== initialConfig) throw Error("COMPLETION_CONFIG_CHANGED")
+      const paths = [...entry.snapshots.keys()].flatMap((name) => {
+        const target = this.store.functionState.get(JSON.stringify([workspace, name]), "review-target")
+        return typeof target === "string" && target ? [target] : []
+      })
+      return captureCompletionBinding({
+        workspace: scope?.workspace ?? workspace, threadId, turnId, runId, pluginDigests,
+        runtimeGeneration: entry.generation, config, paths, signal,
+        excludePaths: this.store.evidenceExcludedPaths,
+        assertLive: () => { assertLive(); scope?.assertLive() }
+      })
+    }
+    let pending: Promise<unknown> | undefined
+    // No cached PASS is reused. Each revision and duplicate delivery gets a fresh binding.
+    return (input) => {
+      if (pending) return Promise.reject(Error("COMPLETION_CHECK_IN_PROGRESS"))
+      const run = async () => {
+        const { signal, revisionAttempts, maxRevisionAttempts } = input
+        signal.throwIfAborted()
+        assertLive()
+        const binding = await capture(signal)
+        const attempt = randomUUID()
+        const record = (phase: CompletionEvidenceRecord["phase"], status: CompletionEvidenceRecord["status"], detail?: ModJson) => {
+          this.store.saveCompletionEvidence({
+            id: randomUUID(), idempotencyKey: `${attempt}:${phase}:${status}`,
+            workspace, threadId, turnId, runId: binding.runId, phase, status, binding,
+            ...(detail === undefined ? {} : { detail }), at: Date.now()
+          })
+        }
+        record("check.started", "running", { attempt, revisionAttempts, maxRevisionAttempts })
+        try {
+          const safe = await this.host.publish(workspace, {
+            ...context(), revisionAttempts, maxRevisionAttempts,
+            evidenceId: attempt, inputFingerprint: bindingFingerprint(binding)
+          }, signal)
+          const result = await entry.session!.checkCompletion(safe as ModObject, signal)
+          signal.throwIfAborted()
+          assertLive()
+          const validatorPolicies = [...entry.snapshots.keys()]
+            .map((name) => policyFor(name))
+            .filter((policy): policy is NonNullable<typeof policy> =>
+              !!policy && policy.checks.includes("autobiz-validator") && policy.mode !== "off"
+            )
+          if (validatorPolicies.length > 0) {
+            const validator = await runAutobizValidator(
+              this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
+              validatorPolicies.find((policy) => policy.feature)?.feature,
+              signal,
+              Math.min(...validatorPolicies.map((policy) => policy.timeoutMs))
+            )
+            record("validator.result", validator.passed ? "pass" : "block", validator as unknown as ModJson)
+            if (!validator.passed) {
+              const repairing = validatorPolicies.some((policy) => policy.mode === "repair")
+              const decision = repairing && revisionAttempts < Math.max(...validatorPolicies.map((p) => p.maxRepairs)) ? "revise" : "block"
+              record("check.result", decision, { reason: validator.reason, source: "host-autobiz-validator", businessAccepted: false })
+              return { decision, reason: `AUTOBIZ_VALIDATOR_FAILED: ${validator.reason}` }
+            }
+          }
+          if (!sameCompletionBinding(binding, await capture(signal))) {
+            record("invalidated", "stale", { reason: "input-changed" })
+            return { decision: "block", reason: "COMPLETION_EVIDENCE_STALE" }
+          }
+          record("check.result", result.decision, { ...result, source: "guest-opinion", businessAccepted: false })
+          if (result.decision === "revise") record("repair.attempt", "revise", { revisionAttempts: revisionAttempts + 1 })
+          return result
+        } catch (error) {
+          record("check.result", signal.aborted ? "cancelled" : "error", {
+            error: error instanceof Error ? error.message.slice(0, 2048) : "COMPLETION_CHECK_FAILED"
+          })
+          throw error
+        }
+      }
+      pending = run().finally(() => { pending = undefined })
+      return pending
     }
   }
-
   async turnComplete(
     workspace: string,
     threadId: string,

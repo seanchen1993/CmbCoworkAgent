@@ -243,6 +243,7 @@ export async function runCompletionHooksWithRevision({
   threadId,
   workspacePath,
   turnId,
+  runId,
   pluginOutputDir,
   systemId,
   pluginWorkspace,
@@ -275,6 +276,7 @@ export async function runCompletionHooksWithRevision({
   threadId: string
   workspacePath?: string
   turnId?: string
+  runId?: string
   pluginOutputDir?: string
   systemId?: string
   pluginWorkspace?: string
@@ -320,6 +322,7 @@ export async function runCompletionHooksWithRevision({
         threadId,
         () => ({
           turnId: turnId ?? "",
+          ...(runId ? { runId } : {}),
           answer: getStopContext().assistantResponse ?? ""
         })
       )

@@ -13,6 +13,7 @@ import type {
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { ModError } from "./errors"
 import { FunctionStateStore } from "./v2/state-store"
+import type { CompletionEvidenceRecord } from "./v2/completion-evidence"
 
 export interface ModGrant {
   workspace: string
@@ -25,8 +26,10 @@ export interface ModGrant {
 export class ModControlStore {
   private readonly db: DatabaseSync
   readonly functionState: FunctionStateStore
+  readonly evidenceExcludedPaths: string[]
 
   constructor(path: string) {
+    this.evidenceExcludedPaths = [path, `${path}-wal`, `${path}-shm`, `${path}.initialized`]
     mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path, { timeout: 1000 })
     try {
@@ -55,10 +58,17 @@ export class ModControlStore {
       CREATE TABLE IF NOT EXISTS mods_jobs (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload TEXT NOT NULL, at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS mods_jobs_thread ON mods_jobs(thread_id,at);
       CREATE TABLE IF NOT EXISTS mods_artifacts (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload TEXT NOT NULL, at INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS mods_artifacts_thread ON mods_artifacts(thread_id,at);
+      CREATE INDEX IF NOT EXISTS mods_artifacts_thread ON mods_artifacts(thread_id,at);      CREATE TABLE IF NOT EXISTS mods_completion_evidence (
+        id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+        workspace TEXT NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+        run_id TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL,
+        payload TEXT NOT NULL, at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS mods_completion_evidence_scope
+        ON mods_completion_evidence(workspace,thread_id,at);
     `)
       const version = this.getSetting("schema", "")
-      if (version && !["1", "2", "3", "4", "5", "6"].includes(version)) {
+      if (version && !["1", "2", "3", "4", "5", "6", "7"].includes(version)) {
         throw new ModError("MODS_STORE_VERSION")
       }
       const columns = new Set(
@@ -88,9 +98,15 @@ export class ModControlStore {
       CREATE INDEX IF NOT EXISTS mods_calls_thread ON mods_calls(thread_id,at);
     `)
       this.functionState = new FunctionStateStore(this.db)
-      this.setSetting("schema", "6")
+      this.setSetting("schema", "7")
       // An interrupted operation may have reached an external service. Never replay it.
       this.db.prepare("UPDATE mods_calls SET status = 'unknown' WHERE status = 'running'").run()
+      this.db.prepare(
+        `UPDATE mods_completion_evidence
+         SET status='interrupted', payload=json_set(payload, '$.status', 'interrupted',
+           '$.detail', 'MODS_PROCESS_RESTARTED')
+         WHERE status='running'`
+      ).run()
       for (const row of this.db
         .prepare(
           "SELECT payload FROM mods_jobs WHERE json_extract(payload,'$.state') IN ('queued','running')"
@@ -223,6 +239,39 @@ export class ModControlStore {
       .map((row) => parseModJson(String(row.payload)))
   }
 
+  saveCompletionEvidence(record: CompletionEvidenceRecord): void {
+    const text = encodeModJson(record)
+    if (Buffer.byteLength(text) > 512 * 1024) throw new ModError("MODS_EVIDENCE_LIMIT")
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO mods_completion_evidence
+          (id,idempotency_key,workspace,thread_id,turn_id,run_id,phase,status,payload,at)
+         VALUES(?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        record.id,
+        record.idempotencyKey,
+        record.workspace,
+        record.threadId,
+        record.turnId,
+        record.runId,
+        record.phase,
+        record.status,
+        text,
+        record.at
+      )
+  }
+
+  completionEvidence(workspace: string, threadId: string, limit = 100): CompletionEvidenceRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+      throw new ModError("MODS_EVIDENCE_QUERY")
+    return this.db
+      .prepare(
+        "SELECT payload FROM mods_completion_evidence WHERE workspace=? AND thread_id=? ORDER BY at DESC,rowid DESC LIMIT ?"
+      )
+      .all(workspace, threadId, limit)
+      .map((row) => parseModJson(String(row.payload)) as unknown as CompletionEvidenceRecord)
+  }
   hasCard(id: string, threadId: string): boolean {
     return Boolean(
       this.db.prepare("SELECT id FROM mods_cards WHERE id=? AND thread_id=?").get(id, threadId)
