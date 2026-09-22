@@ -276,7 +276,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
           className="rounded-lg border bg-background p-3"
           onFocus={(event) => {
             if (event.target !== event.currentTarget) return
-            void act(pane, undefined, "focus", { focused: true })
+            void act(pane, undefined, "focus", { focused: true }).catch(() => {})
           }}
           onBlur={(event) => {
             if (event.target !== event.currentTarget) return
@@ -285,7 +285,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
               event.currentTarget.contains(event.relatedTarget)
             )
               return
-            void act(pane, undefined, "focus", { focused: false })
+            void act(pane, undefined, "focus", { focused: false }).catch(() => {})
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape" && pane.closeOnEscape) {
@@ -316,7 +316,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
                 deltaY: clamp(event.deltaY),
                 top: clamp(event.currentTarget.scrollTop),
                 left: clamp(event.currentTarget.scrollLeft)
-              })
+              }).catch(() => {})
             }}
           >
             <Element
