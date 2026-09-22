@@ -13,7 +13,7 @@ UAT 工作树：`C:\ai\CmbCoworkAgent`
 
 ## 当前基线必须这样认定
 
-- `codex/mods-v2` 的当前实现提交为 `140d9e28`，其后验证报告提交为 `7649ce25`；第 2 批桥接为 `beed7715`，证据/策略/validator 桥接为 `b98785ae`。
+- `codex/mods-v2` 的当前实现提交为 `825339c1`；最近验证报告提交为 `7649ce25`。第 2 批桥接为 `beed7715`，证据/策略/validator 桥接为 `b98785ae`。
 - 该提交之前的基础能力和第 1 批完成门禁属于已提交代码。
 - 当前工作树继续只在 Mods v2 分支工作；已提交的每个实现批次均有独立测试和报告。不能把文档中“已完成”直接当成已发布事实。
 - 任何开发都在 `C:\ai\CmbCoworkAgent-mods-v2` 进行，禁止在 `C:\ai\CmbCoworkAgent` 的 UAT 工作树直接修改或合并。
@@ -57,9 +57,9 @@ UAT 工作树：`C:\ai\CmbCoworkAgent`
 - 宿主证据绑定 workspace/thread/turn/run、插件 digest、runtime generation、diff、需求和文件指纹；重复事件幂等，重启将 running 标为 interrupted，撤权/取消/竞争修改拒绝迟到结果。
 - 四种模式、四种范围和四类检查的严格配置解析及持久化 Pane，含修复/时间/模型预算。
 - 固定 `C:\ai\autobiz_kanban` commit `8db1ec937d6ed3d271cb9dc540310d6633c91e70` 的只读 workflow compiler/validator host bridge；请求的 `C:\ai\autobiz\_kanban` 路径不存在，未修改其他工作树。
-- 兼容性矩阵的每个声明均增加 `implementationStatus`（full/adapted/partial/unsupported），并有结构测试防止无状态条目。
+- 兼容性矩阵的每个声明均增加 `implementationStatus`（full/adapted/partial/unsupported），并有结构测试防止无状态条目；新增动态上下文 breakdown、模型 fork/classify 边界、固定 host test runner 和本地 JSON Schema `$ref`。
 
-仍未完成，下一步继续实现而不暂停：真实 checkpoint CAS 和幂等状态推进、实际单测/E2E host runner、Autobiz 动态 workflow/blocked/外部竞争的端到端测试、Claude 主 Agent 流式/turn.step/fork/classify、动态上下文 breakdown、内建工具 schema、完整 UI sites/focus/scroll/Client 生命周期、安装包和最终性能/关闭对照报告。
+仍未完成，下一步继续实现而不暂停：实际单测/E2E 的真实项目闭环断言、Autobiz 动态 workflow/blocked/外部竞争的端到端测试、Claude 主 Agent 流式/turn.step/fork/classify 实现、完整 UI sites/focus/scroll/Client 生命周期、安装包和最终性能/关闭对照报告。checkpoint guard 已拒绝 stale 状态，但任意非协作外部写入下的原子 CAS 仍需继续收口。
 
 ## 分批实施方案
 
