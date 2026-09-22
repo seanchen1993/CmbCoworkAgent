@@ -188,11 +188,9 @@ describe("desktop function panes through the production session", () => {
       on("ui.scroll",($,e)=>$.store.set("pane-scroll", e.value));
     `)
     const [pane] = await session.panes.snapshot()
-    await session.panes.act({
-      ...action(pane, "count", "focus", { focused: true }),
-      handle: 0,
-      plugin: pane.plugin
-    })
+    const focus = action(pane, "count", "focus", { focused: true })
+    delete focus.handle
+    await session.panes.act(focus)
     await session.panes.act({
       ...action(pane, "count", "scroll", { deltaX: 0, deltaY: 12, top: 12, left: 0 }),
       handle: 0,

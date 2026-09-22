@@ -222,8 +222,11 @@ export class FunctionPanes {
       !/^[a-f0-9-]{36}$/.test(action.generation) ||
       typeof action.plugin !== "string" ||
       action.plugin.length > 100 ||
-      !Number.isSafeInteger(action.handle) ||
-      action.handle < 0 ||
+      !(
+        action.kind === "focus" || action.kind === "scroll"
+          ? action.handle === undefined || action.handle === 0
+          : Number.isSafeInteger(action.handle) && action.handle >= 0
+      ) ||
       !["press", "change", "submit", "select", "close", "focus", "scroll"].includes(action.kind) ||
       (action.kind === "focus" || action.kind === "scroll"
         ? !isModObject(action.value)
@@ -264,7 +267,7 @@ export class FunctionPanes {
         return
       }
       if (action.kind === "focus" || action.kind === "scroll") {
-        if (action.plugin !== pane.plugin || action.handle !== 0)
+        if (action.plugin !== pane.plugin || (action.handle !== undefined && action.handle !== 0))
           throw new ModFunctionError("MODS_UI_ACTION_INVALID")
         const value = action.value
         if (!isModObject(value)) throw new ModFunctionError("MODS_UI_ACTION_INVALID")
