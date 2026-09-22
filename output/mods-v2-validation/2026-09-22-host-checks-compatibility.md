@@ -17,6 +17,7 @@ Commits: `3edb9502`, `711a59a2`, `1296217e`, `773e6ff6`, `825339c1`
 - Project checks, manager, validator, model-operation, compatibility matrix and tool registry focused tests: **all passed** (21 manager/project-check tests, 4 validator/compatibility/model tests, 11 schema/registry tests).
 - Node typecheck and changed-file ESLint: **passed**.
 - Electron Mods E2E after these changes: **66 passed, 0 failed** (`2026-09-22-host-checks-e2e.log`).
+- Packaged demo project exercised the real pinned validator: missing `REQUIREMENTS_EVAL.md` failed with `missing_required_artifacts`; adding a real `verdict: PASS` report produced `compiler: passed`, `validator: passed`. The guarded transition then advanced `requirements_eval_in_progress -> requirements_eval_done`, and the repeated event returned `duplicate: true` without a second write.
 
 ## Still open
 
