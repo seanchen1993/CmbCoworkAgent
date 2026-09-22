@@ -61,6 +61,7 @@ interface FunctionConnection {
   stop(): void
 }
 interface SessionEntry {
+  completionProofs: Map<string, (signal: AbortSignal) => Promise<CompletionEvidenceBinding>>
   turnNotices: FunctionTurnNotices
   workspace: string
   threadId: string
@@ -310,6 +311,7 @@ export class FunctionModsManager {
     }
     if (this.sessions.size >= 6) throw new ModFunctionError("MODS_SESSION_CAPACITY")
     entry = {
+      completionProofs: new Map(),
       turnNotices: new FunctionTurnNotices(),
       workspace,
       threadId,
@@ -627,6 +629,12 @@ export class FunctionModsManager {
     if ([evidenceId, feature, from, to, stateFingerprint, idempotencyKey].some((value) => typeof value !== "string" || !value))
       throw new ModFunctionError("MODS_AUTOBIZ_TRANSITION_ARGUMENTS")
     const records = this.store.completionEvidence(workspace, threadId, 500)
+    const prior = records.find((record) => record.phase === "state.transition" && record.status === "pass" &&
+      isModObject(record.detail) && record.detail.evidenceId === evidenceId && record.detail.idempotencyKey === idempotencyKey)
+    if (prior && this.host.enabled(workspace)) {
+      this.host.assertThread?.(workspace, threadId)
+      return { ...(prior.detail as ModObject), applied: false, duplicate: true }
+    }
     const started = records.find((record) => record.phase === "check.started" && isModObject(record.detail) && record.detail.attempt === evidenceId)
     const validator = records.find((record) => {
       if (record.phase !== "validator.result" || record.status !== "pass" || !started) return false
@@ -638,6 +646,16 @@ export class FunctionModsManager {
       (isModObject(validator.detail) && typeof validator.detail.feature === "string" && validator.detail.feature !== feature) ||
       records.some((record) => record.phase === "invalidated" && record.at >= validator.at && bindingFingerprint(record.binding) === bindingFingerprint(validator.binding)))
       throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    const capture = entry?.completionProofs.get(evidenceId as string)
+    if (!entry || !capture || !this.host.enabled(workspace))
+      throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+    const verifyEvidence = async () => {
+      signal.throwIfAborted()
+      if (!sameCompletionBinding(validator.binding, await capture(signal)))
+        throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+    }
+    await verifyEvidence()
     const scope = this.host.fileScope?.(workspace, threadId)
     scope?.assertLive()
     const result = await advanceAutobizCheckpoint({
@@ -651,8 +669,15 @@ export class FunctionModsManager {
     })
     this.host.assertThread?.(workspace, threadId)
     for (const snapshot of (this.sessions.get(JSON.stringify([workspace, threadId]))?.snapshots.values() ?? [])) this.store.assertGrant(snapshot.grant)
+    await verifyEvidence()
     if (!result.applied && !result.duplicate)
       throw new ModFunctionError(result.reason || "MODS_AUTOBIZ_TRANSITION_FAILED")
+    this.store.saveCompletionEvidence({
+      ...started, id: randomUUID(), idempotencyKey: `transition:${idempotencyKey}`,
+      phase: "state.transition", status: "pass", at: Date.now(),
+      detail: { evidenceId, idempotencyKey, ...result } as ModObject
+    })
+    entry.completionProofs.delete(evidenceId as string)
     return result as unknown as ModObject
   }
 
@@ -687,6 +712,7 @@ export class FunctionModsManager {
     )
       return
     const entry = await this.session(workspace, threadId)
+    entry.completionProofs.clear()
     const safe = await this.host.publish(workspace, input as unknown as ModJson, signal)
     await entry.session!.turnStart(safe as unknown as FunctionTurnStart, signal)
   }
@@ -770,7 +796,7 @@ export class FunctionModsManager {
         const attempt = randomUUID()
         const record = (phase: CompletionEvidenceRecord["phase"], status: CompletionEvidenceRecord["status"], detail?: ModJson) => {
           this.store.saveCompletionEvidence({
-            id: randomUUID(), idempotencyKey: `${attempt}:${phase}:${status}`,
+            id: randomUUID(), idempotencyKey: `${attempt}:${phase}:${status}:${randomUUID()}`,
             workspace, threadId, turnId, runId: binding.runId, phase, status, binding,
             ...(detail === undefined ? {} : { detail }), at: Date.now()
           })
@@ -821,7 +847,7 @@ export class FunctionModsManager {
               signal,
               Math.min(...validatorPolicies.map((policy) => policy.timeoutMs))
             )
-            record("validator.result", validator.passed ? "pass" : "block", validator as unknown as ModJson)
+            record("validator.result", validator.passed ? "pass" : "block", { ...validator, attempt } as unknown as ModJson)
             if (!validator.passed && !reportOnly) {
               const repairing = validatorPolicies.some((policy) => policy.mode === "repair")
               const decision = repairing && revisionAttempts < Math.max(...validatorPolicies.map((p) => p.maxRepairs)) ? "revise" : "block"
@@ -838,9 +864,13 @@ export class FunctionModsManager {
               ...result, decision: "pass", source: "guest-opinion-report", businessAccepted: false,
               reportedDecision: result.decision
             })
-            return { decision: "pass", reason: "COMPLETION_REPORT_ONLY" }
+            return { decision: "pass" }
           }
           record("check.result", result.decision, { ...result, source: "guest-opinion", businessAccepted: false })
+          if (result.decision === "pass" && validatorPolicies.some((policy) => policy.mode === "check" || policy.mode === "repair")) {
+            if (entry.completionProofs.size >= 32) entry.completionProofs.clear()
+            entry.completionProofs.set(attempt, capture)
+          }
           if (result.decision === "revise") record("repair.attempt", "revise", { revisionAttempts: revisionAttempts + 1 })
           return result
         } catch (error) {

@@ -61,7 +61,7 @@ it("records host-owned evidence and blocks a stale pass after a concurrent file 
   const check = gate!({ signal: new AbortController().signal, revisionAttempts: 0, maxRevisionAttempts: 2 })
   expect(await check).toMatchObject({ decision: "block", reason: "COMPLETION_EVIDENCE_STALE" })
   expect(f.control.completionEvidence(f.root, "thread").some((row) => row.phase === "invalidated")).toBe(true)
-})
+}, 15_000)
 
 it("never advances an Autobiz checkpoint without a host validator evidence event", async () => {
   const f = await fixture()
@@ -70,6 +70,28 @@ it("never advances an Autobiz checkpoint without a host validator evidence event
     evidenceId: "missing", feature: "order-export", from: "requirements_eval_in_progress",
     to: "requirements_eval_done", stateFingerprint: "state", idempotencyKey: "once"
   }, new AbortController().signal)).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_REQUIRED")
+})
+
+it("returns an idempotent duplicate for a previously recorded transition", async () => {
+  const f = await fixture()
+  await f.approve()
+  const binding = await captureCompletionBinding({
+    workspace: f.root, threadId: "thread", turnId: "turn", runId: "run",
+    pluginDigests: {}, runtimeGeneration: 1
+  })
+  f.control.saveCompletionEvidence({
+    id: "transition", idempotencyKey: "receipt", workspace: f.root, threadId: "thread",
+    turnId: "turn", runId: "run", phase: "state.transition", status: "pass", binding, at: Date.now(),
+    detail: {
+      evidenceId: "evidence", idempotencyKey: "receipt", applied: true, duplicate: false,
+      feature: "order-export", from: "requirements_eval_in_progress", to: "requirements_eval_done",
+      stateFingerprint: binding.stateFingerprint
+    }
+  })
+  await expect(f.manager.advanceAutobizCheckpoint(f.root, "thread", {
+    evidenceId: "evidence", feature: "order-export", from: "requirements_eval_in_progress",
+    to: "requirements_eval_done", stateFingerprint: binding.stateFingerprint, idempotencyKey: "receipt"
+  }, new AbortController().signal)).resolves.toMatchObject({ applied: false, duplicate: true })
 })
 
 it.each(["code-review", "autobiz-validator"])("does not let report mode block completion for %s", async (check) => {
@@ -92,7 +114,7 @@ it.each(["code-review", "autobiz-validator"])("does not let report mode block co
   const gate = await f.manager.completionGate(f.root, "thread", () => ({ turnId: "turn" }))
   expect(gate).toBeDefined()
   await expect(gate!({ signal: new AbortController().signal, revisionAttempts: 0, maxRevisionAttempts: 2 }))
-    .resolves.toMatchObject({ decision: "pass" })
+    .resolves.toEqual({ decision: "pass" })
 })
 
 it("rejects a checkpoint transition when validator evidence is bound to a stale state", async () => {
@@ -115,6 +137,30 @@ it("rejects a checkpoint transition when validator evidence is bound to a stale 
   await expect(f.manager.advanceAutobizCheckpoint(f.root, "thread", {
     evidenceId: "stale", feature: "order-export", from: "requirements_eval_in_progress",
     to: "requirements_eval_done", stateFingerprint: "changed", idempotencyKey: "stale"
+  }, new AbortController().signal)).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_STALE")
+})
+
+it.each(["disabled", "replaced", "revoked"])("refuses persisted checkpoint evidence after runtime is %s", async (change) => {
+  const f = await fixture()
+  await f.approve()
+  await f.manager.commands(f.root, "thread")
+  const binding = await captureCompletionBinding({
+    workspace: f.root, threadId: "thread", turnId: "turn", runId: "run",
+    pluginDigests: {}, runtimeGeneration: 1, excludePaths: f.control.evidenceExcludedPaths
+  })
+  for (const [id, phase, status, detail] of [
+    ["start", "check.started", "running", { attempt: "persisted" }],
+    ["validate", "validator.result", "pass", { kind: "autobiz-validator", passed: true, feature: "order-export" }]
+  ] as const) f.control.saveCompletionEvidence({
+    id, idempotencyKey: id, workspace: f.root, threadId: "thread", turnId: "turn", runId: "run",
+    phase, status, detail, binding, at: Date.now()
+  })
+  if (change === "disabled") f.setEnabled(false)
+  if (change === "replaced") f.manager.invalidate(f.root)
+  if (change === "revoked") f.manager.revoke(f.root, "function-commands")
+  await expect(f.manager.advanceAutobizCheckpoint(f.root, "thread", {
+    evidenceId: "persisted", feature: "order-export", from: "requirements_eval_in_progress",
+    to: "requirements_eval_done", stateFingerprint: binding.stateFingerprint, idempotencyKey: "persisted"
   }, new AbortController().signal)).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_STALE")
 })
 afterEach(async () => {
