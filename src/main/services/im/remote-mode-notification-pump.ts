@@ -762,11 +762,15 @@ export class ImRemoteModeNotificationPump {
       metadata,
       target: notice.targetSnapshot
     })
+    // getSelectedTarget 而不是 getActiveTarget:后者在目标不是 active 时抛异常，异常被
+    // 吞成 switched=false，于是绑定的授权一失效这行提示就静默消失——最该提示的时候没有。
+    // 绑定关系和它可不可用是两件事，这里要判的是身份。
     let switched = false
     try {
-      const active = this.dependencies.conversations.getActiveTarget(notice.conversationKey)
-      switched = Boolean(active && active.targetId !== notice.targetSnapshot.targetId)
+      const bound = this.dependencies.conversations.getSelectedTarget(notice.conversationKey)
+      switched = Boolean(bound && bound.snapshot.targetId !== notice.targetSnapshot.targetId)
     } catch {
+      // 只兜数据库读失败:标注不出来也要把通知发出去。
       switched = false
     }
     try {

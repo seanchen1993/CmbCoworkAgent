@@ -351,11 +351,92 @@ async function testADesktopResultFromTheBoundThreadStaysQuiet(): Promise<void> {
   }
 }
 
+/**
+ * 绑定的目标授权失效时，提示不能跟着消失。
+ *
+ * 这里原来用的是 getActiveTarget，它在目标不是 active 时抛异常，异常被吞成「没切换」，
+ * 于是授权一挂提示就没了——而那正是最该提示的时候:读者既不知道结果来自别的会话，也
+ * 不知道自己绑的那个已经不能用了。
+ */
+async function testASuspendedBindingStillGetsTheNotice(): Promise<void> {
+  const context = await createContext()
+  try {
+    await context.conversations.registerTarget(
+      "conversation-1",
+      {
+        kind: "thread",
+        targetId: "target-suspended",
+        threadId: "thread-bound",
+        grantId: "grant-suspended",
+        grantVersion: 1,
+        title: "你好",
+        workspacePath: "/workspace"
+      },
+      { activate: true }
+    )
+    // 生产上的真实顺序:绑定时是好的，之后授权才失效。registerTarget 也不允许直接
+    // 激活一个非 active 的目标。
+    await context.conversations.updateTargetState("target-suspended", "suspended", "grant revoked")
+    await context.observer.observe({
+      source: "desktop" as const,
+      threadId: "thread-1",
+      finalAssistantMessageId: "assistant-final-suspended",
+      finalText: "桌面最终答复"
+    })
+    const outbox = context.events.listOutbox()
+    assert.equal(outbox.length, 1)
+    assert.equal(outbox[0].content, `【会话：桌面会话】（非当前绑定会话）\n桌面最终答复`)
+  } finally {
+    context.database.close()
+  }
+}
+
+/**
+ * 反面，也是不能简单地把「取不到活动目标」当成「不是当前绑定」的原因:
+ * 挂掉的那个目标完全可能就是本会话，那样标注是错的。判的是身份，不是状态。
+ */
+async function testASuspendedBindingOnThisVeryThreadStaysQuiet(): Promise<void> {
+  const context = await createContext()
+  try {
+    await context.conversations.registerTarget(
+      "conversation-1",
+      {
+        kind: "thread",
+        targetId: "target-suspended-same",
+        threadId: "thread-1",
+        grantId: "grant-suspended-same",
+        grantVersion: 1,
+        title: "桌面会话",
+        workspacePath: "/workspace"
+      },
+      { activate: true }
+    )
+    await context.conversations.updateTargetState(
+      "target-suspended-same",
+      "suspended",
+      "grant revoked"
+    )
+    await context.observer.observe({
+      source: "desktop" as const,
+      threadId: "thread-1",
+      finalAssistantMessageId: "assistant-final-suspended-same",
+      finalText: "桌面最终答复"
+    })
+    const outbox = context.events.listOutbox()
+    assert.equal(outbox.length, 1)
+    assert.equal(outbox[0].content, `【会话：桌面会话】\n桌面最终答复`)
+  } finally {
+    context.database.close()
+  }
+}
+
 async function main(): Promise<void> {
   for (const test of [
     testStableDesktopDeliveryIsDurableAndIdempotent,
     testADesktopResultFromAnotherThreadSaysSo,
     testADesktopResultFromTheBoundThreadStaysQuiet,
+    testASuspendedBindingStillGetsTheNotice,
+    testASuspendedBindingOnThisVeryThreadStaysQuiet,
     testRevocationAndRouteChangeFailClosed,
     testOutboxAndGatewayFailuresNeverEscapeObserver,
     testInboundConfirmedRouteRebindsGrantAndRejectedProactiveReply,
