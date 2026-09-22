@@ -3055,6 +3055,8 @@ const api = {
       threadId: string
     ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
       ipcRenderer.invoke("mods:function-turn-notices", threadId),
+    completionEvidence: (threadId: string): Promise<import("../main/mods/v2/completion-evidence").CompletionEvidenceRecord[]> =>
+      ipcRenderer.invoke("mods:function-completion-evidence", threadId),
     panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
       ipcRenderer.invoke("mods:function-panes", threadId),
     paneAct: (

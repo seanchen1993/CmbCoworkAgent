@@ -488,6 +488,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   ipcMain.handle("mods:function-turn-notices", (event, threadId: string) =>
     functions.turnNotices(scope(event, threadId), threadId)
   )
+  ipcMain.handle("mods:function-completion-evidence", (event, threadId: string) =>
+    functions.completionEvidence(scope(event, threadId), threadId)
+  )
   ipcMain.handle("mods:function-panes", (event, threadId: string) =>
     functions.panes(scope(event, threadId), threadId)
   )

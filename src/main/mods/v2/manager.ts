@@ -605,6 +605,11 @@ export class FunctionModsManager {
     })
   }
 
+  completionEvidence(workspace: string, threadId: string, limit = 100): CompletionEvidenceRecord[] {
+    this.host.assertThread?.(workspace, threadId)
+    return this.store.completionEvidence(workspace, threadId, limit)
+  }
+
   async interceptTool(
     workspace: string,
     threadId: string,
@@ -693,8 +698,12 @@ export class FunctionModsManager {
       const config = configuration()
       if (JSON.stringify(config) !== initialConfig) throw Error("COMPLETION_CONFIG_CHANGED")
       const paths = [...entry.snapshots.keys()].flatMap((name) => {
-        const target = this.store.functionState.get(JSON.stringify([workspace, name]), "review-target")
-        return typeof target === "string" && target ? [target] : []
+        const policy = policyFor(name)
+        if (!policy) return []
+        if (policy.scope === "file") return policy.target ? [policy.target] : []
+        if (policy.scope === "feature") return policy.feature ? [`.autobizdevops/features/${policy.feature}`] : []
+        if (policy.scope === "project") return ["."]
+        return []
       })
       return captureCompletionBinding({
         workspace: scope?.workspace ?? workspace, threadId, turnId, runId, pluginDigests,
