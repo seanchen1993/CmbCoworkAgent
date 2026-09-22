@@ -13,7 +13,7 @@ UAT 工作树：`C:\ai\CmbCoworkAgent`
 
 ## 当前基线必须这样认定
 
-- `codex/mods-v2` 的当前实现提交为 `5c2da5db`；最近验证报告提交为 `01dc425f`。第 2 批桥接为 `beed7715`，证据/策略/validator 桥接为 `b98785ae`。
+- `codex/mods-v2` 的当前实现提交为 `d7af4134`；最近验证报告提交为 `b0bf4c78`。第 2 批桥接为 `beed7715`，证据/策略/validator 桥接为 `b98785ae`。
 - 该提交之前的基础能力和第 1 批完成门禁属于已提交代码。
 - 当前工作树继续只在 Mods v2 分支工作；已提交的每个实现批次均有独立测试和报告。不能把文档中“已完成”直接当成已发布事实。
 - 任何开发都在 `C:\ai\CmbCoworkAgent-mods-v2` 进行，禁止在 `C:\ai\CmbCoworkAgent` 的 UAT 工作树直接修改或合并。
@@ -41,11 +41,11 @@ UAT 工作树：`C:\ai\CmbCoworkAgent`
 | session、turn、authority、generation、取消 | 已有基础 | 新代码必须复用，不得绕过 manager/host |
 | 完成门禁 `completion.check` 基础 | 第 1 批已提交 | 严格区分 pass/revise/block，共享修复预算 |
 | Function Mods 接入主 Agent 完成循环 | 第 2 批工作树中 | 需先检视未提交 diff、测试并提交 |
-| Autobiz `off/report/check/repair` | 第 2 批工作树中 | 当前仍主要是单文件模型评审 |
+| Autobiz `off/report/check/repair` | 已提交 | 使用固定版本 workflow compiler、真实 artifact validator、项目 test runner 和证据门禁 |
 | 本轮 diff 与需求绑定 | 未完成 | 当前评审可能只绑定一个路径 |
-| 真实 Autobiz validator | 未完成 | 不能把非空文件或模型自报 PASS 当作验收 |
+| 真实 Autobiz validator | 已接入 | 固定源码归档、编译器映射、pre/post artifact validator；动态 workflow 的更广泛 E2E 仍待补齐 |
 | 修复后重新收集证据和去重恢复 | 未完成 | 旧 PASS 必须失效 |
-| checkpoint 竞争控制和状态推进 | 未完成 | 校验与提交之间必须再次确认版本 |
+| checkpoint 竞争控制和状态推进 | 部分完成 | state fingerprint、receipt、transition evidence、前后 re-capture 已接入；跨进程外部写入的原子 CAS 仍待收口 |
 | 可配置 DIY 界面和项目作用域 | 部分 | 命令可用，完整配置体验未完成 |
 | Claude 全部事件、主 Agent 模型控制、动态 breakdown、完整 UI | 未完成 | 属于原对齐计划的后续项 |
 
@@ -296,3 +296,6 @@ C:\ai\CmbCoworkAgent-mods-v2\docs\mods-v2-compatibility-matrix.json
 - Production Electron Mods E2E: 66 / 66 passed, 0 failed.
 - Full Node and web typecheck plus changed-file ESLint passed.
 - UAT worktree was inspected only and remains separate with its pre-existing changes.
+
+
+本次最新提交：`b0bf4c78 docs(mods): record lifecycle e2e verification`。当前工作树干净。
