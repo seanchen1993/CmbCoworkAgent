@@ -170,6 +170,17 @@ it("keeps summary breakdowns cheap while full breakdowns use the detailed estima
   expect(full.estimated).toBe(true)
 })
 
+it("attributes dynamic MCP, memory, skills and agent tools to separate context categories", () => {
+  const result = projectContextBreakdown({
+    detail: "full", model: "actual-model", window: 10_000,
+    tools: ["mcp__search", "memory_write", "skill_loader", "task_agent"].map((name) => ({ name, description: name })),
+    messages: []
+  })
+  expect(result.categories.map((category) => category.name)).toEqual(
+    expect.arrayContaining(["MCP tools", "Memory", "Skills", "Agents"])
+  )
+})
+
 it("yields long scans and invalidates a revoked or cancelled in-flight read", async () => {
   const messages = Array.from({ length: 1000 }, () => new HumanMessage("no usage"))
   const controller = new AbortController()

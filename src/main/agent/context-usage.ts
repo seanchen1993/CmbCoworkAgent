@@ -169,15 +169,23 @@ export function projectContextBreakdown(input: {
       kind: "used",
       estimated: systemValue.estimated
     })
-  if (toolsValue.tokens > 0)
-    categories.push({
-      name: "System tools",
-      tokens: toolsValue.tokens,
-      color: "inactive",
-      isDeferred: false,
-      kind: "used",
-      estimated: toolsValue.estimated
-    })
+  if (toolsValue.tokens > 0) {
+    const dynamic = new Map<string, number>()
+    let attributed = 0
+    for (const tool of input.tools ?? []) {
+      const raw = object(tool)
+      const name = String(raw?.name ?? raw?.function?.name ?? "").toLowerCase()
+      const category = name.includes("mcp") ? "MCP tools" : name.includes("memory") ? "Memory" : name.includes("skill") ? "Skills" : name.includes("agent") || name.includes("task") ? "Agents" : undefined
+      if (!category) continue
+      const tokens = countContextOne(tool).tokens
+      dynamic.set(category, (dynamic.get(category) ?? 0) + tokens)
+      attributed += tokens
+    }
+    for (const [name, tokens] of dynamic)
+      categories.push({ name, tokens, color: "inactive", isDeferred: false, kind: "used", estimated: toolsValue.estimated })
+    if (toolsValue.tokens - attributed > 0)
+      categories.push({ name: "System tools", tokens: toolsValue.tokens - attributed, color: "inactive", isDeferred: false, kind: "used", estimated: toolsValue.estimated })
+  }
   if (messageValue.tokens > 0)
     categories.push({
       name: "Messages",
