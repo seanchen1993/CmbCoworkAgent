@@ -5,7 +5,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it } from "vitest"
-import { advanceAutobizCheckpoint, runAutobizValidator } from "./autobiz-validation"
+import {
+  advanceAutobizCheckpoint,
+  fingerprintAutobizWorkflow,
+  runAutobizValidator
+} from "./autobiz-validation"
 import { withPinnedAutobiz } from "./autobiz-source"
 
 const roots: string[] = []
@@ -18,6 +22,18 @@ it("runs the pinned validator as a read-only failure when the real state is abse
   expect(result.passed).toBe(false)
   expect(result.validator).toBe("failed")
   expect(result.reason).toMatch(/ENOENT|state|AUTOBIZ/i)
+})
+
+it("changes the workflow evidence fingerprint when a dynamic workflow overlay changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mods-autobiz-workflow-fingerprint-"))
+  roots.push(root)
+  const overlay = join(root, ".autobizdevops", "workflow.d", "feature.json")
+  await mkdir(join(root, ".autobizdevops", "workflow.d"), { recursive: true })
+  await writeFile(overlay, JSON.stringify({ profile: "standard", nodes: [] }))
+  const before = await fingerprintAutobizWorkflow(root)
+  await writeFile(overlay, JSON.stringify({ profile: "standard", nodes: [{ id: "review" }] }))
+  const after = await fingerprintAutobizWorkflow(root)
+  expect(after).not.toBe(before)
 })
 
 it("refuses a checkpoint transition when the state fingerprint is not current", async () => {
