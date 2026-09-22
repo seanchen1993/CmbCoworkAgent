@@ -174,7 +174,7 @@ export function projectContextBreakdown(input: {
     let attributed = 0
     for (const tool of input.tools ?? []) {
       const raw = object(tool)
-      const name = String(raw?.name ?? raw?.function?.name ?? "").toLowerCase()
+      const name = String(raw?.name ?? object(raw?.function)?.name ?? "").toLowerCase()
       const category = name.includes("mcp") ? "MCP tools" : name.includes("memory") ? "Memory" : name.includes("skill") ? "Skills" : name.includes("agent") || name.includes("task") ? "Agents" : undefined
       if (!category) continue
       const tokens = countContextOne(tool).tokens
