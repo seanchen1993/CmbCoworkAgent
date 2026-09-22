@@ -326,6 +326,40 @@ describe("gate: reported reproductions", () => {
 })
 
 describe("gate: bounded retries", () => {
+  it("observes background refusal without granting foreground retries", async () => {
+    const options = { ownerRunToken: undefined, observationRunToken: RUN }
+    expect(await runGate({ messages: [aiMessage("", {})] }, options)).toBeUndefined()
+    expect(readTurnCompletionGateReport(THREAD, RUN)).toBeNull()
+    expect(
+      await runGate({ messages: [aiMessage("", { finish_reason: "refusal" })] }, options)
+    ).toEqual({ jumpTo: "end" })
+    expect(readTurnCompletionGateReport(THREAD, RUN)?.refusal).toEqual({
+      category: null,
+      explanation: null
+    })
+  })
+
+  it("ends an explicit refusal without empty-answer or unfinished-todo recovery", async () => {
+    const state = {
+      messages: [aiMessage("", { finish_reason: "content_filter" })],
+      todos: [{ content: "Incomplete", status: "pending" }]
+    }
+    expect(await runGate(state)).toEqual({ jumpTo: "end" })
+    const report = readTurnCompletionGateReport(THREAD, RUN)!
+    expect(report).toMatchObject({
+      refusal: { category: null, explanation: null },
+      retriesUsed: 0,
+      todoNudgesUsed: 0
+    })
+    expect(describeTurnCompletionFailure(report)).toContain("提供商拒绝")
+    expect(inspectFinalAssistantMessage(state.messages[0]).defect).toBeNull()
+    // A subsequent explicit user turn is independently allowed to finish normally.
+    expect(
+      await runGate({ messages: [aiMessage("Next answer", { finish_reason: "stop" })] })
+    ).toBeUndefined()
+    expect(readTurnCompletionGateReport(THREAD, RUN)).not.toHaveProperty("refusal")
+  })
+
   it("stops retrying and records the defect so the turn cannot report success", async () => {
     const empty = { messages: toolResultThen(aiMessage("", { finish_reason: "stop" })) }
 

@@ -1,0 +1,10 @@
+{
+  "apiVersion": "cmb.mods/v1",
+  "id": "company-output-policy",
+  "name": "输出保护摘要",
+  "entry": "index.ts",
+  "activation": "project",
+  "events": ["ui.render"],
+  "tools": [],
+  "permissions": { "readTools": [], "writeTools": [], "context": [], "store": false }
+}

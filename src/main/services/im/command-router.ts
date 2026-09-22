@@ -567,7 +567,7 @@ export class ImCommandRouter {
         : "无"
     return [
       `当前目标：【${targetLabel(target)}】${selected?.state === "active" ? "" : "（授权不可用，请重新绑定或切回收件箱）"}`,
-      `运行状态：${runningEventId ? "IM 任务执行中" : lease?.owner === "desktop" ? "桌面任务执行中" : lease?.owner === "scheduler" ? "定时任务执行中" : "空闲"}`,
+      `运行状态：${runningEventId ? "IM 任务执行中" : lease?.owner === "desktop" ? "桌面任务执行中" : lease?.owner === "scheduler" ? "定时任务执行中" : lease?.owner === "mods" ? "Mods 命令执行中" : "空闲"}`,
       `排队消息：${queued}`,
       `桌面交互：${interaction}`
     ].join("\n")
@@ -580,6 +580,7 @@ export class ImCommandRouter {
     }
     const lease = target ? getLocalThreadRunLease(target.threadId) : undefined
     if (lease?.owner === "desktop") return "当前是桌面任务，请在桌面停止。"
+    if (lease?.owner === "mods") return "当前是 Mods 命令，请在桌面的命令面板停止。"
     if (lease?.owner === "scheduler") return "当前是定时任务，不能通过 IM 跨来源停止。"
     return "当前没有正在执行的 IM 任务。"
   }

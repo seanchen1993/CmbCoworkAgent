@@ -1,6 +1,12 @@
+import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
 import { ToolMessage } from "@langchain/core/messages"
 import { Command, isCommand } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
+import { withModToolCall, publishCurrentModResult } from "../mods/adapters"
+import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
+import { functionToolContexts } from "../mods/v2/tool-result"
+import { withFunctionExecution, currentFunctionExecution } from "../mods/v2/execution-context"
+import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
 import {
@@ -23,6 +29,7 @@ import {
 } from "./failure-fuse"
 
 export interface ToolHookMiddlewareOptions {
+  runtimeAuthority?: ModRuntimeAuthority
   workspacePath: string
   threadId: string
   hookScope: HookScopeController
@@ -251,99 +258,194 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
 
   return createMiddleware({
     name: "toolHookMiddleware",
+    wrapModelCall: async (request, handler) => {
+      const manager = getModsManager()
+      if (!manager?.isActive(options.workspacePath)) return handler(request)
+      const execution = currentFunctionExecution()
+      const runtimeAuthority = execution ? execution.runtimeAuthority : options.runtimeAuthority
+      const turnId = execution?.turnId ?? options.hookTurnId ?? options.threadId
+      const agentId =
+        getHookAgentIdFromRequest(request) ?? execution?.agentId ?? options.agentId ?? "main"
+      const nativeTools = collectRuntimeToolCatalog(request.tools)
+      manager.bindFunctionToolCatalog(
+        {
+          runtimeAuthority,
+          workspace: options.workspacePath,
+          threadId: options.threadId,
+          turnId,
+          agentId
+        },
+        nativeTools
+      )
+      // Only known host-bound subagents may receive guest tools under their role policy.
+      const registered = await withFunctionExecution(
+        {
+          workspace: manager.workspaceKey(options.workspacePath),
+          runtimeAuthority,
+          threadId: options.threadId,
+          agentId,
+          userInitiated: false,
+          turnId,
+          leased: true,
+          immediate: false
+        },
+        () =>
+          agentId === "main" || runtimeAuthority
+            ? manager.registeredFunctionTools(options.workspacePath, options.threadId)
+            : Promise.resolve([])
+      )
+      if (registered.some((tool) => nativeTools.some((native) => native.name === tool.name)))
+        throw new Error("MODS_TOOL_NAME_COLLISION")
+      const tools = registered.length
+        ? [
+            ...request.tools,
+            // Dynamic client Runnable instances are rejected by AgentNode. Advertise schemas;
+            // wrapToolCall serves them through the same grant-checked FunctionSession.
+            ...registered.map((tool) => ({
+              type: "function" as const,
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.inputSchema
+              }
+            }))
+          ]
+        : request.tools
+      const blocks = [
+        ...(await manager.context({
+          runtimeAuthority,
+          workspace: options.workspacePath,
+          threadId: options.threadId,
+          turnId,
+          agentId,
+          activePluginIds: options.hookScope.activePluginIds
+        })),
+        ...functionToolContexts(request.messages)
+      ]
+      return handler({
+        ...request,
+        tools,
+        ...(blocks.length
+          ? { systemMessage: request.systemMessage.concat("\n\n" + blocks.join("\n\n")) }
+          : {})
+      })
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapToolCall: async (request: any, handler: any): Promise<any> => {
-      const agentId = getHookAgentIdFromRequest(request) ?? options.agentId
-      return runWithHookAgentId(agentId, async () => {
-        const toolCall = request.toolCall as
-          | { id?: string; name?: string; args?: unknown }
-          | undefined
-        const toolName = toolCall?.name
-        if (!toolName || skipToolNames.has(toolName)) {
-          return handler(request)
-        }
+      const execution = currentFunctionExecution()
+      const runtimeAuthority = execution ? execution.runtimeAuthority : options.runtimeAuthority
+      return withModToolCall(
+        {
+          runtimeAuthority,
+          workspace: options.workspacePath,
+          threadId: options.threadId,
+          turnId: execution?.turnId ?? options.hookTurnId ?? options.threadId,
+          agentId: execution?.agentId ?? options.agentId,
+          activePluginIds: options.hookScope.activePluginIds,
+          signal: request.runtime?.signal
+        },
+        request,
+        skipToolNames,
+        async (request) => {
+          const agentId =
+            getHookAgentIdFromRequest(request) ?? execution?.agentId ?? options.agentId
+          return runWithHookAgentId(agentId, async () => {
+            const toolCall = request.toolCall as
+              | { id?: string; name?: string; args?: unknown }
+              | undefined
+            const toolName = toolCall?.name
+            if (!toolName || skipToolNames.has(toolName)) {
+              return handler(request)
+            }
 
-        const baseToolArgs = normalizeToolArgs(toolCall.args)
-        const hookContext = buildHookContext(toolName, baseToolArgs, options)
-        const preResult = await runHooksEnriched(
-          options.resolveHooksForContext("PreToolUse", hookContext),
-          "PreToolUse",
-          hookContext,
-          options.onHookResult
-        )
-        if (preResult) {
-          options.hookScope.activatePersistentHooks(
-            options.resolveHooksForContext("PreToolUse", hookContext)
-          )
-        }
-        throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
+            const baseToolArgs = normalizeToolArgs(toolCall.args)
+            const hookContext = buildHookContext(toolName, baseToolArgs, options)
+            const preResult = await runHooksEnriched(
+              options.resolveHooksForContext("PreToolUse", hookContext),
+              "PreToolUse",
+              hookContext,
+              options.onHookResult
+            )
+            if (preResult) {
+              options.hookScope.activatePersistentHooks(
+                options.resolveHooksForContext("PreToolUse", hookContext)
+              )
+            }
+            throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
 
-        if (preResult?.blocked || preResult?.decision === "block") {
-          const reason =
-            preResult.reason ||
-            preResult.stopReason ||
-            preResult.stdout ||
-            preResult.stderr ||
-            `${toolName} was blocked by a hook`
-          return buildBlockedToolResult(toolName, toolCall?.id, reason)
-        }
+            if (preResult?.blocked || preResult?.decision === "block") {
+              const reason =
+                preResult.reason ||
+                preResult.stopReason ||
+                preResult.stdout ||
+                preResult.stderr ||
+                `${toolName} was blocked by a hook`
+              return buildBlockedToolResult(toolName, toolCall?.id, reason)
+            }
 
-        const toolArgs = mergeUpdatedInput(baseToolArgs, preResult?.updatedInput)
-        const result = await handler({
-          ...request,
-          toolCall: toolCall ? { ...toolCall, args: toolArgs } : toolCall,
-          state:
-            request.state && typeof request.state === "object" && !Array.isArray(request.state)
-              ? { ...(request.state as Record<string, unknown>) }
-              : request.state
-        })
+            const toolArgs = mergeUpdatedInput(baseToolArgs, preResult?.updatedInput)
+            await authorizeCurrentModInput(`host:${toolName}`, toolArgs)
+            const result = await publishCurrentModResult(
+              await handler({
+                ...request,
+                toolCall: toolCall ? { ...toolCall, args: toolArgs } : toolCall,
+                state:
+                  request.state &&
+                  typeof request.state === "object" &&
+                  !Array.isArray(request.state)
+                    ? { ...(request.state as Record<string, unknown>) }
+                    : request.state
+              })
+            )
 
-        const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
-        const alreadyRecordedThrowFailure = Boolean(
-          signal && toolCall?.id && hasFailureFired(toolCall.id)
-        )
-        const failureFuseDecision =
-          signal && !alreadyRecordedThrowFailure
-            ? (options.onToolFailureDecision?.({
-                toolName,
-                toolCallId: toolCall?.id,
-                toolArgs,
-                signal
-              }) ?? null)
-            : null
-        if (shouldSendFailureFuseNotice(failureFuseDecision)) {
-          options.onFailureFuseNotice?.(failureFuseDecision)
-        }
-        if (!signal) options.onToolSuccess?.({ toolName, toolArgs })
+            const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
+            const alreadyRecordedThrowFailure = Boolean(
+              signal && toolCall?.id && hasFailureFired(toolCall.id)
+            )
+            const failureFuseDecision =
+              signal && !alreadyRecordedThrowFailure
+                ? (options.onToolFailureDecision?.({
+                    toolName,
+                    toolCallId: toolCall?.id,
+                    toolArgs,
+                    signal
+                  }) ?? null)
+                : null
+            if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+              options.onFailureFuseNotice?.(failureFuseDecision)
+            }
+            if (!signal) options.onToolSuccess?.({ toolName, toolArgs })
 
-        const postContext: HookContext = {
-          ...hookContext,
-          toolArgs,
-          toolResult: stringifyToolResult(result)
-        }
-        const postResult = await runHooksEnriched(
-          options.resolveHooksForContext("PostToolUse", postContext),
-          "PostToolUse",
-          postContext,
-          options.onHookResult
-        )
-        if (postResult) {
-          options.hookScope.activatePersistentHooks(
-            options.resolveHooksForContext("PostToolUse", postContext)
-          )
-        }
-        throwIfHookHalt(
-          "PostToolUse",
-          postResult,
-          `${toolName} was stopped by a PostToolUse hook`
-        )
-        if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
+            const postContext: HookContext = {
+              ...hookContext,
+              toolArgs,
+              toolResult: stringifyToolResult(result)
+            }
+            const postResult = await runHooksEnriched(
+              options.resolveHooksForContext("PostToolUse", postContext),
+              "PostToolUse",
+              postContext,
+              options.onHookResult
+            )
+            if (postResult) {
+              options.hookScope.activatePersistentHooks(
+                options.resolveHooksForContext("PostToolUse", postContext)
+              )
+            }
+            throwIfHookHalt(
+              "PostToolUse",
+              postResult,
+              `${toolName} was stopped by a PostToolUse hook`
+            )
+            if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
 
-        const feedback = buildPostHookFeedback(
-          mergeFailureFuseWarning(postResult, failureFuseDecision)
-        )
-        return feedback ? appendFeedbackToResult(result, feedback, toolCall?.id) : result
-      })
+            const feedback = buildPostHookFeedback(
+              mergeFailureFuseWarning(postResult, failureFuseDecision)
+            )
+            return feedback ? appendFeedbackToResult(result, feedback, toolCall?.id) : result
+          })
+        }
+      )
     }
   })
 }

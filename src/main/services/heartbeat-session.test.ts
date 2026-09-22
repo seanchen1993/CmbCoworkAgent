@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const mocks = vi.hoisted(() => ({
+  closeMods: vi.fn(),
   retire: vi.fn(),
   purgeParent: vi.fn(),
   purgeWorkers: vi.fn(),
@@ -10,6 +11,9 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock("../agent/runtime", () => ({ retireThreadCheckpointers: mocks.retire }))
+vi.mock("../mods/manager", () => ({
+  getModsManager: () => ({ closeFunctionThread: mocks.closeMods })
+}))
 vi.mock("../storage", () => ({
   purgeThreadCheckpointArtifacts: mocks.purgeParent,
   deleteThreadWorkerCheckpoints: mocks.purgeWorkers,
@@ -33,6 +37,10 @@ describe("heartbeat workspace session reset", () => {
     await resetHeartbeatSessionForWorkspaceChange("/workspace/old")
 
     expect(mocks.retire).toHaveBeenCalledWith(HEARTBEAT_THREAD_ID)
+    expect(mocks.closeMods).toHaveBeenCalledWith(HEARTBEAT_THREAD_ID)
+    expect(mocks.closeMods.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.retire.mock.invocationCallOrder[0]
+    )
     expect(mocks.purgeParent).toHaveBeenCalledWith(HEARTBEAT_THREAD_ID)
     expect(mocks.purgeWorkers).toHaveBeenCalledWith(HEARTBEAT_THREAD_ID)
     expect(mocks.purgeWorkflow).toHaveBeenCalledWith(HEARTBEAT_THREAD_ID)
@@ -53,5 +61,6 @@ describe("heartbeat workspace session reset", () => {
       "cleanup failed"
     )
     expect(mocks.deleteDbThread).not.toHaveBeenCalled()
+    expect(mocks.closeMods).toHaveBeenCalledTimes(1)
   })
 })

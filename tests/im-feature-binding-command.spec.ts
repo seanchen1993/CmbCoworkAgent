@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../src/main/agent/thread-run-lease"
 import { mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -913,6 +914,12 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
     assert.equal(target?.threadId, "desktop-thread")
     if (target?.kind !== "thread") throw new Error("thread target expected")
     assert.equal(target.title, "支付排障会话（已更新）")
+    const commandLease = claimLocalThreadRunLease({ threadId: target.threadId, owner: "mods", runId: "mod-command" })
+    assert(commandLease.acquired)
+    try {
+      assert((await router.handle({ ...route, command: parseImCommand("/当前")! })).includes("Mods 命令执行中"))
+      assert((await router.handle({ ...route, command: parseImCommand("/停止")! })).includes("桌面的命令面板停止"))
+    } finally { releaseLocalThreadRunLease(target.threadId, "mods", "mod-command") }
     assert.deepEqual(
       JSON.parse(context.threads.get("desktop-thread")!.metadata!),
       originalMetadata,

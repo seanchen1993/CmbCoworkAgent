@@ -1,5 +1,6 @@
 import type { Worker } from "node:worker_threads"
 import { existsSync } from "node:fs"
+import type { FunctionSessionCheckpoint } from "../../shared/mods/v2/session"
 import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats,
@@ -52,9 +53,7 @@ export function isCheckpointRuntimeProjectionCancelled(error: unknown): boolean 
 }
 
 export function isCheckpointRuntimeProjectionSchemaNotReady(error: unknown): boolean {
-  return (
-    error instanceof Error && error.name === CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
-  )
+  return error instanceof Error && error.name === CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
 }
 
 async function createBundledWorker(): Promise<Worker> {
@@ -87,7 +86,9 @@ export class CheckpointRuntimeProjectionClient {
   private readonly tupleRequests = new Map<string, Promise<unknown | null>>()
   private readonly foregroundRequests = new Map<string, number>()
 
-  constructor(private readonly workerFactory: RuntimeProjectionWorkerFactory = createBundledWorker) {}
+  constructor(
+    private readonly workerFactory: RuntimeProjectionWorkerFactory = createBundledWorker
+  ) {}
 
   private handleResponse = (response: CheckpointRuntimeProjectionWorkerResponse): void => {
     if (response.type === "shutdown-complete") {
@@ -116,6 +117,8 @@ export class CheckpointRuntimeProjectionClient {
       response.type === "read-latest-runtime-tuple-result"
     ) {
       pending.resolve(response.tuple)
+    } else if (response.type === "read-session-transcript-result") {
+      pending.resolve(response.transcript)
     } else if (response.type === "inspect-transcript-presence-result") {
       pending.resolve(response.hasTranscript)
     } else if (response.type === "bootstrap-legacy-transcript-result") {
@@ -205,6 +208,13 @@ export class CheckpointRuntimeProjectionClient {
           checkpointNs: string
         }
       | {
+          type: "read-session-transcript"
+          projection: "messages" | "turns" | "usage"
+          databasePath: string
+          threadId: string
+          checkpointNs: string
+        }
+      | {
           type: "inspect-transcript-presence"
           databasePath: string
           threadId: string
@@ -214,14 +224,19 @@ export class CheckpointRuntimeProjectionClient {
       cancellable?: boolean
       bootstrapThreadId?: string
       foregroundKey?: string
+      signal?: AbortSignal
     } = {}
   ): Promise<unknown> {
+    options.signal?.throwIfAborted()
     if (this.closing) {
       throw new CheckpointRuntimeProjectionWorkerUnavailableError(
         "Checkpoint runtime projection client is closing"
       )
     }
     const worker = await this.getWorker()
+    options.signal?.throwIfAborted()
+    if (request.type === "read-session-transcript" && this.pending.size >= 128)
+      throw new Error("CHECKPOINT_QUERY_CAPACITY")
     // close() can start while getWorker() yields, even when the Worker was
     // already available through Promise.resolve(). Re-check before retaining a
     // pending request: close() has already drained the table by then and the
@@ -233,9 +248,10 @@ export class CheckpointRuntimeProjectionClient {
       )
     }
     const requestId = this.nextRequestId++
-    const cancellation = options.cancellable
-      ? new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
-      : undefined
+    const cancellation =
+      options.cancellable || options.signal
+        ? new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
+        : undefined
     if (options.foregroundKey) {
       const previousId = this.foregroundRequests.get(options.foregroundKey)
       const previous = previousId === undefined ? undefined : this.pending.get(previousId)
@@ -255,15 +271,37 @@ export class CheckpointRuntimeProjectionClient {
       this.foregroundRequests.set(options.foregroundKey, requestId)
     }
     return new Promise((resolve, reject) => {
+      const signal = options.signal
+      const cleanup = () => signal?.removeEventListener("abort", abort)
+      const abort = () => {
+        if (cancellation) Atomics.store(cancellation, 0, 1)
+        this.pending.delete(requestId)
+        if (
+          options.foregroundKey &&
+          this.foregroundRequests.get(options.foregroundKey) === requestId
+        )
+          this.foregroundRequests.delete(options.foregroundKey)
+        cleanup()
+        reject(signal?.reason ?? new Error(CHECKPOINT_RUNTIME_PROJECTION_CANCELLED))
+      }
       this.pending.set(requestId, {
-        resolve,
-        reject,
+        resolve: (value) => {
+          cleanup()
+          resolve(value)
+        },
+        reject: (error) => {
+          cleanup()
+          reject(error)
+        },
         ...(cancellation ? { cancellation } : {}),
-        ...(options.bootstrapThreadId
-          ? { bootstrapThreadId: options.bootstrapThreadId }
-          : {}),
+        ...(options.bootstrapThreadId ? { bootstrapThreadId: options.bootstrapThreadId } : {}),
         ...(options.foregroundKey ? { foregroundKey: options.foregroundKey } : {})
       })
+      signal?.addEventListener("abort", abort, { once: true })
+      if (signal?.aborted) {
+        abort()
+        return
+      }
       try {
         worker.postMessage({
           ...request,
@@ -271,6 +309,7 @@ export class CheckpointRuntimeProjectionClient {
           ...(cancellation ? { cancellationBuffer: cancellation.buffer } : {})
         })
       } catch (error) {
+        cleanup()
         this.pending.delete(requestId)
         if (
           options.foregroundKey &&
@@ -357,10 +396,23 @@ export class CheckpointRuntimeProjectionClient {
         threadId,
         checkpointNs
       },
-      foregroundKey === undefined
-        ? {}
-        : { cancellable: true, foregroundKey: String(foregroundKey) }
+      foregroundKey === undefined ? {} : { cancellable: true, foregroundKey: String(foregroundKey) }
     ).then((value) => value ?? null)
+  }
+
+  async readSessionTranscript(
+    databasePath: string,
+    threadId: string,
+    signal: AbortSignal,
+    checkpointNs = "",
+    projection: "messages" | "turns" | "usage" = "messages"
+  ): Promise<FunctionSessionCheckpoint | null> {
+    signal.throwIfAborted()
+    if (this.pending.size >= 128) return Promise.reject(new Error("CHECKPOINT_QUERY_CAPACITY"))
+    return this.request(
+      { type: "read-session-transcript", databasePath, threadId, checkpointNs, projection },
+      { cancellable: true, signal }
+    ) as Promise<FunctionSessionCheckpoint | null>
   }
 
   bootstrapLegacyTranscript(
@@ -505,6 +557,17 @@ export function readLatestCheckpointRuntimeTupleInWorker(
     checkpointNs,
     foregroundKey
   )
+}
+
+export async function readFunctionSessionTranscriptInWorker(
+  databasePath: string,
+  threadId: string,
+  signal: AbortSignal,
+  projection: "messages" | "turns" | "usage" = "messages"
+): Promise<FunctionSessionCheckpoint | null> {
+  signal.throwIfAborted()
+  if (!existsSync(databasePath)) return Promise.resolve(null)
+  return getDefaultClient().readSessionTranscript(databasePath, threadId, signal, "", projection)
 }
 
 export function bootstrapLegacyCheckpointTranscriptInWorker(

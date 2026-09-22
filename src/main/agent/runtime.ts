@@ -1,3 +1,27 @@
+import { foregroundToolPolicy } from "./foreground-tool-policy"
+import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
+import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
+import {
+  createFunctionChildTurnMiddleware,
+  createFunctionSessionViewMiddleware
+} from "./mods-session-view"
+import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
+import { getModCallContext } from "../mods/context"
+import type { ModRuntimeAuthority } from "../mods/runtime-instance"
+import { ModError } from "../mods/errors"
+import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
+import type { FunctionToolInfo } from "../../shared/mods/v2/tools"
+import { currentFunctionExecution } from "../mods/v2/execution-context"
+import { getLocalThreadRunLease } from "./thread-run-lease"
+import {
+  captureThreadMutationLease,
+  withThreadMutationLeaseLock
+} from "../ipc/thread-run-mutation-lock"
+import type { ModJson } from "../../shared/mods/types"
+import { encodeModJson, parseModJson } from "../../shared/mods/validation"
+import { isModJson } from "../../shared/mods/v2/contracts"
+import { projectFunctionSessionMessages } from "../mods/v2/session-transcript"
+import { recordSuccessfulToolExample } from "../mcp/tool-example-store"
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // Runtime: agent lifecycle and middleware orchestration
 import {
@@ -10,6 +34,7 @@ import {
   StateBackend
 } from "deepagents"
 import { withModelResponseDiagnostics } from "./model-response-diagnostics"
+import { withModelStreamCancellation } from "./model-stream-cancellation"
 import {
   getThreadCheckpointPath,
   deleteThreadCheckpoint,
@@ -32,7 +57,11 @@ import {
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
-import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
+import {
+  createCmbContextController,
+  createCmbSummarizationMiddleware,
+  type CmbContextController
+} from "./context-summarization-middleware"
 import {
   createTurnCompletionGateMiddleware,
   type TurnCompletionRecoveryCallback
@@ -79,8 +108,18 @@ import {
 } from "../../shared/model-token-budget"
 import {
   getAgentGraphRecursionLimit,
-  getWorkflowWorktreeTimeoutMs
+  getAgentToolStrategy,
+  normalizeAgentToolStrategy,
+  getWorkflowWorktreeTimeoutMs,
+  type AgentToolStrategy
 } from "../../shared/agent-runtime-limits"
+import {
+  getToolStrategyReminder,
+  resolveEffectiveToolStrategy,
+  resolveFilesystemToolStrategy,
+  resolveWorkflowToolStrategy,
+  SHELL_FIRST_TOOL_DESCRIPTIONS
+} from "./tool-strategy"
 import {
   DEFAULT_AGENT_OUTPUT_STYLE,
   resolveAgentOutputStyle,
@@ -98,8 +137,8 @@ import {
   humanInTheLoopMiddleware,
   tool as lcTool
 } from "langchain"
-import { HumanMessage, ToolMessage } from "@langchain/core/messages"
-import { Runnable } from "@langchain/core/runnables"
+import { BaseMessage, HumanMessage, RemoveMessage, ToolMessage } from "@langchain/core/messages"
+import { Runnable, RunnableLambda } from "@langchain/core/runnables"
 import { Command, isGraphBubbleUp } from "@langchain/langgraph"
 import { z } from "zod"
 
@@ -110,10 +149,8 @@ import type * as _lcZodTypes from "@langchain/core/utils/types"
 
 import path from "path"
 import { join, resolve, delimiter } from "path"
-import { createWriteStream, createReadStream } from "fs"
+import { ensureCodexExe } from "./codex-sandbox-binary"
 import fs from "fs/promises"
-import { createGunzip } from "zlib"
-import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
 import {
   appendTaskCompletionAndRepetitionPrompt,
@@ -244,7 +281,8 @@ import type {
   McpCapabilityTool,
   McpInvocationResult
 } from "../mcp/capability-types"
-import { buildAliasMaps, buildScopedToolAliases } from "../mcp/aliasing"
+import { buildAliasMaps } from "../mcp/aliasing"
+import { scopedMcpTools } from "../mcp/scoped-tools"
 import {
   closeGlobalMcpCapabilityService,
   getGlobalMcpCapabilityService
@@ -373,26 +411,6 @@ function describeToolError(error: unknown): string {
     return JSON.stringify(error) ?? String(error)
   } catch {
     return String(error)
-  }
-}
-
-/** Decompress codex.exe.gz → codex.exe if needed (re-extract if .gz is newer than .exe). */
-async function ensureCodexExe(exePath: string): Promise<void> {
-  const gzPath = exePath + ".gz"
-  const gzStat = await fs.stat(gzPath).catch(() => null)
-  if (!gzStat) return
-  const exeStat = await fs.stat(exePath).catch(() => null)
-  if (exeStat) {
-    // Skip if exe is up-to-date (gz not newer)
-    if (exeStat.mtimeMs >= gzStat.mtimeMs) return
-    // gz is newer — remove stale exe before re-extracting
-    await fs.unlink(exePath).catch(() => {})
-  }
-  try {
-    await pipeline(createReadStream(gzPath), createGunzip(), createWriteStream(exePath))
-    console.log("[Runtime] codex.exe extracted from .gz")
-  } catch (e) {
-    console.error("[Runtime] Failed to extract codex.exe:", e)
   }
 }
 
@@ -1216,6 +1234,12 @@ export function createScopedMcpCapabilityService(
   baseContext: {
     workspacePath: string
     threadId: string
+    signal?: AbortSignal
+    readOnly?: boolean
+    blockedToolNames?: ReadonlySet<string>
+    executionWorkspace?: string
+    runtimeAuthority?: ModRuntimeAuthority
+    onModBinding?: (release: () => void) => void
     agentId?: string
     turnId?: string
     pluginOutputDir?: string
@@ -1233,10 +1257,6 @@ export function createScopedMcpCapabilityService(
     forceSyncWorkspaceHooks?: boolean
   }
 ): McpCapabilityService {
-  const getEffectivePriority = (tool: McpCapabilityTool): number => {
-    return tool.priority ?? (tool.sourceKind === "connector" ? 100 : 50)
-  }
-
   let scopedSnapshotCache: {
     key: string
     tools: McpCapabilityTool[]
@@ -1283,15 +1303,7 @@ export function createScopedMcpCapabilityService(
       return { tools: [...scopedSnapshotCache.tools], maps: scopedSnapshotCache.maps }
     }
 
-    const tools = baseSnapshot.tools.map((tool) => {
-      const pluginId = extractPluginIdFromProviderKey(tool.providerKey)
-      const isInactiveScopedPlugin =
-        tool.scope === "plugin-active" &&
-        pluginId &&
-        !hookScope.activePluginIds.has(pluginId.toLowerCase())
-      return isInactiveScopedPlugin ? { ...tool, visibility: "lazy" as const } : tool
-    })
-    const scopedTools = buildScopedToolAliases(tools, getEffectivePriority)
+    const scopedTools = scopedMcpTools(baseSnapshot.tools, hookScope.activePluginIds)
     const maps = buildAliasMaps(scopedTools)
     scopedSnapshotCache = { key: cacheKey, tools: scopedTools, maps }
     return { tools: [...scopedTools], maps }
@@ -1428,8 +1440,14 @@ export function createScopedMcpCapabilityService(
     })
   }
 
-  return {
+  const scopedService: McpCapabilityService = {
+    configuredServerNames: () => service.configuredServerNames?.() ?? [],
     listTools: async () => (await getScopedToolSnapshot()).tools,
+    peekTools: () => {
+      // Never initialize a connection; the underlying service rejects stale config fingerprints.
+      const current = service.peekTools?.()
+      return current ? scopedMcpTools(current, hookScope.activePluginIds) : null
+    },
     getSnapshot: async () => {
       const baseSnapshot = await getBaseToolSnapshot()
       const scopedSnapshot = await getScopedToolSnapshot()
@@ -1449,159 +1467,234 @@ export function createScopedMcpCapabilityService(
       const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
       if (!tool) return service.invoke(idOrAlias, args)
 
-      const hookContext: HookContext = {
-        toolName: tool.toolId,
-        toolArgs: args,
-        workspacePath: baseContext.workspacePath,
-        sessionId: baseContext.threadId,
-        agentId: baseContext.agentId,
-        turnId: baseContext.turnId,
-        pluginOutputDir: baseContext.pluginOutputDir,
-        systemId: baseContext.systemId,
-        pluginWorkspace: baseContext.pluginWorkspace,
-        featureId: baseContext.featureId,
-        harnessProjectId: baseContext.harnessProjectId,
-        harnessAdapterName: baseContext.harnessAdapterName,
-        harnessAdapterVersion: baseContext.harnessAdapterVersion,
-        harnessNodeName: baseContext.harnessNodeName,
-        harnessNodeStatus: baseContext.harnessNodeStatus,
-        projectCode: baseContext.projectCode,
-        projectDir: baseContext.projectDir,
-        workspaceHookCwd: baseContext.workspaceHookCwd,
-        forceSyncWorkspaceHooks: baseContext.forceSyncWorkspaceHooks,
-        pluginId,
-        pluginName: pluginId ? getPluginName(pluginId) : undefined
-      }
-      const preHooks = resolveHooksForContext("PreToolUse", hookContext)
-      const preResult = await runHooksEnriched(preHooks, "PreToolUse", hookContext, onHookResult)
-      if (preResult) {
-        hookScope.activatePersistentHooks(preHooks)
-      }
-      throwIfHookHalt(
-        "PreToolUse",
-        preResult,
-        `MCP tool ${tool.toolId} was stopped by a PreToolUse hook`
-      )
-      if (preResult?.blocked || preResult?.decision === "block") {
-        throw new Error(
-          preResult.reason ||
-            preResult.stopReason ||
-            preResult.stdout ||
-            preResult.stderr ||
-            `MCP tool ${tool.toolId} was blocked by a hook`
-        )
-      }
-
-      const effectiveArgs = mergeUpdatedInput(args, preResult?.updatedInput)
-
-      const tabsTool =
-        tool.toolName === "browser_tabs"
-          ? tool
-          : (snapshot.tools.find(
-              (candidate) =>
-                candidate.providerKey === tool.providerKey && candidate.toolName === "browser_tabs"
-            ) ?? null)
-
-      await autoSelectPlaywrightInAppBrowserTab({
+      const modCall = getModCallContext(),
+        modExecution = currentFunctionExecution()
+      const modResult = await withScopedModMcp(
+        {
+          workspace: baseContext.workspacePath,
+          threadId: baseContext.threadId,
+          turnId:
+            modCall?.identity.turnId ??
+            modExecution?.turnId ??
+            baseContext.turnId ??
+            baseContext.threadId,
+          agentId: modCall?.identity.agentId ?? modExecution?.agentId ?? baseContext.agentId,
+          runtimeAuthority: modCall
+            ? modCall.runtimeAuthority
+            : modExecution
+              ? modExecution.runtimeAuthority
+              : baseContext.runtimeAuthority,
+          blockedToolNames: baseContext.blockedToolNames,
+          permissionToolName: tool.toolId,
+          permissionToolAliases: [tool.toolId, tool.canonicalToolId ?? tool.toolId],
+          activePluginIds: hookScope.activePluginIds,
+          ...(baseContext.signal ? { signal: baseContext.signal } : {}),
+          ...(baseContext.readOnly === undefined ? {} : { readOnly: baseContext.readOnly })
+        },
         tool,
-        tabsTool,
-        capabilityService: service,
-        workspacePath: baseContext.workspacePath,
-        threadId: baseContext.threadId
-      })
-
-      if (pluginId) hookScope.activatePlugin(pluginId)
-      const result = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
-        tool,
-        workspacePath: baseContext.workspacePath,
-        threadId: baseContext.threadId,
-        args: effectiveArgs,
-        prepareBeforeInvoke: false,
-        invoke: async () => {
-          try {
-            return await service.invoke(tool.capabilityId, effectiveArgs)
-          } catch (error) {
-            const fallbackTool = shouldFallbackMcpError(error)
-              ? findFallbackTool(tool, snapshot.tools)
-              : null
-            if (!fallbackTool) throw error
-            return appendFallbackNotice(
-              await service.invoke(fallbackTool.capabilityId, effectiveArgs),
-              tool,
-              fallbackTool
+        args,
+        async (args) => {
+          const hookContext: HookContext = {
+            toolName: tool.toolId,
+            toolArgs: args,
+            workspacePath: baseContext.workspacePath,
+            sessionId: baseContext.threadId,
+            agentId: baseContext.agentId,
+            turnId: baseContext.turnId,
+            pluginOutputDir: baseContext.pluginOutputDir,
+            systemId: baseContext.systemId,
+            pluginWorkspace: baseContext.pluginWorkspace,
+            featureId: baseContext.featureId,
+            harnessProjectId: baseContext.harnessProjectId,
+            harnessAdapterName: baseContext.harnessAdapterName,
+            harnessAdapterVersion: baseContext.harnessAdapterVersion,
+            harnessNodeName: baseContext.harnessNodeName,
+            harnessNodeStatus: baseContext.harnessNodeStatus,
+            projectCode: baseContext.projectCode,
+            projectDir: baseContext.projectDir,
+            workspaceHookCwd: baseContext.workspaceHookCwd,
+            forceSyncWorkspaceHooks: baseContext.forceSyncWorkspaceHooks,
+            pluginId,
+            pluginName: pluginId ? getPluginName(pluginId) : undefined
+          }
+          const preHooks = resolveHooksForContext("PreToolUse", hookContext)
+          const preResult = await runHooksEnriched(
+            preHooks,
+            "PreToolUse",
+            hookContext,
+            onHookResult
+          )
+          if (preResult) {
+            hookScope.activatePersistentHooks(preHooks)
+          }
+          throwIfHookHalt(
+            "PreToolUse",
+            preResult,
+            `MCP tool ${tool.toolId} was stopped by a PreToolUse hook`
+          )
+          if (preResult?.blocked || preResult?.decision === "block") {
+            throw new Error(
+              preResult.reason ||
+                preResult.stopReason ||
+                preResult.stdout ||
+                preResult.stderr ||
+                `MCP tool ${tool.toolId} was blocked by a hook`
             )
           }
-        }
-      })
-      const postContext: HookContext = {
-        ...hookContext,
-        toolArgs: effectiveArgs,
-        toolResult: result.text
-      }
-      const postHooks = resolveHooksForContext("PostToolUse", postContext)
-      const postResult = await runHooksEnriched(postHooks, "PostToolUse", postContext, onHookResult)
-      if (postResult) {
-        hookScope.activatePersistentHooks(postHooks)
-      }
-      throwIfHookHalt(
-        "PostToolUse",
-        postResult,
-        `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
-      )
-      const failureFuseDecision = buildMcpFailureFuseDecision(tool, effectiveArgs, result)
-      if (shouldSendFailureFuseNotice(failureFuseDecision)) {
-        onFailureFuseNotice?.(failureFuseDecision)
-      }
-      // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
-      // than a throw or a `success: false` shape, so `detectToolFailure` (which
-      // looks at common ad-hoc shapes) doesn't see them. Translate isError →
-      // PostToolUseFailure here so OMC-style security/observability hooks see
-      // MCP failures on the same channel as the rest.
-      if (result.isError === true) {
-        const failureContext: HookContext = {
-          ...postContext,
-          toolResult: JSON.stringify({
-            error: result.text || `MCP tool ${tool.toolId} returned isError`,
-            error_type: "unknown",
-            failure_kind: "explicit-error",
-            is_interrupt: false,
-            is_timeout: false
+
+          const effectiveArgs = mergeUpdatedInput(args, preResult?.updatedInput)
+          await authorizeCurrentModInput(`mcp:${tool.capabilityId}`, effectiveArgs)
+
+          const tabsTool =
+            tool.toolName === "browser_tabs"
+              ? tool
+              : (snapshot.tools.find(
+                  (candidate) =>
+                    candidate.providerKey === tool.providerKey &&
+                    candidate.toolName === "browser_tabs"
+                ) ?? null)
+
+          await autoSelectPlaywrightInAppBrowserTab({
+            tool,
+            tabsTool,
+            capabilityService: service,
+            workspacePath: baseContext.workspacePath,
+            threadId: baseContext.threadId
           })
+
+          if (pluginId) hookScope.activatePlugin(pluginId)
+          const result = await publishCurrentModResult(
+            await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+              tool,
+              workspacePath: baseContext.workspacePath,
+              threadId: baseContext.threadId,
+              args: effectiveArgs,
+              prepareBeforeInvoke: false,
+              invoke: async () => {
+                try {
+                  return await service.invoke(tool.capabilityId, effectiveArgs)
+                } catch (error) {
+                  const fallbackTool =
+                    !getModCallContext() && shouldFallbackMcpError(error)
+                      ? findFallbackTool(tool, snapshot.tools)
+                      : null
+                  if (!fallbackTool) throw error
+                  return appendFallbackNotice(
+                    await service.invoke(fallbackTool.capabilityId, effectiveArgs),
+                    tool,
+                    fallbackTool
+                  )
+                }
+              }
+            })
+          )
+          const postContext: HookContext = {
+            ...hookContext,
+            toolArgs: effectiveArgs,
+            toolResult: result.text
+          }
+          const postHooks = resolveHooksForContext("PostToolUse", postContext)
+          const postResult = await runHooksEnriched(
+            postHooks,
+            "PostToolUse",
+            postContext,
+            onHookResult
+          )
+          if (postResult) {
+            hookScope.activatePersistentHooks(postHooks)
+          }
+          throwIfHookHalt(
+            "PostToolUse",
+            postResult,
+            `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
+          )
+          const failureFuseDecision = buildMcpFailureFuseDecision(tool, effectiveArgs, result)
+          if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+            onFailureFuseNotice?.(failureFuseDecision)
+          }
+          // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
+          // than a throw or a `success: false` shape, so `detectToolFailure` (which
+          // looks at common ad-hoc shapes) doesn't see them. Translate isError →
+          // PostToolUseFailure here so OMC-style security/observability hooks see
+          // MCP failures on the same channel as the rest.
+          if (result.isError === true) {
+            const failureContext: HookContext = {
+              ...postContext,
+              toolResult: JSON.stringify({
+                error: result.text || `MCP tool ${tool.toolId} returned isError`,
+                error_type: "unknown",
+                failure_kind: "explicit-error",
+                is_interrupt: false,
+                is_timeout: false
+              })
+            }
+            const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
+            runHooksEnriched(
+              failureHooks,
+              "PostToolUseFailure",
+              failureContext,
+              onHookResult
+            ).catch((e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e))
+          }
+          if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
+          const hookFeedback = formatPostHookFeedback(postResult)
+          const failureFuseFeedback = shouldAttachFailureFuseFeedback(failureFuseDecision)
+            ? formatFailureFuseWarning(failureFuseDecision)
+            : null
+          const feedback = [hookFeedback, failureFuseFeedback].filter(Boolean).join("\n\n")
+          const isError =
+            result.isError || postResult?.decision === "block" || postResult?.continue === false
+          return {
+            ...result,
+            isError,
+            text: feedback ? `${result.text}\n\n${feedback}` : result.text,
+            contentBlocks:
+              feedback && result.contentBlocks
+                ? [...result.contentBlocks, { type: "text", text: feedback }]
+                : result.contentBlocks
+          }
         }
-        const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
-        runHooksEnriched(failureHooks, "PostToolUseFailure", failureContext, onHookResult).catch(
-          (e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
-        )
+      )
+      if (getModCallContext()) {
+        try {
+          recordSuccessfulToolExample(tool, modResult)
+        } catch {
+          console.warn(`[MCP] failed to persist filtered tool example for "${tool.toolId}"`)
+        }
       }
-      if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
-      const hookFeedback = formatPostHookFeedback(postResult)
-      const failureFuseFeedback = shouldAttachFailureFuseFeedback(failureFuseDecision)
-        ? formatFailureFuseWarning(failureFuseDecision)
-        : null
-      const feedback = [hookFeedback, failureFuseFeedback].filter(Boolean).join("\n\n")
-      const isError =
-        result.isError || postResult?.decision === "block" || postResult?.continue === false
-      return {
-        ...result,
-        isError,
-        text: feedback ? `${result.text}\n\n${feedback}` : result.text,
-        contentBlocks:
-          feedback && result.contentBlocks
-            ? [...result.contentBlocks, { type: "text", text: feedback }]
-            : result.contentBlocks
-      }
+      return modResult
     },
     invalidate: async (reason) => {
+      releaseModBinding?.()
       scopedSnapshotCache = null
       baseSnapshotCache = null
       await service.invalidate(reason)
     },
     close: async () => {
+      releaseModBinding?.()
       scopedSnapshotCache = null
       baseSnapshotCache = null
       await service.close()
     }
   }
+  const releaseModBinding = getModsManager()?.bindMcp(
+    {
+      workspace: baseContext.workspacePath,
+      runtimeAuthority: baseContext.runtimeAuthority,
+      executionWorkspace: baseContext.executionWorkspace,
+      blockedToolNames: baseContext.blockedToolNames,
+      threadId: baseContext.threadId,
+      turnId: baseContext.turnId ?? baseContext.threadId,
+      agentId: baseContext.agentId,
+      signal: baseContext.signal,
+      readOnly: baseContext.readOnly
+    },
+    (id, args) => scopedService.invoke(id, args),
+    () => scopedService.listTools(),
+    () => scopedService.peekTools!()
+  )
+  if (releaseModBinding) baseContext.onModBinding?.(releaseModBinding)
+  return scopedService
 }
 
 const TASK_TOOL_PROMPT = `## \`task\` (subagent spawner)
@@ -1677,7 +1770,29 @@ export function createSkillHookContextMiddleware(
 export function createOutputStyleTurnReminderMiddleware(
   outputStyle: AgentOutputStyle
 ): ReturnType<typeof createMiddleware> {
-  const reminder = getOutputStyleTurnReminder(outputStyle)
+  return createTurnReminderMiddleware(
+    "outputStyleTurnReminder",
+    getOutputStyleTurnReminder(outputStyle)
+  )
+}
+
+export function createToolStrategyTurnReminderMiddleware(
+  strategy: AgentToolStrategy,
+  access?: CoordinatorWorkerFilesystemAccess
+): ReturnType<typeof createMiddleware> {
+  return createTurnReminderMiddleware(
+    "toolStrategyTurnReminder",
+    getToolStrategyReminder(strategy),
+    (request) => resolveEffectiveToolStrategy(strategy, request.tools ?? [], access) !== "standard"
+  )
+}
+
+function createTurnReminderMiddleware(
+  name: string,
+  reminder: string | null,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  shouldRemind: (request: any) => boolean = () => true
+): ReturnType<typeof createMiddleware> {
   const reminderContent = reminder ? `<system-reminder>\n${reminder}\n</system-reminder>` : null
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const appendReminder = (content: any): any =>
@@ -1686,7 +1801,7 @@ export function createOutputStyleTurnReminderMiddleware(
       : [...content, { type: "text" as const, text: reminderContent }]
 
   return createMiddleware({
-    name: "outputStyleTurnReminder",
+    name,
     // Mirror Claude Code's output-style attachment normalization without
     // persisting the reminder: merge into the current user turn, or smoosh into
     // the last tool result. Never append a standalone HumanMessage after a tool
@@ -1695,7 +1810,7 @@ export function createOutputStyleTurnReminderMiddleware(
     // fallback so the reminder remains model-visible without changing history.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapModelCall: (request: any, handler: any) => {
-      if (!reminderContent) return handler(request)
+      if (!reminderContent || !shouldRemind(request)) return handler(request)
       const messages = Array.isArray(request.messages) ? request.messages : []
       const lastMessage = messages[messages.length - 1]
       const lastType = lastMessage?._getType?.()
@@ -1983,35 +2098,42 @@ function taskInvocationOwnerId(config: { toolCall?: { id?: unknown }; toolCallId
  * with the ToolCall as input re-establishes `config.toolCall` inside it (see
  * @langchain/core tools `invoke`), preserving its Command/result contract.
  */
+export type ModTaskExecution = <T>(
+  input: { agentId: string; subagentType?: string; signal?: AbortSignal },
+  run: () => Promise<T>
+) => Promise<T>
+
 export function wrapTaskToolWithOwnerMetadata(
   taskTool: DynamicStructuredTool,
   soloTaskTraceManager?: SoloTaskTraceManager,
-  captureThreadId?: string
+  captureThreadId?: string,
+  runModTask?: ModTaskExecution
 ): DynamicStructuredTool {
   return tool(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async (input: Record<string, unknown>, config: any) => {
       const invocationOwner = taskInvocationOwnerId(config)
       const ownerId = invocationOwner.explicit
+      const metadata = { ...(config?.metadata ?? {}) }
+      const configurable = { ...(config?.configurable ?? {}) }
+      // A nested id-less task must not inherit its parent's renderer identity.
+      delete metadata[SUBAGENT_OWNER_METADATA_KEY]
+      delete configurable[SUBAGENT_OWNER_METADATA_KEY]
+      if (ownerId) {
+        metadata[SUBAGENT_OWNER_METADATA_KEY] = ownerId
+        configurable[SUBAGENT_OWNER_METADATA_KEY] = ownerId
+      }
       const patchedConfig = {
         ...config,
         // Only a real tool-call id may be exposed as renderer attribution.
         // The generated fallback exists solely inside configurable so an
         // id-less invocation receives its own stationarity scope without
         // pretending to be a UI task id.
-        ...(ownerId
-          ? {
-              metadata: {
-                ...(config?.metadata ?? {}),
-                [SUBAGENT_OWNER_METADATA_KEY]: ownerId
-              }
-            }
-          : {}),
+        metadata,
         configurable: {
-          ...(config?.configurable ?? {}),
+          ...configurable,
           [ACTION_STATIONARITY_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
-          [SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
-          ...(ownerId ? { [SUBAGENT_OWNER_METADATA_KEY]: ownerId } : {})
+          [SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]: invocationOwner.stationarity
         }
       }
       const taskInput =
@@ -2035,13 +2157,26 @@ export function wrapTaskToolWithOwnerMetadata(
             ...patchedConfig,
             callbacks: subagentSessionCallbacks(patchedConfig.callbacks)
           })
-        const result = await (captureThreadId && ownerId
-          ? withSubagentSessionCapture(
-              { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
-              typeof taskInput.description === "string" ? taskInput.description : "子代理",
-              invoke
+        const invokeCaptured = () =>
+          captureThreadId && ownerId
+            ? withSubagentSessionCapture(
+                { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
+                typeof taskInput.description === "string" ? taskInput.description : "子代理",
+                invoke
+              )
+            : taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+        const execute = () => withTaskModelOutcome(invokeCaptured, config?.signal)
+        const result = await (runModTask
+          ? runModTask(
+              {
+                agentId: ownerId ?? `mod-task:${invocationOwner.stationarity}`,
+                subagentType:
+                  typeof taskInput.subagent_type === "string" ? taskInput.subagent_type : undefined,
+                signal: config?.signal
+              },
+              execute
             )
-          : taskTool.invoke(config?.toolCall ?? input, patchedConfig))
+          : execute())
         const sanitizedResult = stripTaskSubagentSummarizationState(result)
         if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", sanitizedResult)
         return sanitizedResult
@@ -2072,13 +2207,14 @@ export function wrapTaskToolWithOwnerMetadata(
 function stampSubagentOwnerMetadata<T>(
   middleware: T,
   soloTaskTraceManager?: SoloTaskTraceManager,
-  captureThreadId?: string
+  captureThreadId?: string,
+  runModTask?: ModTaskExecution
 ): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
     mw.tools = mw.tools.map((t) =>
       t?.name === "task"
-        ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager, captureThreadId)
+        ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager, captureThreadId, runModTask)
         : t
     )
   }
@@ -2126,8 +2262,41 @@ function markFilesystemWriteToolAsUserInitiated(middleware: {
  *   - Accepts custom argument-truncation thresholds so large-context models
  *     don't trim old edit/write tool args after a fixed 20 messages.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
+export function createDeepAgent(params: Parameters<typeof assembleDeepAgent>[0] = {}): DeepAgent {
+  return assembleDeepAgent(params, false) as DeepAgent
+}
+
+export interface DeepAgentToolCatalogOptions {
+  tools: unknown[]
+  mainSubagentsEnabled: boolean
+  registrySubagentSpecs: Array<{
+    name: string
+    description: string
+    systemPrompt: string
+    disallowedTools?: string[]
+    shellAccess?: AgentShellAccess
+  }>
+}
+
+/** The same tool factories, without creating a model, graph, sandbox or runtime authority. */
+export function prepareDeepAgentToolCatalog(
+  options: DeepAgentToolCatalogOptions
+): FunctionToolInfo[] {
+  return assembleDeepAgent(
+    {
+      ...options,
+      backend: () => {
+        throw new ModError("MODS_TOOL_METADATA_ONLY")
+      }
+    },
+    true
+  ) as FunctionToolInfo[]
+}
+
+function assembleDeepAgent(
+  params: Record<string, unknown>,
+  metadataOnly: boolean
+): DeepAgent | FunctionToolInfo[] {
   const {
     model = "claude-sonnet-4-5-20250929",
     summarizationModel = model,
@@ -2169,6 +2338,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     mainBlockedToolNames = [],
     managedExecution = false,
     registrySubagentSpecs = [],
+    modRuntimeAuthority,
+    modSessionModel,
+    modSessionCompact,
+    modTurnRunId,
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
     // read-only cmdlets (Get-Content, …) aren't false-blocked. "unknown" =
@@ -2191,6 +2364,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onTurnCompletionRecovery,
     turnCompletionTodoGateEnabled = true,
     outputStyle,
+    toolStrategy = "standard",
     conciseModeEnabled = false
   }: {
     onFinalSystemPrompt?: (prompt: string) => void
@@ -2210,6 +2384,13 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   const loopGuardsEnabled = areAgentLoopGuardsEnabled()
 
+  // Only this graph's native filesystem descriptions use its effective strategy.
+  // Shared task tools and child runtimes retain the requested preference.
+  const mainToolStrategy = resolveFilesystemToolStrategy(toolStrategy, {
+    filesystemAccess,
+    blockedToolNames: mainBlockedToolNames,
+    filesystemEnabled: mainFilesystemEnabled
+  })
   const effectiveOutputStyle = resolveAgentOutputStyle(outputStyle, conciseModeEnabled)
   const outputStylePrompt = getOutputStylePrompt(effectiveOutputStyle)
 
@@ -2310,10 +2491,14 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       fallbackModel: configureContextCompactionModel(summarizationFallbackModel)
     })
   }
+  const mainSummarizationController = createCmbContextController(mainSummarizationOptions)
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const createFsMiddleware = (fsSystemPrompt = filesystemSystemPrompt): any => {
+  const createFsMiddleware = (
+    fsSystemPrompt = filesystemSystemPrompt,
+    fsToolStrategy = toolStrategy
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): any => {
     // For any restricted leaf runtime — coordinator worker (workload) OR registry
     // workflow agent (explicit denylist/shell) — strip the blocked tools' docs
     // from the injected fs system prompt so a removed tool's description doesn't
@@ -2329,6 +2514,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         : fsSystemPrompt
     const mw = createFilesystemMiddleware({
       backend: filesystemBackend,
+      ...(fsToolStrategy !== "standard" && {
+        customToolDescriptions: SHELL_FIRST_TOOL_DESCRIPTIONS
+      }),
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
@@ -2707,6 +2895,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     `${toolConcurrencyQueueId}:subagent`
   )
 
+  const modManager = getModsManager()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
     ...(soloTaskTraceManager ? [soloTaskTraceManager.middleware] : []),
@@ -2735,7 +2924,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     // Same malformed tool-call recovery as the main agent — task subagents call
     // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
     createMalformedToolCallRecoveryMiddleware(),
-    createPatchToolCallsMiddleware()
+    createPatchToolCallsMiddleware(),
+    createTaskModelOutcomeMiddleware(),
+    ...(modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)
+      ? [createFunctionChildTurnMiddleware(modManager)]
+      : [])
   ]
 
   // Manual general-purpose subagent so AGENTS.md can be injected into its
@@ -2773,6 +2966,18 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...processedSubagents.map((s: any) => (s && typeof s.name === "string" ? s.name : undefined))
     ].filter((name): name is string => Boolean(name))
   )
+  const modAgentAccess = new Map<
+    string,
+    { blockedToolNames: ReadonlySet<string>; readOnly: boolean; tools?: FunctionToolInfo[] }
+  >()
+  if (
+    includeGeneralPurposeSubagent &&
+    !processedSubagents.some((subagent) => subagent?.name === GENERAL_PURPOSE_SUBAGENT.name)
+  )
+    modAgentAccess.set(GENERAL_PURPOSE_SUBAGENT.name, {
+      blockedToolNames: new Set(),
+      readOnly: false
+    })
   const registrySubagents = (
     registrySubagentSpecs as Array<{
       name: string
@@ -2790,6 +2995,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     .map((spec) => {
       const disallowed = spec.disallowedTools ?? []
       const shell: AgentShellAccess = spec.shellAccess ?? "full"
+      modAgentAccess.set(spec.name, {
+        blockedToolNames: registryAgentBlockedTools(disallowed, shell),
+        readOnly: shell === "read_only"
+      })
       // read_only AND none are both restricted roles. Outside project mode they
       // preserve the existing omitClaudeMd-style behavior; project mode may
       // explicitly share the main agent's already-resolved project context with
@@ -2828,12 +3037,33 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   const unresolvedSubagents = includeGeneralPurposeSubagent
     ? [generalPurposeSubagent, ...processedSubagents, ...registrySubagents]
     : [...processedSubagents, ...registrySubagents]
+  const runModTask: ModTaskExecution | undefined =
+    modRuntimeAuthority && modManager
+      ? (input, run) => {
+          const execution = currentFunctionExecution()
+          const parent = execution ? execution.runtimeAuthority : modRuntimeAuthority
+          if (!parent) throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
+          const access = input.subagentType ? modAgentAccess.get(input.subagentType) : undefined
+          return modManager.withSharedAgent(
+            parent,
+            input.agentId,
+            input.signal,
+            access,
+            () =>
+              readOnlyShellExecutionContext.run(
+                readOnlyShellExecutionContext.getStore() === true || access?.readOnly === true,
+                run
+              ),
+            modTurnRunId
+          )
+        }
+      : undefined
   // Task-tool subagents have role-specific prompts and do not inherit the main
   // BASE_SYSTEM_PROMPT. Apply the shared completion/repetition contract at the
   // common exit so general-purpose, registry, and custom string-prompt agents
   // receive the same guidance exactly once. Opaque Runnable agents own their
   // prompt assembly and cannot be safely rewritten here.
-  const availableSubagents = unresolvedSubagents.map((subagent: any) => {
+  const availableSubagents = unresolvedSubagents.map((subagent) => {
     if (
       Runnable.isRunnable(subagent) ||
       !subagent ||
@@ -2844,9 +3074,35 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     }
     return {
       ...subagent,
-      systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt)
+      systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt),
+      ...(toolStrategy !== "standard" && !("runnable" in subagent)
+        ? {
+            middleware: [
+              ...(subagent.middleware ?? []),
+              // Per-role tail: the shared filesystem tools are never mutated,
+              // and the guard has already removed unavailable tools by this point.
+              createToolStrategyTurnReminderMiddleware(
+                toolStrategy,
+                modAgentAccess.get(subagent.name)?.readOnly
+                  ? { ...filesystemAccess, shellAccess: "read_only" }
+                  : filesystemAccess
+              )
+            ]
+          }
+        : {})
     }
   })
+
+  // Capture each known graph's own tool sources before its first model request.
+  // The execution binding below still owns filtering and the child's private lifetime.
+  for (const subagent of availableSubagents) {
+    const access = modAgentAccess.get(subagent?.name)
+    if (!access) continue
+    access.tools = collectRuntimeToolCatalog(subagent.tools ?? subagentDefaultTools ?? tools, [
+      ...subagentMiddleware,
+      ...(subagent.middleware ?? [])
+    ])
+  }
 
   if (mainSubagentsEnabled && onTaskSubagentPromptsResolved) {
     onTaskSubagentPromptsResolved(
@@ -2917,7 +3173,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     ? [createOutputStyleTurnReminderMiddleware(effectiveOutputStyle)]
     : []
 
-  return createAgent({
+  const agentOptions = {
     model,
     systemPrompt: finalSystemPrompt,
     tools,
@@ -2942,7 +3198,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         : []),
       ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
-      ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
+      ...(mainFilesystemEnabled ? [createFsMiddleware("\n", mainToolStrategy)] : []),
       ...postFsToolDocStripMiddleware,
       // The filesystem middleware appends execute documentation dynamically;
       // run the transport denylist after it so the docs and tool disappear
@@ -2961,12 +3217,21 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 defaultTools: subagentDefaultTools ?? tools,
                 defaultMiddleware: subagentMiddleware,
                 defaultInterruptOn: null,
-                subagents: availableSubagents,
+                subagents: metadataOnly
+                  ? availableSubagents.map((subagent) => ({
+                      name: subagent.name,
+                      description: subagent.description,
+                      runnable: RunnableLambda.from(() => {
+                        throw new ModError("MODS_TOOL_METADATA_ONLY")
+                      })
+                    }))
+                  : availableSubagents,
                 generalPurposeAgent: false,
                 systemPrompt: taskSystemPrompt
               } as Parameters<typeof createSubAgentMiddleware>[0]),
               soloTaskTraceManager,
-              threadId
+              threadId,
+              runModTask
             )
           ]
         : []),
@@ -2979,6 +3244,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // prompt this gate would add. See turn-completion-integrity.ts.
       createTurnCompletionGateMiddleware({
         ownerRunToken: currentRunMessageQueueOwnerToken,
+        observationRunToken: modTurnRunId,
         todoGateEnabled: mainTodosEnabled && turnCompletionTodoGateEnabled,
         onRecovery: onTurnCompletionRecovery
       }),
@@ -2987,7 +3253,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // and BEFORE humanInTheLoop (a steered message must never race a pending
       // tool-approval interrupt). See createCurrentRunMessageQueueMiddleware.
       createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken),
-      createCmbSummarizationMiddleware(mainSummarizationOptions),
+      mainSummarizationController.middleware,
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
       // invalid_tool_calls into normalized tool_calls (the guard middleware above
@@ -3002,14 +3268,54 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
       ...customMiddleware,
       ...outputStyleTurnReminderMiddleware,
-      ...systemPromptPreviewCaptureMiddleware
+      ...(toolStrategy !== "standard"
+        ? [createToolStrategyTurnReminderMiddleware(toolStrategy, filesystemAccess)]
+        : []),
+      ...systemPromptPreviewCaptureMiddleware,
+      ...(!metadataOnly &&
+      modRuntimeAuthority?.agentId === "main" &&
+      typeof modSessionModel === "string" &&
+      modManager?.isActive(modRuntimeAuthority.workspace)
+        ? [
+            createFunctionSessionViewMiddleware(
+              modManager,
+              modRuntimeAuthority,
+              modSessionModel,
+              modTurnRunId,
+              summarizationMaxInputTokens,
+              modSessionCompact
+                ? (instructions, messages, state, signal) =>
+                    modSessionCompact(
+                      mainSummarizationController,
+                      instructions,
+                      messages,
+                      state,
+                      signal
+                    )
+                : undefined
+            )
+          ]
+        : [])
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
     checkpointer,
     store,
     name
-  } as unknown as Parameters<typeof createAgent>[0])
+  }
+  if (metadataOnly) return collectRuntimeToolCatalog(agentOptions.tools, agentOptions.middleware)
+  const agent = createAgent(agentOptions as unknown as Parameters<typeof createAgent>[0])
+  if (modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)) {
+    modManager.bindFunctionToolCatalog(
+      {
+        ...modRuntimeAuthority,
+        runtimeAuthority: modRuntimeAuthority,
+        blockedToolNames: new Set(mainBlockedToolNames)
+      },
+      collectRuntimeToolCatalog(agentOptions.tools, agentOptions.middleware)
+    )
+  }
+  return agent
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3155,8 +3461,16 @@ export function getSystemPrompt(
     includeSubagents?: boolean
     includeMemory?: boolean
     includeCurrentTime?: boolean
+    toolStrategy?: AgentToolStrategy
+    filesystemAccess?: CoordinatorWorkerFilesystemAccess
+    blockedToolNames?: Iterable<string>
+    filesystemEnabled?: boolean
   } = {}
 ): string {
+  const effectiveToolStrategy = resolveFilesystemToolStrategy(
+    options.toolStrategy ?? "standard",
+    options
+  )
   const includeBackgroundExec = options.includeBackgroundExec ?? true
   const managedForegroundExec = options.managedForegroundExec === true
   const isWindows = process.platform === "win32"
@@ -3198,7 +3512,7 @@ ${shellGuidance}
 - All file paths use fully qualified absolute system paths
 - The workspace root is: \`${workspacePath}\`
 - Example: \`${examplePath}\`
-- To list the workspace root, use \`ls("${workspacePath}")\`
+${effectiveToolStrategy !== "standard" ? "- Inspect the workspace root with tools appropriate for the active tool strategy" : `- To list the workspace root, use \`ls("${workspacePath}")\``}
 - Always use full absolute paths for all file operations
 `
 
@@ -3267,7 +3581,10 @@ ${shellGuidance}
     workingDirSection +
     backgroundExecSection +
     sandboxSection +
-    renderBaseSystemPrompt({ includeSubagents: options.includeSubagents }) +
+    renderBaseSystemPrompt({
+      includeSubagents: options.includeSubagents,
+      toolStrategy: effectiveToolStrategy
+    }) +
     memorySection
   )
 }
@@ -4181,7 +4498,7 @@ async function runWorkerStopHooksWithRevision({
 /** Default fetch (no UI hooks) for model instances without a UI context (e.g. skill generation). */
 const defaultRetryingFetch = createRetryingFetch()
 
-type ModelInstancePurpose = "agent" | "context-compaction"
+type ModelInstancePurpose = "agent" | "context-compaction" | "function-completion"
 
 function localCompactionTokenCount(content: unknown): number {
   let text: string
@@ -4270,9 +4587,8 @@ export function getModelInstance(
   const baseFields = {
     model: resolvedModel,
     apiKey,
-    // Keep the established agent protocol unchanged. Context compaction uses a
-    // separate model instance because its invoke() must consume SSE internally.
-    ...(purpose === "context-compaction" ? { streaming: true } : {}),
+    // Text-only helpers use separate SSE instances and never change the agent protocol.
+    ...(purpose !== "agent" ? { streaming: true } : {}),
     maxTokens: maxOutputTokens,
     ...samplingFields(resolvedModel, { temperature, topP }),
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
@@ -4299,7 +4615,7 @@ export function getModelInstance(
     configuration: {
       baseURL: customConfig.baseUrl,
       fetch: withModelResponseDiagnostics(
-        modelFetch,
+        withModelStreamCancellation(modelFetch),
         { model: resolvedModel, purpose },
         (diagnostic) => console.log("[Runtime][ModelResponse]", JSON.stringify(diagnostic))
       )
@@ -4324,9 +4640,9 @@ export function getModelInstance(
       ...baseFields,
       completions: new ReasoningDisplayChatOpenAICompletions(baseFields)
     } as never)
-  } else if (purpose === "context-compaction") {
+  } else if (purpose !== "agent") {
     // ChatOpenAI.withConfig() rebuilds the wrapper from its original fields.
-    // Keep the compaction completions explicit so the local token counter below
+    // Keep text-only completions explicit so the local token counter below
     // survives the tags/callback binding applied by configureContextCompactionModel().
     model = new ChatOpenAI({
       ...baseFields,
@@ -4339,7 +4655,7 @@ export function getModelInstance(
     } as never)
   }
 
-  return purpose === "context-compaction" ? configureLocalCompactionTokenEstimation(model) : model
+  return purpose !== "agent" ? configureLocalCompactionTokenEstimation(model) : model
 }
 
 type AgentsPromptLoader = "plugin" | "cmbdevclaw"
@@ -4373,6 +4689,8 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 }
 
 export interface CreateAgentRuntimeOptions {
+  /** Internal inheritance override; absent on top-level runs to capture the global setting. */
+  toolStrategy?: AgentToolStrategy
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
   /** Per-thread output style. Applied only to the foreground normal-mode main agent. */
@@ -4384,6 +4702,8 @@ export interface CreateAgentRuntimeOptions {
   /** Physical foreground run token allowed to drain the current-run steer queue.
    * Doubles as the turn-completion gate's run key (same physical run). */
   currentRunMessageQueueOwnerToken?: string
+  /** Physical Mods observation owner, independent of foreground steering and sandbox ACLs. */
+  modTurnRunId?: string
   /** Notice sink for turn-completion-gate recoveries (empty reply retried, …). */
   onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
   /** Ordinary-path todo completion gate. Defaults to enabled. */
@@ -4591,7 +4911,143 @@ export interface RuntimeInteractionWaitHooks {
 // Create agent runtime with configured model and checkpointer
 export type AgentRuntime = ReturnType<typeof createAgent>
 
+type RuntimeTool = {
+  name?: string
+  func?: unknown
+  invoke?: unknown
+}
+function createRuntimeBaseTools(
+  options: CreateAgentRuntimeOptions,
+  fileRoot: string,
+  runtimePolicy: RuntimePromptToolPolicy
+): RuntimeTool[] {
+  const { workspacePath } = options
+  const extraTools: RuntimeTool[] = []
+  if (options.enableRequestUserInput) {
+    extraTools.push(
+      createRequestUserInputTool({
+        threadId: options.threadId,
+        abortSignal: options.abortSignal,
+        allowDeferredRenderer: options.allowDeferredUserInputRenderer,
+        interactionWaitHooks: options.interactionWaitHooks,
+        requestUserInputConfig: options.requestUserInputConfig
+      })
+    )
+  }
+  if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
+    extraTools.push(
+      createSchedulerTool({
+        workspacePath,
+        modelId: options.modelId,
+        threadId: options.threadId,
+        imDeliveryContext: options.imDeliveryContext ?? null
+      })
+    )
+  }
+  if (!options.noSkillEvolutionTool) {
+    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
+  }
+
+  // Conditionally inject Java LSP tool
+  try {
+    const lspConfig = getLspConfig()
+    // LSP indexes the sources the agent edits, so it follows the file root.
+    if (lspConfig.enabled && detectJavaProject(fileRoot)) {
+      extraTools.push(createLspTool({ workspacePath: fileRoot }))
+      console.log("[Runtime] Java LSP tool injected for:", fileRoot)
+    }
+  } catch (e) {
+    console.warn("[Runtime] Failed to check LSP config:", e)
+  }
+
+  return extraTools
+}
+
+/** Inspect an ordinary desktop thread using the production definition factories only. */
+export async function prepareForegroundRuntimeToolCatalog(
+  workspacePath: string,
+  threadId: string,
+  metadata: Record<string, unknown>,
+  signal: AbortSignal
+): Promise<FunctionToolInfo[]> {
+  signal.throwIfAborted()
+  const settingsKey = () =>
+    JSON.stringify({
+      memory: isThreadMemoryEnabled(metadata),
+      code: isCodeExecEnabled(),
+      lsp: getLspConfig()
+    })
+  const initialSettings = settingsKey()
+  const options: CreateAgentRuntimeOptions = {
+    workspacePath,
+    threadId,
+    agentMode: "normal",
+    abortSignal: signal,
+    ...foregroundToolPolicy("normal", metadata)
+  }
+  const policy = createRuntimePromptToolPolicy({
+    agentMode: "normal",
+    memoryEnabled: isThreadMemoryEnabled(metadata)
+  })
+  const service = getGlobalMcpCapabilityService()
+  const snapshot = await service.getSnapshot!()
+  signal.throwIfAborted()
+  const scoped = scopedMcpTools(snapshot.tools, new Set())
+  const unavailable = async (): Promise<never> => {
+    throw new ModError("MODS_TOOL_METADATA_ONLY")
+  }
+  // Only factory metadata reads are supported. No closure can operate the shared transport.
+  const definitions: McpCapabilityService = {
+    listTools: async () => [...scoped],
+    getSnapshot: async () => ({ fingerprint: snapshot.fingerprint, tools: [...scoped] }),
+    getTool: unavailable,
+    invoke: unavailable,
+    invalidate: unavailable,
+    close: unavailable
+  }
+  const codeExecEnabled = isCodeExecEnabled()
+  const codeExecRouteEnabled = codeExecEnabled && scoped.length > 0 && policy.includeCodeExecRoute
+  const mcpTools = createEagerMcpTools(
+    definitions,
+    scoped.filter((tool) => tool.visibility === "eager"),
+    options
+  )
+  const memoryTools = policy.includeMemory
+    ? [createMemorySearchTool([]), createMemoryGetTool([])]
+    : []
+  const extras = createRuntimeBaseTools(options, workspacePath, policy)
+  const deferred = await createToolSearchTools(definitions, options, {
+    codeExecRouteEnabled,
+    savedToolsEnabled: codeExecEnabled
+  })
+  if (codeExecRouteEnabled)
+    extras.push(
+      createCodeExecTool({
+        workspacePath,
+        threadId,
+        readYoloMode: () => false,
+        capabilityService: definitions,
+        requestApproval: unavailable
+      })
+    )
+  const profiles = options.disableSubagents ? [] : await loadAgentProfilesAsync(workspacePath)
+  signal.throwIfAborted()
+  const result = prepareDeepAgentToolCatalog({
+    tools: [...mcpTools, ...memoryTools, ...extras, ...deferred],
+    mainSubagentsEnabled: !options.disableSubagents,
+    registrySubagentSpecs: profiles
+  })
+  const current = await service.getSnapshot!()
+  signal.throwIfAborted()
+  if (current.fingerprint !== snapshot.fingerprint || settingsKey() !== initialSettings)
+    throw new ModError("MODS_CALL_SCOPE_CHANGED")
+  return result
+}
+
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
+  // Snapshot once per runtime. Nested runtimes inherit this preference, NOT the
+  // parent's role-filtered effective value. Rebuilt top-level runtimes read anew.
+  const toolStrategy = normalizeAgentToolStrategy(options.toolStrategy ?? getAgentToolStrategy())
   const {
     threadId,
     agentId,
@@ -4655,6 +5111,16 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const runtimeBlockedToolNames = new Set(
     blockedToolNames.map((name) => name.trim()).filter(Boolean)
   )
+  const modBlockedToolNames = new Set([
+    ...runtimeBlockedToolNames,
+    ...(options.filesystemAccess ? blockedToolNamesForAccess(options.filesystemAccess) : []),
+    ...(agentMode === "coordinator"
+      ? ["read_file", "write_file", "edit_file", "ls", "glob", "grep", "execute", "task_output"]
+      : [])
+  ])
+  const modReadOnly =
+    options.filesystemAccess?.shellAccess === "read_only" ||
+    options.filesystemAccess?.workload === "read_only"
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
   const outputStyle =
@@ -4672,6 +5138,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       "Workspace path is required. Please select a workspace folder before running the agent."
     )
   }
+
+  const modRuntimeAuthority = getModsManager()?.createRuntimeAuthority({
+    workspace: workspacePath,
+    threadId,
+    agentId,
+    turnId: hookTurnId ?? threadId,
+    signal: options.abortSignal
+  }).authority
 
   // The directory this agent's FILE TOOLS are rooted at. Equal to workspacePath for
   // every ordinary runtime; a private git worktree for an isolated workflow agent.
@@ -4859,6 +5333,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // file root and Git guard remain active when it is "none"; a configured Codex
   // sandbox adds defense in depth but is not required to use worktree isolation.
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
+  // Main and task-agent prompts must see the resolved shell, not a cold-cache cmd fallback.
+  await LocalSandbox.ensureShellReady(windowsSandbox)
   console.log(
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
   )
@@ -4872,6 +5348,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     // remains an additional execution policy rather than a worktree prerequisite.
     rootDir: fileRoot,
     agentId,
+    modWorkspace: workspacePath,
+    modRuntimeAuthority,
+    modBlockedToolNames,
+    modDelegatedBlockedToolNames: new Set([
+      ...runtimeBlockedToolNames,
+      ...(options.filesystemAccess ? blockedToolNamesForAccess(options.filesystemAccess) : [])
+    ]),
+    modReadOnly,
     worktreeIsolation: options.worktreeIsolation,
     virtualMode: false,
     // Native Git in an isolated worktree runs through the normal shell path.
@@ -5138,6 +5622,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // agent would be told the host workspace is its root and write outside its
   // worktree (the sandbox would refuse, so it would just fail confusingly).
   let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
+    toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
+    filesystemAccess: options.filesystemAccess,
+    blockedToolNames: runtimeBlockedToolNames,
+    filesystemEnabled: !isCoordinatorMode,
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
     managedForegroundExec: managedExecution,
     includeSubagents: mainSubagentsEnabled,
@@ -5338,6 +5826,11 @@ The workspace root is: ${fileRoot}`
     onFailureFuseNotice,
     {
       workspacePath,
+      executionWorkspace: fileRoot,
+      runtimeAuthority: modRuntimeAuthority,
+      blockedToolNames: modBlockedToolNames,
+      readOnly: modReadOnly,
+      signal: options.abortSignal,
       threadId,
       agentId,
       pluginOutputDir,
@@ -5438,48 +5931,7 @@ The workspace root is: ${fileRoot}`
     }
   }
 
-  type RuntimeTool = {
-    name?: string
-    func?: unknown
-    invoke?: unknown
-  }
-  const extraTools: RuntimeTool[] = []
-  if (options.enableRequestUserInput) {
-    extraTools.push(
-      createRequestUserInputTool({
-        threadId: options.threadId,
-        abortSignal: options.abortSignal,
-        allowDeferredRenderer: options.allowDeferredUserInputRenderer,
-        interactionWaitHooks: options.interactionWaitHooks,
-        requestUserInputConfig: options.requestUserInputConfig
-      })
-    )
-  }
-  if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
-    extraTools.push(
-      createSchedulerTool({
-        workspacePath,
-        modelId: options.modelId,
-        threadId: options.threadId,
-        imDeliveryContext: options.imDeliveryContext ?? null
-      })
-    )
-  }
-  if (!options.noSkillEvolutionTool) {
-    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
-  }
-
-  // Conditionally inject Java LSP tool
-  try {
-    const lspConfig = getLspConfig()
-    // LSP indexes the sources the agent edits, so it follows the file root.
-    if (lspConfig.enabled && detectJavaProject(fileRoot)) {
-      extraTools.push(createLspTool({ workspacePath: fileRoot }))
-      console.log("[Runtime] Java LSP tool injected for:", fileRoot)
-    }
-  } catch (e) {
-    console.warn("[Runtime] Failed to check LSP config:", e)
-  }
+  const extraTools = createRuntimeBaseTools(options, fileRoot, runtimePolicy)
 
   // Wrap extra tools so that errors are returned as strings instead of throwing
   function wrapToolErrors(tools: RuntimeTool[]): void {
@@ -5570,6 +6022,9 @@ The workspace root is: ${fileRoot}`
             const worktreeIsolation = subagentOptions.worktreeIsolation
             const subagentFileRoot = worktreeIsolation?.workspaceRoot ?? workspacePath
             const subagentRuntime = await createAgentRuntime({
+              // Snapshot at leaf creation: approved file edits should not be steered
+              // into separately gated shell writes. YOLO leaves keep the preference.
+              toolStrategy: resolveWorkflowToolStrategy(toolStrategy, getYoloMode()),
               threadId: subagentOptions.threadId,
               agentId: subagentOptions.agentId,
               actionStationarityTurnId: subagentOptions.threadId,
@@ -5743,6 +6198,7 @@ The workspace root is: ${fileRoot}`
     ...eagerMcpMetadata.map((tool) => tool.toolId)
   ])
   const toolHookMiddleware = createToolHookMiddleware({
+    runtimeAuthority: modRuntimeAuthority,
     workspacePath,
     threadId: options.threadId,
     agentId,
@@ -6177,6 +6633,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         try {
           workerAgent = await createAgentRuntime({
             threadId: workerInput.workerThreadId,
+            toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
@@ -6252,6 +6709,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           const nextCandidate = remainingWorkerCandidates.shift()!
           workerAgent = await createAgentRuntime({
             threadId: workerInput.workerThreadId,
+            toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
@@ -6307,6 +6765,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
 
 Access limits: read-only handoff continuation. Do not modify files, run commands, or call tools. Return only the concise final handoff covering files changed or inspected, commands run and results, remaining risks, and any verification still needed.`
           const handoffAgent = await createAgentRuntime({
+            toolStrategy,
             threadId: workerInput.workerThreadId,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
@@ -6712,6 +7171,150 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     ? resolvedProjectContextPrompt
     : combinedAgentsPrompt
 
+  const runtimeAgentRef: { current?: DeepAgent } = {}
+  const stableMessageFingerprint = (value: unknown): string => {
+    const seen = new WeakSet<object>()
+    const visit = (candidate: unknown): string => {
+      if (candidate === null) return "null"
+      if (typeof candidate === "string") return JSON.stringify(candidate)
+      if (typeof candidate === "number" || typeof candidate === "boolean") return String(candidate)
+      if (typeof candidate === "bigint") return `${candidate.toString()}n`
+      if (typeof candidate !== "object") return String(candidate)
+      if (BaseMessage.isInstance(candidate))
+        return visit({
+          type: candidate.getType(),
+          id: candidate.id,
+          content: candidate.content,
+          additional_kwargs: candidate.additional_kwargs,
+          response_metadata: candidate.response_metadata,
+          tool_calls: (candidate as BaseMessage & { tool_calls?: unknown[] }).tool_calls,
+          invalid_tool_calls: (candidate as BaseMessage & { invalid_tool_calls?: unknown[] })
+            .invalid_tool_calls
+        })
+      if (seen.has(candidate)) return "[Circular]"
+      seen.add(candidate)
+      if (Array.isArray(candidate)) return `[${candidate.map(visit).join(",")}]`
+      const record = candidate as Record<string, unknown>
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${visit(record[key])}`)
+        .join(",")}}`
+    }
+    return visit(value)
+  }
+  const compactMainSession = async (
+    controller: CmbContextController,
+    instructions: string,
+    messages: readonly unknown[],
+    state: { _summarizationEvent?: unknown },
+    signal: AbortSignal
+  ): Promise<ModJson> => {
+    signal.throwIfAborted()
+    if (getLocalThreadRunLease(threadId))
+      throw new ModError("MODS_CONTEXT_COMPACTION_ACTIVE")
+    const agentToUpdate = runtimeAgentRef.current
+    if (!agentToUpdate) throw new ModError("MODS_SESSION_UNAVAILABLE")
+    const lease = captureThreadMutationLease(threadId)
+    if (!lease) throw new ModError("MODS_SESSION_UNAVAILABLE")
+    const config = { configurable: { thread_id: threadId } }
+    const beforePrepare = (await agentToUpdate.getState(config)) as unknown as {
+      values?: { messages?: readonly unknown[] }
+      config?: { configurable?: { checkpoint_id?: string } }
+    }
+    const expectedCheckpointId = beforePrepare.config?.configurable?.checkpoint_id
+    if (!Array.isArray(beforePrepare.values?.messages)) throw new ModError("MODS_CONTEXT_CHANGED")
+    const liveMessages = messages.filter(
+      (message): message is BaseMessage => BaseMessage.isInstance(message)
+    )
+    if (liveMessages.length !== messages.length) throw new ModError("MODS_CONTEXT_CHANGED")
+    const plan = await controller.prepareLatest(
+      liveMessages,
+      state,
+      instructions,
+      signal
+    )
+    if ("skip" in plan) return { skip: plan.skip } as ModJson
+    signal.throwIfAborted()
+    return withThreadMutationLeaseLock(lease, async () => {
+      if (getLocalThreadRunLease(threadId))
+        throw new ModError("MODS_CONTEXT_COMPACTION_ACTIVE")
+      const current = (await agentToUpdate.getState(config)) as unknown as {
+        values?: { messages?: readonly unknown[] }
+        config?: { configurable?: { checkpoint_id?: string } }
+      }
+      const currentMessages = current.values?.messages
+      if (
+        !Array.isArray(currentMessages) ||
+        stableMessageFingerprint(currentMessages) !== stableMessageFingerprint(messages) ||
+        (expectedCheckpointId !== undefined &&
+          current.config?.configurable?.checkpoint_id !== expectedCheckpointId)
+      )
+        throw new ModError("MODS_CONTEXT_CHANGED")
+      modRuntimeAuthority?.assertLive()
+      const committed = plan.commitArchive ? await plan.commitArchive(signal) : undefined
+      const messagesToCommit = committed?.messages ?? plan.messages
+      const updateToCommit = committed?.update ?? plan.update
+      let checkpointUpdated = false
+      try {
+        signal.throwIfAborted()
+        await agentToUpdate.updateState(
+          config,
+          {
+            messages: [new RemoveMessage({ id: "__remove_all__" }), ...messagesToCommit],
+            ...updateToCommit
+          },
+          "model_request"
+        )
+        checkpointUpdated = true
+        signal.throwIfAborted()
+        await checkpointer.flushStrict()
+        modRuntimeAuthority?.assertLive()
+      } catch (error) {
+        // updateState can fail before a checkpoint is durable. Compensate the
+        // staged archive in that case; a flush failure keeps the pointer because
+        // SQLite may already have committed the checkpoint before WAL syncing.
+        if (committed && plan.rollbackArchive && !checkpointUpdated) {
+          try {
+            await plan.rollbackArchive(signal)
+          } catch {
+            // Preserve the original mutation error; the archive path is never
+            // reported as a successful result below.
+          }
+        }
+        throw error
+      }
+      const compactManager = getModsManager()
+      if (compactManager && modRuntimeAuthority) {
+        compactManager.updateFunctionSessionMessages(
+          modRuntimeAuthority,
+          messagesToCommit,
+          { _summarizationEvent: updateToCommit._summarizationEvent }
+        )
+        const currentSession = compactManager.captureFunctionSession(workspacePath, threadId)
+        try {
+          currentSession.assertLive()
+          if (currentSession.request) {
+            compactManager.updateFunctionSessionRequest(modRuntimeAuthority, {
+              ...currentSession.request,
+              messages: messagesToCommit
+            })
+          }
+        } finally {
+          currentSession.release()
+        }
+      }
+      const projectedMessages = parseModJson(
+        encodeModJson(projectFunctionSessionMessages(messagesToCommit))
+      )
+      if (!isModJson(projectedMessages)) throw new ModError("MODS_SDK_RESULT")
+      return {
+        messages: projectedMessages,
+        tokensBefore: plan.estimatedTokensBefore,
+        tokensAfter: plan.estimatedTokensAfter
+      }
+    })
+  }
+
   const agent = createDeepAgent({
     model,
     summarizationModel: contextCompactionModel,
@@ -6722,6 +7325,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     backend,
     systemPrompt,
     outputStyle,
+    toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     onFinalSystemPrompt,
     filesystemSystemPrompt,
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
@@ -6775,6 +7379,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
     onFailureFuseNotice,
+    modRuntimeAuthority,
+    modSessionModel: customConfig.model,
+    modSessionCompact: compactMainSession,
+    modTurnRunId: options.modTurnRunId ?? options.currentRunMessageQueueOwnerToken,
     onContextCompaction,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
@@ -6836,6 +7444,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       return failureFuseDecision
     }
   })
+  runtimeAgentRef.current = agent
 
   console.log("[Runtime] Agent created with skills parameter:", mainSkillSources)
   console.log(

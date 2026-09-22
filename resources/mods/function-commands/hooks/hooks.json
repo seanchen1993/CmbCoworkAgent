@@ -1,0 +1,15 @@
+{
+  "modules": [
+    "./register.ts",
+    "./board.tsx",
+    "./client-board.tsx",
+    "./tools.ts",
+    "./model.ts",
+    "./model-tools.ts",
+    "./registered-tools.ts",
+    "./mcp.ts",
+    "./tool-check.ts",
+    "./session-info.ts",
+    "./turns.ts"
+  ]
+}

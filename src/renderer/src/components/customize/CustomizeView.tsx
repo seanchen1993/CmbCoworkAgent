@@ -10,6 +10,7 @@ import {
   HeartPulse,
   Loader2,
   Network,
+  Palette,
   Plug,
   Puzzle,
   Sparkles,
@@ -30,6 +31,9 @@ import { cn } from "@/lib/utils"
 
 const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
 const GeneralPanel = lazy(() => import("./GeneralPanel").then((m) => ({ default: m.GeneralPanel })))
+const AppearancePanel = lazy(() =>
+  import("./AppearancePanel").then((m) => ({ default: m.AppearancePanel }))
+)
 const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
 const ScheduledPanel = lazy(() =>
   import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
@@ -40,6 +44,7 @@ const HeartbeatPanel = lazy(() =>
   import("./HeartbeatPanel").then((m) => ({ default: m.HeartbeatPanel }))
 )
 const PluginsPanel = lazy(() => import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel })))
+const ModsPanel = lazy(() => import("./ModsPanel").then((m) => ({ default: m.ModsPanel })))
 const MarketPanel = lazy(() => import("./MarketPanel").then((m) => ({ default: m.MarketPanel })))
 const SandboxPanel = lazy(() => import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel })))
 const EvolutionPanel = lazy(() =>
@@ -63,9 +68,11 @@ const ExpertTeamPanel = lazy(() =>
 
 type CustomizeTab =
   | "general"
+  | "appearance"
   | "skills"
   | "connectors"
   | "plugins"
+  | "mods"
   | "scheduled"
   | "heartbeat"
   | "memory"
@@ -102,9 +109,11 @@ const MENU_GROUPS: MenuGroup[] = [
     label: "基础功能",
     items: [
       { tab: "general", label: "通用", icon: Settings2 },
+      { tab: "appearance", label: "外观", icon: Palette },
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
+      { tab: "mods", label: "Function Mods", icon: Webhook },
       { tab: "scheduled", label: "定时任务", icon: Clock },
       { tab: "market", label: "应用市场", icon: ShoppingBag },
       { tab: "sandbox", label: "沙盒环境", icon: Shield }
@@ -166,8 +175,7 @@ export function CustomizeView(): React.JSX.Element {
     pendingEvolution,
     currentThreadId,
     threads
-  } =
-    useAppStore()
+  } = useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
     customizeInitialTab === "commitPolicy"
       ? "skills"
@@ -235,6 +243,7 @@ export function CustomizeView(): React.JSX.Element {
             variant="ghost"
             size="sm"
             className="h-7 w-9 p-0"
+            aria-label="返回会话"
             onClick={() => setShowCustomizeView(false)}
           >
             <ArrowLeft className="size-6" strokeWidth={1} />
@@ -278,12 +287,20 @@ export function CustomizeView(): React.JSX.Element {
       <Suspense fallback={<CustomizePanelFallback />}>
         {activeTab === "general" ? (
           <GeneralPanel targetSection={customizeInitialSection} />
+        ) : activeTab === "appearance" ? (
+          <AppearancePanel />
         ) : activeTab === "skills" ? (
           <SkillsPanel />
         ) : activeTab === "connectors" ? (
           <McpPanel />
         ) : activeTab === "plugins" ? (
-          <PluginsPanel />
+          <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
+            <PluginsPanel />
+          </div>
+        ) : activeTab === "mods" ? (
+          <div className="flex flex-1 min-w-0 min-h-0 overflow-y-auto">
+            <ModsPanel threadId={currentThreadId} />
+          </div>
         ) : activeTab === "scheduled" ? (
           <ScheduledPanel />
         ) : activeTab === "heartbeat" ? (

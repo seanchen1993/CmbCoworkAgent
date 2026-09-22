@@ -35,6 +35,9 @@ import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../share
 import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import {
   isAgentGraphRecursionLimit,
+  isAgentToolStrategy,
+  normalizeAgentToolStrategy,
+  type AgentToolStrategy,
   isWorkflowWorktreeRemoveTimeoutMinutes,
   isWorkflowWorktreeTimeoutMinutes,
   normalizeAgentGraphRecursionLimit,
@@ -380,6 +383,11 @@ export function getThreadCheckpointPath(threadId: string): string {
   const directory = getThreadCheckpointDir()
   registerCheckpointThreadId(checkpointArtifactIndexForDirectory(directory), threadId)
   return threadCheckpointPath(directory, threadId)
+}
+
+/** Read-only discovery must not create directories or register a new durable artifact. */
+export function peekThreadCheckpointPath(threadId: string): string {
+  return threadCheckpointPath(join(OPENWORK_DIR, "threads"), threadId)
 }
 
 export function deleteThreadCheckpoint(threadId: string): void {
@@ -2012,6 +2020,23 @@ export function setStoredDefaultModelId(modelId: string): void {
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
+const MODS_GLOBAL_ENABLED_KEY = "modsGlobalEnabled"
+
+/** Application-level safety switch for both legacy Mods and Function Mods. */
+export function getModsGlobalEnabled(): boolean {
+  try {
+    return getSettingsStore().get(MODS_GLOBAL_ENABLED_KEY, false) === true
+  } catch (error) {
+    console.warn("[Storage] Failed to load Mods global switch; using disabled:", error)
+    return false
+  }
+}
+
+export function setModsGlobalEnabled(enabled: boolean): boolean {
+  const normalized = Boolean(enabled)
+  getSettingsStore().set(MODS_GLOBAL_ENABLED_KEY, normalized)
+  return normalized
+}
 
 export function getGitChangeNoticeEnabled(): boolean {
   try {
@@ -2044,6 +2069,23 @@ export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowClo
 }
 
 const AGENT_GRAPH_RECURSION_LIMIT_KEY = "agentGraphRecursionLimit"
+
+const AGENT_TOOL_STRATEGY_KEY = "agentToolStrategy"
+
+export function getStoredAgentToolStrategy(): AgentToolStrategy {
+  try {
+    return normalizeAgentToolStrategy(getSettingsStore().get(AGENT_TOOL_STRATEGY_KEY))
+  } catch (error) {
+    console.warn("[Storage] Failed to load tool strategy; using standard:", error)
+    return "standard"
+  }
+}
+
+export function setStoredAgentToolStrategy(value: unknown): AgentToolStrategy {
+  if (!isAgentToolStrategy(value)) throw new Error("Invalid agent tool strategy")
+  getSettingsStore().set(AGENT_TOOL_STRATEGY_KEY, value)
+  return value
+}
 
 export function getStoredAgentGraphRecursionLimit(): number {
   try {

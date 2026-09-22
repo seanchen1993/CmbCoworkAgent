@@ -6,6 +6,7 @@ import type {
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
+import type { ModCard, ModProjection, ModWorkspaceStatus } from "../shared/mods/types"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import {
   isWindowCloseBehavior,
@@ -13,7 +14,7 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
+import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 import type {
   Thread,
   Message,
@@ -284,6 +285,7 @@ const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed
 const GIT_CHANGE_NOTICE_GET_CHANNEL = "app:get-git-change-notice-enabled"
 const GIT_CHANGE_NOTICE_SET_CHANNEL = "app:set-git-change-notice-enabled"
 const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_TOOL_STRATEGY_SET_CHANNEL = "app:set-agent-tool-strategy"
 const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
 const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
@@ -353,6 +355,8 @@ const electronAPI = {
     ipcRenderer.invoke(GIT_CHANGE_NOTICE_SET_CHANNEL, enabled) as Promise<boolean>,
   getAgentRuntimeSettings: (): Promise<AgentRuntimeSettings> =>
     ipcRenderer.invoke(AGENT_RUNTIME_SETTINGS_GET_CHANNEL) as Promise<AgentRuntimeSettings>,
+  setAgentToolStrategy: (value: AgentToolStrategy): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(AGENT_TOOL_STRATEGY_SET_CHANNEL, value) as Promise<AgentRuntimeSettings>,
   setAgentRuntimeRecursionLimit: (value: number): Promise<AgentRuntimeSettings> =>
     ipcRenderer.invoke(
       AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
@@ -3043,22 +3047,76 @@ const api = {
       }
     }
   },
+  mods: {
+    globalEnabled: (): Promise<boolean> => ipcRenderer.invoke("mods:global-enabled"),
+    configureGlobal: (enabled: boolean): Promise<boolean> =>
+      ipcRenderer.invoke("mods:configure-global", enabled),
+    functionUnlocked: (): Promise<boolean> => ipcRenderer.invoke("mods:function-unlocked"),
+    unlockFunction: (password: string): Promise<boolean> =>
+      ipcRenderer.invoke("mods:unlock-function", password),
+    turnNotices: (
+      threadId: string
+    ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
+      ipcRenderer.invoke("mods:function-turn-notices", threadId),
+    panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
+      ipcRenderer.invoke("mods:function-panes", threadId),
+    paneAct: (
+      threadId: string,
+      action: import("../shared/mods/v2/ui").FunctionUiAction
+    ): Promise<void> => ipcRenderer.invoke("mods:function-ui-act", { threadId, action }),
+    clientAct: (
+      threadId: string,
+      action: import("../shared/mods/v2/ui").FunctionClientAction
+    ): Promise<void> => ipcRenderer.invoke("mods:function-client-act", { threadId, action }),
+    approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
+    revokeFunction: (threadId: string, name: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name }),
+    status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),
+    configure: (threadId: string, enabled: boolean, outputPolicy: boolean): Promise<void> =>
+      ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy }),
+    approve: (threadId: string, pluginId: string, digest: string): Promise<void> =>
+      ipcRenderer.invoke("mods:approve", { threadId, pluginId, digest }),
+    revoke: (threadId: string, modId: string): Promise<void> => ipcRenderer.invoke("mods:revoke", { threadId, modId }),
+    cards: (threadId: string, callId: string): Promise<ModCard[]> => ipcRenderer.invoke("mods:cards", { threadId, callId }),
+    act: (threadId: string, actionId: string): Promise<ModProjection> => ipcRenderer.invoke("mods:act", { threadId, actionId }),
+    installExamples: (): Promise<void> => ipcRenderer.invoke("mods:install-examples"),
+    audit: (threadId: string, before?: number): Promise<import("../shared/mods/types").ModAuditEntry[]> => ipcRenderer.invoke("mods:audit", { threadId, before }),
+    reconcile: (threadId: string, callId: string, resolution: "confirmed-success" | "confirmed-failure"): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
+    backup: (): Promise<boolean> => ipcRenderer.invoke("mods:backup"),
+    artifact: (threadId: string, id: string): Promise<{ label: string; text: string }> => ipcRenderer.invoke("mods:artifact", { threadId, id }),
+    saveArtifact: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke("mods:save-artifact", { threadId, id }),
+    commands: (threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]> => ipcRenderer.invoke("mods:commands", threadId),
+    enqueue: (threadId: string, descriptor: import("../shared/mods/types").ModCommandDescriptor, args: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModCommandJob> => ipcRenderer.invoke("mods:enqueue", { threadId, descriptor, args }),
+    jobs: (threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]> => ipcRenderer.invoke("mods:jobs", threadId),
+    cancelJob: (threadId: string, id: string): Promise<void> => ipcRenderer.invoke("mods:cancel-job", { threadId, id }),
+    onJobsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { threadId: string }): void => callback(payload)
+      ipcRenderer.on("mods:jobs-changed", listener)
+      return () => ipcRenderer.removeListener("mods:jobs-changed", listener)
+    },
+    onCardsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void => callback(value)
+      ipcRenderer.on("mods:cards-changed", listener)
+      return () => ipcRenderer.removeListener("mods:cards-changed", listener)
+    }
+  },
   plugins: {
+    // Existing plugin APIs remain independent of project-scoped module grants.
     list: (): Promise<PluginMetadata[]> =>
       ipcRenderer.invoke("plugins:list") as Promise<PluginMetadata[]>,
     install: (
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      requireMods?: boolean
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version }) as Promise<{
+      ipcRenderer.invoke("plugins:install", { buffer, fileName, origin, version, requireMods }) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
       }>,
-    installFromDir: (): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
-      ipcRenderer.invoke("plugins:installFromDir") as Promise<{
+    installFromDir: (requireMods?: boolean): Promise<{ success: boolean; pluginName?: string; error?: string }> =>
+      ipcRenderer.invoke("plugins:installFromDir", requireMods) as Promise<{
         success: boolean
         pluginName?: string
         error?: string
