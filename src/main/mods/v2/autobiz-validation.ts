@@ -126,12 +126,13 @@ def load(path, name):
     mod = importlib.util.module_from_spec(spec); sys.modules[name] = mod; spec.loader.exec_module(mod); return mod
 def fingerprint(path): return hashlib.sha256(open(path,'rb').read()).hexdigest()
 try:
-    commit = subprocess.check_output(['git','-C',source,'rev-parse','HEAD'], text=True).strip()
-    if commit != '${AUTOBIZ_KANBAN_COMMIT}': raise RuntimeError('AUTOBIZ_SOURCE_CHANGED')
+    # Source was extracted from the pinned Git object by the host; it has no .git directory.
     state_path = os.path.join(workspace,'.autobizdevops','state.json')
     receipt_path = os.path.join(workspace,'.autobizdevops','.mods-v2-transition-'+hashlib.sha256(key.encode()).hexdigest()+'.json')
     if os.path.isfile(receipt_path):
         receipt = json.load(open(receipt_path, encoding='utf-8'))
+        if receipt.get('feature') != feature or receipt.get('from') != old or receipt.get('to') != new:
+            raise RuntimeError('AUTOBIZ_RECEIPT_MISMATCH')
         print(json.dumps({**receipt, 'applied':False, 'duplicate':True}))
         raise SystemExit(0)
     update = load(os.path.join(source,'hooks','update_checkpoint.py'), 'mods_update')

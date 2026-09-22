@@ -822,7 +822,7 @@ export class FunctionModsManager {
               Math.min(...validatorPolicies.map((policy) => policy.timeoutMs))
             )
             record("validator.result", validator.passed ? "pass" : "block", validator as unknown as ModJson)
-            if (!validator.passed) {
+            if (!validator.passed && !reportOnly) {
               const repairing = validatorPolicies.some((policy) => policy.mode === "repair")
               const decision = repairing && revisionAttempts < Math.max(...validatorPolicies.map((p) => p.maxRepairs)) ? "revise" : "block"
               record("check.result", decision, { reason: validator.reason, source: "host-autobiz-validator", businessAccepted: false })

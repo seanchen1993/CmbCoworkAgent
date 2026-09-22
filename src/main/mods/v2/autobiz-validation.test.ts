@@ -1,8 +1,12 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it } from "vitest"
 import { advanceAutobizCheckpoint, runAutobizValidator } from "./autobiz-validation"
+import { withPinnedAutobiz } from "./autobiz-source"
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })) ) })
@@ -26,6 +30,31 @@ it("refuses a checkpoint transition when the state fingerprint is not current", 
   expect(result.applied).toBe(false)
   expect(result.duplicate).toBe(false)
   expect(result.reason).toMatch(/state|ENOENT|AUTOBIZ/i)
+})
+
+it("rejects a reused transition receipt key when its transition arguments change", async () => {
+  const { root, directory } = await featureFixture()
+  await writeFile(join(directory, "REQUIREMENTS_EVAL.md"), "verdict: PASS\ncontract fixture only")
+  await withPinnedAutobiz(undefined, (source) => promisify(execFile)("python", [
+    "-I", "-B", "-c",
+    "import sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from board_core.state_store import check_or_fix_state_sync; check_or_fix_state_sync(Path(sys.argv[2]), fix=True)",
+    source, root
+  ], { windowsHide: true }))
+  const state = await readFile(join(root, ".autobizdevops/state.json"))
+  const before = createHash("sha256").update(state).digest("hex")
+  const first = await advanceAutobizCheckpoint({
+    workspace: root, feature: "order-export", from: "requirements_eval_in_progress",
+    to: "requirements_eval_done", expectedStateFingerprint: before, idempotencyKey: "same-key"
+  })
+  expect(first.applied, first.reason).toBe(true)
+  const second = await advanceAutobizCheckpoint({
+    workspace: root, feature: "order-export", from: "requirements_eval_done",
+    to: "implementation_in_progress", expectedStateFingerprint: first.stateFingerprint,
+    idempotencyKey: "same-key"
+  })
+  expect(second.applied).toBe(false)
+  expect(second.duplicate).toBe(false)
+  expect(second.reason).toContain("RECEIPT_MISMATCH")
 })
 
 async function featureFixture(record: Record<string, unknown> = {}) {

@@ -72,7 +72,7 @@ it("never advances an Autobiz checkpoint without a host validator evidence event
   }, new AbortController().signal)).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_REQUIRED")
 })
 
-it("does not let report mode block completion on a guest revise decision", async () => {
+it.each(["code-review", "autobiz-validator"])("does not let report mode block completion for %s", async (check) => {
   const f = await fixture()
   await writeFile(
     join(f.plugin, "hooks/gate.ts"),
@@ -84,7 +84,7 @@ it("does not let report mode block completion on a guest revise decision", async
   await writeFile(hooksPath, JSON.stringify(hooks))
   await f.approve()
   f.control.functionState.set(JSON.stringify([f.root, "function-commands"]), "completion-config", {
-    mode: "report", scope: "project", checks: ["code-review"], maxRepairs: 0,
+    mode: "report", scope: "project", checks: [check], maxRepairs: 0,
     timeoutMs: 1000, modelTokenBudget: 256
   })
   expect(f.control.functionState.get(JSON.stringify([f.root, "function-commands"]), "completion-config")).toMatchObject({ mode: "report" })
