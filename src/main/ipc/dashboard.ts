@@ -42,6 +42,7 @@ import {
   type DashboardCodeStats,
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
+import { emptyOrgValueClauses, isMissingOrgValue, readOrgText } from "./dashboard-org-fields"
 import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
   matchesProjectModeCreatedAtRange,
@@ -2609,7 +2610,7 @@ function normalizeTraceDetail(
       sapId: asOptionalString(source.sapId),
       ystId: asOptionalString(source.ystId),
       userName: asOptionalString(source.userName),
-      orgName: asOptionalString(source.orgName),
+      orgName: readOrgText(source.orgName),
       userIp: asOptionalString(source.userIp),
       modelId: trace.modelId || asOptionalString(source.modelId),
       modelName: trace.modelName || asOptionalString(source.modelName),
@@ -2654,7 +2655,7 @@ function normalizeTraceDetail(
     sapId: asOptionalString(source.sapId),
     ystId: asOptionalString(source.ystId),
     userName: asOptionalString(source.userName),
-    orgName: asOptionalString(source.orgName),
+    orgName: readOrgText(source.orgName),
     userIp: asOptionalString(source.userIp),
     modelId: asOptionalString(source.modelId),
     modelName: asOptionalString(source.modelName),
@@ -2725,9 +2726,9 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
     userName: asString(source.userName, "unknown"),
     sapId: asOptionalString(source.sapId),
     ystId: asOptionalString(source.ystId),
-    orgName: asOptionalString(source.orgName),
-    upperOrgLv0: asOptionalString(source.upperOrgLv0),
-    upperOrgLv1: asOptionalString(source.upperOrgLv1),
+    orgName: readOrgText(source.orgName),
+    upperOrgLv0: readOrgText(source.upperOrgLv0),
+    upperOrgLv1: readOrgText(source.upperOrgLv1),
     userIp: asOptionalString(source.userIp),
     repoPath: asOptionalString(properties.repoPath),
     repositoryName: asOptionalString(properties.repositoryName),
@@ -3316,13 +3317,13 @@ function normalizeUpperOrgLv1List(value?: string | string[] | null): string[] {
   return Array.from(new Set(cleaned))
 }
 
-// upperOrgLv1 为空或缺失的匹配子句（「未归类」）。
+// upperOrgLv1 缺失、为空、或是采集占位串的匹配子句（「未归类」）。
 function buildUnclassifiedOrgClause(): Record<string, unknown> {
   return {
     bool: {
       should: [
         { bool: { must_not: { exists: { field: "upperOrgLv1" } } } },
-        { term: { upperOrgLv1: "" } }
+        ...emptyOrgValueClauses("upperOrgLv1")
       ],
       minimum_should_match: 1
     }
@@ -3330,7 +3331,7 @@ function buildUnclassifiedOrgClause(): Record<string, unknown> {
 }
 
 // 多选 LV1 组织筛选 → terms 过滤；空数组返回 null（表示全部，不过滤）。
-// 列表含「未归类」哨兵时，额外 OR 上「空/缺失 upperOrgLv1」的匹配。
+// 列表含「未归类」哨兵时，额外 OR 上「空 / 缺失 / 采集占位串 upperOrgLv1」的匹配。
 function buildUpperOrgLv1ListFilter(list: string[]): Record<string, unknown> | null {
   if (list.length === 0) return null
   const includeUnclassified = list.includes(DASHBOARD_UNCLASSIFIED_ORG)
@@ -3343,13 +3344,14 @@ function buildUpperOrgLv1ListFilter(list: string[]): Record<string, unknown> | n
   return { bool: { should: clauses, minimum_should_match: 1 } }
 }
 
+// 「这一级组织有真值」：排除缺失、空串和采集占位串，三者都归「未归类」，不进排行。
 function buildNonEmptyOrgLevelFilter(
   field: "upperOrgLv0" | "upperOrgLv1"
 ): Record<string, unknown> {
   return {
     bool: {
       must: [{ exists: { field } }],
-      must_not: [{ term: { [field]: "" } }]
+      must_not: emptyOrgValueClauses(field)
     }
   }
 }
@@ -3494,9 +3496,9 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
     sapId,
     ystId: asOptionalString(source.ystId),
     userName: asString(source.userName, sapId || "unknown"),
-    orgName: asOptionalString(source.orgName),
-    upperOrgLv0: asOptionalString(source.upperOrgLv0),
-    upperOrgLv1: asOptionalString(source.upperOrgLv1),
+    orgName: readOrgText(source.orgName),
+    upperOrgLv0: readOrgText(source.upperOrgLv0),
+    upperOrgLv1: readOrgText(source.upperOrgLv1),
     count: asNumber(bucket.doc_count),
     lastActiveAt: asOptionalString(source.startedAt),
     avgDurationMs: asNumber(asRecord(bucket.avg_duration).value),
@@ -3818,9 +3820,9 @@ async function fetchUncommittedRanking(
         sapId,
         ystId: asOptionalString(source.ystId),
         userName: asString(source.userName, sapId),
-        orgName: asOptionalString(source.orgName),
-        upperOrgLv0: asOptionalString(source.upperOrgLv0),
-        upperOrgLv1: asOptionalString(source.upperOrgLv1),
+        orgName: readOrgText(source.orgName),
+        upperOrgLv0: readOrgText(source.upperOrgLv0),
+        upperOrgLv1: readOrgText(source.upperOrgLv1),
         generatedLines,
         measuredGeneratedLines,
         uncommittedLines,
@@ -4192,9 +4194,9 @@ async function fetchUserDetail(
     sapId: asString(userInfo.sapId, normalizedSapId),
     ystId: asOptionalString(userInfo.ystId),
     userName: asString(userInfo.userName, normalizedSapId),
-    orgName: asOptionalString(userInfo.orgName),
-    upperOrgLv0: asOptionalString(userInfo.upperOrgLv0),
-    upperOrgLv1: asOptionalString(userInfo.upperOrgLv1),
+    orgName: readOrgText(userInfo.orgName),
+    upperOrgLv0: readOrgText(userInfo.upperOrgLv0),
+    upperOrgLv1: readOrgText(userInfo.upperOrgLv1),
     totalCalls,
     avgDurationMs: asNumber(asRecord(aggs.avg_duration).value),
     totalToolCalls: asNumber(asRecord(aggs.total_tool_calls).value),
@@ -4706,12 +4708,12 @@ function parseSkillEvalRecordHit(hit: EsSearchHit): TraceSkillEvalRecord | null 
     ystId: asString(source.ystId),
     sapId: asString(source.sapId),
     userName: asString(source.userName),
-    orgName: asString(source.orgName),
+    orgName: readOrgText(source.orgName) ?? "",
     originOrgId: asString(source.originOrgId),
-    upperOrgLv0: asString(source.upperOrgLv0),
-    upperOrgLv1: asString(source.upperOrgLv1),
-    upperOrgLv2: asString(source.upperOrgLv2),
-    upperOrgLv3: asString(source.upperOrgLv3),
+    upperOrgLv0: readOrgText(source.upperOrgLv0) ?? "",
+    upperOrgLv1: readOrgText(source.upperOrgLv1) ?? "",
+    upperOrgLv2: readOrgText(source.upperOrgLv2) ?? "",
+    upperOrgLv3: readOrgText(source.upperOrgLv3) ?? "",
     appVersion: asString(source.appVersion),
     ...(skillAuthor ? { skillAuthor } : {}),
     userMessage: asString(source.userMessage),
@@ -5999,8 +6001,8 @@ async function fetchOrgOptions(range: TimeRange): Promise<string[]> {
     const record = asRecord(bucket)
     const key = asString(record.key).trim()
     const docCount = asNumber(record.doc_count)
-    if (!key || key === DASHBOARD_ORG_MISSING_BUCKET) {
-      // 空串 或 字段缺失 → 计入「未归类」
+    if (key === DASHBOARD_ORG_MISSING_BUCKET || isMissingOrgValue(key)) {
+      // 空串、字段缺失、采集占位串 → 计入「未归类」，不作为一个室出现在下拉里
       if (docCount > 0) hasUnclassified = true
       continue
     }
@@ -6769,7 +6771,13 @@ async function fetchAwardSkillContributions(
       by_skill: {
         filters: { filters: traceFilters },
         aggs: {
-          cross_org: { cardinality: { field: "upperOrgLv1" } },
+          // cardinality 不支持 exclude，所以先用 filter 桶把「未归类」挡在外面再去重。
+          // 空串和采集占位串都是字段里实际存在的值，直接 cardinality 会各自算成一个室，
+          // 把「跨室使用」抬高一到两格。
+          real_org: {
+            filter: buildNonEmptyOrgLevelFilter("upperOrgLv1"),
+            aggs: { cross_org: { cardinality: { field: "upperOrgLv1" } } }
+          },
           users: { cardinality: { field: "ystId" } }
         }
       }
@@ -6816,7 +6824,7 @@ async function fetchAwardSkillContributions(
       asNumber(eBucket.doc_count) > 0 ? normalizeCodeStatsFromContainer(eBucket) : null
     return {
       skillKey: key,
-      crossOrgCount: asNumber(asRecord(tBucket.cross_org).value),
+      crossOrgCount: asNumber(asRecord(asRecord(tBucket.real_org).cross_org).value),
       userCount: asNumber(asRecord(tBucket.users).value),
       callCount: asNumber(tBucket.doc_count),
       codeStats
@@ -6915,9 +6923,9 @@ async function fetchAwardUserApplications(
         sapId: asString(src.sapId),
         ystId: yst,
         userName: asString(src.userName),
-        orgName: asOptionalString(src.orgName),
-        upperOrgLv0: asOptionalString(src.upperOrgLv0),
-        upperOrgLv1: asOptionalString(src.upperOrgLv1),
+        orgName: readOrgText(src.orgName),
+        upperOrgLv0: readOrgText(src.upperOrgLv0),
+        upperOrgLv1: readOrgText(src.upperOrgLv1),
         callCount: asNumber(bucket.doc_count),
         skillCount: asNumber(asRecord(bucket.skill_count).value),
         skillUsageCount: asNumber(asRecord(bucket.skill_usage_total).value),
@@ -6994,8 +7002,9 @@ async function fetchAwardTeamBenchmark(
       bool: {
         filter: [
           timeRangeFilter("startedAt", range),
-          { exists: { field: "upperOrgLv1" } },
-          { bool: { must_not: { term: { upperOrgLv1: "" } } } }
+          // 原先这里内联了「exists + 非空串」，和 buildNonEmptyOrgLevelFilter 是同一件
+          // 事，换成共用的那个，采集占位串才不会在这里独占一行排行。
+          buildNonEmptyOrgLevelFilter("upperOrgLv1")
         ]
       }
     },
@@ -7054,13 +7063,13 @@ async function fetchAwardTeamBenchmark(
   for (const sb of Array.isArray(eventShiBuckets) ? eventShiBuckets : []) {
     const shiBucket = asRecord(sb)
     const shi = asString(shiBucket.key)
-    if (!shi) continue
+    if (isMissingOrgValue(shi)) continue
     codeByOrg.set(teamOrgKey(shi), normalizeCodeStatsFromContainer(shiBucket))
     const groupBuckets = asRecord(shiBucket.by_group).buckets
     for (const gb of Array.isArray(groupBuckets) ? groupBuckets : []) {
       const groupBucket = asRecord(gb)
       const group = asString(groupBucket.key)
-      if (!group) continue
+      if (isMissingOrgValue(group)) continue
       codeByOrg.set(teamOrgKey(shi, group), normalizeCodeStatsFromContainer(groupBucket))
     }
   }
@@ -7076,13 +7085,13 @@ async function fetchAwardTeamBenchmark(
     .map((sb): DashboardAwardTeamBenchmarkRow | null => {
       const shiBucket = asRecord(sb)
       const shi = asString(shiBucket.key)
-      if (!shi) return null
+      if (isMissingOrgValue(shi)) return null
       const groupBuckets = asRecord(shiBucket.by_group).buckets
       const children = (Array.isArray(groupBuckets) ? groupBuckets : [])
         .map((gb): DashboardAwardTeamBenchmarkRow | null => {
           const groupBucket = asRecord(gb)
           const group = asString(groupBucket.key)
-          if (!group) return null
+          if (isMissingOrgValue(group)) return null
           return {
             shi,
             group,
@@ -7137,7 +7146,13 @@ async function fetchAwardTeamSkillCoverage(
     aggs: {
       by_shi: {
         filters: { filters },
-        aggs: { covered_shi: { cardinality: { field: "upperOrgLv1" } } }
+        // 同 cross_org：先挡掉「未归类」再去重，否则空串和采集占位串各算一个室。
+        aggs: {
+          real_org: {
+            filter: buildNonEmptyOrgLevelFilter("upperOrgLv1"),
+            aggs: { covered_shi: { cardinality: { field: "upperOrgLv1" } } }
+          }
+        }
       }
     }
   }
@@ -7145,7 +7160,7 @@ async function fetchAwardTeamSkillCoverage(
   const buckets = asRecord(asRecord(asRecord(asRecord(raw).aggregations).by_shi).buckets)
   const result: Record<string, number> = {}
   for (const shi of Object.keys(filters)) {
-    result[shi] = asNumber(asRecord(asRecord(buckets[shi]).covered_shi).value)
+    result[shi] = asNumber(asRecord(asRecord(asRecord(buckets[shi]).real_org).covered_shi).value)
   }
   return result
 }
@@ -7356,9 +7371,9 @@ function normalizeNonGitAdoptionReport(
     userName: asString(source.userName, "unknown"),
     sapId: asOptionalString(source.sapId),
     ystId: asOptionalString(source.ystId),
-    orgName: asOptionalString(source.orgName),
-    upperOrgLv0: asOptionalString(source.upperOrgLv0),
-    upperOrgLv1: asOptionalString(source.upperOrgLv1),
+    orgName: readOrgText(source.orgName),
+    upperOrgLv0: readOrgText(source.upperOrgLv0),
+    upperOrgLv1: readOrgText(source.upperOrgLv1),
     userIp: asOptionalString(source.userIp),
     source: asOptionalString(properties.source),
     harnessProjectId: asOptionalString(properties.harnessProjectId),
@@ -11889,11 +11904,9 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     creatorSapId: asOptionalString(props.creatorSapId) ?? asOptionalString(source.sapId),
     creatorYstId: asOptionalString(props.creatorYstId) ?? asOptionalString(source.ystId),
     creatorUserName: asOptionalString(props.creatorUserName) ?? asOptionalString(source.userName),
-    creatorOrgName: asOptionalString(props.creatorOrgName) ?? asOptionalString(source.orgName),
-    creatorUpperOrgLv0:
-      asOptionalString(props.creatorUpperOrgLv0) ?? asOptionalString(source.upperOrgLv0),
-    creatorUpperOrgLv1:
-      asOptionalString(props.creatorUpperOrgLv1) ?? asOptionalString(source.upperOrgLv1),
+    creatorOrgName: readOrgText(props.creatorOrgName) ?? readOrgText(source.orgName),
+    creatorUpperOrgLv0: readOrgText(props.creatorUpperOrgLv0) ?? readOrgText(source.upperOrgLv0),
+    creatorUpperOrgLv1: readOrgText(props.creatorUpperOrgLv1) ?? readOrgText(source.upperOrgLv1),
     lifecycleStatus: asOptionalString(props.lifecycleStatus),
     lifecycleCreatedAt: asOptionalString(props.lifecycleCreatedAt),
     lifecycleUpdatedAt: asOptionalString(props.lifecycleUpdatedAt),
@@ -12723,9 +12736,9 @@ function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
     const ystId = asOptionalString(source.ystId)
     const userName = asString(source.userName, sapId)
     const orgName = formatProjectModeOrgName(
-      asOptionalString(source.orgName),
-      asOptionalString(source.upperOrgLv1),
-      asOptionalString(source.upperOrgLv0)
+      readOrgText(source.orgName),
+      readOrgText(source.upperOrgLv1),
+      readOrgText(source.upperOrgLv0)
     )
     result.push({
       sapId,
