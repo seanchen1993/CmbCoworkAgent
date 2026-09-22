@@ -315,3 +315,41 @@ C:\ai\CmbCoworkAgent-mods-v2\docs\mods-v2-compatibility-matrix.json
 - Full repository ESLint still reports pre-existing generated/manual-test diagnostics; no errors were reported for the changed Client files. UAT worktree remains untouched.
 
 本次最新提交：`9fbe7395 feat(mods): route client focus and scroll lifecycle`。文档更新待单独提交。
+
+## Continued implementation after 2026-09-22
+
+- `eba6cdf2` adds a bounded SHA-256 fingerprint for workspace-owned
+  `.autobizdevops/workflow.d` overlays. The real pinned Autobiz validator now
+  compares the fingerprint before and after the Python compiler/validator
+  process and invalidates a result as `AUTOBIZ_WORKFLOW_CHANGED` when another
+  writer changes the dynamic workflow during validation.
+- `864ba2bc` makes blocked Autobiz records (`needs_fix` or an explicit
+  `status: blocked`) a failed validator result (`AUTOBIZ_CHECKPOINT_BLOCKED`)
+  instead of allowing a business acceptance or transition to be inferred.
+- `bf0a8cd9` adds the main-agent model stream boundary. Main model chunks are
+  normalized into opaque, host-owned references before `turn.step` hooks and
+  are revalidated for authority, generation, order, replay, frame count and
+  cancellation before callbacks/checkpoints observe them. The same change
+  adds host-backed `model.fork` snapshots and fixed-prompt `model.classify`,
+  with fork snapshot lifetime and model/provider errors checked at the host
+  boundary. These are `adapted`, not full upstream parity: plugins cannot
+  switch the configured model/effort, and the streamed hook capability set is
+  intentionally bounded.
+- The pane focus/scroll continuation is now represented by
+  `9126e3fa`, `a06a60fd`, `35648288`, `d50be6e7` and `c4ef52ee`; renderer and
+  test action types are aligned by `03916023`.
+
+Validation after these commits: focused model boundary/provider/operation
+tests 32/32; complete Mods function suite 59 files / 430 tests; Node and web
+typecheck pass; changed-file ESLint exits 0 (only existing Prettier warnings
+in newly added tests). Autobiz validation now has 8/8 focused tests. Remaining
+work is the unimplemented classic event production adapter, full dynamic
+workflow end-to-end mutation test, remaining Pane/global UI lifecycle entries,
+installation/package verification and the final performance/disabled-module
+comparison. Compatibility statuses must remain `adapted`, `partial` or
+`unsupported` until those production triggers have evidence.
+
+Current latest commit: `03916023 fix(mods): align model and pane lifecycle types`
+plus the model boundary commit `bf0a8cd9`; the working tree may contain the
+next UI/model review changes from parallel agents. Do not touch or merge
+`C:\ai\CmbCoworkAgent`.
