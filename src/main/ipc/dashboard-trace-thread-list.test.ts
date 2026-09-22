@@ -1,3 +1,4 @@
+import { buildThreadTraceScopeFilters } from "./dashboard-trace-thread-list"
 import { describe, expect, it } from "vitest"
 import {
   buildThreadListPreviewBody,
@@ -352,5 +353,33 @@ describe("resolveModelCallCount", () => {
   it("两边都没有就是 0", () => {
     expect(resolveModelCallCount(undefined, undefined)).toBe(0)
     expect(resolveModelCallCount(Number.NaN, "not-an-array")).toBe(0)
+  })
+})
+
+describe("thread detail scope", () => {
+  it("carries the project, time, feature and stage boundaries without dropping children", () => {
+    const filters = buildThreadTraceScopeFilters({
+      scope: "project",
+      projectId: "p1",
+      range: { from: "start", to: "end" },
+      featureSlug: "f1",
+      nodeName: "dev",
+      nodeStatus: "进行中",
+      triggerScope: "all"
+    })
+    expect(filters).toContainEqual({ term: { harnessProjectId: "p1" } })
+    expect(filters).toContainEqual({ range: { startedAt: { gte: "start", lte: "end" } } })
+    expect(filters).toContainEqual({ term: { harnessFeatureSlug: "f1" } })
+    expect(filters).toContainEqual({ term: { harnessNodeName: "dev" } })
+    expect(JSON.stringify(filters)).not.toContain("traceKind")
+  })
+  it("keeps legacy unscoped requests and maps the unattributed stage to missing fields", () => {
+    expect(buildThreadTraceScopeFilters()).toEqual([])
+    expect(buildThreadTraceScopeFilters({ nodeName: "未归因" })).toEqual([
+      { bool: { must_not: { exists: { field: "harnessNodeName" } } } }
+    ])
+    expect(JSON.stringify(buildThreadTraceScopeFilters({ triggerScope: "active" }))).toContain(
+      "chat"
+    )
   })
 })

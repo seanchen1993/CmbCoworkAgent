@@ -1,3 +1,4 @@
+import { mainAgentConversationAggs } from "./dashboard-stage-buckets"
 /**
  * 项目模式的「运行开销」：工具调用数、模型调用数、Token（总量 / 输入 / 输出）、
  * 请求用户回答次数。
@@ -64,12 +65,14 @@ export interface ProjectModeRunCost {
   outputTokens: number
   userInputRequests: number
   /**
-   * 带 userInputRequestCount 字段的文档数。小于同桶的 conversationCount 时，说明这段
+   * 带 userInputRequestCount 字段的文档数。小于同桶的 traceDocs 时，说明这段
    * 时间里有老 trace 没这个字段，上面的 userInputRequests 是个下限而不是真值。
    *
-   * 只对这一项做覆盖度检查：它是这些字段里最晚加的，其余在本仓库有记录以来一直都在。
+   * 这只识别字段缺失，无法识别历史上采集遗漏却已写成 0 的模型指标。
    */
   userInputRequestDocs: number
+  /** Number of traces in the cost scope, including child agents. */
+  traceDocs?: number
 }
 
 export const EMPTY_PROJECT_MODE_RUN_COST: ProjectModeRunCost = {
@@ -85,12 +88,12 @@ export const EMPTY_PROJECT_MODE_RUN_COST: ProjectModeRunCost = {
 /**
  * 各项 sum + 一个覆盖度探针。
  *
- * 调用方要把它放进 `mainAgentConversationAggs(...)` 的 inner 里，和「对话数」同一个
- * filter。不这么做的话，同一行里会出现「对话数 5、模型调用数含着 50 个子 Agent 的
- * 调用」，看着像 bug 其实是口径差。
+ * 放在项目或阶段桶内，与主 Agent 对话数过滤器平级。每条 trace 只记录自己的开销，
+ * 因此这里必须包含主、子 Agent；不能用对话轮数的过滤器排除实际执行工作。
  */
 export function buildProjectModeRunCostAggs(): Record<string, unknown> {
   return {
+    run_cost_trace_docs: { value_count: { field: "traceId" } },
     run_cost_tool_calls: { sum: { field: RUN_COST_FIELDS.toolCalls } },
     run_cost_model_calls: { sum: { field: RUN_COST_FIELDS.modelCalls } },
     run_cost_total_tokens: { sum: { field: RUN_COST_FIELDS.totalTokens } },
@@ -101,10 +104,20 @@ export function buildProjectModeRunCostAggs(): Record<string, unknown> {
   }
 }
 
-/** 从一个已经解包到主 Agent 口径的桶里读出各项。桶不存在时全零。 */
+/** Keep project costs outside the root-only conversation filter. */
+export function buildProjectModeConversationAndCostAggs(
+  conversations: Record<string, unknown>
+): Record<string, unknown> {
+  return { ...mainAgentConversationAggs(conversations), ...buildProjectModeRunCostAggs() }
+}
+
+/** 从项目或阶段的全量 trace 桶里读出各项。桶不存在时全零。 */
 export function parseProjectModeRunCost(container: unknown): ProjectModeRunCost {
   const bucket = asRecord(container)
   return {
+    ...(bucket.run_cost_trace_docs
+      ? { traceDocs: asCount(asRecord(bucket.run_cost_trace_docs).value) }
+      : {}),
     toolCalls: asCount(asRecord(bucket.run_cost_tool_calls).value),
     modelCalls: asCount(asRecord(bucket.run_cost_model_calls).value),
     totalTokens: asCount(asRecord(bucket.run_cost_total_tokens).value),
@@ -118,7 +131,7 @@ export function parseProjectModeRunCost(container: unknown): ProjectModeRunCost 
 /**
  * 「请求用户回答次数」这个数是不是完整的。
  *
- * conversationCount 是同一个桶里的轮次数。带字段的文档数少于轮次数，就说明有老 trace
+ * traceDocs 是开销范围内的文档数；旧响应缺少它时才用 conversationCount。文档数不足说明有老 trace
  * 不带这个字段，展示时要标注，而不是让人把下限当真值。
  *
  * 轮次数为 0 时没有什么可缺的，返回 true。
@@ -127,6 +140,7 @@ export function isUserInputRequestCountComplete(
   runCost: ProjectModeRunCost,
   conversationCount: number
 ): boolean {
-  if (conversationCount <= 0) return true
-  return runCost.userInputRequestDocs >= conversationCount
+  const expectedDocs = runCost.traceDocs ?? conversationCount
+  if (expectedDocs <= 0) return true
+  return runCost.userInputRequestDocs >= expectedDocs
 }

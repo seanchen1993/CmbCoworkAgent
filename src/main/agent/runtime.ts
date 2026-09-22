@@ -1,3 +1,5 @@
+import { randomUUID } from "crypto"
+import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // Runtime: agent lifecycle and middleware orchestration
 import {
@@ -6070,6 +6072,17 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         )
         workerRuntimeTraceContext = workerTracer?.getTraceContext() ?? traceContext
       }
+      const workerPromptMessage = new HumanMessage({
+        content: effectiveWorkerPrompt,
+        id: randomUUID()
+      })
+      const workerTraceRecorder = workerTracer
+        ? new TurnTraceRecorder({
+            tracer: workerTracer,
+            userMessageId: workerPromptMessage.id,
+            requireUserMessageAnchor: true
+          })
+        : undefined
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
         callbacks: [],
@@ -6087,6 +6100,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
               stream: { mode: mode as "messages" | "values", data }
             })
           }
+          if (mode === "values") workerTraceRecorder?.onRawValues(data)
           const valuesContext = workerValuesSnapshotAccumulator?.createContext(mode, data)
           runTraceSideEffect("CoordinatorWorker Skill observer", () => {
             if (observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)) {
@@ -6213,10 +6227,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             onFailureFuseNotice
           })
 
-          workerStream = await workerAgent.stream(
-            { messages: [new HumanMessage(effectiveWorkerPrompt)] },
-            streamConfig
-          )
+          workerStream = await workerAgent.stream({ messages: [workerPromptMessage] }, streamConfig)
           usedWorkerModelId = candidateId
           runTraceSideEffect("CoordinatorWorker", () => workerTracer?.setModelId(candidateId))
           break

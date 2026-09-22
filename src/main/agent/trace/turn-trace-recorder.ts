@@ -379,6 +379,11 @@ export function recordToolResultTraceNode(input: {
 export class TurnTraceRecorder {
   private readonly tracer: TurnTraceCollector
   private readonly userMessageId: string
+  private readonly requireUserMessageAnchor: boolean
+  private hasSeenUserMessageAnchor = false
+  private rawValuesMessages?: unknown[]
+  private rawValuesLength = 0
+  private rawValuesTailId?: string
   private readonly steppedMessageIds = new Set<string>()
   private readonly recordedModelMessageKeys = new Set<string>()
   private readonly recordedToolResultIds = new Set<string>()
@@ -386,9 +391,14 @@ export class TurnTraceRecorder {
   private readonly toolNodeByRef = new Map<string, string>()
   private readonly reasoningByMessageId = new Map<string, string>()
 
-  constructor(input: { tracer: TurnTraceCollector; userMessageId?: string }) {
+  constructor(input: {
+    tracer: TurnTraceCollector
+    userMessageId?: string
+    requireUserMessageAnchor?: boolean
+  }) {
     this.tracer = input.tracer
     this.userMessageId = input.userMessageId ?? ""
+    this.requireUserMessageAnchor = input.requireUserMessageAnchor ?? false
   }
 
   onStreamChunk(mode: string, data: unknown): void {
@@ -398,6 +408,50 @@ export class TurnTraceRecorder {
     } catch (error) {
       // Tracing is observational; a malformed payload must not fail the turn.
       console.error("[TurnTrace] stream observation failed:", error)
+    }
+  }
+
+  /** Child runtimes expose live LangChain messages, not IPC-serialized values.
+   * Keep references to their fields; serializing an entire checkpoint here would
+   * copy large tool outputs on every update just to recover usage metadata. */
+  onRawValues(snapshot: unknown): void {
+    try {
+      const raw = (snapshot as { messages?: unknown[] } | null)?.messages
+      if (!Array.isArray(raw)) return
+      const tail = raw.at(-1) as Record<string, unknown> | undefined
+      const tailFields = (tail?.kwargs ?? tail) as Record<string, unknown> | undefined
+      const tailClass = Array.isArray(tail?.id)
+        ? String(tail.id.at(-1))
+        : (tail?.constructor?.name ?? "")
+      const plainAssistantTail =
+        traceMessageRole(tailClass, tailFields) === "assistant" &&
+        (!Array.isArray(tailFields?.tool_calls) || tailFields.tool_calls.length === 0)
+      const tailId = typeof tailFields?.id === "string" ? tailFields.id : undefined
+      // Same stable-tail contract as WorkerValuesSnapshotAccumulator: only reuse
+      // the exact array, never a sampled prefix of a replacement/resume snapshot.
+      if (
+        raw === this.rawValuesMessages &&
+        raw.length === this.rawValuesLength &&
+        plainAssistantTail &&
+        tailId &&
+        tailId === this.rawValuesTailId
+      )
+        return
+      const messages = raw.map((value): SerializedTraceMessage => {
+        if (!value || typeof value !== "object") return {}
+        const message = value as Record<string, unknown>
+        if (message.kwargs && typeof message.kwargs === "object") {
+          return message as SerializedTraceMessage
+        }
+        const className = message.constructor?.name
+        return { id: [className ?? ""], kwargs: message }
+      })
+      this.onStreamChunk("values", { messages })
+      this.rawValuesMessages = raw
+      this.rawValuesLength = raw.length
+      this.rawValuesTailId = plainAssistantTail ? tailId : undefined
+    } catch (error) {
+      console.error("[TurnTrace] raw values observation failed:", error)
     }
   }
 
@@ -524,7 +578,11 @@ export class TurnTraceRecorder {
   private turnStartIndex(messages: SerializedTraceMessage[]): number {
     if (this.userMessageId) {
       const anchored = messages.findIndex((message) => message?.kwargs?.id === this.userMessageId)
-      if (anchored >= 0) return anchored + 1
+      if (anchored >= 0) {
+        this.hasSeenUserMessageAnchor = true
+        return anchored + 1
+      }
+      if (this.requireUserMessageAnchor && !this.hasSeenUserMessageAnchor) return messages.length
     }
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       if (traceMessageRole(traceMessageClassName(messages[i]), messages[i]?.kwargs) === "user") {

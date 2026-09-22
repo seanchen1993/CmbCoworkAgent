@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   buildProjectModeRunCostAggs,
+  buildProjectModeConversationAndCostAggs,
   isUserInputRequestCountComplete,
   parseProjectModeRunCost,
   EMPTY_PROJECT_MODE_RUN_COST
@@ -137,4 +138,23 @@ describe("输入 / 输出 Token", () => {
     expect(runCost.inputTokens).toBe(0)
     expect(runCost.outputTokens).toBe(0)
   })
+})
+
+it("includes child traces in the coverage denominator", () => {
+  const costs = parseProjectModeRunCost({
+    run_cost_trace_docs: { value: 12 },
+    run_cost_user_input_docs: { value: 2 }
+  })
+  expect(isUserInputRequestCountComplete(costs, 2)).toBe(false)
+})
+
+it("project costs sum the whole tree while conversations still filter roots", () => {
+  const aggs = buildProjectModeConversationAndCostAggs({
+    by_node: { terms: { field: "harnessNodeName" } }
+  })
+  expect(aggs).toHaveProperty("run_cost_model_calls", { sum: { field: "modelCallCount" } })
+  const main = aggs.main_agent_conversations as { filter: unknown; aggs: Record<string, unknown> }
+  expect(JSON.stringify(main.filter)).toContain("traceKind")
+  expect(main.aggs).toHaveProperty("by_node")
+  expect(main.aggs).not.toHaveProperty("run_cost_model_calls")
 })

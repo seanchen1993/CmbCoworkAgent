@@ -565,6 +565,7 @@ export interface DashboardProjectModeStageMetrics {
     outputTokens: number
     userInputRequests: number
     userInputRequestDocs: number
+    traceDocs?: number
   }
 }
 
@@ -704,6 +705,7 @@ export interface DashboardProjectModeProject {
     totalTokens: number
     userInputRequests: number
     userInputRequestDocs: number
+    traceDocs?: number
   }
   /** false 表示这段时间混着没有 userInputRequestCount 字段的老 trace，问答数是下限。 */
   userInputRequestCountComplete?: boolean

@@ -1,3 +1,4 @@
+import type { DashboardThreadTraceScope } from "../../shared/dashboard-thread-trace-scope"
 /**
  * Dashboard IPC Handlers
  *
@@ -54,7 +55,7 @@ import {
   parseProjectModeManagedRunCount
 } from "./project-mode-managed-run-metrics"
 import {
-  buildProjectModeRunCostAggs,
+  buildProjectModeConversationAndCostAggs,
   parseProjectModeRunCost,
   EMPTY_PROJECT_MODE_RUN_COST,
   isUserInputRequestCountComplete,
@@ -128,6 +129,7 @@ import {
   MAX_THREAD_LIST_BUCKETS,
   orderThreadListPreviewHits,
   collectPagedThreadTraces,
+  buildThreadTraceScopeFilters,
   parseThreadListKeys,
   threadListBucketsNeeded,
   threadListKeysAgg,
@@ -6596,9 +6598,7 @@ const MAX_THREAD_TRACES = 200
  * 串行请求，延迟可接受。 */
 const THREAD_TRACES_FETCH_CHUNK = 25
 
-interface ThreadTracesOptions {
-  scope?: "platform" | "project"
-}
+type ThreadTracesOptions = DashboardThreadTraceScope
 
 async function fetchThreadTraces(
   threadId: string,
@@ -6620,6 +6620,7 @@ async function fetchThreadTraces(
       }
     }
   ]
+  filters.push(...buildThreadTraceScopeFilters(options))
   appendOptionalFilter(
     filters,
     projectScoped ? buildProjectModeAccessFilter(access) : buildTraceAccessFilter(access)
@@ -13033,11 +13034,8 @@ async function fetchProjectModePageUsage(
           // trace 一并计入了，与同一行的「对话数」对不上；现在一起收进 filter 内。
           // 三桶尤其明显：一次用户轮次派出 10 个 Task 子代理就会被记成 11 次对话，
           // 让「VibeCoding 对话远多于 Harness」看起来像结论，其实是口径差。
-          ...mainAgentConversationAggs({
+          ...buildProjectModeConversationAndCostAggs({
             ...stageBucketTraceAggs(),
-            // 运行开销四项必须和「对话数」同在这个 filter 里。挂到外面去的话，同一行会
-            // 出现「对话数 5、模型调用数却含着 50 个子 Agent 的调用」，看着像 bug。
-            ...buildProjectModeRunCostAggs(),
             ...(includeSuspectedTechnicalDetail
               ? {
                   suspected_technical_detail_supplements: {
@@ -13103,7 +13101,7 @@ async function fetchProjectModePageUsage(
       combineSkillCountBuckets(asRecord(b.skills).buckets, asRecord(b.skill_source).buckets, 10)
     )
     perProjectStageConversations.set(key, parseStageBucketConversations(mainAgentConversations))
-    perProjectRunCost.set(key, parseProjectModeRunCost(mainAgentConversations))
+    perProjectRunCost.set(key, parseProjectModeRunCost(b))
   }
 
   return {
@@ -14438,9 +14436,8 @@ async function fetchProjectModeOperationalDetails(
 /**
  * 单项目的阶段耗时分析，供项目列表的二级弹窗使用。
  *
- * 走 trace 索引而不是 event 索引：耗时、Token、模型调用都只在 trace 上。聚合收在
- * mainAgentConversationAggs 里，和项目列表那一行的「对话数」同口径，否则弹窗里的
- * 轮次数会和列表对不上。
+ * 走 trace 索引而不是 event 索引：耗时、Token、模型调用都在 trace 上。
+ * 主 Agent 过滤仅用于轮次和耗时；运行开销包含同范围所有主、子 trace。
  */
 async function fetchProjectModeStageAnalysis(
   projectId: string,
@@ -14465,14 +14462,12 @@ async function fetchProjectModeStageAnalysis(
         ]
       }
     },
-    aggs: mainAgentConversationAggs(
-      buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT)
-    )
+    aggs: buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT)
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   return parseProjectModeStageAnalysis(
     normalizedProjectId,
-    readMainAgentConversations(asRecord(raw.aggregations))
+    asRecord(raw.aggregations)
   )
 }
 

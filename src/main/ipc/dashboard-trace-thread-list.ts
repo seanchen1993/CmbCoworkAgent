@@ -1,3 +1,37 @@
+import type { DashboardThreadTraceScope } from "../../shared/dashboard-thread-trace-scope"
+import { STAGE_BUCKET_LABELS } from "../../shared/harness-stage-bucket"
+import {
+  buildChatTriggeredTraceFilter,
+  stageBucketTraceFilterClause
+} from "./dashboard-stage-buckets"
+
+/** Keep detail requests inside the same project/time/stage scope as their list.
+ * Active child traces inherit the chat trigger; do not filter them out as roots. */
+export function buildThreadTraceScopeFilters(
+  options?: DashboardThreadTraceScope
+): Record<string, unknown>[] {
+  const filters: Record<string, unknown>[] = []
+  if (options?.range)
+    filters.push({ range: { startedAt: { gte: options.range.from, lte: options.range.to } } })
+  for (const [field, value] of [
+    ["harnessProjectId", options?.projectId],
+    ["harnessFeatureSlug", options?.featureSlug],
+    ["harnessNodeStatus", options?.nodeStatus]
+  ]) {
+    if (value?.trim()) filters.push({ term: { [field!]: value.trim() } })
+  }
+  if (options?.nodeName?.trim()) {
+    filters.push(
+      options.nodeName.trim() === STAGE_BUCKET_LABELS.unattributed
+        ? { bool: { must_not: { exists: { field: "harnessNodeName" } } } }
+        : { term: { harnessNodeName: options.nodeName.trim() } }
+    )
+  }
+  if (options?.stageBucket) filters.push(stageBucketTraceFilterClause(options.stageBucket))
+  if (options?.triggerScope === "active") filters.push(buildChatTriggeredTraceFilter())
+  return filters
+}
+
 /**
  * 运营面板「按会话分页」(thread 视图) 的查询构造与响应切片。
  *
