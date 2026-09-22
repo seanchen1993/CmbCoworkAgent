@@ -121,14 +121,19 @@ export class ImDesktopCompletionObserver {
     // grant 就能把结果推过来，那种情况下根本没有 targetId 可比。三种 target 快照都带
     // threadId，比它对三种绑定是同一套逻辑。
     //
-    // getActiveTarget 在目标不是 active 时会抛，这里和另外两条路一样吞掉、当作不标注:
-    // 这行提示是附加信息，不该因为它把一条真实的结果拦在外面。
+    // 用 getSelectedTarget 而不是 getActiveTarget:后者在目标不是 active 时会抛，把提示
+    // 连同异常一起吞掉——绑定的授权一失效就不再标注，而那恰恰是最该标注的时候。
+    // getSelectedTarget 不管状态都把行返回，绑定关系本身和它可不可用是两件事。
+    //
+    // 注意不能反过来把"取不到"当成"不是当前绑定":挂掉的那个目标完全可能就是本会话，
+    // 那样会凭空多出一行假提示。要判的始终是身份，不是状态。
     let switched = false
     try {
-      const active = this.dependencies.conversations.getActiveTarget(grant.conversationKey)
-      switched = Boolean(active && active.threadId !== threadId)
-    } catch {
-      switched = false
+      const bound = this.dependencies.conversations.getSelectedTarget(grant.conversationKey)
+      switched = Boolean(bound && bound.snapshot.threadId !== threadId)
+    } catch (error) {
+      // 只兜数据库读失败。这行提示是附加信息，不该因为它把一条真实的结果拦在外面。
+      this.dependencies.warn("Desktop completion could not read the bound target.", error)
     }
     const prefix = projectContext
       ? imProjectModeReplyPrefix({ ...projectContext, switched })
