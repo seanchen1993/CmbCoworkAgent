@@ -336,20 +336,25 @@ C:\ai\CmbCoworkAgent-mods-v2\docs\mods-v2-compatibility-matrix.json
   switch the configured model/effort, and the streamed hook capability set is
   intentionally bounded.
 - The pane focus/scroll continuation is now represented by
-  `9126e3fa`, `a06a60fd`, `35648288`, `d50be6e7` and `c4ef52ee`; renderer and
-  test action types are aligned by `03916023`.
+  `9126e3fa`, `a06a60fd`, `35648288`, `d50be6e7`, `c4ef52ee`, `7b3f60f5` and
+  `58939661`. Pane actions carry generation and cancellation boundaries,
+  renderer focus/blur and wheel events swallow stale asynchronous failures,
+  and focus state is committed only after the host dispatch core succeeds.
+  Renderer/model action types are aligned by `03916023`.
 
 Validation after these commits: focused model boundary/provider/operation
-tests 32/32; complete Mods function suite 59 files / 430 tests; Node and web
-typecheck pass; changed-file ESLint exits 0 (only existing Prettier warnings
-in newly added tests). Autobiz validation now has 8/8 focused tests. Remaining
-work is the unimplemented classic event production adapter, full dynamic
-workflow end-to-end mutation test, remaining Pane/global UI lifecycle entries,
-installation/package verification and the final performance/disabled-module
-comparison. Compatibility statuses must remain `adapted`, `partial` or
-`unsupported` until those production triggers have evidence.
+tests 32/32; Pane/Client lifecycle tests 21/21; complete Mods function suite
+59 files / 430 tests; Node and web typecheck pass; changed-file ESLint exits 0
+(only existing Prettier warnings in newly added tests). Autobiz validation now
+has 8/8 focused tests. Remaining work is the unimplemented classic event
+production adapter, full dynamic workflow end-to-end mutation test, remaining
+global UI lifecycle entries, installation/package verification and the final
+performance/disabled-module comparison. Compatibility statuses must remain
+`adapted`, `partial` or `unsupported` until those production triggers have
+evidence.
 
-Current latest commit: `03916023 fix(mods): align model and pane lifecycle types`
-plus the model boundary commit `bf0a8cd9`; the working tree may contain the
-next UI/model review changes from parallel agents. Do not touch or merge
+Current latest commits: `bf0a8cd9` (model boundary), `c4ef52ee` (Pane matrix),
+`7b3f60f5` (renderer stale lifecycle), `58939661` (Pane state commit), and
+`74b81db4` (model compatibility docs). The working tree is clean after these
+parallel reviews. Do not touch or merge
 `C:\ai\CmbCoworkAgent`.
