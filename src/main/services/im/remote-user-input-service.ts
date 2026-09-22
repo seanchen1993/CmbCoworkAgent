@@ -432,6 +432,30 @@ export class ImRemoteUserInputService {
     this.sessions.set(request.requestId, session)
     this.codes.set(session.code, session)
 
+    // The card goes first so the reader acts on it rather than on a notice that
+    // repeats it. It does not replace the notice: a card can be accepted by the
+    // platform and still render as nothing, silently on both sides, and a run
+    // waiting on an answer has no timeout. The card earns a shorter notice.
+    let carded = false
+    try {
+      carded = await this.publishCard(session)
+    } catch (error) {
+      this.dependencies.warn("Remote user-input card could not be published.", error)
+    }
+
+    if (carded) {
+      // The card carries the question in full, so no notice follows it. The
+      // pending check still runs: publishing now happens before it, so a
+      // request answered while the card was in flight has to have its card
+      // taken back rather than left on screen looking live.
+      const pending = this.dependencies.getPendingForThread(request.threadId)
+      if (!pending || pending.requestId !== request.requestId) {
+        this.resolveCardFor(session, "已在桌面处理")
+        this.removeSession(request.requestId)
+      }
+      return
+    }
+
     try {
       const outbox = await this.dependencies.events.enqueueProactiveReplies(
         buildImProactiveReplies({
@@ -457,13 +481,6 @@ export class ImRemoteUserInputService {
     } catch (error) {
       this.removeSession(request.requestId)
       throw error
-    }
-    // Outside the block above for the same reason as the approval path: that
-    // catch drops the session and its short code, which the reader already has.
-    try {
-      await this.publishCard(session)
-    } catch (error) {
-      this.dependencies.warn("Remote user-input card could not be published.", error)
     }
   }
 
@@ -494,8 +511,9 @@ export class ImRemoteUserInputService {
     })
   }
 
-  private async publishCard(session: RemoteUserInputSession): Promise<void> {
-    await this.dependencies.cards.publish({
+  /** True only when the platform accepted the card; see the caller. */
+  private async publishCard(session: RemoteUserInputSession): Promise<boolean> {
+    const interaction = await this.dependencies.cards.publish({
       kind: "user_input",
       threadId: session.route.threadId,
       principalId: session.route.principalId,
@@ -508,10 +526,10 @@ export class ImRemoteUserInputService {
         buildQuestionCard({
           targetLabel: session.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
           questions: this.cardQuestions(session),
-          tag,
-          fallbackCommand: `/回答 ${session.code} <编号>`
+          tag
         })
     })
+    return interaction !== null
   }
 
   private resolveRoute(threadId: string): RemoteUserInputRoute | null {

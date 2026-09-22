@@ -1,10 +1,13 @@
 import assert from "node:assert/strict"
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../src/main/agent/thread-run-lease"
 import { mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import initSqlJs from "sql.js"
 import type { ThreadRow } from "../src/main/db"
 import { ImRemoteCapabilityGuard } from "../src/main/services/im/capability-guard"
+import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
+import { ImCardPublisher } from "../src/main/services/im/card-publisher"
 import { ImCommandRouter, parseImCommand } from "../src/main/services/im/command-router"
 import { ImConversationStateStore } from "../src/main/services/im/conversation-state"
 import { ImEventStore, type ImEventRecord } from "../src/main/services/im/event-store"
@@ -307,6 +310,159 @@ async function testSwitchBackByTheNameTheReplyAlreadyShows(): Promise<void> {
     })
     assert(feature.includes("是特性，不是会话"), feature)
     assert(feature.includes("/绑定"), feature)
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * A card submit is the numbered list, pressed.
+ *
+ * The property worth holding is that it reaches the same selection context the
+ * typed `/绑定 <编号>` reaches — so it cannot name a target that was never
+ * offered, and an index the list does not have is refused by the same code that
+ * refuses it for a typed command. The card adds an affordance, never authority.
+ */
+/**
+ * A delivered card replaces the notice rather than accompanying it.
+ *
+ * The numbered list is the card's own content, so printing it again underneath
+ * was the same thing said twice. An empty answer is how the router says it has
+ * nothing to add; the ingress turns that into no message at all.
+ */
+async function testADeliveredTargetCardSendsNoNoticeAtAll(): Promise<void> {
+  const context = await createContext()
+  const sent: string[] = []
+  const cards = new ImCardPublisher({
+    interactions: new ImCardInteractionStore(),
+    createIdempotencyKey: () => `idem-${sent.length}`,
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async (card: { content: unknown }) => {
+        sent.push(JSON.stringify(card.content))
+        return { state: "accepted" } as const
+      }
+    } as never,
+    warn: () => undefined
+  })
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    cards,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const answer = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    // Not empty: a control event has to finalize with at least one reply
+    // segment. An empty answer makes finalizeEventWithReplies throw
+    // OUTBOX_INCOMPLETE, the event never completes, and the gateway republishes
+    // this card every time the 90-second lease expires — forever.
+    assert.notEqual(answer, "", "a control command must always answer something")
+    assert(answer.includes("卡片"), answer)
+    // What it must not do is print the numbered list again; that is the card's.
+    assert(!/^\d+\. /mu.test(answer), answer)
+    assert.equal(sent.length, 1, "exactly one card carries the list")
+    // The numbers are in the option labels, which is the whole reason the text
+    // list can be dropped: a submit sends the same index the option shows.
+    assert(sent[0]!.includes("特性，可创建新会话"), sent[0])
+    assert(sent[0]!.match(/"text":"1\. /u), sent[0])
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testACardSubmitBindsExactlyWhatTypingWouldBind(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+
+    // An index the list never offered is refused by the selection context, not
+    // by the card — the same refusal a typed number out of range earns.
+    const outOfRange = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [{ key: "target", value: String(featureIndex + 99) }]
+    })
+    assert(outOfRange.includes("编号超出范围"), outOfRange)
+    assert.equal(context.createdThreadMetadata.length, 0, "a refused submit must create nothing")
+
+    // Nothing selected is a refusal too, not a bind of whatever came first.
+    const empty = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [{ key: "target", value: "" }]
+    })
+    assert(empty.includes("请先在卡片里选择"), empty)
+    assert.equal(context.createdThreadMetadata.length, 0)
+
+    // A mode the typed path rejects is rejected here with the same words.
+    const badMode = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [
+        { key: "target", value: String(featureIndex) },
+        { key: "mode", value: "agent_team" }
+      ]
+    })
+    assert(badMode.includes("模式无效"), badMode)
+    assert.equal(context.createdThreadMetadata.length, 0)
+
+    // The card's explicit 「跟随特性配置」 has to mean what omitting the word
+    // means, or the default would silently become Multi.
+    const inherited = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [
+        { key: "target", value: String(featureIndex) },
+        { key: "mode", value: "inherit" }
+      ]
+    })
+    assert(inherited.includes("已在【"), inherited)
+    const inheritedMode = context.createdThreadMetadata.at(-1)
+    assert.equal(context.createdThreadMetadata.length, 1)
+
+    // And an explicit mode reaches the same place the typed word reaches.
+    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const team = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [
+        { key: "target", value: String(featureIndex) },
+        { key: "mode", value: "team" }
+      ]
+    })
+    assert(team.includes("Team 会话"), team)
+    assert.equal(context.createdThreadMetadata.at(-1)?.agentMode, "coordinator")
+    assert.notDeepEqual(
+      context.createdThreadMetadata.at(-1),
+      inheritedMode,
+      "an explicit mode must not produce the same thread the inherited default did"
+    )
   } finally {
     context.database.close()
     await rm(context.root, { recursive: true, force: true })
@@ -758,6 +914,12 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
     assert.equal(target?.threadId, "desktop-thread")
     if (target?.kind !== "thread") throw new Error("thread target expected")
     assert.equal(target.title, "支付排障会话（已更新）")
+    const commandLease = claimLocalThreadRunLease({ threadId: target.threadId, owner: "mods", runId: "mod-command" })
+    assert(commandLease.acquired)
+    try {
+      assert((await router.handle({ ...route, command: parseImCommand("/当前")! })).includes("Mods 命令执行中"))
+      assert((await router.handle({ ...route, command: parseImCommand("/停止")! })).includes("桌面的命令面板停止"))
+    } finally { releaseLocalThreadRunLease(target.threadId, "mods", "mod-command") }
     assert.deepEqual(
       JSON.parse(context.threads.get("desktop-thread")!.metadata!),
       originalMetadata,
@@ -1089,6 +1251,8 @@ async function testExplicitRetryCreatesNewEventWithOriginalSnapshot(): Promise<v
 const tests: Array<[string, () => Promise<void>]> = [
   ["testSwitchBackByTheNameTheReplyAlreadyShows", testSwitchBackByTheNameTheReplyAlreadyShows],
   ["testBindModeOnlyAppliesWhereASessionIsCreated", testBindModeOnlyAppliesWhereASessionIsCreated],
+  ["testACardSubmitBindsExactlyWhatTypingWouldBind", testACardSubmitBindsExactlyWhatTypingWouldBind],
+  ["testADeliveredTargetCardSendsNoNoticeAtAll", testADeliveredTargetCardSendsNoNoticeAtAll],
   [
     "testFeatureCreateGrantCreatesIndependentThreadGrants",
     testFeatureCreateGrantCreatesIndependentThreadGrants

@@ -34,6 +34,11 @@ import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"
 import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 import { withThreadRunMutationLock } from "../ipc/thread-run-mutation-lock"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+import { FunctionTurnRun } from "../mods/v2/turn-run"
+import {
+  assertNoTurnModelRefusal,
+  clearTurnCompletionGateState
+} from "../agent/turn-completion-integrity"
 
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 // A cleared timeout may already have a callback queued in the event loop. Each
@@ -309,6 +314,8 @@ async function executeHeartbeat(): Promise<void> {
   const checkpointerPin: { release: (() => void) | null } = { release: null }
   const heartbeatRunId = uuid()
   let leaseAcquired = false
+  let functionTurn: FunctionTurnRun | undefined
+  let completionSucceeded = false
 
   try {
     const config = getHeartbeatConfig()
@@ -430,6 +437,7 @@ async function executeHeartbeat(): Promise<void> {
     ].join("\n")
     const heartbeatContext = `${heartbeatGuidelines}\n\n# Project Context\n\n## HEARTBEAT.md\n\n${content}`
     assertLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)
+    const userMessage = new HumanMessage({ id: uuid(), content: config.prompt })
     const agent = await createAgentRuntime({
       threadId,
       workspacePath: config.workDir,
@@ -437,13 +445,26 @@ async function executeHeartbeat(): Promise<void> {
       extraSystemPrompt: heartbeatContext,
       enableAgentsPrompt: false,
       noSchedulerTool: true,
+      hookTurnId: userMessage.id,
+      modTurnRunId: heartbeatRunId,
       abortSignal: controller.signal
     })
 
+    functionTurn = new FunctionTurnRun({
+      workspace: config.workDir,
+      threadId,
+      runId: heartbeatRunId,
+      turnId: userMessage.id!,
+      text: config.prompt,
+      owner: "scheduler",
+      signal: controller.signal,
+      cancel: () => controller.abort()
+    })
+    await functionTurn.start()
     const converter = new StreamConverter()
     const serializeForRun = createStreamDataSerializer()
     const stream = await agent.stream(
-      { messages: [new HumanMessage(config.prompt)] },
+      { messages: [userMessage] },
       {
         configurable: { thread_id: threadId },
         signal: controller.signal,
@@ -482,6 +503,7 @@ async function executeHeartbeat(): Promise<void> {
         valuesMessageIndexOffset,
         valuesSnapshotKind
       } = serializeForRun(mode, data)
+      functionTurn.observeStream(mode, serialized)
       const events = converter.processChunk(mode, serialized, {
         valuesMessageIndexOffset,
         valuesSnapshotScope: "turn",
@@ -503,6 +525,8 @@ async function executeHeartbeat(): Promise<void> {
       }
     }
 
+    controller.signal.throwIfAborted()
+    assertNoTurnModelRefusal(threadId, heartbeatRunId)
     broadcastToChannel(channel, { type: "done" })
 
     const stripped = stripHeartbeatToken(fullReply)
@@ -559,6 +583,7 @@ async function executeHeartbeat(): Promise<void> {
         console.warn("[event] failed to emit heartbeat.run.completed:", e)
       }
     }
+    completionSucceeded = true
   } catch (error) {
     const isAbort =
       error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
@@ -601,6 +626,8 @@ async function executeHeartbeat(): Promise<void> {
       await closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
     }
     if (leaseAcquired) {
+      functionTurn?.finish(completionSucceeded ? "answer" : "error")
+      clearTurnCompletionGateState(threadId, heartbeatRunId)
       releaseLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)
     }
     running = false
