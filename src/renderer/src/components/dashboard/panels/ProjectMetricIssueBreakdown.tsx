@@ -11,9 +11,19 @@ export function ProjectMetricIssueBreakdown({
 }: {
   groups: ProjectMetricSummaryGroup[]
 }): React.JSX.Element {
+  const categoryTotals = new Map<string, number>()
+  for (const group of groups) {
+    for (const item of group.kenanIssueCategories) {
+      categoryTotals.set(item.category, (categoryTotals.get(item.category) ?? 0) + item.count)
+    }
+  }
   const categories = Array.from(
     new Set(groups.flatMap((group) => group.kenanIssueCategories.map((item) => item.category)))
-  ).sort((left, right) => left.localeCompare(right, "zh-CN"))
+  ).sort(
+    (left, right) =>
+      (categoryTotals.get(right) ?? 0) - (categoryTotals.get(left) ?? 0) ||
+      left.localeCompare(right, "zh-CN")
+  )
 
   if (categories.length === 0) {
     return <div className="text-[11px] text-muted-foreground">无非功能问题类别</div>
@@ -80,7 +90,10 @@ export function ProjectMetricProjectIssueBreakdown({
         </thead>
         <tbody>
           {[...categories]
-            .sort((left, right) => left.category.localeCompare(right.category, "zh-CN"))
+            .sort(
+              (left, right) =>
+                right.count - left.count || left.category.localeCompare(right.category, "zh-CN")
+            )
             .map((item) => (
               <tr key={item.category}>
                 <td className="py-1 pr-3">{item.category}</td>

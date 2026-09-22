@@ -162,7 +162,11 @@ describe("项目非功能问题汇总", () => {
       }
     })
 
-    const projects = await fetchProjectMetricProjects(filters, {}, deps)
+    const projects = await fetchProjectMetricProjects(
+      filters,
+      { sortBy: "kenanIssueCount", sortOrder: "desc" },
+      deps
+    )
     expect(projects.items[0]).toMatchObject({
       firstUatStartDate: "2026-08-06 00:00:00",
       uatLeadDays: 5,
@@ -185,6 +189,10 @@ describe("项目非功能问题汇总", () => {
     expect(projectQuery?.body.query).toMatchObject({
       bool: { filter: expect.arrayContaining([{ terms: { groupName: ["组一"] } }]) }
     })
+    expect(projectQuery?.body.sort).toEqual([
+      { kenanIssueCount: { order: "desc", missing: "_last" } },
+      { prjCode: { order: "asc" } }
+    ])
 
     const groupOptions = await fetchProjectMetricGroupOptions(filters, deps)
     expect(groupOptions).toEqual(["组二", "组一"])

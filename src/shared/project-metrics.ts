@@ -21,6 +21,7 @@ export interface ProjectMetricListOptions {
   sortBy?:
     | "deliveryDays"
     | "bugNum"
+    | "kenanIssueCount"
     | "notAdjustFuns"
     | "pushedAdoptedLines"
     | "tokensPerAdoptedLine"
