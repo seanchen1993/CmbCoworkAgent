@@ -382,7 +382,10 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 它不是授权，也不证明所用宿主能力全部已经接入。`inspect` 输出相同范围的检查报告。
 
 当前尚不能用这一入口交付官方完整 diff、`engine.create` 能力提供方、
-主模型流程拦截与 `model.fork/classify`、网络 SDK、`fs.write` 与祖先指令读取、配置表单或完整 classic 事件。这些保持在后续实施项中。
+网络 SDK、`fs.write` 与祖先指令读取、配置表单或完整 classic 事件。主 Agent 的
+`turn.step` 已经过宿主 opaque-frame 边界，`model.fork` 使用清洗后的实时会话快照，
+`model.classify` 使用固定宿主提示；这些是 adapted desktop 能力，插件不能改写模型/effort，
+也不会获得工具、凭据或未发布 provider 流。模型选择和流式兼容差异仍应按兼容矩阵查看。
 命令文本以桌面结果区呈现；终端的显示宽度与布局不能等同于 Electron 窗口尺寸。
 
 运行中最多保留 6 个函数会话，每个会话最多 8 个插件；单命令参数上限为 32000 字符。
