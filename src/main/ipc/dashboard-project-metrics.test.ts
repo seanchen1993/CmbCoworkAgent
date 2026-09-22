@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { fetchProjectMetricProjects, fetchProjectMetricSummary } from "./dashboard-project-metrics"
+import {
+  fetchProjectMetricGroupOptions,
+  fetchProjectMetricProjects,
+  fetchProjectMetricSummary
+} from "./dashboard-project-metrics"
 
 describe("项目非功能问题汇总", () => {
   it("按全部项目数计算平均值，并解析 nested 类别计数", async () => {
@@ -25,6 +29,16 @@ describe("项目非功能问题汇总", () => {
         }
       }
       if (index === "projects" && body.aggs) {
+        if ("groups" in (body.aggs as Record<string, unknown>)) {
+          return {
+            aggregations: {
+              groups: {
+                sum_other_doc_count: 0,
+                buckets: [{ key: "组二" }, { key: "组一" }]
+              }
+            }
+          }
+        }
         return {
           aggregations: {
             by_project_type: {
@@ -88,10 +102,12 @@ describe("项目非功能问题汇总", () => {
       factIndex: "projects",
       allowedRoomNames: null
     }
-    const result = await fetchProjectMetricSummary(
-      { range: { from: "2026-08-01", to: "2026-08-31" } },
-      deps
-    )
+    const filters = {
+      range: { from: "2026-08-01", to: "2026-08-31" },
+      upperOrgLv1: ["测试室"],
+      groupNames: ["组一"]
+    }
+    const result = await fetchProjectMetricSummary(filters, deps)
 
     expect(result.groups[0]).toMatchObject({
       projectCount: 2,
@@ -137,12 +153,16 @@ describe("项目非功能问题汇总", () => {
         }
       }
     })
+    expect(summaryQuery?.body.query).toMatchObject({
+      bool: {
+        filter: expect.arrayContaining([
+          { terms: { roomName: ["测试室"] } },
+          { terms: { groupName: ["组一"] } }
+        ])
+      }
+    })
 
-    const projects = await fetchProjectMetricProjects(
-      { range: { from: "2026-08-01", to: "2026-08-31" } },
-      {},
-      deps
-    )
+    const projects = await fetchProjectMetricProjects(filters, {}, deps)
     expect(projects.items[0]).toMatchObject({
       firstUatStartDate: "2026-08-06 00:00:00",
       uatLeadDays: 5,
@@ -162,5 +182,34 @@ describe("项目非功能问题汇总", () => {
         "firstUatStartDate"
       ])
     })
+    expect(projectQuery?.body.query).toMatchObject({
+      bool: { filter: expect.arrayContaining([{ terms: { groupName: ["组一"] } }]) }
+    })
+
+    const groupOptions = await fetchProjectMetricGroupOptions(filters, deps)
+    expect(groupOptions).toEqual(["组二", "组一"])
+    const groupQuery = queries.find(
+      (item) =>
+        item.index === "projects" &&
+        Boolean((item.body.aggs as Record<string, unknown> | undefined)?.groups)
+    )
+    expect(groupQuery?.body.query).toMatchObject({
+      bool: {
+        filter: expect.arrayContaining([
+          { terms: { roomName: ["测试室"] } },
+          {
+            range: {
+              createDate: { gte: "2026-08-01 00:00:00", lt: "2026-09-01 00:00:00" }
+            }
+          }
+        ])
+      }
+    })
+    const groupFilters = (groupQuery?.body.query as { bool?: { filter?: unknown[] } } | undefined)
+      ?.bool?.filter
+    expect(groupFilters).not.toContainEqual({ terms: { groupName: ["组一"] } })
+    const queryCount = queries.length
+    expect(await fetchProjectMetricGroupOptions({ range: filters.range }, deps)).toEqual([])
+    expect(queries).toHaveLength(queryCount)
   })
 })

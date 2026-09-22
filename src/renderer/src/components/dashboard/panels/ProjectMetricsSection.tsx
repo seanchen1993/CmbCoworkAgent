@@ -699,10 +699,12 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
 export function ProjectMetricsSection({
   range,
   upperOrgLv1,
+  groupNames,
   refreshKey
 }: {
   range: { from: string; to: string }
   upperOrgLv1: string[]
+  groupNames: string[]
   refreshKey: number
 }): React.JSX.Element {
   const [phaseStatuses, setPhaseStatuses] = useState<string[]>([])
@@ -754,6 +756,7 @@ export function ProjectMetricsSection({
   const trendFilters = useMemo<ProjectMetricTrendFilters>(
     () => ({
       upperOrgLv1,
+      groupNames,
       phaseStatuses,
       functionPointMin: nullableNumber(debouncedFunctionPointMin),
       functionPointMax: nullableNumber(debouncedFunctionPointMax),
@@ -768,6 +771,7 @@ export function ProjectMetricsSection({
       debouncedTokenConsumptionMax,
       debouncedTokenConsumptionMin,
       phaseStatuses,
+      groupNames,
       upperOrgLv1
     ]
   )
