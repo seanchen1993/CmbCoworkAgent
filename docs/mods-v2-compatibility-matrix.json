@@ -4,13 +4,14 @@
   "date": "2026-09-22",
   "codeBaseline": "bf0a8cd9",
   "upstream": {
-    "versionInDeclaration": "2.1.273",
-    "revision": "b782847db9a18667f00918ea341197f201b22bb4",
-    "declarationSha256": "3320DB952D7441BECA33D4AE084A3FFC99D206F92911280A93D27D9EAA670D36",
-    "source": "https://github.com/anthropics/claude-code/blob/b782847db9a18667f00918ea341197f201b22bb4/mods/types/claude-code.d.ts",
+    "versionInDeclaration": "2.1.277",
+    "revision": "bf7d404e26a5fb6167d21b46c93a2bf6c22ab274",
+    "declarationSha256": "AC107A37C08AD46F8632EDC1639B13A740FAE0B8249A2245532ADFD325E57D0D",
+    "source": "https://github.com/anthropics/claude-code/blob/v2.1.278/mods/types/claude-code.d.ts",
     "runtimePreviouslyVerified": "2.1.272",
     "runtime273Verified": true,
-    "runtime273VerificationScope": "52 usage-operation/turn-lifecycle/session-metadata/session-state/permission-query/command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor/tool-SDK-envelope/model-completion-operation/engine-tool-ingress/tool-registration-operation/MCP-operation conformance cases in real plugin test; usage and turn lifecycle use mocked lower engine, not actual upstream transport; not full API or product parity"
+    "runtime273VerificationScope": "52 usage-operation/turn-lifecycle/session-metadata/session-state/permission-query/command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor/tool-SDK-envelope/model-completion-operation/engine-tool-ingress/tool-registration-operation/MCP-operation conformance cases in real plugin test; usage and turn lifecycle use mocked lower engine, not actual upstream transport; not full API or product parity",
+    "latestAudit": "docs/mods-v2-claude-latest-audit-2026-09-22.md"
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
@@ -290,7 +291,7 @@
     {"name":"ui.message","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D09"]},
     {"name":"ui.scroll","target":"desktop-pane-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client and Pane wheel events are normalized to bounded finite deltas and scroll offsets; non-desktop sites remain partial."},
     {"name":"ui.focus","target":"desktop-pane-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client root and Pane focus transitions are normalized to focused boolean events; nested focus and non-desktop sites remain partial."},
-    {"name":"agent.offer","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A04","A10"],"differences":["D01","D05"]},
+    {"name":"agent.offer","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A04","A10"],"differences":["D01","D05"],"note":"Host filters registry agent profiles through the real FunctionSession chain; provider identity is pinned and the default host answer is isOffered:true. Provider/plugin-specific listing provenance remains adapted."},
     {"name":"agent.spawn","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A04","A10"],"differences":["D01","D05"]},
     {"name":"prompt.submit","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},
     {"name":"prompt.fill","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08","A09"],"differences":[]},

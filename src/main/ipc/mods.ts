@@ -491,6 +491,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           functions.interceptTool(binding.workspace, binding.threadId, input, binding.signal, core)
       ),
     turnStep: (...args) => functions.turnStep(...args),
+    offerAgent: (...args) => functions.offerAgent(...args),
     invalidate: (workspace) => functions.invalidate(workspace),
     invalidateAll: () => functions.invalidateAll(),
     closeThread: (threadId) => {

@@ -2,7 +2,7 @@ import type { ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { ModFunctionError } from "./contracts"
 
-/** Host-owned fields in the pinned 2.1.273 contracts; required identity fields cannot be omitted. */
+/** Host-owned fields in the pinned v2.1.278 contracts; required identity fields cannot be omitted. */
 const pinned: Record<string, readonly string[]> = {
   "command.run": ["command", "origin", "presentation"],
   "command.describe": ["command", "immediate", "provider"],

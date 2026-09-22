@@ -1,6 +1,6 @@
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 
-/** Frozen Claude 2.1.273 pn/XPe/vcr spelling rules; names never grant provider authority. */
+/** Claude Code v2.1.278 pn/XPe/vcr spelling rules; names never grant provider authority. */
 export function functionMcpNamePart(value: string): string {
   const normalized = value.replace(/[^a-zA-Z0-9_-]/g, "_")
   return value.startsWith("claude.ai ")

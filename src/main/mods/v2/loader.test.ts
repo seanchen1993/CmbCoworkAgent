@@ -54,7 +54,7 @@ describe("function plugin snapshot loader", () => {
   })
   it("loads the real Claude package layout and reports registration without granting permissions", async () => {
     const report = await checkFunctionPlugin(resolve("tests/fixtures/mods-v2/conformance"))
-    expect(report).toMatchObject({ valid: true, authorized: false, profile: "claude-code/2.1.273" })
+    expect(report).toMatchObject({ valid: true, authorized: false, profile: "claude-code/2.1.278" })
     expect(report.registrations.some((r) => r.hasCatch)).toBe(true)
   })
   it("includes package metadata and source in the immutable digest", async () => {

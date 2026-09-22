@@ -331,6 +331,12 @@ export class ModsManager {
       core: FunctionStreamOptions["core"],
       signal: AbortSignal
     ): Promise<ModHookStream>
+    offerAgent?(
+      workspace: string,
+      threadId: string,
+      input: ModObject,
+      signal: AbortSignal
+    ): Promise<ModObject>
   }
 
   attachFunctions(lifecycle: NonNullable<ModsManager["functionLifecycle"]>): void {
@@ -528,6 +534,18 @@ export class ModsManager {
     const lifecycle = this.functionLifecycle?.turnStep
     if (!lifecycle) throw new ModError("MODS_MODEL_OPERATION_UNSUPPORTED")
     return lifecycle(authority.workspace, authority.threadId, input, core, signal)
+  }
+
+  async offerAgent(
+    workspace: string,
+    threadId: string,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject> {
+    if (!this.isEnabled(workspace)) return { isOffered: true }
+    return (await this.functionLifecycle?.offerAgent?.(workspace, threadId, input, signal)) ?? {
+      isOffered: true
+    }
   }
 
   isEnabled(workspace: string): boolean {

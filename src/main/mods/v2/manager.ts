@@ -9,7 +9,7 @@ import { FunctionTurnNotices } from "./turn-notices"
 import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { randomInt, randomUUID } from "node:crypto"
+import { createHash, randomInt, randomUUID } from "node:crypto"
 import { parseCompletionPolicy } from "../../../shared/mods/v2/completion-policy"
 import { ProjectFunctionFiles, type FunctionFileScope } from "./file-access"
 import type { ModControlStore, ModGrant } from "../control-store"
@@ -660,6 +660,15 @@ export class FunctionModsManager {
       isModObject(record.detail) && record.detail.evidenceId === evidenceId && record.detail.idempotencyKey === idempotencyKey)
     if (prior && this.host.enabled(workspace)) {
       this.host.assertThread?.(workspace, threadId)
+      const detail = isModObject(prior.detail) ? prior.detail : undefined
+      const targetFingerprint = detail && typeof detail.stateFingerprint === "string"
+        ? detail.stateFingerprint : undefined
+      const statePath = join(this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
+        ".autobizdevops", "state.json")
+      if (targetFingerprint && existsSync(statePath)) {
+        const currentFingerprint = createHash("sha256").update(readFileSync(statePath)).digest("hex")
+        if (currentFingerprint !== targetFingerprint) throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+      }
       return { ...(prior.detail as ModObject), applied: false, duplicate: true }
     }
     const started = records.find((record) => record.phase === "check.started" && isModObject(record.detail) && record.detail.attempt === evidenceId)
@@ -724,6 +733,32 @@ export class FunctionModsManager {
       return core(input, signal ?? new AbortController().signal)
     const entry = await this.session(workspace, threadId)
     return entry.session!.interceptTool(input, signal, core)
+  }
+
+  async offerAgent(
+    workspace: string,
+    threadId: string,
+    input: ModObject,
+    signal: AbortSignal,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModJson> = async () => ({
+      isOffered: true
+    })
+  ): Promise<ModObject> {
+    if (
+      !this.host.enabled(workspace) ||
+      this.sources().length === 0 ||
+      (!this.sessions.has(JSON.stringify([workspace, threadId])) &&
+        !(await this.status(workspace)).some((item) => item.state === "ready"))
+    )
+      return (await core(input, signal)) as ModObject
+    const entry = await this.session(workspace, threadId)
+    if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    const safe = await this.host.publish(workspace, input, signal)
+    const result = await entry.session!.offerAgent(safe as ModObject, signal, core)
+    if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    return result
   }
 
   async turnStart(

@@ -1,6 +1,6 @@
 import type { ModJson, ModObject } from "../types"
 
-/** Frozen Claude Code 2.1.273 public repository projection. */
+/** Claude Code v2.1.278 public repository projection, with adapted host limits. */
 export interface FunctionSessionRepo {
   root: string
   remote: string | null

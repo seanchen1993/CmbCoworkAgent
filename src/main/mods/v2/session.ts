@@ -73,6 +73,11 @@ import {
   validateFunctionTurnStepInput
 } from "./turn-contract"
 import { FunctionTurnAbortBudget } from "./turn-lifecycle"
+import {
+  assertPinnedAgentOfferProvider,
+  validateFunctionAgentOfferInput,
+  validateFunctionAgentOfferResult
+} from "../../../shared/mods/v2/agent"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -426,6 +431,37 @@ export class FunctionSession {
     })) as ModObject
   }
 
+  async offerAgent(
+    input: ModObject,
+    signal?: AbortSignal,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModJson> = async () => ({
+      isOffered: true
+    })
+  ): Promise<ModObject> {
+    await this.start()
+    validateFunctionAgentOfferInput(input)
+    const provider = input.provider as ModObject
+    const value = await this.dispatch(
+      "agent.offer",
+      input,
+      signal,
+      undefined,
+      0,
+      undefined,
+      undefined,
+      {
+        core: async (received, callSignal) => {
+          validateFunctionAgentOfferInput(received)
+          assertPinnedAgentOfferProvider(received, provider)
+          return core(received, callSignal)
+        }
+      }
+    )
+    if (!isModObject(value)) throw new ModFunctionError("MODS_AGENT_OFFER_RESULT")
+    validateFunctionAgentOfferResult(value)
+    return value
+  }
+
   async registeredTools(): Promise<RegisteredFunctionTool[]> {
     await this.start()
     this.assertLive()
@@ -569,6 +605,7 @@ export class FunctionSession {
         if (name === "model.complete") functionModelRequest(value)
         if (name === "model.classify") functionModelClassifyRequest(value)
         if (name === "model.fork") functionModelForkRequest(value)
+        if (name === "agent.offer") validateFunctionAgentOfferInput(value)
         if (name === "mcp.call") functionMcpInput(value)
         if (name === "tool.check") functionToolCheckInput(value, true)
         if (name === "ui.open") validatePaneArgs(value)
@@ -606,6 +643,7 @@ export class FunctionSession {
         if (name === "tool.check") return validateToolCheckResult(value)
         if (name === "tool.call") return validateFunctionToolResult(value)
         if (name === "ui.render") return validateFunctionTree(value)
+        if (name === "agent.offer") validateFunctionAgentOfferResult(value as ModObject)
         if (isOperation) {
           if (!isModObject(value)) throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (typeof value.deny === "string") return

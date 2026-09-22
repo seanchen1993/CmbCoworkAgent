@@ -1,4 +1,4 @@
-/** Public event names pinned to Claude Code 2.1.273; presence is not a claim of a host adapter. */
+/** Public event names checked against Claude Code v2.1.278; presence is not a claim of a host adapter. */
 export const CLAUDE_EVENT_NAMES = [
   "tool.call",
   "tool.check",

@@ -5220,18 +5220,38 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return undefined
     }
   }
-  const registrySubagentSpecs = mainSubagentsEnabled
-    ? (await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)).map(
-        (profile) => ({
-          name: profile.name,
-          description: profile.description,
-          systemPrompt: profile.systemPrompt,
-          disallowedTools: profile.disallowedTools,
-          shellAccess: profile.shellAccess,
-          model: resolveRegistryModelInstance(profile.model)
-        })
-      )
+  let registryProfiles = mainSubagentsEnabled
+    ? await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)
     : []
+  const functionMods = getModsManager()
+  if (functionMods && registryProfiles.length > 0) {
+    const offerSignal = options.abortSignal ?? new AbortController().signal
+    const offered: typeof registryProfiles = []
+    for (const profile of registryProfiles) {
+      offerSignal.throwIfAborted()
+      const decision = await functionMods.offerAgent(
+        workspacePath,
+        threadId,
+        {
+          agent: profile.name,
+          description: profile.description,
+          source: profile.source,
+          provider: { plugin: "engine", tier: "core" }
+        },
+        offerSignal
+      )
+      if (decision.isOffered) offered.push(profile)
+    }
+    registryProfiles = offered
+  }
+  const registrySubagentSpecs = registryProfiles.map((profile) => ({
+    name: profile.name,
+    description: profile.description,
+    systemPrompt: profile.systemPrompt,
+    disallowedTools: profile.disallowedTools,
+    shellAccess: profile.shellAccess,
+    model: resolveRegistryModelInstance(profile.model)
+  }))
 
   const checkpointer = await getCheckpointer(threadId)
   console.log("[Runtime] Checkpointer ready for thread:", threadId)
