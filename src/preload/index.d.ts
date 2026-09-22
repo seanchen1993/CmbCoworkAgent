@@ -210,7 +210,7 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
+import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -231,6 +231,7 @@ interface ElectronAPI {
   getGitChangeNoticeEnabled: () => Promise<boolean>
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
+  setAgentToolStrategy: (value: AgentToolStrategy) => Promise<AgentRuntimeSettings>
   setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>

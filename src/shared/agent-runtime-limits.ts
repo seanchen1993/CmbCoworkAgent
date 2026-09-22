@@ -16,16 +16,38 @@ export const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_DEFAULT = 1
 export const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_MIN = 1
 export const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_MAX = 10
 
+export type AgentToolStrategy = "standard" | "shell-first" | "shell-first-relaxed"
+export const AGENT_TOOL_STRATEGY_DEFAULT: AgentToolStrategy = "standard"
+
 export interface AgentRuntimeSettings {
+  toolStrategy: AgentToolStrategy
   recursionLimit: number
   workflowWorktreeTimeoutMinutes: number
   workflowWorktreeRemoveTimeoutMinutes: number
 }
 
 let configuredAgentGraphRecursionLimit = AGENT_GRAPH_RECURSION_LIMIT_DEFAULT
+let configuredAgentToolStrategy: AgentToolStrategy = AGENT_TOOL_STRATEGY_DEFAULT
 let configuredWorkflowWorktreeTimeoutMinutes = WORKFLOW_WORKTREE_TIMEOUT_MINUTES_DEFAULT
 let configuredWorkflowWorktreeRemoveTimeoutMinutes =
   WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_DEFAULT
+
+export function isAgentToolStrategy(value: unknown): value is AgentToolStrategy {
+  return value === "standard" || value === "shell-first" || value === "shell-first-relaxed"
+}
+
+export function normalizeAgentToolStrategy(value: unknown): AgentToolStrategy {
+  return isAgentToolStrategy(value) ? value : AGENT_TOOL_STRATEGY_DEFAULT
+}
+
+export function configureAgentToolStrategy(value: unknown): AgentToolStrategy {
+  configuredAgentToolStrategy = normalizeAgentToolStrategy(value)
+  return configuredAgentToolStrategy
+}
+
+export function getAgentToolStrategy(): AgentToolStrategy {
+  return configuredAgentToolStrategy
+}
 
 export function isAgentGraphRecursionLimit(value: unknown): value is number {
   return (

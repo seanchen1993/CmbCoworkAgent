@@ -86,6 +86,9 @@ import {
 } from "../shared/close-to-tray"
 import {
   configureAgentGraphRecursionLimit,
+  configureAgentToolStrategy,
+  getAgentToolStrategy,
+  isAgentToolStrategy,
   configureWorkflowWorktreeRemoveTimeoutMinutes,
   configureWorkflowWorktreeTimeoutMinutes,
   getAgentGraphRecursionLimit,
@@ -107,6 +110,7 @@ const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed
 const GIT_CHANGE_NOTICE_GET_CHANNEL = "app:get-git-change-notice-enabled"
 const GIT_CHANGE_NOTICE_SET_CHANNEL = "app:set-git-change-notice-enabled"
 const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_TOOL_STRATEGY_SET_CHANNEL = "app:set-agent-tool-strategy"
 const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
 const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
@@ -452,12 +456,14 @@ import {
   getGitChangeNoticeEnabled,
   getOpenworkDir,
   getStoredAgentGraphRecursionLimit,
+  getStoredAgentToolStrategy,
   getStoredWorkflowWorktreeRemoveTimeoutMinutes,
   getStoredWorkflowWorktreeTimeoutMinutes,
   getWindowCloseBehavior,
   isKeepAwakeEnabled,
   setGitChangeNoticeEnabled,
   setStoredAgentGraphRecursionLimit,
+  setStoredAgentToolStrategy,
   setStoredWorkflowWorktreeRemoveTimeoutMinutes,
   setStoredWorkflowWorktreeTimeoutMinutes,
   setKeepAwakeEnabled,
@@ -1005,6 +1011,7 @@ if (browserNativeMessagingHostLaunch) {
 
   app.whenReady().then(async () => {
     configureAgentGraphRecursionLimit(getStoredAgentGraphRecursionLimit())
+    configureAgentToolStrategy(getStoredAgentToolStrategy())
     configureWorkflowWorktreeTimeoutMinutes(getStoredWorkflowWorktreeTimeoutMinutes())
     configureWorkflowWorktreeRemoveTimeoutMinutes(getStoredWorkflowWorktreeRemoveTimeoutMinutes())
 
@@ -1240,6 +1247,7 @@ if (browserNativeMessagingHostLaunch) {
       }
       return {
         recursionLimit: getAgentGraphRecursionLimit(),
+        toolStrategy: getAgentToolStrategy(),
         workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
         workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
       }
@@ -1261,6 +1269,7 @@ if (browserNativeMessagingHostLaunch) {
         const persisted = setStoredAgentGraphRecursionLimit(value)
         return {
           recursionLimit: configureAgentGraphRecursionLimit(persisted),
+          toolStrategy: getAgentToolStrategy(),
           workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
           workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
         }
@@ -1283,6 +1292,7 @@ if (browserNativeMessagingHostLaunch) {
         const persisted = setStoredWorkflowWorktreeTimeoutMinutes(value)
         return {
           recursionLimit: getAgentGraphRecursionLimit(),
+          toolStrategy: getAgentToolStrategy(),
           workflowWorktreeTimeoutMinutes: configureWorkflowWorktreeTimeoutMinutes(persisted),
           workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
         }
@@ -1307,9 +1317,31 @@ if (browserNativeMessagingHostLaunch) {
         const persisted = setStoredWorkflowWorktreeRemoveTimeoutMinutes(value)
         return {
           recursionLimit: getAgentGraphRecursionLimit(),
+          toolStrategy: getAgentToolStrategy(),
           workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
           workflowWorktreeRemoveTimeoutMinutes:
             configureWorkflowWorktreeRemoveTimeoutMinutes(persisted)
+        }
+      }
+    )
+
+    ipcMain.handle(
+      AGENT_TOOL_STRATEGY_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isAgentToolStrategy(value)) throw new Error("Invalid agent tool strategy")
+        const persisted = setStoredAgentToolStrategy(value)
+        return {
+          toolStrategy: configureAgentToolStrategy(persisted),
+          recursionLimit: getAgentGraphRecursionLimit(),
+          workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+          workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
         }
       }
     )

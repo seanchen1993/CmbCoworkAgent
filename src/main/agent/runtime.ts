@@ -112,8 +112,18 @@ import {
 } from "../../shared/model-token-budget"
 import {
   getAgentGraphRecursionLimit,
-  getWorkflowWorktreeTimeoutMs
+  getAgentToolStrategy,
+  normalizeAgentToolStrategy,
+  getWorkflowWorktreeTimeoutMs,
+  type AgentToolStrategy
 } from "../../shared/agent-runtime-limits"
+import {
+  getToolStrategyReminder,
+  resolveEffectiveToolStrategy,
+  resolveFilesystemToolStrategy,
+  resolveWorkflowToolStrategy,
+  SHELL_FIRST_TOOL_DESCRIPTIONS
+} from "./tool-strategy"
 import {
   DEFAULT_AGENT_OUTPUT_STYLE,
   resolveAgentOutputStyle,
@@ -1767,7 +1777,29 @@ export function createSkillHookContextMiddleware(
 export function createOutputStyleTurnReminderMiddleware(
   outputStyle: AgentOutputStyle
 ): ReturnType<typeof createMiddleware> {
-  const reminder = getOutputStyleTurnReminder(outputStyle)
+  return createTurnReminderMiddleware(
+    "outputStyleTurnReminder",
+    getOutputStyleTurnReminder(outputStyle)
+  )
+}
+
+export function createToolStrategyTurnReminderMiddleware(
+  strategy: AgentToolStrategy,
+  access?: CoordinatorWorkerFilesystemAccess
+): ReturnType<typeof createMiddleware> {
+  return createTurnReminderMiddleware(
+    "toolStrategyTurnReminder",
+    getToolStrategyReminder(strategy),
+    (request) => resolveEffectiveToolStrategy(strategy, request.tools ?? [], access) !== "standard"
+  )
+}
+
+function createTurnReminderMiddleware(
+  name: string,
+  reminder: string | null,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  shouldRemind: (request: any) => boolean = () => true
+): ReturnType<typeof createMiddleware> {
   const reminderContent = reminder ? `<system-reminder>\n${reminder}\n</system-reminder>` : null
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const appendReminder = (content: any): any =>
@@ -1776,7 +1808,7 @@ export function createOutputStyleTurnReminderMiddleware(
       : [...content, { type: "text" as const, text: reminderContent }]
 
   return createMiddleware({
-    name: "outputStyleTurnReminder",
+    name,
     // Mirror Claude Code's output-style attachment normalization without
     // persisting the reminder: merge into the current user turn, or smoosh into
     // the last tool result. Never append a standalone HumanMessage after a tool
@@ -1785,7 +1817,7 @@ export function createOutputStyleTurnReminderMiddleware(
     // fallback so the reminder remains model-visible without changing history.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapModelCall: (request: any, handler: any) => {
-      if (!reminderContent) return handler(request)
+      if (!reminderContent || !shouldRemind(request)) return handler(request)
       const messages = Array.isArray(request.messages) ? request.messages : []
       const lastMessage = messages[messages.length - 1]
       const lastType = lastMessage?._getType?.()
@@ -2339,6 +2371,7 @@ function assembleDeepAgent(
     onTurnCompletionRecovery,
     turnCompletionTodoGateEnabled = true,
     outputStyle,
+    toolStrategy = "standard",
     conciseModeEnabled = false
   }: {
     onFinalSystemPrompt?: (prompt: string) => void
@@ -2358,6 +2391,13 @@ function assembleDeepAgent(
 
   const loopGuardsEnabled = areAgentLoopGuardsEnabled()
 
+  // Only this graph's native filesystem descriptions use its effective strategy.
+  // Shared task tools and child runtimes retain the requested preference.
+  const mainToolStrategy = resolveFilesystemToolStrategy(toolStrategy, {
+    filesystemAccess,
+    blockedToolNames: mainBlockedToolNames,
+    filesystemEnabled: mainFilesystemEnabled
+  })
   const effectiveOutputStyle = resolveAgentOutputStyle(outputStyle, conciseModeEnabled)
   const outputStylePrompt = getOutputStylePrompt(effectiveOutputStyle)
 
@@ -2461,8 +2501,11 @@ function assembleDeepAgent(
   const mainSummarizationController = createCmbContextController(mainSummarizationOptions)
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const createFsMiddleware = (fsSystemPrompt = filesystemSystemPrompt): any => {
+  const createFsMiddleware = (
+    fsSystemPrompt = filesystemSystemPrompt,
+    fsToolStrategy = toolStrategy
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): any => {
     // For any restricted leaf runtime — coordinator worker (workload) OR registry
     // workflow agent (explicit denylist/shell) — strip the blocked tools' docs
     // from the injected fs system prompt so a removed tool's description doesn't
@@ -2478,6 +2521,9 @@ function assembleDeepAgent(
         : fsSystemPrompt
     const mw = createFilesystemMiddleware({
       backend: filesystemBackend,
+      ...(fsToolStrategy !== "standard" && {
+        customToolDescriptions: SHELL_FIRST_TOOL_DESCRIPTIONS
+      }),
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
@@ -3035,7 +3081,22 @@ function assembleDeepAgent(
     }
     return {
       ...subagent,
-      systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt)
+      systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt),
+      ...(toolStrategy !== "standard" && !("runnable" in subagent)
+        ? {
+            middleware: [
+              ...(subagent.middleware ?? []),
+              // Per-role tail: the shared filesystem tools are never mutated,
+              // and the guard has already removed unavailable tools by this point.
+              createToolStrategyTurnReminderMiddleware(
+                toolStrategy,
+                modAgentAccess.get(subagent.name)?.readOnly
+                  ? { ...filesystemAccess, shellAccess: "read_only" }
+                  : filesystemAccess
+              )
+            ]
+          }
+        : {})
     }
   })
 
@@ -3144,7 +3205,7 @@ function assembleDeepAgent(
         : []),
       ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
-      ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
+      ...(mainFilesystemEnabled ? [createFsMiddleware("\n", mainToolStrategy)] : []),
       ...postFsToolDocStripMiddleware,
       // The filesystem middleware appends execute documentation dynamically;
       // run the transport denylist after it so the docs and tool disappear
@@ -3214,6 +3275,9 @@ function assembleDeepAgent(
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
       ...customMiddleware,
       ...outputStyleTurnReminderMiddleware,
+      ...(toolStrategy !== "standard"
+        ? [createToolStrategyTurnReminderMiddleware(toolStrategy, filesystemAccess)]
+        : []),
       ...systemPromptPreviewCaptureMiddleware,
       ...(!metadataOnly &&
       modRuntimeAuthority?.agentId === "main" &&
@@ -3404,8 +3468,16 @@ export function getSystemPrompt(
     includeSubagents?: boolean
     includeMemory?: boolean
     includeCurrentTime?: boolean
+    toolStrategy?: AgentToolStrategy
+    filesystemAccess?: CoordinatorWorkerFilesystemAccess
+    blockedToolNames?: Iterable<string>
+    filesystemEnabled?: boolean
   } = {}
 ): string {
+  const effectiveToolStrategy = resolveFilesystemToolStrategy(
+    options.toolStrategy ?? "standard",
+    options
+  )
   const includeBackgroundExec = options.includeBackgroundExec ?? true
   const managedForegroundExec = options.managedForegroundExec === true
   const isWindows = process.platform === "win32"
@@ -3447,7 +3519,7 @@ ${shellGuidance}
 - All file paths use fully qualified absolute system paths
 - The workspace root is: \`${workspacePath}\`
 - Example: \`${examplePath}\`
-- To list the workspace root, use \`ls("${workspacePath}")\`
+${effectiveToolStrategy !== "standard" ? "- Inspect the workspace root with tools appropriate for the active tool strategy" : `- To list the workspace root, use \`ls("${workspacePath}")\``}
 - Always use full absolute paths for all file operations
 `
 
@@ -3516,7 +3588,10 @@ ${shellGuidance}
     workingDirSection +
     backgroundExecSection +
     sandboxSection +
-    renderBaseSystemPrompt({ includeSubagents: options.includeSubagents }) +
+    renderBaseSystemPrompt({
+      includeSubagents: options.includeSubagents,
+      toolStrategy: effectiveToolStrategy
+    }) +
     memorySection
   )
 }
@@ -4621,6 +4696,8 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 }
 
 export interface CreateAgentRuntimeOptions {
+  /** Internal inheritance override; absent on top-level runs to capture the global setting. */
+  toolStrategy?: AgentToolStrategy
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
   /** Per-thread output style. Applied only to the foreground normal-mode main agent. */
@@ -4975,6 +5052,9 @@ export async function prepareForegroundRuntimeToolCatalog(
 }
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
+  // Snapshot once per runtime. Nested runtimes inherit this preference, NOT the
+  // parent's role-filtered effective value. Rebuilt top-level runtimes read anew.
+  const toolStrategy = normalizeAgentToolStrategy(options.toolStrategy ?? getAgentToolStrategy())
   const {
     threadId,
     agentId,
@@ -5267,6 +5347,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // file root and Git guard remain active when it is "none"; a configured Codex
   // sandbox adds defense in depth but is not required to use worktree isolation.
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
+  // Main and task-agent prompts must see the resolved shell, not a cold-cache cmd fallback.
+  await LocalSandbox.ensureShellReady(windowsSandbox)
   console.log(
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
   )
@@ -5554,6 +5636,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // agent would be told the host workspace is its root and write outside its
   // worktree (the sandbox would refuse, so it would just fail confusingly).
   let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
+    toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
+    filesystemAccess: options.filesystemAccess,
+    blockedToolNames: runtimeBlockedToolNames,
+    filesystemEnabled: !isCoordinatorMode,
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
     managedForegroundExec: managedExecution,
     includeSubagents: mainSubagentsEnabled,
@@ -5955,6 +6041,9 @@ The workspace root is: ${fileRoot}`
             const worktreeIsolation = subagentOptions.worktreeIsolation
             const subagentFileRoot = worktreeIsolation?.workspaceRoot ?? workspacePath
             const subagentRuntime = await createAgentRuntime({
+              // Snapshot at leaf creation: approved file edits should not be steered
+              // into separately gated shell writes. YOLO leaves keep the preference.
+              toolStrategy: resolveWorkflowToolStrategy(toolStrategy, getYoloMode()),
               threadId: subagentOptions.threadId,
               agentId: subagentOptions.agentId,
               actionStationarityTurnId: subagentOptions.threadId,
@@ -6564,6 +6653,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         try {
           workerAgent = await createAgentRuntime({
             threadId: workerInput.workerThreadId,
+            toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
@@ -6639,6 +6729,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           const nextCandidate = remainingWorkerCandidates.shift()!
           workerAgent = await createAgentRuntime({
             threadId: workerInput.workerThreadId,
+            toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
@@ -6694,6 +6785,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
 
 Access limits: read-only handoff continuation. Do not modify files, run commands, or call tools. Return only the concise final handoff covering files changed or inspected, commands run and results, remaining risks, and any verification still needed.`
           const handoffAgent = await createAgentRuntime({
+            toolStrategy,
             threadId: workerInput.workerThreadId,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
@@ -7253,6 +7345,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     backend,
     systemPrompt,
     outputStyle,
+    toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     onFinalSystemPrompt,
     filesystemSystemPrompt,
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
