@@ -109,6 +109,8 @@ try:
     if isinstance(record, str): raise RuntimeError('AUTOBIZ_FEATURE_RECORD_INVALID')
     checkpoint = record.get('checkpoint')
     if not checkpoint: raise RuntimeError('AUTOBIZ_CHECKPOINT_MISSING')
+    if checkpoint == 'needs_fix' or record.get('status') == 'blocked':
+        raise RuntimeError('AUTOBIZ_CHECKPOINT_BLOCKED')
     compiler = load(os.path.join(source,'board_core','workflow_compiler.py'), 'mods_compiler')
     contracts = load(os.path.join(source,'board_core','contracts.py'), 'mods_contracts')
     profile = record.get('workflowProfile') or record.get('profile')

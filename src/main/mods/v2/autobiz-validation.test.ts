@@ -127,3 +127,10 @@ it("runs real artifact validation and exposes which precheck failed", async () =
   expect(result.passed).toBe(false)
   expect(result.reason).toContain("proposal.md")
 })
+
+it("reports a blocked checkpoint without treating it as a validator success", async () => {
+  const { root } = await featureFixture({ checkpoint: "needs_fix" })
+  const result = await runAutobizValidator(root, "order-export")
+  expect(result.passed).toBe(false)
+  expect(result.reason).toContain("AUTOBIZ_CHECKPOINT_BLOCKED")
+})
