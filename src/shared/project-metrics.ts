@@ -32,6 +32,7 @@ export interface ProjectMetricSamples {
   functionPoint: number
   defectDensity: number
   testLead: number
+  uatLead: number
   delivery: number
   token: number
   codeLines: number
@@ -52,6 +53,7 @@ export interface ProjectMetricSummaryGroup {
   avgFuncPointCount: number | null
   defectDensityPer100Fp: number | null
   avgTestLeadDays: number | null
+  avgUatLeadDays: number | null
   avgDeliveryDays: number | null
   avgInputTokens: number | null
   avgOutputTokens: number | null
@@ -94,9 +96,11 @@ export interface ProjectMetricProjectItem {
   pushedAdoptedLines: number | null
   createDate: string | null
   firstStStartDate: string | null
+  firstUatStartDate: string | null
   firstOnlineDate: string | null
   approvedDate: string | null
   testLeadDays: number | null
+  uatLeadDays: number | null
   deliveryDays: number | null
   totalInputTokens: number | null
   totalOutputTokens: number | null
