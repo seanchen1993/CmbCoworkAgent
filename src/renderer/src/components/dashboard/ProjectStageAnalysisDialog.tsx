@@ -159,8 +159,10 @@ export function ProjectStageAnalysisDialog({
         */}
         <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
           耗时统计的是 <span className="font-medium text-foreground">Agent 实际工作时长</span>
-          （每轮对话从发起到结束），按该轮开始时特性所处的阶段归属。 轮次和耗时只统计主动触发的主
-          Agent 会话；工具、模型调用与 Token 包含同范围内所有主、子 Agent 及后台任务。
+          （每轮对话从发起到结束），
+          <strong className="font-bold text-foreground">按该轮开始时特性所处的阶段归属</strong>。
+          轮次和耗时只统计主动触发的主 Agent 会话；工具、模型调用与 Token 包含同范围内所有主、子
+          Agent。
         </div>
 
         {loading && !analysis ? (
