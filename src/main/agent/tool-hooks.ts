@@ -41,6 +41,7 @@ export interface ToolHookMiddlewareOptions {
   pluginWorkspace?: string
   featureId?: string
   harnessProjectId?: string
+  harnessAdapterId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   harnessNodeName?: string
@@ -76,6 +77,7 @@ function buildHookContext(
     pluginWorkspace: options.pluginWorkspace,
     featureId: options.featureId,
     harnessProjectId: options.harnessProjectId,
+    harnessAdapterId: options.harnessAdapterId,
     harnessAdapterName: options.harnessAdapterName,
     harnessAdapterVersion: options.harnessAdapterVersion,
     harnessNodeName: options.harnessNodeName,

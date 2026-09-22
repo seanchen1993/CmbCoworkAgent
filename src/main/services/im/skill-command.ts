@@ -11,6 +11,10 @@ import {
 import type { SkillMetadata } from "../../types"
 import { normalizeSkillId } from "../../skills/ids"
 import {
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../../shared/skill-visibility"
+import {
   imConversationStateStore,
   type ImConversationStateStore,
   type ImTargetSnapshot
@@ -49,16 +53,6 @@ interface ImSkillCommandDependencies {
 
 function normalizeSkillName(value: string): string {
   return normalizeSkillId(value)
-}
-
-function samePlugin(skill: SkillMetadata, preferred: { id?: string; name?: string }): boolean {
-  const pluginId = normalizeSkillName(skill.pluginId ?? "")
-  const pluginName = normalizeSkillName(skill.pluginName ?? "")
-  const preferredId = normalizeSkillName(preferred.id ?? "")
-  const preferredName = normalizeSkillName(preferred.name ?? "")
-  return Boolean(
-    (preferredId && pluginId === preferredId) || (preferredName && pluginName === preferredName)
-  )
 }
 
 function sourceLabel(skill: SkillMetadata): string {
@@ -326,10 +320,14 @@ export class ImSkillCommandService {
         .getHarnessAgentContext(metadata, { purpose: "plugin-identity" })
         .catch(() => ({}))
       const preferred = { id: context.pluginId, name: context.pluginName }
-      visiblePluginSkills =
-        preferred.id || preferred.name
-          ? pluginSkills.filter((skill) => samePlugin(skill, preferred))
-          : []
+      const visibilityScope: ProjectModeSkillScope = {
+        projectMode: true,
+        boundPluginId: preferred.id,
+        boundPluginName: preferred.name
+      }
+      visiblePluginSkills = pluginSkills.filter((skill) =>
+        isSkillVisibleForProjectMode(skill, visibilityScope)
+      )
     }
 
     const byPath = new Map<string, ImResolvedSkill>()

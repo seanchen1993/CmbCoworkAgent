@@ -128,6 +128,46 @@ async function testFallbackRequiresSafeToRetry(): Promise<void> {
   assert.equal(calls[globalTool.capabilityId] ?? 0, 0)
 }
 
+async function testMcpHookKeepsBoundAdapterIdentity(): Promise<void> {
+  const tool = makeTool({
+    capabilityId: "plugin:tool-owner/tools:run",
+    providerKey: "plugin:tool-owner/tools",
+    toolName: "run",
+    sourceKind: "plugin"
+  })
+  const service: McpCapabilityService = {
+    listTools: async () => [tool],
+    getTool: async () => tool,
+    invoke: async (id) => makeResult(id, "ok"),
+    invalidate: async () => undefined,
+    close: async () => undefined
+  }
+  const scope = createHookScope()
+  scope.activatePlugin("tool-owner")
+  let observedContext: { pluginId?: string; harnessAdapterId?: string } | undefined
+  const scoped = createScopedMcpCapabilityService(
+    service,
+    scope,
+    (event, context) => {
+      if (event === "PreToolUse") observedContext = context
+      return []
+    },
+    undefined,
+    undefined,
+    {
+      workspacePath: process.cwd(),
+      threadId: "bound-adapter-context",
+      harnessProjectId: "project-1",
+      harnessAdapterId: "bound-adapter",
+      harnessAdapterName: "Bound Adapter"
+    }
+  )
+
+  await scoped.invoke(tool.capabilityId, {})
+  assert.equal(observedContext?.pluginId, "tool-owner")
+  assert.equal(observedContext?.harnessAdapterId, "bound-adapter")
+}
+
 function testRetryableErrorClassifier(): void {
   assert.equal(isRetryableMcpTransportError(new Error("request timed out")), true)
   assert.equal(isRetryableMcpTransportError(new Error("HTTP 503 from MCP")), true)
@@ -185,6 +225,7 @@ async function run(): Promise<void> {
   testRetryableErrorClassifier()
   await testFallbackOnlyInvokedOnceAfterPrimaryThrow()
   await testFallbackRequiresSafeToRetry()
+  await testMcpHookKeepsBoundAdapterIdentity()
   await testScopedSnapshotCacheReusesBaseSnapshot()
   await testScopedPermissionSnapshot()
   console.log("PASS MCP fallback invokes fallback once")

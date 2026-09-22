@@ -88,6 +88,10 @@ import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
+import {
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../shared/skill-visibility"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
@@ -206,6 +210,7 @@ import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
   createInheritedHookScope,
+  isSkillPathVisibleForProjectMode,
   resolvePluginIdForSkillPath,
   extractPluginIdFromProviderKey,
   resolveEnabledHooksForRun,
@@ -1237,6 +1242,7 @@ export function createScopedMcpCapabilityService(
     pluginWorkspace?: string
     featureId?: string
     harnessProjectId?: string
+    harnessAdapterId?: string
     harnessAdapterName?: string
     harnessAdapterVersion?: string
     harnessNodeName?: string
@@ -1496,6 +1502,7 @@ export function createScopedMcpCapabilityService(
             pluginWorkspace: baseContext.pluginWorkspace,
             featureId: baseContext.featureId,
             harnessProjectId: baseContext.harnessProjectId,
+            harnessAdapterId: baseContext.harnessAdapterId,
             harnessAdapterName: baseContext.harnessAdapterName,
             harnessAdapterVersion: baseContext.harnessAdapterVersion,
             harnessNodeName: baseContext.harnessNodeName,
@@ -5094,6 +5101,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentMode,
     memoryEnabled: memoryEnabledForThread
   })
+  const skillVisibility: ProjectModeSkillScope = {
+    projectMode: runtimePolicy.isProjectMode,
+    boundPluginId: pluginId,
+    boundPluginName: pluginName
+  }
   // Keep the registry catalogue tied to the task tool itself. This enables the
   // same task types in Multi and Workflow while excluding Solo, coordinator,
   // and every leaf runtime through the existing mainSubagentsEnabled policy.
@@ -5122,8 +5134,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // Only the explicit slash selection counts, not auto-routed skills.
   if (isCoordinatorMode && options.coordinatorExplicitSelectedSkill) {
     const sel = options.coordinatorExplicitSelectedSkill
-    const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
-    hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+    if (isSkillPathVisibleForProjectMode(sel.skillPath, skillVisibility)) {
+      const ownerPluginId = resolvePluginIdForSkillPath(sel.skillPath)
+      hookScope.activateSkill(sel.skillName, ownerPluginId, sel.skillPath)
+    }
   }
   const resolveHooksForContext = (event: HookEvent, context: HookContext) =>
     resolveEnabledHooksForRun(
@@ -5693,8 +5707,12 @@ The workspace root is: ${fileRoot}`
   console.log("[Runtime] Skill middleware sources:", skillsSources)
 
   // Merge plugin skills sources
-  const pluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
-  const pluginSkillsSources = await getEnabledPluginSkillMiddlewareSources()
+  const allPluginSkillSourceMetadata = getEnabledPluginSkillSourceMetadata()
+  const pluginSkillSourceMetadata = allPluginSkillSourceMetadata.filter((source) =>
+    isSkillVisibleForProjectMode(source, skillVisibility)
+  )
+  const pluginSkillsSources =
+    await getEnabledPluginSkillMiddlewareSources(pluginSkillSourceMetadata)
   console.log("[Runtime] Plugin skills sources:", pluginSkillsSources)
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
@@ -5752,6 +5770,7 @@ The workspace root is: ${fileRoot}`
       pluginWorkspace,
       featureId,
       harnessProjectId,
+      harnessAdapterId: pluginId,
       harnessAdapterName,
       harnessAdapterVersion,
       harnessNodeName,
@@ -6122,6 +6141,7 @@ The workspace root is: ${fileRoot}`
     pluginWorkspace,
     featureId,
     harnessProjectId,
+    harnessAdapterId: pluginId,
     harnessAdapterName,
     harnessAdapterVersion,
     harnessNodeName,

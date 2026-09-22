@@ -853,6 +853,7 @@ export interface SkillHookMetadata extends HookConfig {
   pluginId?: string
   pluginName?: string
   pluginRoot?: string
+  isProjectModePlugin?: boolean
 }
 
 /**
@@ -1245,6 +1246,8 @@ export interface SkillMetadata {
   relativePath?: string
   pluginId?: string
   pluginName?: string
+  /** True when the owning plugin exposes board_core/board_config.json. */
+  isProjectModePlugin?: boolean
   /** Skill version from SKILL.md frontmatter, defaults to "v1.0.0" */
   version: string
   license?: string | null
