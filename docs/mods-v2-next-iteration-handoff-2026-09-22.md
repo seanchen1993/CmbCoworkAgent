@@ -13,7 +13,7 @@ UAT 工作树：`C:\ai\CmbCoworkAgent`
 
 ## 当前基线必须这样认定
 
-- `codex/mods-v2` 的当前实现提交为 `9fbe7395`；最近验证报告仍由工作树中的日期报告记录，上一份文档提交为 `8bf0a0c3`。第 2 批桥接为 `beed7715`，证据/策略/validator 桥接为 `b98785ae`。
+- `codex/mods-v2` 的当前实现提交为 `e7ebd706`；此前模型边界提交为 `89f4ce02`，classic once 生命周期提交为 `9f7ff11c`，Claude Code v2.1.278 对齐提交为 `ee7302e5`。第 2 批桥接为 `beed7715`，证据/策略/validator 桥接为 `b98785ae`。
 - 该提交之前的基础能力和第 1 批完成门禁属于已提交代码。
 - 当前工作树继续只在 Mods v2 分支工作；已提交的每个实现批次均有独立测试和报告。不能把文档中“已完成”直接当成已发布事实。
 - 任何开发都在 `C:\ai\CmbCoworkAgent-mods-v2` 进行，禁止在 `C:\ai\CmbCoworkAgent` 的 UAT 工作树直接修改或合并。
@@ -58,8 +58,12 @@ UAT 工作树：`C:\ai\CmbCoworkAgent`
 - 四种模式、四种范围和四类检查的严格配置解析及持久化 Pane，含修复/时间/模型预算。
 - 固定 `C:\ai\autobiz_kanban` commit `8db1ec937d6ed3d271cb9dc540310d6633c91e70` 的只读 workflow compiler/validator host bridge；请求的 `C:\ai\autobiz\_kanban` 路径不存在，未修改其他工作树。
 - 兼容性矩阵的每个声明均增加 `implementationStatus`（full/adapted/partial/unsupported），并有结构测试防止无状态条目；新增动态上下文 breakdown、模型 fork/classify 边界、固定 host test runner 和本地 JSON Schema `$ref`。
+- 按官方 Claude Code `v2.1.278`（声明文件头 `2.1.277`）重新审查 Mods：`agent.offer` 已接入 FunctionSession、主 Agent registry 列表过滤和 provider pinning；`classic.*`、`engine.create`、Client 多 surface 和新增上下文字段继续按 adapted/partial 标注。
+- 主 Agent 流边界允许长增量流，只限制插件保留的 opaque frame；fork 在结果发布前重新检查 runtime scope。经典 Hook `once` 支持并发共享、异步失败重试、session/hook generation 和旧完成事件隔离。
+- Autobiz 演示适配层已增加 9 个真实临时项目集成场景：固定 compiler/validator、真实 Vitest 通过/失败、repair 后复检、off/check 对照、动态 workflow.d、blocked checkpoint、外部 state 竞争和重复推进；Windows 项目测试通过固定 `cmd.exe` 包装运行。
+- 生产 Electron Mods E2E 已增加真实 main-agent `turn.step` 转换、host-backed `model.fork`/`model.classify`、Pane focus/scroll 无模型调用和全局关闭对照。
 
-仍未完成，下一步继续实现而不暂停：实际单测/E2E 的真实项目闭环断言、Autobiz 动态 workflow/blocked/外部竞争的端到端测试、Claude 主 Agent 流式/turn.step/fork/classify 实现、Pane/global UI lifecycle、安装包和最终性能/关闭对照报告。checkpoint guard 已拒绝 stale 状态，但任意非协作外部写入下的原子 CAS 仍需继续收口。
+仍未完成，下一步继续实现而不暂停：完整 classic 生产触发器的逐事件字段映射和去重、`engine.create` 动态 noun contract、跨 terminal/desktop/vscode/mobile 的 Client 生命周期、完整 MCP/memory/skills/agents breakdown、安装包和最终性能/关闭对照报告。Autobiz 的真实 validator 演示已具备，但不能替代通用 Mods 验收；checkpoint guard 已拒绝 stale 状态，跨进程外部写入的原子 CAS 仍需继续收口。
 
 ## 分批实施方案
 
@@ -246,6 +250,14 @@ output/mods-v2-validation/usage-full-comparison.txt
 ```
 
 反编译产物只作为行为证据，不能复制私有实现或用名称存在冒充行为一致。
+
+### Claude Code 最新官方 Mods 审查
+
+```text
+C:\ai\claude-code-v2.1.278\mods\README.md
+C:\ai\claude-code-v2.1.278\mods\types\claude-code.d.ts
+docs/mods-v2-claude-latest-audit-2026-09-22.md
+```
 
 ## 新会话直接复制的提问词
 
