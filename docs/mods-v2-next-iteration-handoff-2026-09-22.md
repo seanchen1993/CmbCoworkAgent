@@ -283,3 +283,10 @@ C:\ai\CmbCoworkAgent-mods-v2\docs\mods-v2-compatibility-matrix.json
 - Regression coverage: Autobiz validator 5/5, manager 24/24, Node/web typecheck and ESLint passed.
 - Production Electron Mods E2E remains 66/66 passed, 0 failed.
 - Next step is to continue closing remaining compatibility entries marked partial/adapted/unsupported; do not touch `C:\ai\CmbCoworkAgent`.
+
+## Follow-up audit after d7af4134
+
+- Checkpoint transitions now retain a live evidence capture closure, re-capture immediately before and after the pinned transition, and reject disabled/revoked/replaced runtimes.
+- Durable `state.transition` evidence makes duplicate completion events idempotent without rerunning the transition.
+- Validator records include their originating attempt ID; completion event keys remain unique per attempt.
+- Focused manager audit: 6/6 passed; full Mods function suite rerun: 59 files / 412 tests passed after one contention timeout was handled with a bounded test timeout.
