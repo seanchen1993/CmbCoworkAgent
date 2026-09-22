@@ -48,8 +48,8 @@ export interface FunctionUiAction {
   intentId: string
   plugin: string
   handle: number
-  kind: "press" | "change" | "submit" | "select" | "close"
-  value?: string
+  kind: "press" | "change" | "submit" | "select" | "close" | "focus" | "scroll"
+  value?: ModJson
 }
 
 const props: Record<FunctionUiElement["type"], readonly string[]> = {

@@ -25,6 +25,7 @@ export interface FunctionUiDispatch {
 }
 interface Pane extends FunctionPaneSnapshot {
   dirty: boolean
+  focused: boolean
 }
 interface PaneHost {
   clients?: import("./clients").FunctionClients
@@ -84,7 +85,8 @@ export class FunctionPanes {
       tree: prior?.tree ?? { type: "Box", props: {}, children: [] },
       closeOnEscape: input.closeOnEscape === true,
       rows: typeof input.rows === "number" ? Math.min(50, input.rows) : 12,
-      dirty: true
+      dirty: true,
+      focused: prior?.focused ?? false
     })
     this.changed()
   }
@@ -139,7 +141,12 @@ export class FunctionPanes {
               surface: "desktop",
               component: "Pane",
               requestId: pane.id,
-              props: { title: pane.title, isFocused: false, placement: "inline", bodyColumns: 80 }
+              props: {
+                title: pane.title,
+                isFocused: pane.focused,
+                placement: "inline",
+                bodyColumns: 80
+              }
             },
             { generation, core: async () => ({ type: "Box", props: {}, children: [] }) }
           )
@@ -217,9 +224,11 @@ export class FunctionPanes {
       action.plugin.length > 100 ||
       !Number.isSafeInteger(action.handle) ||
       action.handle < 0 ||
-      !["press", "change", "submit", "select", "close"].includes(action.kind) ||
-      (action.value !== undefined &&
-        (typeof action.value !== "string" || action.value.length > 10000))
+      !["press", "change", "submit", "select", "close", "focus", "scroll"].includes(action.kind) ||
+      (action.kind === "focus" || action.kind === "scroll"
+        ? !isModObject(action.value)
+        : action.value !== undefined &&
+          (typeof action.value !== "string" || action.value.length > 10000))
     )
       return Promise.reject(new ModFunctionError("MODS_UI_ACTION_INVALID"))
     const input = createHash("sha256").update(encodeModJson(action)).digest("hex")
@@ -252,6 +261,68 @@ export class FunctionPanes {
             }
           }
         )
+        return
+      }
+      if (action.kind === "focus" || action.kind === "scroll") {
+        if (action.plugin !== pane.plugin || action.handle !== 0)
+          throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+        const value = action.value
+        if (!isModObject(value)) throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+        if (
+          action.kind === "focus" &&
+          (typeof value.focused !== "boolean" ||
+            Object.keys(value).some((key) => key !== "focused"))
+        )
+          throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+        if (
+          action.kind === "scroll" &&
+          (Object.keys(value).some((key) => !["deltaX", "deltaY", "top", "left"].includes(key)) ||
+            ![value.deltaX, value.deltaY, value.top, value.left].every(
+              (number) =>
+                typeof number === "number" && Number.isFinite(number) && Math.abs(number) <= 100000
+            ))
+        )
+          throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+        const controller = new AbortController()
+        this.active.set(controller, pane.key)
+        this.retained.set(action.generation, (this.retained.get(action.generation) ?? 0) + 1)
+        try {
+          if (action.kind === "focus") pane.focused = value.focused as boolean
+          pane.dirty = true
+          await this.host.dispatch(
+            action.kind === "focus" ? "ui.focus" : "ui.scroll",
+            {
+              surface: "desktop",
+              component: "Pane",
+              requestId: pane.id,
+              plugin: pane.plugin,
+              element: pane.id,
+              ...(action.kind === "focus" ? { focused: value.focused } : { value })
+            },
+            {
+              signal: controller.signal,
+              generation: action.generation,
+              core: async (input) => {
+                if (this.panes.get(pane.key) !== pane)
+                  throw new ModFunctionError("MODS_UI_STALE_ACTION")
+                return {
+                  element: pane.id,
+                  value: action.kind === "focus" ? { focused: input.focused } : input.value
+                }
+              }
+            }
+          )
+          this.host.assertLive()
+          this.changed()
+        } finally {
+          this.active.delete(controller)
+          const count = this.retained.get(action.generation)! - 1
+          if (count) this.retained.set(action.generation, count)
+          else {
+            this.retained.delete(action.generation)
+            if (this.retired.has(action.generation)) await this.release(action.generation)
+          }
+        }
         return
       }
       let element: FunctionUiElement | undefined

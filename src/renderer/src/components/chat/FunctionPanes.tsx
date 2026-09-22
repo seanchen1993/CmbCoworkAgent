@@ -7,13 +7,13 @@ import {
   type FunctionUiElement,
   type FunctionUiAction
 } from "../../../../shared/mods/v2/ui"
-import type { ModObject } from "../../../../shared/mods/types"
+import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { FunctionClient } from "./FunctionClient"
 
 type Act = (
   node: FunctionUiElement | undefined,
   kind: FunctionUiAction["kind"],
-  value?: string
+  value?: ModJson
 ) => Promise<void>
 
 function Field({ node, busy, act }: { node: FunctionUiElement; busy: boolean; act: Act }) {
@@ -230,7 +230,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
       pane: FunctionPaneSnapshot,
       node: FunctionUiElement | undefined,
       kind: FunctionUiAction["kind"],
-      value?: string
+      value?: ModJson
     ) => {
       pending.current++
       if (kind !== "change") setBusy(true)
@@ -272,7 +272,21 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
         <section
           key={pane.key}
           data-function-pane={pane.id}
+          tabIndex={0}
           className="rounded-lg border bg-background p-3"
+          onFocus={(event) => {
+            if (event.target !== event.currentTarget) return
+            void act(pane, undefined, "focus", { focused: true })
+          }}
+          onBlur={(event) => {
+            if (event.target !== event.currentTarget) return
+            if (
+              event.relatedTarget instanceof Node &&
+              event.currentTarget.contains(event.relatedTarget)
+            )
+              return
+            void act(pane, undefined, "focus", { focused: false })
+          }}
           onKeyDown={(event) => {
             if (event.key === "Escape" && pane.closeOnEscape) {
               event.stopPropagation()
@@ -294,6 +308,16 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
           <div
             className="overflow-auto text-sm"
             style={{ maxHeight: Math.min(pane.rows * 24, 480) }}
+            onWheel={(event) => {
+              const clamp = (value: number): number =>
+                Number.isFinite(value) ? Math.max(-100000, Math.min(100000, value)) : 0
+              void act(pane, undefined, "scroll", {
+                deltaX: clamp(event.deltaX),
+                deltaY: clamp(event.deltaY),
+                top: clamp(event.currentTarget.scrollTop),
+                left: clamp(event.currentTarget.scrollLeft)
+              })
+            }}
           >
             <Element
               node={pane.tree}

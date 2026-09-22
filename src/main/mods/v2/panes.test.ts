@@ -76,7 +76,7 @@ function action(
   pane: FunctionPaneSnapshot,
   key: string,
   kind: FunctionUiAction["kind"] = "press",
-  value?: string
+  value?: ModJson
 ): FunctionUiAction {
   let found: FunctionUiElement | undefined
   const visit = (node: FunctionUiElement | string): void => {
@@ -180,6 +180,47 @@ describe("desktop function panes through the production session", () => {
     const [updated] = await session.panes.snapshot()
     await session.panes.act({ ...action(updated, "count"), kind: "close" })
     expect(await session.panes.snapshot()).toHaveLength(1)
+  })
+
+  it("routes Pane focus and scroll lifecycle events through the host hooks", async () => {
+    const { session, state } = await fixture(`
+      on("ui.focus",($,e)=>$.store.set("pane-focus", e.focused));
+      on("ui.scroll",($,e)=>$.store.set("pane-scroll", e.value));
+    `)
+    const [pane] = await session.panes.snapshot()
+    await session.panes.act({
+      ...action(pane, "count", "focus", { focused: true }),
+      handle: 0,
+      plugin: pane.plugin
+    })
+    await session.panes.act({
+      ...action(pane, "count", "scroll", { deltaX: 0, deltaY: 12, top: 12, left: 0 }),
+      handle: 0,
+      plugin: pane.plugin
+    })
+    expect(state.get("pane-focus")).toBe(true)
+    expect(state.get("pane-scroll")).toEqual({ deltaX: 0, deltaY: 12, top: 12, left: 0 })
+  })
+
+  it("cancels a pending Pane focus hook when the pane closes", async () => {
+    const { session, state } = await fixture(`
+      on("ui.focus", async ($)=>{
+        await $.store.set("focus-entered", true);
+        await $.clock.sleep(200);
+        await $.store.set("focus-completed", true);
+      });
+    `)
+    const [pane] = await session.panes.snapshot()
+    const focus = session.panes.act({
+      ...action(pane, "count", "focus", { focused: true }),
+      handle: 0,
+      plugin: pane.plugin
+    })
+    await expect.poll(() => state.get("focus-entered")).toBe(true)
+    await session.panes.closePane(pane.plugin, pane.id)
+    await expect(focus).rejects.toThrow()
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    expect(state.has("focus-completed")).toBe(false)
   })
 
   it("checks grants again even when an intent was already settled", async () => {
