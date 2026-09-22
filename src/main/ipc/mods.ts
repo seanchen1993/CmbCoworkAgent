@@ -491,6 +491,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   ipcMain.handle("mods:function-completion-evidence", (event, threadId: string) =>
     functions.completionEvidence(scope(event, threadId), threadId)
   )
+  ipcMain.handle("mods:function-autobiz-transition", (event, input: { threadId: string; transition: ModObject }) => {
+    const workspace = writableScope(event, input?.threadId)
+    return withFunctionExecution(
+      { ...manager.functionUserScope(workspace, input.threadId), workspace, threadId: input.threadId, leased: false, immediate: false, userInitiated: true },
+      () => functions.advanceAutobizCheckpoint(workspace, input.threadId, parseModJson(encodeModJson(input.transition)) as ModObject, new AbortController().signal)
+    )
+  })
   ipcMain.handle("mods:function-panes", (event, threadId: string) =>
     functions.panes(scope(event, threadId), threadId)
   )

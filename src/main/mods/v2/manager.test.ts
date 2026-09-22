@@ -61,6 +61,15 @@ it("records host-owned evidence and blocks a stale pass after a concurrent file 
   expect(await check).toMatchObject({ decision: "block", reason: "COMPLETION_EVIDENCE_STALE" })
   expect(f.control.completionEvidence(f.root, "thread").some((row) => row.phase === "invalidated")).toBe(true)
 })
+
+it("never advances an Autobiz checkpoint without a host validator evidence event", async () => {
+  const f = await fixture()
+  await f.approve()
+  await expect(f.manager.advanceAutobizCheckpoint(f.root, "thread", {
+    evidenceId: "missing", feature: "order-export", from: "requirements_eval_in_progress",
+    to: "requirements_eval_done", stateFingerprint: "state", idempotencyKey: "once"
+  }, new AbortController().signal)).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_REQUIRED")
+})
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })

@@ -23,6 +23,7 @@ import type {
 import type { FunctionPluginStatus } from "../../../shared/mods/v2/commands"
 import {
   ModFunctionError,
+  isModObject,
   matchesEventPattern,
   type FunctionGuest
 } from "../../../shared/mods/v2/contracts"
@@ -48,7 +49,7 @@ import {
   type CompletionEvidenceBinding,
   type CompletionEvidenceRecord
 } from "./completion-evidence"
-import { runAutobizValidator } from "./autobiz-validation"
+import { advanceAutobizCheckpoint, runAutobizValidator } from "./autobiz-validation"
 import { runProjectCheck, type ProjectCheckKind } from "./project-checks"
 
 interface Snapshot {
@@ -608,6 +609,41 @@ export class FunctionModsManager {
   completionEvidence(workspace: string, threadId: string, limit = 100): CompletionEvidenceRecord[] {
     this.host.assertThread?.(workspace, threadId)
     return this.store.completionEvidence(workspace, threadId, limit)
+  }
+
+  async advanceAutobizCheckpoint(
+    workspace: string,
+    threadId: string,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<ModObject> {
+    this.host.assertThread?.(workspace, threadId)
+    const evidenceId = input.evidenceId
+    const feature = input.feature
+    const from = input.from
+    const to = input.to
+    const stateFingerprint = input.stateFingerprint
+    const idempotencyKey = input.idempotencyKey
+    if ([evidenceId, feature, from, to, stateFingerprint, idempotencyKey].some((value) => typeof value !== "string" || !value))
+      throw new ModFunctionError("MODS_AUTOBIZ_TRANSITION_ARGUMENTS")
+    const records = this.store.completionEvidence(workspace, threadId, 500)
+    const started = records.find((record) => record.phase === "check.started" && isModObject(record.detail) && record.detail.attempt === evidenceId)
+    const validator = records.find((record) => record.phase === "validator.result" && record.status === "pass" && started && bindingFingerprint(record.binding) === bindingFingerprint(started.binding))
+    if (!validator) throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_REQUIRED")
+    const scope = this.host.fileScope?.(workspace, threadId)
+    scope?.assertLive()
+    const result = await advanceAutobizCheckpoint({
+      workspace: scope?.workspace ?? workspace,
+      feature: feature as string,
+      from: from as string,
+      to: to as string,
+      expectedStateFingerprint: stateFingerprint as string,
+      idempotencyKey: idempotencyKey as string,
+      signal
+    })
+    this.host.assertThread?.(workspace, threadId)
+    for (const snapshot of (this.sessions.get(JSON.stringify([workspace, threadId]))?.snapshots.values() ?? [])) this.store.assertGrant(snapshot.grant)
+    return result as unknown as ModObject
   }
 
   async interceptTool(

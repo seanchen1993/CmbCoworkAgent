@@ -3057,6 +3057,8 @@ const api = {
       ipcRenderer.invoke("mods:function-turn-notices", threadId),
     completionEvidence: (threadId: string): Promise<import("../main/mods/v2/completion-evidence").CompletionEvidenceRecord[]> =>
       ipcRenderer.invoke("mods:function-completion-evidence", threadId),
+    advanceAutobizCheckpoint: (threadId: string, transition: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModObject> =>
+      ipcRenderer.invoke("mods:function-autobiz-transition", { threadId, transition }),
     panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
       ipcRenderer.invoke("mods:function-panes", threadId),
     paneAct: (
