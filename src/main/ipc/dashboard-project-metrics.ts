@@ -53,6 +53,7 @@ interface FactProject {
   notAdjustFuns: number | null
   createDate: string | null
   firstStStartDate: string | null
+  firstUatStartDate: string | null
   firstOnlineDate: string | null
   approvedDate: string | null
 }
@@ -90,6 +91,7 @@ const FACT_SOURCE_INCLUDES = [
   "notAdjustFuns",
   "createDate",
   "firstStStartDate",
+  "firstUatStartDate",
   "firstOnlineDate",
   "approvedDate"
 ]
@@ -343,6 +345,7 @@ function summaryAggs(): Record<string, unknown> {
       }
     },
     test_lead_valid: durationAgg("createDate", "firstStStartDate"),
+    uat_lead_valid: durationAgg("createDate", "firstUatStartDate"),
     delivery_valid: durationAgg("approvedDate", "firstOnlineDate")
   }
 }
@@ -402,6 +405,7 @@ function parseFactProject(hit: EsHit): FactProject | null {
     notAdjustFuns: asNullableNumber(source.notAdjustFuns),
     createDate: asNullableString(source.createDate),
     firstStStartDate: asNullableString(source.firstStStartDate),
+    firstUatStartDate: asNullableString(source.firstUatStartDate),
     firstOnlineDate: asNullableString(source.firstOnlineDate),
     approvedDate: asNullableString(source.approvedDate)
   }
@@ -448,8 +452,10 @@ function parseSummaryGroup(
   const densityBug = asNumber(nestedRecord(density, "sum_bug_count").value)
   const densityFp = asNumber(nestedRecord(density, "sum_function_points").value)
   const testLead = nestedRecord(bucket, "test_lead_valid")
+  const uatLead = nestedRecord(bucket, "uat_lead_valid")
   const delivery = nestedRecord(bucket, "delivery_valid")
   const testLeadSeconds = nullableAggValue(testLead, "avg_seconds")
+  const uatLeadSeconds = nullableAggValue(uatLead, "avg_seconds")
   const deliverySeconds = nullableAggValue(delivery, "avg_seconds")
   const projectCount = asNumber(bucket.doc_count)
   const categories = nestedRecord(nestedRecord(bucket, "kenan_issue_categories"), "by_category")
@@ -478,6 +484,7 @@ function parseSummaryGroup(
     avgFuncPointCount: nullableAggValue(bucket, "avg_function_points"),
     defectDensityPer100Fp: ratio(densityBug, densityFp, 100),
     avgTestLeadDays: testLeadSeconds === null ? null : testLeadSeconds / 86_400,
+    avgUatLeadDays: uatLeadSeconds === null ? null : uatLeadSeconds / 86_400,
     avgDeliveryDays: deliverySeconds === null ? null : deliverySeconds / 86_400,
     avgInputTokens: developmentMode === "devclaw" ? 0 : null,
     avgOutputTokens: developmentMode === "devclaw" ? 0 : null,
@@ -490,6 +497,7 @@ function parseSummaryGroup(
       functionPoint: asNumber(nestedRecord(bucket, "function_point_sample_count").value),
       defectDensity: asNumber(density.doc_count),
       testLead: asNumber(testLead.doc_count),
+      uatLead: asNumber(uatLead.doc_count),
       delivery: asNumber(delivery.doc_count),
       token: 0,
       codeLines: 0,
@@ -699,6 +707,7 @@ function buildProjectItem(
   const tokens =
     devclaw && tokensByHarness ? sumTokens(snapshot, tokensByHarness, fact.prjCode) : null
   const testLeadMs = millisBetween(fact.createDate, fact.firstStStartDate)
+  const uatLeadMs = millisBetween(fact.createDate, fact.firstUatStartDate)
   const deliveryMs = millisBetween(fact.approvedDate, fact.firstOnlineDate)
   return {
     ...fact,
@@ -710,6 +719,7 @@ function buildProjectItem(
         : null,
     pushedAdoptedLines,
     testLeadDays: testLeadMs === null ? null : testLeadMs / DAY_MS,
+    uatLeadDays: uatLeadMs === null ? null : uatLeadMs / DAY_MS,
     deliveryDays: deliveryMs === null ? null : deliveryMs / DAY_MS,
     totalInputTokens: tokens?.input ?? null,
     totalOutputTokens: tokens?.output ?? null,
@@ -1020,6 +1030,7 @@ export function makeMockProjectMetricTrend(
                 ? null
                 : group.defectDensityPer100Fp * factor * factor,
             avgTestLeadDays: group.avgTestLeadDays === null ? null : group.avgTestLeadDays * factor,
+            avgUatLeadDays: group.avgUatLeadDays === null ? null : group.avgUatLeadDays * factor,
             avgDeliveryDays: group.avgDeliveryDays === null ? null : group.avgDeliveryDays * factor,
             avgInputTokens: group.avgInputTokens === null ? null : group.avgInputTokens * factor,
             avgOutputTokens: group.avgOutputTokens === null ? null : group.avgOutputTokens * factor,
@@ -1135,6 +1146,7 @@ export function makeMockProjectMetricSummary(
         avgFuncPointCount: 112.8,
         defectDensityPer100Fp: 5.67,
         avgTestLeadDays: 24.6,
+        avgUatLeadDays: 28.4,
         avgDeliveryDays: 18.2,
         avgInputTokens: 678_571,
         avgOutputTokens: 56_190,
@@ -1147,6 +1159,7 @@ export function makeMockProjectMetricSummary(
           functionPoint: pluginSelected ? 17 : 40,
           defectDensity: pluginSelected ? 17 : 39,
           testLead: pluginSelected ? 16 : 38,
+          uatLead: pluginSelected ? 15 : 36,
           delivery: pluginSelected ? 16 : 37,
           token: pluginSelected ? 18 : 42,
           codeLines: pluginSelected ? 18 : 42,
@@ -1165,6 +1178,7 @@ export function makeMockProjectMetricSummary(
         avgFuncPointCount: 105.2,
         defectDensityPer100Fp: 8.46,
         avgTestLeadDays: 31.4,
+        avgUatLeadDays: 35.2,
         avgDeliveryDays: 22.8,
         avgInputTokens: null,
         avgOutputTokens: null,
@@ -1177,6 +1191,7 @@ export function makeMockProjectMetricSummary(
           functionPoint: 129,
           defectDensity: 126,
           testLead: 121,
+          uatLead: 118,
           delivery: 124,
           token: 0,
           codeLines: 0,
@@ -1209,9 +1224,11 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     pushedAdoptedLines: 6000,
     createDate: "2026-07-06 00:00:00",
     firstStStartDate: "2026-07-27 09:44:49",
+    firstUatStartDate: "2026-07-31 00:00:00",
     firstOnlineDate: "2026-08-03 00:00:00",
     approvedDate: "2026-07-06 00:00:00",
     testLeadDays: 21.41,
+    uatLeadDays: 25,
     deliveryDays: 28,
     totalInputTokens: 2_400_000,
     totalOutputTokens: 180_000,
@@ -1235,9 +1252,11 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     pushedAdoptedLines: 3000,
     createDate: "2026-07-12 00:00:00",
     firstStStartDate: "2026-07-30 10:00:00",
+    firstUatStartDate: "2026-08-04 00:00:00",
     firstOnlineDate: "2026-08-08 00:00:00",
     approvedDate: "2026-07-15 00:00:00",
     testLeadDays: 18.42,
+    uatLeadDays: 23,
     deliveryDays: 24,
     totalInputTokens: 1_860_000,
     totalOutputTokens: 142_000,
@@ -1261,9 +1280,11 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     pushedAdoptedLines: null,
     createDate: "2026-07-18 00:00:00",
     firstStStartDate: "2026-08-02 09:30:00",
+    firstUatStartDate: null,
     firstOnlineDate: null,
     approvedDate: "2026-07-20 00:00:00",
     testLeadDays: 15.4,
+    uatLeadDays: null,
     deliveryDays: null,
     totalInputTokens: null,
     totalOutputTokens: null,

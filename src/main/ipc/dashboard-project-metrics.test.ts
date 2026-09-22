@@ -31,6 +31,7 @@ describe("项目非功能问题汇总", () => {
               buckets: {
                 devclaw: {
                   doc_count: 2,
+                  uat_lead_valid: { doc_count: 1, avg_seconds: { value: 432_000 } },
                   sum_kenan_issue_count: { value: 3 },
                   kenan_issue_categories: {
                     by_category: {
@@ -44,6 +45,7 @@ describe("项目非功能问题汇总", () => {
                 },
                 non_devclaw: {
                   doc_count: 1,
+                  uat_lead_valid: { doc_count: 0, avg_seconds: { value: null } },
                   sum_kenan_issue_count: { value: 0 },
                   kenan_issue_categories: {
                     by_category: { sum_other_doc_count: 0, buckets: [] }
@@ -63,6 +65,8 @@ describe("项目非功能问题汇总", () => {
                 _source: {
                   prjCode: "DEV-1",
                   prjName: "测试项目",
+                  createDate: "2026-08-01 00:00:00",
+                  firstUatStartDate: "2026-08-06 00:00:00",
                   kenanIssueCount: 3,
                   kenanIssueCategoryCount: [
                     { category: "安全", count: 2 },
@@ -91,23 +95,35 @@ describe("项目非功能问题汇总", () => {
 
     expect(result.groups[0]).toMatchObject({
       projectCount: 2,
+      avgUatLeadDays: 5,
       avgKenanIssueCount: 1.5,
       kenanIssueCategories: [
         { category: "安全", count: 2 },
         { category: "性能", count: 1 }
       ],
-      samples: { kenanIssue: 2 }
+      samples: { kenanIssue: 2, uatLead: 1 }
     })
     expect(result.groups[1]).toMatchObject({
       projectCount: 1,
+      avgUatLeadDays: null,
       avgKenanIssueCount: 0,
       kenanIssueCategories: [],
-      samples: { kenanIssue: 1 }
+      samples: { kenanIssue: 1, uatLead: 0 }
     })
     const summaryQuery = queries.find((item) => item.index === "projects" && item.body.aggs)
     expect(summaryQuery?.body.aggs).toMatchObject({
       by_project_type: {
         aggs: {
+          uat_lead_valid: {
+            filter: {
+              bool: {
+                filter: expect.arrayContaining([
+                  { exists: { field: "createDate" } },
+                  { exists: { field: "firstUatStartDate" } }
+                ])
+              }
+            }
+          },
           sum_kenan_issue_count: { sum: { field: "kenanIssueCount" } },
           kenan_issue_categories: {
             nested: { path: "kenanIssueCategoryCount" },
@@ -128,6 +144,8 @@ describe("项目非功能问题汇总", () => {
       deps
     )
     expect(projects.items[0]).toMatchObject({
+      firstUatStartDate: "2026-08-06 00:00:00",
+      uatLeadDays: 5,
       kenanIssueCount: 3,
       kenanIssueCategories: [
         { category: "安全", count: 2 },
@@ -138,7 +156,11 @@ describe("项目非功能问题汇总", () => {
       (item) => item.index === "projects" && !item.body.aggs && item.body.track_total_hits
     )
     expect(projectQuery?.body._source).toMatchObject({
-      includes: expect.arrayContaining(["kenanIssueCount", "kenanIssueCategoryCount"])
+      includes: expect.arrayContaining([
+        "kenanIssueCount",
+        "kenanIssueCategoryCount",
+        "firstUatStartDate"
+      ])
     })
   })
 })

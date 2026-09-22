@@ -341,6 +341,13 @@ function SummaryComparison({
       formatter: formatDays
     },
     {
+      label: "平均发起 UAT 耗时",
+      hint: "UAT 发起日期 - 立项日期",
+      read: (group) => group.avgUatLeadDays,
+      sample: "uatLead",
+      formatter: formatDays
+    },
+    {
       label: "平均特性上线耗时",
       hint: "项目首次上线日期 - 特性审批通过日期",
       read: (group) => group.avgDeliveryDays,
@@ -618,17 +625,17 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
         <div className="mt-0.5 text-[10px] text-muted-foreground">{item.groupName || "—"}</div>
       </td>
       <td className="px-3 py-2 text-right tabular-nums">{formatCount(item.bugNum)}</td>
-      <td className="text-right tabular-nums">
+      <td className="px-3 py-2 text-right tabular-nums">
         <TooltipProvider delayDuration={150}>
           <Tooltip>
             <TooltipTrigger asChild>
-              <div
-                tabIndex={0}
-                className="px-3 py-2 focus-visible:ring-2 focus-visible:ring-ring"
+              <button
+                type="button"
+                className="cursor-help border-b border-dashed border-muted-foreground/40 tabular-nums hover:border-foreground/60 hover:text-foreground"
                 aria-label={`查看${item.prjName || item.prjCode}非功能问题细分类别`}
               >
                 {formatCount(item.kenanIssueCount)}
-              </div>
+              </button>
             </TooltipTrigger>
             <TooltipContent className={PROJECT_METRIC_TOOLTIP_CLASS}>
               <ProjectMetricProjectIssueBreakdown categories={item.kenanIssueCategories} />
@@ -646,6 +653,16 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
           label="发起 ST 耗时"
           dates={[
             { label: "ST 发起时间", value: item.firstStStartDate },
+            { label: "立项时间", value: item.createDate }
+          ]}
+        />
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        <ProjectDateMetric
+          value={item.uatLeadDays}
+          label="发起 UAT 耗时"
+          dates={[
+            { label: "UAT 发起时间", value: item.firstUatStartDate },
             { label: "立项时间", value: item.createDate }
           ]}
         />
@@ -1035,7 +1052,7 @@ export function ProjectMetricsSection({
         ) : null}
 
         <div className="mt-3 overflow-x-auto rounded-md border border-border">
-          <table className="w-full min-w-[1570px] table-fixed text-xs">
+          <table className="w-full min-w-[1690px] table-fixed text-xs">
             <colgroup>
               <col className="w-[250px]" />
               <col className="w-[190px]" />
@@ -1044,6 +1061,7 @@ export function ProjectMetricsSection({
               <col className="w-[115px]" />
               <col className="w-[90px]" />
               <col className="w-[105px]" />
+              <col className="w-[120px]" />
               <col className="w-[120px]" />
               <col className="w-[125px]" />
               <col className="w-[155px]" />
@@ -1072,6 +1090,7 @@ export function ProjectMetricsSection({
                 />
                 <th className="px-3 py-2 text-right font-medium">缺陷密度</th>
                 <th className="px-3 py-2 text-right font-medium">发起 ST 耗时</th>
+                <th className="px-3 py-2 text-right font-medium">发起 UAT 耗时</th>
                 <SortableProjectMetricTh
                   label="特性上线耗时"
                   sortKey="deliveryDays"
@@ -1102,14 +1121,14 @@ export function ProjectMetricsSection({
             <tbody>
               {projectsLoading && !projects ? (
                 <tr>
-                  <td colSpan={12} className="h-28 text-center text-muted-foreground">
+                  <td colSpan={13} className="h-28 text-center text-muted-foreground">
                     <Loader2 className="mr-2 inline size-4 animate-spin" />
                     正在加载项目明细
                   </td>
                 </tr>
               ) : (projects?.items.length ?? 0) === 0 ? (
                 <tr>
-                  <td colSpan={12} className="h-28 text-center text-muted-foreground">
+                  <td colSpan={13} className="h-28 text-center text-muted-foreground">
                     暂无符合条件的项目
                   </td>
                 </tr>

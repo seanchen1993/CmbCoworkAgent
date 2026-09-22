@@ -64,6 +64,13 @@ const METRICS: Array<{
     color: "#10b981"
   },
   {
+    key: "avgUatLeadDays",
+    label: "平均发起 UAT 耗时",
+    unit: "天",
+    sample: "uatLead",
+    color: "#06b6d4"
+  },
+  {
     key: "avgDeliveryDays",
     label: "平均特性上线耗时",
     unit: "天",
