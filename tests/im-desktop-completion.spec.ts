@@ -276,9 +276,86 @@ function testDesktopEntrypointsUseNarrowCompletionSeam(): void {
   )
 }
 
+/**
+ * 桌面发起的结果推到招乎时，必须标出它不是当前绑定的会话。
+ *
+ * 读者没有在招乎里发起过这一轮，落在一串对话里看不出它来自别处；不标注就会被当成
+ * 当前会话的回复。IM 发起的和模式通知两条路一直都标，唯独这条漏了。
+ */
+async function testADesktopResultFromAnotherThreadSaysSo(): Promise<void> {
+  const context = await createContext()
+  try {
+    // 把另一个会话设为当前绑定，桌面这一轮仍然发生在 thread-1。
+    const bound = await context.conversations.registerTarget(
+      "conversation-1",
+      {
+        kind: "thread",
+        targetId: "target-bound",
+        threadId: "thread-bound",
+        grantId: "grant-bound",
+        grantVersion: 1,
+        title: "你好",
+        workspacePath: "/workspace"
+      },
+      { activate: true }
+    )
+    assert.equal(
+      context.conversations.getActiveTarget("conversation-1")?.threadId,
+      "thread-bound",
+      "前置条件：当前绑定的必须是另一个会话"
+    )
+    assert.equal(bound.snapshot.targetId, "target-bound")
+
+    await context.observer.observe({
+      source: "desktop" as const,
+      threadId: "thread-1",
+      finalAssistantMessageId: "assistant-final-switched",
+      finalText: "桌面最终答复"
+    })
+    const outbox = context.events.listOutbox()
+    assert.equal(outbox.length, 1)
+    assert.equal(outbox[0].content, `【会话：桌面会话】（非当前绑定会话）\n桌面最终答复`)
+  } finally {
+    context.database.close()
+  }
+}
+
+/** 反面:桌面这一轮就发生在当前绑定的会话里，不能平白多出一行提示。 */
+async function testADesktopResultFromTheBoundThreadStaysQuiet(): Promise<void> {
+  const context = await createContext()
+  try {
+    await context.conversations.registerTarget(
+      "conversation-1",
+      {
+        kind: "thread",
+        targetId: "target-same",
+        threadId: "thread-1",
+        grantId: "grant-same",
+        grantVersion: 1,
+        title: "桌面会话",
+        workspacePath: "/workspace"
+      },
+      { activate: true }
+    )
+    await context.observer.observe({
+      source: "desktop" as const,
+      threadId: "thread-1",
+      finalAssistantMessageId: "assistant-final-same",
+      finalText: "桌面最终答复"
+    })
+    const outbox = context.events.listOutbox()
+    assert.equal(outbox.length, 1)
+    assert.equal(outbox[0].content, `【会话：桌面会话】\n桌面最终答复`)
+  } finally {
+    context.database.close()
+  }
+}
+
 async function main(): Promise<void> {
   for (const test of [
     testStableDesktopDeliveryIsDurableAndIdempotent,
+    testADesktopResultFromAnotherThreadSaysSo,
+    testADesktopResultFromTheBoundThreadStaysQuiet,
     testRevocationAndRouteChangeFailClosed,
     testOutboxAndGatewayFailuresNeverEscapeObserver,
     testInboundConfirmedRouteRebindsGrantAndRejectedProactiveReply,
