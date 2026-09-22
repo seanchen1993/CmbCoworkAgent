@@ -52,8 +52,8 @@ try:
     compiler = load(os.path.join(source,'board_core','workflow_compiler.py'), 'mods_compiler')
     contracts = load(os.path.join(source,'board_core','contracts.py'), 'mods_contracts')
     profile = record.get('workflowProfile') or record.get('profile')
-    config_path = os.path.join(workspace,'.autobizdevops','config.json')
-    compiler.load_record_effective_board_config(config_path, source, workspace, record)
+    config_path = os.path.join(source,'board_core','board_config.json')
+    compiler.load_record_effective_board_config(config_path, repo_root=source, workspace=workspace, record=record)
     contracts.load_record_workflow_contracts(source, record, workspace=workspace)
     artifact = load(os.path.join(source,'skills','autodev','hooks','artifact_check.py'), 'mods_artifact_check')
     skill = record.get('currentSkill') or record.get('skill') or checkpoint
