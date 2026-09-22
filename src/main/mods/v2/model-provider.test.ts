@@ -3,8 +3,9 @@ import { afterEach, beforeAll, expect, it, vi } from "vitest"
 import { RunnableLambda } from "@langchain/core/runnables"
 import { HumanMessage } from "@langchain/core/messages"
 import { createAgent } from "langchain"
-import { invokeFunctionModel } from "./model-provider"
+import { invokeFunctionFork, invokeFunctionModel } from "./model-provider"
 import type { ResolvedModelConfig } from "../../models/registry"
+import type { FunctionModelForkSnapshot } from "./model-operations"
 
 const cleanups: Array<() => Promise<void>> = []
 beforeAll(async () => {
@@ -181,6 +182,29 @@ it("does not retry a failed provider request or accept a tool call in a text com
       new AbortController().signal
     )
   ).rejects.toThrow("MODS_MODEL_UNEXPECTED_TOOL")
+})
+
+it("invokes fork from the sanitized host snapshot without forwarding tools", async () => {
+  const f = await endpoint()
+  const snapshot: FunctionModelForkSnapshot = {
+    model: "gpt-4",
+    messages: [{ role: "user", text: "existing context" }],
+    system: "host-only policy"
+  }
+  const result = await invokeFunctionFork(
+    f.config,
+    { prompt: "continue", maxTokens: 32 },
+    snapshot,
+    new AbortController().signal
+  )
+  expect(result).toEqual({ text: "first answer", usage: { input_tokens: 12, output_tokens: 3 } })
+  expect(f.bodies).toHaveLength(1)
+  expect(f.bodies[0].messages).toEqual([
+    { role: "system", content: "host-only policy" },
+    { role: "user", content: "existing context" },
+    { role: "user", content: "continue" }
+  ])
+  expect(f.bodies[0]).not.toHaveProperty("tools")
 })
 
 it("keeps nested provider events out of the caller's stream and callback observers", async () => {

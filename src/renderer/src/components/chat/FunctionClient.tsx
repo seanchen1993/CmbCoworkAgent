@@ -10,7 +10,7 @@ import type { ModJson, ModObject } from "../../../../shared/mods/types"
 type Control = (
   node: FunctionUiElement | undefined,
   kind: FunctionUiAction["kind"],
-  value?: string
+  value?: ModJson
 ) => Promise<void>
 
 /** The renderer interprets data only. Client JavaScript stays in the utility process. */
