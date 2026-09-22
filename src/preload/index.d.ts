@@ -1,3 +1,4 @@
+import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
   AppNotification,
   AppDecisionInput,
@@ -976,6 +977,7 @@ interface DashboardProjectModeStageMetrics {
     outputTokens: number
     userInputRequests: number
     userInputRequestDocs: number
+    traceDocs?: number
   }
 }
 
@@ -2872,7 +2874,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     threadTraces: (
       threadId: string,
-      options?: { scope?: "platform" | "project" }
+      options?: DashboardThreadTraceScope
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,

@@ -1093,7 +1093,7 @@ const USER_LIST_EXPORT_MAX_PAGES = 100
 const USER_TRACE_PAGE_SIZE = 10
 const SKILL_TRACE_PAGE_SIZE = 10
 const PROJECT_TRACE_PAGE_SIZE = 10
-const PROJECT_TRACE_TRIGGER_SCOPE: DashboardTraceTriggerScope = "active"
+const PROJECT_TRACE_TRIGGER_SCOPE: DashboardTraceTriggerScope = "all"
 
 type DashboardSubPage =
   | { kind: "main" }
@@ -4252,14 +4252,41 @@ export function DashboardView(): React.JSX.Element {
     setProjectTracePage(1)
   }, [])
 
+  const loadProjectUserThreadTraces = useCallback(
+    async (threadId: string): Promise<DashboardTraceDetail[]> =>
+      unwrapThreadTracesResponse(
+        await window.api.dashboard.threadTraces(threadId, {
+          scope: "project",
+          range,
+          triggerScope: userDetailTraceTriggerScope
+        })
+      ),
+    [range, userDetailTraceTriggerScope]
+  )
   const loadProjectThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
-      // 同上：失败抛出，交给 TraceExplorer 显示并允许重试，别缓存成空成功。
+      if (!projectTraceProject) return []
       return unwrapThreadTracesResponse(
-        await window.api.dashboard.threadTraces(threadId, { scope: "project" })
+        await window.api.dashboard.threadTraces(threadId, {
+          scope: "project",
+          projectId: projectTraceProject.projectId,
+          range,
+          featureSlug: projectTraceFeature?.slug,
+          nodeName: projectTraceNode?.nodeName,
+          nodeStatus: projectTraceStatus ?? undefined,
+          stageBucket: projectTraceStageBucket ?? undefined,
+          triggerScope: PROJECT_TRACE_TRIGGER_SCOPE
+        })
       )
     },
-    []
+    [
+      projectTraceProject,
+      range,
+      projectTraceFeature,
+      projectTraceNode,
+      projectTraceStatus,
+      projectTraceStageBucket
+    ]
   )
 
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
@@ -5188,7 +5215,7 @@ export function DashboardView(): React.JSX.Element {
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
             onExportPage={handleUserTraceExport}
             exporting={userDetailTraceExporting}
-            loadThreadTraces={subPage.projectMode ? loadProjectThreadTraces : undefined}
+            loadThreadTraces={subPage.projectMode ? loadProjectUserThreadTraces : undefined}
           />
         </ScrollArea>
       ) : (

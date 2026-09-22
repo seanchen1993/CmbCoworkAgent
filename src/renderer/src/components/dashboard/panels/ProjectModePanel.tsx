@@ -2398,13 +2398,13 @@ function ProjectListSection({
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="所选时间范围内的工具调用总次数与模型调用总次数。与同一行的「对话数」同口径：只统计主动触发的主 Agent 轮次，不含定时任务、心跳与子 Agent"
+                title="所选时间范围内，该项目所有 trace 的工具与模型调用总次数，包含 Team、Workflow 等子 Agent 及后台任务。主、子 Agent 各统计自身调用。"
               >
                 工具 / 模型调用
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="所选时间范围内消耗的 Token 总量，以及 Agent 调用 request_user_input 向用户提问的次数。与「对话数」同口径"
+                title="所选时间范围内，该项目所有主、子 Agent 及后台任务消耗的 Token 总量和请求用户回答次数。"
               >
                 Token / 请求问答
               </th>

@@ -884,9 +884,10 @@ export function TraceExplorer({
   const [localViewMode, setLocalViewMode] = useState<DashboardTraceViewMode>(defaultViewMode)
   const [fullscreen, setFullscreen] = useState(false)
   // 按 threadId 缓存「完整 thread」拉取结果，避免重复请求。
-  const [threadTraceCache, setThreadTraceCache] = useState<Record<string, DashboardTraceDetail[]>>(
-    {}
-  )
+  const [threadCacheState, setThreadCacheState] = useState<{
+    loader?: (threadId: string) => Promise<DashboardTraceDetail[]>
+    traces: Record<string, DashboardTraceDetail[]>
+  }>({ traces: {} })
   const [threadLoadingId, setThreadLoadingId] = useState<string | null>(null)
   // 最近一次失败的会话 id。只记一个：横幅只讲当前选中的会话，切走再切回会重试。
   const [threadLoadErrorId, setThreadLoadErrorId] = useState<string | null>(null)
@@ -908,6 +909,12 @@ export function TraceExplorer({
     []
   )
   const effectiveLoadThreadTraces = loadThreadTraces ?? defaultLoadThreadTraces
+  // Cache identity includes the query loader (project/time/stage scope). An old
+  // scope is ignored during render, before effects or a new request can run.
+  const threadTraceCache = useMemo<Record<string, DashboardTraceDetail[]>>(
+    () => (threadCacheState.loader === effectiveLoadThreadTraces ? threadCacheState.traces : {}),
+    [threadCacheState, effectiveLoadThreadTraces]
+  )
 
   // 概览分组（来自分页接口，每个 thread 仅含预览的若干条 trace）。
   const baseGroups = useMemo(() => buildTraceThreadGroups(traces), [traces])
@@ -957,11 +964,13 @@ export function TraceExplorer({
     void effectiveLoadThreadTraces(selectedThreadId)
       .then((full) => {
         if (cancelled) return
-        setThreadTraceCache((prev) =>
-          prev[selectedThreadId]
-            ? prev
-            : { ...prev, [selectedThreadId]: Array.isArray(full) ? full : [] }
-        )
+        setThreadCacheState((prev) => ({
+          loader: effectiveLoadThreadTraces,
+          traces: {
+            ...(prev.loader === effectiveLoadThreadTraces ? prev.traces : {}),
+            [selectedThreadId]: Array.isArray(full) ? full : []
+          }
+        }))
       })
       .catch((error) => {
         // 关键：失败不写缓存。写进去的话 `if (threadTraceCache[id]) return` 会把这

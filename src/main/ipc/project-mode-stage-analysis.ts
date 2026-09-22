@@ -1,3 +1,4 @@
+import { mainAgentConversationAggs, readMainAgentConversations } from "./dashboard-stage-buckets"
 import {
   buildProjectModeRunCostAggs,
   parseProjectModeRunCost,
@@ -97,12 +98,12 @@ function durationAggs(): Record<string, unknown> {
 function metricsAggs(): Record<string, unknown> {
   return {
     ...buildProjectModeRunCostAggs(),
-    ...durationAggs()
+    ...mainAgentConversationAggs(durationAggs())
   }
 }
 
 /**
- * 弹窗的聚合树。调用方要把它放进 mainAgentConversationAggs 里，和项目列表同口径。
+ * 弹窗的聚合树直接放在项目范围内：开销包含子 Agent，对话数与耗时仅取主 Agent。
  *
  * by_node 的 missing 桶用调用方给的未归因标签，和项目列表里已有的阶段细分保持一致，
  * 免得同一个项目在两处看到不同的阶段清单。
@@ -126,10 +127,11 @@ export function buildProjectModeStageAnalysisAggs(
 
 function parseMetrics(container: unknown): ProjectModeStageMetrics {
   const bucket = asRecord(container)
-  const stats = asRecord(bucket.duration_stats)
-  const percentileValues = asRecord(asRecord(bucket.duration_percentiles).values)
+  const conversations = readMainAgentConversations(bucket)
+  const stats = asRecord(conversations.duration_stats)
+  const percentileValues = asRecord(asRecord(conversations.duration_percentiles).values)
   return {
-    conversationCount: asCount(bucket.doc_count),
+    conversationCount: asCount(conversations.doc_count),
     totalDurationMs: asCount(stats.sum),
     avgDurationMs: asCount(stats.avg),
     // ES 在桶为空时给 null，桶里只有一条时给那一条的值。两种都不是错误。
@@ -147,9 +149,9 @@ function parseMetrics(container: unknown): ProjectModeStageMetrics {
  */
 export function parseProjectModeStageAnalysis(
   projectId: string,
-  mainAgentContainer: unknown
+  traceContainer: unknown
 ): ProjectModeStageAnalysis {
-  const container = asRecord(mainAgentContainer)
+  const container = asRecord(traceContainer)
   const nodeBuckets = asRecord(container.by_node).buckets
   const stages: ProjectModeStageRow[] = Array.isArray(nodeBuckets)
     ? nodeBuckets

@@ -28,9 +28,11 @@ function nodeBucket(
 ): Record<string, unknown> {
   return {
     key,
-    doc_count: options.docCount,
-    duration_stats: { sum: options.sum, avg: options.avg },
-    duration_percentiles: { values: { "95.0": options.p95 } },
+    main_agent_conversations: {
+      doc_count: options.docCount,
+      duration_stats: { sum: options.sum, avg: options.avg },
+      duration_percentiles: { values: { "95.0": options.p95 } }
+    },
     run_cost_tool_calls: { value: 100 },
     run_cost_model_calls: { value: 10 },
     run_cost_total_tokens: { value: 1000 },
@@ -55,9 +57,14 @@ describe("阶段分析的聚合条件", () => {
   it("全项目和每个阶段都带耗时统计，不只是总和", () => {
     // 只有 sum 的话，阶段排名基本等于轮次排名，回答不了「哪个阶段慢」。
     for (const scope of [aggs, (aggs.by_node as { aggs: Record<string, unknown> }).aggs]) {
-      const stats = (scope as Record<string, { stats?: { field: string } }>).duration_stats
-      const percentiles = (scope as Record<string, { percentiles?: { field: string } }>)
-        .duration_percentiles
+      const main = (
+        scope.main_agent_conversations as {
+          aggs: Record<string, { stats?: { field: string }; percentiles?: { field: string } }>
+        }
+      ).aggs
+      const stats = main.duration_stats
+      const percentiles = main.duration_percentiles
+      expect(main).not.toHaveProperty("run_cost_model_calls")
       expect(stats.stats?.field).toBe("durationMs")
       expect(percentiles.percentiles?.field).toBe("durationMs")
     }
@@ -86,9 +93,11 @@ describe("阶段分析的聚合条件", () => {
 describe("阶段分析的解析", () => {
   it("阶段按总忙碌时长倒序，最吃时间的排最前", () => {
     const parsed = parseProjectModeStageAnalysis("p1", {
-      doc_count: 60,
-      duration_stats: { sum: 900_000, avg: 15_000 },
-      duration_percentiles: { values: { "95.0": 48_000 } },
+      main_agent_conversations: {
+        doc_count: 60,
+        duration_stats: { sum: 900_000, avg: 15_000 },
+        duration_percentiles: { values: { "95.0": 48_000 } }
+      },
       by_node: {
         buckets: [
           nodeBucket("plan-方案设计", { docCount: 10, sum: 100_000, avg: 10_000, p95: 20_000 }),
@@ -124,9 +133,11 @@ describe("阶段分析的解析", () => {
 
   it("平均和 P95 分别落位，不会互相串", () => {
     const parsed = parseProjectModeStageAnalysis("p1", {
-      doc_count: 40,
-      duration_stats: { sum: 700_000, avg: 17_500 },
-      duration_percentiles: { values: { "95.0": 52_000 } },
+      main_agent_conversations: {
+        doc_count: 40,
+        duration_stats: { sum: 700_000, avg: 17_500 },
+        duration_percentiles: { values: { "95.0": 52_000 } }
+      },
       by_node: { buckets: [] }
     })
 
@@ -139,9 +150,11 @@ describe("阶段分析的解析", () => {
   it("空桶的百分位是 null，按 0 处理而不是 NaN", () => {
     // ES 对空桶返回 {"95.0": null}，这是正常返回，不是错误。
     const parsed = parseProjectModeStageAnalysis("p1", {
-      doc_count: 0,
-      duration_stats: { sum: null, avg: null },
-      duration_percentiles: { values: { "95.0": null } },
+      main_agent_conversations: {
+        doc_count: 0,
+        duration_stats: { sum: null, avg: null },
+        duration_percentiles: { values: { "95.0": null } }
+      },
       by_node: { buckets: [] }
     })
 
@@ -157,4 +170,20 @@ describe("阶段分析的解析", () => {
       []
     )
   })
+})
+
+it("keeps root conversation/duration separate from the whole tree cost", () => {
+  const parsed = parseProjectModeStageAnalysis("p", {
+    main_agent_conversations: {
+      doc_count: 1,
+      duration_stats: { sum: 1000, avg: 1000 }
+    },
+    run_cost_tool_calls: { value: 80 },
+    run_cost_model_calls: { value: 13 },
+    run_cost_total_tokens: { value: 14000 },
+    by_node: { buckets: [] }
+  })
+  expect(parsed.total.conversationCount).toBe(1)
+  expect(parsed.total.totalDurationMs).toBe(1000)
+  expect(parsed.total.runCost).toMatchObject({ toolCalls: 80, modelCalls: 13, totalTokens: 14000 })
 })
