@@ -1084,7 +1084,13 @@ export function ProjectMetricsSection({
                   order={sortOrder}
                   onSort={cycleSort}
                 />
-                <th className="px-3 py-2 text-right font-medium">非功能问题数</th>
+                <SortableProjectMetricTh
+                  label="非功能问题数"
+                  sortKey="kenanIssueCount"
+                  activeKey={sortBy}
+                  order={sortOrder}
+                  onSort={cycleSort}
+                />
                 <SortableProjectMetricTh
                   label="功能点"
                   sortKey="notAdjustFuns"

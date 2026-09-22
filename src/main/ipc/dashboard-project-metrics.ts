@@ -821,7 +821,10 @@ function factSort(options: ProjectMetricListOptions): Record<string, unknown>[] 
       { prjCode: { order: "asc" } }
     ]
   }
-  const field = options.sortBy === "bugNum" ? "bugNum" : "notAdjustFuns"
+  const field =
+    options.sortBy === "bugNum" || options.sortBy === "kenanIssueCount"
+      ? options.sortBy
+      : "notAdjustFuns"
   return [{ [field]: { order, missing: "_last" } }, { prjCode: { order: "asc" } }]
 }
 

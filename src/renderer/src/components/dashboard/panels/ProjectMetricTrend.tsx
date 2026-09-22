@@ -425,6 +425,7 @@ export function ProjectMetricTrend({
                 />
                 <Tooltip
                   filterNull={false}
+                  wrapperStyle={{ pointerEvents: "auto" }}
                   content={({ active, label }) => {
                     const month = data?.months.find((item) => item.month === label)
                     if (!active || !month) return null
