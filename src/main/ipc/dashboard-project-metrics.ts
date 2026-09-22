@@ -219,8 +219,10 @@ function buildFactBaseFilters(
     { range: { [dateField]: projectDateRange(filters.range) } }
   ]
   const rooms = effectiveRoomNames(uniqueSorted(filters.upperOrgLv1 ?? []), allowedRoomNames)
+  const groups = uniqueSorted(filters.groupNames ?? [])
   const phases = uniqueSorted(filters.phaseStatuses ?? [])
   if (rooms !== null) result.push(matchNoneOrTerms("roomName", rooms))
+  if (groups.length > 0) result.push({ terms: { groupName: groups } })
   if (phases.length > 0) result.push({ terms: { phaseStatus: phases } })
 
   const minimum = filters.functionPointMin
@@ -232,6 +234,31 @@ function buildFactBaseFilters(
     result.push({ range: { notAdjustFuns: { lte: maximum } } })
   }
   return result
+}
+
+export async function fetchProjectMetricGroupOptions(
+  filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">,
+  deps: ProjectMetricDependencies
+): Promise<string[]> {
+  if (!filters.upperOrgLv1?.length) return []
+  const raw = (await queryProjectMetricEs(deps, "项目组可选项", deps.factIndex, {
+    size: 0,
+    query: {
+      bool: {
+        filter: buildFactBaseFilters(
+          { range: filters.range, upperOrgLv1: filters.upperOrgLv1 },
+          deps.allowedRoomNames
+        )
+      }
+    },
+    aggs: { groups: { terms: { field: "groupName", size: 1000 } } }
+  })) as EsResponse
+  const aggregation = nestedRecord(asRecord(raw.aggregations), "groups")
+  if (asNumber(aggregation.sum_other_doc_count) > 0) {
+    throw new Error("项目组数量超过筛选上限，组列表不完整")
+  }
+  const buckets = Array.isArray(aggregation.buckets) ? aggregation.buckets : []
+  return uniqueSorted(buckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean))
 }
 
 async function fetchLeanSnapshotState(deps: ProjectMetricDependencies): Promise<LeanSnapshotState> {
@@ -1294,6 +1321,18 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
   }
 ]
 
+export function makeMockProjectMetricGroupOptions(
+  filters: Pick<ProjectMetricFilters, "upperOrgLv1">
+): string[] {
+  if (!filters.upperOrgLv1?.length) return []
+  const rooms = new Set(filters.upperOrgLv1)
+  return uniqueSorted(
+    MOCK_PROJECTS.filter((project) => rooms.has(project.roomName)).map(
+      (project) => project.groupName
+    )
+  )
+}
+
 export function makeMockProjectMetricProjects(
   filters: ProjectMetricFilters,
   options: ProjectMetricListOptions = {}
@@ -1304,6 +1343,8 @@ export function makeMockProjectMetricProjects(
   const adapterName = asString(filters.adapterName)
   const tokenConsumptionFiltered = hasTokenConsumptionFilter(filters)
   const filtered = MOCK_PROJECTS.filter((item) => mode === "all" || item.developmentMode === mode)
+    .filter((item) => !filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(item.roomName))
+    .filter((item) => !filters.groupNames?.length || filters.groupNames.includes(item.groupName))
     .filter((item) => !adapterName || item.plugins.includes(adapterName))
     .filter(
       (item) =>

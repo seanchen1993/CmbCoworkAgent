@@ -121,9 +121,11 @@ import type {
   ProjectMetricTrendFilters
 } from "../../shared/project-metrics"
 import {
+  fetchProjectMetricGroupOptions,
   fetchProjectMetricProjects,
   fetchProjectMetricSummary,
   fetchProjectMetricTrend,
+  makeMockProjectMetricGroupOptions,
   makeMockProjectMetricProjects,
   makeMockProjectMetricSummary,
   makeMockProjectMetricTrend
@@ -15000,6 +15002,32 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchDashboardEfficiency(range, opts) }
       } catch (e) {
         logDashboardRequestError("efficiency", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricGroupOptions",
+    async (_, filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricGroupOptions(filters) }
+      }
+      try {
+        const access = requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricGroupOptions(filters, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricGroupOptions", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

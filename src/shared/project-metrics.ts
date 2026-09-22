@@ -3,6 +3,7 @@ export type ProjectMetricDevelopmentMode = "devclaw" | "non_devclaw"
 export interface ProjectMetricFilters {
   range: { from: string; to: string }
   upperOrgLv1?: string[]
+  groupNames?: string[]
   phaseStatuses?: string[]
   functionPointMin?: number | null
   functionPointMax?: number | null
