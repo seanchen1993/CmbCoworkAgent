@@ -44,6 +44,57 @@ export type FunctionSessionContextGridSquare = ModObject & {
   squareFullness: number
 }
 
+/** Dynamic prompt contributors exposed by Claude Code's context breakdown. */
+export type FunctionSessionContextMemoryFile = ModObject & {
+  path: string
+  type: string
+  tokens: number
+}
+
+export type FunctionSessionContextMcpTool = ModObject & {
+  name: string
+  serverName: string
+  tokens: number
+  isLoaded: boolean
+}
+
+export type FunctionSessionContextAgent = ModObject & {
+  agentType: string
+  source: string
+  tokens: number
+}
+
+export type FunctionSessionContextSkill = ModObject & {
+  name: string
+  source: string
+  pluginName?: string
+  tokens: number
+}
+
+export type FunctionSessionContextSkills = ModObject & {
+  totalSkills: number
+  includedSkills: number
+  tokens: number
+  skillFrontmatter: FunctionSessionContextSkill[]
+}
+
+export type FunctionSessionContextSlashCommands = ModObject & {
+  totalCommands: number
+  includedCommands: number
+  tokens: number
+}
+
+/** Host-owned dynamic context metadata; omitted sources remain empty/undefined. */
+export interface FunctionSessionContextSources {
+  memoryFiles?: FunctionSessionContextMemoryFile[]
+  mcpTools?: FunctionSessionContextMcpTool[]
+  agents?: FunctionSessionContextAgent[]
+  slashCommands?: FunctionSessionContextSlashCommands
+  skills?: FunctionSessionContextSkills
+  autoCompactThreshold?: number
+  isAutoCompactEnabled?: boolean
+}
+
 export type FunctionSessionApiUsage = ModObject & {
   input_tokens: number
   output_tokens: number
@@ -73,6 +124,13 @@ export type FunctionSessionContextBreakdown = ModObject & {
   gridRows: FunctionSessionContextGridSquare[][]
   model: string
   messageBreakdown: FunctionSessionMessageBreakdown
+  memoryFiles: FunctionSessionContextMemoryFile[]
+  mcpTools: FunctionSessionContextMcpTool[]
+  agents: FunctionSessionContextAgent[]
+  slashCommands?: FunctionSessionContextSlashCommands
+  skills?: FunctionSessionContextSkills
+  autoCompactThreshold?: number
+  isAutoCompactEnabled: boolean
   apiUsage: FunctionSessionApiUsage | null
   /** True when any context category uses the local estimator. */
   estimated: boolean

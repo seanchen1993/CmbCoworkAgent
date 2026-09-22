@@ -181,6 +181,27 @@ it("attributes dynamic MCP, memory, skills and agent tools to separate context c
   )
 })
 
+it("returns the latest dynamic context breakdown lists with host supplied metadata", () => {
+  const result = projectContextBreakdown({
+    detail: "full",
+    model: "actual-model",
+    window: 10_000,
+    tools: [{ name: "mcp__search", description: "search" }, { name: "task_agent", description: "agent" }],
+    messages: [],
+    contextSources: {
+      memoryFiles: [{ path: "/workspace/MEMORY.md", type: "project", tokens: 12 }],
+      agents: [{ agentType: "Explore", source: "built-in", tokens: 8 }],
+      autoCompactThreshold: 8000,
+      isAutoCompactEnabled: false
+    }
+  })
+  expect(result.memoryFiles).toEqual([{ path: "/workspace/MEMORY.md", type: "project", tokens: 12 }])
+  expect(result.mcpTools[0]).toMatchObject({ name: "mcp__search", isLoaded: true })
+  expect(result.agents).toEqual(expect.arrayContaining([expect.objectContaining({ agentType: "Explore" }), expect.objectContaining({ agentType: "task_agent" })]))
+  expect(result.autoCompactThreshold).toBe(8000)
+  expect(result.isAutoCompactEnabled).toBe(false)
+})
+
 it("yields long scans and invalidates a revoked or cancelled in-flight read", async () => {
   const messages = Array.from({ length: 1000 }, () => new HumanMessage("no usage"))
   const controller = new AbortController()

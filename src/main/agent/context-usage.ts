@@ -6,7 +6,13 @@ import { normalizeTraceTokenUsage } from "./trace/token-usage"
 import type {
   FunctionSessionApiUsage,
   FunctionSessionContextBreakdown,
-  FunctionSessionMessageBreakdown
+  FunctionSessionMessageBreakdown,
+  FunctionSessionContextSources,
+  FunctionSessionContextMemoryFile,
+  FunctionSessionContextMcpTool,
+  FunctionSessionContextAgent,
+  FunctionSessionContextSkills,
+  FunctionSessionContextSkill
 } from "../../shared/mods/v2/session"
 
 export interface ContextResponseUsage {
@@ -138,6 +144,7 @@ export function projectContextBreakdown(input: {
   tools?: readonly unknown[]
   messages: readonly unknown[]
   apiUsage?: ContextResponseUsage
+  contextSources?: FunctionSessionContextSources
 }): FunctionSessionContextBreakdown {
   const countContext = (messages: readonly unknown[], tools?: readonly unknown[]): CountResult =>
     input.detail === "summary"
@@ -156,6 +163,45 @@ export function projectContextBreakdown(input: {
   const toolsValue = input.tools?.length
     ? countContext([], input.tools)
     : { tokens: 0, estimated: true }
+  const memoryFiles: FunctionSessionContextMemoryFile[] = [
+    ...(input.contextSources?.memoryFiles ?? [])
+  ]
+  const mcpTools: FunctionSessionContextMcpTool[] = [...(input.contextSources?.mcpTools ?? [])]
+  const agents: FunctionSessionContextAgent[] = [...(input.contextSources?.agents ?? [])]
+  const skillFrontmatter: FunctionSessionContextSkill[] = []
+  for (const tool of input.tools ?? []) {
+    const raw = object(tool)
+    const name = String(raw?.name ?? raw?.tool_name ?? "")
+    const tokens = countContextOne(tool).tokens
+    const lower = name.toLowerCase()
+    if (lower.includes("mcp")) {
+      if (!mcpTools.some((entry) => entry.name === name))
+        mcpTools.push({
+          name,
+          serverName: name.split("__")[1] ?? "unknown",
+          tokens,
+          isLoaded: true
+        })
+    } else if (lower.includes("agent") || lower.includes("task")) {
+      if (!agents.some((entry) => entry.agentType === name))
+        agents.push({ agentType: name, source: "tool", tokens })
+    } else if (lower.includes("skill")) {
+      if (!skillFrontmatter.some((entry) => entry.name === name))
+        skillFrontmatter.push({ name, source: "tool", tokens })
+    }
+  }
+  const skills: FunctionSessionContextSkills | undefined =
+    input.contextSources?.skills || skillFrontmatter.length > 0
+      ? {
+          totalSkills: input.contextSources?.skills?.totalSkills ?? skillFrontmatter.length,
+          includedSkills: input.contextSources?.skills?.includedSkills ?? skillFrontmatter.length,
+          tokens: input.contextSources?.skills?.tokens ?? skillFrontmatter.reduce((sum, item) => sum + item.tokens, 0),
+          skillFrontmatter: [
+            ...(input.contextSources?.skills?.skillFrontmatter ?? []),
+            ...skillFrontmatter
+          ]
+        }
+      : undefined
   const messageValue = countContext(
     input.messages.filter((message): message is BaseMessage => BaseMessage.isInstance(message))
   )
@@ -297,6 +343,15 @@ export function projectContextBreakdown(input: {
     gridRows: buildGrid(categories, input.window, input.columns),
     model: input.model,
     messageBreakdown,
+    memoryFiles,
+    mcpTools,
+    agents,
+    ...(input.contextSources?.slashCommands ? { slashCommands: input.contextSources.slashCommands } : {}),
+    ...(skills ? { skills } : {}),
+    ...(input.contextSources?.autoCompactThreshold !== undefined
+      ? { autoCompactThreshold: input.contextSources.autoCompactThreshold }
+      : {}),
+    isAutoCompactEnabled: input.contextSources?.isAutoCompactEnabled ?? true,
     apiUsage,
     estimated: true
   }
