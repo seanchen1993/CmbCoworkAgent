@@ -288,8 +288,6 @@ export class FunctionPanes {
         this.active.set(controller, pane.key)
         this.retained.set(action.generation, (this.retained.get(action.generation) ?? 0) + 1)
         try {
-          if (action.kind === "focus") pane.focused = value.focused as boolean
-          pane.dirty = true
           await this.host.dispatch(
             action.kind === "focus" ? "ui.focus" : "ui.scroll",
             {
@@ -306,6 +304,8 @@ export class FunctionPanes {
               core: async (input) => {
                 if (this.panes.get(pane.key) !== pane)
                   throw new ModFunctionError("MODS_UI_STALE_ACTION")
+                if (action.kind === "focus") pane.focused = input.focused as boolean
+                pane.dirty = true
                 return {
                   element: pane.id,
                   value: action.kind === "focus" ? { focused: input.focused } : input.value
