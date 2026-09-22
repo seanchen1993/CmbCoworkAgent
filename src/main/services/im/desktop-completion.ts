@@ -112,9 +112,27 @@ export class ImDesktopCompletionObserver {
     }
 
     const projectContext = await resolveImProjectModeReplyContext({ metadata: threadMetadata })
+    // 桌面发起的结果同样要标出它不是当前绑定的会话。IM 发起的走 remote-runner，模式
+    // 通知走 notification-pump，那两条都算了这个标志，只有这条漏了——于是从桌面发起的
+    // 任何结果推到招乎都不带提示。而这条路恰恰最需要它:读者根本没在招乎里发起过这一
+    // 轮，也就没有任何理由知道它来自哪个会话，落在一串对话里就像是当前会话的回复。
+    //
+    // 比 threadId 而不是 targetId:桌面会话不一定在 im_targets 里登记过，它只要有一个
+    // grant 就能把结果推过来，那种情况下根本没有 targetId 可比。三种 target 快照都带
+    // threadId，比它对三种绑定是同一套逻辑。
+    //
+    // getActiveTarget 在目标不是 active 时会抛，这里和另外两条路一样吞掉、当作不标注:
+    // 这行提示是附加信息，不该因为它把一条真实的结果拦在外面。
+    let switched = false
+    try {
+      const active = this.dependencies.conversations.getActiveTarget(grant.conversationKey)
+      switched = Boolean(active && active.threadId !== threadId)
+    } catch {
+      switched = false
+    }
     const prefix = projectContext
-      ? imProjectModeReplyPrefix(projectContext)
-      : imThreadReplyPrefix(threadTitle)
+      ? imProjectModeReplyPrefix({ ...projectContext, switched })
+      : imThreadReplyPrefix(threadTitle, switched)
 
     const deliveryId = `desktop-turn:${threadId}:${finalAssistantMessageId}`
     await this.dependencies.events.enqueueProactiveReplies(
