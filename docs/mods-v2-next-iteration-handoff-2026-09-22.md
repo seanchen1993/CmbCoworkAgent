@@ -13,7 +13,7 @@ UAT 工作树：`C:\ai\CmbCoworkAgent`
 
 ## 当前基线必须这样认定
 
-- `codex/mods-v2` 的当前实现提交为 `d7af4134`；最近验证报告提交为 `b0bf4c78`。第 2 批桥接为 `beed7715`，证据/策略/validator 桥接为 `b98785ae`。
+- `codex/mods-v2` 的当前实现提交为 `9fbe7395`；最近验证报告仍由工作树中的日期报告记录，上一份文档提交为 `8bf0a0c3`。第 2 批桥接为 `beed7715`，证据/策略/validator 桥接为 `b98785ae`。
 - 该提交之前的基础能力和第 1 批完成门禁属于已提交代码。
 - 当前工作树继续只在 Mods v2 分支工作；已提交的每个实现批次均有独立测试和报告。不能把文档中“已完成”直接当成已发布事实。
 - 任何开发都在 `C:\ai\CmbCoworkAgent-mods-v2` 进行，禁止在 `C:\ai\CmbCoworkAgent` 的 UAT 工作树直接修改或合并。
@@ -47,7 +47,7 @@ UAT 工作树：`C:\ai\CmbCoworkAgent`
 | 修复后重新收集证据和去重恢复 | 未完成 | 旧 PASS 必须失效 |
 | checkpoint 竞争控制和状态推进 | 部分完成 | state fingerprint、receipt、transition evidence、前后 re-capture 已接入；跨进程外部写入的原子 CAS 仍待收口 |
 | 可配置 DIY 界面和项目作用域 | 部分 | 命令可用，完整配置体验未完成 |
-| Claude 全部事件、主 Agent 模型控制、动态 breakdown、完整 UI | 未完成 | 属于原对齐计划的后续项 |
+| Claude 全部事件、主 Agent 模型控制、动态 breakdown、完整 UI | 部分完成 | 动态 breakdown、模型 fork/classify 边界和 Client focus/scroll 已接入；Pane/global lifecycle 与其余矩阵项仍按 partial/adapted 标注 |
 
 ## 2026-09-22 执行更新
 
@@ -59,7 +59,7 @@ UAT 工作树：`C:\ai\CmbCoworkAgent`
 - 固定 `C:\ai\autobiz_kanban` commit `8db1ec937d6ed3d271cb9dc540310d6633c91e70` 的只读 workflow compiler/validator host bridge；请求的 `C:\ai\autobiz\_kanban` 路径不存在，未修改其他工作树。
 - 兼容性矩阵的每个声明均增加 `implementationStatus`（full/adapted/partial/unsupported），并有结构测试防止无状态条目；新增动态上下文 breakdown、模型 fork/classify 边界、固定 host test runner 和本地 JSON Schema `$ref`。
 
-仍未完成，下一步继续实现而不暂停：实际单测/E2E 的真实项目闭环断言、Autobiz 动态 workflow/blocked/外部竞争的端到端测试、Claude 主 Agent 流式/turn.step/fork/classify 实现、完整 UI sites/focus/scroll/Client 生命周期、安装包和最终性能/关闭对照报告。checkpoint guard 已拒绝 stale 状态，但任意非协作外部写入下的原子 CAS 仍需继续收口。
+仍未完成，下一步继续实现而不暂停：实际单测/E2E 的真实项目闭环断言、Autobiz 动态 workflow/blocked/外部竞争的端到端测试、Claude 主 Agent 流式/turn.step/fork/classify 实现、Pane/global UI lifecycle、安装包和最终性能/关闭对照报告。checkpoint guard 已拒绝 stale 状态，但任意非协作外部写入下的原子 CAS 仍需继续收口。
 
 ## 分批实施方案
 
@@ -305,3 +305,13 @@ C:\ai\CmbCoworkAgent-mods-v2\docs\mods-v2-compatibility-matrix.json
 - Commit preparation now pauses before writing and requires a fresh host evidence callback followed by an explicit `commit` token.
 - If evidence changes or the host callback fails, state.json remains unchanged; regression coverage is in `autobiz-validation.test.ts`.
 - Focused validator + manager suites: 34/34 passed; Node/web typecheck and changed-file ESLint passed.
+
+## Client lifecycle continuation after 9fbe7395
+
+- Added `Client.onFocus` and `Client.onScroll` across the shared action contract, utility-process bootstrap, host Client manager, session validation, renderer event surface, and compatibility matrix.
+- Root focus transitions preserve the prior focus target and avoid duplicate descendant events. Wheel payloads are finite and bounded before host hook dispatch; authority, lease, generation, cancellation, and existing completion paths remain unchanged.
+- Tests-first red was recorded before implementation (`MODS_CLIENT_ACTION` for `focus`). Green validation: focused Client/session suite 45/45, full Mods function suite 59 files / 418 tests, Node/web typecheck, changed-file ESLint, compatibility JSON/test, and production Electron E2E 66/66.
+- New validation record: `output/mods-v2-validation/2026-09-22-client-lifecycle.md`; the audit index is updated in `output/mods-v2-validation/2026-09-22-evidence-audit.md`.
+- Full repository ESLint still reports pre-existing generated/manual-test diagnostics; no errors were reported for the changed Client files. UAT worktree remains untouched.
+
+本次最新提交：`9fbe7395 feat(mods): route client focus and scroll lifecycle`。文档更新待单独提交。
