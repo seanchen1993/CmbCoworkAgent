@@ -698,16 +698,23 @@ export interface DashboardProjectModeProject {
   managedRunEverStarted?: boolean
   /** 所选时间范围内开启的托管运行次数。与上面那个标记不同源，可能标记为真而次数为 0。 */
   managedRunCount?: number
-  /** 运行开销四项，与「对话数」同口径（主动触发的主 Agent root trace）。 */
+  /** 运行开销各项，与「对话数」同口径（主动触发的主 Agent root trace）。 */
   runCost?: {
     toolCalls: number
     modelCalls: number
+    /** 总量，含缓存读取与创建，所以不等于 inputTokens + outputTokens。 */
     totalTokens: number
+    inputTokens: number
+    outputTokens: number
+    /**
+     * 恒为 0：`userInputRequestCount` 这个字段采集侧从未写入，索引里不存在，sum 缺字段
+     * 返回 0。界面上已经撤掉，等采集侧补上标量再恢复展示。
+     */
     userInputRequests: number
     userInputRequestDocs: number
     traceDocs?: number
   }
-  /** false 表示这段时间混着没有 userInputRequestCount 字段的老 trace，问答数是下限。 */
+  /** 带 userInputRequestCount 字段的文档是否覆盖全部轮次。字段目前恒缺失，所以恒为 false。 */
   userInputRequestCountComplete?: boolean
   featureCount: number
   conversationCount: number

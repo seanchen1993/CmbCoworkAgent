@@ -119,9 +119,6 @@ function StageRow({
       </td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtCount(metrics.runCost.modelCalls)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtCount(metrics.runCost.toolCalls)}</td>
-      <td className="px-3 py-2 text-right tabular-nums">
-        {fmtCount(metrics.runCost.userInputRequests)}
-      </td>
     </tr>
   )
 }
@@ -215,7 +212,6 @@ export function ProjectStageAnalysisDialog({
                   <col className="w-[96px]" />
                   <col className="w-[84px]" />
                   <col className="w-[84px]" />
-                  <col className="w-[72px]" />
                 </colgroup>
                 <thead className="sticky top-0 bg-muted/60 backdrop-blur">
                   <tr className="whitespace-nowrap border-b border-border text-muted-foreground">
@@ -248,7 +244,6 @@ export function ProjectStageAnalysisDialog({
                     </th>
                     <th className="px-3 py-2 text-right font-medium">模型调用</th>
                     <th className="px-3 py-2 text-right font-medium">工具调用</th>
-                    <th className="px-3 py-2 text-right font-medium">问答</th>
                   </tr>
                 </thead>
                 <tbody>

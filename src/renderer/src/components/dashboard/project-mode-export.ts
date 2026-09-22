@@ -51,10 +51,9 @@ export const PROJECT_MODE_PROJECT_EXPORT_HEADER = [
   "工具调用次数",
   "模型调用次数",
   "Token 总量",
-  "请求用户回答次数",
-  // 导出是拿去算数的，下限当真值会算错。所以单开一列说明上一列完不完整，而不是像
-  // 界面那样在数字前加个 ~ —— 那会让整列变成字符串。
-  "请求用户回答次数是否完整",
+  // 输入 + 输出 < 总量：差额是缓存读取与缓存创建，三个是不同的量，不是对不上。
+  "输入 Token",
+  "输出 Token",
   "创建人",
   "创建人 SAP ID",
   "创建人 YST ID",
@@ -229,8 +228,8 @@ export function buildProjectModeProjectExportRows(
         project.runCost?.toolCalls ?? 0,
         project.runCost?.modelCalls ?? 0,
         project.runCost?.totalTokens ?? 0,
-        project.runCost?.userInputRequests ?? 0,
-        project.userInputRequestCountComplete === false ? "否（下限）" : "是",
+        project.runCost?.inputTokens ?? 0,
+        project.runCost?.outputTokens ?? 0,
         creatorName(project),
         project.creatorSapId || "",
         project.creatorYstId || "",

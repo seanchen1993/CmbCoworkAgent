@@ -1049,6 +1049,8 @@ const EMPTY_RUN_COST = {
   toolCalls: 0,
   modelCalls: 0,
   totalTokens: 0,
+  inputTokens: 0,
+  outputTokens: 0,
   userInputRequests: 0,
   userInputRequestDocs: 0
 } as const
@@ -1634,14 +1636,8 @@ function ProjectRow({
         <td className="px-3 py-2 text-right tabular-nums">
           <RunCostPair
             rows={[
-              { label: "Token", value: formatCompact(runCost.totalTokens) },
-              {
-                label: "问答",
-                value: formatNumber(runCost.userInputRequests),
-                // 老 trace 没有 userInputRequestCount 字段，sum 把它们当 0 算进来了，
-                // 所以这个数是下限。标出来，别让人把下限当真值读。
-                incomplete: project.userInputRequestCountComplete === false
-              }
+              { label: "输入", value: formatCompact(runCost.inputTokens) },
+              { label: "输出", value: formatCompact(runCost.outputTokens) }
             ]}
           />
         </td>
@@ -2282,7 +2278,7 @@ function ProjectListSection({
         <table
           className={cn(
             "w-full table-fixed text-xs",
-            showSuspectedTechnicalDetailMetric ? "min-w-[2960px]" : "min-w-[2820px]"
+            showSuspectedTechnicalDetailMetric ? "min-w-[2968px]" : "min-w-[2828px]"
           )}
         >
           {/*
@@ -2313,7 +2309,8 @@ function ProjectListSection({
             <col className="w-[190px]" />
             <col className="w-[110px]" />
             <col className="w-[120px]" />
-            <col className="w-[120px]" />
+            {/* Token 输入 / 输出：表头比原来的「Token / 请求问答」多一个空格，120px 差 1px */}
+            <col className="w-[128px]" />
             <col className="w-[110px]" />
             <col className="w-[210px]" />
             <col className="w-[140px]" />
@@ -2404,9 +2401,9 @@ function ProjectListSection({
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="所选时间范围内，该项目所有主、子 Agent 及后台任务消耗的 Token 总量和请求用户回答次数。"
+                title="所选时间范围内，该项目所有主、子 Agent 及后台任务消耗的 Token。输入与输出分开统计，两者之和小于总量——差额是缓存读取与缓存创建。"
               >
-                Token / 请求问答
+                Token 输入 / 输出
               </th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
