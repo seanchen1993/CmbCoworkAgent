@@ -11,6 +11,10 @@ import {
 } from "recharts"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import {
+  PROJECT_METRIC_TOOLTIP_CLASS,
+  ProjectMetricIssueBreakdown
+} from "./ProjectMetricIssueBreakdown"
 import type {
   ProjectMetricSummaryGroup,
   ProjectMetricTrendData,
@@ -20,7 +24,7 @@ import type {
 
 type MetricKey = Exclude<
   keyof ProjectMetricSummaryGroup,
-  "developmentMode" | "projectCount" | "samples"
+  "developmentMode" | "projectCount" | "samples" | "kenanIssueCategories"
 >
 
 const METRICS: Array<{
@@ -31,6 +35,13 @@ const METRICS: Array<{
   color: string
 }> = [
   { key: "avgBugCount", label: "平均缺陷数", unit: "个", sample: "bug", color: "#3b82f6" },
+  {
+    key: "avgKenanIssueCount",
+    label: "平均非功能问题数",
+    unit: "个",
+    sample: "kenanIssue",
+    color: "#14b8a6"
+  },
   {
     key: "avgFuncPointCount",
     label: "平均功能点",
@@ -158,6 +169,10 @@ export function ProjectMetricTrend({
   }, [filters, refreshKey, dateField])
 
   const metrics = METRICS.filter((metric) => selected.includes(metric.key))
+  const tooltipMetrics = [
+    ...metrics.filter((metric) => metric.key !== "avgKenanIssueCount"),
+    ...metrics.filter((metric) => metric.key === "avgKenanIssueCount")
+  ]
   const firstSelectedLabel = METRICS.find((metric) => metric.key === selected[0])?.label
   const changeSelection = (next: MetricKey[]): void => {
     const multiple = next.length > 1
@@ -333,6 +348,12 @@ export function ProjectMetricTrend({
           ))}
         </div>
       </div>
+      {selected.includes("avgKenanIssueCount") ? (
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          按项目{dateField === "endDate" ? "结项" : "立项"}
+          月份分组，展示这些项目截至最近同步时的累计非功能问题数。
+        </p>
+      ) : null}
       {/*<p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">*/}
       {/*  最近 6 个完整自然月，按 GMT+8 立项月份分组，不含当月；不受顶部日期选择影响。*/}
       {/*  数值沿用下方对比指标口径，反映各月立项项目截至当前的指标，并非历史月末快照。*/}
@@ -401,7 +422,7 @@ export function ProjectMetricTrend({
                     const month = data?.months.find((item) => item.month === label)
                     if (!active || !month) return null
                     return (
-                      <div className="rounded-lg border border-border bg-popover p-3 text-xs text-popover-foreground shadow-md">
+                      <div className={PROJECT_METRIC_TOOLTIP_CLASS}>
                         <div className="mb-2 font-semibold">
                           {month.month} {dateField === "endDate" ? "结项" : "立项"}项目
                         </div>
@@ -417,7 +438,7 @@ export function ProjectMetricTrend({
                             </tr>
                           </thead>
                           <tbody>
-                            {metrics.map((metric) => (
+                            {tooltipMetrics.map((metric) => (
                               <tr key={metric.key}>
                                 <td className="py-1" style={{ color: metric.color }}>
                                   {metric.label}
@@ -447,6 +468,11 @@ export function ProjectMetricTrend({
                             ))}
                           </tbody>
                         </table>
+                        {selected.includes("avgKenanIssueCount") ? (
+                          <div className="mt-3 border-t border-border pt-3">
+                            <ProjectMetricIssueBreakdown groups={month.groups} />
+                          </div>
+                        ) : null}
                       </div>
                     )
                   }}

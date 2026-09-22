@@ -24,6 +24,11 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { ProjectMetricTrend } from "./ProjectMetricTrend"
+import {
+  PROJECT_METRIC_TOOLTIP_CLASS,
+  ProjectMetricIssueBreakdown,
+  ProjectMetricProjectIssueBreakdown
+} from "./ProjectMetricIssueBreakdown"
 import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
@@ -96,9 +101,10 @@ function TimeScopeTip(): React.JSX.Element {
           </button>
         </TooltipTrigger>
         <TooltipContent className="max-w-[420px] text-xs leading-relaxed">
-          日期、室组仅用于筛选项目；缺陷数、功能点均为 T-1 数据；代码行数取所选 CMBDevClaw
-          项目截至查询时的累计已 Push 采纳行数；输入/输出 Token 取所选 CMBDevClaw
-          项目截至查询时的累计 trace Token。日期不用于截断代码行数或 Token。
+          日期、室组仅用于筛选项目；缺陷数、功能点均为 T-1 数据；非功能问题数取项目索引中的累计值，
+          日期不截断问题检出时间。代码行数取所选 CMBDevClaw 项目截至查询时的累计已 Push
+          采纳行数；输入/输出 Token 取所选 CMBDevClaw 项目截至查询时的累计 trace
+          Token。日期不用于截断代码行数或 Token。
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -243,6 +249,47 @@ function SummaryMetricValue({
   )
 }
 
+function SummaryMetricCell({
+  row,
+  group,
+  tone,
+  issueGroups
+}: {
+  row: SummaryMetricRow
+  group: ProjectMetricSummaryGroup | null
+  tone: "devclaw" | "non_devclaw"
+  issueGroups: ProjectMetricSummaryGroup[]
+}): React.JSX.Element {
+  const cellClassName =
+    tone === "devclaw"
+      ? "border-l border-sky-500/10 bg-sky-500/[0.025]"
+      : "border-l border-amber-500/10 bg-amber-500/[0.025]"
+  const value = <SummaryMetricValue row={row} group={group} tone={tone} />
+  if (row.sample !== "kenanIssue") {
+    return <td className={`${cellClassName} px-4 py-2.5`}>{value}</td>
+  }
+  return (
+    <td className={cellClassName}>
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div
+              tabIndex={0}
+              className="px-4 py-2.5 focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label="查看非功能问题细分类别"
+            >
+              {value}
+            </div>
+          </TooltipTrigger>
+          <TooltipContent className={PROJECT_METRIC_TOOLTIP_CLASS}>
+            <ProjectMetricIssueBreakdown groups={issueGroups} />
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </td>
+  )
+}
+
 function SummaryComparison({
   data,
   loading,
@@ -258,12 +305,21 @@ function SummaryComparison({
 }): React.JSX.Element {
   const devclaw = summaryGroup(data, "devclaw")
   const nonDevclaw = summaryGroup(data, "non_devclaw")
+  const issueGroups = [devclaw, nonDevclaw].filter(
+    (group): group is ProjectMetricSummaryGroup => group !== null
+  )
   const rows: SummaryMetricRow[] = [
     {
       label: "平均缺陷数",
       hint: "无缺陷的项目按 0 计算",
       read: (group) => group.avgBugCount,
       sample: "bug"
+    },
+    {
+      label: "平均非功能问题数",
+      hint: "项目上线流程关联的 label 对应的 UAT 流水线构建的柯南问题",
+      read: (group) => group.avgKenanIssueCount,
+      sample: "kenanIssue"
     },
     {
       label: "平均功能点",
@@ -389,12 +445,18 @@ function SummaryComparison({
                     <MetricHint label={row.label}>{row.hint}</MetricHint>
                   </div>
                 </td>
-                <td className="border-l border-sky-500/10 bg-sky-500/[0.025] px-4 py-2.5">
-                  <SummaryMetricValue row={row} group={devclaw} tone="devclaw" />
-                </td>
-                <td className="border-l border-amber-500/10 bg-amber-500/[0.025] px-4 py-2.5">
-                  <SummaryMetricValue row={row} group={nonDevclaw} tone="non_devclaw" />
-                </td>
+                <SummaryMetricCell
+                  row={row}
+                  group={devclaw}
+                  tone="devclaw"
+                  issueGroups={issueGroups}
+                />
+                <SummaryMetricCell
+                  row={row}
+                  group={nonDevclaw}
+                  tone="non_devclaw"
+                  issueGroups={issueGroups}
+                />
               </tr>
             ))}
           </tbody>
@@ -556,6 +618,24 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
         <div className="mt-0.5 text-[10px] text-muted-foreground">{item.groupName || "—"}</div>
       </td>
       <td className="px-3 py-2 text-right tabular-nums">{formatCount(item.bugNum)}</td>
+      <td className="text-right tabular-nums">
+        <TooltipProvider delayDuration={150}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div
+                tabIndex={0}
+                className="px-3 py-2 focus-visible:ring-2 focus-visible:ring-ring"
+                aria-label={`查看${item.prjName || item.prjCode}非功能问题细分类别`}
+              >
+                {formatCount(item.kenanIssueCount)}
+              </div>
+            </TooltipTrigger>
+            <TooltipContent className={PROJECT_METRIC_TOOLTIP_CLASS}>
+              <ProjectMetricProjectIssueBreakdown categories={item.kenanIssueCategories} />
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </td>
       <td className="px-3 py-2 text-right tabular-nums">{formatMetric(item.notAdjustFuns)}</td>
       <td className="px-3 py-2 text-right tabular-nums">
         {formatMetric(item.defectDensityPer100Fp)}
@@ -955,12 +1035,13 @@ export function ProjectMetricsSection({
         ) : null}
 
         <div className="mt-3 overflow-x-auto rounded-md border border-border">
-          <table className="w-full min-w-[1455px] table-fixed text-xs">
+          <table className="w-full min-w-[1570px] table-fixed text-xs">
             <colgroup>
               <col className="w-[250px]" />
               <col className="w-[190px]" />
               <col className="w-[190px]" />
               <col className="w-[90px]" />
+              <col className="w-[115px]" />
               <col className="w-[90px]" />
               <col className="w-[105px]" />
               <col className="w-[120px]" />
@@ -981,6 +1062,7 @@ export function ProjectMetricsSection({
                   order={sortOrder}
                   onSort={cycleSort}
                 />
+                <th className="px-3 py-2 text-right font-medium">非功能问题数</th>
                 <SortableProjectMetricTh
                   label="功能点"
                   sortKey="notAdjustFuns"
