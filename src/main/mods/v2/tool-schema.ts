@@ -22,6 +22,7 @@ const keywords = new Set([
   "oneOf",
   "not",
   "uniqueItems"
+  ,"$defs", "definitions", "$ref"
 ])
 
 /** A bounded, non-executable JSON Schema profile. Unsupported keywords fail at registration. */
@@ -54,6 +55,17 @@ export function validateToolSchema(schema: ModObject): void {
       if (!isModObject(value.properties)) throw new ModFunctionError("MODS_TOOL_SCHEMA")
       for (const child of Object.values(value.properties)) visit(child, depth + 1)
     }
+    for (const key of ["$defs", "definitions"]) {
+      if (value[key] !== undefined) {
+        if (!isModObject(value[key])) throw new ModFunctionError("MODS_TOOL_SCHEMA")
+        for (const [name, child] of Object.entries(value[key])) {
+          if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name)) throw new ModFunctionError("MODS_TOOL_SCHEMA")
+          visit(child, depth + 1)
+        }
+      }
+    }
+    if (value.$ref !== undefined && (typeof value.$ref !== "string" || !/^#\/(?:\$defs|definitions)\/[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value.$ref)))
+      throw new ModFunctionError("MODS_TOOL_SCHEMA_REF")
     if (
       value.required !== undefined &&
       (!Array.isArray(value.required) ||
@@ -136,11 +148,20 @@ export function validateRegisteredToolInput(schema: ModObject, input: ModObject)
   const tick = () => {
     if (++work > 20000) throw new ModFunctionError("MODS_TOOL_VALIDATION_LIMIT")
   }
-  const matches = (s: ModJson, value: ModJson, depth = 0): boolean => {
+  const matches = (s: ModJson, value: ModJson, depth = 0, refs = new Set<string>()): boolean => {
     tick()
     if (depth > 32) throw new ModFunctionError("MODS_TOOL_VALIDATION_LIMIT")
     if (typeof s === "boolean") return s
     const rule = s as ModObject
+    if (typeof rule.$ref === "string") {
+      if (refs.has(rule.$ref)) throw new ModFunctionError("MODS_TOOL_VALIDATION_LIMIT")
+      const [, section, name] = rule.$ref.split("/")
+      const definitions = isModObject(schema[section]) ? schema[section] as ModObject : undefined
+      const target = definitions?.[name]
+      if (target === undefined) throw new ModFunctionError("MODS_REGISTERED_TOOL_INPUT")
+      const nextRefs = new Set(refs).add(rule.$ref)
+      return matches(target, value, depth + 1, nextRefs)
+    }
     if (rule.type !== undefined) {
       const declared = Array.isArray(rule.type) ? rule.type : [rule.type]
       if (

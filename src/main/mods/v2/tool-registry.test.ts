@@ -2,6 +2,7 @@ import { afterEach, expect, it } from "vitest"
 import { resolve } from "node:path"
 import { FunctionToolRegistry, functionToolSpec } from "./tool-registry"
 import { validateRegisteredToolInput } from "./tool-schema"
+import { validateToolSchema } from "./tool-schema"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { compileFunctionPlugin } from "./loader"
@@ -308,4 +309,16 @@ it("separates the actual SDK caller from the registered tool owner during admiss
     ["mod", { plugin: "caller", tier: "user" }],
     ["model", { plugin: "engine", tier: "core" }]
   ])
+})
+it("supports bounded local JSON Schema references for built-in style tool parameters", () => {
+  const schema = {
+    type: "object",
+    $defs: { id: { type: "string", minLength: 2 } },
+    properties: { id: { $ref: "#/$defs/id" } },
+    required: ["id"]
+  }
+  validateToolSchema(schema)
+  validateRegisteredToolInput(schema, { id: "ok" })
+  expect(() => validateRegisteredToolInput(schema, { id: "x" })).toThrow("MODS_REGISTERED_TOOL_INPUT")
+  expect(() => validateToolSchema({ $ref: "https://example.com/schema" })).toThrow("MODS_TOOL_SCHEMA_REF")
 })
