@@ -56,6 +56,44 @@ function isTokenUserContextField(field: string): boolean {
 // with CC's session-scoped session-hooks Map, except we track fired state
 // rather than registering ephemeral hooks.
 const firedOnceHookKeys = new Map<string, Set<string>>()
+// A once hook can be reached by two event producers in the same turn before
+// the first child process settles. Keep the shared promise so the command is
+// executed once and both producers observe the same result. Async hooks use a
+// separate pending set because their public result is intentionally a
+// placeholder while the actual execution continues in the background.
+const onceInFlight = new Map<string, Promise<HookResult>>()
+const oncePending = new Set<string>()
+const oncePendingTokens = new Map<string, number>()
+let nextOncePendingToken = 0
+const onceGenerations = new Map<string, number>()
+const onceHookGenerations = new Map<string, number>()
+const onceGenerationSymbol = Symbol("onceGeneration")
+
+interface OnceResultGeneration {
+  session: number
+  hook: number
+}
+
+function currentOnceGeneration(sessionId: string): number {
+  return onceGenerations.get(sessionId) ?? 0
+}
+
+function currentOnceHookGeneration(hookId: string): number {
+  return onceHookGenerations.get(hookId) ?? 0
+}
+
+function tagOnceResult<T extends HookResult>(
+  result: T,
+  sessionId: string,
+  generation?: OnceResultGeneration
+): T {
+  Object.defineProperty(result, onceGenerationSymbol, {
+    value: generation ?? currentOnceGeneration(sessionId),
+    enumerable: true,
+    configurable: true
+  })
+  return result
+}
 
 // Compiled regex cache keyed by matcher string. null = invalid pattern (fallback to exact match).
 const _regexCache = new Map<string, RegExp | null>()
@@ -1194,6 +1232,26 @@ async function executeHook(
   event: HookEvent,
   onLateHookResult?: HookResultCallback
 ): Promise<HookResult> {
+  const onceKey = hook.once === true ? getOnceExecutionKey(hook, event, context) : undefined
+  const onceGeneration = onceKey
+    ? {
+        session: currentOnceGeneration(getOnceSessionId(context)),
+        hook: currentOnceHookGeneration(hook.id)
+      }
+    : undefined
+  if (onceKey && hook.async !== true) {
+    const existing = onceInFlight.get(onceKey)
+    if (existing) return existing
+  }
+  if (onceKey && hook.async === true && oncePending.has(onceKey))
+    return { exitCode: 0, stdout: "", stderr: "", blocked: false, asyncStatus: "pending" }
+  const pendingToken = onceKey ? ++nextOncePendingToken : undefined
+  const clearPending = (): void => {
+    if (!onceKey || pendingToken === undefined || oncePendingTokens.get(onceKey) !== pendingToken)
+      return
+    oncePendingTokens.delete(onceKey)
+    oncePending.delete(onceKey)
+  }
   // PR-15 — async config-layer fork: return a `pending` placeholder
   // synchronously so the calling event chain doesn't wait, then run the
   // real executor in the background and forward the final result through the
@@ -1207,25 +1265,40 @@ async function executeHook(
     event !== "Setup" &&
     !(context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
   ) {
+    if (onceKey) {
+      oncePending.add(onceKey)
+      oncePendingTokens.set(onceKey, pendingToken!)
+    }
     void executeSyncHook(hook, env, context, event)
       .then((late) => {
-        const finalLate: HookResult = {
-          ...applyForcedOutcome(late, hook),
-          asyncStatus: "completed",
-          lateCompletedAt: new Date().toISOString()
-        }
+        clearPending()
+        const finalLate: HookResult = tagOnceResult(
+          {
+            ...applyForcedOutcome(late, hook),
+            asyncStatus: "completed",
+            lateCompletedAt: new Date().toISOString()
+          },
+          getOnceSessionId(context),
+          onceGeneration
+        )
         recordHookResult(event, hook, finalLate, context, onLateHookResult)
+        markOnceHookIfNeeded(hook, event, context, finalLate)
       })
       .catch((err) => {
+        clearPending()
         const errStr = err instanceof Error ? err.message : String(err)
-        const finalLate: HookResult = {
-          exitCode: null,
-          stdout: "",
-          stderr: errStr,
-          blocked: false,
-          asyncStatus: "timeout",
-          lateCompletedAt: new Date().toISOString()
-        }
+        const finalLate: HookResult = tagOnceResult(
+          {
+            exitCode: null,
+            stdout: "",
+            stderr: errStr,
+            blocked: false,
+            asyncStatus: "timeout",
+            lateCompletedAt: new Date().toISOString()
+          },
+          getOnceSessionId(context),
+          onceGeneration
+        )
         recordHookResult(event, hook, finalLate, context, onLateHookResult)
       })
     return {
@@ -1236,7 +1309,22 @@ async function executeHook(
       asyncStatus: "pending"
     }
   }
-  return executeSyncHook(hook, env, context, event)
+  if (onceKey) {
+    oncePending.add(onceKey)
+    oncePendingTokens.set(onceKey, pendingToken!)
+  }
+  const execution = executeSyncHook(hook, env, context, event).then((result) =>
+    onceKey ? tagOnceResult(result, getOnceSessionId(context), onceGeneration) : result
+  )
+  if (!onceKey) return execution
+  onceInFlight.set(onceKey, execution)
+  void execution
+    .then(undefined, () => undefined)
+    .finally(() => {
+      if (onceInFlight.get(onceKey) === execution) onceInFlight.delete(onceKey)
+      clearPending()
+    })
+  return execution
 }
 
 async function executeSyncHook(
@@ -1319,13 +1407,17 @@ function getOnceHookKey(hook: HookConfig, event: HookEvent, context: HookContext
 
 function shouldSkipOnceHook(hook: HookConfig, event: HookEvent, context: HookContext): boolean {
   if (hook.once !== true) return false
+  const key = getOnceHookKey(hook, event, context)
   const sessionSet = firedOnceHookKeys.get(getOnceSessionId(context))
-  if (!sessionSet) return false
-  return sessionSet.has(getOnceHookKey(hook, event, context))
+  return sessionSet?.has(key) ?? false
+}
+
+function getOnceExecutionKey(hook: HookConfig, event: HookEvent, context: HookContext): string {
+  return `${getOnceSessionId(context)}${ONCE_HOOK_KEY_SEPARATOR}${getOnceHookKey(hook, event, context)}`
 }
 
 function shouldConsumeOnceHook(result: HookResult): boolean {
-  return result.exitCode === 0
+  return result.asyncStatus !== "pending" && result.exitCode === 0
 }
 
 function markOnceHookIfNeeded(
@@ -1336,6 +1428,15 @@ function markOnceHookIfNeeded(
 ): void {
   if (hook.once !== true || !shouldConsumeOnceHook(result)) return
   const sessionId = getOnceSessionId(context)
+  const resultGeneration = (
+    result as HookResult & { [onceGenerationSymbol]?: OnceResultGeneration }
+  )[onceGenerationSymbol]
+  if (
+    resultGeneration !== undefined &&
+    (resultGeneration.session !== currentOnceGeneration(sessionId) ||
+      resultGeneration.hook !== currentOnceHookGeneration(hook.id))
+  )
+    return
   let sessionSet = firedOnceHookKeys.get(sessionId)
   if (!sessionSet) {
     sessionSet = new Set<string>()
@@ -1346,7 +1447,17 @@ function markOnceHookIfNeeded(
 
 /** Drop all once-fired entries belonging to a session — call from fireSessionEnd. */
 export function clearOnceStateForSession(sessionId: string): void {
+  onceGenerations.set(sessionId, currentOnceGeneration(sessionId) + 1)
   firedOnceHookKeys.delete(sessionId)
+  for (const key of [...onceInFlight.keys()]) {
+    if (key.startsWith(`${sessionId}${ONCE_HOOK_KEY_SEPARATOR}`)) onceInFlight.delete(key)
+  }
+  for (const key of [...oncePending]) {
+    if (key.startsWith(`${sessionId}${ONCE_HOOK_KEY_SEPARATOR}`)) {
+      oncePending.delete(key)
+      oncePendingTokens.delete(key)
+    }
+  }
 }
 
 /**
@@ -1355,16 +1466,28 @@ export function clearOnceStateForSession(sessionId: string): void {
  * applies — mirrors CC's "register/unregister hook" semantics.
  */
 export function clearOnceStateForHook(hookId: string): void {
+  onceHookGenerations.set(hookId, currentOnceHookGeneration(hookId) + 1)
   const suffix = ONCE_HOOK_KEY_SEPARATOR + hookId
   for (const sessionSet of firedOnceHookKeys.values()) {
     for (const key of [...sessionSet]) {
       if (key.endsWith(suffix)) sessionSet.delete(key)
     }
   }
+  for (const key of [...onceInFlight.keys()]) if (key.endsWith(suffix)) onceInFlight.delete(key)
+  for (const key of [...oncePending])
+    if (key.endsWith(suffix)) {
+      oncePending.delete(key)
+      oncePendingTokens.delete(key)
+    }
 }
 
 export function resetHookOnceStateForTests(): void {
   firedOnceHookKeys.clear()
+  onceInFlight.clear()
+  oncePending.clear()
+  oncePendingTokens.clear()
+  onceGenerations.clear()
+  onceHookGenerations.clear()
 }
 
 function enrichContextFromHook(hook: HookConfig, context: HookContext): HookContext {
@@ -1503,6 +1626,10 @@ export async function runHooks(
       | undefined
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
+      // Multiple definitions can have the same identity in one resolved
+      // chain. Re-check after each completion so a successful first execution
+      // consumes the duplicate before it reaches its executor.
+      if (shouldSkipOnceHook(hook, event, hookContext)) continue
       const result = applyForcedOutcome(
         await executeHook(
           hook,
@@ -1920,15 +2047,17 @@ export async function runHooks(
       }
     })
     let timedOut = false
-    const settled = await Promise.race<Array<PromiseSettledResult<HookResult | undefined>> | "timeout">(
-      [
-        Promise.allSettled(tasks),
-        new Promise<"timeout">((resolve) => setTimeout(() => {
+    const settled = await Promise.race<
+      Array<PromiseSettledResult<HookResult | undefined>> | "timeout"
+    >([
+      Promise.allSettled(tasks),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => {
           timedOut = true
           resolve("timeout")
-        }, TOTAL_TIMEOUT_MS))
-      ]
-    )
+        }, TOTAL_TIMEOUT_MS)
+      )
+    ])
     // For Setup we surface a synthetic blocking result on timeout so the
     // caller (session-lifecycle) does NOT mark the workspace initialised.
     if (event === "Setup") {
@@ -1972,6 +2101,7 @@ export async function runHooks(
   // Notification / SessionStart: fire-and-forget
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
+    if (shouldSkipOnceHook(hook, event, hookContext)) continue
     executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)
