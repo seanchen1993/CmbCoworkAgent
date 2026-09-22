@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it } from "vitest"
@@ -92,5 +92,17 @@ it("honors cancellation before enumeration and records missing explicit files", 
     paths: ["not-created.txt"]
   })
   expect(binding.files).toEqual([{ path: "not-created.txt", size: -1, sha256: "missing" }])
+})
+
+it("expands explicit directory scope and does not fingerprint the directory as a file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mods-evidence-"))
+  roots.push(root)
+  await mkdir(join(root, "src"))
+  await writeFile(join(root, "src", "index.ts"), "version one")
+  const binding = await captureCompletionBinding({
+    workspace: root, threadId: "thread", turnId: "turn", pluginDigests: {}, runtimeGeneration: 1,
+    paths: ["src"]
+  })
+  expect(binding.files).toContainEqual(expect.objectContaining({ path: "src/index.ts" }))
 })
 

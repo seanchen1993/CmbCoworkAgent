@@ -25,6 +25,7 @@ export interface CompletionEvidenceBinding {
   pluginDigests: Record<string, string>
   runtimeGeneration: number
   diffFingerprint: string
+  stateFingerprint: string
   requirementVersion: string
   configFingerprint: string
   files: CompletionFileFingerprint[]
@@ -76,6 +77,9 @@ async function collectFiles(input: CompletionCaptureInput, prefix: string, outpu
   input.assertLive?.()
   if (depth > 24) throw Error("COMPLETION_EVIDENCE_DEPTH")
   const absolute = resolve(input.workspace, prefix)
+  const child = relative(resolve(input.workspace), absolute)
+  if (isAbsolute(child) || child === ".." || child.startsWith("../") || child.startsWith("..\\"))
+    throw Error("COMPLETION_EVIDENCE_PATH")
   if (input.excludePaths?.some((path) => resolve(path) === absolute)) return
   const item = await lstat(absolute).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined
@@ -98,7 +102,10 @@ export async function captureCompletionBinding(input: CompletionCaptureInput): P
   input.assertLive?.()
   if (relative(resolve(input.workspace), await realpath(input.workspace)) !== "")
     throw Error("COMPLETION_EVIDENCE_ROOT_CHANGED")
-  const candidates = new Set<string>(input.paths ?? [])
+  const candidates = new Set<string>()
+  for (const path of input.paths ?? []) {
+    await collectFiles(input, path === "." ? "" : path, candidates)
+  }
   let diff = "non-git"
   let repository = false
   try { repository = (await git(input, ["rev-parse", "--is-inside-work-tree"])).trim() === "true" }
@@ -108,7 +115,11 @@ export async function captureCompletionBinding(input: CompletionCaptureInput): P
   }
   if (repository) {
     const [head, unstaged, staged, paths] = await Promise.all([
-      git(input, ["rev-parse", "--verify", "HEAD"]).catch(() => "unborn"),
+      git(input, ["rev-parse", "--verify", "HEAD"]).catch((error: NodeJS.ErrnoException) => {
+        input.signal?.throwIfAborted()
+        if (Number(error.code) === 128) return "unborn"
+        throw error
+      }),
       git(input, ["diff", "--no-ext-diff", "--no-textconv", "--binary"]),
       git(input, ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--binary"]),
       git(input, ["ls-files", "--modified", "--deleted", "--others", "--exclude-standard", "-z"])
@@ -149,6 +160,7 @@ export async function captureCompletionBinding(input: CompletionCaptureInput): P
     runId: input.runId || `completion:${input.threadId}:${input.turnId}`,
     pluginDigests: Object.fromEntries(Object.entries(input.pluginDigests).sort()),
     runtimeGeneration: input.runtimeGeneration, diffFingerprint: sha256(diff),
+    stateFingerprint: files.find((file) => file.path === ".autobizdevops/state.json")?.sha256 ?? "missing",
     requirementVersion: sha256(JSON.stringify(files.filter((file) =>
       /(^|\/)(requirements?|proposal|spec|prd|design|plan|state|workflow\.d)([^/]*)/i.test(file.path)))),
     configFingerprint: sha256(JSON.stringify(input.config ?? null)), files

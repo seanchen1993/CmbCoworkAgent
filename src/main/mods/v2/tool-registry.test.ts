@@ -322,3 +322,17 @@ it("supports bounded local JSON Schema references for built-in style tool parame
   expect(() => validateRegisteredToolInput(schema, { id: "x" })).toThrow("MODS_REGISTERED_TOOL_INPUT")
   expect(() => validateToolSchema({ $ref: "https://example.com/schema" })).toThrow("MODS_TOOL_SCHEMA_REF")
 })
+
+it("enforces ref siblings and rejects dangling or cyclic references at registration", () => {
+  const schema = {
+    type: "object", $defs: { text: { type: "string" } },
+    properties: { id: { $ref: "#/$defs/text", minLength: 3 } }
+  }
+  validateToolSchema(schema)
+  expect(() => validateRegisteredToolInput(schema, { id: "x" })).toThrow()
+  for (const invalid of [
+    { type: "object", properties: { id: { $ref: "#/$defs/missing" } } },
+    { type: "object", $defs: { cycle: { $ref: "#/$defs/cycle" } } },
+    { type: "object", $defs: { identity: { properties: { tool: { type: "string" } } } }, $ref: "#/$defs/identity" }
+  ]) expect(() => validateToolSchema(invalid as unknown as ModObject)).toThrow()
+})

@@ -2,12 +2,13 @@ import { execFile } from "node:child_process"
 import { access } from "node:fs/promises"
 import { promisify } from "node:util"
 import { join, resolve } from "node:path"
+import { AUTOBIZ_KANBAN_COMMIT, withPinnedAutobiz } from "./autobiz-source"
+export { AUTOBIZ_KANBAN_SOURCE, AUTOBIZ_KANBAN_COMMIT } from "./autobiz-source"
 
 const run = promisify(execFile)
-export const AUTOBIZ_KANBAN_SOURCE = "C:\\ai\\autobiz_kanban"
-export const AUTOBIZ_KANBAN_COMMIT = "8db1ec937d6ed3d271cb9dc540310d6633c91e70"
 
 export interface AutobizValidationResult {
+  kind?: "autobiz-validator"
   passed: boolean
   feature?: string
   checkpoint?: string
@@ -52,15 +53,15 @@ def load(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec); sys.modules[name] = mod; spec.loader.exec_module(mod); return mod
 try:
-    commit = subprocess.check_output(['git','-C',source,'rev-parse','HEAD'], text=True).strip()
-    if commit != expected: raise RuntimeError('AUTOBIZ_SOURCE_CHANGED:'+commit)
+    commit = expected
     with open(state_path, encoding='utf-8') as f: state = json.load(f)
     features = state.get('features') or {}
     feature = requested or (next(iter(features)) if len(features) == 1 else None)
     if not feature or feature not in features: raise RuntimeError('AUTOBIZ_FEATURE_MISSING')
+    if not __import__('re').fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', feature): raise RuntimeError('AUTOBIZ_FEATURE_INVALID')
     record = features[feature]
     if isinstance(record, str): raise RuntimeError('AUTOBIZ_FEATURE_RECORD_INVALID')
-    checkpoint = record.get('currentCheckpoint') or record.get('checkpoint') or record.get('currentNode') or record.get('node')
+    checkpoint = record.get('checkpoint')
     if not checkpoint: raise RuntimeError('AUTOBIZ_CHECKPOINT_MISSING')
     compiler = load(os.path.join(source,'board_core','workflow_compiler.py'), 'mods_compiler')
     contracts = load(os.path.join(source,'board_core','contracts.py'), 'mods_contracts')
@@ -69,22 +70,22 @@ try:
     compiler.load_record_effective_board_config(Path(config_path), repo_root=Path(source), workspace=Path(workspace), record=record)
     workflow_contracts = contracts.load_record_workflow_contracts(Path(source), record, workspace=Path(workspace))
     artifact = load(os.path.join(source,'skills','autodev','hooks','artifact_check.py'), 'mods_artifact_check')
-    skill = record.get('currentSkill') or record.get('skill') or workflow_contracts.end_checkpoint_to_skill.get(checkpoint) or workflow_contracts.start_checkpoint_to_skill.get(checkpoint)
+    skill = workflow_contracts.end_checkpoint_to_skill.get(checkpoint) or workflow_contracts.start_checkpoint_to_skill.get(checkpoint)
     if not skill: raise RuntimeError('AUTOBIZ_SKILL_MISSING:'+str(checkpoint))
-    slug = record.get('featureSlug') or record.get('slug') or feature
+    slug = feature
     pre_code, pre_msg = artifact.run_precheck(Path(source), Path(workspace), skill, slug, workflow_record=record)
     post_code, post_msg = artifact.run_postcheck(Path(source), Path(workspace), skill, slug, workflow_record=record)
     ok = int(pre_code) == 0 and int(post_code) == 0
-    print(json.dumps({'passed':ok,'feature':feature,'checkpoint':checkpoint,'sourceCommit':commit,'compiler':'passed','validator':'passed' if ok else 'failed','reason':str(post_msg or pre_msg)}, ensure_ascii=False))
+    print(json.dumps({'kind':'autobiz-validator','passed':ok,'feature':feature,'checkpoint':checkpoint,'sourceCommit':commit,'compiler':'passed','validator':'passed' if ok else 'failed','reason':str(pre_msg if pre_code else post_msg)}, ensure_ascii=False))
 except Exception as e:
     print(json.dumps({'passed':False,'sourceCommit':locals().get('commit', ''),'compiler':'failed','validator':'failed','reason':str(e)[:4000]}, ensure_ascii=False))
     sys.exit(0)
 `
   try {
     await access(statePath)
-    const { stdout } = await run(PYTHON, ["-c", script, AUTOBIZ_KANBAN_SOURCE, root, AUTOBIZ_KANBAN_COMMIT, statePath, feature || ""], {
-      cwd: root, encoding: "utf8", timeout: timeoutMs, maxBuffer: 256 * 1024, windowsHide: true, signal
-    })
+    const { stdout } = await withPinnedAutobiz(signal, (source) => run(PYTHON, ["-I", "-B", "-X", "utf8", "-c", script, source, root, AUTOBIZ_KANBAN_COMMIT, statePath, feature || ""], {
+      cwd: source, encoding: "utf8", timeout: timeoutMs, maxBuffer: 256 * 1024, windowsHide: true, signal
+    }))
     const line = stdout.trim().split(/\r?\n/).at(-1) || ""
     const result = JSON.parse(line) as AutobizValidationResult
     if (result.sourceCommit !== AUTOBIZ_KANBAN_COMMIT)
@@ -163,9 +164,9 @@ except Exception as e:
 `
   const root = resolve(input.workspace)
   try {
-    const { stdout } = await run(PYTHON, ["-c", script, AUTOBIZ_KANBAN_SOURCE, root, input.feature, input.from, input.to, input.expectedStateFingerprint, input.idempotencyKey], {
-      cwd: root, encoding: "utf8", timeout: input.timeoutMs ?? 120_000, maxBuffer: 256 * 1024, windowsHide: true, signal: input.signal
-    })
+    const { stdout } = await withPinnedAutobiz(input.signal, (source) => run(PYTHON, ["-I", "-B", "-X", "utf8", "-c", script, source, root, input.feature, input.from, input.to, input.expectedStateFingerprint, input.idempotencyKey], {
+      cwd: source, encoding: "utf8", timeout: input.timeoutMs ?? 120_000, maxBuffer: 256 * 1024, windowsHide: true, signal: input.signal
+    }))
     return JSON.parse(stdout.trim().split(/\r?\n/).at(-1) || "") as AutobizCheckpointTransition
   } catch (error) {
     if (input.signal?.aborted) throw error

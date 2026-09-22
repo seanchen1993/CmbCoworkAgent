@@ -8,6 +8,7 @@ import { FunctionModsManager } from "./manager"
 import type { ModJson } from "../../../shared/mods/types"
 import { randomUUID } from "node:crypto"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
+import { captureCompletionBinding } from "./completion-evidence"
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -69,6 +70,52 @@ it("never advances an Autobiz checkpoint without a host validator evidence event
     evidenceId: "missing", feature: "order-export", from: "requirements_eval_in_progress",
     to: "requirements_eval_done", stateFingerprint: "state", idempotencyKey: "once"
   }, new AbortController().signal)).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_REQUIRED")
+})
+
+it("does not let report mode block completion on a guest revise decision", async () => {
+  const f = await fixture()
+  await writeFile(
+    join(f.plugin, "hooks/gate.ts"),
+    `export function register(on) { on("completion.check", () => ({decision:"revise",reason:"report only"})) }`
+  )
+  const hooksPath = join(f.plugin, "hooks/hooks.json")
+  const hooks = JSON.parse(await readFile(hooksPath, "utf8"))
+  hooks.modules.push("./gate.ts")
+  await writeFile(hooksPath, JSON.stringify(hooks))
+  await f.approve()
+  f.control.functionState.set(JSON.stringify([f.root, "function-commands"]), "completion-config", {
+    mode: "report", scope: "project", checks: ["code-review"], maxRepairs: 0,
+    timeoutMs: 1000, modelTokenBudget: 256
+  })
+  expect(f.control.functionState.get(JSON.stringify([f.root, "function-commands"]), "completion-config")).toMatchObject({ mode: "report" })
+  await f.manager.turnStart(f.root, "thread", { turnId: "turn", text: "implement" }, new AbortController().signal)
+  const gate = await f.manager.completionGate(f.root, "thread", () => ({ turnId: "turn" }))
+  expect(gate).toBeDefined()
+  await expect(gate!({ signal: new AbortController().signal, revisionAttempts: 0, maxRevisionAttempts: 2 }))
+    .resolves.toMatchObject({ decision: "pass" })
+})
+
+it("rejects a checkpoint transition when validator evidence is bound to a stale state", async () => {
+  const f = await fixture()
+  await f.approve()
+  const binding = await captureCompletionBinding({
+    workspace: f.root, threadId: "thread", turnId: "turn", runId: "run",
+    pluginDigests: { plugin: "digest" }, runtimeGeneration: 1
+  })
+  f.control.saveCompletionEvidence({
+    id: "started", idempotencyKey: "started", workspace: f.root, threadId: "thread",
+    turnId: "turn", runId: "run", phase: "check.started", status: "running", binding,
+    detail: { attempt: "stale" }, at: 1
+  })
+  f.control.saveCompletionEvidence({
+    id: "validator", idempotencyKey: "validator", workspace: f.root, threadId: "thread",
+    turnId: "turn", runId: "run", phase: "validator.result", status: "pass", binding,
+    detail: { kind: "autobiz-validator", passed: true, feature: "order-export" }, at: 2
+  })
+  await expect(f.manager.advanceAutobizCheckpoint(f.root, "thread", {
+    evidenceId: "stale", feature: "order-export", from: "requirements_eval_in_progress",
+    to: "requirements_eval_done", stateFingerprint: "changed", idempotencyKey: "stale"
+  }, new AbortController().signal)).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_STALE")
 })
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()

@@ -628,8 +628,16 @@ export class FunctionModsManager {
       throw new ModFunctionError("MODS_AUTOBIZ_TRANSITION_ARGUMENTS")
     const records = this.store.completionEvidence(workspace, threadId, 500)
     const started = records.find((record) => record.phase === "check.started" && isModObject(record.detail) && record.detail.attempt === evidenceId)
-    const validator = records.find((record) => record.phase === "validator.result" && record.status === "pass" && started && bindingFingerprint(record.binding) === bindingFingerprint(started.binding))
-    if (!validator) throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_REQUIRED")
+    const validator = records.find((record) => {
+      if (record.phase !== "validator.result" || record.status !== "pass" || !started) return false
+      if (record.at < started.at || bindingFingerprint(record.binding) !== bindingFingerprint(started.binding)) return false
+      return isModObject(record.detail) && record.detail.kind === "autobiz-validator" && record.detail.passed === true
+    })
+    if (!started || !validator) throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_REQUIRED")
+    if (validator.binding.stateFingerprint !== stateFingerprint ||
+      (isModObject(validator.detail) && typeof validator.detail.feature === "string" && validator.detail.feature !== feature) ||
+      records.some((record) => record.phase === "invalidated" && record.at >= validator.at && bindingFingerprint(record.binding) === bindingFingerprint(validator.binding)))
+      throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
     const scope = this.host.fileScope?.(workspace, threadId)
     scope?.assertLive()
     const result = await advanceAutobizCheckpoint({
@@ -643,6 +651,8 @@ export class FunctionModsManager {
     })
     this.host.assertThread?.(workspace, threadId)
     for (const snapshot of (this.sessions.get(JSON.stringify([workspace, threadId]))?.snapshots.values() ?? [])) this.store.assertGrant(snapshot.grant)
+    if (!result.applied && !result.duplicate)
+      throw new ModFunctionError(result.reason || "MODS_AUTOBIZ_TRANSITION_FAILED")
     return result as unknown as ModObject
   }
 
@@ -774,6 +784,10 @@ export class FunctionModsManager {
           const result = await entry.session!.checkCompletion(safe as ModObject, signal)
           signal.throwIfAborted()
           assertLive()
+          const policies = [...entry.snapshots.keys()]
+            .map((name) => policyFor(name))
+            .filter((policy): policy is NonNullable<typeof policy> => !!policy)
+          const reportOnly = policies.length > 0 && policies.every((policy) => policy.mode === "report")
           const projectPolicies = [...entry.snapshots.keys()]
             .map((name) => policyFor(name))
             .filter((policy): policy is NonNullable<typeof policy> =>
@@ -818,6 +832,13 @@ export class FunctionModsManager {
           if (!sameCompletionBinding(binding, await capture(signal))) {
             record("invalidated", "stale", { reason: "input-changed" })
             return { decision: "block", reason: "COMPLETION_EVIDENCE_STALE" }
+          }
+          if (reportOnly) {
+            record("check.result", "pass", {
+              ...result, decision: "pass", source: "guest-opinion-report", businessAccepted: false,
+              reportedDecision: result.decision
+            })
+            return { decision: "pass", reason: "COMPLETION_REPORT_ONLY" }
           }
           record("check.result", result.decision, { ...result, source: "guest-opinion", businessAccepted: false })
           if (result.decision === "revise") record("repair.attempt", "revise", { revisionAttempts: revisionAttempts + 1 })

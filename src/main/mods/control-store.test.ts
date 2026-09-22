@@ -47,6 +47,7 @@ describe("Mod durable control store", () => {
         pluginDigests: { p: "d" },
         runtimeGeneration: 1,
         diffFingerprint: "diff",
+        stateFingerprint: "state",
         requirementVersion: "req",
         configFingerprint: "config",
         files: []
