@@ -91,9 +91,17 @@ async function main(): Promise<void> {
             path: "hooks",
             namespace: "fixture"
           }))
+          builder.onResolve({ filter: /[\\/]lib[\\/]thread-context(?:\.tsx?)?$/ }, () => ({
+            path: "thread-context",
+            namespace: "fixture"
+          }))
           builder.onLoad({ filter: /.*/, namespace: "fixture" }, (args) => ({
             contents:
-              args.path === "hooks"
+              args.path === "thread-context"
+                ? `export function useThreadStateSelector(_threadId, selector) {
+                    return selector({ workspacePath: "C:/workspace", workspaceFiles: [] });
+                  }`
+                : args.path === "hooks"
                 ? "export const HookLogChip=()=>null"
                 : `import {StreamingMarkdown} from ${JSON.stringify(join(projectRoot, "src/renderer/src/components/chat/StreamingMarkdown.tsx"))};
           export function MessageBubble({message}) {
@@ -151,12 +159,42 @@ async function main(): Promise<void> {
   }
   try {
     await page.addScriptTag({ content: "window.__name = (value) => value" })
+    await page.evaluate(() => {
+      Object.defineProperty(window, "electron", {
+        configurable: true,
+        value: { process: { platform: "win32" } }
+      })
+      ;(window as unknown as { resourcePreviewEvents: unknown[] }).resourcePreviewEvents = []
+      window.addEventListener("resource-preview:open", (event) => {
+        ;(window as unknown as { resourcePreviewEvents: unknown[] }).resourcePreviewEvents.push(
+          (event as CustomEvent).detail
+        )
+      })
+    })
     await page.evaluate((source) => {
       window.chatSearchWorkerUrl = URL.createObjectURL(
         new Blob([source], { type: "text/javascript" })
       )
     }, workerBundle.outputFiles[0].text)
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await check("file links without code spans emit preview requests", async () => {
+      if (baseline) return { skipped: true }
+      await page.evaluate(() => window.chatNavigationFixture.mountFileLinks())
+      await page.getByTestId("file-link-fixture").waitFor()
+      const driveLink = page.getByRole("link", { name: "drive", exact: true })
+      const customLink = page.getByRole("link", { name: "custom", exact: true })
+      await driveLink.click()
+      await customLink.click()
+      const events = await page.evaluate(
+        () => (window as unknown as { resourcePreviewEvents: Array<Record<string, unknown>> })
+          .resourcePreviewEvents
+      )
+      assert.deepEqual(
+        events.map((event) => event.filePath),
+        ["C:/workspace/src/index.ts", "C:/workspace/src/data.json"]
+      )
+      return events
+    })
     const open = async (
       kind: "occurrences" | "folded" | "delayed" | "dense" | "tail" | "inline"
     ): Promise<void> => {

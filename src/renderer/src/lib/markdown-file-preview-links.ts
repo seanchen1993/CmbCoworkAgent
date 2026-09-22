@@ -1,3 +1,5 @@
+import { resolveResourcePreviewPaths } from "./resource-preview-paths"
+
 function normalizeWindowsDrivePath(value: string): string {
   return value.replace(/^\/+([a-zA-Z]:[\\/])/, "$1")
 }
@@ -6,88 +8,127 @@ function stripLineSuffix(value: string): string {
   return value.replace(/:\d+(?::\d+)?$/, "")
 }
 
-function isAbsoluteFilePath(value: string): boolean {
-  return value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value)
+function decodeHref(value: string): string | null {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    try {
+      return decodeURI(value)
+    } catch {
+      return null
+    }
+  }
 }
 
-function normalizePathForCompare(value: string): string {
-  return normalizeWindowsDrivePath(stripLineSuffix(value)).replace(/\\/g, "/").replace(/\/+$/, "")
-}
-
-function isWorkspaceFilePath(
-  filePath: string,
-  workspacePath: string | null | undefined
-): boolean {
-  if (!workspacePath) return false
-  const normalizedFilePath = normalizePathForCompare(filePath)
-  const normalizedWorkspacePath = normalizePathForCompare(workspacePath)
+function isWindowsAbsolutePath(value: string): boolean {
   return (
-    normalizedFilePath === normalizedWorkspacePath ||
-    normalizedFilePath.startsWith(`${normalizedWorkspacePath}/`)
+    /^[a-zA-Z]:[\\/]/.test(value) ||
+    /^\\\\[^\\/]+[\\/]+[^\\/]+(?:[\\/]|$)/.test(value) ||
+    /^\/\/[^/]+\/[^/]+(?:\/|$)/.test(value) ||
+    /^\/\/\?\/UNC\/[^/]+\/[^/]+(?:\/|$)/i.test(value)
   )
 }
 
-function isLocalhostFileUrl(value: string): string | null {
+function isAbsoluteFilePath(value: string): boolean {
+  return value.startsWith("/") || isWindowsAbsolutePath(value)
+}
+
+function isLocalhost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase()
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "[::1]"
+}
+
+function pathFromCustomFileScheme(value: string, scheme: "codex-file:" | "file:"): string | null {
+  const rest = value.slice(scheme.length)
+  if (!rest.startsWith("//")) {
+    return rest || null
+  }
+
+  const authorityAndPath = rest.slice(2)
+  // `codex-file://C:/repo/file` is not parsed as a normal URL: URL treats `C:`
+  // as the host. Handle the drive form before looking for an authority.
+  if (/^[a-zA-Z]:[\\/]/.test(authorityAndPath)) return authorityAndPath
+  if (authorityAndPath.startsWith("/")) return authorityAndPath
+
+  const slashIndex = authorityAndPath.indexOf("/")
+  if (slashIndex < 0) return `//${authorityAndPath}`
+  const authority = authorityAndPath.slice(0, slashIndex)
+  const pathname = authorityAndPath.slice(slashIndex)
+  if (authority.toLowerCase() === "localhost") return pathname
+  return `//${authority}${pathname}`
+}
+
+function pathFromHref(value: string): string | null {
+  const decoded = decodeHref(value.trim())
+  if (!decoded) return null
+
+  const normalizedDrivePath = normalizeWindowsDrivePath(decoded)
+  if (isAbsoluteFilePath(normalizedDrivePath)) return normalizedDrivePath
+
+  const lower = decoded.toLowerCase()
+  if (lower.startsWith("codex-file:")) {
+    return pathFromCustomFileScheme(decoded, "codex-file:")
+  }
+  if (lower.startsWith("file:")) {
+    return pathFromCustomFileScheme(decoded, "file:")
+  }
+
   let url: URL
   try {
-    url = new URL(value)
+    url = new URL(decoded)
   } catch {
     return null
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null
-  if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1" && url.hostname !== "::1") {
-    return null
+  if ((url.protocol === "http:" || url.protocol === "https:") && isLocalhost(url.hostname)) {
+    try {
+      return decodeURIComponent(url.pathname)
+    } catch {
+      return null
+    }
   }
-  let filePath: string
-  try {
-    filePath = decodeURIComponent(url.pathname)
-  } catch {
-    return null
+  return null
+}
+
+function rendererPlatformForPaths(filePath: string, workspacePath: string): NodeJS.Platform {
+  if (isWindowsAbsolutePath(filePath) || isWindowsAbsolutePath(workspacePath)) return "win32"
+  if (typeof window !== "undefined") {
+    const platform = window.electron?.process?.platform
+    if (platform) return platform
   }
-  return isAbsoluteFilePath(stripLineSuffix(filePath)) ? stripLineSuffix(filePath) : null
+  return "linux"
 }
 
 export function normalizePreviewFileHref(
   href: string | undefined,
   workspacePath: string | null | undefined
 ): string | null {
-  if (!href) return null
-  let decoded: string
-  try {
-    decoded = decodeURI(href)
-  } catch {
-    return null
-  }
-  if (decoded.startsWith("codex-file://")) {
-    try {
-      const url = new URL(decoded)
-      return `${url.hostname ? `/${url.hostname}` : ""}${url.pathname}`
-    } catch {
-      return null
-    }
-  }
-  const localhostFilePath = isLocalhostFileUrl(decoded)
-  if (localhostFilePath && isWorkspaceFilePath(localhostFilePath, workspacePath)) {
-    return localhostFilePath
-  }
-  const withoutLine = normalizeWindowsDrivePath(stripLineSuffix(decoded))
-  return isAbsoluteFilePath(withoutLine) && isWorkspaceFilePath(withoutLine, workspacePath)
-    ? withoutLine
-    : null
+  if (!href || !workspacePath) return null
+  const filePath = pathFromHref(href)
+  if (!filePath) return null
+  const withoutLine = normalizeWindowsDrivePath(stripLineSuffix(filePath))
+  if (!isAbsoluteFilePath(withoutLine)) return null
+
+  const resolved = resolveResourcePreviewPaths(
+    withoutLine,
+    workspacePath,
+    rendererPlatformForPaths(withoutLine, workspacePath),
+    "absolute"
+  )
+  return resolved.inWorkspace ? resolved.fullPath : null
 }
 
 export function isLocalFileLikeHref(href: string): boolean {
-  let decoded = href.trim()
-  try {
-    decoded = decodeURI(decoded)
-  } catch {
-    return true
-  }
+  const decoded = decodeHref(href.trim())
+  if (!decoded) return true
   const withoutLine = normalizeWindowsDrivePath(stripLineSuffix(decoded))
+  const lower = decoded.toLowerCase()
   return (
-    decoded.startsWith("codex-file://") ||
+    lower.startsWith("codex-file:") ||
+    lower.startsWith("file:") ||
     /^[a-zA-Z]:[\\/]/.test(withoutLine) ||
     /^\/+[a-zA-Z]:[\\/]/.test(decoded) ||
-    withoutLine.startsWith("/")
+    withoutLine.startsWith("/") ||
+    /^\\\\[^\\/]+[\\/]+[^\\/]+/.test(withoutLine) ||
+    /^\/\/[^/]+\/[^/]+/.test(withoutLine)
   )
 }
