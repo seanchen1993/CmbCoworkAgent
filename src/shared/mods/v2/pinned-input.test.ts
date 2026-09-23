@@ -95,3 +95,11 @@ it("pins InstructionsLoaded source facts", () => {
       )
     ).toThrow("MODS_PINNED_INPUT")
 })
+
+it("pins explicit expansion identity and original command text", () => {
+  const original = { hook_event_name: "UserPromptExpansion", session_id: "thread", expansion_type: "slash_command", command_name: "review", command_args: "changes", command_source: "plugin", prompt: "/review changes" }
+  expect(normalizeFunctionInput("classic.UserPromptExpansion", {}, original)).toEqual(original)
+  for (const key of ["expansion_type", "command_name", "command_args", "command_source", "prompt"]) {
+    expect(() => normalizeFunctionInput("classic.UserPromptExpansion", { ...original, [key]: "spoofed" }, original)).toThrow("MODS_PINNED_INPUT")
+  }
+})

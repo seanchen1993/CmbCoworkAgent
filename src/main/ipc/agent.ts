@@ -2406,7 +2406,8 @@ function registerCurrentRunMessagePreparer({
           type: "custom",
           data: {
             type: "hook_blocked",
-            hookEvent: prepared.blockedBy === "explicit_skill" ? "PreSkillUse" : "UserPromptSubmit",
+            hookEvent: prepared.blockedBy === "explicit_skill"
+              ? prepared.hookEvent ?? "PreSkillUse" : "UserPromptSubmit",
             action: "block",
             reason: prepared.reason
           }
@@ -7176,7 +7177,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               },
               onSystemMessage: (notice) => {
                 sendHookNotice(notice)
-              }
+              },
+              isPreparationCurrent: () =>
+                isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
             })
 
           // Internal notification turns (coordinator OR workflow) carry a synthetic

@@ -185,3 +185,11 @@ it("describes InstructionsLoaded as an asynchronous AGENTS adaptation with upstr
   expect(row?.note).toContain("CLAUDE.md")
   expect(row?.evidence).toContain("tests/support/mods-instructions-loaded-e2e.ts")
 })
+
+it("bounds UserPromptExpansion compatibility to real direct skill selection", () => {
+  const row = (matrix.classicEvents as Array<Record<string, unknown>>).find((item) => item.name === "classic.UserPromptExpansion")
+  expect(row?.implementationStatus).toBe("adapted")
+  expect(row?.note).toContain("direct skill")
+  expect(row?.note).toContain("MCP prompt")
+  expect(row?.evidence).toContain("tests/support/mods-prompt-expansion-e2e.ts")
+})

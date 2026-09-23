@@ -651,3 +651,45 @@ it("discards a real guest InstructionsLoaded decision without changing the origi
     await session.close()
   }
 })
+
+it("awaits an expansion matcher and runs the legacy core only once", async () => {
+  classicEvent.mockImplementation(async (_workspace, _thread, _event, input, signal, core) => {
+    expect(input).toMatchObject({ command_name: "review", command_args: "changes", prompt: "/review changes", expansion_type: "slash_command", command_source: "plugin" })
+    await core(input, signal)
+    return core(input, signal)
+  })
+  legacyCall.mockResolvedValue({ exitCode: 2, stdout: "", stderr: "review required", blocked: true })
+  const result = await runHooks([{
+    id: "expansion", event: "UserPromptExpansion", type: "http", url: "https://example.invalid/policy", enabled: true, matcher: "review", async: true, createdAt: "2026-09-23", updatedAt: "2026-09-23"
+  }], "UserPromptExpansion", {
+    workspacePath: "/workspace", sessionId: "thread", userPrompt: "/review changes",
+    promptExpansion: { expansion_type: "slash_command", command_name: "review", command_args: "changes", command_source: "plugin" }
+  })
+  expect(result).toMatchObject({ blocked: true })
+  expect(legacyCall).toHaveBeenCalledOnce()
+  expect(JSON.parse(legacyCall.mock.calls[0][1])).toMatchObject({ command_name: "review", prompt: "/review changes" })
+})
+
+it("projects real guest expansion context and rejects forged command identity", async () => {
+  const { FunctionGuestRuntime } = await import("../mods/v2/guest-runtime")
+  const { FunctionSession, SESSION_CAPABILITIES } = await import("../mods/v2/session")
+  const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+    on("classic.UserPromptExpansion",async($,e,next)=>{
+      if(e.command_args==="forge") return next({...e,command_name:"spoofed"});
+      await next(e);return {additionalContext:["ACTUAL_EXPANSION_CONTEXT"]}
+    })
+  }}`)
+  const session = new FunctionSession([{name:"expansion",root:"/expansion",tier:"user",guest,capabilities:[...SESSION_CAPABILITIES]}],{
+    workspace:"/workspace",threadId:"thread",assertLive:()=>undefined,publish:async(value)=>value
+  })
+  classicEvent.mockImplementation((_workspace,_thread,event,input,signal,core)=>session.classicEvent(event,input,signal,core))
+  try {
+    const context = {workspacePath:"/workspace",sessionId:"thread",userPrompt:"/review changes",promptExpansion:{expansion_type:"slash_command" as const,command_name:"review",command_args:"changes",command_source:"plugin"}}
+    expect(await runHooks([],"UserPromptExpansion",context)).toMatchObject({additionalContext:"ACTUAL_EXPANSION_CONTEXT"})
+    const core = vi.fn(async(_input: unknown, _signal: AbortSignal)=>{ void _input; void _signal; return {} })
+    await session.classicEvent("classic.UserPromptExpansion",{hook_event_name:"UserPromptExpansion",session_id:"thread",cwd:"/workspace",transcript_path:"",prompt:"/review forge",...context.promptExpansion,command_args:"forge"},new AbortController().signal,core)
+    // Optional handler failure falls back through its original input, never a forged identity.
+    expect(core).toHaveBeenCalledOnce()
+    expect(core.mock.calls[0][0]).toMatchObject({command_name:"review"})
+  } finally { await session.close() }
+})

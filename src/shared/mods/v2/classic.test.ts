@@ -255,3 +255,11 @@ it("requires valid InstructionsLoaded file provenance", () => {
       validateClassicInput("classic.InstructionsLoaded", { ...input, ...change })
     ).toThrow("MODS_CLASSIC_INPUT")
 })
+
+it("requires resolved prompt expansion facts and bounded original text", () => {
+  const input = { hook_event_name: "UserPromptExpansion", session_id: "thread", cwd: "/workspace", transcript_path: "", expansion_type: "slash_command", command_name: "review", command_args: "changes", command_source: "plugin", prompt: "/review changes" }
+  expect(() => validateClassicInput("classic.UserPromptExpansion", input)).not.toThrow()
+  for (const [key, value] of [["expansion_type", "tool"], ["command_name", ""], ["command_args", 5], ["command_source", null], ["prompt", "x".repeat(32001)]]) {
+    expect(() => validateClassicInput("classic.UserPromptExpansion", { ...input, [key as string]: value })).toThrow("MODS_CLASSIC_INPUT")
+  }
+})

@@ -104,6 +104,11 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
     description: "在本轮结束时，对本轮实际激活过的技能触发，可记录使用结果或要求 Agent 修订"
   },
   {
+    value: "UserPromptExpansion",
+    label: "技能提示展开前（UserPromptExpansion）",
+    description: "用户直接选择的有效技能激活前触发，可阻止展开或补充上下文；不包括模型调用技能工具"
+  },
+  {
     value: "UserPromptSubmit",
     label: "用户提交提示（UserPromptSubmit）",
     description: "用户消息进入模型前触发，可阻断、重写提示或注入 additionalContext"
@@ -1415,6 +1420,16 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
 
   const extraObjects: HookReadableObjectDoc[] = []
 
+  if (event === "UserPromptExpansion") {
+    stdinFields.push(
+      { key: "command_name", description: "已解析的技能名称，也是此事件的 matcher。" },
+      { key: "command_args", description: "选择技能时的消息正文，不包含内部技能标记。" },
+      { key: "command_source", description: "plugin 为已安装插件技能，local 为其他已启用技能。" },
+      { key: "expansion_type", description: "当前适配 slash_command；不声明 MCP prompt 支持。" },
+      { key: "prompt", description: "原始输入。decision=block 阻止激活和模型请求；additionalContext 附加到技能上下文。" }
+    )
+  }
+
   if (event === "InstructionsLoaded") {
     stdinFields.push(
       { key: "file_path", description: "实际注入的指令来源路径。" },
@@ -1732,7 +1747,8 @@ export function AddHookDialog(props: {
     () => HOOK_EVENTS.find((item) => item.value === event) ?? HOOK_EVENTS[0],
     [event]
   )
-  const isSkillMatcherEvent = event === "PreSkillUse" || event === "PostSkillUse"
+  const isSkillMatcherEvent =
+    event === "PreSkillUse" || event === "PostSkillUse" || event === "UserPromptExpansion"
   const showMatcher =
     event === "PreToolUse" ||
     event === "PostToolUse" ||

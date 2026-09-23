@@ -43,6 +43,7 @@ const classicIdentity = [
 
 const classicFacts: Record<string, readonly string[]> = {
   "classic.PostToolBatch": ["tool_calls"],
+  "classic.UserPromptExpansion": ["expansion_type", "command_name", "command_args", "command_source", "prompt"],
   "classic.InstructionsLoaded": [
     "file_path", "memory_type", "load_reason", "globs", "trigger_file_path", "parent_file_path"
   ]

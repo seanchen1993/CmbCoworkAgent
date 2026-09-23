@@ -10,6 +10,7 @@ export type HookEvent =
   | "StopFailure"
   | "Notification"
   | "UserPromptSubmit"
+  | "UserPromptExpansion"
   | "SessionStart"
   | "SessionEnd"
   | "SubagentStart"
@@ -38,6 +39,7 @@ export const SUPPORTED_HOOK_EVENTS = [
   "Stop",
   "Notification",
   "UserPromptSubmit",
+  "UserPromptExpansion",
   "SessionStart",
   "SessionEnd",
   "SubagentStop",

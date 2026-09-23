@@ -289,6 +289,7 @@ export interface PromptPreparationTurnState {
 }
 
 interface ExplicitSkillActivation {
+  blockedEvent?: "UserPromptExpansion"
   parsed: ParsedSkillUseBlock
   skill?: SkillLifecycleMatch
   hookContext?: string
@@ -305,6 +306,7 @@ export type PreparedUserPrompt =
   | {
       accepted: false
       blockedBy: "explicit_skill"
+      hookEvent?: "UserPromptExpansion"
       reason: string
     }
   | {
@@ -371,8 +373,12 @@ async function activateExplicitSkillFromMessage({
   firedSkillKeys,
   skillUseTracker,
   onHookResult,
-  onHookSkippedFactory
+  onHookSkippedFactory,
+  originalPrompt,
+  isPreparationCurrent
 }: {
+  originalPrompt: string
+  isPreparationCurrent?: () => boolean
   message: string
   workspacePath: string
   pluginOutputDir?: string
@@ -408,6 +414,56 @@ async function activateExplicitSkillFromMessage({
       parsed,
       blocked: true,
       reason: `显式选择的技能不存在或已禁用：${parsed.skillName}`
+    }
+  }
+
+  if (isPreparationCurrent && !isPreparationCurrent())
+    return { parsed, blocked: true, reason: "当前运行已结束或被替换" }
+  const expansionContext: HookContext = {
+    workspacePath,
+    sessionId,
+    turnId,
+    pluginOutputDir,
+    systemId,
+    pluginWorkspace,
+    featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
+    projectCode,
+    projectDir,
+    userPrompt: originalPrompt,
+    promptExpansion: {
+      expansion_type: "slash_command",
+      command_name: skill.name,
+      command_args: parsed.rest,
+      command_source: skill.pluginId ? "plugin" : "local"
+    }
+  }
+  const expansion = await runHooksEnriched(
+    resolveEnabledHooksForRun(
+      workspacePath,
+      "UserPromptExpansion",
+      expansionContext,
+      hookScope,
+      onHookSkippedFactory?.("UserPromptExpansion")
+    ),
+    "UserPromptExpansion",
+    expansionContext,
+    onHookResult
+  )
+  if (isPreparationCurrent && !isPreparationCurrent())
+    return { parsed, blocked: true, reason: "当前运行已结束或被替换" }
+  if (expansion?.blocked || expansion?.continue === false || expansion?.decision === "block") {
+    return {
+      parsed,
+      blocked: true,
+      blockedEvent: "UserPromptExpansion",
+      reason:
+        expansion.stopReason || expansion.reason || expansion.stderr || expansion.stdout ||
+        "显式技能展开被 Hook 拦截"
     }
   }
 
@@ -456,7 +512,11 @@ async function activateExplicitSkillFromMessage({
   return {
     parsed,
     skill,
-    hookContext: formatSkillHookContext(skill, result.notes) ?? undefined,
+    hookContext:
+      formatSkillHookContext(skill, [
+        ...result.notes,
+        ...(expansion?.additionalContext ? [expansion.additionalContext] : [])
+      ]) ?? undefined,
     blocked: result.blocked,
     reason: result.reason
   }
@@ -509,6 +569,8 @@ export async function prepareStandardUserPrompt({
       : ""
   const explicitSkillActivation = await activateExplicitSkillFromMessage({
     message: explicitSkillActivationMessage,
+    originalPrompt: rawMessage,
+    isPreparationCurrent,
     workspacePath,
     pluginOutputDir: harnessAgentContext.pluginOutputDir,
     systemId: harnessAgentContext.systemId,
@@ -532,6 +594,7 @@ export async function prepareStandardUserPrompt({
     return {
       accepted: false,
       blockedBy: "explicit_skill",
+      hookEvent: explicitSkillActivation.blockedEvent,
       reason: explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
     }
   }

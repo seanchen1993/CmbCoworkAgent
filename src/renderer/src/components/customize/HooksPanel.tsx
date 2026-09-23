@@ -86,6 +86,12 @@ const EVENT_BADGE: Record<
     english: "PostToolUseFailure",
     tip: "工具抛异常、返回显式 error、非零 exitCode、abort 或超时时触发；仅观测，不阻断当前流程"
   },
+  UserPromptExpansion: {
+    label: "技能展开前",
+    className: "bg-muted text-muted-foreground",
+    english: "UserPromptExpansion",
+    tip: "已解析的用户直接技能选择，在激活及模型请求前等待检查；可阻止或补充上下文。不是模型技能工具事件"
+  },
   UserPromptSubmit: {
     label: "提交",
     className: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",

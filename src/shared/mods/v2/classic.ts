@@ -160,6 +160,13 @@ export function validateClassicInput(event: string, value: unknown): void {
     (value.effort !== undefined && !shape(value.effort, { level: text }, ["level"]))
   )
     throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  if (name === "UserPromptExpansion") {
+    if (
+      !oneOf(["slash_command", "mcp_prompt"])(value.expansion_type) ||
+      !text(value.command_name) || !value.command_name ||
+      ![value.command_args, value.command_source, value.prompt].every(text)
+    ) throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  }
   if (name === "InstructionsLoaded") {
     if (
       !text(value.file_path) || !value.file_path ||

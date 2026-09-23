@@ -138,6 +138,13 @@ export interface HookContext {
   forceSyncWorkspaceHooks?: boolean
   /** User prompt text for UserPromptSubmit — exposed as USER_PROMPT env and prompt in stdin JSON */
   userPrompt?: string
+  /** Resolved direct skill selection, never a model-raised Skill tool call. */
+  promptExpansion?: {
+    expansion_type: "slash_command" | "mcp_prompt"
+    command_name: string
+    command_args: string
+    command_source: string
+  }
   /** Skill lifecycle context for PreSkillUse/PostSkillUse. */
   skillName?: string
   skillPath?: string
@@ -312,6 +319,8 @@ function getMatcherTarget(event: HookEvent, context: HookContext): string | unde
       return context.subagent?.name ?? context.subagent?.id
     case "Setup":
       return context.setupTrigger
+    case "UserPromptExpansion":
+      return context.promptExpansion?.command_name
     case "InstructionsLoaded":
       return context.instructionLoad?.load_reason
     case "PreCompact":
@@ -519,6 +528,7 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.hookSourcePath) payload.hook_source_path = context.hookSourcePath
   if (context.toolName) payload.tool_name = context.toolName
   if (context.toolArgs) payload.tool_input = context.toolArgs
+  if (event === "UserPromptExpansion") Object.assign(payload, context.promptExpansion, { prompt: context.userPrompt ?? "" })
   if (event === "PostToolBatch") payload.tool_calls = context.toolBatch ?? []
   if (event === "InstructionsLoaded") Object.assign(payload, context.instructionLoad)
   if (context.pluginId) payload.plugin_id = context.pluginId
@@ -1260,7 +1270,7 @@ async function executeHook(
 ): Promise<HookResult> {
   // Compaction cannot begin until its gate settles. Imported async settings
   // are adapted to an awaited gate, including once/in-flight deduplication.
-  if (["PreCompact", "PostToolBatch"].includes(event) && hook.async === true)
+  if (["PreCompact", "PostToolBatch", "UserPromptExpansion"].includes(event) && hook.async === true)
     hook = { ...hook, async: false }
   const onceKey = hook.once === true ? getOnceExecutionKey(hook, event, context) : undefined
   const onceGeneration = onceKey
@@ -1471,6 +1481,7 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
         } else payload.tool_response = output
       }
     }
+    if (event === "UserPromptExpansion") Object.assign(payload, context.promptExpansion, { prompt: context.userPrompt ?? "" })
     if (event === "PostToolBatch") payload.tool_calls = context.toolBatch ?? []
     if (event === "InstructionsLoaded") Object.assign(payload, context.instructionLoad)
     if (event === "UserPromptSubmit") payload.prompt = context.userPrompt ?? ""
@@ -1915,6 +1926,7 @@ async function runLegacyHooks(
     event === "PreToolUse" ||
     event === "PreSkillUse" ||
     event === "UserPromptSubmit" ||
+    event === "UserPromptExpansion" ||
     event === "PreCompact" ||
     event === "PostToolBatch"
   ) {
