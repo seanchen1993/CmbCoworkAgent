@@ -41,6 +41,13 @@ const classicIdentity = [
   "effort"
 ] as const
 
+const classicFacts: Record<string, readonly string[]> = {
+  "classic.PostToolBatch": ["tool_calls"],
+  "classic.InstructionsLoaded": [
+    "file_path", "memory_type", "load_reason", "globs", "trigger_file_path", "parent_file_path"
+  ]
+}
+
 function same(a: unknown, b: unknown): boolean {
   if (a === b) return true
   if (!a || !b || typeof a !== "object" || typeof b !== "object") return false
@@ -60,9 +67,9 @@ export function normalizeFunctionInput(
 ): ModObject {
   encodeModJson(received)
   const result = { ...received }
-  const fields = event === "classic.PostToolBatch"
-    ? [...classicIdentity, "tool_calls"]
-    : pinned[event] ?? (event.startsWith("classic.") ? classicIdentity : [])
+  const fields = pinned[event] ?? (
+    event.startsWith("classic.") ? [...classicIdentity, ...(classicFacts[event] ?? [])] : []
+  )
   for (const key of fields) {
     if (
       required[event]?.includes(key) &&

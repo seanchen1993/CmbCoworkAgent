@@ -160,6 +160,15 @@ export function validateClassicInput(event: string, value: unknown): void {
     (value.effort !== undefined && !shape(value.effort, { level: text }, ["level"]))
   )
     throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  if (name === "InstructionsLoaded") {
+    if (
+      !text(value.file_path) || !value.file_path ||
+      !oneOf(["User", "Project", "Local", "Managed"])(value.memory_type) ||
+      !oneOf(["session_start", "nested_traversal", "path_glob_match", "include", "compact"])(value.load_reason) ||
+      (value.globs !== undefined && !strings(value.globs)) ||
+      ["trigger_file_path", "parent_file_path"].some((key) => value[key] !== undefined && !text(value[key]))
+    ) throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  }
   if (name === "PostToolBatch") {
     const calls = value.tool_calls
     if (
@@ -194,6 +203,15 @@ export function validateClassicInput(event: string, value: unknown): void {
     )
       throw new ModFunctionError("MODS_CLASSIC_INPUT")
   }
+}
+
+export interface ClassicInstructionLoad {
+  file_path: string
+  memory_type: "User" | "Project" | "Local" | "Managed"
+  load_reason: "session_start" | "nested_traversal" | "path_glob_match" | "include" | "compact"
+  globs?: string[]
+  trigger_file_path?: string
+  parent_file_path?: string
 }
 
 /** ClassicResultOf per event; invalid optional hooks are recovered by the dispatcher. */

@@ -9,6 +9,12 @@
 真实工具结果投影，见 [输出效果适配](mods-v2-classic-output-2026-09-23.md)。下文“尚未消费”
 是原审计时间点；除这两个字段外的差异仍未解决，传统配置脚本解析器未随之扩展。
 
+2026-09-23运行时复核：通用Mods类型中的 block / preventContinuation 不等于每个事件支持门禁。
+最新[官方事件说明](https://code.claude.com/docs/en/hooks#instructionsloaded)明确 InstructionsLoaded
+异步观察且忽略决策，直接AGENTS加载不属于官方触发范围。本工程的AGENTS来源映射见
+[指令观察适配](mods-v2-instructions-loaded-2026-09-23.md)，不是CLAUDE文件规则的full兼容。
+PostToolBatch及真实压缩适配已各有独立报告，下表旧“契约/手动”是原审计时点。
+
 ## 33 个事件的实际状态
 
 “生产触发”表示找到应用真实调用点，不代表该事件所有官方字段、结果效果和时序已完整实现。

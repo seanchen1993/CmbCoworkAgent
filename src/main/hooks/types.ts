@@ -2,6 +2,7 @@ export type HookEvent =
   | "PreToolUse"
   | "PostToolUse"
   | "PostToolBatch"
+  | "InstructionsLoaded"
   | "PreSkillUse"
   | "PostSkillUse"
   | "PostToolUseFailure"
@@ -29,6 +30,7 @@ export const SUPPORTED_HOOK_EVENTS = [
   "PreToolUse",
   "PostToolUse",
   "PostToolBatch",
+  "InstructionsLoaded",
   "PreSkillUse",
   "PostSkillUse",
   "PreCompact",

@@ -538,3 +538,116 @@ it("consumes a real guest batch gate through FunctionSession and the original le
     await session.close()
   }
 })
+
+it("maps real instruction provenance to classic and legacy input without duplicate checks", async () => {
+  classicEvent.mockImplementation(async (_workspace, _thread, _event, input, signal, core) => {
+    expect(input).toMatchObject({
+      file_path: "/workspace/AGENTS.md",
+      memory_type: "Project",
+      load_reason: "session_start"
+    })
+    await core(input, signal)
+    await core(input, signal)
+    return { block: "instructions denied" }
+  })
+  legacyCall.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "", blocked: false })
+  const result = await runHooks(
+    [
+      {
+        id: "instructions",
+        event: "InstructionsLoaded",
+        enabled: true,
+        type: "http",
+        async: true,
+        url: "https://example.invalid",
+        createdAt: "",
+        updatedAt: ""
+      }
+    ],
+    "InstructionsLoaded",
+    {
+      workspacePath: "/workspace",
+      sessionId: "thread",
+      instructionLoad: {
+        file_path: "/workspace/AGENTS.md",
+        memory_type: "Project",
+        load_reason: "session_start"
+      }
+    }
+  )
+  expect(result).toBeNull()
+  expect(legacyCall).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(legacyCall.mock.calls[0][1])).toMatchObject({
+    file_path: "/workspace/AGENTS.md",
+    memory_type: "Project",
+    load_reason: "session_start"
+  })
+})
+
+it("matches InstructionsLoaded legacy hooks against load_reason, not a tool name", async () => {
+  classicEvent.mockImplementation(async (_w, _t, _e, input, signal, core) => core(input, signal))
+  legacyCall.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "", blocked: false })
+  const hook = {
+    id: "instructions-reason",
+    event: "InstructionsLoaded" as const,
+    enabled: true,
+    type: "http" as const,
+    matcher: "session_start",
+    url: "https://example.invalid",
+    createdAt: "",
+    updatedAt: ""
+  }
+  await runHooks([hook], "InstructionsLoaded", {
+    workspacePath: "/workspace",
+    sessionId: "thread",
+    instructionLoad: {
+      file_path: "/workspace/AGENTS.md",
+      memory_type: "Project",
+      load_reason: "session_start"
+    }
+  })
+  expect(legacyCall).toHaveBeenCalledTimes(1)
+})
+
+it("discards a real guest InstructionsLoaded decision without changing the original flow", async () => {
+  const { FunctionGuestRuntime } = await import("../mods/v2/guest-runtime")
+  const { FunctionSession, SESSION_CAPABILITIES } = await import("../mods/v2/session")
+  const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+    on("classic.InstructionsLoaded",async($,e,next)=>{await next(e);return {block:"observer cannot block",preventContinuation:true}})
+  }}`)
+  const session = new FunctionSession(
+    [
+      {
+        name: "observer",
+        root: "/observer",
+        tier: "user",
+        guest,
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+    ],
+    {
+      workspace: "/workspace",
+      threadId: "instructions-real",
+      assertLive: () => undefined,
+      publish: async (value) => value
+    }
+  )
+  classicEvent.mockImplementation((_w, _t, event, input, signal, core) =>
+    session.classicEvent(event, input, signal, core)
+  )
+  try {
+    expect(
+      await runHooks([], "InstructionsLoaded", {
+        workspacePath: "/workspace",
+        sessionId: "instructions-real",
+        instructionLoad: {
+          file_path: "/workspace/AGENTS.md",
+          memory_type: "Project",
+          load_reason: "session_start"
+        }
+      })
+    ).toBeNull()
+  } finally {
+    await session.close()
+  }
+})

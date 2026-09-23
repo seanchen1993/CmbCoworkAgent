@@ -94,6 +94,11 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
     description: "在技能被选择、激活或首次读取前触发，可按技能名拦截或注入使用前上下文"
   },
   {
+    value: "InstructionsLoaded",
+    label: "指令加载后（InstructionsLoaded）",
+    description: "异步观察主 Agent 实际载入的 AGENTS 指令；不阻止任务，不包含预算省略的文件"
+  },
+  {
     value: "PostSkillUse",
     label: "技能使用后（PostSkillUse）",
     description: "在本轮结束时，对本轮实际激活过的技能触发，可记录使用结果或要求 Agent 修订"
@@ -224,6 +229,20 @@ function mergeCommandHookFieldKeys(fields: string[], extra: string[]): string[] 
 }
 
 export const COMMAND_HOOK_EVENT_DOCS: Partial<Record<HookEvent, CommandHookEventDoc>> = {
+  InstructionsLoaded: {
+    inputDescription: "当前主 Agent 实际注入 AGENTS 指令后的文件来源；不重新扫描，也不把省略提示作为载入。",
+    inputFields: ["hook_event_name", "session_id", "workspace", "file_path", "memory_type", "load_reason"],
+    envFields: ["HOOK_EVENT", "SESSION_ID", "WORKSPACE_PATH"],
+    stdinExample: '{"hook_event_name":"InstructionsLoaded","session_id":"thread-123","file_path":"/project/AGENTS.md","memory_type":"Project","load_reason":"session_start"}',
+    outputDescription: "仅用于日志和观察，忽略 decision、continue 等返回值，不阻止或修改任务。",
+    outputNotes: [
+      "异步通知，单 runtime 每个实际来源只通知一次；任务结束、取消或撤权会取消未完成通知。",
+      "本工程适配 AGENTS 文件；官方仅观察 CLAUDE.md/规则文件。尚不覆盖嵌套、受管指令或 compact 再加载。"
+    ],
+    outputExample: '{}',
+    pythonExample: 'import json, sys\npayload = json.load(sys.stdin)\nprint(json.dumps({"continue": True}))',
+    shellExample: 'cat >/dev/null\nprintf \'%s\\n\' \'{"continue":true}\''
+  },
   PostToolBatch: {
     inputDescription: "主 Agent 当前模型批次的全部工具返回后触发一次；不重放历史批次。",
     inputFields: ["hook_event_name", "session_id", "workspace", "tool_calls"],
@@ -1396,6 +1415,14 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
 
   const extraObjects: HookReadableObjectDoc[] = []
 
+  if (event === "InstructionsLoaded") {
+    stdinFields.push(
+      { key: "file_path", description: "实际注入的指令来源路径。" },
+      { key: "memory_type", description: "User 为全局，Project 为项目，Local 为项目 AGENTS.override.md。" },
+      { key: "load_reason", description: "当前生产适配为 session_start，即主 runtime 启动加载。" }
+    )
+  }
+
   if (event === "PostToolBatch") {
     stdinFields.push({ key: "tool_calls", description: "当前已返回的完整工具批次，按模型请求顺序排列。" })
     extraObjects.push({
@@ -1942,15 +1969,14 @@ export function AddHookDialog(props: {
         additionalContext: onBlockAdditionalContext.trim()
       }
       if (
-        onBlock.reason ||
-        onBlock.systemMessage ||
-        onBlock.requiredSkill ||
-        onBlock.additionalContext
+        event !== "InstructionsLoaded" && (
+          onBlock.reason || onBlock.systemMessage || onBlock.requiredSkill || onBlock.additionalContext
+        )
       ) {
         config.onBlock = onBlock
       }
 
-      if (forcedOutcome === "always-revise" || forcedOutcome === "always-halt") {
+      if (event !== "InstructionsLoaded" && (forcedOutcome === "always-revise" || forcedOutcome === "always-halt")) {
         config.forcedOutcome = forcedOutcome
         const trimmed = forcedReason.trim()
         if (trimmed) config.forcedReason = trimmed
@@ -2740,6 +2766,9 @@ export function AddHookDialog(props: {
               </div>
             </div>
 
+            {event === "InstructionsLoaded" ? (
+              <p className="text-xs text-muted-foreground">此事件仅用于异步观察。返回值不修改指令，不要求修订，也不终止任务。</p>
+            ) : <>
             <div className="space-y-3 rounded-md border border-border/60 bg-muted/20 p-3">
               <div className="space-y-1">
                 <label className="text-sm font-medium">阻断后补充配置（onBlock）</label>
@@ -2953,6 +2982,7 @@ echo {"decision":"block","reason":"…","additionalContext":"提示：先跑 pyt
                 </div>
               </details>
             </div>
+            </>}
           </div>
         </div>
 

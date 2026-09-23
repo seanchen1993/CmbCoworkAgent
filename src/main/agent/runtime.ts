@@ -1,4 +1,5 @@
 import { createFunctionToolBatchMiddleware, type FunctionToolBatchOptions } from "./mods-tool-batch"
+import { createInstructionsLoadedMiddleware, type InstructionsLoadedOptions } from "./mods-instructions-loaded"
 import { applyClassicToolOutput } from "../hooks/tool-output"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
@@ -2342,6 +2343,7 @@ function assembleDeepAgent(
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
     modToolBatch,
+    modInstructions,
     threadId,
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
@@ -3194,6 +3196,10 @@ function assembleDeepAgent(
               ownerConfigKey: SUBAGENT_OWNER_METADATA_KEY
             })
           ]
+        : []),
+      ...(!metadataOnly && modRuntimeAuthority?.agentId === "main" &&
+        modInstructions?.sources.length && modInstructions.enabled()
+        ? [createInstructionsLoadedMiddleware(modInstructions as InstructionsLoadedOptions)]
         : []),
       ...(!metadataOnly && modRuntimeAuthority?.agentId === "main" && modToolBatch?.enabled()
         ? [createFunctionToolBatchMiddleware(modToolBatch as FunctionToolBatchOptions)]
@@ -7481,6 +7487,45 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         return () => manager.updateFunctionSessionModel(modRuntimeAuthority, customConfig.model, maxTokens)
       }
     } satisfies FunctionStepModelHost : undefined,
+    modInstructions: {
+      sources: agentsPrompt.instructionSources ?? [],
+      signal: options.abortSignal,
+      enabled: () =>
+        getModsManager()?.isEnabled(workspacePath) === true ||
+        getEnabledHooks(workspacePath).some((hook) => hook.event === "InstructionsLoaded"),
+      assertLive: () => modRuntimeAuthority?.assertLive(),
+      failed: () => console.warn("[Hooks] InstructionsLoaded observer failed"),
+      notify: async (source, signal) => {
+        const context: HookContext = {
+          workspacePath,
+          sessionId: threadId,
+          agentId,
+          turnId: hookTurnId,
+          pluginOutputDir,
+          systemId,
+          pluginWorkspace,
+          featureId,
+          harnessProjectId,
+          harnessAdapterName,
+          harnessAdapterVersion,
+          harnessNodeName,
+          harnessNodeStatus,
+          projectCode,
+          projectDir,
+          ...isolatedWorkspaceHookContext,
+          signal,
+          instructionLoad: source
+        }
+        await runHooks(
+          resolveHooksForContext("InstructionsLoaded", context),
+          "InstructionsLoaded",
+          context,
+          onHookResult
+        )
+        signal.throwIfAborted()
+        modRuntimeAuthority?.assertLive()
+      }
+    } satisfies InstructionsLoadedOptions,
     modToolBatch: {
       signal: options.abortSignal,
       enabled: () =>

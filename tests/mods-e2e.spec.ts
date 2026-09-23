@@ -1,3 +1,4 @@
+import { verifyInstructionsLoaded } from "./support/mods-instructions-loaded-e2e"
 /** Real Electron, production IPC/React, SQLite, QuickJS utility process and LocalSandbox.
  * Tool probes use the real ingress; model scenarios use a local HTTP producer and real agent loop.
  * Native confirmation is answered by the test; no external model/API is used.
@@ -42,7 +43,7 @@ const binary = packagedDir
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
-const focus = ["status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output", "completion-freshness", "ui-log", "ui-ask", "question-site", "ui-notice", "tool-batch"].includes(requestedFocus)
+const focus = ["status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output", "completion-freshness", "ui-log", "ui-ask", "question-site", "ui-notice", "tool-batch", "instructions-loaded"].includes(requestedFocus)
   ? requestedFocus : undefined
 const artifacts = join(
   root, "output/mods-validation",
@@ -178,7 +179,9 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "tool-batch")
+      if (focus === "instructions-loaded") {
+        await verifyInstructionsLoaded(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+      } else if (focus === "tool-batch")
         await verifyToolBatch(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
       else if (focus === "ui-notice")
         await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
@@ -3099,6 +3102,7 @@ async function main(): Promise<void> {
     await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyToolBatch(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+    await verifyInstructionsLoaded(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})

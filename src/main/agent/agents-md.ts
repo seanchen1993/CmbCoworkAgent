@@ -1,7 +1,7 @@
 import { constants as fsConstants, type Stats } from "fs"
 import { lstat, open, realpath, stat } from "fs/promises"
 import { homedir } from "os"
-import { dirname, isAbsolute, join, relative, resolve } from "path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "path"
 import type { HarnessAgentmdLoadStatusItem } from "../../shared/harness-board-types"
 
 export const DEFAULT_AGENTS_FILENAME = "AGENTS.md"
@@ -36,10 +36,33 @@ interface ReadAgentsFileResult {
   bytesRead: number
 }
 
+export interface LoadedInstructionSource {
+  file_path: string
+  memory_type: "User" | "Project" | "Local"
+}
+
+function instructionSources(
+  globalEntries: readonly AgentsPromptEntry[],
+  projectEntries: readonly AgentsPromptEntry[]
+): LoadedInstructionSource[] {
+  return [
+    ...globalEntries.map((entry): LoadedInstructionSource => ({
+      file_path: entry.path,
+      memory_type: "User"
+    })),
+    ...projectEntries.map((entry): LoadedInstructionSource => ({
+      file_path: entry.path,
+      memory_type: basename(entry.path) === LOCAL_AGENTS_OVERRIDE_FILENAME ? "Local" : "Project"
+    }))
+  ]
+}
+
 interface BaseAgentsPromptResult {
   prompt: string | null
   projectRoot: string
   loadedPaths: string[]
+  /** Actual budget-fitted content only; omitted-file placeholders are not injected instructions. */
+  instructionSources?: LoadedInstructionSource[]
   truncated: boolean
 }
 
@@ -976,6 +999,10 @@ export async function loadAgentsPromptForWorkspace(
     loadedPaths: [...totalBudgetResult.globalEntries, ...totalBudgetResult.projectEntries].map(
       (entry) => entry.path
     ),
+    instructionSources: instructionSources(
+      totalBudgetResult.globalEntries,
+      totalBudgetResult.projectEntries
+    ),
     truncated: globalResult.truncated || projectResult.truncated || totalBudgetResult.truncated
   }
 }
@@ -1049,6 +1076,10 @@ export async function loadAgentsPromptForWorkspaces(
     type: "workspaces",
     prompt: renderAgentsPromptForWorkspaceSections(promptGlobalEntries, promptWorkspaceSections),
     projectRoot: promptWorkspaceSections[0]?.projectRoot ?? primaryCwd,
+    instructionSources: instructionSources(
+      totalBudgetResult.globalEntries,
+      totalBudgetResult.workspaceSections.flatMap((section) => section.entries)
+    ),
     loadedPaths: [
       ...promptGlobalEntries,
       ...promptWorkspaceSections.flatMap((section) => section.entries)

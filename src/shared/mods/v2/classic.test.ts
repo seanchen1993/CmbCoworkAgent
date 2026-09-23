@@ -227,3 +227,31 @@ it("requires a bounded complete PostToolBatch inventory with unique host IDs", (
       })
     ).toThrow("MODS_CLASSIC_INPUT")
 })
+
+it("requires valid InstructionsLoaded file provenance", () => {
+  const base = {
+    hook_event_name: "InstructionsLoaded",
+    session_id: "thread",
+    cwd: "/workspace",
+    transcript_path: ""
+  }
+  expect(() => validateClassicInput("classic.InstructionsLoaded", base)).toThrow(
+    "MODS_CLASSIC_INPUT"
+  )
+  const input = {
+    ...base,
+    file_path: "/workspace/AGENTS.md",
+    memory_type: "Project",
+    load_reason: "session_start"
+  }
+  expect(() => validateClassicInput("classic.InstructionsLoaded", input)).not.toThrow()
+  for (const change of [
+    { file_path: "" },
+    { memory_type: "Unknown" },
+    { load_reason: "model" },
+    { globs: [1] }
+  ])
+    expect(() =>
+      validateClassicInput("classic.InstructionsLoaded", { ...input, ...change })
+    ).toThrow("MODS_CLASSIC_INPUT")
+})

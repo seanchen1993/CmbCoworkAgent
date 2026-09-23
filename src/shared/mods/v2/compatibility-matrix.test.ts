@@ -174,3 +174,14 @@ it("records PostToolBatch as a tested main-runtime adaptation, not raw execution
   expect(row?.note).toContain("model-visible")
   expect(row?.evidence).toContain("tests/support/mods-tool-batch-e2e.ts")
 })
+
+it("describes InstructionsLoaded as an asynchronous AGENTS adaptation with upstream differences", () => {
+  const row = (matrix.classicEvents as Array<Record<string, unknown>>).find(
+    (item) => item.name === "classic.InstructionsLoaded"
+  )
+  expect(row?.implementationStatus).toBe("adapted")
+  expect(row?.note).toContain("observational")
+  expect(row?.note).toContain("AGENTS")
+  expect(row?.note).toContain("CLAUDE.md")
+  expect(row?.evidence).toContain("tests/support/mods-instructions-loaded-e2e.ts")
+})

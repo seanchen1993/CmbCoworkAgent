@@ -74,3 +74,24 @@ it("pins PostToolBatch execution facts as well as its common host identity", () 
   expect(normalizeFunctionInput("classic.PostToolBatch", {}, original)).toEqual(original)
   expect(()=>normalizeFunctionInput("classic.PostToolBatch",{...original,tool_calls:[]},original)).toThrow("MODS_PINNED_INPUT")
 })
+
+it("pins InstructionsLoaded source facts", () => {
+  const original = {
+    hook_event_name: "InstructionsLoaded",
+    session_id: "thread",
+    cwd: "/workspace",
+    transcript_path: "",
+    file_path: "/workspace/AGENTS.md",
+    memory_type: "Project",
+    load_reason: "session_start"
+  }
+  expect(normalizeFunctionInput("classic.InstructionsLoaded", {}, original)).toEqual(original)
+  for (const key of ["file_path", "memory_type", "load_reason"])
+    expect(() =>
+      normalizeFunctionInput(
+        "classic.InstructionsLoaded",
+        { ...original, [key]: "forged" },
+        original
+      )
+    ).toThrow("MODS_PINNED_INPUT")
+})

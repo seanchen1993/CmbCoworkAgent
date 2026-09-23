@@ -113,6 +113,7 @@ export interface HookContext {
   compactionSummary?: string
   toolName?: string
   toolBatch?: import("../../shared/mods/v2/classic").ClassicToolBatchCall[]
+  instructionLoad?: import("../../shared/mods/v2/classic").ClassicInstructionLoad
   toolArgs?: Record<string, unknown>
   toolResult?: string
   workspacePath?: string
@@ -311,6 +312,8 @@ function getMatcherTarget(event: HookEvent, context: HookContext): string | unde
       return context.subagent?.name ?? context.subagent?.id
     case "Setup":
       return context.setupTrigger
+    case "InstructionsLoaded":
+      return context.instructionLoad?.load_reason
     case "PreCompact":
     case "PostCompact":
       return context.compactionTrigger
@@ -517,6 +520,7 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.toolName) payload.tool_name = context.toolName
   if (context.toolArgs) payload.tool_input = context.toolArgs
   if (event === "PostToolBatch") payload.tool_calls = context.toolBatch ?? []
+  if (event === "InstructionsLoaded") Object.assign(payload, context.instructionLoad)
   if (context.pluginId) payload.plugin_id = context.pluginId
   if (context.pluginName) payload.plugin_name = context.pluginName
   if (context.pluginRoot) payload.plugin_root = context.pluginRoot
@@ -1256,7 +1260,8 @@ async function executeHook(
 ): Promise<HookResult> {
   // Compaction cannot begin until its gate settles. Imported async settings
   // are adapted to an awaited gate, including once/in-flight deduplication.
-  if ((event === "PreCompact" || event === "PostToolBatch") && hook.async === true) hook = { ...hook, async: false }
+  if (["PreCompact", "PostToolBatch"].includes(event) && hook.async === true)
+    hook = { ...hook, async: false }
   const onceKey = hook.once === true ? getOnceExecutionKey(hook, event, context) : undefined
   const onceGeneration = onceKey
     ? {
@@ -1467,6 +1472,7 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
       }
     }
     if (event === "PostToolBatch") payload.tool_calls = context.toolBatch ?? []
+    if (event === "InstructionsLoaded") Object.assign(payload, context.instructionLoad)
     if (event === "UserPromptSubmit") payload.prompt = context.userPrompt ?? ""
     if (event === "SessionStart") payload.source = context.sessionStartSource ?? "startup"
     if (event === "SessionEnd") payload.reason = context.sessionEndReason ?? "other"
@@ -1502,6 +1508,8 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
 }
 
 function projectClassicResult(event: HookEvent, value: ModObject): HookResult | null {
+  // Upstream runtime discards decisions from this asynchronous observation event.
+  if (event === "InstructionsLoaded") return null
   const reason = [value.deny, value.ask, value.block, value.stopReason]
     .find((item): item is string => typeof item === "string" && item.length > 0)
   const denied =

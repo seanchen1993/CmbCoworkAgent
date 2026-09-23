@@ -62,6 +62,12 @@ const EVENT_BADGE: Record<
     english: "PostToolBatch",
     tip: "主 Agent 的整批工具完成后、下一次模型请求前触发一次；可补充上下文或阻止继续"
   },
+  InstructionsLoaded: {
+    label: "指令加载",
+    className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+    english: "InstructionsLoaded",
+    tip: "异步观察主 Agent 实际载入的 AGENTS 指令；不支持阻止或修改任务"
+  },
   PreSkillUse: {
     label: "技能前",
     className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
