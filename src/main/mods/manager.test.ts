@@ -1,3 +1,4 @@
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
@@ -242,6 +243,13 @@ async function fixture(
 describe("project Mods lifecycle and UI authority", () => {
   it("binds completion checks to the live main turn and rejects replacement during a check", async () => {
     const f = await fixture()
+    expect(
+      claimLocalThreadRunLease({ threadId: "thread", owner: "mods", runId: "completion-test" })
+        .acquired
+    ).toBe(true)
+    cleanup.push(() => {
+      releaseLocalThreadRunLease("thread", "mods", "completion-test")
+    })
     f.manager.configure(f.root, true, false)
     const controller = new AbortController()
     const scope = { ...f.scope, signal: controller.signal }

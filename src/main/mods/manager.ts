@@ -689,6 +689,8 @@ export class ModsManager {
   async createCompletionGate(workspace: string, threadId: string, context: () => ModObject) {
     if (!this.isEnabled(workspace)) return undefined
     const key = this.workspaceKey(workspace)
+    // Keep the originating lease even if guest initialization yields to a successor run.
+    const lease = getLocalThreadRunLease(threadId)
     const gate = await this.functionLifecycle?.completionGate?.(key, threadId, context)
     if (!gate) return undefined
     const binding = this.bindings.get(`${threadId}:main`)
@@ -711,11 +713,17 @@ export class ModsManager {
           this.assertFunctionBinding(binding)
           if (this.bindings.get(`${threadId}:main`) !== binding)
             throw new ModError("MODS_CALL_SCOPE_CHANGED")
-          const result = await gate(input)
-          this.assertFunctionBinding(binding)
-          if (this.bindings.get(`${threadId}:main`) !== binding)
-            throw new ModError("MODS_CALL_SCOPE_CHANGED")
-          return result
+          const operation = this.registerRuntimeOperation(binding, input.signal, lease)
+          try {
+            const result = await gate({ ...input, signal: operation.signal })
+            this.assertFunctionBinding(binding)
+            if (this.bindings.get(`${threadId}:main`) !== binding)
+              throw new ModError("MODS_CALL_SCOPE_CHANGED")
+            operation.assertLive()
+            return result
+          } finally {
+            operation.release()
+          }
         }
       )
     const budget = completionGateBudget(gate)
@@ -1082,7 +1090,6 @@ export class ModsManager {
     sessionSignal.throwIfAborted()
     const bindingKey = `${identity.threadId}:${identity.agentId}`
     const binding = this.bindings.get(bindingKey)
-    const epoch = this.config(identity.workspace).epoch
     const grant = identity.modId && this.store.getGrant(identity.workspace, identity.modId)
     const lease = getLocalThreadRunLease(identity.threadId)
     if (
@@ -1093,6 +1100,24 @@ export class ModsManager {
       grant.epoch !== identity.grantEpoch
     )
       throw new ModError("MODS_BACKGROUND_OWNER_REQUIRED")
+    return this.registerRuntimeOperation(binding, sessionSignal, lease, () =>
+      this.store.assertGrant(grant)
+    )
+  }
+
+  /** A lifecycle fence for existing runtime work; it never claims or transfers a run lease. */
+  private registerRuntimeOperation(
+    binding: ModThreadBinding,
+    sessionSignal: AbortSignal,
+    lease: ReturnType<typeof getLocalThreadRunLease>,
+    assertOwner: () => void = () => {}
+  ) {
+    sessionSignal.throwIfAborted()
+    if (!lease) throw new ModError("MODS_COMPLETION_LEASE")
+    const authority = binding.runtimeAuthority
+    if (!authority) throw new ModError("MODS_RUNTIME_OWNER_REQUIRED")
+    const bindingKey = `${binding.threadId}:${binding.agentId ?? "main"}`
+    const epoch = this.config(binding.workspace).epoch
     if (this.activeActions.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
     const controller = new AbortController()
     const signal = AbortSignal.any([
@@ -1103,13 +1128,14 @@ export class ModsManager {
     const assertLive = () => {
       signal.throwIfAborted()
       authority.assertLive()
-      this.store.assertGrant(grant)
-      const currentLease = getLocalThreadRunLease(identity.threadId)
+      assertOwner()
+      const currentLease = getLocalThreadRunLease(binding.threadId)
       if (
         this.bindings.get(bindingKey) !== binding ||
-        this.config(identity.workspace).epoch !== epoch ||
+        this.config(binding.workspace).epoch !== epoch ||
         currentLease?.runId !== lease.runId ||
-        currentLease.owner !== lease.owner
+        currentLease.owner !== lease.owner ||
+        currentLease.acquiredAt !== lease.acquiredAt
       )
         throw new ModError("MODS_CALL_SCOPE_CHANGED")
     }
@@ -1121,7 +1147,8 @@ export class ModsManager {
       if (
         released.threadId === lease.threadId &&
         released.runId === lease.runId &&
-        released.owner === lease.owner
+        released.owner === lease.owner &&
+        released.acquiredAt === lease.acquiredAt
       )
         controller.abort()
     })
@@ -1134,7 +1161,7 @@ export class ModsManager {
       }
     }, 100)
     watchdog.unref()
-    this.activeActions.set(controller, identity.workspace)
+    this.activeActions.set(controller, binding.workspace)
     return {
       signal,
       assertLive,
