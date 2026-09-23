@@ -313,7 +313,7 @@ import {
   buildSubagentStopHookContext,
   extractSubagentStartToolCallsFromStreamPayload
 } from "../hooks/subagent-context"
-import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
+import { getHookHaltError, isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
 import {
   getFailureFuseHaltError,
   shouldSendFailureFuseNotice,
@@ -9652,13 +9652,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
             return
           }
-          if (isHookHaltError(error)) {
+          const hookHalt = getHookHaltError(error)
+          if (hookHalt) {
             clearCoordinatorNotificationSelectedSkillsOnExit = true
-            console.warn("[Agent] Hook halted turn:", error.reason)
-            pauseActiveGoalForRuntimeStop(error.reason)
-            sendHookHalt(window, channel, error)
+            console.warn("[Agent] Hook halted turn:", hookHalt.reason)
+            pauseActiveGoalForRuntimeStop(hookHalt.reason)
+            sendHookHalt(window, channel, hookHalt)
             syncUsedSkillsContext()
-            finishTraceInBackground(tracer, "cancelled", error.reason, "Agent")
+            finishTraceInBackground(tracer, "cancelled", hookHalt.reason, "Agent")
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -9670,7 +9671,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "hook_halt", error.reason, error)
+            markAutoModeTerminal("error", "hook_halt", hookHalt.reason, hookHalt)
             return
           }
           const actionStationarityHalt = getActionStationarityHaltError(error)
@@ -11240,19 +11241,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
             return
           }
-          if (isHookHaltError(error)) {
-            resumeAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", error.reason)
+          const hookHalt = getHookHaltError(error)
+          if (hookHalt) {
+            resumeAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", hookHalt.reason)
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
-            console.warn("[Agent] Resume hook halted turn:", error.reason)
+            console.warn("[Agent] Resume hook halted turn:", hookHalt.reason)
             pauseActiveGoalAfterBoundary(
               threadId,
               window,
               channel,
-              error.reason,
+              hookHalt.reason,
               boundaryGoalId,
               boundaryGoalActiveWindowId
             )
-            sendHookHalt(window, channel, error)
+            sendHookHalt(window, channel, hookHalt)
             turnStateShouldDispose = true
             return
           }
@@ -12414,19 +12416,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
-        if (isHookHaltError(error)) {
-          interruptAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", error.reason)
-          console.warn("[Agent] Interrupt hook halted turn:", error.reason)
+        const hookHalt = getHookHaltError(error)
+        if (hookHalt) {
+          interruptAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", hookHalt.reason)
+          console.warn("[Agent] Interrupt hook halted turn:", hookHalt.reason)
           pauseActiveGoalAfterBoundary(
             threadId,
             window,
             channel,
-            error.reason,
+            hookHalt.reason,
             boundaryGoalId,
             boundaryGoalActiveWindowId
           )
           turnStateShouldDispose = true
-          sendHookHalt(window, channel, error)
+          sendHookHalt(window, channel, hookHalt)
           return
         }
         const actionStationarityHalt = getActionStationarityHaltError(error)

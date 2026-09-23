@@ -60,7 +60,9 @@ export function normalizeFunctionInput(
 ): ModObject {
   encodeModJson(received)
   const result = { ...received }
-  const fields = pinned[event] ?? (event.startsWith("classic.") ? classicIdentity : [])
+  const fields = event === "classic.PostToolBatch"
+    ? [...classicIdentity, "tool_calls"]
+    : pinned[event] ?? (event.startsWith("classic.") ? classicIdentity : [])
   for (const key of fields) {
     if (
       required[event]?.includes(key) &&

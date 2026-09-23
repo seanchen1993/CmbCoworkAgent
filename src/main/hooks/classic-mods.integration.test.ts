@@ -406,3 +406,135 @@ describe("classic Function Mods bridge", () => {
     expect(result).toBeNull()
   })
 })
+
+
+it("sends one host-owned full tool batch to classic hooks and awaits its context", async () => {
+  const calls = [
+    {
+      tool_name: "read_file",
+      tool_input: { file_path: "a" },
+      tool_use_id: "one",
+      tool_response: "read"
+    },
+    {
+      tool_name: "execute",
+      tool_input: { command: "test" },
+      tool_use_id: "two",
+      tool_response: { exitCode: 1 }
+    }
+  ]
+  classicEvent.mockResolvedValue({ additionalContext: ["repair failed tests"] })
+  const result = await runHooks([], "PostToolBatch", {
+    workspacePath: "/workspace",
+    sessionId: "thread",
+    toolBatch: calls
+  })
+  expect(classicEvent.mock.calls[0][3]).toMatchObject({
+    hook_event_name: "PostToolBatch",
+    tool_calls: calls
+  })
+  expect(result?.additionalContext).toBe("repair failed tests")
+})
+
+it("waits for a legacy PostToolBatch gate once even when declared async and next is repeated", async () => {
+  const calls = [
+    {
+      tool_name: "read_file",
+      tool_input: { file_path: "a" },
+      tool_use_id: "one",
+      tool_response: "done"
+    }
+  ]
+  classicEvent.mockImplementation(async (_workspace, _thread, _event, input, signal, core) => {
+    const result = await core(input, signal)
+    await core(input, signal)
+    return result
+  })
+  legacyCall.mockResolvedValue({ exitCode: 2, stdout: "batch blocked", stderr: "", blocked: true })
+  const result = await runHooks(
+    [
+      {
+        id: "batch-gate",
+        event: "PostToolBatch",
+        type: "http",
+        url: "https://example.invalid",
+        enabled: true,
+        async: true,
+        createdAt: "2026-09-23",
+        updatedAt: "2026-09-23"
+      }
+    ],
+    "PostToolBatch",
+    { workspacePath: "/workspace", sessionId: "batch-thread", toolBatch: calls }
+  )
+  expect(result?.blocked).toBe(true)
+  expect(legacyCall).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(legacyCall.mock.calls[0][1])).toMatchObject({
+    hook_event_name: "PostToolBatch",
+    tool_calls: calls
+  })
+})
+
+it("consumes a real guest batch gate through FunctionSession and the original legacy core", async () => {
+  const { FunctionGuestRuntime } = await import("../mods/v2/guest-runtime")
+  const { FunctionSession, SESSION_CAPABILITIES } = await import("../mods/v2/session")
+  const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+    on("classic.PostToolBatch",async($,e,next)=>{
+      await next(e);await next(e)
+      return {block:e.tool_calls[0].tool_response === "failed" ? "repair batch" : undefined}
+    })
+  }}`)
+  const session = new FunctionSession(
+    [
+      {
+        name: "batch",
+        root: "/batch",
+        tier: "user",
+        guest,
+        capabilities: [...SESSION_CAPABILITIES]
+      }
+    ],
+    {
+      workspace: "/workspace",
+      threadId: "batch-real",
+      assertLive: () => undefined,
+      publish: async (value) => value
+    }
+  )
+  classicEvent.mockImplementation((_workspace, _thread, event, input, signal, core) =>
+    session.classicEvent(event, input, signal, core)
+  )
+  legacyCall.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "", blocked: false })
+  try {
+    const result = await runHooks(
+      [
+        {
+          id: "batch",
+          event: "PostToolBatch",
+          enabled: true,
+          type: "http",
+          url: "https://example.invalid",
+          createdAt: "",
+          updatedAt: ""
+        }
+      ],
+      "PostToolBatch",
+      {
+        workspacePath: "/workspace",
+        sessionId: "batch-real",
+        toolBatch: [
+          {
+            tool_name: "execute",
+            tool_input: { command: "test" },
+            tool_use_id: "host-call",
+            tool_response: "failed"
+          }
+        ]
+      }
+    )
+    expect(result).toMatchObject({ blocked: true, reason: "repair batch" })
+    expect(legacyCall).toHaveBeenCalledTimes(1)
+  } finally {
+    await session.close()
+  }
+})

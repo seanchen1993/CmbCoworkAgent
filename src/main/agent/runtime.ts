@@ -1,3 +1,4 @@
+import { createFunctionToolBatchMiddleware, type FunctionToolBatchOptions } from "./mods-tool-batch"
 import { applyClassicToolOutput } from "../hooks/tool-output"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
@@ -200,7 +201,7 @@ import {
 import { runHooks, type HookContext } from "../hooks/runner"
 import type { HookEvent } from "../hooks/types"
 import { runHooksEnriched } from "../hooks/required-skill"
-import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
+import { HookHaltError, isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import {
   hasFailureFired,
   markFailureFired,
@@ -2340,6 +2341,7 @@ function assembleDeepAgent(
     windowsShellKind = "unknown",
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
+    modToolBatch,
     threadId,
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
@@ -3192,6 +3194,9 @@ function assembleDeepAgent(
               ownerConfigKey: SUBAGENT_OWNER_METADATA_KEY
             })
           ]
+        : []),
+      ...(!metadataOnly && modRuntimeAuthority?.agentId === "main" && modToolBatch?.enabled()
+        ? [createFunctionToolBatchMiddleware(modToolBatch as FunctionToolBatchOptions)]
         : []),
       ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
@@ -7476,6 +7481,50 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         return () => manager.updateFunctionSessionModel(modRuntimeAuthority, customConfig.model, maxTokens)
       }
     } satisfies FunctionStepModelHost : undefined,
+    modToolBatch: {
+      signal: options.abortSignal,
+      enabled: () =>
+        getModsManager()?.isEnabled(workspacePath) === true ||
+        getEnabledHooks(workspacePath).some((hook) => hook.event === "PostToolBatch"),
+      assertLive: () => modRuntimeAuthority?.assertLive(),
+      notify: async (calls, signal) => {
+        const context: HookContext = {
+          workspacePath,
+          sessionId: threadId,
+          agentId,
+          turnId: hookTurnId,
+          pluginOutputDir,
+          systemId,
+          pluginWorkspace,
+          featureId,
+          harnessProjectId,
+          harnessAdapterName,
+          harnessAdapterVersion,
+          harnessNodeName,
+          harnessNodeStatus,
+          projectCode,
+          projectDir,
+          ...isolatedWorkspaceHookContext,
+          signal,
+          toolBatch: calls
+        }
+        const result = await runHooksEnriched(
+          resolveHooksForContext("PostToolBatch", context),
+          "PostToolBatch",
+          context,
+          onHookResult
+        )
+        signal.throwIfAborted()
+        modRuntimeAuthority?.assertLive()
+        if (result?.blocked || result?.continue === false || result?.decision === "block")
+          throw new HookHaltError({
+            hookEvent: "PostToolBatch",
+            result,
+            fallbackReason: "PostToolBatch blocked the next model request"
+          })
+        return result?.additionalContext
+      }
+    } satisfies FunctionToolBatchOptions,
     modSessionCompact: compactMainSession,
     classicCompactionHooks: {
       isEnabled: () =>

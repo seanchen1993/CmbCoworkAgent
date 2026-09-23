@@ -67,3 +67,10 @@ it("pins classic session and event base fields and restores omitted identities",
       normalizeFunctionInput("classic.Stop", { ...original, [key]: "forged" }, original)
     ).toThrow("MODS_PINNED_INPUT")
 })
+
+
+it("pins PostToolBatch execution facts as well as its common host identity", () => {
+  const original={hook_event_name:"PostToolBatch",session_id:"thread",cwd:"/workspace",transcript_path:"",tool_calls:[{tool_name:"read_file",tool_use_id:"one",tool_input:{file_path:"a"},tool_response:"actual"}]}
+  expect(normalizeFunctionInput("classic.PostToolBatch", {}, original)).toEqual(original)
+  expect(()=>normalizeFunctionInput("classic.PostToolBatch",{...original,tool_calls:[]},original)).toThrow("MODS_PINNED_INPUT")
+})

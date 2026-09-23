@@ -274,6 +274,17 @@ export async function startModsModelServer() {
       response.end("data: [DONE]\n\n")
       return
     }
+    if (Array.isArray(body.tools) && userPrompt?.includes("[mods-tool-batch]")) {
+      const completed = body.messages?.at(-1)?.role === "tool"
+      event([{index:0,delta:completed ? {role:"assistant",content:"TOOL_BATCH_OK"} : {
+        role:"assistant",tool_calls:["batch-present.txt","batch-missing.txt"].map((file,index)=>({
+          index,id:`batch-tool-${index}`,type:"function",function:{name:"read_file",arguments:JSON.stringify({file_path:file})}
+        }))
+      },finish_reason:completed?"stop":"tool_calls"}])
+      event([], {prompt_tokens:12,completion_tokens:3,total_tokens:15})
+      response.end("data: [DONE]\n\n")
+      return
+    }
     if (Array.isArray(body.tools) && userPrompt?.includes("[mods-native-question]")) {
       if (body.messages?.at(-1)?.role === "tool") {
         event([

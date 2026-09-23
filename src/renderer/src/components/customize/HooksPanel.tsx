@@ -56,6 +56,12 @@ const EVENT_BADGE: Record<
     english: "PostToolUse",
     tip: "工具执行后触发，输出追加到 Agent 上下文，可要求修订或终止本轮"
   },
+  PostToolBatch: {
+    label: "批次后",
+    className: "bg-green-500/15 text-green-600 dark:text-green-400",
+    english: "PostToolBatch",
+    tip: "主 Agent 的整批工具完成后、下一次模型请求前触发一次；可补充上下文或阻止继续"
+  },
   PreSkillUse: {
     label: "技能前",
     className: "bg-blue-500/15 text-blue-600 dark:text-blue-400",

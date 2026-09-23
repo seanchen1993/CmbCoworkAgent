@@ -163,3 +163,14 @@ it("records notice dialog ownership and the native question adaptation limit", (
     expect((row?.evidence as unknown[])?.length).toBeGreaterThan(0)
   }
 })
+
+
+it("records PostToolBatch as a tested main-runtime adaptation, not raw execution receipts", () => {
+  const row = (matrix.classicEvents as Array<Record<string, unknown>>).find(
+    (item) => item.name === "classic.PostToolBatch"
+  )
+  expect(row?.implementationStatus).toBe("adapted")
+  expect(row?.note).toContain("main runtime")
+  expect(row?.note).toContain("model-visible")
+  expect(row?.evidence).toContain("tests/support/mods-tool-batch-e2e.ts")
+})

@@ -195,3 +195,35 @@ describe("Claude v2.1.278 classic event contracts", () => {
     ).toThrow("MODS_CLASSIC_INPUT")
   })
 })
+
+it("requires a bounded complete PostToolBatch inventory with unique host IDs", () => {
+  const base = {
+    hook_event_name: "PostToolBatch",
+    session_id: "t",
+    cwd: "/project",
+    transcript_path: ""
+  }
+  const call = {
+    tool_name: "read_file",
+    tool_use_id: "one",
+    tool_input: { file_path: "a" },
+    tool_response: "done"
+  }
+  expect(() =>
+    validateClassicInput("classic.PostToolBatch", { ...base, tool_calls: [call] })
+  ).not.toThrow()
+  for (const calls of [
+    undefined,
+    [],
+    [call, call],
+    [{ ...call, tool_use_id: "" }],
+    [{ ...call, tool_name: 3 }],
+    Array.from({ length: 129 }, (_, i) => ({ ...call, tool_use_id: String(i) }))
+  ])
+    expect(() =>
+      validateClassicInput("classic.PostToolBatch", {
+        ...base,
+        ...(calls === undefined ? {} : { tool_calls: calls })
+      })
+    ).toThrow("MODS_CLASSIC_INPUT")
+})

@@ -84,6 +84,11 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
     description: "在工具执行后触发，stdout 会追加到 Agent 下一轮上下文，外部系统状态可参与 AI 推理"
   },
   {
+    value: "PostToolBatch",
+    label: "工具批次后（PostToolBatch）",
+    description: "主 Agent 当前批次的全部工具返回后、下次模型请求前触发，可阻止继续或补充上下文"
+  },
+  {
     value: "PreSkillUse",
     label: "技能使用前（PreSkillUse）",
     description: "在技能被选择、激活或首次读取前触发，可按技能名拦截或注入使用前上下文"
@@ -219,6 +224,27 @@ function mergeCommandHookFieldKeys(fields: string[], extra: string[]): string[] 
 }
 
 export const COMMAND_HOOK_EVENT_DOCS: Partial<Record<HookEvent, CommandHookEventDoc>> = {
+  PostToolBatch: {
+    inputDescription: "主 Agent 当前模型批次的全部工具返回后触发一次；不重放历史批次。",
+    inputFields: ["hook_event_name", "session_id", "workspace", "tool_calls"],
+    envFields: ["HOOK_EVENT", "SESSION_ID", "WORKSPACE_PATH"],
+    stdinExample: JSON.stringify({
+      hook_event_name: "PostToolBatch",
+      session_id: "thread-123",
+      workspace: "C:\\ai\\demo",
+      tool_calls: [{ tool_name: "read_file", tool_input: { file_path: "README.md" },
+        tool_use_id: "call-1", tool_response: "File contents..." }]
+    }, null, 2),
+    outputDescription: "返回 decision=block 可阻止下次模型请求；additionalContext 补充下一次请求的上下文。",
+    outputNotes: [
+      "事件始终等待检查完成，导入配置中的 async=true 在此事件不生效。",
+      "tool_input 是模型请求参数，tool_response 是模型可见输出，不是测试或业务验收凭证。",
+      "仅支持当前主 Agent runtime，批次上限 128 项；不重放重启前历史，不覆盖共享子 Agent。"
+    ],
+    outputExample: '{"decision":"block","reason":"请修复本批次发现的问题"}',
+    pythonExample: 'import json, sys\npayload = json.load(sys.stdin)\nprint(json.dumps({"additionalContext": "已收到 %s 项工具返回" % len(payload["tool_calls"])}))',
+    shellExample: 'cat >/dev/null\nprintf \'%s\\n\' \'{"additionalContext":"工具批次已返回"}\''
+  },
   PreToolUse: {
     inputDescription: "当前事件发生在工具真正执行前，最常见的输入是工具名和工具参数。",
     inputFields: ["hook_event_name", "session_id", "cwd", "tool_name", "tool_input"],
@@ -1270,6 +1296,9 @@ export function getCommandHookToolInputDocs(event: HookEvent, matcher?: string):
 }
 
 export function getCommandHookToolInputSummary(event: HookEvent, matcher?: string): string {
+  if (event === "PostToolBatch") {
+    return "读取 tool_calls 数组，每项包含模型请求参数、工具 ID 和模型可见输出；没有单工具 matcher。"
+  }
   if (event === "UserPromptSubmit") {
     return "当前事件主要读取用户原始输入，重点看 tool_input.message 和顶层 prompt。"
   }
@@ -1366,6 +1395,16 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
   ]
 
   const extraObjects: HookReadableObjectDoc[] = []
+
+  if (event === "PostToolBatch") {
+    stdinFields.push({ key: "tool_calls", description: "当前已返回的完整工具批次，按模型请求顺序排列。" })
+    extraObjects.push({
+      key: "tool_calls[]",
+      fields: ["tool_name", "tool_input", "tool_use_id", "tool_response"],
+      description: "模型请求参数与模型可见输出；不代表原生执行凭证或最终验收。",
+      note: "完整批次仅在 stdin JSON 中提供，没有对应的专用环境变量。"
+    })
+  }
 
   if (
     event === "PreToolUse" ||

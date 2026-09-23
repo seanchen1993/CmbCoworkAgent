@@ -112,6 +112,7 @@ export interface HookContext {
   compactionInstructions?: string | null
   compactionSummary?: string
   toolName?: string
+  toolBatch?: import("../../shared/mods/v2/classic").ClassicToolBatchCall[]
   toolArgs?: Record<string, unknown>
   toolResult?: string
   workspacePath?: string
@@ -515,6 +516,7 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.hookSourcePath) payload.hook_source_path = context.hookSourcePath
   if (context.toolName) payload.tool_name = context.toolName
   if (context.toolArgs) payload.tool_input = context.toolArgs
+  if (event === "PostToolBatch") payload.tool_calls = context.toolBatch ?? []
   if (context.pluginId) payload.plugin_id = context.pluginId
   if (context.pluginName) payload.plugin_name = context.pluginName
   if (context.pluginRoot) payload.plugin_root = context.pluginRoot
@@ -1254,7 +1256,7 @@ async function executeHook(
 ): Promise<HookResult> {
   // Compaction cannot begin until its gate settles. Imported async settings
   // are adapted to an awaited gate, including once/in-flight deduplication.
-  if (event === "PreCompact" && hook.async === true) hook = { ...hook, async: false }
+  if ((event === "PreCompact" || event === "PostToolBatch") && hook.async === true) hook = { ...hook, async: false }
   const onceKey = hook.once === true ? getOnceExecutionKey(hook, event, context) : undefined
   const onceGeneration = onceKey
     ? {
@@ -1464,6 +1466,7 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
         } else payload.tool_response = output
       }
     }
+    if (event === "PostToolBatch") payload.tool_calls = context.toolBatch ?? []
     if (event === "UserPromptSubmit") payload.prompt = context.userPrompt ?? ""
     if (event === "SessionStart") payload.source = context.sessionStartSource ?? "startup"
     if (event === "SessionEnd") payload.reason = context.sessionEndReason ?? "other"
@@ -1904,7 +1907,8 @@ async function runLegacyHooks(
     event === "PreToolUse" ||
     event === "PreSkillUse" ||
     event === "UserPromptSubmit" ||
-    event === "PreCompact"
+    event === "PreCompact" ||
+    event === "PostToolBatch"
   ) {
     let mergedUpdatedInput: Record<string, unknown> | undefined
     let mergedAdditionalContext = classicResult?.additionalContext

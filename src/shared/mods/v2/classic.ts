@@ -1,6 +1,12 @@
 import { isModObject, ModFunctionError } from "./contracts"
 import { isClaudeEventName } from "./event-catalog"
 
+export interface ClassicToolBatchCall {
+  tool_name: string
+  tool_input: unknown
+  tool_use_id: string
+  tool_response?: unknown
+}
 const MAX_TEXT = 32000
 const MAX_ITEMS = 256
 type Validator = (value: unknown) => boolean
@@ -154,6 +160,30 @@ export function validateClassicInput(event: string, value: unknown): void {
     (value.effort !== undefined && !shape(value.effort, { level: text }, ["level"]))
   )
     throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  if (name === "PostToolBatch") {
+    const calls = value.tool_calls
+    if (
+      !Array.isArray(calls) ||
+      calls.length === 0 ||
+      calls.length > 128 ||
+      calls.some(
+        (call) =>
+          !shape(
+            call,
+            {
+              tool_name: (value) => text(value) && !!value,
+              tool_use_id: (value) => text(value) && !!value,
+              tool_input: () => true,
+              tool_response: () => true
+            },
+            ["tool_name", "tool_use_id", "tool_input"]
+          )
+      ) ||
+      new Set(calls.map((call) => (call as { tool_use_id: string }).tool_use_id)).size !==
+        calls.length
+    )
+      throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  }
   if (name === "PreCompact" || name === "PostCompact") {
     if (
       !oneOf(["manual", "auto"])(value.trigger) ||
