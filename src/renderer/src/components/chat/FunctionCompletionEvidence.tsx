@@ -69,14 +69,28 @@ export function FunctionCompletionEvidenceContent({
   records: CompletionEvidenceRecord[]
 }): React.JSX.Element | null {
   if (!records.length) return null
-  const visible = [...records].sort((a, b) => b.at - a.at).slice(0, 24)
+  const sorted = [...records].sort((a, b) => b.at - a.at)
+  const visible = sorted.slice(0, 24)
+  const latest = sorted.find((record) => record.phase !== "invalidated") ?? sorted[0]
+  const latestInvalidation = sorted.find(
+    (record) =>
+      record.phase === "invalidated" &&
+      record.at >= latest.at &&
+      JSON.stringify(record.binding) === JSON.stringify(latest.binding)
+  )
+  // A delayed invalidation from an older runtime does not change newer execution
+  // facts. A confirmed checkpoint transition remains a historical commit fact.
+  const currentStatus =
+    latest.phase !== "state.transition" && latest.status === "pass" && latestInvalidation
+      ? "stale"
+      : latest.status
   return (
     <details
       className="mx-auto mb-2 max-w-3xl rounded border px-3 py-2 text-xs"
       data-completion-evidence
     >
       <summary className="cursor-pointer">
-        完成检查证据 · {statuses[visible[0].status]} · {records.length} 条记录
+        完成检查证据 · {statuses[currentStatus]} · {records.length} 条记录
       </summary>
       <p className="mt-2 text-muted-foreground">
         来自宿主历史执行记录，仅对所列文件版本有效。文件、需求或配置变化后需要重新检查。插件评审意见不代表测试通过或业务验收。显示最近{" "}

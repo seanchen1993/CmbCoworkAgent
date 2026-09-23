@@ -88,6 +88,24 @@ it("adds no visible UI when there is no trusted host evidence", () => {
   ).toBe("")
 })
 
+it("does not let late invalidation of an old runtime replace a newer check summary", () => {
+  const old = { ...record("check.result", "pass", {}), id: "old", at: 1 }
+  const current = {
+    ...record("check.result", "pass", {}),
+    id: "new",
+    at: 2,
+    binding: { ...old.binding, runtimeGeneration: 5 }
+  }
+  const stale = { ...record("invalidated", "stale", { reason: "runtime-replaced" }), at: 3 }
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [stale, current, old]
+    })
+  )
+  expect(html).toMatch(/完成检查证据 · 通过/)
+  expect(html).toContain("证据已失效")
+})
+
 it("identifies an uncertain checkpoint commit and requires reconciliation before retry", () => {
   const html = renderToStaticMarkup(
     createElement(FunctionCompletionEvidenceContent, {

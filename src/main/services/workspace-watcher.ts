@@ -19,6 +19,7 @@ import {
   type WorkspaceWatcherWorkerEvent
 } from "../workspace-watcher-worker/client"
 import { bumpHookCatalogWorkspaceRevision } from "../hook-catalog/revision"
+import { emitWorkspaceFilesChanged } from "./workspace-change-events"
 
 /**
  * Files directly under .git/ that signal meta-relevant changes:
@@ -827,6 +828,7 @@ function notifyRenderer(
     changeType,
     update
   }
+  emitWorkspaceFilesChanged(payload)
   const windows = BrowserWindow.getAllWindows()
 
   for (const win of windows) {

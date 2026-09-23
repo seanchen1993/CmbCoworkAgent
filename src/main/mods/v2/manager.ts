@@ -54,6 +54,9 @@ import {
 import { advanceAutobizCheckpoint, runAutobizValidator } from "./autobiz-validation"
 import { runProjectCheck, type ProjectCheckKind } from "./project-checks"
 import { dispatchFunctionStream, type FunctionStreamOptions, type ModHookStream } from "./stream-dispatcher"
+import { CompletionFreshness } from "./completion-freshness"
+import { onWorkspaceFilesChanged } from "../../services/workspace-change-events"
+import { isSameWorkspacePath } from "../../../shared/workspace-path"
 
 interface Snapshot {
   compiled: CompiledFunctionPlugin
@@ -64,6 +67,7 @@ interface FunctionConnection {
   stop(): void
 }
 interface SessionEntry {
+  freshness: CompletionFreshness
   completionProofs: Map<string, (signal: AbortSignal) => Promise<CompletionEvidenceBinding>>
   turnNotices: FunctionTurnNotices
   workspace: string
@@ -172,13 +176,24 @@ export class FunctionModsManager {
   }>()
   private closed = false
   private sessionGeneration = this.initialEpoch
+  private readonly stopWatching: () => void
 
   constructor(
     private readonly store: ModControlStore,
     private readonly host: FunctionManagerHost,
     private readonly createClient: () => FunctionConnection = () =>
       new FunctionRuntimeClient(join(__dirname, "function-mod-host.js"))
-  ) {}
+  ) {
+    this.stopWatching = onWorkspaceFilesChanged((change) => {
+      for (const entry of this.sessions.values())
+        if (
+          this.host.enabled(entry.workspace) &&
+          (isSameWorkspacePath(entry.workspace, change.workspacePath) ||
+            entry.freshness.matchesWorkspace(change.workspacePath))
+        )
+          entry.freshness.changed()
+    })
+  }
 
   private epoch(workspace: string): number {
     return this.epochs.get(workspace) ?? this.initialEpoch
@@ -293,6 +308,7 @@ export class FunctionModsManager {
       if (request.workspace === workspace) request.valid = false
     for (const [key, entry] of this.sessions) {
       if (entry.workspace !== workspace) continue
+      entry.freshness.close("runtime-replaced")
       this.sessions.delete(key)
       void entry.session?.close()
       entry.client.stop()
@@ -314,6 +330,7 @@ export class FunctionModsManager {
       if (request.threadId === threadId) request.valid = false
     for (const [key, entry] of this.sessions) {
       if (entry.threadId !== threadId) continue
+      entry.freshness.close("session-closed")
       this.sessions.delete(key)
       void entry.session?.close()
       entry.client.stop()
@@ -334,6 +351,9 @@ export class FunctionModsManager {
     }
     if (this.sessions.size >= 6) throw new ModFunctionError("MODS_SESSION_CAPACITY")
     entry = {
+      freshness: new CompletionFreshness((id, binding, reason) => {
+        this.invalidateCompletionEvidence(workspace, threadId, id, binding, reason)
+      }),
       completionProofs: new Map(),
       turnNotices: new FunctionTurnNotices(),
       workspace,
@@ -598,6 +618,7 @@ export class FunctionModsManager {
               delete: (key) => {
                 assertLive(plugin)
                 this.store.functionState.delete(namespace, key)
+                current.freshness.changed()
               },
               set: async (key, value, signal) => {
                 assertLive(plugin)
@@ -605,6 +626,7 @@ export class FunctionModsManager {
                 assertLive(plugin)
                 signal.throwIfAborted()
                 this.store.functionState.set(namespace, key, checked)
+                current.freshness.changed()
               }
             }
           },
@@ -614,6 +636,7 @@ export class FunctionModsManager {
         assertLive()
         return current.session
       } catch (error) {
+        current.freshness.close("session-load-failed")
         if (this.sessions.get(key) === current) this.sessions.delete(key)
         current.client.stop()
         throw error
@@ -649,9 +672,52 @@ export class FunctionModsManager {
     })
   }
 
+  private invalidateCompletionEvidence(
+    workspace: string,
+    threadId: string,
+    evidenceId: string,
+    binding: CompletionEvidenceBinding,
+    reason: string
+  ): void {
+    this.sessions.get(JSON.stringify([workspace, threadId]))?.completionProofs.delete(evidenceId)
+    this.store.saveCompletionEvidence({
+      id: randomUUID(),
+      idempotencyKey: `freshness:${bindingFingerprint(binding)}`,
+      workspace,
+      threadId,
+      turnId: binding.turnId,
+      runId: binding.runId,
+      phase: "invalidated",
+      status: "stale",
+      binding,
+      detail: { evidenceId, reason },
+      at: Date.now()
+    })
+    this.host.changed(threadId)
+  }
+
   completionEvidence(workspace: string, threadId: string, limit = 100): CompletionEvidenceRecord[] {
     this.host.assertThread?.(workspace, threadId)
     if (!this.host.enabled(workspace)) return []
+    const records = this.store.completionEvidence(workspace, threadId, limit)
+    const generation = this.sessions.get(JSON.stringify([workspace, threadId]))?.generation
+    const invalidated = new Set(
+      records.filter((row) => row.phase === "invalidated").map((row) => bindingFingerprint(row.binding))
+    )
+    // A previous process has no live authority/capture closure. Preserve its historical
+    // facts and append an invalidation instead of reviving a PASS on UI reload.
+    for (const row of records) {
+      const fingerprint = bindingFingerprint(row.binding)
+      if (
+        row.phase === "check.result" &&
+        row.status === "pass" &&
+        row.binding.runtimeGeneration !== generation &&
+        !invalidated.has(fingerprint)
+      ) {
+        this.invalidateCompletionEvidence(workspace, threadId, row.id, row.binding, "runtime-replaced")
+        invalidated.add(fingerprint)
+      }
+    }
     return this.store.completionEvidence(workspace, threadId, limit)
   }
 
@@ -1216,6 +1282,7 @@ export class FunctionModsManager {
           signal.throwIfAborted()
           sharedBudget?.assertSettled()
           if (reportOnly) {
+            entry.freshness.track(attempt, binding, capture)
             record("check.result", "pass", {
               ...result,
               decision: "pass",
@@ -1225,6 +1292,7 @@ export class FunctionModsManager {
             })
             return { decision: "pass" }
           }
+          if (result.decision === "pass") entry.freshness.track(attempt, binding, capture)
           record("check.result", result.decision, {
             ...result,
             source: "guest-opinion",
@@ -1485,6 +1553,7 @@ export class FunctionModsManager {
 
   close(): void {
     this.closed = true
+    this.stopWatching()
     for (const workspace of new Set([...this.sessions.values()].map((entry) => entry.workspace)))
       this.invalidate(workspace)
   }
