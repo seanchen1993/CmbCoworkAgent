@@ -46,6 +46,8 @@ interface Instance {
   pending: number
   backgroundRunning: boolean
   backgroundEvents: Map<string, ModObject>
+  renderStreak: number
+  pendingMessage?: { data: ModJson }
   frame?: ReturnType<typeof setTimeout>
   timers: Map<string, { ms: number; timer: ReturnType<typeof setInterval> }>
 }
@@ -77,6 +79,7 @@ export class FunctionClients {
     for (const { timer } of instance.timers.values()) clearInterval(timer)
     instance.timers.clear()
     instance.backgroundEvents.clear()
+    instance.pendingMessage = undefined
     void instance.loading.then((guest) => guest.dispose()).catch(() => {})
   }
 
@@ -135,11 +138,15 @@ export class FunctionClients {
     return task
   }
 
-  private fail(instance: Instance): void {
+  private fail(instance: Instance, error?: unknown): void {
+    if (instance.stopped) return
     this.stop(instance)
     instance.snapshot = {
       ...instance.snapshot,
-      error: "MODS_CLIENT_FAILED",
+      error:
+        error instanceof ModFunctionError && error.code === "MODS_CLIENT_RENDER_LOOP"
+          ? error.code
+          : "MODS_CLIENT_FAILED",
       tree: {
         type: "Text",
         props: {},
@@ -162,10 +169,12 @@ export class FunctionClients {
           this.enqueue(instance, async () => {
             const events = [...instance.backgroundEvents.values()]
             instance.backgroundEvents.clear()
-            for (const event of events) await this.update(instance, event)
+            for (const event of events)
+              if (event.kind !== "post") await this.update(instance, event)
+            await this.flushMessage(instance)
           })
         )
-        .catch(() => this.fail(instance))
+        .catch((error) => this.fail(instance, error))
         .finally(() => {
           instance.backgroundRunning = false
           const pending = instance.backgroundEvents.values().next().value
@@ -179,7 +188,7 @@ export class FunctionClients {
     try {
       await this.render(instance, input)
     } catch (error) {
-      this.fail(instance)
+      this.fail(instance, error)
       throw error
     }
   }
@@ -214,10 +223,14 @@ export class FunctionClients {
     if (
       !isModObject(value) ||
       typeof value.dirty !== "boolean" ||
+      typeof value.renderSetState !== "boolean" ||
       !Array.isArray(value.timers) ||
       value.timers.length > 16
     )
       throw new ModFunctionError("MODS_CLIENT_RESULT")
+    if (input.kind !== "frame") instance.renderStreak = 0
+    instance.renderStreak = value.renderSetState ? instance.renderStreak + 1 : 0
+    if (instance.renderStreak >= 3) throw new ModFunctionError("MODS_CLIENT_RENDER_LOOP")
     validateFunctionTree(value.tree)
     const rawTree = encodeModJson(value.tree)
     const tree =
@@ -260,29 +273,39 @@ export class FunctionClients {
         instance.timers.delete(id)
       }
     if (Object.hasOwn(value, "message")) {
-      const answer = await this.host.message(
-        instance.snapshot.plugin,
-        {
-          surface: "desktop",
-          component: "Pane",
-          requestId: instance.requestId,
-          element: instance.snapshot.element,
-          module: instance.snapshot.module,
-          data: await this.host.publish(value.message)
-        },
-        instance.controller.signal
-      )
-      this.assert(instance)
-      if (!isModObject(answer)) throw new ModFunctionError("MODS_CLIENT_MESSAGE_RESULT")
-      if (Object.hasOwn(answer, "props")) {
-        instance.props = answer.props
-        this.background(instance, {
-          kind: "render"
-        })
-      }
+      instance.pendingMessage = { data: value.message }
+      this.background(instance, { kind: "post" })
     }
     if (value.dirty) this.background(instance, { kind: "frame" })
     if (changed) this.host.changed()
+  }
+
+  private async flushMessage(instance: Instance): Promise<void> {
+    this.assert(instance)
+    const pending = instance.pendingMessage
+    if (!pending) return
+    instance.pendingMessage = undefined
+    instance.backgroundEvents.delete("post:")
+    const data = await this.host.publish(pending.data)
+    this.assert(instance)
+    const answer = await this.host.message(
+      instance.snapshot.plugin,
+      {
+        surface: "desktop",
+        component: "Pane",
+        requestId: instance.requestId,
+        element: instance.snapshot.element,
+        module: instance.snapshot.module,
+        data
+      },
+      instance.controller.signal
+    )
+    this.assert(instance)
+    if (!isModObject(answer)) throw new ModFunctionError("MODS_CLIENT_MESSAGE_RESULT")
+    if (Object.hasOwn(answer, "props")) {
+      instance.props = answer.props
+      this.background(instance, { kind: "render" })
+    }
   }
 
   async reconcile(
@@ -340,6 +363,7 @@ export class FunctionClients {
           pending: 0,
           backgroundRunning: false,
           backgroundEvents: new Map(),
+          renderStreak: 0,
           loading,
           stopped: false,
           controller: new AbortController(),

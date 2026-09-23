@@ -5,7 +5,42 @@ export const CLIENT_BOOTSTRAP = String.raw`
   const callbacks=new Map(), timers=new Map();
   let previous=new Map();
   let sequence=0, owner, state, props, columns=0, rows=0, dirty=false, message;
+  let drawing=false, renderSetState=false;
   let onKey, onPointer, onFocus, onScroll;
+  function post(data) {
+    let values=0, characters=0;
+    const ancestors=new Set();
+    function copy(value,depth) {
+      // The shared transport's 32-level limit includes the result and message envelope.
+      if(++values>20000||depth>30)throw Error("MODS_CLIENT_POST");
+      if(value===null||typeof value==="boolean")return value;
+      if(typeof value==="number"&&Number.isFinite(value))return value;
+      if(typeof value==="string"){
+        characters+=value.length;
+        if(characters>100000)throw Error("MODS_CLIENT_POST");
+        return value;
+      }
+      if(typeof value!=="object"||ancestors.has(value))throw Error("MODS_CLIENT_POST");
+      const array=Array.isArray(value), prototype=Object.getPrototypeOf(value);
+      if(!array&&prototype!==Object.prototype&&prototype!==null)throw Error("MODS_CLIENT_POST");
+      ancestors.add(value);
+      const result=array?[]:Object.create(null);
+      if(array){
+        if(value.length>20000)throw Error("MODS_CLIENT_POST");
+        for(let i=0;i<value.length;i++)result.push(copy(value[i],depth+1));
+      }else for(const key of Object.keys(value)){
+        if(["__proto__","prototype","constructor"].includes(key))throw Error("MODS_CLIENT_POST");
+        characters+=key.length;
+        if(characters>100000)throw Error("MODS_CLIENT_POST");
+        const descriptor=Object.getOwnPropertyDescriptor(value,key);
+        if(!descriptor||!("value" in descriptor))throw Error("MODS_CLIENT_POST");
+        result[key]=copy(descriptor.value,depth+1);
+      }
+      ancestors.delete(value);
+      return result;
+    }
+    try {message=copy(data,0);} catch {}
+  }
   function children(value,depth=0) {
     if(depth>24)throw Error("MODS_UI_DEPTH");
     const out=[];
@@ -49,7 +84,7 @@ export const CLIENT_BOOTSTRAP = String.raw`
   const surface=freeze({
     elements,
     get state(){return state;}, get columns(){return columns;}, get rows(){return rows;},
-    setState(value){state=value;dirty=true;},
+    setState(value){state=value;dirty=true;if(drawing)renderSetState=true;},
     every(ms,fn){
       if(!Number.isFinite(ms)||ms<0||typeof fn!=="function"||timers.size>=16)
         throw Error("MODS_CLIENT_TIMER");
@@ -59,7 +94,7 @@ export const CLIENT_BOOTSTRAP = String.raw`
     onPointer(fn){if(typeof fn!=="function")throw Error("MODS_CLIENT_POINTER");onPointer=fn;return()=>{if(onPointer===fn)onPointer=undefined;}},
     onFocus(fn){if(typeof fn!=="function")throw Error("MODS_CLIENT_FOCUS");onFocus=fn;return()=>{if(onFocus===fn)onFocus=undefined;}},
     onScroll(fn){if(typeof fn!=="function")throw Error("MODS_CLIENT_SCROLL");onScroll=fn;return()=>{if(onScroll===fn)onScroll=undefined;}},
-    post(data){message=data;}
+    post
   });
   const sync=value=>{if(value&&typeof value.then==="function")throw Error("MODS_CLIENT_ASYNC");};
   globalThis.__cmbFunctionMod={register(on,options){
@@ -85,8 +120,9 @@ export const CLIENT_BOOTSTRAP = String.raw`
       const names=Object.keys(module).filter(name=>/^[A-Z]/.test(name)&&typeof module[name]==="function");
       const draw=module.default||(names.length===1?module[names[0]]:undefined);
       if(typeof draw!=="function")throw Error("MODS_CLIENT_EXPORT");
-      const tree=draw(props,surface);sync(tree);
-      return {tree,dirty,...(message===undefined?{}:{message}),
+      let tree;renderSetState=false;drawing=true;
+      try {tree=draw(props,surface);sync(tree);} finally {drawing=false;}
+      return {tree,dirty,renderSetState,...(message===undefined?{}:{message}),
         timers:[...timers].map(([id,t])=>({id,ms:t.ms}))};
     });
   }};

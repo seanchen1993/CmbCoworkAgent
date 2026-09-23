@@ -118,7 +118,7 @@ it("matches the upstream Client descriptor and preserves local state across pare
   expect(client.error).toBeUndefined()
   const click = action(client, "press")
   await Promise.all([f.session.clients.act(click), f.session.clients.act(click)])
-  expect(f.state.get("client-message")).toEqual({ count: 1 })
+  await expect.poll(() => f.state.get("client-message")).toEqual({ count: 1 })
   await expect
     .poll(async () => JSON.stringify((await f.snapshot()).client.tree))
     .toContain("Acknowledged")
@@ -286,7 +286,7 @@ it("cancels a waiting owner hook on unmount before it can write persistent state
   const press = f.session.clients.act(action(client, "press")).catch((error) => error)
   await expect.poll(() => f.state.get("entered")).toBe(true)
   await f.session.panes.closePane("client-board", "client-board")
-  expect(await press).toBeInstanceOf(Error)
+  expect(await press).toBeUndefined()
   await new Promise((r) => setTimeout(r, 250))
   expect(f.state.has("client-message")).toBe(false)
   expect(f.guest.stats.frames).toBe(0)
@@ -358,7 +358,7 @@ it("filters Client output and posted data before it reaches renderer or hooks", 
   const { client } = await f.snapshot()
   expect(content(client.tree)).toBe("FILTERED")
   await f.session.clients.act(action(client, "press"))
-  expect(f.state.get("client-message")).toEqual({ count: "FILTERED" })
+  await expect.poll(() => f.state.get("client-message")).toEqual({ count: "FILTERED" })
 })
 
 it("does not revive a removed control handle when its key is later reused", async () => {
