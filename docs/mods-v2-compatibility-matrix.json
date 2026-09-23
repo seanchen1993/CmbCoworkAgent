@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
-  "date": "2026-09-22",
-  "codeBaseline": "bf0a8cd9",
+  "date": "2026-09-23",
+  "codeBaseline": "1584c03c",
   "upstream": {
     "versionInDeclaration": "2.1.277",
     "revision": "bf7d404e26a5fb6167d21b46c93a2bf6c22ab274",
@@ -18,19 +18,23 @@
     "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, registered tools in main and explicitly host-bound shared task agents, host-bound main-agent model stream/turn.step and adapted model fork/classify, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete; MCP tool.call routing and scoped permission metadata; explicit grant/execution workspace separation, runtime tool restrictions and private instance lifetimes",
     "desktopEvents": [
       "session.start",
+      "engine.create (bounded per-session noun fold)",
       "turn.start (desktop/scheduler/heartbeat/legacy remote main runs)",
       "turn.complete (desktop/scheduler/heartbeat/legacy remote main runs and host-bound shared children)",
       "turn.step (host-bound main-agent model stream)",
       "turn.abort",
       "command.run",
       "command.describe",
-      "ui.render (desktop Pane)",
+      "ui.render (desktop Pane and eleven bounded live sites; details in renderComponents)",
       "ui.press",
       "ui.input",
       "ui.select",
       "ui.message (owner only)",
       "ui.open",
       "ui.close",
+      "ui.focus (desktop Pane/Client)",
+      "ui.scroll (desktop Pane/Client)",
+      "agent.offer (actual main agent registry)",
       "tool.call (SDK and model-raised tools)",
       "tool.register",
       "tool.list",
@@ -38,7 +42,9 @@
       "model.fork",
       "model.classify",
       "mcp.call",
-      "tool.check"
+      "tool.check",
+      "ui.toast",
+      "ui.status"
     ],
     "desktopSdk": [
       "command.register",
@@ -79,10 +85,12 @@
       "model.fork",
       "model.classify",
       "mcp.call",
-      "tool.check"
+      "tool.check",
+      "ui.toast",
+      "ui.status"
     ],
     "modelLimitations": [
-      "main-agent turn.step and model.fork/classify are host-bound adapted bridges; model selection/effort rewrites remain rejected",
+      "Host-bound main-agent turn.step permits configured model selection and DeepSeek-only effort; opaque stream resources and authority remain host-owned. model.fork/classify keep their separately bounded adapted contracts.",
       "configured model IDs/refs and default alias only; no implicit Claude alias remapping",
       "one text prompt, host identity plus optional system; no tools or history",
       "256 default output tokens, 4096 ceiling additionally capped by configured model; 32000 prompt/8000 system characters, 64000 response bytes",
@@ -91,25 +99,26 @@
       "local real-client protocol and UI fixtures do not prove external production-model behavior"
     ],
     "toolLimitations": [
-      "native CMB tool names/arguments/results; Claude built-in Read/Bash schemas pending",
+      "Native CMB tool names, arguments and outputs are adapted; no Claude Bash/PowerShell/Read aliases or complete built-in input/output schema equivalence.",
       "SDK supports read_file/write_file/edit_file/ls/glob/grep/execute/task_output and registered guest tools; model ingress retains actual adapter schemas",
       "SDK writes require live user action and shared thread lease; model hooks do not grant that authority; actual native writes retain host approval",
       "physical MCP SDK requires live user action and final approval; named MCP can also call registered tools in main or explicitly host-bound tasks under registered admission; tool.check uses current scoped or cold valid cached metadata",
       "tool.register exposes normalized mcp__plugin__name tools to main and explicitly host-bound shared task agents; namespace conflicts and changed in-flight definitions are rejected; custom/opaque agents without a known authority cannot acquire them",
       "tool.list uses actual graph construction and model catalogs plus registered entries; known child roles own their initial catalogs; cold ordinary foreground threads use the same production metadata factories with no model or tool execution",
-      "JSON Schema bounded subset; refs, regex, format and other unsupported keywords explicitly rejected; see authoring guide",
+      "Bounded JSON Schema supports root #/$defs/Name and #/definitions/Name with ref siblings; missing/cyclic/external/other-pointer refs, regex, format and unknown keywords are rejected. Defaults/examples are annotations, not input mutations.",
       "32 registrations/plugin, 128/session, 256000 aggregate metadata characters; input schemas 16000 characters and registered inputs 64000 characters; validation work bounded",
       "16000-character native SDK input bound; model ingress uses bounded JSON",
       "tool/agentId/tool_use_id are host event identities; colliding native arguments retain their original values",
       "ref selects original host messages within one ingress; result replacement preserves real execution status and graph control",
-      "context is model-only for the latest contiguous tool round, 128000 aggregate characters; normal remote providers not tested"
+      "context is model-only for the latest contiguous tool round, 128000 aggregate characters; normal remote providers not tested",
+      "Supported annotation types and unique type arrays are checked at registration; deny excludes result/context/ref/text/isError. Malformed optional-hook results follow dispatcher fallback without bypassing host policy."
     ],
     "paneLimitations": [
-      "inline Pane only; no dock or remaining 13 sites",
-      "eight elements including Client with a restricted prop allowlist; no Svg/diff Code",
+      "Inline Pane and eleven live non-Pane desktop sites, including user/assistant messages and nonapproval tool detail/results; AskUserQuestion and ToolGroup remain partial; terminal-only ToolProgress unsupported.",
+      "Nine native elements including bounded Code and isolated Svg. SVG excludes scripts, external resources, SMIL and filters; Client remains Pane-only. Contributed syntax grammars unsupported.",
       "ui.resolve returns native constructors only; constructor replacement hooks pending",
       "ui.invalidate supports ui.render only",
-      "Pane focus and bounded scroll are adapted; hotkeys, hover, holdToasts and measured viewport remain pending",
+      "Pane focus and bounded scroll are adapted; one-shot focus requests select the first autoFocus control without stealing active editing and expire on close/replacement; holdToasts is explicitly rejected; hotkeys, hover and measured viewport remain pending",
       "native dynamically compiled async functions do not inherit guest continuation identity",
       "Claude static dollar-SDK usage scanner not yet implemented"
     ],
@@ -121,10 +130,7 @@
       "desktop cell dimensions estimated at 8x24 pixels",
       "upstream descriptor conformance verified; desktop Client and Pane focus/scroll lifecycle are adapted and covered by host/session tests; remaining upstream lifecycle details remain partial"
     ],
-    "unitPrototypeOnly": [
-      "turn.step",
-      "model stream boundary"
-    ],
+    "unitPrototypeOnly": [],
     "turnLifecycle": {
       "revision": "desktop-turn-presentation-v24",
       "design": "mods-v2-turn-presentation-2026-09-18.md",
@@ -181,7 +187,7 @@
       "design": "mods-v2-context-usage-2026-09-18.md",
       "scope": "actual main live window plus exact read-only checkpoint worker; latest valid response input including cache, never turn accumulation; durable and in-flight native compaction boundaries",
       "limits": [
-        "breakdown is available from a bound live model request with estimated system/tools/messages categories and separate provider apiUsage; dynamic MCP/memory/skills/agents sources remain omitted; explicit compact publishes a staged archive pointer with checkpoint compensation",
+        "breakdown uses the bound live model request; memoryContents and skillsMetadata come from actual production middleware state, MCP loaded state from current request tool IDs, agents from the enabled registry when task is available; source token counts are estimates and do not add a second category total; provider apiUsage stays separate",
         "unknown or zero input omits tokens/percent; legacy compaction boundary remains unknown until a new response",
         "no real cost ledger or subscription rate-limit reading; cost omitted and rateLimits empty",
         "100000 scanned messages, 1 MiB cold row; cancellation and scope/config invalidation enforced"
@@ -275,225 +281,1166 @@
     "namespaces": 19,
     "sdkMembers": 65,
     "sdkMethods": 63,
-    "renderComponents": 14,
+    "renderComponents": 15,
     "desktopElements": 9,
     "clientSurfaceMembers": 11,
     "globalNames": 14
   },
   "engineEvents": [
-    {"name":"tool.call","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A03","A05"],"differences":["D01","D02"]},
-    {"name":"tool.check","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01"]},
-    {"name":"ui.render","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"ui.resolve","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"ui.press","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A03","A08"],"differences":["D01"]},
-    {"name":"ui.input","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":[]},
-    {"name":"ui.select","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":[]},
-    {"name":"ui.message","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D09"]},
-    {"name":"ui.scroll","target":"desktop-pane-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client and Pane wheel events are normalized to bounded finite deltas and scroll offsets; non-desktop sites remain partial."},
-    {"name":"ui.focus","target":"desktop-pane-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client root and Pane focus transitions are normalized to focused boolean events; nested focus and non-desktop sites remain partial."},
-    {"name":"agent.offer","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A04","A10"],"differences":["D01","D05"],"note":"Host filters registry agent profiles through the real FunctionSession chain; provider identity is pinned and the default host answer is isOffered:true. Provider/plugin-specific listing provenance remains adapted."},
-    {"name":"agent.spawn","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A04","A10"],"differences":["D01","D05"]},
-    {"name":"prompt.submit","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},
-    {"name":"prompt.fill","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08","A09"],"differences":[]},
-    {"name":"prompt.suggest","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":[]},
-    {"name":"prompt.section","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},
-    {"name":"prompt.context","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},
-    {"name":"tool.describe","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A05"],"differences":["D01"]},
-    {"name":"command.run","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A06"],"differences":["D01","D02"]},
-    {"name":"command.describe","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A06"],"differences":[]},
-    {"name":"config.set","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"config.describe","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A05"],"differences":["D06"]},
-    {"name":"skill.prompt","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},
-    {"name":"attribution.text","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},
-    {"name":"session.start","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04"],"differences":["D06"]},
-    {"name":"session.receive","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04"],"differences":["D01"]},
-    {"name":"session.compact","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A04","A10","A11"],"differences":["D05"]},
-    {"name":"session.attach","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04"],"differences":["D03"]},
-    {"name":"session.detach","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04"],"differences":["D03"]},
-    {"name":"plugin.register","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A07"],"differences":["D01","D08"]},
-    {"name":"turn.start","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04"],"differences":[]},
-    {"name":"turn.step","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A03","A10"],"differences":["D01","D02","D05"],"note":"Main-agent stream crosses an opaque host reference boundary; child/metadata paths bypass it and plugin model/effort rewrites are rejected."},
-    {"name":"turn.complete","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A04","A10"],"differences":[]},
-    {"name":"engine.create","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A07"],"differences":["D01"]}
+    {"name": "tool.call", "target": "desktop-native-and-registered-tool-bridge", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A03", "A05"], "differences": ["D01", "D02"], "note": "Actual native and registered tool adapters retain host policy, lease and authority; bounded inputs and deny/result envelopes are validated. Native names and outputs differ from upstream.", "evidence": ["src/main/mods/v2/tool-schema-contract.test.ts", "src/main/mods/v2/tool-sdk.integration.test.ts"]},
+    {"name": "tool.check", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01"]},
+    {"name": "ui.render", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"]},
+    {"name": "ui.resolve", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"]},
+    {"name": "ui.press", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A03", "A08"], "differences": ["D01"]},
+    {"name": "ui.input", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": []},
+    {"name": "ui.select", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": []},
+    {"name": "ui.message", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D09"]},
+    {"name": "ui.scroll", "target": "desktop-pane-client-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"], "note": "Client and Pane wheel events are normalized to bounded finite deltas and scroll offsets; non-desktop sites remain partial."},
+    {"name": "ui.focus", "target": "desktop-pane-client-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"], "note": "Client root and Pane focus transitions are normalized to focused boolean events; nested focus and non-desktop sites remain partial."},
+    {"name": "agent.offer", "target": "desktop-live-adapter", "implementationStatus": "adapted", "batch": "B6", "acceptance": ["A04", "A10"], "differences": ["D01", "D05"], "note": "Host filters registry agent profiles through the real FunctionSession chain; provider identity is pinned and the default host answer is isOffered:true. Provider/plugin-specific listing provenance remains adapted."},
+    {"name": "agent.spawn", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A04", "A10"], "differences": ["D01", "D05"]},
+    {"name": "prompt.submit", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A10"], "differences": ["D01"]},
+    {"name": "prompt.fill", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08", "A09"], "differences": []},
+    {"name": "prompt.suggest", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": []},
+    {"name": "prompt.section", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A10"], "differences": ["D01"]},
+    {"name": "prompt.context", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A10"], "differences": ["D01"]},
+    {"name": "tool.describe", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A05"], "differences": ["D01"]},
+    {"name": "command.run", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A06"], "differences": ["D01", "D02"]},
+    {"name": "command.describe", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A06"], "differences": []},
+    {"name": "config.set", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "config.describe", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A05"], "differences": ["D06"]},
+    {"name": "skill.prompt", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A10"], "differences": ["D01"]},
+    {"name": "attribution.text", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A10"], "differences": ["D01"]},
+    {"name": "session.start", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04"], "differences": ["D06"]},
+    {"name": "session.receive", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04"], "differences": ["D01"]},
+    {"name": "session.compact", "target": "desktop-live-adapter", "implementationStatus": "adapted", "batch": "B6", "acceptance": ["A04", "A10", "A11"], "differences": ["D05"]},
+    {"name": "session.attach", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04"], "differences": ["D03"]},
+    {"name": "session.detach", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04"], "differences": ["D03"]},
+    {"name": "plugin.register", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A03", "A07"], "differences": ["D01", "D08"]},
+    {"name": "turn.start", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04"], "differences": []},
+    {"name": "turn.step", "target": "desktop-live-adapter", "implementationStatus": "adapted", "batch": "B6", "acceptance": ["A03", "A10"], "differences": ["D01", "D02", "D05"], "note": "Main-agent stream crosses an opaque host reference boundary with configured per-step model selection and DeepSeek-only effort. Cancellation/revocation actively closes provider resources; children and metadata paths remain separately adapted.", "evidence": ["src/main/agent/mods-model-boundary.test.ts", "src/main/agent/mods-session-view.test.ts", "src/main/mods/v2/session-read-host.test.ts", "docs/mods-v2-model-step-2026-09-23.md"]},
+    {"name": "turn.complete", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A04", "A10"], "differences": []},
+    {"name": "engine.create", "target": "desktop-session-noun-fold", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A03", "A07"], "differences": ["D01"], "note": "JSON object methods across isolated guests, operation middleware, caller/provider capability intersection and session invalidation. No stream provider, generated types, static dependency graph or failed-plugin unload/rebuild recovery.", "evidence": ["src/main/mods/v2/engine-nouns.test.ts", "tests/support/function-engine-nouns-process.ts", "docs/mods-v2-engine-nouns-2026-09-23.md"]}
   ],
   "operationEvents": [
-    {"name":"model.complete","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"],"note":"Existing bounded host completion remains the only operation with unrestricted configured-model selection."},
-    {"name":"model.classify","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"],"note":"Fixed host prompt and bounded labels; provider failure returns an empty classification and guest cannot rewrite model/effort."},
-    {"name":"model.fork","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"],"note":"Fork uses a sanitized live host snapshot and releases it after the provider call; tools/credentials are never forwarded."},
-    {"name":"audio.play","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A05","A08"],"differences":["D01","D03"]},
-    {"name":"audio.speak","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A05","A08"],"differences":["D01","D03"]},
-    {"name":"mcp.call","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02"]},
-    {"name":"session.cwd","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},
-    {"name":"session.model","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},
-    {"name":"session.turns","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},
-    {"name":"session.id","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},
-    {"name":"session.messages","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},
-    {"name":"session.repo","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},
-    {"name":"session.surface","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},
-    {"name":"session.surfaces","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},
-    {"name":"session.authorize","target":"conditional-empty","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D04"],"note":"No Anthropic first-party credential is presumed; return the upstream empty result, never a CMB credential."},
-    {"name":"session.usage","target":"live-context-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A05","A10"],"differences":["D04","D05"],"note":"breakdown is estimated from the captured live request; provider apiUsage remains separate and unavailable dynamic sources are omitted"},
-    {"name":"turn.abort","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D02"]},
-    {"name":"tool.list","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02"]},
-    {"name":"tool.register","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A05"],"differences":["D01","D02"]},
-    {"name":"command.list","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A06"],"differences":["D01","D02"]},
-    {"name":"command.register","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A06"],"differences":["D01","D02"]},
-    {"name":"config.list","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"agent.list","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A04","A05","A10"],"differences":["D01","D05"]},
-    {"name":"ui.toast","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"ui.status","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"ui.log","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"ui.notice","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"ui.invalidate","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"ui.open","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"ui.close","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"ui.blit","target":"explicitly-unsupported","implementationStatus":"unsupported","batch":"B5","acceptance":["A01","A08"],"differences":["D03"],"note":"Terminal Raster is not a desktop surface capability; reject with a named error."},
-    {"name":"fs.read","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"fs.write","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"fs.list","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"fs.exists","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"fs.stat","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"fs.ancestors","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"store.get","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A05","A13"],"differences":["D06"]},
-    {"name":"store.set","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A05","A13"],"differences":["D06"]},
-    {"name":"store.delete","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A05","A13"],"differences":["D06"]},
-    {"name":"store.keys","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A05","A13"],"differences":["D06"]},
-    {"name":"clock.now","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A02","A05"],"differences":[]},
-    {"name":"clock.sleep","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A02","A05"],"differences":[]},
-    {"name":"clock.after","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A02","A05"],"differences":[]},
-    {"name":"clock.every","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A02","A05"],"differences":[]},
-    {"name":"http.fetch","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"process.run","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02","D06"]},
-    {"name":"settings.read","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},
-    {"name":"env.get","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D06"]},
-    {"name":"env.set","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D06"]}
+    {"name": "model.complete", "target": "desktop-live-adapter", "implementationStatus": "adapted", "batch": "B6", "acceptance": ["A05", "A10"], "differences": ["D02", "D05"], "note": "Existing bounded host completion remains the only operation with unrestricted configured-model selection."},
+    {"name": "model.classify", "target": "desktop-live-adapter", "implementationStatus": "adapted", "batch": "B6", "acceptance": ["A05", "A10"], "differences": ["D02", "D05"], "note": "Fixed host prompt and bounded labels; provider failure returns an empty classification and guest cannot rewrite model/effort."},
+    {"name": "model.fork", "target": "desktop-live-adapter", "implementationStatus": "adapted", "batch": "B6", "acceptance": ["A05", "A10"], "differences": ["D02", "D05"], "note": "Fork uses a sanitized live host snapshot and releases it after the provider call; tools/credentials are never forwarded."},
+    {"name": "audio.play", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A05", "A08"], "differences": ["D01", "D03"]},
+    {"name": "audio.speak", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A05", "A08"], "differences": ["D01", "D03"]},
+    {"name": "mcp.call", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D02"]},
+    {"name": "session.cwd", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04", "A05"], "differences": ["D06"]},
+    {"name": "session.model", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04", "A05"], "differences": ["D06"]},
+    {"name": "session.turns", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04", "A05"], "differences": ["D06"]},
+    {"name": "session.id", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04", "A05"], "differences": ["D06"]},
+    {"name": "session.messages", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04", "A05"], "differences": ["D06"]},
+    {"name": "session.repo", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04", "A05"], "differences": ["D06"]},
+    {"name": "session.surface", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04", "A05"], "differences": ["D03"]},
+    {"name": "session.surfaces", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04", "A05"], "differences": ["D03"]},
+    {"name": "session.authorize", "target": "conditional-empty", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D04"], "note": "No Anthropic first-party credential is presumed; return the upstream empty result, never a CMB credential."},
+    {"name": "session.usage", "target": "live-context-adapter", "implementationStatus": "adapted", "batch": "B6", "acceptance": ["A05", "A10"], "differences": ["D04", "D05"], "note": "Captured request plus actual middleware memory/skills, enabled agent registry and current MCP tool IDs. Source metadata is estimated; no extra filesystem/MCP discovery, no double-counted categories. Unknown provider usage/cost is not fabricated.", "evidence": ["src/main/agent/context-sources.test.ts", "src/main/agent/mods-session-view.test.ts", "src/main/mods/v2/session-read-host.test.ts"]},
+    {"name": "turn.abort", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A04", "A05"], "differences": ["D02"]},
+    {"name": "tool.list", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D02"]},
+    {"name": "tool.register", "target": "desktop-registered-tool-schema", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A03", "A05"], "differences": ["D01", "D02"], "note": "Bounded JSON Schema subset with local references, registration validation and real main/shared-task model admission; not a complete JSON Schema dialect.", "evidence": ["src/main/mods/v2/tool-schema-contract.test.ts", "src/main/mods/v2/tool-registry.test.ts", "src/main/mods/v2/model-tools.test.ts", "docs/mods-v2-tool-schema-contract-2026-09-23.md"]},
+    {"name": "command.list", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A06"], "differences": ["D01", "D02"]},
+    {"name": "command.register", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A06"], "differences": ["D01", "D02"]},
+    {"name": "config.list", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "agent.list", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A04", "A05", "A10"], "differences": ["D01", "D05"]},
+    {"name": "ui.toast", "target": "desktop-session-prompt-feedback", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"], "note": "Host-owned session presentation via real operation hooks and publication policy; no model/history mutation. Toast defaults 4000 ms, bounds 0–60000 ms and four/plugin; status replaces/clears per caller. Aggregate 512 KiB. No terminal layout, holdToasts or restart persistence.", "evidence": ["src/main/mods/v2/ui-feedback.test.ts", "src/main/mods/v2/ui-feedback-session.test.ts", "src/main/mods/v2/manager.test.ts", "tests/support/mods-ui-feedback-e2e.ts", "output/mods-v2-validation/2026-09-23-ui-feedback.md"]},
+    {"name": "ui.status", "target": "desktop-session-prompt-feedback", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"], "note": "Host-owned session presentation via real operation hooks and publication policy; no model/history mutation. Toast defaults 4000 ms, bounds 0–60000 ms and four/plugin; status replaces/clears per caller. Aggregate 512 KiB. No terminal layout, holdToasts or restart persistence.", "evidence": ["src/main/mods/v2/ui-feedback.test.ts", "src/main/mods/v2/ui-feedback-session.test.ts", "src/main/mods/v2/manager.test.ts", "tests/support/mods-ui-feedback-e2e.ts", "output/mods-v2-validation/2026-09-23-ui-feedback.md"]},
+    {"name": "ui.log", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"]},
+    {"name": "ui.notice", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"]},
+    {"name": "ui.invalidate", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"], "note": "Actual FunctionSession dispatch and scoped Pane lifecycle. invalidate supports ui.render only; no terminal surface or toast queue.", "evidence": ["src/main/mods/v2/panes.test.ts", "src/main/mods/v2/sites.test.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "ui.open", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"], "note": "Actual FunctionSession dispatch and scoped Pane lifecycle. invalidate supports ui.render only; no terminal surface or toast queue.", "evidence": ["src/main/mods/v2/panes.test.ts", "src/main/mods/v2/sites.test.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "ui.close", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"], "note": "Actual FunctionSession dispatch and scoped Pane lifecycle. invalidate supports ui.render only; no terminal surface or toast queue.", "evidence": ["src/main/mods/v2/panes.test.ts", "src/main/mods/v2/sites.test.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "ui.blit", "target": "explicitly-unsupported", "implementationStatus": "unsupported", "batch": "B5", "acceptance": ["A01", "A08"], "differences": ["D03"], "note": "Terminal Raster is not a desktop surface capability; reject with a named error."},
+    {"name": "fs.read", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "fs.write", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "fs.list", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "fs.exists", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "fs.stat", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "fs.ancestors", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "store.get", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A05", "A13"], "differences": ["D06"]},
+    {"name": "store.set", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A05", "A13"], "differences": ["D06"]},
+    {"name": "store.delete", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A05", "A13"], "differences": ["D06"]},
+    {"name": "store.keys", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A05", "A13"], "differences": ["D06"]},
+    {"name": "clock.now", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A02", "A05"], "differences": []},
+    {"name": "clock.sleep", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A02", "A05"], "differences": []},
+    {"name": "clock.after", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A02", "A05"], "differences": []},
+    {"name": "clock.every", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A02", "A05"], "differences": []},
+    {"name": "http.fetch", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "process.run", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D02", "D06"]},
+    {"name": "settings.read", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D01", "D06"]},
+    {"name": "env.get", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D06"]},
+    {"name": "env.set", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A05"], "differences": ["D06"]}
   ],
   "classicEvents": [
-    {"name":"classic.PreToolUse","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.PostToolUse","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.PostToolUseFailure","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.PostToolBatch","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.PermissionDenied","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.Notification","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.UserPromptSubmit","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.UserPromptExpansion","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.SessionStart","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.SessionEnd","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.Stop","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.StopFailure","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.SubagentStart","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.SubagentStop","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.PreCompact","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.PostCompact","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.PreModelSwitch","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.PostModelSwitch","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.PermissionRequest","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.Setup","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"bridge-existing-production-trigger"},
-    {"name":"classic.TeammateIdle","target":"explicitly-unsupported","implementationStatus":"unsupported","batch":"B3","acceptance":["A01","A11"],"differences":["D07"],"note":"No equivalent teammate lifecycle; do not relabel subagent completion."},
-    {"name":"classic.TaskCreated","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.TaskCompleted","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.Elicitation","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.ElicitationResult","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.ConfigChange","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.InstructionsLoaded","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.WorktreeCreate","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.WorktreeRemove","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.CwdChanged","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.FileChanged","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.DirectoryAdded","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"},
-    {"name":"classic.MessageDisplay","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A03","A11"],"differences":["D01","D02"],"integration":"add-and-prove-production-trigger"}
+    {"name": "classic.PreToolUse", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "adapted", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.PostToolUse", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.PostToolUseFailure", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.PostToolBatch", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.PermissionDenied", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.Notification", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.UserPromptSubmit", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.UserPromptExpansion", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.SessionStart", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.SessionEnd", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.Stop", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.StopFailure", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.SubagentStart", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.SubagentStop", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.PreCompact", "target": "desktop-committed-compaction-adapter", "implementationStatus": "adapted", "batch": "B6", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "production-summary-and-checkpoint-trigger", "note": "Runs before a real automatic or explicit summary; block prevents model/archive mutation. Off/no hooks takes the original path.", "evidence": ["src/main/agent/context-compaction-hooks.integration.test.ts", "src/main/hooks/classic-mods.integration.test.ts", "docs/mods-v2-compaction-hooks-2026-09-23.md"]},
+    {"name": "classic.PostCompact", "target": "desktop-committed-compaction-adapter", "implementationStatus": "adapted", "batch": "B6", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "production-summary-and-checkpoint-trigger", "note": "Runs only after saver/updateState flush and checkpoint/content identity verification. Post observation failure does not undo a committed summary; at-most-once within the live controller, no durable replay after process restart.", "evidence": ["src/main/agent/context-compaction-hooks.integration.test.ts", "src/main/hooks/classic-mods.integration.test.ts", "docs/mods-v2-compaction-hooks-2026-09-23.md"]},
+    {"name": "classic.PreModelSwitch", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.PostModelSwitch", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.PermissionRequest", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.Setup", "target": "desktop-classic-legacy-core-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "bridge-existing-production-trigger", "note": "Real production trigger; strict official result schema and pinned identity; existing waiting/notification timing is retained. Only control/additionalContext/PreToolUse updatedInput effects are projected. See per-event field and timing audit.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/main/hooks/classic-mods.integration.test.ts", "src/main/mods/v2/classic-session.test.ts"]},
+    {"name": "classic.TeammateIdle", "target": "explicitly-unsupported", "implementationStatus": "unsupported", "batch": "B3", "acceptance": ["A01", "A11"], "differences": ["D07"], "note": "No equivalent teammate lifecycle; do not relabel subagent completion."},
+    {"name": "classic.TaskCreated", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.TaskCompleted", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.Elicitation", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.ElicitationResult", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.ConfigChange", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.InstructionsLoaded", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.WorktreeCreate", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.WorktreeRemove", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.CwdChanged", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.FileChanged", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.DirectoryAdded", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B3", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]},
+    {"name": "classic.MessageDisplay", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A03", "A11"], "differences": ["D01", "D02"], "integration": "add-and-prove-production-trigger", "note": "Result schema and manual FunctionSession dispatch only; no production trigger or result-effect integration. Not claimed as implemented compatibility.", "evidence": ["docs/mods-v2-classic-contract-2026-09-23.md", "src/shared/mods/v2/classic.test.ts"]}
   ],
   "sdk": [
-    {"namespace":"plugin","members":[{"name":"plugin.name","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A03"],"differences":["D06"]},{"name":"plugin.root","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A03"],"differences":["D06"]}]},
-    {"namespace":"ui","members":[{"name":"ui.notice","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.invalidate","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.blit","target":"explicitly-unsupported","implementationStatus":"unsupported","batch":"B5","acceptance":["A01","A08"],"differences":["D03"],"note":"Terminal Raster is not a desktop surface capability; reject with a named error."},{"name":"ui.resolve","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.log","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.ask","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.toast","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.status","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.open","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.close","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},{"name":"ui.scroll","target":"desktop-pane-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client and Pane wheel events are normalized to bounded finite deltas and scroll offsets; non-desktop sites remain partial."},{"name":"ui.focus","target":"desktop-pane-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A08"],"differences":["D03"],"note":"Client root and Pane focus transitions are normalized to focused boolean events; nested focus and non-desktop sites remain partial."}]},
-    {"namespace":"model","members":[{"name":"model.complete","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"]},{"name":"model.fork","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"]},{"name":"model.classify","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A05","A10"],"differences":["D02","D05"]}]},
-    {"namespace":"audio","members":[{"name":"audio.play","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A05","A08"],"differences":["D01","D03"]},{"name":"audio.speak","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A05","A08"],"differences":["D01","D03"]}]},
-    {"namespace":"mcp","members":[{"name":"mcp.call","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02"]}]},
-    {"namespace":"session","members":[{"name":"session.messages","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.cwd","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.model","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.turns","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.id","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.repo","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D06"]},{"name":"session.surfaces","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},{"name":"session.surface","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D03"]},{"name":"session.usage","target":"live-context-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A05","A10"],"differences":["D04","D05"],"note":"breakdown is estimated from the captured live request; provider apiUsage remains separate and unavailable dynamic sources are omitted"},{"name":"session.compact","target":"desktop-live-adapter","implementationStatus":"adapted","batch":"B6","acceptance":["A04","A10","A11"],"differences":["D05"]},{"name":"session.authorize","target":"conditional-empty","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D04"],"note":"No Anthropic first-party credential is presumed; return the upstream empty result, never a CMB credential."}]},
-    {"namespace":"turn","members":[{"name":"turn.abort","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A04","A05"],"differences":["D02"]}]},
-    {"namespace":"prompt","members":[{"name":"prompt.submit","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A10"],"differences":["D01"]},{"name":"prompt.fill","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08","A09"],"differences":[]},{"name":"prompt.suggest","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":[]}]},
-    {"namespace":"tool","members":[{"name":"tool.list","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02"]},{"name":"tool.call","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A03","A05"],"differences":["D01","D02"]},{"name":"tool.check","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01"]},{"name":"tool.register","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A05"],"differences":["D01","D02"]}]},
-    {"namespace":"command","members":[{"name":"command.list","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A06"],"differences":["D01","D02"]},{"name":"command.run","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A06"],"differences":["D01","D02"]},{"name":"command.register","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A06"],"differences":["D01","D02"]}]},
-    {"namespace":"config","members":[{"name":"config.list","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A05"],"differences":["D01","D06"]},{"name":"config.set","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A05"],"differences":["D01","D06"]}]},
-    {"namespace":"agent","members":[{"name":"agent.spawn","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A04","A10"],"differences":["D01","D05"]},{"name":"agent.list","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A04","A05","A10"],"differences":["D01","D05"]}]},
-    {"namespace":"fs","members":[{"name":"fs.read","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},{"name":"fs.write","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},{"name":"fs.list","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},{"name":"fs.exists","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},{"name":"fs.stat","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]},{"name":"fs.ancestors","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]}]},
-    {"namespace":"store","members":[{"name":"store.get","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A05","A13"],"differences":["D06"]},{"name":"store.set","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A05","A13"],"differences":["D06"]},{"name":"store.delete","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A05","A13"],"differences":["D06"]},{"name":"store.keys","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A05","A13"],"differences":["D06"]}]},
-    {"namespace":"clock","members":[{"name":"clock.now","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A02","A05"],"differences":[]},{"name":"clock.sleep","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A02","A05"],"differences":[]},{"name":"clock.after","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A02","A05"],"differences":[]},{"name":"clock.every","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A02","A05"],"differences":[]}]},
-    {"namespace":"http","members":[{"name":"http.fetch","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]}]},
-    {"namespace":"process","members":[{"name":"process.run","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D02","D06"]}]},
-    {"namespace":"settings","members":[{"name":"settings.read","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D01","D06"]}]},
-    {"namespace":"env","members":[{"name":"env.get","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D06"]},{"name":"env.set","target":"planned-adapter","implementationStatus":"partial","batch":"B3","acceptance":["A03","A05"],"differences":["D06"]}]}
+    {
+      "namespace": "plugin",
+      "members": [
+        {
+          "name": "plugin.name",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B2",
+          "acceptance": [
+            "A01",
+            "A03"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "plugin.root",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B2",
+          "acceptance": [
+            "A01",
+            "A03"
+          ],
+          "differences": [
+            "D06"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "ui",
+      "members": [
+        {
+          "name": "ui.notice",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "ui.invalidate",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "ui.blit",
+          "target": "explicitly-unsupported",
+          "implementationStatus": "unsupported",
+          "batch": "B5",
+          "acceptance": [
+            "A01",
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ],
+          "note": "Terminal Raster is not a desktop surface capability; reject with a named error."
+        },
+        {
+          "name": "ui.resolve",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "ui.log",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "ui.ask",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "ui.toast",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "ui.status",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "ui.open",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "ui.close",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "ui.scroll",
+          "target": "desktop-pane-client-adapter",
+          "implementationStatus": "adapted",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ],
+          "note": "Client and Pane wheel events are normalized to bounded finite deltas and scroll offsets; non-desktop sites remain partial."
+        },
+        {
+          "name": "ui.focus",
+          "target": "desktop-pane-client-adapter",
+          "implementationStatus": "adapted",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": [
+            "D03"
+          ],
+          "note": "Client root and Pane focus transitions are normalized to focused boolean events; nested focus and non-desktop sites remain partial."
+        }
+      ]
+    },
+    {
+      "namespace": "model",
+      "members": [
+        {
+          "name": "model.complete",
+          "target": "desktop-live-adapter",
+          "implementationStatus": "adapted",
+          "batch": "B6",
+          "acceptance": [
+            "A05",
+            "A10"
+          ],
+          "differences": [
+            "D02",
+            "D05"
+          ]
+        },
+        {
+          "name": "model.fork",
+          "target": "desktop-live-adapter",
+          "implementationStatus": "adapted",
+          "batch": "B6",
+          "acceptance": [
+            "A05",
+            "A10"
+          ],
+          "differences": [
+            "D02",
+            "D05"
+          ]
+        },
+        {
+          "name": "model.classify",
+          "target": "desktop-live-adapter",
+          "implementationStatus": "adapted",
+          "batch": "B6",
+          "acceptance": [
+            "A05",
+            "A10"
+          ],
+          "differences": [
+            "D02",
+            "D05"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "audio",
+      "members": [
+        {
+          "name": "audio.play",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A05",
+            "A08"
+          ],
+          "differences": [
+            "D01",
+            "D03"
+          ]
+        },
+        {
+          "name": "audio.speak",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A05",
+            "A08"
+          ],
+          "differences": [
+            "D01",
+            "D03"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "mcp",
+      "members": [
+        {
+          "name": "mcp.call",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D02"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "session",
+      "members": [
+        {
+          "name": "session.messages",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A04",
+            "A05"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "session.cwd",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A04",
+            "A05"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "session.model",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A04",
+            "A05"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "session.turns",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A04",
+            "A05"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "session.id",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A04",
+            "A05"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "session.repo",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A04",
+            "A05"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "session.surfaces",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A04",
+            "A05"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "session.surface",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A04",
+            "A05"
+          ],
+          "differences": [
+            "D03"
+          ]
+        },
+        {
+          "name": "session.usage",
+          "target": "live-context-adapter",
+          "implementationStatus": "adapted",
+          "batch": "B6",
+          "acceptance": [
+            "A05",
+            "A10"
+          ],
+          "differences": [
+            "D04",
+            "D05"
+          ],
+          "note": "breakdown is estimated from the captured live request; provider apiUsage remains separate and unavailable dynamic sources are omitted"
+        },
+        {
+          "name": "session.compact",
+          "target": "desktop-live-adapter",
+          "implementationStatus": "adapted",
+          "batch": "B6",
+          "acceptance": [
+            "A04",
+            "A10",
+            "A11"
+          ],
+          "differences": [
+            "D05"
+          ]
+        },
+        {
+          "name": "session.authorize",
+          "target": "conditional-empty",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D04"
+          ],
+          "note": "No Anthropic first-party credential is presumed; return the upstream empty result, never a CMB credential."
+        }
+      ]
+    },
+    {
+      "namespace": "turn",
+      "members": [
+        {
+          "name": "turn.abort",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A04",
+            "A05"
+          ],
+          "differences": [
+            "D02"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "prompt",
+      "members": [
+        {
+          "name": "prompt.submit",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B6",
+          "acceptance": [
+            "A03",
+            "A10"
+          ],
+          "differences": [
+            "D01"
+          ]
+        },
+        {
+          "name": "prompt.fill",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08",
+            "A09"
+          ],
+          "differences": []
+        },
+        {
+          "name": "prompt.suggest",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B5",
+          "acceptance": [
+            "A08"
+          ],
+          "differences": []
+        }
+      ]
+    },
+    {
+      "namespace": "tool",
+      "members": [
+        {
+          "name": "tool.list",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D02"
+          ]
+        },
+        {
+          "name": "tool.call",
+          "target": "desktop-native-and-registered-tool-bridge",
+          "implementationStatus": "partial",
+          "batch": "B2",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D02"
+          ],
+          "note": "Actual native and registered tool adapters retain host policy, lease and authority; bounded inputs and deny/result envelopes are validated. Native names and outputs differ from upstream.",
+          "evidence": [
+            "src/main/mods/v2/tool-schema-contract.test.ts",
+            "src/main/mods/v2/tool-sdk.integration.test.ts"
+          ]
+        },
+        {
+          "name": "tool.check",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01"
+          ]
+        },
+        {
+          "name": "tool.register",
+          "target": "desktop-registered-tool-schema",
+          "implementationStatus": "partial",
+          "batch": "B4",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D02"
+          ],
+          "note": "Bounded JSON Schema subset with local references, registration validation and real main/shared-task model admission; not a complete JSON Schema dialect.",
+          "evidence": [
+            "src/main/mods/v2/tool-schema-contract.test.ts",
+            "src/main/mods/v2/tool-registry.test.ts",
+            "src/main/mods/v2/model-tools.test.ts",
+            "docs/mods-v2-tool-schema-contract-2026-09-23.md"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "command",
+      "members": [
+        {
+          "name": "command.list",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B4",
+          "acceptance": [
+            "A06"
+          ],
+          "differences": [
+            "D01",
+            "D02"
+          ]
+        },
+        {
+          "name": "command.run",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B4",
+          "acceptance": [
+            "A06"
+          ],
+          "differences": [
+            "D01",
+            "D02"
+          ]
+        },
+        {
+          "name": "command.register",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B4",
+          "acceptance": [
+            "A06"
+          ],
+          "differences": [
+            "D01",
+            "D02"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "config",
+      "members": [
+        {
+          "name": "config.list",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B4",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        },
+        {
+          "name": "config.set",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B4",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "agent",
+      "members": [
+        {
+          "name": "agent.spawn",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B6",
+          "acceptance": [
+            "A03",
+            "A04",
+            "A10"
+          ],
+          "differences": [
+            "D01",
+            "D05"
+          ]
+        },
+        {
+          "name": "agent.list",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B6",
+          "acceptance": [
+            "A04",
+            "A05",
+            "A10"
+          ],
+          "differences": [
+            "D01",
+            "D05"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "fs",
+      "members": [
+        {
+          "name": "fs.read",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        },
+        {
+          "name": "fs.write",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        },
+        {
+          "name": "fs.list",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        },
+        {
+          "name": "fs.exists",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        },
+        {
+          "name": "fs.stat",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        },
+        {
+          "name": "fs.ancestors",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "store",
+      "members": [
+        {
+          "name": "store.get",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A05",
+            "A13"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "store.set",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A05",
+            "A13"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "store.delete",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A05",
+            "A13"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "store.keys",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A05",
+            "A13"
+          ],
+          "differences": [
+            "D06"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "clock",
+      "members": [
+        {
+          "name": "clock.now",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B2",
+          "acceptance": [
+            "A02",
+            "A05"
+          ],
+          "differences": []
+        },
+        {
+          "name": "clock.sleep",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B2",
+          "acceptance": [
+            "A02",
+            "A05"
+          ],
+          "differences": []
+        },
+        {
+          "name": "clock.after",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B2",
+          "acceptance": [
+            "A02",
+            "A05"
+          ],
+          "differences": []
+        },
+        {
+          "name": "clock.every",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B2",
+          "acceptance": [
+            "A02",
+            "A05"
+          ],
+          "differences": []
+        }
+      ]
+    },
+    {
+      "namespace": "http",
+      "members": [
+        {
+          "name": "http.fetch",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "process",
+      "members": [
+        {
+          "name": "process.run",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D02",
+            "D06"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "settings",
+      "members": [
+        {
+          "name": "settings.read",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D01",
+            "D06"
+          ]
+        }
+      ]
+    },
+    {
+      "namespace": "env",
+      "members": [
+        {
+          "name": "env.get",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D06"
+          ]
+        },
+        {
+          "name": "env.set",
+          "target": "planned-adapter",
+          "implementationStatus": "partial",
+          "batch": "B3",
+          "acceptance": [
+            "A03",
+            "A05"
+          ],
+          "differences": [
+            "D06"
+          ]
+        }
+      ]
+    }
   ],
   "renderComponents": [
-    {"name":"AskUserQuestion","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"UserMessage","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"AssistantMessage","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"ToolUse","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"ToolResult","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"ToolGroup","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"CommandOutput","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"Spinner","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"TurnDuration","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"InfoNotice","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"SessionMode","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"PromptHint","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"AbovePrompt","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]},
-    {"name":"Pane","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D01","D03"]}
+    {"name": "AskUserQuestion", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"]},
+    {"name": "UserMessage", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Visible text blocks only; model, stored history and copy retain original text. origin is unclassified, isExpanded is the desktop expand toggle, terminal onScreen/task/from absent. 10000 chars and 32 owners; larger content keeps native rendering. No embedded Client. Electron message3 verifies two turns, reload and off.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-message-sites-e2e.ts", "tests/support/mods-status-sites-e2e.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "AssistantMessage", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Visible text only; host-owned first-of-reply/header, model input and stored history unchanged. No terminal onScreen or embedded Client. 10000 chars and 32 owners; overflow stays native. Electron message3 verifies two turns, reload and off.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-message-sites-e2e.ts", "tests/support/mods-status-sites-e2e.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "ToolUse", "target": "desktop-nonapproval-tool-detail", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Visible nonapproval detail only; original headers, approvals, raw arguments and execution state remain host-owned. Input display may change within bounded JSON. No terminal geometry or embedded Clients.", "evidence": ["src/main/mods/v2/sites.test.ts", "src/renderer/src/lib/function-tool-display.test.ts", "tests/support/mods-tool-sites-e2e.ts", "docs/mods-v2-tool-sites-2026-09-23.md"]},
+    {"name": "ToolResult", "target": "desktop-nonapproval-tool-result", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Visible nonapproval result presentation only; original stored/model tool results, raw result, tool identity and error state are preserved. Oversized or non-JSON output keeps native renderer.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-tool-sites-e2e.ts", "docs/mods-v2-tool-sites-2026-09-23.md"]},
+    {"name": "ToolGroup", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"]},
+    {"name": "ToolProgress", "target": "explicitly-unsupported", "implementationStatus": "unsupported", "batch": "B5", "acceptance": ["A01", "A08"], "differences": ["D01", "D03"], "note": "Added in the latest pinned declaration. CMB tool execution progress has no Function Mods render interception; not claimed by matching ToolUse or Pane.", "evidence": ["src/shared/mods/v2/compatibility-matrix.test.ts", "docs/mods-v2-claude-latest-audit-2026-09-22.md"]},
+    {"name": "CommandOutput", "target": "desktop-command-job-output", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Mods command job text only. Execution state and command identity are read-only; unavailable stored arguments are masked as ***. Native slash-command surfaces, terminal geometry and embedded Clients are not implemented.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-command-output-e2e.ts", "docs/mods-v2-command-output-2026-09-23.md"]},
+    {"name": "Spinner", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Live runtime status and custom word/message/suffix; mode uses existing requesting/responding/thinking/tool-input/tool-use state. Native spinner remains when unchanged. Electron11 and focused status2.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-message-sites-e2e.ts", "tests/support/mods-status-sites-e2e.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "TurnDuration", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Live completed assistant duration; 32 independent owners with cancellation on recycling. Terminal onScreen absent. Native timing/header retained. Electron11 and focused status2.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-message-sites-e2e.ts", "tests/support/mods-status-sites-e2e.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "InfoNotice", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Actual completion interruption notices; no fabricated host notices. Client rejected. Electron11 verifies the real completion loop and default restoration.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-message-sites-e2e.ts", "tests/support/mods-status-sites-e2e.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "SessionMode", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Live composer mode labels; native mode controls retain execution authority. Changes are presentation only. Electron11 and focused status2.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-message-sites-e2e.ts", "tests/support/mods-status-sites-e2e.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "PromptHint", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Live composer placeholder and custom tree. Draft/thread/config generations reject stale answers. Client rejected. Electron11 verifies off/on and actual input.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-message-sites-e2e.ts", "tests/support/mods-status-sites-e2e.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "AbovePrompt", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Live composer band with bounded desktop geometry and controls. Embedded Client is rejected; terminal geometry is adapted. Global off/on and cold mount verified in Electron11.", "evidence": ["src/main/mods/v2/sites.test.ts", "tests/support/mods-message-sites-e2e.ts", "tests/support/mods-status-sites-e2e.ts", "tests/support/mods-function-sites-e2e.ts"]},
+    {"name": "Pane", "target": "desktop-live-site-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D01", "D03"], "note": "Live desktop panel with captured callbacks, Input/Select/Client, bounded rows, focus and close lifecycle. Not terminal pixels; holdToasts is explicitly rejected. Process12 and Electron11.", "evidence": ["src/main/mods/v2/panes.test.ts", "src/main/mods/v2/pane-focus.test.ts", "tests/support/function-mods-process-entry.ts", "tests/mods-e2e.spec.ts"]}
   ],
   "desktopElements": [
-    {"name":"Box","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"Text","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"Button","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"Input","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"Select","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"Svg","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"Link","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"Code","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D03"]},
-    {"name":"Client","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A08"],"differences":["D09","D10"]}
+    {"name": "Box", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"]},
+    {"name": "Text", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"]},
+    {"name": "Button", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"]},
+    {"name": "Input", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"]},
+    {"name": "Select", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"]},
+    {"name": "Svg", "target": "desktop-isolated-vector-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"], "note": "Bounded 131072-character source and required alt. Detached XML allowlist; static image or scriptless opaque sandbox with CSP. CSS hover/title work; no external resources, links, foreignObject, SMIL or filters. Interactive omitted dimensions use iframe defaults. Real pane and Client Electron svg1; not unrestricted SVG parity.", "evidence": ["src/shared/mods/v2/svg.test.ts", "src/main/mods/v2/svg-pane.test.ts", "tests/support/mods-svg-e2e.ts"]},
+    {"name": "Link", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"]},
+    {"name": "Code", "target": "desktop-source-diff-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A08"], "differences": ["D03"], "note": "Bounded unified diff parsing, gutters/markers, source line numbers and wrap; host Shiki source highlighting with bounded latest-only queue. No file reads, contributed grammars or syntax coloring inside diff hunks.", "evidence": ["src/shared/mods/v2/code.test.ts", "src/main/mods/v2/code-pane.test.ts", "src/renderer/src/lib/function-code-highlight.test.ts", "docs/mods-v2-code-ui-2026-09-23.md"]},
+    {"name": "Client", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A08"], "differences": ["D09", "D10"]}
   ],
   "clientSurface": [
-    {"name":"elements","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"state","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"setState","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"columns","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"rows","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"every","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"onPointer","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"onKey","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"post","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A02","A08"],"differences":["D09"]},
-    {"name":"onFocus","target":"desktop-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A02","A08"],"differences":["D09"],"note":"Host routes root focus transitions through ui.focus with bounded lifecycle data."},
-    {"name":"onScroll","target":"desktop-client-adapter","implementationStatus":"adapted","batch":"B5","acceptance":["A02","A08"],"differences":["D09"],"note":"Host routes wheel lifecycle data through ui.scroll with bounded deltas and offsets."}
+    {"name": "elements", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "state", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "setState", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "columns", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "rows", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "every", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "onPointer", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "onKey", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "post", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "onFocus", "target": "desktop-client-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"], "note": "Host routes root focus transitions through ui.focus with bounded lifecycle data."},
+    {"name": "onScroll", "target": "desktop-client-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"], "note": "Host routes wheel lifecycle data through ui.scroll with bounded deltas and offsets."}
   ],
   "globals": [
-    {"name":"h","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"Fragment","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"JSX","target":"planned-adapter","implementationStatus":"partial","batch":"B5","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"AbortSignal","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"AbortController","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"TextEncoder","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"TextDecoder","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"URLSearchParams","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"URL","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"atob","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"btoa","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"structuredClone","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"crypto","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"performance","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]}
+    {"name": "h", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "Fragment", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "JSX", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "AbortSignal", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "AbortController", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "TextEncoder", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "TextDecoder", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "URLSearchParams", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "URL", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "atob", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "btoa", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "structuredClone", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "crypto", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "performance", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]}
   ],
   "behaviorContracts": [
-    {"name":"register/on/options","target":"planned-adapter","implementationStatus":"partial","batch":"B1","acceptance":["A01"],"differences":["D10"]},
-    {"name":"matcher/glob/depth/regex-budget","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A02"],"differences":["D10"]},
-    {"name":"registration.catch/failure-policy","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A03"],"differences":["D02"]},
-    {"name":"next.origin/next.trace","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A03"],"differences":["D01"]},
-    {"name":"tiers/next.to","target":"planned-adapter","implementationStatus":"partial","batch":"B2","acceptance":["A01","A03"],"differences":["D01"]},
-    {"name":"field-mutability-and-result-schemas","target":"planned-adapter","implementationStatus":"partial","batch":"B1","acceptance":["A01"],"differences":["D01","D02"]},
-    {"name":"multi-next/model-attempt-accounting","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A03","A10"],"differences":["D02","D05"]},
-    {"name":"stream-yield-vs-generator-return","target":"planned-adapter","implementationStatus":"partial","batch":"B6","acceptance":["A01","A10"],"differences":[]},
-    {"name":"engine.create/provider-contract","target":"planned-adapter","implementationStatus":"partial","batch":"B4","acceptance":["A03","A07"],"differences":["D01"]},
-    {"name":"claude-package-import","target":"planned-adapter","implementationStatus":"partial","batch":"B7","acceptance":["A12","A13"],"differences":["D08","D10"]},
-    {"name":"testing-api/mocks/tier/engine","target":"planned-adapter","implementationStatus":"partial","batch":"B7","acceptance":["A01","A12"],"differences":["D01","D03","D10"]},
-    {"name":"v1-adapter-and-data-migration","target":"planned-adapter","implementationStatus":"partial","batch":"B7","acceptance":["A13"],"differences":["D08"]},
-    {"name":"production-package-and-conformance","target":"planned-adapter","implementationStatus":"partial","batch":"B8","acceptance":["A14","A15"],"differences":[]}
+    {"name": "register/on/options", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B1", "acceptance": ["A01"], "differences": ["D10"]},
+    {"name": "matcher/glob/depth/regex-budget", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "registration.catch/failure-policy", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A03"], "differences": ["D02"]},
+    {"name": "next.origin/next.trace", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A03"], "differences": ["D01"]},
+    {"name": "tiers/next.to", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A03"], "differences": ["D01"]},
+    {"name": "field-mutability-and-result-schemas", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B1", "acceptance": ["A01"], "differences": ["D01", "D02"]},
+    {"name": "multi-next/model-attempt-accounting", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A03", "A10"], "differences": ["D02", "D05"]},
+    {"name": "stream-yield-vs-generator-return", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B6", "acceptance": ["A01", "A10"], "differences": []},
+    {"name": "engine.create/provider-contract", "target": "desktop-session-noun-fold", "implementationStatus": "partial", "batch": "B4", "acceptance": ["A03", "A07"], "differences": ["D01"], "note": "Provider state stays in its guest; delegated calls preserve authority, lease, cancellation and capability intersection. JSON methods only; stream providers, generated schemas and failed-provider recovery remain unsupported.", "evidence": ["src/main/mods/v2/engine-nouns.test.ts", "tests/support/function-engine-nouns-process.ts"]},
+    {"name": "claude-package-import", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B7", "acceptance": ["A12", "A13"], "differences": ["D08", "D10"]},
+    {"name": "testing-api/mocks/tier/engine", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B7", "acceptance": ["A01", "A12"], "differences": ["D01", "D03", "D10"]},
+    {"name": "v1-adapter-and-data-migration", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B7", "acceptance": ["A13"], "differences": ["D08"]},
+    {"name": "production-package-and-conformance", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B8", "acceptance": ["A14", "A15"], "differences": []}
   ]
 }
-
