@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process"
-import { access, readdir, readFile } from "node:fs/promises"
-import { createHash } from "node:crypto"
+import { access } from "node:fs/promises"
 import { promisify } from "node:util"
-import { join, relative, resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { AUTOBIZ_KANBAN_COMMIT, withPinnedAutobiz } from "./autobiz-source"
 import { commitAutobizState, type AutobizCommitInput } from "./autobiz-state-commit"
 export { AUTOBIZ_KANBAN_SOURCE, AUTOBIZ_KANBAN_COMMIT } from "./autobiz-source"
+
+import { fingerprintAutobizWorkflow } from "./autobiz-workflow-fingerprint"
+export { fingerprintAutobizWorkflow } from "./autobiz-workflow-fingerprint"
 
 const run = promisify(execFile)
 
@@ -35,49 +37,6 @@ export interface AutobizCheckpointTransition {
 }
 
 const PYTHON = process.env.CMB_AUTOBIZ_PYTHON || "python"
-
-/**
- * Fingerprint workspace-owned workflow overlays before accepting a validator
- * result. The pinned compiler source is immutable, while .autobizdevops/
- * workflow.d is intentionally live and may be edited by another process.
- */
-export async function fingerprintAutobizWorkflow(workspace: string): Promise<string> {
-  const root = resolve(workspace)
-  const overlayRoot = join(root, ".autobizdevops", "workflow.d")
-  const files: string[] = []
-  const visit = async (directory: string): Promise<void> => {
-    let entries
-    try {
-      entries = await readdir(directory, { withFileTypes: true })
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return
-      throw error
-    }
-    for (const entry of entries) {
-      const path = join(directory, entry.name)
-      if (entry.isDirectory()) {
-        await visit(path)
-      } else if (entry.isFile()) {
-        files.push(path)
-      }
-    }
-  }
-  await visit(overlayRoot)
-  files.sort((left, right) => left.localeCompare(right))
-  if (files.length > 512) throw Error("AUTOBIZ_WORKFLOW_LIMIT")
-  const digest = createHash("sha256")
-  let bytes = 0
-  for (const path of files) {
-    const data = await readFile(path)
-    bytes += data.byteLength
-    if (bytes > 8 * 1024 * 1024) throw Error("AUTOBIZ_WORKFLOW_LIMIT")
-    digest.update(relative(overlayRoot, path).replaceAll("\\", "/"))
-    digest.update("\0")
-    digest.update(data)
-    digest.update("\0")
-  }
-  return digest.digest("hex")
-}
 
 /**
  * Runs the pinned workflow compiler and the upstream artifact validator in a
@@ -134,7 +93,7 @@ except Exception as e:
 `
   try {
     await access(statePath)
-    const workflowBefore = await fingerprintAutobizWorkflow(root)
+    const workflowBefore = await fingerprintAutobizWorkflow(root, signal)
     const { stdout } = await withPinnedAutobiz(signal, (source) =>
       run(
         PYTHON,
@@ -164,7 +123,7 @@ except Exception as e:
     const line = stdout.trim().split(/\r?\n/).at(-1) || ""
     const result = JSON.parse(line) as AutobizValidationResult
     if (result.sourceCommit !== AUTOBIZ_KANBAN_COMMIT) throw new Error("AUTOBIZ_SOURCE_CHANGED")
-    const workflowAfter = await fingerprintAutobizWorkflow(root)
+    const workflowAfter = await fingerprintAutobizWorkflow(root, signal)
     if (workflowAfter !== workflowBefore)
       return {
         ...result,
