@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { waitUntilMonotonic } from "./mods-monotonic-wait"
 import { createServer } from "node:http"
 import { existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -24,13 +25,7 @@ export async function verifyDesktopPerformance(input: {
   const stop = () => {
     if (existsSync(join(artifacts, "STOP"))) throw Error("DESKTOP_PERFORMANCE_STOP_REQUESTED")
   }
-  const pause = async (ms: number) => {
-    const end = Date.now() + ms
-    while (Date.now() < end) {
-      stop()
-      await new Promise((resolve) => setTimeout(resolve, Math.min(500, end - Date.now())))
-    }
-  }
+  const pause = (ms: number) => waitUntilMonotonic(performance.now() + ms, stop)
   const idle: Array<{
     enabled: boolean
     elapsedMs: number

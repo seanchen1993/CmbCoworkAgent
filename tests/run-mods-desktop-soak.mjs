@@ -63,6 +63,7 @@ const driverHashes = Object.fromEntries(
     "tests/support/mods-desktop-soak-e2e.ts",
     "tests/support/mods-desktop-soak-options.ts",
     "tests/support/mods-desktop-latency.ts",
+    "tests/support/mods-monotonic-wait.ts",
     "tests/support/mods-v2-performance.ts",
     "tests/support/mods-desktop-performance.ts",
     "tests/support/mods-desktop-performance-e2e.ts"

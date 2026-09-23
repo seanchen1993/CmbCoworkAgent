@@ -1,3 +1,4 @@
+import { waitUntilMonotonic } from "./mods-monotonic-wait"
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -179,7 +180,8 @@ export async function verifyDesktopSoak(
     })
     return
   }
-  const started = Date.now()
+  const startedAt = new Date().toISOString()
+  const started = performance.now()
   const save = () =>
     writeFileSync(
       join(artifacts, "desktop-soak-progress.json"),
@@ -187,8 +189,8 @@ export async function verifyDesktopSoak(
         {
           status,
           options,
-          startedAt: new Date(started).toISOString(),
-          elapsedMs: Date.now() - started,
+          startedAt,
+          elapsedMs: performance.now() - started,
           completed,
           cycles,
           counts,
@@ -196,7 +198,7 @@ export async function verifyDesktopSoak(
           memory,
           qualified:
             status === "completed" &&
-            qualifiesDesktopSoak(options, Date.now() - started, completed),
+            qualifiesDesktopSoak(options, performance.now() - started, completed),
           limits: [
             "Acknowledgement and input timings include Playwright IPC and scheduling.",
             "Separate DOM metrics measure trusted input to the second animation frame, and trusted click to the host acknowledgement DOM update; these exclude automation waits.",
@@ -214,10 +216,9 @@ export async function verifyDesktopSoak(
     for (let event = 1; event <= options.events; event++) {
       if (existsSync(join(artifacts, "STOP"))) throw Error("DESKTOP_SOAK_STOP_REQUESTED")
       const target = started + (options.durationMs * event) / options.events
-      while (Date.now() < target) {
+      await waitUntilMonotonic(target, () => {
         if (existsSync(join(artifacts, "STOP"))) throw Error("DESKTOP_SOAK_STOP_REQUESTED")
-        await new Promise((resolve) => setTimeout(resolve, Math.min(500, target - Date.now())))
-      }
+      })
       const pane = (event - 1) % 4
       await beginDesktopLatency(page, pane, counts[pane] + 1)
       const input = page.getByRole("textbox", { name: `Soak note ${pane}`, exact: true })
@@ -246,7 +247,7 @@ export async function verifyDesktopSoak(
       }
       if (event % 100 === 0 || options.smoke) {
         save()
-        console.log(JSON.stringify({ completed, cycles, elapsedMs: Date.now() - started }))
+        console.log(JSON.stringify({ completed, cycles, elapsedMs: performance.now() - started }))
       }
     }
     await off()
@@ -258,7 +259,7 @@ export async function verifyDesktopSoak(
       join(artifacts, "desktop-soak-summary.json"),
       JSON.stringify(
         {
-          qualified: qualifiesDesktopSoak(options, Date.now() - started, completed),
+          qualified: qualifiesDesktopSoak(options, performance.now() - started, completed),
           completed,
           cycles,
           input: summarizeSamples(samples.map((s) => s.inputMs)),
