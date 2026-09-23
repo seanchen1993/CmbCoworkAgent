@@ -52,6 +52,7 @@ import type {
 } from "./types"
 import { copyDirRecursive } from "./utils/fs"
 import Store from "electron-store"
+import { createDisabledSwitchReader } from "./mods/disabled-switch-cache"
 import {
   discoverSkills,
   discoverSkillsSync,
@@ -2018,11 +2019,17 @@ export function setStoredDefaultModelId(modelId: string): void {
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
 const MODS_GLOBAL_ENABLED_KEY = "modsGlobalEnabled"
+let modsGlobalSwitch: ReturnType<typeof createDisabledSwitchReader> | undefined
 
 /** Application-level safety switch for both legacy Mods and Function Mods. */
 export function getModsGlobalEnabled(): boolean {
   try {
-    return getSettingsStore().get(MODS_GLOBAL_ENABLED_KEY, false) === true
+    const settings = getSettingsStore()
+    modsGlobalSwitch ??= createDisabledSwitchReader(
+      settings.path,
+      () => settings.get(MODS_GLOBAL_ENABLED_KEY, false) === true
+    )
+    return modsGlobalSwitch.read()
   } catch (error) {
     console.warn("[Storage] Failed to load Mods global switch; using disabled:", error)
     return false
@@ -2032,6 +2039,7 @@ export function getModsGlobalEnabled(): boolean {
 export function setModsGlobalEnabled(enabled: boolean): boolean {
   const normalized = Boolean(enabled)
   getSettingsStore().set(MODS_GLOBAL_ENABLED_KEY, normalized)
+  modsGlobalSwitch?.invalidate()
   return normalized
 }
 

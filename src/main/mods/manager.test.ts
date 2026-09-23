@@ -51,6 +51,24 @@ afterEach(() => {
   for (const fn of cleanup.splice(0)) fn()
 })
 
+it("does not read application settings repeatedly for an already disabled unprotected project", async () => {
+  const globalEnabled = vi.fn(() => true)
+  const f = await fixture(undefined, globalEnabled)
+  f.manager.configure(f.root, false, false)
+  globalEnabled.mockClear()
+  for (let index = 0; index < 100; index++) {
+    expect(f.manager.isActive(f.root)).toBe(false)
+    expect(f.manager.isEnabled(f.root)).toBe(false)
+    expect(f.manager.protects(f.root)).toBe(false)
+  }
+  expect(globalEnabled).not.toHaveBeenCalled()
+  f.manager.configure(f.root, true, false)
+  expect(f.manager.isActive(f.root)).toBe(true)
+  globalEnabled.mockReturnValue(false)
+  expect(f.manager.isActive(f.root)).toBe(false)
+  expect(f.manager.isEnabled(f.root)).toBe(false)
+})
+
 it("does not lend a main backend to a model-raised unbound child through a legacy Mod", async () => {
   const f = await fixture()
   const manifestPath = join(f.plugin, "manifest.json")

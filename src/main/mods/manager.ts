@@ -677,6 +677,8 @@ export class ModsManager {
   }
 
   isEnabled(workspace: string): boolean {
+    const cached = this.settings.get(this.canonical.get(workspace) ?? workspace)
+    if (cached?.enabled === false) return false
     return this.globalEnabled() && this.config(this.workspaceKey(workspace)).enabled
   }
 
@@ -813,12 +815,16 @@ export class ModsManager {
   }
 
   isActive(workspace: string): boolean {
+    const cached = this.settings.get(this.canonical.get(workspace) ?? workspace)
+    if (cached && !cached.enabled && !cached.policy) return false
     if (!this.globalEnabled()) return false
     const value = this.config(this.workspaceKey(workspace))
     return value.enabled || value.policy
   }
 
   protects(workspace: string): boolean {
+    const cached = this.settings.get(this.canonical.get(workspace) ?? workspace)
+    if (cached?.policy === false) return false
     if (!this.globalEnabled()) return false
     return this.config(this.workspaceKey(workspace)).policy
   }
