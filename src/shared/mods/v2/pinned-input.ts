@@ -42,6 +42,7 @@ const classicIdentity = [
 ] as const
 
 const classicFacts: Record<string, readonly string[]> = {
+  "classic.StopFailure": ["error", "error_details", "last_assistant_message"],
   "classic.Stop": ["stop_hook_active", "last_assistant_message", "background_tasks", "session_crons"],
   "classic.SubagentStop": [
     "stop_hook_active",

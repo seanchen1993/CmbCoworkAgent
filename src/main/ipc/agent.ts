@@ -1,3 +1,4 @@
+import { observeStopFailure } from "../hooks/stop-failure-observer"
 import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
 import { managedBizRetryService } from "../harness-board/biz-retry-service"
 import { IpcMain, BrowserWindow, dialog } from "electron"
@@ -295,7 +296,7 @@ import {
   type FailoverAttempt,
   type ApiErrorDetail
 } from "../agent/failover"
-import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
+import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import {
   normalizePathKey,
@@ -9781,12 +9782,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 sessionId: threadId,
                 turnId: turnState.turnId,
                 stopFailureError: stopFailureErrorCode,
+                stopFailureDetails: errMsg,
+                stopContext: stopContextCollector.snapshot(),
+                signal: abortController.signal,
                 toolResult: JSON.stringify({
                   error: errMsg,
                   error_type: stopFailureErrorCode
                 })
               }
-              runHooks(
+              await observeStopFailure(
                 resolveEnabledHooksForRun(
                   sessionWorkspacePath,
                   "StopFailure",
@@ -9794,10 +9798,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   hookScope,
                   onHookSkippedFactory("StopFailure")
                 ),
-                "StopFailure",
                 stopFailureContext,
                 onHookResult
-              ).catch((e: unknown) => console.warn("[Hooks] StopFailure hook error:", e))
+              )
             }
             // Sent BEFORE the error event: the error event terminates the stream
             // in the renderer (useStream), so any custom event sent after it is

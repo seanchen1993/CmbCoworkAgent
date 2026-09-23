@@ -160,6 +160,11 @@ export function validateClassicInput(event: string, value: unknown): void {
     (value.effort !== undefined && !shape(value.effort, { level: text }, ["level"]))
   )
     throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  if (name === "StopFailure") {
+    for (const key of ["error", "error_details", "last_assistant_message"])
+      if (value[key] !== undefined && typeof value[key] !== "string")
+        throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  }
   if (name === "Stop" || name === "SubagentStop") {
     if (
       (value.stop_hook_active !== undefined && typeof value.stop_hook_active !== "boolean") ||

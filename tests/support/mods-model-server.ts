@@ -26,6 +26,11 @@ export async function startModsModelServer() {
       } }))
       return
     }
+    if (prompt.includes("[mods-stop-failure-task]")) {
+      response.writeHead(400, { "content-type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "actual protocol request rejected" } }))
+      return
+    }
     if (prompt.includes("[error]")) {
       response.writeHead(500, { "content-type": "application/json" })
       response.end(JSON.stringify({ error: { message: "synthetic provider failure" } }))

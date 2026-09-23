@@ -225,6 +225,8 @@ export interface HookContext {
   /** PR-17 — classifyApiError output for StopFailure / PostToolUseFailure
    *  matchers. Exposed as part of stdin JSON's `tool_input.error_type`. */
   stopFailureError?: string
+  /** Actual failure message; passed through the existing publication/redaction boundary. */
+  stopFailureDetails?: string
   /** PR-16 follow-up — CC SessionStart `source` matchQuery. Today this
    *  project only ever fires SessionStart on thread first-run, so the value
    *  is always "startup" (no resume/clear/compact concept yet). The field
@@ -592,6 +594,12 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.skillTriggerToolName) payload.skill_trigger_tool_name = context.skillTriggerToolName
   if (context.subagent) payload.subagent = context.subagent
   if (context.stopContext) payload.stop_context = context.stopContext
+  if (event === "StopFailure") {
+    payload.error = context.stopFailureError
+    payload.error_details = context.stopFailureDetails
+    if (context.stopContext?.assistantResponse !== undefined)
+      payload.last_assistant_message = context.stopContext.assistantResponse
+  }
   if (event === "Stop" || event === "SubagentStop") {
     payload.stop_hook_active = context.stopHookActive === true
     if (context.stopContext?.assistantResponse !== undefined)
@@ -1527,6 +1535,7 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
     }
     if (event === "StopFailure") {
       payload.error = context.stopFailureError
+      payload.error_details = context.stopFailureDetails
       payload.last_assistant_message = context.stopContext?.assistantResponse
     }
     if (event === "SubagentStart" || event === "SubagentStop") {

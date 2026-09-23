@@ -228,3 +228,12 @@ it("records Stop feedback and continuation state with its actual desktop scope",
   expect(row?.note).toContain("additionalContext")
   expect(row?.evidence).toContain("tests/support/mods-stop-feedback-e2e.ts")
 })
+
+
+it("records StopFailure observed facts and original failure lifetime rather than claiming a repair gate", () => {
+  const entry = (matrix.classicEvents as Array<Record<string, unknown>>).find((item) => item.name === "classic.StopFailure")!
+  expect(entry.implementationStatus).toBe("partial")
+  expect(entry.note).toContain("error_details")
+  expect(entry.note).toContain("original failure")
+  expect(entry.evidence).toContain("tests/support/mods-stop-failure-e2e.ts")
+})

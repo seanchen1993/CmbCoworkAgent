@@ -331,3 +331,19 @@ it("retains long genuine Stop replies within the existing overall JSON bound", (
     })
   ).not.toThrow()
 })
+
+it("validates present StopFailure facts without inventing unavailable fields", () => {
+  const base = {
+    hook_event_name: "StopFailure",
+    session_id: "thread",
+    cwd: "/workspace",
+    transcript_path: ""
+  }
+  for (const key of ["error", "error_details", "last_assistant_message"])
+    expect(() => validateClassicInput("classic.StopFailure", { ...base, [key]: false })).toThrow(
+      "MODS_CLASSIC_INPUT"
+    )
+  expect(() =>
+    validateClassicInput("classic.StopFailure", { ...base, error: "network_error" })
+  ).not.toThrow()
+})

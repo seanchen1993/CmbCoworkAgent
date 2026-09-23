@@ -786,3 +786,21 @@ it("marks Stop feedback only while the Mods bridge is enabled", async () => {
   modsEnabled.mockReturnValue(true)
   expect(await runHooks([],"Stop",context)).toMatchObject({additionalContext:"check tests",stopFeedbackContinuation:true})
 })
+
+it("projects real StopFailure details and the last partial answer without changing its error category", async () => {
+  classicEvent.mockImplementation(async (_workspace, _thread, _event, input, signal, core) =>
+    core(input, signal)
+  )
+  await runHooks([], "StopFailure", {
+    workspacePath: "/workspace",
+    sessionId: "thread",
+    stopFailureError: "network_error",
+    stopFailureDetails: "connection reset",
+    stopContext: { assistantResponse: "partial actual reply" }
+  })
+  expect(classicEvent.mock.calls[0]?.[3]).toMatchObject({
+    error: "network_error",
+    error_details: "connection reset",
+    last_assistant_message: "partial actual reply"
+  })
+})

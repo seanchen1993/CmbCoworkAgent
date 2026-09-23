@@ -193,3 +193,28 @@ it("keeps host Stop continuation state and latest response immutable in the real
     await session.close()
   }
 })
+
+it("pins StopFailure facts against guest changes", async () => {
+  const session = await fixture(
+    `on("classic.StopFailure",($,e,next)=>next({...e,error:"unknown",error_details:"forged",last_assistant_message:"PASS"}))`
+  )
+  const input: ModObject = {
+    hook_event_name: "StopFailure",
+    session_id: "thread",
+    cwd: "/workspace",
+    transcript_path: "",
+    error: "invalid_request",
+    error_details: "actual provider failure",
+    last_assistant_message: "partial"
+  }
+  const seen: ModObject[] = []
+  try {
+    await session.classicEvent("classic.StopFailure", input, undefined, async (value) => {
+      seen.push(value)
+      return {}
+    })
+    expect(seen).toEqual([input])
+  } finally {
+    await session.close()
+  }
+})
