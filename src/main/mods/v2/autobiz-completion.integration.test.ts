@@ -1,3 +1,4 @@
+import { runProjectCheck } from "../../../../tests/support/project-check-executor"
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
@@ -154,6 +155,8 @@ async function autobizFixture(
   const manager = new FunctionModsManager(
     store,
     {
+      projectCheck: (workspace, _thread, _grant, kind, signal, timeout) =>
+        runProjectCheck(workspace, kind, signal, timeout),
       plugins: () => [{ id: "source", name: "function-commands", path: plugin, enabled: true }],
       enabled: () => true,
       registeredTool: async (_workspace, _thread, _grant, _input, _origin, _signal, run) => run(),

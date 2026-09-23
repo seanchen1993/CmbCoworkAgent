@@ -158,6 +158,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     manager.store,
     {
       plugins: getPlugins,
+      projectCheck: (...args) => manager.runCompletionProjectCheck(...args),
       dialogs: nativeFunctionDialogAccess,
       fileScope: (workspace, threadId) =>
         functionFileScope(manager, assertStandaloneThread, workspace, threadId),

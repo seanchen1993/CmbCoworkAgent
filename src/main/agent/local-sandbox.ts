@@ -1,6 +1,7 @@
 import type { ModObject } from "../../shared/mods/types"
 import { beforeModToolExecution } from "../mods/execution-error"
 import { ModPermissionError } from "../mods/errors"
+import { isProjectCheckExecution } from "../mods/v2/project-check-input"
 import { applyClassicToolOutput } from "../hooks/tool-output"
 import { attachModBackend, protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
 import { currentFunctionBackgroundOwner } from "../mods/v2/background-owner"
@@ -476,6 +477,7 @@ export interface LocalSandboxOptions {
 }
 
 interface ExecuteRawOptions {
+  containProcessTree?: boolean
   background?: boolean
   cwd?: string
   /** Background teardown waits for residual descendants before releasing ownership. */
@@ -7786,7 +7788,10 @@ export class LocalSandbox
       overrideAbortSignal,
       options
     )
-    const modSignal = getModCallContext()?.signal
+    const modContext = getModCallContext()
+    if (modContext && isProjectCheckExecution(modContext.identity))
+      options = { ...options, containProcessTree: true, waitForProcessTree: true }
+    const modSignal = modContext?.signal
     if (modSignal)
       overrideAbortSignal = overrideAbortSignal
         ? AbortSignal.any([overrideAbortSignal, modSignal])
@@ -8579,7 +8584,8 @@ export class LocalSandbox
         ? LocalSandbox.buildInteractiveGitEnv(this.env)
         : this.env
 
-      const useWindowsBackgroundJob = isWindows && options?.background === true
+      const useWindowsBackgroundJob =
+        isWindows && (options?.background === true || options?.containProcessTree === true)
       const windowsBackgroundShellKind = isBashOnWin
         ? "stdin"
         : ["powershell", "pwsh"].includes(shellBase)

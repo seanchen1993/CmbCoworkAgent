@@ -19,6 +19,9 @@ import { compileMod, readModApiVersion, type CompiledMod } from "./loader"
 import { ModRuntimeClient } from "./runtime-client"
 import { ModEngine, classifyModTool, type ApprovedMod, type ModDispatchRequest } from "./engine"
 import { ModError, ModPermissionError, modErrorCode } from "./errors"
+import { planProjectCheck } from "./v2/project-check-plan"
+import { assertProjectCheckInput, withProjectCheckInput } from "./v2/project-check-input"
+import type { ProjectCheckKind, ProjectCheckResult } from "./v2/project-checks"
 import { bindCompletionGateBudget, completionGateBudget } from "./v2/completion-budget"
 import { validateModRegistrations } from "./registrations"
 import { filterModData, projectModResult } from "./publication"
@@ -1068,10 +1071,19 @@ export class ModsManager {
     const authority = context?.runtimeAuthority
     if (!identity?.modId?.startsWith("function:") || !authority)
       throw new ModError("MODS_BACKGROUND_OWNER_REQUIRED")
+    return this.registerFunctionProcess(identity, authority, sessionSignal)
+  }
+
+  private registerFunctionProcess(
+    identity: Pick<ModIdentity, "workspace" | "threadId" | "agentId" | "modId" | "grantEpoch">,
+    authority: ModRuntimeAuthority,
+    sessionSignal: AbortSignal
+  ) {
+    sessionSignal.throwIfAborted()
     const bindingKey = `${identity.threadId}:${identity.agentId}`
     const binding = this.bindings.get(bindingKey)
     const epoch = this.config(identity.workspace).epoch
-    const grant = this.store.getGrant(identity.workspace, identity.modId)
+    const grant = identity.modId && this.store.getGrant(identity.workspace, identity.modId)
     const lease = getLocalThreadRunLease(identity.threadId)
     if (
       !binding ||
@@ -1524,6 +1536,93 @@ export class ModsManager {
       : this.confirmOperation(threadId, modId, toolId, args, signal)
   }
 
+  /** Configured checks retain the original turn, lease, approval and native execution receipt. */
+  async runCompletionProjectCheck(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    kind: ProjectCheckKind,
+    signal: AbortSignal,
+    timeoutMs: number
+  ): Promise<ProjectCheckResult> {
+    workspace = this.workspaceKey(workspace)
+    const scope = functionExecutionScope(workspace, threadId)
+    if (!scope?.leased || !scope.turnId || !getLocalThreadRunLease(threadId))
+      throw new ModError("MODS_PROJECT_CHECK_LEASE")
+    if (!scope.runtimeAuthority) throw new ModError("MODS_PROJECT_CHECK_AUTHORITY")
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new ModError("MODS_COMPLETION_TIMEOUT")
+    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    const identity = {
+      workspace,
+      threadId,
+      turnId: scope.turnId,
+      agentId: scope.agentId ?? "main",
+      modId: grant.modId,
+      grantEpoch: grant.epoch,
+      toolCallId: randomUUID()
+    }
+    const guard = this.registerFunctionProcess(identity, scope.runtimeAuthority, signal)
+    const deadline = new AbortController()
+    const timer = setTimeout(
+      () => deadline.abort(new ModError("MODS_COMPLETION_TIMEOUT")),
+      Math.min(timeoutMs, 2_147_483_647)
+    )
+    const checkSignal = AbortSignal.any([guard.signal, deadline.signal])
+    try {
+      const plan = await planProjectCheck(
+        this.functionRuntimeScope(workspace, threadId).workspace,
+        kind,
+        checkSignal
+      )
+      guard.assertLive()
+      let receipt: { executionId: string; exitCode: number; passed: boolean } | undefined
+      const input = { command: plan.command, cwd: plan.cwd }
+      const published = await withProjectCheckInput(identity, input, () =>
+        this.invokeFunctionCapability(
+          workspace,
+          threadId,
+          grant,
+          "host:execute",
+          input,
+          checkSignal,
+          false,
+          true,
+          undefined,
+          (value, call) => {
+            const result = value as { exitCode?: unknown }
+            const exitCode = typeof result?.exitCode === "number" ? result.exitCode : 1
+            const status = this.store.status(call.callId)
+            if (status !== "succeeded" && status !== "failed")
+              throw new ModError("MODS_PROJECT_CHECK_RECEIPT_REQUIRED")
+            receipt = {
+              executionId: call.callId,
+              exitCode,
+              passed: status === "succeeded" && exitCode === 0
+            }
+            return value
+          },
+          identity.toolCallId
+        )
+      )
+      checkSignal.throwIfAborted()
+      guard.assertLive()
+      if (!receipt) throw new ModError("MODS_PROJECT_CHECK_RECEIPT_REQUIRED")
+      const output = projectModResult(published).text.slice(-64 * 1024)
+      return {
+        kind,
+        ...receipt,
+        output,
+        outputFingerprint: createHash("sha256").update(output).digest("hex"),
+        ...(!receipt.passed
+          ? { reason: `PROJECT_${kind.toUpperCase()}_FAILED: ${output.slice(-8192)}` }
+          : {})
+      }
+    } finally {
+      clearTimeout(timer)
+      guard.release()
+    }
+  }
+
   /** Function SDK calls reuse native tool authority, execution receipts and final-argument approval. */
   async invokeFunctionTool(
     workspace: string,
@@ -1710,7 +1809,7 @@ export class ModsManager {
     readOnly: boolean,
     userInitiated: boolean,
     mcpBinding?: ModThreadBinding,
-    project: (value: unknown) => unknown = (value) => value,
+    project: (value: unknown, identity: ModIdentity) => unknown = (value) => value,
     toolCallId?: string
   ): Promise<unknown> {
     workspace = this.workspaceKey(workspace)
@@ -1752,7 +1851,7 @@ export class ModsManager {
       this.store.assertGrant(grant)
       const published = await this.publish(
         workspace,
-        project(actual),
+        project(actual, identity),
         identity.callId,
         binding.signal
       )
@@ -2543,6 +2642,7 @@ export async function authorizeCurrentModInput(
     args = filterModData(args, false) as Record<string, unknown>
     const signature = `${toolId}:${encodeModJson(args)}`
     context.assertLive?.()
+    assertProjectCheckInput(context.identity, toolId, args)
     if (context.approvedOperation && context.authorizedInput === signature) return
     context.approvedOperation = undefined
     await context.authorize?.(toolId, args)

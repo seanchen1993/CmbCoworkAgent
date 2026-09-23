@@ -1,3 +1,4 @@
+import { runProjectCheck } from "../../../../tests/support/project-check-executor"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -69,6 +70,8 @@ async function fixture(specs: Array<{ hook?: string; setup?: string; policy?: ob
   const manager = new FunctionModsManager(
     store,
     {
+      projectCheck: (workspace, _thread, _grant, kind, signal, timeout) =>
+        runProjectCheck(workspace, kind, signal, timeout),
       plugins: () => sources,
       enabled: () => enabled,
       changed: () => {},

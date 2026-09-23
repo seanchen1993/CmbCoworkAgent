@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
-import type { Page } from "playwright"
+import type { ElectronApplication, Page } from "playwright"
 
 /** Physical file edit -> existing watcher -> host evidence ledger -> real React UI. */
 export async function verifyCompletionFreshness(
@@ -11,7 +11,8 @@ export async function verifyCompletionFreshness(
   artifacts: string,
   requests: unknown[],
   until: (check: () => Promise<boolean>, label: string) => Promise<void>,
-  pass: (label: string) => void
+  pass: (label: string) => void,
+  app: ElectronApplication
 ): Promise<void> {
   const project = join(workspace, "completion-freshness-project")
   mkdirSync(project, { recursive: true })
@@ -142,6 +143,129 @@ export async function verifyCompletionFreshness(
     await until(async () => (await rail.count()) === 0, "off removes evidence UI")
     assert.deepEqual(await records(), [])
     pass("durable stale evidence survives renderer restart and disabling Mods removes the gate UI")
+    writeFileSync(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { test: "node suite.cjs" } })
+    )
+    writeFileSync(
+      join(project, "suite.cjs"),
+      'console.log("REAL_ELECTRON_ASSERTION_FAILED");process.exitCode=2'
+    )
+    const configureTests = (mode: "off" | "check") =>
+      page.evaluate(
+        ({ id, plugin, mode }) =>
+          window.api.mods.setCompletionPolicy(id, plugin, {
+            mode,
+            scope: "project",
+            checks: ["unit-test"],
+            maxRepairs: 0,
+            timeoutMs: 30000,
+            modelTokenBudget: 4096
+          }),
+        { id: threadId, plugin: mod.name, mode }
+      )
+    await page.evaluate(() => window.api.mods.configureGlobal(true))
+    await configureTests("off")
+    const beforeOff = requests.length
+    await run("请确认任务状态。[project-test-off]")
+    await until(
+      async () =>
+        requests.length > beforeOff &&
+        (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
+      "off completes without running the failing project suite"
+    )
+    assert(
+      !(await page.evaluate((id) => window.api.mods.audit(id), threadId)).some(
+        (row) => row.toolId === "host:execute"
+      )
+    )
+    pass(
+      "explicitly disabled project check leaves the same failing task ungated without executing tests"
+    )
+    await configureTests("check")
+    await app.evaluate(({ dialog }) => {
+      Object.assign(globalThis, { completionTestOriginalDialog: dialog.showMessageBox })
+      dialog.showMessageBox = (async () => ({
+        response: 1,
+        checkboxChecked: false
+      })) as typeof dialog.showMessageBox
+    })
+    try {
+      const previousIds = new Set((await records()).map((row) => row.id))
+      await run("请确认任务状态。[project-test-on-fail]")
+      await until(
+        async () =>
+          (await records()).some(
+            (row) =>
+              !previousIds.has(row.id) &&
+              row.phase === "validator.result" &&
+              row.status === "block" &&
+              JSON.stringify(row.detail).includes("REAL_ELECTRON_ASSERTION_FAILED")
+          ),
+        "native project failure records the actual assertion output"
+      )
+      await until(
+        async () =>
+          (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
+        "failing configured test blocks original completion"
+      )
+      const failedRows = (await records()).filter((row) => !previousIds.has(row.id))
+      const checked = failedRows.find(
+        (row) =>
+          row.phase === "validator.result" && JSON.stringify(row.detail).includes("executionId")
+      )!
+      const detail = checked.detail as { executionId: string; exitCode: number }
+      assert.equal(detail.exitCode, 2)
+      const receipt = (await page.evaluate((id) => window.api.mods.audit(id), threadId)).find(
+        (row) => row.callId === detail.executionId
+      )
+      assert.equal(receipt?.status, "failed")
+      assert(failedRows.some((row) => row.phase === "check.result" && row.status === "block"))
+      assert(!failedRows.some((row) => row.phase === "check.result" && row.status === "pass"))
+      pass(
+        "enabled project check blocks a real failing npm test with original native approval and durable failed receipt"
+      )
+      writeFileSync(join(project, "suite.cjs"), 'console.log("REAL_ELECTRON_ASSERTION_PASSED")')
+      const prior = new Set((await records()).map((row) => row.id))
+      await run("请复检已修复的任务。[project-test-on-fixed]")
+      await until(
+        async () =>
+          (await records()).some(
+            (row) => !prior.has(row.id) && row.phase === "check.result" && row.status === "pass"
+          ),
+        "repaired project suite is re-executed and passes"
+      )
+      await until(
+        async () =>
+          (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
+        "rechecked completion settles"
+      )
+      const passed = (await records()).filter((row) => !prior.has(row.id))
+      assert(
+        passed.some(
+          (row) =>
+            row.phase === "validator.result" &&
+            row.status === "pass" &&
+            JSON.stringify(row.detail).includes("executionId")
+        )
+      )
+      writeFileSync(
+        join(artifacts, "native-project-check.json"),
+        JSON.stringify({ failedRows, passed }, null, 2)
+      )
+      await page.screenshot({ path: join(artifacts, "native-project-check.png") })
+      pass(
+        "a repaired real project test receives a new native receipt and new bound completion evidence"
+      )
+    } finally {
+      await app.evaluate(({ dialog }) => {
+        dialog.showMessageBox = (
+          globalThis as unknown as { completionTestOriginalDialog: typeof dialog.showMessageBox }
+        ).completionTestOriginalDialog
+        delete (globalThis as unknown as { completionTestOriginalDialog?: unknown })
+          .completionTestOriginalDialog
+      })
+    }
     writeFileSync(join(project, "too-large.txt"), Buffer.alloc(3 * 1024 * 1024, 65))
     await page.evaluate(
       async ({ id, plugin }) => {

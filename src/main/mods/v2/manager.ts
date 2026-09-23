@@ -55,7 +55,7 @@ import {
   type CompletionEvidenceRecord
 } from "./completion-evidence"
 import { advanceAutobizCheckpoint, runAutobizValidator } from "./autobiz-validation"
-import { runProjectCheck, type ProjectCheckKind } from "./project-checks"
+import type { ProjectCheckResult, ProjectCheckKind } from "./project-checks"
 import {
   dispatchFunctionStream,
   type FunctionStreamOptions,
@@ -88,6 +88,14 @@ interface SessionEntry {
   snapshots: Map<string, Snapshot>
 }
 interface FunctionManagerHost {
+  projectCheck?(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    kind: ProjectCheckKind,
+    signal: AbortSignal,
+    timeoutMs: number
+  ): Promise<ProjectCheckResult>
   plugins(): ModPluginSource[]
   enabled(workspace: string): boolean
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
@@ -1390,12 +1398,22 @@ export class FunctionModsManager {
               if (mandatoryPolicies.length) throw new ModFunctionError("MODS_COMPLETION_TIMEOUT")
               continue
             }
-            const check = await runProjectCheck(
-              this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
-              kind as ProjectCheckKind,
+            const owner = active.find(
+              ([, policy]) => policy && selectedPolicies.includes(policy)
+            )?.[0]
+            const grant = owner && entry.snapshots.get(owner)?.grant
+            if (!grant || !this.host.projectCheck)
+              throw new ModFunctionError("MODS_PROJECT_CHECK_UNAVAILABLE")
+            assertLive()
+            const check = await this.host.projectCheck(
+              workspace,
+              threadId,
+              grant,
+              kind,
               signal,
               remaining
             )
+            assertLive()
             signal.throwIfAborted()
             sharedBudget?.assert()
             record("validator.result", check.passed ? "pass" : "block", {
@@ -1403,6 +1421,7 @@ export class FunctionModsManager {
               passed: check.passed,
               exitCode: check.exitCode,
               outputFingerprint: check.outputFingerprint,
+              ...(check.executionId ? { executionId: check.executionId } : {}),
               ...(check.reason ? { reason: check.reason } : {})
             })
             if (
