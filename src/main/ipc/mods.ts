@@ -666,6 +666,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       input: { threadId: string; descriptor: ModCommandDescriptor; args: ModObject }
     ) => {
       const workspace = writableScope(event, input?.threadId)
+      if (!manager.isEnabled(workspace)) throw new ModError("MODS_DISABLED")
       if (input.descriptor?.apiVersion === "cmb.mods/v2") {
         const executionScope = manager.functionUserScope(workspace, input.threadId)
         if (!input.args || typeof input.args.text !== "string" || input.args.text.length > 32000)

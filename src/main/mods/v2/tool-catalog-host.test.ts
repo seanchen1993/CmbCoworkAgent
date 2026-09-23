@@ -187,12 +187,18 @@ it("rejects a changed metadata scope or configuration instead of publishing a mi
 
 it("does not replace an instance that starts during cold discovery", async () => {
   const f = fixture()
+  let started: ReturnType<ModsManager["createRuntimeAuthority"]> | undefined
   mocks.snapshot.mockImplementationOnce(async () => {
-    f.manager.createRuntimeAuthority({ workspace: f.workspace, threadId: "thread", turnId: "turn" })
+    started = f.manager.createRuntimeAuthority({
+      workspace: f.workspace, threadId: "thread", turnId: "turn"
+    })
     return { fingerprint: "one", tools: [] }
   })
   await expect(f.query()).rejects.toThrow("MODS_CALL_SCOPE_CHANGED")
-  f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!.assertLive()
+  expect(started).toBeDefined()
+  started!.authority.assertLive()
+  // The ordinary runtime lives independently of a Mods adapter binding.
+  expect(f.manager.functionUserScope(f.workspace, "thread")).toEqual({})
 })
 
 it("rejects cancellation and refuses a non-plain thread without discovering capabilities", async () => {

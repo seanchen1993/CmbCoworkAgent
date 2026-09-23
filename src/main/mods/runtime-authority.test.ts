@@ -1258,3 +1258,15 @@ it("canonicalizes native agent offers before entering the Function Mods thread g
   )).resolves.toEqual({ isOffered: true })
   expect(offerAgent.mock.calls[0][0]).toBe(f.scope.workspace)
 })
+
+it("fresh UI entry after Mods invalidation does not borrow an unbound runtime turn", async () => {
+  const f = fixture()
+  const previous = f.manager.functionUserScope(f.workspace, "thread")
+  expect(previous.runtimeAuthority).toBeDefined()
+  f.manager.invalidateAll()
+  expect(f.manager.functionUserScope(f.workspace, "thread")).toEqual({})
+  expect(f.manager.functionRuntimeScope(f.workspace, "thread").bound).toBe(false)
+  await expect(withFunctionExecution({ ...f.scope, ...previous }, async () =>
+    f.manager.functionRuntimeScope(f.workspace, "thread")
+  )).rejects.toThrow("MODS_THREAD_CONTEXT_REQUIRED")
+})

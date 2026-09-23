@@ -1060,7 +1060,13 @@ export class ModsManager {
       workspace: this.workspaceKey(workspace),
       threadId
     })
-    return runtimeAuthority
+    const binding = this.bindings.get(`${threadId}:main`)
+    // Toggling Mods drops adapters while the ordinary agent may remain resident.
+    // A new UI read is cold until the host binds that runtime again; old guest
+    // continuations still retain their original turn and fail the binding check.
+    return runtimeAuthority &&
+      binding?.runtimeAuthority === runtimeAuthority &&
+      !binding.signal?.aborted
       ? { runtimeAuthority, turnId: runtimeAuthority.turnId, agentId: runtimeAuthority.agentId }
       : {}
   }
