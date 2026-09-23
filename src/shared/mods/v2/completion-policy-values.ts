@@ -15,6 +15,8 @@ export interface CompletionPolicy {
   maxRepairs: number
   timeoutMs: number
   modelTokenBudget: number
+  /** Application-owned stage opt-in; ignored by the guest policy parser. */
+  autobizStartCheckpoint?: string
 }
 
 export const DEFAULT_COMPLETION_POLICY: CompletionPolicy = {

@@ -111,6 +111,8 @@ async function autobizFixture(
     nativeTransition?: boolean
     nativeBridge?: boolean
     approved?: boolean
+    autoStage?: string
+    guestStage?: string
   } = {}
 ) {
   let root = await mkdtemp(join(tmpdir(), "mods-autobiz-completion-"))
@@ -266,8 +268,20 @@ async function autobizFixture(
     checks: options.checks ?? ["autobiz-validator"],
     maxRepairs: 1,
     timeoutMs: 30_000,
-    modelTokenBudget: 512
+    modelTokenBudget: 512,
+    ...(options.guestStage ? { autobizStartCheckpoint: options.guestStage } : {})
   })
+  if (options.autoStage)
+    manager.setCompletionPolicy(root, "thread", "function-commands", {
+      mode: options.mode ?? "check",
+      scope: "feature",
+      feature: "order-export",
+      checks: options.checks ?? ["autobiz-validator"],
+      maxRepairs: 1,
+      timeoutMs: 30000,
+      modelTokenBudget: 512,
+      autobizStartCheckpoint: options.autoStage
+    })
   native?.attachFunctions({
     completionGate: (...args) => manager.completionGate(...args),
     invalidate: (workspace) => manager.invalidate(workspace),
@@ -651,3 +665,197 @@ it.each([true, false])(
     }
   }
 )
+
+it("automatically advances the configured stage once through the original completion loop and native authority", async () => {
+  const f = await autobizFixture({
+    nativeBridge: true,
+    autoStage: "requirements_eval_in_progress",
+    report: "verdict: PASS\ncontract fixture only"
+  })
+  expect(await runLoop(f)).toBe("passed")
+  const statePath = join(f.root, ".autobizdevops", "state.json")
+  const after = await readFile(statePath, "utf8")
+  expect(JSON.parse(after).features["order-export"].checkpoint).toBe("requirements_eval_done")
+  expect(await runLoop(f)).toBe("passed")
+  expect(await readFile(statePath, "utf8")).toBe(after)
+  expect(
+    f.store
+      .completionEvidence(f.root, "thread")
+      .filter((row) => row.phase === "state.transition" && row.status === "pass")
+  ).toHaveLength(1)
+  expect(
+    f.store.audit(f.root).filter((row) => row.toolId === "host:autobiz_checkpoint")
+  ).toHaveLength(1)
+})
+
+it("keeps guest-selected stage metadata read-only and requires an explicit app opt-in", async () => {
+  const f = await autobizFixture({
+    nativeBridge: true,
+    guestStage: "requirements_eval_in_progress",
+    report: "verdict: PASS\ncontract fixture only"
+  })
+  const statePath = join(f.root, ".autobizdevops", "state.json")
+  const before = await readFile(statePath, "utf8")
+  expect(await runLoop(f)).toBe("passed")
+  expect(await readFile(statePath, "utf8")).toBe(before)
+  expect(f.store.audit(f.root)).toHaveLength(0)
+})
+
+it("performs a real artifact repair and revalidation before the automatic stage transition", async () => {
+  const f = await autobizFixture({
+    nativeBridge: true,
+    autoStage: "requirements_eval_in_progress",
+    mode: "repair"
+  })
+  const repair = vi.fn(async () => {
+    await writeFile(
+      join(f.featureDir, "REQUIREMENTS_EVAL.md"),
+      "verdict: PASS\ncontract fixture repaired"
+    )
+  })
+  expect(await runLoop(f, repair)).toBe("passed")
+  expect(repair).toHaveBeenCalledTimes(1)
+  expect(
+    JSON.parse(await readFile(join(f.root, ".autobizdevops", "state.json"), "utf8")).features[
+      "order-export"
+    ].checkpoint
+  ).toBe("requirements_eval_done")
+})
+
+it("leaves the same task ungated when off and advances only after the application stage is enabled", async () => {
+  const f = await autobizFixture({
+    nativeBridge: true,
+    report: "verdict: PASS\ncontract fixture only"
+  })
+  const policy = {
+    mode: "check",
+    scope: "feature",
+    feature: "order-export",
+    checks: ["autobiz-validator"],
+    maxRepairs: 1,
+    timeoutMs: 30000,
+    modelTokenBudget: 512,
+    autobizStartCheckpoint: "requirements_eval_in_progress"
+  }
+  f.manager.setCompletionPolicy(f.root, "thread", "function-commands", { ...policy, mode: "off" })
+  expect(
+    await f.native!.createCompletionGate(f.root, "thread", () => ({ turnId: "turn" }))
+  ).toBeUndefined()
+  expect(f.store.audit(f.root)).toHaveLength(0)
+  f.manager.setCompletionPolicy(f.root, "thread", "function-commands", policy)
+  expect(await runLoop(f)).toBe("passed")
+  expect(
+    JSON.parse(await readFile(join(f.root, ".autobizdevops", "state.json"), "utf8")).features[
+      "order-export"
+    ].checkpoint
+  ).toBe("requirements_eval_done")
+})
+
+it("fails the original completion when native checkpoint approval is rejected", async () => {
+  const f = await autobizFixture({
+    nativeBridge: true,
+    approved: false,
+    autoStage: "requirements_eval_in_progress",
+    report: "verdict: PASS\ncontract fixture only"
+  })
+  const statePath = join(f.root, ".autobizdevops", "state.json")
+  const before = await readFile(statePath, "utf8")
+  expect(await runLoop(f)).toBe("failed")
+  expect(await readFile(statePath, "utf8")).toBe(before)
+  expect(
+    f.store
+      .completionEvidence(f.root, "thread")
+      .some((row) => row.phase === "state.transition" && row.status === "pass")
+  ).toBe(false)
+})
+
+it("retains read-only project validation when no explicit feature or automatic stage is selected", async () => {
+  const f = await autobizFixture({
+    nativeBridge: true,
+    report: "verdict: PASS\ncontract fixture only"
+  })
+  f.manager.setCompletionPolicy(f.root, "thread", "function-commands", {
+    mode: "check",
+    scope: "project",
+    checks: ["autobiz-validator"],
+    maxRepairs: 0,
+    timeoutMs: 30000,
+    modelTokenBudget: 512
+  })
+  const path = join(f.root, ".autobizdevops", "state.json")
+  const before = await readFile(path, "utf8")
+  expect(await runLoop(f)).toBe("passed")
+  expect(await readFile(path, "utf8")).toBe(before)
+  expect(f.store.audit(f.root)).toHaveLength(0)
+})
+
+it("persists separate transition receipts when two projects reuse the same completion key", async () => {
+  const first = await autobizFixture({ report: "verdict: PASS\ncontract fixture only" })
+  const second = await autobizFixture({ report: "verdict: PASS\ncontract fixture only" })
+  for (const f of [first, second]) {
+    expect(await runLoop(f)).toBe("passed")
+    const start = f.store
+      .completionEvidence(f.root, "thread")
+      .find((row) => row.phase === "check.started")!
+    if (
+      !start.binding ||
+      !start.detail ||
+      typeof start.detail !== "object" ||
+      Array.isArray(start.detail)
+    )
+      throw Error("missing evidence")
+    await f.manager.advanceAutobizCheckpoint(
+      f.root,
+      "thread",
+      {
+        evidenceId: String(start.detail.attempt),
+        feature: "order-export",
+        from: "requirements_eval_in_progress",
+        to: "requirements_eval_done",
+        stateFingerprint: start.binding.stateFingerprint,
+        idempotencyKey: "same-project-local-key"
+      },
+      f.signal
+    )
+    const committed = f.store
+      .completionEvidence(f.root, "thread")
+      .filter((row) => row.phase === "state.transition")
+    expect(committed).toHaveLength(1)
+    // Production uses one control store for all workspaces. Import the genuine first
+    // receipt into the second fixture's store before its operation starts.
+    if (f === first) second.store.saveCompletionEvidence(committed[0])
+  }
+})
+
+it("cannot use a stage validator proof to authorize a different destination", async () => {
+  const f = await autobizFixture({ report: "verdict: PASS\ncontract fixture only" })
+  expect(await runLoop(f)).toBe("passed")
+  const start = f.store
+    .completionEvidence(f.root, "thread")
+    .find((row) => row.phase === "check.started")!
+  if (
+    !start.binding ||
+    !start.detail ||
+    typeof start.detail !== "object" ||
+    Array.isArray(start.detail)
+  )
+    throw Error("missing evidence")
+  const path = join(f.root, ".autobizdevops", "state.json")
+  const before = await readFile(path, "utf8")
+  await expect(
+    f.manager.advanceAutobizCheckpoint(
+      f.root,
+      "thread",
+      {
+        evidenceId: String(start.detail.attempt),
+        feature: "order-export",
+        from: "requirements_eval_in_progress",
+        to: "development_in_progress",
+        stateFingerprint: start.binding.stateFingerprint,
+        idempotencyKey: "different-destination"
+      },
+      f.signal
+    )
+  ).rejects.toThrow("MODS_AUTOBIZ_STAGE_EVIDENCE_REQUIRED")
+  expect(await readFile(path, "utf8")).toBe(before)
+})

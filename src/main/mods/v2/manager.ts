@@ -967,6 +967,14 @@ export class FunctionModsManager {
         throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
     }
     await verifyEvidence()
+    const validatedStage = isModObject(validator.detail) ? validator.detail.stage : undefined
+    if (
+      !isModObject(validatedStage) ||
+      validatedStage.start !== from ||
+      validatedStage.end !== to ||
+      validatedStage.alreadyAtTarget !== false
+    )
+      throw new ModFunctionError("MODS_AUTOBIZ_STAGE_EVIDENCE_REQUIRED")
     const scope = this.host.fileScope?.(workspace, threadId)
     scope?.assertLive()
     const plugin = isModObject(validator.detail) ? validator.detail.plugin : undefined
@@ -994,7 +1002,7 @@ export class FunctionModsManager {
       ...started,
       id: randomUUID(),
       idempotencyKey: accepted
-        ? `transition:${idempotencyKey}`
+        ? JSON.stringify(["transition", workspace, threadId, idempotencyKey])
         : `transition-attempt:${randomUUID()}`,
       phase: "state.transition",
       status: accepted ? "pass" : result.status === "unknown" ? "interrupted" : "block",
@@ -1277,6 +1285,20 @@ export class FunctionModsManager {
       policy ? policy.mode !== "off" : completionProviders.has(name)
     )
     if (active.length === 0) return undefined
+    const automaticStages = active.flatMap(([plugin]) => {
+      const app = this.applicationPolicies.hostValue(workspace, plugin)
+      return isModObject(app) &&
+        typeof app.autobizStartCheckpoint === "string" &&
+        typeof app.feature === "string"
+        ? [{ plugin, feature: app.feature, start: app.autobizStartCheckpoint }]
+        : []
+    })
+    // One snapshot cannot authorize a second state mutation after the first changes it.
+    if (
+      new Set(automaticStages.map((stage) => JSON.stringify([stage.feature, stage.start]))).size > 1
+    )
+      throw new ModFunctionError("MODS_AUTOBIZ_STAGE_CONFLICT")
+    const automaticStage = automaticStages[0]
     const policyFor = (name: string) => configured.get(name)
     const policies = active
       .map(([, policy]) => policy)
@@ -1353,6 +1375,7 @@ export class FunctionModsManager {
         const signal = AbortSignal.any([originalSignal, deadline.signal, lifecycle.signal])
         let timer: ReturnType<typeof setTimeout> | undefined
         let binding: CompletionEvidenceBinding | undefined
+        let stageToCommit: { feature: string; start: string; end: string } | undefined
         const attempt = randomUUID()
         const recordCapture = (
           phase: "capture.started" | "capture.failed",
@@ -1560,7 +1583,10 @@ export class FunctionModsManager {
               this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
               feature,
               signal,
-              remaining
+              remaining,
+              automaticStage && feature === automaticStage.feature
+                ? automaticStage.start
+                : undefined
             )
             signal.throwIfAborted()
             sharedBudget?.assert()
@@ -1570,6 +1596,12 @@ export class FunctionModsManager {
                 active.find(([, policy]) => policy && selectedPolicies.includes(policy))?.[0] ?? "",
               attempt
             } as unknown as ModJson)
+            if (validator.passed && automaticStage && feature === automaticStage.feature) {
+              if (!validator.stage || validator.stage.start !== automaticStage.start)
+                throw new ModFunctionError("MODS_AUTOBIZ_STAGE_EVIDENCE_REQUIRED")
+              if (!validator.stage.alreadyAtTarget)
+                stageToCommit = { feature, start: validator.stage.start, end: validator.stage.end }
+            }
             const mandatory = selectedPolicies.filter((policy) => policy.mode !== "report")
             if (!validator.passed && mandatory.length) {
               const repairing = mandatory.every((policy) => policy.mode === "repair")
@@ -1617,11 +1649,41 @@ export class FunctionModsManager {
           ) {
             if (entry.completionProofs.size >= 32) entry.completionProofs.clear()
             entry.completionProofs.set(attempt, capture)
+            if (stageToCommit) {
+              const idempotencyKey = createHash("sha256")
+                .update(
+                  JSON.stringify([
+                    workspace,
+                    stageToCommit,
+                    binding.stateFingerprint,
+                    binding.requirementVersion,
+                    binding.configFingerprint,
+                    binding.diffFingerprint,
+                    binding.pluginDigests
+                  ])
+                )
+                .digest("hex")
+              await this.advanceAutobizCheckpoint(
+                workspace,
+                threadId,
+                {
+                  evidenceId: attempt,
+                  feature: stageToCommit.feature,
+                  from: stageToCommit.start,
+                  to: stageToCommit.end,
+                  stateFingerprint: binding.stateFingerprint,
+                  idempotencyKey
+                },
+                signal
+              )
+              sharedBudget?.assertSettled()
+            }
           }
           if (result.decision === "revise")
             record("repair.attempt", "revise", { revisionAttempts: revisionAttempts + 1 })
           return result
         } catch (error) {
+          entry.completionProofs.delete(attempt)
           const reason = lifecycle.signal.aborted
             ? String(lifecycle.signal.reason?.message ?? "MODS_COMPLETION_CONFIG_CHANGED")
             : deadline.signal.aborted

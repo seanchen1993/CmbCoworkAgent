@@ -21,6 +21,7 @@ export interface AutobizValidationResult {
   validator: "passed" | "failed"
   reason: string
   workflowFingerprint?: string
+  stage?: { start: string; end: string; alreadyAtTarget: boolean }
 }
 
 export interface AutobizCheckpointTransition {
@@ -47,14 +48,15 @@ export async function runAutobizValidator(
   workspace: string,
   feature?: string,
   signal?: AbortSignal,
-  timeoutMs = 120_000
+  timeoutMs = 120_000,
+  stageStart?: string
 ): Promise<AutobizValidationResult> {
   const root = resolve(workspace)
   const statePath = join(root, ".autobizdevops", "state.json")
   const script = `
 import json, os, sys, importlib.util, subprocess
 from pathlib import Path
-source, workspace, expected, state_path, requested = sys.argv[1:]
+source, workspace, expected, state_path, requested, stage_start = sys.argv[1:]
 sys.path.insert(0, source)
 sys.path.insert(0, os.path.join(source, 'skills', 'autodev', 'hooks'))
 def load(path, name):
@@ -80,13 +82,33 @@ try:
     compiler.load_record_effective_board_config(Path(config_path), repo_root=Path(source), workspace=Path(workspace), record=record)
     workflow_contracts = contracts.load_record_workflow_contracts(Path(source), record, workspace=Path(workspace))
     artifact = load(os.path.join(source,'skills','autodev','hooks','artifact_check.py'), 'mods_artifact_check')
-    skill = workflow_contracts.end_checkpoint_to_skill.get(checkpoint) or workflow_contracts.start_checkpoint_to_skill.get(checkpoint)
+    stage = None
+    if stage_start:
+        skill = workflow_contracts.start_checkpoint_to_skill.get(stage_start)
+        if not skill: raise RuntimeError('AUTOBIZ_STAGE_UNKNOWN')
+        contract = workflow_contracts.contract_for_skill(skill)
+        if len(contract.checkpoints) != 2 or contract.checkpoints[0] != stage_start:
+            raise RuntimeError('AUTOBIZ_STAGE_UNSUPPORTED')
+        stage_end = contract.checkpoints[1]
+        if stage_end not in workflow_contracts.allowed_next.get(stage_start, ()):
+            raise RuntimeError('AUTOBIZ_STAGE_TRANSITION_INVALID')
+        if checkpoint not in (stage_start, stage_end):
+            raise RuntimeError('AUTOBIZ_STAGE_CHECKPOINT_MISMATCH')
+        stage = {'start':stage_start, 'end':stage_end, 'alreadyAtTarget':checkpoint == stage_end}
+    else:
+        skill = workflow_contracts.end_checkpoint_to_skill.get(checkpoint) or workflow_contracts.start_checkpoint_to_skill.get(checkpoint)
     if not skill: raise RuntimeError('AUTOBIZ_SKILL_MISSING:'+str(checkpoint))
+    if stage is None:
+        contract = workflow_contracts.contract_for_skill(skill)
+        if len(contract.checkpoints) == 2:
+            start, end = contract.checkpoints
+            if checkpoint in (start, end) and end in workflow_contracts.allowed_next.get(start, ()):
+                stage = {'start':start, 'end':end, 'alreadyAtTarget':checkpoint == end}
     slug = feature
     pre_code, pre_msg = artifact.run_precheck(Path(source), Path(workspace), skill, slug, workflow_record=record)
     post_code, post_msg = artifact.run_postcheck(Path(source), Path(workspace), skill, slug, workflow_record=record)
     ok = int(pre_code) == 0 and int(post_code) == 0
-    print(json.dumps({'kind':'autobiz-validator','passed':ok,'feature':feature,'checkpoint':checkpoint,'sourceCommit':commit,'compiler':'passed','validator':'passed' if ok else 'failed','reason':str(pre_msg if pre_code else post_msg)}, ensure_ascii=False))
+    print(json.dumps({'kind':'autobiz-validator','passed':ok,'feature':feature,'checkpoint':checkpoint,'sourceCommit':commit,'compiler':'passed','validator':'passed' if ok else 'failed','reason':str(pre_msg if pre_code else post_msg), **({'stage':stage} if stage else {})}, ensure_ascii=False))
 except Exception as e:
     print(json.dumps({'passed':False,'sourceCommit':locals().get('commit', ''),'compiler':'failed','validator':'failed','reason':str(e)[:4000]}, ensure_ascii=False))
     sys.exit(0)
@@ -108,7 +130,8 @@ except Exception as e:
           root,
           AUTOBIZ_KANBAN_COMMIT,
           statePath,
-          feature || ""
+          feature || "",
+          stageStart || ""
         ],
         {
           cwd: source,

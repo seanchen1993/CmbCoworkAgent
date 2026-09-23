@@ -56,3 +56,25 @@ it("keeps inherited plugin behavior visibly distinct until an application rule i
   expect(html).toContain("保存前沿用插件行为")
   expect(html).toContain('disabled=""')
 })
+
+it("offers an explicit stage input and explains that only the compiler chooses its destination", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionPolicyForm, {
+      value: {
+        ...DEFAULT_COMPLETION_POLICY,
+        mode: "check",
+        feature: "orders",
+        checks: ["autobiz-validator"],
+        autobizStartCheckpoint: "requirements_eval_in_progress"
+      },
+      source: "application",
+      disabled: false,
+      onChange: () => {},
+      onSave: () => {}
+    })
+  )
+  expect(html).toContain("自动推进阶段起点")
+  expect(html).toContain('value="requirements_eval_in_progress"')
+  expect(html).toContain("固定版本 workflow compiler 推导终点")
+  expect(html).toContain("留空只检查，不推进")
+})

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import {
   COMPLETION_CHECKS,
@@ -31,7 +31,15 @@ export function FunctionCompletionPolicyForm({
   onChange(value: CompletionPolicy): void
   onSave(): void
 }): React.JSX.Element {
-  const change = (patch: Partial<CompletionPolicy>) => onChange({ ...value, ...patch })
+  const stageHelpId = useId()
+  const change = (patch: Partial<CompletionPolicy>) => {
+    const next = { ...value, ...patch }
+    if (!["check", "repair"].includes(next.mode) || !next.checks.includes("autobiz-validator"))
+      delete next.autobizStartCheckpoint
+    onChange(next)
+  }
+  const stageAvailable =
+    ["check", "repair"].includes(value.mode) && value.checks.includes("autobiz-validator")
   return (
     <form
       className="space-y-3"
@@ -94,7 +102,10 @@ export function FunctionCompletionPolicyForm({
               className={field}
               value={value.feature ?? ""}
               maxLength={128}
-              required={value.mode !== "off" && value.scope === "feature"}
+              required={
+                value.mode !== "off" &&
+                (value.scope === "feature" || !!value.autobizStartCheckpoint)
+              }
               onChange={(e) => change({ feature: e.target.value || undefined })}
               placeholder="order-export"
             />
@@ -119,6 +130,25 @@ export function FunctionCompletionPolicyForm({
             </label>
           ))}
         </fieldset>
+        {stageAvailable && (
+          <label className="grid gap-1">
+            自动推进阶段起点
+            <input
+              aria-label="自动推进阶段起点"
+              className={field}
+              value={value.autobizStartCheckpoint ?? ""}
+              maxLength={128}
+              pattern="[A-Za-z0-9][A-Za-z0-9_.\\-]{0,127}"
+              placeholder="requirements_eval_in_progress"
+              onChange={(e) => change({ autobizStartCheckpoint: e.target.value || undefined })}
+              aria-describedby={stageHelpId}
+            />
+            <span id={stageHelpId} className="text-xs text-muted-foreground">
+              留空只检查，不推进。填写后须指定 Feature ID；固定版本 workflow compiler 推导终点。
+              全部检查通过且证据未变化，再按原权限审批推进。到达终点后只复检本阶段。
+            </span>
+          </label>
+        )}
         <div className="grid gap-3 sm:grid-cols-3">
           <label className="grid gap-1">
             最大修复次数

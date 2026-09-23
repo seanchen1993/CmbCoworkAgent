@@ -188,3 +188,38 @@ it("reports a blocked checkpoint without treating it as a validator success", as
   expect(result.passed).toBe(false)
   expect(result.reason).toContain("AUTOBIZ_CHECKPOINT_BLOCKED")
 })
+
+it.each(["requirements_eval_in_progress", "requirements_eval_done"])(
+  "derives a fixed stage end from the pinned compiler at %s without moving another stage",
+  async (checkpoint) => {
+    const { root, directory } = await featureFixture({ checkpoint })
+    await writeFile(join(directory, "REQUIREMENTS_EVAL.md"), "verdict: PASS\ncontract fixture only")
+    const result = await runAutobizValidator(
+      root,
+      "order-export",
+      undefined,
+      10000,
+      "requirements_eval_in_progress"
+    )
+    expect(result.passed, result.reason).toBe(true)
+    expect(result.stage).toEqual({
+      start: "requirements_eval_in_progress",
+      end: "requirements_eval_done",
+      alreadyAtTarget: checkpoint === "requirements_eval_done"
+    })
+  }
+)
+
+it("rejects a configured stage that does not contain the actual checkpoint", async () => {
+  const { root, directory } = await featureFixture()
+  await writeFile(join(directory, "REQUIREMENTS_EVAL.md"), "verdict: PASS\ncontract fixture only")
+  const result = await runAutobizValidator(
+    root,
+    "order-export",
+    undefined,
+    10000,
+    "unit_test_in_progress"
+  )
+  expect(result.passed).toBe(false)
+  expect(result.reason).toContain("AUTOBIZ_STAGE_CHECKPOINT_MISMATCH")
+})

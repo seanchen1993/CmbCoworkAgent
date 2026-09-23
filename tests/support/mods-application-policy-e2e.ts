@@ -55,6 +55,36 @@ export async function verifyApplicationCompletionSettings(
     assert.equal(saved.policy.timeoutMs, 90000)
     assert.equal(saved.policy.modelTokenBudget, 4096)
   }
+  const stage = form.getByLabel("自动推进阶段起点", { exact: true })
+  await stage.fill("requirements_eval_in_progress")
+  assert(await stage.evaluate((node: HTMLInputElement) => node.checkValidity()))
+  await form.getByRole("button", { name: "保存项目规则", exact: true }).click()
+  await form.getByRole("status").waitFor()
+  assert.equal(
+    (
+      await page.evaluate(
+        (id) => window.api.mods.completionPolicy(id, "function-commands"),
+        threadId
+      )
+    ).policy.autobizStartCheckpoint,
+    "requirements_eval_in_progress"
+  )
+  await form.getByLabel("完成模式", { exact: true }).selectOption("report")
+  await form.getByRole("button", { name: "保存项目规则", exact: true }).click()
+  await form.getByRole("status").waitFor()
+  assert.equal(
+    (
+      await page.evaluate(
+        (id) => window.api.mods.completionPolicy(id, "function-commands"),
+        threadId
+      )
+    ).policy.autobizStartCheckpoint,
+    undefined
+  )
+  assert.equal(await stage.count(), 0)
+  pass(
+    "explicit stage setting persists and switching to report removes automatic checkpoint mutation"
+  )
   await page.screenshot({ path: join(artifacts, "application-completion-policy.png") })
   await form.getByLabel("完成模式", { exact: true }).selectOption("off")
   await form.getByRole("button", { name: "保存项目规则", exact: true }).click()

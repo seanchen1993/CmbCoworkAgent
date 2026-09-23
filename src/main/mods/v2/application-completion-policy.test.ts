@@ -239,3 +239,47 @@ it.each(["configuration", "runtime", "thread"])(
     ).toBe(false)
   }
 )
+
+it("persists an explicitly app-owned checkpoint stage without allowing guest state to enable it", async () => {
+  const f = await fixture()
+  const policy = {
+    ...rule,
+    checks: ["autobiz-validator"],
+    feature: "order-export",
+    autobizStartCheckpoint: "requirements_eval_in_progress"
+  }
+  f.store.functionState.set(
+    JSON.stringify([f.root, "policy"]),
+    "completion-config",
+    policy as unknown as ModJson
+  )
+  expect(f.manager.completionPolicy(f.root, "thread", "policy").policy).not.toHaveProperty(
+    "autobizStartCheckpoint"
+  )
+  expect(f.manager.setCompletionPolicy(f.root, "thread", "policy", policy).policy).toMatchObject(
+    policy
+  )
+  f.reopen()
+  expect(f.manager.completionPolicy(f.root, "thread", "policy")).toMatchObject({
+    source: "application",
+    policy
+  })
+})
+
+it.each([
+  { mode: "report" },
+  { feature: undefined },
+  { checks: ["unit-test"] },
+  { autobizStartCheckpoint: "../checkpoint" }
+])("rejects an unsafe automatic checkpoint configuration: %j", async (patch) => {
+  const f = await fixture()
+  expect(() =>
+    f.manager.setCompletionPolicy(f.root, "thread", "policy", {
+      ...rule,
+      checks: ["autobiz-validator"],
+      feature: "order-export",
+      autobizStartCheckpoint: "requirements_eval_in_progress",
+      ...patch
+    })
+  ).toThrow("MODS_AUTOBIZ_STAGE_CONFIG_INVALID")
+})

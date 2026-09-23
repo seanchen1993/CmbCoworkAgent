@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
+import { verifyAutobizStage } from "./mods-autobiz-stage-e2e"
 
 /** Physical file edit -> existing watcher -> host evidence ledger -> real React UI. */
 export async function verifyCompletionFreshness(
@@ -263,6 +264,7 @@ export async function verifyCompletionFreshness(
       pass(
         "a repaired real project test receives a new native receipt and new bound completion evidence"
       )
+      await verifyAutobizStage(page, app, project, threadId, mod.name, artifacts, run, until, pass)
     } finally {
       await app.evaluate(({ dialog }) => {
         dialog.showMessageBox = (
