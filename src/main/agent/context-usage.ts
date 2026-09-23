@@ -12,7 +12,6 @@ import type {
   FunctionSessionContextMcpTool,
   FunctionSessionContextAgent,
   FunctionSessionContextSkills,
-  FunctionSessionContextSkill
 } from "../../shared/mods/v2/session"
 
 export interface ContextResponseUsage {
@@ -168,40 +167,7 @@ export function projectContextBreakdown(input: {
   ]
   const mcpTools: FunctionSessionContextMcpTool[] = [...(input.contextSources?.mcpTools ?? [])]
   const agents: FunctionSessionContextAgent[] = [...(input.contextSources?.agents ?? [])]
-  const skillFrontmatter: FunctionSessionContextSkill[] = []
-  for (const tool of input.tools ?? []) {
-    const raw = object(tool)
-    const name = String(raw?.name ?? raw?.tool_name ?? "")
-    const tokens = countContextOne(tool).tokens
-    const lower = name.toLowerCase()
-    if (lower.includes("mcp")) {
-      if (!mcpTools.some((entry) => entry.name === name))
-        mcpTools.push({
-          name,
-          serverName: name.split("__")[1] ?? "unknown",
-          tokens,
-          isLoaded: true
-        })
-    } else if (lower.includes("agent") || lower.includes("task")) {
-      if (!agents.some((entry) => entry.agentType === name))
-        agents.push({ agentType: name, source: "tool", tokens })
-    } else if (lower.includes("skill")) {
-      if (!skillFrontmatter.some((entry) => entry.name === name))
-        skillFrontmatter.push({ name, source: "tool", tokens })
-    }
-  }
-  const skills: FunctionSessionContextSkills | undefined =
-    input.contextSources?.skills || skillFrontmatter.length > 0
-      ? {
-          totalSkills: input.contextSources?.skills?.totalSkills ?? skillFrontmatter.length,
-          includedSkills: input.contextSources?.skills?.includedSkills ?? skillFrontmatter.length,
-          tokens: input.contextSources?.skills?.tokens ?? skillFrontmatter.reduce((sum, item) => sum + item.tokens, 0),
-          skillFrontmatter: [
-            ...(input.contextSources?.skills?.skillFrontmatter ?? []),
-            ...skillFrontmatter
-          ]
-        }
-      : undefined
+  const skills: FunctionSessionContextSkills | undefined = input.contextSources?.skills
   const messageValue = countContext(
     input.messages.filter((message): message is BaseMessage => BaseMessage.isInstance(message))
   )
@@ -215,23 +181,17 @@ export function projectContextBreakdown(input: {
       kind: "used",
       estimated: systemValue.estimated
     })
-  if (toolsValue.tokens > 0) {
-    const dynamic = new Map<string, number>()
-    let attributed = 0
-    for (const tool of input.tools ?? []) {
-      const raw = object(tool)
-      const name = String(raw?.name ?? object(raw?.function)?.name ?? "").toLowerCase()
-      const category = name.includes("mcp") ? "MCP tools" : name.includes("memory") ? "Memory" : name.includes("skill") ? "Skills" : name.includes("agent") || name.includes("task") ? "Agents" : undefined
-      if (!category) continue
-      const tokens = countContextOne(tool).tokens
-      dynamic.set(category, (dynamic.get(category) ?? 0) + tokens)
-      attributed += tokens
-    }
-    for (const [name, tokens] of dynamic)
-      categories.push({ name, tokens, color: "inactive", isDeferred: false, kind: "used", estimated: toolsValue.estimated })
-    if (toolsValue.tokens - attributed > 0)
-      categories.push({ name: "System tools", tokens: toolsValue.tokens - attributed, color: "inactive", isDeferred: false, kind: "used", estimated: toolsValue.estimated })
-  }
+  // Dynamic lists are metadata about contributors already present in system/tools;
+  // keep aggregate categories intact rather than double-counting or guessing ownership.
+  if (toolsValue.tokens > 0)
+    categories.push({
+      name: "System tools",
+      tokens: toolsValue.tokens,
+      color: "inactive",
+      isDeferred: false,
+      kind: "used",
+      estimated: toolsValue.estimated
+    })
   if (messageValue.tokens > 0)
     categories.push({
       name: "Messages",

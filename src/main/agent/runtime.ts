@@ -91,6 +91,10 @@ import {
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
+import {
+  buildFunctionSessionContextSources,
+  type FunctionSessionContextSourceResolver
+} from "./context-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
@@ -2313,6 +2317,7 @@ function assembleDeepAgent(
     modRuntimeAuthority,
     modSessionModel,
     modSessionCompact,
+    modContextSources,
     modTurnRunId,
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
@@ -3256,7 +3261,8 @@ function assembleDeepAgent(
                       state,
                       signal
                     )
-                : undefined
+                : undefined,
+              modContextSources
             )
           ]
         : [])
@@ -7121,6 +7127,18 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   // Same memory middleware as a normal main agent — injects content only, no tool changes.
   const mainMemorySources =
     !disableMemoryInjection && memorySources?.length ? memorySources : undefined
+  // Observe the state loaded by memory/skills middleware and the final model
+  // request, without extra file reads or MCP discovery. Disabled main sources
+  // cannot reappear through state retained from an earlier runtime.
+  const functionSessionContextSources: FunctionSessionContextSourceResolver = (request) =>
+    buildFunctionSessionContextSources({
+      memorySources: mainMemorySources,
+      skillSources: mainSkillSources,
+      pluginSkillSources: pluginSkillSourceMetadata,
+      mcpTools: [...eagerMcpMetadata, ...lazyMcpMetadata],
+      agents: registryProfiles,
+      autoCompactThreshold: triggerTokens
+    }, request)
   const projectModeTaskSubagentsInheritFullContext =
     runtimePolicy.isProjectMode && mainSubagentsEnabled
   const taskSubagentExtraSystemPrompt = projectModeTaskSubagentsInheritFullContext
@@ -7337,6 +7355,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     modRuntimeAuthority,
     modSessionModel: customConfig.model,
     modSessionCompact: compactMainSession,
+    modContextSources: functionSessionContextSources,
     modTurnRunId: options.modTurnRunId ?? options.currentRunMessageQueueOwnerToken,
     onContextCompaction,
     // PR-12 — closure captures threadId / workspacePath / hookScope so

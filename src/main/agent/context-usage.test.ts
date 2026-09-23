@@ -170,15 +170,17 @@ it("keeps summary breakdowns cheap while full breakdowns use the detailed estima
   expect(full.estimated).toBe(true)
 })
 
-it("attributes dynamic MCP, memory, skills and agent tools to separate context categories", () => {
+it("does not invent dynamic context sources or categories from tool name substrings", () => {
   const result = projectContextBreakdown({
     detail: "full", model: "actual-model", window: 10_000,
     tools: ["mcp__search", "memory_write", "skill_loader", "task_agent"].map((name) => ({ name, description: name })),
     messages: []
   })
-  expect(result.categories.map((category) => category.name)).toEqual(
-    expect.arrayContaining(["MCP tools", "Memory", "Skills", "Agents"])
-  )
+  expect(result.categories.map((category) => category.name)).toEqual(["System tools", "Free space"])
+  expect(result.mcpTools).toEqual([])
+  expect(result.memoryFiles).toEqual([])
+  expect(result.agents).toEqual([])
+  expect(result.skills).toBeUndefined()
 })
 
 it("returns the latest dynamic context breakdown lists with host supplied metadata", () => {
@@ -196,8 +198,8 @@ it("returns the latest dynamic context breakdown lists with host supplied metada
     }
   })
   expect(result.memoryFiles).toEqual([{ path: "/workspace/MEMORY.md", type: "project", tokens: 12 }])
-  expect(result.mcpTools[0]).toMatchObject({ name: "mcp__search", isLoaded: true })
-  expect(result.agents).toEqual(expect.arrayContaining([expect.objectContaining({ agentType: "Explore" }), expect.objectContaining({ agentType: "task_agent" })]))
+  expect(result.mcpTools).toEqual([])
+  expect(result.agents).toEqual([{ agentType: "Explore", source: "built-in", tokens: 8 }])
   expect(result.autoCompactThreshold).toBe(8000)
   expect(result.isAutoCompactEnabled).toBe(false)
 })

@@ -164,7 +164,19 @@ it("reads the actual main model and messages inside a shared child without openi
   })
   f.manager.updateFunctionSessionRequest(instance.authority, {
     systemMessage: new SystemMessage("system"),
-    tools: [{ name: "inspect", description: "Inspect", input_schema: {} }]
+    tools: [{ name: "inspect", description: "Inspect", input_schema: {} }],
+    contextSources: {
+      memoryFiles: [{ path: "/workspace/MEMORY.md", type: "memory", tokens: 7 }],
+      mcpTools: [{ name: "search", serverName: "github", tokens: 11, isLoaded: true }],
+      agents: [{ agentType: "Explore", source: "built-in", tokens: 5 }],
+      skills: {
+        totalSkills: 1,
+        includedSkills: 1,
+        tokens: 3,
+        skillFrontmatter: [{ name: "review", source: "/workspace/review", tokens: 3 }]
+      },
+      autoCompactThreshold: 900
+    }
   })
   const breakdown = (await query("session.usage", { breakdown: "full", columns: 60 })) as {
     context: {
@@ -185,6 +197,16 @@ it("reads the actual main model and messages inside a shared child without openi
       expect.objectContaining({ name: "Messages" })
     ])
   )
+  expect(breakdown.context.breakdown).toMatchObject({
+    memoryFiles: [{ path: "/workspace/MEMORY.md", tokens: 7 }],
+    mcpTools: [{ name: "search", serverName: "github", isLoaded: true }],
+    agents: [{ agentType: "Explore", source: "built-in" }],
+    skills: {
+      totalSkills: 1,
+      skillFrontmatter: [{ name: "review", source: "/workspace/review" }]
+    },
+    autoCompactThreshold: 900
+  })
   const summary = (await query("session.usage", { breakdown: "summary", columns: 60 })) as {
     context: { breakdown?: { totalTokens: number } }
   }

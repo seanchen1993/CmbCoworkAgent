@@ -25,6 +25,7 @@ import { getModCallContext, modCallContext } from "./context"
 import { ManagedModPolicy, DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { orderApprovedMods } from "./order"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../shared/mods/v2/tools"
+import type { FunctionSessionContextSources } from "../../shared/mods/v2/session"
 import {
   assertFunctionGrant,
   functionCallIdentity,
@@ -190,6 +191,7 @@ export class ModsManager {
         messages: readonly unknown[]
         systemMessage?: unknown
         tools?: readonly unknown[]
+        contextSources?: FunctionSessionContextSources
       }
     }
   >()
@@ -222,7 +224,12 @@ export class ModsManager {
 
   updateFunctionSessionRequest(
     authority: ModRuntimeAuthority,
-    request: { messages?: readonly unknown[]; systemMessage?: unknown; tools?: readonly unknown[] }
+    request: {
+      messages?: readonly unknown[]
+      systemMessage?: unknown
+      tools?: readonly unknown[]
+      contextSources?: FunctionSessionContextSources
+    }
   ): void {
     authority.assertLive()
     const view = this.functionSessions.get(authority)
@@ -231,7 +238,29 @@ export class ModsManager {
     view.request = {
       messages: [...(request.messages ?? view.messages ?? [])],
       systemMessage: request.systemMessage,
-      tools: request.tools ? [...request.tools] : undefined
+      tools: request.tools ? [...request.tools] : undefined,
+      contextSources: request.contextSources
+        ? {
+            ...request.contextSources,
+            memoryFiles: request.contextSources.memoryFiles
+              ? request.contextSources.memoryFiles.map((file) => ({ ...file }))
+              : undefined,
+            mcpTools: request.contextSources.mcpTools
+              ? request.contextSources.mcpTools.map((tool) => ({ ...tool }))
+              : undefined,
+            agents: request.contextSources.agents
+              ? request.contextSources.agents.map((agent) => ({ ...agent }))
+              : undefined,
+            skills: request.contextSources.skills
+              ? {
+                  ...request.contextSources.skills,
+                  skillFrontmatter: request.contextSources.skills.skillFrontmatter.map((skill) => ({
+                    ...skill
+                  }))
+                }
+              : undefined
+          }
+        : undefined
     }
   }
 

@@ -91,6 +91,7 @@ export async function queryFunctionSessionRead(
                 systemMessage: session.request.systemMessage,
                 tools: session.request.tools,
                 messages: session.request.messages,
+                contextSources: session.request.contextSources,
                 apiUsage: usage
               })
             },

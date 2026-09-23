@@ -5,6 +5,8 @@ import { currentCompactedContextStart } from "./context-usage"
 import type { ModsManager } from "../mods/manager"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { ModJson } from "../../shared/mods/types"
+import type { FunctionSessionContextSources } from "../../shared/mods/v2/session"
+import type { FunctionSessionContextSourceResolver } from "./context-sources"
 
 export type FunctionSessionCompactor = (
   instructions: string,
@@ -31,7 +33,8 @@ export function createFunctionSessionViewMiddleware(
   model: string,
   runId?: string,
   contextWindow?: number,
-  compact?: FunctionSessionCompactor
+  compact?: FunctionSessionCompactor,
+  contextSources?: FunctionSessionContextSources | FunctionSessionContextSourceResolver
 ) {
   if (compact) manager.bindFunctionSession(authority, model, contextWindow, compact)
   else manager.bindFunctionSession(authority, model, contextWindow)
@@ -48,7 +51,14 @@ export function createFunctionSessionViewMiddleware(
   }
   return createMiddleware({
     name: "functionSessionView",
-    stateSchema: z.object({ _summarizationEvent: SummarizationEventSchema.optional() }),
+    // LangChain filters each middleware's request.state to its declared keys.
+    // This observer follows the loading middleware; the original graph fields
+    // and skills reducer remain owned by those earlier middleware definitions.
+    stateSchema: z.object({
+      _summarizationEvent: SummarizationEventSchema.optional(),
+      memoryContents: z.record(z.string(), z.string()).optional(),
+      skillsMetadata: z.array(z.unknown()).optional()
+    }),
     beforeAgent: (state) => {
       capture(state)
       return undefined
@@ -67,7 +77,8 @@ export function createFunctionSessionViewMiddleware(
       manager.updateFunctionSessionRequest(authority, {
         messages: request.messages,
         systemMessage: request.systemMessage,
-        tools: request.tools
+        tools: request.tools,
+        contextSources: typeof contextSources === "function" ? contextSources(request) : contextSources
       })
       return handler(request)
     },
