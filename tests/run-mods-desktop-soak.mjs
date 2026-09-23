@@ -6,13 +6,17 @@ import { fileURLToPath } from "node:url"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const args = process.argv.slice(2)
-if (args.length > 1 || (args.length === 1 && args[0] !== "--smoke"))
-  throw Error("Usage: node tests/run-mods-desktop-soak.mjs [--smoke]")
-const smoke = args.length === 1
+if (
+  new Set(args).size !== args.length ||
+  args.some((arg) => !["--smoke", "--performance"].includes(arg))
+)
+  throw Error("Usage: node tests/run-mods-desktop-soak.mjs [--smoke] [--performance]")
+const smoke = args.includes("--smoke")
+const performanceOnly = args.includes("--performance")
 const output = join(
   root,
   "output/mods-v2-validation",
-  `desktop-soak-${new Date().toISOString().replace(/[:.]/g, "-")}-${smoke ? "smoke" : "full"}-${randomUUID().slice(0, 8)}`
+  `desktop-${performanceOnly ? "performance" : "soak"}-${new Date().toISOString().replace(/[:.]/g, "-")}-${smoke ? "smoke" : "full"}-${randomUUID().slice(0, 8)}`
 )
 mkdirSync(output, { recursive: true })
 const build = spawnSync(
@@ -30,6 +34,8 @@ if (build.status !== 0 || existsSync(join(root, "out/main/mods-e2e.js")))
 const snapshot = join(output, "application")
 mkdirSync(snapshot)
 cpSync(join(root, "out"), join(snapshot, "out"), { recursive: true })
+// Host adapters also resolve platform helpers relative to app.getAppPath()/resources.
+cpSync(join(root, "resources"), join(snapshot, "resources"), { recursive: true })
 // A package root preserves production app.getAppPath() semantics in the frozen copy.
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
 writeFileSync(
@@ -57,7 +63,9 @@ const driverHashes = Object.fromEntries(
     "tests/support/mods-desktop-soak-e2e.ts",
     "tests/support/mods-desktop-soak-options.ts",
     "tests/support/mods-desktop-latency.ts",
-    "tests/support/mods-v2-performance.ts"
+    "tests/support/mods-v2-performance.ts",
+    "tests/support/mods-desktop-performance.ts",
+    "tests/support/mods-desktop-performance-e2e.ts"
   ].map((file) => [
     file,
     createHash("sha256")
@@ -72,6 +80,7 @@ writeFileSync(
       startedAt: new Date().toISOString(),
       runnerPid: process.pid,
       smoke,
+      performanceOnly,
       output,
       snapshot,
       hashes,
@@ -97,7 +106,7 @@ writeFileSync(
 console.log(JSON.stringify({ output, snapshot, smoke }))
 const runEnv = {
   ...process.env,
-  CMB_MODS_E2E_FOCUS: "desktop-soak",
+  CMB_MODS_E2E_FOCUS: performanceOnly ? "desktop-performance" : "desktop-soak",
   CMB_MODS_E2E_APP_DIR: snapshot,
   CMB_MODS_E2E_ARTIFACTS: output
 }

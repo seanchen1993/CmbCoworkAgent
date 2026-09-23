@@ -49,7 +49,7 @@ const binary = packagedDir
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
-const focus = ["desktop-soak", "status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output", "completion-freshness", "ui-log", "ui-ask", "question-site", "ui-notice", "tool-batch", "instructions-loaded", "prompt-expansion", "session-title", "stop-feedback", "stop-failure"].includes(requestedFocus)
+const focus = ["desktop-performance", "desktop-soak", "status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output", "completion-freshness", "ui-log", "ui-ask", "question-site", "ui-notice", "tool-batch", "instructions-loaded", "prompt-expansion", "session-title", "stop-feedback", "stop-failure"].includes(requestedFocus)
   ? requestedFocus : undefined
 const artifacts = process.env.CMB_MODS_E2E_ARTIFACTS ?? join(
   root, "output/mods-validation",
@@ -123,7 +123,7 @@ async function main(): Promise<void> {
   // scenarios plus classic event lifecycles. Individual waits retain their 30/45-second failure bounds.
   }, focus === "desktop-soak"
     ? desktopSoakOptions({smoke:process.env.CMB_MODS_SOAK_SMOKE}).durationMs + 900_000
-    : 900_000)
+    : focus === "desktop-performance" ? 1_800_000 : 900_000)
   try {
     console.log("STEP launch")
     app = await _electron.launch({
@@ -178,9 +178,11 @@ async function main(): Promise<void> {
       return id
     }, workspace)
     if (focus && !packagedDir) {
-      if (focus === "desktop-soak") {
-        timings.scope = "Whole desktop soak; separate from streaming and idle CPU gates"
-        await verifyDesktopSoak(app!, page!, workspace, artifacts, until, pass)
+      if (focus === "desktop-soak" || focus === "desktop-performance") {
+        timings.scope = focus === "desktop-performance"
+          ? "Whole desktop idle CPU and paired model/IPC streaming"
+          : "Whole desktop soak; separate from streaming and idle CPU gates"
+        await verifyDesktopSoak(app!, page!, workspace, artifacts, until, pass, focus === "desktop-performance")
         return
       }
       modelServer = await startModsModelServer()

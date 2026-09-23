@@ -6,6 +6,7 @@ import type { ElectronApplication, Page } from "playwright"
 import { desktopSoakOptions, qualifiesDesktopSoak } from "./mods-desktop-soak-options"
 import { summarizeSamples } from "./mods-v2-performance"
 import { beginDesktopLatency, finishDesktopLatency } from "./mods-desktop-latency"
+import { verifyDesktopPerformance } from "./mods-desktop-performance-e2e"
 
 /** Whole application workload. No test IPC bridge, direct guest dispatcher or fake store. */
 export async function verifyDesktopSoak(
@@ -14,7 +15,8 @@ export async function verifyDesktopSoak(
   workspace: string,
   artifacts: string,
   until: (check: () => Promise<boolean>, label: string) => Promise<void>,
-  pass: (label: string) => void
+  pass: (label: string) => void,
+  performanceOnly = false
 ): Promise<void> {
   const options = desktopSoakOptions({ smoke: process.env.CMB_MODS_SOAK_SMOKE })
   const project = join(workspace, "desktop-soak")
@@ -39,6 +41,7 @@ export async function verifyDesktopSoak(
     zip.addFile(
       "hooks/register.tsx",
       Buffer.from(`export function register(on){
+      ${performanceOnly ? 'on("turn.step",async function*($,e,next){return yield* next(e)});' : ""}
       on("session.start",async($,e,next)=>{await $.command.register({name:"soak-${n}",description:"Soak ${n}",immediate:true});return next(e)});
       on("command.run",{command:"soak-${n}"},async($)=>{
         ${n < 4 ? `await $.ui.open({id:"soak-${n}",title:"Soak ${n}",rows:5,closeOnEscape:true});` : ""}
@@ -162,6 +165,20 @@ export async function verifyDesktopSoak(
   await open()
   await page.screenshot({ path: join(artifacts, "desktop-soak-four-panes.png") })
   pass("eight installed and approved guests execute; four real Client panes render")
+  if (performanceOnly) {
+    await verifyDesktopPerformance({
+      app,
+      page,
+      id,
+      artifacts,
+      smoke: options.smoke,
+      open,
+      off,
+      select,
+      pass
+    })
+    return
+  }
   const started = Date.now()
   const save = () =>
     writeFileSync(
