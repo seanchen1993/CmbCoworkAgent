@@ -1,3 +1,31 @@
+## 2026-09-24 继续执行：SDK 审查已提交，工具入口去重证据先红测（最新）
+
+- HEAD **a99c330f** SDK callable/event 区分已提交；4e188d8c retention、935658d3 fixture、4a9fd215 monotonic runtime 均已提交。只在 Mods v2 工作树，不改 UAT/共享依赖，不本地 NSIS，不派 agent。
+- 正式 desktop full4 已退出 1、无遗留运行，qualified=true / passed=false：CPU +0.098856 点通过，吞吐 0.996589 通过，TTFT p95 off154.2/on221.9、增加67.7ms超过40ms失败。完整报告 desktop-performance-full4.md；真实2小时10000事件soak尚未执行。
+- SDK先2红后10files83pass，Node/lint0；真实QuickJS核对暴露能力；SDK ui.focus/ui.scroll由错误的adapted修为partial/unavailable（事件行保留adapted）。全部244行190partial/50adapted/4unsupported/0full，未虚增兼容声明。详细 sdk-boundaries / sdk-boundary-audit 已提交。
+- ingress profile-3 独占诊断已退出0：1plugin p9516.714ms，claim/bindFinalInput/settle各约3ms。诊断不算正式验收。真实read默认别名/offset/limit晚于claim才补全，导致一次重复FULL持久化；计划仅宿主描述初始native参数，原请求、后续hook改参授权/最终绑定/claim幂等都保留。
+- 当前新增 tool-sdk.integration.test.ts 两项原生read证据回归，先红测正在运行（日志2026-09-24-read-evidence-red.log）。尚未改生产代码。后续须poll、实现、检视、窄测/原guest-session/Node-Web/lint/Electron/性能及off对照，单独提交。
+- imperative UI仍未实现，设计 output/mods-v2-validation/2026-09-24-imperative-ui-design.md。剩余classic/SDK、性能正式门禁、2小时长稳、GitHub Actions安装交付均不得声称完成。继续工作，不在批次边界停止。
+
+## 2026-09-24 04:35 正式性能 full4 运行，SDK 兼容核对待 red（最新）
+
+- HEAD **4e188d8c** checkpoint shared payload scan 优化已提交；前置 **935658d3** 真实目录 fixture 维护、**4a9fd215** runtime monotonic clocks。当前无生产代码未提交。UAT/共享依赖/打包不动。
+- retention narrow 整 checkpointer7files87pass，5 standalone全pass，Node final0，Web前置已0且无web改动；lint0error21旧warning。原应用 session recovery E2E exec16434 exit0已poll：1002原消息逐条保留、两轮后1006 durable无重复/丢失、真实Electron重启及stream persistence通过。Mods focused completion exec35506 exit0已poll，13pass，ordinaryout恢复。报告 **2026-09-24-checkpoint-retention.md** 已提交。
+- 真实长history诊断 exec86730 exit0已poll：相同40次off预热，retention CPU off541.080→33.071ms/on528.537→35.653ms；TTFT off658.8→158.8/on697.3→217.2ms。小样本/Inspector intrusive，不能算正式性能pass。
+- **唯一运行 exec50249** 正式desktop full4：`node tests/run-mods-desktop-soak.mjs --performance`；日志 **2026-09-24-desktop-performance-full4.log**，独立冻结目录 **desktop-performance-2026-09-23T20-26-04-922Z-full-f21f61f3**。snapshot开始20:26:43UTC；04:35北京时间时off5min CPU1.791525已完成，on5min中。必须poll退出再启动任何重测/build/E2E/benchmark，保持独占。旧full3 TTFT+203/ingress仍fail；正式2h10000soak未启动。
+- 未提交测试两项：`src/shared/mods/v2/compatibility-evidence.test.ts` 要求partialSDK具体availability/source；新 `src/main/mods/v2/sdk-compatibility.test.ts` 用真实QuickJS检查adapted/full SDK行确实可调用。**尚未运行red**，因为不能干扰正式性能。矩阵未改。
+- 审查发现SDK `ui.focus/ui.scroll` 当前SESSION_CAPABILITIES根本没开放，表却复制了可观察事件的adapted描述。docs/pane-focus早已明确不宣称imperativeSDK；需纠正两条SDK为partial/unavailable，事件行仍adapted。并补所有partialSDK真实边界，不批量升级status。
+- 已准备忽略区 **output/mods-v2-validation/update-sdk-audit.py**：逐SDK源码核对的availability/implementation/note/evidence更新器，保留compact rows；**未执行**。全partial带具体说明，两SDK降级，tool.call/register保留既有note。证据文件ui-elements已修为真实guest-ui.test.ts。执行前先跑两新增测试保存red，再执行脚本、查所有引用存在、窄测+typecheck/lint，独立报告提交。
+- 发现imperative focus/scroll实现要有宿主renderer request/ack，不能套现有观察事件造成功。细设计 **output/mods-v2-validation/2026-09-24-imperative-ui-design.md**（计划未实现）：callback actions queue重入ACK会死锁；busy禁用控件会失去focus/无法聚焦，需真实person input lease/epoch；pane.focused只观察根节点，不足证明当前键盘owner；不偷composer/dialog焦点。后续实现需先red及真实DOM E2E，别直接返回假success。
+- 接下来：poll full4并诚实记结果；SDK矩阵纠正/证据审查；必要ingress --profile 定位原15ms gate；继续imperative UI/剩余classic与SDK、安全恢复边界、正式2hsoak、最终Actions安装验证。不要停在批次边界。
+## 2026-09-24 04:20 单调 runtime 已提交，checkpoint 性能优化验证中（最新）
+
+- HEAD **4a9fd215**：runtime guest CPU/帧与 utility heartbeat/reply deadline 改 monotonic；先 3 red，最终 4 files 52 pass，真实 utility/FunctionSession 41 checks，Electron completion 13 checks，Node/Web 0、5 files lint 0 warning；独立报告 runtime-clock.md。恢复核对 UI 已在 **38726352** 提交。
+- 当前未提交：sqljs-saver root retention 的 snapshot_sizes MATERIALIZED，只计算同 thread/root namespace 的每个 suffix 长度一次，保留原 UNION cycle 去重、排序、预算与 BEGIN IMMEDIATE 事务。先 red：20 快照被重复测量 210 次；后 20 次。新增共享/cycle/missing 链字节核对及跨 thread/namespace 同 id 隔离；整 checkpointer 7 files 87 pass。5 套 standalone（message-delta/fork/reopen-performance/LRU/cleanup）全部 pass，Node final 0，scoped lint 0 errors/21 旧 warning（新段无 warning）。普通 build exit0。
+- 当前唯一运行 **exec86730**：长 history 40 次 off 预热后的 intrusive CPU profile，日志 2026-09-24-retention-profile-warm.log，artifacts 同名前缀目录。必须 poll 退出后再启动任何 build/test/正式性能。本次 smoke 不替代正式性能验收。
+- 优化前诊断已完成：2026-09-24-desktop-profile-warm/，TTFT off658.8/on697.3ms；主线程 root retention SQL 分别耗约541/528ms。非 provider 创建热点，不能凭猜测改模型预算或 authority。旧正式 full3 TTFT+203ms 与 ingress 门槛仍 FAIL；2h10000 soak 未启动。
+- 下一步 profile before/after 比较；原 session checkpoint recovery Electron（npm run test:session-recovery:e2e）及 Mods Electron；必要检查后独立提交 retention。随后正式性能与2h长稳、剩余compat/Actions交付继续，不在批次停止。
+- 仍有旧未提交 file-access.test.ts fixture 批量32创建1025真实文件/30s setup timeout，需单独验证报告提交。UAT未改；共享 node_modules 不安装/重建；不跑本机NSIS；不派agent。
 ## 2026-09-24 04:03 恢复核对与性能诊断续作（优先于历史快照）
 
 - 最新已提交：4c9c8272 bundled examples ASAR实路径/祖先.asar修复、可选私有诊断脚本（不执行本机打包）；fdc44583 最新状态/兼容元数据/真实业务与性能失败报告。UAT及共享依赖未动，没有push/Actions触发。
