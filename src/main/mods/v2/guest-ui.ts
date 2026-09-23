@@ -22,7 +22,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
   }) });
   function uiElements(meta, input) {
     if (!input || input.surface !== "desktop" ||
-        !["Pane", "AbovePrompt", "PromptHint", "InfoNotice", "Spinner", "TurnDuration", "SessionMode"].includes(input.component) ||
+        !["Pane", "AbovePrompt", "PromptHint", "InfoNotice", "Spinner", "TurnDuration", "SessionMode", "UserMessage", "AssistantMessage"].includes(input.component) ||
         !asyncScope?.uiGeneration || asyncScope.event !== "ui.render" ||
         asyncScope.plugin !== meta.plugin.name || asyncScope.requestId !== input.requestId ||
         asyncScope.component !== input.component)

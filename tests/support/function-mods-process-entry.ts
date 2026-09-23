@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { AsyncLocalStorage } from "node:async_hooks"
+import { EventEmitter, once } from "node:events"
 import { join, resolve } from "node:path"
 import { app } from "electron"
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
@@ -615,6 +616,7 @@ void app.whenReady().then(async () => {
       join(root, "tests/fixtures/mods-v2/client-board")
     )
     const clientState = new Map<string, ModJson>()
+    const clientMessages = new EventEmitter()
     const surfaceSession = new FunctionSession(
       [
         {
@@ -640,6 +642,7 @@ void app.whenReady().then(async () => {
           keys: async () => [...clientState.keys()],
           set: async (k, v) => {
             clientState.set(k, v)
+            if (k === "client-message") clientMessages.emit("message", v)
           },
           delete: (k) => {
             clientState.delete(k)
@@ -655,13 +658,18 @@ void app.whenReady().then(async () => {
       const surface = pane.clients![0]
       assert.equal(surface.error, undefined)
       const button = surface.tree.children![1] as FunctionUiElement
-      await surfaceSession.clients.act({
-        pane: pane.key,
-        instance: surface.id,
-        intentId: randomUUID(),
-        kind: "press",
-        handle: button.press!.handle
-      })
+      // Posting is frame-coalesced. Observe actual guest delivery before issuing another press.
+      const delivered = once(clientMessages, "message", { signal: AbortSignal.timeout(2000) })
+      await Promise.all([
+        delivered,
+        surfaceSession.clients.act({
+          pane: pane.key,
+          instance: surface.id,
+          intentId: randomUUID(),
+          kind: "press",
+          handle: button.press!.handle
+        })
+      ])
       assert.deepEqual(clientState.get("client-message"), { count: index + 1 })
       if (index >= 20) clientTimes.push(performance.now() - before)
     }

@@ -95,6 +95,97 @@ function drawnText(tree: FunctionUiElement | string): string {
   return typeof tree === "string" ? tree : (tree.children ?? []).map(drawnText).join("")
 }
 
+it("redraws cached message owners when the installed message fixture changes preference", async () => {
+  const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/message-sites"))
+  const { session } = await fixture("", compiled)
+  const owner = await session.sites.mount("AssistantMessage")
+  const facts = { text: "original", isFirstOfReply: true }
+  expect((await session.sites.render(owner, facts)).nativeFallback).toBe(true)
+  await session.run("message-style", "custom")
+  const custom = await session.sites.render(owner, facts)
+  expect(drawnText(custom.tree)).toBe("DISPLAY_ONLY_AssistantMessage: original")
+  await session.run("message-style", "native")
+  expect((await session.sites.render(owner, facts)).nativeFallback).toBe(true)
+})
+
+it("keeps the host-owned assistant header when a guest tries to rewrite first-of-reply", async () => {
+  const { session } = await fixture(`
+    on("ui.render",{component:"AssistantMessage"},($,e,next)=>
+      next({...e,props:{...e.props,text:"forged",isFirstOfReply:false}}))
+  `)
+  const owner = await session.sites.mount("AssistantMessage")
+  expect(
+    (
+      await session.sites.render(owner, {
+        text: "original",
+        isFirstOfReply: true
+      })
+    ).nativeFallback
+  ).toBe(true)
+})
+
+it.each(["UserMessage", "AssistantMessage"])(
+  "renders multiple %s text owners without changing the source facts",
+  async (name) => {
+    const component = name as FunctionUiSite
+    const { session } = await fixture(`
+    on("ui.render", {component:"${name}"}, async ($,e,next) => {
+      return next({...e,props:{...e.props,text:"visible:"+e.props.text}})
+    })
+  `)
+    const first = await session.sites.mount(component)
+    const second = await session.sites.mount(component)
+    const facts: ModObject =
+      name === "UserMessage"
+        ? { text: "original", origin: { kind: "unclassified" }, isExpanded: true }
+        : { text: "original", isFirstOfReply: true }
+    const before = JSON.stringify(facts)
+    expect(drawnText((await session.sites.render(first, facts)).tree)).toBe("visible:original")
+    expect(drawnText((await session.sites.render(second, { ...facts, text: "second" })).tree)).toBe(
+      "visible:second"
+    )
+    expect(JSON.stringify(facts)).toBe(before)
+    await session.sites.unmount(first)
+    expect(
+      drawnText((await session.sites.render(second, { ...facts, text: "updated" })).tree)
+    ).toBe("visible:updated")
+    await expect(session.sites.render(first, facts)).rejects.toThrow("MODS_UI_SITE_CLOSED")
+  }
+)
+
+it.each(["origin", "isExpanded", "onScreen"])(
+  "rejects forged UserMessage %s facts in a real guest",
+  async (field) => {
+    const { session } = await fixture(`
+    on("ui.render",{component:"UserMessage"},async($,e,next)=>{
+      const props={...e.props,text:"forged"}; props["${field}"]=${field === "origin" ? '{kind:"composer"}' : field === "isExpanded" ? "false" : "null"};
+      return next({...e,props})
+    })
+  `)
+    const owner = await session.sites.mount("UserMessage" as FunctionUiSite)
+    const result = await session.sites.render(owner, {
+      text: "original",
+      origin: { kind: "unclassified" },
+      isExpanded: true
+    })
+    expect(drawnText(result.tree)).toBe("original")
+    expect(result.nativeFallback).toBe(true)
+  }
+)
+
+it("bounds message owners and rejects oversized text without truncating it into a false complete row", async () => {
+  const { session } = await fixture("")
+  const component = "AssistantMessage" as FunctionUiSite
+  const owners: string[] = []
+  for (let index = 0; index < 32; index++) owners.push(await session.sites.mount(component))
+  await expect(session.sites.mount(component)).rejects.toThrow("MODS_UI_SITE_LIMIT")
+  await expect(
+    session.sites.render(owners[0], { text: "x".repeat(10001), isFirstOfReply: true })
+  ).rejects.toThrow("MODS_UI_SITE_PROPS")
+  await session.sites.unmount(owners[0])
+  expect(await session.sites.mount(component)).not.toBe(owners[0])
+})
+
 it("draws default content through next, preserves read-only site props and caches unchanged draws", async () => {
   const { session } = await fixture(`
     let draws=0;

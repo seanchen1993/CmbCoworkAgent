@@ -48,6 +48,7 @@ import {
 import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { FunctionSite } from "./FunctionSite"
+import { FunctionMessageText } from "./FunctionMessageText"
 import { formatMessageTimeLabel, getAssistantStartTime } from "@/lib/message-bubble-timing"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
@@ -632,6 +633,25 @@ function MessageBubbleImpl({
     </div>
   )
 
+  const messageText = (text: string, index: number, fallback: React.ReactNode): React.ReactNode => {
+    if (message.role !== "user" && message.role !== "assistant") return fallback
+    const firstTextIndex =
+      typeof displayMessageContent === "string"
+        ? 0
+        : displayMessageContent.findIndex((block) => block.type === "text" && !!block.text?.trim())
+    return (
+      <FunctionMessageText
+        key={`text:${threadId}:${message.id}:${messageGeneration}:${index}`}
+        threadId={threadId}
+        role={message.role}
+        text={text}
+        isExpanded={userContentExpanded}
+        isFirstOfReply={shouldShowMessageHead && index === firstTextIndex}
+        fallback={fallback}
+      />
+    )
+  }
+
   const renderContent = (): React.ReactNode => {
     if (goalUserSetMessage) {
       return renderGoalUserSetContent(goalUserSetMessage)
@@ -660,13 +680,24 @@ function MessageBubbleImpl({
               <SkillChip label={skillContent.skillName} compact className="mr-2" />
             )}
             {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-            <span data-chat-search-text data-chat-search-block-index={0}
-              data-chat-search-source-start={0} data-chat-search-source-end={displayContent.length}
-            >{browserContent.visibleText}</span>
+            {messageText(
+              browserContent.visibleText,
+              0,
+              <span
+                data-chat-search-text
+                data-chat-search-block-index={0}
+                data-chat-search-source-start={0}
+                data-chat-search-source-end={displayContent.length}
+              >
+                {browserContent.visibleText}
+              </span>
+            )}
           </div>
         )
       }
-      return (
+      return messageText(
+        displayContent,
+        0,
         <StreamingMarkdown
           isStreaming={isStreaming}
           threadId={threadId}
@@ -696,13 +727,24 @@ function MessageBubbleImpl({
                   <SkillChip label={skillContent.skillName} compact className="mr-2" />
                 )}
                 {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-                <span data-chat-search-text data-chat-search-block-index={index}
-                  data-chat-search-source-start={0} data-chat-search-source-end={displayText.length}
-                >{browserContent.visibleText}</span>
+                {messageText(
+                  browserContent.visibleText,
+                  index,
+                  <span
+                    data-chat-search-text
+                    data-chat-search-block-index={index}
+                    data-chat-search-source-start={0}
+                    data-chat-search-source-end={displayText.length}
+                  >
+                    {browserContent.visibleText}
+                  </span>
+                )}
               </div>
             )
           }
-          return (
+          return messageText(
+            displayText,
+            index,
             <StreamingMarkdown
               key={index}
               isStreaming={isStreaming}

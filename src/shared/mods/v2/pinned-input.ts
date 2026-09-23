@@ -73,13 +73,17 @@ export function normalizeFunctionInput(
   }
   if (event === "ui.render" && original.props && typeof original.props === "object") {
     const facts =
-      original.component === "AbovePrompt"
-        ? ["hasSurvey", "isWorking", "maxRows", "bodyColumns", "scroll", "view"]
-        : original.component === "PromptHint"
-          ? ["isDraft", "isWorking"]
-          : original.component === "InfoNotice" || original.component === "TurnDuration"
-            ? ["onScreen"]
-            : []
+      original.component === "UserMessage"
+        ? ["origin", "isExpanded", "task", "from", "onScreen"]
+        : original.component === "AssistantMessage"
+          ? ["isFirstOfReply", "onScreen"]
+          : original.component === "AbovePrompt"
+            ? ["hasSurvey", "isWorking", "maxRows", "bodyColumns", "scroll", "view"]
+            : original.component === "PromptHint"
+              ? ["isDraft", "isWorking"]
+              : original.component === "InfoNotice" || original.component === "TurnDuration"
+                ? ["onScreen"]
+                : []
     for (const key of facts) {
       const props = result.props as ModObject | undefined
       const before = original.props as ModObject
@@ -91,7 +95,9 @@ export function normalizeFunctionInput(
       original.component === "InfoNotice" ||
       original.component === "Spinner" ||
       original.component === "TurnDuration" ||
-      original.component === "SessionMode"
+      original.component === "SessionMode" ||
+      original.component === "UserMessage" ||
+      original.component === "AssistantMessage"
     )
       functionSiteProps(original.component, result.props)
   }

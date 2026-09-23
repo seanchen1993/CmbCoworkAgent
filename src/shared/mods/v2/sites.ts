@@ -8,7 +8,9 @@ export const FUNCTION_UI_SITES = [
   "InfoNotice",
   "Spinner",
   "TurnDuration",
-  "SessionMode"
+  "SessionMode",
+  "UserMessage",
+  "AssistantMessage"
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
 export const FUNCTION_DURATION_SITE_LIMIT = 32
@@ -26,6 +28,28 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
   }
   if (!isModObject(value)) return fail()
   const text = (v: unknown): v is string => typeof v === "string" && v.length <= 10000
+  if (site === "UserMessage") {
+    if (
+      !text(value.text) ||
+      typeof value.isExpanded !== "boolean" ||
+      !isModObject(value.origin) ||
+      value.origin.kind !== "unclassified" ||
+      Object.keys(value.origin).some((key) => key !== "kind") ||
+      Object.keys(value).some((key) => !["text", "origin", "isExpanded"].includes(key))
+    )
+      return fail()
+    // CMB's durable transcript has no upstream PromptOrigin stamp. Never infer authorship.
+    return { text: value.text, origin: { kind: "unclassified" }, isExpanded: value.isExpanded }
+  }
+  if (site === "AssistantMessage") {
+    if (
+      !text(value.text) ||
+      typeof value.isFirstOfReply !== "boolean" ||
+      Object.keys(value).some((key) => !["text", "isFirstOfReply"].includes(key))
+    )
+      return fail()
+    return { text: value.text, isFirstOfReply: value.isFirstOfReply }
+  }
   if (site === "Spinner") {
     if (
       !text(value.word) ||
@@ -107,6 +131,8 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
 }
 
 export function functionSiteDefault(site: FunctionUiSite, props: ModObject): FunctionUiElement {
+  if (site === "UserMessage" || site === "AssistantMessage")
+    return { type: "Text", props: {}, children: [String(props.text)] }
   if (site === "Spinner" || site === "TurnDuration" || site === "SessionMode") {
     const ms = Number(props.durationMs)
     const seconds = Math.round(ms / 1000)
