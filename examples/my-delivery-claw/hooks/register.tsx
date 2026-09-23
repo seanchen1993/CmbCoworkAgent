@@ -8,12 +8,12 @@ export function register(on) {
       enabled: (await $.store.get("enabled")) !== false
     }
   }
-  async function saveText($, key, text, limit) {
+  async function saveText($, key, text, limit, label) {
     const value = text.trim()
     if (!value || value.length > limit) return `请输入 1–${limit} 个字符。`
     await $.store.set(key, value)
     $.ui.invalidate("ui.render")
-    return "已保存。本项目的其他会话也会使用这项设置。"
+    return `已保存${label}：${value}\n\n${card(await settings($), "当前预览")}\n\n本项目的其他会话也会使用这项设置。`
   }
   function card(config, detail) {
     return [
@@ -27,24 +27,25 @@ export function register(on) {
     await $.command.register({
       name: "my-claw",
       description: "打开我的交付助手，设置名字、提醒并预览交付卡",
-      argumentHint: "[preview | on | off | last | name 名字 | rule 提醒]",
+      argumentHint: "[preview | status | on | off | last | name 名字 | rule 提醒]",
       immediate: true
     })
     return next(e)
   })
   on("command.run", { command: "my-claw" }, async ($, e) => {
     const args = e.args.trim()
-    if (args.startsWith("name ")) return { text: await saveText($, "name", args.slice(5), 30) }
-    if (args.startsWith("rule ")) return { text: await saveText($, "rule", args.slice(5), 300) }
+    if (args.startsWith("name ")) return { text: await saveText($, "name", args.slice(5), 30, "名字") }
+    if (args.startsWith("rule ")) return { text: await saveText($, "rule", args.slice(5), 300, "提醒") }
     if (args === "on" || args === "off") {
       await $.store.set("enabled", args === "on")
       $.ui.invalidate("ui.render")
       return { text: args === "on" ? "已开启自动交付提醒。" : "已关闭自动交付提醒。" }
     }
-    if (args === "preview") return { text: card(await settings($), "预览（未执行任务）") }
+    if (args === "preview" || args === "status")
+      return { text: card(await settings($), args === "status" ? "当前状态" : "预览（未执行任务）") }
     if (args === "last")
       return { text: (await $.store.get("last-report")) || "本项目还没有交付卡。" }
-    if (args) return { text: "用法：/my-claw [preview | on | off | last | name 名字 | rule 提醒]" }
+    if (args) return { text: "用法：/my-claw [preview | status | on | off | last | name 名字 | rule 提醒]" }
     await $.ui.open({ id: paneId, title: "我的交付 Claw", rows: 18, closeOnEscape: true })
     return { text: "交付助手已打开。修改名字和提醒，再发一条普通消息体验自动交付卡。" }
   })

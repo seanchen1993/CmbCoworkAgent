@@ -5609,6 +5609,16 @@ export class LocalSandbox
   private static _cachedResolvedShell: string | null = null
   private static _resolvedShellPromise: Promise<string> | null = null
 
+  /** Resolve the execution shell before synchronous environment prompts read its cache. */
+  static async ensureShellReady(windowsSandbox: WindowsSandboxMode): Promise<void> {
+    if (process.platform !== "win32") return
+    if (windowsSandbox === "none") {
+      await LocalSandbox.resolveShell()
+    } else {
+      await LocalSandbox.resolveWindowsSandboxShell()
+    }
+  }
+
   /** Public accessor for the resolved shell path (used by system prompt). */
   static resolvedShell(): string {
     if (LocalSandbox._cachedResolvedShell) return LocalSandbox._cachedResolvedShell

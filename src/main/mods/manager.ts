@@ -302,6 +302,7 @@ export class ModsManager {
       anchorMessageId?: string
     ): Promise<FunctionTurnResult>
     invalidate(workspace: string): void
+    invalidateAll?(): void
     closeThread(threadId: string): void
     close(): void
     registeredTools?(workspace: string, threadId: string): Promise<RegisteredFunctionTool[]>
@@ -502,7 +503,29 @@ export class ModsManager {
   }
 
   isEnabled(workspace: string): boolean {
-    return this.config(this.workspaceKey(workspace)).enabled
+    return this.globalEnabled() && this.config(this.workspaceKey(workspace)).enabled
+  }
+
+  isGloballyEnabled(): boolean {
+    return this.globalEnabled()
+  }
+
+  /** Abort and discard all legacy Mod runtime state after the application switch changes. */
+  invalidateAll(): void {
+    this.functionTurns.invalidate()
+    this.invalidateFunctionReads()
+    this.functionLifecycle?.invalidateAll?.()
+    for (const pending of this.sessions.values())
+      void pending.then((session) => session.engine.dispose()).catch(() => undefined)
+    this.sessions.clear()
+    for (const client of this.clients.values()) client.stop()
+    this.clients.clear()
+    this.functionToolCatalogs.clear()
+    this.mcpBindings.clear()
+    this.bindings.clear()
+    this.actions.clear()
+    for (const controller of this.activeActions.keys()) controller.abort()
+    this.activeActions.clear()
   }
   readonly store: ModControlStore
   readonly policy: ManagedModPolicy
@@ -541,7 +564,8 @@ export class ModsManager {
     ) => Promise<boolean>,
     private readonly notifyCards: (threadId: string) => void,
     private readonly hostEntry?: string,
-    deployment: ManagedModDeployment = DEFAULT_MOD_POLICY
+    deployment: ManagedModDeployment = DEFAULT_MOD_POLICY,
+    private readonly globalEnabled: () => boolean = () => true
   ) {
     const marker = `${controlPath}.initialized`
     if (existsSync(marker) && !existsSync(controlPath))
@@ -581,11 +605,13 @@ export class ModsManager {
   }
 
   isActive(workspace: string): boolean {
+    if (!this.globalEnabled()) return false
     const value = this.config(this.workspaceKey(workspace))
     return value.enabled || value.policy
   }
 
   protects(workspace: string): boolean {
+    if (!this.globalEnabled()) return false
     return this.config(this.workspaceKey(workspace)).policy
   }
 
@@ -699,6 +725,7 @@ export class ModsManager {
     const config = this.config(key)
     return {
       workspace: key,
+      globalEnabled: this.globalEnabled(),
       enabled: config.enabled,
       outputPolicy: config.policy,
       mods: (await this.candidates(key)).map((value) => value.status),
@@ -1545,7 +1572,7 @@ export class ModsManager {
           }
         }
         const approved: ApprovedMod[] = []
-        if (this.config(binding.workspace).enabled) {
+        if (this.isEnabled(binding.workspace)) {
           for (const candidate of await this.candidates(binding.workspace)) {
             if (candidate.status.state !== "ready" || !candidate.compiled) continue
             const grant = this.store.getGrant(binding.workspace, candidate.compiled.manifest.id)!
@@ -1597,15 +1624,15 @@ export class ModsManager {
       toolId,
       args,
       effect: classifyModTool(toolId),
-      protectedOutput: this.config(binding.workspace).policy,
-      policyDigest: this.config(binding.workspace).policy ? this.policy.digest : undefined,
-      protectData: this.config(binding.workspace).policy
+      protectedOutput: this.protects(binding.workspace),
+      policyDigest: this.protects(binding.workspace) ? this.policy.digest : undefined,
+      protectData: this.protects(binding.workspace)
         ? (value) => this.policy.observer(value)
         : undefined,
-      admit: this.config(binding.workspace).policy
+      admit: this.protects(binding.workspace)
         ? (input) => this.policy.admit(identity, toolId, input, binding.signal)
         : undefined,
-      publish: this.config(binding.workspace).policy
+      publish: this.protects(binding.workspace)
         ? async (value, stage) => {
             assertEpoch()
             try {
@@ -1877,7 +1904,7 @@ export class ModsManager {
 
   async commands(workspace: string, threadId: string): Promise<ModCommandDescriptor[]> {
     workspace = this.workspaceKey(workspace)
-    if (!this.config(workspace).enabled) return []
+    if (!this.isEnabled(workspace)) return []
     const binding = this.bindings.get(`${threadId}:main`) ?? {
       workspace,
       threadId,
@@ -1936,7 +1963,7 @@ export class ModsManager {
     signal: AbortSignal
   ): Promise<ModProjection> {
     workspace = this.workspaceKey(workspace)
-    if (!this.config(workspace).enabled || this.config(workspace).epoch !== expected.workspaceEpoch)
+    if (!this.isEnabled(workspace) || this.config(workspace).epoch !== expected.workspaceEpoch)
       throw new ModError("MODS_SCOPE_CHANGED")
     this.store.assertGrant({
       workspace,
@@ -1982,7 +2009,7 @@ export class ModsManager {
 
   async finishTurn(threadId: string): Promise<void> {
     const binding = this.bindings.get(`${threadId}:main`)
-    if (!binding || !this.config(binding.workspace).enabled) return
+    if (!binding || !this.isEnabled(binding.workspace)) return
     // This view reads durable execution facts after cancellation. It owns no
     // runtime, adapter or tool authority; render() rejects every I/O capability.
     const summaryBinding: ModThreadBinding = {
@@ -2048,7 +2075,7 @@ export class ModsManager {
     return list.map((stored) => {
       const { grant } = stored
       // Recheck current publication policy, including cards restored without a live agent.
-      const card = this.config(grant.workspace).policy
+      const card = this.protects(grant.workspace)
         ? {
             ...stored.card,
             name: String(filterModData(stored.card.name, true)),
@@ -2060,7 +2087,7 @@ export class ModsManager {
       const workspaceEpoch = this.config(binding.workspace).epoch
       const liveGrant = this.store.getGrant(binding.workspace, card.modId)
       const live =
-        this.config(binding.workspace).enabled &&
+        this.isEnabled(binding.workspace) &&
         !binding.signal?.aborted &&
         grant.workspace === binding.workspace &&
         stored.workspaceEpoch === workspaceEpoch &&

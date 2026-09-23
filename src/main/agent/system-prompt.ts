@@ -6,6 +6,7 @@
  * @see https://github.com/deepagents-ai/deepagents
  */
 import type { AgentOutputStyle } from "../../shared/agent-output-style"
+import type { AgentToolStrategy } from "../../shared/agent-runtime-limits"
 
 export const OUTPUT_STYLE_IDENTITY_PROMPT =
   'You are an interactive agent that helps users according to your "Output Style" below, which describes how you should respond to user queries. Use the instructions below and the tools available to you to assist the user.'
@@ -158,6 +159,27 @@ export function appendTaskCompletionAndRepetitionPrompt(prompt: string): string 
     : TASK_COMPLETION_AND_REPETITION_PROMPT
 }
 
+const FILE_READING_GUIDANCE = `## File Reading Best Practices
+
+When exploring codebases or reading multiple files, use pagination to prevent context overflow.
+
+**Pattern for codebase exploration:**
+1. Default read: \`read_file(file_path=path)\` - Reads up to 2000 lines from the beginning
+2. Quick scan: \`read_file(file_path=path, limit=200)\` - See file structure and key sections
+3. Targeted read: \`read_file(file_path=path, offset=2000, limit=2000)\` - Read additional sections if needed
+
+**When to paginate:**
+- Reading any file >2000 lines
+- Exploring unfamiliar codebases when only a specific section is needed
+- Reading multiple files in sequence
+
+**When default read is OK:**
+- Small files (<2000 lines)
+- Files you need to edit immediately after reading`
+
+const FILE_TOOL_PREFERENCE = `- Avoid using shell for file reading (use read_file instead)
+- Avoid using shell for file searching (use grep/glob instead)`
+
 export const BASE_SYSTEM_PROMPT = `You are an AI assistant that helps users with various tasks including coding, research, and analysis.
 
 # Core Behavior
@@ -187,23 +209,7 @@ If asked how to approach something, answer first before taking action.
 Use write_todos for complex multi-step tasks (3+ steps). Mark tasks in_progress before starting, completed immediately after finishing.
 For simple 1-2 step tasks, just do them directly without todos.
 
-## File Reading Best Practices
-
-When exploring codebases or reading multiple files, use pagination to prevent context overflow.
-
-**Pattern for codebase exploration:**
-1. Default read: \`read_file(file_path=path)\` - Reads up to 2000 lines from the beginning
-2. Quick scan: \`read_file(file_path=path, limit=200)\` - See file structure and key sections
-3. Targeted read: \`read_file(file_path=path, offset=2000, limit=2000)\` - Read additional sections if needed
-
-**When to paginate:**
-- Reading any file >2000 lines
-- Exploring unfamiliar codebases when only a specific section is needed
-- Reading multiple files in sequence
-
-**When default read is OK:**
-- Small files (<2000 lines)
-- Files you need to edit immediately after reading
+${FILE_READING_GUIDANCE}
 
 ${SUBAGENT_SYSTEM_PROMPT_SECTION}## Tools
 
@@ -251,8 +257,7 @@ unless the user explicitly asks again.
 - Commands run in the workspace root directory unless execute.cwd is provided
 - When following a skill, resolve relative scripts, resources, and templates from the directory that contains that skill's SKILL.md. Run skill scripts with absolute paths or pass execute.cwd as that skill directory.
 - Always use shell commands appropriate for the user's operating system and shell (see System Environment above)
-- Avoid using shell for file reading (use read_file instead)
-- Avoid using shell for file searching (use grep/glob instead)
+${FILE_TOOL_PREFERENCE}
 - When running non-trivial commands, briefly explain what they do
 
 ## File References
@@ -286,10 +291,23 @@ When using the write_todos tool:
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking.
 `
 
-export function renderBaseSystemPrompt(options: { includeSubagents?: boolean } = {}): string {
-  return options.includeSubagents === false
-    ? BASE_SYSTEM_PROMPT.replace(SUBAGENT_SYSTEM_PROMPT_SECTION, "")
-    : BASE_SYSTEM_PROMPT
+export function renderBaseSystemPrompt(
+  options: { includeSubagents?: boolean; toolStrategy?: AgentToolStrategy } = {}
+): string {
+  let prompt =
+    options.includeSubagents === false
+      ? BASE_SYSTEM_PROMPT.replace(SUBAGENT_SYSTEM_PROMPT_SECTION, "")
+      : BASE_SYSTEM_PROMPT
+  if (options.toolStrategy && options.toolStrategy !== "standard") {
+    // Only replace our owned sections, before user/project/Skill content is added.
+    prompt = prompt
+      .replace(
+        FILE_READING_GUIDANCE,
+        "## File Reading Best Practices\n\nUse bounded output and targeted ranges to prevent context overflow. Inspect relevant sections before editing; do not dump entire large files. Dedicated read_file supports offset/limit pagination when needed."
+      )
+      .replace(FILE_TOOL_PREFERENCE, "- Follow the active tool strategy for ordinary file work")
+  }
+  return prompt
 }
 
 export const MEMORY_SYSTEM_PROMPT = `

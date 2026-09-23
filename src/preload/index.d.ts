@@ -209,7 +209,7 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
+import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -230,6 +230,7 @@ interface ElectronAPI {
   getGitChangeNoticeEnabled: () => Promise<boolean>
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
+  setAgentToolStrategy: (value: AgentToolStrategy) => Promise<AgentRuntimeSettings>
   setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
@@ -973,6 +974,10 @@ interface DashboardPluginAggregate {
 
 interface CustomAPI {
   mods: {
+    globalEnabled(): Promise<boolean>
+    configureGlobal(enabled: boolean): Promise<boolean>
+    functionUnlocked(): Promise<boolean>
+    unlockFunction(password: string): Promise<boolean>
     turnNotices(threadId: string): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]>
     panes(threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]>
     paneAct(
@@ -2186,9 +2191,10 @@ interface CustomAPI {
       buffer: ArrayBuffer,
       fileName: string,
       origin?: "market" | "local",
-      version?: string
+      version?: string,
+      requireMods?: boolean
     ) => Promise<{ success: boolean; pluginName?: string; error?: string }>
-    installFromDir: () => Promise<{ success: boolean; pluginName?: string; error?: string }>
+    installFromDir: (requireMods?: boolean) => Promise<{ success: boolean; pluginName?: string; error?: string }>
     exportForMarket: (
       id: string,
       options?: { version?: string | null }
