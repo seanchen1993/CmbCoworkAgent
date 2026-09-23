@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Download,
   Info,
   Loader2,
   Search
@@ -24,6 +25,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { ProjectMetricTrend } from "./ProjectMetricTrend"
+import { projectMetricExportSheet } from "./project-metric-export"
 import {
   PROJECT_METRIC_TOOLTIP_CLASS,
   ProjectMetricIssueBreakdown,
@@ -732,6 +734,8 @@ export function ProjectMetricsSection({
   const [projectsLoading, setProjectsLoading] = useState(false)
   const [summaryError, setSummaryError] = useState<string | null>(null)
   const [projectsError, setProjectsError] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
   const summaryRequestId = useRef(0)
   const projectsRequestId = useRef(0)
 
@@ -847,6 +851,30 @@ export function ProjectMetricsSection({
 
   const totalPages = Math.max(1, Math.ceil((projects?.total ?? 0) / pageSize))
   const truncated = summary?.truncated || projects?.truncated
+  const exportProjects = async (): Promise<void> => {
+    setExporting(true)
+    setExportError(null)
+    try {
+      const result = await window.api.dashboard.projectMetricProjects(filters, {
+        ...listOptions,
+        exportAll: true
+      })
+      if (!result.success || !result.data) {
+        throw new Error(result.error || "获取项目明细导出数据失败")
+      }
+      const saved = await window.api.dashboard.exportExcel(
+        [projectMetricExportSheet(result.data.items)],
+        { fileName: "研发效能看板-项目明细" }
+      )
+      if (!saved.success && !saved.canceled) {
+        throw new Error(saved.error || "导出项目明细失败")
+      }
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setExporting(false)
+    }
+  }
   const cycleSort = (key: ProjectMetricSortKey): void => {
     setPage(1)
     if (sortBy !== key) {
@@ -998,6 +1026,20 @@ export function ProjectMetricsSection({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-xs font-semibold text-foreground">项目明细</h3>
           <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8"
+              disabled={exporting || projectsLoading}
+              onClick={() => void exportProjects()}
+            >
+              {exporting ? (
+                <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+              ) : (
+                <Download className="mr-1.5 size-3.5" />
+              )}
+              导出 Excel
+            </Button>
             <Select
               value={developmentMode}
               onValueChange={(value: "all" | "devclaw" | "non_devclaw") => {
@@ -1047,6 +1089,13 @@ export function ProjectMetricsSection({
             </div>
           </div>
         </div>
+
+        {exportError ? (
+          <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
+            {exportError}
+          </div>
+        ) : null}
 
         {projectsError ? (
           <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">

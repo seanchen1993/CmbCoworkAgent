@@ -13,6 +13,7 @@ export interface ProjectMetricFilters {
 }
 
 export interface ProjectMetricListOptions {
+  exportAll?: boolean
   developmentMode?: "all" | ProjectMetricDevelopmentMode
   keyword?: string
   departmentKeyword?: string
@@ -98,6 +99,7 @@ export interface ProjectMetricProjectItem {
   pushedAdoptedLines: number | null
   createDate: string | null
   firstStStartDate: string | null
+  firstStEndDate: string | null
   firstUatStartDate: string | null
   firstOnlineDate: string | null
   approvedDate: string | null

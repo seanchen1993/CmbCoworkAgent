@@ -9636,6 +9636,16 @@ export function HarnessBoardView({
     void loadProjects()
   }, [loadProjects])
 
+  useEffect(() => {
+    let active = true
+    void loadHarnessMarketPlugins().then((plugins) => {
+      if (active) setMarketPluginItems(plugins)
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
   const loadMoreRegistry = useCallback(async (): Promise<void> => {
     if (registryNextCursor === null || loadingMoreRegistry) return
     setLoadingMoreRegistry(true)
