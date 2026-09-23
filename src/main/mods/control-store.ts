@@ -104,7 +104,7 @@ export class ModControlStore {
       this.db.prepare(
         `UPDATE mods_completion_evidence
          SET status='interrupted', payload=json_set(payload, '$.status', 'interrupted',
-           '$.detail', 'MODS_PROCESS_RESTARTED')
+           '$.detail.error', 'MODS_PROCESS_RESTARTED')
          WHERE status='running'`
       ).run()
       for (const row of this.db
@@ -240,31 +240,80 @@ export class ModControlStore {
   }
 
   saveCompletionEvidence(record: CompletionEvidenceRecord): void {
+    const unbound = record.phase === "capture.started" || record.phase === "capture.failed"
+    const unboundStatuses =
+      record.phase === "capture.started"
+        ? ["running", "completed", "cancelled", "error", "interrupted"]
+        : ["cancelled", "error", "interrupted"]
     if (
-      (record.binding === null) !== (record.phase === "capture.failed") ||
-      (record.binding === null && !["cancelled", "error", "interrupted"].includes(record.status))
+      (record.binding === null) !== unbound ||
+      (unbound && !unboundStatuses.includes(record.status)) ||
+      (record.status === "completed" &&
+        !["capture.started", "check.started"].includes(record.phase))
     )
       throw new ModError("MODS_EVIDENCE_UNBOUND")
     const text = encodeModJson(record)
     if (Buffer.byteLength(text) > 512 * 1024) throw new ModError("MODS_EVIDENCE_LIMIT")
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO mods_completion_evidence
+    const detail = record.detail
+    const attempt =
+      detail && typeof detail === "object" && !Array.isArray(detail) ? detail.attempt : undefined
+    const previous =
+      record.phase === "check.started" || record.phase === "capture.failed"
+        ? ["capture.started", "capture.started"]
+        : (record.phase === "check.result" || record.phase === "invalidated") &&
+            record.status !== "running"
+          ? ["capture.started", "check.started"]
+          : undefined
+    const settle = previous && typeof attempt === "string" && attempt.length > 0
+    // The terminal fact and its start marker must be committed together. A crash
+    // between the two must never turn a finished operation into an interrupted one.
+    if (settle) this.db.exec("BEGIN IMMEDIATE")
+    try {
+      const inserted = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO mods_completion_evidence
           (id,idempotency_key,workspace,thread_id,turn_id,run_id,phase,status,payload,at)
          VALUES(?,?,?,?,?,?,?,?,?,?)`
-      )
-      .run(
-        record.id,
-        record.idempotencyKey,
-        record.workspace,
-        record.threadId,
-        record.turnId,
-        record.runId,
-        record.phase,
-        record.status,
-        text,
-        record.at
-      )
+        )
+        .run(
+          record.id,
+          record.idempotencyKey,
+          record.workspace,
+          record.threadId,
+          record.turnId,
+          record.runId,
+          record.phase,
+          record.status,
+          text,
+          record.at
+        )
+      if (settle && inserted.changes > 0) {
+        // completed means only that the step ended; it is never a PASS or a proof.
+        this.db
+          .prepare(
+            `UPDATE mods_completion_evidence
+          SET status='completed', payload=json_set(payload, '$.status', 'completed',
+            '$.detail.settledBy', ?, '$.detail.settledAt', ?)
+          WHERE workspace=? AND thread_id=? AND turn_id=? AND run_id=?
+            AND phase IN (?,?) AND status='running' AND json_extract(payload,'$.detail.attempt')=?`
+          )
+          .run(
+            record.id,
+            record.at,
+            record.workspace,
+            record.threadId,
+            record.turnId,
+            record.runId,
+            previous![0],
+            previous![1],
+            attempt
+          )
+      }
+      if (settle) this.db.exec("COMMIT")
+    } catch (error) {
+      if (settle) this.db.exec("ROLLBACK")
+      throw error
+    }
   }
 
   completionEvidence(workspace: string, threadId: string, limit = 100): CompletionEvidenceRecord[] {

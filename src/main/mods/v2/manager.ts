@@ -1299,6 +1299,38 @@ export class FunctionModsManager {
         let timer: ReturnType<typeof setTimeout> | undefined
         let binding: CompletionEvidenceBinding | undefined
         const attempt = randomUUID()
+        const recordCapture = (
+          phase: "capture.started" | "capture.failed",
+          status: "running" | "cancelled" | "error",
+          detail: ModObject = {}
+        ) => {
+          const captureIdentity = {
+            workspace: captureWorkspace,
+            threadId,
+            turnId,
+            runId: runId || `completion:${threadId}:${turnId}`,
+            runtimeGeneration: entry.generation,
+            pluginDigests: Object.fromEntries(
+              [...entry.snapshots].map(([name, snapshot]) => [name, snapshot.compiled.digest])
+            ),
+            configFingerprint: createHash("sha256").update(initialConfig).digest("hex")
+          }
+          this.store.saveCompletionEvidence({
+            workspace,
+            threadId,
+            turnId,
+            runId: captureIdentity.runId,
+            id: randomUUID(),
+            idempotencyKey: `${attempt}:${phase}`,
+            phase,
+            status,
+            binding: null,
+            capture: captureIdentity,
+            detail: { ...detail, attempt, businessAccepted: false, reportOnly },
+            at: Date.now()
+          })
+          this.host.changed(threadId)
+        }
         const record = (
           phase: BoundCompletionEvidenceRecord["phase"],
           status: BoundCompletionEvidenceRecord["status"],
@@ -1315,7 +1347,7 @@ export class FunctionModsManager {
             phase,
             status,
             binding,
-            ...(detail === undefined ? {} : { detail }),
+            detail: { ...(isModObject(detail) ? detail : {}), attempt },
             at: Date.now()
           })
           this.host.changed(threadId)
@@ -1330,6 +1362,8 @@ export class FunctionModsManager {
             )
             timer.unref()
           }
+          captureWorkspace = this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace
+          recordCapture("capture.started", "running")
           binding = await capture(signal)
           signal.throwIfAborted()
           record("check.started", "running", {
@@ -1541,37 +1575,14 @@ export class FunctionModsManager {
           const status = originalSignal.aborted ? "cancelled" : "error"
           if (binding) record("check.result", status, { error: reason })
           else {
-            const capture = {
-              workspace: captureWorkspace,
-              threadId,
-              turnId,
-              runId: runId || `completion:${threadId}:${turnId}`,
-              runtimeGeneration: entry.generation,
-              pluginDigests: Object.fromEntries(
-                [...entry.snapshots].map(([name, snapshot]) => [name, snapshot.compiled.digest])
-              ),
-              configFingerprint: createHash("sha256").update(initialConfig).digest("hex")
-            }
-            this.store.saveCompletionEvidence({
-              workspace,
-              threadId,
-              turnId,
-              runId: capture.runId,
-              id: randomUUID(),
-              idempotencyKey: `${attempt}:capture.failed`,
-              phase: "capture.failed",
-              status,
-              binding: null,
-              capture,
-              detail: { attempt, error: reason, businessAccepted: false, reportOnly },
-              at: Date.now()
-            })
+            recordCapture("capture.failed", status, { error: reason })
             this.host.changed(threadId)
           }
           originalSignal.throwIfAborted()
           assertLive()
           if (reportOnly) return { decision: "pass" }
-          if (!binding || reason.startsWith("MODS_COMPLETION_")) return { decision: "block", reason }
+          if (!binding || reason.startsWith("MODS_COMPLETION_"))
+            return { decision: "block", reason }
           throw error
         } finally {
           entry.completionChecks.delete(lifecycle)

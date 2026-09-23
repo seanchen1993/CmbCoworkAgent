@@ -163,3 +163,31 @@ it("limits history while preserving stale and cancelled outcomes instead of call
   expect(html.match(/data-completion-record=/g)).toHaveLength(24)
   expect(html).not.toContain("changed-0<")
 })
+
+it("explains interrupted capture without suggesting business acceptance or automatic replay", () => {
+  const base = record("check.started", "running", { attempt: "attempt" })
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [
+        {
+          ...base,
+          phase: "capture.started",
+          status: "interrupted",
+          binding: null,
+          capture: {
+            workspace: "workspace",
+            threadId: "thread",
+            turnId: "turn",
+            runId: "run",
+            pluginDigests: {},
+            runtimeGeneration: 1,
+            configFingerprint: "config"
+          }
+        } as never
+      ]
+    })
+  )
+  expect(html).toContain("开始采集文件证据")
+  expect(html).toContain("采集中断")
+  expect(html).not.toContain("文件指纹 0 项")
+})

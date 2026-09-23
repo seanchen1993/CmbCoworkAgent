@@ -28,6 +28,116 @@ afterEach(() => {
 })
 
 describe("Mod durable control store", () => {
+  it("recovers an unfinished capture without losing its identity or replaying it", () => {
+    const { store, file } = fixture()
+    const row = {
+      id: "capture",
+      idempotencyKey: "capture",
+      workspace: "project",
+      threadId: "thread",
+      turnId: "turn",
+      runId: "run",
+      phase: "capture.started",
+      status: "running",
+      binding: null,
+      capture: {
+        workspace: "project",
+        threadId: "thread",
+        turnId: "turn",
+        runId: "run",
+        pluginDigests: { p: "digest" },
+        runtimeGeneration: 1,
+        configFingerprint: "config"
+      },
+      detail: { attempt: "attempt", businessAccepted: false },
+      at: 1
+    } as unknown as CompletionEvidenceRecord
+    store.saveCompletionEvidence(row)
+    store.close()
+    stores.pop()
+    const reopened = new ModControlStore(file)
+    stores.push(reopened)
+    expect(reopened.completionEvidence("project", "thread")).toEqual([
+      {
+        ...row,
+        status: "interrupted",
+        detail: { attempt: "attempt", businessAccepted: false, error: "MODS_PROCESS_RESTARTED" }
+      }
+    ])
+    expect(() =>
+      reopened.saveCompletionEvidence({
+        ...row,
+        id: "forged",
+        status: "pass"
+      } as unknown as CompletionEvidenceRecord)
+    ).toThrow("MODS_EVIDENCE_UNBOUND")
+  })
+
+  it("atomically settles only the matching attempt and preserves completed capture across restart", () => {
+    const { store, file } = fixture()
+    const base = {
+      id: "capture",
+      idempotencyKey: "capture",
+      workspace: "project",
+      threadId: "thread",
+      turnId: "turn",
+      runId: "run",
+      phase: "capture.started",
+      status: "running",
+      binding: null,
+      capture: {
+        workspace: "project",
+        threadId: "thread",
+        turnId: "turn",
+        runId: "run",
+        pluginDigests: {},
+        runtimeGeneration: 1,
+        configFingerprint: "config"
+      },
+      detail: { attempt: "attempt" },
+      at: 1
+    } satisfies CompletionEvidenceRecord
+    store.saveCompletionEvidence(base)
+    store.saveCompletionEvidence({
+      ...base,
+      id: "different-attempt",
+      idempotencyKey: "different-attempt",
+      detail: { attempt: "other" }
+    })
+    store.saveCompletionEvidence({
+      ...base,
+      id: "other-thread",
+      idempotencyKey: "other-thread",
+      threadId: "other-thread"
+    })
+    const failed = {
+      ...base,
+      id: "failure",
+      idempotencyKey: "failure",
+      phase: "capture.failed",
+      status: "error",
+      at: 2
+    } satisfies CompletionEvidenceRecord
+    store.saveCompletionEvidence(failed)
+    store.saveCompletionEvidence({ ...failed, detail: { attempt: "other" } })
+    const before = store.completionEvidence("project", "thread")
+    expect(before.find((row) => row.id === "capture")).toMatchObject({
+      status: "completed",
+      binding: null,
+      detail: { attempt: "attempt", settledBy: "failure", settledAt: 2 }
+    })
+    expect(before.find((row) => row.id === "different-attempt")?.status).toBe("running")
+    expect(store.completionEvidence("project", "other-thread")[0].status).toBe("running")
+    store.close()
+    stores.pop()
+    const reopened = new ModControlStore(file)
+    stores.push(reopened)
+    const after = reopened.completionEvidence("project", "thread")
+    expect(after.find((row) => row.id === "capture")).toEqual(
+      before.find((row) => row.id === "capture")
+    )
+    expect(after.find((row) => row.id === "different-attempt")?.status).toBe("interrupted")
+  })
   it("persists unbound capture errors across restart but never accepts them as PASS", () => {
     const { store, file } = fixture()
     const capture = {

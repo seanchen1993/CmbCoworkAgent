@@ -56,14 +56,23 @@ export interface BoundCompletionEvidenceRecord extends CompletionRecordIdentity 
     | "validator.result"
     | "state.transition"
     | "invalidated"
-  status: "running" | "pass" | "revise" | "block" | "stale" | "cancelled" | "error" | "interrupted"
+  status:
+    | "completed"
+    | "running"
+    | "pass"
+    | "revise"
+    | "block"
+    | "stale"
+    | "cancelled"
+    | "error"
+    | "interrupted"
   binding: CompletionEvidenceBinding
 }
 
-/** A failed capture has execution identity but no file, requirement or checkpoint proof. */
+/** Capture lifecycle facts have execution identity but no file or checkpoint proof. */
 export interface UnboundCompletionEvidenceRecord extends CompletionRecordIdentity {
-  phase: "capture.failed"
-  status: "cancelled" | "error" | "interrupted"
+  phase: "capture.started" | "capture.failed"
+  status: "running" | "completed" | "cancelled" | "error" | "interrupted"
   binding: null
   capture: Pick<
     CompletionEvidenceBinding,

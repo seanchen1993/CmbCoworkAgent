@@ -432,3 +432,31 @@ it("never converts cancellation before capture into an advisory completion", asy
   )
   expect(f.invocations).toEqual([])
 })
+
+it("journals capture identity before the first asynchronous read and settles both start records", async () => {
+  const f = await fixture([{ hook: '() => ({decision:"pass"})' }])
+  const gate = (await f.gate())!
+  const result = gate({
+    signal: new AbortController().signal,
+    revisionAttempts: 0,
+    maxRevisionAttempts: 4
+  })
+  const during = f.store.completionEvidence(f.root, "thread")
+  await expect(result).resolves.toMatchObject({ decision: "pass" })
+  expect(during).toContainEqual(
+    expect.objectContaining({
+      phase: "capture.started",
+      status: "running",
+      binding: null,
+      capture: expect.objectContaining({ threadId: "thread", turnId: "turn" })
+    })
+  )
+  const records = f.store.completionEvidence(f.root, "thread")
+  expect(records.filter((row) => row.phase.endsWith(".started"))).toHaveLength(2)
+  expect(records.filter((row) => row.status === "running")).toEqual([])
+  expect(
+    records
+      .filter((row) => row.phase.endsWith(".started"))
+      .every((row) => row.status === "completed")
+  ).toBe(true)
+})

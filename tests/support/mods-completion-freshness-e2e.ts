@@ -99,6 +99,12 @@ export async function verifyCompletionFreshness(
     )
     const initial = await records()
     assert(!initial.some((row) => row.phase === "invalidated"))
+    assert(initial.some((row) => row.phase === "capture.started" && row.status === "completed"))
+    assert(initial.some((row) => row.phase === "check.started" && row.status === "completed"))
+    assert(!initial.some((row) => row.status === "running"))
+    pass(
+      "capture starts durably and completed steps do not remain running beside the real guest result"
+    )
     const modelCalls = requests.length
     // Same-content writes still generate an OS notification. They must not stale a proof.
     writeFileSync(target, "version one")

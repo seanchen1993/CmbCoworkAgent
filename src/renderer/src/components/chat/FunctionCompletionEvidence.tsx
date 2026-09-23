@@ -4,6 +4,7 @@ import { isModObject } from "../../../../shared/mods/v2/contracts"
 import { FunctionSiteLifetime } from "../../lib/function-site-lifecycle"
 
 const statuses = {
+  completed: "步骤已结束",
   running: "执行中",
   pass: "通过",
   revise: "需要修复并复检",
@@ -14,6 +15,7 @@ const statuses = {
   interrupted: "执行中断"
 }
 const phases = {
+  "capture.started": "开始采集文件证据",
   "capture.failed": "文件证据采集失败",
   "check.started": "开始检查",
   "check.result": "完成门禁",
@@ -43,6 +45,12 @@ function label(record: CompletionEvidenceRecord): string {
           : phases[record.phase]
 }
 function nextAction(record: CompletionEvidenceRecord): string {
+  if (record.phase === "capture.started")
+    return record.status === "running"
+      ? "正在读取当前文件、需求和配置；尚未形成检查结论。"
+      : record.status === "completed"
+        ? "采集步骤已结束，请查看后续检查结果；此步骤不代表检查通过。"
+        : "采集中断，尚未取得完整文件证据；恢复任务后重新检查，不自动重放。"
   if (record.phase === "capture.failed")
     return "尚未取得文件和需求证据；检查路径、文件大小或读取权限，缩小范围后重新检查。"
   if (record.phase === "state.transition" && record.status === "interrupted")
