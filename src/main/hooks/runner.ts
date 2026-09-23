@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import * as chardet from "jschardet"
@@ -13,8 +14,10 @@ import { getHookLoggingConfig, getUserInfo } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { persistHookResultRecord } from "./log-record"
 import { getModsManager } from "../mods/manager"
+import { getModCallContext } from "../mods/context"
+import { ModError } from "../mods/errors"
 import type { ModObject } from "../../shared/mods/types"
-import { isModObject } from "../../shared/mods/v2/contracts"
+import { isModObject, ModFunctionError } from "../../shared/mods/v2/contracts"
 import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
@@ -102,6 +105,9 @@ function tagOnceResult<T extends HookResult>(
 const _regexCache = new Map<string, RegExp | null>()
 
 export interface HookContext {
+  /** Host-owned invocation identity and cancellation; never read from tool arguments. */
+  toolCallId?: string
+  signal?: AbortSignal
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolResult?: string
@@ -1413,9 +1419,59 @@ const CLASSIC_HOOK_EVENTS = new Set<string>([
   "MessageDisplay"
 ])
 
-function toClassicInput(context: HookContext): ModObject {
+function toClassicInput(event: HookEvent, context: HookContext): ModObject {
   try {
-    const parsed = JSON.parse(JSON.stringify(context)) as unknown
+    const toolCallId = context.toolCallId ?? getModCallContext()?.identity.toolCallId ?? randomUUID()
+    if (event === "PreToolUse")
+      return JSON.parse(JSON.stringify({
+        ...context.toolArgs,
+        tool: context.toolName,
+        tool_use_id: toolCallId
+      })) as ModObject
+    const payload: Record<string, unknown> = {
+      hook_event_name: event,
+      session_id: context.sessionId,
+      cwd: getCommandCwd(context),
+      transcript_path: context.transcriptPath ?? "",
+      permission_mode: context.permissionMode,
+      agent_id: context.agentId
+    }
+    if (["PostToolUse", "PostToolUseFailure", "PermissionRequest", "PermissionDenied"].includes(event)) {
+      payload.tool_name = context.toolName
+      payload.tool_input = context.toolArgs ?? {}
+      payload.tool_use_id = toolCallId
+      if (context.toolResult !== undefined) {
+        let output: unknown = context.toolResult
+        try { output = JSON.parse(context.toolResult) } catch { /* Plain tool text remains text. */ }
+        if (event === "PostToolUseFailure") {
+          const failure = output && typeof output === "object" ? output as Record<string, unknown> : {}
+          payload.error = typeof failure.error === "string" ? failure.error : context.toolResult
+          if (typeof failure.is_interrupt === "boolean") payload.is_interrupt = failure.is_interrupt
+        } else payload.tool_response = output
+      }
+    }
+    if (event === "UserPromptSubmit") payload.prompt = context.userPrompt ?? ""
+    if (event === "SessionStart") payload.source = context.sessionStartSource ?? "startup"
+    if (event === "SessionEnd") payload.reason = context.sessionEndReason ?? "other"
+    if (event === "Setup") payload.trigger = context.setupTrigger ?? "init"
+    if (event === "Notification") {
+      payload.notification_type = context.notificationType
+      payload.message = context.userPrompt ?? context.toolResult ?? ""
+    }
+    if (event === "Stop" || event === "SubagentStop") {
+      payload.stop_hook_active = false
+      payload.last_assistant_message = context.stopContext?.assistantResponse
+    }
+    if (event === "StopFailure") {
+      payload.error = context.stopFailureError
+      payload.last_assistant_message = context.stopContext?.assistantResponse
+    }
+    if (event === "SubagentStart" || event === "SubagentStop") {
+      payload.agent_id = context.subagent?.id ?? context.agentId ?? ""
+      payload.agent_type = context.subagent?.name ?? ""
+      if (event === "SubagentStop") payload.agent_transcript_path = context.transcriptPath ?? ""
+    }
+    const parsed = JSON.parse(JSON.stringify(payload)) as unknown
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as ModObject
   } catch {
     // Optional classic hooks cannot make a legacy event fail because a context field is opaque.
@@ -1424,54 +1480,119 @@ function toClassicInput(context: HookContext): ModObject {
 }
 
 function projectClassicResult(event: HookEvent, value: ModObject): HookResult | null {
-  const reason = [value.reason, value.stopReason, value.message, value.deny]
+  const reason = [value.deny, value.ask, value.block, value.stopReason]
     .find((item): item is string => typeof item === "string" && item.length > 0)
-  const denied = value.block === true || value.decision === "deny" || value.decision === "block"
-  const asked = event === "PreToolUse" && value.decision === "ask"
+  const denied =
+    typeof value.block === "string" ||
+    typeof value.deny === "string"
+  const asked = event === "PreToolUse" && typeof value.ask === "string"
   const prevented = value.preventContinuation === true
-  if (denied || asked || prevented) {
-    return {
-      exitCode: 0,
-      stdout: reason ?? `${event} classic Function Mod blocked the event`,
-      stderr: "",
-      blocked: !prevented,
-      continue: prevented ? false : undefined,
-      decision: denied || asked ? "block" : undefined,
-      reason
-    }
+  const result: HookResult = {
+    exitCode: 0,
+    stdout: denied || asked ? reason ?? `${event} classic Function Mod blocked the event` : "",
+    stderr: "",
+    blocked: denied || asked || prevented,
+    continue: prevented ? false : typeof value.continue === "boolean" ? value.continue : undefined,
+    stopReason: typeof value.stopReason === "string" ? value.stopReason : undefined,
+    decision: denied || asked ? "block" : undefined,
+    reason,
+    additionalContext:
+      typeof value.additionalContext === "string"
+        ? value.additionalContext
+        : Array.isArray(value.additionalContext) &&
+            value.additionalContext.every((item) => typeof item === "string")
+          ? value.additionalContext.join("\n")
+          : undefined,
+    systemMessage: typeof value.systemMessage === "string" ? value.systemMessage : undefined,
+    requiredSkill: typeof value.requiredSkill === "string" ? value.requiredSkill : undefined,
+    suppressOutput: value.suppressOutput === true ? true : undefined,
+    updatedInput:
+      value.updatedInput && typeof value.updatedInput === "object" && !Array.isArray(value.updatedInput)
+        ? (value.updatedInput as Record<string, unknown>)
+        : undefined
   }
-  if (typeof value.additionalContext === "string" || typeof value.systemMessage === "string") {
-    return {
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-      blocked: false,
-      additionalContext: typeof value.additionalContext === "string" ? value.additionalContext : undefined,
-      systemMessage: typeof value.systemMessage === "string" ? value.systemMessage : undefined
-    }
-  }
-  return null
+  const hasPayload =
+    denied ||
+    asked ||
+    prevented ||
+    result.continue !== undefined ||
+    result.additionalContext !== undefined ||
+    result.systemMessage !== undefined ||
+    result.requiredSkill !== undefined ||
+    result.suppressOutput !== undefined ||
+    result.updatedInput !== undefined
+  return hasPayload ? result : null
 }
 
 async function runClassicFunctionHook(
   event: HookEvent,
-  context: HookContext
+  context: HookContext,
+  legacy: (input?: ModObject) => Promise<HookResult | null>,
+  assertCurrent: () => void
 ): Promise<HookResult | null> {
-  if (!CLASSIC_HOOK_EVENTS.has(event) || !context.workspacePath || !context.sessionId) return null
+  if (!CLASSIC_HOOK_EVENTS.has(event) || !context.workspacePath || !context.sessionId) return legacy()
   const manager = getModsManager()
-  if (!manager) return null
+  if (!manager) return legacy()
+  const signal = context.signal ?? getModCallContext()?.signal ?? new AbortController().signal
+  signal.throwIfAborted()
+  assertCurrent()
+  // A recovery path must not rerun a settings hook that already had effects.
+  let lower: Promise<HookResult | null> | undefined
+  const runLower = (input?: ModObject) => (lower ??= legacy(input))
   try {
     const result = await manager.classicEvent(
       context.workspacePath,
       context.sessionId,
       `classic.${event}`,
-      toClassicInput(context),
-      new AbortController().signal
+      toClassicInput(event, context),
+      signal,
+      async (input, callSignal) => {
+        callSignal.throwIfAborted()
+        assertCurrent()
+        const value = await runLower(input)
+        callSignal.throwIfAborted()
+        assertCurrent()
+        if (!value) return {}
+        const result: ModObject = {}
+        const reason = value.stopReason || value.reason || value.stderr || value.stdout || `${event} hook blocked`
+        if (event === "PreToolUse") {
+          if (value.blocked || value.decision === "block" || value.continue === false) result.deny = reason
+          if (value.updatedInput) result.updatedInput = value.updatedInput as ModObject
+        } else {
+          if (value.blocked || value.decision === "block") result.block = reason
+          if (value.continue === false) { result.preventContinuation = true; result.stopReason = reason }
+        }
+        if (value.additionalContext) result.additionalContext = [value.additionalContext]
+        return result
+      }
     )
-    return isModObject(result) ? projectClassicResult(event, result) : null
+    signal.throwIfAborted()
+    assertCurrent()
+    const projected = isModObject(result) ? projectClassicResult(event, result) : null
+    const native = lower ? await lower : null
+    // CMB-specific notices and human gates have no upstream result fields. Keep
+    // them host-owned while the classic control fields follow the module fold.
+    if (native) return {
+      ...native,
+      blocked: projected?.blocked ?? false,
+      decision: native.decision === "human_gate" ? "human_gate" : projected?.decision,
+      reason: projected?.reason,
+      continue: native.continue === false ? false : projected?.continue,
+      stopReason: native.stopReason ?? projected?.stopReason,
+      updatedInput: projected?.updatedInput,
+      additionalContext: projected?.additionalContext
+    }
+    return projected
   } catch (error) {
+    signal.throwIfAborted()
+    assertCurrent()
+    // Optional guest failures are recovered inside the dispatcher. Errors that
+    // escape its host boundary must not re-enter settings hooks after revocation.
+    if (error instanceof ModError || error instanceof ModFunctionError) throw error
     console.warn(`[Hooks] ${event} classic Function Mod skipped:`, error)
-    return null
+    const fallback = await runLower()
+    assertCurrent()
+    return fallback
   }
 }
 
@@ -1707,18 +1828,46 @@ function recordHookResult(
   onHookResult?.(event, hook, result)
 }
 
-export async function runHooks(
+export function runHooks(
   hooks: HookConfig[],
   event: HookEvent,
   context: HookContext,
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
+  const generation = currentOnceGeneration(getOnceSessionId(context))
+  const callContext = getModCallContext()
+  const assertCurrent = () => {
+    context.signal?.throwIfAborted()
+    callContext?.signal?.throwIfAborted()
+    callContext?.assertLive?.()
+    if (generation !== currentOnceGeneration(getOnceSessionId(context)))
+      throw Error("HOOK_SESSION_CHANGED")
+  }
+  return runClassicFunctionHook(event, context, (input) => {
+    assertCurrent()
+    if (event === "PreToolUse" && input) {
+      const toolArgs: Record<string, unknown> = { ...input }
+      for (const key of ["tool", "tool_use_id"]) {
+        if (context.toolArgs && Object.hasOwn(context.toolArgs, key))
+          toolArgs[key] = context.toolArgs[key]
+        else delete toolArgs[key]
+      }
+      return runLegacyHooks(hooks, event, { ...context, toolArgs }, onHookResult)
+    }
+    return runLegacyHooks(hooks, event, context, onHookResult)
+  }, assertCurrent)
+}
+
+async function runLegacyHooks(
+  hooks: HookConfig[],
+  event: HookEvent,
+  context: HookContext,
+  onHookResult?: HookResultCallback,
+  classicResult: HookResult | null = null
+): Promise<HookResult | null> {
   // Keep the legacy no-context path synchronous up to its first hook await.
   // Session teardown can clear once state immediately after calling runHooks;
   // an unconditional await here would capture the new generation too late.
-  let classicResult: HookResult | null = null
-  if (context.workspacePath && context.sessionId)
-    classicResult = await runClassicFunctionHook(event, context)
   if (classicResult?.blocked || classicResult?.continue === false) return classicResult
   const matched = hooks.filter((h) => hookMatchesRunCriteria(h, event, context))
 

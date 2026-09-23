@@ -8,6 +8,7 @@ const pinned: Record<string, readonly string[]> = {
   "command.describe": ["command", "immediate", "provider"],
   "config.describe": ["key", "provider"],
   "tool.call": ["tool", "tool_use_id", "agentId"],
+  "classic.PreToolUse": ["tool", "tool_use_id"],
   "tool.check": ["tool", "input", "tool_use_id"],
   "turn.step": ["turnId", "index", "messageCount", "agentId"],
   "turn.complete": ["agentId"],
@@ -25,6 +26,17 @@ const required: Record<string, readonly string[]> = {
   "config.describe": ["key"],
   "turn.step": ["turnId", "index", "messageCount"]
 }
+const classicIdentity = [
+  "hook_event_name",
+  "session_id",
+  "transcript_path",
+  "cwd",
+  "prompt_id",
+  "permission_mode",
+  "agent_id",
+  "agent_type",
+  "effort"
+] as const
 
 function same(a: unknown, b: unknown): boolean {
   if (a === b) return true
@@ -45,7 +57,8 @@ export function normalizeFunctionInput(
 ): ModObject {
   encodeModJson(received)
   const result = { ...received }
-  for (const key of pinned[event] ?? []) {
+  const fields = pinned[event] ?? (event.startsWith("classic.") ? classicIdentity : [])
+  for (const key of fields) {
     if (
       required[event]?.includes(key) &&
       Object.hasOwn(original, key) &&

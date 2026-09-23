@@ -360,6 +360,8 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
 
             const baseToolArgs = normalizeToolArgs(toolCall.args)
             const hookContext = buildHookContext(toolName, baseToolArgs, options)
+            hookContext.toolCallId = toolCall?.id
+            hookContext.signal = request.runtime?.signal
             const preResult = await runHooksEnriched(
               options.resolveHooksForContext("PreToolUse", hookContext),
               "PreToolUse",

@@ -716,3 +716,29 @@ it("protects real turn facts before observers and notices after hooks, including
   expect(await f.manager.turnNotices(f.root, "thread")).toEqual([])
   expect(f.loads()).toBe(loads)
 })
+
+it("does not fall through classic core when a cold session is invalidated during discovery", async () => {
+  const f = await fixture()
+  vi.spyOn(f.manager, "status").mockImplementationOnce(async () => {
+    f.manager.invalidate(f.root)
+    return []
+  })
+  const core = vi.fn(async () => ({}))
+  await expect(f.manager.classicEvent(f.root, "thread", "classic.Stop", {
+    hook_event_name: "Stop", session_id: "thread", cwd: f.root, transcript_path: ""
+  }, new AbortController().signal, core)).rejects.toThrow("MODS_SCOPE_CHANGED")
+  expect(core).not.toHaveBeenCalled()
+})
+
+
+it("does not run the disabled classic core for an already-cancelled caller", async () => {
+  const f = await fixture()
+  f.setEnabled(false)
+  const controller = new AbortController()
+  controller.abort(Error("cancelled"))
+  const core = vi.fn(async () => ({}))
+  await expect(f.manager.classicEvent(f.root, "thread", "classic.Stop", {
+    hook_event_name: "Stop", session_id: "thread", cwd: f.root, transcript_path: ""
+  }, controller.signal, core)).rejects.toThrow("cancelled")
+  expect(core).not.toHaveBeenCalled()
+})

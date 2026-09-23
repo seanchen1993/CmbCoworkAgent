@@ -766,20 +766,40 @@ export class FunctionModsManager {
     threadId: string,
     event: string,
     input: ModObject,
-    signal: AbortSignal
+    signal: AbortSignal,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModObject> = async () => ({})
   ): Promise<ModObject> {
-    if (
-      !this.host.enabled(workspace) ||
-      this.sources().length === 0 ||
-      (!this.sessions.has(JSON.stringify([workspace, threadId])) &&
-        !(await this.status(workspace)).some((item) => item.state === "ready"))
-    )
-      return {}
+    const epoch = this.epoch(workspace)
+    const assertCurrent = () => {
+      signal.throwIfAborted()
+      this.host.assertThread?.(workspace, threadId)
+      if (this.closed || this.epoch(workspace) !== epoch)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    }
+    const runCore = async (input: ModObject, callSignal: AbortSignal) => {
+      assertCurrent()
+      callSignal.throwIfAborted()
+      const result = await core(input, callSignal)
+      callSignal.throwIfAborted()
+      assertCurrent()
+      return result
+    }
+    assertCurrent()
+    if (!this.host.enabled(workspace) || this.sources().length === 0)
+      return runCore(input, signal)
+    const ready = this.sessions.has(JSON.stringify([workspace, threadId])) ||
+      (await this.status(workspace)).some((item) => item.state === "ready")
+    assertCurrent()
+    if (!this.host.enabled(workspace)) throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    if (!ready) return runCore(input, signal)
     const entry = await this.session(workspace, threadId)
+    assertCurrent()
     if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
     const safe = await this.host.publish(workspace, input, signal)
-    const result = await entry.session!.classicEvent(event, safe as ModObject, signal)
+    assertCurrent()
+    const result = await entry.session!.classicEvent(event, safe as ModObject, signal, runCore)
+    assertCurrent()
     if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
     return result

@@ -34,3 +34,36 @@ it("compares pinned objects structurally, independently of property insertion or
     )
   ).toThrow("MODS_PINNED_INPUT")
 })
+
+it("pins classic tool identities while allowing argument rewrites", () => {
+  const original = { tool: "write_file", tool_use_id: "call-1", path: "old.txt" }
+  expect(normalizeFunctionInput("classic.PreToolUse", { path: "safe.txt" }, original)).toEqual({
+    ...original,
+    path: "safe.txt"
+  })
+  for (const changed of [
+    { ...original, tool: "execute" },
+    { ...original, tool_use_id: "other" }
+  ])
+    expect(() => normalizeFunctionInput("classic.PreToolUse", changed, original)).toThrow(
+      "MODS_PINNED_INPUT"
+    )
+})
+
+it("pins classic session and event base fields and restores omitted identities", () => {
+  const original = {
+    hook_event_name: "Stop",
+    session_id: "thread",
+    cwd: "/workspace",
+    transcript_path: "/transcript",
+    prompt_id: "prompt",
+    agent_id: "agent",
+    agent_type: "reviewer",
+    permission_mode: "plan"
+  }
+  expect(normalizeFunctionInput("classic.Stop", {}, original)).toEqual(original)
+  for (const key of Object.keys(original))
+    expect(() =>
+      normalizeFunctionInput("classic.Stop", { ...original, [key]: "forged" }, original)
+    ).toThrow("MODS_PINNED_INPUT")
+})

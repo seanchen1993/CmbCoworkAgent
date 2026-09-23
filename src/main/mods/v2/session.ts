@@ -78,6 +78,7 @@ import {
   validateFunctionAgentOfferInput,
   validateFunctionAgentOfferResult
 } from "../../../shared/mods/v2/agent"
+import { validateClassicInput, validateClassicResult } from "../../../shared/mods/v2/classic"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -615,6 +616,7 @@ export class FunctionSession {
             ? { ...value, path: resolve(this.host.cwd?.() ?? this.host.workspace, value.path) }
             : value,
       validateInput: (name, value) => {
+        validateClassicInput(name, value)
         validateBasicInput(name, value)
         validateFunctionTurnInput(name, value)
         if (name === "tool.register") functionToolSpec(value)
@@ -661,6 +663,7 @@ export class FunctionSession {
           throw new ModFunctionError("MODS_COMMAND_ARGS")
       },
       validateResult: (name, value) => {
+        validateClassicResult(name, value)
         validateFunctionTurnResult(name, value)
         if (name === "tool.check") return validateToolCheckResult(value)
         if (name === "tool.call") return validateFunctionToolResult(value)

@@ -371,7 +371,8 @@ export class ModsManager {
       threadId: string,
       event: string,
       input: ModObject,
-      signal: AbortSignal
+      signal: AbortSignal,
+      core?: (input: ModObject, signal: AbortSignal) => Promise<ModObject>
     ): Promise<ModObject>
   }
 
@@ -578,10 +579,14 @@ export class ModsManager {
     input: ModObject,
     signal: AbortSignal
   ): Promise<ModObject> {
+    workspace = this.workspaceKey(workspace)
+    signal.throwIfAborted()
     if (!this.isEnabled(workspace)) return { isOffered: true }
-    return (await this.functionLifecycle?.offerAgent?.(workspace, threadId, input, signal)) ?? {
-      isOffered: true
-    }
+    return (
+      (await this.functionLifecycle?.offerAgent?.(workspace, threadId, input, signal)) ?? {
+        isOffered: true
+      }
+    )
   }
 
   async classicEvent(
@@ -589,10 +594,15 @@ export class ModsManager {
     threadId: string,
     event: string,
     input: ModObject,
-    signal: AbortSignal
+    signal: AbortSignal,
+    core: (input: ModObject, signal: AbortSignal) => Promise<ModObject> = async () => ({})
   ): Promise<ModObject> {
-    if (!this.isEnabled(workspace)) return {}
-    return (await this.functionLifecycle?.classicEvent?.(workspace, threadId, event, input, signal)) ?? {}
+    workspace = this.workspaceKey(workspace)
+    signal.throwIfAborted()
+    getModCallContext()?.assertLive?.()
+    if (!this.isEnabled(workspace) || !this.functionLifecycle?.classicEvent)
+      return core(input, signal)
+    return this.functionLifecycle.classicEvent(workspace, threadId, event, input, signal, core)
   }
 
   isEnabled(workspace: string): boolean {

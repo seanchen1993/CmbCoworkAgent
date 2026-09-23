@@ -1220,3 +1220,41 @@ it("keeps live catalogs at capacity and only reclaims expired entries without bo
     "MODS_TOOL_CONTEXT_REQUIRED"
   )
 })
+
+it("canonicalizes native Hook workspaces before entering the Function Mods thread guard", async () => {
+  const f = fixture()
+  const classicEvent = vi.fn(async (workspace: string) => {
+    if (workspace !== f.scope.workspace) throw Error("MODS_CALL_SCOPE_CHANGED")
+    return {}
+  })
+  f.manager.attachFunctions({
+    invalidate: () => undefined,
+    closeThread: () => undefined,
+    close: () => undefined,
+    classicEvent
+  })
+  await expect(f.manager.classicEvent(
+    f.workspace, "thread", "classic.PreToolUse", { tool: "read_file", tool_use_id: "read" },
+    f.controller.signal
+  )).resolves.toEqual({})
+  expect(classicEvent.mock.calls[0][0]).toBe(f.scope.workspace)
+})
+
+
+it("canonicalizes native agent offers before entering the Function Mods thread guard", async () => {
+  const f = fixture()
+  const offerAgent = vi.fn(async (workspace: string) => {
+    if (workspace !== f.scope.workspace) throw Error("MODS_CALL_SCOPE_CHANGED")
+    return { isOffered: true }
+  })
+  f.manager.attachFunctions({
+    invalidate: () => undefined,
+    closeThread: () => undefined,
+    close: () => undefined,
+    offerAgent
+  })
+  await expect(f.manager.offerAgent(
+    f.workspace, "thread", { agentId: "reviewer" }, f.controller.signal
+  )).resolves.toEqual({ isOffered: true })
+  expect(offerAgent.mock.calls[0][0]).toBe(f.scope.workspace)
+})
