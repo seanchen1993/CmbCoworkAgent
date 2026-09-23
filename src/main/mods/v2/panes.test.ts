@@ -237,6 +237,9 @@ describe("desktop function panes through the production session", () => {
       const [pane] = await session.panes.snapshot()
       expect(JSON.stringify(pane.tree)).toContain("加一")
       session.panes.invalidate()
+      // Production invalidations coalesce for 100 ms. This is a handle-retention test,
+      // not an attempt to exceed the separate guest CPU budget with a busy render loop.
+      await new Promise((resolve) => setTimeout(resolve, 100))
     }
-  }, 15000)
+  }, 45000)
 })

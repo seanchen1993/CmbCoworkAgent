@@ -11,8 +11,10 @@ import {
   validatePaneArgs,
   type FunctionUiAction,
   type FunctionUiElement,
+  type FunctionFocusResult,
   type FunctionPaneSnapshot
 } from "../../../shared/mods/v2/ui"
+import { functionFocusTargets } from "../../../shared/mods/v2/focus"
 import type { FunctionPlugin } from "./dispatcher"
 
 export interface FunctionUiDispatch {
@@ -26,6 +28,7 @@ export interface FunctionUiDispatch {
 interface Pane extends FunctionPaneSnapshot {
   dirty: boolean
   focused: boolean
+  visibleTree?: FunctionUiElement
 }
 interface PaneHost {
   clients?: import("./clients").FunctionClients
@@ -46,7 +49,10 @@ interface PaneHost {
 /** Owns drawings and person intents. An IPC retry never invokes a closure for a second time. */
 export class FunctionPanes {
   private readonly panes = new Map<string, Pane>()
-  private readonly intents = new Map<string, { input: string; result: Promise<void> }>()
+  private readonly intents = new Map<
+    string,
+    { input: string; result: Promise<void | FunctionFocusResult> }
+  >()
   private serial: Promise<unknown> = Promise.resolve()
   private actions: Promise<unknown> = Promise.resolve()
   private readonly active = new Map<AbortController, string>()
@@ -86,7 +92,8 @@ export class FunctionPanes {
       closeOnEscape: input.closeOnEscape === true,
       rows: typeof input.rows === "number" ? Math.min(50, input.rows) : 12,
       dirty: true,
-      focused: prior?.focused ?? false
+      focused: prior?.focused ?? false,
+      ...(input.focus === true ? { focusRequest: { id: randomUUID(), pending: true } } : {})
     })
     this.changed()
   }
@@ -116,7 +123,11 @@ export class FunctionPanes {
       return
     }
     this.retired.delete(generation)
-    await Promise.allSettled(this.host.plugins.map((plugin) => plugin.guest.releaseUi(generation)))
+    await Promise.allSettled(
+      this.host.plugins.map((plugin) =>
+        Promise.resolve().then(() => plugin.guest.releaseUi(generation))
+      )
+    )
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -168,9 +179,19 @@ export class FunctionPanes {
       this.host.assertLive()
       const originals = new Map(this.panes)
       const snapshots = [...this.panes.values()].map(
-        ({ key, id, plugin, title, generation, tree, closeOnEscape, rows }) =>
+        ({ key, id, plugin, title, generation, tree, closeOnEscape, rows, focusRequest }) =>
           parseModJson(
-            encodeModJson({ key, id, plugin, title, generation, tree, closeOnEscape, rows })
+            encodeModJson({
+              key,
+              id,
+              plugin,
+              title,
+              generation,
+              tree,
+              closeOnEscape,
+              rows,
+              ...(focusRequest ? { focusRequest } : {})
+            })
           ) as unknown as FunctionPaneSnapshot
       )
       const published = await this.host.publish(snapshots as unknown as ModJson)
@@ -184,6 +205,7 @@ export class FunctionPanes {
         if (
           !isModObject(result) ||
           typeof result.title !== "string" ||
+          JSON.stringify(result.focusRequest) !== JSON.stringify(original.focusRequest) ||
           ["key", "id", "plugin", "generation", "closeOnEscape", "rows"].some(
             (key) => result[key] !== original[key]
           )
@@ -204,13 +226,16 @@ export class FunctionPanes {
           this.host.clients?.closePane(result.key as string)
           continue
         }
+        const pane = this.panes.get(result.key as string)!
+        pane.visibleTree = result.tree
+        pane.clients = result.clients as unknown as FunctionPaneSnapshot["clients"]
         visible.push(result)
       }
       return visible as unknown as FunctionPaneSnapshot[]
     })
   }
 
-  act(action: FunctionUiAction): Promise<void> {
+  act(action: FunctionUiAction): Promise<void | FunctionFocusResult> {
     this.host.assertLive()
     if (
       !isModObject(action) ||
@@ -243,7 +268,7 @@ export class FunctionPanes {
     // Keep settled IDs for the life of the session: evicting one could replay its action.
     if (this.intents.size >= 4096)
       return Promise.reject(new ModFunctionError("MODS_UI_INTENT_LIMIT"))
-    const perform = async (): Promise<void> => {
+    const perform = async (): Promise<void | FunctionFocusResult> => {
       this.host.assertLive()
       const pane = this.panes.get(action.pane)
       if (!pane || pane.generation !== action.generation)
@@ -272,7 +297,8 @@ export class FunctionPanes {
         if (
           action.kind === "focus" &&
           (typeof value.focused !== "boolean" ||
-            Object.keys(value).some((key) => key !== "focused"))
+            (value.request !== undefined && typeof value.request !== "string") ||
+            Object.keys(value).some((key) => !["focused", "request"].includes(key)))
         )
           throw new ModFunctionError("MODS_UI_ACTION_INVALID")
         if (
@@ -284,27 +310,67 @@ export class FunctionPanes {
             ))
         )
           throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+        if (action.kind === "focus" && value.request !== undefined) {
+          if (pane.focusRequest?.id !== value.request || !pane.focusRequest.pending)
+            throw new ModFunctionError("MODS_UI_STALE_FOCUS")
+          pane.focusRequest.pending = false
+          if (!value.focused) return { focused: false }
+        }
+        const targets = functionFocusTargets({
+          tree: pane.visibleTree ?? pane.tree,
+          clients: pane.clients
+        })
+        const target =
+          action.kind === "focus" && value.focused
+            ? targets.find((row) => row.autoFocus)?.target
+            : undefined
+        let focusResult: FunctionFocusResult = { focused: false }
+        let focusApplied = false
         const controller = new AbortController()
         this.active.set(controller, pane.key)
         this.retained.set(action.generation, (this.retained.get(action.generation) ?? 0) + 1)
         try {
-          await this.host.dispatch(
+          const outcome = await this.host.dispatch(
             action.kind === "focus" ? "ui.focus" : "ui.scroll",
             {
               surface: "desktop",
               component: "Pane",
               requestId: pane.id,
-              plugin: pane.plugin,
-              element: pane.id,
-              ...(action.kind === "focus" ? { focused: value.focused } : { value })
+              plugin: target?.plugin ?? pane.plugin,
+              element: target?.element ?? pane.id,
+              ...(action.kind === "focus"
+                ? {
+                    focused: value.focused,
+                    origin: target
+                      ? { kind: "plugin", name: target.plugin }
+                      : value.request === undefined
+                        ? { kind: "person" }
+                        : { kind: "plugin", name: pane.plugin }
+                  }
+                : { value })
             },
             {
               signal: controller.signal,
               generation: action.generation,
-              core: async (input) => {
+              core: async (input): Promise<ModJson> => {
                 if (this.panes.get(pane.key) !== pane)
                   throw new ModFunctionError("MODS_UI_STALE_ACTION")
-                if (action.kind === "focus") pane.focused = input.focused as boolean
+                if (action.kind === "focus") {
+                  const selected = targets.find(
+                    (row) =>
+                      row.target.plugin === input.plugin &&
+                      row.target.element === input.element &&
+                      row.target.client === target?.client
+                  )?.target
+                  if (input.element !== pane.id && !selected)
+                    return { deny: "Element is not drawn" }
+                  controller.signal.throwIfAborted()
+                  focusResult = {
+                    focused: input.focused as boolean,
+                    ...(selected ? { target: selected } : {})
+                  }
+                  focusApplied = true
+                }
                 pane.dirty = true
                 return {
                   element: pane.id,
@@ -314,6 +380,27 @@ export class FunctionPanes {
             }
           )
           this.host.assertLive()
+          controller.signal.throwIfAborted()
+          if (this.panes.get(pane.key) !== pane || pane.generation !== action.generation)
+            throw new ModFunctionError("MODS_UI_STALE_ACTION")
+          if (action.kind === "focus") {
+            if (isModObject(outcome) && typeof outcome.deny === "string") {
+              focusResult = { focused: false }
+              focusApplied = false
+            }
+            if (focusResult.focused && focusResult.target?.client && this.host.clients)
+              await this.host.clients.focusFromPane(
+                pane.key,
+                focusResult.target.client,
+                focusResult.target.element,
+                true
+              )
+            this.host.assertLive()
+            controller.signal.throwIfAborted()
+            if (this.panes.get(pane.key) !== pane || pane.generation !== action.generation)
+              throw new ModFunctionError("MODS_UI_STALE_ACTION")
+            if (focusApplied) pane.focused = focusResult.focused
+          }
           this.changed()
         } finally {
           this.active.delete(controller)
@@ -324,7 +411,7 @@ export class FunctionPanes {
             if (this.retired.has(action.generation)) await this.release(action.generation)
           }
         }
-        return
+        return action.kind === "focus" ? focusResult : undefined
       }
       let element: FunctionUiElement | undefined
       const find = (node: FunctionUiElement | string): void => {

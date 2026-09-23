@@ -652,7 +652,15 @@ export class FunctionSession {
           (typeof value.focused !== "boolean" ||
             Object.keys(value).some(
               (key) =>
-                !["surface", "component", "requestId", "plugin", "element", "focused"].includes(key)
+                ![
+                  "surface",
+                  "component",
+                  "requestId",
+                  "plugin",
+                  "element",
+                  "focused",
+                  "origin"
+                ].includes(key)
             ))
         )
           throw new ModFunctionError("MODS_UI_ACTION_INVALID")
@@ -716,6 +724,11 @@ export class FunctionSession {
           return validateBasicResult(name, value.value)
         }
         if (!isModObject(value)) throw new ModFunctionError("MODS_EVENT_RESULT")
+        if (
+          name === "ui.focus" &&
+          (Object.keys(value).length === 0 || typeof value.deny === "string")
+        )
+          return
         if (
           ["ui.press", "ui.input", "ui.select", "ui.focus", "ui.scroll"].includes(name) &&
           (typeof value.element !== "string" ||

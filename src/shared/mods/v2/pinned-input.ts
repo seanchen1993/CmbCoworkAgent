@@ -18,6 +18,7 @@ const pinned: Record<string, readonly string[]> = {
   "ui.press": ["plugin", "element", "component", "requestId", "surface"],
   "ui.input": ["plugin", "element", "component", "requestId", "surface", "kind"],
   "ui.select": ["plugin", "element", "component", "requestId", "surface"],
+  "ui.focus": ["plugin", "component", "requestId", "surface", "origin", "focused"],
   "ui.message": ["surface", "component", "requestId", "element", "module"]
 }
 const required: Record<string, readonly string[]> = {

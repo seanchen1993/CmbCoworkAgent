@@ -982,7 +982,7 @@ interface CustomAPI {
     paneAct(
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction
-    ): Promise<void>
+    ): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult>
     clientAct(
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionClientAction

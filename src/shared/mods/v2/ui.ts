@@ -25,6 +25,16 @@ export interface FunctionPaneSnapshot {
   closeOnEscape: boolean
   rows: number
   clients?: FunctionClientSnapshot[]
+  focusRequest?: { id: string; pending: boolean }
+}
+export interface FunctionFocusTarget {
+  plugin: string
+  element: string
+  client?: string
+}
+export interface FunctionFocusResult {
+  focused: boolean
+  target?: FunctionFocusTarget
 }
 export interface FunctionClientSnapshot {
   id: string
@@ -259,6 +269,7 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
 }
 
 export function validatePaneArgs(value: ModObject): void {
+  if (value.holdToasts === true) throw new ModFunctionError("MODS_UI_HOLD_TOASTS_UNSUPPORTED")
   if (
     typeof value.id !== "string" ||
     !/^[\w-]{1,64}$/.test(value.id) ||

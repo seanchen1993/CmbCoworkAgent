@@ -1134,11 +1134,15 @@ export class FunctionModsManager {
     return entry.session!.panes.snapshot()
   }
 
-  async act(workspace: string, threadId: string, action: FunctionUiAction): Promise<void> {
+  async act(
+    workspace: string,
+    threadId: string,
+    action: FunctionUiAction
+  ): Promise<void | import("../../../shared/mods/v2/ui").FunctionFocusResult> {
     const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
     if (!entry || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_UI_STALE_ACTION")
     await entry.loading
-    await entry.session!.panes.act(action)
+    return entry.session!.panes.act(action)
   }
 
   async clientAct(

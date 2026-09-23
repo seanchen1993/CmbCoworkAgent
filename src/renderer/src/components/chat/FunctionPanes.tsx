@@ -9,6 +9,7 @@ import {
 } from "../../../../shared/mods/v2/ui"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { FunctionClient } from "./FunctionClient"
+import { desktopAllowsPaneFocus, paneFocusElement } from "../../lib/function-pane-focus"
 
 type Act = (
   node: FunctionUiElement | undefined,
@@ -17,13 +18,19 @@ type Act = (
 ) => Promise<void>
 
 function Field({ node, busy, act }: { node: FunctionUiElement; busy: boolean; act: Act }) {
-  const [value, setValue] = useState(String(node.props.value ?? ""))
+  const source = String(node.props.value ?? "")
+  const [field, setField] = useState({ source, value: source })
+  if (field.source !== source) setField({ source, value: source })
+  const value = field.source === source ? field.value : source
+  const setValue = (value: string): void => setField({ source, value })
   const label = String(node.props.label ?? node.props.key)
   if (node.type === "Select")
     return (
       <label className="flex items-center gap-2 text-sm">
         {label}
         <select
+          data-function-control={String(node.props.key)}
+          data-function-plugin={node.press?.plugin}
           aria-label={label}
           value={value}
           disabled={busy}
@@ -52,6 +59,8 @@ function Field({ node, busy, act }: { node: FunctionUiElement; busy: boolean; ac
       <label className="flex min-w-0 flex-1 items-center gap-2 text-sm">
         {label}
         <input
+          data-function-control={String(node.props.key)}
+          data-function-plugin={node.press?.plugin}
           aria-label={label}
           value={value}
           maxLength={10000}
@@ -151,6 +160,8 @@ function Element({
   if (node.type === "Button")
     return (
       <Button
+        data-function-control={String(node.props.key)}
+        data-function-plugin={node.press?.plugin}
         size="sm"
         variant="outline"
         disabled={busy}
@@ -161,7 +172,14 @@ function Element({
       </Button>
     )
   if (node.type === "Input" || node.type === "Select")
-    return <Field key={node.press?.handle} node={node} busy={busy} act={act} />
+    return (
+      <Field
+        key={`${node.press?.plugin}:${String(node.props.key)}`}
+        node={node}
+        busy={busy}
+        act={act}
+      />
+    )
   if (node.type === "Link")
     return (
       <a
@@ -194,6 +212,62 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
   const pending = useRef(0)
   const [error, setError] = useState("")
   const refreshRef = useRef<() => void>(() => {})
+  const panesRef = useRef(panes)
+  panesRef.current = panes
+  const sections = useRef(new Map<string, HTMLElement>())
+  const attemptedFocus = useRef(new Set<string>())
+  const focusEpoch = useRef(0)
+  const applyingFocus = useRef(false)
+  useEffect(() => {
+    const changed = (): void => {
+      focusEpoch.current++
+    }
+    window.addEventListener("pointerdown", changed, true)
+    window.addEventListener("keydown", changed, true)
+    window.addEventListener("mods:configuration-changed", changed)
+    return () => {
+      changed()
+      window.removeEventListener("pointerdown", changed, true)
+      window.removeEventListener("keydown", changed, true)
+      window.removeEventListener("mods:configuration-changed", changed)
+    }
+  }, [threadId])
+  useEffect(() => {
+    for (const pane of panes) {
+      const request = pane.focusRequest
+      if (!request?.pending || attemptedFocus.current.has(request.id)) continue
+      attemptedFocus.current.add(request.id)
+      const epoch = focusEpoch.current
+      const allowed = desktopAllowsPaneFocus()
+      void window.api.mods
+        .paneAct(threadId, {
+          pane: pane.key,
+          generation: pane.generation,
+          plugin: pane.plugin,
+          handle: 0,
+          kind: "focus",
+          intentId: crypto.randomUUID(),
+          value: { focused: allowed, request: request.id }
+        })
+        .then((result) => {
+          if (!result?.focused || epoch !== focusEpoch.current || !desktopAllowsPaneFocus()) return
+          const current = panesRef.current.find((row) => row.key === pane.key)
+          if (current?.focusRequest?.id !== request.id) return
+          const section = sections.current.get(pane.key)
+          if (!section?.isConnected) return
+          const element = paneFocusElement(section, result.target)
+          if (!element || !element.isConnected || element.matches(":disabled")) return
+          applyingFocus.current = true
+          try {
+            element.focus({ preventScroll: true })
+          } finally {
+            applyingFocus.current = false
+          }
+        })
+        .catch(() => {})
+        .finally(() => refreshRef.current())
+    }
+  }, [panes, threadId])
   useEffect(() => {
     let live = true
     let sequence = 0
@@ -233,7 +307,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
       value?: ModJson
     ) => {
       pending.current++
-      if (kind !== "change") setBusy(true)
+      if (!["change", "focus", "scroll"].includes(kind)) setBusy(true)
       setError("")
       try {
         await window.api.mods.paneAct(threadId, {
@@ -271,15 +345,48 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
       {panes.map((pane) => (
         <section
           key={pane.key}
+          ref={(element) => {
+            if (element) sections.current.set(pane.key, element)
+            else sections.current.delete(pane.key)
+          }}
           data-function-pane={pane.id}
           tabIndex={0}
           className="rounded-lg border bg-background p-3"
           onFocus={(event) => {
+            if (applyingFocus.current) return
             if (event.target !== event.currentTarget) return
-            void act(pane, undefined, "focus", { focused: true }).catch(() => {})
+            const section = event.currentTarget
+            const epoch = focusEpoch.current
+            void window.api.mods
+              .paneAct(threadId, {
+                pane: pane.key,
+                generation: pane.generation,
+                plugin: pane.plugin,
+                handle: 0,
+                kind: "focus",
+                intentId: crypto.randomUUID(),
+                value: { focused: true }
+              })
+              .then((result) => {
+                if (
+                  !result?.focused ||
+                  epoch !== focusEpoch.current ||
+                  document.activeElement !== section ||
+                  !section.isConnected
+                )
+                  return
+                const element = paneFocusElement(section, result.target)
+                if (!element || element.matches(":disabled")) return
+                applyingFocus.current = true
+                try {
+                  element.focus({ preventScroll: true })
+                } finally {
+                  applyingFocus.current = false
+                }
+              })
+              .catch(() => {})
           }}
           onBlur={(event) => {
-            if (event.target !== event.currentTarget) return
             if (
               event.relatedTarget instanceof Node &&
               event.currentTarget.contains(event.relatedTarget)

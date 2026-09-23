@@ -140,6 +140,7 @@ export function FunctionClient({
     <div
       ref={region}
       data-function-client={snapshot.element}
+      data-function-client-instance={snapshot.id}
       tabIndex={0}
       onFocus={(event) => {
         if (event.target !== event.currentTarget) return
@@ -151,7 +152,6 @@ export function FunctionClient({
         void send("focus", { focused: true }).catch(() => {})
       }}
       onBlur={(event) => {
-        if (event.target !== event.currentTarget) return
         if (
           event.relatedTarget instanceof Node &&
           event.currentTarget.contains(event.relatedTarget)

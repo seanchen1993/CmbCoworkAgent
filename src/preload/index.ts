@@ -3064,7 +3064,8 @@ const api = {
     paneAct: (
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction
-    ): Promise<void> => ipcRenderer.invoke("mods:function-ui-act", { threadId, action }),
+    ): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult> =>
+      ipcRenderer.invoke("mods:function-ui-act", { threadId, action }),
     clientAct: (
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionClientAction

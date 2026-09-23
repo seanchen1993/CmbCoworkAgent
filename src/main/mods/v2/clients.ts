@@ -88,6 +88,31 @@ export class FunctionClients {
       }
   }
 
+  /** Pane core already ran ui.focus. Deliver its decision to the live isolated surface once. */
+  async focusFromPane(
+    pane: string,
+    client: string,
+    element: string,
+    focused: boolean
+  ): Promise<void> {
+    this.assert()
+    const instance = [...this.instances.values()].find(
+      (row) => row.pane === pane && row.snapshot.id === client
+    )
+    if (!instance) throw new ModFunctionError("MODS_CLIENT_UNMOUNTED")
+    await this.enqueue(instance, async () => {
+      this.assert(instance)
+      let found = false
+      visit(instance.snapshot.tree, (node) => {
+        if (node.press?.plugin === instance.snapshot.plugin && node.props.key === element)
+          found = true
+      })
+      if (!found) throw new ModFunctionError("MODS_UI_STALE_FOCUS")
+      await this.update(instance, { kind: "focus", value: { focused } })
+      this.assert(instance)
+    })
+  }
+
   close(): void {
     this.closed = true
     for (const instance of this.instances.values()) this.stop(instance)

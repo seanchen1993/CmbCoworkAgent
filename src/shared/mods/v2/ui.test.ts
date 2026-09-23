@@ -49,4 +49,7 @@ describe("function UI data boundary", () => {
     for (const input of invalid)
       expect(() => validatePaneArgs(input)).toThrow("MODS_UI_PANE_ARGUMENTS")
   })
+  it("refuses holdToasts because the desktop does not have the matching toast queue", () => {
+    expect(() => validatePaneArgs({ id: "dialog", holdToasts: true })).toThrow("MODS_UI_HOLD_TOASTS_UNSUPPORTED")
+  })
 })

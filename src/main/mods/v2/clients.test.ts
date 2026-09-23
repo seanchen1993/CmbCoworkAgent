@@ -162,6 +162,34 @@ it("supports size, key, pointer, input, select and clock updates, then releases 
   expect(content(fresh.tree)).toContain("count:0")
 })
 
+it("focuses the first drawn Client control through the owning pane and isolated session", async () => {
+  const f = await fixture(`var __cmbSurfaceMod={default(props,s){
+    if(s.state===undefined){s.setState(false);s.onFocus(e=>s.setState(e.focused))}
+    return s.elements.Button({key:"first",label:"focused:"+s.state,autoFocus:true,onPress(){}});
+  }}`)
+  f.session.panes.open("client-board", { id: "client-board", focus: true })
+  const { pane, client } = await f.snapshot()
+  expect(pane.focusRequest?.pending).toBe(true)
+  const result = await f.session.panes.act({
+    pane: pane.key,
+    generation: pane.generation,
+    plugin: pane.plugin,
+    handle: 0,
+    kind: "focus",
+    intentId: randomUUID(),
+    value: { focused: true, request: pane.focusRequest!.id }
+  })
+  expect(result).toEqual({
+    focused: true,
+    target: { plugin: "client-board", element: "first", client: client.id }
+  })
+  expect((await f.snapshot()).client.tree.props.label).toBe("focused:true")
+  await f.session.panes.closePane("client-board", "client-board")
+  await expect(f.session.clients.focusFromPane(pane.key, client.id, "first", true)).rejects.toThrow(
+    "MODS_CLIENT_UNMOUNTED"
+  )
+})
+
 it("routes focus and scroll lifecycle events through the host and guest surface", async () => {
   const f = await fixture(`var __cmbSurfaceMod={default(props,s){
     if(s.state===undefined){s.setState({focus:"none",scroll:0});s.onFocus(e=>s.setState({...s.state,focus:e.focused?"focused":"blurred"}));s.onScroll(e=>s.setState({...s.state,scroll:e.deltaY||0}))}
