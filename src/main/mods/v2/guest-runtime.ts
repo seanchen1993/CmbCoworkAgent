@@ -109,10 +109,16 @@ export class FunctionGuestRuntime {
             typeof row.id !== "string" ||
             typeof row.pattern !== "string" ||
             !validEventPattern(row.pattern) ||
-            typeof row.hasCatch !== "boolean"
+            typeof row.hasCatch !== "boolean" ||
+            typeof row.hasMatcher !== "boolean"
           )
             throw Error("MODS_REGISTRATION_INVALID")
-          guest.registrations.push({ id: row.id, pattern: row.pattern, hasCatch: row.hasCatch })
+          guest.registrations.push({
+            id: row.id,
+            pattern: row.pattern,
+            hasCatch: row.hasCatch,
+            hasMatcher: row.hasMatcher
+          })
         }
       } finally {
         registration.dispose()

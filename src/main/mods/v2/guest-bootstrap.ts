@@ -73,7 +73,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     }
     if (registrations.length >= 128) throw Error("MODS_REGISTRATION_LIMIT");
     const id = String(registrations.length);
-    const record = { id, pattern, hasCatch: false };
+    const record = { id, pattern, hasCatch: false, hasMatcher: matcher !== undefined };
     const handler = { fn, matcher, recover: undefined };
     registrations.push(record);
     handlers.set(id, handler);

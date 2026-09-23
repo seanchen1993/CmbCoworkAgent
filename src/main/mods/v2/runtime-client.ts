@@ -215,6 +215,10 @@ export class FunctionRuntimeClient {
       code,
       options
     })) as unknown as FunctionRegistration[]
+    // Capture immutable bootstrap facts, never a cache of mutable guest matcher values.
+    const unconditional = new Set(
+      registrations.filter((row) => row.hasMatcher === false).map((row) => row.id)
+    )
     const generation = this.generation
     let disposed = false
     const isDisposed = (): boolean =>
@@ -230,6 +234,10 @@ export class FunctionRuntimeClient {
       },
       async matches(registration, event) {
         assertLive()
+        if (unconditional.has(registration)) {
+          encodeModJson(event)
+          return true
+        }
         return (await request({ type: "match", runtimeId, registration, event })) === true
       },
       async releaseUi(generation) {

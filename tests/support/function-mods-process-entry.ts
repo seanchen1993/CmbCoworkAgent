@@ -25,6 +25,29 @@ let temporaryProject: string | undefined
 let paneStore: ModControlStore | undefined
 void app.whenReady().then(async () => {
   try {
+    const matcherGuest = await client.load(`var __cmbFunctionMod={register(on){
+      const matcher={command:"before"};
+      on("turn.step",($,e,next)=>next(e));
+      on("command.run",matcher,($,e)=>({text:e.command}));
+      on("session.start",()=>{matcher.command="after";return {text:"changed"}});
+    }}`)
+    assert.equal(matcherGuest.registrations[0].hasMatcher, false)
+    assert.equal(matcherGuest.registrations[1].hasMatcher, true)
+    for (let index = 0; index < 32; index++) assert.equal(await matcherGuest.matches("0", {}), true)
+    assert.equal(await matcherGuest.matches("1", { command: "before" }), true)
+    await matcherGuest.invoke("2", {}, async () => ({}), {
+      event: "session.start",
+      origin: { plugin: "engine", tier: "core" },
+      capabilities: [],
+      plugin: { name: "matcher-probe", root }
+    })
+    assert.equal(await matcherGuest.matches("1", { command: "before" }), false)
+    assert.equal(await matcherGuest.matches("1", { command: "after" }), true)
+    await matcherGuest.dispose()
+    await assert.rejects(matcherGuest.matches("0", {}), /MODS_UNLOADED/)
+    checks.push(
+      "unconditional host matching retains dynamic guest matchers and disposal across real utility IPC"
+    )
     const engineNounsPerformance = await checkEngineNouns(client, root)
     checks.push(
       "engine.create cross-guest noun fold, original authority, middleware and closed zero-call comparison"

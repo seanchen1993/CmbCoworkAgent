@@ -16,6 +16,8 @@ export interface FunctionRegistration {
   id: string
   pattern: string
   hasCatch: boolean
+  /** Missing metadata retains remote matching for older runtime peers. */
+  hasMatcher?: boolean
 }
 
 export interface ModTraceEntry {
