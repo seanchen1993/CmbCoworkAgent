@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { resolve } from "node:path"
-import { afterEach, expect, it } from "vitest"
+import { afterEach, expect, it, vi } from "vitest"
 import { FunctionSession, SESSION_CAPABILITIES } from "./session"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import type {
@@ -19,7 +19,8 @@ afterEach(async () => {
 async function fixture(
   hooks: string,
   compiled?: { code: string; name: string; root: string },
-  publish = async (value: ModJson): Promise<ModJson> => value
+  publish = async (value: ModJson): Promise<ModJson> => value,
+  changed = () => {}
 ) {
   let live = true
   const state = new Map<string, ModJson>()
@@ -39,6 +40,7 @@ async function fixture(
     {
       workspace: "/project",
       threadId: "thread",
+      uiChanged: changed,
       publish,
       assertLive() {
         if (!live) throw Error("revoked")
@@ -94,6 +96,21 @@ function press(pane: FunctionPaneSnapshot): FunctionUiAction {
 function drawnText(tree: FunctionUiElement | string): string {
   return typeof tree === "string" ? tree : (tree.children ?? []).map(drawnText).join("")
 }
+
+it("does not broadcast host-driven site mounting, rendering and unmounting back to every renderer owner", async () => {
+  const changed = vi.fn()
+  const { session } = await fixture("", undefined, async (v) => v, changed)
+  const owners = await Promise.all(
+    Array.from({ length: 20 }, () => session.sites.mount("AssistantMessage"))
+  )
+  for (const owner of owners)
+    await session.sites.render(owner, { text: "message", isFirstOfReply: true })
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  expect(changed).not.toHaveBeenCalled()
+  for (const owner of owners) await session.sites.unmount(owner)
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  expect(changed).not.toHaveBeenCalled()
+})
 
 it("rewrites CommandOutput presentation while retaining command identity and error facts", async () => {
   const { session } = await fixture(`

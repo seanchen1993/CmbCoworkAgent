@@ -35,6 +35,9 @@ export class FunctionUiSites {
   private drawings(): FunctionPanes {
     return new FunctionPanes({
       ...this.host,
+      // Host-driven mount/prop updates already have an awaiting renderer. Broadcasting them
+      // back invalidates every in-flight owner and turns a transcript mount into a redraw storm.
+      changed: () => {},
       clients: undefined,
       site: (pane) => {
         const site = this.get(pane.id)
@@ -118,7 +121,9 @@ export class FunctionUiSites {
       ((action.kind === "focus" || action.kind === "scroll") && site.component !== "AbovePrompt")
     )
       throw new ModFunctionError("MODS_UI_ACTION_INVALID")
-    return site.drawings.act(action)
+    const result = await site.drawings.act(action)
+    if (this.slots.get(owner) === site) this.host.changed()
+    return result
   }
 
   async unmount(owner: string): Promise<void> {
@@ -133,6 +138,7 @@ export class FunctionUiSites {
   }
 
   invalidate(): void {
+    // The session invalidates its Pane registry in the same SDK call, emitting one shared notice.
     for (const site of this.slots.values()) site.drawings.invalidate()
   }
   close(): void {

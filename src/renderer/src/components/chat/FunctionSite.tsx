@@ -10,6 +10,7 @@ import { Element } from "./FunctionPanes"
 import { paneFocusElement } from "../../lib/function-pane-focus"
 import { functionFocusTargets } from "../../../../shared/mods/v2/focus"
 import { FunctionSiteLifetime, type FunctionSiteTicket } from "../../lib/function-site-lifecycle"
+import { functionSiteQueue } from "../../lib/function-site-queue"
 
 type Act = (
   node: FunctionUiElement | undefined,
@@ -127,7 +128,9 @@ export function FunctionSite({
       const ticket = lifetime.capture()
       try {
         if (!owner) {
-          owner = await window.api.mods.siteMount(threadId, component)
+          owner = await functionSiteQueue.run(ticket.current, () =>
+            window.api.mods.siteMount(threadId, component)
+          )
           if (!ticket.current()) {
             if (owner) void window.api.mods.siteUnmount(threadId, owner).catch(() => {})
             owner = null
@@ -136,7 +139,9 @@ export function FunctionSite({
           ownerRef.current = owner
         }
         const result = owner
-          ? await window.api.mods.siteRender(threadId, owner, inputRef.current)
+          ? await functionSiteQueue.run(ticket.current, () =>
+              window.api.mods.siteRender(threadId, owner!, inputRef.current)
+            )
           : null
         if (!ticket.current()) return
         if (result) validateFunctionSiteTree(result.tree)
