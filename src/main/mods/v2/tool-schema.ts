@@ -22,7 +22,9 @@ const keywords = new Set([
   "oneOf",
   "not",
   "uniqueItems",
-  "$defs", "definitions", "$ref"
+  "$defs",
+  "definitions",
+  "$ref"
 ])
 
 /** A bounded, non-executable JSON Schema profile. Unsupported keywords fail at registration. */
@@ -43,17 +45,28 @@ export function validateToolSchema(schema: ModObject): void {
           "MODS_TOOL_SCHEMA_UNSUPPORTED",
           `MODS_TOOL_SCHEMA_UNSUPPORTED: ${key}`
         )
+    for (const key of ["title", "description", "$comment"])
+      if (value[key] !== undefined && typeof value[key] !== "string")
+        throw new ModFunctionError("MODS_TOOL_SCHEMA")
+    if (value.examples !== undefined && !Array.isArray(value.examples))
+      throw new ModFunctionError("MODS_TOOL_SCHEMA")
     if (value.type !== undefined) {
       const declared = Array.isArray(value.type) ? value.type : [value.type]
       if (
         !declared.length ||
+        new Set(declared).size !== declared.length ||
         declared.some((type) => typeof type !== "string" || !types.includes(type))
       )
         throw new ModFunctionError("MODS_TOOL_SCHEMA")
     }
     if (value.properties !== undefined) {
       if (!isModObject(value.properties)) throw new ModFunctionError("MODS_TOOL_SCHEMA")
-      if (root && ["tool", "tool_use_id", "agentId"].some((key) => Object.hasOwn(value.properties as ModObject, key)))
+      if (
+        root &&
+        ["tool", "tool_use_id", "agentId"].some((key) =>
+          Object.hasOwn(value.properties as ModObject, key)
+        )
+      )
         throw new ModFunctionError("MODS_TOOL_SCHEMA_RESERVED")
       for (const child of Object.values(value.properties)) visit(child, depth + 1, refs)
     }
@@ -61,12 +74,17 @@ export function validateToolSchema(schema: ModObject): void {
       if (value[key] !== undefined) {
         if (!isModObject(value[key])) throw new ModFunctionError("MODS_TOOL_SCHEMA")
         for (const [name, child] of Object.entries(value[key])) {
-          if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name)) throw new ModFunctionError("MODS_TOOL_SCHEMA")
+          if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(name))
+            throw new ModFunctionError("MODS_TOOL_SCHEMA")
           visit(child, depth + 1, refs)
         }
       }
     }
-    if (value.$ref !== undefined && (typeof value.$ref !== "string" || !/^#\/(?:\$defs|definitions)\/[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value.$ref)))
+    if (
+      value.$ref !== undefined &&
+      (typeof value.$ref !== "string" ||
+        !/^#\/(?:\$defs|definitions)\/[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value.$ref))
+    )
       throw new ModFunctionError("MODS_TOOL_SCHEMA_REF")
     if (typeof value.$ref === "string") {
       const [, section, name] = value.$ref.split("/")
@@ -82,7 +100,11 @@ export function validateToolSchema(schema: ModObject): void {
         new Set(value.required).size !== value.required.length)
     )
       throw new ModFunctionError("MODS_TOOL_SCHEMA")
-    if (root && Array.isArray(value.required) && value.required.some((key) => ["tool", "tool_use_id", "agentId"].includes(String(key))))
+    if (
+      root &&
+      Array.isArray(value.required) &&
+      value.required.some((key) => ["tool", "tool_use_id", "agentId"].includes(String(key)))
+    )
       throw new ModFunctionError("MODS_TOOL_SCHEMA_RESERVED")
     for (const key of ["items", "additionalProperties", "not"])
       if (value[key] !== undefined) visit(value[key], depth + 1, refs, key === "not" && root)
@@ -167,7 +189,7 @@ export function validateRegisteredToolInput(schema: ModObject, input: ModObject)
     if (typeof rule.$ref === "string") {
       if (refs.has(rule.$ref)) throw new ModFunctionError("MODS_TOOL_VALIDATION_LIMIT")
       const [, section, name] = rule.$ref.split("/")
-      const definitions = isModObject(schema[section]) ? schema[section] as ModObject : undefined
+      const definitions = isModObject(schema[section]) ? (schema[section] as ModObject) : undefined
       const target = definitions?.[name]
       if (target === undefined) throw new ModFunctionError("MODS_REGISTERED_TOOL_INPUT")
       const nextRefs = new Set(refs).add(rule.$ref)

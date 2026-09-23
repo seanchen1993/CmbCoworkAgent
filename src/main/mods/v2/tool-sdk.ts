@@ -74,7 +74,11 @@ export function functionToolTarget(input: ModObject): { target: string; args: Mo
 
 export function validateFunctionToolResult(result: ModJson): void {
   if (!isModObject(result)) throw new ModFunctionError("MODS_TOOL_RESULT")
-  if (typeof result.deny === "string" && !Object.hasOwn(result, "result")) return
+  if (typeof result.deny === "string") {
+    if (["result", "context", "ref", "text", "isError"].some((key) => Object.hasOwn(result, key)))
+      throw new ModFunctionError("MODS_TOOL_RESULT")
+    return
+  }
   if (
     !Object.hasOwn(result, "result") ||
     result.deny !== undefined ||
