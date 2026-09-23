@@ -3039,6 +3039,7 @@ export class LocalSandbox
     }
     const hookContext: HookContext = {
       ...context,
+      toolCallId: context.toolCallId ?? getModCallContext()?.identity.toolCallId,
       ...(this.pluginOutputDir && !context.pluginOutputDir
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
@@ -3122,9 +3123,7 @@ export class LocalSandbox
       return null
     }
 
-    const toolCallId = (context.toolArgs?.tool_call_id ??
-      context.toolArgs?.tool_use_id ??
-      "") as string
+    const toolCallId = context.toolCallId ?? getModCallContext()?.identity.toolCallId ?? ""
 
     return recordToolFailure({
       threadId,
@@ -3141,14 +3140,13 @@ export class LocalSandbox
     const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
     const signal = detectToolFailure(context.toolName ?? "", parsed)
     if (!signal) return
-    const toolCallId = (context.toolArgs?.tool_call_id ??
-      context.toolArgs?.tool_use_id ??
-      "") as string
+    const toolCallId = context.toolCallId ?? getModCallContext()?.identity.toolCallId ?? ""
     if (typeof toolCallId === "string" && toolCallId && hasFailureFired(toolCallId)) return
     if (typeof toolCallId === "string" && toolCallId) markFailureFired(toolCallId)
 
     const failureContext: HookContext = {
       ...context,
+      toolCallId: toolCallId || undefined,
       toolResult: JSON.stringify({
         error: signal.message,
         error_type: signal.errorType,

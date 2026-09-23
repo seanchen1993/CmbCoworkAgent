@@ -693,3 +693,69 @@ it("projects real guest expansion context and rejects forged command identity", 
     expect(core.mock.calls[0][0]).toMatchObject({command_name:"review"})
   } finally { await session.close() }
 })
+
+it("publishes host-measured duration on both classic post events without inventing missing data", async () => {
+  classicEvent.mockResolvedValue({})
+  for (const event of ["PostToolUse", "PostToolUseFailure"] as const) {
+    await runHooks([], event, {
+      workspacePath: "/workspace",
+      sessionId: "thread",
+      toolName: "mcp__test",
+      toolCallId: "host-id",
+      toolArgs: { duration_ms: 999, tool_use_id: "forged" },
+      toolResult:
+        event === "PostToolUseFailure"
+          ? JSON.stringify({ error: "failed", is_interrupt: false })
+          : "ok",
+      toolDurationMs: 12.5
+    })
+    expect(classicEvent.mock.calls.at(-1)?.[3]).toMatchObject({
+      duration_ms: 12.5,
+      tool_use_id: "host-id"
+    })
+  }
+  await runHooks([], "PostToolUse", {
+    workspacePath: "/workspace",
+    sessionId: "thread",
+    toolName: "read_file"
+  })
+  expect(classicEvent.mock.calls.at(-1)?.[3]).not.toHaveProperty("duration_ms")
+})
+
+it("keeps legacy post failure fields compatible while exposing official host facts", async () => {
+  classicEvent.mockImplementation(async (_workspace, _thread, _event, input, signal, core) =>
+    core(input, signal)
+  )
+  legacyCall.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "", blocked: false })
+  const failure = { error: "cancelled", is_interrupt: true, is_timeout: false }
+  await runHooks(
+    [
+      {
+        id: "observe",
+        event: "PostToolUseFailure",
+        type: "http",
+        url: "https://example.invalid/hook",
+        enabled: true,
+        createdAt: "2026-09-23",
+        updatedAt: "2026-09-23"
+      }
+    ],
+    "PostToolUseFailure",
+    {
+      workspacePath: "/workspace",
+      sessionId: "thread",
+      toolName: "execute",
+      toolCallId: "host-failure",
+      toolDurationMs: 4.25,
+      toolArgs: { tool_use_id: "forged" },
+      toolResult: JSON.stringify(failure)
+    }
+  )
+  expect(JSON.parse(legacyCall.mock.calls[0][1])).toMatchObject({
+    tool_use_id: "host-failure",
+    duration_ms: 4.25,
+    error: "cancelled",
+    is_interrupt: true,
+    tool_response: failure
+  })
+})

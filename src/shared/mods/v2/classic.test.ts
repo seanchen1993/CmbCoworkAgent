@@ -263,3 +263,27 @@ it("requires resolved prompt expansion facts and bounded original text", () => {
     expect(() => validateClassicInput("classic.UserPromptExpansion", { ...input, [key as string]: value })).toThrow("MODS_CLASSIC_INPUT")
   }
 })
+
+it.each(["PostToolUse", "PostToolUseFailure"])(
+  "rejects invalid optional execution facts for %s",
+  (event) => {
+    const input = {
+      hook_event_name: event,
+      session_id: "thread",
+      cwd: "/workspace",
+      transcript_path: ""
+    }
+    for (const duration_ms of [-1, "12", null]) {
+      expect(() => validateClassicInput(`classic.${event}`, { ...input, duration_ms })).toThrow(
+        "MODS_CLASSIC_INPUT"
+      )
+    }
+    expect(() =>
+      validateClassicInput(`classic.${event}`, { ...input, duration_ms: 0 })
+    ).not.toThrow()
+    if (event === "PostToolUseFailure")
+      expect(() =>
+        validateClassicInput(`classic.${event}`, { ...input, is_interrupt: "false" })
+      ).toThrow("MODS_CLASSIC_INPUT")
+  }
+)

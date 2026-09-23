@@ -106,7 +106,7 @@ export function toolFailureSignalFromThrow(
   err: unknown,
   opts: { aborted?: boolean } = {}
 ): ToolFailureSignal {
-  if (opts.aborted) {
+  if (opts.aborted || (err instanceof Error && err.name === "AbortError")) {
     const msg = err instanceof Error ? err.message : String(err)
     return {
       kind: "abort",
@@ -118,7 +118,9 @@ export function toolFailureSignalFromThrow(
   }
   const isTimeout =
     err instanceof Error &&
-    (err.message.toLowerCase().includes("timeout") || (err as { code?: string }).code === "ETIMEDOUT")
+    (err.name === "TimeoutError" ||
+      err.message.toLowerCase().includes("timeout") ||
+      (err as { code?: string }).code === "ETIMEDOUT")
   return {
     kind: isTimeout ? "timeout" : "throw",
     message: err instanceof Error ? err.message : String(err),

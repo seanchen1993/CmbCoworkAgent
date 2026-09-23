@@ -42,6 +42,24 @@ const classicIdentity = [
 ] as const
 
 const classicFacts: Record<string, readonly string[]> = {
+  "classic.PostToolUse": [
+    "tool_name",
+    "tool_input",
+    "tool_use_id",
+    "tool_response",
+    "duration_ms",
+    "mcp_server",
+    "is_interrupt"
+  ],
+  "classic.PostToolUseFailure": [
+    "tool_name",
+    "tool_input",
+    "tool_use_id",
+    "error",
+    "is_interrupt",
+    "duration_ms",
+    "mcp_server"
+  ],
   "classic.PostToolBatch": ["tool_calls"],
   "classic.UserPromptExpansion": ["expansion_type", "command_name", "command_args", "command_source", "prompt"],
   "classic.InstructionsLoaded": [

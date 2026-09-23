@@ -160,6 +160,18 @@ export function validateClassicInput(event: string, value: unknown): void {
     (value.effort !== undefined && !shape(value.effort, { level: text }, ["level"]))
   )
     throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  if (name === "PostToolUse" || name === "PostToolUseFailure") {
+    if (
+      (value.duration_ms !== undefined &&
+        (typeof value.duration_ms !== "number" ||
+          !Number.isFinite(value.duration_ms) ||
+          value.duration_ms < 0)) ||
+      (name === "PostToolUseFailure" &&
+        value.is_interrupt !== undefined &&
+        typeof value.is_interrupt !== "boolean")
+    )
+      throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  }
   if (name === "UserPromptExpansion") {
     if (
       !oneOf(["slash_command", "mcp_prompt"])(value.expansion_type) ||

@@ -1504,6 +1504,8 @@ export function createScopedMcpCapabilityService(
         args,
         async (args) => {
           const hookContext: HookContext = {
+            toolCallId: getModCallContext()?.identity.toolCallId,
+            signal: getModCallContext()?.signal ?? baseContext.signal,
             toolName: tool.toolId,
             toolArgs: args,
             workspacePath: baseContext.workspacePath,
@@ -1572,33 +1574,37 @@ export function createScopedMcpCapabilityService(
           })
 
           if (pluginId) hookScope.activatePlugin(pluginId)
-          const result = await publishCurrentModResult(
-            await invokeMcpToolWithPlaywrightInAppBrowserSupport({
-              tool,
-              workspacePath: baseContext.workspacePath,
-              threadId: baseContext.threadId,
-              args: effectiveArgs,
-              prepareBeforeInvoke: false,
-              invoke: async () => {
-                try {
-                  return await service.invoke(tool.capabilityId, effectiveArgs)
-                } catch (error) {
-                  const fallbackTool =
-                    !getModCallContext() && shouldFallbackMcpError(error)
-                      ? findFallbackTool(tool, snapshot.tools)
-                      : null
-                  if (!fallbackTool) throw error
-                  return appendFallbackNotice(
-                    await service.invoke(fallbackTool.capabilityId, effectiveArgs),
-                    tool,
-                    fallbackTool
-                  )
-                }
+          // Time only the actual adapter invocation; authorization, tab selection,
+          // hooks and result publication occur outside this interval.
+          const toolStartedAt = performance.now()
+          const nativeResult = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+            tool,
+            workspacePath: baseContext.workspacePath,
+            threadId: baseContext.threadId,
+            args: effectiveArgs,
+            prepareBeforeInvoke: false,
+            invoke: async () => {
+              try {
+                return await service.invoke(tool.capabilityId, effectiveArgs)
+              } catch (error) {
+                const fallbackTool =
+                  !getModCallContext() && shouldFallbackMcpError(error)
+                    ? findFallbackTool(tool, snapshot.tools)
+                    : null
+                if (!fallbackTool) throw error
+                return appendFallbackNotice(
+                  await service.invoke(fallbackTool.capabilityId, effectiveArgs),
+                  tool,
+                  fallbackTool
+                )
               }
-            })
-          )
+            }
+          })
+          const toolDurationMs = performance.now() - toolStartedAt
+          const result = await publishCurrentModResult(nativeResult)
           const postContext: HookContext = {
             ...hookContext,
+            toolDurationMs,
             toolArgs: effectiveArgs,
             toolResult: result.text
           }
@@ -1638,12 +1644,15 @@ export function createScopedMcpCapabilityService(
               })
             }
             const failureHooks = resolveHooksForContext("PostToolUseFailure", failureContext)
-            runHooksEnriched(
+            const observation = runHooksEnriched(
               failureHooks,
               "PostToolUseFailure",
               failureContext,
               onHookResult
             ).catch((e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e))
+            // Function observers need the original call lease until their host calls
+            // settle. Keep the legacy fire-and-forget path when Mods are disabled.
+            if (getModsManager()?.isEnabled(baseContext.workspacePath)) await observation
           }
           if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
           const hookFeedback = formatPostHookFeedback(postResult)
@@ -7691,6 +7700,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         projectDir,
         ...isolatedWorkspaceHookContext,
         toolName: input.toolName,
+        toolCallId: input.toolCallId,
         toolArgs:
           input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)
             ? (input.toolArgs as Record<string, unknown>)

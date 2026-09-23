@@ -107,6 +107,8 @@ const _regexCache = new Map<string, RegExp | null>()
 export interface HookContext {
   /** Host-owned invocation identity and cancellation; never read from tool arguments. */
   toolCallId?: string
+  /** Measured by the host around execution, excluding hook/approval waiting. Absent if unknown. */
+  toolDurationMs?: number
   signal?: AbortSignal
   compactionTrigger?: "manual" | "auto"
   compactionInstructions?: string | null
@@ -528,6 +530,15 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.hookSourcePath) payload.hook_source_path = context.hookSourcePath
   if (context.toolName) payload.tool_name = context.toolName
   if (context.toolArgs) payload.tool_input = context.toolArgs
+  if (["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(event)) {
+    const toolCallId = context.toolCallId ?? getModCallContext()?.identity.toolCallId
+    if (toolCallId) payload.tool_use_id = toolCallId
+  }
+  if (
+    (event === "PostToolUse" || event === "PostToolUseFailure") &&
+    context.toolDurationMs !== undefined
+  )
+    payload.duration_ms = context.toolDurationMs
   if (event === "UserPromptExpansion") Object.assign(payload, context.promptExpansion, { prompt: context.userPrompt ?? "" })
   if (event === "PostToolBatch") payload.tool_calls = context.toolBatch ?? []
   if (event === "InstructionsLoaded") Object.assign(payload, context.instructionLoad)
@@ -552,6 +563,11 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
     } catch {
       payload.tool_response = context.toolResult
     }
+  }
+  if (event === "PostToolUseFailure" && context.toolResult !== undefined) {
+    const failure = isModObject(payload.tool_response) ? payload.tool_response : {}
+    payload.error = typeof failure.error === "string" ? failure.error : context.toolResult
+    if (typeof failure.is_interrupt === "boolean") payload.is_interrupt = failure.is_interrupt
   }
   if (context.userPrompt) payload.prompt = context.userPrompt
   // PR-01: Claude Code-compatible payload fields. Only emitted when present so
@@ -1471,6 +1487,7 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
       payload.tool_name = context.toolName
       payload.tool_input = context.toolArgs ?? {}
       payload.tool_use_id = toolCallId
+      if (context.toolDurationMs !== undefined) payload.duration_ms = context.toolDurationMs
       if (context.toolResult !== undefined) {
         let output: unknown = context.toolResult
         try { output = JSON.parse(context.toolResult) } catch { /* Plain tool text remains text. */ }

@@ -208,3 +208,14 @@ it("records actual title effects without claiming all SessionStart outputs", () 
     )?.implementationStatus
   ).toBe("partial")
 })
+
+it("bounds tool observations to measured MCP invocations and preserved host facts", () => {
+  for (const name of ["classic.PostToolUse", "classic.PostToolUseFailure"]) {
+    const row = (matrix.classicEvents as Array<Record<string, unknown>>).find(
+      (item) => item.name === name
+    )
+    expect(row?.implementationStatus).toBe("partial")
+    expect(row?.note).toContain("duration_ms")
+    expect(row?.evidence).toContain("src/main/agent/mods-tool-observation.test.ts")
+  }
+})

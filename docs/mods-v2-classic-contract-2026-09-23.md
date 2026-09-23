@@ -15,6 +15,10 @@
 [指令观察适配](mods-v2-instructions-loaded-2026-09-23.md)，不是CLAUDE文件规则的full兼容。
 PostToolBatch及真实压缩适配已各有独立报告，下表旧“契约/手动”是原审计时点。
 
+2026-09-23 工具观察补充：后置工具事实固定、MCP 实测 duration_ms、宿主失败身份与
+原生 AbortError/TimeoutError 分类，以及开启 Mods 时 MCP 失败观察的 lease 内等待，见
+[工具观察适配](mods-v2-tool-observation-2026-09-23.md)。下表保留历史时点，不作为最新完成清单。
+
 ## 33 个事件的实际状态
 
 “生产触发”表示找到应用真实调用点，不代表该事件所有官方字段、结果效果和时序已完整实现。

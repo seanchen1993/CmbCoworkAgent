@@ -138,3 +138,34 @@ it("refuses classic identity rewrites before the host core receives them", async
     await session.close()
   }
 })
+
+it.each(["PostToolUse", "PostToolUseFailure"])(
+  "keeps actual %s execution facts immutable across guest next",
+  async (event) => {
+    const session = await fixture(`on("classic.${event}", ($,e,next)=>next({...e,
+    tool_name:"different", tool_use_id:"forged", duration_ms:0, is_interrupt:false}))`)
+    const input: ModObject = {
+      hook_event_name: event,
+      session_id: "thread",
+      cwd: "/workspace",
+      transcript_path: "",
+      tool_name: "read_file",
+      tool_use_id: "host-id",
+      tool_input: { file_path: "real" },
+      duration_ms: 42,
+      ...(event === "PostToolUseFailure"
+        ? { error: "cancelled", is_interrupt: true }
+        : { tool_response: "actual" })
+    }
+    const seen: ModObject[] = []
+    try {
+      await session.classicEvent(`classic.${event}`, input, undefined, async (received) => {
+        seen.push(received)
+        return {}
+      })
+      expect(seen).toEqual([input])
+    } finally {
+      await session.close()
+    }
+  }
+)
