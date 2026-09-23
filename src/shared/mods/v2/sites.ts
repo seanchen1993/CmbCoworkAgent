@@ -1,4 +1,5 @@
 import type { ModObject } from "../types"
+import { encodeModJson } from "../validation"
 import { isModObject, ModFunctionError } from "./contracts"
 import { validateFunctionTree, type FunctionUiElement } from "./ui"
 
@@ -11,7 +12,9 @@ export const FUNCTION_UI_SITES = [
   "SessionMode",
   "UserMessage",
   "AssistantMessage",
-  "CommandOutput"
+  "CommandOutput",
+  "ToolUse",
+  "ToolResult"
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
 export const FUNCTION_DURATION_SITE_LIMIT = 32
@@ -29,6 +32,28 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
   }
   if (!isModObject(value)) return fail()
   const text = (v: unknown): v is string => typeof v === "string" && v.length <= 10000
+  if (site === "ToolUse" || site === "ToolResult") {
+    const fields =
+      site === "ToolUse"
+        ? ["tool_use_id", "tool", "input", "output", "isRunning", "isErrored", "isInterrupted"]
+        : ["tool_use_id", "tool", "output", "isErrored"]
+    if (
+      !text(value.tool_use_id) ||
+      !value.tool_use_id ||
+      !text(value.tool) ||
+      !value.tool ||
+      typeof value.isErrored !== "boolean" ||
+      (site === "ToolUse" &&
+        (typeof value.isRunning !== "boolean" ||
+          typeof value.isInterrupted !== "boolean" ||
+          !Object.hasOwn(value, "input"))) ||
+      (site === "ToolResult" && !Object.hasOwn(value, "output")) ||
+      Object.keys(value).some((key) => !fields.includes(key)) ||
+      encodeModJson(value).length > 10000
+    )
+      return fail()
+    return { ...value }
+  }
   if (site === "CommandOutput") {
     if (
       !text(value.command) ||
@@ -149,6 +174,18 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
 }
 
 export function functionSiteDefault(site: FunctionUiSite, props: ModObject): FunctionUiElement {
+  if (site === "ToolUse" || site === "ToolResult")
+    return {
+      type: "Text",
+      props: {},
+      children: [
+        site === "ToolUse"
+          ? `${props.tool} ${JSON.stringify(props.input)}`
+          : typeof props.output === "string"
+            ? props.output
+            : JSON.stringify(props.output)
+      ]
+    }
   if (site === "UserMessage" || site === "AssistantMessage" || site === "CommandOutput")
     return { type: "Text", props: {}, children: [String(props.text)] }
   if (site === "Spinner" || site === "TurnDuration" || site === "SessionMode") {

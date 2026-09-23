@@ -72,7 +72,14 @@ export class FunctionUiSites {
     return this.enqueue(async () => {
       functionUiSite(component)
       if (
-        ["TurnDuration", "UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
+        [
+          "TurnDuration",
+          "UserMessage",
+          "AssistantMessage",
+          "CommandOutput",
+          "ToolUse",
+          "ToolResult"
+        ].includes(component)
       ) {
         if (
           [...this.slots.values()].filter((entry) => entry.component === component).length >=

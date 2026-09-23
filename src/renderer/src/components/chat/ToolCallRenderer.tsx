@@ -22,6 +22,7 @@ import { cn } from "@/lib/utils"
 import { getToolLabel } from "@/lib/tool-labels"
 import type { ToolCall, Todo, ToolCallStatus } from "@/types"
 import { ToolCallErrorBoundary, RenderProbe } from "./ToolCallErrorBoundary"
+import { FunctionToolDisplay } from "./FunctionToolDisplay"
 
 // Module-level sentinel so identity is stable across renders. Returned by
 // `tryRender` when the formatter throws synchronously — callers fall back
@@ -409,7 +410,6 @@ export function ToolCallRenderer({
   isStreaming = true
 }: ToolCallRendererProps) {
   const [isExpanded, setIsExpanded] = useState(false)
-  void threadId
 
   // Defensive: ensure args is always an object
   const args = toolCall?.args || {}
@@ -422,7 +422,7 @@ export function ToolCallRenderer({
   const Icon = TOOL_ICONS[toolCall.name] || Terminal
   const label = getToolLabel(toolCall.name, { args: toolCall.args })
   const isPanelSynced = PANEL_SYNCED_TOOLS.has(toolCall.name)
-  const statusBadge = getStatusBadge(
+  const resolvedStatus =
     status ||
       (needsApproval
         ? "awaiting_approval"
@@ -431,7 +431,7 @@ export function ToolCallRenderer({
           : isStreaming
             ? "running"
             : "interrupted")
-  )
+  const statusBadge = getStatusBadge(resolvedStatus)
 
   const handleReject = (e: React.MouseEvent): void => {
     e.stopPropagation()
@@ -809,6 +809,12 @@ export function ToolCallRenderer({
     </ToolCallErrorBoundary>
   ) : null
 
+  const detail = (component: "ToolUse" | "ToolResult", fallback: React.ReactNode) => (
+    <FunctionToolDisplay threadId={threadId} component={component} toolCall={toolCall}
+      result={result} status={resolvedStatus} isError={isError} needsApproval={needsApproval}
+      fallback={fallback}/>
+  )
+
   return (
     <div
       className={cn(
@@ -949,8 +955,8 @@ export function ToolCallRenderer({
       {/* Formatted content (only visible when collapsed AND has result) */}
       {hasFormattedDisplay && !isExpanded && !needsApproval && result !== undefined && (
         <div className="border-t border-border px-3 py-2 space-y-2 overflow-hidden">
-          {formattedContent}
-          {formattedResult}
+          {detail("ToolUse", formattedContent)}
+          {detail("ToolResult", formattedResult)}
         </div>
       )}
 
@@ -958,8 +964,8 @@ export function ToolCallRenderer({
       {isExpanded && !needsApproval && (
         <div className="border-t border-border px-3 py-2 space-y-2 overflow-hidden">
           {/* Formatted display first */}
-          {formattedContent}
-          {formattedResult}
+          {detail("ToolUse", formattedContent)}
+          {detail("ToolResult", formattedResult)}
 
           {/* Raw Arguments */}
           <div className="overflow-hidden w-full">

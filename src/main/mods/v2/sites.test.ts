@@ -112,6 +112,81 @@ it("does not broadcast host-driven site mounting, rendering and unmounting back 
   expect(changed).not.toHaveBeenCalled()
 })
 
+it("rewrites tool detail presentation in independent owners while preserving original call data", async () => {
+  const { session } = await fixture(`
+    on("ui.render",{component:"ToolUse"},($,e,next)=>next({...e,props:{...e.props,input:{path:"display"}}}));
+    on("ui.render",{component:"ToolResult"},($,e,next)=>next({...e,props:{...e.props,output:"visible result"}}));
+  `)
+  const call = {
+    tool_use_id: "actual",
+    tool: "read_file",
+    input: { path: "original" },
+    isRunning: false,
+    isErrored: false,
+    isInterrupted: false
+  }
+  const owner = await session.sites.mount("ToolUse" as FunctionUiSite)
+  const other = await session.sites.mount("ToolUse" as FunctionUiSite)
+  await session.sites.render(other, { ...call, tool_use_id: "other" })
+  expect(drawnText((await session.sites.render(owner, call)).tree)).toContain("display")
+  expect(call.input.path).toBe("original")
+  const result = await session.sites.mount("ToolResult" as FunctionUiSite)
+  expect(
+    drawnText(
+      (
+        await session.sites.render(result, {
+          tool_use_id: "actual",
+          tool: "read_file",
+          output: "original result",
+          isErrored: false
+        })
+      ).tree
+    )
+  ).toBe("visible result")
+})
+
+it.each(["tool_use_id", "tool", "isErrored", "onScreen"])(
+  "pins ToolResult %s identity and error facts",
+  async (field) => {
+    const { session } = await fixture(`
+    on("ui.render",{component:"ToolResult"},($,e,next)=>next({...e,props:{...e.props,output:"forged",${field}:${field === "isErrored" ? "true" : '"forged"'}}}));
+  `)
+    const owner = await session.sites.mount("ToolResult" as FunctionUiSite)
+    expect(
+      (
+        await session.sites.render(owner, {
+          tool_use_id: "actual",
+          tool: "read_file",
+          output: "original",
+          isErrored: false
+        })
+      ).nativeFallback
+    ).toBe(true)
+  }
+)
+
+it.each(["tool_use_id", "isRunning", "isErrored", "isInterrupted", "onScreen"])(
+  "pins ToolUse %s execution facts",
+  async (field) => {
+    const { session } = await fixture(`
+    on("ui.render",{component:"ToolUse"},($,e,next)=>next({...e,props:{...e.props,input:"forged",${field}:${field.startsWith("is") ? "true" : '"forged"'}}}));
+  `)
+    const owner = await session.sites.mount("ToolUse" as FunctionUiSite)
+    expect(
+      (
+        await session.sites.render(owner, {
+          tool_use_id: "actual",
+          tool: "read_file",
+          input: {},
+          isRunning: false,
+          isErrored: false,
+          isInterrupted: false
+        })
+      ).nativeFallback
+    ).toBe(true)
+  }
+)
+
 it("rewrites CommandOutput presentation while retaining command identity and error facts", async () => {
   const { session } = await fixture(`
     on("ui.render",{component:"CommandOutput"},($,e,next)=>
