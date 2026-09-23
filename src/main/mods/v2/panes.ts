@@ -30,12 +30,15 @@ interface Pane extends FunctionPaneSnapshot {
   focused: boolean
   visibleTree?: FunctionUiElement
 }
-interface PaneHost {
+export interface PaneHost {
   clients?: import("./clients").FunctionClients
   plugins: readonly FunctionPlugin[]
   assertLive(): void
   changed(): void
   publish(value: ModJson): Promise<ModJson>
+  site?(pane: FunctionPaneSnapshot): { component: string; props: ModObject }
+  renderCore?(input: ModObject): Promise<ModJson>
+  validateTree?(tree: unknown): void
   dispatch(event: string, input: ModObject, options: FunctionUiDispatch): Promise<ModJson>
   callback(
     plugin: FunctionPlugin,
@@ -146,23 +149,28 @@ export class FunctionPanes {
         const generation = randomUUID()
         pane.dirty = false
         try {
+          const site = this.host.site?.(pane)
           const tree = await this.host.dispatch(
             "ui.render",
             {
               surface: "desktop",
-              component: "Pane",
+              component: site?.component ?? "Pane",
               requestId: pane.id,
-              props: {
+              props: site?.props ?? {
                 title: pane.title,
                 isFocused: pane.focused,
                 placement: "inline",
                 bodyColumns: 80
               }
             },
-            { generation, core: async () => ({ type: "Box", props: {}, children: [] }) }
+            {
+              generation,
+              core: this.host.renderCore ?? (async () => ({ type: "Box", props: {}, children: [] }))
+            }
           )
           this.host.assertLive()
           validateFunctionTree(tree)
+          this.host.validateTree?.(tree)
           if (this.panes.get(pane.key) !== pane) {
             await this.release(generation)
             continue
@@ -212,6 +220,7 @@ export class FunctionPanes {
         )
           throw new ModFunctionError("MODS_UI_PUBLICATION")
         validateFunctionTree(result.tree)
+        this.host.validateTree?.(result.tree)
         const current = () =>
           this.panes.get(result.key as string) === originals.get(result.key as string)
         if (!current()) continue
@@ -334,7 +343,7 @@ export class FunctionPanes {
             action.kind === "focus" ? "ui.focus" : "ui.scroll",
             {
               surface: "desktop",
-              component: "Pane",
+              component: this.host.site?.(pane).component ?? "Pane",
               requestId: pane.id,
               plugin: target?.plugin ?? pane.plugin,
               element: target?.element ?? pane.id,
@@ -420,7 +429,7 @@ export class FunctionPanes {
           element = node
         node.children?.forEach(find)
       }
-      find(pane.tree)
+      find(pane.visibleTree ?? pane.tree)
       const node = element as FunctionUiElement | undefined
       const plugin = this.host.plugins.find((plugin) => plugin.name === action.plugin)
       if (!node || !plugin) throw new ModFunctionError("MODS_UI_STALE_ACTION")
@@ -442,7 +451,7 @@ export class FunctionPanes {
       const e: ModObject = {
         plugin: plugin.name,
         element: node.props.key,
-        component: "Pane",
+        component: this.host.site?.(pane).component ?? "Pane",
         requestId: pane.id,
         surface: "desktop",
         ...(event !== "ui.press" ? { value: action.value ?? "" } : {}),

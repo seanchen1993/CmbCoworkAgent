@@ -241,11 +241,12 @@ afterEach(async () => {
 })
 
 async function fixture(
-  readSession?: ConstructorParameters<typeof FunctionModsManager>[1]["readSession"]
+  readSession?: ConstructorParameters<typeof FunctionModsManager>[1]["readSession"],
+  sourceFixture = "resources/mods/function-commands"
 ) {
   const root = await mkdtemp(join(tmpdir(), "function-manager-"))
   const plugin = join(root, "plugin")
-  await cp(resolve("resources/mods/function-commands"), plugin, { recursive: true })
+  await cp(resolve(sourceFixture), plugin, { recursive: true })
   const store = new ModControlStore(join(root, "control.sqlite"))
   let enabled = true
   let pluginEnabled = true
@@ -313,6 +314,140 @@ async function fixture(
   }
 }
 
+it("does not load sessions for unmounted or disabled render sites and invalidates old site actions", async () => {
+  const f = await fixture()
+  expect(await f.manager.siteMount(f.root, "cold", "PromptHint")).toBeNull()
+  expect(f.loads()).toBe(0)
+  await f.approve()
+  await f.manager.commands(f.root, "thread")
+  const owner = await f.manager.siteMount(f.root, "thread", "PromptHint")
+  expect(owner).toBeTypeOf("string")
+  const rendered = await f.manager.siteRender(f.root, "thread", owner!, {
+    isDraft: false, isWorking: false, hint: "Enter to send"
+  })
+  expect(JSON.stringify(rendered)).toContain("Enter to send")
+  const before = f.loads()
+  f.setEnabled(false)
+  expect(await f.manager.siteMount(f.root, "thread", "PromptHint")).toBeNull()
+  expect(await f.manager.siteRender(f.root, "thread", owner!, {})).toBeNull()
+  expect(f.loads()).toBe(before)
+  await expect(f.manager.siteAct(f.root, "thread", owner!, {
+    pane: rendered!.key, generation: rendered!.generation, plugin: "engine", handle: 0,
+    intentId: randomUUID(), kind: "focus", value: { focused: true }
+  })).rejects.toThrow("MODS_UI_SITE_CLOSED")
+})
+
+it("cold-mounts approved UI sites without command warmup and rebuilds after reload or reenable", async () => {
+  const f = await fixture(undefined, "tests/fixtures/mods-v2/site-board")
+  expect(await f.manager.siteMount(f.root, "thread", "AbovePrompt")).toBeNull()
+  expect(f.loads()).toBe(0)
+  await f.approve()
+  const approvalLoads = f.loads()
+  const [above, hint] = await Promise.all([
+    f.manager.siteMount(f.root, "thread", "AbovePrompt"),
+    f.manager.siteMount(f.root, "thread", "PromptHint")
+  ])
+  expect(above).toBeTypeOf("string")
+  expect(hint).toBeTypeOf("string")
+  expect(f.loads()).toBe(approvalLoads + 1)
+  expect(
+    JSON.stringify(
+      await f.manager.siteRender(f.root, "thread", above!, {
+        isWorking: false,
+        maxRows: 8,
+        bodyColumns: 80
+      })
+    )
+  ).toContain("SITE_ABOVE count:")
+  expect(
+    JSON.stringify(
+      await f.manager.siteRender(f.root, "thread", hint!, {
+        isWorking: false,
+        isDraft: false,
+        hint: "Actual composer hint"
+      })
+    )
+  ).toContain("SITE_HINT draft:false working:false Actual composer hint")
+  f.manager.closeThread("thread")
+  const reloaded = await f.manager.siteMount(f.root, "thread", "AbovePrompt")
+  expect(reloaded).toBeTypeOf("string")
+  expect(reloaded).not.toBe(above)
+  expect(f.loads()).toBe(approvalLoads + 2)
+  await expect(f.manager.siteRender(f.root, "thread", above!, {})).rejects.toThrow(
+    "MODS_UI_SITE_CLOSED"
+  )
+  f.setEnabled(false)
+  expect(await f.manager.siteMount(f.root, "thread", "AbovePrompt")).toBeNull()
+  expect(f.loads()).toBe(approvalLoads + 2)
+  f.setEnabled(true)
+  expect(await f.manager.siteMount(f.root, "thread", "AbovePrompt")).toBeTypeOf("string")
+  expect(f.loads()).toBe(approvalLoads + 3)
+})
+
+it.each(["disable", "revoke", "close-thread", "replace", "off-on"])(
+  "does not start a cold site when %s races readiness inspection",
+  async (change) => {
+    const f = await fixture(undefined, "tests/fixtures/mods-v2/site-board")
+    await f.approve()
+    const before = f.loads()
+    const status = f.manager.status.bind(f.manager)
+    const inspection = vi.spyOn(f.manager, "status").mockImplementationOnce(async (workspace) => {
+      const captured = await status(workspace)
+      if (change === "disable") f.setEnabled(false)
+      else if (change === "revoke") f.manager.revoke(f.root, "site-board")
+      else if (change === "close-thread") f.manager.closeThread("thread")
+      else if (change === "replace") f.manager.invalidate(f.root)
+      else {
+        f.setEnabled(false)
+        f.setEnabled(true)
+      }
+      return captured
+    })
+    expect(await f.manager.siteMount(f.root, "thread", "AbovePrompt")).toBeNull()
+    expect(inspection).toHaveBeenCalledOnce()
+    expect(f.loads()).toBe(before)
+  }
+)
+
+it("does not start a cold site for disabled plugins or changed unapproved source", async () => {
+  const f = await fixture(undefined, "tests/fixtures/mods-v2/site-board")
+  await f.approve()
+  const before = f.loads()
+  f.setPluginEnabled(false)
+  expect(await f.manager.siteMount(f.root, "thread", "AbovePrompt")).toBeNull()
+  f.setPluginEnabled(true)
+  const file = join(f.plugin, "hooks", "register.tsx")
+  await writeFile(file, (await readFile(file, "utf8")) + "\n// changed source\n")
+  expect(await f.manager.siteMount(f.root, "thread", "AbovePrompt")).toBeNull()
+  expect(f.loads()).toBe(before)
+})
+
+it("bounds pending cold mounts and releases every request after thread closure", async () => {
+  const f = await fixture(undefined, "tests/fixtures/mods-v2/site-board")
+  await f.approve()
+  const ready = await f.manager.status(f.root)
+  const before = f.loads()
+  let release!: () => void
+  const inspected = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const inspection = vi.spyOn(f.manager, "status").mockImplementation(async () => {
+    await inspected
+    return ready
+  })
+  const mounts = Array.from({ length: 32 }, () =>
+    f.manager.siteMount(f.root, "thread", "AbovePrompt")
+  )
+  await expect(f.manager.siteMount(f.root, "thread", "AbovePrompt")).rejects.toThrow(
+    "MODS_UI_SITE_MOUNT_CAPACITY"
+  )
+  f.manager.closeThread("thread")
+  release()
+  expect(await Promise.all(mounts)).toEqual(Array(32).fill(null))
+  expect(f.loads()).toBe(before)
+  inspection.mockRestore()
+  expect(await f.manager.siteMount(f.root, "thread", "AbovePrompt")).toBeTypeOf("string")
+})
 it("registers tools before the first model prompt and drops them on revocation and disable", async () => {
   const f = await fixture()
   expect(await f.manager.registeredTools(f.root, "cold")).toEqual([])

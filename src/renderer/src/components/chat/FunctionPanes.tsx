@@ -135,7 +135,7 @@ function style(node: FunctionUiElement): CSSProperties {
   }
 }
 
-function Element({
+export function Element({
   node,
   busy,
   act,
@@ -287,11 +287,16 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
     const stop = window.api.mods.onCardsChanged((event) => {
       if (event.threadId === threadId) refresh()
     })
+    const stopConfiguration = window.api.mods.onConfigurationChanged(() => {
+      focusEpoch.current++
+      refresh()
+    })
     window.addEventListener("mods:configuration-changed", refresh)
     refresh()
     return () => {
       live = false
       stop()
+      stopConfiguration()
       window.removeEventListener("mods:configuration-changed", refresh)
     }
   }, [threadId])

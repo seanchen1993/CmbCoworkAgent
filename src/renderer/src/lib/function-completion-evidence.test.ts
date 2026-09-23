@@ -1,0 +1,117 @@
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
+import { expect, it } from "vitest"
+import { FunctionCompletionEvidenceContent } from "../components/chat/FunctionCompletionEvidence"
+import type { CompletionEvidenceRecord } from "../../../main/mods/v2/completion-evidence"
+
+const record = (
+  phase: CompletionEvidenceRecord["phase"],
+  status: CompletionEvidenceRecord["status"],
+  detail: CompletionEvidenceRecord["detail"]
+): CompletionEvidenceRecord => ({
+  id: `${phase}:${status}`,
+  idempotencyKey: "key",
+  workspace: "workspace",
+  threadId: "thread",
+  turnId: "turn",
+  runId: "run",
+  phase,
+  status,
+  detail,
+  at: 1,
+  binding: {
+    workspace: "workspace",
+    threadId: "thread",
+    turnId: "turn",
+    runId: "run",
+    runtimeGeneration: 4,
+    pluginDigests: { review: "digest" },
+    diffFingerprint: "diff",
+    stateFingerprint: "state",
+    configFingerprint: "config",
+    requirementVersion: "requirements-v2",
+    files: [{ path: "src/main.ts", size: 21, sha256: "fingerprint" }]
+  }
+})
+
+it("separates host test evidence from guest opinion and gives a concrete next action", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [
+        record("check.started", "running", {
+          rules: [
+            {
+              plugin: "policy",
+              mode: "repair",
+              scope: "diff",
+              checks: ["code-review", "unit-test"],
+              maxRepairs: 2,
+              timeoutMs: 5000,
+              modelTokenBudget: 4096
+            }
+          ]
+        }),
+        record("validator.result", "pass", {
+          source: "guest-opinion",
+          check: "code-review",
+          businessAccepted: false
+        }),
+        record("validator.result", "block", {
+          kind: "unit-test",
+          reason: "assertion failed <script>",
+          outputFingerprint: "test-output"
+        }),
+        record("check.result", "block", {
+          reason: "MODS_COMPLETION_MODEL_BUDGET",
+          inputTokens: 123,
+          outputTokens: 45
+        })
+      ]
+    })
+  )
+  expect(html).toContain("插件评审意见")
+  expect(html).toContain("宿主单元测试")
+  expect(html).toContain("不代表业务验收")
+  expect(html).toContain("assertion failed &lt;script&gt;")
+  expect(html).toContain("调整模型总预算")
+  expect(html).toContain("src/main.ts")
+  expect(html).toContain("fingerprint")
+  expect(html).toContain("requirements-v2")
+  expect(html).toContain("4096")
+  expect(html).toContain("code-review + unit-test")
+  expect(html).not.toContain("<script>")
+})
+
+it("adds no visible UI when there is no trusted host evidence", () => {
+  expect(
+    renderToStaticMarkup(createElement(FunctionCompletionEvidenceContent, { records: [] }))
+  ).toBe("")
+})
+
+it("identifies an uncertain checkpoint commit and requires reconciliation before retry", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [
+        record("state.transition", "interrupted", {
+          operationId: "trusted-operation-123",
+          reason: "AUTOBIZ_COMMIT_UNKNOWN"
+        })
+      ]
+    })
+  )
+  expect(html).toContain("trusted-operation-123")
+  expect(html).toContain("提交结果未知")
+  expect(html).toContain("不要直接重试推进")
+})
+
+it("limits history while preserving stale and cancelled outcomes instead of calling them PASS", () => {
+  const records = Array.from({ length: 40 }, (_, index) => ({
+    ...record("invalidated", "stale", { reason: `changed-${index}` }),
+    id: `${index}`,
+    at: index
+  }))
+  const html = renderToStaticMarkup(createElement(FunctionCompletionEvidenceContent, { records }))
+  expect(html).toContain("证据已失效")
+  expect(html.match(/data-completion-record=/g)).toHaveLength(24)
+  expect(html).not.toContain("changed-0<")
+})

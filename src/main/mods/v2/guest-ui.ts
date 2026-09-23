@@ -21,16 +21,20 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
     type: "Box", props: {}, children: uiChildren(props?.children)
   }) });
   function uiElements(meta, input) {
-    if (!input || input.surface !== "desktop" || input.component !== "Pane" ||
+    if (!input || input.surface !== "desktop" ||
+        !["Pane", "AbovePrompt", "PromptHint", "InfoNotice", "Spinner", "TurnDuration", "SessionMode"].includes(input.component) ||
         !asyncScope?.uiGeneration || asyncScope.event !== "ui.render" ||
-        asyncScope.plugin !== meta.plugin.name || asyncScope.requestId !== input.requestId)
+        asyncScope.plugin !== meta.plugin.name || asyncScope.requestId !== input.requestId ||
+        asyncScope.component !== input.component)
       throw Error("MODS_UI_SURFACE_UNAVAILABLE");
     const table = Object.create(null);
     for (const name of ["Box", "Text", "Button", "Input", "Select", "Link", "Code", "Client"]) {
       table[name] = raw => {
         const scope = asyncScope;
         if (!scope || scope.event !== "ui.render" || !scope.uiGeneration ||
-            scope.plugin !== meta.plugin.name) throw Error("MODS_UI_RENDER_ENDED");
+            scope.plugin !== meta.plugin.name || scope.requestId !== input.requestId ||
+            scope.component !== input.component)
+          throw Error("MODS_UI_RENDER_ENDED");
         const props = { ...raw };
         const children = uiChildren(props.children);
         delete props.children;
@@ -56,7 +60,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
           const handle = ++uiSequence;
           uiCallbacks.set(handle, {
             generation: scope.uiGeneration, callbacks, requestId: scope.requestId,
-            plugin: scope.plugin, element: props.key
+            plugin: scope.plugin, element: props.key, component: input.component
           });
           tree.press = { plugin: scope.plugin, handle };
         } else if (ownKeys(callbacks).length) throw Error("MODS_UI_CALLBACK");
@@ -70,7 +74,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
     const record = uiCallbacks.get(binding.handle);
     if (!record || record.generation !== binding.generation ||
         record.plugin !== meta.plugin.name || record.requestId !== event.requestId ||
-        event.surface !== "desktop" || event.component !== "Pane" ||
+        event.surface !== "desktop" || event.component !== record.component ||
         record.plugin !== event.plugin || record.element !== event.element)
       throw Error("MODS_UI_STALE_ACTION");
     const kind = binding.kind;

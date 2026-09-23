@@ -18,7 +18,8 @@ import {
   validateFunctionTree,
   validatePaneArgs
 } from "../../../shared/mods/v2/ui"
-import { FunctionPanes, type FunctionUiDispatch } from "./panes"
+import { FunctionPanes, type FunctionUiDispatch, type PaneHost } from "./panes"
+import { FunctionUiSites } from "./sites"
 export const SESSION_CAPABILITIES = [
   ...BASIC_CAPABILITIES,
   ...FUNCTION_UI_CAPABILITIES,
@@ -142,6 +143,7 @@ export interface FunctionSessionHost {
 /** A session keeps registration state and VMs across turns; every call still has its own frame. */
 export class FunctionSession {
   readonly panes: FunctionPanes
+  readonly sites: FunctionUiSites
   readonly clients: FunctionClients
   private readonly controller = new AbortController()
   private readonly registry = new Map<string, FunctionCommand>()
@@ -187,7 +189,7 @@ export class FunctionSession {
       control: (event, input, core, signal) =>
         this.dispatch(event, input, signal, undefined, 0, undefined, undefined, { core })
     })
-    this.panes = new FunctionPanes({
+    const paneHost: PaneHost = {
       clients: this.clients,
       plugins,
       assertLive: () => this.assertLive(),
@@ -235,7 +237,9 @@ export class FunctionSession {
         )
         this.assertLive(plugin)
       }
-    })
+    }
+    this.panes = new FunctionPanes(paneHost)
+    this.sites = new FunctionUiSites(paneHost)
   }
 
   start(): Promise<void> {
@@ -490,7 +494,9 @@ export class FunctionSession {
   ): Promise<ModHookStream> {
     await this.start()
     this.assertLive()
-    const scoped = signal ? AbortSignal.any([signal, this.controller.signal]) : this.controller.signal
+    const scoped = signal
+      ? AbortSignal.any([signal, this.controller.signal])
+      : this.controller.signal
     validateFunctionTurnStepInput(input)
     return dispatchFunctionStream(this.plugins, input, {
       signal: scoped,
@@ -575,16 +581,9 @@ export class FunctionSession {
   ): Promise<ModObject> {
     await this.start()
     if (!event.startsWith("classic.")) throw new ModFunctionError("MODS_CLASSIC_EVENT_INVALID")
-    const value = await this.dispatch(
-      event,
-      input,
-      signal,
-      undefined,
-      0,
-      undefined,
-      undefined,
-      { core }
-    )
+    const value = await this.dispatch(event, input, signal, undefined, 0, undefined, undefined, {
+      core
+    })
     if (!isModObject(value)) throw new ModFunctionError("MODS_CLASSIC_RESULT")
     return value
   }
@@ -1132,7 +1131,8 @@ export class FunctionSession {
           plugin,
           core: async (input, signal) => {
             this.assertLive(plugin)
-            if (!this.host.capability) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
+            if (!this.host.capability)
+              throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
             const value = await this.host.capability(plugin, method, [input], signal)
             if (value === undefined && method === "model.classify") return null
             if (value === undefined) throw new ModFunctionError("MODS_MODEL_OPERATION_UNSUPPORTED")
@@ -1142,7 +1142,8 @@ export class FunctionSession {
         turnHeld
       )
       if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
-      if (typeof result.deny === "string") throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
+      if (typeof result.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
       return method === "model.classify" && result.value === null ? undefined : result.value
     }
     if (method === "model.complete") {
@@ -1211,6 +1212,7 @@ export class FunctionSession {
     if (method === "ui.invalidate") {
       if (args[0] !== "ui.render") throw new ModFunctionError("MODS_UI_INVALIDATE_UNAVAILABLE")
       this.panes.invalidate()
+      this.sites.invalidate()
       return undefined
     }
     if (method === "ui.open" || method === "ui.close") {
@@ -1318,6 +1320,7 @@ export class FunctionSession {
   async close(): Promise<void> {
     this.controller.abort(new ModFunctionError("MODS_SESSION_CLOSED"))
     this.panes.close()
+    this.sites.close()
     this.clients.close()
     this.registry.clear()
     this.tools.clear()

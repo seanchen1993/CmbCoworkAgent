@@ -14,10 +14,12 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { FunctionSite } from "./FunctionSite"
 
 export type ChatAgentMode = "normal" | "multi" | "coordinator" | "workflow"
 
 interface AgentModeSwitcherProps {
+  threadId?: string
   mode: ChatAgentMode
   locked?: boolean
   lockedReason?: string
@@ -338,6 +340,7 @@ function WorkflowMosaicCanvas(): JSX.Element {
 export const AgentModeSwitcher = memo(AgentModeSwitcherImpl)
 
 function AgentModeSwitcherImpl({
+  threadId,
   mode,
   locked,
   lockedReason,
@@ -347,6 +350,7 @@ function AgentModeSwitcherImpl({
   onChange
 }: AgentModeSwitcherProps): JSX.Element {
   const [open, setOpen] = useState(false)
+  const [customModeLabel, setCustomModeLabel] = useState(false)
   const [infoOpen, setInfoOpen] = useState(false)
   const [thumbHovered, setThumbHovered] = useState(false)
   const [hoveredStopIndex, setHoveredStopIndex] = useState<number | null>(null)
@@ -432,7 +436,9 @@ function AgentModeSwitcherImpl({
       >
         <ActiveIcon className="size-3.5" />
       </span>
-      <span className="font-medium">{activeMode.shortLabel}</span>
+      <span className={cn("font-medium", customModeLabel && "sr-only")}>
+        {activeMode.shortLabel}
+      </span>
       <ChevronDown className="size-3 opacity-70" />
       {lockedReason && (
         <span id={lockedReasonId} className="sr-only">
@@ -672,8 +678,8 @@ function AgentModeSwitcherImpl({
     </PopoverContent>
   )
 
-  if (locked) {
-    return (
+  return (
+    <span className="inline-flex items-center gap-1.5">
       <Popover
         open={open}
         onOpenChange={(nextOpen) => {
@@ -684,19 +690,16 @@ function AgentModeSwitcherImpl({
         <PopoverTrigger asChild>{modeButton}</PopoverTrigger>
         {popoverContent}
       </Popover>
-    )
-  }
-
-  return (
-    <Popover
-      open={open}
-      onOpenChange={(nextOpen) => {
-        setOpen(nextOpen)
-        if (!nextOpen) setInfoOpen(false)
-      }}
-    >
-      <PopoverTrigger asChild>{modeButton}</PopoverTrigger>
-      {popoverContent}
-    </Popover>
+      {threadId && (
+        <FunctionSite
+          key={`mode:${threadId}`}
+          threadId={threadId}
+          component="SessionMode"
+          facts={{ modes: [activeMode.shortLabel] }}
+          className="contents"
+          onCustom={setCustomModeLabel}
+        />
+      )}
+    </span>
   )
 }

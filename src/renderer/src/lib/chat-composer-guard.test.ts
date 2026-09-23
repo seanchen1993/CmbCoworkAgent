@@ -36,6 +36,7 @@ function renderComposer(overrides: Record<string, unknown> = {}): string {
     readOnly: false,
     input: "",
     inputPlaceholder: "输入消息",
+    functionHint: null,
     inputRef: { current: null },
     handleKeyDown: () => undefined,
     handleAttachClick: () => undefined,

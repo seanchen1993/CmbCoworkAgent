@@ -216,7 +216,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     if (meta.event !== "engine.create") sdk.plugin = meta.plugin;
     const scope = {
       call, plugin: meta.plugin.name, callback: !!meta.callback, event: meta.event,
-      uiGeneration: meta.uiGeneration, requestId: event.requestId
+      uiGeneration: meta.uiGeneration, requestId: event.requestId, component: event.component
     };
     const unawaited = [];
     function sdkCall(method, args) {

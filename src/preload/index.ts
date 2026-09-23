@@ -3048,6 +3048,11 @@ const api = {
     globalEnabled: (): Promise<boolean> => ipcRenderer.invoke("mods:global-enabled"),
     configureGlobal: (enabled: boolean): Promise<boolean> =>
       ipcRenderer.invoke("mods:configure-global", enabled),
+    onConfigurationChanged: (callback: () => void): (() => void) => {
+      const listener = (): void => callback()
+      ipcRenderer.on("mods:configuration-changed", listener)
+      return () => ipcRenderer.removeListener("mods:configuration-changed", listener)
+    },
     functionUnlocked: (): Promise<boolean> => ipcRenderer.invoke("mods:function-unlocked"),
     unlockFunction: (password: string): Promise<boolean> =>
       ipcRenderer.invoke("mods:unlock-function", password),
@@ -3061,6 +3066,14 @@ const api = {
       ipcRenderer.invoke("mods:function-autobiz-transition", { threadId, transition }),
     panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>
       ipcRenderer.invoke("mods:function-panes", threadId),
+    siteMount: (threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite): Promise<string | null> =>
+      ipcRenderer.invoke("mods:function-site-mount", { threadId, component }),
+    siteRender: (threadId: string, owner: string, props: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null> =>
+      ipcRenderer.invoke("mods:function-site-render", { threadId, owner, props }),
+    siteUnmount: (threadId: string, owner: string): Promise<void> =>
+      ipcRenderer.invoke("mods:function-site-unmount", { threadId, owner }),
+    siteAct: (threadId: string, owner: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult> =>
+      ipcRenderer.invoke("mods:function-site-act", { threadId, owner, action }),
     paneAct: (
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction

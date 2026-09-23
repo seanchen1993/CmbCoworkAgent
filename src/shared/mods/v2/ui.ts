@@ -25,6 +25,8 @@ export interface FunctionPaneSnapshot {
   tree: FunctionUiElement
   closeOnEscape: boolean
   rows: number
+  /** Set by the host after publication when the site exactly preserves its native default. */
+  nativeFallback?: boolean
   clients?: FunctionClientSnapshot[]
   focusRequest?: { id: string; pending: boolean }
 }

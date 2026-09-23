@@ -2,6 +2,9 @@ import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useModCommands } from "../../features/slash-commands/useModCommands"
 import { ModCommandJobs } from "./ModCommandJobs"
 import { FunctionPanes } from "./FunctionPanes"
+import { FunctionCompletionEvidence } from "./FunctionCompletionEvidence"
+import { FunctionSite } from "./FunctionSite"
+import { functionSpinnerFacts } from "../../lib/function-status-site"
 import { useFunctionTurnNotices } from "@/lib/use-function-turn-notices"
 import { ModCards } from "./ModCards"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
@@ -1660,6 +1663,10 @@ export function ChatContainer({
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
   const functionTurnNotices = useFunctionTurnNotices(threadId)
+  const [functionHint, setFunctionHint] = useState<{ threadId: string; text: string | null } | null>(null)
+  const updateFunctionHint = useCallback((text: string | null) => {
+    setFunctionHint((old) => old?.threadId === threadId && old.text === text ? old : { threadId, text })
+  }, [threadId])
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
   )
@@ -7600,12 +7607,25 @@ export function ChatContainer({
           {contextCompaction?.phase !== "started" && (
             <div className="flex items-center gap-2 text-sm">
               <div className="rainbow-spinner" />
-              <span
-                className="thinking-shimmer-text"
-                data-text={THINKING_MESSAGES[thinkingMessageIndex]}
-              >
-                {THINKING_MESSAGES[thinkingMessageIndex]}
-              </span>
+              <FunctionSite
+                key={`spinner:${threadId}`}
+                threadId={threadId}
+                component="Spinner"
+                facts={functionSpinnerFacts(
+                  THINKING_MESSAGES[thinkingMessageIndex],
+                  liveDisplayMessages.at(-1),
+                  Object.values(toolCallStates).some((tool) => tool.status === "running")
+                )}
+                className="text-sm"
+                fallback={
+                  <span
+                    className="thinking-shimmer-text"
+                    data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+                  >
+                    {THINKING_MESSAGES[thinkingMessageIndex]}
+                  </span>
+                }
+              />
               {streamData.isLoading && (
                 <ProcessingDuration key={threadId} startTime={activeTurnStartTime} text="已处理" />
               )}
@@ -7635,7 +7655,9 @@ export function ChatContainer({
               </span>
             </div>
             <div className="mt-2 break-words text-sm text-status-warning-foreground">
-              {hookInterruption.reason}
+              <FunctionSite key={`notice:${threadId}:${hookInterruption.timestamp}`}
+                threadId={threadId} component="InfoNotice" className="contents"
+                facts={{ text: hookInterruption.reason, command: null }} fallback={hookInterruption.reason} />
             </div>
             {hookInterruption.systemMessage && (
               <div className="mt-2 break-words text-xs text-status-warning-foreground/80">
@@ -8329,6 +8351,9 @@ export function ChatContainer({
               <div className="max-w-3xl mx-auto"><ModCards threadId={threadId} slot="turn.summary" /></div>
               <ModCommandJobs key={threadId} threadId={threadId} />
               <FunctionPanes key={`panes:${threadId}`} threadId={threadId} />
+              <FunctionCompletionEvidence key={`evidence:${threadId}`} threadId={threadId} isWorking={isLoading} />
+              <FunctionSite key={`above:${threadId}`} threadId={threadId} component="AbovePrompt"
+                facts={{ isWorking: isLoading }} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
                   visible={chatScrollUiState.mode === "detached"}
@@ -8930,7 +8955,7 @@ export function ChatContainer({
                           isComposingRef.current = false
                         }}
                         onKeyDown={handleKeyDown}
-                        placeholder={inputPlaceholder}
+                        placeholder={functionHint?.threadId === threadId ? functionHint.text ?? inputPlaceholder : inputPlaceholder}
                         disabled={effectiveInputDisabled}
                         className={cn(
                           "composer-textarea relative z-[1] mr-2 w-[calc(100%-0.5rem)] resize-none overflow-y-auto bg-transparent",
@@ -8962,6 +8987,7 @@ export function ChatContainer({
                           <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                           <ModelSwitcher threadId={threadId} />
                           <AgentModeSwitcher
+                            threadId={threadId}
                             showWorkflow
                             mode={
                               (disableCoordinatorModeOption && agentMode === "coordinator") ||
@@ -9087,6 +9113,9 @@ export function ChatContainer({
                   </div>
                 </div>
               </form>
+              <FunctionSite key={`hint:${threadId}`} threadId={threadId} component="PromptHint"
+                facts={{ isDraft: input.length > 0, isWorking: isLoading,
+                  hint: inputPlaceholder }} onHint={updateFunctionHint} />
             </div>
           </>
         )}

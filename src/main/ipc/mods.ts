@@ -593,6 +593,26 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   ipcMain.handle("mods:function-panes", (event, threadId: string) =>
     functions.panes(scope(event, threadId), threadId)
   )
+  ipcMain.handle("mods:function-site-mount", (event, input: {
+    threadId: string; component: import("../../shared/mods/v2/sites").FunctionUiSite
+  }) => functions.siteMount(scope(event, input?.threadId), input.threadId, input.component))
+  ipcMain.handle("mods:function-site-render", (event, input: {
+    threadId: string; owner: string; props: ModObject
+  }) => functions.siteRender(scope(event, input?.threadId), input.threadId, input.owner,
+    parseModJson(encodeModJson(input.props)) as ModObject))
+  ipcMain.handle("mods:function-site-unmount", (event, input: { threadId: string; owner: string }) =>
+    functions.siteUnmount(scope(event, input?.threadId), input.threadId, input.owner))
+  ipcMain.handle("mods:function-site-act", (event, input: {
+    threadId: string; owner: string; action: FunctionUiAction
+  }) => {
+    const workspace = writableScope(event, input?.threadId)
+    return withFunctionExecution({
+      ...manager.functionUserScope(workspace, input.threadId), workspace, threadId: input.threadId,
+      leased: false, immediate: false,
+      userInitiated: ["press", "submit", "select"].includes(input.action?.kind)
+    }, () => functions.siteAct(workspace, input.threadId, input.owner,
+      parseModJson(encodeModJson(input.action)) as unknown as FunctionUiAction))
+  })
   ipcMain.handle(
     "mods:function-client-act",
     (event, input: { threadId: string; action: FunctionClientAction }) => {
@@ -787,6 +807,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     if (enabled) settingsAccess.assertUnlocked(event.sender)
     const value = setModsGlobalEnabled(enabled)
     manager.invalidateAll()
+    const owner = window()
+    if (owner && !owner.isDestroyed()) owner.webContents.send("mods:configuration-changed")
     return value
   })
   ipcMain.handle("mods:function-unlocked", (event) => {

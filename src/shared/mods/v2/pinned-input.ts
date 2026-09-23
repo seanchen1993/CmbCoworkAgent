@@ -1,6 +1,7 @@
 import type { ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { ModFunctionError } from "./contracts"
+import { functionSiteProps } from "./sites"
 
 /** Host-owned fields in the pinned v2.1.278 contracts; required identity fields cannot be omitted. */
 const pinned: Record<string, readonly string[]> = {
@@ -69,6 +70,30 @@ export function normalizeFunctionInput(
     if (Object.hasOwn(received, key) && !same(received[key], original[key]))
       throw new ModFunctionError("MODS_PINNED_INPUT", `MODS_PINNED_INPUT: ${event}.${key}`)
     if (Object.hasOwn(original, key)) result[key] = original[key]
+  }
+  if (event === "ui.render" && original.props && typeof original.props === "object") {
+    const facts =
+      original.component === "AbovePrompt"
+        ? ["hasSurvey", "isWorking", "maxRows", "bodyColumns", "scroll", "view"]
+        : original.component === "PromptHint"
+          ? ["isDraft", "isWorking"]
+          : original.component === "InfoNotice" || original.component === "TurnDuration"
+            ? ["onScreen"]
+            : []
+    for (const key of facts) {
+      const props = result.props as ModObject | undefined
+      const before = original.props as ModObject
+      if (!props || !same(props[key], before[key]))
+        throw new ModFunctionError("MODS_PINNED_INPUT", `MODS_PINNED_INPUT: ui.render.props.${key}`)
+    }
+    if (
+      original.component === "PromptHint" ||
+      original.component === "InfoNotice" ||
+      original.component === "Spinner" ||
+      original.component === "TurnDuration" ||
+      original.component === "SessionMode"
+    )
+      functionSiteProps(original.component, result.props)
   }
   return result
 }

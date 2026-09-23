@@ -39,6 +39,7 @@ import type {
   FunctionUiAction,
   FunctionClientAction
 } from "../../../shared/mods/v2/ui"
+import { functionUiSite, type FunctionUiSite } from "../../../shared/mods/v2/sites"
 import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
 import type { ToolPermissionResult } from "../../../shared/tool-permission"
@@ -164,6 +165,11 @@ export class FunctionModsManager {
   private readonly initialEpoch = randomInt(1, 2 ** 48)
   private readonly epochs = new Map<string, number>()
   private readonly sessions = new Map<string, SessionEntry>()
+  private readonly pendingSiteMounts = new Set<{
+    workspace: string
+    threadId: string
+    valid: boolean
+  }>()
   private closed = false
   private sessionGeneration = this.initialEpoch
 
@@ -283,6 +289,8 @@ export class FunctionModsManager {
 
   invalidate(workspace: string): void {
     this.epochs.set(workspace, this.epoch(workspace) + 1)
+    for (const request of this.pendingSiteMounts)
+      if (request.workspace === workspace) request.valid = false
     for (const [key, entry] of this.sessions) {
       if (entry.workspace !== workspace) continue
       this.sessions.delete(key)
@@ -294,11 +302,16 @@ export class FunctionModsManager {
 
   /** Stop every Function Mods session when the application-level switch changes. */
   invalidateAll(): void {
-    const workspaces = new Set([...this.sessions.values()].map((entry) => entry.workspace))
+    const workspaces = new Set([
+      ...[...this.sessions.values()].map((entry) => entry.workspace),
+      ...[...this.pendingSiteMounts].map((request) => request.workspace)
+    ])
     for (const workspace of workspaces) this.invalidate(workspace)
   }
 
   closeThread(threadId: string): void {
+    for (const request of this.pendingSiteMounts)
+      if (request.threadId === threadId) request.valid = false
     for (const [key, entry] of this.sessions) {
       if (entry.threadId !== threadId) continue
       this.sessions.delete(key)
@@ -1356,6 +1369,71 @@ export class FunctionModsManager {
     if (!entry || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_UI_STALE_ACTION")
     await entry.loading
     return entry.session!.panes.act(action)
+  }
+
+  async siteMount(
+    workspace: string,
+    threadId: string,
+    component: FunctionUiSite
+  ): Promise<string | null> {
+    if (this.closed || !this.host.enabled(workspace) || this.sources().length === 0) return null
+    functionUiSite(component)
+    this.host.assertThread?.(workspace, threadId)
+    if (this.pendingSiteMounts.size >= 32) throw new ModFunctionError("MODS_UI_SITE_MOUNT_CAPACITY")
+    const request = { workspace, threadId, valid: true }
+    const current = (): boolean => request.valid && !this.closed && this.host.enabled(workspace)
+    this.pendingSiteMounts.add(request)
+    try {
+      const key = JSON.stringify([workspace, threadId])
+      // A visible site is an entry point: approved modules must start without a command warmup.
+      // Inspect grants before allocating a runtime, and retain cancellation during discovery.
+      if (
+        !this.sessions.has(key) &&
+        !(await this.status(workspace)).some((item) => item.state === "ready")
+      )
+        return null
+      if (!current()) return null
+      this.host.assertThread?.(workspace, threadId)
+      const entry = await this.session(workspace, threadId)
+      if (!current() || this.sessions.get(key) !== entry || entry.session!.plugins.length === 0)
+        return null
+      const owner = await entry.session!.sites.mount(component)
+      return current() && this.sessions.get(key) === entry ? owner : null
+    } finally {
+      this.pendingSiteMounts.delete(request)
+    }
+  }
+
+  async siteRender(
+    workspace: string,
+    threadId: string,
+    owner: string,
+    props: ModObject
+  ): Promise<FunctionPaneSnapshot | null> {
+    if (!this.host.enabled(workspace)) return null
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry) return null
+    await entry.loading
+    return entry.session!.sites.render(owner, props)
+  }
+
+  async siteUnmount(workspace: string, threadId: string, owner: string): Promise<void> {
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry || !this.host.enabled(workspace)) return
+    await entry.loading
+    await entry.session!.sites.unmount(owner)
+  }
+
+  async siteAct(
+    workspace: string,
+    threadId: string,
+    owner: string,
+    action: FunctionUiAction
+  ): Promise<void | import("../../../shared/mods/v2/ui").FunctionFocusResult> {
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
+    await entry.loading
+    return entry.session!.sites.act(owner, action)
   }
 
   async clientAct(

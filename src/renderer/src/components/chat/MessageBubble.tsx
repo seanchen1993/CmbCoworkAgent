@@ -47,6 +47,7 @@ import {
 } from "@/lib/coordinator-worker-tool-args"
 import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
+import { FunctionSite } from "./FunctionSite"
 import { formatMessageTimeLabel, getAssistantStartTime } from "@/lib/message-bubble-timing"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
@@ -921,7 +922,16 @@ function MessageBubbleImpl({
               开始于 {assistantStartTimeLabel}
             </time>
           )}
-          {!shouldHideDuration && <DurationShow durationMs={duration} text="耗时" />}
+          {!shouldHideDuration && duration > 0 && (
+            <FunctionSite
+              key={`duration:${threadId}:${message.id}:${messageGeneration}`}
+              threadId={threadId}
+              component="TurnDuration"
+              facts={{ word: "耗时", durationMs: duration }}
+              className="text-xs text-muted-foreground/70"
+              fallback={<DurationShow durationMs={duration} text="耗时" />}
+            />
+          )}
         </div>
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden">

@@ -975,10 +975,16 @@ interface CustomAPI {
   mods: {
     globalEnabled(): Promise<boolean>
     configureGlobal(enabled: boolean): Promise<boolean>
+    onConfigurationChanged(callback: () => void): () => void
+    completionEvidence(threadId: string): Promise<import("../main/mods/v2/completion-evidence").CompletionEvidenceRecord[]>
     functionUnlocked(): Promise<boolean>
     unlockFunction(password: string): Promise<boolean>
     turnNotices(threadId: string): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]>
     panes(threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]>
+    siteMount(threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite): Promise<string | null>
+    siteRender(threadId: string, owner: string, props: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null>
+    siteUnmount(threadId: string, owner: string): Promise<void>
+    siteAct(threadId: string, owner: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult>
     paneAct(
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction
