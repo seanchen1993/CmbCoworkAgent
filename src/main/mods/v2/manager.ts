@@ -1421,7 +1421,7 @@ export class FunctionModsManager {
             const remaining = Math.min(
               ...active
                 .filter(([, policy]) => policy && selectedPolicies.includes(policy))
-                .map(([name]) => budgets.get(name)!.deadline - Date.now())
+                .map(([name]) => budgets.get(name)!.remainingTimeMs())
             )
             if (remaining <= 0) {
               record("validator.result", "block", {
@@ -1490,7 +1490,7 @@ export class FunctionModsManager {
             const remaining = Math.min(
               ...active
                 .filter(([, policy]) => policy && timedPolicies.includes(policy))
-                .map(([name]) => budgets.get(name)!.deadline - Date.now())
+                .map(([name]) => budgets.get(name)!.remainingTimeMs())
             )
             if (remaining <= 0) {
               record("validator.result", "block", {

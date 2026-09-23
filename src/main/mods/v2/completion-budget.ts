@@ -8,7 +8,7 @@ export interface CompletionReservation {
 
 /** Host-owned total usage and conservative in-flight reservations across checks and repairs. */
 export class CompletionBudget {
-  readonly deadline: number
+  private readonly deadline: number
   outputReserved = 0
   inputTokens = 0
   outputTokens = 0
@@ -18,7 +18,7 @@ export class CompletionBudget {
   constructor(
     readonly tokenLimit: number,
     timeoutMs: number,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = () => performance.now()
   ) {
     this.deadline = now() + timeoutMs
   }
@@ -29,9 +29,15 @@ export class CompletionBudget {
     if (this.failure) throw this.failure
   }
 
+  /** Duration only: never subtract a wall clock from this monotonic deadline. */
+  remainingTimeMs(): number {
+    return Math.max(0, Math.ceil(this.deadline - this.now()))
+  }
+
   remainingMs(): number {
     this.assert()
-    return Math.max(1, this.deadline - this.now())
+    // Native AbortSignal.timeout rejects fractional milliseconds.
+    return Math.max(1, this.remainingTimeMs())
   }
 
   availableTokens(): number {

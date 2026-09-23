@@ -1,4 +1,4 @@
-import { expect, it } from "vitest"
+import { expect, it, vi } from "vitest"
 import {
   CompletionBudget,
   reserveCompletionModelUsage,
@@ -56,3 +56,28 @@ it("shares an absolute deadline across later revisions", async () => {
     "MODS_COMPLETION_TIMEOUT"
   )
 })
+
+it.each([86400000, -86400000])(
+  "does not change a completion deadline when wall time jumps by %s",
+  (jump) => {
+    let wall = 100000
+    let monotonic = 50
+    const wallClock = vi.spyOn(Date, "now").mockImplementation(() => wall)
+    const elapsedClock = vi.spyOn(performance, "now").mockImplementation(() => monotonic)
+    try {
+      const budget = new CompletionBudget(300, 1000)
+      wall += jump
+      monotonic += 250.25
+      expect(budget.remainingMs()).toBe(750)
+      // AbortSignal.timeout requires an integer, although the monotonic clock has fractions.
+      expect(() => AbortSignal.timeout(budget.remainingMs())).not.toThrow()
+      monotonic += 800
+      expect(() => budget.assert()).toThrow("MODS_COMPLETION_TIMEOUT")
+      wall -= jump
+      expect(() => budget.assert()).toThrow("MODS_COMPLETION_TIMEOUT")
+    } finally {
+      wallClock.mockRestore()
+      elapsedClock.mockRestore()
+    }
+  }
+)
