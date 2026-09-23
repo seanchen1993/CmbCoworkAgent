@@ -1,7 +1,7 @@
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
-import { afterEach, expect, it } from "vitest"
+import { afterEach, expect, it, vi } from "vitest"
 import { ModControlStore } from "../control-store"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionModsManager } from "./manager"
@@ -9,8 +9,81 @@ import type { ModJson } from "../../../shared/mods/types"
 import { randomUUID } from "node:crypto"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
 import { captureCompletionBinding } from "./completion-evidence"
+import { FakeStreamingChatModel } from "@langchain/core/utils/testing"
+import { AIMessageChunk, HumanMessage } from "@langchain/core/messages"
+import { createModModelBoundary } from "../../agent/mods-model-boundary"
 
 const cleanups: Array<() => Promise<void>> = []
+
+it.each(["consumer-close", "publication-failure"])(
+  "closes the actual model core and restores its selection after %s through turnStep",
+  async (mode) => {
+    const f = await fixture()
+    await writeFile(join(f.plugin, "hooks/register.ts"), `export function register(on) {
+      on("turn.step", async function* ($, e, next) {
+        for await (const chunk of next({...e, model:"selected"})) yield chunk
+      })
+    }`)
+    await f.approve()
+    const provider = new FakeStreamingChatModel({})
+    let closed = 0
+    vi.spyOn(provider, "stream").mockImplementation(async () => (async function* () {
+      try {
+        yield new AIMessageChunk({ content: "first" })
+        yield new AIMessageChunk({ content: "second" })
+      } finally { closed++ }
+    })() as never)
+    let effective = "default"
+    const release = vi.fn(() => { effective = "default" })
+    if (mode === "publication-failure") f.setPublication(async (value) => {
+      if (value && typeof value === "object" && !Array.isArray(value) && value.kind === "text")
+        throw Error("PUBLICATION_FAILED")
+      return value
+    })
+    const model = createModModelBoundary(provider, {
+      functionModelStream: (_authority, input, core, signal) => f.manager.turnStep(f.root, "thread", input, core, signal)
+    }, { turnId: "turn", assertLive: () => {} } as never, { turnId: "turn", model: "default" }, {
+      resolve: async (selection) => ({ provider, model: selection.model, contextWindow: 32000, inputBudget: 30000 }),
+      activate: (selection) => { effective = selection.model; return release }
+    })
+    if (mode === "publication-failure")
+      await expect(model.invoke([new HumanMessage("publish")])).rejects.toThrow("PUBLICATION_FAILED")
+    else {
+      const stream = await model.stream([new HumanMessage("close")])
+      expect((await stream.next()).done).toBe(false)
+      expect(effective).toBe("selected")
+      await stream.return()
+    }
+    expect(closed).toBe(1)
+    expect(effective).toBe("default")
+    expect(release).toHaveBeenCalledOnce()
+  }
+)
+
+it("does not fall through classic core when a cold session is invalidated during discovery", async () => {
+  const f = await fixture()
+  vi.spyOn(f.manager, "status").mockImplementationOnce(async () => {
+    f.manager.invalidate(f.root)
+    return []
+  })
+  const core = vi.fn(async () => ({}))
+  await expect(f.manager.classicEvent(f.root, "thread", "classic.Stop", {
+    hook_event_name: "Stop", session_id: "thread", cwd: f.root, transcript_path: ""
+  }, new AbortController().signal, core)).rejects.toThrow("MODS_SCOPE_CHANGED")
+  expect(core).not.toHaveBeenCalled()
+})
+
+it("does not run the disabled classic core for an already-cancelled caller", async () => {
+  const f = await fixture()
+  f.setEnabled(false)
+  const controller = new AbortController()
+  controller.abort(Error("cancelled"))
+  const core = vi.fn(async () => ({}))
+  await expect(f.manager.classicEvent(f.root, "thread", "classic.Stop", {
+    hook_event_name: "Stop", session_id: "thread", cwd: f.root, transcript_path: ""
+  }, controller.signal, core)).rejects.toThrow("cancelled")
+  expect(core).not.toHaveBeenCalled()
+})
 
 it("pins mandatory completion checks to the loaded grant and rejects revocation", async () => {
   const f = await fixture()
@@ -715,30 +788,4 @@ it("protects real turn facts before observers and notices after hooks, including
   await result
   expect(await f.manager.turnNotices(f.root, "thread")).toEqual([])
   expect(f.loads()).toBe(loads)
-})
-
-it("does not fall through classic core when a cold session is invalidated during discovery", async () => {
-  const f = await fixture()
-  vi.spyOn(f.manager, "status").mockImplementationOnce(async () => {
-    f.manager.invalidate(f.root)
-    return []
-  })
-  const core = vi.fn(async () => ({}))
-  await expect(f.manager.classicEvent(f.root, "thread", "classic.Stop", {
-    hook_event_name: "Stop", session_id: "thread", cwd: f.root, transcript_path: ""
-  }, new AbortController().signal, core)).rejects.toThrow("MODS_SCOPE_CHANGED")
-  expect(core).not.toHaveBeenCalled()
-})
-
-
-it("does not run the disabled classic core for an already-cancelled caller", async () => {
-  const f = await fixture()
-  f.setEnabled(false)
-  const controller = new AbortController()
-  controller.abort(Error("cancelled"))
-  const core = vi.fn(async () => ({}))
-  await expect(f.manager.classicEvent(f.root, "thread", "classic.Stop", {
-    hook_event_name: "Stop", session_id: "thread", cwd: f.root, transcript_path: ""
-  }, controller.signal, core)).rejects.toThrow("cancelled")
-  expect(core).not.toHaveBeenCalled()
 })

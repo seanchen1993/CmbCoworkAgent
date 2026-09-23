@@ -59,7 +59,11 @@ import {
   resolveFunctionMcpToolName
 } from "./v2/mcp-sdk"
 import { functionSdkToolInput, isNativeFunctionTool } from "./v2/tool-sdk"
-import type { FunctionStreamOptions, ModHookStream } from "./v2/stream-dispatcher"
+import {
+  dispatchFunctionStream,
+  type FunctionStreamOptions,
+  type ModHookStream
+} from "./v2/stream-dispatcher"
 import { queryModRuntimeToolAccess, type ModRuntimeToolAccess } from "./runtime-tool-access"
 import {
   assertModRuntimeAuthority,
@@ -206,6 +210,21 @@ export class ModsManager {
     if (authority.agentId !== "main" || this.runtimeAuthorities.get(authority) !== authority)
       throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
     this.functionSessions.set(authority, { model, contextWindow, compact })
+  }
+
+  updateFunctionSessionModel(
+    authority: ModRuntimeAuthority,
+    model: string,
+    contextWindow: number
+  ): void {
+    authority.assertLive()
+    const view = this.functionSessions.get(authority)
+    if (!view || this.runtimeAuthorities.get(authority) !== authority)
+      throw new ModError("MODS_SESSION_UNAVAILABLE")
+    if (view.model !== model || view.contextWindow !== contextWindow)
+      this.invalidateFunctionReads(authority.threadId)
+    view.model = model
+    view.contextWindow = contextWindow
   }
 
   updateFunctionSessionMessages(
@@ -559,7 +578,7 @@ export class ModsManager {
   }
 
   /** Main-agent model streams enter the same host-owned FunctionSession boundary as hooks. */
-  functionModelStream(
+  async functionModelStream(
     authority: ModRuntimeAuthority,
     input: ModObject,
     core: FunctionStreamOptions["core"],
@@ -568,9 +587,61 @@ export class ModsManager {
     authority.assertLive()
     if (authority.agentId !== "main" || !this.isEnabled(authority.workspace))
       throw new ModError("MODS_MODEL_OPERATION_UNSUPPORTED")
-    const lifecycle = this.functionLifecycle?.turnStep
-    if (!lifecycle) throw new ModError("MODS_MODEL_OPERATION_UNSUPPORTED")
-    return lifecycle(authority.workspace, authority.threadId, input, core, signal)
+    signal.throwIfAborted()
+    const controller = new AbortController()
+    const activeSignal = AbortSignal.any([signal, controller.signal])
+    const detach = this.runtimeAuthorities.registerResource(authority, () =>
+      controller.abort(new ModError("MODS_RUNTIME_INSTANCE_EXPIRED"))
+    )
+    let output: ModHookStream | undefined
+    let released = false
+    const close = () => { void output?.return(null).catch(() => {}) }
+    const release = () => {
+      if (released) return
+      released = true
+      activeSignal.removeEventListener("abort", close)
+      detach()
+    }
+    activeSignal.addEventListener("abort", close, { once: true })
+    const protectedCore: FunctionStreamOptions["core"] = async function* (received, context) {
+      authority.assertLive()
+      context.signal.throwIfAborted()
+      const stream = core(received, context)
+      try {
+        while (true) {
+          authority.assertLive()
+          context.signal.throwIfAborted()
+          const item = await stream.next()
+          authority.assertLive()
+          context.signal.throwIfAborted()
+          if (item.done) return item.value
+          yield item.value
+        }
+      } finally {
+        await stream.return(null)
+      }
+    }
+    try {
+      const lifecycle = this.functionLifecycle?.turnStep
+      output = lifecycle
+        ? await lifecycle(authority.workspace, authority.threadId, input, protectedCore, activeSignal)
+        : dispatchFunctionStream([], input, { signal: activeSignal, core: protectedCore })
+      activeSignal.throwIfAborted()
+      authority.assertLive()
+      const next = output.next.bind(output)
+      output.next = async (...args) => {
+        // Automatic cleanup must not make a cancelled stream appear successfully done.
+        activeSignal.throwIfAborted()
+        authority.assertLive()
+        return next(...args)
+      }
+      void output.result.then(release, release)
+      return output
+    } catch (error) {
+      close()
+      release()
+      throw error
+    }
   }
 
   async offerAgent(

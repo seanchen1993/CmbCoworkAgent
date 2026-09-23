@@ -3,6 +3,7 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { ChatGenerationChunk, type ChatResult } from "@langchain/core/outputs"
 import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
+import { countTokensApproximately } from "langchain"
 import type { ModJson, ModObject } from "../../shared/mods/types"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { ModHookStream, FunctionStreamOptions } from "../mods/v2/stream-dispatcher"
@@ -21,8 +22,32 @@ export interface FunctionModelStreamHost {
 interface BoundaryInput {
   turnId: string
   model: string
-  effort?: string
+  effort?: string | number
   agentId?: string
+}
+
+export interface FunctionStepModelSelection {
+  model: string
+  effort?: string | number
+}
+
+export interface FunctionStepModel {
+  provider: BaseChatModel
+  model: string
+  effort?: "low" | "high" | "max"
+  contextWindow: number
+  inputBudget: number
+}
+
+/** Only the host resolves credentials, provider adapters, budgets and session metadata. */
+export interface FunctionStepModelHost {
+  resolve(selection: FunctionStepModelSelection, signal: AbortSignal): Promise<FunctionStepModel>
+  activate?(selection: FunctionStepModel): () => void
+}
+
+type BoundTools = {
+  tools: Parameters<NonNullable<BaseChatModel["bindTools"]>>[0]
+  kwargs?: Parameters<NonNullable<BaseChatModel["bindTools"]>>[1]
 }
 
 const MAX_MODEL_FRAMES = 512
@@ -88,10 +113,11 @@ export function createModModelBoundary(
   delegate: BaseChatModel,
   manager: FunctionModelStreamHost | undefined,
   authority: ModRuntimeAuthority | undefined,
-  input: BoundaryInput
+  input: BoundaryInput,
+  stepModel?: FunctionStepModelHost
 ): BaseChatModel {
   if (!manager || !authority) return delegate
-  return new ModAwareChatModel(delegate, manager, authority, input)
+  return new ModAwareChatModel(delegate, manager, authority, input, { value: 0 }, stepModel)
 }
 
 class ModAwareChatModel extends BaseChatModel {
@@ -100,7 +126,9 @@ class ModAwareChatModel extends BaseChatModel {
     private readonly manager: FunctionModelStreamHost,
     private readonly authority: ModRuntimeAuthority,
     private readonly boundaryInput: BoundaryInput,
-    private readonly stepCounter: { value: number } = { value: 0 }
+    private readonly stepCounter: { value: number } = { value: 0 },
+    private readonly stepModel?: FunctionStepModelHost,
+    private readonly boundTools?: BoundTools
   ) {
     super({})
   }
@@ -121,7 +149,9 @@ class ModAwareChatModel extends BaseChatModel {
       this.manager,
       this.authority,
       this.boundaryInput,
-      this.stepCounter
+      this.stepCounter,
+      this.stepModel,
+      { tools: [...tools], kwargs }
     ) as this
   }
 
@@ -146,11 +176,14 @@ class ModAwareChatModel extends BaseChatModel {
       index: this.stepCounter.value++,
       model: this.boundaryInput.model,
       messageCount: messages.length,
-      ...(this.boundaryInput.effort ? { effort: this.boundaryInput.effort } : {}),
+      ...(this.boundaryInput.effort !== undefined ? { effort: this.boundaryInput.effort } : {}),
       ...(this.boundaryInput.agentId ? { agentId: this.boundaryInput.agentId } : {})
     }
     const delegate = this.delegate
     const authority = this.authority
+    const stepModel = this.stepModel
+    const boundTools = this.boundTools
+    let activeRequest = false
     const runProvider = <T>(operation: () => Promise<T>): Promise<T> =>
       AsyncLocalStorageProviderSingleton.getInstance().run(undefined, () =>
         AsyncLocalStorageProviderSingleton.runWithConfig(
@@ -160,26 +193,72 @@ class ModAwareChatModel extends BaseChatModel {
       )
     const core: FunctionStreamOptions["core"] = async function* (received, context) {
       assertActive()
+      context.signal.throwIfAborted()
+      if (activeRequest) throw new Error("MODS_MODEL_REQUEST_CONCURRENT")
       if (
-        received.model !== input.model ||
-        (received.effort ?? undefined) !== (input.effort ?? undefined)
+        !stepModel &&
+        (received.model !== input.model ||
+          (received.effort ?? undefined) !== (input.effort ?? undefined))
       )
         throw new Error("MODS_MODEL_SELECTION_UNSUPPORTED")
-      // Do not pass the graph callback manager to the raw provider.  It is
-      // deliberately reattached below only after a transformed chunk returns.
-      // Use the public stream API with an empty callback list.  Calling the
-      // protected provider method directly is not stable across LangChain
-      // releases (and some providers do not expose it at runtime).
-      const raw = await runProvider(() =>
-        delegate.stream(messages, {
-          ...options,
-          callbacks: [],
-          signal: context.signal
-        })
-      )
+      activeRequest = true
+      let release: (() => void) | undefined
+      let raw: Awaited<ReturnType<BaseChatModel["stream"]>> | undefined
       try {
+        let provider = delegate
+        if (stepModel) {
+          if (typeof received.model !== "string" || !received.model.trim())
+            throw new Error("MODS_MODEL_NOT_CONFIGURED")
+          if (
+            received.effort !== undefined &&
+            typeof received.effort !== "string" &&
+            typeof received.effort !== "number"
+          )
+            throw new Error("MODS_MODEL_EFFORT_UNSUPPORTED")
+          const selection = await stepModel.resolve(
+            {
+              model: received.model,
+              ...(received.effort !== undefined ? { effort: received.effort } : {})
+            },
+            context.signal
+          )
+          assertActive()
+          context.signal.throwIfAborted()
+          // This is the host's existing local estimator, including system messages
+          // and current tools. It prevents a known overflow, not a tokenizer guarantee.
+          const inputTokens = countTokensApproximately(messages, boundTools?.tools)
+          if (
+            !Number.isFinite(inputTokens) ||
+            !Number.isFinite(selection.inputBudget) ||
+            selection.inputBudget <= 0 ||
+            inputTokens > selection.inputBudget
+          )
+            throw new Error("MODS_MODEL_INPUT_BUDGET")
+          provider = selection.provider
+          if (boundTools) {
+            if (!provider.bindTools) throw new Error("MODS_MODEL_TOOLS_UNSUPPORTED")
+            provider = provider.bindTools(boundTools.tools, boundTools.kwargs) as BaseChatModel
+          }
+          release = stepModel.activate?.(selection)
+          assertActive()
+          context.signal.throwIfAborted()
+        }
+        // Do not pass the graph callback manager to the raw provider.  It is
+        // deliberately reattached below only after a transformed chunk returns.
+        // Use the public stream API with an empty callback list.  Calling the
+        // protected provider method directly is not stable across LangChain
+        // releases (and some providers do not expose it at runtime).
+        raw = await runProvider(() =>
+          provider.stream(messages, {
+            ...options,
+            callbacks: [],
+            signal: context.signal
+          })
+        )
         while (true) {
-          const item = await runProvider(() => raw.next())
+          assertActive()
+          context.signal.throwIfAborted()
+          const item = await runProvider(() => raw!.next())
           if (item.done) break
           assertActive()
           // Limit unconsumed host references, not the length of an ordinary streamed reply.
@@ -205,7 +284,19 @@ class ModAwareChatModel extends BaseChatModel {
           yield frameFor(ref, sequence - 1, chunk)
         }
       } finally {
-        await runProvider(() => raw.return?.().then(() => undefined) ?? Promise.resolve())
+        try {
+          if (raw)
+            await runProvider(() => raw!.return?.().then(() => undefined) ?? Promise.resolve())
+        } finally {
+          activeRequest = false
+          // An expired authority cannot republish into its replacement session.
+          try {
+            authority.assertLive()
+          } catch {
+            release = undefined
+          }
+          release?.()
+        }
       }
       return { kind: "complete", count: sequence }
     }

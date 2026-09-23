@@ -846,12 +846,18 @@ export class FunctionModsManager {
     const protectedCore: FunctionStreamOptions["core"] = async function* (value, context) {
       assertEntry()
       const output = core(value, context)
-      while (true) {
-        const item = await output.next()
-        if (item.done)
-          return await publish(workspace, item.value ?? {}, context.signal)
-        assertEntry()
-        yield await publish(workspace, item.value, context.signal)
+      try {
+        while (true) {
+          const item = await output.next()
+          if (item.done)
+            return await publish(workspace, item.value ?? {}, context.signal)
+          assertEntry()
+          yield await publish(workspace, item.value, context.signal)
+        }
+      } finally {
+        // Manual iteration must propagate consumer close and publication failure.
+        // The model boundary owns provider cleanup and restoring its local selection.
+        await output.return(null)
       }
     }
     return entry.session!.turnStep(safe as ModObject, protectedCore, signal)

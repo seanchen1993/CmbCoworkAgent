@@ -227,6 +227,153 @@ it("captures binding generations and never turns a lost live scope into a projec
   ).rejects.toThrow("MODS_TOOL_AGENT_UNAVAILABLE")
 })
 
+it("canonicalizes native Hook workspaces before entering the Function Mods thread guard", async () => {
+  const f = fixture()
+  const classicEvent = vi.fn(async (workspace: string) => {
+    if (workspace !== f.scope.workspace) throw Error("MODS_CALL_SCOPE_CHANGED")
+    return {}
+  })
+  f.manager.attachFunctions({
+    invalidate: () => undefined,
+    closeThread: () => undefined,
+    close: () => undefined,
+    classicEvent
+  })
+  await expect(f.manager.classicEvent(
+    f.workspace, "thread", "classic.PreToolUse", { tool: "read_file", tool_use_id: "read" },
+    f.controller.signal
+  )).resolves.toEqual({})
+  expect(classicEvent.mock.calls[0][0]).toBe(f.scope.workspace)
+})
+
+it("canonicalizes native agent offers before entering the Function Mods thread guard", async () => {
+  const f = fixture()
+  const offerAgent = vi.fn(async (workspace: string) => {
+    if (workspace !== f.scope.workspace) throw Error("MODS_CALL_SCOPE_CHANGED")
+    return { isOffered: true }
+  })
+  f.manager.attachFunctions({
+    invalidate: () => undefined,
+    closeThread: () => undefined,
+    close: () => undefined,
+    offerAgent
+  })
+  await expect(f.manager.offerAgent(
+    f.workspace, "thread", { agentId: "reviewer" }, f.controller.signal
+  )).resolves.toEqual({ isOffered: true })
+  expect(offerAgent.mock.calls[0][0]).toBe(f.scope.workspace)
+})
+
+it("keeps the core model stream available when no Function Mods lifecycle is installed", async () => {
+  const f = fixture()
+  const authority = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+  const calls: string[] = []
+  const stream = await f.manager.functionModelStream(
+    authority,
+    { prompt: "native model" },
+    async function* (input, { signal }) {
+      signal.throwIfAborted()
+      calls.push(String(input.prompt))
+      yield { text: "native chunk" }
+      return { text: "native result" }
+    },
+    f.controller.signal
+  )
+  expect(await stream.next()).toEqual({ done: false, value: { text: "native chunk" } })
+  expect(await stream.next()).toEqual({ done: true, value: { text: "native result" } })
+  expect(await stream.result).toEqual({ text: "native result" })
+  expect(calls).toEqual(["native model"])
+})
+
+it("does not resume a native model stream after its runtime authority is released", async () => {
+  const f = fixture()
+  const authority = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+  let resumed = false
+  const stream = await f.manager.functionModelStream(
+    authority,
+    {},
+    async function* () {
+      yield { text: "first" }
+      resumed = true
+      return { text: "late" }
+    },
+    f.controller.signal
+  )
+  const result = expect(stream.result).rejects.toThrow()
+  await stream.next()
+  f.release()
+  await expect(stream.next()).rejects.toThrow()
+  await result
+  expect(resumed).toBe(false)
+})
+
+it("actively aborts an in-flight model provider when its exact runtime authority is replaced", async () => {
+  const f = fixture()
+  const authority = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+  let entered!: () => void
+  const pendingProvider = new Promise<void>((resolve) => { entered = resolve })
+  let providerSignal: AbortSignal | undefined
+  let closed = false
+  const stream = await f.manager.functionModelStream(authority, {}, async function* (_input, { signal }) {
+    providerSignal = signal
+    try {
+      entered()
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+        if (signal.aborted) reject(signal.reason)
+      })
+      yield { text: "must not arrive" }
+      return null
+    } finally { closed = true }
+  }, f.controller.signal)
+  const result = expect(stream.result).rejects.toThrow()
+  const pending = stream.next()
+  void pending.catch(() => {})
+  await pendingProvider
+  f.manager.createRuntimeAuthority({ workspace: f.workspace, threadId: "thread", turnId: "replacement" })
+  expect(providerSignal?.aborted).toBe(true)
+  await expect(pending).rejects.toThrow()
+  await result
+  expect(closed).toBe(true)
+})
+
+it.each(["complete", "return-unused", "abort-unused", "creation-failure"])(
+  "releases exact-authority stream resources after repeated %s",
+  async (mode) => {
+    const f = fixture()
+    const authority = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+    let entered = 0
+    if (mode === "creation-failure") f.manager.attachFunctions({
+      invalidate: () => {}, closeThread: () => {}, close: () => {},
+      turnStep: async () => { throw Error("CREATION_FAILED") }
+    })
+    // Runtime ownership caps resources at 100. Every settled path must detach.
+    for (let index = 0; index < 105; index++) {
+      const controller = new AbortController()
+      const open = f.manager.functionModelStream(authority, {}, async function* () {
+        entered++
+        yield { text: "one" }
+        return null
+      }, controller.signal)
+      if (mode === "creation-failure") {
+        await expect(open).rejects.toThrow("CREATION_FAILED")
+        continue
+      }
+      const stream = await open
+      if (mode === "complete") {
+        for await (const value of stream) expect(value).toEqual({ text: "one" })
+        await expect(stream.result).resolves.toBeNull()
+      } else {
+        const result = expect(stream.result).rejects.toThrow()
+        if (mode === "return-unused") await stream.return(null)
+        else controller.abort(Error("unused cancelled"))
+        await result
+      }
+    }
+    expect(entered).toBe(mode === "complete" ? 105 : 0)
+  }
+)
+
 it("rejects writes using the initial runtime readonly authority before backend post-construction setup", async () => {
   const f = fixture(new Set(), true)
   await expect(
@@ -1133,6 +1280,18 @@ it("does not lend built-in authority to a custom agent that overrides general-pu
   parent.assertLive()
 })
 
+it("fresh UI entry after Mods invalidation does not borrow an unbound runtime turn", async () => {
+  const f = fixture()
+  const previous = f.manager.functionUserScope(f.workspace, "thread")
+  expect(previous.runtimeAuthority).toBeDefined()
+  f.manager.invalidateAll()
+  expect(f.manager.functionUserScope(f.workspace, "thread")).toEqual({})
+  expect(f.manager.functionRuntimeScope(f.workspace, "thread").bound).toBe(false)
+  await expect(withFunctionExecution({ ...f.scope, ...previous }, async () =>
+    f.manager.functionRuntimeScope(f.workspace, "thread")
+  )).rejects.toThrow("MODS_THREAD_CONTEXT_REQUIRED")
+})
+
 it("captures actual native and middleware tools at graph construction without a model request", () => {
   const f = fixture()
   const authority = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
@@ -1219,54 +1378,4 @@ it("keeps live catalogs at capacity and only reclaims expired entries without bo
   expect(() => f.manager.functionToolCatalog(f.workspace, "catalog-50")).toThrow(
     "MODS_TOOL_CONTEXT_REQUIRED"
   )
-})
-
-it("canonicalizes native Hook workspaces before entering the Function Mods thread guard", async () => {
-  const f = fixture()
-  const classicEvent = vi.fn(async (workspace: string) => {
-    if (workspace !== f.scope.workspace) throw Error("MODS_CALL_SCOPE_CHANGED")
-    return {}
-  })
-  f.manager.attachFunctions({
-    invalidate: () => undefined,
-    closeThread: () => undefined,
-    close: () => undefined,
-    classicEvent
-  })
-  await expect(f.manager.classicEvent(
-    f.workspace, "thread", "classic.PreToolUse", { tool: "read_file", tool_use_id: "read" },
-    f.controller.signal
-  )).resolves.toEqual({})
-  expect(classicEvent.mock.calls[0][0]).toBe(f.scope.workspace)
-})
-
-
-it("canonicalizes native agent offers before entering the Function Mods thread guard", async () => {
-  const f = fixture()
-  const offerAgent = vi.fn(async (workspace: string) => {
-    if (workspace !== f.scope.workspace) throw Error("MODS_CALL_SCOPE_CHANGED")
-    return { isOffered: true }
-  })
-  f.manager.attachFunctions({
-    invalidate: () => undefined,
-    closeThread: () => undefined,
-    close: () => undefined,
-    offerAgent
-  })
-  await expect(f.manager.offerAgent(
-    f.workspace, "thread", { agentId: "reviewer" }, f.controller.signal
-  )).resolves.toEqual({ isOffered: true })
-  expect(offerAgent.mock.calls[0][0]).toBe(f.scope.workspace)
-})
-
-it("fresh UI entry after Mods invalidation does not borrow an unbound runtime turn", async () => {
-  const f = fixture()
-  const previous = f.manager.functionUserScope(f.workspace, "thread")
-  expect(previous.runtimeAuthority).toBeDefined()
-  f.manager.invalidateAll()
-  expect(f.manager.functionUserScope(f.workspace, "thread")).toEqual({})
-  expect(f.manager.functionRuntimeScope(f.workspace, "thread").bound).toBe(false)
-  await expect(withFunctionExecution({ ...f.scope, ...previous }, async () =>
-    f.manager.functionRuntimeScope(f.workspace, "thread")
-  )).rejects.toThrow("MODS_THREAD_CONTEXT_REQUIRED")
 })

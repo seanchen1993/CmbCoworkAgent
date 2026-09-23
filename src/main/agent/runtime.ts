@@ -7,7 +7,8 @@ import {
 } from "./mods-session-view"
 import {
   createModModelBoundary,
-  type FunctionModelStreamHost
+  type FunctionModelStreamHost,
+  type FunctionStepModelHost
 } from "./mods-model-boundary"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
@@ -2316,6 +2317,8 @@ function assembleDeepAgent(
     registrySubagentSpecs = [],
     modRuntimeAuthority,
     modSessionModel,
+    modSessionEffort,
+    modStepModel,
     modSessionCompact,
     modContextSources,
     modTurnRunId,
@@ -3140,8 +3143,9 @@ function assembleDeepAgent(
           {
             turnId: modRuntimeAuthority.turnId,
             model: typeof modSessionModel === "string" ? modSessionModel : "configured",
-            agentId: modRuntimeAuthority.agentId
-          }
+            ...(typeof modSessionEffort === "string" ? { effort: modSessionEffort } : {})
+          },
+          modStepModel as FunctionStepModelHost | undefined
         )
       : model
 
@@ -4615,6 +4619,56 @@ export function getModelInstance(
   }
 
   return purpose !== "agent" ? configureLocalCompactionTokenEstimation(model) : model
+}
+
+/** Resolve a single step without mutating saved or runtime-default model settings. */
+export function createFunctionStepModelResolver(
+  configured: Parameters<typeof getModelInstance>[0] & { maxTokens?: number },
+  options: {
+    retryHooks?: ModelRetryHooks
+    maxRetryAttempts?: number
+    threadId?: string
+    lookup?: (name: string) => (Parameters<typeof getModelInstance>[0] & { maxTokens?: number }) | null
+  } = {}
+): FunctionStepModelHost["resolve"] {
+  // Capture the selected runtime configuration, including its endpoint identity.
+  // A duplicate public model name in another configured provider must not reroute it.
+  const baseline = { ...configured }
+  return async (selection, signal) => {
+    signal.throwIfAborted()
+    if (selection.effort !== undefined &&
+        selection.effort !== "low" && selection.effort !== "high" && selection.effort !== "max")
+      throw new ModError("MODS_MODEL_EFFORT_UNSUPPORTED")
+    const selected = selection.model === baseline.model
+      ? baseline
+      : (options.lookup ?? getModelConfigByRef)(selection.model)
+    if (!selected?.apiKey) throw new ModError("MODS_MODEL_NOT_CONFIGURED")
+    // Only this existing host adapter has an explicit top-level effort protocol.
+    // Generic chat_template_kwargs are not evidence that a provider honors effort.
+    if (selection.effort !== undefined && !/deepseek/i.test(selected.model))
+      throw new ModError("MODS_MODEL_EFFORT_UNSUPPORTED")
+    const config: typeof baseline = {
+      ...selected,
+      ...(selection.effort !== undefined ? {
+        enableThinking: true,
+        enableThinkingEffort: true,
+        thinkingEffort: selection.effort
+      } : {})
+    }
+    const contextWindow = config.maxTokens ?? DEFAULT_MAX_TOKENS
+    const inputBudget = calculateModelInputBudgetTokens(
+      contextWindow, config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+    )
+    signal.throwIfAborted()
+    return {
+      provider: getModelInstance(config, options.retryHooks, options.maxRetryAttempts, "agent", options.threadId),
+      model: config.model,
+      ...(/deepseek/i.test(config.model) && config.enableThinking && config.enableThinkingEffort
+        ? { effort: config.thinkingEffort ?? DEFAULT_THINKING_EFFORT } : {}),
+      contextWindow,
+      inputBudget
+    }
+  }
 }
 
 type AgentsPromptLoader = "plugin" | "cmbdevclaw"
@@ -7355,6 +7409,17 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     onFailureFuseNotice,
     modRuntimeAuthority,
     modSessionModel: customConfig.model,
+    modSessionEffort: /deepseek/i.test(customConfig.model) && customConfig.enableThinking && customConfig.enableThinkingEffort
+      ? customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT : undefined,
+    modStepModel: modRuntimeAuthority ? {
+      resolve: createFunctionStepModelResolver(customConfig, { retryHooks, maxRetryAttempts, threadId }),
+      activate: (selection: import("./mods-model-boundary").FunctionStepModel) => {
+        const manager = getModsManager()
+        if (!manager) throw new ModError("MODS_SESSION_UNAVAILABLE")
+        manager.updateFunctionSessionModel(modRuntimeAuthority, selection.model, selection.contextWindow)
+        return () => manager.updateFunctionSessionModel(modRuntimeAuthority, customConfig.model, maxTokens)
+      }
+    } satisfies FunctionStepModelHost : undefined,
     modSessionCompact: compactMainSession,
     modContextSources: functionSessionContextSources,
     modTurnRunId: options.modTurnRunId ?? options.currentRunMessageQueueOwnerToken,
