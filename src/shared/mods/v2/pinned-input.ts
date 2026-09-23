@@ -42,6 +42,14 @@ const classicIdentity = [
 ] as const
 
 const classicFacts: Record<string, readonly string[]> = {
+  "classic.Stop": ["stop_hook_active", "last_assistant_message", "background_tasks", "session_crons"],
+  "classic.SubagentStop": [
+    "stop_hook_active",
+    "last_assistant_message",
+    "background_tasks",
+    "session_crons",
+    "agent_transcript_path"
+  ],
   "classic.PostToolUse": [
     "tool_name",
     "tool_input",

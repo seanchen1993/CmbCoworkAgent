@@ -160,6 +160,13 @@ export function validateClassicInput(event: string, value: unknown): void {
     (value.effort !== undefined && !shape(value.effort, { level: text }, ["level"]))
   )
     throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  if (name === "Stop" || name === "SubagentStop") {
+    if (
+      (value.stop_hook_active !== undefined && typeof value.stop_hook_active !== "boolean") ||
+      (value.last_assistant_message !== undefined && typeof value.last_assistant_message !== "string")
+    )
+      throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  }
   if (name === "PostToolUse" || name === "PostToolUseFailure") {
     if (
       (value.duration_ms !== undefined &&

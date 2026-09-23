@@ -219,3 +219,12 @@ it("bounds tool observations to measured MCP invocations and preserved host fact
     expect(row?.evidence).toContain("src/main/agent/mods-tool-observation.test.ts")
   }
 })
+
+
+it("records Stop feedback and continuation state with its actual desktop scope", () => {
+  const row=(matrix.classicEvents as Array<Record<string,unknown>>).find(item=>item.name==="classic.Stop")
+  expect(row?.implementationStatus).toBe("partial")
+  expect(row?.note).toContain("stop_hook_active")
+  expect(row?.note).toContain("additionalContext")
+  expect(row?.evidence).toContain("tests/support/mods-stop-feedback-e2e.ts")
+})

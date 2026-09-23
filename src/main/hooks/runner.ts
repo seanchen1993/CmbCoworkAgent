@@ -110,6 +110,8 @@ export interface HookContext {
   /** Measured by the host around execution, excluding hook/approval waiting. Absent if unknown. */
   toolDurationMs?: number
   signal?: AbortSignal
+  /** Current continuation was initiated by a Stop hook in the original completion loop. */
+  stopHookActive?: boolean
   compactionTrigger?: "manual" | "auto"
   compactionInstructions?: string | null
   compactionSummary?: string
@@ -590,6 +592,11 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.skillTriggerToolName) payload.skill_trigger_tool_name = context.skillTriggerToolName
   if (context.subagent) payload.subagent = context.subagent
   if (context.stopContext) payload.stop_context = context.stopContext
+  if (event === "Stop" || event === "SubagentStop") {
+    payload.stop_hook_active = context.stopHookActive === true
+    if (context.stopContext?.assistantResponse !== undefined)
+      payload.last_assistant_message = context.stopContext.assistantResponse
+  }
   return stringifyAsciiJson(payload)
 }
 
@@ -1515,7 +1522,7 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
       payload.message = context.userPrompt ?? context.toolResult ?? ""
     }
     if (event === "Stop" || event === "SubagentStop") {
-      payload.stop_hook_active = false
+      payload.stop_hook_active = context.stopHookActive === true
       payload.last_assistant_message = context.stopContext?.assistantResponse
     }
     if (event === "StopFailure") {
@@ -1535,7 +1542,11 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
   return {}
 }
 
-function projectClassicResult(event: HookEvent, value: ModObject): HookResult | null {
+function projectClassicResult(
+  event: HookEvent,
+  value: ModObject,
+  allowStopFeedback: boolean
+): HookResult | null {
   // Upstream runtime discards decisions from this asynchronous observation event.
   if (event === "InstructionsLoaded") return null
   const reason = [value.deny, value.ask, value.block, value.stopReason]
@@ -1573,6 +1584,8 @@ function projectClassicResult(event: HookEvent, value: ModObject): HookResult | 
         ? (value.updatedInput as Record<string, unknown>)
         : undefined
   }
+  if (event === "Stop" && allowStopFeedback && result.additionalContext?.trim())
+    result.stopFeedbackContinuation = true
   const hasPayload =
     denied ||
     asked ||
@@ -1632,7 +1645,9 @@ async function runClassicFunctionHook(
     )
     signal.throwIfAborted()
     assertCurrent()
-    const projected = isModObject(result) ? projectClassicResult(event, result) : null
+    const projected = isModObject(result)
+      ? projectClassicResult(event, result, event === "Stop" && manager.isEnabled(context.workspacePath))
+      : null
     const native = lower ? await lower : null
     // CMB-specific notices and human gates have no upstream result fields. Keep
     // them host-owned while the classic control fields follow the module fold.
@@ -1646,7 +1661,8 @@ async function runClassicFunctionHook(
       updatedInput: projected?.updatedInput,
       ...(projected?.updatedToolOutput !== undefined ? { updatedToolOutput: projected.updatedToolOutput } : {}),
       ...(projected?.updatedMCPToolOutput !== undefined ? { updatedMCPToolOutput: projected.updatedMCPToolOutput } : {}),
-      additionalContext: projected?.additionalContext
+      additionalContext: projected?.additionalContext,
+      stopFeedbackContinuation: projected?.stopFeedbackContinuation
     }
     return projected
   } catch (error) {

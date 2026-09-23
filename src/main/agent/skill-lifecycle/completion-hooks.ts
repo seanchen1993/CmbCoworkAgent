@@ -70,21 +70,29 @@ export function buildCompletionRevisionPrompt({
   attempt,
   maxRevisionAttempts,
   hookLabel,
-  revisionPromptPrefix
+  revisionPromptPrefix,
+  feedbackOnly = false
 }: {
   result: HookResult
   attempt: number
   maxRevisionAttempts: number
   hookLabel: string
   revisionPromptPrefix: string
+  feedbackOnly?: boolean
 }): string {
   const parts = [
     `${revisionPromptPrefix} Internal revision request. Do not mention this marker.`,
-    "A completion hook reviewed your previous response and requested a revision.",
-    "Revise the work now. Address the issue directly, run any checks that are needed, and then provide an updated final answer.",
+    feedbackOnly
+      ? "A Stop hook provided feedback for your next step. This is not a tool or model error."
+      : "A completion hook reviewed your previous response and requested a revision.",
+    feedbackOnly
+      ? "Act on the feedback, perform any checks needed, and provide an updated final answer."
+      : "Revise the work now. Address the issue directly, run any checks that are needed, and then provide an updated final answer.",
     `Revision attempt: ${attempt}/${maxRevisionAttempts}`,
     `Hook type: ${hookLabel}`,
-    `Hook reason:\n${getCompletionHookBlockReason(result)}`
+    feedbackOnly
+      ? "Stop hook feedback follows."
+      : `Hook reason:\n${getCompletionHookBlockReason(result)}`
   ]
   if (result.additionalContext) {
     parts.push(`Additional hook context:\n${result.additionalContext}`)
@@ -312,6 +320,7 @@ export async function runCompletionHooksWithRevision({
 }): Promise<CompletionHookOutcome> {
   let postSkillRevisionCount = 0
   let stopRevisionCount = 0
+  let stopHookActive = false
   let gateRevisionCount = 0
   if (!Number.isSafeInteger(maxRevisionAttempts) || maxRevisionAttempts < 0) {
     sendError("Invalid completion revision budget")
@@ -399,6 +408,7 @@ export async function runCompletionHooksWithRevision({
         }
 
         postSkillRevisionCount += 1
+        stopHookActive = false
         sendNotice(
           `PostSkillUse hook requested revision (${postSkillRevisionCount}/${maxRevisionAttempts}): ${reason}`
         )
@@ -437,6 +447,7 @@ export async function runCompletionHooksWithRevision({
                 projectDir,
                 sessionId: threadId,
                 turnId,
+                stopHookActive,
                 stopContext: getStopContext()
               },
               hookScope,
@@ -459,6 +470,7 @@ export async function runCompletionHooksWithRevision({
               projectDir,
               sessionId: threadId,
               turnId,
+              stopHookActive,
               stopContext: getStopContext()
             },
             onHookResult
@@ -477,7 +489,11 @@ export async function runCompletionHooksWithRevision({
         return "halted"
       }
 
-      if (!stopResult || !shouldRequestRevision(stopResult)) {
+      const stopFeedback =
+        !stopResult || !stopResult.stopFeedbackContinuation || shouldRequestRevision(stopResult)
+          ? undefined
+          : stopResult.additionalContext?.trim() || undefined
+      if (!stopResult || (!shouldRequestRevision(stopResult) && !stopFeedback)) {
         if (!completionGate) return "passed"
         let decision
         try {
@@ -500,6 +516,7 @@ export async function runCompletionHooksWithRevision({
           return "failed"
         }
         gateRevisionCount += 1
+        stopHookActive = false
         sendNotice(
           `Completion gate requested revision (${usedBudget()}/${maxRevisionAttempts}): ${decision.reason}`
         )
@@ -516,17 +533,23 @@ export async function runCompletionHooksWithRevision({
       }
       if (stopResult.systemMessage) sendNotice(stopResult.systemMessage)
 
-      const reason = getCompletionHookBlockReason(stopResult, "Stop hook requested revision")
+      const reason =
+        stopFeedback ?? getCompletionHookBlockReason(stopResult, "Stop hook requested revision")
       if (budgetExhausted(stopRevisionCount)) {
         sendError(
-          `Stop hook blocked completion after ${maxRevisionAttempts} revision attempts: ${reason}`
+          stopFeedback
+            ? `Stop hook feedback exceeded ${maxRevisionAttempts} continuation attempts: ${reason}`
+            : `Stop hook blocked completion after ${maxRevisionAttempts} revision attempts: ${reason}`
         )
         return "failed"
       }
 
       stopRevisionCount += 1
+      stopHookActive = true
       sendNotice(
-        `Stop hook requested revision (${stopRevisionCount}/${maxRevisionAttempts}): ${reason}`
+        stopFeedback
+          ? `Stop hook feedback (${stopRevisionCount}/${maxRevisionAttempts}): ${reason}`
+          : `Stop hook requested revision (${stopRevisionCount}/${maxRevisionAttempts}): ${reason}`
       )
       await revise(
         buildCompletionRevisionPrompt({
@@ -534,6 +557,7 @@ export async function runCompletionHooksWithRevision({
           attempt: stopRevisionCount,
           maxRevisionAttempts,
           hookLabel: "Stop",
+          feedbackOnly: !!stopFeedback,
           revisionPromptPrefix
         })
       )

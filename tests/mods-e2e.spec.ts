@@ -1,3 +1,4 @@
+import { verifyStopFeedback } from "./support/mods-stop-feedback-e2e"
 import { verifySessionTitle } from "./support/mods-session-title-e2e"
 import { verifyPromptExpansion } from "./support/mods-prompt-expansion-e2e"
 import { verifyInstructionsLoaded } from "./support/mods-instructions-loaded-e2e"
@@ -45,7 +46,7 @@ const binary = packagedDir
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
-const focus = ["status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output", "completion-freshness", "ui-log", "ui-ask", "question-site", "ui-notice", "tool-batch", "instructions-loaded", "prompt-expansion", "session-title"].includes(requestedFocus)
+const focus = ["status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output", "completion-freshness", "ui-log", "ui-ask", "question-site", "ui-notice", "tool-batch", "instructions-loaded", "prompt-expansion", "session-title", "stop-feedback"].includes(requestedFocus)
   ? requestedFocus : undefined
 const artifacts = join(
   root, "output/mods-validation",
@@ -199,6 +200,8 @@ async function main(): Promise<void> {
         await verifyUiLog(page!, workspace, artifacts, join(isolated, "data/logs/main.log"), modelServer.requests, until, pass)
       else if (focus === "completion-freshness")
         await verifyCompletionFreshness(page!, workspace, artifacts, modelServer.requests, until, pass)
+      else if (focus === "stop-feedback")
+        await verifyStopFeedback(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
       else if (focus === "classic-output")
         await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass, app!, modelServer.closedStalls)
       else if (focus === "ui-feedback")
@@ -3111,6 +3114,7 @@ async function main(): Promise<void> {
     await verifyInstructionsLoaded(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
     await verifyPromptExpansion(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
     await verifySessionTitle(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
+    await verifyStopFeedback(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})

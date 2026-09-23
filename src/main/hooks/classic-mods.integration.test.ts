@@ -2,9 +2,10 @@ import { beforeEach, describe, expect, vi, it } from "vitest"
 
 const classicEvent = vi.fn()
 const legacyCall = vi.fn()
+const modsEnabled = vi.fn()
 vi.mock("./http-runner", () => ({ executeHttpHook: (...args: unknown[]) => legacyCall(...args) }))
 vi.mock("../mods/manager", () => ({
-  getModsManager: () => ({ classicEvent })
+  getModsManager: () => ({ classicEvent, isEnabled: modsEnabled })
 }))
 
 import { clearOnceStateForSession, runHooks } from "./runner"
@@ -14,6 +15,7 @@ import { ModError } from "../mods/errors"
 beforeEach(() => {
   classicEvent.mockReset()
   legacyCall.mockReset()
+  modsEnabled.mockReset().mockReturnValue(true)
 })
 
 describe("classic Function Mods bridge", () => {
@@ -758,4 +760,29 @@ it("keeps legacy post failure fields compatible while exposing official host fac
     is_interrupt: true,
     tool_response: failure
   })
+})
+
+
+it("maps host Stop continuation state to both classic and legacy inputs", async () => {
+  classicEvent.mockImplementation(async (_workspace,_thread,_event,input,signal,core)=>core(input,signal))
+  legacyCall.mockResolvedValue({exitCode:0,stdout:"",stderr:"",blocked:false})
+  await runHooks([{id:"stop-observer",event:"Stop",type:"http",url:"https://example.invalid/stop",
+    enabled:true,createdAt:"2026-09-23",updatedAt:"2026-09-23"}], "Stop", {
+    workspacePath:"/workspace",sessionId:"thread",stopHookActive:true,
+    stopContext:{assistantResponse:"latest host response"}
+  })
+  expect(classicEvent.mock.calls[0][3]).toMatchObject({stop_hook_active:true,last_assistant_message:"latest host response"})
+  expect(JSON.parse(legacyCall.mock.calls[0][1])).toMatchObject({stop_hook_active:true,last_assistant_message:"latest host response"})
+})
+
+
+it("marks Stop feedback only while the Mods bridge is enabled", async () => {
+  classicEvent.mockResolvedValue({additionalContext:["check tests"]})
+  const context={workspacePath:"/workspace",sessionId:"thread"}
+  modsEnabled.mockReturnValue(false)
+  const off=await runHooks([],"Stop",context)
+  expect(off?.additionalContext).toBe("check tests")
+  expect(off?.stopFeedbackContinuation).toBeUndefined()
+  modsEnabled.mockReturnValue(true)
+  expect(await runHooks([],"Stop",context)).toMatchObject({additionalContext:"check tests",stopFeedbackContinuation:true})
 })

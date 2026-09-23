@@ -227,6 +227,8 @@ export interface HookConfig {
 }
 
 export interface HookResult {
+  /** Host-only: enabled Mods bridge supplied non-error Stop feedback. Never parsed from script output. */
+  stopFeedbackContinuation?: true
   exitCode: number | null
   stdout: string
   /**

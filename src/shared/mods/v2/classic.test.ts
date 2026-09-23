@@ -287,3 +287,47 @@ it.each(["PostToolUse", "PostToolUseFailure"])(
       ).toThrow("MODS_CLASSIC_INPUT")
   }
 )
+
+it("validates optional Stop state and refuses the internal host continuation marker from plugins", () => {
+  for (const event of ["Stop", "SubagentStop"]) {
+    const base = {
+      hook_event_name: event,
+      session_id: "thread",
+      cwd: "/workspace",
+      transcript_path: ""
+    }
+    expect(() =>
+      validateClassicInput(`classic.${event}`, { ...base, stop_hook_active: "false" })
+    ).toThrow("MODS_CLASSIC_INPUT")
+    expect(() =>
+      validateClassicInput(`classic.${event}`, {
+        ...base,
+        stop_hook_active: false,
+        last_assistant_message: 3
+      })
+    ).toThrow("MODS_CLASSIC_INPUT")
+    expect(() =>
+      validateClassicInput(`classic.${event}`, {
+        ...base,
+        stop_hook_active: true,
+        last_assistant_message: "latest"
+      })
+    ).not.toThrow()
+  }
+  expect(() => validateClassicResult("classic.Stop", { stopFeedbackContinuation: true })).toThrow(
+    "MODS_CLASSIC_RESULT"
+  )
+})
+
+it("retains long genuine Stop replies within the existing overall JSON bound", () => {
+  expect(() =>
+    validateClassicInput("classic.Stop", {
+      hook_event_name: "Stop",
+      session_id: "thread",
+      cwd: "/workspace",
+      transcript_path: "",
+      stop_hook_active: false,
+      last_assistant_message: "x".repeat(40000)
+    })
+  ).not.toThrow()
+})
