@@ -105,6 +105,7 @@
       "package.json"
     ],
     "asarUnpack": [
+      "out/resources/mods/**",
       "node_modules/@jitl/**/*.wasm",
       "node_modules/@esbuild/**",
       "node_modules/esbuild/**",

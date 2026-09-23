@@ -12,6 +12,7 @@ import { ModsManager, setModsManager, setModsUnavailable } from "../mods/manager
 import { ModError, modErrorCode } from "../mods/errors"
 import { ModsSettingsAccess } from "../mods/settings-access"
 import { installPluginFromDir } from "./plugins"
+import { bundledModExamplesRoot } from "../mods/bundled-examples"
 import { readManagedModDeployment } from "../mods/policy"
 import { ModCommandQueue } from "../mods/command-queue"
 import { bindStandaloneModCommand } from "../mods/command-backend"
@@ -982,7 +983,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     settingsAccess.assertUnlocked(event.sender)
     for (const name of ["project-quality", "company-output-policy", "function-commands"]) {
       const result = await installPluginFromDir(
-        join(__dirname, "../resources/mods", name),
+        join(bundledModExamplesRoot(__dirname), name),
         name,
         "local"
       )

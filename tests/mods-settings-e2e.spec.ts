@@ -69,12 +69,25 @@ function pass(name: string) {
 async function boot() {
   app = await _electron.launch({
     executablePath: join(root, "tests/support/electron-launcher.cmd"),
-    args: [join(root, "out/main/index.js"), "--user-data-dir=" + join(isolated, "electron")],
+    args: [
+      ...(packagedDir ? [] : [join(root, "out/main/index.js")]),
+      "--user-data-dir=" + join(isolated, "electron")
+    ],
     cwd: root,
     env,
     timeout: 60000
   })
   await app.firstWindow()
+  if (packagedDir) {
+    const identity = await app.evaluate(({ app }) => ({
+      packaged: app.isPackaged,
+      path: app.getAppPath(),
+      argv: process.argv
+    }))
+    assert.equal(identity.packaged, true)
+    assert(identity.path.endsWith("app.asar"))
+    assert(!identity.argv.some((argument) => /out[\\/]main[\\/]index\.js$/.test(argument)))
+  }
   await app.evaluate(({ ipcMain }) => {
     ipcMain.removeHandler("open-login-page")
     ipcMain.handle("open-login-page", () => undefined)
