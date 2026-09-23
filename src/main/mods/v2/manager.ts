@@ -875,7 +875,18 @@ export class FunctionModsManager {
       return result
     }
     assertCurrent()
-    if (!this.host.enabled(workspace) || this.sources().length === 0) return runCore(input, signal)
+    if (!this.host.enabled(workspace)) return runCore(input, signal)
+    // A live session with no matching handler has nothing new to discover here.
+    // Keep the normal session, publication and grant checks below; do not shortcut to core.
+    const loaded = this.sessions.get(JSON.stringify([workspace, threadId]))?.session
+    const noLoadedHandler = loaded?.plugins.every(
+      (plugin) =>
+        !plugin.guest.stats.disposed &&
+        !plugin.guest.registrations.some((registration) =>
+          matchesEventPattern(registration.pattern, event)
+        )
+    )
+    if (!noLoadedHandler && this.sources().length === 0) return runCore(input, signal)
     const ready =
       this.sessions.has(JSON.stringify([workspace, threadId])) ||
       (await this.status(workspace)).some((item) => item.state === "ready")
