@@ -60,10 +60,6 @@ export async function verifyToolSites(
         (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
       "real native tool turn completes"
     )
-    await page
-      .getByRole("button", { name: /claw-notes/ })
-      .first()
-      .click()
     const uses = page.locator('[data-function-site="ToolUse"]')
     const results = page.locator('[data-function-site="ToolResult"]')
     await until(
@@ -71,6 +67,20 @@ export async function verifyToolSites(
         (await uses.allInnerTexts()).join("\n").includes("DISPLAY_TOOL_INPUT") &&
         (await results.allInnerTexts()).join("\n").includes("DISPLAY_TOOL_RESULT"),
       "tool detail render hooks publish changed presentation"
+    )
+    pass(
+      "ToolGroup expansion unfolds native ToolUse/ToolResult automatically without requiring a manual click"
+    )
+    const nativeToggle = page.getByRole("button", { name: /claw-notes/ }).first()
+    await nativeToggle.click()
+    await until(
+      async () => (await uses.count()) === 0,
+      "native group row remains manually collapsible"
+    )
+    await nativeToggle.click()
+    await until(
+      async () => (await uses.allInnerTexts()).join("\n").includes("DISPLAY_TOOL_INPUT"),
+      "native group row remains manually expandable"
     )
     const wire = JSON.stringify(requests.slice(started))
     const persisted = JSON.stringify(
@@ -91,7 +101,15 @@ export async function verifyToolSites(
         !(await results.allInnerTexts()).join("\n").includes("DISPLAY_TOOL_"),
       "off restores native formatted tool details"
     )
-    assert((await page.locator("body").innerText()).includes("ORIGINAL_TOOL_RESULT"))
+    await until(
+      async () => (await uses.count()) === 0,
+      "off restores the original collapsed native row"
+    )
+    await nativeToggle.click()
+    await until(
+      async () => (await page.locator("body").innerText()).includes("ORIGINAL_TOOL_RESULT"),
+      "original result is still manually accessible after off"
+    )
     await page.screenshot({ path: join(artifacts, "tool-sites-off.png") })
     writeFileSync(
       join(artifacts, "tool-sites-evidence.json"),

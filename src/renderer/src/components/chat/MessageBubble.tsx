@@ -48,6 +48,7 @@ import {
 import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { FunctionSite } from "./FunctionSite"
+import { FunctionToolGroup } from "./FunctionToolGroup"
 import { FunctionMessageText } from "./FunctionMessageText"
 import { formatMessageTimeLabel, getAssistantStartTime } from "@/lib/message-bubble-timing"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
@@ -765,6 +766,33 @@ function MessageBubbleImpl({
 
   const content = renderContent()
   const displayToolCalls = message.tool_calls?.map(normalizeToolCallForDisplay)
+  const displayToolRows = displayToolCalls?.map((toolCall, index) => {
+    const toolId = getWorkerToolUiKey(message.id, toolCall.id, index)
+    const toolState = toolCallStates?.get(toolId)
+    const resolvedToolCall = hydrateToolCall(toolCall, toolState)
+    const result = toolResults?.get(toolId)
+    const pendingIds = pendingApproval?.pendingToolCallIds
+    const needsApproval = pendingApprovalToolCallKeys
+      ? pendingApprovalToolCallKeys.has(toolId)
+      : Boolean(
+          pendingIds?.length
+            ? pendingIds.includes(toolCall.id)
+            : pendingApproval?.tool_call?.id &&
+                pendingApproval.tool_call.id === toolCall.id
+        )
+    const inferredStatus: ToolCallStatus =
+      toolState?.status ||
+      (needsApproval
+        ? "awaiting_approval"
+        : result !== undefined
+          ? "completed"
+          : isResultlessCompletedToolCall(resolvedToolCall)
+            ? "completed"
+            : isStreaming
+              ? "running"
+              : "interrupted")
+    return { toolId, resolvedToolCall, result, needsApproval, inferredStatus }
+  })
   const shouldShowAssistantActions =
     showAssistantMeta && !isLoading && Boolean(content || hasToolCalls)
   const canSetGoalFromMessage =
@@ -1011,193 +1039,192 @@ function MessageBubbleImpl({
         )}
         {hasToolCalls && (
           <div className="space-y-2 overflow-hidden">
-            {displayToolCalls!.map((toolCall, index) => {
-              const toolId = getWorkerToolUiKey(message.id, toolCall.id, index)
-              const toolState = toolCallStates?.get(toolId)
-              const resolvedToolCall = hydrateToolCall(toolCall, toolState)
-              const result = toolResults?.get(toolId)
-              const pendingIds = pendingApproval?.pendingToolCallIds
-              const needsApproval = pendingApprovalToolCallKeys
-                ? pendingApprovalToolCallKeys.has(toolId)
-                : Boolean(
-                    pendingIds?.length
-                      ? pendingIds.includes(toolCall.id)
-                      : pendingApproval?.tool_call?.id &&
-                          pendingApproval.tool_call.id === toolCall.id
-                  )
-              const inferredStatus: ToolCallStatus =
-                toolState?.status ||
-                (needsApproval
-                  ? "awaiting_approval"
-                  : result !== undefined
-                    ? "completed"
-                    : isResultlessCompletedToolCall(resolvedToolCall)
-                      ? "completed"
-                      : isStreaming
-                        ? "running"
-                        : "interrupted")
-              const statusMeta = getToolStatusMeta(inferredStatus)
-              const isHtmlTool = isHtmlRenderToolCall(resolvedToolCall)
-              const isExpanded = isHtmlTool
-                ? collapsedHtmlTools.has(toolId)
-                : collapsedTools.has(toolId)
-              const summary = getCollapsedToolCallSummary(resolvedToolCall)
-              const previewPath = getToolPreviewPath(resolvedToolCall)
-              const isOk = result !== undefined && !result?.is_error
+            <FunctionToolGroup
+              threadId={threadId}
+              blocked={displayToolRows!.some((row) => row.needsApproval)}
+              isActive={Boolean(isStreaming)}
+              calls={displayToolRows!.map((row) => ({
+                tool_use_id: row.resolvedToolCall.id,
+                tool: row.resolvedToolCall.name,
+                input: row.resolvedToolCall.args,
+                isRunning: row.inferredStatus === "running",
+                isErrored: Boolean(
+                  row.result?.is_error || ["failed", "rejected"].includes(row.inferredStatus)
+                ),
+                isInterrupted: row.inferredStatus === "interrupted",
+                ...(row.result ? { output: row.result.content } : {})
+              }))}
+            >
+              {(groupExpanded) =>
+                displayToolRows!.map((row) => {
+                  const { toolId, resolvedToolCall, result, needsApproval, inferredStatus } = row
+                  const statusMeta = getToolStatusMeta(inferredStatus)
+                  const isHtmlTool = isHtmlRenderToolCall(resolvedToolCall)
+                  const isExpanded =
+                    groupExpanded !==
+                    (isHtmlTool ? collapsedHtmlTools.has(toolId) : collapsedTools.has(toolId))
+                  const summary = getCollapsedToolCallSummary(resolvedToolCall)
+                  const previewPath = getToolPreviewPath(resolvedToolCall)
+                  const isOk = result !== undefined && !result?.is_error
 
-              // 如果工具需要审批，使用原来的ToolCallRenderer（批量时隐藏按钮）
-              if (needsApproval) {
-                const isBatch = (pendingApproval?.pendingCount ?? 1) > 1
-                // git commit is approved through the dedicated task-card dialog, so the
-                // inline approve/reject buttons are hidden to avoid a second (card-less) path.
-                const pendingOperation = (
-                  pendingApproval as unknown as {
-                    operation?: string
-                  } | null
-                )?.operation
-                const isGitCommitApproval = pendingOperation === "git_commit"
-                const isAutoGitPushApproval = autoApproveGitPush && pendingOperation === "git_push"
-                return (
-                  <ToolCallRenderer
-                    key={`${toolId}-${needsApproval ? "pending" : "done"}`}
-                    toolCall={resolvedToolCall}
-                    result={result?.content}
-                    isError={result?.is_error}
-                    status={inferredStatus}
-                    needsApproval={needsApproval}
-                    searchableSummary={summary}
-                    showApprovalButtons={!isBatch && !isGitCommitApproval && !isAutoGitPushApproval}
-                    onApprovalDecision={onApprovalDecision}
-                    approvalTypes={
-                      (
-                        pendingApproval as unknown as {
-                          _approvalTypes?: (
-                            | "approve"
-                            | "approve_session"
-                            | "approve_permanent"
-                            | "reject"
-                          )[]
-                        }
-                      )?._approvalTypes
-                    }
-                    threadId={threadId}
-                    isStreaming={isStreaming}
-                  />
-                )
-              }
-
-              // 工具执行完成后，显示折叠的标题
-              return (
-                <div
-                  key={toolId}
-                  className="rounded-sm border overflow-hidden border-border bg-background-elevated"
-                >
-                  {/* 可折叠的工具标题 */}
-                  <div className="flex w-full items-center hover:bg-muted/50 transition-colors">
-                    <button
-                      type="button"
-                      onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
-                      className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2"
-                    >
-                      {isExpanded ? (
-                        <ChevronDown className="size-4 text-muted-foreground shrink-0" />
-                      ) : (
-                        <ChevronRight className="size-4 text-muted-foreground shrink-0" />
-                      )}
-
-                      <Wrench className="size-4 shrink-0 text-status-info" />
-
-                      <span
-                        data-chat-search-text
-                        className="text-xs font-medium min-w-0 truncate text-left"
-                      >
-                        {summary}
-                      </span>
-                    </button>
-                    <div className="flex items-center gap-2 shrink-0 pr-3">
-                      {previewPath && isOk && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            const intentId = beginOpenResourcePreviewIntent(threadId)
-                            void (async () => {
-                              const authorized =
-                                await window.api.workspace.authorizeToolFilePreview({
-                                  threadId,
-                                  toolCallId: resolvedToolCall.id
-                                })
-                              if (!authorized.success) {
-                                emitOpenResourcePreview({
-                                  threadId,
-                                  filePath: previewPath,
-                                  intentId,
-                                  toolCallId: resolvedToolCall.id
-                                })
-                                return
-                              }
-                              emitOpenResourcePreview({
-                                threadId,
-                                filePath: authorized.filePath,
-                                intentId,
-                                workspacePathKind: "absolute",
-                                toolCallId: resolvedToolCall.id,
-                                externalPreviewGrant: authorized.external
-                                  ? authorized.grant
-                                  : undefined,
-                                externalPreviewGrantExpiresAt: authorized.external
-                                  ? authorized.expiresAt
-                                  : undefined
-                              })
-                            })().catch((error) => {
-                              console.error(
-                                "[MessageBubble] Failed to authorize file preview:",
-                                error
-                              )
-                              emitOpenResourcePreview({
-                                threadId,
-                                filePath: previewPath,
-                                intentId,
-                                toolCallId: resolvedToolCall.id
-                              })
-                            })
-                          }}
-                          className="inline-flex items-center justify-center rounded border border-border/70 bg-background px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                          title="在右侧资源预览中打开"
-                          aria-label="在右侧资源预览中打开"
-                        >
-                          <Eye className="size-3" />
-                        </button>
-                      )}
-
-                      {/* 状态指示器 */}
-                      <div
-                        className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded ${statusMeta.className}`}
-                      >
-                        {statusMeta.label}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 展开的详细内容 */}
-                  {isExpanded && (
-                    <div className="border-t border-border">
+                  // 如果工具需要审批，使用原来的ToolCallRenderer（批量时隐藏按钮）
+                  if (needsApproval) {
+                    const isBatch = (pendingApproval?.pendingCount ?? 1) > 1
+                    // git commit is approved through the dedicated task-card dialog, so the
+                    // inline approve/reject buttons are hidden to avoid a second (card-less) path.
+                    const pendingOperation = (
+                      pendingApproval as unknown as {
+                        operation?: string
+                      } | null
+                    )?.operation
+                    const isGitCommitApproval = pendingOperation === "git_commit"
+                    const isAutoGitPushApproval =
+                      autoApproveGitPush && pendingOperation === "git_push"
+                    return (
                       <ToolCallRenderer
+                        key={`${toolId}-${needsApproval ? "pending" : "done"}`}
                         toolCall={resolvedToolCall}
                         result={result?.content}
                         isError={result?.is_error}
                         status={inferredStatus}
-                        needsApproval={false}
-                        onApprovalDecision={undefined}
-                        isStreaming={isStreaming}
+                        needsApproval={needsApproval}
+                        searchableSummary={summary}
+                        showApprovalButtons={
+                          !isBatch && !isGitCommitApproval && !isAutoGitPushApproval
+                        }
+                        onApprovalDecision={onApprovalDecision}
+                        approvalTypes={
+                          (
+                            pendingApproval as unknown as {
+                              _approvalTypes?: (
+                                | "approve"
+                                | "approve_session"
+                                | "approve_permanent"
+                                | "reject"
+                              )[]
+                            }
+                          )?._approvalTypes
+                        }
                         threadId={threadId}
+                        isStreaming={isStreaming}
                       />
+                    )
+                  }
+
+                  // 工具执行完成后，显示折叠的标题
+                  return (
+                    <div
+                      key={toolId}
+                      className="rounded-sm border overflow-hidden border-border bg-background-elevated"
+                    >
+                      {/* 可折叠的工具标题 */}
+                      <div className="flex w-full items-center hover:bg-muted/50 transition-colors">
+                        <button
+                          type="button"
+                          onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
+                          className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2"
+                        >
+                          {isExpanded ? (
+                            <ChevronDown className="size-4 text-muted-foreground shrink-0" />
+                          ) : (
+                            <ChevronRight className="size-4 text-muted-foreground shrink-0" />
+                          )}
+
+                          <Wrench className="size-4 shrink-0 text-status-info" />
+
+                          <span
+                            data-chat-search-text
+                            className="text-xs font-medium min-w-0 truncate text-left"
+                          >
+                            {summary}
+                          </span>
+                        </button>
+                        <div className="flex items-center gap-2 shrink-0 pr-3">
+                          {previewPath && isOk && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                const intentId = beginOpenResourcePreviewIntent(threadId)
+                                void (async () => {
+                                  const authorized =
+                                    await window.api.workspace.authorizeToolFilePreview({
+                                      threadId,
+                                      toolCallId: resolvedToolCall.id
+                                    })
+                                  if (!authorized.success) {
+                                    emitOpenResourcePreview({
+                                      threadId,
+                                      filePath: previewPath,
+                                      intentId,
+                                      toolCallId: resolvedToolCall.id
+                                    })
+                                    return
+                                  }
+                                  emitOpenResourcePreview({
+                                    threadId,
+                                    filePath: authorized.filePath,
+                                    intentId,
+                                    workspacePathKind: "absolute",
+                                    toolCallId: resolvedToolCall.id,
+                                    externalPreviewGrant: authorized.external
+                                      ? authorized.grant
+                                      : undefined,
+                                    externalPreviewGrantExpiresAt: authorized.external
+                                      ? authorized.expiresAt
+                                      : undefined
+                                  })
+                                })().catch((error) => {
+                                  console.error(
+                                    "[MessageBubble] Failed to authorize file preview:",
+                                    error
+                                  )
+                                  emitOpenResourcePreview({
+                                    threadId,
+                                    filePath: previewPath,
+                                    intentId,
+                                    toolCallId: resolvedToolCall.id
+                                  })
+                                })
+                              }}
+                              className="inline-flex items-center justify-center rounded border border-border/70 bg-background px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
+                              title="在右侧资源预览中打开"
+                              aria-label="在右侧资源预览中打开"
+                            >
+                              <Eye className="size-3" />
+                            </button>
+                          )}
+
+                          {/* 状态指示器 */}
+                          <div
+                            className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded ${statusMeta.className}`}
+                          >
+                            {statusMeta.label}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* 展开的详细内容 */}
+                      {isExpanded && (
+                        <div className="border-t border-border">
+                          <ToolCallRenderer
+                            toolCall={resolvedToolCall}
+                            result={result?.content}
+                            isError={result?.is_error}
+                            status={inferredStatus}
+                            needsApproval={false}
+                            onApprovalDecision={undefined}
+                            isStreaming={isStreaming}
+                            threadId={threadId}
+                          />
+                        </div>
+                      )}
+                      <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
                     </div>
-                  )}
-                  <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
-                </div>
-              )
-            })}
+                  )
+                })
+              }
+            </FunctionToolGroup>
 
             {/* 批量审批栏 - 只在当前消息包含待审批工具调用时显示 */}
             {pendingApproval &&

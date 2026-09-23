@@ -30,6 +30,8 @@ export interface FunctionPaneSnapshot {
   rows: number
   /** Set by the host after publication when the site exactly preserves its native default. */
   nativeFallback?: boolean
+  /** Host-derived ToolGroup expansion, only when the final tree retains native rendering. */
+  nativeExpansion?: boolean
   clients?: FunctionClientSnapshot[]
   focusRequest?: { id: string; pending: boolean }
 }

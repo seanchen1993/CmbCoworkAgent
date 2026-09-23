@@ -42,6 +42,7 @@ export function FunctionSite({
   fallback,
   onHint,
   onCustom,
+  onExpansion,
   className
 }: {
   threadId: string
@@ -50,6 +51,7 @@ export function FunctionSite({
   fallback?: ReactNode
   onHint?(text: string | null): void
   onCustom?(custom: boolean): void
+  onExpansion?(expanded: boolean): void
   className?: string
 }): React.JSX.Element {
   const [frame, setFrame] = useState<{
@@ -79,6 +81,11 @@ export function FunctionSite({
     snapshot.tree.children?.every((child) => typeof child === "string")
       ? snapshot.tree.children.join("")
       : null
+  useEffect(() => {
+    onExpansion?.(Boolean(frame?.ticket.current() && frame.snapshot.nativeFallback &&
+      frame.snapshot.nativeExpansion))
+    return () => onExpansion?.(false)
+  }, [onExpansion, frame])
   useEffect(() => {
     onCustom?.(Boolean(frame?.ticket.current() && !frame.snapshot.nativeFallback))
     return () => onCustom?.(false)

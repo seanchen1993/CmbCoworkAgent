@@ -648,3 +648,80 @@ it("cancels only the recycled duration owner while keeping another visible row a
   expect(state.get("completed:live")).toBe(true)
   expect(state.has("completed:old")).toBe(false)
 })
+
+const groupFacts = {
+  calls: [
+    {
+      tool_use_id: "read-1",
+      tool: "read_file",
+      input: { file_path: "original" },
+      output: "actual",
+      isRunning: false,
+      isErrored: false,
+      isInterrupted: false
+    }
+  ],
+  isActive: false,
+  isExpanded: false
+}
+it("ToolGroup expansion reaches the native rows without changing execution facts", async () => {
+  const { session } = await fixture(`on("ui.render", {component:"ToolGroup"},
+    ($, e, next) => next({...e, props:{...e.props, isExpanded:true}}))`)
+  const owner = await session.sites.mount("ToolGroup" as FunctionUiSite)
+  const result = await session.sites.render(owner, groupFacts)
+  expect(result.nativeFallback).toBe(true)
+  expect(result.nativeExpansion).toBe(true)
+  expect(groupFacts.isExpanded).toBe(false)
+  const second = await session.sites.mount("ToolGroup" as FunctionUiSite)
+  await session.sites.render(second, groupFacts)
+  expect((await session.sites.render(owner, groupFacts)).nativeExpansion).toBe(true)
+})
+it.each(["calls:[]", "isActive:true", "onScreen:null", 'isExpanded:"yes"'])(
+  "rejects ToolGroup fact forgery or malformed expansion: %s",
+  async (change) => {
+    const { session } = await fixture(`on("ui.render", {component:"ToolGroup"},
+    ($, e, next) => next({...e, props:{...e.props, isExpanded:true, ${change}}}))`)
+    const owner = await session.sites.mount("ToolGroup" as FunctionUiSite)
+    const result = await session.sites.render(owner, groupFacts)
+    expect(result.nativeFallback).toBe(true)
+    expect(result.nativeExpansion).toBe(false)
+  }
+)
+it("custom ToolGroup trees cannot carry a previous native expansion decision", async () => {
+  const { session, state } = await fixture(`on("ui.render", {component:"ToolGroup"},
+    async ($, e, next) => (await $.store.get("custom"))
+      ? {type:"Text",props:{},children:["group summary"]}
+      : next({...e, props:{...e.props, isExpanded:true}}))`)
+  const owner = await session.sites.mount("ToolGroup" as FunctionUiSite)
+  expect((await session.sites.render(owner, groupFacts)).nativeExpansion).toBe(true)
+  state.set("custom", true)
+  session.sites.invalidate()
+  const result = await session.sites.render(owner, groupFacts)
+  expect(result.nativeFallback).toBe(false)
+  expect(result.nativeExpansion).toBeUndefined()
+})
+
+it("ToolGroup rejects duplicate, oversized and excessive call inventories", async () => {
+  const { session } = await fixture("")
+  const owner = await session.sites.mount("ToolGroup")
+  const call = groupFacts.calls[0]
+  for (const calls of [
+    [],
+    [call, call],
+    [{ ...call, output: "x".repeat(10001) }],
+    Array.from({ length: 33 }, (_, i) => ({ ...call, tool_use_id: String(i) }))
+  ]) {
+    await expect(session.sites.render(owner, { ...groupFacts, calls })).rejects.toThrow(
+      "MODS_UI_SITE_PROPS"
+    )
+  }
+})
+it("publication cannot forge the native group expansion flag", async () => {
+  const { session } = await fixture("", undefined, async (value) =>
+    Array.isArray(value)
+      ? value.map((row) => ({ ...(row as ModObject), nativeExpansion: true }))
+      : value
+  )
+  const owner = await session.sites.mount("ToolGroup")
+  expect((await session.sites.render(owner, groupFacts)).nativeExpansion).toBe(false)
+})

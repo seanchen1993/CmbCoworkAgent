@@ -22,6 +22,7 @@ interface Site {
   component: FunctionUiSite
   props?: ModObject
   fingerprint?: string
+  nativeExpansion?: boolean
   drawings: FunctionPanes
 }
 
@@ -41,13 +42,16 @@ export class FunctionUiSites {
       clients: undefined,
       site: (pane) => {
         const site = this.get(pane.id)
+        site.nativeExpansion = undefined
         return { component: site.component, props: site.props! }
       },
-      renderCore: async (input) =>
-        functionSiteDefault(
-          functionUiSite(input.component),
-          input.props as ModObject
-        ) as unknown as ModJson,
+      renderCore: async (input) => {
+        const site = this.get(input.requestId as string)
+        const props = input.props as ModObject
+        if (site.component === "ToolGroup")
+          site.nativeExpansion = functionSiteProps(site.component, props).isExpanded as boolean
+        return functionSiteDefault(site.component, props) as unknown as ModJson
+      },
       validateTree: validateFunctionSiteTree
     })
   }
@@ -78,7 +82,8 @@ export class FunctionUiSites {
           "AssistantMessage",
           "CommandOutput",
           "ToolUse",
-          "ToolResult"
+          "ToolResult",
+          "ToolGroup"
         ].includes(component)
       ) {
         if (
@@ -111,11 +116,13 @@ export class FunctionUiSites {
       const snapshot = snapshots.find((pane) => pane.id === owner)
       if (!snapshot) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
       // Recompute after plugin publication: a guest cannot assert native ownership via metadata.
+      const nativeFallback =
+        encodeModJson(snapshot.tree as unknown as ModJson) ===
+        encodeModJson(functionSiteDefault(site.component, value) as unknown as ModJson)
       return {
         ...snapshot,
-        nativeFallback:
-          encodeModJson(snapshot.tree as unknown as ModJson) ===
-          encodeModJson(functionSiteDefault(site.component, value) as unknown as ModJson)
+        nativeFallback,
+        nativeExpansion: nativeFallback ? site.nativeExpansion : undefined
       }
     })
   }

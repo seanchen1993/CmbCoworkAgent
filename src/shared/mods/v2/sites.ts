@@ -14,7 +14,8 @@ export const FUNCTION_UI_SITES = [
   "AssistantMessage",
   "CommandOutput",
   "ToolUse",
-  "ToolResult"
+  "ToolResult",
+  "ToolGroup"
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
 export const FUNCTION_DURATION_SITE_LIMIT = 32
@@ -32,6 +33,25 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
   }
   if (!isModObject(value)) return fail()
   const text = (v: unknown): v is string => typeof v === "string" && v.length <= 10000
+  if (site === "ToolGroup") {
+    if (
+      !Array.isArray(value.calls) ||
+      value.calls.length < 1 ||
+      value.calls.length > 32 ||
+      typeof value.isActive !== "boolean" ||
+      typeof value.isExpanded !== "boolean" ||
+      Object.keys(value).some((key) => !["calls", "isActive", "isExpanded"].includes(key)) ||
+      encodeModJson(value).length > 10000
+    )
+      return fail()
+    const ids = new Set<string>()
+    for (const call of value.calls) {
+      const checked = functionSiteProps("ToolUse", call)
+      if (ids.has(checked.tool_use_id as string)) return fail()
+      ids.add(checked.tool_use_id as string)
+    }
+    return { ...value }
+  }
   if (site === "ToolUse" || site === "ToolResult") {
     const fields =
       site === "ToolUse"
@@ -174,6 +194,12 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
 }
 
 export function functionSiteDefault(site: FunctionUiSite, props: ModObject): FunctionUiElement {
+  if (site === "ToolGroup")
+    return {
+      type: "Text",
+      props: { dimColor: true },
+      children: [`${(props.calls as unknown[]).length} tools`]
+    }
   if (site === "ToolUse" || site === "ToolResult")
     return {
       type: "Text",

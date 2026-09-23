@@ -122,3 +122,11 @@ it("describes ui.log as a bounded desktop log adaptation in both operation and S
     expect((row?.evidence as unknown[])?.length).toBeGreaterThan(0)
   }
 })
+
+it("records ToolGroup as a tested desktop adaptation with native row limits", () => {
+  const site = (matrix.renderComponents as Array<Record<string, unknown>>).find(
+    (s) => s.name === "ToolGroup"
+  )!
+  expect(site.implementationStatus).toBe("adapted")
+  expect(JSON.stringify(site)).toContain("tool-group")
+})

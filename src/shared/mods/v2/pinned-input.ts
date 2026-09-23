@@ -73,23 +73,25 @@ export function normalizeFunctionInput(
   }
   if (event === "ui.render" && original.props && typeof original.props === "object") {
     const facts =
-      original.component === "ToolUse"
-        ? ["tool_use_id", "isRunning", "isErrored", "isInterrupted", "onScreen"]
-        : original.component === "ToolResult"
-          ? ["tool_use_id", "tool", "isErrored", "onScreen"]
-          : original.component === "CommandOutput"
-            ? ["command", "args", "isErrored", "onScreen"]
-            : original.component === "UserMessage"
-              ? ["origin", "isExpanded", "task", "from", "onScreen"]
-              : original.component === "AssistantMessage"
-                ? ["isFirstOfReply", "onScreen"]
-                : original.component === "AbovePrompt"
-                  ? ["hasSurvey", "isWorking", "maxRows", "bodyColumns", "scroll", "view"]
-                  : original.component === "PromptHint"
-                    ? ["isDraft", "isWorking"]
-                    : original.component === "InfoNotice" || original.component === "TurnDuration"
-                      ? ["onScreen"]
-                      : []
+      original.component === "ToolGroup"
+        ? ["calls", "isActive", "onScreen"]
+        : original.component === "ToolUse"
+          ? ["tool_use_id", "isRunning", "isErrored", "isInterrupted", "onScreen"]
+          : original.component === "ToolResult"
+            ? ["tool_use_id", "tool", "isErrored", "onScreen"]
+            : original.component === "CommandOutput"
+              ? ["command", "args", "isErrored", "onScreen"]
+              : original.component === "UserMessage"
+                ? ["origin", "isExpanded", "task", "from", "onScreen"]
+                : original.component === "AssistantMessage"
+                  ? ["isFirstOfReply", "onScreen"]
+                  : original.component === "AbovePrompt"
+                    ? ["hasSurvey", "isWorking", "maxRows", "bodyColumns", "scroll", "view"]
+                    : original.component === "PromptHint"
+                      ? ["isDraft", "isWorking"]
+                      : original.component === "InfoNotice" || original.component === "TurnDuration"
+                        ? ["onScreen"]
+                        : []
     for (const key of facts) {
       const props = result.props as ModObject | undefined
       const before = original.props as ModObject
@@ -106,7 +108,8 @@ export function normalizeFunctionInput(
       original.component === "AssistantMessage" ||
       original.component === "CommandOutput" ||
       original.component === "ToolUse" ||
-      original.component === "ToolResult"
+      original.component === "ToolResult" ||
+      original.component === "ToolGroup"
     )
       functionSiteProps(original.component, result.props)
   }
