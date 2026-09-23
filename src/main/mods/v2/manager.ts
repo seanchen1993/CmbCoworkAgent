@@ -1,3 +1,4 @@
+import type { FunctionSessionTitleUpdate } from "./session-title"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import type { CompletionGate } from "../../agent/skill-lifecycle/completion-gate"
 import type {
@@ -85,6 +86,12 @@ interface FunctionManagerHost {
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
   changed(threadId: string): void
   assertThread?(workspace: string, threadId: string): void
+  prepareSessionTitle?(
+    workspace: string,
+    threadId: string,
+    signal: AbortSignal,
+    assertCurrent: () => void
+  ): FunctionSessionTitleUpdate
   abortTurn?(
     workspace: string,
     threadId: string,
@@ -868,24 +875,51 @@ export class FunctionModsManager {
       return result
     }
     assertCurrent()
-    if (!this.host.enabled(workspace) || this.sources().length === 0)
-      return runCore(input, signal)
-    const ready = this.sessions.has(JSON.stringify([workspace, threadId])) ||
+    if (!this.host.enabled(workspace) || this.sources().length === 0) return runCore(input, signal)
+    const ready =
+      this.sessions.has(JSON.stringify([workspace, threadId])) ||
       (await this.status(workspace)).some((item) => item.state === "ready")
     assertCurrent()
     if (!this.host.enabled(workspace)) throw new ModFunctionError("MODS_SCOPE_CHANGED")
     if (!ready) return runCore(input, signal)
     const entry = await this.session(workspace, threadId)
     assertCurrent()
-    if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+    if (
+      !this.host.enabled(workspace) ||
+      this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+    )
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
-    const safe = await this.host.publish(workspace, input, signal)
-    assertCurrent()
-    const result = await entry.session!.classicEvent(event, safe as ModObject, signal, runCore)
-    assertCurrent()
-    if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
-      throw new ModFunctionError("MODS_SCOPE_CHANGED")
-    return result
+    const assertTitleScope = () => {
+      assertCurrent()
+      if (
+        !this.host.enabled(workspace) ||
+        this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+      )
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      for (const snapshot of entry.snapshots.values()) this.store.assertGrant(snapshot.grant)
+      if (entry.session?.plugins.some((plugin) => plugin.guest.stats.disposed))
+        throw new ModFunctionError("MODS_RUNTIME_LOST")
+    }
+    const title = ["classic.UserPromptSubmit", "classic.SessionStart"].includes(event)
+      ? this.host.prepareSessionTitle?.(
+          workspace,
+          threadId,
+          AbortSignal.any([signal, entry.session!.lifecycleSignal]),
+          assertTitleScope
+        )
+      : undefined
+    try {
+      const safe = await this.host.publish(workspace, input, signal)
+      assertCurrent()
+      const result = await entry.session!.classicEvent(event, safe as ModObject, signal, runCore)
+      assertCurrent()
+      if (this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+      if (typeof result.sessionTitle === "string") await title?.apply(result.sessionTitle)
+      return result
+    } finally {
+      title?.close()
+    }
   }
 
   async turnStart(

@@ -1,7 +1,8 @@
+import { prepareFunctionSessionTitle } from "../mods/v2/session-title"
 import { nativeFunctionDialogAccess } from "../mods/v2/native-dialog-access"
 import { compactFunctionSession, queryFunctionSessionRead } from "../mods/v2/session-read-host"
 import { queryFunctionToolCatalog } from "../mods/v2/tool-catalog-host"
-import { app, dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
+import { app, dialog, BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { join } from "node:path"
 import { writeFile } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
@@ -179,6 +180,30 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         manager.store.assertGrant(grant)
         manager.functionTurns.abort(workspace, threadId, turnId)
         recordFunctionCancellationReceipt()
+      },
+      prepareSessionTitle: (workspace, threadId, signal, assertCurrent) => {
+        const scope = manager.functionRuntimeScope(workspace, threadId)
+        return prepareFunctionSessionTitle(
+          threadId,
+          () => {
+            signal.throwIfAborted()
+            assertCurrent()
+            scope.assertLive()
+            if (writableThreadScope(threadId) !== workspace)
+              throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          },
+          () => {
+            for (const target of BrowserWindow.getAllWindows()) {
+              try {
+                if (!target.isDestroyed() && !target.webContents.isDestroyed())
+                  target.webContents.send("threads:changed")
+              } catch {
+                console.warn("[Mods] Title committed but renderer notification was unavailable")
+              }
+            }
+          },
+          signal
+        )
       },
       readSession: (workspace, threadId, method, signal, usageArgs) =>
         queryFunctionSessionRead(

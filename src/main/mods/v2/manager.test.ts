@@ -242,7 +242,8 @@ afterEach(async () => {
 
 async function fixture(
   readSession?: ConstructorParameters<typeof FunctionModsManager>[1]["readSession"],
-  sourceFixture = "resources/mods/function-commands"
+  sourceFixture = "resources/mods/function-commands",
+  prepareSessionTitle?: ConstructorParameters<typeof FunctionModsManager>[1]["prepareSessionTitle"]
 ) {
   const root = await mkdtemp(join(tmpdir(), "function-manager-"))
   const plugin = join(root, "plugin")
@@ -261,6 +262,7 @@ async function fixture(
       ],
       enabled: () => enabled,
       readSession,
+      prepareSessionTitle,
       registeredTool: async (_workspace, _threadId, _grant, _input, _origin, _signal, run) => run(),
       publish: async (_, value) => publish(value),
       changed: () => undefined
@@ -972,4 +974,139 @@ it("log reads never create guests and runtime replacement removes prior log pres
   f.setEnabled(true)
   expect(await f.manager.logs(f.root, "thread")).toEqual([])
   expect(f.loads()).toBe(loads + 1)
+})
+
+it("applies a published classic session title through the host and disposes the captured proposal", async () => {
+  const apply = vi.fn(async (_title: string) => {
+    void _title
+    return true
+  })
+  const close = vi.fn()
+  const capture = vi.fn(() => ({ apply, close }))
+  const f = await fixture(undefined, undefined, capture)
+  await writeFile(
+    join(f.plugin, "hooks/title.ts"),
+    `export function register(on){on("classic.UserPromptSubmit",()=>({sessionTitle:"SECRET title",block:"review required"}))}`
+  )
+  const path = join(f.plugin, "hooks/hooks.json")
+  const hooks = JSON.parse(await readFile(path, "utf8"))
+  hooks.modules.push("./title.ts")
+  await writeFile(path, JSON.stringify(hooks))
+  f.setPublication(async (value) =>
+    JSON.parse(JSON.stringify(value).replaceAll("SECRET", "FILTERED"))
+  )
+  await f.approve()
+  const signal = new AbortController().signal
+  const input = {
+    hook_event_name: "UserPromptSubmit",
+    session_id: "thread",
+    cwd: f.root,
+    transcript_path: "",
+    prompt: "review"
+  }
+  expect(
+    await f.manager.classicEvent(f.root, "thread", "classic.UserPromptSubmit", input, signal)
+  ).toMatchObject({ sessionTitle: "FILTERED title", block: "review required" })
+  expect(capture).toHaveBeenCalledOnce()
+  expect(apply).toHaveBeenCalledExactlyOnceWith("FILTERED title")
+  expect(close).toHaveBeenCalledOnce()
+  f.setEnabled(false)
+  await f.manager.classicEvent(f.root, "thread", "classic.UserPromptSubmit", input, signal)
+  expect(capture).toHaveBeenCalledOnce()
+})
+
+it("never applies a title if revocation races guest publication and always closes the proposal", async () => {
+  const apply = vi.fn(async () => true),
+    close = vi.fn()
+  const f = await fixture(undefined, undefined, () => ({ apply, close }))
+  await writeFile(
+    join(f.plugin, "hooks/title.ts"),
+    `export function register(on){on("classic.UserPromptSubmit",()=>({sessionTitle:"Late title"}))}`
+  )
+  const path = join(f.plugin, "hooks/hooks.json")
+  const hooks = JSON.parse(await readFile(path, "utf8"))
+  hooks.modules.push("./title.ts")
+  await writeFile(path, JSON.stringify(hooks))
+  await f.approve()
+  f.setPublication(async (value) => {
+    if (value && typeof value === "object" && !Array.isArray(value) && value.sessionTitle)
+      f.manager.revoke(f.root, "function-commands")
+    return value
+  })
+  await expect(
+    f.manager.classicEvent(
+      f.root,
+      "thread",
+      "classic.UserPromptSubmit",
+      {
+        hook_event_name: "UserPromptSubmit",
+        session_id: "thread",
+        cwd: f.root,
+        transcript_path: "",
+        prompt: "review"
+      },
+      new AbortController().signal
+    )
+  ).rejects.toThrow()
+  expect(apply).not.toHaveBeenCalled()
+  expect(close).toHaveBeenCalledOnce()
+})
+
+it("aborts a host title write waiting outside the guest when the session is replaced", async () => {
+  let entered!: () => void
+  const applying = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const close = vi.fn()
+  const f = await fixture(undefined, undefined, (_workspace, _thread, signal) => ({
+    apply: async () => {
+      entered()
+      return new Promise<boolean>((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+      )
+    },
+    close
+  }))
+  await writeFile(
+    join(f.plugin, "hooks/title.ts"),
+    `export function register(on){on("classic.UserPromptSubmit",()=>({sessionTitle:"Pending"}))}`
+  )
+  const path = join(f.plugin, "hooks/hooks.json")
+  const hooks = JSON.parse(await readFile(path, "utf8"))
+  hooks.modules.push("./title.ts")
+  await writeFile(path, JSON.stringify(hooks))
+  await f.approve()
+  const controller = new AbortController()
+  const result = f.manager
+    .classicEvent(
+      f.root,
+      "thread",
+      "classic.UserPromptSubmit",
+      {
+        hook_event_name: "UserPromptSubmit",
+        session_id: "thread",
+        cwd: f.root,
+        transcript_path: "",
+        prompt: "review"
+      },
+      controller.signal
+    )
+    .catch((error) => error)
+  await applying
+  f.manager.invalidate(f.root)
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    const outcome = await Promise.race([
+      result,
+      new Promise((resolve) => {
+        timeout = setTimeout(() => resolve("still pending"), 250)
+      })
+    ])
+    expect(outcome).toBeInstanceOf(Error)
+    expect(close).toHaveBeenCalledOnce()
+  } finally {
+    if (timeout) clearTimeout(timeout)
+    controller.abort()
+    await result
+  }
 })

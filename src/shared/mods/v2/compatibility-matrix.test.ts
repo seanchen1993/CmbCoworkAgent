@@ -193,3 +193,18 @@ it("bounds UserPromptExpansion compatibility to real direct skill selection", ()
   expect(row?.note).toContain("MCP prompt")
   expect(row?.evidence).toContain("tests/support/mods-prompt-expansion-e2e.ts")
 })
+
+it("records actual title effects without claiming all SessionStart outputs", () => {
+  for (const name of ["classic.UserPromptSubmit", "classic.SessionStart"]) {
+    const row = (matrix.classicEvents as Array<Record<string, unknown>>).find(
+      (item) => item.name === name
+    )
+    expect(row?.note).toContain("sessionTitle")
+    expect(row?.evidence).toContain("tests/support/mods-session-title-e2e.ts")
+  }
+  expect(
+    (matrix.classicEvents as Array<Record<string, unknown>>).find(
+      (item) => item.name === "classic.SessionStart"
+    )?.implementationStatus
+  ).toBe("partial")
+})

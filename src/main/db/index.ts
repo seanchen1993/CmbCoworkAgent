@@ -1,3 +1,4 @@
+import { invalidateThreadTitleObservers } from "./thread-title-observer"
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
 import {
   getDbPath,
@@ -5879,6 +5880,7 @@ export function updateThread(
   values.push(threadId)
 
   database.run(`UPDATE threads SET ${setClauses.join(", ")} WHERE thread_id = ?`, values)
+  if (updates.title !== undefined) invalidateThreadTitleObservers(threadId)
 
   saveToDisk()
 

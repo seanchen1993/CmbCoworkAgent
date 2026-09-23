@@ -167,6 +167,8 @@ export class FunctionSession {
   readonly sites: FunctionUiSites
   readonly clients: FunctionClients
   private readonly controller = new AbortController()
+  /** Host effects waiting outside dispatch still belong to this exact session. */
+  readonly lifecycleSignal = this.controller.signal
   private readonly registry = new Map<string, FunctionCommand>()
   private readonly tools = new FunctionToolRegistry()
   private readonly dispatcher: FunctionDispatcher
