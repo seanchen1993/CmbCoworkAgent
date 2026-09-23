@@ -9,6 +9,7 @@ export const FUNCTION_UI_CAPABILITIES = [
   "ui.resolve",
   "ui.invalidate",
   "ui.toast",
+  "ui.log",
   "ui.status"
 ] as const
 export interface FunctionUiElement {

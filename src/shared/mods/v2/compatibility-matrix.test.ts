@@ -94,7 +94,9 @@ it("records tested live desktop sites and vector adaptation with explicit eviden
 
 it("labels prompt feedback as an evidenced bounded desktop adaptation", () => {
   for (const name of ["ui.toast", "ui.status"]) {
-    const row = (matrix.operationEvents as Array<Record<string, unknown>>).find((item) => item.name === name)
+    const row = (matrix.operationEvents as Array<Record<string, unknown>>).find(
+      (item) => item.name === name
+    )
     expect(row?.implementationStatus, name).toBe("adapted")
     expect((row?.evidence as unknown[])?.length, name).toBeGreaterThan(0)
     expect(row?.note, name).toContain("session")
@@ -102,8 +104,21 @@ it("labels prompt feedback as an evidenced bounded desktop adaptation", () => {
 })
 
 it("keeps implemented feedback SDK members consistent with their operation rows", () => {
-  const sdk = matrix.sdk as Array<{namespace:string;members:Array<Record<string,unknown>>}>
+  const sdk = matrix.sdk as Array<{ namespace: string; members: Array<Record<string, unknown>> }>
   const ui = sdk.find((group) => group.namespace === "ui")!
   for (const name of ["ui.toast", "ui.status"])
     expect(ui.members.find((member) => member.name === name)?.implementationStatus).toBe("adapted")
+})
+
+it("describes ui.log as a bounded desktop log adaptation in both operation and SDK inventories", () => {
+  const sdk = matrix.sdk as Array<{ namespace: string; members: Array<Record<string, unknown>> }>
+  const rows = [
+    (matrix.operationEvents as Array<Record<string, unknown>>).find((row) => row.name === "ui.log"),
+    sdk.find((group) => group.namespace === "ui")!.members.find((row) => row.name === "ui.log")
+  ]
+  for (const row of rows) {
+    expect(row?.implementationStatus).toBe("adapted")
+    expect(row?.note).toContain("session")
+    expect((row?.evidence as unknown[])?.length).toBeGreaterThan(0)
+  }
 })

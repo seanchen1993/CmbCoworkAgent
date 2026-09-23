@@ -233,7 +233,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
         sdk.ui.resolve = input => uiElements(meta, input);
         continue;
       }
-      if (["ui.invalidate", "ui.toast", "ui.status"].includes(capability)) {
+      if (["ui.invalidate", "ui.toast", "ui.status", "ui.log"].includes(capability)) {
         sdk[noun][method] = (...args) => {
           // JSON carries a missing status argument as an empty list, never as null.
           if (capability === "ui.status" && args[0] === undefined) args = [];

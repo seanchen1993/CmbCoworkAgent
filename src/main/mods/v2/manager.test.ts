@@ -952,3 +952,24 @@ it("feedback reads never create sessions and fail closed across off and revocati
   await result
   expect(await f.manager.feedback(f.root, "thread")).toEqual([])
 })
+
+
+it("log reads never create guests and runtime replacement removes prior log presentation", async () => {
+  const f = await fixture()
+  expect(await f.manager.logs(f.root, "thread")).toEqual([])
+  expect(f.loads()).toBe(0)
+  await writeFile(join(f.plugin, "hooks/register.ts"), `export function register(on) {
+    on("session.start", ($, e, next) => { $.ui.log("scoped log"); return next(e) })
+  }`)
+  await f.approve()
+  const loads = f.loads()
+  expect(await f.manager.logs(f.root, "thread")).toEqual([])
+  expect(f.loads()).toBe(loads)
+  await f.manager.commands(f.root, "thread")
+  expect((await f.manager.logs(f.root, "thread")).map(row => row.text)).toEqual(["scoped log"])
+  f.setEnabled(false)
+  expect(await f.manager.logs(f.root, "thread")).toEqual([])
+  f.setEnabled(true)
+  expect(await f.manager.logs(f.root, "thread")).toEqual([])
+  expect(f.loads()).toBe(loads + 1)
+})

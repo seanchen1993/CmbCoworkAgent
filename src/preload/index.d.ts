@@ -979,6 +979,7 @@ interface CustomAPI {
     completionEvidence(threadId: string): Promise<import("../main/mods/v2/completion-evidence").CompletionEvidenceRecord[]>
     functionUnlocked(): Promise<boolean>
     unlockFunction(password: string): Promise<boolean>
+    logs(threadId: string): Promise<import("../shared/mods/v2/ui-log").FunctionLogEntry[]>
     feedback(threadId: string): Promise<import("../shared/mods/v2/ui-feedback").FunctionFeedbackEntry[]>
     turnNotices(threadId: string): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]>
     panes(threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]>

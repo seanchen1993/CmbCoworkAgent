@@ -3,6 +3,7 @@ import { useModCommands } from "../../features/slash-commands/useModCommands"
 import { ModCommandJobs } from "./ModCommandJobs"
 import { FunctionPanes } from "./FunctionPanes"
 import { FunctionFeedback } from "./FunctionFeedback"
+import { FunctionLogs } from "./FunctionLogs"
 import { FunctionCompletionEvidence } from "./FunctionCompletionEvidence"
 import { FunctionSite } from "./FunctionSite"
 import { functionSpinnerFacts } from "../../lib/function-status-site"
@@ -7581,6 +7582,7 @@ export function ChatContainer({
       className="space-y-4 pt-4 pb-4"
       style={userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined}
     >
+      <FunctionLogs key={`logs:${threadId}`} threadId={threadId} />
       {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
       {modelRetry && (
         <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground">

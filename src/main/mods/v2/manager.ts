@@ -1419,6 +1419,19 @@ export class FunctionModsManager {
     )
   }
 
+  async logs(workspace: string, threadId: string): Promise<import("../../../shared/mods/v2/ui-log").FunctionLogEntry[]> {
+    this.host.assertThread?.(workspace, threadId)
+    if (!this.host.enabled(workspace)) return []
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry) return []
+    await entry.loading
+    const result = await entry.session!.logSnapshot()
+    this.host.assertThread?.(workspace, threadId)
+    if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    return result
+  }
+
   async feedback(workspace: string, threadId: string): Promise<import("../../../shared/mods/v2/ui-feedback").FunctionFeedbackEntry[]> {
     this.host.assertThread?.(workspace, threadId)
     if (!this.host.enabled(workspace)) return []

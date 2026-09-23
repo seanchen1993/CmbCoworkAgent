@@ -85,6 +85,12 @@ import { validateClassicInput, validateClassicResult } from "../../../shared/mod
 import { parseCompletionPolicy, type CompletionPolicy } from "../../../shared/mods/v2/completion-policy"
 import { CompletionBudget, withCompletionBudget } from "./completion-budget"
 import { FunctionUiFeedback } from "./ui-feedback"
+import { FunctionUiLog } from "./ui-log"
+import {
+  functionLogSnapshot,
+  validateFunctionLog,
+  type FunctionLogEntry
+} from "../../../shared/mods/v2/ui-log"
 import { validateFunctionFeedback, type FunctionFeedbackEntry } from "../../../shared/mods/v2/ui-feedback"
 
 export interface FunctionSessionHost {
@@ -100,6 +106,7 @@ export interface FunctionSessionHost {
   abortTurn?(plugin: FunctionPlugin, turnId: string, signal: AbortSignal): Promise<void>
   assertLive(plugin?: FunctionPlugin): void
   uiChanged?(): void
+  debugLog?(plugin: string, text: string): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
   callTool?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
   callMcp?(
@@ -146,6 +153,7 @@ export interface FunctionSessionHost {
 export class FunctionSession {
   private readonly feedbackOrder = new Map<string, { requested: number; committed: number }>()
   private readonly feedback: FunctionUiFeedback
+  private readonly logs: FunctionUiLog
   readonly panes: FunctionPanes
   readonly sites: FunctionUiSites
   readonly clients: FunctionClients
@@ -162,6 +170,13 @@ export class FunctionSession {
     private readonly host: FunctionSessionHost
   ) {
     this.feedback = new FunctionUiFeedback(() => this.host.uiChanged?.())
+    this.logs = new FunctionUiLog(
+      () => this.host.uiChanged?.(),
+      (plugin, text) =>
+        this.host.debugLog
+          ? this.host.debugLog(plugin, text)
+          : console.info(`[Function Mods] [${plugin}]`, text)
+    )
     this.dispatcher = new FunctionDispatcher(plugins)
     this.nouns = new FunctionEngineNouns(plugins, (plugin) => this.assertLive(plugin))
     this.clients = new FunctionClients({
@@ -691,7 +706,8 @@ export class FunctionSession {
       core(input: ModObject, signal: AbortSignal): Promise<ModJson | undefined>
     },
     held?: string,
-    presentation?: FunctionUiDispatch & { modelTool?: boolean }
+    presentation?: FunctionUiDispatch & { modelTool?: boolean },
+    logSignal?: AbortSignal
   ): Promise<ModJson> {
     if (depth > 16) throw new ModFunctionError("MODS_DISPATCH_DEPTH")
     this.assertLive()
@@ -743,6 +759,7 @@ export class FunctionSession {
         if (name === "tool.check") functionToolCheckInput(value, true)
         if (name === "ui.open") validatePaneArgs(value)
         if (name === "ui.toast" || name === "ui.status") validateFunctionFeedback(name, value)
+        if (name === "ui.log") validateFunctionLog(value)
         if (
           (name === "ui.input" || name === "ui.select") &&
           (typeof value.value !== "string" || value.value.length > 10000)
@@ -870,7 +887,9 @@ export class FunctionSession {
         throw new ModFunctionError("MODS_EVENT_UNAVAILABLE")
       },
       capability: (plugin, method, raw, callSignal, source) =>
-        this.capability(plugin, method, raw, callSignal, source, depth, turnHeld)
+        this.capability(
+          plugin, method, raw, callSignal, source, depth, turnHeld, logSignal ?? scopedSignal
+        )
     })
     // Policy sees short-circuit results as well as results that passed through core.
     this.assertLive(undefined, true)
@@ -886,7 +905,8 @@ export class FunctionSession {
     callSignal: AbortSignal,
     source: { event: string; registration: string },
     depth = 0,
-    turnHeld?: string
+    turnHeld?: string,
+    logSignal: AbortSignal = callSignal
   ): Promise<ModJson | undefined> {
     this.assertLive(plugin)
     this.nouns.assertAccess(plugin, method)
@@ -1215,6 +1235,67 @@ export class FunctionSession {
       )
       return result
     }
+    if (method === "ui.log") {
+      if (
+        args.length < 1 ||
+        args.length > 2 ||
+        (args[1] !== undefined &&
+          (!isModObject(args[1]) || Object.keys(args[1]).some((key) => key !== "to")))
+      )
+        throw new ModFunctionError("MODS_UI_LOG_ARGUMENTS")
+      const input = {
+        text: args[0],
+        to: isModObject(args[1]) && args[1].to !== undefined ? args[1].to : "transcript"
+      }
+      validateFunctionLog(input)
+      const ticket = this.logs.reserve(plugin.name)
+      let accepted: ModObject | undefined
+      try {
+        const answer = await this.dispatch(
+          method,
+          input,
+          callSignal,
+          { plugin: plugin.name, registration: source.registration },
+          depth + 1,
+          {
+            plugin,
+            core: async (value, signal) => {
+              const safe = await this.host.publish(value, signal)
+              signal.throwIfAborted()
+              this.assertLive(plugin)
+              if (!isModObject(safe)) throw new ModFunctionError("MODS_UI_LOG_ARGUMENTS")
+              validateFunctionLog(safe)
+              accepted = safe
+              return undefined
+            }
+          },
+          turnHeld,
+          undefined,
+          logSignal
+        )
+        callSignal.throwIfAborted()
+        this.assertLive(plugin)
+        if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+        if (typeof answer.deny === "string")
+          throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+        this.logs.settle(ticket, accepted, () => {
+          try {
+            // Nested RPC frames may have ended normally. Retain the original
+            // dispatch's cancellation boundary until the ordered display drains.
+            logSignal.throwIfAborted()
+            this.assertLive(plugin)
+            return true
+          } catch {
+            return false
+          }
+        })
+      } finally {
+        // A denied/failed earlier line must not stall later accepted lines. Nested log
+        // calls settle without waiting for the outer operation's earlier ticket.
+        this.logs.settle(ticket)
+      }
+      return undefined
+    }
     if (method === "ui.toast" || method === "ui.status") {
       if (
         args.length > (method === "ui.toast" ? 2 : 1) ||
@@ -1376,9 +1457,18 @@ export class FunctionSession {
     return safe as unknown as FunctionFeedbackEntry[]
   }
 
+  async logSnapshot(): Promise<FunctionLogEntry[]> {
+    this.assertLive()
+    const original = this.logs.snapshot()
+    const safe = await this.host.publish(original as unknown as ModJson, this.controller.signal)
+    this.assertLive()
+    return functionLogSnapshot(safe, original)
+  }
+
   async close(): Promise<void> {
     this.controller.abort(new ModFunctionError("MODS_SESSION_CLOSED"))
     this.feedback.close()
+    this.logs.close()
     this.feedbackOrder.clear()
     this.panes.close()
     this.sites.close()
