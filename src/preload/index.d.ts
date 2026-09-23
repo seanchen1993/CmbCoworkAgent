@@ -977,6 +977,15 @@ interface CustomAPI {
     configureGlobal(enabled: boolean): Promise<boolean>
     onConfigurationChanged(callback: () => void): () => void
     completionEvidence(threadId: string): Promise<import("../main/mods/v2/completion-evidence").CompletionEvidenceRecord[]>
+    completionPolicy(
+      threadId: string,
+      plugin: string
+    ): Promise<import("../shared/mods/v2/completion-policy-values").CompletionPolicyView>
+    setCompletionPolicy(
+      threadId: string,
+      plugin: string,
+      policy: import("../shared/mods/v2/completion-policy-values").CompletionPolicy
+    ): Promise<import("../shared/mods/v2/completion-policy-values").CompletionPolicyView>
     functionUnlocked(): Promise<boolean>
     unlockFunction(password: string): Promise<boolean>
     logs(threadId: string): Promise<import("../shared/mods/v2/ui-log").FunctionLogEntry[]>

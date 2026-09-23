@@ -6,6 +6,7 @@ import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
 import { _electron, type ElectronApplication, type Page } from "playwright"
 import AdmZip from "adm-zip"
+import { verifyApplicationCompletionSettings } from "./support/mods-application-policy-e2e"
 
 const root = resolve(__dirname, "..")
 const localRequire = createRequire(join(root, "package.json"))
@@ -228,6 +229,7 @@ async function main() {
       (d) => d.command === "claw-info"
     )!
     assert(descriptor)
+    await verifyApplicationCompletionSettings(page!, threadId, artifacts, pass)
     await row.getByRole("button", { name: "卸载", exact: true }).click()
     await page!.screenshot({ path: join(artifacts, "uninstall-confirm.png") })
     await dialog.getByRole("button", { name: "确认卸载", exact: true }).click()
@@ -276,6 +278,23 @@ async function main() {
       /MODS_FUNCTION_LOCKED/
     )
     pass("restart restores settings lock and retains the disabled runtime switch")
+    const savedPolicy = await page!.evaluate(
+      (id) => window.api.mods.completionPolicy(id, "function-commands"),
+      threadId
+    )
+    assert.equal(savedPolicy.source, "application")
+    assert.equal(savedPolicy.policy.mode, "off")
+    assert.equal(savedPolicy.policy.modelTokenBudget, 4096)
+    await assert.rejects(
+      page!.evaluate(
+        ({ id, policy }) => window.api.mods.setCompletionPolicy(id, "function-commands", policy),
+        { id: threadId, policy: savedPolicy.policy }
+      ),
+      /MODS_FUNCTION_LOCKED/
+    )
+    pass(
+      "real Electron restart retains project completion rules and restores the native write lock"
+    )
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})
     throw error

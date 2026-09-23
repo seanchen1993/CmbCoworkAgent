@@ -617,6 +617,27 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   ipcMain.handle("mods:function-completion-evidence", (event, threadId: string) =>
     functions.completionEvidence(scope(event, threadId), threadId)
   )
+  ipcMain.handle(
+    "mods:function-completion-policy",
+    (event, input: { threadId: string; plugin: string }) =>
+      functions.completionPolicy(scope(event, input?.threadId), input.threadId, input.plugin)
+  )
+  ipcMain.handle(
+    "mods:function-completion-policy-set",
+    (event, input: { threadId: string; plugin: string; policy: unknown }) => {
+      const workspace = writableScope(event, input?.threadId)
+      settingsAccess.assertUnlocked(event.sender)
+      const result = functions.setCompletionPolicy(
+        workspace,
+        input.threadId,
+        input.plugin,
+        input.policy
+      )
+      const owner = window()
+      if (owner && !owner.isDestroyed()) owner.webContents.send("mods:configuration-changed")
+      return result
+    }
+  )
   ipcMain.handle("mods:function-autobiz-transition", (event, input: { threadId: string; transition: ModObject }) => {
     const workspace = writableScope(event, input?.threadId)
     return withFunctionExecution(

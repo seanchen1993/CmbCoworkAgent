@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { ModsAudit } from "./ModsAudit"
 import { ModsSettingsGate } from "./ModsSettingsGate"
+import { FunctionCompletionPolicy } from "./FunctionCompletionPolicy"
 import {
   Dialog,
   DialogContent,
@@ -399,6 +400,11 @@ function UnlockedModsPanel({ threadId }: { threadId: string | null }): React.JSX
                         撤销权限
                       </Button>
                     )}
+                    <FunctionCompletionPolicy
+                      threadId={threadId}
+                      plugin={mod.name}
+                      disabled={busy || mod.state !== "ready"}
+                    />
                   </div>
                 ))}
               </div>

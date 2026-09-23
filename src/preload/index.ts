@@ -3064,6 +3064,17 @@ const api = {
       ipcRenderer.invoke("mods:function-turn-notices", threadId),
     completionEvidence: (threadId: string): Promise<import("../main/mods/v2/completion-evidence").CompletionEvidenceRecord[]> =>
       ipcRenderer.invoke("mods:function-completion-evidence", threadId),
+    completionPolicy: (
+      threadId: string,
+      plugin: string
+    ): Promise<import("../shared/mods/v2/completion-policy-values").CompletionPolicyView> =>
+      ipcRenderer.invoke("mods:function-completion-policy", { threadId, plugin }),
+    setCompletionPolicy: (
+      threadId: string,
+      plugin: string,
+      policy: import("../shared/mods/v2/completion-policy-values").CompletionPolicy
+    ): Promise<import("../shared/mods/v2/completion-policy-values").CompletionPolicyView> =>
+      ipcRenderer.invoke("mods:function-completion-policy-set", { threadId, plugin, policy }),
     advanceAutobizCheckpoint: (threadId: string, transition: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/types").ModObject> =>
       ipcRenderer.invoke("mods:function-autobiz-transition", { threadId, transition }),
     panes: (threadId: string): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot[]> =>

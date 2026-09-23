@@ -25,7 +25,7 @@ function expression(file: string, pick: (node: ts.Node) => ts.Node | undefined, 
   return runInNewContext(code, scope)
 }
 
-function globalHandler(scope: object) {
+function globalHandler(scope: object, channel = "mods:configure-global") {
   return expression(
     "src/main/ipc/mods.ts",
     (node) => {
@@ -33,7 +33,7 @@ function globalHandler(scope: object) {
         ts.isCallExpression(node) &&
         node.expression.getText() === "ipcMain.handle" &&
         ts.isStringLiteral(node.arguments[0]) &&
-        node.arguments[0].text === "mods:configure-global"
+        node.arguments[0].text === channel
       )
         return node.arguments[1]
       return undefined
@@ -64,6 +64,38 @@ it("notifies mounted renderers after global off and reenable even with no live s
   expect(handler({ sender: {} }, false)).toBe(false)
   expect(handler({ sender: {} }, true)).toBe(true)
   expect(events).toEqual([false, true])
+})
+
+it("protects application completion settings with writable scope and the existing settings lock", () => {
+  const save = vi.fn(() => ({ source: "application", policy: { mode: "off" } }))
+  const send = vi.fn()
+  const scope = vi.fn(() => "workspace")
+  const unlock = vi.fn<() => void>(() => {
+    throw Error("locked")
+  })
+  const handler = globalHandler(
+    {
+      writableScope: scope,
+      settingsAccess: { assertUnlocked: unlock },
+      functions: { setCompletionPolicy: save },
+      window: () => ({ isDestroyed: () => false, webContents: { send } })
+    },
+    "mods:function-completion-policy-set"
+  )
+  const event = { sender: {} }
+  const input = { threadId: "thread", plugin: "plugin", policy: { mode: "off" } }
+  expect(() => handler(event, input)).toThrow("locked")
+  expect(save).not.toHaveBeenCalled()
+  expect(send).not.toHaveBeenCalled()
+  unlock.mockImplementation(() => {})
+  expect(handler(event, input)).toMatchObject({ source: "application" })
+  expect(save).toHaveBeenCalledWith("workspace", "thread", "plugin", input.policy)
+  expect(send).toHaveBeenCalledWith("mods:configuration-changed")
+  scope.mockImplementation(() => {
+    throw Error("read only")
+  })
+  expect(() => handler(event, input)).toThrow("read only")
+  expect(save).toHaveBeenCalledTimes(1)
 })
 
 it("does not mutate or broadcast a denied global enable", () => {

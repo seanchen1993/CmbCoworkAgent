@@ -1,3 +1,4 @@
+import { ApplicationCompletionPolicies } from "./application-completion-policy"
 import type { FunctionSessionTitleUpdate } from "./session-title"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import type { CompletionGate } from "../../agent/skill-lifecycle/completion-gate"
@@ -72,6 +73,7 @@ interface FunctionConnection {
   stop(): void
 }
 interface SessionEntry {
+  completionChecks: Set<AbortController>
   freshness: CompletionFreshness
   completionProofs: Map<string, (signal: AbortSignal) => Promise<CompletionEvidenceBinding>>
   turnNotices: FunctionTurnNotices
@@ -178,6 +180,7 @@ interface FunctionManagerHost {
 
 /** Grants bind a complete source snapshot; a live session never rereads mutable plugin source. */
 export class FunctionModsManager {
+  private readonly applicationPolicies: ApplicationCompletionPolicies
   private readonly initialEpoch = randomInt(1, 2 ** 48)
   private readonly epochs = new Map<string, number>()
   private readonly sessions = new Map<string, SessionEntry>()
@@ -196,6 +199,7 @@ export class FunctionModsManager {
     private readonly createClient: () => FunctionConnection = () =>
       new FunctionRuntimeClient(join(__dirname, "function-mod-host.js"))
   ) {
+    this.applicationPolicies = new ApplicationCompletionPolicies(store)
     this.stopWatching = onWorkspaceFilesChanged((change) => {
       for (const entry of this.sessions.values())
         if (
@@ -205,6 +209,26 @@ export class FunctionModsManager {
         )
           entry.freshness.changed()
     })
+  }
+
+  completionPolicy(workspace: string, threadId: string, plugin: string) {
+    this.host.assertThread?.(workspace, threadId)
+    return this.applicationPolicies.view(workspace, plugin)
+  }
+
+  setCompletionPolicy(workspace: string, threadId: string, plugin: string, value: unknown) {
+    this.host.assertThread?.(workspace, threadId)
+    const grant = this.store.getGrant(workspace, `function:${plugin}`)
+    if (!grant?.enabled) throw new ModFunctionError("MODS_PLUGIN_UNAPPROVED")
+    const result = this.applicationPolicies.save(workspace, plugin, value)
+    for (const entry of this.sessions.values()) {
+      if (!isSameWorkspacePath(entry.workspace, workspace)) continue
+      for (const check of entry.completionChecks)
+        check.abort(new ModFunctionError("MODS_COMPLETION_CONFIG_CHANGED"))
+      entry.freshness.changed()
+      this.host.changed(entry.threadId)
+    }
+    return result
   }
 
   private epoch(workspace: string): number {
@@ -323,6 +347,8 @@ export class FunctionModsManager {
       if (request.workspace === workspace) request.valid = false
     for (const [key, entry] of this.sessions) {
       if (entry.workspace !== workspace) continue
+      for (const check of entry.completionChecks)
+        check.abort(new ModFunctionError("MODS_SCOPE_CHANGED"))
       entry.freshness.close("runtime-replaced")
       this.sessions.delete(key)
       void entry.session?.close()
@@ -345,6 +371,8 @@ export class FunctionModsManager {
       if (request.threadId === threadId) request.valid = false
     for (const [key, entry] of this.sessions) {
       if (entry.threadId !== threadId) continue
+      for (const check of entry.completionChecks)
+        check.abort(new ModFunctionError("MODS_SCOPE_CHANGED"))
       entry.freshness.close("session-closed")
       this.sessions.delete(key)
       void entry.session?.close()
@@ -369,6 +397,7 @@ export class FunctionModsManager {
       freshness: new CompletionFreshness((id, binding, reason) => {
         this.invalidateCompletionEvidence(workspace, threadId, id, binding, reason)
       }),
+      completionChecks: new Set(),
       completionProofs: new Map(),
       turnNotices: new FunctionTurnNotices(),
       workspace,
@@ -611,7 +640,10 @@ export class FunctionModsManager {
             return {
               get: async (key, signal) => {
                 assertLive(plugin)
-                const value = this.store.functionState.get(namespace, key)
+                const value =
+                  key === "completion-config"
+                    ? this.applicationPolicies.value(workspace, plugin.name)
+                    : this.store.functionState.get(namespace, key)
                 const checked =
                   value === undefined
                     ? undefined
@@ -623,7 +655,14 @@ export class FunctionModsManager {
                 assertLive(plugin)
                 const checked = await this.host.publish(
                   workspace,
-                  this.store.functionState.keys(namespace),
+                  [
+                    ...new Set([
+                      ...this.store.functionState.keys(namespace),
+                      ...(this.applicationPolicies.hostValue(workspace, plugin.name) === undefined
+                        ? []
+                        : ["completion-config"])
+                    ])
+                  ],
                   signal
                 )
                 assertLive(plugin)
@@ -633,14 +672,17 @@ export class FunctionModsManager {
               },
               delete: (key) => {
                 assertLive(plugin)
+                this.applicationPolicies.assertGuestWritable(workspace, plugin.name, key)
                 this.store.functionState.delete(namespace, key)
                 current.freshness.changed()
               },
               set: async (key, value, signal) => {
                 assertLive(plugin)
+                this.applicationPolicies.assertGuestWritable(workspace, plugin.name, key)
                 const checked = await this.host.publish(workspace, value, signal)
                 assertLive(plugin)
                 signal.throwIfAborted()
+                this.applicationPolicies.assertGuestWritable(workspace, plugin.name, key)
                 this.store.functionState.set(namespace, key, checked)
                 current.freshness.changed()
               }
@@ -1143,7 +1185,9 @@ export class FunctionModsManager {
             Object.fromEntries(
               ["review-mode", "review-target", "completion-config"].map((key) => [
                 key,
-                this.store.functionState.get(namespace, key) ?? null
+                (key === "completion-config"
+                  ? this.applicationPolicies.value(workspace, name)
+                  : this.store.functionState.get(namespace, key)) ?? null
               ])
             )
           ]
@@ -1151,10 +1195,7 @@ export class FunctionModsManager {
       )
     const configured = new Map(
       [...entry.snapshots.keys()].map((name) => {
-        const raw = this.store.functionState.get(
-          JSON.stringify([workspace, name]),
-          "completion-config"
-        )
+        const raw = this.applicationPolicies.value(workspace, name)
         if (raw === undefined || raw === null) return [name, undefined] as const
         try {
           return [name, parseCompletionPolicy(raw)] as const
@@ -1238,7 +1279,9 @@ export class FunctionModsManager {
       const run = async () => {
         const { signal: originalSignal, revisionAttempts, maxRevisionAttempts } = input
         const deadline = new AbortController()
-        const signal = AbortSignal.any([originalSignal, deadline.signal])
+        const lifecycle = new AbortController()
+        entry.completionChecks.add(lifecycle)
+        const signal = AbortSignal.any([originalSignal, deadline.signal, lifecycle.signal])
         let timer: ReturnType<typeof setTimeout> | undefined
         let binding: CompletionEvidenceBinding | undefined
         const attempt = randomUUID()
@@ -1463,11 +1506,13 @@ export class FunctionModsManager {
             record("repair.attempt", "revise", { revisionAttempts: revisionAttempts + 1 })
           return result
         } catch (error) {
-          const reason = deadline.signal.aborted
-            ? "MODS_COMPLETION_TIMEOUT"
-            : error instanceof Error
-              ? error.message.slice(0, 2048)
-              : "COMPLETION_CHECK_FAILED"
+          const reason = lifecycle.signal.aborted
+            ? String(lifecycle.signal.reason?.message ?? "MODS_COMPLETION_CONFIG_CHANGED")
+            : deadline.signal.aborted
+              ? "MODS_COMPLETION_TIMEOUT"
+              : error instanceof Error
+                ? error.message.slice(0, 2048)
+                : "COMPLETION_CHECK_FAILED"
           record("check.result", originalSignal.aborted ? "cancelled" : "error", { error: reason })
           originalSignal.throwIfAborted()
           assertLive()
@@ -1475,6 +1520,7 @@ export class FunctionModsManager {
             return reportOnly ? { decision: "pass" } : { decision: "block", reason }
           throw error
         } finally {
+          entry.completionChecks.delete(lifecycle)
           if (timer) clearTimeout(timer)
         }
       }
