@@ -3056,6 +3056,7 @@ const api = {
     functionUnlocked: (): Promise<boolean> => ipcRenderer.invoke("mods:function-unlocked"),
     unlockFunction: (password: string): Promise<boolean> =>
       ipcRenderer.invoke("mods:unlock-function", password),
+    feedback: (threadId: string) => ipcRenderer.invoke("mods:function-feedback", threadId),
     turnNotices: (
       threadId: string
     ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>

@@ -577,6 +577,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       ...(await functions.commands(workspace, threadId))
     ]
   })
+  ipcMain.handle("mods:function-feedback", (event, threadId: string) =>
+    functions.feedback(scope(event, threadId), threadId)
+  )
   ipcMain.handle("mods:function-turn-notices", (event, threadId: string) =>
     functions.turnNotices(scope(event, threadId), threadId)
   )

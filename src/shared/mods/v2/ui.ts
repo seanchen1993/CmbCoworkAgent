@@ -7,7 +7,9 @@ export const FUNCTION_UI_CAPABILITIES = [
   "ui.open",
   "ui.close",
   "ui.resolve",
-  "ui.invalidate"
+  "ui.invalidate",
+  "ui.toast",
+  "ui.status"
 ] as const
 export interface FunctionUiElement {
   type: "Box" | "Text" | "Button" | "Input" | "Select" | "Link" | "Code" | "Svg" | "Client"

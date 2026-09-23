@@ -233,9 +233,11 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
         sdk.ui.resolve = input => uiElements(meta, input);
         continue;
       }
-      if (capability === "ui.invalidate") {
-        sdk.ui.invalidate = event => {
-          const pending = sdkCall(capability, [event]);
+      if (["ui.invalidate", "ui.toast", "ui.status"].includes(capability)) {
+        sdk[noun][method] = (...args) => {
+          // JSON carries a missing status argument as an empty list, never as null.
+          if (capability === "ui.status" && args[0] === undefined) args = [];
+          const pending = sdkCall(capability, args);
           pending.catch(() => {});
           const current = asyncScope;
           (current && current.plugin === meta.plugin.name ? current.unawaited : unawaited).push(pending);

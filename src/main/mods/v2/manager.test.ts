@@ -924,3 +924,31 @@ it("protects real turn facts before observers and notices after hooks, including
   expect(await f.manager.turnNotices(f.root, "thread")).toEqual([])
   expect(f.loads()).toBe(loads)
 })
+
+it("feedback reads never create sessions and fail closed across off and revocation", async () => {
+  const f = await fixture()
+  const initial = f.loads()
+  expect(await f.manager.feedback(f.root, "thread")).toEqual([])
+  expect(f.loads()).toBe(initial)
+  await writeFile(join(f.plugin, "hooks/register.ts"), `export function register(on) {
+    on("session.start", ($,e,next)=>{ $.ui.status("SESSION STATUS"); return next(e) })
+  }`)
+  await f.approve()
+  await f.manager.commands(f.root, "thread")
+  expect((await f.manager.feedback(f.root, "thread"))[0].text).toBe("SESSION STATUS")
+  f.setEnabled(false)
+  expect(await f.manager.feedback(f.root, "thread")).toEqual([])
+  f.setEnabled(true)
+  await f.manager.commands(f.root, "thread")
+  let release!: () => void
+  let entered!: () => void
+  const started = new Promise<void>((resolve) => { entered = resolve })
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  f.setPublication(async (value) => { entered(); await pending; return value })
+  const result = expect(f.manager.feedback(f.root, "thread")).rejects.toThrow()
+  await started
+  f.manager.revoke(f.root, "function-commands")
+  release()
+  await result
+  expect(await f.manager.feedback(f.root, "thread")).toEqual([])
+})

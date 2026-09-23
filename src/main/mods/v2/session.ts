@@ -84,6 +84,8 @@ import {
 import { validateClassicInput, validateClassicResult } from "../../../shared/mods/v2/classic"
 import { parseCompletionPolicy, type CompletionPolicy } from "../../../shared/mods/v2/completion-policy"
 import { CompletionBudget, withCompletionBudget } from "./completion-budget"
+import { FunctionUiFeedback } from "./ui-feedback"
+import { validateFunctionFeedback, type FunctionFeedbackEntry } from "../../../shared/mods/v2/ui-feedback"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -142,6 +144,8 @@ export interface FunctionSessionHost {
 
 /** A session keeps registration state and VMs across turns; every call still has its own frame. */
 export class FunctionSession {
+  private readonly feedbackOrder = new Map<string, { requested: number; committed: number }>()
+  private readonly feedback: FunctionUiFeedback
   readonly panes: FunctionPanes
   readonly sites: FunctionUiSites
   readonly clients: FunctionClients
@@ -157,6 +161,7 @@ export class FunctionSession {
     readonly plugins: readonly FunctionPlugin[],
     private readonly host: FunctionSessionHost
   ) {
+    this.feedback = new FunctionUiFeedback(() => this.host.uiChanged?.())
     this.dispatcher = new FunctionDispatcher(plugins)
     this.nouns = new FunctionEngineNouns(plugins, (plugin) => this.assertLive(plugin))
     this.clients = new FunctionClients({
@@ -737,6 +742,7 @@ export class FunctionSession {
         if (name === "mcp.call") functionMcpInput(value)
         if (name === "tool.check") functionToolCheckInput(value, true)
         if (name === "ui.open") validatePaneArgs(value)
+        if (name === "ui.toast" || name === "ui.status") validateFunctionFeedback(name, value)
         if (
           (name === "ui.input" || name === "ui.select") &&
           (typeof value.value !== "string" || value.value.length > 10000)
@@ -1209,6 +1215,49 @@ export class FunctionSession {
       )
       return result
     }
+    if (method === "ui.toast" || method === "ui.status") {
+      if (
+        args.length > (method === "ui.toast" ? 2 : 1) ||
+        (args[1] !== undefined &&
+          (!isModObject(args[1]) || Object.keys(args[1]).some((key) => key !== "timeoutMs")))
+      )
+        throw new ModFunctionError("MODS_UI_FEEDBACK_ARGUMENTS")
+      const input: ModObject = {
+        ...(args.length ? { text: args[0] } : {}),
+        ...(isModObject(args[1]) ? args[1] : {})
+      }
+      validateFunctionFeedback(method, input)
+      const order = this.feedbackOrder.get(plugin.name) ?? { requested: 0, committed: 0 }
+      this.feedbackOrder.set(plugin.name, order)
+      const revision = ++order.requested
+      const answer = await this.dispatch(
+        method,
+        input,
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: async (value, signal) => {
+            // Sanitize before storing or notifying; never publish a late revoked/cancelled write.
+            const safe = await this.host.publish(value, signal)
+            signal.throwIfAborted()
+            this.assertLive(plugin)
+            if (!isModObject(safe)) throw new ModFunctionError("MODS_UI_FEEDBACK_ARGUMENTS")
+            if (method !== "ui.status" || revision > order.committed) {
+              this.feedback.set(plugin.name, method, safe)
+              if (method === "ui.status") order.committed = revision
+            }
+            return undefined
+          }
+        },
+        turnHeld
+      )
+      if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof answer.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      return undefined
+    }
     if (method === "ui.invalidate") {
       if (args[0] !== "ui.render") throw new ModFunctionError("MODS_UI_INVALIDATE_UNAVAILABLE")
       this.panes.invalidate()
@@ -1317,8 +1366,20 @@ export class FunctionSession {
     return value
   }
 
+  async feedbackSnapshot(): Promise<FunctionFeedbackEntry[]> {
+    this.assertLive()
+    const safe = await this.host.publish(
+      this.feedback.snapshot() as unknown as ModJson,
+      this.controller.signal
+    )
+    this.assertLive()
+    return safe as unknown as FunctionFeedbackEntry[]
+  }
+
   async close(): Promise<void> {
     this.controller.abort(new ModFunctionError("MODS_SESSION_CLOSED"))
+    this.feedback.close()
+    this.feedbackOrder.clear()
     this.panes.close()
     this.sites.close()
     this.clients.close()

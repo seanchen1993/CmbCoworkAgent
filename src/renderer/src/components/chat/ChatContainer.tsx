@@ -2,6 +2,7 @@ import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useModCommands } from "../../features/slash-commands/useModCommands"
 import { ModCommandJobs } from "./ModCommandJobs"
 import { FunctionPanes } from "./FunctionPanes"
+import { FunctionFeedback } from "./FunctionFeedback"
 import { FunctionCompletionEvidence } from "./FunctionCompletionEvidence"
 import { FunctionSite } from "./FunctionSite"
 import { functionSpinnerFacts } from "../../lib/function-status-site"
@@ -9113,6 +9114,7 @@ export function ChatContainer({
                   </div>
                 </div>
               </form>
+              <FunctionFeedback key={`feedback:${threadId}`} threadId={threadId} />
               <FunctionSite key={`hint:${threadId}`} threadId={threadId} component="PromptHint"
                 facts={{ isDraft: input.length > 0, isWorking: isLoading,
                   hint: inputPlaceholder }} onHint={updateFunctionHint} />
