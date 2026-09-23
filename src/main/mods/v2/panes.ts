@@ -62,21 +62,28 @@ export class FunctionPanes {
   private readonly retained = new Map<string, number>()
   private readonly retired = new Set<string>()
   private notification?: ReturnType<typeof setTimeout>
+  private notificationDeadline = 0
   private closed = false
 
   constructor(private readonly host: PaneHost) {}
 
-  private changed(): void {
-    if (this.closed || this.notification) return
+  private changed(delay = 100): void {
+    if (this.closed) return
+    const deadline = performance.now() + delay
+    if (this.notification && this.notificationDeadline <= deadline) return
+    clearTimeout(this.notification)
+    this.notificationDeadline = deadline
     this.notification = setTimeout(() => {
       this.notification = undefined
       if (!this.closed) this.host.changed()
-    }, 100)
+    }, delay)
     this.notification.unref()
   }
 
   notify(): void {
-    this.changed()
+    // Client frames are already bounded by their host scheduler. Batch them for one
+    // frame without delaying interactive feedback behind ordinary pane invalidations.
+    this.changed(16)
   }
 
   open(plugin: string, input: ModObject): void {
