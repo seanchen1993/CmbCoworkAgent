@@ -105,6 +105,7 @@ interface FunctionManagerHost {
     instructions: string,
     signal: AbortSignal
   ): Promise<ModJson>
+  dialogs?(workspace: string, threadId: string): import("./ui-notice").FunctionNoticeDialogAccess
   fileScope?(workspace: string, threadId: string): FunctionFileScope
   listTools?(workspace: string, threadId: string, signal: AbortSignal): Promise<FunctionToolInfo[]>
   filterTools?(workspace: string, threadId: string, tools: FunctionToolInfo[]): FunctionToolInfo[]
@@ -415,6 +416,7 @@ export class FunctionModsManager {
           workspace,
           threadId,
           cwd: () => this.host.fileScope?.(workspace, threadId).workspace ?? workspace,
+          dialogs: this.host.dialogs?.(workspace, threadId),
           assertLive,
           abortTurn: async (plugin, turnId, signal) => {
             assertLive(plugin)

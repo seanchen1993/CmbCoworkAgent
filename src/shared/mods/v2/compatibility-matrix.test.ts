@@ -147,3 +147,19 @@ it("records AskUserQuestion as native presentation with protected answer identit
   expect(JSON.stringify(site)).toContain("question-site")
   expect(site.note).toContain("identity")
 })
+
+it("records notice dialog ownership and the native question adaptation limit", () => {
+  const sdk = matrix.sdk as Array<{ namespace: string; members: Array<Record<string, unknown>> }>
+  const rows = [
+    (matrix.operationEvents as Array<Record<string, unknown>>).find(
+      (row) => row.name === "ui.notice"
+    ),
+    sdk.find((group) => group.namespace === "ui")!.members.find((row) => row.name === "ui.notice")
+  ]
+  for (const row of rows) {
+    expect(row?.implementationStatus).toBe("adapted")
+    expect(row?.note).toContain("acknowledged")
+    expect(row?.note).toContain("permission")
+    expect((row?.evidence as unknown[])?.length).toBeGreaterThan(0)
+  }
+})

@@ -1,3 +1,5 @@
+import { FunctionUiNotices, type FunctionNoticeDialogAccess } from "./ui-notice"
+import { validateFunctionNotice } from "../../../shared/mods/v2/ui-notice"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import { ModFunctionError, isModObject } from "../../../shared/mods/v2/contracts"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
@@ -92,7 +94,11 @@ import {
   validateFunctionLog,
   type FunctionLogEntry
 } from "../../../shared/mods/v2/ui-log"
-import { validateFunctionFeedback, type FunctionFeedbackEntry } from "../../../shared/mods/v2/ui-feedback"
+import {
+  functionFeedbackSnapshot,
+  validateFunctionFeedback,
+  type FunctionFeedbackEntry
+} from "../../../shared/mods/v2/ui-feedback"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -107,6 +113,7 @@ export interface FunctionSessionHost {
   abortTurn?(plugin: FunctionPlugin, turnId: string, signal: AbortSignal): Promise<void>
   assertLive(plugin?: FunctionPlugin): void
   uiChanged?(): void
+  dialogs?: FunctionNoticeDialogAccess
   debugLog?(plugin: string, text: string): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
   callTool?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
@@ -153,6 +160,7 @@ export interface FunctionSessionHost {
 /** A session keeps registration state and VMs across turns; every call still has its own frame. */
 export class FunctionSession {
   private readonly feedbackOrder = new Map<string, { requested: number; committed: number }>()
+  private readonly notices?: FunctionUiNotices
   private readonly feedback: FunctionUiFeedback
   private readonly logs: FunctionUiLog
   readonly panes: FunctionPanes
@@ -170,6 +178,8 @@ export class FunctionSession {
     readonly plugins: readonly FunctionPlugin[],
     private readonly host: FunctionSessionHost
   ) {
+    if (host.dialogs)
+      this.notices = new FunctionUiNotices(host.dialogs, () => this.host.uiChanged?.())
     this.feedback = new FunctionUiFeedback(() => this.host.uiChanged?.())
     this.logs = new FunctionUiLog(
       () => this.host.uiChanged?.(),
@@ -761,6 +771,7 @@ export class FunctionSession {
         if (name === "ui.open") validatePaneArgs(value)
         if (name === "ui.toast" || name === "ui.status") validateFunctionFeedback(name, value)
         if (name === "ui.log") validateFunctionLog(value)
+        if (name === "ui.notice") validateFunctionNotice(value)
         if (
           (name === "ui.input" || name === "ui.select") &&
           (typeof value.value !== "string" || value.value.length > 10000)
@@ -889,7 +900,14 @@ export class FunctionSession {
       },
       capability: (plugin, method, raw, callSignal, source) =>
         this.capability(
-          plugin, method, raw, callSignal, source, depth, turnHeld, logSignal ?? scopedSignal
+          plugin,
+          method,
+          raw,
+          callSignal,
+          source,
+          depth,
+          turnHeld,
+          logSignal ?? scopedSignal
         )
     })
     // Policy sees short-circuit results as well as results that passed through core.
@@ -1252,6 +1270,48 @@ export class FunctionSession {
       )
       return result
     }
+    if (method === "ui.notice") {
+      if (args.length < 1 || args.length > 2) throw new ModFunctionError("MODS_UI_NOTICE_ARGUMENTS")
+      const input: ModObject = {
+        tool_use_id: args[0],
+        ...(args.length === 2 ? { text: args[1] } : {})
+      }
+      validateFunctionNotice(input)
+      if (!this.notices) throw new ModFunctionError("MODS_UI_NOTICE_UNAVAILABLE")
+      const ticket = this.notices.reserve(plugin.name, input.tool_use_id as string)
+      try {
+        const answer = await this.dispatch(
+          method,
+          input,
+          callSignal,
+          { plugin: plugin.name, registration: source.registration },
+          depth + 1,
+          {
+            plugin,
+            core: async (value, signal) => {
+              const safe = await this.host.publish(value, signal)
+              signal.throwIfAborted()
+              this.assertLive(plugin)
+              if (!isModObject(safe) || safe.tool_use_id !== input.tool_use_id)
+                throw new ModFunctionError("MODS_UI_NOTICE_ARGUMENTS")
+              validateFunctionNotice(safe)
+              this.notices!.commit(ticket, safe.text as string | undefined, () => {
+                signal.throwIfAborted()
+                this.assertLive(plugin)
+              })
+              return undefined
+            }
+          },
+          turnHeld
+        )
+        if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+        if (typeof answer.deny === "string")
+          throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      } finally {
+        this.notices.release(ticket)
+      }
+      return undefined
+    }
     if (method === "ui.log") {
       if (
         args.length < 1 ||
@@ -1466,12 +1526,10 @@ export class FunctionSession {
 
   async feedbackSnapshot(): Promise<FunctionFeedbackEntry[]> {
     this.assertLive()
-    const safe = await this.host.publish(
-      this.feedback.snapshot() as unknown as ModJson,
-      this.controller.signal
-    )
+    const original = [...this.feedback.snapshot(), ...(this.notices?.snapshot() ?? [])]
+    const safe = await this.host.publish(original as unknown as ModJson, this.controller.signal)
     this.assertLive()
-    return safe as unknown as FunctionFeedbackEntry[]
+    return functionFeedbackSnapshot(safe, original)
   }
 
   async logSnapshot(): Promise<FunctionLogEntry[]> {
@@ -1485,6 +1543,7 @@ export class FunctionSession {
   async close(): Promise<void> {
     this.controller.abort(new ModFunctionError("MODS_SESSION_CLOSED"))
     this.feedback.close()
+    this.notices?.close()
     this.logs.close()
     this.feedbackOrder.clear()
     this.panes.close()

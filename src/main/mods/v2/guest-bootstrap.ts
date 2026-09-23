@@ -233,10 +233,11 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
         sdk.ui.resolve = input => uiElements(meta, input);
         continue;
       }
-      if (["ui.invalidate", "ui.toast", "ui.status", "ui.log"].includes(capability)) {
+      if (["ui.invalidate", "ui.toast", "ui.status", "ui.log", "ui.notice"].includes(capability)) {
         sdk[noun][method] = (...args) => {
           // JSON carries a missing status argument as an empty list, never as null.
           if (capability === "ui.status" && args[0] === undefined) args = [];
+          if (capability === "ui.notice" && args.length === 2 && args[1] === undefined) args = [args[0]];
           const pending = sdkCall(capability, args);
           pending.catch(() => {});
           const current = asyncScope;

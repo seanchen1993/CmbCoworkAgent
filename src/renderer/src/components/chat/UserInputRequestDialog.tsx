@@ -7,6 +7,7 @@ import {
   MessageSquareText,
   PencilLine
 } from "lucide-react"
+import { FunctionFeedback } from "./FunctionFeedback"
 import { FunctionQuestionSite } from "./FunctionQuestionSite"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -321,6 +322,7 @@ function ActiveUserInputRequestDialog({
         </div>
 
         <div className={collapsed ? "hidden" : "contents"}>
+          <FunctionFeedback threadId={request.threadId} requestId={request.requestId} />
           <FunctionQuestionSite
             key={request.requestId}
             request={request}

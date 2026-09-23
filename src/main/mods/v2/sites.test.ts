@@ -818,3 +818,21 @@ it("publishes native question wording through host policy before exposing it", a
   const result = await session.sites.render(owner, questionFacts)
   expect(result.nativeQuestions?.[0].question).toBe("Filtered wording")
 })
+
+it.each(["ToolGroup", "AskUserQuestion"] as const)(
+  "resolves SDK components and callbacks at %s",
+  async (component) => {
+    const { session, state } = await fixture(`on("ui.render",{component:"${component}"},($,e)=>{
+    const {Button}=$.ui.resolve(e);return Button({label:"Context control",onPress:async()=>{$.store.set("clicked",true)}})
+  })`)
+    const owner = await session.sites.mount(component)
+    const snapshot = await session.sites.render(
+      owner,
+      component === "ToolGroup" ? groupFacts : questionFacts
+    )
+    expect(snapshot.nativeFallback).toBe(false)
+    expect(button(snapshot.tree).props.label).toBe("Context control")
+    await session.sites.act(owner, press(snapshot))
+    expect(state.get("clicked")).toBe(true)
+  }
+)

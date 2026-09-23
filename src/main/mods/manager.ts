@@ -1533,7 +1533,8 @@ export class ModsManager {
     args: ModObject,
     signal: AbortSignal,
     readOnly: boolean,
-    userInitiated: boolean
+    userInitiated: boolean,
+    toolCallId?: string
   ): Promise<ModObject> {
     const published = await this.invokeFunctionCapability(
       workspace,
@@ -1543,7 +1544,10 @@ export class ModsManager {
       args,
       signal,
       readOnly,
-      userInitiated
+      userInitiated,
+      undefined,
+      undefined,
+      toolCallId
     )
     const result = filterModData(published, false)
     const text = projectModResult(published).text
@@ -1706,7 +1710,8 @@ export class ModsManager {
     readOnly: boolean,
     userInitiated: boolean,
     mcpBinding?: ModThreadBinding,
-    project: (value: unknown) => unknown = (value) => value
+    project: (value: unknown) => unknown = (value) => value,
+    toolCallId?: string
   ): Promise<unknown> {
     workspace = this.workspaceKey(workspace)
     if (
@@ -1718,6 +1723,7 @@ export class ModsManager {
     assertFunctionGrant(this.store, workspace, threadId, grant, signal)
     const identity = functionCallIdentity(workspace, threadId, grant, {
       origin: "mod",
+      toolCallId,
       fallbackTurnId:
         mcpBinding?.turnId ??
         this.bindings.get(`${threadId}:main`)?.turnId ??

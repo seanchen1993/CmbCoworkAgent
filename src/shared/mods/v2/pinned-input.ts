@@ -14,6 +14,7 @@ const pinned: Record<string, readonly string[]> = {
   "turn.step": ["turnId", "index", "messageCount", "agentId"],
   "turn.complete": ["agentId"],
   "ui.open": ["id"],
+  "ui.notice": ["tool_use_id"],
   "ui.close": ["id", "origin"],
   "ui.render": ["surface", "component", "requestId", "viewport"],
   "ui.press": ["plugin", "element", "component", "requestId", "surface"],

@@ -1,3 +1,4 @@
+import { nativeFunctionDialogAccess } from "../mods/v2/native-dialog-access"
 import { compactFunctionSession, queryFunctionSessionRead } from "../mods/v2/session-read-host"
 import { queryFunctionToolCatalog } from "../mods/v2/tool-catalog-host"
 import { app, dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
@@ -156,6 +157,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     manager.store,
     {
       plugins: getPlugins,
+      dialogs: nativeFunctionDialogAccess,
       fileScope: (workspace, threadId) =>
         functionFileScope(manager, assertStandaloneThread, workspace, threadId),
       filterTools: (workspace, threadId, tools) =>
@@ -275,7 +277,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
                 args,
                 operationSignal,
                 readOnly,
-                userInitiated
+                userInitiated,
+                typeof input.tool_use_id === "string" ? input.tool_use_id : undefined
               )
             if (execution?.turnId || !manager.needsCommandBinding(threadId)) return invoke()
             assertStandaloneThread(threadId)

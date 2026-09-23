@@ -13,6 +13,7 @@ interface AutoResolvedUserInputResponse {
 type UserInputResult = UserInputResponse | AutoResolvedUserInputResponse
 
 interface PendingUserInput {
+  acknowledged?: boolean
   request: UserInputRequest
   resolve: (response: UserInputResult) => void
   reject: (error: Error) => void
@@ -57,6 +58,12 @@ export function getPendingUserInputForThread(threadId: string): UserInputRequest
   const requestId = pendingUserInputThreads.get(threadId)
   if (!requestId) return null
   return pendingUserInputs.get(requestId)?.request ?? null
+}
+
+/** Read-only host lifecycle fact; a queued/headless request is not an open desktop dialog. */
+export function isUserInputRequestAcknowledged(requestId: string, threadId: string): boolean {
+  const pending = pendingUserInputs.get(requestId)
+  return pending?.request.threadId === threadId && pending.acknowledged === true
 }
 
 export function subscribePendingUserInput(listener: PendingUserInputListener): () => void {
@@ -263,6 +270,7 @@ export function acknowledgeUserInputRequest(requestId: string, threadId: string)
     clearTimeout(pending.ackTimeout)
     delete pending.ackTimeout
   }
+  pending.acknowledged = true
   return true
 }
 

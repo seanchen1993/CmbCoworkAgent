@@ -835,6 +835,38 @@ describe("project Mods lifecycle and UI authority", () => {
     ).rejects.toThrow("MODS_GRANT_REVOKED")
     expect(f.executions).toEqual([args])
   })
+  it("preserves the FunctionSession tool ID across the native execution context", async () => {
+    const f = await fixture()
+    await f.enable()
+    const workspace = f.manager.workspaceKey(f.root)
+    const grant = f.manager.store.grant(workspace, "function:sdk", "snapshot", true)
+    let actual: unknown
+    f.manager.bindThread({
+      ...f.scope,
+      invokeTool: async () => {
+        actual = getModCallContext()?.identity
+        return { output: "verified", exitCode: 0 }
+      }
+    })
+    await f.manager.invokeFunctionTool(
+      workspace,
+      "thread",
+      grant,
+      "host:execute",
+      { command: "echo identity" },
+      new AbortController().signal,
+      false,
+      true,
+      "host-generated-sdk-id"
+    )
+    expect(actual).toMatchObject({
+      toolCallId: "host-generated-sdk-id",
+      modId: "function:sdk",
+      workspace,
+      threadId: "thread"
+    })
+  })
+
   it("links nested SDK tools to their real parent and never borrows the main binding for a worker", async () => {
     const f = await fixture()
     await f.enable()

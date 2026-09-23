@@ -1,3 +1,5 @@
+import { FUNCTION_UI_SITES } from "../../../shared/mods/v2/sites"
+
 /** Runs in the function VM. Only data trees and opaque callback handles leave this closure. */
 export const FUNCTION_UI_BOOTSTRAP = String.raw`
   const uiCallbacks = new Map();
@@ -22,7 +24,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
   }) });
   function uiElements(meta, input) {
     if (!input || input.surface !== "desktop" ||
-        !["Pane", "AbovePrompt", "PromptHint", "InfoNotice", "Spinner", "TurnDuration", "SessionMode", "UserMessage", "AssistantMessage", "CommandOutput", "ToolUse", "ToolResult"].includes(input.component) ||
+        !${JSON.stringify(["Pane", ...FUNCTION_UI_SITES])}.includes(input.component) ||
         !asyncScope?.uiGeneration || asyncScope.event !== "ui.render" ||
         asyncScope.plugin !== meta.plugin.name || asyncScope.requestId !== input.requestId ||
         asyncScope.component !== input.component)

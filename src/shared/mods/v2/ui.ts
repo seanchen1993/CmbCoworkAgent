@@ -12,6 +12,7 @@ export const FUNCTION_UI_CAPABILITIES = [
   "ui.toast",
   "ui.log",
   "ui.ask",
+  "ui.notice",
   "ui.status"
 ] as const
 export interface FunctionUiElement {
