@@ -179,7 +179,7 @@ async function readBackgroundTask(
   )
     throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
   const timeout = (input.timeout as number | undefined) ?? 30000
-  const start = Date.now()
+  const start = performance.now()
   for (;;) {
     if (signal?.aborted) throw new ModError("MODS_CANCELLED")
     assertLive()
@@ -194,10 +194,11 @@ async function readBackgroundTask(
       throw new ModError("MODS_TOOL_RESULT")
     if (result.completed) return result
     if (input.block === false) return { ...result, retrieval_status: "not_ready" }
-    const remaining = timeout - (Date.now() - start)
+    const elapsed = performance.now() - start
+    const remaining = timeout - elapsed
     if (remaining <= 0) return { ...result, retrieval_status: "timeout" }
     try {
-      await delay(Math.min(remaining, Date.now() - start < 2000 ? 100 : 500), undefined, { signal })
+      await delay(Math.min(remaining, elapsed < 2000 ? 100 : 500), undefined, { signal })
     } catch (error) {
       if (signal?.aborted) throw new ModError("MODS_CANCELLED")
       throw error

@@ -13,7 +13,7 @@
 | `store.get/set/delete/keys` | SQLite JSON 持久化，按项目与插件隔离；区分未设置与 null，保留插入顺序，受容量/键名限制。不能写宿主验收证据。 |
 | `fs.read/list/exists/stat` | 原生权限约束下的项目内读取；读取最多 512 KiB，目录访问最多 1024 项。路径替换检查和发布过滤仍适用。 |
 | `command.register/list/run` | 插件命令注册表；不是全部原生命令目录。原调度与 lease 生效，持有 turn 的回调不能等待新的排队命令。 |
-| `tool.list/check/call/register` | 当前宿主目录、权限及有界注册 schema；query 不执行或授权。工具参数及名称使用本应用契约，不能用同名宣称 Claude 工具完全一致。 |
+| `tool.list/check/call/register` | 当前宿主目录、权限及有界注册 schema；query 不执行或授权。工具参数及名称使用本应用契约，不能用同名宣称 Claude 工具完全一致。`task_output` 轮询按单调期限等待，系统墙钟回拨不延长 timeout；后台进程仍要求实际 runtime/lease，冷命令不能凭授权摘要启动无所有者进程。 |
 | `mcp.call` | 当前连接代际、唯一 provider 和真实审批/回执；不接收 guest 提供的连接与凭据，不自动重试丢失的写响应。 |
 | `clock.now/sleep` | now 是 epoch 墙钟；sleep 受本次 dispatch 的取消和预算约束。独立 guest `options.signal` 尚未作为独立取消域传输。runtime 内部 deadline 使用单调时钟。 |
 | `ui.resolve/invalidate/open/close` | 受限桌面树及 Pane；invalidate 仅接受 ui.render。不存在任意 DOM、终端 docking 或全部上游选项支持。 |

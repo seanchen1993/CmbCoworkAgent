@@ -436,6 +436,37 @@ it("refuses an SDK background start without the original run lease", async () =>
   expect(LocalSandbox.hasActiveBackgroundTasks(f.threadId)).toBe(false)
 })
 
+it.each(["frozen", "backward"])(
+  "bounds SDK task_output while the wall clock is %s",
+  async (clock) => {
+    const f = await fixture()
+    const taskId = await background(f)
+    const wallStart = Date.now()
+    let reads = 0
+    const wallClock = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => (clock === "frozen" ? wallStart : wallStart - reads++ * 1000))
+    const guard = setTimeout(() => f.commandController.abort(), 700)
+    const started = performance.now()
+    try {
+      const answer = await f.run({
+        tool: "task_output",
+        task_id: taskId,
+        block: true,
+        timeout: 200
+      })
+      expect(answer.result).toMatchObject({ completed: false, retrieval_status: "timeout" })
+      expect(performance.now() - started).toBeLessThan(700)
+      expect(f.commandController.signal.aborted).toBe(false)
+      expect(f.sandbox.getTaskOutput(taskId)).toMatchObject({ completed: false })
+    } finally {
+      clearTimeout(guard)
+      wallClock.mockRestore()
+    }
+  },
+  15000
+)
+
 it("honors zero polling timeout and cancellation without publishing a late polling success", async () => {
   const f = await fixture()
   const taskId = await background(f)

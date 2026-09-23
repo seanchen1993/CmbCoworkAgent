@@ -1,3 +1,13 @@
+## 2026-09-24 07:05 后台 task_output 单调期限完成，继续 SDK 元数据（最新）
+
+- 本提交前 HEAD **eb613005**。后台读取 elapsed/remaining/poll interval 改 performance.now，仅 4 行生产变动，原 signal/live authority/grant/lease 和原生 API 全保留。两项真实 guest/session freeze/backward 先 red MODS_CANCELLED（700ms guard）；真实 Electron red4 1444.011ms，修后 focused 692.414ms，整套704.780ms（含500ms交接等待），均完成真实200ms timeout且进程未完成。
+- **Mods44 135files1197PASS**（exec80918 exit0已poll）；**完整Electron182checksPASS**（exec39429 exit0已poll，普通out恢复）。narrow4files88pass，Node/Web/helper tsc0，scopedlint0/0，diff check0。报告 `2026-09-24-background-timeout.md`，最新完整artifact `2026-09-24-background-timeout-full-electron-artifacts/`。
+- Electron fixture 初始冷命令被 BACKGROUND_OWNER_REQUIRED、自动tool.call hook被 WRITE_REQUIRES_USER_ACTION 拒绝，均保留边界。最终先原Agent真实read建立live runtime，再人提交非immediate command，原lease/原native审批精确临时deadline-job；未放宽权限。实际故障仅隔离Electron main Date.now短暂冻结，不改系统时钟/UAT。原进程与关闭对照都测。
+- **唯一性能smoke已结束 exec66379 exit0已poll**：`desktop-performance-2026-09-23T23-03-25-056Z-smoke-5a2ad4a6/`，qualified=false/passed=false；TTFTp95 110.6/163.5(+52.9)ms，吞吐0.9952867，1s idle delta1.552334点。旧正式full4+67.7ms / ingress off1/10超预算仍FAIL；2h10000soak、剩余compat、Actions安装验证仍未做。
+- **没有运行中的测试/build/E2E/perf**。当前能力提交后继续 **fs.stat resolve / fs.stat+list isLink 元数据**。固定官方 types 4010–4110、5640–5670已只读核对；basicSdkInput现丢弃stat options、host缺isLink。设计 `2026-09-24-fs-metadata-design.md`，忽略区 `fs-metadata-tests-draft.txt` 有5条测试草稿（尚未复制到src、尚未跑红测，生产完全未改）。先复制到src/main/mods/v2/file-metadata.test.ts跑红，再实现并加真实session/Electron红→绿。
+- 实现注意：event fs.stat 是 `{path,resolve:boolean}`；SDK缺省false，未知/无效options不静默忽略。host run可加可选第四options参数保留旧调用。真实isLink描述输入路径leaf本身（父junction不算leaf link），stat kind/size/mtime描述目标；realPath仅resolve时提供且仍项目内。list对entry自身lstat、不follow外部link，保留1024预算和权限过滤。stat在mandatory publish等待后复核路径/目标identity，reject replacement；metadata是当次观测，不代替以后native工具授权。结果validator应容许旧hook省略新增field以免存量破坏，但存在时校验type。hostrevision需v57；仍partial/bounded（dangling link、bytes/4MiB等差异仍未实现），不冒称full。要补manager真实guest、Electron/native/off、types/lint/perf/report/独立commit。
+- UAT、共享依赖、安装包均未动；不派agent、不本地NSIS、不push触发Actions。继续任务，不询问是否继续、不停批次边界。
+
 ## 2026-09-24 06:38 主动滚动收口，准备独立提交（最新）
 
 - HEAD 在本提交前为 **4f8061f3** focus；scroll 源码、真实 guest/session、DOM/end 跟随、ACK race 修复、SDK/matrix/文档/报告全部在本提交收口。仍 partial/bounded，不能称完整 Claude parity。

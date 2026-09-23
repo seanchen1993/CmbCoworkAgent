@@ -1,3 +1,4 @@
+import { verifyBackgroundTimeout } from "./support/mods-background-timeout-e2e"
 import { verifyImperativeScroll } from "./support/mods-imperative-scroll-e2e"
 import { verifyImperativeFocus } from "./support/mods-imperative-focus-e2e"
 import { verifyDesktopSoak } from "./support/mods-desktop-soak-e2e"
@@ -52,6 +53,7 @@ const binary = packagedDir
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
 const focus = [
+  "background-timeout",
   "imperative-scroll",
   "imperative-focus",
   "desktop-performance",
@@ -219,7 +221,17 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "imperative-scroll") {
+      if (focus === "background-timeout") {
+        await verifyBackgroundTimeout(
+          app!,
+          page!,
+          workspace,
+          artifacts,
+          modelServer.requests,
+          until,
+          pass
+        )
+      } else if (focus === "imperative-scroll") {
         await verifyImperativeScroll(page!, workspace, artifacts, modelServer.requests, until, pass)
       } else if (focus === "imperative-focus") {
         await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
@@ -3156,6 +3168,15 @@ async function main(): Promise<void> {
     await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
+    await verifyBackgroundTimeout(
+      app!,
+      page!,
+      workspace,
+      artifacts,
+      modelServer.requests,
+      until,
+      pass
+    )
     await verifyImperativeScroll(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyToolBatch(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
     await verifyInstructionsLoaded(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
