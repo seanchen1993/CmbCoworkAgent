@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest"
+import { projectMetricExportSheet } from "../../renderer/src/components/dashboard/panels/project-metric-export"
 import {
   fetchProjectMetricGroupOptions,
   fetchProjectMetricProjects,
-  fetchProjectMetricSummary
+  fetchProjectMetricSummary,
+  makeMockProjectMetricProjects
 } from "./dashboard-project-metrics"
 
 describe("项目非功能问题汇总", () => {
@@ -80,6 +82,7 @@ describe("项目非功能问题汇总", () => {
                   prjCode: "DEV-1",
                   prjName: "测试项目",
                   createDate: "2026-08-01 00:00:00",
+                  firstStEndDate: "2026-08-04 12:00:00",
                   firstUatStartDate: "2026-08-06 00:00:00",
                   kenanIssueCount: 3,
                   kenanIssueCategoryCount: [
@@ -168,6 +171,7 @@ describe("项目非功能问题汇总", () => {
       deps
     )
     expect(projects.items[0]).toMatchObject({
+      firstStEndDate: "2026-08-04 12:00:00",
       firstUatStartDate: "2026-08-06 00:00:00",
       uatLeadDays: 5,
       kenanIssueCount: 3,
@@ -183,6 +187,7 @@ describe("项目非功能问题汇总", () => {
       includes: expect.arrayContaining([
         "kenanIssueCount",
         "kenanIssueCategoryCount",
+        "firstStEndDate",
         "firstUatStartDate"
       ])
     })
@@ -193,6 +198,36 @@ describe("项目非功能问题汇总", () => {
       { kenanIssueCount: { order: "desc", missing: "_last" } },
       { prjCode: { order: "asc" } }
     ])
+
+    const exported = await fetchProjectMetricProjects(
+      filters,
+      {
+        page: 2,
+        pageSize: 20,
+        exportAll: true,
+        keyword: "DEV-1",
+        sortBy: "kenanIssueCount",
+        sortOrder: "desc"
+      },
+      deps
+    )
+    expect(exported).toMatchObject({ page: 1, pageSize: 10_000, total: 1 })
+    const exportQuery = queries
+      .filter((item) => item.index === "projects" && !item.body.aggs && item.body.track_total_hits)
+      .at(-1)
+    expect(exportQuery?.body).toMatchObject({
+      from: 0,
+      size: 10_000,
+      sort: projectQuery?.body.sort,
+      query: {
+        bool: {
+          filter: expect.arrayContaining([
+            { terms: { groupName: ["组一"] } },
+            { bool: { should: expect.any(Array), minimum_should_match: 1 } }
+          ])
+        }
+      }
+    })
 
     const groupOptions = await fetchProjectMetricGroupOptions(filters, deps)
     expect(groupOptions).toEqual(["组二", "组一"])
@@ -219,5 +254,50 @@ describe("项目非功能问题汇总", () => {
     const queryCount = queries.length
     expect(await fetchProjectMetricGroupOptions({ range: filters.range }, deps)).toEqual([])
     expect(queries).toHaveLength(queryCount)
+  })
+})
+
+describe("项目明细导出列", () => {
+  it("分别导出项目、部门和已有的四个时间字段", () => {
+    const item = {
+      ...makeMockProjectMetricProjects({ range: { from: "2026-08-01", to: "2026-08-31" } })
+        .items[0],
+      prjCode: "P-001",
+      prjName: "示例项目",
+      developmentMode: "non_devclaw",
+      plugins: [],
+      roomName: "研发室",
+      groupName: "一组",
+      createDate: "2026-08-01 09:00:00",
+      firstStStartDate: "2026-08-02 10:00:00",
+      firstStEndDate: "2026-08-03 11:00:00",
+      firstUatStartDate: "2026-08-04 12:00:00"
+    }
+
+    const sheet = projectMetricExportSheet([item])
+    expect(sheet.header.slice(0, 9)).toEqual([
+      "项目编号",
+      "项目名称",
+      "CMBDevClaw 插件",
+      "室",
+      "组",
+      "立项时间",
+      "ST 发起时间",
+      "ST 结束时间",
+      "UAT 发起时间"
+    ])
+    expect(sheet.header).not.toContain("UAT 结束时间")
+    expect(sheet.rows[0].slice(0, 9)).toEqual([
+      "P-001",
+      "示例项目",
+      "--",
+      "研发室",
+      "一组",
+      "2026-08-01 09:00:00",
+      "2026-08-02 10:00:00",
+      "2026-08-03 11:00:00",
+      "2026-08-04 12:00:00"
+    ])
+    expect(sheet.rows[0]).toHaveLength(sheet.header.length)
   })
 })

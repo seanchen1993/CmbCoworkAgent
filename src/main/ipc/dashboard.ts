@@ -15108,7 +15108,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         logDashboardRequestError("projectMetricProjects", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
-    }
+    },
+    (_filters, options) =>
+      options?.exportAll
+        ? "dashboard:projectMetricProjects:export"
+        : "dashboard:projectMetricProjects:list"
   )
 
   registerLatestDashboardHandler(

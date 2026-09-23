@@ -53,6 +53,7 @@ interface FactProject {
   notAdjustFuns: number | null
   createDate: string | null
   firstStStartDate: string | null
+  firstStEndDate: string | null
   firstUatStartDate: string | null
   firstOnlineDate: string | null
   approvedDate: string | null
@@ -91,6 +92,7 @@ const FACT_SOURCE_INCLUDES = [
   "notAdjustFuns",
   "createDate",
   "firstStStartDate",
+  "firstStEndDate",
   "firstUatStartDate",
   "firstOnlineDate",
   "approvedDate"
@@ -432,6 +434,7 @@ function parseFactProject(hit: EsHit): FactProject | null {
     notAdjustFuns: asNullableNumber(source.notAdjustFuns),
     createDate: asNullableString(source.createDate),
     firstStStartDate: asNullableString(source.firstStStartDate),
+    firstStEndDate: asNullableString(source.firstStEndDate),
     firstUatStartDate: asNullableString(source.firstUatStartDate),
     firstOnlineDate: asNullableString(source.firstOnlineDate),
     approvedDate: asNullableString(source.approvedDate)
@@ -1106,8 +1109,10 @@ export async function fetchProjectMetricProjects(
   const departmentKeywordFilter = buildDepartmentKeywordFilter(options.departmentKeyword)
   if (departmentKeywordFilter) factFilters.push(departmentKeywordFilter)
 
-  const pageSize = normalizePageSize(options.pageSize)
-  const page = normalizePage(options.page, pageSize)
+  const pageSize = options.exportAll
+    ? PROJECT_METRIC_JOIN_KEY_LIMIT
+    : normalizePageSize(options.pageSize)
+  const page = options.exportAll ? 1 : normalizePage(options.page, pageSize)
   const derivedSortBy = isDerivedMetricSort(options.sortBy) ? options.sortBy : null
   const derivedSort = derivedSortBy !== null
   const applicationFiltered = derivedSort || tokenConsumptionFiltered
@@ -1149,7 +1154,9 @@ export async function fetchProjectMetricProjects(
     total: applicationFiltered ? ordered.length : actualTotal,
     page,
     pageSize,
-    truncated: snapshot.truncated || (applicationFiltered && actualTotal > facts.length)
+    truncated:
+      snapshot.truncated ||
+      ((applicationFiltered || Boolean(options.exportAll)) && actualTotal > facts.length)
   }
 }
 
@@ -1254,6 +1261,7 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     pushedAdoptedLines: 6000,
     createDate: "2026-07-06 00:00:00",
     firstStStartDate: "2026-07-27 09:44:49",
+    firstStEndDate: "2026-07-27 10:20:07",
     firstUatStartDate: "2026-07-31 00:00:00",
     firstOnlineDate: "2026-08-03 00:00:00",
     approvedDate: "2026-07-06 00:00:00",
@@ -1282,6 +1290,7 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     pushedAdoptedLines: 3000,
     createDate: "2026-07-12 00:00:00",
     firstStStartDate: "2026-07-30 10:00:00",
+    firstStEndDate: "2026-07-31 17:00:00",
     firstUatStartDate: "2026-08-04 00:00:00",
     firstOnlineDate: "2026-08-08 00:00:00",
     approvedDate: "2026-07-15 00:00:00",
@@ -1310,6 +1319,7 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     pushedAdoptedLines: null,
     createDate: "2026-07-18 00:00:00",
     firstStStartDate: "2026-08-02 09:30:00",
+    firstStEndDate: "2026-08-03 17:00:00",
     firstUatStartDate: null,
     firstOnlineDate: null,
     approvedDate: "2026-07-20 00:00:00",
@@ -1382,8 +1392,10 @@ export function makeMockProjectMetricProjects(
     }
     return left.prjCode.localeCompare(right.prjCode)
   })
-  const pageSize = normalizePageSize(options.pageSize)
-  const page = normalizePage(options.page, pageSize)
+  const pageSize = options.exportAll
+    ? PROJECT_METRIC_JOIN_KEY_LIMIT
+    : normalizePageSize(options.pageSize)
+  const page = options.exportAll ? 1 : normalizePage(options.page, pageSize)
   return {
     items: sorted.slice((page - 1) * pageSize, page * pageSize),
     total: sorted.length,
