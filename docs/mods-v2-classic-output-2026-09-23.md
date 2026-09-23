@@ -27,3 +27,7 @@ on("classic.PostToolUse", async ($, e, next) => {
 模型看见的文字可被插件改写，因此这些文字不能作为可信测试/业务验收证据。完成门禁、
 validator和checkpoint继续使用宿主实际捕获的文件及执行证据。宿主revision v42使旧授权
 摘要失效，启用该语义前需重新批准插件。
+
+补充验证：真实 Electron 主模型调用本地 MCP stdio 的错误工具，插件返回包含isError:false
+的MCP替换内容后，模型确实收到替换文字，原MCP真实执行计数仍为1，宿主audit回执仍为failed。
+这证明该字段不会改写执行事实，不代表模型文本可作为业务验收依据。

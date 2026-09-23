@@ -259,6 +259,21 @@ export async function startModsModelServer() {
       response.end("data: [DONE]\n\n")
       return
     }
+    if (Array.isArray(body.tools) && userPrompt?.includes("[mods-classic-mcp]")) {
+      const tool = body.tools.find((entry: {function?:{name?:string}}) =>
+        entry.function?.name?.includes("mods_error"))
+      if (body.messages?.at(-1)?.role === "tool") {
+        event([{index:0,delta:{role:"assistant",content:"MODEL_CLASSIC_MCP_OK"},finish_reason:"stop"}])
+      } else if (tool) {
+        event([{index:0,delta:{role:"assistant",tool_calls:[{index:0,id:"classic-mcp-error",
+          type:"function",function:{name:tool.function.name,arguments:"{}"}}]},finish_reason:"tool_calls"}])
+      } else {
+        event([{index:0,delta:{role:"assistant",content:"MODEL_CLASSIC_MCP_MISSING"},finish_reason:"stop"}])
+      }
+      event([], {prompt_tokens:13,completion_tokens:7,total_tokens:20})
+      response.end("data: [DONE]\n\n")
+      return
+    }
     const modelToolMode =
       Array.isArray(body.tools) &&
       (userPrompt?.includes("[mods-tool-rewrite]") || userPrompt?.includes("[mods-tool-deny]"))

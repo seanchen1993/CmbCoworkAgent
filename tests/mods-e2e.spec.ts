@@ -173,7 +173,7 @@ async function main(): Promise<void> {
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
       if (focus === "classic-output")
-        await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass)
+        await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass, app!)
       else if (focus === "ui-feedback")
         await verifyUiFeedback(page!, root, workspace, artifacts, until, pass)
       else if (focus === "tool-sites")
@@ -3074,7 +3074,7 @@ async function main(): Promise<void> {
     await verifyCommandOutput(page!, root, workspace, artifacts, until, pass)
     await verifyToolSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
     await verifyUiFeedback(page!, root, workspace, artifacts, until, pass)
-    await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass)
+    await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass, app!)
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})

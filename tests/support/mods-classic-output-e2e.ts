@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import AdmZip from "adm-zip"
-import type { Page } from "playwright"
+import type { Page, ElectronApplication } from "playwright"
 
 export async function verifyClassicOutput(
   page: Page,
@@ -11,7 +11,8 @@ export async function verifyClassicOutput(
   artifacts: string,
   requests: Array<{ messages: unknown }>,
   until: (check: () => Promise<boolean>, label: string) => Promise<void>,
-  pass: (label: string) => void
+  pass: (label: string) => void,
+  app: ElectronApplication
 ): Promise<void> {
   const project = join(workspace, "classic-output-project")
   mkdirSync(project, { recursive: true })
@@ -92,6 +93,82 @@ export async function verifyClassicOutput(
       JSON.stringify({ on, off, actualFileUnchanged: true }, null, 2)
     )
     pass("same native task with Mods off restores original model output")
+    await page.evaluate(() => window.api.mods.configureGlobal(true))
+    await app.evaluate(({ dialog }, entry) => {
+      const state = globalThis as unknown as {modsFixture?: unknown; modsConfirmations?: unknown[]}
+      if (state.modsFixture) return
+      const { createRequire } = process.getBuiltinModule("node:module")
+      state.modsFixture = createRequire(entry)(entry)
+      state.modsConfirmations = []
+      dialog.showMessageBox = (async (_window, options) => {
+        state.modsConfirmations!.push(options)
+        return {response:1,checkboxChecked:false}
+      }) as typeof dialog.showMessageBox
+    }, join(root, "out/main/mods-e2e.js"))
+    const connector = await app.evaluate(
+      (_electron, input) =>
+        (
+          globalThis as unknown as {
+            modsFixture: {
+              startFunctionMcpFixture(
+                workspace: string,
+                node: string,
+                server: string
+              ): Promise<string>
+            }
+          }
+        ).modsFixture.startFunctionMcpFixture(input.workspace, input.node, input.server),
+      {
+        workspace: project,
+        node: process.execPath,
+        server: join(root, "tests/support/mods-mcp-server.mjs")
+      }
+    )
+    try {
+      const startedMcp = requests.length
+      await composer.fill("[mods-classic-mcp]")
+      await submit.click()
+      await until(
+        async () =>
+          (await page.getByText("MODEL_CLASSIC_MCP_OK", { exact: true }).count()) === 1 &&
+          (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
+        "actual model-raised MCP completes"
+      )
+      const output = lastTool(startedMcp)
+      assert(output.includes("CLASSIC_MCP_REPLACEMENT"), output)
+      assert(!output.includes("WRONG_GENERIC_MCP_OUTPUT"))
+      assert.equal(readFileSync(join(project, "mcp-sdk-counter.txt"), "utf8"), "error\n")
+      const audit = (await page.evaluate((id) => window.api.mods.audit(id), threadId)).filter(
+        (row) => row.toolId.startsWith("mcp:")
+      )
+      assert.equal(audit.length, 1)
+      assert.equal(audit[0].status, "failed")
+      writeFileSync(
+        join(artifacts, "classic-mcp-output-evidence.json"),
+        JSON.stringify(
+          {
+            output,
+            actualExecutions: 1,
+            receiptStatus: audit[0].status
+          },
+          null,
+          2
+        )
+      )
+      pass(
+        "real model-raised MCP preserves one failed execution receipt despite replacement claiming isError false"
+      )
+    } finally {
+      await app.evaluate(
+        (_electron, id) =>
+          (
+            globalThis as unknown as {
+              modsFixture: { stopFunctionMcpFixture(id: string): Promise<void> }
+            }
+          ).modsFixture.stopFunctionMcpFixture(id),
+        connector
+      )
+    }
   } finally {
     await page.evaluate(() => window.api.mods.configureGlobal(true))
   }
