@@ -18,6 +18,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
   const signals = new Map();
   const registrations = [];
   const unqualified = new Set();
+  const nounMethods = new Map();
   let registering = true;
   function pack(value) {
     const text = stringify(value);
@@ -32,6 +33,14 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       freeze(value);
     }
     return value;
+  }
+  function providerJson(value, depth = 0) {
+    if (depth > 32) throw Error("MODS_JSON_DEPTH");
+    if (value === null || typeof value === "string" || typeof value === "boolean") return;
+    if (typeof value === "number" && Number.isFinite(value)) return;
+    if (!value || typeof value !== "object") throw Error("MODS_ENGINE_RESULT_JSON");
+    if (typeof value[Symbol.asyncIterator] === "function") throw Error("MODS_ENGINE_STREAM_UNSUPPORTED");
+    for (const key of ownKeys(value)) providerJson(value[key], depth + 1);
   }
   function match(pattern, value, depth = 0) {
     if (depth > 8) throw Error("MODS_MATCHER_DEPTH");
@@ -94,12 +103,46 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     const event = frozen(parse(json));
     const meta = frozen(parse(metadata));
     const registration = handlers.get(id);
-    if (!registration && !meta.callback) throw Error("MODS_HANDLER_MISSING");
+    if (!registration && !meta.callback && meta.provider === undefined) throw Error("MODS_HANDLER_MISSING");
     let aborted = false;
     let reason;
     let trace = freeze([]);
     const inheritedActions = new Set();
     const listeners = new Set();
+    const engineDescriptors = new WeakMap();
+    function engineObjects(descriptors) {
+      const built = Object.create(null);
+      for (const noun of ownKeys(descriptors)) {
+        const descriptor = descriptors[noun];
+        const table = Object.create(null);
+        for (const method of ownKeys(descriptor.methods))
+          table[method] = (...args) => sdkCall(noun + "." + method, args);
+        engineDescriptors.set(table, descriptor);
+        built[noun] = freeze(table);
+      }
+      return freeze(built);
+    }
+    function engineSerialize(built) {
+      if (!built || typeof built !== "object" || Array.isArray(built)) throw Error("MODS_ENGINE_NOUN_INVALID");
+      const result = Object.create(null);
+      for (const noun of ownKeys(built)) {
+        const table = built[noun];
+        if (!table || typeof table !== "object" || Array.isArray(table)) throw Error("MODS_ENGINE_NOUN_INVALID");
+        const inherited = engineDescriptors.get(table);
+        if (inherited) {result[noun] = inherited;continue;}
+        const methods = Object.create(null);
+        for (const method of ownKeys(table)) {
+          if (typeof table[method] !== "function") throw Error("MODS_ENGINE_NOUN_INVALID");
+          if (nounMethods.size >= 256) throw Error("MODS_ENGINE_NOUN_LIMIT");
+          const handle = String(nounMethods.size);
+          const fn = table[method];
+          nounMethods.set(handle, input => fn.call(table, input));
+          methods[method] = handle;
+        }
+        result[noun] = {provider:meta.plugin.name,methods};
+      }
+      return result;
+    }
     const signal = freeze({
       get aborted() { return aborted; },
       get reason() { return reason; },
@@ -128,6 +171,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
         reply.value.value = undefined;
       if (meta.event === "ui.render" && method === "next")
         uiHandles(reply.value, press => inheritedActions.add(pack(press)));
+      if (meta.event === "engine.create" && method === "next") return engineObjects(reply.value);
       return frozen(reply.value);
     }
     function streamNext(input, tier) {
@@ -169,7 +213,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     }
     freeze(next);
     const sdk = Object.create(null);
-    sdk.plugin = meta.plugin;
+    if (meta.event !== "engine.create") sdk.plugin = meta.plugin;
     const scope = {
       call, plugin: meta.plugin.name, callback: !!meta.callback, event: meta.event,
       uiGeneration: meta.uiGeneration, requestId: event.requestId
@@ -208,7 +252,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
     for (const noun of ownKeys(sdk)) freeze(sdk[noun]);
     freeze(sdk);
     try {
-      const fn = meta.callback ? uiCallback(meta, event) : meta.caught ? registration.recover : registration.fn;
+      const fn = meta.provider !== undefined ? nounMethods.get(meta.provider) : meta.callback ? uiCallback(meta, event) : meta.caught ? registration.recover : registration.fn;
       if (typeof fn !== "function") throw Error("MODS_CATCH_MISSING");
       let value;
       if (meta.streaming) {
@@ -220,11 +264,14 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
           await call("stream.yield", {chunk:item.value});
         }
         if (value === undefined) return pack({absent:true});
-      } else value = await inScope(scope, () => Promise.resolve(fn(sdk, event, next)));
+      } else value = await inScope(scope, () => Promise.resolve(meta.provider !== undefined ? fn(event) : fn(sdk, event, next)));
       if (unawaited.length) await Promise.all(unawaited);
       if (meta.callback) return pack({ value: {} });
       if (meta.event === "ui.render") uiProvenance(value, meta, inheritedActions);
       if (value === undefined && meta.caught) return pack({ absent: true });
+      if (meta.provider !== undefined && value === undefined) return pack({ absent: true });
+      if (meta.provider !== undefined) providerJson(value);
+      if (meta.event === "engine.create") return pack({value:engineSerialize(value)});
       if (meta.operation && (!value || typeof value !== "object" || Array.isArray(value) ||
           (!Object.hasOwn(value, "value") && typeof value.deny !== "string")))
         throw Error("MODS_OPERATION_RESULT");

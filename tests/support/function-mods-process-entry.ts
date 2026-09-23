@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto"
 import type { FunctionUiElement } from "../../src/shared/mods/v2/ui"
 import { ModControlStore } from "../../src/main/mods/control-store"
 import { CLIENT_BOOTSTRAP } from "../../src/main/mods/v2/client-bootstrap"
+import { checkEngineNouns } from "./function-engine-nouns-process"
 
 const root = resolve(process.argv[2])
 const client = new FunctionRuntimeClient(join(__dirname, "function-mod-host.cjs"))
@@ -23,6 +24,10 @@ let temporaryProject: string | undefined
 let paneStore: ModControlStore | undefined
 void app.whenReady().then(async () => {
   try {
+    const engineNounsPerformance = await checkEngineNouns(client, root)
+    checks.push(
+      "engine.create cross-guest noun fold, original authority, middleware and closed zero-call comparison"
+    )
     const compiled = await compileFunctionPlugin(join(root, "tests/fixtures/mods-v2/conformance"))
     const guest = await client.load(compiled.code, compiled.options)
     const plugin = {
@@ -747,6 +752,8 @@ void app.whenReady().then(async () => {
     assert.equal(client.stats.replies, 0)
     checks.push("process crash revokes capabilities and stale handles; explicit reload recovers")
     const report = {
+      runtime: { node: process.versions.node, electron: process.versions.electron },
+      engineNounsPerformance,
       passed: checks.length,
       checks,
       stats: client.stats,

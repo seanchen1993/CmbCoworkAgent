@@ -32,6 +32,7 @@ export interface FunctionDispatchOptions {
   timeoutMs?: number
   operation?: boolean
   uiGeneration?: string
+  capabilities?(plugin: FunctionPlugin): string[]
   normalizeInput?(event: string, input: ModObject): ModObject
   validateInput?(event: string, input: ModObject): void
   validateResult?(event: string, output: ModJson): void
@@ -190,7 +191,10 @@ export class FunctionDispatcher {
         signal: AbortSignal
       ): Promise<FunctionHostReply> => {
         if (method !== "next") {
-          if (!plugin.capabilities.includes(method) || !options.capability)
+          if (
+            !(options.capabilities?.(plugin) ?? plugin.capabilities).includes(method) ||
+            !options.capability
+          )
             throw new ModFunctionError("MODS_CAPABILITY_DENIED")
           const value = await options.capability(plugin, method, args, signal, {
             event,
@@ -242,7 +246,7 @@ export class FunctionDispatcher {
         plugin.guest.invoke(registration.id, received, host, {
           event,
           origin,
-          capabilities: plugin.capabilities,
+          capabilities: options.capabilities?.(plugin) ?? plugin.capabilities,
           plugin: { name: plugin.name, root: plugin.root },
           ...(options.operation ? { operation: true } : {}),
           ...(options.uiGeneration ? { uiGeneration: options.uiGeneration } : {}),

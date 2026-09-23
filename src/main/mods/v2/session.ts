@@ -4,6 +4,7 @@ import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { FunctionDispatcher, type FunctionPlugin } from "./dispatcher"
+import { FunctionEngineNouns } from "./engine-nouns"
 import {
   basicSdkInput,
   runBasicSdk,
@@ -143,6 +144,7 @@ export class FunctionSession {
   private readonly registry = new Map<string, FunctionCommand>()
   private readonly tools = new FunctionToolRegistry()
   private readonly dispatcher: FunctionDispatcher
+  private readonly nouns: FunctionEngineNouns
   private starting?: Promise<void>
   private readonly abortBudget = new FunctionTurnAbortBudget()
 
@@ -151,6 +153,7 @@ export class FunctionSession {
     private readonly host: FunctionSessionHost
   ) {
     this.dispatcher = new FunctionDispatcher(plugins)
+    this.nouns = new FunctionEngineNouns(plugins, (plugin) => this.assertLive(plugin))
     this.clients = new FunctionClients({
       assertLive: () => this.assertLive(),
       // Mounted surfaces outlive the event that created them. A host timer is a fresh
@@ -204,7 +207,7 @@ export class FunctionSession {
           "callback",
           input,
           async (method, args, callSignal) => {
-            if (!plugin.capabilities.includes(method))
+            if (!this.nouns.capabilities(plugin).includes(method))
               throw new ModFunctionError("MODS_CAPABILITY_DENIED")
             const value = await this.capability(
               plugin,
@@ -223,7 +226,7 @@ export class FunctionSession {
             callback,
             signal,
             origin: { plugin: "engine", tier: "core" },
-            capabilities: plugin.capabilities,
+            capabilities: this.nouns.capabilities(plugin),
             plugin: { name: plugin.name, root: plugin.root }
           }
         )
@@ -233,11 +236,13 @@ export class FunctionSession {
   }
 
   start(): Promise<void> {
-    this.starting ??= this.dispatch("session.start", {
-      cwd: this.host.cwd?.() ?? this.host.workspace,
-      surface: "desktop",
-      isInteractive: true
-    }).then(() => {})
+    this.starting ??= this.nouns.build(this.controller.signal).then(() =>
+      this.dispatch("session.start", {
+        cwd: this.host.cwd?.() ?? this.host.workspace,
+        surface: "desktop",
+        isInteractive: true
+      }).then(() => {})
+    )
     return this.starting
   }
 
@@ -593,6 +598,7 @@ export class FunctionSession {
       ? AbortSignal.any([signal, this.controller.signal])
       : this.controller.signal
     const result = await this.dispatcher.dispatch(event, input, {
+      capabilities: (plugin) => this.nouns.capabilities(plugin),
       skip,
       onlyPlugin: presentation?.onlyPlugin,
       signal: scopedSignal,
@@ -766,8 +772,42 @@ export class FunctionSession {
     turnHeld?: string
   ): Promise<ModJson | undefined> {
     this.assertLive(plugin)
+    this.nouns.assertAccess(plugin, method)
     if (!Array.isArray(raw)) throw new ModFunctionError("MODS_SDK_ARGUMENTS")
     const args = raw
+    if (this.nouns.provider(method)) {
+      if (args.length !== 1 || !isModObject(args[0]))
+        throw new ModFunctionError("MODS_ENGINE_METHOD_ARGUMENTS")
+      return this.nouns.delegated(plugin, async () => {
+        const result = await this.dispatch(
+          method,
+          args[0] as ModObject,
+          callSignal,
+          { plugin: plugin.name, registration: source.registration },
+          depth + 1,
+          {
+            plugin,
+            core: (input, signal) =>
+              this.nouns.invoke(plugin, method, input, signal, (owner, nested, raw, nestedSignal) =>
+                this.capability(
+                  owner,
+                  nested,
+                  raw,
+                  nestedSignal,
+                  { event: method, registration: "provider" },
+                  depth + 1,
+                  turnHeld
+                )
+              )
+          },
+          turnHeld
+        )
+        if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+        if (typeof result.deny === "string")
+          throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny, true)
+        return result.value
+      })
+    }
     if (method === "turn.abort") {
       if (args.length !== 1 || !isModObject(args[0]))
         throw new ModFunctionError("MODS_TURN_ABORT_ARGUMENTS")
