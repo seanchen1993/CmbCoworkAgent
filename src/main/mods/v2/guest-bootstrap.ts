@@ -248,6 +248,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       sdk[noun][method] = async (...args) => {
         if (capability === "store.set") args = [args[0], parse(pack(args[1]))];
         if (capability === "fs.list" && args[0] === undefined) args = ["."];
+        if (capability === "fs.stat" && args.length === 2 && args[1] === undefined) args = [args[0]];
         return sdkCall(capability, args);
       };
     }

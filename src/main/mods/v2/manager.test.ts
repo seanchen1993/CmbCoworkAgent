@@ -1,4 +1,4 @@
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
@@ -762,11 +762,53 @@ it("runs the official file fixture through the project filesystem and normalizes
   expect(JSON.parse(answer.text)).toEqual({
     text: "HI",
     absolute: true,
-    entries: [{ name: "hello.txt", kind: "file", size: 2 }],
+    entries: [{ name: "hello.txt", kind: "file", size: 2, isLink: false }],
     exists: true,
     missing: false,
     stat: { kind: "file", size: 2, modified: true }
   })
+})
+
+it("preserves canonical stat options through a real guest rewrite and the project filesystem", async () => {
+  const f = await fixture()
+  await mkdir(join(f.root, "target"))
+  await writeFile(join(f.root, "target/note.txt"), "hello")
+  await symlink(
+    join(f.root, "target"),
+    join(f.root, "alias"),
+    process.platform === "win32" ? "junction" : "dir"
+  )
+  await writeFile(
+    join(f.plugin, "hooks/register.ts"),
+    `export function register(on) {
+    on("session.start",async($,e,next)=>{await $.command.register({name:"metadata",description:"Metadata"});return next(e)});
+    on("fs.stat",async($,e,next)=>next({...e,path:"alias/note.txt"}));
+    on("command.run",{command:"metadata"},async($)=>({text:JSON.stringify({
+      resolved:await $.fs.stat("rewrite",{resolve:true}),
+      plain:await $.fs.stat("rewrite",undefined),
+      entries:await $.fs.list()
+    })}));
+  }`
+  )
+  await f.approve()
+  const [command] = await f.manager.commands(f.root, "thread")
+  const answer = await f.manager.runCommand(
+    f.root,
+    "thread",
+    command,
+    "",
+    new AbortController().signal
+  )
+  const value = JSON.parse(answer.text)
+  expect(value.resolved).toMatchObject({
+    kind: "file",
+    size: 5,
+    isLink: false,
+    realPath: await realpath(join(f.root, "target/note.txt"))
+  })
+  expect(value.plain).toMatchObject({ kind: "file", size: 5, isLink: false })
+  expect(value.plain).not.toHaveProperty("realPath")
+  expect(value.entries).toContainEqual({ name: "alias", kind: "other", size: 0, isLink: true })
 })
 
 it("runs the shipped board's file-list command from its captured callback", async () => {

@@ -39,8 +39,8 @@ it("reads UTF-8 files, sorts directory entries and returns real metadata", async
   await mkdir(join(f.project, "a"))
   expect(await f.files.run("fs.read", "b.txt", f.signal)).toBe("你好")
   expect(await f.files.run("fs.list", ".", f.signal)).toEqual([
-    { name: "a", kind: "dir", size: 0 },
-    { name: "b.txt", kind: "file", size: 6 }
+    { name: "a", kind: "dir", size: 0, isLink: false },
+    { name: "b.txt", kind: "file", size: 6, isLink: false }
   ])
   expect(await f.files.run("fs.stat", join(f.project, "b.txt"), f.signal)).toMatchObject({
     kind: "file",
@@ -66,7 +66,7 @@ it("refuses traversal, outside junctions, ADS and device paths", async () => {
   for (const path of ["file:secret", "NUL", "aux.txt", "name. ", "\\\\?\\C:\\private.txt"])
     await expect(f.files.run("fs.read", path, f.signal)).rejects.toThrow("MODS_FS_PATH")
   expect(await f.files.run("fs.list", ".", f.signal)).toEqual([
-    { name: "link", kind: "other", size: 0 }
+    { name: "link", kind: "other", size: 0, isLink: true }
   ])
 })
 
@@ -157,7 +157,7 @@ it("applies real backend path policy before reading and hides denied directory e
   )
   expect(await files.run("fs.exists", "private.txt", f.signal)).toBe(false)
   expect(await files.run("fs.list", ".", f.signal)).toEqual([
-    { name: "public.txt", kind: "file", size: 6 }
+    { name: "public.txt", kind: "file", size: 6, isLink: false }
   ])
   expect(query).toHaveBeenCalledWith("host:read_file", { file_path: join(f.project, "public.txt") })
 })

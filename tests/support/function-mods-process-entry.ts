@@ -547,7 +547,7 @@ void app.whenReady().then(async () => {
         {
           text: "HI",
           absolute: true,
-          entries: [{ name: "hello.txt", kind: "file", size: 2 }],
+          entries: [{ name: "hello.txt", kind: "file", size: 2, isLink: false }],
           exists: true,
           missing: false,
           stat: { kind: "file", size: 2, modified: true }

@@ -3,7 +3,7 @@ import type { ModJson, ModObject } from "../types"
 export const MODS_V2_API = "cmb.mods/v2" as const
 export const CLAUDE_MODS_PROFILE = "claude-code/2.1.278" as const
 /** Bump when expanding host authority so an old digest grant cannot silently gain capabilities. */
-export const FUNCTION_HOST_REVISION = "desktop-scroll-ack-v56" as const
+export const FUNCTION_HOST_REVISION = "desktop-file-metadata-v57" as const
 export const MOD_TIERS = ["prepend", "user", "append", "builtin", "core"] as const
 export type ModTier = (typeof MOD_TIERS)[number]
 

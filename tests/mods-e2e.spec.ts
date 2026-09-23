@@ -1,3 +1,4 @@
+import { verifyFileMetadata } from "./support/mods-file-metadata-e2e"
 import { verifyBackgroundTimeout } from "./support/mods-background-timeout-e2e"
 import { verifyImperativeScroll } from "./support/mods-imperative-scroll-e2e"
 import { verifyImperativeFocus } from "./support/mods-imperative-focus-e2e"
@@ -53,6 +54,7 @@ const binary = packagedDir
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
 const focus = [
+  "file-metadata",
   "background-timeout",
   "imperative-scroll",
   "imperative-focus",
@@ -221,7 +223,9 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "background-timeout") {
+      if (focus === "file-metadata") {
+        await verifyFileMetadata(page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "background-timeout") {
         await verifyBackgroundTimeout(
           app!,
           page!,
@@ -3168,6 +3172,7 @@ async function main(): Promise<void> {
     await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
+    await verifyFileMetadata(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyBackgroundTimeout(
       app!,
       page!,

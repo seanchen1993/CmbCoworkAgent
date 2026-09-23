@@ -44,6 +44,18 @@ export function basicSdkInput(method: string, args: ModJson[]): ModObject {
     if (!isModObject(args[0])) throw new ModFunctionError("MODS_SESSION_USAGE_ARGUMENT")
     return args[0]
   }
+  if (method === "fs.stat") {
+    const options = args[1]
+    if (
+      args.length > 2 ||
+      (options !== undefined &&
+        (!isModObject(options) ||
+          Object.keys(options).some((key) => key !== "resolve") ||
+          (options.resolve !== undefined && typeof options.resolve !== "boolean")))
+    )
+      throw new ModFunctionError("MODS_FS_OPTIONS")
+    return { path: args[0], resolve: isModObject(options) && options.resolve === true }
+  }
   if (FILE_CAPABILITIES.some((name) => name === method))
     return { path: method === "fs.list" && args[0] === undefined ? "." : args[0] }
   if (method === "clock.sleep") return { ms: args[0] }
@@ -79,6 +91,8 @@ export function validateBasicInput(name: string, value: ModObject): void {
     (typeof value.path !== "string" || value.path.length === 0)
   )
     throw new ModFunctionError("MODS_FS_PATH")
+  if (name === "fs.stat" && value.resolve !== undefined && typeof value.resolve !== "boolean")
+    throw new ModFunctionError("MODS_FS_OPTIONS")
   if (name.startsWith("store.") && name !== "store.keys" && typeof value.key !== "string")
     throw new ModFunctionError("MODS_STORE_KEY")
   if (name === "store.set" && !Object.hasOwn(value, "value"))
@@ -275,7 +289,8 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
     ["file", "dir", "other"].includes(String(entry.kind)) &&
     typeof entry.size === "number" &&
     Number.isSafeInteger(entry.size) &&
-    entry.size >= 0
+    entry.size >= 0 &&
+    (entry.isLink === undefined || typeof entry.isLink === "boolean")
   if (
     (name === "fs.read" && typeof value !== "string") ||
     (name === "fs.exists" && typeof value !== "boolean") ||
@@ -283,7 +298,9 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
       (!fileStat(value) ||
         !isModObject(value) ||
         typeof value.mtimeMs !== "number" ||
-        !Number.isFinite(value.mtimeMs))) ||
+        !Number.isFinite(value.mtimeMs) ||
+        (value.realPath !== undefined &&
+          (typeof value.realPath !== "string" || value.realPath.length === 0)))) ||
     (name === "fs.list" &&
       (!Array.isArray(value) ||
         value.some(
@@ -366,7 +383,12 @@ export async function runBasicSdk(
   validateBasicInput(method, input)
   if (FILE_CAPABILITIES.some((name) => name === method)) {
     if (!context.files) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")
-    return context.files.run(method as FunctionFileMethod, input.path as string, signal)
+    return context.files.run(
+      method as FunctionFileMethod,
+      input.path as string,
+      signal,
+      method === "fs.stat" ? { resolve: input.resolve === true } : undefined
+    )
   }
   if (method.startsWith("store.")) {
     if (!context.state) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")

@@ -1,3 +1,22 @@
+## 2026-09-24 07:33 文件元数据完成，继续性能分段诊断（最新）
+
+- 本提交前 HEAD **f06fead5**。文件 SDK 元数据本次独立提交：真实 stat/list isLink、可选 realPath、严格 resolve、发布后节点/目标复核，保留旧 hook 形状、原权限和撤权/取消；host revision v57，仍 partial/bounded。指南、矩阵、状态与报告已更新。
+- 失败先行5项、真实guest/session红、Electron红；最终 Mods45 **136files1205PASS**，完整Electron **186checksPASS**（exec62539 exit0已poll，普通out恢复）；utility process41、focusedElectron5、窄测/Node/Web/helper类型/ESLint无新增警告通过。报告 `2026-09-24-file-metadata.md`。
+- 独占标准smoke exec27120已exit0：`desktop-performance-2026-09-23T23-29-54-616Z-smoke-78e4e86f/`，qualified=false/passed=false，TTFT127.4/183.3(+55.9)ms、吞吐0.998273、约1s idle delta1.577565。旧正式门槛仍未过。
+- **唯一运行 exec83701**：忽略区stream-phases/driver.ts 独占时序诊断，日志 `2026-09-24-stream-phases.log`，artifacts `2026-09-24-stream-phases-result/`。使用本次普通out；生产未插桩，off/on各4，performance.timeOrigin+now同机分段。必须等退出再做其它tests/build/E2E/perf。先看result.stream[].samples[].phases，再定位，不猜TTFT主因/不提前拉下游/不跳插件、权限或预算。详见前段准备说明。
+- 本次提交后继续性能与剩余兼容实现，不停批次边界。正式TTFT/ingress关闭组、2h10000soak、剩余classic/SDK、Actions安装验证仍未完成；UAT/共享依赖/本机NSIS不动，不派agent。
+
+## 2026-09-24 07:24 文件 SDK 元数据最终 Electron 运行中（最新，继续勿停）
+
+- HEAD **f06fead5** 后台task_output单调deadline已提交。该能力 Mods44 135/1197、完整Electron182、真实freeze/backward guest红→绿及Electron1444→705ms、Node/Web/lint通过；独占smoke+52.9ms qualified=false/passed=false。报告已提交，UAT/共享依赖不动。
+- **未提交 metadata 能力**：basic-sdk fs.stat options→事件resolve（缺省false，严格选项）；guest显式undefined预归一；ProjectFunctionFiles stat/list真实isLink、stat可选realPath、发布后节点与目标identity/mtime/ctime复核，list lstat不follow链接。保留项目/权限/取消/发布边界和512KiB/1024上限；旧hook可省新增字段但存在须正确type。hostrevision **desktop-file-metadata-v57**。docs `mods-v2-file-metadata-2026-09-24.md`、SDK边界、matrix已更新仍partial；报告 `2026-09-24-file-metadata.md` 草稿待最终Electron/perf。
+- 先5metadata红、真实manager/session1红、真实Electron缺isLink红；实现后首轮5files89pass，末次4files44pass(新增cancel/revoke)，manager整47前置通过；真实utility process **41checks PASS exec29113 exit0已poll**。focused Electron **5checks PASS**（普通build，之后仅补outer post-await check；最终整套会覆盖）图片已看，includes实际junction/改写/outside拒绝/撤权/off原native读。Node最终 **79008 exit0已poll**，Web/helper0；ESLint一度basic-sdk混合换行多277warning已LF修正，最终baseline原2+manager116=118警告不增，新文件/helper0warning。
+- **Mods45 完成136files1205PASS exec83874 exit0已poll**。**唯一仍运行 exec62539 完整Electron**，日志 `2026-09-24-file-metadata-full-electron.log`，artifacts同名`-artifacts/`；runner会恢复ordinaryout，必须poll到exit。当前约PASS290s。源码/测试冻结，不再追加红测或修改任何生产/测试直到整套结束；不重叠其他build/E2E/perf。
+- 完整Electron退出后：先独占标准 `node tests/run-mods-desktop-soak.mjs --performance --smoke`（新log file-metadata-performance-smoke），结果写报告，不替代正式门槛。最终检视/更新status/handoff，单独commit metadata。可顺序再跑下面诊断，不停在提交边界。
+- **下一步性能诊断已准备但尚未运行**：忽略目录 `output/mods-v2-validation/2026-09-24-stream-phases/` 的driver.ts/soak.ts/performance.ts/README.md，由当前测试driver复制，imports绝对化。生产源码没有计量插桩；HTTP producer和preload sample记录performance.timeOrigin+now，把TTFT分invoke→provider receipt / producer→first write / first write→preload。off/on各4，仍真实8插件4Pane原模型/IPC。待上述最终Electron和标准smoke都结束，独占普通out运行 env CMB_MODS_E2E_FOCUS=desktop-performance,CMB_MODS_SOAK_SMOKE=1,CMB_MODS_E2E_ARTIFACTS=绝对新目录 `2026-09-24-stream-phases-result`，node --import tsx .../driver.ts；无需重复build。纯定位，不当正式通过；精确说明同机跨process performance origin可能偏移，配对增量作参考。
+- 未修改stream生产路径。只读发现guest streamNext的eager stream.open再pull有多次IPC，但**不得猜测为TTFT主因**；禁止在open时提前拉取下游或跳过看似no-op插件。先时序分段定位，再真正profile对应边界，优化需先red和完整语义验证。模型resolve/getModelInstance/countTokensApproximately也仅候选，不得略过预算/权限。
+- 仍未完成：最新参考下classic生产事件/SDK部分不可用（不要把计划标为完成）、正式TTFT+67.7ms与ingress off1/10超预算、2h10000真实soak、Actions安装交付；业务demo既有1fa0e52e是真实provider/validator演示，不必无故重复花模型额度。fs.write/ancestors/bytes和dangling stat本次仍未实现。不派agent、不本地NSIS、不push触发Actions、不碰UAT。
+
 ## 2026-09-24 07:05 后台 task_output 单调期限完成，继续 SDK 元数据（最新）
 
 - 本提交前 HEAD **eb613005**。后台读取 elapsed/remaining/poll interval 改 performance.now，仅 4 行生产变动，原 signal/live authority/grant/lease 和原生 API 全保留。两项真实 guest/session freeze/backward 先 red MODS_CANCELLED（700ms guard）；真实 Electron red4 1444.011ms，修后 focused 692.414ms，整套704.780ms（含500ms交接等待），均完成真实200ms timeout且进程未完成。
