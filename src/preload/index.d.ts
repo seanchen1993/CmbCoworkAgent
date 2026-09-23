@@ -976,6 +976,10 @@ interface CustomAPI {
     globalEnabled(): Promise<boolean>
     configureGlobal(enabled: boolean): Promise<boolean>
     onConfigurationChanged(callback: () => void): () => void
+    inspectCheckpointRecovery(
+      threadId: string,
+      recordId: string
+    ): Promise<import("../shared/mods/v2/autobiz-recovery").AutobizRecoveryInspection>
     completionEvidence(threadId: string): Promise<import("../main/mods/v2/completion-evidence").CompletionEvidenceRecord[]>
     completionPolicy(
       threadId: string,

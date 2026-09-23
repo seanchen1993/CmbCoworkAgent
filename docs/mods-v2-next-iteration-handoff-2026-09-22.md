@@ -1,3 +1,13 @@
+## 2026-09-24 04:03 恢复核对与性能诊断续作（优先于历史快照）
+
+- 最新已提交：4c9c8272 bundled examples ASAR实路径/祖先.asar修复、可选私有诊断脚本（不执行本机打包）；fdc44583 最新状态/兼容元数据/真实业务与性能失败报告。UAT及共享依赖未动，没有push/Actions触发。
+- 当前准备提交只读checkpoint恢复核对：新shared type、host service、SQLite readOnly inspection、manager限定本线程host transition record、原IPC/preload、React按钮及5类状态指导。只读摘要，不改变日志、不重放、不自动清除unknown，不恢复PASS。缺模块/缺按钮先red；检视发现构造器创建日志目录，新增red后改readonly open/no mkdir/schema。真实hardlink失败、超大/缺失、并发改写、异步失效测试；文件symlink测试曾EPERM改成真实hardlink未跳过。
+- Narrow 3files44pass；final4files43pass含真实Python afterACK/partial进程死亡重新开journal观测before/mixed，均仍unknown。Node/Web最终0；scopedlint0errors，新模块0warning，IPC/preload保留旧format警告。Electron final13checks exit0已poll且ordinaryout恢复，artifacts 2026-09-24-recovery-electron-final-artifacts，checkpoint-inspection.png首轮等价图已看。报告checkpoint-inspection.md。
+- Mods40 exec27847 exit1已poll：129files1111pass1fail（manager approval case 5s超时）。整manager窄重跑46pass，exec78748 exit0已poll；没改该测试timeout/断言，不能称原全量全绿。无test/build/E2E运行。
+- 准备的忽略区长history CPUprofile：output/mods-v2-validation/2026-09-24-desktop-profile/driver-warm.ts、soak-warm.ts、performance-warm.ts。ordinary app，40次off真实预热后各2off/on smoke，Inspector各采1次；计划artifacts 2026-09-24-desktop-profile-warm/。尚未启动。诊断不是性能验收；原正式full3 +203ms TTFT仍fail，ingress仍fail，正式2h10000soak未做。
+- 只读考察：FunctionStepModelResolver每step会建provider并countTokensApproximately含bound tools，即使原model不变；可能开销但未证明，不能跳过预算/authority。前次冷history CPUprofile（profile-2）on192.5/off121.6ms，而正式长historyon约800/off620。需长historyprofile定位，不能凭猜测改架构或放宽门槛。
+- 唯一旧未提交非恢复改动 file-access.test.ts：1025真实文件setup批量32并延长fixture test30s，final narrow已8pass；应单独报告/提交。待继续缺口包括unknown自动协调（只读UI不声称完成它）、仍partial/unsupported SDK/classic适配、正式性能/长稳和Actions安装验证；不要批次边界停止。
+
 ## 2026-09-24 真实业务闭环已通过，继续性能诊断（优先于历史记录）
 
 - HEAD **1fa0e52e**。新提交 **3b8ce3f7** native failure不得覆盖已有block、保存host修复请求；**1fa0e52e** 可复现真实模型/业务/Autobiz演示及报告。前述388005da/76d62a9d均保留。UAT和共享依赖未动，不本地NSIS，不派agent。

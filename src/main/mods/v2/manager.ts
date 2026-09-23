@@ -1,4 +1,5 @@
 import { ApplicationCompletionPolicies } from "./application-completion-policy"
+import { inspectAutobizRecovery } from "./autobiz-recovery"
 import type { FunctionSessionTitleUpdate } from "./session-title"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import type { CompletionGate } from "../../agent/skill-lifecycle/completion-gate"
@@ -807,6 +808,24 @@ export class FunctionModsManager {
       }
     }
     return this.store.completionEvidence(workspace, threadId, limit)
+  }
+
+  async inspectCheckpointRecovery(workspace: string, threadId: string, recordId: string) {
+    const epoch = this.epoch(workspace)
+    const assertLive = () => {
+      this.host.assertThread?.(workspace, threadId)
+      if (this.closed || !this.host.enabled(workspace) || this.epoch(workspace) !== epoch)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    }
+    assertLive()
+    if (typeof recordId !== "string" || recordId.length > 200)
+      throw new ModFunctionError("MODS_RECOVERY_RECORD_INVALID")
+    const record = this.store
+      .completionEvidence(workspace, threadId, 500)
+      .find((row) => row.id === recordId && row.phase === "state.transition")
+    const operationId = record && isModObject(record.detail) ? record.detail.operationId : undefined
+    if (typeof operationId !== "string") throw new ModFunctionError("MODS_RECOVERY_RECORD_MISSING")
+    return inspectAutobizRecovery(workspace, operationId, assertLive)
   }
 
   private async submitAutobizTransition(

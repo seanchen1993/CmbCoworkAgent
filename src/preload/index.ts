@@ -3062,6 +3062,11 @@ const api = {
       threadId: string
     ): Promise<import("../shared/mods/v2/turn").FunctionTurnNotice[]> =>
       ipcRenderer.invoke("mods:function-turn-notices", threadId),
+    inspectCheckpointRecovery: (
+      threadId: string,
+      recordId: string
+    ): Promise<import("../shared/mods/v2/autobiz-recovery").AutobizRecoveryInspection> =>
+      ipcRenderer.invoke("mods:function-checkpoint-inspect", { threadId, recordId }),
     completionEvidence: (threadId: string): Promise<import("../main/mods/v2/completion-evidence").CompletionEvidenceRecord[]> =>
       ipcRenderer.invoke("mods:function-completion-evidence", threadId),
     completionPolicy: (

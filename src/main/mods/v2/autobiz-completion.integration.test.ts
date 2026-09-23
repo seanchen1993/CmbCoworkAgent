@@ -673,6 +673,18 @@ it.each([true, false])(
       expect(await advance()).toMatchObject({ applied: true, duplicate: false })
       const after = await readFile(state, "utf8")
       expect(JSON.parse(after).features["order-export"].checkpoint).toBe("requirements_eval_done")
+      const transition = f.store
+        .completionEvidence(f.root, "thread")
+        .find((row) => row.phase === "state.transition" && row.status === "pass")!
+      await expect(
+        f.manager.inspectCheckpointRecovery(f.root, "thread", transition.id)
+      ).resolves.toMatchObject({ state: "after", journalStatus: "committed" })
+      await expect(
+        f.manager.inspectCheckpointRecovery(f.root, "other-thread", transition.id)
+      ).rejects.toThrow("MODS_RECOVERY_RECORD_MISSING")
+      await expect(f.manager.inspectCheckpointRecovery(f.root, "thread", start.id)).rejects.toThrow(
+        "MODS_RECOVERY_RECORD_MISSING"
+      )
       expect(await advance()).toMatchObject({ applied: false, duplicate: true })
       expect(await readFile(state, "utf8")).toBe(after)
       expect(

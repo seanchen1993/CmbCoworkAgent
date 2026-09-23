@@ -621,6 +621,15 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     functions.completionEvidence(scope(event, threadId), threadId)
   )
   ipcMain.handle(
+    "mods:function-checkpoint-inspect",
+    (event, input: { threadId: string; recordId: string }) =>
+      functions.inspectCheckpointRecovery(
+        scope(event, input?.threadId),
+        input.threadId,
+        input.recordId
+      )
+  )
+  ipcMain.handle(
     "mods:function-completion-policy",
     (event, input: { threadId: string; plugin: string }) =>
       functions.completionPolicy(scope(event, input?.threadId), input.threadId, input.plugin)

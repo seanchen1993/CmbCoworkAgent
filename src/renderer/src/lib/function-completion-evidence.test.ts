@@ -34,6 +34,21 @@ const record = (
   }
 })
 
+it("offers explicit read-only checkpoint recovery inspection only for host transition records", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [record("state.transition", "interrupted", { operationId: "a".repeat(64) })]
+    })
+  )
+  expect(html).toContain("核对 checkpoint 恢复证据")
+  const guest = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [record("validator.result", "block", { operationId: "a".repeat(64) })]
+    })
+  )
+  expect(guest).not.toContain("核对 checkpoint 恢复证据")
+})
+
 it("separates host test evidence from guest opinion and gives a concrete next action", () => {
   const html = renderToStaticMarkup(
     createElement(FunctionCompletionEvidenceContent, {

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import type { CompletionEvidenceRecord } from "../../../../main/mods/v2/completion-evidence"
 import { isModObject } from "../../../../shared/mods/v2/contracts"
 import { FunctionSiteLifetime } from "../../lib/function-site-lifecycle"
+import { FunctionCheckpointInspection } from "./FunctionCheckpointInspection"
 
 const statuses = {
   completed: "步骤已结束",
@@ -128,6 +129,10 @@ export function FunctionCompletionEvidenceContent({
               {detailText(record, "reason") || detailText(record, "error")}
             </p>
             <p>下一步：{nextAction(record)}</p>
+            {record.phase === "state.transition" &&
+              /^[a-f0-9]{64}$/.test(detailText(record, "operationId")) && (
+                <FunctionCheckpointInspection threadId={record.threadId} recordId={record.id} />
+              )}
             {isModObject(record.detail) &&
               Array.isArray(record.detail.rules) &&
               record.detail.rules.filter(isModObject).map((rule, index) => (

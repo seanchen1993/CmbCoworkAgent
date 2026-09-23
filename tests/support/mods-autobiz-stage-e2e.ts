@@ -155,6 +155,38 @@ export async function verifyAutobizStage(
   const starts = (await records()).filter((row) => row.phase === "state.transition.started")
   assert.equal(starts.length, 2)
   assert(starts.every((row) => row.status === "completed"))
+  const committed = (await records()).find(
+    (row) => row.phase === "state.transition" && row.status === "pass"
+  )!
+  const inspect = () =>
+    page.evaluate(
+      ({ threadId, recordId }) => window.api.mods.inspectCheckpointRecovery(threadId, recordId),
+      { threadId, recordId: committed.id }
+    )
+  assert.equal((await inspect()).state, "after")
+  const evidencePanel = page.locator("details[data-completion-evidence]")
+  if (!(await evidencePanel.evaluate((element) => (element as HTMLDetailsElement).open)))
+    await evidencePanel.locator(":scope > summary").click()
+  const row = page.locator(`[data-completion-record="${committed.id}"]`)
+  await row.getByRole("button", { name: "核对 checkpoint 恢复证据", exact: true }).click()
+  await until(
+    async () => (await row.locator('[data-checkpoint-inspection="after"]').count()) === 1,
+    "checkpoint inspection renders"
+  )
+  await page.screenshot({ path: join(artifacts, "checkpoint-inspection.png") })
+  await writeFile(statePath, after + "\n")
+  assert.equal((await inspect()).state, "changed")
+  await writeFile(statePath, after)
+  const auditBeforeInspection = (await audit()).length
+  await page.evaluate(() => window.api.mods.configureGlobal(false))
+  await assert.rejects(inspect(), /MODS_SCOPE_CHANGED/)
+  await page.evaluate(() => window.api.mods.configureGlobal(true))
+  assert.equal((await inspect()).state, "after")
+  assert.equal((await audit()).length, auditBeforeInspection)
+  assert.equal(await readFile(statePath, "utf8"), after)
+  pass(
+    "read-only checkpoint recovery UI compares host hashes, observes external changes and refuses disabled inspection without replay"
+  )
   await writeFile(
     join(artifacts, "autobiz-stage.json"),
     JSON.stringify(

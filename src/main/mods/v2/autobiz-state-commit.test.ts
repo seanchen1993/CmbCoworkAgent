@@ -7,6 +7,7 @@ import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
 import { advanceAutobizCheckpoint } from "./autobiz-validation"
 import { withPinnedAutobiz } from "./autobiz-source"
+import { inspectAutobizRecovery } from "./autobiz-recovery"
 
 const isolated = vi.hoisted(() => ({
   root: "",
@@ -225,6 +226,10 @@ it.each(["after-ack", "partial"])(
     // Each invocation closes/reopens the host DB and launches a fresh child.
     const restarted = await advanceAutobizCheckpoint({ ...f.input, idempotencyKey: "fresh-grant" })
     expect(restarted.status).toBe("unknown")
+    expect(await inspectAutobizRecovery(f.root, restarted.operationId!, () => {})).toMatchObject({
+      journalStatus: "unknown",
+      state: fault === "partial" ? "mixed" : "before"
+    })
     expect(restarted.reason).toContain(lost.operationId)
     expect(restarted.operationId).toBe(lost.operationId)
     expect(await readFile(f.state)).toEqual(observed)

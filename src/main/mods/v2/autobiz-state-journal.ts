@@ -27,7 +27,8 @@ export class AutobizStateJournal {
   constructor(
     workspace: string,
     private readonly identity: string,
-    key: string
+    key: string,
+    readOnly = false
   ) {
     if (process.platform !== "win32") throw Error("AUTOBIZ_COMMIT_PLATFORM_UNSUPPORTED")
     this.workspace = realpathSync(workspace).toLowerCase()
@@ -41,10 +42,13 @@ export class AutobizStateJournal {
       if (dirname(path) === path) break
     }
     this.root = join(configured, "mods", "autobiz-commits")
-    mkdirSync(this.root, { recursive: true })
+    if (readOnly) {
+      if (!existsSync(this.root)) throw Error("AUTOBIZ_RECOVERY_MISSING")
+    } else mkdirSync(this.root, { recursive: true })
     for (const path of [join(configured, "mods"), this.root])
       if (lstatSync(path).isSymbolicLink()) throw Error("AUTOBIZ_JOURNAL_UNTRUSTED")
     const file = join(this.root, "journal.sqlite")
+    if (readOnly && !existsSync(file)) throw Error("AUTOBIZ_RECOVERY_MISSING")
     if (existsSync(file) && lstatSync(file).isSymbolicLink())
       throw Error("AUTOBIZ_JOURNAL_UNTRUSTED")
     this.operationId = createHash("sha256")
@@ -52,9 +56,10 @@ export class AutobizStateJournal {
       .update("\0")
       .update(key)
       .digest("hex")
-    this.db = new DatabaseSync(file, { timeout: 1000 })
+    this.db = new DatabaseSync(file, { timeout: 1000, readOnly })
     try {
-      this.db.exec(`
+      if (!readOnly)
+        this.db.exec(`
       PRAGMA journal_mode = DELETE;
       PRAGMA synchronous = EXTRA;
       CREATE TABLE IF NOT EXISTS commits (
@@ -81,6 +86,34 @@ export class AutobizStateJournal {
     if (!row) return undefined
     if (row.identity !== this.identity) throw Error("AUTOBIZ_RECEIPT_MISMATCH")
     return JSON.parse(String(row.evidence)) as AutobizCommitEvidence
+  }
+
+  /** Scoped diagnostics only: does not resolve pending/unknown commits or expose content. */
+  inspect(operationId: string): {
+    status: "pending" | "unknown" | "committed"
+    before: [string, string]
+    after: [string, string]
+  } {
+    if (!/^[a-f0-9]{64}$/.test(operationId)) throw Error("AUTOBIZ_RECOVERY_ID")
+    const row = this.db
+      .prepare("SELECT status, evidence FROM commits WHERE workspace = ? AND operation_id = ?")
+      .get(this.workspace, operationId)
+    if (!row) throw Error("AUTOBIZ_RECOVERY_MISSING")
+    if (!["pending", "unknown", "committed"].includes(String(row.status)))
+      throw Error("AUTOBIZ_RECOVERY_CORRUPT")
+    const evidence = JSON.parse(String(row.evidence)) as AutobizCommitEvidence
+    for (const hashes of [evidence?.before, evidence?.after])
+      if (
+        !Array.isArray(hashes) ||
+        hashes.length !== 2 ||
+        hashes.some((hash) => typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash))
+      )
+        throw Error("AUTOBIZ_RECOVERY_CORRUPT")
+    return {
+      status: row.status as "pending" | "unknown" | "committed",
+      before: evidence.before,
+      after: evidence.after
+    }
   }
 
   begin(evidence: AutobizCommitEvidence): void {
