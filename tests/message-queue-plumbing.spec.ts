@@ -100,7 +100,7 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // context management): the queue middleware immediately precedes it in the array.
   assertMatches(
     after,
-    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*createCmbSummarizationMiddleware\(mainSummarizationOptions\)/,
+    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*mainSummarizationController\.middleware/,
     "queue middleware immediately precedes summarization on the main stack"
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts
@@ -511,8 +511,8 @@ function testClearOnEveryRunExit(): void {
   assertOccurrences(
     agentIpc,
     "resolveAgentStreamRequestChannel(",
-    3,
-    "invoke, resume, and interrupt isolate terminal events on request-scoped channels"
+    4,
+    "invoke, resume, interrupt, and preflight rejection isolate terminal events on request-scoped channels"
   )
   assert(
     !agentIpc.includes("abort: () => {\n      LocalSandbox.cancelBackgroundTasks(threadId)"),
@@ -1456,7 +1456,10 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     `invoke, resume, and interrupt each have one completion hook: got ${completionHookIndexes.length}`
   )
   for (const [index, label] of ["invoke", "resume", "interrupt"].entries()) {
-    const body = agentIpc.slice(completionHookIndexes[index], completionHookIndexes[index] + 2600)
+    const body = agentIpc.slice(
+      completionHookIndexes[index],
+      agentIpc.indexOf('if (completionOutcome === "failed")', completionHookIndexes[index]) + 40
+    )
     const fence =
       label === "invoke"
         ? "throwIfInvokeAborted()"
@@ -1916,8 +1919,8 @@ function testPumpGatedOnHistoryLoadingReadOnlyContextReminder(): void {
   // never accept one. Mirrors handleSubmit's own early-return guards.
   assertIncludes(
     chat,
-    "if (historyLoading || readOnly || contextReminderPending) return",
-    "auto-drain gated on historyLoading/readOnly/contextReminderPending"
+    "if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return",
+    "auto-drain gated on historyLoading/readOnly/contextReminderPending/bizRetryPending"
   )
 }
 
