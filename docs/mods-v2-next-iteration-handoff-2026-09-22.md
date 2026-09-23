@@ -1,3 +1,22 @@
+## 2026-09-24 07:56 授权查询复用验收收口，立即继续 fs.write（最新）
+
+- 本提交前HEAD **be5dd56b**；本次grant prepared query源码/真实SQLite与guest测试、状态/报告收口单独提交。完整Electron **186checksPASS exec80399 exit0已poll**，ordinaryout恢复。Mods46 136/1207 +renderer1/2、process41、最终Node/Web、无新增lint全部通过；细节见下段。
+- 独占smoke **exec84541 exit0已poll**：`desktop-performance-2026-09-23T23-55-02-416Z-smoke-a73ddf4c/`，qualified=false/passed=false，TTFTp95增量74.7ms、吞吐1.003621、1秒idle delta1.796212。未证明正式性能通过。报告 `2026-09-24-grant-query.md`已填完整结果。
+- **当前无运行tests/build/E2E/perf**。下一步commit该能力后立即fs.write失败测试，不停边界。忽略区设计和session测试草案已准备，详见下一段；草案nonvoid hook测试已按原dispatcher可选错误fallback修正（不是所有invalid hook阻断写）。先复制至src跑红，再实现。可在既有tool-sdk.integration fixture分支添加SDKwrite保留默认tool路径，补真实native写与audit；Electron用新helper+focus，原审批/只读拒绝/延迟撤权/off原工具对照。新hostrevision、matrix partial/bounded和docs/report必须跟进。
+- 未完成门槛不变：正式TTFT/ingress off、2h10000soak、余下SDK/classic、Actions最终交付。仅Mods v2，不派agent/不动UAT与共享依赖/不本地NSIS/不push。
+
+## 2026-09-24 07:51 授权查询复用完整 Electron 验证中（最新，继续勿停）
+
+- HEAD **be5dd56b**，文件元数据已独立提交；Mods45 136/1205、完整Electron186、process41、类型/无新增lint通过。smoke+55.9ms qualified=false/passed=false，不是正式性能通过。
+- **未提交生产仅control-store**：连接内惰性复用grant SELECT prepared statement，每次get重新读取当前已提交row；无授权值缓存。先1000frame回归红（1001次prepare），改后1次；外部SQLite撤权/重新授权epoch/摘要变化/删除、未提交事务可见性、返回对象与连接隔离/重开均测。新增control-store-grant-read.test.ts3，source-presence真实双guest/session新增外部撤权1。基线窄测67 +最新3files8（含物理crash）通过。
+- Mods46 **136files1207PASS**，exec31886已exit0；另renderer function-scroll-follow **1file2PASS**。Mods45当时含该renderer，所以136/1205→默认Mods46缺该renderer再加4新测为136/1207，不是删除测试。真实process41 **63563 exit0已poll**。最终Node/Web **44125 exit0**；lintbaseline control-store原3警告不增、source-presence0、新test0。diffcheck通过。
+- **唯一运行 exec80399** `node tests/run-mods-e2e.mjs`，日志 `2026-09-24-grant-query-full-electron.log`，artifacts `2026-09-24-grant-query-full-electron-artifacts/`。当前约PASS330s。必须poll到exit并恢复ordinaryout前不跑其他build/E2E/perf；生产/测试冻结直到结束。随后独占标准performance smoke记录结果，更新report/status/handoff，单独commit grant query，继续下一能力。
+- 报告草稿 `output/mods-v2-validation/2026-09-24-grant-query.md` 已写（最终Electron/perf待填），含性能定位事实：无生产插桩stream-phases off/on各4，preProvider均值80.834→139.070ms；postWrite3.490→10.698。主CPU侵入采样on:globalsettings12.3ms/sourcepresence9.38ms/grant3.14ms仅定位，不是统计性能结论。runtime IPC诊断：八层open/pull约8–9ms，第一层前113–130ms；未改stream路径。所有诊断exec83701/47903/25820均exit0已确认，仅在忽略区，未提交临时插桩/日志。
+- **下一项 fs.write 真实原生适配已准备，未实现/未跑红测**：设计 `output/mods-v2-validation/2026-09-24-fs-write-design.md`，黑盒guest/session草案 `fs-write-session-tests-draft.txt`（复制后需TS标注/格式/精确参数case；不要误报可运行）。固定官方v2.1.278 fs.write(path,text)→event{path,text}→void。
+- 建议专用 file-write.ts 校验位置参数/事件和native结果，Session能力列表新增fs.write、normalizepath/validate/operation core/120s写审批timeout；**不要加进ProjectFunctionFiles只读联合**。core直接既有host.callTool映射write_file，不再额外dispatchFunction tool.call造成双检查，原native hooks/approval/ModsManager/lease/authority/receipt照常。16K原native参数预算明确小于upstream4MiB，不扩大权限；nativeisError/deny必须reject不能当void成功。optional fs.write短路不是host执行回执/PASS。hostrevision需新版本。
+- 真实集成可在现有tool-sdk.integration fixture command handler新增sdkWrite选择（原默认tool调用不变），增加实际文件/父目录/原auditreceipt、拒绝审批/权限/lease用例；自动hook/readonlyimmediate等需生产scheduleFunctionTool/Electron验证，不要用fixture硬编码userInitiated=true去假证。Electron可仿file-metadata helper插件安装/批准、非immediate命令fswrite改写nested/written.md，原dialog仅批准该path，检查实际内容和window.api.mods.audit；拒绝/只读immediate/延迟撤权无写；关闭后原Agent读取claw-notes对照，不额外花外部模型额度。
+- 仍未完成正式TTFT/ingress关闭预算、2h10000真实长稳、剩余classic/SDK、最终Actions安装验证。UAT、共享依赖、不派agent、不本地NSIS、不push限制不变。不要停在提交边界。
+
 ## 2026-09-24 07:33 文件元数据完成，继续性能分段诊断（最新）
 
 - 本提交前 HEAD **f06fead5**。文件 SDK 元数据本次独立提交：真实 stat/list isLink、可选 realPath、严格 resolve、发布后节点/目标复核，保留旧 hook 形状、原权限和撤权/取消；host revision v57，仍 partial/bounded。指南、矩阵、状态与报告已更新。

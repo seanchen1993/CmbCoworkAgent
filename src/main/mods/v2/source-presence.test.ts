@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { DatabaseSync } from "node:sqlite"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it } from "vitest"
@@ -117,4 +118,22 @@ it("does not skip later guest grant checks when only the first source is inspect
   const grant = f.store.getGrant(f.root, "function:source-1")!
   f.store.grant(f.root, grant.modId, grant.digest, false)
   await expect(f.call()).rejects.toThrow("MODS_GRANT_REVOKED")
+})
+
+it("rejects external grant changes on the next real guest/session dispatch", async () => {
+  const f = await fixture()
+  await expect(f.call()).resolves.toEqual({ result: 2 })
+  const writer = new DatabaseSync(join(f.root, "control.sqlite"))
+  try {
+    writer
+      .prepare("UPDATE mods_grants SET enabled=0, epoch=epoch+1 WHERE mod_id=?")
+      .run("function:source-1")
+    await expect(f.call()).rejects.toThrow("MODS_GRANT_REVOKED")
+    writer
+      .prepare("UPDATE mods_grants SET enabled=1, epoch=epoch+1 WHERE mod_id=?")
+      .run("function:source-1")
+    await expect(f.call()).rejects.toThrow("MODS_GRANT_REVOKED")
+  } finally {
+    writer.close()
+  }
 })

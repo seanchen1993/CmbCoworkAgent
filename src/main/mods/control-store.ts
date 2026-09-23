@@ -25,6 +25,7 @@ export interface ModGrant {
 
 export class ModControlStore {
   private readonly db: DatabaseSync
+  private grantQuery?: ReturnType<DatabaseSync["prepare"]>
   readonly functionState: FunctionStateStore
   readonly evidenceExcludedPaths: string[]
 
@@ -358,9 +359,10 @@ export class ModControlStore {
   }
 
   getGrant(workspace: string, modId: string): ModGrant | null {
-    const row = this.db
-      .prepare("SELECT * FROM mods_grants WHERE workspace=? AND mod_id=?")
-      .get(workspace, modId)
+    // Reuse the compiled query, never an authorization result. Each get sees
+    // the current committed row, including changes from another connection.
+    this.grantQuery ??= this.db.prepare("SELECT * FROM mods_grants WHERE workspace=? AND mod_id=?")
+    const row = this.grantQuery.get(workspace, modId)
     return row
       ? {
           workspace,
