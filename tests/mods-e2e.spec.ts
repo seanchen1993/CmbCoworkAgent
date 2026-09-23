@@ -16,6 +16,14 @@ import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
 import { _electron, type ElectronApplication, type Page } from "playwright"
 import { startModsModelServer } from "./support/mods-model-server"
+import { verifyPackagedFunctions } from "./support/mods-packaged-functions"
+import { verifyFunctionSites } from "./support/mods-function-sites-e2e"
+import { verifyCompactionHooks } from "./support/mods-compaction-e2e"
+import { verifyStatusSites } from "./support/mods-status-sites-e2e"
+import { verifyMessageSites } from "./support/mods-message-sites-e2e"
+import { verifySvg } from "./support/mods-svg-e2e"
+import { verifyCommandOutput } from "./support/mods-command-output-e2e"
+import { verifyToolSites } from "./support/mods-tool-sites-e2e"
 import AdmZip from "adm-zip"
 
 const root = resolve(__dirname, "..")
@@ -25,7 +33,13 @@ const binary = packagedDir
   ? join(resolve(packagedDir), "CMBDevClaw.exe")
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
-const artifacts = join(root, "output/mods-validation", packagedDir ? "packaged-e2e" : "e2e")
+const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
+const focus = ["status-sites", "message-sites", "svg", "command-output", "tool-sites"].includes(requestedFocus)
+  ? requestedFocus : undefined
+const artifacts = join(
+  root, "output/mods-validation",
+  packagedDir ? "packaged-e2e" : focus ? `e2e-${focus}` : "e2e"
+)
 mkdirSync(artifacts, { recursive: true })
 const workspace = join(isolated, "workspace")
 mkdirSync(workspace)
@@ -90,7 +104,9 @@ async function main(): Promise<void> {
   const watchdog = setTimeout(() => {
     console.error("E2E deadline exceeded")
     void app?.close()
-  }, 240_000)
+  // The integrated suite now includes full compaction and three status-site
+  // scenarios. Individual waits retain their 30/45-second failure bounds.
+  }, 600_000)
   try {
     console.log("STEP launch")
     app = await _electron.launch({
@@ -144,6 +160,26 @@ async function main(): Promise<void> {
       await window.api.workspace.set(id, workspace)
       return id
     }, workspace)
+    if (focus && !packagedDir) {
+      modelServer = await startModsModelServer()
+      await page!.evaluate(async (baseUrl) => {
+        await window.api.models.setCustomConfig({
+          id: "mods-model-fixture", name: "Mods protocol fixture", baseUrl,
+          model: "gpt-4", apiKey: "fixture-key", maxTokens: 32000, maxOutputTokens: 4096
+        })
+        await window.api.models.setDefault("custom:mods-model-fixture")
+      }, modelServer.url)
+      timings.scope = "Focused site Electron regression; not the full integrated suite"
+      if (focus === "tool-sites")
+        await verifyToolSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
+      else if (focus === "command-output")
+        await verifyCommandOutput(page!, root, workspace, artifacts, until, pass)
+      else if (focus === "svg") await verifySvg(page!, root, workspace, artifacts, until, pass)
+      else if (focus === "message-sites")
+        await verifyMessageSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
+      else await verifyStatusSites(page!, root, workspace, artifacts, until, pass)
+      return
+    }
     if (packagedDir) {
       const packaged = await app.evaluate(({ app }) => ({
         packaged: app.isPackaged,
@@ -156,6 +192,7 @@ async function main(): Promise<void> {
       }
       const files = asar.listPackage(packaged.path).map((file) => file.replace(/\\/g, "/"))
       assert(files.some((file) => file.endsWith("/out/main/mod-host.js")))
+      assert(files.some((file) => file.endsWith("/out/main/function-mod-host.js")))
       assert(!files.some((file) => file.endsWith("/mods-e2e.js")))
       assert(files.some((file) => file.endsWith(".wasm") && file.includes("/@jitl/")))
       pass("production ASAR starts without a test entry and contains the isolated runtime")
@@ -233,6 +270,7 @@ async function main(): Promise<void> {
       pass(
         "packaged cold session executes a real approved command and previews/exports its report without a model or test bridge"
       )
+      await verifyPackagedFunctions(page!, root, threadId, artifacts, until, pass)
       await page!.getByRole("button", { name: "自定义", exact: true }).click()
       await page!.getByRole("button", { name: "Function Mods", exact: true }).click()
       await page!.locator("[data-mods-settings]").waitFor()
@@ -950,7 +988,7 @@ async function main(): Promise<void> {
       "function SDK creates and refreshes native tool context in a cold session with no model turn"
     )
     modelServer = await startModsModelServer()
-    await page!.evaluate(async (baseUrl) => {
+    await page!.evaluate(async ({ baseUrl, threadId }) => {
       await window.api.models.setCustomConfig({
         id: "mods-model-fixture",
         name: "Mods protocol fixture",
@@ -961,7 +999,8 @@ async function main(): Promise<void> {
         maxOutputTokens: 4096
       })
       await window.api.models.setDefault("custom:mods-model-fixture")
-    }, modelServer.url)
+      await window.api.threads.patchMetadata(threadId, { set: { model: "custom:mods-model-fixture" } })
+    }, { baseUrl: modelServer.url, threadId })
     const lifecycleZip = new AdmZip()
     lifecycleZip.addLocalFolder(join(root, "tests/fixtures/mods-v2/model-lifecycle"))
     const lifecycleInstall = await page!.evaluate(
@@ -981,6 +1020,7 @@ async function main(): Promise<void> {
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     const lifecycleComposer = page!.locator("textarea.composer-textarea")
+    await until(async () => (await lifecycleComposer.count()) > 0 && await lifecycleComposer.isEnabled(), "lifecycle composer ready")
     const lifecycleBefore = modelServer.requests.length
     await lifecycleComposer.fill("[model-lifecycle] run the lifecycle probe")
     await lifecycleComposer.press("Enter")
@@ -993,26 +1033,252 @@ async function main(): Promise<void> {
     assert.doesNotMatch(JSON.stringify(lifecycleMessages), /LIFECYCLE_RAW/)
     pass("production main-agent stream transforms before transcript publication and runs host-backed fork/classify")
     const lifecycleRequestCount = modelServer.requests.length
+    await lifecycleComposer.fill("/")
+    await page!.getByText("lifecycle-pane", { exact: true }).first().waitFor({ timeout: 30_000 })
     await lifecycleComposer.fill("/lifecycle-pane")
+    // The first Enter accepts the slash suggestion and inserts the command's
+    // trailing space; the second submits the now closed slash popover.
+    await lifecycleComposer.press("Enter")
+    await until(
+      async () => (await lifecycleComposer.inputValue()) === "/lifecycle-pane ",
+      "lifecycle command accepted"
+    )
     await lifecycleComposer.press("Enter")
     const lifecyclePane = page!.locator('[data-function-pane="lifecycle"]')
     await lifecyclePane.waitFor({ state: "visible" })
     const paneRequestCount = modelServer.requests.length
     await lifecyclePane.focus()
-    await lifecyclePane.locator("div.overflow-auto").dispatchEvent("wheel", { deltaY: 18, deltaX: 0 })
-    await page!.getByText(/focus:1 focused:true scroll:1/).waitFor({ timeout: 30000 })
+    await until(
+      async () => (await lifecyclePane.innerText()).includes("focus:1 focused:true scroll:0"),
+      "lifecycle pane focus"
+    )
+    await lifecyclePane.locator("div.overflow-auto").hover()
+    await page!.mouse.wheel(0, 18)
+    await until(
+      async () => (await lifecyclePane.innerText()).includes("focus:1 focused:true scroll:1"),
+      "lifecycle pane scroll"
+    )
     assert.equal(modelServer.requests.length, paneRequestCount)
     assert.equal(modelServer.requests.length, lifecycleRequestCount)
     pass("production Pane focus and bounded scroll events reach the real Function Mod without model calls")
+    const lifecycleDescriptor = (
+      await page!.evaluate((id) => window.api.mods.commands(id), threadId)
+    ).find((command) => command.command === "lifecycle-pane")!
+    assert.ok(lifecycleDescriptor)
     await page!.evaluate(() => window.api.mods.configureGlobal(false))
     const disabledRequestCount = modelServer.requests.length
-    await lifecycleComposer.fill("/lifecycle-pane")
-    await lifecycleComposer.press("Enter")
-    await new Promise((resolve) => setTimeout(resolve, 800))
+    await assert.rejects(
+      page!.evaluate(
+        ({ id, descriptor }) => window.api.mods.enqueue(id, descriptor, { text: "" }),
+        { id: threadId, descriptor: lifecycleDescriptor }
+      ),
+      /MODS_DISABLED/
+    )
+    await until(async () => (await lifecyclePane.count()) === 0, "disabled pane is removed")
     assert.equal(modelServer.requests.length, disabledRequestCount)
     assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
     await page!.evaluate(() => window.api.mods.configureGlobal(true))
     pass("global Mods off comparison performs no extra model or Pane calls")
+    // Installing and approving each provider changes the runtime generation. Do both
+    // before the first UI invocation so the provider's private counter starts at zero.
+    for (const name of ["engine-noun-provider", "engine-noun-consumer"]) {
+      const zip = new AdmZip()
+      zip.addLocalFolder(join(root, "tests/fixtures/mods-v2", name))
+      const installedNoun = await page!.evaluate(
+        ({ bytes, filename }) =>
+          window.api.plugins.install(new Uint8Array(bytes).buffer, filename, "local"),
+        { bytes: [...zip.toBuffer()], filename: `${name}.zip` }
+      )
+      assert.equal(installedNoun.success, true, installedNoun.error)
+      const nounMod = (
+        await page!.evaluate((id) => window.api.mods.status(id), threadId)
+      ).functionMods!.find((mod) => mod.name === name)!
+      assert.ok(nounMod?.digest)
+      await page!.evaluate(
+        ({ id, pluginId, digest }) => window.api.mods.approveFunction(id, pluginId, digest),
+        { id: threadId, pluginId: nounMod.pluginId, digest: nounMod.digest! }
+      )
+    }
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    const nounComposer = page!.locator("textarea.composer-textarea")
+    const nounRequestsBefore = modelServer.requests.length
+    await nounComposer.fill("/")
+    await page!.getByText("noun-identity", { exact: true }).first().waitFor()
+    const nounCallTimes: number[] = []
+    for (const [label, count] of [
+      ["fixture", 1],
+      ["again", 2]
+    ] as const) {
+      const started = performance.now()
+      // An explicit argument closes the slash suggestion; Enter submits the command.
+      await nounComposer.fill(`/noun-identity ${label}`)
+      await nounComposer.press("Enter")
+      const expected = `ENGINE_NOUN:${label}!?:${threadId}:${count}`
+      await until(
+        async () =>
+          (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+            (job) =>
+              job.command === "noun-identity" &&
+              job.state === "succeeded" &&
+              job.result?.text === expected
+          ),
+        `engine noun UI call ${count}`
+      )
+      await page!.getByText(expected, { exact: true }).first().waitFor()
+      nounCallTimes.push(performance.now() - started)
+    }
+    assert.equal(modelServer.requests.length, nounRequestsBefore)
+    await page!.screenshot({ path: join(artifacts, "function-engine-nouns.png") })
+    pass(
+      "installed engine.create provider and consumer compose through real UI commands, middleware and persistent guest state"
+    )
+    const nounDescriptor = (
+      await page!.evaluate((id) => window.api.mods.commands(id), threadId)
+    ).find((command) => command.command === "noun-identity")!
+    assert.ok(nounDescriptor)
+    const nounJobsBeforeDisable = (
+      await page!.evaluate((id) => window.api.mods.jobs(id), threadId)
+    ).filter((job) => job.command === "noun-identity").length
+    await page!.evaluate(() => window.api.mods.configureGlobal(false))
+    assert.equal(await page!.evaluate(() => window.api.mods.globalEnabled()), false)
+    assert.deepEqual(await page!.evaluate((id) => window.api.mods.commands(id), threadId), [])
+    await assert.rejects(
+      page!.evaluate(
+        ({ id, descriptor }) => window.api.mods.enqueue(id, descriptor, { text: "disabled" }),
+        { id: threadId, descriptor: nounDescriptor }
+      ),
+      /MODS_DISABLED/
+    )
+    assert.equal(
+      (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).filter(
+        (job) => job.command === "noun-identity"
+      ).length,
+      nounJobsBeforeDisable
+    )
+    assert.equal(modelServer.requests.length, nounRequestsBefore)
+    await page!.evaluate(() => window.api.mods.configureGlobal(true))
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    const restoredNounDescriptor = (
+      await page!.evaluate((id) => window.api.mods.commands(id), threadId)
+    ).find((command) => command.command === "noun-identity")!
+    assert.ok(restoredNounDescriptor)
+    assert.notEqual(restoredNounDescriptor.workspaceEpoch, nounDescriptor.workspaceEpoch)
+    await assert.rejects(
+      page!.evaluate(
+        ({ id, descriptor }) => window.api.mods.enqueue(id, descriptor, { text: "stale" }),
+        { id: threadId, descriptor: nounDescriptor }
+      ),
+      /MODS_COMMAND_STALE/
+    )
+    await nounComposer.fill("/")
+    await page!.getByText("noun-identity", { exact: true }).first().waitFor()
+    await nounComposer.fill("/noun-identity restored")
+    await nounComposer.press("Enter")
+    const restoredNounText = `ENGINE_NOUN:restored!?:${threadId}:1`
+    await until(
+      async () =>
+        (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).some(
+          (job) =>
+            job.command === "noun-identity" &&
+            job.state === "succeeded" &&
+            job.result?.text === restoredNounText
+        ),
+      "engine noun rebuild resets the provider closure"
+    )
+    await page!.getByText(restoredNounText, { exact: true }).first().waitFor()
+    assert.equal(modelServer.requests.length, nounRequestsBefore)
+    timings.engineNouns = {
+      uiCallsMs: nounCallTimes,
+      disabledNewJobs: 0,
+      modelRequests: 0,
+      restoredProviderCallCount: 1,
+      comparison:
+        "same installed provider/consumer, global off refuses, restore rebuilds guest state"
+    }
+    await page!.screenshot({ path: join(artifacts, "function-engine-nouns-restored.png") })
+    pass(
+      "global Mods off rejects noun commands without jobs or model calls; restore rejects stale descriptors and rebuilds provider state"
+    )
+    const codeZip = new AdmZip()
+    codeZip.addLocalFolder(join(root, "tests/fixtures/mods-v2/code-pane"))
+    const installedCode = await page!.evaluate(
+      (bytes) => window.api.plugins.install(new Uint8Array(bytes).buffer, "code-pane.zip", "local"),
+      [...codeZip.toBuffer()]
+    )
+    assert.equal(installedCode.success, true, installedCode.error)
+    const codeMod = (
+      await page!.evaluate((id) => window.api.mods.status(id), threadId)
+    ).functionMods!.find((mod) => mod.name === "code-pane")!
+    await page!.evaluate(
+      ({ id, pluginId, digest }) => window.api.mods.approveFunction(id, pluginId, digest),
+      { id: threadId, pluginId: codeMod.pluginId, digest: codeMod.digest! }
+    )
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await nounComposer.fill("/")
+    await page!.getByText("code-pane", { exact: true }).first().waitFor()
+    await nounComposer.fill("/code-pane ")
+    await nounComposer.press("Enter")
+    const codePane = page!.locator("section").filter({ hasText: "Code E2E" }).last()
+    await codePane.waitFor()
+    await codePane.locator(".shiki").waitFor()
+    const tokenColors = await codePane.locator(".shiki .line span").evaluateAll((tokens) =>
+      [...new Set(tokens.map((token) => getComputedStyle(token).color))]
+    )
+    assert.ok(tokenColors.length > 1, "source tokens use the application's actual syntax colors")
+    assert.equal(await codePane.locator(".shiki").evaluate((element) =>
+      getComputedStyle(element.parentElement!).counterReset), "mod-line 41")
+    assert.deepEqual(await codePane.locator('[data-code-kind="remove"] > span').allTextContents(), ["1", "", "-"])
+    assert.deepEqual(await codePane.locator('[data-code-kind="add"] > span').allTextContents(), ["", "1", "+"])
+    assert.equal(await codePane.locator('[data-code-kind="remove"] > code').innerText(), "old value")
+    assert.equal(await codePane.locator('[data-code-kind="add"] > code').innerText(), "new value")
+    assert.equal(await codePane.locator(".shiki").getByText('const label = "safe"').count(), 1)
+    assert.equal((await codePane.innerText()).includes("never-read/private.ts"), false)
+    await page!.screenshot({ path: join(artifacts, "function-code-pane.png") })
+    assert.equal(modelServer.requests.length, nounRequestsBefore)
+    pass("installed Code renders real unified diff markers and host-worker syntax highlighting without reading its path")
+    const focusZip = new AdmZip()
+    focusZip.addLocalFolder(join(root, "tests/fixtures/mods-v2/focus-board"))
+    const installedFocus = await page!.evaluate(
+      (bytes) => window.api.plugins.install(new Uint8Array(bytes).buffer, "focus-board.zip", "local"),
+      [...focusZip.toBuffer()]
+    )
+    assert.equal(installedFocus.success, true, installedFocus.error)
+    const focusMod = (
+      await page!.evaluate((id) => window.api.mods.status(id), threadId)
+    ).functionMods!.find((mod) => mod.name === "focus-board")!
+    await page!.evaluate(
+      ({ id, pluginId, digest }) => window.api.mods.approveFunction(id, pluginId, digest),
+      { id: threadId, pluginId: focusMod.pluginId, digest: focusMod.digest! }
+    )
+    await page!.reload({ waitUntil: "domcontentloaded" })
+    await page!.bringToFront()
+    await page!.getByText("Mods E2E", { exact: true }).first().click()
+    await nounComposer.fill("/")
+    await page!.getByText("focus-board", { exact: true }).first().waitFor()
+    await nounComposer.fill("/focus-board ")
+    await nounComposer.press("Enter")
+    const firstFocus = page!.getByRole("textbox", { name: "First focus field" })
+    const secondFocus = page!.getByRole("textbox", { name: "Second focus field" })
+    await firstFocus.waitFor()
+    await until(() => firstFocus.evaluate((element) => element === document.activeElement), "first autoFocus gets keyboard")
+    await secondFocus.fill("preserve user focus")
+    await page!.getByText("focus-events:1 entered:preserve user focus", { exact: true }).waitFor()
+    assert.equal(await secondFocus.evaluate((element) => element === document.activeElement), true)
+    assert.equal(await secondFocus.inputValue(), "preserve user focus")
+    await page!.screenshot({ path: join(artifacts, "function-focus-pane.png") })
+    await page!.getByRole("button", { name: "关闭 Focus E2E", exact: true }).click()
+    await until(async () => (await firstFocus.count()) === 0, "closed focus pane releases controls")
+    await nounComposer.fill("focus stays with user after close")
+    assert.equal(await nounComposer.evaluate((element) => element === document.activeElement), true)
+    await nounComposer.fill("")
+    assert.equal(modelServer.requests.length, nounRequestsBefore)
+    pass("Pane focus selects the first autoFocus control, preserves user focus across redraws and cannot reclaim after close")
+    await verifyFunctionSites(page!, root, threadId, artifacts, until, pass)
+    assert.equal(modelServer.requests.length, nounRequestsBefore)
+    const sdkRequestsBefore = modelServer.requests.length
     await functionComposer.fill("/claw-ask 模型 SDK 协议回检")
     await functionComposer.press("Enter")
     await until(
@@ -1025,8 +1291,8 @@ async function main(): Promise<void> {
         ),
       "model SDK publishes protected text"
     )
-    assert.equal(modelServer.requests.length, 1)
-    const modelRequest = modelServer.requests[0]
+    assert.equal(modelServer.requests.length, sdkRequestsBefore + 1)
+    const modelRequest = modelServer.requests[sdkRequestsBefore]
     assert.equal(modelRequest.max_tokens, 512)
     assert.deepEqual(
       modelRequest.messages.map((message) => message.role),
@@ -1050,7 +1316,10 @@ async function main(): Promise<void> {
     )
     await functionComposer.fill("/claw-ask [stall]")
     await functionComposer.press("Enter")
-    await until(async () => modelServer!.requests.length === 2, "stalled model reaches the server")
+    await until(
+      async () => modelServer!.requests.length === sdkRequestsBefore + 2,
+      "stalled model reaches the server"
+    )
     const modelJob = (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).find(
       (job) => job.command === "claw-ask" && job.state === "running"
     )!
@@ -1070,7 +1339,7 @@ async function main(): Promise<void> {
         )?.state === "unknown",
       "cancelled started model is not falsely marked unexecuted"
     )
-    assert.equal(modelServer.requests.length, 2)
+    assert.equal(modelServer.requests.length, sdkRequestsBefore + 2)
     pass(
       "cancelling a function model command closes its provider stream and preserves uncertain execution without retry"
     )
@@ -1098,9 +1367,12 @@ async function main(): Promise<void> {
       "enable model tool hooks"
     )
     await functionComposer.fill("[mods-tool-rewrite] 请读取 claw-notes。")
+    const toolRequestsBefore = modelServer.requests.length
     await functionComposer.press("Enter")
     await page!.getByText("MODEL_TOOL_HOOK_OK", { exact: true }).first().waitFor({ timeout: 30000 })
-    const toolModelRequests = modelServer.requests.filter((request) => Array.isArray(request.tools))
+    const toolModelRequests = modelServer.requests
+      .slice(toolRequestsBefore)
+      .filter((request) => Array.isArray(request.tools))
     const afterRead = toolModelRequests.find((request) => request.messages.at(-1)?.role === "tool")
     assert.ok(afterRead, "agent sends a second model request after the actual tool")
     writeFileSync(
@@ -2566,6 +2838,23 @@ async function main(): Promise<void> {
     pass(
       "TSX pane presses, input, selection, close/reopen and stale drawing rejection work through production React and IPC"
     )
+    // Install/grant/off/on scenarios above legitimately rebuild the FunctionSession.
+    // Establish a fresh live closure counter, then prove renderer reload preserves it.
+    const beforeReloadJobs = new Set(
+      (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).map((job) => job.id)
+    )
+    await functionComposer.fill("/claw-info 重载基线")
+    await functionComposer.press("Enter")
+    let visitsBeforeReload = 0
+    await until(async () => {
+      const job = (await page!.evaluate((id) => window.api.mods.jobs(id), threadId)).find(
+        (job) => !beforeReloadJobs.has(job.id) && job.command === "claw-info" && job.state === "succeeded"
+      )
+      const count = job?.result?.text.match(/本次会话查询：(\d+)/)?.[1]
+      if (!count) return false
+      visitsBeforeReload = Number(count)
+      return visitsBeforeReload > 0
+    }, "capture live session counter before renderer reload")
     await page!.reload({ waitUntil: "domcontentloaded" })
     await page!.getByText("Mods E2E", { exact: true }).first().click()
     await page!
@@ -2580,7 +2869,8 @@ async function main(): Promise<void> {
           (job) =>
             job.command === "claw-info" &&
             job.state === "succeeded" &&
-            job.result?.text.includes("本次会话查询：3") === true
+            job.result?.text.includes(`本次会话查询：${visitsBeforeReload + 1}`) === true &&
+            job.result.text.includes("备注：重载后")
         ),
       "renderer reload keeps function session state"
     )
@@ -2760,8 +3050,23 @@ async function main(): Promise<void> {
     const gateRequests = modelServer.requests.slice(beforeGate)
     assert.ok(gateRequests.length >= 2)
     assert.ok(gateRequests.some(request => JSON.stringify(request.messages).includes("COMPLETION_GATE_E2E_REPAIR")))
+    const completionEvidence = page!.locator("[data-completion-evidence]")
+    await until(async () => await completionEvidence.count() === 1,
+      "host completion evidence reaches the real task UI")
+    await completionEvidence.locator(":scope > summary").click()
+    assert.ok((await completionEvidence.innerText()).includes("插件评审意见不代表测试通过或业务验收"))
+    assert.ok((await completionEvidence.innerText()).includes("插件评审意见"))
+    assert.ok((await completionEvidence.innerText()).includes("完成门禁"))
+    assert.ok(await completionEvidence.locator("[data-completion-record]").count() >= 3)
     await page!.screenshot({ path: join(artifacts, "completion-gate-repair.png") })
     pass("installed Function Mod requests a real agent revision and rechecks before completion")
+    pass("real host evidence explains completion checks without presenting guest opinion as business acceptance")
+    await verifyCompactionHooks(page!, root, workspace, artifacts, modelServer, until, pass)
+    await verifyStatusSites(page!, root, workspace, artifacts, until, pass)
+    await verifyMessageSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
+    await verifySvg(page!, root, workspace, artifacts, until, pass)
+    await verifyCommandOutput(page!, root, workspace, artifacts, until, pass)
+    await verifyToolSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})
