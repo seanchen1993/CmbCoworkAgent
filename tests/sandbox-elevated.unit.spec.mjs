@@ -16,6 +16,10 @@ const windowsSafeCommandsSource = readFileSync(
   "utf8"
 )
 const runtimeSource = readFileSync(new URL("../src/main/agent/runtime.ts", import.meta.url), "utf8")
+const codexSandboxBinarySource = readFileSync(
+  new URL("../src/main/agent/codex-sandbox-binary.ts", import.meta.url),
+  "utf8"
+)
 const workflowEngineSource = readFileSync(
   new URL("../src/main/agent/workflow/engine.ts", import.meta.url),
   "utf8"
@@ -1546,8 +1550,8 @@ test("sandbox execute safety checks do not synchronously spawn helper processes"
 test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", () => {
   const runtimeResourceSection = sectionBetween(
     runtimeSource,
-    "async function ensureCodexExe(",
-    "  const enabledHooks = getEnabledHooks(workspacePath)"
+    "  const codexExePath = join(rgDir, \"codex.exe\")",
+    "  const baseHooks = getEnabledHooks(workspacePath)"
   )
   const codeExecHelperSection = sectionBetween(
     codeExecRunnerSource,
@@ -1563,7 +1567,7 @@ test("sandbox-adjacent runtime startup avoids synchronous filesystem probes", ()
     "agent runtime should not import sync fs helpers on sandbox startup path"
   )
   assert.doesNotMatch(
-    runtimeResourceSection,
+    `${runtimeResourceSection}\n${codexSandboxBinarySource}`,
     forbiddenSyncFs,
     "sandbox runtime resource/codex.exe checks should use async fs APIs"
   )
@@ -1840,7 +1844,7 @@ test("workflow notification backlog drains: ack kicks the next pending run", () 
   )
   assert.match(
     workflowRunManagerSource,
-    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{ type: "workflow_notification"/,
+    /async kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{\s*type: "workflow_notification"/,
     "the async kick re-broadcasts the next undelivered run's notification"
   )
   assert.match(
@@ -2737,8 +2741,8 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   )
   assert.match(
     agentIpcSource,
-    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId\s*\)/,
-    "notification turn uses the atomic async claim"
+    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId,\s*\{ owner: backgroundNotificationOwner \}\s*\)/,
+    "notification turn uses the atomic async claim scoped to its notification owner"
   )
   const notificationClaimStart = agentIpcSource.indexOf(
     "claimWorkflowNotification(pendingWorkflowRun.runId, runToken)"

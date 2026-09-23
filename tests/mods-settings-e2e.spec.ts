@@ -67,7 +67,8 @@ function pass(name: string) {
 }
 async function boot() {
   app = await _electron.launch({
-    executablePath: join(root, "tests/support/electron-launcher.cmd"),
+    executablePath:
+      process.platform === "win32" ? join(root, "tests/support/electron-launcher.cmd") : binary,
     args: [join(root, "out/main/index.js"), "--user-data-dir=" + join(isolated, "electron")],
     cwd: root,
     env,
