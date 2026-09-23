@@ -28,11 +28,11 @@
 
 ## 焦点与滚动：事件不等于主动调用
 
-当前 `ui.focus/ui.scroll` 事件、Pane `autoFocus` 和 Client 输入观察已实现受限适配；**`$.ui.focus()` 与 `$.ui.scroll()` 的主动 SDK 调用尚未开放**。SDK 两行原先复制了事件的 adapted 描述，需以本次核对后的 partial/unavailable 为准。事件行的已验证状态不变。
+当前 `ui.focus/ui.scroll` 事件、Pane `autoFocus` 和 Client 输入观察保留原受限适配。新增 **`$.ui.focus()` 的原生桌面 Pane 目标实现**，仍为 partial/bounded；通过真实 renderer 归属探测、原 dispatcher 最终决策和实际 DOM 回执完成，不支持 AbovePrompt、Client 内目标或非桌面 surface。详见[主动焦点说明](mods-v2-imperative-focus-2026-09-24.md)。
 
-主动调用必须具备实际 renderer 确认：核对绘制代际、目标所有者、当前键盘归属或滚动几何，经过原 dispatcher，再收到当前请求的 DOM 执行结果。取消、撤权、关闭、重绘和用户竞争操作必须使旧请求失效。不能把 guest 返回的成功或宿主发出请求当作实际完成。
+回执绕过正在等待 SDK 的回调队列，避免死锁；忙碌 Pane 控件保留焦点但阻止重复操作。关闭、重绘、取消、撤权、重载和竞争输入使旧请求失效。原 composer 和对话框优先。
 
-现有回调串行队列与“操作中禁用控件”会影响该设计：ACK 如果排在正在等待 SDK 的回调后面会死锁；禁用的目标不能聚焦。完成这两项时应先覆盖实际 DOM 和回调等待场景，保留用户对 composer、对话框及其他插件焦点的控制权。
+**`$.ui.scroll()` 仍未开放**。它需要实际 renderer 几何和滚动回执，已有 wheel 事件不能替代这一能力。
 
 ## 证据使用原则
 

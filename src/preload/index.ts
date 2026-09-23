@@ -3092,6 +3092,10 @@ const api = {
       ipcRenderer.invoke("mods:function-site-unmount", { threadId, owner }),
     siteAct: (threadId: string, owner: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult> =>
       ipcRenderer.invoke("mods:function-site-act", { threadId, owner, action }),
+    focusAck: (
+      threadId: string,
+      ack: import("../shared/mods/v2/ui-focus").FunctionFocusAck
+    ): Promise<void> => ipcRenderer.invoke("mods:function-focus-ack", { threadId, ack }),
     paneAct: (
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction

@@ -1,3 +1,29 @@
+## 2026-09-24 05:56 焦点验证完成并准备独立提交；滚动继续（最新）
+
+- 当前 HEAD **16fe8def**（Electron harness 独立提交）；之前 **88ced672** native read 初始 durable claim 输入去重。仅 Mods v2，不碰 UAT/共享依赖，不本地 NSIS，不派 agent。
+- 焦点 capability 新代码已完成检视、真实 guest/session 与 DOM 测试。空字符串 deny 又发现真漏洞，先 red（错误进入 apply），改为 typeof deny string；最后 3 files32pass，Node/Web/helper tsc0，新focus/renderer/helper lint0/0（原跨域文件 scoped63旧warning）。Mods42 冻结代码131files1143pass，早于空deny单条件修复。
+- 完整 Electron **focus-full-electron-2**：172checks PASS，exec56165 exit0已poll，普通out恢复；完整包早于空deny修复。最新普通包 focused **imperative-focus-electron-final**：9checks PASS，exec73350 exit0已poll，含实际空deny不移动DOM。原失败颜色断言与更早ToolBatch输入超时有独立harness报告，未删断言，使用实际submit按钮/颜色有界等待。两份artifact目录各自保留。
+- 独占性能 smoke exec30695 exit0已poll，目录 **desktop-performance-2026-09-23T21-53-02-115Z-smoke-0f435165**。qualified=false、passed=false；off/on各2流样本TTFT p95 109.6/177.5ms(+67.9)，吞吐1.000615；1s idle delta1.7871点非正式采样。旧正式full4 +67.7ms 与ingress off1/10超预算仍FAIL，2小时10000正式soak未跑。不能称性能通过。
+- focus report **2026-09-24-imperative-focus.md**、指南、matrix/status已更新；提交须包括focus模块/相关接线及tests/mods-e2e.spec.ts的focus入口，不包括下面滚动未完成文件。
+- **下一项滚动已经开始，不要停在提交边界**：未提交 `src/shared/mods/v2/ui-scroll.ts/.test.ts` 参数/实际CSS行几何，先缺模块red，再26green，review发现block数组被String强转，先red再修，最终27green。这两个新文件还未ESLint格式。另新 `src/main/mods/v2/ui-scroll.test.ts` 是两阶段exchange9测试，**尚未运行red，production同路径ui-scroll.ts尚不存在**。下一步先跑这份red再实现；别误报当前工作树全部测试已绿，也勿把这些滚动文件夹入focus提交。
+- 滚动设计在忽略区 **2026-09-24-imperative-scroll-design.md**。需probe实测几何→原dispatcher只允许offset变→整个链结束后actual DOM apply/ACK，取消/重载/重绘/用户竞争使旧请求失效。`end` 持续跟随增长需独立生命周期，不能一次滚底宣称完整语义。现有wheel观察保持原适配，不得冒充imperative。尚未接生产capability。AbovePrompt/Client/转录所有权边界诚实partial。
+- 无运行中的测试/build/E2E/perf；下一步完成focus独立commit，然后继续scroll与其实际Electron/关闭对照/报告。formal性能/2hsoak、remainingcompat、Actions最终安装验证仍待；不询问是否继续。
+
+## 2026-09-24 05:35 主动焦点待收口，完整测试正在运行（最新）
+
+- HEAD **88ced672** native read初始证据去重已独立提交；**b076336a**正式desktop full4失败报告已提交。仅Mods v2工作树，不碰UAT/共享依赖、不本地NSIS、不派agent。不要停止在批次边界。
+- read先2红，最终5files122pass，Node/Web0，scopedlint0error3旧managerwarning。完整Electron第一次132checks后ToolBatch提交场景超时，截图文字留在composer；原脚本focusedToolBatch6checks通过，普通out恢复。报告2026-09-24-read-input-evidence.md随88提交。完整运行不能标绿。
+- 独占正式ingress已结束exit2：v2-ingress-2026-09-23T21-05-41-167Z-matrix-6f7041be；5轮1000samples/100warmups，single p95 13.683/13.518/13.233/13.547/13.271ms全部<15ms。off9/10pass，round1 project-off+14.584%(0.3574ms)失败；所有off discovery/runtime0。整体仍FAIL；desktop full4 TTFT+67.7ms仍FAIL，2小时10000事件soak未跑。
+- 未提交焦点功能：shared ui-focus types/input parser；main ui-focus.ts探测/准备/最终DOM回执状态机；FunctionPanes/FunctionSession/manager/原IPC/preload；renderer实际ownership/epoch/activeElement校验。SDK ui.focus加入cap列表，hostrevision v55，旧grant摘要失效。只支持本插件拥有的**原生Pane控件**，明确拒绝Client目标/AbovePrompt；ui.scroll仍未实现。矩阵ui.focus维持partial、availability改bounded，没有升级full/adapted。
+- 先缺模块red；代码检视又逐项red：renderer deny被覆盖、hook永不返回、next之后最终veto应先完成再DOM移动、探测ACK后snapshot不能丢ownership、已排队hook取消、同id reopen。分别修正。ACK不走callbacks actions串行队列，5秒deadline覆盖hook和renderer等待，取消/撤权/重绘/close/reopen都失效。renderer只在probe ACK真的成功、epoch一致、当前DOM归属一致时apply，实际activeElement后回执。
+- 实际Electron第3轮普通out通过7checks（含总开关）；发现按钮busy disabled丢失焦点后新增真实Electron先red，改Pane内retainFocusWhileBusy：aria-disabled/readOnly+事件守卫保留键盘但防重复操作；其他UI site默认disabled不变。第4轮普通out **8checks通过**，日志2026-09-24-imperative-focus-electron-4.log/artifacts，包含Button->Input、防重复Enter、lateveto、重写、拒绝抢composer、人竞争、renderer reload、revoke/off。脚本首次解析错误和第二轮fixture遗漏Input.onSubmit已修，不算产品失败。图片需最终查看。
+- 窄测先5files41pass；最终reopen修复后3files31pass（17 exchange+12真实guest Pane+2compat）。Node/Web先0，busy后Web final0；helper专用tsconfig补src/main/env.d.ts后0。旧scopedlint0errors/63既有warnings在IPC/preload/session，新模块renderer0warning；最终改动格式还需再核对。
+- Mods41完整131files1142pass1fail：运行中新增的reopen red用例被该worker收集，之后修复已在窄测通过，不能称Mods41全绿。**从现在起不要再改生产/测试，等待当前冻结验证完成**。
+- 当前运行：**exec3916** Mods42全量（npm run test:mods -- --maxWorkers=2），2026-09-24-mods42.log；**exec14553** Node final types，focus-node-final.log；**exec44841**完整Electron（node tests/run-mods-e2e.mjs），focus-full-electron.log，默认artifacts output/mods-validation/e2e（完成后复制到新日期focus-full-electron-artifacts）。runner会恢复ordinaryout，必须poll到exit；不要重叠build/E2E/性能。没有其它运行进程。
+- tests/support/mods-tool-batch-e2e.ts另有单独harness修改：fill后点击真实submit按钮，避免旧Enter提交时序；不改断言/业务检查。待完整通过后单独提交/报告，别混入focus能力commit。
+- 未提交docs：mods-v2-imperative-focus-2026-09-24.md、sdk-boundaries、compatibility-matrix；未提交生产/测试见git status，均属focus，另上述toolbatch harness。新增helper tests/support/mods-imperative-focus-e2e.ts已接focused imperative-focus与完整suite。新报告focus尚未写，须等最终checks+性能回检/off对照后写独立报告commit。
+- 下一步：poll3个命令，修真实失败；图片与代码检视；最终scopedlint/types/guest/session，性能smoke(非正式门禁)须独占；可审查提交focus+harness分别提交。继续主动scroll、剩余classic/SDK、正式性能与2hsoak、最终Actions交付。background task_output的readBackgroundTask仍用Date.now作耗时，审查发现但还没写red/修改，可后续补monotonic防墙钟跳变预算问题。
+
 ## 2026-09-24 继续执行：SDK 审查已提交，工具入口去重证据先红测（最新）
 
 - HEAD **a99c330f** SDK callable/event 区分已提交；4e188d8c retention、935658d3 fixture、4a9fd215 monotonic runtime 均已提交。只在 Mods v2 工作树，不改 UAT/共享依赖，不本地 NSIS，不派 agent。

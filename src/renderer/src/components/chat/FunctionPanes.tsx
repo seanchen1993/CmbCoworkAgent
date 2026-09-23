@@ -11,7 +11,11 @@ import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { FunctionClient } from "./FunctionClient"
 import { FunctionCode } from "./FunctionCode"
 import { FunctionSvg } from "./FunctionSvg"
-import { desktopAllowsPaneFocus, paneFocusElement } from "../../lib/function-pane-focus"
+import {
+  desktopAllowsPaneFocus,
+  desktopOwnsPaneFocus,
+  paneFocusElement
+} from "../../lib/function-pane-focus"
 
 type Act = (
   node: FunctionUiElement | undefined,
@@ -19,7 +23,17 @@ type Act = (
   value?: ModJson
 ) => Promise<void>
 
-function Field({ node, busy, act }: { node: FunctionUiElement; busy: boolean; act: Act }) {
+function Field({
+  node,
+  busy,
+  act,
+  retainFocusWhileBusy
+}: {
+  node: FunctionUiElement
+  busy: boolean
+  act: Act
+  retainFocusWhileBusy?: boolean
+}) {
   const source = String(node.props.value ?? "")
   const [field, setField] = useState({ source, value: source })
   if (field.source !== source) setField({ source, value: source })
@@ -35,9 +49,20 @@ function Field({ node, busy, act }: { node: FunctionUiElement; busy: boolean; ac
           data-function-plugin={node.press?.plugin}
           aria-label={label}
           value={value}
-          disabled={busy}
+          disabled={busy && !retainFocusWhileBusy}
+          aria-disabled={busy || undefined}
           className="rounded border bg-background p-1"
+          onPointerDown={(event) => {
+            if (busy) event.preventDefault()
+          }}
+          onKeyDown={(event) => {
+            if (busy && event.key !== "Tab") event.preventDefault()
+          }}
           onChange={(event) => {
+            if (busy) {
+              event.currentTarget.value = value
+              return
+            }
             setValue(event.target.value)
             void act(node, "select", event.target.value)
           }}
@@ -55,6 +80,7 @@ function Field({ node, busy, act }: { node: FunctionUiElement; busy: boolean; ac
       className="flex flex-wrap items-center gap-2"
       onSubmit={(event) => {
         event.preventDefault()
+        if (busy) return
         void act(node, "submit", value)
       }}
     >
@@ -66,16 +92,27 @@ function Field({ node, busy, act }: { node: FunctionUiElement; busy: boolean; ac
           aria-label={label}
           value={value}
           maxLength={10000}
-          disabled={busy}
+          disabled={busy && !retainFocusWhileBusy}
+          readOnly={busy && retainFocusWhileBusy}
+          aria-disabled={busy || undefined}
           placeholder={String(node.props.placeholder ?? "")}
           className="min-w-0 flex-1 rounded border bg-background px-2 py-1"
           onChange={(event) => {
+            if (busy) return
             setValue(event.target.value)
             void act(node, "change", event.target.value)
           }}
         />
       </label>
-      <Button type="submit" variant="outline" size="sm" disabled={busy}>
+      <Button
+        type="submit"
+        variant="outline"
+        size="sm"
+        disabled={busy && !retainFocusWhileBusy}
+        aria-disabled={busy || undefined}
+        data-function-control={String(node.props.key)}
+        data-function-plugin={node.press?.plugin}
+      >
         {String(node.props.submitLabel ?? "提交")}
       </Button>
     </form>
@@ -140,12 +177,14 @@ export function Element({
   node,
   busy,
   act,
-  renderClient
+  renderClient,
+  retainFocusWhileBusy
 }: {
   node: FunctionUiElement | string
   busy: boolean
   act: Act
   renderClient?(node: FunctionUiElement): React.ReactNode
+  retainFocusWhileBusy?: boolean
 }): React.ReactNode {
   if (typeof node === "string") return node
   const p = node.props
@@ -155,7 +194,14 @@ export function Element({
     return (
       <Tag style={style(node)}>
         {node.children?.map((child, index) => (
-          <Element key={index} node={child} busy={busy} act={act} renderClient={renderClient} />
+          <Element
+            key={index}
+            node={child}
+            busy={busy}
+            act={act}
+            renderClient={renderClient}
+            retainFocusWhileBusy={retainFocusWhileBusy}
+          />
         ))}
       </Tag>
     )
@@ -167,9 +213,12 @@ export function Element({
         data-function-plugin={node.press?.plugin}
         size="sm"
         variant="outline"
-        disabled={busy}
-        className={p.dimColor ? "opacity-65" : undefined}
-        onClick={() => void act(node, "press")}
+        disabled={busy && !retainFocusWhileBusy}
+        aria-disabled={busy || undefined}
+        className={p.dimColor || busy ? "opacity-65" : undefined}
+        onClick={() => {
+          if (!busy) void act(node, "press")
+        }}
       >
         {String(p.label)}
       </Button>
@@ -180,6 +229,7 @@ export function Element({
         key={`${node.press?.plugin}:${String(node.props.key)}`}
         node={node}
         busy={busy}
+        retainFocusWhileBusy={retainFocusWhileBusy}
         act={act}
       />
     )
@@ -195,7 +245,14 @@ export function Element({
       >
         {node.children?.length
           ? node.children.map((child, index) => (
-              <Element key={index} node={child} busy={busy} act={act} renderClient={renderClient} />
+              <Element
+                key={index}
+                node={child}
+                busy={busy}
+                act={act}
+                renderClient={renderClient}
+                retainFocusWhileBusy={retainFocusWhileBusy}
+              />
             ))
           : String(p.label ?? p.href)}
       </a>
@@ -216,20 +273,98 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
   const attemptedFocus = useRef(new Set<string>())
   const focusEpoch = useRef(0)
   const applyingFocus = useRef(false)
+  const loadedThread = useRef<string | undefined>(undefined)
+  const focusProbes = useRef(new Map<string, { epoch: number; accepted: Promise<boolean> }>())
+  const focusSteps = useRef(new Set<string>())
   useEffect(() => {
+    const probes = focusProbes.current
+    const steps = focusSteps.current
     const changed = (): void => {
       focusEpoch.current++
     }
+    const focusChanged = (): void => {
+      if (!applyingFocus.current) changed()
+    }
+    window.addEventListener("focusin", focusChanged, true)
     window.addEventListener("pointerdown", changed, true)
     window.addEventListener("keydown", changed, true)
     window.addEventListener("mods:configuration-changed", changed)
     return () => {
       changed()
+      loadedThread.current = undefined
+      probes.clear()
+      steps.clear()
+      window.removeEventListener("focusin", focusChanged, true)
       window.removeEventListener("pointerdown", changed, true)
       window.removeEventListener("keydown", changed, true)
       window.removeEventListener("mods:configuration-changed", changed)
     }
   }, [threadId])
+  useEffect(() => {
+    if (loadedThread.current !== threadId) return
+    const currentIds = new Set(
+      panes.flatMap((pane) => (pane.imperativeFocus ? [pane.imperativeFocus.id] : []))
+    )
+    for (const id of focusProbes.current.keys())
+      if (!currentIds.has(id)) focusProbes.current.delete(id)
+    for (const step of focusSteps.current)
+      if (!currentIds.has(step.split(":")[0])) focusSteps.current.delete(step)
+    for (const pane of panes) {
+      const request = pane.imperativeFocus
+      if (!request || request.generation !== pane.generation || request.pane !== pane.key) continue
+      const step = `${request.id}:${request.phase}`
+      if (focusSteps.current.has(step)) continue
+      focusSteps.current.add(step)
+      const ready = (): HTMLElement | undefined => {
+        if (loadedThread.current !== threadId) return undefined
+        const current = panesRef.current.find((row) => row.key === pane.key)
+        if (
+          current?.generation !== request.generation ||
+          current.imperativeFocus?.id !== request.id ||
+          current.imperativeFocus.phase !== request.phase
+        )
+          return undefined
+        const section = sections.current.get(pane.key)
+        const target = section && paneFocusElement(section, request)
+        return section &&
+          target?.isConnected &&
+          !target.matches(":disabled") &&
+          target.getClientRects().length &&
+          desktopOwnsPaneFocus(section, request.plugin)
+          ? target
+          : undefined
+      }
+      if (request.phase === "probe") {
+        const allowed = Boolean(ready())
+        const accepted = window.api.mods.focusAck(threadId, { ...request, allowed }).then(
+          () => allowed,
+          () => false
+        )
+        if (allowed) focusProbes.current.set(request.id, { epoch: focusEpoch.current, accepted })
+        void accepted.finally(() => refreshRef.current())
+      } else {
+        const probe = focusProbes.current.get(request.id)
+        void (async () => {
+          const accepted = probe && (await probe.accepted)
+          const target = ready()
+          let allowed = Boolean(accepted && target && probe?.epoch === focusEpoch.current)
+          focusProbes.current.delete(request.id)
+          if (allowed && target) {
+            applyingFocus.current = true
+            try {
+              target.focus({ preventScroll: true })
+              allowed = document.activeElement === target
+            } finally {
+              applyingFocus.current = false
+            }
+          }
+          await window.api.mods.focusAck(threadId, { ...request, allowed })
+        })()
+          .catch(() => {})
+          .finally(() => refreshRef.current())
+      }
+    }
+  }, [panes, threadId])
   useEffect(() => {
     for (const pane of panes) {
       const request = pane.focusRequest
@@ -279,6 +414,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
             validateFunctionTree(row.tree)
             for (const client of row.clients ?? []) validateFunctionTree(client.tree)
           }
+          loadedThread.current = threadId
           setPanes(rows)
         })
         .catch(() => {
@@ -432,6 +568,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
             <Element
               node={pane.tree}
               busy={busy}
+              retainFocusWhileBusy
               act={(node, kind, value) => act(pane, node, kind, value)}
               renderClient={(node) => {
                 const client = pane.clients?.find(
@@ -445,7 +582,9 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
                     node={node}
                     snapshot={client}
                     refresh={() => refreshRef.current()}
-                    render={(tree, busy, act) => <Element node={tree} busy={busy} act={act} />}
+                    render={(tree, busy, act) => (
+                      <Element node={tree} busy={busy} act={act} retainFocusWhileBusy />
+                    )}
                   />
                 ) : null
               }}

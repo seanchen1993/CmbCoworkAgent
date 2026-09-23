@@ -48,3 +48,19 @@ export function paneFocusElement(
         .functionClientInstance === target.client
   )
 }
+
+/** Imperative focus can move only inside the caller's already focused, visible site. */
+export function desktopOwnsPaneFocus(section: HTMLElement, plugin: string): boolean {
+  const current = document.activeElement
+  return (
+    document.visibilityState === "visible" &&
+    document.hasFocus() &&
+    section.isConnected &&
+    section.getClientRects().length > 0 &&
+    !document.querySelector('[role="dialog"], [role="alertdialog"], dialog[open]') &&
+    current instanceof HTMLElement &&
+    section.contains(current) &&
+    current.dataset.functionPlugin === plugin &&
+    !current.matches(":disabled")
+  )
+}

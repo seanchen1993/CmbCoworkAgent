@@ -657,6 +657,23 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       () => functions.advanceAutobizCheckpoint(workspace, input.threadId, parseModJson(encodeModJson(input.transition)) as ModObject, new AbortController().signal)
     )
   })
+  ipcMain.handle(
+    "mods:function-focus-ack",
+    (
+      event,
+      input: {
+        threadId: string
+        ack: import("../../shared/mods/v2/ui-focus").FunctionFocusAck
+      }
+    ) =>
+      functions.focusAck(
+        writableScope(event, input?.threadId),
+        input.threadId,
+        parseModJson(
+          encodeModJson(input.ack)
+        ) as unknown as import("../../shared/mods/v2/ui-focus").FunctionFocusAck
+      )
+  )
   ipcMain.handle("mods:function-panes", (event, threadId: string) =>
     functions.panes(scope(event, threadId), threadId)
   )

@@ -1949,6 +1949,23 @@ export class FunctionModsManager {
     return entry.session!.panes.snapshot()
   }
 
+  async focusAck(
+    workspace: string,
+    threadId: string,
+    ack: import("../../../shared/mods/v2/ui-focus").FunctionFocusAck
+  ): Promise<void> {
+    this.host.assertThread?.(workspace, threadId)
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_UI_FOCUS_STALE")
+    await entry.loading
+    if (
+      this.sessions.get(JSON.stringify([workspace, threadId])) !== entry ||
+      !this.host.enabled(workspace)
+    )
+      throw new ModFunctionError("MODS_UI_FOCUS_STALE")
+    entry.session!.panes.focus.ack(ack)
+  }
+
   async act(
     workspace: string,
     threadId: string,

@@ -1000,6 +1000,10 @@ interface CustomAPI {
     siteRender(threadId: string, owner: string, props: import("../shared/mods/types").ModObject): Promise<import("../shared/mods/v2/ui").FunctionPaneSnapshot | null>
     siteUnmount(threadId: string, owner: string): Promise<void>
     siteAct(threadId: string, owner: string, action: import("../shared/mods/v2/ui").FunctionUiAction): Promise<void | import("../shared/mods/v2/ui").FunctionFocusResult>
+    focusAck(
+      threadId: string,
+      ack: import("../shared/mods/v2/ui-focus").FunctionFocusAck
+    ): Promise<void>
     paneAct(
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction

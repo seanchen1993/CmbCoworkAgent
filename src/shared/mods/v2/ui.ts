@@ -6,6 +6,7 @@ import { functionCodeRows } from "./code"
 
 export const FUNCTION_UI_CAPABILITIES = [
   "ui.open",
+  "ui.focus",
   "ui.close",
   "ui.resolve",
   "ui.invalidate",
@@ -39,6 +40,7 @@ export interface FunctionPaneSnapshot {
   nativeQuestions?: NativeUserInputQuestion[]
   clients?: FunctionClientSnapshot[]
   focusRequest?: { id: string; pending: boolean }
+  imperativeFocus?: import("./ui-focus").FunctionFocusRequest
 }
 export interface FunctionFocusTarget {
   plugin: string

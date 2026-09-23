@@ -14,6 +14,8 @@ import {
   type FunctionFocusResult,
   type FunctionPaneSnapshot
 } from "../../../shared/mods/v2/ui"
+import { FunctionFocusRequests } from "./ui-focus"
+import type { FunctionFocusAddress, FunctionFocusOutcome } from "../../../shared/mods/v2/ui-focus"
 import { functionFocusTargets } from "../../../shared/mods/v2/focus"
 import type { FunctionPlugin } from "./dispatcher"
 
@@ -65,7 +67,79 @@ export class FunctionPanes {
   private notificationDeadline = 0
   private closed = false
 
-  constructor(private readonly host: PaneHost) {}
+  readonly focus: FunctionFocusRequests
+  constructor(private readonly host: PaneHost) {
+    this.focus = new FunctionFocusRequests({
+      assertLive: (target) => {
+        this.host.assertLive()
+        const pane = this.panes.get(target.pane)
+        if (
+          !pane ||
+          pane.generation !== target.generation ||
+          pane.plugin !== target.plugin ||
+          !functionFocusTargets({
+            tree: pane.visibleTree ?? pane.tree,
+            clients: pane.clients
+          }).some(
+            ({ target: drawn }) =>
+              drawn.plugin === target.plugin &&
+              drawn.element === target.element &&
+              drawn.client === target.client
+          )
+        )
+          throw new ModFunctionError("MODS_UI_FOCUS_STALE")
+      },
+      changed: () => this.changed(0)
+    })
+  }
+
+  async requestFocus(
+    plugin: string,
+    args: { requestId: string; key: string },
+    signal: AbortSignal,
+    operation: (
+      input: ModObject,
+      core: (input: ModObject) => Promise<ModJson>,
+      signal: AbortSignal
+    ) => Promise<FunctionFocusOutcome>
+  ): Promise<FunctionFocusOutcome> {
+    this.host.assertLive()
+    const pane = this.panes.get(`${plugin}:${args.requestId}`)
+    if (!pane || pane.dirty || this.host.site) return { deny: "No current owned Pane drawing" }
+    const targets = functionFocusTargets({
+      tree: pane.visibleTree ?? pane.tree,
+      clients: pane.clients
+    })
+    const drawn = targets.find(
+      ({ target }) => !target.client && target.plugin === plugin && target.element === args.key
+    )?.target
+    if (!drawn) return { deny: "Element is not drawn by this plugin" }
+    const address: FunctionFocusAddress = { ...drawn, pane: pane.key, generation: pane.generation }
+    return this.focus.run(address, signal, (apply, focusSignal) =>
+      operation(
+        {
+          surface: "desktop",
+          component: "Pane",
+          requestId: pane.id,
+          plugin,
+          element: drawn.element,
+          focused: true,
+          origin: { kind: "plugin", name: plugin }
+        },
+        async (input) => {
+          const selected = targets.find(
+            ({ target }) =>
+              !target.client && target.plugin === plugin && target.element === input.element
+          )?.target
+          if (!selected) return { deny: "Element is not drawn by this plugin" }
+          return {
+            ...(await apply({ ...selected, pane: pane.key, generation: address.generation }))
+          }
+        },
+        focusSignal
+      )
+    )
+  }
 
   private changed(delay = 100): void {
     if (this.closed) return
@@ -91,6 +165,7 @@ export class FunctionPanes {
     validatePaneArgs(input)
     const key = `${plugin}:${input.id}`
     const prior = this.panes.get(key)
+    if (prior) this.focus.cancel(key)
     if (!prior && this.panes.size >= 8) throw new ModFunctionError("MODS_UI_PANE_LIMIT")
     this.panes.set(key, {
       key,
@@ -112,6 +187,7 @@ export class FunctionPanes {
     this.host.assertLive()
     const pane = this.panes.get(`${plugin}:${id}`)
     if (!pane) return
+    this.focus.cancel(pane.key)
     this.panes.delete(pane.key)
     this.host.clients?.closePane(pane.key)
     for (const [controller, key] of this.active)
@@ -123,7 +199,10 @@ export class FunctionPanes {
 
   invalidate(): void {
     this.host.assertLive()
-    for (const pane of this.panes.values()) pane.dirty = true
+    for (const pane of this.panes.values()) {
+      this.focus.cancel(pane.key)
+      pane.dirty = true
+    }
     this.changed()
   }
 
@@ -153,6 +232,7 @@ export class FunctionPanes {
     return this.enqueue(async () => {
       for (const pane of this.panes.values()) {
         if (!pane.dirty) continue
+        this.focus.cancel(pane.key)
         const generation = randomUUID()
         pane.dirty = false
         try {
@@ -205,7 +285,8 @@ export class FunctionPanes {
               tree,
               closeOnEscape,
               rows,
-              ...(focusRequest ? { focusRequest } : {})
+              ...(focusRequest ? { focusRequest } : {}),
+              ...(this.focus.current(key) ? { imperativeFocus: this.focus.current(key) } : {})
             })
           ) as unknown as FunctionPaneSnapshot
       )
@@ -221,6 +302,7 @@ export class FunctionPanes {
           !isModObject(result) ||
           typeof result.title !== "string" ||
           JSON.stringify(result.focusRequest) !== JSON.stringify(original.focusRequest) ||
+          JSON.stringify(result.imperativeFocus) !== JSON.stringify(original.imperativeFocus) ||
           ["key", "id", "plugin", "generation", "closeOnEscape", "rows"].some(
             (key) => result[key] !== original[key]
           )
@@ -510,6 +592,7 @@ export class FunctionPanes {
 
   close(): void {
     this.closed = true
+    this.focus.close()
     clearTimeout(this.notification)
     for (const controller of this.active.keys()) controller.abort()
     this.active.clear()

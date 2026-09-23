@@ -1,3 +1,4 @@
+import { functionFocusInput } from "../../../shared/mods/v2/ui-focus"
 import { FunctionUiNotices, type FunctionNoticeDialogAccess } from "./ui-notice"
 import { validateFunctionNotice } from "../../../shared/mods/v2/ui-notice"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
@@ -1423,6 +1424,33 @@ export class FunctionSession {
       this.panes.invalidate()
       this.sites.invalidate()
       return undefined
+    }
+    if (method === "ui.focus") {
+      if (args.length !== 1) throw new ModFunctionError("MODS_UI_FOCUS_ARGUMENTS")
+      const input = functionFocusInput(args[0])
+      return {
+        ...(await this.panes.requestFocus(
+          plugin.name,
+          input,
+          callSignal,
+          async (event, core, signal) => {
+            const answer = await this.dispatch(
+              "ui.focus",
+              event,
+              signal,
+              { plugin: plugin.name, registration: source.registration },
+              depth + 1,
+              { plugin, core },
+              turnHeld
+            )
+            if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+            if (typeof answer.deny === "string") return { deny: answer.deny }
+            if (isModObject(answer.value) && typeof answer.value.deny === "string")
+              return { deny: answer.value.deny }
+            return {}
+          }
+        ))
+      }
     }
     if (method === "ui.open" || method === "ui.close") {
       if (!isModObject(args[0])) throw new ModFunctionError("MODS_UI_PANE_ARGUMENTS")
