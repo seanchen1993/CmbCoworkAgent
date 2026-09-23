@@ -8789,12 +8789,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 // behavior (Stop hooks fire) — its worker result is re-discoverable
                 // on the next thread hydrate, so the same loss risk does not apply.
                 runStopHooks: isWorkflowNotificationTurn ? async () => null : undefined,
-                runRevision: async (revisionPrompt) => {
+                runRevision: async (revisionPrompt, revisionSignal) => {
                   if (!agent)
                     throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
                   const revisionStream = await agent.stream(
                     { messages: [new HumanMessage(revisionPrompt)] },
-                    streamConfig
+                    { ...streamConfig, signal: revisionSignal ?? streamConfig.signal }
                   )
                   await consumeStreamWithSideEffects(revisionStream)
                 },
@@ -11124,12 +11124,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               ...getHarnessHookContext(harnessAgentContext),
               abortSignal: abortController.signal,
               getStopContext: () => stopContextCollector.snapshot(),
-              runRevision: async (revisionPrompt) => {
+              runRevision: async (revisionPrompt, revisionSignal) => {
                 if (!resumeAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
                 const revisionStream = await resumeAgentRuntime.stream(
                   { messages: [new HumanMessage(revisionPrompt)] },
-                  resumeStreamConfig
+                  { ...resumeStreamConfig, signal: revisionSignal ?? resumeStreamConfig.signal }
                 )
                 await consumeResumeStream(revisionStream)
               },
@@ -12278,12 +12278,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               ...getHarnessHookContext(harnessAgentContext),
               abortSignal: abortController.signal,
               getStopContext: () => stopContextCollector.snapshot(),
-              runRevision: async (revisionPrompt) => {
+              runRevision: async (revisionPrompt, revisionSignal) => {
                 if (!intAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
                 const revisionStream = await intAgentRuntime.stream(
                   { messages: [new HumanMessage(revisionPrompt)] },
-                  interruptStreamConfig
+                  {
+                    ...interruptStreamConfig,
+                    signal: revisionSignal ?? interruptStreamConfig.signal
+                  }
                 )
                 await consumeInterruptStream(revisionStream)
               },

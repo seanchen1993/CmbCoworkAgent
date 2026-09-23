@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest"
 import type { ModJson } from "../../../shared/mods/types"
 import { compileFunctionPlugin } from "./loader"
 import { FunctionGuestRuntime } from "./guest-runtime"
-import { FunctionSession, SESSION_CAPABILITIES } from "./session"
+import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
 import { ProjectFunctionFiles } from "./file-access"
 import type { FunctionUiElement } from "../../../shared/mods/v2/ui"
 
@@ -15,7 +15,7 @@ afterEach(async () => {
   for (const run of cleanup.splice(0)) await run()
 })
 
-async function fixture() {
+async function fixture(initialState: Record<string, ModJson> = {}) {
   const root = await mkdtemp(join(tmpdir(), "autobiz-gate-"))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
   await mkdir(join(root, "hooks"))
@@ -53,8 +53,10 @@ async function fixture() {
   await writeFile(join(root, "example.ts"), "export const total = amount + taxRate")
   const compiled = await compileFunctionPlugin(root)
   const guest = await FunctionGuestRuntime.create(compiled.code)
-  const state = new Map<string, ModJson>()
-  const model = vi.fn(async () => JSON.stringify({ passed: false, findings: "错误计算税额" }))
+  const state = new Map<string, ModJson>(Object.entries(initialState))
+  const model = vi.fn<NonNullable<FunctionSessionHost["completeModel"]>>(async () =>
+    JSON.stringify({ passed: false, findings: "错误计算税额" })
+  )
   const files = new ProjectFunctionFiles(
     root,
     () => {},
@@ -83,7 +85,7 @@ async function fixture() {
   )
   cleanup.unshift(() => session.close())
   await session.start()
-  return { session, model, root, state }
+  return { session, model, root, state, files }
 }
 
 it("changes automatic behavior with the same file and persists the review report", async () => {
@@ -103,6 +105,112 @@ it("changes automatic behavior with the same file and persists the review report
   }
   expect(model).toHaveBeenCalledTimes(3)
   expect((await session.run("kanban-last", "")).text).toContain("错误计算税额")
+})
+
+it("persists a canonical off policy at first startup before any completion gate can scan files", async () => {
+  const f = await fixture()
+  expect(f.state.get("completion-config")).toMatchObject({ mode: "off", checks: ["code-review"] })
+  expect(f.model).not.toHaveBeenCalled()
+})
+
+it("migrates existing command configuration without turning an active project off", async () => {
+  const f = await fixture({ "review-mode": "check", "review-target": "example.ts" })
+  expect(f.state.get("completion-config")).toMatchObject({
+    mode: "check",
+    scope: "file",
+    target: "example.ts"
+  })
+  expect(
+    await f.session.checkCompletion({ turnId: "turn" }, new AbortController().signal)
+  ).toMatchObject({ decision: "block" })
+  expect(f.model).toHaveBeenCalledOnce()
+})
+
+it("does not append an old same-turn review report after the gate is turned off", async () => {
+  const f = await fixture({ "review-result": { turnId: "turn", report: "old plugin review" } })
+  await f.session.run("kanban-mode", "off")
+  expect(
+    await f.session.turnComplete(
+      { turnId: "turn", answer: "host answer", durationMs: 1, isAborted: false, reason: "answer" },
+      new AbortController().signal
+    )
+  ).toEqual({ text: "host answer" })
+})
+
+it("uses the canonical project policy instead of stale single-file aliases", async () => {
+  const f = await fixture()
+  f.state.set("review-mode", "off")
+  f.state.set("review-target", "wrong.ts")
+  f.state.set("completion-config", {
+    mode: "check",
+    scope: "file",
+    target: "example.ts",
+    checks: ["code-review"]
+  })
+  expect(
+    await f.session.checkCompletion({ turnId: "turn" }, new AbortController().signal)
+  ).toMatchObject({ decision: "block" })
+  expect(f.model).toHaveBeenCalledOnce()
+  expect(f.model.mock.calls[0][1].prompt).toContain("example.ts")
+  expect(f.model.mock.calls[0][1].prompt).not.toContain("wrong.ts")
+})
+
+it.each(["diff", "feature", "project"])(
+  "reviews the real files selected by the host %s scope",
+  async (scope) => {
+    const f = await fixture()
+    await writeFile(join(f.root, "changed.ts"), "export const changed = 1")
+    await writeFile(join(f.root, "unrelated.ts"), "export const unrelated = 1")
+    const requirement = ".autobizdevops/features/orders/proposal.md"
+    await mkdir(join(f.root, ".autobizdevops/features/orders"), { recursive: true })
+    await writeFile(join(f.root, requirement), "# Order requirements\nExport orders")
+    f.state.set("completion-config", {
+      mode: "check",
+      scope,
+      feature: "orders",
+      target: "changed.ts",
+      checks: ["code-review"]
+    })
+    await f.session.checkCompletion(
+      {
+        turnId: "turn",
+        completionDiffFiles: ["changed.ts"],
+        completionFiles: ["changed.ts", "unrelated.ts", requirement].map((path) => ({
+          path,
+          size: 30,
+          sha256: "host-bound"
+        }))
+      },
+      new AbortController().signal
+    )
+    const prompt = f.model.mock.calls.map((call) => call[1].prompt).join("\n")
+    expect(prompt).toContain("changed.ts")
+    if (scope === "project") expect(prompt).toContain("unrelated.ts")
+    else expect(prompt).not.toContain("unrelated.ts")
+    if (scope === "feature" || scope === "project") expect(prompt).toContain(requirement)
+    const result = f.state.get("review-result") as {
+      report?: string
+      steps?: unknown[]
+      nextAction?: string
+    }
+    expect(result.steps?.length).toBeGreaterThan(0)
+    expect(result.nextAction).toBeTypeOf("string")
+    expect(result.report).toContain("未推进 checkpoint")
+  }
+)
+
+it("performs no file reads, model calls or result writes when the canonical policy is off", async () => {
+  const f = await fixture()
+  f.state.set("review-mode", "repair")
+  f.state.set("review-target", "example.ts")
+  f.state.set("completion-config", { mode: "off", scope: "project", checks: ["code-review"] })
+  const reads = vi.spyOn(f.files, "run")
+  expect(await f.session.checkCompletion({ turnId: "turn" }, new AbortController().signal)).toEqual(
+    { decision: "pass" }
+  )
+  expect(reads).not.toHaveBeenCalled()
+  expect(f.model).not.toHaveBeenCalled()
+  expect(f.state.has("review-result")).toBe(false)
 })
 
 it("rejects malformed model output and stale file evidence", async () => {
@@ -169,6 +277,7 @@ it("configures the automatic gate using real pane callbacks and rejects an unsaf
     })
   }
   await change("review-target", "submit", "example.ts")
+  await change("review-scope", "select", "file")
   await change("review-mode", "select", "repair")
   expect(state.get("review-target")).toBe("example.ts")
   expect(state.get("review-mode")).toBe("repair")

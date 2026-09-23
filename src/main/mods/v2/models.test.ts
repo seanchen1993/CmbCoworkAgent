@@ -13,6 +13,7 @@ import {
 } from "./model-sdk"
 import type { ModIdentity, ModObject } from "../../../shared/mods/types"
 import { withFunctionExecution } from "./execution-context"
+import { CompletionBudget, withCompletionBudget } from "./completion-budget"
 import { FunctionRegisteredTools } from "./registered-tools"
 import type {
   FunctionModelForkReply,
@@ -79,6 +80,20 @@ function fixture() {
     )
   return { folder, store, grant, config, host, models, call }
 }
+
+it("enforces completion output reservations before the actual provider across repeated checks", async () => {
+  const f = fixture()
+  const budget = new CompletionBudget(400, 10000)
+  f.host.invoke.mockResolvedValue({ text: "answer", inputTokens: 120, outputTokens: 180 })
+  await withCompletionBudget(budget, () => f.call(undefined, 200))
+  await expect(withCompletionBudget(budget, async () => {
+    try { await f.call(undefined, 200) } catch { /* guest recovery cannot authorize a PASS */ }
+  })).rejects.toThrow("MODS_COMPLETION_MODEL_BUDGET")
+  expect(f.host.invoke).toHaveBeenCalledTimes(1)
+  expect(budget.outputReserved).toBe(200)
+  expect(budget.inputTokens).toBe(120)
+  expect(budget.outputTokens).toBe(180)
+})
 
 it("bounds guest inputs and refuses endpoints, credentials, invalid caps and oversized prompts", () => {
   const invalid: ModObject[] = [

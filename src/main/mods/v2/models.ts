@@ -4,6 +4,7 @@ import type { ModIdentity, ModObject } from "../../../shared/mods/types"
 import type { ResolvedModelConfig } from "../../models/registry"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { ModError } from "../errors"
+import { currentCompletionBudget, reserveCompletionModelUsage, type CompletionReservation } from "./completion-budget"
 import { assertFunctionGrant, functionCallIdentity, runFunctionHostCall } from "./host-call"
 import {
   functionModelRequest,
@@ -136,7 +137,9 @@ export class FunctionModels {
             outputTokens: reply.usage?.output_tokens
           }
         },
-        () => snapshot.assertLive?.()
+        () => snapshot.assertLive?.(),
+        Buffer.byteLength(JSON.stringify({ messages: snapshot.messages, system: snapshot.system,
+          prompt: request.prompt }), "utf8") + 128 * (snapshot.messages.length + 2)
       )
       return {
         text: result.text,
@@ -168,7 +171,8 @@ export class FunctionModels {
       request: FunctionModelRequest,
       signal: AbortSignal
     ) => Promise<FunctionModelReply>,
-    assertCapturedScope?: () => void
+    assertCapturedScope?: () => void,
+    inputUpperBound = Buffer.byteLength(request.prompt + (request.system ?? ""), "utf8") + 128
   ): Promise<FunctionModelReply> {
     const timer = new AbortController()
     const timeout = setTimeout(() => timer.abort(), 60000)
@@ -189,13 +193,19 @@ export class FunctionModels {
       reserved = true
       const config = await this.host.resolve(request.model)
       assertLive()
-      const maxTokens = Math.min(request.maxTokens ?? 256, config.maxOutputTokens ?? 4096)
+      const completionBudget = currentCompletionBudget()
+      const availableOutput = completionBudget
+        ? completionBudget.availableTokens() - inputUpperBound : Infinity
+      // A too-large observer rewrite may reduce the output cap, but cannot spend past the budget.
+      if (availableOutput < 1) completionBudget!.reserve(inputUpperBound, 1)
+      const maxTokens = Math.min(request.maxTokens ?? 256, config.maxOutputTokens ?? 4096, availableOutput)
       const identity = functionCallIdentity(workspace, threadId, grant, {
         fallbackTurnId: `function-model:${randomUUID()}`,
         origin: "mod"
       })
       const finalInput = { ...input, model: config.ref, maxTokens }
       let providerResult: FunctionModelReply | undefined
+      let completionReservation: CompletionReservation | undefined
       const published = await runFunctionHostCall({
         store: this.store,
         identity,
@@ -204,16 +214,25 @@ export class FunctionModels {
         claim: () =>
           this.store.claimFunctionModel(identity, input, finalInput, config.ref, maxTokens),
         invoke: async () => {
-          providerResult = await invoke(config, { ...request, maxTokens }, signal)
+          completionReservation = reserveCompletionModelUsage(inputUpperBound, maxTokens)
+          try {
+            providerResult = await invoke(config, { ...request, maxTokens }, signal)
+          } catch (error) {
+            // Preserve the provider failure, but a caller cannot catch it and invent known usage.
+            try { completionReservation?.settle() } catch { /* budget keeps the failure */ }
+            throw error
+          }
           return providerResult
         },
         status: () => "succeeded",
-        recordResult: (result) =>
+        recordResult: (result) => {
           this.store.recordFunctionModelUsage(
             identity.callId,
             result.inputTokens,
             result.outputTokens
-          ),
+          )
+          completionReservation?.settle(result.inputTokens, result.outputTokens)
+        },
         publish: async (result) => {
           validateFunctionModelText(result.text)
           // Complete provider text is protected before any guest after-hook can observe it.

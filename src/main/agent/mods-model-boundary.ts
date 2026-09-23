@@ -3,10 +3,258 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { ChatGenerationChunk, type ChatResult } from "@langchain/core/outputs"
 import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager"
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
-import { countTokensApproximately } from "langchain"
+import { countTokensApproximately, createMiddleware } from "langchain"
 import type { ModJson, ModObject } from "../../shared/mods/types"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import type { ModHookStream, FunctionStreamOptions } from "../mods/v2/stream-dispatcher"
+import { currentCompletionBudget, reserveCompletionModelUsage } from "../mods/v2/completion-budget"
+
+export interface CompletionRuntimeCancellation {
+  signal: AbortSignal
+  run<T>(scopedSignal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T>
+}
+
+/** One controller per existing runtime; never aborts a later runtime or its caller's controller. */
+export function createCompletionRuntimeCancellation(
+  parent?: AbortSignal
+): CompletionRuntimeCancellation {
+  const local = new AbortController()
+  const signal = parent ? AbortSignal.any([parent, local.signal]) : local.signal
+  return {
+    signal,
+    async run(scopedSignal, operation) {
+      const budget = currentCompletionBudget()
+      if (!budget) return operation()
+      let active: AbortSignal
+      try {
+        active = AbortSignal.any([
+          signal,
+          ...(scopedSignal ? [scopedSignal] : []),
+          AbortSignal.timeout(Math.min(2147483647, budget.remainingMs()))
+        ])
+      } catch (error) {
+        local.abort(error)
+        throw error
+      }
+      const cancel = (): void => local.abort(active.reason)
+      active.addEventListener("abort", cancel, { once: true })
+      try {
+        if (active.aborted) cancel()
+        active.throwIfAborted()
+        const result = await operation()
+        active.throwIfAborted()
+        budget.assert()
+        return result
+      } finally {
+        active.removeEventListener("abort", cancel)
+      }
+    }
+  }
+}
+
+export function createCompletionToolBudgetMiddleware(cancellation: CompletionRuntimeCancellation) {
+  return createMiddleware({
+    name: "completionToolBudget",
+    wrapToolCall: (request, handler) =>
+      cancellation.run(request.runtime.signal, async () => handler(request))
+  })
+}
+
+/** Applies only inside the original completion-repair scope, at each real HTTP attempt. */
+export function withCompletionModelBudget(delegate: typeof fetch): typeof fetch {
+  return async (input, init) => {
+    const budget = currentCompletionBudget()
+    // No body parsing, counting, timers or stream wrappers for ordinary/off calls.
+    if (!budget) return delegate(input, init)
+    budget.assert()
+    const originalSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    originalSignal?.throwIfAborted()
+    if (typeof init?.body !== "string" || Buffer.byteLength(init.body) > 8 * 1024 * 1024)
+      throw Error("MODS_COMPLETION_MODEL_INPUT_UNSUPPORTED")
+    const request = JSON.parse(init.body) as Record<string, unknown>
+    if (!Array.isArray(request.messages)) throw Error("MODS_COMPLETION_MODEL_INPUT_UNSUPPORTED")
+    // Count the actual serialized request, including tool schemas, plus a
+    // conservative framing allowance. Actual provider usage remains authoritative.
+    const inputUpperBound = Buffer.byteLength(init.body) + 128 * (request.messages.length + 1)
+    const field = Object.hasOwn(request, "max_completion_tokens")
+      ? "max_completion_tokens"
+      : "max_tokens"
+    const configuredOutput = request[field]
+    if (
+      configuredOutput !== undefined &&
+      (!Number.isSafeInteger(configuredOutput) || Number(configuredOutput) < 1)
+    )
+      throw Error("MODS_COMPLETION_MODEL_OUTPUT_UNSUPPORTED")
+    const outputMax = Math.max(
+      1,
+      Math.min(
+        Number(configuredOutput ?? Number.MAX_SAFE_INTEGER),
+        budget.availableTokens() - inputUpperBound
+      )
+    )
+    const reservation = reserveCompletionModelUsage(inputUpperBound, outputMax)!
+    request[field] = outputMax
+    if (request.stream === true)
+      request.stream_options = {
+        ...(request.stream_options as object | undefined),
+        include_usage: true
+      }
+    const signal = AbortSignal.any([
+      ...(originalSignal ? [originalSignal] : []),
+      AbortSignal.timeout(Math.min(2147483647, budget.remainingMs()))
+    ])
+    let settled = false
+    let lastUsage: { input: number; output: number } | undefined
+    let pending = ""
+    let dataLines: string[] = []
+    let eventBytes = 0
+    let terminal = false
+    const decoder = new TextDecoder()
+    const unknown = (): void => {
+      if (settled) return
+      settled = true
+      reservation.settle()
+    }
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      reservation.settle(lastUsage?.input, lastUsage?.output)
+    }
+    const observeUsage = (value: unknown): void => {
+      if (!value || typeof value !== "object") return
+      const usage = (value as Record<string, unknown>).usage
+      if (!usage || typeof usage !== "object") return
+      const record = usage as Record<string, unknown>
+      const input = record.prompt_tokens ?? record.input_tokens
+      const output = record.completion_tokens ?? record.output_tokens
+      if (
+        !Number.isSafeInteger(input) ||
+        Number(input) < 0 ||
+        !Number.isSafeInteger(output) ||
+        Number(output) < 0 ||
+        (record.total_tokens !== undefined &&
+          record.total_tokens !== Number(input) + Number(output))
+      ) {
+        unknown()
+        return
+      }
+      if (lastUsage && (Number(input) < lastUsage.input || Number(output) < lastUsage.output)) {
+        unknown()
+        return
+      }
+      // Compatible SSE usage is cumulative. Repeated terminal usage is not a
+      // second model call; cache counters are already included in prompt_tokens.
+      lastUsage = { input: Number(input), output: Number(output) }
+    }
+    const event = (): void => {
+      if (!dataLines.length) return
+      const text = dataLines.join("\n")
+      dataLines = []
+      eventBytes = 0
+      if (text.trim() === "[DONE]") {
+        terminal = true
+        finish()
+        return
+      }
+      if (terminal) {
+        // Settlement cannot be silently rewritten by a later usage event.
+        budget.charge(undefined, undefined)
+        throw Error("MODS_COMPLETION_USAGE_UNAVAILABLE")
+      }
+      observeUsage(JSON.parse(text))
+    }
+    let response: Response
+    try {
+      response = await delegate(input, { ...init, body: JSON.stringify(request), signal })
+      signal.throwIfAborted()
+    } catch (error) {
+      try {
+        unknown()
+      } catch {
+        /* Preserve the transport error, latch the unknown charge. */
+      }
+      throw error
+    }
+    if (!response.body) {
+      unknown()
+      throw Error("MODS_COMPLETION_USAGE_UNAVAILABLE")
+    }
+    const reader = response.body.getReader()
+    const sse = response.headers.get("content-type")?.includes("text/event-stream") ?? false
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined
+    const cleanup = (): void => signal.removeEventListener("abort", onAbort)
+    const onAbort = (): void => {
+      let error: unknown = signal.reason
+      try {
+        unknown()
+      } catch (failure) {
+        error = failure
+      }
+      void reader.cancel(signal.reason).catch(() => undefined)
+      streamController?.error(error)
+      cleanup()
+    }
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller
+        signal.addEventListener("abort", onAbort, { once: true })
+        if (signal.aborted) onAbort()
+      },
+      async pull(controller) {
+        try {
+          signal.throwIfAborted()
+          const item = await reader.read()
+          pending += decoder.decode(item.value, { stream: !item.done })
+          if (Buffer.byteLength(pending) > 1024 * 1024) throw Error("MODS_COMPLETION_USAGE_LIMIT")
+          if (sse) {
+            let newline: number
+            while ((newline = pending.indexOf("\n")) >= 0) {
+              const line = pending.slice(0, newline).replace(/\r$/, "")
+              pending = pending.slice(newline + 1)
+              if (!line) event()
+              else if (line.startsWith("data:")) {
+                eventBytes += Buffer.byteLength(line)
+                if (eventBytes > 1024 * 1024 || dataLines.length >= 8192)
+                  throw Error("MODS_COMPLETION_USAGE_LIMIT")
+                dataLines.push(line.slice(5).trimStart())
+              }
+            }
+          }
+          if (item.done) {
+            if (sse) event()
+            else observeUsage(JSON.parse(pending))
+            finish()
+            cleanup()
+            controller.close()
+          } else controller.enqueue(item.value)
+        } catch (error) {
+          try {
+            unknown()
+          } catch {
+            /* The original parse/transport failure remains visible. */
+          }
+          cleanup()
+          await reader.cancel(error).catch(() => undefined)
+          controller.error(error)
+        }
+      },
+      async cancel(reason) {
+        try {
+          unknown()
+        } catch {
+          /* Cancellation cannot turn missing usage into PASS. */
+        }
+        cleanup()
+        await reader.cancel(reason)
+      }
+    })
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers
+    })
+  }
+}
 
 /** The small host surface needed by the model boundary.  Keeping this structural
  * avoids making the LangChain wrapper depend on the concrete Mods manager. */

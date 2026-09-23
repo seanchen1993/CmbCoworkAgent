@@ -81,6 +81,8 @@ import {
   validateFunctionAgentOfferResult
 } from "../../../shared/mods/v2/agent"
 import { validateClassicInput, validateClassicResult } from "../../../shared/mods/v2/classic"
+import { parseCompletionPolicy, type CompletionPolicy } from "../../../shared/mods/v2/completion-policy"
+import { CompletionBudget, withCompletionBudget } from "./completion-budget"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -302,64 +304,158 @@ export class FunctionSession {
   }
 
   /** CMB extension: independent votes, never the optional-hook recovery chain. */
-  async checkCompletion(input: ModObject, signal: AbortSignal): Promise<CompletionGateDecision> {
+  async checkCompletion(
+    input: ModObject,
+    signal: AbortSignal,
+    options: {
+      policies?: ReadonlyMap<string, CompletionPolicy | undefined>
+      budgets?: ReadonlyMap<string, CompletionBudget>
+      evidence?(plugin: string, detail: ModObject): void
+    } = {}
+  ): Promise<CompletionGateDecision> {
     this.assertLive()
-    const scoped = AbortSignal.any([signal, this.controller.signal, AbortSignal.timeout(120000)])
+    const sessionSignal = AbortSignal.any([signal, this.controller.signal])
     const reasons: string[] = []
     let blocked = false
     for (const plugin of this.plugins) {
+      let policy = options.policies?.get(plugin.name)
+      if (!options.policies) {
+        const raw = await this.host.state?.(plugin).get("completion-config", sessionSignal)
+        if (raw !== undefined && raw !== null) policy = parseCompletionPolicy(raw)
+      }
+      if (policy?.mode === "off" || (policy && !policy.checks.includes("code-review"))) continue
+      const budget = policy
+        ? (options.budgets?.get(plugin.name) ??
+          new CompletionBudget(policy.modelTokenBudget, policy.timeoutMs))
+        : undefined
+      let reviewed = false
       for (const registration of plugin.guest.registrations) {
         if (registration.pattern !== "completion.check") continue
-        scoped.throwIfAborted()
-        this.assertLive(plugin)
-        // Matcher exceptions, invalid output and handler exceptions reject completion.
-        if (!(await plugin.guest.matches(registration.id, input))) continue
-        const answer = await plugin.guest.invoke(
-          registration.id,
-          input,
-          async (method, args, callSignal) => {
-            this.assertLive(plugin)
-            if (method === "next") return { value: { decision: "pass" } }
-            if (!plugin.capabilities.includes(method))
-              throw new ModFunctionError("MODS_CAPABILITY_DENIED")
-            const value = await this.capability(
-              plugin,
-              method,
-              args,
-              callSignal,
-              { event: "completion.check", registration: registration.id },
-              0,
-              "completion.check"
+        try {
+          sessionSignal.throwIfAborted()
+          this.assertLive(plugin)
+          const timeoutMs = Math.min(120000, budget?.remainingMs() ?? 120000)
+          const scoped = AbortSignal.any([sessionSignal, AbortSignal.timeout(timeoutMs)])
+          const check = async (): Promise<CompletionGateDecision | undefined> => {
+            if (!(await plugin.guest.matches(registration.id, input))) return undefined
+            const answer = await plugin.guest.invoke(
+              registration.id,
+              {
+                ...input,
+                ...(policy
+                  ? { completionPolicy: JSON.parse(JSON.stringify(policy)) as ModJson }
+                  : {})
+              },
+              async (method, args, callSignal) => {
+                this.assertLive(plugin)
+                if (method === "next") return { value: { decision: "pass" } }
+                if (!plugin.capabilities.includes(method))
+                  throw new ModFunctionError("MODS_CAPABILITY_DENIED")
+                const value = await this.capability(
+                  plugin,
+                  method,
+                  args,
+                  callSignal,
+                  { event: "completion.check", registration: registration.id },
+                  0,
+                  "completion.check"
+                )
+                return value === undefined ? {} : { value }
+              },
+              {
+                event: "completion.check",
+                origin: { plugin: "engine", tier: "core" },
+                capabilities: plugin.capabilities,
+                plugin: { name: plugin.name, root: plugin.root },
+                signal: scoped,
+                timeoutMs
+              }
             )
-            return value === undefined ? {} : { value }
-          },
-          {
-            event: "completion.check",
-            origin: { plugin: "engine", tier: "core" },
-            capabilities: plugin.capabilities,
-            plugin: { name: plugin.name, root: plugin.root },
-            signal: scoped,
-            timeoutMs: 120000
+            scoped.throwIfAborted()
+            this.assertLive(plugin)
+            return parseCompletionGateDecision(answer.value)
           }
-        )
-        scoped.throwIfAborted()
-        this.assertLive(plugin)
-        const decision = parseCompletionGateDecision(answer.value)
-        if (decision.decision === "block") {
-          blocked = true
+          const decision = budget ? await withCompletionBudget(budget, check) : await check()
+          if (!decision) continue
+          reviewed = true
+          options.evidence?.(plugin.name, {
+            ...decision,
+            mode: policy?.mode ?? "legacy",
+            check: "code-review",
+            source: "guest-opinion",
+            businessAccepted: false,
+            ...(budget
+              ? {
+                  outputTokensReserved: budget.outputReserved,
+                  modelTokenBudget: budget.tokenLimit,
+                  inputTokens: budget.inputTokens,
+                  outputTokens: budget.outputTokens
+                }
+              : {})
+          })
+          if (policy?.mode === "report" || decision.decision === "pass") continue
+          const attempts = typeof input.revisionAttempts === "number" ? input.revisionAttempts : 0
+          if (
+            decision.decision === "block" ||
+            (policy && (policy.mode !== "repair" || attempts >= policy.maxRepairs))
+          )
+            blocked = true
           reasons.push(`${plugin.name}: ${decision.reason}`)
-          continue
+        } catch (error) {
+          sessionSignal.throwIfAborted()
+          this.assertLive(plugin)
+          if (!policy) throw error
+          reviewed = true
+          let reason = error instanceof Error ? error.message : "COMPLETION_CHECK_FAILED"
+          try {
+            budget?.assert()
+          } catch (failure) {
+            reason = failure instanceof Error ? failure.message : reason
+          }
+          options.evidence?.(plugin.name, {
+            decision: "block",
+            reason,
+            mode: policy.mode,
+            check: "code-review",
+            source: "guest-error",
+            businessAccepted: false,
+            ...(budget
+              ? {
+                  outputTokensReserved: budget.outputReserved,
+                  modelTokenBudget: budget.tokenLimit,
+                  inputTokens: budget.inputTokens,
+                  outputTokens: budget.outputTokens
+                }
+              : {})
+          })
+          if (policy.mode === "report") continue
+          blocked = true
+          reasons.push(`${plugin.name}: ${reason}`)
         }
-        if (decision.decision === "revise") reasons.push(`${plugin.name}: ${decision.reason}`)
+      }
+      if (policy && !reviewed) {
+        const reason = `COMPLETION_CHECK_UNAVAILABLE: ${plugin.name}: code-review`
+        options.evidence?.(plugin.name, {
+          decision: "block",
+          reason,
+          mode: policy.mode,
+          check: "code-review",
+          source: "guest-unavailable",
+          businessAccepted: false
+        })
+        if (policy.mode !== "report") {
+          blocked = true
+          reasons.push(reason)
+        }
       }
     }
-    scoped.throwIfAborted()
+    sessionSignal.throwIfAborted()
     this.assertLive()
     const result: ModObject = reasons.length
       ? { decision: blocked ? "block" : "revise", reason: reasons.join("\n").slice(0, 8000) }
       : { decision: "pass" }
-    const safe = await this.host.publish(result, scoped)
-    scoped.throwIfAborted()
+    const safe = await this.host.publish(result, sessionSignal)
+    sessionSignal.throwIfAborted()
     this.assertLive(undefined, true)
     return parseCompletionGateDecision(safe)
   }

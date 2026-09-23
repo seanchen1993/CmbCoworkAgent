@@ -11,6 +11,7 @@ import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { createHash, randomInt, randomUUID } from "node:crypto"
 import { parseCompletionPolicy } from "../../../shared/mods/v2/completion-policy"
+import { CompletionBudget, bindCompletionGateBudget } from "./completion-budget"
 import { ProjectFunctionFiles, type FunctionFileScope } from "./file-access"
 import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModPluginSource } from "../manager"
@@ -637,6 +638,7 @@ export class FunctionModsManager {
 
   completionEvidence(workspace: string, threadId: string, limit = 100): CompletionEvidenceRecord[] {
     this.host.assertThread?.(workspace, threadId)
+    if (!this.host.enabled(workspace)) return []
     return this.store.completionEvidence(workspace, threadId, limit)
   }
 
@@ -881,7 +883,15 @@ export class FunctionModsManager {
     if (!entry || !this.host.enabled(workspace)) return undefined
     await entry.loading
     if (this.sessions.get(key) !== entry) throw new ModFunctionError("MODS_SCOPE_CHANGED")
-    if (!entry.session!.hasCompletionGate()) return undefined
+    const completionProviders = new Set(
+      entry
+        .session!.plugins.filter((plugin) =>
+          plugin.guest.registrations.some(
+            (registration) => registration.pattern === "completion.check"
+          )
+        )
+        .map((plugin) => plugin.name)
+    )
     const first = context()
     const turnId = typeof first.turnId === "string" ? first.turnId : ""
     const runId = typeof first.runId === "string" ? first.runId : undefined
@@ -891,26 +901,62 @@ export class FunctionModsManager {
       this.host.assertThread?.(workspace, threadId)
       for (const snapshot of entry.snapshots.values()) this.store.assertGrant(snapshot.grant)
     }
-    const configuration = (): ModObject => Object.fromEntries(
-      [...entry.snapshots.keys()].sort().map((name) => {
-        const namespace = JSON.stringify([workspace, name])
-        return [name, Object.fromEntries(["review-mode", "review-target", "completion-config"].map(
-          (key) => [key, this.store.functionState.get(namespace, key) ?? null]))]
+    const configuration = (): ModObject =>
+      Object.fromEntries(
+        [...entry.snapshots.keys()].sort().map((name) => {
+          const namespace = JSON.stringify([workspace, name])
+          return [
+            name,
+            Object.fromEntries(
+              ["review-mode", "review-target", "completion-config"].map((key) => [
+                key,
+                this.store.functionState.get(namespace, key) ?? null
+              ])
+            )
+          ]
+        })
+      )
+    const configured = new Map(
+      [...entry.snapshots.keys()].map((name) => {
+        const raw = this.store.functionState.get(
+          JSON.stringify([workspace, name]),
+          "completion-config"
+        )
+        if (raw === undefined || raw === null) return [name, undefined] as const
+        try {
+          return [name, parseCompletionPolicy(raw)] as const
+        } catch {
+          throw new ModFunctionError("MODS_COMPLETION_CONFIG_INVALID")
+        }
       })
     )
-    const configured = [...entry.snapshots.keys()].map((name) => {
-      const raw = this.store.functionState.get(JSON.stringify([workspace, name]), "completion-config")
-      if (raw === undefined || raw === null) return null
-      try { return parseCompletionPolicy(raw) } catch { throw new ModFunctionError("MODS_COMPLETION_CONFIG_INVALID") }
-    })
     // An explicitly persisted off policy removes the gate. Legacy plugins without this
     // setting retain their existing completion hook behavior.
-    if (configured.length > 0 && configured.every((policy) => policy?.mode === "off")) return undefined
-    const policyFor = (name: string) => {
-      const raw = this.store.functionState.get(JSON.stringify([workspace, name]), "completion-config")
-      if (raw === undefined || raw === null) return undefined
-      return parseCompletionPolicy(raw)
-    }
+    const active = [...configured].filter(([name, policy]) =>
+      policy ? policy.mode !== "off" : completionProviders.has(name)
+    )
+    if (active.length === 0) return undefined
+    const policyFor = (name: string) => configured.get(name)
+    const policies = active
+      .map(([, policy]) => policy)
+      .filter((policy): policy is NonNullable<typeof policy> => !!policy)
+    const reportOnly = active.every(([, policy]) => policy?.mode === "report")
+    const budgets = new Map<string, CompletionBudget>()
+    const mandatory = policies.filter((policy) => policy.mode !== "report")
+    const sharedBudget = mandatory.length
+      ? new CompletionBudget(
+          Math.min(...mandatory.map((policy) => policy.modelTokenBudget)),
+          Math.min(...mandatory.map((policy) => policy.timeoutMs))
+        )
+      : undefined
+    for (const [name, policy] of active)
+      if (policy)
+        budgets.set(
+          name,
+          policy.mode === "report"
+            ? new CompletionBudget(policy.modelTokenBudget, policy.timeoutMs)
+            : sharedBudget!
+        )
     const initialConfig = JSON.stringify(configuration())
     const capture = async (signal: AbortSignal): Promise<CompletionEvidenceBinding> => {
       assertLive()
@@ -925,118 +971,285 @@ export class FunctionModsManager {
       if (JSON.stringify(config) !== initialConfig) throw Error("COMPLETION_CONFIG_CHANGED")
       const paths = [...entry.snapshots.keys()].flatMap((name) => {
         const policy = policyFor(name)
-        if (!policy) return []
+        if (!policy || policy.mode === "off") return []
         if (policy.scope === "file") return policy.target ? [policy.target] : []
-        if (policy.scope === "feature") return policy.feature ? [`.autobizdevops/features/${policy.feature}`] : []
+        if (policy.scope === "feature")
+          return [
+            ...(policy.feature ? [`.autobizdevops/features/${policy.feature}`] : []),
+            ...(policy.target ? [policy.target] : [])
+          ]
         if (policy.scope === "project") return ["."]
         return []
       })
       return captureCompletionBinding({
-        workspace: scope?.workspace ?? workspace, threadId, turnId, runId, pluginDigests,
-        runtimeGeneration: entry.generation, config, paths, signal,
+        workspace: scope?.workspace ?? workspace,
+        threadId,
+        turnId,
+        runId,
+        pluginDigests,
+        runtimeGeneration: entry.generation,
+        config,
+        paths,
+        signal,
         excludePaths: this.store.evidenceExcludedPaths,
-        assertLive: () => { assertLive(); scope?.assertLive() }
+        assertLive: () => {
+          assertLive()
+          scope?.assertLive()
+        }
       })
     }
     let pending: Promise<unknown> | undefined
     // No cached PASS is reused. Each revision and duplicate delivery gets a fresh binding.
-    return (input) => {
+    const gate: CompletionGate = (input) => {
       if (pending) return Promise.reject(Error("COMPLETION_CHECK_IN_PROGRESS"))
       const run = async () => {
-        const { signal, revisionAttempts, maxRevisionAttempts } = input
-        signal.throwIfAborted()
-        assertLive()
-        const binding = await capture(signal)
+        const { signal: originalSignal, revisionAttempts, maxRevisionAttempts } = input
+        const deadline = new AbortController()
+        const signal = AbortSignal.any([originalSignal, deadline.signal])
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let binding: CompletionEvidenceBinding | undefined
         const attempt = randomUUID()
-        const record = (phase: CompletionEvidenceRecord["phase"], status: CompletionEvidenceRecord["status"], detail?: ModJson) => {
+        const record = (
+          phase: CompletionEvidenceRecord["phase"],
+          status: CompletionEvidenceRecord["status"],
+          detail?: ModJson
+        ) => {
+          if (!binding) return
           this.store.saveCompletionEvidence({
-            id: randomUUID(), idempotencyKey: `${attempt}:${phase}:${status}:${randomUUID()}`,
-            workspace, threadId, turnId, runId: binding.runId, phase, status, binding,
-            ...(detail === undefined ? {} : { detail }), at: Date.now()
+            id: randomUUID(),
+            idempotencyKey: `${attempt}:${phase}:${status}:${randomUUID()}`,
+            workspace,
+            threadId,
+            turnId,
+            runId: binding.runId,
+            phase,
+            status,
+            binding,
+            ...(detail === undefined ? {} : { detail }),
+            at: Date.now()
           })
+          this.host.changed(threadId)
         }
-        record("check.started", "running", { attempt, revisionAttempts, maxRevisionAttempts })
         try {
-          const safe = await this.host.publish(workspace, {
-            ...context(), revisionAttempts, maxRevisionAttempts,
-            evidenceId: attempt, inputFingerprint: bindingFingerprint(binding)
-          }, signal)
-          const result = await entry.session!.checkCompletion(safe as ModObject, signal)
+          originalSignal.throwIfAborted()
+          assertLive()
+          if (sharedBudget) {
+            timer = setTimeout(
+              () => deadline.abort(new ModFunctionError("MODS_COMPLETION_TIMEOUT")),
+              sharedBudget.remainingMs()
+            )
+            timer.unref()
+          }
+          binding = await capture(signal)
+          signal.throwIfAborted()
+          record("check.started", "running", {
+            attempt,
+            revisionAttempts,
+            maxRevisionAttempts,
+            rules: active.map(([plugin, policy]) => ({
+              plugin,
+              ...JSON.parse(JSON.stringify(policy ?? { mode: "legacy", checks: ["code-review"] }))
+            }))
+          })
+          for (const [name, policy] of active) {
+            if (!policy?.checks.includes("code-review") || completionProviders.has(name)) continue
+            const reason = `COMPLETION_CHECK_UNAVAILABLE: ${name}: code-review`
+            record("validator.result", "block", {
+              plugin: name,
+              kind: "code-review",
+              reason,
+              businessAccepted: false
+            })
+            if (policy.mode !== "report") {
+              record("check.result", "block", { reason, businessAccepted: false })
+              return { decision: "block", reason }
+            }
+          }
+          const safe = await this.host.publish(
+            workspace,
+            {
+              ...context(),
+              revisionAttempts,
+              maxRevisionAttempts,
+              evidenceId: attempt,
+              inputFingerprint: bindingFingerprint(binding),
+              completionFiles: binding.files.map((file) => ({ ...file })),
+              ...(binding.diffFiles ? { completionDiffFiles: binding.diffFiles } : {})
+            },
+            signal
+          )
+          const result = await entry.session!.checkCompletion(safe as ModObject, signal, {
+            policies: configured,
+            budgets,
+            evidence: (plugin, detail) =>
+              record("validator.result", detail.decision === "pass" ? "pass" : "block", {
+                plugin,
+                ...detail
+              })
+          })
           signal.throwIfAborted()
           assertLive()
-          const policies = [...entry.snapshots.keys()]
-            .map((name) => policyFor(name))
-            .filter((policy): policy is NonNullable<typeof policy> => !!policy)
-          const reportOnly = policies.length > 0 && policies.every((policy) => policy.mode === "report")
-          const projectPolicies = [...entry.snapshots.keys()]
-            .map((name) => policyFor(name))
-            .filter((policy): policy is NonNullable<typeof policy> =>
-              !!policy && policy.mode !== "off" && policy.checks.some((check) => check === "unit-test" || check === "e2e")
-            )
           for (const kind of ["unit-test", "e2e"] as const) {
-            if (!projectPolicies.some((policy) => policy.checks.includes(kind))) continue
+            const projectPolicies = policies.filter((policy) => policy.checks.includes(kind))
+            if (!projectPolicies.length) continue
+            const mandatoryPolicies = projectPolicies.filter((policy) => policy.mode !== "report")
+            const selectedPolicies = mandatoryPolicies.length ? mandatoryPolicies : projectPolicies
+            const remaining = Math.min(
+              ...active
+                .filter(([, policy]) => policy && selectedPolicies.includes(policy))
+                .map(([name]) => budgets.get(name)!.deadline - Date.now())
+            )
+            if (remaining <= 0) {
+              record("validator.result", "block", {
+                kind,
+                reason: "MODS_COMPLETION_TIMEOUT",
+                businessAccepted: false
+              })
+              if (mandatoryPolicies.length) throw new ModFunctionError("MODS_COMPLETION_TIMEOUT")
+              continue
+            }
             const check = await runProjectCheck(
               this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
               kind as ProjectCheckKind,
               signal,
-              Math.min(...projectPolicies.map((policy) => policy.timeoutMs))
+              remaining
             )
-            record("validator.result", check.passed ? "pass" : "block", { kind, passed: check.passed, exitCode: check.exitCode, outputFingerprint: check.outputFingerprint, ...(check.reason ? { reason: check.reason } : {}) })
-            if (!check.passed && projectPolicies.some((policy) => policy.mode === "check" || policy.mode === "repair")) {
-              const repairing = projectPolicies.some((policy) => policy.mode === "repair")
-              const decision = repairing && revisionAttempts < Math.max(...projectPolicies.map((policy) => policy.maxRepairs)) ? "revise" : "block"
-              record("check.result", decision, { reason: check.reason ?? `PROJECT_${kind.toUpperCase()}_FAILED`, source: "host-project-check", businessAccepted: false })
+            signal.throwIfAborted()
+            sharedBudget?.assert()
+            record("validator.result", check.passed ? "pass" : "block", {
+              kind,
+              passed: check.passed,
+              exitCode: check.exitCode,
+              outputFingerprint: check.outputFingerprint,
+              ...(check.reason ? { reason: check.reason } : {})
+            })
+            if (
+              !check.passed &&
+              projectPolicies.some((policy) => policy.mode === "check" || policy.mode === "repair")
+            ) {
+              const mandatory = projectPolicies.filter((policy) => policy.mode !== "report")
+              const repairing = mandatory.every((policy) => policy.mode === "repair")
+              const decision =
+                repairing &&
+                revisionAttempts <
+                  Math.min(maxRevisionAttempts, ...mandatory.map((policy) => policy.maxRepairs))
+                  ? "revise"
+                  : "block"
+              record("check.result", decision, {
+                reason: check.reason ?? `PROJECT_${kind.toUpperCase()}_FAILED`,
+                source: "host-project-check",
+                businessAccepted: false
+              })
               return { decision, reason: check.reason ?? `PROJECT_${kind.toUpperCase()}_FAILED` }
             }
           }
-          const validatorPolicies = [...entry.snapshots.keys()]
-            .map((name) => policyFor(name))
-            .filter((policy): policy is NonNullable<typeof policy> =>
-              !!policy && policy.checks.includes("autobiz-validator") && policy.mode !== "off"
+          const validatorPolicies = policies.filter((policy) =>
+            policy.checks.includes("autobiz-validator")
+          )
+          for (const feature of new Set(validatorPolicies.map((policy) => policy.feature))) {
+            const selectedPolicies = validatorPolicies.filter(
+              (policy) => policy.feature === feature
             )
-          if (validatorPolicies.length > 0) {
+            const mandatoryPolicies = selectedPolicies.filter((policy) => policy.mode !== "report")
+            const timedPolicies = mandatoryPolicies.length ? mandatoryPolicies : selectedPolicies
+            const remaining = Math.min(
+              ...active
+                .filter(([, policy]) => policy && timedPolicies.includes(policy))
+                .map(([name]) => budgets.get(name)!.deadline - Date.now())
+            )
+            if (remaining <= 0) {
+              record("validator.result", "block", {
+                kind: "autobiz-validator",
+                reason: "MODS_COMPLETION_TIMEOUT",
+                businessAccepted: false
+              })
+              if (mandatoryPolicies.length) throw new ModFunctionError("MODS_COMPLETION_TIMEOUT")
+              continue
+            }
             const validator = await runAutobizValidator(
               this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
-              validatorPolicies.find((policy) => policy.feature)?.feature,
+              feature,
               signal,
-              Math.min(...validatorPolicies.map((policy) => policy.timeoutMs))
+              remaining
             )
-            record("validator.result", validator.passed ? "pass" : "block", { ...validator, attempt } as unknown as ModJson)
-            if (!validator.passed && !reportOnly) {
-              const repairing = validatorPolicies.some((policy) => policy.mode === "repair")
-              const decision = repairing && revisionAttempts < Math.max(...validatorPolicies.map((p) => p.maxRepairs)) ? "revise" : "block"
-              record("check.result", decision, { reason: validator.reason, source: "host-autobiz-validator", businessAccepted: false })
+            signal.throwIfAborted()
+            sharedBudget?.assert()
+            record("validator.result", validator.passed ? "pass" : "block", {
+              ...validator,
+              attempt
+            } as unknown as ModJson)
+            const mandatory = selectedPolicies.filter((policy) => policy.mode !== "report")
+            if (!validator.passed && mandatory.length) {
+              const repairing = mandatory.every((policy) => policy.mode === "repair")
+              const decision =
+                repairing &&
+                revisionAttempts <
+                  Math.min(maxRevisionAttempts, ...mandatory.map((p) => p.maxRepairs))
+                  ? "revise"
+                  : "block"
+              record("check.result", decision, {
+                reason: validator.reason,
+                source: "host-autobiz-validator",
+                businessAccepted: false
+              })
               return { decision, reason: `AUTOBIZ_VALIDATOR_FAILED: ${validator.reason}` }
             }
           }
           if (!sameCompletionBinding(binding, await capture(signal))) {
             record("invalidated", "stale", { reason: "input-changed" })
+            if (reportOnly) return { decision: "pass" }
             return { decision: "block", reason: "COMPLETION_EVIDENCE_STALE" }
           }
+          signal.throwIfAborted()
+          sharedBudget?.assertSettled()
           if (reportOnly) {
             record("check.result", "pass", {
-              ...result, decision: "pass", source: "guest-opinion-report", businessAccepted: false,
+              ...result,
+              decision: "pass",
+              source: "guest-opinion-report",
+              businessAccepted: false,
               reportedDecision: result.decision
             })
             return { decision: "pass" }
           }
-          record("check.result", result.decision, { ...result, source: "guest-opinion", businessAccepted: false })
-          if (result.decision === "pass" && validatorPolicies.some((policy) => policy.mode === "check" || policy.mode === "repair")) {
+          record("check.result", result.decision, {
+            ...result,
+            source: "guest-opinion",
+            businessAccepted: false
+          })
+          if (
+            result.decision === "pass" &&
+            validatorPolicies.some((policy) => policy.mode === "check" || policy.mode === "repair")
+          ) {
             if (entry.completionProofs.size >= 32) entry.completionProofs.clear()
             entry.completionProofs.set(attempt, capture)
           }
-          if (result.decision === "revise") record("repair.attempt", "revise", { revisionAttempts: revisionAttempts + 1 })
+          if (result.decision === "revise")
+            record("repair.attempt", "revise", { revisionAttempts: revisionAttempts + 1 })
           return result
         } catch (error) {
-          record("check.result", signal.aborted ? "cancelled" : "error", {
-            error: error instanceof Error ? error.message.slice(0, 2048) : "COMPLETION_CHECK_FAILED"
-          })
+          const reason = deadline.signal.aborted
+            ? "MODS_COMPLETION_TIMEOUT"
+            : error instanceof Error
+              ? error.message.slice(0, 2048)
+              : "COMPLETION_CHECK_FAILED"
+          record("check.result", originalSignal.aborted ? "cancelled" : "error", { error: reason })
+          originalSignal.throwIfAborted()
+          assertLive()
+          if (reason.startsWith("MODS_COMPLETION_"))
+            return reportOnly ? { decision: "pass" } : { decision: "block", reason }
           throw error
+        } finally {
+          if (timer) clearTimeout(timer)
         }
       }
-      pending = run().finally(() => { pending = undefined })
+      pending = run().finally(() => {
+        pending = undefined
+      })
       return pending
     }
+    if (sharedBudget) bindCompletionGateBudget(gate, sharedBudget)
+    return gate
   }
   async turnComplete(
     workspace: string,

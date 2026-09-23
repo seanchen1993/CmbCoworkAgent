@@ -19,6 +19,7 @@ import { compileMod, readModApiVersion, type CompiledMod } from "./loader"
 import { ModRuntimeClient } from "./runtime-client"
 import { ModEngine, classifyModTool, type ApprovedMod, type ModDispatchRequest } from "./engine"
 import { ModError, ModPermissionError, modErrorCode } from "./errors"
+import { bindCompletionGateBudget, completionGateBudget } from "./v2/completion-budget"
 import { validateModRegistrations } from "./registrations"
 import { filterModData, projectModResult } from "./publication"
 import { getModCallContext, modCallContext } from "./context"
@@ -691,7 +692,7 @@ export class ModsManager {
     if (!binding || binding.workspace !== key || binding.turnId !== context().turnId)
       throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
     this.assertFunctionBinding(binding)
-    return (input: import("../agent/skill-lifecycle/completion-gate").CompletionGateInput) =>
+    const wrapped = (input: import("../agent/skill-lifecycle/completion-gate").CompletionGateInput) =>
       withFunctionAgentExecution(
         {
           workspace: key,
@@ -714,6 +715,9 @@ export class ModsManager {
           return result
         }
       )
+    const budget = completionGateBudget(gate)
+    if (budget) bindCompletionGateBudget(wrapped, budget)
+    return wrapped
   }
 
   isGloballyEnabled(): boolean {

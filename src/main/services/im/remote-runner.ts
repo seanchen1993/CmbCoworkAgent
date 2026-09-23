@@ -593,7 +593,7 @@ export async function executePreparedRemoteStandardTurn(
           }),
           hookScope,
           skillUseTracker,
-          runRevision: async (revisionPrompt) => {
+          runRevision: async (revisionPrompt, revisionSignal) => {
             revision += 1
             const stream = await agent!.stream(
               {
@@ -606,12 +606,12 @@ export async function executePreparedRemoteStandardTurn(
               },
               {
                 configurable: { thread_id: threadId },
-                signal,
+                signal: revisionSignal ?? signal,
                 streamMode: ["messages", "values"],
                 recursionLimit: getAgentGraphRecursionLimit()
               }
             )
-            await streamConsumer.consume(stream, signal)
+            await streamConsumer.consume(stream, revisionSignal ?? signal)
           },
           sendNotice: (message) =>
             mirrorStandardTurnStreamToRenderer(threadId, {

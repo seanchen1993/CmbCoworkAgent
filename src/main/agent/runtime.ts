@@ -7,6 +7,10 @@ import {
 } from "./mods-session-view"
 import {
   createModModelBoundary,
+  withCompletionModelBudget,
+  createCompletionRuntimeCancellation,
+  createCompletionToolBudgetMiddleware,
+  type CompletionRuntimeCancellation,
   type FunctionModelStreamHost,
   type FunctionStepModelHost
 } from "./mods-model-boundary"
@@ -17,6 +21,7 @@ import { ModError } from "../mods/errors"
 import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
 import type { FunctionToolInfo } from "../../shared/mods/v2/tools"
 import { currentFunctionExecution } from "../mods/v2/execution-context"
+import { currentCompletionBudget } from "../mods/v2/completion-budget"
 import { getLocalThreadRunLease } from "./thread-run-lease"
 import {
   captureThreadMutationLease,
@@ -2324,6 +2329,7 @@ function assembleDeepAgent(
     modSessionCompact,
     modContextSources,
     modTurnRunId,
+    completionCancellation,
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
     // read-only cmdlets (Get-Content, …) aren't false-blocked. "unknown" =
@@ -2561,7 +2567,7 @@ function assembleDeepAgent(
             return readOnlyExecuteBlockMessage(windowsShellKind)
           }
           if (input.run_in_background) {
-            if (managedExecution) {
+            if (managedExecution || currentCompletionBudget()) {
               return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
             }
             return sandbox.executeBackground(input.command, input.cwd)
@@ -2865,12 +2871,20 @@ function assembleDeepAgent(
   )
 
   const modManager = getModsManager()
+  const completionToolBudgetMiddleware = completionCancellation
+    ? [
+        createCompletionToolBudgetMiddleware(
+          completionCancellation as CompletionRuntimeCancellation
+        )
+      ]
+    : []
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
     ...(soloTaskTraceManager ? [soloTaskTraceManager.middleware] : []),
     // FIRST for the same reason as the main agent: reject recovered-malformed
     // calls before any tool lifecycle (hooks/fuse/task-mmd) can observe them.
     createMalformedToolCallGuardMiddleware(),
+    ...completionToolBudgetMiddleware,
     ...(loopGuardsEnabled
       ? [
           createActionStationarityMiddleware({
@@ -3163,6 +3177,7 @@ function assembleDeepAgent(
       // task-mmd must not observe a tool that never runs. Mirrors Claude Code's
       // validate-before-permissions order.
       createMalformedToolCallGuardMiddleware(),
+      ...completionToolBudgetMiddleware,
       ...(loopGuardsEnabled
         ? [
             // Grok-style action-stationarity guard: observe the complete normalized
@@ -4158,7 +4173,8 @@ export interface ModelRetryHooks {
 function createRetryingFetch(
   hooks?: ModelRetryHooks,
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
-  capture?: { threadId?: string }
+  capture?: { threadId?: string },
+  completionBudget = true
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
@@ -4209,7 +4225,8 @@ function createRetryingFetch(
           typeof init?.body === "string" && init.body.includes('"stream":true')
         const attemptStartedAt = Date.now()
         // Observe only attempts submitted to fetch, after cancellation checks.
-        const sendFetch = capture ? withRawApiCallCapture(fetch, capture.threadId) : fetch
+        const rawFetch = capture ? withRawApiCallCapture(fetch, capture.threadId) : fetch
+        const sendFetch = completionBudget ? withCompletionModelBudget(rawFetch) : rawFetch
         const res = await sendFetch(input, { ...init, signal: attemptCtrl.signal })
 
         // IMPORTANT: do not cancel the per-attempt timeout yet for streaming
@@ -4254,6 +4271,8 @@ function createRetryingFetch(
           /* ignore */
         }
 
+        if (completionBudget) currentCompletionBudget()?.assert()
+
         const delay = computeBackoffDelay(attempt)
         console.warn(
           `[Runtime] fetch HTTP ${res.status}, retry ${attempt}/${maxRetries} after ${delay}ms`
@@ -4268,6 +4287,9 @@ function createRetryingFetch(
         continue
       } catch (err) {
         cleanup()
+
+        // Unknown/failed usage cannot be hidden by a later successful retry.
+        if (completionBudget) currentCompletionBudget()?.assert()
 
         // Parent signal aborted (user cancel) — propagate immediately, no retry.
         if (parentSignal?.aborted) throw err
@@ -4544,11 +4566,14 @@ export function getModelInstance(
   const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
   const modelFetch =
-    purpose === "agent"
-      ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId })
-      : retryHooks || maxRetryAttempts !== undefined
-        ? createRetryingFetch(retryHooks, maxRetryAttempts)
-        : defaultRetryingFetch
+    purpose === "function-completion"
+      // SDK complete/classify/fork already reserve and settle at FunctionModels.
+      ? createRetryingFetch(retryHooks, maxRetryAttempts, undefined, false)
+      : purpose === "agent"
+        ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId })
+        : retryHooks || maxRetryAttempts !== undefined
+          ? createRetryingFetch(retryHooks, maxRetryAttempts)
+          : defaultRetryingFetch
 
   const baseFields = {
     model: resolvedModel,
@@ -5059,6 +5084,8 @@ export async function prepareForegroundRuntimeToolCatalog(
 }
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
+  const completionCancellation = createCompletionRuntimeCancellation(options.abortSignal)
+  options = { ...options, abortSignal: completionCancellation.signal }
   const {
     threadId,
     agentId,
@@ -7363,6 +7390,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   }
 
   const agent = createDeepAgent({
+    completionCancellation,
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,
