@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto"
+import type { DatabaseSync } from "node:sqlite"
+import { encodeModJson } from "../../../shared/mods/validation"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
@@ -634,4 +637,72 @@ it("rechecks both native write permissions after the checkpoint approval boundar
   await expect(checkpoint(f, commit)).rejects.toThrow("PATH_CHANGED_DURING_APPROVAL")
   expect(query).toHaveBeenCalledTimes(3)
   expect(commit).not.toHaveBeenCalled()
+})
+
+it.each([false, true])(
+  "records native read defaults once while preserving hook rewrites (%s)",
+  async (rewrite) => {
+    const f = await fixture()
+    const file = join(f.workspace, "read.txt")
+    writeFileSync(file, "first line\nsecond line\nthird line")
+    const store = f.manager.store
+    const db = (store as unknown as { db: DatabaseSync }).db
+    const changes = () => Number(db.prepare("SELECT total_changes() AS n").get()!.n)
+    const bind = store.bindFinalInput.bind(store)
+    const writes: number[] = []
+    const initialHashes: unknown[] = []
+    const finalInputs: unknown[] = []
+    vi.spyOn(store, "bindFinalInput").mockImplementation((id, tool, args) => {
+      initialHashes.push(
+        store.audit(f.grant.workspace).find((row) => row.callId === id)!.finalArgsHash
+      )
+      const before = changes()
+      bind(id, tool, args)
+      writes.push(changes() - before)
+      finalInputs.push(args)
+    })
+    vi.spyOn(
+      f.sandbox as unknown as { runHooks(event: string): Promise<HookResult | null> },
+      "runHooks"
+    ).mockImplementation(async (event) =>
+      event === "PreToolUse" && rewrite
+        ? {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            blocked: false,
+            updatedInput: { offset: 1, limit: 1 }
+          }
+        : null
+    )
+    const result = await f.run({ tool: "read_file", file_path: file })
+    const hash = (args: unknown) =>
+      createHash("sha256").update("host:read_file").update(encodeModJson(args)).digest("hex")
+    expect(JSON.stringify(result)).toContain(rewrite ? "second line" : "first line")
+    if (rewrite) expect(JSON.stringify(result)).not.toContain("first line")
+    expect(initialHashes).toEqual([
+      hash({ file_path: file, filePath: file, offset: 0, limit: 2000 })
+    ])
+    expect(writes).toEqual([rewrite ? 1 : 0])
+    expect(store.audit(f.grant.workspace)).toEqual([
+      expect.objectContaining({
+        status: "succeeded",
+        originalArgsHash: hash({ file_path: file }),
+        finalArgsHash: hash(finalInputs[0])
+      })
+    ])
+  }
+)
+
+it("keeps native reads and their output unchanged with the project gate disabled", async () => {
+  const f = await fixture()
+  const file = join(f.workspace, "off.txt")
+  writeFileSync(file, "unchanged native read")
+  f.manager.configure(f.workspace, false, false)
+  const claim = vi.spyOn(f.manager.store, "claim")
+  const bind = vi.spyOn(f.manager.store, "bindFinalInput")
+  expect(await f.sandbox.read(file)).toContain("unchanged native read")
+  expect(claim).not.toHaveBeenCalled()
+  expect(bind).not.toHaveBeenCalled()
+  expect(f.manager.store.audit(f.grant.workspace)).toEqual([])
 })

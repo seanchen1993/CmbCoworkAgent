@@ -2329,7 +2329,8 @@ export class ModsManager {
     binding: ModThreadBinding,
     toolId: string,
     args: Record<string, unknown>,
-    core: (args: Record<string, unknown>) => Promise<T>
+    core: (args: Record<string, unknown>) => Promise<T>,
+    describeInitialInput?: ModDispatchRequest["describeInitialInput"]
   ): Promise<T> {
     // An in-flight capability cannot escape revocation by reaching the now-disabled fast path.
     getModCallContext()?.assertLive?.()
@@ -2393,6 +2394,7 @@ export class ModsManager {
     const session = await this.session(binding)
     session.refs++
     const request = this.request(binding, identity, toolId, args, inherited?.userInitiated)
+    request.describeInitialInput = describeInitialInput
     try {
       const value = await session.engine.dispatch(request, core)
       return this.publish(workspace, value, identity.toolCallId ?? identity.callId, binding.signal)

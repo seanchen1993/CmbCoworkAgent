@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+import { encodeModJson } from "../../shared/mods/validation"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
@@ -377,4 +379,34 @@ describe("Mod execution contract", () => {
       )
     ).toBe("safe")
   })
+})
+
+it("describes host defaults after middleware without changing hook or core inputs", async () => {
+  const f = await fixture(`on.tool({id:"rewrite",tools:["host:write_file"]},async($,e,next)=>{
+    if (Object.keys(e.args).join() !== "content") throw Error("unexpected default exposure");
+    const r=await next({args:{content:"rewritten"}});
+    return {kind:"result",receipt:r.receipt,projection:r.projection};
+  })`)
+  const described: unknown[] = []
+  f.request.describeInitialInput = (args) => {
+    described.push(args)
+    return { ...args, nativeDefault: true }
+  }
+  const result = await f.engine.dispatch(f.request, async (args) => {
+    expect(args).toEqual({ content: "rewritten" })
+    expect(getModCallContext()!.effectiveArgs).toEqual(args)
+    return "native output"
+  })
+  expect(result).toBe("native output")
+  expect(described).toEqual([{ content: "rewritten" }])
+  const hash = (args: unknown) =>
+    createHash("sha256").update(f.request.toolId).update(encodeModJson(args)).digest("hex")
+  expect(f.store.audit("workspace")[0]).toMatchObject({
+    originalArgsHash: hash({ content: "original" }),
+    finalArgsHash: hash({ content: "rewritten", nativeDefault: true }),
+    status: "succeeded"
+  })
+  await expect(f.engine.dispatch(f.request, async () => "duplicate")).rejects.toThrow(
+    "MODS_CALL_ALREADY_STARTED"
+  )
 })

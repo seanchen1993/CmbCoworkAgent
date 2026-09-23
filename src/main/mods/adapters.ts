@@ -213,6 +213,10 @@ export function attachModBackend(
   options: {
     managedExecution?: boolean
     userInput?: (input: ModObject, signal: AbortSignal) => Promise<string>
+    describeInitialInput?: (
+      method: string,
+      values: readonly unknown[]
+    ) => Record<string, unknown> | undefined
   } = {}
 ): () => void {
   const record = instance as Record<string, unknown>
@@ -237,28 +241,41 @@ export function attachModBackend(
           if (values[index] !== undefined) args[key] = values[index]
         })
         if (name === "executeBackground") args.run_in_background = true
-        return manager
-          .dispatch(scope, `host:${spec.tool}`, args, async (effective) => {
-            const actual = [...values]
-            spec.names.forEach((key, index) => {
-              if (effective[key] !== undefined) actual[index] = effective[key]
-            })
-            for (const key of [
-              "command",
-              "file_path",
-              "content",
-              "pattern",
-              "old_string",
-              "new_string"
-            ]) {
-              if (args[key] !== undefined && typeof effective[key] !== "string")
-                throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
-            }
-            return backendOperation.run(true, async () => {
-              const result = await Reflect.apply(method, instance, actual)
-              return name === "executeBackground" ? { task_id: result } : result
-            })
+        const nativeValues = (effective: Record<string, unknown>) => {
+          const actual = [...values]
+          spec.names.forEach((key, index) => {
+            if (effective[key] !== undefined) actual[index] = effective[key]
           })
+          return actual
+        }
+        return manager
+          .dispatch(
+            scope,
+            `host:${spec.tool}`,
+            args,
+            async (effective) => {
+              const actual = nativeValues(effective)
+              for (const key of [
+                "command",
+                "file_path",
+                "content",
+                "pattern",
+                "old_string",
+                "new_string"
+              ]) {
+                if (args[key] !== undefined && typeof effective[key] !== "string")
+                  throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
+              }
+              return backendOperation.run(true, async () => {
+                const result = await Reflect.apply(method, instance, actual)
+                return name === "executeBackground" ? { task_id: result } : result
+              })
+            },
+            options.describeInitialInput
+              ? (effective) =>
+                  options.describeInitialInput!(name, nativeValues(effective)) ?? effective
+              : undefined
+          )
           .then((result) =>
             name === "executeBackground" ? (result as { task_id: string }).task_id : result
           )

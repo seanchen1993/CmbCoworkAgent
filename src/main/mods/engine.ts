@@ -52,6 +52,8 @@ export interface ModDispatchRequest {
   toolId: string
   effect: ModEffect
   args: Record<string, unknown>
+  /** Host-only description of native defaults; never substitutes for final authorization. */
+  describeInitialInput?: (args: Record<string, unknown>) => Record<string, unknown>
   protectedOutput: boolean
   readOnly?: boolean
   signal?: AbortSignal
@@ -215,7 +217,7 @@ export class ModEngine {
             request.toolId,
             request.args,
             request.identity,
-            args
+            request.describeInitialInput?.(args) ?? args
           )
           try {
             await request.admit?.(args)

@@ -2169,6 +2169,14 @@ export class LocalSandbox
         },
         {
           managedExecution: options.modManagedExecution,
+          describeInitialInput: (method, values) =>
+            method === "read"
+              ? LocalSandbox.readFileHookArgs(
+                  values[0] as string,
+                  values[1] as number | undefined,
+                  values[2] as number | undefined
+                )
+              : undefined,
           userInput: userInput
             ? (input, signal) => this.runModUserInput(userInput, input, signal)
             : undefined
@@ -3173,8 +3181,8 @@ export class LocalSandbox
 
   private static readFileHookArgs(
     filePath: string,
-    offset: number,
-    limit: number
+    offset = 0,
+    limit = READ_FILE_DEFAULT_LIMIT
   ): Record<string, unknown> {
     return { file_path: filePath, filePath, offset, limit }
   }
