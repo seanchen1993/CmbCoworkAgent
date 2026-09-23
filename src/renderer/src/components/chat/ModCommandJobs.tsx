@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import type { ModCommandJob } from "../../../../shared/mods/types"
 import { Button } from "@/components/ui/button"
+import { FunctionCommandOutput } from "./FunctionCommandOutput"
 
 const labels = {
   queued: "等待会话空闲",
@@ -83,8 +84,24 @@ export function ModCommandJobs({ threadId }: { threadId: string }): React.JSX.El
               <strong>{job.command}</strong> · {labels[job.state]}
             </p>
             <p className="text-muted-foreground">{new Date(job.createdAt).toLocaleString()}</p>
-            {job.result && <pre className="whitespace-pre-wrap break-words">{job.result.text}</pre>}
-            {job.error && <p role="status">{errorMessages[job.error] ?? job.error}</p>}
+            {job.result && (
+              <FunctionCommandOutput
+                threadId={threadId}
+                command={job.command}
+                text={job.result.text}
+                isErrored={job.state !== "succeeded"}
+                fallback={<pre className="whitespace-pre-wrap break-words">{job.result.text}</pre>}
+              />
+            )}
+            {job.error && (
+              <FunctionCommandOutput
+                threadId={threadId}
+                command={job.command}
+                text={errorMessages[job.error] ?? job.error}
+                isErrored
+                fallback={<p role="status">{errorMessages[job.error] ?? job.error}</p>}
+              />
+            )}
             {job.state === "unknown" && (
               <p>操作可能已生效。请在项目执行记录中核查，不要直接重试。</p>
             )}

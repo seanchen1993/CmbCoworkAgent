@@ -68,7 +68,9 @@ export class FunctionUiSites {
   mount(component: FunctionUiSite): Promise<string> {
     return this.enqueue(async () => {
       functionUiSite(component)
-      if (["TurnDuration", "UserMessage", "AssistantMessage"].includes(component)) {
+      if (
+        ["TurnDuration", "UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
+      ) {
         if (
           [...this.slots.values()].filter((entry) => entry.component === component).length >=
           FUNCTION_DURATION_SITE_LIMIT

@@ -10,7 +10,8 @@ export const FUNCTION_UI_SITES = [
   "TurnDuration",
   "SessionMode",
   "UserMessage",
-  "AssistantMessage"
+  "AssistantMessage",
+  "CommandOutput"
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
 export const FUNCTION_DURATION_SITE_LIMIT = 32
@@ -28,6 +29,23 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
   }
   if (!isModObject(value)) return fail()
   const text = (v: unknown): v is string => typeof v === "string" && v.length <= 10000
+  if (site === "CommandOutput") {
+    if (
+      !text(value.command) ||
+      !value.command ||
+      !text(value.args) ||
+      !text(value.text) ||
+      typeof value.isErrored !== "boolean" ||
+      Object.keys(value).some((key) => !["command", "args", "text", "isErrored"].includes(key))
+    )
+      return fail()
+    return {
+      command: value.command,
+      args: value.args,
+      text: value.text,
+      isErrored: value.isErrored
+    }
+  }
   if (site === "UserMessage") {
     if (
       !text(value.text) ||
@@ -131,7 +149,7 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
 }
 
 export function functionSiteDefault(site: FunctionUiSite, props: ModObject): FunctionUiElement {
-  if (site === "UserMessage" || site === "AssistantMessage")
+  if (site === "UserMessage" || site === "AssistantMessage" || site === "CommandOutput")
     return { type: "Text", props: {}, children: [String(props.text)] }
   if (site === "Spinner" || site === "TurnDuration" || site === "SessionMode") {
     const ms = Number(props.durationMs)

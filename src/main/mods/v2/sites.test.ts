@@ -95,6 +95,41 @@ function drawnText(tree: FunctionUiElement | string): string {
   return typeof tree === "string" ? tree : (tree.children ?? []).map(drawnText).join("")
 }
 
+it("rewrites CommandOutput presentation while retaining command identity and error facts", async () => {
+  const { session } = await fixture(`
+    on("ui.render",{component:"CommandOutput"},($,e,next)=>
+      next({...e,props:{...e.props,text:"visible:"+e.props.text}}))
+  `)
+  const owner = await session.sites.mount("CommandOutput" as FunctionUiSite)
+  const facts = { command: "echo", args: "***", text: "original", isErrored: false }
+  expect(drawnText((await session.sites.render(owner, facts)).tree)).toBe("visible:original")
+  expect(facts.text).toBe("original")
+  const second = await session.sites.mount("CommandOutput" as FunctionUiSite)
+  await session.sites.render(second, { ...facts, text: "second" })
+  expect(drawnText((await session.sites.render(owner, facts)).tree)).toBe("visible:original")
+})
+
+it.each(["command", "args", "isErrored", "onScreen"])(
+  "rejects forged CommandOutput %s facts",
+  async (field) => {
+    const { session } = await fixture(`
+    on("ui.render",{component:"CommandOutput"},($,e,next)=>
+      next({...e,props:{...e.props,text:"forged",${field}:${field === "isErrored" ? "false" : '"forged"'}}}))
+  `)
+    const owner = await session.sites.mount("CommandOutput" as FunctionUiSite)
+    expect(
+      (
+        await session.sites.render(owner, {
+          command: "echo",
+          args: "***",
+          text: "error",
+          isErrored: true
+        })
+      ).nativeFallback
+    ).toBe(true)
+  }
+)
+
 it("redraws cached message owners when the installed message fixture changes preference", async () => {
   const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/message-sites"))
   const { session } = await fixture("", compiled)
