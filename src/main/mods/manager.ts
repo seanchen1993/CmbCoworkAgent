@@ -19,6 +19,8 @@ import { compileMod, readModApiVersion, type CompiledMod } from "./loader"
 import { ModRuntimeClient } from "./runtime-client"
 import { ModEngine, classifyModTool, type ApprovedMod, type ModDispatchRequest } from "./engine"
 import { ModError, ModPermissionError, modErrorCode } from "./errors"
+import { autobizCheckpointRequest } from "./v2/autobiz-checkpoint-request"
+import type { AutobizCheckpointTransition } from "./v2/autobiz-validation"
 import { planProjectCheck } from "./v2/project-check-plan"
 import { assertProjectCheckInput, withProjectCheckInput } from "./v2/project-check-input"
 import type { ProjectCheckKind, ProjectCheckResult } from "./v2/project-checks"
@@ -1561,6 +1563,100 @@ export class ModsManager {
     return reason
       ? this.confirmOperation(threadId, modId, toolId, args, signal, reason)
       : this.confirmOperation(threadId, modId, toolId, args, signal)
+  }
+
+  /** Internal application adapter; no Function SDK tool can provide this host commit callback. */
+  async runCompletionCheckpoint(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal,
+    commit: (signal: AbortSignal) => Promise<AutobizCheckpointTransition>
+  ): Promise<AutobizCheckpointTransition> {
+    workspace = this.workspaceKey(workspace)
+    const scope = functionExecutionScope(workspace, threadId)
+    if (!scope?.leased || !scope.turnId || !getLocalThreadRunLease(threadId))
+      throw new ModError("MODS_AUTOBIZ_TRANSITION_LEASE")
+    if (!scope.runtimeAuthority) throw new ModError("MODS_RUNTIME_OWNER_REQUIRED")
+    const saved = this.bindings.get(`${threadId}:${scope.agentId ?? "main"}`)
+    if (!saved?.queryTool) throw new ModError("MODS_AUTOBIZ_PATH_AUTHORITY_REQUIRED")
+    assertFunctionGrant(this.store, workspace, threadId, grant, signal)
+    const args = autobizCheckpointRequest(
+      this.functionRuntimeScope(workspace, threadId).workspace,
+      input
+    )
+    const signature = encodeModJson(args)
+    const identity = {
+      workspace,
+      threadId,
+      turnId: scope.turnId,
+      agentId: scope.agentId ?? "main",
+      modId: grant.modId,
+      grantEpoch: grant.epoch,
+      toolCallId: randomUUID()
+    }
+    const guard = this.registerFunctionProcess(identity, scope.runtimeAuthority, signal)
+    const target = "host:autobiz_checkpoint"
+    let committed: AutobizCheckpointTransition | undefined
+    let audited = false
+    try {
+      const paths = [...(args.files as string[])]
+      const assertPaths = async () => {
+        guard.assertLive()
+        for (const path of paths) {
+          const permission = await saved.queryTool!("host:write_file", { file_path: path })
+          guard.assertLive()
+          if (permission.decision === "deny") throw new ModPermissionError(permission.reason)
+        }
+      }
+      const binding: ModThreadBinding = {
+        ...saved,
+        signal: guard.signal,
+        permissionToolAliases: ["write_file", "edit_file", "host:write_file", "host:edit_file"],
+        invokeTool: (tool, value) =>
+          this.dispatch(binding, tool, value, async (final) => {
+            await beforeModToolExecution(async () => {
+              guard.assertLive()
+              if (tool !== target || encodeModJson(final) !== signature)
+                throw new ModError("MODS_AUTOBIZ_TRANSITION_INPUT_CHANGED")
+              // Native path/read-only/worktree decisions are mandatory both before
+              // the original approval dialog and immediately before the host commit.
+              await assertPaths()
+              await authorizeCurrentModInput(target, final)
+              await assertPaths()
+            })
+            committed = await commit(guard.signal)
+            guard.assertLive()
+            if (!committed.applied && !committed.duplicate)
+              throw new ModError(committed.reason || "MODS_AUTOBIZ_TRANSITION_FAILED")
+            return committed
+          })
+      }
+      await this.invokeFunctionCapability(
+        workspace,
+        threadId,
+        grant,
+        target,
+        args,
+        guard.signal,
+        false,
+        true,
+        binding,
+        (value, call) => {
+          if (this.store.status(call.callId) !== "succeeded")
+            throw new ModError("MODS_AUTOBIZ_TRANSITION_RECEIPT_REQUIRED")
+          audited = true
+          return value
+        },
+        identity.toolCallId
+      )
+      guard.assertLive()
+      if (!committed || !audited) throw new ModError("MODS_AUTOBIZ_TRANSITION_RECEIPT_REQUIRED")
+      return committed
+    } finally {
+      guard.release()
+    }
   }
 
   /** Configured checks retain the original turn, lease, approval and native execution receipt. */

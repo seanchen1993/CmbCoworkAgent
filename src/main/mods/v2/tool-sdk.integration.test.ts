@@ -1,3 +1,4 @@
+import { isSameWorkspacePath } from "../../../shared/workspace-path"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
@@ -486,3 +487,151 @@ it("leaves the same real native background job working with Mods disabled", asyn
   )
   expect(f.manager.store.audit(f.manager.workspaceKey(f.workspace))).toHaveLength(0)
 }, 15000)
+
+const checkpointRequest = {
+  evidenceId: "proof",
+  feature: "order-export",
+  from: "requirements_eval_in_progress",
+  to: "requirements_eval_done",
+  stateFingerprint: "a".repeat(64),
+  idempotencyKey: "operation"
+}
+function checkpoint(
+  f: Awaited<ReturnType<typeof fixture>>,
+  commit: (
+    signal: AbortSignal
+  ) => Promise<import("./autobiz-validation").AutobizCheckpointTransition>,
+  request = checkpointRequest
+) {
+  return withFunctionExecution(
+    {
+      workspace: f.grant.workspace,
+      threadId: f.threadId,
+      turnId: "turn",
+      runtimeAuthority: f.authority,
+      leased: true,
+      immediate: false,
+      userInitiated: false
+    },
+    () =>
+      f.manager.runCompletionCheckpoint(
+        f.grant.workspace,
+        f.threadId,
+        f.grant,
+        request,
+        f.commandController.signal,
+        commit
+      )
+  )
+}
+const checkpointResult = () => ({
+  applied: true,
+  duplicate: false,
+  feature: checkpointRequest.feature,
+  from: checkpointRequest.from,
+  to: checkpointRequest.to,
+  stateFingerprint: "b".repeat(64)
+})
+
+it("routes a host checkpoint callback through native path permissions and one original audit receipt", async () => {
+  const f = await fixture()
+  const query = vi.spyOn(f.sandbox, "queryToolPermission")
+  const commit = vi.fn(async () => checkpointResult())
+  expect(await checkpoint(f, commit)).toMatchObject({ applied: true })
+  expect(commit).toHaveBeenCalledTimes(1)
+  const paths = query.mock.calls
+    .filter(([tool]) => tool === "write_file")
+    .map(([, args]) => String(args.file_path))
+  expect(
+    paths.some((path) =>
+      isSameWorkspacePath(path, join(f.workspace, ".autobizdevops", "state.json"))
+    )
+  ).toBe(true)
+  expect(
+    paths.some((path) => isSameWorkspacePath(path, join(f.workspace, ".autobizdevops", "STATE.md")))
+  ).toBe(true)
+  expect(f.manager.store.audit(f.grant.workspace)).toEqual([
+    expect.objectContaining({
+      toolId: "host:autobiz_checkpoint",
+      status: "succeeded",
+      identity: expect.objectContaining({ turnId: "turn", modId: f.grant.modId })
+    })
+  ])
+})
+
+it.each(["lease", "write_file", "edit_file", "approval", "native-path", "traversal", "read-only"])(
+  "rejects a checkpoint callback before side effects when %s is unavailable",
+  async (reason) => {
+    const f = await fixture(new Set([reason]), false, reason !== "approval")
+    if (reason === "lease") releaseLocalThreadRunLease(f.threadId, "mods", "run")
+    if (reason === "native-path")
+      vi.spyOn(f.sandbox, "queryToolPermission").mockResolvedValue({
+        decision: "deny",
+        reason: "TEST_NATIVE_PATH_DENIED"
+      })
+    if (reason === "read-only") f.sandbox.setReadOnlyShellEnforced(true)
+    const commit = vi.fn(async () => checkpointResult())
+    await expect(
+      checkpoint(
+        f,
+        commit,
+        reason === "traversal" ? { ...checkpointRequest, feature: "../outside" } : checkpointRequest
+      )
+    ).rejects.toThrow()
+    expect(commit).not.toHaveBeenCalled()
+    expect(f.manager.store.audit(f.grant.workspace).some((row) => row.status === "succeeded")).toBe(
+      false
+    )
+  }
+)
+
+it.each(["cancel", "revoke", "replace", "handoff"])(
+  "aborts a checkpoint callback after %s and never accepts its late success",
+  async (action) => {
+    const f = await fixture()
+    let started = false
+    const commit = vi.fn(
+      (signal: AbortSignal) =>
+        new Promise<ReturnType<typeof checkpointResult>>((_resolve, reject) => {
+          started = true
+          if (signal.aborted) reject(signal.reason)
+          else signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+        })
+    )
+    const result = checkpoint(f, commit)
+    const rejected = expect(result).rejects.toThrow()
+    await vi.waitFor(() => expect(started).toBe(true))
+    if (action === "cancel") f.commandController.abort()
+    if (action === "revoke") f.manager.revoke(f.workspace, f.grant.modId)
+    if (action === "replace")
+      f.manager.createRuntimeAuthority({
+        workspace: f.workspace,
+        threadId: f.threadId,
+        turnId: "replacement"
+      })
+    if (action === "handoff")
+      claimLocalThreadRunLease({
+        threadId: f.threadId,
+        owner: "mods",
+        runId: "replacement",
+        handoffFromRunId: "run"
+      })
+    await rejected
+    expect(f.manager.store.audit(f.grant.workspace).some((row) => row.status === "succeeded")).toBe(
+      false
+    )
+  }
+)
+
+it("rechecks both native write permissions after the checkpoint approval boundary", async () => {
+  const f = await fixture()
+  const query = vi.spyOn(f.sandbox, "queryToolPermission")
+  query
+    .mockResolvedValueOnce({ decision: "allow" })
+    .mockResolvedValueOnce({ decision: "allow" })
+    .mockResolvedValue({ decision: "deny", reason: "PATH_CHANGED_DURING_APPROVAL" })
+  const commit = vi.fn(async () => checkpointResult())
+  await expect(checkpoint(f, commit)).rejects.toThrow("PATH_CHANGED_DURING_APPROVAL")
+  expect(query).toHaveBeenCalledTimes(3)
+  expect(commit).not.toHaveBeenCalled()
+})

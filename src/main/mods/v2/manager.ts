@@ -54,7 +54,11 @@ import {
   type BoundCompletionEvidenceRecord,
   type CompletionEvidenceRecord
 } from "./completion-evidence"
-import { advanceAutobizCheckpoint, runAutobizValidator } from "./autobiz-validation"
+import {
+  advanceAutobizCheckpoint,
+  runAutobizValidator,
+  type AutobizCheckpointTransition
+} from "./autobiz-validation"
 import type { ProjectCheckResult, ProjectCheckKind } from "./project-checks"
 import {
   dispatchFunctionStream,
@@ -88,6 +92,14 @@ interface SessionEntry {
   snapshots: Map<string, Snapshot>
 }
 interface FunctionManagerHost {
+  checkpointTransition?(
+    workspace: string,
+    threadId: string,
+    grant: ModGrant,
+    input: ModObject,
+    signal: AbortSignal,
+    commit: (signal: AbortSignal) => Promise<AutobizCheckpointTransition>
+  ): Promise<AutobizCheckpointTransition>
   projectCheck?(
     workspace: string,
     threadId: string,
@@ -797,6 +809,30 @@ export class FunctionModsManager {
     return this.store.completionEvidence(workspace, threadId, limit)
   }
 
+  private submitAutobizTransition(
+    workspace: string,
+    threadId: string,
+    entry: SessionEntry,
+    plugin: unknown,
+    input: ModObject,
+    signal: AbortSignal,
+    commit: (signal: AbortSignal) => Promise<AutobizCheckpointTransition>
+  ): Promise<AutobizCheckpointTransition> {
+    if (!this.host.checkpointTransition)
+      throw new ModFunctionError("MODS_AUTOBIZ_TRANSITION_AUTHORITY_REQUIRED")
+    const snapshot = typeof plugin === "string" ? entry.snapshots.get(plugin) : undefined
+    if (!snapshot) throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+    this.store.assertGrant(snapshot.grant)
+    return this.host.checkpointTransition(
+      workspace,
+      threadId,
+      snapshot.grant,
+      input,
+      signal,
+      commit
+    )
+  }
+
   async advanceAutobizCheckpoint(
     workspace: string,
     threadId: string,
@@ -861,19 +897,28 @@ export class FunctionModsManager {
       assertCurrent()
       // A ledger row is not a state receipt. Recheck both state files and file identities
       // against the host-owned durable journal while holding the real Windows locks.
-      const duplicate = await advanceAutobizCheckpoint({
-        workspace: scope?.workspace ?? workspace,
-        feature: feature as string,
-        from: from as string,
-        to: to as string,
-        expectedStateFingerprint: stateFingerprint as string,
-        idempotencyKey: idempotencyKey as string,
+      const duplicate = await this.submitAutobizTransition(
+        workspace,
+        threadId,
+        entry,
+        detail.plugin,
+        input,
         signal,
-        requireCommittedReceipt: true,
-        verifyEvidence: async () => {
-          assertCurrent()
-        }
-      })
+        (commitSignal) =>
+          advanceAutobizCheckpoint({
+            workspace: scope?.workspace ?? workspace,
+            feature: feature as string,
+            from: from as string,
+            to: to as string,
+            expectedStateFingerprint: stateFingerprint as string,
+            idempotencyKey: idempotencyKey as string,
+            signal: commitSignal,
+            requireCommittedReceipt: true,
+            verifyEvidence: async () => {
+              assertCurrent()
+            }
+          })
+      )
       assertCurrent()
       if (!duplicate.duplicate || duplicate.applied)
         throw new ModFunctionError(duplicate.reason || "MODS_AUTOBIZ_VALIDATOR_STALE")
@@ -924,16 +969,26 @@ export class FunctionModsManager {
     await verifyEvidence()
     const scope = this.host.fileScope?.(workspace, threadId)
     scope?.assertLive()
-    const result = await advanceAutobizCheckpoint({
-      workspace: scope?.workspace ?? workspace,
-      feature: feature as string,
-      from: from as string,
-      to: to as string,
-      expectedStateFingerprint: stateFingerprint as string,
-      idempotencyKey: idempotencyKey as string,
+    const plugin = isModObject(validator.detail) ? validator.detail.plugin : undefined
+    const result = await this.submitAutobizTransition(
+      workspace,
+      threadId,
+      entry,
+      plugin,
+      input,
       signal,
-      verifyEvidence
-    })
+      (commitSignal) =>
+        advanceAutobizCheckpoint({
+          workspace: scope?.workspace ?? workspace,
+          feature: feature as string,
+          from: from as string,
+          to: to as string,
+          expectedStateFingerprint: stateFingerprint as string,
+          idempotencyKey: idempotencyKey as string,
+          signal: commitSignal,
+          verifyEvidence
+        })
+    )
     const accepted = result.applied || result.duplicate
     this.store.saveCompletionEvidence({
       ...started,
@@ -944,7 +999,7 @@ export class FunctionModsManager {
       phase: "state.transition",
       status: accepted ? "pass" : result.status === "unknown" ? "interrupted" : "block",
       at: Date.now(),
-      detail: { evidenceId, idempotencyKey, ...result } as ModObject
+      detail: { evidenceId, idempotencyKey, plugin, ...result } as ModObject
     })
     if (!accepted) throw new ModFunctionError(result.reason || "MODS_AUTOBIZ_TRANSITION_FAILED")
     signal.throwIfAborted()
@@ -1511,6 +1566,8 @@ export class FunctionModsManager {
             sharedBudget?.assert()
             record("validator.result", validator.passed ? "pass" : "block", {
               ...validator,
+              plugin:
+                active.find(([, policy]) => policy && selectedPolicies.includes(policy))?.[0] ?? "",
               attempt
             } as unknown as ModJson)
             const mandatory = selectedPolicies.filter((policy) => policy.mode !== "report")

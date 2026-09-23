@@ -158,6 +158,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     manager.store,
     {
       plugins: getPlugins,
+      checkpointTransition: (...args) => manager.runCompletionCheckpoint(...args),
       projectCheck: (...args) => manager.runCompletionProjectCheck(...args),
       dialogs: nativeFunctionDialogAccess,
       fileScope: (workspace, threadId) =>

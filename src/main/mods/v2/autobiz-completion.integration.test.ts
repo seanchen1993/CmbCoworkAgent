@@ -1,3 +1,7 @@
+import { LocalSandbox } from "../../agent/local-sandbox"
+import { ModsManager, getModsManager, setModsManager } from "../manager"
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
+import { withFunctionExecution } from "./execution-context"
 import { runProjectCheck } from "../../../../tests/support/project-check-executor"
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { randomUUID } from "node:crypto"
@@ -5,7 +9,7 @@ import { execFile } from "node:child_process"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { promisify } from "node:util"
-import { afterEach, beforeEach, expect, it, vi } from "vitest"
+import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest"
 import { ModControlStore } from "../control-store"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionModsManager } from "./manager"
@@ -13,6 +17,12 @@ import { runCompletionHooksWithRevision } from "../../agent/skill-lifecycle/comp
 import type { HookScopeController } from "../../hooks/scope"
 import { withPinnedAutobiz } from "./autobiz-source"
 
+vi.mock("electron", () => ({
+  app: { getPath: () => tmpdir(), getName: () => "test", getVersion: () => "0" },
+  BrowserWindow: { getAllWindows: () => [] },
+  dialog: {},
+  ipcMain: { handle: () => {} }
+}))
 vi.mock("../../hooks/required-skill", () => ({ runHooksEnriched: vi.fn() }))
 vi.mock("../../services/harness-stage-attribution", () => ({
   markHarnessStageAttributionDirty: vi.fn()
@@ -23,8 +33,17 @@ vi.mock("../../hooks/scope", () => ({ resolveEnabledHooksForRun: vi.fn() }))
 vi.setConfig({ testTimeout: 60_000 })
 
 const roots: string[] = []
-const hostJournal = vi.hoisted(() => ({ root: "" }))
-vi.mock("../../app-data-root", () => ({ getCmbCoworkAgentDataRoot: () => hostJournal.root }))
+const hostJournal = vi.hoisted(() => ({ root: "", applicationRoot: "" }))
+vi.mock("../../app-data-root", async () => {
+  const { mkdtemp } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  hostJournal.applicationRoot = await mkdtemp(join(tmpdir(), "mods-autobiz-app-"))
+  return { getCmbCoworkAgentDataRoot: () => hostJournal.root || hostJournal.applicationRoot }
+})
+afterAll(async () => {
+  await rm(hostJournal.applicationRoot, { recursive: true, force: true })
+})
 beforeEach(async () => {
   hostJournal.root = await mkdtemp(join(tmpdir(), "mods-autobiz-journal-"))
   roots.push(hostJournal.root)
@@ -89,9 +108,12 @@ async function autobizFixture(
     checks?: Array<"autobiz-validator" | "unit-test">
     realTestRunner?: boolean
     testPass?: boolean
+    nativeTransition?: boolean
+    nativeBridge?: boolean
+    approved?: boolean
   } = {}
 ) {
-  const root = await mkdtemp(join(tmpdir(), "mods-autobiz-completion-"))
+  let root = await mkdtemp(join(tmpdir(), "mods-autobiz-completion-"))
   roots.push(root)
   const plugin = join(root, "plugin")
   await cp(resolve("resources/mods/function-commands"), plugin, { recursive: true })
@@ -150,11 +172,56 @@ async function autobizFixture(
     `export function register(on) {\n  on("completion.check", () => ({ decision: "pass" }))\n}\n`
   )
 
-  const store = new ModControlStore(join(root, "control.sqlite"))
+  const native = options.nativeBridge
+    ? new ModsManager(
+        join(hostJournal.root, "native-control.sqlite"),
+        () => [],
+        async () => options.approved !== false,
+        () => {}
+      )
+    : undefined
+  const previous = getModsManager()
+  const nativeController = new AbortController()
+  const signal = nativeController.signal
+  let release = () => {}
+  let authority: ReturnType<ModsManager["createRuntimeAuthority"]> | undefined
+  if (native) {
+    root = native.workspaceKey(root)
+    native.configure(root, true, false)
+    setModsManager(native)
+    authority = native.createRuntimeAuthority({
+      workspace: root,
+      threadId: "thread",
+      turnId: "turn",
+      signal
+    })
+    expect(
+      claimLocalThreadRunLease({ threadId: "thread", owner: "mods", runId: "run" }).acquired
+    ).toBe(true)
+    new LocalSandbox({
+      rootDir: root,
+      modWorkspace: root,
+      modRuntimeAuthority: authority.authority,
+      runId: "thread",
+      hookTurnId: "turn",
+      windowsSandbox: "none",
+      abortSignal: signal,
+      onModBinding: (dispose) => {
+        release = dispose
+      }
+    })
+  }
+  const store = native?.store ?? new ModControlStore(join(root, "control.sqlite"))
   const allGuests = new Set<FunctionGuestRuntime>()
   const manager = new FunctionModsManager(
     store,
     {
+      // Upstream contract fixture only. Native approval/lease integration lives in tool-sdk.integration.test.ts.
+      checkpointTransition: native
+        ? (...args) => native.runCompletionCheckpoint(...args)
+        : options.nativeTransition === false
+          ? undefined
+          : (_workspace, _thread, _grant, _input, signal, commit) => commit(signal),
       projectCheck: (workspace, _thread, _grant, kind, signal, timeout) =>
         runProjectCheck(workspace, kind, signal, timeout),
       plugins: () => [{ id: "source", name: "function-commands", path: plugin, enabled: true }],
@@ -179,8 +246,15 @@ async function autobizFixture(
     }
   )
   cleanups.push(async () => {
+    nativeController.abort()
+    release()
+    authority?.release()
+    if (native) releaseLocalThreadRunLease("thread", "mods", "run")
     manager.close()
-    store.close()
+    if (native) {
+      native.close()
+      setModsManager(previous)
+    } else store.close()
     for (const guest of allGuests) guest.dispose()
   })
   const status = await manager.status(root)
@@ -194,20 +268,24 @@ async function autobizFixture(
     timeoutMs: 30_000,
     modelTokenBudget: 512
   })
-  const signal = new AbortController().signal
+  native?.attachFunctions({
+    completionGate: (...args) => manager.completionGate(...args),
+    invalidate: (workspace) => manager.invalidate(workspace),
+    closeThread: (thread) => manager.closeThread(thread),
+    close: () => manager.close()
+  })
   await manager.turnStart(root, "thread", { turnId: "turn", text: "review" }, signal)
-  return { root, featureDir, manager, store, signal }
+  return { root, featureDir, manager, store, signal, native, authority: authority?.authority }
 }
 
 async function runLoop(
   fixture: Awaited<ReturnType<typeof autobizFixture>>,
   runRevision: () => Promise<void> = async () => {}
 ) {
-  const gate = await fixture.manager.completionGate(fixture.root, "thread", () => ({
-    turnId: "turn",
-    runId: "run",
-    answer: "done"
-  }))
+  const context = () => ({ turnId: "turn", runId: "run", answer: "done" })
+  const gate = fixture.native
+    ? await fixture.native.createCompletionGate(fixture.root, "thread", context)
+    : await fixture.manager.completionGate(fixture.root, "thread", context)
   expect(gate).toBeDefined()
   return runCompletionHooksWithRevision({
     threadId: "thread",
@@ -465,7 +543,7 @@ it("does not reapply a ledger-only transition when the trusted commit receipt is
   fixture.store.saveCompletionEvidence({
     ...started, id: randomUUID(), idempotencyKey: `ledger-only:${input.idempotencyKey}`,
     phase: "state.transition", status: "pass", at: Date.now(),
-    detail: { ...input, applied: true, duplicate: false }
+    detail: { ...input, plugin: "function-commands", applied: true, duplicate: false }
   })
   const statePath = join(fixture.root, ".autobizdevops", "state.json")
   const before = await readFile(statePath, "utf8")
@@ -474,3 +552,102 @@ it("does not reapply a ledger-only transition when the trusted commit receipt is
   )).rejects.toThrow("AUTOBIZ_RECEIPT_REQUIRED")
   expect(await readFile(statePath, "utf8")).toBe(before)
 })
+
+it("cannot advance valid upstream evidence without the native transition authority adapter", async () => {
+  const f = await autobizFixture({
+    report: "verdict: PASS\ncontract fixture only",
+    nativeTransition: false
+  })
+  const gate = await f.manager.completionGate(f.root, "thread", () => ({ turnId: "turn" }))
+  expect(
+    await gate!({ signal: f.signal, revisionAttempts: 0, maxRevisionAttempts: 2 })
+  ).toMatchObject({ decision: "pass" })
+  const rows = f.manager.completionEvidence(f.root, "thread")
+  const start = rows.find((row) => row.phase === "check.started")!
+  if (
+    !start.binding ||
+    !start.detail ||
+    typeof start.detail !== "object" ||
+    Array.isArray(start.detail)
+  )
+    throw Error("missing evidence")
+  const before = await readFile(join(f.root, ".autobizdevops", "state.json"), "utf8")
+  await expect(
+    f.manager.advanceAutobizCheckpoint(
+      f.root,
+      "thread",
+      {
+        evidenceId: String(start.detail.attempt),
+        feature: "order-export",
+        from: "requirements_eval_in_progress",
+        to: "requirements_eval_done",
+        stateFingerprint: start.binding.stateFingerprint,
+        idempotencyKey: "missing-native-adapter"
+      },
+      f.signal
+    )
+  ).rejects.toThrow("MODS_AUTOBIZ_TRANSITION_AUTHORITY_REQUIRED")
+  expect(await readFile(join(f.root, ".autobizdevops", "state.json"), "utf8")).toBe(before)
+})
+
+it.each([true, false])(
+  "uses the real native authority and upstream journal with approval=%s",
+  async (approved) => {
+    const f = await autobizFixture({
+      nativeBridge: true,
+      approved,
+      report: "verdict: PASS\nupstream contract fixture only"
+    })
+    expect(await runLoop(f)).toBe("passed")
+    const start = f.store
+      .completionEvidence(f.root, "thread")
+      .find((row) => row.phase === "check.started")!
+    if (
+      !start.binding ||
+      !start.detail ||
+      typeof start.detail !== "object" ||
+      Array.isArray(start.detail)
+    )
+      throw Error("missing evidence")
+    const input = {
+      evidenceId: String(start.detail.attempt),
+      feature: "order-export",
+      from: "requirements_eval_in_progress",
+      to: "requirements_eval_done",
+      stateFingerprint: start.binding.stateFingerprint,
+      idempotencyKey: "native-upstream-operation"
+    }
+    const state = join(f.root, ".autobizdevops", "state.json")
+    const before = await readFile(state, "utf8")
+    const advance = () =>
+      withFunctionExecution(
+        {
+          workspace: f.root,
+          threadId: "thread",
+          turnId: "turn",
+          runtimeAuthority: f.authority,
+          leased: true,
+          immediate: false,
+          userInitiated: false
+        },
+        () => f.manager.advanceAutobizCheckpoint(f.root, "thread", input, f.signal)
+      )
+    if (approved) {
+      expect(await advance()).toMatchObject({ applied: true, duplicate: false })
+      const after = await readFile(state, "utf8")
+      expect(JSON.parse(after).features["order-export"].checkpoint).toBe("requirements_eval_done")
+      expect(await advance()).toMatchObject({ applied: false, duplicate: true })
+      expect(await readFile(state, "utf8")).toBe(after)
+      expect(
+        f.store
+          .audit(f.root)
+          .filter((row) => row.toolId === "host:autobiz_checkpoint")
+          .every((row) => row.status === "succeeded")
+      ).toBe(true)
+    } else {
+      await expect(advance()).rejects.toThrow("MODS_USER_REJECTED")
+      expect(await readFile(state, "utf8")).toBe(before)
+      expect(f.store.audit(f.root).some((row) => row.status === "succeeded")).toBe(false)
+    }
+  }
+)
