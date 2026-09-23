@@ -1,6 +1,7 @@
 export function register(on) {
   on("session.start", async ($, e, next) => {
     await $.command.register({ name: "feedback-show", description: "Show feedback", immediate: true })
+    await $.command.register({ name: "feedback-flood", description: "Feedback layout bound", immediate: true })
     await $.command.register({ name: "feedback-clear", description: "Clear feedback", immediate: true })
     return next(e)
   })
@@ -8,6 +9,11 @@ export function register(on) {
     $.ui.status("FEEDBACK_PINNED")
     $.ui.toast("FEEDBACK_TEMPORARY", { timeoutMs: 2500 })
     return { text: "FEEDBACK_COMMAND_ORIGINAL" }
+  })
+  on("command.run", { command: "feedback-flood" }, ($) => {
+    $.ui.status("LONG_FEEDBACK " + "x".repeat(9000))
+    for (let i = 0; i < 4; i++) $.ui.toast("<script>window.shouldNotRun=true</script>" + "y".repeat(9000))
+    return { text: "FEEDBACK_LAYOUT" }
   })
   on("command.run", { command: "feedback-clear" }, ($) => {
     $.ui.status(undefined)

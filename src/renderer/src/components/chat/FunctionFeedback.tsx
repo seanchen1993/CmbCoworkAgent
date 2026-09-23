@@ -33,8 +33,10 @@ export function FunctionFeedback({ threadId }: { threadId: string }): React.JSX.
   if (!entries.length) return null
   return (
     <div
-      className="mx-auto max-w-3xl space-y-1 px-3 py-1 text-xs text-muted-foreground"
+      className="mx-auto max-h-32 max-w-3xl space-y-1 overflow-y-auto overscroll-contain px-3 py-1 text-xs text-muted-foreground"
       data-function-feedback
+      tabIndex={0}
+      aria-label="插件状态与提示"
       role="status"
       aria-live="polite"
     >
