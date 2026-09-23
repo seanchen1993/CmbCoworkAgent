@@ -1596,17 +1596,31 @@ export class FunctionModsManager {
               const mandatory = projectPolicies.filter((policy) => policy.mode !== "report")
               const repairing = mandatory.every((policy) => policy.mode === "repair")
               const decision =
+                result.decision !== "block" &&
                 repairing &&
                 revisionAttempts <
                   Math.min(maxRevisionAttempts, ...mandatory.map((policy) => policy.maxRepairs))
                   ? "revise"
                   : "block"
+              const reason = [
+                ...(result.decision === "pass" ? [] : [result.reason]),
+                check.reason ?? `PROJECT_${kind.toUpperCase()}_FAILED`
+              ]
+                .join("\n")
+                .slice(0, 8000)
               record("check.result", decision, {
-                reason: check.reason ?? `PROJECT_${kind.toUpperCase()}_FAILED`,
+                reason,
                 source: "host-project-check",
                 businessAccepted: false
               })
-              return { decision, reason: check.reason ?? `PROJECT_${kind.toUpperCase()}_FAILED` }
+              if (decision === "revise")
+                record("repair.attempt", "revise", {
+                  revisionAttempts: revisionAttempts + 1,
+                  source: "host-project-check",
+                  kind,
+                  reason
+                })
+              return { decision, reason }
             }
           }
           const validatorPolicies = policies.filter((policy) =>
@@ -1659,17 +1673,30 @@ export class FunctionModsManager {
             if (!validator.passed && mandatory.length) {
               const repairing = mandatory.every((policy) => policy.mode === "repair")
               const decision =
+                result.decision !== "block" &&
                 repairing &&
                 revisionAttempts <
                   Math.min(maxRevisionAttempts, ...mandatory.map((p) => p.maxRepairs))
                   ? "revise"
                   : "block"
+              const reason = [
+                ...(result.decision === "pass" ? [] : [result.reason]),
+                `AUTOBIZ_VALIDATOR_FAILED: ${validator.reason}`
+              ]
+                .join("\n")
+                .slice(0, 8000)
               record("check.result", decision, {
-                reason: validator.reason,
+                reason,
                 source: "host-autobiz-validator",
                 businessAccepted: false
               })
-              return { decision, reason: `AUTOBIZ_VALIDATOR_FAILED: ${validator.reason}` }
+              if (decision === "revise")
+                record("repair.attempt", "revise", {
+                  revisionAttempts: revisionAttempts + 1,
+                  source: "host-autobiz-validator",
+                  reason
+                })
+              return { decision, reason }
             }
           }
           if (!sameCompletionBinding(binding, await capture(signal))) {

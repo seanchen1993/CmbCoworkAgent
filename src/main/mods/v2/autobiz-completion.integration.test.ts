@@ -105,7 +105,8 @@ async function autobizFixture(
     report?: string
     removeProposal?: boolean
     mode?: "off" | "check" | "repair"
-    checks?: Array<"autobiz-validator" | "unit-test">
+    checks?: Array<"autobiz-validator" | "unit-test" | "code-review">
+    guestBlock?: boolean
     realTestRunner?: boolean
     testPass?: boolean
     nativeTransition?: boolean
@@ -173,7 +174,7 @@ async function autobizFixture(
   await writeFile(hooksPath, JSON.stringify(hooks))
   await writeFile(
     join(plugin, "hooks", "completion-gate.ts"),
-    `export function register(on) {\n  on("completion.check", () => ({ decision: "pass" }))\n}\n`
+    `export function register(on) {\n  on("completion.check", () => (${options.guestBlock ? '{ decision: "block", reason: "MANDATORY_REVIEW_BLOCK" }' : '{ decision: "pass" }'}))\n}\n`
   )
 
   const native = options.nativeBridge
@@ -456,6 +457,11 @@ it("rechecks a failed validator after a real repair revision", async () => {
   })
   expect(repaired).toBe(true)
   expect(outcome).toBe("passed")
+  const repairs = fixture.store
+    .completionEvidence(fixture.root, "thread", 100)
+    .filter((row) => row.phase === "repair.attempt")
+  expect(repairs).toHaveLength(1)
+  expect(repairs[0].detail).toMatchObject({ revisionAttempts: 1, source: "host-autobiz-validator" })
   const validators = fixture.store
     .completionEvidence(fixture.root, "thread", 100)
     .filter((record) => record.phase === "validator.result")
@@ -931,4 +937,46 @@ it("retains an interrupted transition fact if revocation arrives after the physi
   })
   expect((attempts[0].detail as { operationId: string }).operationId).toMatch(/^[a-f0-9]{64}$/)
   expect(attempts.some((row) => row.status === "pass")).toBe(false)
+})
+
+it.each(["unit-test", "autobiz-validator"] as const)(
+  "does not turn an explicit guest block into an automatic repair after %s fails",
+  async (kind) => {
+    const f = await autobizFixture({
+      mode: "repair",
+      guestBlock: true,
+      checks: ["code-review", kind],
+      realTestRunner: kind === "unit-test",
+      testPass: false
+    })
+    const revise = vi.fn(async () => {})
+    expect(await runLoop(f, revise)).toBe("failed")
+    expect(revise).not.toHaveBeenCalled()
+    expect(
+      f.store.completionEvidence(f.root, "thread").some((row) => row.phase === "repair.attempt")
+    ).toBe(false)
+  }
+)
+
+it("persists a native test repair request once before the original revision callback", async () => {
+  const f = await autobizFixture({
+    mode: "repair",
+    checks: ["unit-test"],
+    realTestRunner: true,
+    testPass: false
+  })
+  let duringRevision: unknown[] = []
+  const revise = vi.fn(async () => {
+    duringRevision = f.store
+      .completionEvidence(f.root, "thread")
+      .filter((row) => row.phase === "repair.attempt")
+  })
+  expect(await runLoop(f, revise)).toBe("failed")
+  expect(revise).toHaveBeenCalledOnce()
+  expect(duringRevision).toEqual([
+    expect.objectContaining({
+      status: "revise",
+      detail: expect.objectContaining({ source: "host-project-check", revisionAttempts: 1 })
+    })
+  ])
 })
