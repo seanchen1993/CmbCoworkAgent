@@ -1,6 +1,7 @@
 import { attachModBackend, protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
-import { authorizeCurrentModInput } from "../mods/manager"
-import { getModCallContext } from "../mods/context"
+import { currentFunctionBackgroundOwner } from "../mods/v2/background-owner"
+import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
+import { getModCallContext, modCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { currentFunctionExecution } from "../mods/v2/execution-context"
 /**
@@ -351,6 +352,8 @@ export interface LocalSandboxOptions {
   modBlockedToolNames?: ReadonlySet<string>
   modDelegatedBlockedToolNames?: ReadonlySet<string>
   modReadOnly?: boolean
+  /** Match the runtime's foreground-only shell behavior for SDK calls too. */
+  modManagedExecution?: boolean
   modRuntimeAuthority?: ModRuntimeAuthority
   /** Host-created command-only context; a model turn replaces it with its own full runtime. */
   modCommandOnly?: boolean
@@ -2150,7 +2153,7 @@ export class LocalSandbox
         ...owner,
         runtimeAuthority,
         readOnly: options.modReadOnly === true || this.readOnlyShellEnforced
-      })
+      }, { managedExecution: options.modManagedExecution })
       options.onModBinding?.(release)
     }
   }
@@ -7023,6 +7026,15 @@ export class LocalSandbox
       return LocalSandbox.backgroundStartCancelledMessage()
     }
     await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
+    const modContext = getModCallContext()
+    const sessionOwner = currentFunctionBackgroundOwner()
+    const backgroundOwner = modContext?.identity.modId?.startsWith("function:")
+      ? (() => {
+          const manager = getModsManager()
+          if (!manager || !sessionOwner) throw new Error("MODS_BACKGROUND_OWNER_REQUIRED")
+          return manager.registerFunctionBackground(sessionOwner)
+        })()
+      : undefined
     const taskId = randomUUID().slice(0, 8)
     const task = {
       id: taskId,
@@ -7050,44 +7062,57 @@ export class LocalSandbox
     // Fire and forget — don't await. Uses extended timeout for background execution.
     // Background tasks use their own AbortController (not the conversation's abortSignal)
     // so they survive conversation switches but can still be cancelled explicitly.
-    const completion = this.executeRaw(
-      effectiveCommand,
-      undefined,
-      LocalSandbox.BACKGROUND_ABSOLUTE_MAX_MS,
-      taskAbortController.signal,
-      {
-        background: true,
-        cwd: effectiveCwd,
-        // Live partial-output buffer (separate from the final authoritative
-        // output appended to outputChunks/result on completion). Caps at
-        // maxOutputBytes; once exceeded it stops growing and marks truncated.
-        onData: (text: string) => {
-          task.lastOutputAt = Date.now()
-          if (task.partialTruncated) return
-          const remaining = this.maxOutputBytes - task.partialOutput.length
-          if (remaining <= 0) {
-            task.partialTruncated = true
-            return
+    const execute = () =>
+      this.executeRaw(
+        effectiveCommand,
+        undefined,
+        LocalSandbox.BACKGROUND_ABSOLUTE_MAX_MS,
+        taskAbortController.signal,
+        {
+          background: true,
+          cwd: effectiveCwd,
+          // Live partial-output buffer (separate from the final authoritative
+          // output appended to outputChunks/result on completion). Caps at
+          // maxOutputBytes; once exceeded it stops growing and marks truncated.
+          onData: (text: string) => {
+            task.lastOutputAt = Date.now()
+            if (task.partialTruncated) return
+            const remaining = this.maxOutputBytes - task.partialOutput.length
+            if (remaining <= 0) {
+              task.partialTruncated = true
+              return
+            }
+            if (text.length > remaining) {
+              task.partialOutput += text.slice(0, remaining)
+              task.partialTruncated = true
+            } else {
+              task.partialOutput += text
+            }
+          },
+          // Cancellation/timeout must settle the whole process tree before any
+          // thread-owned data can be deleted, regardless of worktree isolation.
+          waitForProcessTree: true,
+          // Capture the physical kill/descendant-drain promise for every background
+          // task, not only worktree-isolated ones. `completed` may become true as
+          // soon as cancellation publishes an exit-130 result, while the process
+          // tree is still unwinding.
+          onTermination: (termination: Promise<void>) => {
+            task.termination = termination
           }
-          if (text.length > remaining) {
-            task.partialOutput += text.slice(0, remaining)
-            task.partialTruncated = true
-          } else {
-            task.partialOutput += text
-          }
-        },
-        // Cancellation/timeout must settle the whole process tree before any
-        // thread-owned data can be deleted, regardless of worktree isolation.
-        waitForProcessTree: true,
-        // Capture the physical kill/descendant-drain promise for every background
-        // task, not only worktree-isolated ones. `completed` may become true as
-        // soon as cancellation publishes an exit-130 result, while the process
-        // tree is still unwinding.
-        onTermination: (termination: Promise<void>) => {
-          task.termination = termination
         }
-      }
-    )
+      )
+    const execution =
+      backgroundOwner && modContext
+        ? modCallContext.run(
+            {
+              ...modContext,
+              signal: backgroundOwner.signal,
+              assertLive: backgroundOwner.assertLive
+            },
+            execute
+          )
+        : execute()
+    const completion = execution
       .then(async (rawResult) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
         if (task.completed) return
@@ -7096,23 +7121,25 @@ export class LocalSandbox
         // approval. Route the result back through the orchestrator's bypass check so the
         // approval prompt renders for backgrounded `npm run build` etc. before the task
         // is marked complete and task_output() returns to the agent.
-        const result = this.orchestrator
-          ? await this.orchestrator
-              .maybeRetryOutsideSandbox(
-                effectiveCommand,
-                effectiveCwd,
-                this.windowsSandbox,
-                rawResult,
-                outsideShellSyntax
-              )
-              .catch((err) => {
-                console.warn(
-                  `[LocalSandbox] background bypass check failed for task ${taskId}:`,
-                  err
+        // A detached SDK task cannot initiate a second execution/approval after its RPC ends.
+        const result =
+          this.orchestrator && !backgroundOwner
+            ? await this.orchestrator
+                .maybeRetryOutsideSandbox(
+                  effectiveCommand,
+                  effectiveCwd,
+                  this.windowsSandbox,
+                  rawResult,
+                  outsideShellSyntax
                 )
-                return rawResult
-              })
-          : rawResult
+                .catch((err) => {
+                  console.warn(
+                    `[LocalSandbox] background bypass check failed for task ${taskId}:`,
+                    err
+                  )
+                  return rawResult
+                })
+            : rawResult
         if (task.completed) return
         task.result = result
         if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
@@ -7145,6 +7172,7 @@ export class LocalSandbox
         // ownership signals have reached a terminal state.
         await task.termination?.catch(() => undefined)
         task.settled = true
+        backgroundOwner?.release()
 
         // Keep the result available for task_output, but never expire the only
         // ownership record before the command is deletion-safe. Checking object

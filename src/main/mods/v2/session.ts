@@ -5,6 +5,7 @@ import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { FunctionDispatcher, type FunctionPlugin } from "./dispatcher"
 import { FunctionEngineNouns } from "./engine-nouns"
+import { withFunctionBackgroundOwner } from "./background-owner"
 import {
   basicSdkInput,
   runBasicSdk,
@@ -408,15 +409,17 @@ export class FunctionSession {
     if (!this.registry.has(command)) throw new ModFunctionError("MODS_COMMAND_MISSING")
     if (typeof args !== "string" || args.length > 32000)
       throw new ModFunctionError("MODS_COMMAND_ARGS")
-    const value = await this.dispatch(
-      "command.run",
-      {
-        command,
-        args,
-        origin: { kind: "composer" },
-        presentation: { isFullscreen: false, columns: 80 }
-      },
-      signal
+    const value = await withFunctionBackgroundOwner(signal ?? this.controller.signal, () =>
+      this.dispatch(
+        "command.run",
+        {
+          command,
+          args,
+          origin: { kind: "composer" },
+          presentation: { isFullscreen: false, columns: 80 }
+        },
+        signal
+      )
     )
     if (!isModObject(value) || (value.text !== undefined && typeof value.text !== "string"))
       throw new ModFunctionError("MODS_COMMAND_RESULT")
@@ -1088,7 +1091,9 @@ export class FunctionSession {
           core: (e, signal) => {
             this.assertLive(plugin)
             if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
-            return this.host.callTool(plugin, e, signal)
+            return withFunctionBackgroundOwner(this.controller.signal, () =>
+              this.host.callTool!(plugin, e, signal)
+            )
           }
         }
       )

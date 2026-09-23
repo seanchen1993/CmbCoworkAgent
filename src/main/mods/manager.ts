@@ -978,6 +978,82 @@ export class ModsManager {
     return instance
   }
 
+  /** An approved background process remains a resource of this exact live runtime and grant. */
+  registerFunctionBackground(sessionSignal: AbortSignal) {
+    const context = getModCallContext()
+    context?.assertLive?.()
+    sessionSignal.throwIfAborted()
+    const identity = context?.identity
+    const authority = context?.runtimeAuthority
+    if (!identity?.modId?.startsWith("function:") || !authority)
+      throw new ModError("MODS_BACKGROUND_OWNER_REQUIRED")
+    const bindingKey = `${identity.threadId}:${identity.agentId}`
+    const binding = this.bindings.get(bindingKey)
+    const epoch = this.config(identity.workspace).epoch
+    const grant = this.store.getGrant(identity.workspace, identity.modId)
+    const lease = getLocalThreadRunLease(identity.threadId)
+    if (
+      !binding ||
+      binding.runtimeAuthority !== authority ||
+      !grant ||
+      !lease ||
+      grant.epoch !== identity.grantEpoch
+    )
+      throw new ModError("MODS_BACKGROUND_OWNER_REQUIRED")
+    if (this.activeActions.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
+    const controller = new AbortController()
+    const signal = AbortSignal.any([
+      controller.signal,
+      sessionSignal,
+      ...(binding.signal ? [binding.signal] : [])
+    ])
+    const assertLive = () => {
+      signal.throwIfAborted()
+      authority.assertLive()
+      this.store.assertGrant(grant)
+      const currentLease = getLocalThreadRunLease(identity.threadId)
+      if (
+        this.bindings.get(bindingKey) !== binding ||
+        this.config(identity.workspace).epoch !== epoch ||
+        currentLease?.runId !== lease.runId ||
+        currentLease.owner !== lease.owner
+      )
+        throw new ModError("MODS_CALL_SCOPE_CHANGED")
+    }
+    assertLive()
+    const detachRuntime = this.runtimeAuthorities.registerResource(authority, () =>
+      controller.abort()
+    )
+    const detachLease = onLocalThreadRunLeaseReleased((released) => {
+      if (
+        released.threadId === lease.threadId &&
+        released.runId === lease.runId &&
+        released.owner === lease.owner
+      )
+        controller.abort()
+    })
+    // Lease handoffs retain a busy thread without emitting release. Bound the stale-owner window.
+    const watchdog = setInterval(() => {
+      try {
+        assertLive()
+      } catch {
+        controller.abort()
+      }
+    }, 100)
+    watchdog.unref()
+    this.activeActions.set(controller, identity.workspace)
+    return {
+      signal,
+      assertLive,
+      release: () => {
+        clearInterval(watchdog)
+        detachRuntime()
+        detachLease()
+        this.activeActions.delete(controller)
+      }
+    }
+  }
+
   /** Only a fresh host entry may acquire the current instance; SDK continuations retain theirs. */
   functionUserScope(workspace: string, threadId: string) {
     const runtimeAuthority = this.runtimeAuthorities.get({

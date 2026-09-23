@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
+import { setTimeout as delay } from "node:timers/promises"
 import type { ModObject } from "../../shared/mods/types"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { getModCallContext, modCallContext } from "./context"
@@ -160,22 +161,65 @@ const backendMethods: Record<string, MethodSpec> = {
   executeBackground: { tool: "execute", names: ["command", "cwd"] }
 }
 
+/** Poll the same scoped status reader; each read retains the caller's live authority. */
+async function readBackgroundTask(
+  read: () => unknown,
+  input: Record<string, unknown>,
+  assertLive: () => void,
+  signal?: AbortSignal
+): Promise<unknown> {
+  if (
+    typeof input.task_id !== "string" ||
+    (input.block !== undefined && typeof input.block !== "boolean") ||
+    (input.timeout !== undefined &&
+      (typeof input.timeout !== "number" ||
+        !Number.isFinite(input.timeout) ||
+        input.timeout < 0 ||
+        input.timeout > 600000))
+  )
+    throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
+  const timeout = (input.timeout as number | undefined) ?? 30000
+  const start = Date.now()
+  for (;;) {
+    if (signal?.aborted) throw new ModError("MODS_CANCELLED")
+    assertLive()
+    const result = read()
+    if (result === null) return result
+    if (
+      typeof result !== "object" ||
+      !result ||
+      !("completed" in result) ||
+      typeof result.completed !== "boolean"
+    )
+      throw new ModError("MODS_TOOL_RESULT")
+    if (result.completed) return result
+    if (input.block === false) return { ...result, retrieval_status: "not_ready" }
+    const remaining = timeout - (Date.now() - start)
+    if (remaining <= 0) return { ...result, retrieval_status: "timeout" }
+    try {
+      await delay(Math.min(remaining, Date.now() - start < 2000 ? 100 : 500), undefined, { signal })
+    } catch (error) {
+      if (signal?.aborted) throw new ModError("MODS_CANCELLED")
+      throw error
+    }
+  }
+}
+
 /** Only host-owned backend methods receive this wrapper; guests never get the instance. */
 export function attachModBackend(
   instance: object,
   binding: () => ModThreadBinding,
-  owner = binding()
+  owner = binding(),
+  options: { managedExecution?: boolean } = {}
 ): () => void {
   const record = instance as Record<string, unknown>
   const originalMethods = new Map<string, (...args: unknown[]) => Promise<unknown>>()
   for (const [name, spec] of Object.entries(backendMethods)) {
     const method = record[name]
     if (typeof method !== "function") continue
-    if (!originalMethods.has(spec.tool)) {
-      originalMethods.set(spec.tool, (...args) =>
-        Reflect.apply(record[name] as (...args: unknown[]) => Promise<unknown>, instance, args)
-      )
-    }
+    originalMethods.set(name, (...args) =>
+      Reflect.apply(record[name] as (...args: unknown[]) => Promise<unknown>, instance, args)
+    )
     Object.defineProperty(instance, name, {
       configurable: true,
       writable: true,
@@ -238,18 +282,42 @@ export function attachModBackend(
           const manager = getModsManager()
           if (!manager || typeof args.task_id !== "string")
             throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
+          const context = getModCallContext()
+          const scope = binding()
+          const signals = [context?.signal, scope.signal].filter(
+            (value): value is AbortSignal => !!value
+          )
+          const signal = signals.length ? AbortSignal.any(signals) : undefined
           return manager.dispatch(binding(), toolId, args, async (input) => {
-            if (typeof input.task_id !== "string") throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
-            return Reflect.apply(
-              record.getTaskOutput as (...args: unknown[]) => unknown,
-              instance,
-              [input.task_id]
+            return readBackgroundTask(
+              () =>
+                Reflect.apply(record.getTaskOutput as (...args: unknown[]) => unknown, instance, [
+                  input.task_id
+                ]),
+              input,
+              () => {
+                context?.assertLive?.()
+                scope.runtimeAuthority?.assertLive()
+              },
+              signal
             )
           })
         }
         const tool = toolId.replace(/^host:/, "")
-        const method = originalMethods.get(tool)
-        const spec = Object.values(backendMethods).find((value) => value.tool === tool)
+        if (
+          tool === "execute" &&
+          args.run_in_background !== undefined &&
+          typeof args.run_in_background !== "boolean"
+        )
+          throw new ModError("MODS_TOOL_ARGUMENT_TYPE")
+        const methodName =
+          tool === "execute"
+            ? args.run_in_background === true && !options.managedExecution
+              ? "executeBackground"
+              : "execute"
+            : Object.keys(backendMethods).find((name) => backendMethods[name].tool === tool)
+        const method = methodName && originalMethods.get(methodName)
+        const spec = methodName && backendMethods[methodName]
         if (!method || !spec) throw new ModError("MODS_TOOL_UNAVAILABLE")
         const values = spec.names.map((key) => args[key])
         // A capability request is a new operation, never an internal backend helper call.

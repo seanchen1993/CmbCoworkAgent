@@ -35,6 +35,7 @@ interface Entry {
   authority: ModRuntimeAuthority
   parent?: Entry
   children: Set<Entry>
+  resources: Set<() => void>
   release(): void
 }
 
@@ -79,15 +80,29 @@ export class ModRuntimeAuthorities {
         parent?.assertLive()
       }
     })
+    let released = false
     const entry: Entry = {
       authority,
       parent: parentEntry,
       children: new Set(),
+      resources: new Set(),
       release: () => {
+        if (released) return
+        released = true
         signal?.removeEventListener("abort", entry.release)
-        for (const child of [...entry.children]) child.release()
-        parentEntry?.children.delete(entry)
         if (this.entries.get(key) === entry) this.entries.delete(key)
+        for (const child of [...entry.children]) child.release()
+        entry.children.clear()
+        parentEntry?.children.delete(entry)
+        const resources = [...entry.resources]
+        entry.resources.clear()
+        for (const dispose of resources) {
+          try {
+            dispose()
+          } catch {
+            // A failed resource cleanup must never keep other owned work authorized.
+          }
+        }
       }
     }
     this.entries.set(key, entry)
@@ -103,6 +118,16 @@ export class ModRuntimeAuthorities {
     const authority = this.entries.get(this.key(scope))?.authority
     authority?.assertLive()
     return authority
+  }
+
+  /** Host resources are revoked with the exact owner, never transferred to a replacement. */
+  registerResource(authority: ModRuntimeAuthority, dispose: () => void): () => void {
+    authority.assertLive()
+    const entry = this.owners.get(authority)
+    if (!entry) throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
+    if (entry.resources.size >= 100) throw new ModError("MODS_RUNTIME_CAPACITY")
+    entry.resources.add(dispose)
+    return () => entry.resources.delete(dispose)
   }
 
   closeThread(threadId: string): void {

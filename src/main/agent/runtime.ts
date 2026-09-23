@@ -5328,6 +5328,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       ...(options.filesystemAccess ? blockedToolNamesForAccess(options.filesystemAccess) : [])
     ]),
     modReadOnly,
+    modManagedExecution: managedExecution,
     worktreeIsolation: options.worktreeIsolation,
     virtualMode: false,
     // Native Git in an isolated worktree runs through the normal shell path.

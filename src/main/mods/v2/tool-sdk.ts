@@ -14,8 +14,12 @@ const tools: Record<string, { target: string; required: string[]; optional: stri
   ls: { target: "host:ls", required: ["path"], optional: [] },
   glob: { target: "host:glob", required: ["pattern"], optional: ["path"] },
   grep: { target: "host:grep", required: ["pattern"], optional: ["path", "glob"] },
-  execute: { target: "host:execute", required: ["command"], optional: ["cwd"] },
-  task_output: { target: "host:task_output", required: ["task_id"], optional: [] }
+  execute: {
+    target: "host:execute",
+    required: ["command"],
+    optional: ["cwd", "run_in_background"]
+  },
+  task_output: { target: "host:task_output", required: ["task_id"], optional: ["block", "timeout"] }
 }
 
 export function isNativeFunctionTool(name: string): boolean {
@@ -58,7 +62,10 @@ export function functionToolTarget(input: ModObject): { target: string; args: Mo
     if (key === "offset" || key === "limit") {
       if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100000)
         throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
-    } else if (key === "replace_all") {
+    } else if (key === "timeout") {
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 600000)
+        throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
+    } else if (["replace_all", "run_in_background", "block"].includes(key)) {
       if (typeof value !== "boolean") throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
     } else if (typeof value !== "string") throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
   }

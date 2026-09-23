@@ -1,7 +1,54 @@
 import { expect, it } from "vitest"
 import { assertModRuntimeAuthority, ModRuntimeAuthorities } from "./runtime-instance"
 
+it("actively disposes registered runtime resources exactly once on replacement or cancellation", () => {
+  const registry = new ModRuntimeAuthorities()
+  const controller = new AbortController()
+  const first = registry.create(scope, controller.signal)
+  const calls: string[] = []
+  registry.registerResource(first.authority, () => calls.push("first"))
+  const detach = registry.registerResource(first.authority, () => calls.push("detached"))
+  detach()
+  const next = registry.create(scope)
+  expect(calls).toEqual(["first"])
+  controller.abort()
+  first.release()
+  expect(calls).toEqual(["first"])
+  expect(() => registry.registerResource(first.authority, () => {})).toThrow(
+    "MODS_RUNTIME_INSTANCE_EXPIRED"
+  )
+  registry.registerResource(next.authority, () => calls.push("next"))
+  registry.closeThread(scope.threadId)
+  expect(calls).toEqual(["first", "next"])
+})
+
 const scope = { workspace: "project", threadId: "thread", turnId: "turn" }
+
+it("continues child and parent revocation after a disposer throws and permits reentrant cleanup", () => {
+  const registry = new ModRuntimeAuthorities()
+  const parent = registry.create(scope)
+  const child = registry.create({ ...scope, agentId: "child" }, undefined, parent.authority)
+  const calls: string[] = []
+  registry.registerResource(child.authority, () => {
+    calls.push("child throws")
+    throw Error("cleanup")
+  })
+  registry.registerResource(child.authority, () => calls.push("child finishes"))
+  registry.registerResource(parent.authority, () => {
+    calls.push("parent throws")
+    throw Error("cleanup")
+  })
+  registry.registerResource(parent.authority, () => {
+    calls.push("parent finishes")
+    parent.release()
+  })
+  expect(() => parent.release()).not.toThrow()
+  parent.release()
+  child.release()
+  expect(calls).toEqual(["child throws", "child finishes", "parent throws", "parent finishes"])
+  expect(() => child.authority.assertLive()).toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+  expect(() => parent.authority.assertLive()).toThrow("MODS_RUNTIME_INSTANCE_EXPIRED")
+})
 
 it("expires a same-agent same-turn predecessor without letting its disposer revoke the replacement", () => {
   const registry = new ModRuntimeAuthorities()
