@@ -4,7 +4,7 @@ import { createHash } from "node:crypto"
 import { promisify } from "node:util"
 import { join, relative, resolve } from "node:path"
 import { AUTOBIZ_KANBAN_COMMIT, withPinnedAutobiz } from "./autobiz-source"
-import { runAutobizTransitionProcess } from "./autobiz-transition-process"
+import { commitAutobizState, type AutobizCommitInput } from "./autobiz-state-commit"
 export { AUTOBIZ_KANBAN_SOURCE, AUTOBIZ_KANBAN_COMMIT } from "./autobiz-source"
 
 const run = promisify(execFile)
@@ -28,6 +28,9 @@ export interface AutobizCheckpointTransition {
   from: string
   to: string
   stateFingerprint: string
+  markdownFingerprint?: string
+  operationId?: string
+  status?: "committed" | "not-applied" | "unknown"
   reason?: string
 }
 
@@ -132,13 +135,35 @@ except Exception as e:
   try {
     await access(statePath)
     const workflowBefore = await fingerprintAutobizWorkflow(root)
-    const { stdout } = await withPinnedAutobiz(signal, (source) => run(PYTHON, ["-I", "-B", "-X", "utf8", "-c", script, source, root, AUTOBIZ_KANBAN_COMMIT, statePath, feature || ""], {
-      cwd: source, encoding: "utf8", timeout: timeoutMs, maxBuffer: 256 * 1024, windowsHide: true, signal
-    }))
+    const { stdout } = await withPinnedAutobiz(signal, (source) =>
+      run(
+        PYTHON,
+        [
+          "-I",
+          "-B",
+          "-X",
+          "utf8",
+          "-c",
+          script,
+          source,
+          root,
+          AUTOBIZ_KANBAN_COMMIT,
+          statePath,
+          feature || ""
+        ],
+        {
+          cwd: source,
+          encoding: "utf8",
+          timeout: timeoutMs,
+          maxBuffer: 256 * 1024,
+          windowsHide: true,
+          signal
+        }
+      )
+    )
     const line = stdout.trim().split(/\r?\n/).at(-1) || ""
     const result = JSON.parse(line) as AutobizValidationResult
-    if (result.sourceCommit !== AUTOBIZ_KANBAN_COMMIT)
-      throw new Error("AUTOBIZ_SOURCE_CHANGED")
+    if (result.sourceCommit !== AUTOBIZ_KANBAN_COMMIT) throw new Error("AUTOBIZ_SOURCE_CHANGED")
     const workflowAfter = await fingerprintAutobizWorkflow(root)
     if (workflowAfter !== workflowBefore)
       return {
@@ -152,91 +177,18 @@ except Exception as e:
   } catch (error) {
     if (signal?.aborted) throw error
     return {
-      passed: false, sourceCommit: "", compiler: "failed", validator: "failed",
+      passed: false,
+      sourceCommit: "",
+      compiler: "failed",
+      validator: "failed",
       reason: error instanceof Error ? error.message.slice(0, 4000) : "AUTOBIZ_VALIDATOR_FAILED"
     }
   }
 }
 
-/**
- * Uses the upstream checkpoint preparation and state writer only after a
- * read-only fingerprint and current-checkpoint check. A repeated transition
- * is an idempotent no-op; an external write between validation and commit is
- * rejected and never overwritten.
- */
-export async function advanceAutobizCheckpoint(input: {
-  workspace: string
-  feature: string
-  from: string
-  to: string
-  expectedStateFingerprint: string
-  idempotencyKey: string
-  signal?: AbortSignal
-  timeoutMs?: number
-  verifyEvidence?(): Promise<void>
-}): Promise<AutobizCheckpointTransition> {
-  const script = `
-import hashlib, importlib.util, json, os, subprocess, sys
-source, workspace, feature, old, new, expected, key = sys.argv[1:]
-sys.path.insert(0, source)
-sys.path.insert(0, os.path.join(source, 'skills', 'autodev', 'hooks'))
-def load(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec); sys.modules[name] = mod; spec.loader.exec_module(mod); return mod
-def fingerprint(path): return hashlib.sha256(open(path,'rb').read()).hexdigest()
-try:
-    # Source was extracted from the pinned Git object by the host; it has no .git directory.
-    state_path = os.path.join(workspace,'.autobizdevops','state.json')
-    receipt_path = os.path.join(workspace,'.autobizdevops','.mods-v2-transition-'+hashlib.sha256(key.encode()).hexdigest()+'.json')
-    if os.path.isfile(receipt_path):
-        receipt = json.load(open(receipt_path, encoding='utf-8'))
-        if receipt.get('feature') != feature or receipt.get('from') != old or receipt.get('to') != new:
-            raise RuntimeError('AUTOBIZ_RECEIPT_MISMATCH')
-        if fingerprint(state_path) != receipt.get('stateFingerprint'):
-            raise RuntimeError('AUTOBIZ_STATE_CHANGED')
-        print(json.dumps({**receipt, 'applied':False, 'duplicate':True}))
-        raise SystemExit(0)
-    update = load(os.path.join(source,'hooks','update_checkpoint.py'), 'mods_update')
-    sync = update.check_or_fix_state_sync
-    state_store = load(os.path.join(source,'board_core','state_store.py'), 'mods_state_store')
-    current = sync(__import__('pathlib').Path(workspace), fix=False)
-    if not current.state_exists or current.errors: raise RuntimeError('AUTOBIZ_STATE_NOT_CANONICAL')
-    record = current.records.get(feature)
-    actual = (record or {}).get('checkpoint')
-    before = fingerprint(state_path)
-    if before != expected: raise RuntimeError('AUTOBIZ_STATE_CHANGED')
-    if actual == new:
-        print(json.dumps({'applied':False,'duplicate':True,'feature':feature,'from':old,'to':new,'stateFingerprint':before}))
-        raise SystemExit(0)
-    if actual != old: raise RuntimeError('AUTOBIZ_CHECKPOINT_CHANGED:'+str(actual))
-    result = update.prepare_checkpoint_update(workspace=__import__('pathlib').Path(workspace), feature=feature, checkpoint=new)
-    if not result.ok: raise RuntimeError('; '.join(result.errors))
-    print(json.dumps({'ready':True}), flush=True)
-    if sys.stdin.readline().strip() != 'commit': raise RuntimeError('AUTOBIZ_COMMIT_NOT_AUTHORIZED')
-    if fingerprint(state_path) != before: raise RuntimeError('AUTOBIZ_STATE_CHANGED')
-    state_store.write_state_records_preserving_raw(__import__('pathlib').Path(workspace), result.records, raw_records=result.raw_records)
-    after = fingerprint(state_path)
-    verify = sync(__import__('pathlib').Path(workspace), fix=False)
-    if not verify.state_exists or verify.errors or (verify.records.get(feature) or {}).get('checkpoint') != new:
-        raise RuntimeError('AUTOBIZ_STATE_COMMIT_VERIFY_FAILED')
-    receipt = {'applied':True,'duplicate':False,'feature':feature,'from':old,'to':new,'stateFingerprint':after}
-    with open(receipt_path, 'x', encoding='utf-8') as handle: json.dump(receipt, handle)
-    print(json.dumps(receipt))
-except SystemExit: raise
-except Exception as e:
-    print(json.dumps({'applied':False,'duplicate':False,'feature':feature,'from':old,'to':new,'stateFingerprint':'','reason':str(e)[:4000]}))
-`
-  const root = resolve(input.workspace)
-  try {
-    const stdout = await withPinnedAutobiz(input.signal, (source) => runAutobizTransitionProcess({
-      command: PYTHON,
-      args: ["-I", "-B", "-X", "utf8", "-c", script, source, root, input.feature, input.from, input.to, input.expectedStateFingerprint, input.idempotencyKey],
-      cwd: source, timeoutMs: input.timeoutMs ?? 120_000, signal: input.signal,
-      verifyEvidence: input.verifyEvidence ?? (async () => { input.signal?.throwIfAborted() })
-    }))
-    return JSON.parse(stdout.trim().split(/\r?\n/).at(-1) || "") as AutobizCheckpointTransition
-  } catch (error) {
-    if (input.signal?.aborted) throw error
-    return { applied: false, duplicate: false, feature: input.feature, from: input.from, to: input.to, stateFingerprint: "", reason: error instanceof Error ? error.message.slice(0, 4000) : "AUTOBIZ_TRANSITION_FAILED" }
-  }
+/** Advances only through the host journal and locked, pinned upstream state adapter. */
+export async function advanceAutobizCheckpoint(
+  input: AutobizCommitInput
+): Promise<AutobizCheckpointTransition> {
+  return commitAutobizState(input)
 }

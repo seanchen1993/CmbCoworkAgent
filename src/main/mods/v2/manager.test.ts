@@ -145,7 +145,7 @@ it("never advances an Autobiz checkpoint without a host validator evidence event
   }, new AbortController().signal)).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_REQUIRED")
 })
 
-it("returns an idempotent duplicate for a previously recorded transition", async () => {
+it("does not treat a ledger row without current state and trusted commit proof as a duplicate", async () => {
   const f = await fixture()
   await f.approve()
   const binding = await captureCompletionBinding({
@@ -164,7 +164,7 @@ it("returns an idempotent duplicate for a previously recorded transition", async
   await expect(f.manager.advanceAutobizCheckpoint(f.root, "thread", {
     evidenceId: "evidence", feature: "order-export", from: "requirements_eval_in_progress",
     to: "requirements_eval_done", stateFingerprint: binding.stateFingerprint, idempotencyKey: "receipt"
-  }, new AbortController().signal)).resolves.toMatchObject({ applied: false, duplicate: true })
+  }, new AbortController().signal)).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_STALE")
 })
 
 it.each(["code-review", "autobiz-validator"])("does not let report mode block completion for %s", async (check) => {

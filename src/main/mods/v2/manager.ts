@@ -10,7 +10,7 @@ import { FunctionTurnNotices } from "./turn-notices"
 import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { createHash, randomInt, randomUUID } from "node:crypto"
+import { randomInt, randomUUID } from "node:crypto"
 import { parseCompletionPolicy } from "../../../shared/mods/v2/completion-policy"
 import { CompletionBudget, bindCompletionGateBudget } from "./completion-budget"
 import { ProjectFunctionFiles, type FunctionFileScope } from "./file-access"
@@ -54,7 +54,11 @@ import {
 } from "./completion-evidence"
 import { advanceAutobizCheckpoint, runAutobizValidator } from "./autobiz-validation"
 import { runProjectCheck, type ProjectCheckKind } from "./project-checks"
-import { dispatchFunctionStream, type FunctionStreamOptions, type ModHookStream } from "./stream-dispatcher"
+import {
+  dispatchFunctionStream,
+  type FunctionStreamOptions,
+  type ModHookStream
+} from "./stream-dispatcher"
 import { CompletionFreshness } from "./completion-freshness"
 import { onWorkspaceFilesChanged } from "../../services/workspace-change-events"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"
@@ -714,7 +718,9 @@ export class FunctionModsManager {
     const records = this.store.completionEvidence(workspace, threadId, limit)
     const generation = this.sessions.get(JSON.stringify([workspace, threadId]))?.generation
     const invalidated = new Set(
-      records.filter((row) => row.phase === "invalidated").map((row) => bindingFingerprint(row.binding))
+      records
+        .filter((row) => row.phase === "invalidated")
+        .map((row) => bindingFingerprint(row.binding))
     )
     // A previous process has no live authority/capture closure. Preserve its historical
     // facts and append an invalidation instead of reviving a PASS on UI reload.
@@ -726,7 +732,13 @@ export class FunctionModsManager {
         row.binding.runtimeGeneration !== generation &&
         !invalidated.has(fingerprint)
       ) {
-        this.invalidateCompletionEvidence(workspace, threadId, row.id, row.binding, "runtime-replaced")
+        this.invalidateCompletionEvidence(
+          workspace,
+          threadId,
+          row.id,
+          row.binding,
+          "runtime-replaced"
+        )
         invalidated.add(fingerprint)
       }
     }
@@ -746,34 +758,105 @@ export class FunctionModsManager {
     const to = input.to
     const stateFingerprint = input.stateFingerprint
     const idempotencyKey = input.idempotencyKey
-    if ([evidenceId, feature, from, to, stateFingerprint, idempotencyKey].some((value) => typeof value !== "string" || !value))
+    if (
+      [evidenceId, feature, from, to, stateFingerprint, idempotencyKey].some(
+        (value) => typeof value !== "string" || !value
+      )
+    )
       throw new ModFunctionError("MODS_AUTOBIZ_TRANSITION_ARGUMENTS")
     const records = this.store.completionEvidence(workspace, threadId, 500)
-    const prior = records.find((record) => record.phase === "state.transition" && record.status === "pass" &&
-      isModObject(record.detail) && record.detail.evidenceId === evidenceId && record.detail.idempotencyKey === idempotencyKey)
+    const prior = records.find(
+      (record) =>
+        record.phase === "state.transition" &&
+        record.status === "pass" &&
+        isModObject(record.detail) &&
+        record.detail.evidenceId === evidenceId &&
+        record.detail.idempotencyKey === idempotencyKey
+    )
     if (prior && this.host.enabled(workspace)) {
+      signal.throwIfAborted()
       this.host.assertThread?.(workspace, threadId)
       const detail = isModObject(prior.detail) ? prior.detail : undefined
-      const targetFingerprint = detail && typeof detail.stateFingerprint === "string"
-        ? detail.stateFingerprint : undefined
-      const statePath = join(this.host.fileScope?.(workspace, threadId)?.workspace ?? workspace,
-        ".autobizdevops", "state.json")
-      if (targetFingerprint && existsSync(statePath)) {
-        const currentFingerprint = createHash("sha256").update(readFileSync(statePath)).digest("hex")
-        if (currentFingerprint !== targetFingerprint) throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+      if (
+        !detail ||
+        detail.feature !== feature ||
+        detail.from !== from ||
+        detail.to !== to ||
+        prior.binding.stateFingerprint !== stateFingerprint ||
+        Object.keys(prior.binding.pluginDigests).length === 0
+      )
+        throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+      const entry = await this.session(workspace, threadId)
+      const scope = this.host.fileScope?.(workspace, threadId)
+      const assertCurrent = (): void => {
+        signal.throwIfAborted()
+        scope?.assertLive()
+        this.host.assertThread?.(workspace, threadId)
+        if (
+          !this.host.enabled(workspace) ||
+          this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+        )
+          throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+        for (const [name, digest] of Object.entries(prior.binding.pluginDigests)) {
+          const snapshot = entry.snapshots.get(name)
+          if (!snapshot || snapshot.compiled.digest !== digest)
+            throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+          this.store.assertGrant(snapshot.grant)
+        }
       }
-      return { ...(prior.detail as ModObject), applied: false, duplicate: true }
+      assertCurrent()
+      // A ledger row is not a state receipt. Recheck both state files and file identities
+      // against the host-owned durable journal while holding the real Windows locks.
+      const duplicate = await advanceAutobizCheckpoint({
+        workspace: scope?.workspace ?? workspace,
+        feature: feature as string,
+        from: from as string,
+        to: to as string,
+        expectedStateFingerprint: stateFingerprint as string,
+        idempotencyKey: idempotencyKey as string,
+        signal,
+        requireCommittedReceipt: true,
+        verifyEvidence: async () => {
+          assertCurrent()
+        }
+      })
+      assertCurrent()
+      if (!duplicate.duplicate || duplicate.applied)
+        throw new ModFunctionError(duplicate.reason || "MODS_AUTOBIZ_VALIDATOR_STALE")
+      return { evidenceId, idempotencyKey, ...duplicate } as ModObject
     }
-    const started = records.find((record) => record.phase === "check.started" && isModObject(record.detail) && record.detail.attempt === evidenceId)
+    const started = records.find(
+      (record) =>
+        record.phase === "check.started" &&
+        isModObject(record.detail) &&
+        record.detail.attempt === evidenceId
+    )
     const validator = records.find((record) => {
       if (record.phase !== "validator.result" || record.status !== "pass" || !started) return false
-      if (record.at < started.at || bindingFingerprint(record.binding) !== bindingFingerprint(started.binding)) return false
-      return isModObject(record.detail) && record.detail.kind === "autobiz-validator" && record.detail.passed === true
+      if (
+        record.at < started.at ||
+        bindingFingerprint(record.binding) !== bindingFingerprint(started.binding)
+      )
+        return false
+      return (
+        isModObject(record.detail) &&
+        record.detail.kind === "autobiz-validator" &&
+        record.detail.passed === true
+      )
     })
     if (!started || !validator) throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_REQUIRED")
-    if (validator.binding.stateFingerprint !== stateFingerprint ||
-      (isModObject(validator.detail) && typeof validator.detail.feature === "string" && validator.detail.feature !== feature) ||
-      records.some((record) => record.phase === "invalidated" && record.at >= validator.at && bindingFingerprint(record.binding) === bindingFingerprint(validator.binding)))
+    if (
+      validator.binding.stateFingerprint !== stateFingerprint ||
+      (isModObject(validator.detail) &&
+        typeof validator.detail.feature === "string" &&
+        validator.detail.feature !== feature) ||
+      records.some(
+        (record) =>
+          record.phase === "invalidated" &&
+          record.at >= validator.at &&
+          bindingFingerprint(record.binding) === bindingFingerprint(validator.binding)
+      )
+    )
       throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
     const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
     const capture = entry?.completionProofs.get(evidenceId as string)
@@ -797,15 +880,28 @@ export class FunctionModsManager {
       signal,
       verifyEvidence
     })
-    this.host.assertThread?.(workspace, threadId)
-    for (const snapshot of (this.sessions.get(JSON.stringify([workspace, threadId]))?.snapshots.values() ?? [])) this.store.assertGrant(snapshot.grant)
-    if (!result.applied && !result.duplicate)
-      throw new ModFunctionError(result.reason || "MODS_AUTOBIZ_TRANSITION_FAILED")
+    const accepted = result.applied || result.duplicate
     this.store.saveCompletionEvidence({
-      ...started, id: randomUUID(), idempotencyKey: `transition:${idempotencyKey}`,
-      phase: "state.transition", status: "pass", at: Date.now(),
+      ...started,
+      id: randomUUID(),
+      idempotencyKey: accepted
+        ? `transition:${idempotencyKey}`
+        : `transition-attempt:${randomUUID()}`,
+      phase: "state.transition",
+      status: accepted ? "pass" : result.status === "unknown" ? "interrupted" : "block",
+      at: Date.now(),
       detail: { evidenceId, idempotencyKey, ...result } as ModObject
     })
+    if (!accepted) throw new ModFunctionError(result.reason || "MODS_AUTOBIZ_TRANSITION_FAILED")
+    signal.throwIfAborted()
+    scope?.assertLive()
+    this.host.assertThread?.(workspace, threadId)
+    if (
+      !this.host.enabled(workspace) ||
+      this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+    )
+      throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+    for (const snapshot of entry.snapshots.values()) this.store.assertGrant(snapshot.grant)
     entry.completionProofs.delete(evidenceId as string)
     return result as unknown as ModObject
   }
@@ -845,7 +941,10 @@ export class FunctionModsManager {
     )
       return (await core(input, signal)) as ModObject
     const entry = await this.session(workspace, threadId)
-    if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+    if (
+      !this.host.enabled(workspace) ||
+      this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+    )
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
     const safe = await this.host.publish(workspace, input, signal)
     const result = await entry.session!.offerAgent(safe as ModObject, signal, core)
@@ -964,14 +1063,20 @@ export class FunctionModsManager {
     if (!this.host.enabled(workspace) || !this.hasSources())
       return this.emptyStep(input, core, signal)
     const entry = await this.session(workspace, threadId)
-    if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+    if (
+      !this.host.enabled(workspace) ||
+      this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+    )
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
     const safe = await this.host.publish(workspace, input, signal)
     const publish = this.host.publish.bind(this.host)
     const assertEntry = (): void => {
       signal.throwIfAborted()
       this.host.assertThread?.(workspace, threadId)
-      if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+      if (
+        !this.host.enabled(workspace) ||
+        this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+      )
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
     }
     const protectedCore: FunctionStreamOptions["core"] = async function* (value, context) {
@@ -980,8 +1085,7 @@ export class FunctionModsManager {
       try {
         while (true) {
           const item = await output.next()
-          if (item.done)
-            return await publish(workspace, item.value ?? {}, context.signal)
+          if (item.done) return await publish(workspace, item.value ?? {}, context.signal)
           assertEntry()
           yield await publish(workspace, item.value, context.signal)
         }
@@ -1469,7 +1573,10 @@ export class FunctionModsManager {
     )
   }
 
-  async logs(workspace: string, threadId: string): Promise<import("../../../shared/mods/v2/ui-log").FunctionLogEntry[]> {
+  async logs(
+    workspace: string,
+    threadId: string
+  ): Promise<import("../../../shared/mods/v2/ui-log").FunctionLogEntry[]> {
     this.host.assertThread?.(workspace, threadId)
     if (!this.host.enabled(workspace)) return []
     const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
@@ -1477,12 +1584,18 @@ export class FunctionModsManager {
     await entry.loading
     const result = await entry.session!.logSnapshot()
     this.host.assertThread?.(workspace, threadId)
-    if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+    if (
+      !this.host.enabled(workspace) ||
+      this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+    )
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
     return result
   }
 
-  async feedback(workspace: string, threadId: string): Promise<import("../../../shared/mods/v2/ui-feedback").FunctionFeedbackEntry[]> {
+  async feedback(
+    workspace: string,
+    threadId: string
+  ): Promise<import("../../../shared/mods/v2/ui-feedback").FunctionFeedbackEntry[]> {
     this.host.assertThread?.(workspace, threadId)
     if (!this.host.enabled(workspace)) return []
     const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
@@ -1490,7 +1603,10 @@ export class FunctionModsManager {
     await entry.loading
     const result = await entry.session!.feedbackSnapshot()
     this.host.assertThread?.(workspace, threadId)
-    if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
+    if (
+      !this.host.enabled(workspace) ||
+      this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+    )
       throw new ModFunctionError("MODS_SCOPE_CHANGED")
     return result
   }

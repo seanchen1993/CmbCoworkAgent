@@ -4,7 +4,7 @@ import { execFile } from "node:child_process"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { promisify } from "node:util"
-import { afterEach, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { ModControlStore } from "../control-store"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { FunctionModsManager } from "./manager"
@@ -17,9 +17,17 @@ vi.mock("../../services/harness-stage-attribution", () => ({
   markHarnessStageAttributionDirty: vi.fn()
 }))
 vi.mock("../../hooks/scope", () => ({ resolveEnabledHooksForRun: vi.fn() }))
-vi.setConfig({ testTimeout: 20_000 })
+// The real pinned validator starts a Python subprocess and can contend with
+// the other Mods suites when Vitest runs them in parallel.
+vi.setConfig({ testTimeout: 60_000 })
 
 const roots: string[] = []
+const hostJournal = vi.hoisted(() => ({ root: "" }))
+vi.mock("../../app-data-root", () => ({ getCmbCoworkAgentDataRoot: () => hostJournal.root }))
+beforeEach(async () => {
+  hostJournal.root = await mkdtemp(join(tmpdir(), "mods-autobiz-journal-"))
+  roots.push(hostJournal.root)
+})
 const cleanups: Array<() => Promise<void>> = []
 const execute = promisify(execFile)
 
@@ -430,5 +438,32 @@ it("rejects a duplicate completion after external state competition", async () =
   await writeFile(statePath, JSON.stringify(state))
   await expect(
     fixture.manager.advanceAutobizCheckpoint(fixture.root, "thread", input, fixture.signal)
-  ).rejects.toThrow("MODS_AUTOBIZ_VALIDATOR_STALE")
+  ).rejects.toThrow("AUTOBIZ_STATE_CHANGED")
+})
+
+it("does not reapply a ledger-only transition when the trusted commit receipt is missing", async () => {
+  const fixture = await autobizFixture({ report: "verdict: PASS\nreal fixture report" })
+  expect(await runLoop(fixture)).toBe("passed")
+  const records = fixture.store.completionEvidence(fixture.root, "thread", 100)
+  const started = records.find((record) => record.phase === "check.started")!
+  const validator = records.find((record) => record.phase === "validator.result")!
+  const input = {
+    evidenceId: String((started.detail as { attempt: string }).attempt),
+    feature: "order-export",
+    from: "requirements_eval_in_progress",
+    to: "requirements_eval_done",
+    stateFingerprint: validator.binding.stateFingerprint,
+    idempotencyKey: randomUUID()
+  }
+  fixture.store.saveCompletionEvidence({
+    ...started, id: randomUUID(), idempotencyKey: `ledger-only:${input.idempotencyKey}`,
+    phase: "state.transition", status: "pass", at: Date.now(),
+    detail: { ...input, applied: true, duplicate: false }
+  })
+  const statePath = join(fixture.root, ".autobizdevops", "state.json")
+  const before = await readFile(statePath, "utf8")
+  await expect(fixture.manager.advanceAutobizCheckpoint(
+    fixture.root, "thread", input, fixture.signal
+  )).rejects.toThrow("AUTOBIZ_RECEIPT_REQUIRED")
+  expect(await readFile(statePath, "utf8")).toBe(before)
 })
