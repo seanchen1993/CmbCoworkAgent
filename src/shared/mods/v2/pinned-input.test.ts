@@ -103,3 +103,34 @@ it("pins explicit expansion identity and original command text", () => {
     expect(() => normalizeFunctionInput("classic.UserPromptExpansion", { ...original, [key]: "spoofed" }, original)).toThrow("MODS_PINNED_INPUT")
   }
 })
+
+const scroll = {
+  component: "Pane",
+  requestId: "board",
+  offset: 10,
+  by: 2,
+  bodyRows: 5,
+  contentRows: 40,
+  origin: { kind: "plugin", name: "owner" }
+}
+it("only lets an imperative scroll hook rewrite offset and inherits omitted host geometry", () => {
+  expect(normalizeFunctionInput("ui.scroll", { offset: 0 }, scroll)).toEqual({
+    ...scroll,
+    offset: 0
+  })
+})
+it.each<import("../types").ModObject>([
+  { by: 0 },
+  { bodyRows: 0 },
+  { contentRows: 200 },
+  { requestId: "other" },
+  { origin: { kind: "person" } },
+  { pointer: { row: 1 } },
+  { offset: "3" }
+])("refuses fabricated imperative scroll input %j", (change) => {
+  expect(() => normalizeFunctionInput("ui.scroll", { ...scroll, ...change }, scroll)).toThrow()
+})
+it("preserves the existing legacy wheel observation envelope", () => {
+  const before = { plugin: "demo", component: "Pane", value: { deltaY: 1, top: 20 } }
+  expect(normalizeFunctionInput("ui.scroll", before, before)).toEqual(before)
+})

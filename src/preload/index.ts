@@ -3096,6 +3096,10 @@ const api = {
       threadId: string,
       ack: import("../shared/mods/v2/ui-focus").FunctionFocusAck
     ): Promise<void> => ipcRenderer.invoke("mods:function-focus-ack", { threadId, ack }),
+    scrollAck: (
+      threadId: string,
+      ack: import("../shared/mods/v2/ui-scroll").FunctionScrollAck
+    ): Promise<void> => ipcRenderer.invoke("mods:function-scroll-ack", { threadId, ack }),
     paneAct: (
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction

@@ -674,6 +674,23 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         ) as unknown as import("../../shared/mods/v2/ui-focus").FunctionFocusAck
       )
   )
+  ipcMain.handle(
+    "mods:function-scroll-ack",
+    (
+      event,
+      input: {
+        threadId: string
+        ack: import("../../shared/mods/v2/ui-scroll").FunctionScrollAck
+      }
+    ) =>
+      functions.scrollAck(
+        writableScope(event, input?.threadId),
+        input.threadId,
+        parseModJson(
+          encodeModJson(input.ack)
+        ) as unknown as import("../../shared/mods/v2/ui-scroll").FunctionScrollAck
+      )
+  )
   ipcMain.handle("mods:function-panes", (event, threadId: string) =>
     functions.panes(scope(event, threadId), threadId)
   )

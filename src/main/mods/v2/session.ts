@@ -1,3 +1,4 @@
+import { functionScrollInput } from "../../../shared/mods/v2/ui-scroll"
 import { functionFocusInput } from "../../../shared/mods/v2/ui-focus"
 import { FunctionUiNotices, type FunctionNoticeDialogAccess } from "./ui-notice"
 import { validateFunctionNotice } from "../../../shared/mods/v2/ui-notice"
@@ -799,6 +800,7 @@ export class FunctionSession {
           throw new ModFunctionError("MODS_UI_ACTION_INVALID")
         if (
           name === "ui.scroll" &&
+          !Object.hasOwn(input, "offset") &&
           (!isModObject(value.value) ||
             Object.keys(value.value).some(
               (key) => !["deltaX", "deltaY", "top", "left"].includes(key)
@@ -807,6 +809,21 @@ export class FunctionSession {
               (number) =>
                 typeof number !== "number" || !Number.isFinite(number) || Math.abs(number) > 100000
             ))
+        )
+          throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+        if (
+          name === "ui.scroll" &&
+          Object.hasOwn(input, "offset") &&
+          ([value.offset, value.by, value.bodyRows, value.contentRows].some(
+            (item) => typeof item !== "number" || !Number.isFinite(item)
+          ) ||
+            Number(value.bodyRows) <= 0 ||
+            Number(value.contentRows) < 0 ||
+            value.component !== "Pane" ||
+            typeof value.requestId !== "string" ||
+            !isModObject(value.origin) ||
+            value.origin.kind !== "plugin" ||
+            typeof value.origin.name !== "string")
         )
           throw new ModFunctionError("MODS_UI_ACTION_INVALID")
         if (name === "command.run" && (typeof value.args !== "string" || value.args.length > 32000))
@@ -858,7 +875,7 @@ export class FunctionSession {
         }
         if (!isModObject(value)) throw new ModFunctionError("MODS_EVENT_RESULT")
         if (
-          name === "ui.focus" &&
+          (name === "ui.focus" || (name === "ui.scroll" && Object.hasOwn(input, "offset"))) &&
           (Object.keys(value).length === 0 || typeof value.deny === "string")
         )
           return
@@ -1424,6 +1441,33 @@ export class FunctionSession {
       this.panes.invalidate()
       this.sites.invalidate()
       return undefined
+    }
+    if (method === "ui.scroll") {
+      if (args.length !== 1) throw new ModFunctionError("MODS_UI_SCROLL_ARGUMENTS")
+      const input = functionScrollInput(args[0])
+      return {
+        ...(await this.panes.requestScroll(
+          plugin.name,
+          input,
+          callSignal,
+          async (event, core, signal) => {
+            const answer = await this.dispatch(
+              "ui.scroll",
+              event,
+              signal,
+              { plugin: plugin.name, registration: source.registration },
+              depth + 1,
+              { plugin, core },
+              turnHeld
+            )
+            if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+            if (typeof answer.deny === "string") return { deny: answer.deny }
+            if (isModObject(answer.value) && typeof answer.value.deny === "string")
+              return { deny: answer.value.deny }
+            return {}
+          }
+        ))
+      }
     }
     if (method === "ui.focus") {
       if (args.length !== 1) throw new ModFunctionError("MODS_UI_FOCUS_ARGUMENTS")

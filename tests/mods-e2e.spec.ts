@@ -1,3 +1,4 @@
+import { verifyImperativeScroll } from "./support/mods-imperative-scroll-e2e"
 import { verifyImperativeFocus } from "./support/mods-imperative-focus-e2e"
 import { verifyDesktopSoak } from "./support/mods-desktop-soak-e2e"
 import { desktopSoakOptions } from "./support/mods-desktop-soak-options"
@@ -50,7 +51,30 @@ const binary = packagedDir
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
-const focus = ["imperative-focus", "desktop-performance", "desktop-soak", "status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output", "completion-freshness", "ui-log", "ui-ask", "question-site", "ui-notice", "tool-batch", "instructions-loaded", "prompt-expansion", "session-title", "stop-feedback", "stop-failure"].includes(requestedFocus)
+const focus = [
+  "imperative-scroll",
+  "imperative-focus",
+  "desktop-performance",
+  "desktop-soak",
+  "status-sites",
+  "message-sites",
+  "svg",
+  "command-output",
+  "tool-sites",
+  "ui-feedback",
+  "classic-output",
+  "completion-freshness",
+  "ui-log",
+  "ui-ask",
+  "question-site",
+  "ui-notice",
+  "tool-batch",
+  "instructions-loaded",
+  "prompt-expansion",
+  "session-title",
+  "stop-feedback",
+  "stop-failure"
+].includes(requestedFocus)
   ? requestedFocus : undefined
 const artifacts = process.env.CMB_MODS_E2E_ARTIFACTS ?? join(
   root, "output/mods-validation",
@@ -195,7 +219,9 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "imperative-focus") {
+      if (focus === "imperative-scroll") {
+        await verifyImperativeScroll(page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "imperative-focus") {
         await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
       } else if (focus === "session-title") {
         await verifySessionTitle(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
@@ -3130,6 +3156,7 @@ async function main(): Promise<void> {
     await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
+    await verifyImperativeScroll(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyToolBatch(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
     await verifyInstructionsLoaded(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)
     await verifyPromptExpansion(page!, workspace, artifacts, modelServer.requests, until, pass, modelServer.closedStalls)

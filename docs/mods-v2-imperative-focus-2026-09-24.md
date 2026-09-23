@@ -18,4 +18,4 @@ Pane 的交互回调仍串行。忙碌控件通过 aria-disabled、输入只读�
 
 真实 QuickJS/FunctionSession 覆盖请求阶段、原 dispatcher、否决、取消与回调等待。Electron 使用生产 IPC/React/utility process，检查实际 activeElement、按钮回调到输入框、重复激活阻止、改选目标、编辑器归属、人输入竞争、renderer 重载、撤权及关闭对照，不调用模型。详见 output/mods-v2-validation 下本次报告。测试回执不等同于业务验收。
 
-`$.ui.scroll()` 仍未开放，不能用已有 wheel/scroll 观察事件代替主动滚动 SDK。后续需实际宿主几何、可变 offset 和 DOM 滚动回执。
+主动 `$.ui.scroll()` 的独立流程见[主动滚动说明](mods-v2-imperative-scroll-2026-09-24.md)。原 wheel 观察事件与主动操作仍分开标记兼容边界。

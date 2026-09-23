@@ -32,7 +32,7 @@
 
 回执绕过正在等待 SDK 的回调队列，避免死锁；忙碌 Pane 控件保留焦点但阻止重复操作。关闭、重绘、取消、撤权、重载和竞争输入使旧请求失效。原 composer 和对话框优先。
 
-**`$.ui.scroll()` 仍未开放**。它需要实际 renderer 几何和滚动回执，已有 wheel 事件不能替代这一能力。
+**`$.ui.scroll()` 已提供受限原生 Pane 实现**：实际几何、原 dispatcher、DOM ACK 与 end 持续跟随；仍不支持 AbovePrompt、Client/Box/Text keys、转录定位。person wheel 观察保留旧像素包。详见[主动滚动说明](mods-v2-imperative-scroll-2026-09-24.md)。
 
 ## 证据使用原则
 

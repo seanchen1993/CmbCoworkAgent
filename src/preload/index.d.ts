@@ -1004,6 +1004,10 @@ interface CustomAPI {
       threadId: string,
       ack: import("../shared/mods/v2/ui-focus").FunctionFocusAck
     ): Promise<void>
+    scrollAck(
+      threadId: string,
+      ack: import("../shared/mods/v2/ui-scroll").FunctionScrollAck
+    ): Promise<void>
     paneAct(
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction

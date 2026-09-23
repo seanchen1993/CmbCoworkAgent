@@ -1,3 +1,4 @@
+import { useFunctionPaneScroll } from "../../lib/function-pane-scroll"
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react"
 import { Button } from "@/components/ui/button"
 import {
@@ -276,6 +277,14 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
   const loadedThread = useRef<string | undefined>(undefined)
   const focusProbes = useRef(new Map<string, { epoch: number; accepted: Promise<boolean> }>())
   const focusSteps = useRef(new Set<string>())
+  useFunctionPaneScroll({
+    threadId,
+    panes,
+    current: panesRef,
+    sections,
+    loadedThread,
+    refresh: refreshRef
+  })
   useEffect(() => {
     const probes = focusProbes.current
     const steps = focusSteps.current
@@ -552,6 +561,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
             </Button>
           </div>
           <div
+            data-function-pane-body
             className="overflow-auto text-sm"
             style={{ maxHeight: Math.min(pane.rows * 24, 480) }}
             onWheel={(event) => {

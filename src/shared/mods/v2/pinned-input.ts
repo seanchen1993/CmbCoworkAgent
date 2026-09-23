@@ -94,6 +94,19 @@ export function normalizeFunctionInput(
   original: ModObject
 ): ModObject {
   encodeModJson(received)
+  if (event === "ui.scroll" && Object.hasOwn(original, "offset")) {
+    for (const key of Object.keys(received)) {
+      if (
+        key !== "offset" &&
+        (!Object.hasOwn(original, key) || !same(received[key], original[key]))
+      )
+        throw new ModFunctionError("MODS_PINNED_INPUT", `MODS_PINNED_INPUT: ui.scroll.${key}`)
+    }
+    const input = { ...original, ...received }
+    if (typeof input.offset !== "number" || !Number.isFinite(input.offset))
+      throw new ModFunctionError("MODS_PINNED_INPUT", "MODS_PINNED_INPUT: ui.scroll.offset")
+    return input
+  }
   const result = { ...received }
   const fields = pinned[event] ?? (
     event.startsWith("classic.") ? [...classicIdentity, ...(classicFacts[event] ?? [])] : []

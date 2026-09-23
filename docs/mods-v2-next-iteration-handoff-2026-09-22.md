@@ -1,3 +1,24 @@
+## 2026-09-24 06:38 主动滚动收口，准备独立提交（最新）
+
+- HEAD 在本提交前为 **4f8061f3** focus；scroll 源码、真实 guest/session、DOM/end 跟随、ACK race 修复、SDK/matrix/文档/报告全部在本提交收口。仍 partial/bounded，不能称完整 Claude parity。
+- **Mods43:135files1195PASS**（exec6207 exit0已poll）；**完整Electron:180checksPASS**（exec55799 exit0已poll，普通out恢复）。最终 Node/Web/helper tsc0，ESLint0error/74旧warning，新模块0warning。所有测试过程中最终源码冻结，报告 `2026-09-24-imperative-scroll.md` 已补实测结果。新截图实际DOM已看。
+- 独占smoke **exec86936 exit0已poll**，`desktop-performance-2026-09-23T22-35-24-597Z-smoke-ecdb9d82/`：qualified=false/passed=false，off/on p95 112.9/164.3ms(+51.4)，吞吐0.995207，1s idle delta1.145402点。smoke不替代正式门槛，不能凭小样本称性能优化成功。原正式full4 TTFT+67.7ms及ingress关闭1/10组超预算仍FAIL，2h10000soak/Actions安装验证尚未做。
+- **当前没有运行中的测试/build/E2E/perf**。下一步提交scroll后，继续修 `readBackgroundTask` Date.now 等待期限：设计 `output/mods-v2-validation/2026-09-24-background-timeout-design.md` 已写，**未加其测试/未改代码**。先真实 tool-sdk.integration 冻结/回拨wall clock红测，再performance.now；可用隔离Electron main Date.now短暂故障注入+真实timer自动恢复验证（先证明注入确实作用生产同realm），严守原审批/lease/runtime/authority。不要改变系统时钟或UAT。
+- 继续剩余compat边界、正式性能诊断/2h长稳/最后Actions交付，不停在能力提交边界。仅Mods v2，未动UAT/共享依赖，不派agent、不本地NSIS、不push触发Actions。
+
+## 2026-09-24 06:24 主动滚动最终回归中（最新，继续勿停）
+
+- HEAD **4f8061f3**：主动原生 Pane focus 已独立提交；**16fe8def** Electron submit/高亮等待 harness 独立提交。focus 最终 Node/Web/lint、Mods42 131files1143pass，空deny后 narrow32pass，完整Electron172pass（早于空deny）、最新focused9pass。独占smoke +67.9ms，qualified=false/passed=false；报告已提交，不能称正式性能通过。
+- **未提交滚动 capability**：`src/shared/mods/v2/ui-scroll.ts/.test.ts` parser/几何27；`src/main/mods/v2/ui-scroll.ts/.test.ts` probe→原dispatcher→apply/ACK9；`pane-scroll.test.ts` realQuickJS/session4；strict pinned input 新9；原 Pane/Client 观察 envelope 原样保留。main panes/session/manager、原IPC/preload、host revision v56、shared ui snapshot/capabilities接线；renderer 新 `function-pane-scroll.ts` hook、`function-scroll-follow.ts` host token+本地许可/ResizeObserver，FunctionPanes只接 hook/body marker。测试和说明见新 imperative-scroll docs/report。
+- 失败路径：缺模块red、parser block数组red、session/pins11red、原wheel校验不兼容新形状red；实际Electron无renderer时TIMEOUT red。第二/三轮竞争wheel返回真实MODS_UI_SCROLL_STALE（原观察导致重绘），已精确容许此错误或deny，并保留真实位置不可覆盖断言。不是任意放宽失败。
+- end持续跟随先host token red和实际Electron growth red，修完后 **Electron第4轮8checks PASS**，exec86475 exit0已poll；artifacts `2026-09-24-imperative-scroll-electron-4-artifacts/`，on.png已看。随后review发现ACK等待中人操作会被迟到prepare覆盖，提取原顺序回归red2得到700→900；改`FunctionScrollFollow.acknowledge`先prepare/等待/按id清理。两renderer race测试green；此修改尚待正在跑的最终完整Electron覆盖。
+- 最后窄测 **5files68PASS** + renderer race2PASS。Node最终 **exec81221 exit0已poll**；Web **exec55984 exit0已poll**；helper types0。scoped ESLint **0 errors/74旧warnings**（IPC29、session2、preload23+dts9、pinned测试6+源码5），所有新模块/renderer/helper0warning。git diff --check通过。所有source/tests/docs matrix已冻结；不要在整套未结束时添加新的red测试污染结果。
+- **Mods43 已完成135files1195PASS，exec6207 exit0已poll；仅55799仍运行**。原命令：**6207** `npm run test:mods -- src/renderer/src/lib/function-scroll-follow.test.ts --maxWorkers=2` → `2026-09-24-mods43.log`；**55799** `node tests/run-mods-e2e.mjs` → `2026-09-24-scroll-full-electron.log`，artifacts同前缀`-artifacts/`。后者最终restore普通out，exit前禁止任何其他build/E2E/performance。两者都结束才运行独占 `node tests/run-mods-desktop-soak.mjs --performance --smoke`；smoke不能替代正式验收。请持续中文进度，不要频繁无意义poll。
+- 新报告 **output/mods-v2-validation/2026-09-24-imperative-scroll.md** 已草写，最终Mods43/fullElectron/perf结果待补。指南、matrix（codeBaseline4f8061f3、SDKscroll partial/bounded）、sdk-boundaries、status和focus指南crosslink已改。确认测试/回检后单独提交scroll全部相关修改，不要停止。
+- scope边界：原生Pane start/end/key(Button/Input/Select)，其他site/Client/Text/Box keys/transcript不开放；end跟随已实现、重载无本地许可不复活。行单位是实测CSS line-height，可小数；person wheel依旧legacypixel envelope，不能宣称terminal row全等。
+- 后续已定位但**未加测试/未实现**：`src/main/mods/adapters.ts` readBackgroundTask 仍 Date.now elapsed/remaining，可冻结/回拨后超过task_output timeout。应先真实tool-sdk.integration fixture背景process+冻结Date.now红测，再改performance.now（不改时间戳/clock.now语义）；原取消/撤权/lease仍须通过。可作为下一小能力继续，不能以此忽略仍未对齐的classic/SDK。
+- 旧正式full4 TTFT+67.7ms仍FAIL，正式ingress单plugin五轮<15ms但off1/10组+14.584%仍FAIL；真实2h10000eventsoak尚未启动。最终Actions包/安装验证尚未做，按用户不跑本地NSIS、不push触发；UAT和共享junction依赖一直未动，不派agent。
+
 ## 2026-09-24 05:56 焦点验证完成并准备独立提交；滚动继续（最新）
 
 - 当前 HEAD **16fe8def**（Electron harness 独立提交）；之前 **88ced672** native read 初始 durable claim 输入去重。仅 Mods v2，不碰 UAT/共享依赖，不本地 NSIS，不派 agent。

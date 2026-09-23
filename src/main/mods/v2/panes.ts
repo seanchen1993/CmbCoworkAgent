@@ -14,6 +14,8 @@ import {
   type FunctionFocusResult,
   type FunctionPaneSnapshot
 } from "../../../shared/mods/v2/ui"
+import { FunctionScrollRequests } from "./ui-scroll"
+import type { FunctionScrollArgs, FunctionScrollOutcome } from "../../../shared/mods/v2/ui-scroll"
 import { FunctionFocusRequests } from "./ui-focus"
 import type { FunctionFocusAddress, FunctionFocusOutcome } from "../../../shared/mods/v2/ui-focus"
 import { functionFocusTargets } from "../../../shared/mods/v2/focus"
@@ -67,8 +69,28 @@ export class FunctionPanes {
   private notificationDeadline = 0
   private closed = false
 
+  readonly scroll: FunctionScrollRequests
   readonly focus: FunctionFocusRequests
   constructor(private readonly host: PaneHost) {
+    this.scroll = new FunctionScrollRequests({
+      applied: (address, id, followEnd) => {
+        const pane = this.panes.get(address.pane)!
+        pane.scrollFollowToken = followEnd ? id : undefined
+      },
+      assertLive: (address) => {
+        this.host.assertLive()
+        const pane = this.panes.get(address.pane)
+        if (
+          !pane ||
+          pane.dirty ||
+          pane.generation !== address.generation ||
+          pane.plugin !== address.plugin ||
+          pane.id !== address.requestId
+        )
+          throw new ModFunctionError("MODS_UI_SCROLL_STALE")
+      },
+      changed: () => this.changed(0)
+    })
     this.focus = new FunctionFocusRequests({
       assertLive: (target) => {
         this.host.assertLive()
@@ -141,6 +163,50 @@ export class FunctionPanes {
     )
   }
 
+  async requestScroll(
+    plugin: string,
+    args: FunctionScrollArgs,
+    signal: AbortSignal,
+    operation: (
+      input: ModObject,
+      core: (input: ModObject) => Promise<ModJson>,
+      signal: AbortSignal
+    ) => Promise<FunctionScrollOutcome>
+  ): Promise<FunctionScrollOutcome> {
+    this.host.assertLive()
+    if (this.host.site || (typeof args.to === "object" && "requestId" in args.to))
+      return { deny: "Only owned desktop Pane targets are supported" }
+    const target = typeof args.to === "object" ? args.to.key : undefined
+    const candidates = [...this.panes.values()].filter((pane) => {
+      if (pane.plugin !== plugin || pane.dirty || (args.in !== undefined && pane.id !== args.in))
+        return false
+      return (
+        target === undefined ||
+        functionFocusTargets({ tree: pane.visibleTree ?? pane.tree, clients: pane.clients }).some(
+          ({ target: drawn }) =>
+            !drawn.client && drawn.plugin === plugin && drawn.element === target
+        )
+      )
+    })
+    if (candidates.length !== 1) return { deny: "No unique current owned Pane target" }
+    const pane = candidates[0]
+    return this.scroll.run(
+      { pane: pane.key, generation: pane.generation, plugin, requestId: pane.id },
+      args,
+      signal,
+      (input, select, scrollSignal) =>
+        operation(
+          input,
+          async (rewritten) => {
+            if (typeof rewritten.offset !== "number")
+              throw new ModFunctionError("MODS_UI_SCROLL_OFFSET")
+            return { ...(await select(rewritten.offset)) }
+          },
+          scrollSignal
+        )
+    )
+  }
+
   private changed(delay = 100): void {
     if (this.closed) return
     const deadline = performance.now() + delay
@@ -165,7 +231,10 @@ export class FunctionPanes {
     validatePaneArgs(input)
     const key = `${plugin}:${input.id}`
     const prior = this.panes.get(key)
-    if (prior) this.focus.cancel(key)
+    if (prior) {
+      this.focus.cancel(key)
+      this.scroll.cancel(key)
+    }
     if (!prior && this.panes.size >= 8) throw new ModFunctionError("MODS_UI_PANE_LIMIT")
     this.panes.set(key, {
       key,
@@ -188,6 +257,7 @@ export class FunctionPanes {
     const pane = this.panes.get(`${plugin}:${id}`)
     if (!pane) return
     this.focus.cancel(pane.key)
+    this.scroll.cancel(pane.key)
     this.panes.delete(pane.key)
     this.host.clients?.closePane(pane.key)
     for (const [controller, key] of this.active)
@@ -201,6 +271,7 @@ export class FunctionPanes {
     this.host.assertLive()
     for (const pane of this.panes.values()) {
       this.focus.cancel(pane.key)
+      this.scroll.cancel(pane.key)
       pane.dirty = true
     }
     this.changed()
@@ -233,6 +304,7 @@ export class FunctionPanes {
       for (const pane of this.panes.values()) {
         if (!pane.dirty) continue
         this.focus.cancel(pane.key)
+        this.scroll.cancel(pane.key)
         const generation = randomUUID()
         pane.dirty = false
         try {
@@ -274,7 +346,18 @@ export class FunctionPanes {
       this.host.assertLive()
       const originals = new Map(this.panes)
       const snapshots = [...this.panes.values()].map(
-        ({ key, id, plugin, title, generation, tree, closeOnEscape, rows, focusRequest }) =>
+        ({
+          key,
+          id,
+          plugin,
+          title,
+          generation,
+          tree,
+          closeOnEscape,
+          rows,
+          focusRequest,
+          scrollFollowToken
+        }) =>
           parseModJson(
             encodeModJson({
               key,
@@ -286,7 +369,9 @@ export class FunctionPanes {
               closeOnEscape,
               rows,
               ...(focusRequest ? { focusRequest } : {}),
-              ...(this.focus.current(key) ? { imperativeFocus: this.focus.current(key) } : {})
+              ...(scrollFollowToken ? { scrollFollowToken } : {}),
+              ...(this.focus.current(key) ? { imperativeFocus: this.focus.current(key) } : {}),
+              ...(this.scroll.current(key) ? { imperativeScroll: this.scroll.current(key) } : {})
             })
           ) as unknown as FunctionPaneSnapshot
       )
@@ -303,6 +388,8 @@ export class FunctionPanes {
           typeof result.title !== "string" ||
           JSON.stringify(result.focusRequest) !== JSON.stringify(original.focusRequest) ||
           JSON.stringify(result.imperativeFocus) !== JSON.stringify(original.imperativeFocus) ||
+          JSON.stringify(result.imperativeScroll) !== JSON.stringify(original.imperativeScroll) ||
+          result.scrollFollowToken !== original.scrollFollowToken ||
           ["key", "id", "plugin", "generation", "closeOnEscape", "rows"].some(
             (key) => result[key] !== original[key]
           )
@@ -593,6 +680,7 @@ export class FunctionPanes {
   close(): void {
     this.closed = true
     this.focus.close()
+    this.scroll.close()
     clearTimeout(this.notification)
     for (const controller of this.active.keys()) controller.abort()
     this.active.clear()

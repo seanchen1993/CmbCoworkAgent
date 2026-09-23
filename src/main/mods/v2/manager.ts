@@ -1966,6 +1966,23 @@ export class FunctionModsManager {
     entry.session!.panes.focus.ack(ack)
   }
 
+  async scrollAck(
+    workspace: string,
+    threadId: string,
+    ack: import("../../../shared/mods/v2/ui-scroll").FunctionScrollAck
+  ): Promise<void> {
+    this.host.assertThread?.(workspace, threadId)
+    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
+    if (!entry || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_UI_SCROLL_STALE")
+    await entry.loading
+    if (
+      this.sessions.get(JSON.stringify([workspace, threadId])) !== entry ||
+      !this.host.enabled(workspace)
+    )
+      throw new ModFunctionError("MODS_UI_SCROLL_STALE")
+    entry.session!.panes.scroll.ack(ack)
+  }
+
   async act(
     workspace: string,
     threadId: string,
