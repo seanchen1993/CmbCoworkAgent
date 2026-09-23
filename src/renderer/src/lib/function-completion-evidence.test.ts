@@ -2,7 +2,7 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { expect, it } from "vitest"
 import { FunctionCompletionEvidenceContent } from "../components/chat/FunctionCompletionEvidence"
-import type { CompletionEvidenceRecord } from "../../../main/mods/v2/completion-evidence"
+import type { BoundCompletionEvidenceRecord as CompletionEvidenceRecord } from "../../../main/mods/v2/completion-evidence"
 
 const record = (
   phase: CompletionEvidenceRecord["phase"],
@@ -86,6 +86,36 @@ it("adds no visible UI when there is no trusted host evidence", () => {
   expect(
     renderToStaticMarkup(createElement(FunctionCompletionEvidenceContent, { records: [] }))
   ).toBe("")
+})
+
+it("shows capture errors as unavailable file evidence without claiming a zero-file PASS", () => {
+  const base = record("check.result", "error", { error: "File is too large" })
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [
+        {
+          ...base,
+          phase: "capture.failed",
+          status: "error",
+          binding: null,
+          capture: {
+            workspace: "workspace",
+            threadId: "thread",
+            turnId: "turn",
+            runId: "run",
+            runtimeGeneration: 4,
+            pluginDigests: { review: "digest" },
+            configFingerprint: "config"
+          }
+        }
+      ]
+    })
+  )
+  expect(html).toContain("文件证据采集失败")
+  expect(html).toContain("未取得文件证据")
+  expect(html).toContain("File is too large")
+  expect(html).not.toContain("文件指纹 0")
+  expect(html).not.toContain("需求版本：")
 })
 
 it("does not let late invalidation of an old runtime replace a newer check summary", () => {

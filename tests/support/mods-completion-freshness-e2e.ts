@@ -142,6 +142,46 @@ export async function verifyCompletionFreshness(
     await until(async () => (await rail.count()) === 0, "off removes evidence UI")
     assert.deepEqual(await records(), [])
     pass("durable stale evidence survives renderer restart and disabling Mods removes the gate UI")
+    writeFileSync(join(project, "too-large.txt"), Buffer.alloc(3 * 1024 * 1024, 65))
+    await page.evaluate(
+      async ({ id, plugin }) => {
+        await window.api.mods.configureGlobal(true)
+        await window.api.mods.setCompletionPolicy(id, plugin, {
+          mode: "report",
+          scope: "project",
+          checks: ["code-review"],
+          maxRepairs: 0,
+          timeoutMs: 30000,
+          modelTokenBudget: 4096
+        })
+      },
+      { id: threadId, plugin: mod.name }
+    )
+    await run("请确认任务状态。[freshness-capture-error]")
+    await until(
+      async () => (await records()).some((row) => row.phase === "capture.failed"),
+      "initial capture error reaches durable host evidence"
+    )
+    await until(
+      async () => (await page.getByRole("button", { name: "停止生成", exact: true }).count()) === 0,
+      "report-only capture error does not block original completion"
+    )
+    await until(
+      async () => (await rail.locator(":scope > summary").innerText()).includes("检查错误"),
+      "capture error reaches the actual evidence UI"
+    )
+    await rail.locator(":scope > summary").click()
+    assert((await rail.innerText()).includes("未取得文件证据"))
+    const failed = (await records()).find((row) => row.phase === "capture.failed")!
+    assert.equal(failed.binding, null)
+    assert.equal(failed.status, "error")
+    await page.screenshot({ path: join(artifacts, "completion-capture-error.png") })
+    await page.reload({ waitUntil: "domcontentloaded" })
+    await page.getByText("Evidence freshness E2E", { exact: true }).first().click()
+    assert((await records()).some((row) => row.id === failed.id && row.binding === null))
+    pass(
+      "report-only capture failure persists as unavailable evidence, explains the next action and survives renderer restart"
+    )
   } finally {
     await page.evaluate(() => window.api.mods.configureGlobal(true))
   }

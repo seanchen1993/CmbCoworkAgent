@@ -37,13 +37,18 @@ export interface CompletionEvidenceBinding {
   files: CompletionFileFingerprint[]
 }
 
-export interface CompletionEvidenceRecord {
+interface CompletionRecordIdentity {
   id: string
   idempotencyKey: string
   workspace: string
   threadId: string
   turnId: string
   runId: string
+  detail?: ModJson
+  at: number
+}
+
+export interface BoundCompletionEvidenceRecord extends CompletionRecordIdentity {
   phase:
     | "check.started"
     | "check.result"
@@ -53,9 +58,28 @@ export interface CompletionEvidenceRecord {
     | "invalidated"
   status: "running" | "pass" | "revise" | "block" | "stale" | "cancelled" | "error" | "interrupted"
   binding: CompletionEvidenceBinding
-  detail?: ModJson
-  at: number
 }
+
+/** A failed capture has execution identity but no file, requirement or checkpoint proof. */
+export interface UnboundCompletionEvidenceRecord extends CompletionRecordIdentity {
+  phase: "capture.failed"
+  status: "cancelled" | "error" | "interrupted"
+  binding: null
+  capture: Pick<
+    CompletionEvidenceBinding,
+    | "workspace"
+    | "threadId"
+    | "turnId"
+    | "runId"
+    | "pluginDigests"
+    | "runtimeGeneration"
+    | "configFingerprint"
+  >
+}
+
+export type CompletionEvidenceRecord =
+  | BoundCompletionEvidenceRecord
+  | UnboundCompletionEvidenceRecord
 
 export interface CompletionCaptureInput {
   workspace: string

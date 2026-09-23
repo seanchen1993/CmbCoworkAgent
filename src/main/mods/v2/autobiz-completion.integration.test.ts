@@ -231,6 +231,8 @@ it("runs the production completion loop against the pinned validator and advance
   const records = fixture.store.completionEvidence(fixture.root, "thread", 100)
   const started = records.find((record) => record.phase === "check.started")!
   const validator = records.find((record) => record.phase === "validator.result")!
+  if (started.phase === "capture.failed" || validator.phase === "capture.failed")
+    throw Error("Expected bound completion proof")
   expect(validator.detail).toMatchObject({ kind: "autobiz-validator", passed: true })
   const input = {
     evidenceId:
@@ -309,6 +311,8 @@ it("binds dynamic workflow overlays and rejects a transition after the overlay c
   const records = fixture.store.completionEvidence(fixture.root, "thread", 100)
   const started = records.find((record) => record.phase === "check.started")!
   const validator = records.find((record) => record.phase === "validator.result")!
+  if (started.phase === "capture.failed" || validator.phase === "capture.failed")
+    throw Error("Expected bound completion proof")
   await writeFile(
     join(fixture.root, ".autobizdevops", "workflow.d", "review-overlay.json"),
     JSON.stringify({ profile: "review-overlay", nodes: [], changed: true })
@@ -421,6 +425,8 @@ it("rejects a duplicate completion after external state competition", async () =
   const records = fixture.store.completionEvidence(fixture.root, "thread", 100)
   const started = records.find((record) => record.phase === "check.started")!
   const validator = records.find((record) => record.phase === "validator.result")!
+  if (started.phase === "capture.failed" || validator.phase === "capture.failed")
+    throw Error("Expected bound completion proof")
   const input = {
     evidenceId: String((started.detail as { attempt: string }).attempt),
     feature: "order-export",
@@ -447,6 +453,8 @@ it("does not reapply a ledger-only transition when the trusted commit receipt is
   const records = fixture.store.completionEvidence(fixture.root, "thread", 100)
   const started = records.find((record) => record.phase === "check.started")!
   const validator = records.find((record) => record.phase === "validator.result")!
+  if (started.phase === "capture.failed" || validator.phase === "capture.failed")
+    throw Error("Expected bound completion proof")
   const input = {
     evidenceId: String((started.detail as { attempt: string }).attempt),
     feature: "order-export",

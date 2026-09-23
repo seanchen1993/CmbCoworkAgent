@@ -14,6 +14,7 @@ const statuses = {
   interrupted: "执行中断"
 }
 const phases = {
+  "capture.failed": "文件证据采集失败",
   "check.started": "开始检查",
   "check.result": "完成门禁",
   "repair.attempt": "修复尝试",
@@ -42,6 +43,8 @@ function label(record: CompletionEvidenceRecord): string {
           : phases[record.phase]
 }
 function nextAction(record: CompletionEvidenceRecord): string {
+  if (record.phase === "capture.failed")
+    return "尚未取得文件和需求证据；检查路径、文件大小或读取权限，缩小范围后重新检查。"
   if (record.phase === "state.transition" && record.status === "interrupted")
     return "提交结果未知。请先按操作编号复核宿主提交日志、state.json 与 STATE.md；不要直接重试推进。"
   const reason = detailText(record, "reason") || detailText(record, "error")
@@ -120,40 +123,57 @@ export function FunctionCompletionEvidenceContent({
                     ` · 模型输入+输出总预算 ${rule.modelTokenBudget} tokens`}
                 </p>
               ))}
-            <details className="mt-1 text-muted-foreground">
-              <summary>版本与检查证据</summary>
-              <p className="break-all">
-                任务 {record.threadId} · 轮次 {record.turnId} · 运行 {record.runId} · generation{" "}
-                {record.binding.runtimeGeneration}
-              </p>
-              <p className="break-all">需求版本：{record.binding.requirementVersion}</p>
-              {detailText(record, "operationId") && (
-                <p className="break-all">操作编号：{detailText(record, "operationId")}</p>
-              )}
-              <p className="break-all">
-                diff：{record.binding.diffFingerprint} · 配置：{record.binding.configFingerprint}
-              </p>
-              {Object.entries(record.binding.pluginDigests).map(([name, digest]) => (
-                <p key={name} className="break-all">
-                  插件 {name}：{digest}
+            {record.binding ? (
+              <details className="mt-1 text-muted-foreground">
+                <summary>版本与检查证据</summary>
+                <p className="break-all">
+                  任务 {record.threadId} · 轮次 {record.turnId} · 运行 {record.runId} · generation{" "}
+                  {record.binding.runtimeGeneration}
                 </p>
-              ))}
-              {detailText(record, "outputFingerprint") && (
-                <p className="break-all">检查输出：{detailText(record, "outputFingerprint")}</p>
-              )}
-              {isModObject(record.detail) && typeof record.detail.inputTokens === "number" && (
-                <p>
-                  实际模型用量：输入 {record.detail.inputTokens} · 输出{" "}
-                  {String(record.detail.outputTokens ?? "未返回")}
+                <p className="break-all">需求版本：{record.binding.requirementVersion}</p>
+                {detailText(record, "operationId") && (
+                  <p className="break-all">操作编号：{detailText(record, "operationId")}</p>
+                )}
+                <p className="break-all">
+                  diff：{record.binding.diffFingerprint} · 配置：{record.binding.configFingerprint}
                 </p>
-              )}
-              <p>文件指纹 {record.binding.files.length} 项（显示前 24 项）</p>
-              {record.binding.files.slice(0, 24).map((file) => (
-                <p key={file.path} className="break-all">
-                  {file.path} · {file.sha256}
+                {Object.entries(record.binding.pluginDigests).map(([name, digest]) => (
+                  <p key={name} className="break-all">
+                    插件 {name}：{digest}
+                  </p>
+                ))}
+                {detailText(record, "outputFingerprint") && (
+                  <p className="break-all">检查输出：{detailText(record, "outputFingerprint")}</p>
+                )}
+                {isModObject(record.detail) && typeof record.detail.inputTokens === "number" && (
+                  <p>
+                    实际模型用量：输入 {record.detail.inputTokens} · 输出{" "}
+                    {String(record.detail.outputTokens ?? "未返回")}
+                  </p>
+                )}
+                <p>文件指纹 {record.binding.files.length} 项（显示前 24 项）</p>
+                {record.binding.files.slice(0, 24).map((file) => (
+                  <p key={file.path} className="break-all">
+                    {file.path} · {file.sha256}
+                  </p>
+                ))}
+              </details>
+            ) : (
+              <details className="mt-1 text-muted-foreground">
+                <summary>执行身份（未取得文件证据）</summary>
+                <p className="break-all">
+                  任务 {record.threadId} · 轮次 {record.turnId} · 运行 {record.runId} · generation{" "}
+                  {record.capture.runtimeGeneration}
                 </p>
-              ))}
-            </details>
+                <p className="break-all">配置：{record.capture.configFingerprint}</p>
+                {Object.entries(record.capture.pluginDigests).map(([name, digest]) => (
+                  <p key={name} className="break-all">
+                    插件 {name}：{digest}
+                  </p>
+                ))}
+                <p>未生成 diff、需求版本、文件指纹或 checkpoint 推进凭据。</p>
+              </details>
+            )}
           </li>
         ))}
       </ol>

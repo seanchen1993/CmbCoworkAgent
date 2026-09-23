@@ -150,6 +150,7 @@ it("invalidates persisted PASS after restart without loading a guest or rewritin
   const original = f.store
     .completionEvidence(f.root, "thread")
     .find((row) => row.phase === "check.result")!
+  if (!original.binding) throw Error("Expected bound completion proof")
   // Simulate an earlier process record with no orderly close/invalidation.
   f.store.saveCompletionEvidence({
     ...original,

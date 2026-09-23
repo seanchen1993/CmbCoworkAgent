@@ -28,6 +28,45 @@ afterEach(() => {
 })
 
 describe("Mod durable control store", () => {
+  it("persists unbound capture errors across restart but never accepts them as PASS", () => {
+    const { store, file } = fixture()
+    const capture = {
+      workspace: "project",
+      threadId: "thread",
+      turnId: "turn",
+      runId: "run",
+      pluginDigests: { p: "digest" },
+      runtimeGeneration: 4,
+      configFingerprint: "config"
+    }
+    const record = {
+      id: "capture-error",
+      idempotencyKey: "attempt:capture.failed",
+      workspace: "project",
+      threadId: "thread",
+      turnId: "turn",
+      runId: "run",
+      phase: "capture.failed",
+      status: "error",
+      binding: null,
+      capture,
+      detail: { error: "COMPLETION_EVIDENCE_LINK", businessAccepted: false },
+      at: Date.now()
+    } satisfies CompletionEvidenceRecord
+    store.saveCompletionEvidence(record)
+    expect(() =>
+      store.saveCompletionEvidence({
+        ...record,
+        id: "forged",
+        status: "pass"
+      } as unknown as CompletionEvidenceRecord)
+    ).toThrow("MODS_EVIDENCE_UNBOUND")
+    store.close()
+    stores.pop()
+    const reopened = new ModControlStore(file)
+    stores.push(reopened)
+    expect(reopened.completionEvidence("project", "thread")).toEqual([record])
+  })
   it("persists completion evidence with an idempotent event key", () => {
     const { store, file } = fixture()
     const record = {

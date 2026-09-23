@@ -381,3 +381,51 @@ it("hides completion evidence from disabled project UI without deleting trusted 
   expect(f.manager.completionEvidence(f.root, "thread")).toEqual([])
   expect(f.store.completionEvidence(f.root, "thread").length).toBeGreaterThan(0)
 })
+
+it.each(["report", "check", "repair"])(
+  "records an initial capture failure without inventing file evidence in %s mode",
+  async (mode) => {
+    const f = await fixture([
+      { hook: '() => ({decision:"pass"})', policy: { mode, checks: ["code-review"] } }
+    ])
+    await writeFile(join(f.root, "large.txt"), Buffer.alloc(3 * 1024 * 1024, 65))
+    await expect(f.run()).resolves.toMatchObject({
+      decision: mode === "report" ? "pass" : "block"
+    })
+    const records = f.manager.completionEvidence(f.root, "thread")
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        phase: "capture.failed",
+        status: "error",
+        binding: null,
+        capture: expect.objectContaining({
+          workspace: f.root,
+          threadId: "thread",
+          turnId: "turn",
+          pluginDigests: { policy0: expect.any(String) },
+          runtimeGeneration: expect.any(Number),
+          configFingerprint: expect.any(String)
+        })
+      })
+    )
+    expect(records.some((record) => record.status === "pass")).toBe(false)
+    expect(f.invocations).toEqual([])
+    expect(f.model).not.toHaveBeenCalled()
+  }
+)
+
+it("never converts cancellation before capture into an advisory completion", async () => {
+  const f = await fixture([
+    { hook: '() => ({decision:"pass"})', policy: { mode: "report", checks: ["code-review"] } }
+  ])
+  const gate = (await f.gate())!
+  const controller = new AbortController()
+  controller.abort(Error("user cancelled"))
+  await expect(
+    gate({ signal: controller.signal, revisionAttempts: 0, maxRevisionAttempts: 4 })
+  ).rejects.toThrow("user cancelled")
+  expect(f.manager.completionEvidence(f.root, "thread")).toContainEqual(
+    expect.objectContaining({ phase: "capture.failed", status: "cancelled", binding: null })
+  )
+  expect(f.invocations).toEqual([])
+})

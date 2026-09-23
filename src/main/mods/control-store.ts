@@ -240,6 +240,11 @@ export class ModControlStore {
   }
 
   saveCompletionEvidence(record: CompletionEvidenceRecord): void {
+    if (
+      (record.binding === null) !== (record.phase === "capture.failed") ||
+      (record.binding === null && !["cancelled", "error", "interrupted"].includes(record.status))
+    )
+      throw new ModError("MODS_EVIDENCE_UNBOUND")
     const text = encodeModJson(record)
     if (Buffer.byteLength(text) > 512 * 1024) throw new ModError("MODS_EVIDENCE_LIMIT")
     this.db

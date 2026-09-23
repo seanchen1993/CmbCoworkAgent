@@ -11,7 +11,7 @@ import { FunctionTurnNotices } from "./turn-notices"
 import type { FunctionTurnNotice } from "../../../shared/mods/v2/turn"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { randomInt, randomUUID } from "node:crypto"
+import { createHash, randomInt, randomUUID } from "node:crypto"
 import { parseCompletionPolicy } from "../../../shared/mods/v2/completion-policy"
 import { CompletionBudget, bindCompletionGateBudget } from "./completion-budget"
 import { ProjectFunctionFiles, type FunctionFileScope } from "./file-access"
@@ -51,6 +51,7 @@ import {
   captureCompletionBinding,
   sameCompletionBinding,
   type CompletionEvidenceBinding,
+  type BoundCompletionEvidenceRecord,
   type CompletionEvidenceRecord
 } from "./completion-evidence"
 import { advanceAutobizCheckpoint, runAutobizValidator } from "./autobiz-validation"
@@ -761,12 +762,13 @@ export class FunctionModsManager {
     const generation = this.sessions.get(JSON.stringify([workspace, threadId]))?.generation
     const invalidated = new Set(
       records
-        .filter((row) => row.phase === "invalidated")
+        .filter((row): row is BoundCompletionEvidenceRecord => row.phase === "invalidated")
         .map((row) => bindingFingerprint(row.binding))
     )
     // A previous process has no live authority/capture closure. Preserve its historical
     // facts and append an invalidation instead of reviving a PASS on UI reload.
     for (const row of records) {
+      if (!row.binding) continue
       const fingerprint = bindingFingerprint(row.binding)
       if (
         row.phase === "check.result" &&
@@ -806,7 +808,9 @@ export class FunctionModsManager {
       )
     )
       throw new ModFunctionError("MODS_AUTOBIZ_TRANSITION_ARGUMENTS")
-    const records = this.store.completionEvidence(workspace, threadId, 500)
+    const records = this.store
+      .completionEvidence(workspace, threadId, 500)
+      .filter((record): record is BoundCompletionEvidenceRecord => record.binding !== null)
     const prior = records.find(
       (record) =>
         record.phase === "state.transition" &&
@@ -1232,9 +1236,11 @@ export class FunctionModsManager {
             : sharedBudget!
         )
     const initialConfig = JSON.stringify(configuration())
+    let captureWorkspace = workspace
     const capture = async (signal: AbortSignal): Promise<CompletionEvidenceBinding> => {
       assertLive()
       const scope = this.host.fileScope?.(workspace, threadId)
+      captureWorkspace = scope?.workspace ?? workspace
       const pluginDigests: Record<string, string> = {}
       for (const [name, snapshot] of entry.snapshots) {
         const current = await compileFunctionPlugin(snapshot.compiled.root)
@@ -1286,8 +1292,8 @@ export class FunctionModsManager {
         let binding: CompletionEvidenceBinding | undefined
         const attempt = randomUUID()
         const record = (
-          phase: CompletionEvidenceRecord["phase"],
-          status: CompletionEvidenceRecord["status"],
+          phase: BoundCompletionEvidenceRecord["phase"],
+          status: BoundCompletionEvidenceRecord["status"],
           detail?: ModJson
         ) => {
           if (!binding) return
@@ -1513,11 +1519,40 @@ export class FunctionModsManager {
               : error instanceof Error
                 ? error.message.slice(0, 2048)
                 : "COMPLETION_CHECK_FAILED"
-          record("check.result", originalSignal.aborted ? "cancelled" : "error", { error: reason })
+          const status = originalSignal.aborted ? "cancelled" : "error"
+          if (binding) record("check.result", status, { error: reason })
+          else {
+            const capture = {
+              workspace: captureWorkspace,
+              threadId,
+              turnId,
+              runId: runId || `completion:${threadId}:${turnId}`,
+              runtimeGeneration: entry.generation,
+              pluginDigests: Object.fromEntries(
+                [...entry.snapshots].map(([name, snapshot]) => [name, snapshot.compiled.digest])
+              ),
+              configFingerprint: createHash("sha256").update(initialConfig).digest("hex")
+            }
+            this.store.saveCompletionEvidence({
+              workspace,
+              threadId,
+              turnId,
+              runId: capture.runId,
+              id: randomUUID(),
+              idempotencyKey: `${attempt}:capture.failed`,
+              phase: "capture.failed",
+              status,
+              binding: null,
+              capture,
+              detail: { attempt, error: reason, businessAccepted: false, reportOnly },
+              at: Date.now()
+            })
+            this.host.changed(threadId)
+          }
           originalSignal.throwIfAborted()
           assertLive()
-          if (reason.startsWith("MODS_COMPLETION_"))
-            return reportOnly ? { decision: "pass" } : { decision: "block", reason }
+          if (reportOnly) return { decision: "pass" }
+          if (!binding || reason.startsWith("MODS_COMPLETION_")) return { decision: "block", reason }
           throw error
         } finally {
           entry.completionChecks.delete(lifecycle)
