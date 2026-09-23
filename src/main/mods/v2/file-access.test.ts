@@ -118,7 +118,14 @@ it("refuses a canonical project root replaced with an outside junction", async (
 
 it("bounds directory iteration instead of accumulating an unbounded host result", async () => {
   const f = await fixture()
-  for (let index = 0; index < 1025; index++) await writeFile(join(f.project, `entry-${index}`), "")
+  // Real directory entries remain essential here; bound setup concurrency so the
+  // full Windows suite does not spend its entire deadline on sequential creates.
+  for (let start = 0; start < 1025; start += 32)
+    await Promise.all(
+      Array.from({ length: Math.min(32, 1025 - start) }, (_, offset) =>
+        writeFile(join(f.project, `entry-${start + offset}`), "")
+      )
+    )
   await expect(f.files.run("fs.list", ".", f.signal)).rejects.toThrow("MODS_FS_ENTRY_LIMIT")
   const filtered = new ProjectFunctionFiles(
     f.project,
@@ -127,7 +134,7 @@ it("bounds directory iteration instead of accumulating an unbounded host result"
     async (tool) => ({ decision: tool === "host:ls" ? "allow" : "deny" })
   )
   await expect(filtered.run("fs.list", ".", f.signal)).rejects.toThrow("MODS_FS_ENTRY_LIMIT")
-})
+}, 30000)
 
 it("applies real backend path policy before reading and hides denied directory entries", async () => {
   const f = await fixture()
