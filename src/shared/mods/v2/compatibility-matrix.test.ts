@@ -100,3 +100,10 @@ it("labels prompt feedback as an evidenced bounded desktop adaptation", () => {
     expect(row?.note, name).toContain("session")
   }
 })
+
+it("keeps implemented feedback SDK members consistent with their operation rows", () => {
+  const sdk = matrix.sdk as Array<{namespace:string;members:Array<Record<string,unknown>>}>
+  const ui = sdk.find((group) => group.namespace === "ui")!
+  for (const name of ["ui.toast", "ui.status"])
+    expect(ui.members.find((member) => member.name === name)?.implementationStatus).toBe("adapted")
+})
