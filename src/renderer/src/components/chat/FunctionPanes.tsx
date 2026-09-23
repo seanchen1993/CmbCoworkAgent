@@ -9,6 +9,7 @@ import {
 } from "../../../../shared/mods/v2/ui"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { FunctionClient } from "./FunctionClient"
+import { FunctionCode } from "./FunctionCode"
 import { desktopAllowsPaneFocus, paneFocusElement } from "../../lib/function-pane-focus"
 
 type Act = (
@@ -197,12 +198,7 @@ function Element({
           : String(p.label ?? p.href)}
       </a>
     )
-  if (node.type === "Code")
-    return (
-      <pre className="overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-xs">
-        <code>{String(p.source)}</code>
-      </pre>
-    )
+  if (node.type === "Code") return <FunctionCode props={p} />
   return node.type === "Client" ? (renderClient?.(node) ?? null) : null
 }
 

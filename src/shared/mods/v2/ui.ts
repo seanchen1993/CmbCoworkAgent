@@ -1,6 +1,7 @@
 import type { ModJson, ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { isModObject, ModFunctionError } from "./contracts"
+import { functionCodeRows } from "./code"
 
 export const FUNCTION_UI_CAPABILITIES = [
   "ui.open",
@@ -254,11 +255,12 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
     if (
       item.type === "Code" &&
       (!text(p.source) ||
-        (p.format !== undefined && p.format !== "source") ||
+        (p.format !== undefined && p.format !== "source" && p.format !== "diff") ||
         (p.startLine !== undefined &&
           (!Number.isInteger(p.startLine) || (p.startLine as number) < 1)))
     )
       fail()
+    if (item.type === "Code") functionCodeRows(p)
     if (["Box", "Text", "Link"].includes(item.type)) {
       if (!Array.isArray(item.children)) fail()
       for (const child of item.children!) visit(child, depth + 1)
