@@ -11,6 +11,7 @@ import {
 
 const execute = promisify(execFile)
 const MAX_FILES = 2048
+const MAX_ENTRIES = 8192
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 const MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
@@ -86,10 +87,18 @@ async function git(input: CompletionCaptureInput, args: string[]): Promise<strin
 }
 
 /** Bounded complete enumeration: exceeding a limit fails rather than silently omitting evidence. */
+function visitEntry(visited: Set<string>, path: string): boolean {
+  if (visited.has(path)) return false
+  if (visited.size >= MAX_ENTRIES) throw Error("COMPLETION_EVIDENCE_ENTRY_LIMIT")
+  visited.add(path)
+  return true
+}
+
 async function collectFiles(
   input: CompletionCaptureInput,
   prefix: string,
   output: Set<string>,
+  budget: { entries: Set<string>; visited: Set<string> },
   depth = 0
 ): Promise<void> {
   input.signal?.throwIfAborted()
@@ -99,6 +108,9 @@ async function collectFiles(
   const child = relative(resolve(input.workspace), absolute)
   if (isAbsolute(child) || child === ".." || child.startsWith("../") || child.startsWith("..\\"))
     throw Error("COMPLETION_EVIDENCE_PATH")
+  if (budget.visited.has(absolute)) return
+  visitEntry(budget.entries, absolute)
+  budget.visited.add(absolute)
   if (input.excludePaths?.some((path) => resolve(path) === absolute)) return
   const item = await lstat(absolute).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined
@@ -118,10 +130,18 @@ async function collectFiles(
   for await (const entry of directory) {
     if (
       [".git", "node_modules", "dist", "out", "build", ".codex", "__pycache__"].includes(entry.name)
-    )
+    ) {
+      visitEntry(budget.entries, join(absolute, entry.name))
       continue
+    }
     if (output.size >= MAX_FILES) throw Error("COMPLETION_EVIDENCE_FILE_LIMIT")
-    await collectFiles(input, prefix ? `${prefix}/${entry.name}` : entry.name, output, depth + 1)
+    await collectFiles(
+      input,
+      prefix ? `${prefix}/${entry.name}` : entry.name,
+      output,
+      budget,
+      depth + 1
+    )
   }
 }
 
@@ -133,8 +153,9 @@ export async function captureCompletionBinding(
   if (relative(resolve(input.workspace), await realpath(input.workspace)) !== "")
     throw Error("COMPLETION_EVIDENCE_ROOT_CHANGED")
   const candidates = new Set<string>()
+  const budget = { entries: new Set<string>(), visited: new Set<string>() }
   for (const path of input.paths ?? []) {
-    await collectFiles(input, path === "." ? "" : path, candidates)
+    await collectFiles(input, path === "." ? "" : path, candidates, budget)
   }
   let diff = "non-git"
   let diffFiles: string[] | undefined
@@ -160,9 +181,9 @@ export async function captureCompletionBinding(
     diffFiles = [...new Set((paths + stagedPaths).split("\0").filter(Boolean))].sort()
     diff = JSON.stringify([head, unstaged, staged, diffFiles])
     for (const path of diffFiles) candidates.add(path)
-  } else await collectFiles(input, "", candidates)
+  } else await collectFiles(input, "", candidates, budget)
   if (await lstat(join(input.workspace, ".autobizdevops")).catch(() => undefined))
-    await collectFiles(input, ".autobizdevops", candidates)
+    await collectFiles(input, ".autobizdevops", candidates, budget)
   if (candidates.size > MAX_FILES) throw Error("COMPLETION_EVIDENCE_FILE_LIMIT")
   let total = 0
   const files: CompletionFileFingerprint[] = []
