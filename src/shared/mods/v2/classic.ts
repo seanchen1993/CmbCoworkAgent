@@ -154,6 +154,16 @@ export function validateClassicInput(event: string, value: unknown): void {
     (value.effort !== undefined && !shape(value.effort, { level: text }, ["level"]))
   )
     throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  if (name === "PreCompact" || name === "PostCompact") {
+    if (
+      !oneOf(["manual", "auto"])(value.trigger) ||
+      (name === "PreCompact" &&
+        value.custom_instructions !== null &&
+        !text(value.custom_instructions)) ||
+      (name === "PostCompact" && !text(value.compact_summary))
+    )
+      throw new ModFunctionError("MODS_CLASSIC_INPUT")
+  }
 }
 
 /** ClassicResultOf per event; invalid optional hooks are recovered by the dispatcher. */

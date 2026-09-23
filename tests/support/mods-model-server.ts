@@ -1,4 +1,5 @@
 import { createServer } from "node:http"
+import { COMPACTION_SUMMARY, isCompactionSummaryRequest } from "./mods-compaction-fixture"
 
 /** Local protocol fixture; the application still uses production model settings and client. */
 export async function startModsModelServer() {
@@ -7,6 +8,7 @@ export async function startModsModelServer() {
     [key: string]: unknown
   }> = []
   let closedStalls = 0
+  let compactionOverflowSent = false
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = []
     for await (const chunk of request) chunks.push(chunk)
@@ -15,6 +17,15 @@ export async function startModsModelServer() {
     // Each completion needs its own provider id; reusing one rewrites prior checkpoint messages.
     const responseId = `mods-model-fixture-${requests.length}`
     const prompt = String(body.messages?.at(-1)?.content)
+    if (!isCompactionSummaryRequest(body) && !compactionOverflowSent &&
+        prompt.includes("[mods-compaction-force-overflow]")) {
+      compactionOverflowSent = true
+      response.writeHead(400, { "content-type": "application/json" })
+      response.end(JSON.stringify({ error: {
+        code: "context_length_exceeded", message: "maximum context length exceeded"
+      } }))
+      return
+    }
     if (prompt.includes("[error]")) {
       response.writeHead(500, { "content-type": "application/json" })
       response.end(JSON.stringify({ error: { message: "synthetic provider failure" } }))
@@ -36,6 +47,12 @@ export async function startModsModelServer() {
       body.messages?.findLast((message: { role: string }) => message.role === "user")?.content
     )
     const lifecyclePrompt = JSON.stringify(body.messages)
+    if (isCompactionSummaryRequest(body)) {
+      event([{ index: 0, delta: { role: "assistant", content: COMPACTION_SUMMARY }, finish_reason: "stop" }])
+      event([], { prompt_tokens: 4000, completion_tokens: 350, total_tokens: 4350 })
+      response.end("data: [DONE]\n\n")
+      return
+    }
     if (lifecyclePrompt.includes("[lifecycle-fork]")) {
       event([
         { index: 0, delta: { role: "assistant", content: "LIFECYCLE_FORK" }, finish_reason: "stop" }

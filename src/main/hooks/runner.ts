@@ -108,6 +108,9 @@ export interface HookContext {
   /** Host-owned invocation identity and cancellation; never read from tool arguments. */
   toolCallId?: string
   signal?: AbortSignal
+  compactionTrigger?: "manual" | "auto"
+  compactionInstructions?: string | null
+  compactionSummary?: string
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolResult?: string
@@ -307,6 +310,9 @@ function getMatcherTarget(event: HookEvent, context: HookContext): string | unde
       return context.subagent?.name ?? context.subagent?.id
     case "Setup":
       return context.setupTrigger
+    case "PreCompact":
+    case "PostCompact":
+      return context.compactionTrigger
     case "SessionStart":
       return context.sessionStartSource
     case "SessionEnd":
@@ -540,6 +546,11 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   // PR-11 — Setup event payload. Workspace aliases are common to every event.
   if (context.setupTrigger) {
     payload.trigger = context.setupTrigger
+  }
+  if (event === "PreCompact" || event === "PostCompact") {
+    payload.trigger = context.compactionTrigger
+    if (event === "PreCompact") payload.custom_instructions = context.compactionInstructions ?? null
+    else payload.compact_summary = context.compactionSummary ?? ""
   }
   if (context.skillName) payload.skill_name = context.skillName
   if (context.skillPath) payload.skill_path = context.skillPath
@@ -1241,6 +1252,9 @@ async function executeHook(
   event: HookEvent,
   onLateHookResult?: HookResultCallback
 ): Promise<HookResult> {
+  // Compaction cannot begin until its gate settles. Imported async settings
+  // are adapted to an awaited gate, including once/in-flight deduplication.
+  if (event === "PreCompact" && hook.async === true) hook = { ...hook, async: false }
   const onceKey = hook.once === true ? getOnceExecutionKey(hook, event, context) : undefined
   const onceGeneration = onceKey
     ? {
@@ -1454,6 +1468,11 @@ function toClassicInput(event: HookEvent, context: HookContext): ModObject {
     if (event === "SessionStart") payload.source = context.sessionStartSource ?? "startup"
     if (event === "SessionEnd") payload.reason = context.sessionEndReason ?? "other"
     if (event === "Setup") payload.trigger = context.setupTrigger ?? "init"
+    if (event === "PreCompact" || event === "PostCompact") {
+      payload.trigger = context.compactionTrigger
+      if (event === "PreCompact") payload.custom_instructions = context.compactionInstructions ?? null
+      else payload.compact_summary = context.compactionSummary ?? ""
+    }
     if (event === "Notification") {
       payload.notification_type = context.notificationType
       payload.message = context.userPrompt ?? context.toolResult ?? ""
@@ -1873,7 +1892,12 @@ async function runLegacyHooks(
 
   if (matched.length === 0) return classicResult
 
-  if (event === "PreToolUse" || event === "PreSkillUse" || event === "UserPromptSubmit") {
+  if (
+    event === "PreToolUse" ||
+    event === "PreSkillUse" ||
+    event === "UserPromptSubmit" ||
+    event === "PreCompact"
+  ) {
     let mergedUpdatedInput: Record<string, unknown> | undefined
     let mergedAdditionalContext = classicResult?.additionalContext
     let mergedSystemMessage = classicResult?.systemMessage

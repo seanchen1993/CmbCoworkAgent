@@ -17,6 +17,73 @@ beforeEach(() => {
 })
 
 describe("classic Function Mods bridge", () => {
+  it("awaits PreCompact's legacy gate even when imported settings request async", async () => {
+    classicEvent.mockImplementation(async (_workspace, _thread, _event, input, signal, core) =>
+      core(input, signal)
+    )
+    legacyCall.mockResolvedValue({
+      exitCode: 2,
+      stdout: "preserve history",
+      stderr: "",
+      blocked: true
+    })
+    const result = await runHooks(
+      [
+        {
+          id: "compact-policy",
+          event: "PreCompact",
+          type: "http",
+          url: "https://example.invalid/policy",
+          enabled: true,
+          matcher: "manual",
+          async: true,
+          createdAt: "2026-09-23T00:00:00.000Z",
+          updatedAt: "2026-09-23T00:00:00.000Z"
+        }
+      ],
+      "PreCompact",
+      {
+        workspacePath: "/workspace",
+        sessionId: "thread",
+        compactionTrigger: "manual",
+        compactionInstructions: "Keep paths"
+      }
+    )
+    expect(result).toMatchObject({ blocked: true })
+    expect(JSON.parse(legacyCall.mock.calls[0][1])).toMatchObject({
+      trigger: "manual",
+      custom_instructions: "Keep paths"
+    })
+  })
+
+  it("projects real compaction fields for manual Pre and automatic Post", async () => {
+    classicEvent.mockResolvedValue({ block: "keep history" })
+    expect(
+      await runHooks([], "PreCompact", {
+        sessionId: "thread",
+        workspacePath: "/workspace",
+        compactionTrigger: "manual",
+        compactionInstructions: "Preserve paths"
+      })
+    ).toMatchObject({ blocked: true, reason: "keep history" })
+    expect(classicEvent.mock.calls[0][3]).toMatchObject({
+      hook_event_name: "PreCompact",
+      trigger: "manual",
+      custom_instructions: "Preserve paths"
+    })
+    await runHooks([], "PostCompact", {
+      sessionId: "thread",
+      workspacePath: "/workspace",
+      compactionTrigger: "auto",
+      compactionSummary: "durable summary"
+    })
+    expect(classicEvent.mock.calls[1][3]).toMatchObject({
+      hook_event_name: "PostCompact",
+      trigger: "auto",
+      compact_summary: "durable summary"
+    })
+  })
+
   it("dispatches classic.PreToolUse even when no legacy hook is configured", async () => {
     classicEvent.mockResolvedValue({ deny: "mod policy" })
     const result = await runHooks([], "PreToolUse", {

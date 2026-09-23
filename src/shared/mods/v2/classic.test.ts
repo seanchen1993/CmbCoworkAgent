@@ -2,6 +2,38 @@ import { describe, expect, it } from "vitest"
 import { validateClassicInput, validateClassicResult } from "./classic"
 
 describe("Claude v2.1.278 classic event contracts", () => {
+  it("requires actual compaction trigger and event-specific evidence", () => {
+    const base = { session_id: "thread", cwd: "/workspace", transcript_path: "" }
+    for (const name of ["PreCompact", "PostCompact"]) {
+      expect(() =>
+        validateClassicInput(`classic.${name}`, { ...base, hook_event_name: name })
+      ).toThrow("MODS_CLASSIC_INPUT")
+      expect(() =>
+        validateClassicInput(`classic.${name}`, {
+          ...base,
+          hook_event_name: name,
+          trigger: "beforeModel"
+        })
+      ).toThrow("MODS_CLASSIC_INPUT")
+    }
+    expect(() =>
+      validateClassicInput("classic.PreCompact", {
+        ...base,
+        hook_event_name: "PreCompact",
+        trigger: "manual",
+        custom_instructions: null
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateClassicInput("classic.PostCompact", {
+        ...base,
+        hook_event_name: "PostCompact",
+        trigger: "auto",
+        compact_summary: "committed summary"
+      })
+    ).not.toThrow()
+  })
+
   it("uses the PreToolUse tool envelope and typed decisions", () => {
     expect(() =>
       validateClassicInput("classic.PreToolUse", {

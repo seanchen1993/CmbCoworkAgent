@@ -22,22 +22,15 @@ export type HookEvent =
 
 // Events currently emitted by the runtime and safe to configure in files / IPC.
 //
-// `PreCompact` / `PostCompact` are intentionally NOT here. A first attempt at
-// wiring them (a "sandwich" pair of beforeModel bridges around
-// createSummarizationMiddleware) was reverted because deepagents'
-// summarization actually runs in `wrapModelCall` and stores its summary in
-// `state._summarizationEvent.summaryMessage` rather than `state.messages` —
-// so a beforeModel-based Post bridge would never see it, and a beforeModel
-// Pre bridge cannot reuse the real trigger logic (effective messages, system
-// prompt, tools, tokenEstimationMultiplier, context-overflow fallback). Any
-// future implementation must wrap / co-locate with summarization's
-// wrapModelCall to observe `Command.update._summarizationEvent`. Until that
-// lands, the events remain declared in HookEvent but unsupported.
+// Compaction events are emitted by the main runtime's actual summarizer and
+// checkpoint commit boundary, never by a speculative beforeModel bridge.
 export const SUPPORTED_HOOK_EVENTS = [
   "PreToolUse",
   "PostToolUse",
   "PreSkillUse",
   "PostSkillUse",
+  "PreCompact",
+  "PostCompact",
   "Stop",
   "Notification",
   "UserPromptSubmit",

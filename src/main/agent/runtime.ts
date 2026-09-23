@@ -67,6 +67,7 @@ import {
   createCmbSummarizationMiddleware,
   type CmbContextController
 } from "./context-summarization-middleware"
+import { hasSameCompactionEvidence } from "./context-compaction-hooks"
 import {
   createTurnCompletionGateMiddleware,
   type TurnCompletionRecoveryCallback
@@ -2303,6 +2304,7 @@ function assembleDeepAgent(
     summarizationLegacyHistoryPathPrefix,
     summarizationTruncateArgsSettings,
     onContextCompaction,
+    classicCompactionHooks,
     subagentExtraSystemPrompt,
     subagentExtraSystemPromptForRestrictedRoles = false,
     mainFilesystemEnabled = true,
@@ -2447,6 +2449,7 @@ function assembleDeepAgent(
   }
   const mainSummarizationOptions = {
     ...summarizationBaseOptions,
+    compactionHooks: classicCompactionHooks,
     model: configureContextCompactionModel(summarizationModel, onContextCompaction),
     ...(summarizationFallbackModel && {
       fallbackModel: configureContextCompactionModel(
@@ -3273,7 +3276,7 @@ function assembleDeepAgent(
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
-    checkpointer,
+    checkpointer: mainSummarizationController.wrapCheckpointer(checkpointer),
     store,
     name
   }
@@ -7286,7 +7289,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       let checkpointUpdated = false
       try {
         signal.throwIfAborted()
-        await agentToUpdate.updateState(
+        const updatedConfig = await agentToUpdate.updateState(
           config,
           {
             messages: [new RemoveMessage({ id: "__remove_all__" }), ...messagesToCommit],
@@ -7297,6 +7300,20 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         checkpointUpdated = true
         signal.throwIfAborted()
         await checkpointer.flushStrict()
+        signal.throwIfAborted()
+        const committedState = (await agentToUpdate.getState(config)) as unknown as {
+          config?: { configurable?: { checkpoint_id?: string } }
+          values?: Record<string, unknown>
+        }
+        const committedId = (updatedConfig as { configurable?: { checkpoint_id?: string } })
+          .configurable?.checkpoint_id
+        if (
+          !committedId ||
+          committedState.config?.configurable?.checkpoint_id !== committedId ||
+          !hasSameCompactionEvidence(committedState.values, updateToCommit)
+        )
+          throw new ModError("MODS_CONTEXT_CHANGED")
+        signal.throwIfAborted()
         modRuntimeAuthority?.assertLive()
       } catch (error) {
         // updateState can fail before a checkpoint is durable. Compensate the
@@ -7336,6 +7353,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         encodeModJson(projectFunctionSessionMessages(messagesToCommit))
       )
       if (!isModJson(projectedMessages)) throw new ModError("MODS_SDK_RESULT")
+      await plan.afterCommit?.(signal)
       return {
         messages: projectedMessages,
         tokensBefore: plan.estimatedTokensBefore,
@@ -7421,6 +7439,85 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       }
     } satisfies FunctionStepModelHost : undefined,
     modSessionCompact: compactMainSession,
+    classicCompactionHooks: {
+      isEnabled: () =>
+        getModsManager()?.isActive(workspacePath) === true ||
+        getEnabledHooks(workspacePath).some(
+          (hook) => hook.event === "PreCompact" || hook.event === "PostCompact"
+        ),
+      before: async (
+        event: { trigger: "manual" | "auto"; customInstructions: string | null },
+        signal?: AbortSignal
+      ) => {
+        modRuntimeAuthority?.assertLive()
+        const context: HookContext = {
+          workspacePath,
+          sessionId: threadId,
+          agentId,
+          turnId: hookTurnId,
+          pluginOutputDir,
+          systemId,
+          pluginWorkspace,
+          featureId,
+          harnessProjectId,
+          harnessAdapterName,
+          harnessAdapterVersion,
+          harnessNodeName,
+          harnessNodeStatus,
+          projectCode,
+          projectDir,
+          ...isolatedWorkspaceHookContext,
+          signal,
+          compactionTrigger: event.trigger,
+          compactionInstructions: event.customInstructions
+        }
+        const result = await runHooks(
+          resolveHooksForContext("PreCompact", context),
+          "PreCompact",
+          context,
+          onHookResult
+        )
+        signal?.throwIfAborted()
+        modRuntimeAuthority?.assertLive()
+        if (result?.blocked || result?.continue === false || result?.decision === "block")
+          throw new Error(
+            `CONTEXT_COMPACTION_BLOCKED: ${result.reason || result.stopReason || result.stdout || "PreCompact blocked summarization"}`
+          )
+      },
+      after: async (
+        event: { trigger: "manual" | "auto"; summary: string },
+        signal?: AbortSignal
+      ) => {
+        modRuntimeAuthority?.assertLive()
+        const context: HookContext = {
+          workspacePath,
+          sessionId: threadId,
+          agentId,
+          turnId: hookTurnId,
+          pluginOutputDir,
+          systemId,
+          pluginWorkspace,
+          featureId,
+          harnessProjectId,
+          harnessAdapterName,
+          harnessAdapterVersion,
+          harnessNodeName,
+          harnessNodeStatus,
+          projectCode,
+          projectDir,
+          ...isolatedWorkspaceHookContext,
+          signal,
+          compactionTrigger: event.trigger,
+          compactionSummary: event.summary
+        }
+        await runHooks(
+          resolveHooksForContext("PostCompact", context),
+          "PostCompact",
+          context,
+          onHookResult
+        )
+      }
+    },
     modContextSources: functionSessionContextSources,
     modTurnRunId: options.modTurnRunId ?? options.currentRunMessageQueueOwnerToken,
     onContextCompaction,

@@ -126,13 +126,13 @@ const EVENT_BADGE: Record<
     label: "压缩前",
     className: "bg-muted text-muted-foreground",
     english: "PreCompact",
-    tip: "上下文压缩前触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
+    tip: "主会话实际开始自动或手动摘要前触发；阻止结果会取消摘要和归档。异步配置在此按同步门禁执行，子 Agent 内部摘要暂不触发"
   },
   PostCompact: {
     label: "压缩后",
     className: "bg-muted text-muted-foreground",
     english: "PostCompact",
-    tip: "上下文压缩后触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
+    tip: "主会话摘要 checkpoint 持久化且仍为当前版本后触发；提供最终摘要，仅作提交后观察。失败、取消或 checkpoint 竞争不触发"
   },
   PermissionRequest: {
     label: "权限申请",

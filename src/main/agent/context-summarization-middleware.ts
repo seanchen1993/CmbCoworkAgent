@@ -25,6 +25,7 @@ import {
 import { isWorkflowNotificationPrompt } from "../../shared/internal-notification-turn"
 import { withCompactedContext } from "./context-usage"
 import { ModError } from "../mods/errors"
+import { CompactionCommitObserver, type CmbCompactionHooks } from "./context-compaction-hooks"
 
 export interface ContextSize {
   type: "messages" | "tokens" | "fraction"
@@ -39,6 +40,7 @@ export interface TruncateArgsSettings {
 }
 
 export interface CmbSummarizationMiddlewareOptions {
+  compactionHooks?: CmbCompactionHooks
   model: string | BaseChatModel | BaseLanguageModel
   /**
    * Optional non-thinking model used only after a summary response contains no
@@ -225,6 +227,7 @@ const SUMMARY_TEXT_ONLY_INSTRUCTION =
   "Do not call, request, or imitate any tool. Do not emit tool-call markup or arguments. Return only the continuation handoff as text in the final content field."
 
 export const SummarizationEventSchema = z.object({
+  compactionId: z.string().optional(),
   cutoffIndex: z.number(),
   // First response in the new context window, including when old responses are kept as tail.
   usageStartIndex: z.number().int().nonnegative().optional(),
@@ -265,9 +268,12 @@ export interface CmbCompactionPlan {
   }>
   /** Compensates a staged archive when checkpoint mutation fails before commit. */
   rollbackArchive?: (signal: AbortSignal) => Promise<void>
+  /** Host calls this only after durable checkpoint commit and its final authority/CAS checks. */
+  afterCommit?: (signal: AbortSignal) => Promise<void>
 }
 
 export interface CmbContextController {
+  wrapCheckpointer<T>(saver: T): T
   middleware: ReturnType<typeof createMiddleware>
   prepare(
     request: CmbContextRequest,
@@ -845,6 +851,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
 export function createCmbContextController(
   options: CmbSummarizationMiddlewareOptions
 ): CmbContextController {
+  const compactionObserver = new CompactionCommitObserver(options.compactionHooks)
   const {
     model,
     fallbackModel,
@@ -1718,6 +1725,11 @@ ${summary}
       }
     }
 
+    const observeCompaction = await compactionObserver.before(
+      handler ? "auto" : "manual",
+      instructions,
+      request.runtime?.signal
+    )
     const summaryAttemptBudget = { used: 0 }
     const summaryResult = await summarizeMessages(
       messagesToSummarize,
@@ -1876,7 +1888,13 @@ ${summary}
         _summarizationSessionId: getSessionId(request.state, owner, initialOwnerSessionId),
         ...(owner ? { [SUMMARIZATION_STATE_OWNER_KEY]: owner } : {})
     }
-    if (handler) return new Command({ update }) as TResult
+    if (handler) {
+      const compactionId = observeCompaction
+        ? compactionObserver.register(finalSummaryText, request.runtime?.signal)
+        : undefined
+      if (compactionId) update._summarizationEvent.compactionId = compactionId
+      return new Command({ update }) as TResult
+    }
     request.runtime?.signal?.throwIfAborted()
     const plan: CmbCompactionPlan = {
       messages: modifiedMessages,
@@ -1893,6 +1911,7 @@ ${summary}
       ),
       summaryAttempts: summaryAttemptBudget.used
     }
+    if (observeCompaction) plan.afterCommit = compactionObserver.onceAfterManual(finalSummaryText)
     if (!handler && !persistArchive) {
       let committed:
         | {
@@ -2118,6 +2137,7 @@ ${summary}
 
   return {
     middleware,
+    wrapCheckpointer: (saver) => compactionObserver.wrapCheckpointer(saver),
     /** Produces a plan without calling the conversation model or writing its checkpoint. */
     async prepare(
       request: CmbContextRequest,
