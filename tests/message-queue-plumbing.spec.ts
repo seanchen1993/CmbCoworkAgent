@@ -100,8 +100,13 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // context management): the queue middleware immediately precedes it in the array.
   assertMatches(
     after,
-    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*createCmbSummarizationMiddleware\(mainSummarizationOptions\)/,
+    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*mainSummarizationController\.middleware/,
     "queue middleware immediately precedes summarization on the main stack"
+  )
+  assertIncludes(
+    runtime,
+    "const mainSummarizationController = createCmbContextController(mainSummarizationOptions)",
+    "the main stack uses the same controller as host compaction"
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts
   // injection.
@@ -510,7 +515,7 @@ function testClearOnEveryRunExit(): void {
   )
   assertOccurrences(
     agentIpc,
-    "resolveAgentStreamRequestChannel(",
+    "const channel = resolveAgentStreamRequestChannel(",
     3,
     "invoke, resume, and interrupt isolate terminal events on request-scoped channels"
   )
@@ -1456,7 +1461,10 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     `invoke, resume, and interrupt each have one completion hook: got ${completionHookIndexes.length}`
   )
   for (const [index, label] of ["invoke", "resume", "interrupt"].entries()) {
-    const body = agentIpc.slice(completionHookIndexes[index], completionHookIndexes[index] + 2600)
+    const outcomeMarker = 'if (completionOutcome === "failed")'
+    const outcomeIndex = agentIpc.indexOf(outcomeMarker, completionHookIndexes[index])
+    assert(outcomeIndex >= 0, `${label} has a completion outcome boundary`)
+    const body = agentIpc.slice(completionHookIndexes[index], outcomeIndex + outcomeMarker.length)
     const fence =
       label === "invoke"
         ? "throwIfInvokeAborted()"
@@ -1916,7 +1924,7 @@ function testPumpGatedOnHistoryLoadingReadOnlyContextReminder(): void {
   // never accept one. Mirrors handleSubmit's own early-return guards.
   assertIncludes(
     chat,
-    "if (historyLoading || readOnly || contextReminderPending) return",
+    "if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return",
     "auto-drain gated on historyLoading/readOnly/contextReminderPending"
   )
 }
