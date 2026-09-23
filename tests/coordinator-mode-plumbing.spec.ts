@@ -157,7 +157,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertMatches(
     chat,
-    /<AgentModeSwitcher\s+showWorkflow\b/,
+    /<AgentModeSwitcher\b[^>]*\bshowWorkflow\b/,
     "project mode and normal chat both show Workflow"
   )
   assertIncludes(

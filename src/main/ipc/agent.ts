@@ -9675,7 +9675,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             turnStateShouldDispose = true
-            markAutoModeTerminal("error", "hook_halt", hookHalt.reason, hookHalt)
+            markAutoModeTerminal("error", "hook_halt", hookHalt.reason, error)
             return
           }
           const actionStationarityHalt = getActionStationarityHaltError(error)
