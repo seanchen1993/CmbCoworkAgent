@@ -43,7 +43,7 @@ export class FunctionGuestRuntime {
   private scheduled?: NodeJS.Immediate
   private watchdog?: ReturnType<typeof setInterval>
   private cpuMs = 0
-  private cpuWindow = Date.now()
+  private cpuWindow = performance.now()
 
   private constructor(
     private readonly vm: QuickJSRuntime,
@@ -57,7 +57,7 @@ export class FunctionGuestRuntime {
     vm.setMaxStackSize(512 * 1024)
     const context = vm.newContext()
     const guest = new FunctionGuestRuntime(vm, context)
-    vm.setInterruptHandler(() => guest.disposed || Date.now() > guest.deadline)
+    vm.setInterruptHandler(() => guest.disposed || performance.now() > guest.deadline)
     const host = context.newFunction("__functionHost", (token, method, json) => {
       const frame = guest.frames.get(context.getString(token))
       if (!frame || frame.controller.signal.aborted) throw Error("MODS_STALE_INVOCATION")
@@ -136,7 +136,7 @@ export class FunctionGuestRuntime {
 
   private evaluate(code: string): QuickJSHandle {
     if (this.disposed) throw new ModFunctionError("MODS_UNLOADED")
-    this.deadline = Date.now() + 50
+    this.deadline = performance.now() + 50
     const result = this.context.evalCode(code)
     if (result.error) {
       // Dumping an arbitrary guest object could execute accessors. Read a fixed diagnostic only.
@@ -178,7 +178,7 @@ export class FunctionGuestRuntime {
         id: token,
         host: AsyncResource.bind(host),
         controller: new AbortController(),
-        expiresAt: Date.now() + Math.min(Math.max(timeoutMs, 1), 120_000),
+        expiresAt: performance.now() + Math.min(Math.max(timeoutMs, 1), 120_000),
         resolve,
         reject,
         detach: () => signal?.removeEventListener("abort", cancel)
@@ -223,7 +223,7 @@ export class FunctionGuestRuntime {
   private pump(): void {
     this.scheduled = undefined
     if (this.disposed) return
-    const now = Date.now()
+    const now = performance.now()
     if (now - this.cpuWindow > 5000) {
       this.cpuWindow = now
       this.cpuMs = 0
@@ -231,7 +231,7 @@ export class FunctionGuestRuntime {
     for (const frame of [...this.frames.values()]) {
       if (now >= frame.expiresAt) this.cancel(frame.id, "MODS_BUDGET_EXCEEDED")
     }
-    this.deadline = Date.now() + 50
+    this.deadline = performance.now() + 50
     const start = performance.now()
     const jobs = this.vm.executePendingJobs(32)
     this.cpuMs += performance.now() - start

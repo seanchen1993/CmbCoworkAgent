@@ -11,6 +11,8 @@ import { FunctionRuntimeClient } from "./runtime-client"
 const clients: FunctionRuntimeClient[] = []
 afterEach(() => {
   for (const client of clients.splice(0)) client.stop()
+  vi.useRealTimers()
+  vi.restoreAllMocks()
 })
 
 async function fixture(rows: ModJson) {
@@ -45,6 +47,39 @@ async function fixture(rows: ModJson) {
   const guest = await client.load("fixture")
   return { client, guest, child, messages }
 }
+
+it("keeps a healthy utility runtime live across a wall-clock correction", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+  const f = await fixture([{ id: "0", pattern: "turn.step", hasCatch: false, hasMatcher: false }])
+  const wall = Date.now()
+  vi.spyOn(Date, "now").mockReturnValue(wall + 3600000)
+  await vi.advanceTimersByTimeAsync(250)
+  await expect(f.guest.matches("0", {})).resolves.toBe(true)
+})
+
+it("expires missing utility replies with a frozen wall clock even while heartbeats continue", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] })
+  const f = await fixture([{ id: "0", pattern: "command.run", hasCatch: false }])
+  f.child.postMessage = () => {}
+  vi.spyOn(Date, "now").mockReturnValue(1)
+  const heartbeat = setInterval(() => {
+    f.child.emit("message", { type: "heartbeat", rss: 0, runtimes: 1, frames: 1, replies: 0 })
+  }, 200)
+  const pending = f.guest.invoke("0", {}, async () => ({}), {
+    event: "command.run",
+    origin: { plugin: "engine", tier: "core" },
+    capabilities: [],
+    plugin: { name: "probe", root: "/probe" },
+    timeoutMs: 1
+  })
+  const rejection = expect(pending).rejects.toThrow("MODS_HOST_TIMEOUT")
+  await vi.advanceTimersByTimeAsync(3500)
+  await rejection
+  clearInterval(heartbeat)
+  expect(f.client.stats.pending).toBe(0)
+  expect(f.client.stats.calls).toBe(0)
+  await expect(f.guest.matches("0", {})).rejects.toThrow("MODS_UNLOADED")
+})
 
 it("records matcher absence from the actual QuickJS registration closure", async () => {
   const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){

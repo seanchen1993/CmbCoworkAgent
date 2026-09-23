@@ -48,6 +48,34 @@ void app.whenReady().then(async () => {
     checks.push(
       "unconditional host matching retains dynamic guest matchers and disposal across real utility IPC"
     )
+    const clockGuest = await client.load(`var __cmbFunctionMod={register(on){
+      on("command.run",async $=>({text:await $.session.id()}));
+    }}`)
+    const wallClock = Date.now
+    try {
+      const corrected = Date.now() + 3600000
+      Date.now = () => corrected
+      const result = await clockGuest.invoke(
+        "0",
+        {},
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 350))
+          return { value: "alive" }
+        },
+        {
+          event: "command.run",
+          origin: { plugin: "engine", tier: "core" },
+          capabilities: ["session.id"],
+          plugin: { name: "clock-probe", root },
+          timeoutMs: 2000
+        }
+      )
+      assert.deepEqual(result.value, { text: "alive" })
+    } finally {
+      Date.now = wallClock
+      await clockGuest.dispose()
+    }
+    checks.push("real utility IPC survives wall-clock correction during a pending guest host call")
     const engineNounsPerformance = await checkEngineNouns(client, root)
     checks.push(
       "engine.create cross-guest noun fold, original authority, middleware and closed zero-call comparison"

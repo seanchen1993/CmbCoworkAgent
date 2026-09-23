@@ -58,7 +58,7 @@ export class FunctionRuntimeClient {
     const env: Record<string, string> = {}
     for (const key of ["SystemRoot", "WINDIR", "TEMP", "TMP", "LANG"])
       if (process.env[key]) env[key] = process.env[key]!
-    this.heartbeatAt = Date.now() + 8000
+    this.heartbeatAt = performance.now() + 8000
     this.ready = new Promise<void>((resolve, reject) => {
       this.rejectReady = reject
       const child = utilityProcess.fork(this.entry, [], {
@@ -72,7 +72,7 @@ export class FunctionRuntimeClient {
       child.on("message", (message: FunctionResponse) => {
         if (this.child !== child) return
         if (message.type === "ready") {
-          this.heartbeatAt = Date.now()
+          this.heartbeatAt = performance.now()
           this.rejectReady = undefined
           resolve()
         } else this.onMessage(message)
@@ -85,8 +85,8 @@ export class FunctionRuntimeClient {
       })
     })
     this.timer = setInterval(() => {
-      if (Date.now() - this.heartbeatAt > 2000) this.stop("MODS_HOST_UNRESPONSIVE")
-      else if ([...this.pending.values()].some((p) => p.expiresAt < Date.now()))
+      if (performance.now() - this.heartbeatAt > 2000) this.stop("MODS_HOST_UNRESPONSIVE")
+      else if ([...this.pending.values()].some((p) => p.expiresAt < performance.now()))
         this.stop("MODS_HOST_TIMEOUT")
     }, 250)
     this.timer.unref()
@@ -100,7 +100,7 @@ export class FunctionRuntimeClient {
       return
     }
     if (message.type === "heartbeat") {
-      this.heartbeatAt = Date.now()
+      this.heartbeatAt = performance.now()
       const { rss, runtimes, frames, replies } = message
       this.remote = { rss, runtimes, frames, replies }
       if (rss > 384 * 1024 * 1024) this.stop("MODS_HOST_MEMORY")
@@ -199,7 +199,7 @@ export class FunctionRuntimeClient {
         resolve,
         reject,
         controller,
-        expiresAt: Date.now() + timeout,
+        expiresAt: performance.now() + timeout,
         detach: () => signal?.removeEventListener("abort", cancel)
       })
       signal?.addEventListener("abort", cancel, { once: true })

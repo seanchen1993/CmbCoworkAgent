@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { FunctionInvocation } from "../../../shared/mods/v2/contracts"
 import { FunctionGuestRuntime } from "./guest-runtime"
 
@@ -16,7 +16,40 @@ async function guest(body: string): Promise<FunctionGuestRuntime> {
   guests.push(result)
   return result
 }
-afterEach(() => guests.splice(0).forEach((runtime) => runtime.dispose()))
+afterEach(() => {
+  guests.splice(0).forEach((runtime) => runtime.dispose())
+  vi.restoreAllMocks()
+})
+
+it("expires a pending guest even when the wall clock stops advancing", async () => {
+  const runtime = await guest(`on("command.run", async () => new Promise(()=>{}))`)
+  vi.spyOn(Date, "now").mockReturnValue(1)
+  const controller = new AbortController()
+  const safety = setTimeout(() => controller.abort(), 250)
+  try {
+    await expect(
+      runtime.invoke("0", {}, async () => ({}), {
+        ...options,
+        timeoutMs: 20,
+        signal: controller.signal
+      })
+    ).rejects.toThrow("MODS_BUDGET_EXCEEDED")
+    expect(runtime.stats.frames).toBe(0)
+  } finally {
+    clearTimeout(safety)
+  }
+})
+
+it("does not expire a live guest when the wall clock jumps forward", async () => {
+  const runtime = await guest(`on("command.run", async ($) => ({text:await $.session.id()}))`)
+  const wall = Date.now()
+  const pending = runtime.invoke("0", {}, async () => ({ value: "current" }), {
+    ...options,
+    timeoutMs: 1000
+  })
+  vi.spyOn(Date, "now").mockReturnValue(wall + 3600000)
+  await expect(pending).resolves.toEqual({ value: { text: "current" } })
+})
 
 describe("persistent function guest frame boundaries", () => {
   it("keeps concurrent host calls attached to their original frames", async () => {
