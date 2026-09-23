@@ -28,7 +28,7 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
         asyncScope.component !== input.component)
       throw Error("MODS_UI_SURFACE_UNAVAILABLE");
     const table = Object.create(null);
-    for (const name of ["Box", "Text", "Button", "Input", "Select", "Link", "Code", "Client"]) {
+    for (const name of ["Box", "Text", "Button", "Input", "Select", "Link", "Code", "Svg", "Client"]) {
       table[name] = raw => {
         const scope = asyncScope;
         if (!scope || scope.event !== "ui.render" || !scope.uiGeneration ||

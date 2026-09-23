@@ -679,6 +679,44 @@ void app.whenReady().then(async () => {
       "isolated Client preserves state, controls and messages across 120 production process frames"
     )
 
+    const vectors = await compileFunctionPlugin(join(root, "tests/fixtures/mods-v2/svg-pane"))
+    const vectorSession = new FunctionSession(
+      [
+        {
+          ...vectors,
+          tier: "user",
+          guest: await client.load(vectors.code),
+          capabilities: [...SESSION_CAPABILITIES]
+        }
+      ],
+      {
+        workspace: root,
+        threadId: "vectors",
+        assertLive: () => {},
+        publish: async (v) => v,
+        loadClient: (plugin, module) =>
+          client.load(CLIENT_BOOTSTRAP + "\n" + vectors.clients[module], { plugin })
+      }
+    )
+    try {
+      await vectorSession.run("svg-pane", "")
+      const [pane] = await vectorSession.panes.snapshot()
+      assert.equal((pane.tree.children![0] as FunctionUiElement).type, "Svg")
+      assert.equal(pane.clients![0].tree.type, "Svg")
+      assert.equal(pane.clients![0].error, undefined)
+      // Unchanged snapshots reuse the captured draw and the same isolated Client identity.
+      for (let index = 0; index < 100; index++) {
+        const [again] = await vectorSession.panes.snapshot()
+        assert.equal(again.generation, pane.generation)
+        assert.equal(again.clients![0].id, pane.clients![0].id)
+      }
+    } finally {
+      await vectorSession.close()
+    }
+    checks.push(
+      "bounded SVG leaves cross real guest and Client processes, with 100 stable cached snapshots"
+    )
+
     const exhausted = await client.load(`var __cmbFunctionMod={register(on){
       on("command.run", async()=>{await Promise.resolve();const until=Date.now()+30;while(Date.now()<until){};return {text:"ok"}})
     }}`)

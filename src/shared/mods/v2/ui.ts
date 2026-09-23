@@ -10,7 +10,7 @@ export const FUNCTION_UI_CAPABILITIES = [
   "ui.invalidate"
 ] as const
 export interface FunctionUiElement {
-  type: "Box" | "Text" | "Button" | "Input" | "Select" | "Link" | "Code" | "Client"
+  type: "Box" | "Text" | "Button" | "Input" | "Select" | "Link" | "Code" | "Svg" | "Client"
   props: ModObject
   children?: (FunctionUiElement | string)[]
   press?: { plugin: string; handle: number }
@@ -98,6 +98,7 @@ const props: Record<FunctionUiElement["type"], readonly string[]> = {
   Select: ["key", "label", "options", "value", "autoFocus"],
   Link: ["href", "label"],
   Code: ["source", "language", "path", "startLine", "format", "wrap"],
+  Svg: ["source", "alt", "width", "height", "isInteractive"],
   Client: ["key", "module", "props", "width", "height", "flexGrow"]
 }
 const text = (value: unknown, max = 10000): value is string =>
@@ -147,8 +148,17 @@ export function validateFunctionTree(value: unknown): asserts value is FunctionU
       fail()
     const item = node as unknown as FunctionUiElement
     const p = item.props
+    if (
+      item.type === "Svg" &&
+      (!text(p.source, 131072) ||
+        !text(p.alt) ||
+        (p.isInteractive !== undefined && typeof p.isInteractive !== "boolean") ||
+        [p.width, p.height].some((v) => v !== undefined && typeof v !== "number"))
+    )
+      fail()
     for (const [key, value] of Object.entries(p)) {
       if (!props[item.type].includes(key)) fail()
+      if (item.type === "Svg" && key === "source") continue
       if (key === "options") continue
       if (key === "props" && item.type === "Client") continue
       if (

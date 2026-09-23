@@ -53,7 +53,7 @@ export const CLIENT_BOOTSTRAP = String.raw`
     return out;
   }
   const elements=Object.create(null);
-  for(const type of ["Box","Text","Button","Input","Select","Link","Code"]) {
+  for(const type of ["Box","Text","Button","Input","Select","Link","Code","Svg"]) {
     elements[type]=raw=>{
       const props={...raw}, nested=children(props.children), handlers={};
       delete props.children;

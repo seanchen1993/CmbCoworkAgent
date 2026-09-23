@@ -10,6 +10,7 @@ import {
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { FunctionClient } from "./FunctionClient"
 import { FunctionCode } from "./FunctionCode"
+import { FunctionSvg } from "./FunctionSvg"
 import { desktopAllowsPaneFocus, paneFocusElement } from "../../lib/function-pane-focus"
 
 type Act = (
@@ -148,6 +149,7 @@ export function Element({
 }): React.ReactNode {
   if (typeof node === "string") return node
   const p = node.props
+  if (node.type === "Svg") return <FunctionSvg props={p} />
   if (node.type === "Box" || node.type === "Text") {
     const Tag = node.type === "Box" ? "div" : "span"
     return (
