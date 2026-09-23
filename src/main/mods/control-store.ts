@@ -248,8 +248,10 @@ export class ModControlStore {
     if (
       (record.binding === null) !== unbound ||
       (unbound && !unboundStatuses.includes(record.status)) ||
+      (record.phase === "state.transition.started" &&
+        !["running", "completed", "cancelled", "interrupted", "error"].includes(record.status)) ||
       (record.status === "completed" &&
-        !["capture.started", "check.started"].includes(record.phase))
+        !["capture.started", "check.started", "state.transition.started"].includes(record.phase))
     )
       throw new ModError("MODS_EVIDENCE_UNBOUND")
     const text = encodeModJson(record)
@@ -263,7 +265,9 @@ export class ModControlStore {
         : (record.phase === "check.result" || record.phase === "invalidated") &&
             record.status !== "running"
           ? ["capture.started", "check.started"]
-          : undefined
+          : record.phase === "state.transition" && record.status !== "running"
+            ? ["state.transition.started", "state.transition.started"]
+            : undefined
     const settle = previous && typeof attempt === "string" && attempt.length > 0
     // The terminal fact and its start marker must be committed together. A crash
     // between the two must never turn a finished operation into an interrupted one.

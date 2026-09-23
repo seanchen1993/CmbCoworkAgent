@@ -55,6 +55,7 @@ export interface BoundCompletionEvidenceRecord extends CompletionRecordIdentity 
     | "repair.attempt"
     | "validator.result"
     | "state.transition"
+    | "state.transition.started"
     | "invalidated"
   status:
     | "completed"

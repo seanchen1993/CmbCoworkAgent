@@ -32,7 +32,7 @@ it("recovers durable capture after physical process termination without replay o
     await closed
     store = new ModControlStore(database)
     const rows = store.completionEvidence("project", "thread")
-    expect(rows).toHaveLength(3)
+    expect(rows).toHaveLength(6)
     expect(rows.find((row) => row.id === "pending")).toMatchObject({
       phase: "capture.started",
       status: "interrupted",
@@ -44,6 +44,16 @@ it("recovers durable capture after physical process termination without replay o
       status: "completed",
       binding: null,
       detail: { attempt: "settled", settledBy: "error" }
+    })
+    expect(rows.find((row) => row.id === "pending-transition")).toMatchObject({
+      phase: "state.transition.started",
+      status: "interrupted",
+      detail: { attempt: "pending-transition", error: "MODS_PROCESS_RESTARTED" }
+    })
+    expect(rows.find((row) => row.id === "settled-transition")).toMatchObject({
+      phase: "state.transition.started",
+      status: "completed",
+      detail: { attempt: "settled-transition", settledBy: "transition-block" }
     })
     expect(rows.some((row) => row.status === "pass" || row.status === "running")).toBe(false)
   } finally {

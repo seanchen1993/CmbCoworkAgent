@@ -88,6 +88,25 @@ it("adds no visible UI when there is no trusted host evidence", () => {
   ).toBe("")
 })
 
+it("distinguishes a recorded write from confirmed completion when authority expires after commit", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [
+        record("state.transition", "interrupted", {
+          applied: true,
+          status: "committed",
+          operationId: "host-operation",
+          reason: "MODS_GRANT_REVOKED"
+        })
+      ]
+    })
+  )
+  expect(html).toContain("宿主已记录状态写入")
+  expect(html).toContain("不要直接重试推进")
+  expect(html).toContain("host-operation")
+  expect(html).not.toContain("checkpoint 已由宿主确认")
+})
+
 it("shows capture errors as unavailable file evidence without claiming a zero-file PASS", () => {
   const base = record("check.result", "error", { error: "File is too large" })
   const html = renderToStaticMarkup(
@@ -190,4 +209,14 @@ it("explains interrupted capture without suggesting business acceptance or autom
   expect(html).toContain("开始采集文件证据")
   expect(html).toContain("采集中断")
   expect(html).not.toContain("文件指纹 0 项")
+})
+
+it("explains duplicate checkpoint confirmation without implying another write", () => {
+  const html = renderToStaticMarkup(
+    createElement(FunctionCompletionEvidenceContent, {
+      records: [record("state.transition", "pass", { applied: false, duplicate: true })]
+    })
+  )
+  expect(html).toContain("此前已确认")
+  expect(html).toContain("未重复写入")
 })

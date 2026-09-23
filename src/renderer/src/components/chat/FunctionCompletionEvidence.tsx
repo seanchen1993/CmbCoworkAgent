@@ -21,6 +21,7 @@ const phases = {
   "check.result": "完成门禁",
   "repair.attempt": "修复尝试",
   "validator.result": "检查结果",
+  "state.transition.started": "开始 checkpoint 推进",
   "state.transition": "checkpoint 推进"
 }
 function detailText(record: CompletionEvidenceRecord, key: string): string {
@@ -45,6 +46,12 @@ function label(record: CompletionEvidenceRecord): string {
           : phases[record.phase]
 }
 function nextAction(record: CompletionEvidenceRecord): string {
+  if (record.phase === "state.transition.started")
+    return record.status === "running"
+      ? "等待原生权限审批及宿主提交结果；此步骤不代表推进成功。"
+      : record.status === "completed"
+        ? "推进步骤已结束，请查看对应提交结果；此步骤不代表推进成功。"
+        : "推进确认中断，请先核对宿主提交日志与状态文件；不要直接重试推进。"
   if (record.phase === "capture.started")
     return record.status === "running"
       ? "正在读取当前文件、需求和配置；尚未形成检查结论。"
@@ -54,7 +61,9 @@ function nextAction(record: CompletionEvidenceRecord): string {
   if (record.phase === "capture.failed")
     return "尚未取得文件和需求证据；检查路径、文件大小或读取权限，缩小范围后重新检查。"
   if (record.phase === "state.transition" && record.status === "interrupted")
-    return "提交结果未知。请先按操作编号复核宿主提交日志、state.json 与 STATE.md；不要直接重试推进。"
+    return isModObject(record.detail) && record.detail.applied === true
+      ? "宿主已记录状态写入，但本次权限或生命周期复核未完成。请按操作编号复核日志与状态；不要直接重试推进。"
+      : "提交结果未知。请先按操作编号复核宿主提交日志、state.json 与 STATE.md；不要直接重试推进。"
   const reason = detailText(record, "reason") || detailText(record, "error")
   if (reason.includes("MODEL_BUDGET"))
     return "调整模型总预算或缩小范围后重新执行；已有用量不会被本次重试清零。"
@@ -68,7 +77,9 @@ function nextAction(record: CompletionEvidenceRecord): string {
   if (record.status === "block" || record.status === "error")
     return "根据失败原因修复代码、测试或配置后重新检查。"
   if (record.phase === "state.transition" && record.status === "pass")
-    return "checkpoint 已由宿主确认；继续下一阶段。"
+    return isModObject(record.detail) && record.detail.duplicate === true
+      ? "checkpoint 此前已确认；本次复核未重复写入，继续下一阶段。"
+      : "checkpoint 已由宿主确认；继续下一阶段。"
   return record.status === "running"
     ? "等待检查结果。"
     : "此记录仅对应所列检查和文件版本，不代表业务验收。"

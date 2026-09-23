@@ -42,5 +42,37 @@ store.saveCompletionEvidence({
   detail: { attempt: "settled", error: "COMPLETION_EVIDENCE_LINK" },
   at: 2
 })
+const transition = {
+  workspace: "project",
+  threadId: "thread",
+  turnId: "turn",
+  runId: "run",
+  binding: {
+    ...base.capture,
+    diffFingerprint: "diff",
+    stateFingerprint: "state",
+    requirementVersion: "requirements",
+    files: []
+  },
+  at: 3
+}
+for (const attempt of ["pending-transition", "settled-transition"])
+  store.saveCompletionEvidence({
+    ...transition,
+    id: attempt,
+    idempotencyKey: attempt,
+    phase: "state.transition.started",
+    status: "running",
+    detail: { attempt }
+  })
+store.saveCompletionEvidence({
+  ...transition,
+  id: "transition-block",
+  idempotencyKey: "transition-block",
+  phase: "state.transition",
+  status: "block",
+  detail: { attempt: "settled-transition", reason: "MODS_USER_REJECTED" },
+  at: 4
+})
 process.stdout.write("CAPTURE_DURABLE\n")
 setInterval(() => {}, 1000)

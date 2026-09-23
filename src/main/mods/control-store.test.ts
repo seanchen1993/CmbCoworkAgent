@@ -203,6 +203,16 @@ describe("Mod durable control store", () => {
       },
       at: Date.now()
     } satisfies CompletionEvidenceRecord
+    for (const status of ["pass", "block", "revise"] as const)
+      expect(() =>
+        store.saveCompletionEvidence({
+          ...record,
+          id: `invalid-start-${status}`,
+          idempotencyKey: `invalid-start-${status}`,
+          phase: "state.transition.started",
+          status
+        })
+      ).toThrow("MODS_EVIDENCE_UNBOUND")
     store.saveCompletionEvidence(record)
     store.saveCompletionEvidence({ ...record, id: "other-id", status: "pass" })
     expect(store.completionEvidence("project", "thread")).toEqual([record])

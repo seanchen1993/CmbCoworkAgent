@@ -113,6 +113,8 @@ async function autobizFixture(
     approved?: boolean
     autoStage?: string
     guestStage?: string
+    revokeAfterCommit?: boolean
+    approvalObserver?: () => void
   } = {}
 ) {
   let root = await mkdtemp(join(tmpdir(), "mods-autobiz-completion-"))
@@ -178,7 +180,10 @@ async function autobizFixture(
     ? new ModsManager(
         join(hostJournal.root, "native-control.sqlite"),
         () => [],
-        async () => options.approved !== false,
+        async () => {
+          options.approvalObserver?.()
+          return options.approved !== false
+        },
         () => {}
       )
     : undefined
@@ -220,7 +225,19 @@ async function autobizFixture(
     {
       // Upstream contract fixture only. Native approval/lease integration lives in tool-sdk.integration.test.ts.
       checkpointTransition: native
-        ? (...args) => native.runCompletionCheckpoint(...args)
+        ? (workspace, thread, grant, input, signal, commit) =>
+            native.runCompletionCheckpoint(
+              workspace,
+              thread,
+              grant,
+              input,
+              signal,
+              async (signal) => {
+                const result = await commit(signal)
+                if (options.revokeAfterCommit) manager.revoke(root, "function-commands")
+                return result
+              }
+            )
         : options.nativeTransition === false
           ? undefined
           : (_workspace, _thread, _grant, _input, signal, commit) => commit(signal),
@@ -858,4 +875,60 @@ it("cannot use a stage validator proof to authorize a different destination", as
     )
   ).rejects.toThrow("MODS_AUTOBIZ_STAGE_EVIDENCE_REQUIRED")
   expect(await readFile(path, "utf8")).toBe(before)
+})
+
+it("preserves a blocked transition attempt when native approval throws before the commit", async () => {
+  let observedStart = false
+  const f = await autobizFixture({
+    nativeBridge: true,
+    approved: false,
+    autoStage: "requirements_eval_in_progress",
+    report: "verdict: PASS\ncontract fixture only",
+    approvalObserver: () => {
+      observedStart = f.store
+        .completionEvidence(f.root, "thread")
+        .some((row) => String(row.phase) === "state.transition.started" && row.status === "running")
+    }
+  })
+  expect(await runLoop(f)).toBe("failed")
+  expect(observedStart).toBe(true)
+  const attempt = f.store
+    .completionEvidence(f.root, "thread")
+    .find((row) => row.phase === "state.transition")
+  expect(attempt).toMatchObject({ status: "block", detail: { reason: "MODS_USER_REJECTED" } })
+  expect(
+    f.store
+      .completionEvidence(f.root, "thread")
+      .some((row) => String(row.phase) === "state.transition.started" && row.status === "completed")
+  ).toBe(true)
+  expect(
+    JSON.parse(await readFile(join(f.root, ".autobizdevops/state.json"), "utf8")).features[
+      "order-export"
+    ].checkpoint
+  ).toBe("requirements_eval_in_progress")
+})
+
+it("retains an interrupted transition fact if revocation arrives after the physical journal commit", async () => {
+  const f = await autobizFixture({
+    nativeBridge: true,
+    revokeAfterCommit: true,
+    autoStage: "requirements_eval_in_progress",
+    report: "verdict: PASS\ncontract fixture only"
+  })
+  await runLoop(f).catch(() => undefined)
+  expect(
+    JSON.parse(await readFile(join(f.root, ".autobizdevops/state.json"), "utf8")).features[
+      "order-export"
+    ].checkpoint
+  ).toBe("requirements_eval_done")
+  const attempts = f.store
+    .completionEvidence(f.root, "thread")
+    .filter((row) => row.phase === "state.transition")
+  expect(attempts).toHaveLength(1)
+  expect(attempts[0]).toMatchObject({
+    status: "interrupted",
+    detail: { applied: true, status: "committed" }
+  })
+  expect((attempts[0].detail as { operationId: string }).operationId).toMatch(/^[a-f0-9]{64}$/)
+  expect(attempts.some((row) => row.status === "pass")).toBe(false)
 })

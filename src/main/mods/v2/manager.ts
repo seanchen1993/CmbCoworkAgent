@@ -809,28 +809,90 @@ export class FunctionModsManager {
     return this.store.completionEvidence(workspace, threadId, limit)
   }
 
-  private submitAutobizTransition(
+  private async submitAutobizTransition(
     workspace: string,
     threadId: string,
     entry: SessionEntry,
+    proof: BoundCompletionEvidenceRecord,
     plugin: unknown,
     input: ModObject,
     signal: AbortSignal,
     commit: (signal: AbortSignal) => Promise<AutobizCheckpointTransition>
   ): Promise<AutobizCheckpointTransition> {
-    if (!this.host.checkpointTransition)
-      throw new ModFunctionError("MODS_AUTOBIZ_TRANSITION_AUTHORITY_REQUIRED")
-    const snapshot = typeof plugin === "string" ? entry.snapshots.get(plugin) : undefined
-    if (!snapshot) throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
-    this.store.assertGrant(snapshot.grant)
-    return this.host.checkpointTransition(
-      workspace,
-      threadId,
-      snapshot.grant,
-      input,
-      signal,
-      commit
-    )
+    const attempt = randomUUID()
+    const record = (
+      phase: "state.transition.started" | "state.transition",
+      status: BoundCompletionEvidenceRecord["status"],
+      detail: ModObject,
+      idempotencyKey = `transition-attempt:${randomUUID()}`
+    ) =>
+      this.store.saveCompletionEvidence({
+        ...proof,
+        id: randomUUID(),
+        idempotencyKey,
+        phase,
+        status,
+        at: Date.now(),
+        detail: { ...input, plugin: typeof plugin === "string" ? plugin : "", ...detail, attempt }
+      })
+    // Persist before approval or I/O. On restart an unfinished transition must not
+    // leave the preceding check PASS looking like a completed checkpoint operation.
+    record("state.transition.started", "running", {})
+    let captured: AutobizCheckpointTransition | undefined
+    try {
+      if (!this.host.checkpointTransition)
+        throw new ModFunctionError("MODS_AUTOBIZ_TRANSITION_AUTHORITY_REQUIRED")
+      const snapshot = typeof plugin === "string" ? entry.snapshots.get(plugin) : undefined
+      if (!snapshot) throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+      this.store.assertGrant(snapshot.grant)
+      const result = await this.host.checkpointTransition(
+        workspace,
+        threadId,
+        snapshot.grant,
+        input,
+        signal,
+        async (commitSignal) => {
+          captured = await commit(commitSignal)
+          return captured
+        }
+      )
+      signal.throwIfAborted()
+      this.host.assertThread?.(workspace, threadId)
+      if (
+        !this.host.enabled(workspace) ||
+        this.sessions.get(JSON.stringify([workspace, threadId])) !== entry
+      )
+        throw new ModFunctionError("MODS_AUTOBIZ_VALIDATOR_STALE")
+      this.store.assertGrant(snapshot.grant)
+      const accepted = result.applied || result.duplicate
+      record(
+        "state.transition",
+        accepted ? "pass" : result.status === "unknown" ? "interrupted" : "block",
+        result as unknown as ModObject,
+        result.applied
+          ? JSON.stringify(["transition", workspace, threadId, input.idempotencyKey])
+          : `transition-confirmation:${attempt}`
+      )
+      return result
+    } catch (error) {
+      // This is a host-owned callback outcome, never a published guest tool value.
+      // A commit followed by revocation is an interrupted confirmation, not a PASS.
+      const uncertain = captured?.applied || captured?.duplicate || captured?.status === "unknown"
+      const reason =
+        error instanceof Error ? error.message.slice(0, 2048) : "MODS_AUTOBIZ_TRANSITION_FAILED"
+      record(
+        "state.transition",
+        uncertain ? "interrupted" : signal.aborted ? "cancelled" : "block",
+        {
+          ...captured,
+          reason: captured?.reason ?? reason,
+          error: reason,
+          businessAccepted: false
+        } as ModObject
+      )
+      entry.completionProofs.delete(String(input.evidenceId))
+      throw error
+    }
   }
 
   async advanceAutobizCheckpoint(
@@ -901,6 +963,7 @@ export class FunctionModsManager {
         workspace,
         threadId,
         entry,
+        prior,
         detail.plugin,
         input,
         signal,
@@ -982,6 +1045,7 @@ export class FunctionModsManager {
       workspace,
       threadId,
       entry,
+      started,
       plugin,
       input,
       signal,
@@ -998,17 +1062,6 @@ export class FunctionModsManager {
         })
     )
     const accepted = result.applied || result.duplicate
-    this.store.saveCompletionEvidence({
-      ...started,
-      id: randomUUID(),
-      idempotencyKey: accepted
-        ? JSON.stringify(["transition", workspace, threadId, idempotencyKey])
-        : `transition-attempt:${randomUUID()}`,
-      phase: "state.transition",
-      status: accepted ? "pass" : result.status === "unknown" ? "interrupted" : "block",
-      at: Date.now(),
-      detail: { evidenceId, idempotencyKey, plugin, ...result } as ModObject
-    })
     if (!accepted) throw new ModFunctionError(result.reason || "MODS_AUTOBIZ_TRANSITION_FAILED")
     signal.throwIfAborted()
     scope?.assertLive()

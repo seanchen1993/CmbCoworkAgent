@@ -113,6 +113,13 @@ export async function verifyAutobizStage(
   assert(
     !(await records()).some((row) => row.phase === "state.transition" && row.status === "pass")
   )
+  const denied = (await records()).filter((row) => !idsDenied.has(row.id))
+  const deniedResult = denied.find((row) => row.phase === "state.transition")
+  assert.equal(deniedResult?.status, "block")
+  assert(JSON.stringify(deniedResult?.detail).includes("MODS_USER_REJECTED"))
+  const deniedStart = denied.find((row) => row.phase === "state.transition.started")
+  assert.equal(deniedStart?.status, "completed")
+  assert(JSON.stringify(deniedStart?.detail).includes(deniedResult!.id))
   pass(
     "real native approval rejection prevents the automatic checkpoint write after upstream validation"
   )
@@ -145,6 +152,9 @@ export async function verifyAutobizStage(
   await settle()
   assert.equal(await readFile(statePath, "utf8"), after)
   assert.equal((await audit()).filter((row) => row.status === "succeeded").length, 1)
+  const starts = (await records()).filter((row) => row.phase === "state.transition.started")
+  assert.equal(starts.length, 2)
+  assert(starts.every((row) => row.status === "completed"))
   await writeFile(
     join(artifacts, "autobiz-stage.json"),
     JSON.stringify(
