@@ -1,3 +1,4 @@
+import { requestUserInputSchema } from "../../user-input-schema"
 import type { ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { isModObject, ModFunctionError } from "./contracts"
@@ -15,7 +16,8 @@ export const FUNCTION_UI_SITES = [
   "CommandOutput",
   "ToolUse",
   "ToolResult",
-  "ToolGroup"
+  "ToolGroup",
+  "AskUserQuestion"
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
 export const FUNCTION_DURATION_SITE_LIMIT = 32
@@ -26,6 +28,21 @@ export function functionUiSite(value: unknown): FunctionUiSite {
   return value as FunctionUiSite
 }
 
+/** Display wording may change; native answer IDs and option ordering keep their original meaning. */
+export function functionQuestionPresentation(original: unknown, value: unknown) {
+  const before = requestUserInputSchema.safeParse({ questions: original })
+  const after = requestUserInputSchema.safeParse({ questions: value })
+  if (!before.success || !after.success) throw new ModFunctionError("MODS_UI_SITE_PROPS")
+  const identity = (questions: typeof before.data.questions) =>
+    questions.map((q) => [q.id, q.options.map((option) => option.label)])
+  if (
+    JSON.stringify(identity(before.data.questions)) !==
+    JSON.stringify(identity(after.data.questions))
+  )
+    throw new ModFunctionError("MODS_PINNED_INPUT")
+  return after.data.questions
+}
+
 /** Desktop presentation facts. They carry no execution or thread authority. */
 export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObject {
   const fail = (): never => {
@@ -33,6 +50,23 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
   }
   if (!isModObject(value)) return fail()
   const text = (v: unknown): v is string => typeof v === "string" && v.length <= 10000
+  if (site === "AskUserQuestion") {
+    const parsed = requestUserInputSchema.safeParse({ questions: value.questions })
+    if (
+      !text(value.tool) ||
+      !value.tool ||
+      !parsed.success ||
+      (value.metadataSource !== undefined && !text(value.metadataSource)) ||
+      Object.keys(value).some((key) => !["tool", "questions", "metadataSource"].includes(key)) ||
+      encodeModJson(value).length > 16000
+    )
+      return fail()
+    return {
+      tool: value.tool,
+      questions: parsed.data.questions,
+      ...(value.metadataSource === undefined ? {} : { metadataSource: value.metadataSource })
+    }
+  }
   if (site === "ToolGroup") {
     if (
       !Array.isArray(value.calls) ||
@@ -194,6 +228,7 @@ export function functionSiteProps(site: FunctionUiSite, value: unknown): ModObje
 }
 
 export function functionSiteDefault(site: FunctionUiSite, props: ModObject): FunctionUiElement {
+  if (site === "AskUserQuestion") return { type: "Box", props: {}, children: [] }
   if (site === "ToolGroup")
     return {
       type: "Text",

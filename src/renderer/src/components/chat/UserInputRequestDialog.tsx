@@ -7,6 +7,7 @@ import {
   MessageSquareText,
   PencilLine
 } from "lucide-react"
+import { FunctionQuestionSite } from "./FunctionQuestionSite"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { UserInputAnswer, UserInputRequest, UserInputResponse } from "@/types"
@@ -37,38 +38,62 @@ function formatRemainingTime(totalSeconds: number): string {
   return `${Math.floor(totalSeconds / 60)} 分 ${totalSeconds % 60} 秒`
 }
 
-export function UserInputRequestDialog({
+export function UserInputRequestDialog(
+  props: UserInputRequestDialogProps
+): React.JSX.Element | null {
+  const { request, onLayoutChange } = props
+  useEffect(() => {
+    if (!request) onLayoutChange?.(null)
+  }, [request, onLayoutChange])
+  if (!request) return null
+  return (
+    <ActiveUserInputRequestDialog
+      key={request.requestId}
+      {...props}
+      request={request}
+    />
+  )
+}
+
+/** Request identity resets drafts before rendering, rather than an effect clearing a previous answer. */
+function ActiveUserInputRequestDialog({
   request,
   onSubmit,
   onLayoutChange
-}: UserInputRequestDialogProps): React.JSX.Element | null {
+}: Omit<UserInputRequestDialogProps, "request"> & {
+  request: UserInputRequest
+}): React.JSX.Element | null {
   const dialogRef = useRef<HTMLDivElement>(null)
   const [draftAnswers, setDraftAnswers] = useState<Record<string, DraftAnswer>>({})
   const [activeIndex, setActiveIndex] = useState(0)
   const [collapsed, setCollapsed] = useState(false)
-  const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null)
+  const [clockNow, setClockNow] = useState(() => Date.now())
+  const remainingSeconds = request.autoResolutionMs
+    ? Math.max(
+        0,
+        Math.ceil(
+          (new Date(request.createdAt).getTime() + request.autoResolutionMs - clockNow) / 1000
+        )
+      )
+    : null
+
+  const [presentation, setPresentation] = useState<{
+    requestId: string
+    questions: UserInputRequest["questions"]
+  } | null>(null)
+  const requestId = request?.requestId
+  const updateQuestions = useCallback(
+    (questions: UserInputRequest["questions"] | null | undefined) => {
+      setPresentation(questions && requestId ? { requestId, questions } : null)
+    },
+    [requestId]
+  )
 
   useEffect(() => {
-    setDraftAnswers({})
-    setActiveIndex(0)
-    setCollapsed(false)
-  }, [request?.requestId])
-
-  useEffect(() => {
-    if (!request?.autoResolutionMs) {
-      setRemainingSeconds(null)
-      return
-    }
-
-    const deadline = new Date(request.createdAt).getTime() + request.autoResolutionMs
-    const updateRemainingSeconds = (): void => {
-      setRemainingSeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1_000)))
-    }
-
-    updateRemainingSeconds()
-    const interval = window.setInterval(updateRemainingSeconds, 1_000)
+    if (!request.autoResolutionMs) return
+    const interval = window.setInterval(() => setClockNow(Date.now()), 1000)
     return () => window.clearInterval(interval)
-  }, [request?.autoResolutionMs, request?.createdAt, request?.requestId])
+  }, [request.autoResolutionMs])
 
   const handleIgnore = useCallback((): void => {
     if (!request) return
@@ -143,7 +168,9 @@ export function UserInputRequestDialog({
   }, [draftAnswers, request])
 
   if (!request) return null
-  const activeQuestion = request.questions[Math.min(activeIndex, request.questions.length - 1)]
+  const shownQuestions =
+    presentation?.requestId === request.requestId ? presentation.questions : request.questions
+  const activeQuestion = shownQuestions[Math.min(activeIndex, request.questions.length - 1)]
   if (!activeQuestion) return null
 
   const activeDraft = draftAnswers[activeQuestion.id]
@@ -293,6 +320,13 @@ export function UserInputRequestDialog({
           </Button>
         </div>
 
+        <div className={collapsed ? "hidden" : "contents"}>
+          <FunctionQuestionSite
+            key={request.requestId}
+            request={request}
+            onQuestions={updateQuestions}
+          />
+        </div>
         {!collapsed && (
           <>
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">

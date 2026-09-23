@@ -138,3 +138,12 @@ it("marks ui.ask as native single-selection adaptation with evidence", () => {
   expect(item.implementationStatus).toBe("adapted")
   expect(JSON.stringify(item)).toContain("ui-ask")
 })
+
+it("records AskUserQuestion as native presentation with protected answer identities", () => {
+  const site = (matrix.renderComponents as Array<Record<string, unknown>>).find(
+    (s) => s.name === "AskUserQuestion"
+  )!
+  expect(site.implementationStatus).toBe("adapted")
+  expect(JSON.stringify(site)).toContain("question-site")
+  expect(site.note).toContain("identity")
+})

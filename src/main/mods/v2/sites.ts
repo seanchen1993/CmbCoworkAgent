@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { encodeModJson } from "../../../shared/mods/validation"
-import { ModFunctionError } from "../../../shared/mods/v2/contracts"
+import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import {
+  functionQuestionPresentation,
   functionSiteDefault,
   functionSiteProps,
   functionUiSite,
@@ -23,6 +24,7 @@ interface Site {
   props?: ModObject
   fingerprint?: string
   nativeExpansion?: boolean
+  nativeQuestions?: FunctionPaneSnapshot["nativeQuestions"]
   drawings: FunctionPanes
 }
 
@@ -43,6 +45,7 @@ export class FunctionUiSites {
       site: (pane) => {
         const site = this.get(pane.id)
         site.nativeExpansion = undefined
+        site.nativeQuestions = undefined
         return { component: site.component, props: site.props! }
       },
       renderCore: async (input) => {
@@ -50,6 +53,9 @@ export class FunctionUiSites {
         const props = input.props as ModObject
         if (site.component === "ToolGroup")
           site.nativeExpansion = functionSiteProps(site.component, props).isExpanded as boolean
+        if (site.component === "AskUserQuestion")
+          site.nativeQuestions = functionSiteProps(site.component, props)
+            .questions as FunctionPaneSnapshot["nativeQuestions"]
         return functionSiteDefault(site.component, props) as unknown as ModJson
       },
       validateTree: validateFunctionSiteTree
@@ -119,10 +125,20 @@ export class FunctionUiSites {
       const nativeFallback =
         encodeModJson(snapshot.tree as unknown as ModJson) ===
         encodeModJson(functionSiteDefault(site.component, value) as unknown as ModJson)
+      let nativeQuestions: FunctionPaneSnapshot["nativeQuestions"]
+      if (nativeFallback && site.nativeQuestions) {
+        const published = await this.host.publish({ questions: site.nativeQuestions })
+        if (this.get(owner) !== site) throw new ModFunctionError("MODS_UI_SITE_CLOSED")
+        nativeQuestions = functionQuestionPresentation(
+          value.questions,
+          isModObject(published) ? published.questions : undefined
+        )
+      }
       return {
         ...snapshot,
         nativeFallback,
-        nativeExpansion: nativeFallback ? site.nativeExpansion : undefined
+        nativeExpansion: nativeFallback ? site.nativeExpansion : undefined,
+        nativeQuestions
       }
     })
   }

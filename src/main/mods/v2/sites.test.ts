@@ -725,3 +725,96 @@ it("publication cannot forge the native group expansion flag", async () => {
   const owner = await session.sites.mount("ToolGroup")
   expect((await session.sites.render(owner, groupFacts)).nativeExpansion).toBe(false)
 })
+
+const questionFacts = {
+  tool: "request_user_input",
+  questions: [
+    {
+      id: "choice",
+      header: "Plan",
+      question: "Original question?",
+      options: [
+        { label: "Careful", description: "Original description" },
+        { label: "Fast", description: "Other description" }
+      ]
+    }
+  ]
+}
+it("AskUserQuestion rewrites native wording while preserving answer identities", async () => {
+  const { session } = await fixture(`on("ui.render",{component:"AskUserQuestion"},
+    ($,e,next)=>next({...e,props:{...e.props,questions:e.props.questions.map(q=>({...q,
+      header:"Review",question:"Rewritten question?",options:q.options.map(o=>({...o,description:"Rewritten description"}))}))}}))`)
+  const owner = await session.sites.mount("AskUserQuestion" as FunctionUiSite)
+  const result = await session.sites.render(owner, questionFacts)
+  expect(result.nativeFallback).toBe(true)
+  expect((result as unknown as ModObject).nativeQuestions).toMatchObject([
+    {
+      id: "choice",
+      header: "Review",
+      question: "Rewritten question?",
+      options: [{ label: "Careful", description: "Rewritten description" }, { label: "Fast" }]
+    }
+  ])
+  expect(questionFacts.questions[0].question).toBe("Original question?")
+  await session.sites.unmount(owner)
+  await expect(session.sites.render(owner, questionFacts)).rejects.toThrow("MODS_UI_SITE_CLOSED")
+})
+it.each([
+  "questions:[]",
+  'tool:"permission"',
+  'metadataSource:"forged"',
+  'questions:e.props.questions.map(q=>({...q,id:"forged"}))',
+  'questions:e.props.questions.map(q=>({...q,question:"x".repeat(501)}))',
+  "questions:e.props.questions.map(q=>({...q,options:q.options.slice().reverse()}))"
+])("AskUserQuestion rejects unsafe or invalid presentation changes: %s", async (change) => {
+  const { session } = await fixture(`on("ui.render",{component:"AskUserQuestion"},
+    ($,e,next)=>next({...e,props:{...e.props,${change}}}))`)
+  const owner = await session.sites.mount("AskUserQuestion" as FunctionUiSite)
+  const result = await session.sites.render(owner, questionFacts)
+  expect(result.nativeFallback).toBe(true)
+  expect((result as unknown as ModObject).nativeQuestions).toEqual(questionFacts.questions)
+})
+it("question custom content and publication cannot carry stale or forged native answers", async () => {
+  const { session, state } = await fixture(
+    `on("ui.render",{component:"AskUserQuestion"},
+    async($,e,next)=>(await $.store.get("custom"))?{type:"Text",props:{},children:["Context"]}:
+      next({...e,props:{...e.props,questions:e.props.questions.map(q=>({...q,question:"Rewrite?"}))}}))`,
+    undefined,
+    async (value) =>
+      Array.isArray(value)
+        ? value.map((row) => ({
+            ...(row as ModObject),
+            nativeQuestions: [{ id: "forged", question: "Forged answer" }]
+          }))
+        : value
+  )
+  const owner = await session.sites.mount("AskUserQuestion" as FunctionUiSite)
+  const first = await session.sites.render(owner, questionFacts)
+  expect((first as unknown as ModObject).nativeQuestions).toMatchObject([{ question: "Rewrite?" }])
+  state.set("custom", true)
+  session.sites.invalidate()
+  const second = await session.sites.render(owner, questionFacts)
+  expect(second.nativeFallback).toBe(false)
+  expect((second as unknown as ModObject).nativeQuestions).toBeUndefined()
+})
+
+it("publishes native question wording through host policy before exposing it", async () => {
+  const { session } = await fixture(
+    `on("ui.render",{component:"AskUserQuestion"},
+    ($,e,next)=>next({...e,props:{...e.props,questions:e.props.questions.map(q=>({...q,question:"Private wording"}))}}))`,
+    undefined,
+    async (value) =>
+      value && !Array.isArray(value) && typeof value === "object" && Array.isArray(value.questions)
+        ? {
+            ...value,
+            questions: value.questions.map((q) => ({
+              ...(q as ModObject),
+              question: "Filtered wording"
+            }))
+          }
+        : value
+  )
+  const owner = await session.sites.mount("AskUserQuestion")
+  const result = await session.sites.render(owner, questionFacts)
+  expect(result.nativeQuestions?.[0].question).toBe("Filtered wording")
+})

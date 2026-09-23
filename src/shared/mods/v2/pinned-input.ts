@@ -1,7 +1,7 @@
 import type { ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { ModFunctionError } from "./contracts"
-import { functionSiteProps } from "./sites"
+import { functionQuestionPresentation, functionSiteProps } from "./sites"
 
 /** Host-owned fields in the pinned v2.1.278 contracts; required identity fields cannot be omitted. */
 const pinned: Record<string, readonly string[]> = {
@@ -73,30 +73,39 @@ export function normalizeFunctionInput(
   }
   if (event === "ui.render" && original.props && typeof original.props === "object") {
     const facts =
-      original.component === "ToolGroup"
-        ? ["calls", "isActive", "onScreen"]
-        : original.component === "ToolUse"
-          ? ["tool_use_id", "isRunning", "isErrored", "isInterrupted", "onScreen"]
-          : original.component === "ToolResult"
-            ? ["tool_use_id", "tool", "isErrored", "onScreen"]
-            : original.component === "CommandOutput"
-              ? ["command", "args", "isErrored", "onScreen"]
-              : original.component === "UserMessage"
-                ? ["origin", "isExpanded", "task", "from", "onScreen"]
-                : original.component === "AssistantMessage"
-                  ? ["isFirstOfReply", "onScreen"]
-                  : original.component === "AbovePrompt"
-                    ? ["hasSurvey", "isWorking", "maxRows", "bodyColumns", "scroll", "view"]
-                    : original.component === "PromptHint"
-                      ? ["isDraft", "isWorking"]
-                      : original.component === "InfoNotice" || original.component === "TurnDuration"
-                        ? ["onScreen"]
-                        : []
+      original.component === "AskUserQuestion"
+        ? ["tool", "metadataSource"]
+        : original.component === "ToolGroup"
+          ? ["calls", "isActive", "onScreen"]
+          : original.component === "ToolUse"
+            ? ["tool_use_id", "isRunning", "isErrored", "isInterrupted", "onScreen"]
+            : original.component === "ToolResult"
+              ? ["tool_use_id", "tool", "isErrored", "onScreen"]
+              : original.component === "CommandOutput"
+                ? ["command", "args", "isErrored", "onScreen"]
+                : original.component === "UserMessage"
+                  ? ["origin", "isExpanded", "task", "from", "onScreen"]
+                  : original.component === "AssistantMessage"
+                    ? ["isFirstOfReply", "onScreen"]
+                    : original.component === "AbovePrompt"
+                      ? ["hasSurvey", "isWorking", "maxRows", "bodyColumns", "scroll", "view"]
+                      : original.component === "PromptHint"
+                        ? ["isDraft", "isWorking"]
+                        : original.component === "InfoNotice" ||
+                            original.component === "TurnDuration"
+                          ? ["onScreen"]
+                          : []
     for (const key of facts) {
       const props = result.props as ModObject | undefined
       const before = original.props as ModObject
       if (!props || !same(props[key], before[key]))
         throw new ModFunctionError("MODS_PINNED_INPUT", `MODS_PINNED_INPUT: ui.render.props.${key}`)
+    }
+    if (original.component === "AskUserQuestion") {
+      const before = original.props as ModObject
+      const after = result.props as ModObject
+      functionQuestionPresentation(before.questions, after.questions)
+      functionSiteProps("AskUserQuestion", after)
     }
     if (
       original.component === "PromptHint" ||

@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
-import { validateFunctionSiteTree, type FunctionUiSite } from "../../../../shared/mods/v2/sites"
+import {
+  functionQuestionPresentation,
+  validateFunctionSiteTree,
+  type FunctionUiSite
+} from "../../../../shared/mods/v2/sites"
 import type {
   FunctionPaneSnapshot,
   FunctionUiAction,
@@ -43,6 +47,7 @@ export function FunctionSite({
   onHint,
   onCustom,
   onExpansion,
+  onQuestions,
   className
 }: {
   threadId: string
@@ -52,6 +57,7 @@ export function FunctionSite({
   onHint?(text: string | null): void
   onCustom?(custom: boolean): void
   onExpansion?(expanded: boolean): void
+  onQuestions?(questions: FunctionPaneSnapshot["nativeQuestions"] | null): void
   className?: string
 }): React.JSX.Element {
   const [frame, setFrame] = useState<{
@@ -82,8 +88,30 @@ export function FunctionSite({
       ? snapshot.tree.children.join("")
       : null
   useEffect(() => {
-    onExpansion?.(Boolean(frame?.ticket.current() && frame.snapshot.nativeFallback &&
-      frame.snapshot.nativeExpansion))
+    let questions: FunctionPaneSnapshot["nativeQuestions"] | null = null
+    if (
+      frame?.ticket.current() &&
+      frame.snapshot.nativeFallback &&
+      frame.snapshot.nativeQuestions
+    ) {
+      try {
+        questions = functionQuestionPresentation(
+          inputRef.current.questions,
+          frame.snapshot.nativeQuestions
+        )
+      } catch {
+        /* Invalid or obsolete presentation cannot change the native dialog. */
+      }
+    }
+    onQuestions?.(questions)
+    return () => onQuestions?.(null)
+  }, [onQuestions, frame, inputKey])
+  useEffect(() => {
+    onExpansion?.(
+      Boolean(
+        frame?.ticket.current() && frame.snapshot.nativeFallback && frame.snapshot.nativeExpansion
+      )
+    )
     return () => onExpansion?.(false)
   }, [onExpansion, frame])
   useEffect(() => {

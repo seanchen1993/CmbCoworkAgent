@@ -1,3 +1,4 @@
+import type { NativeUserInputQuestion } from "../../user-input-schema"
 import type { ModJson, ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { isModObject, ModFunctionError } from "./contracts"
@@ -33,6 +34,8 @@ export interface FunctionPaneSnapshot {
   nativeFallback?: boolean
   /** Host-derived ToolGroup expansion, only when the final tree retains native rendering. */
   nativeExpansion?: boolean
+  /** Validated host-derived question wording; never an answer or a permission decision. */
+  nativeQuestions?: NativeUserInputQuestion[]
   clients?: FunctionClientSnapshot[]
   focusRequest?: { id: string; pending: boolean }
 }
