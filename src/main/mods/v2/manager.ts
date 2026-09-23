@@ -207,44 +207,47 @@ export class FunctionModsManager {
     return this.epochs.get(workspace) ?? this.initialEpoch
   }
 
+  private isSource(plugin: ModPluginSource): boolean {
+    const manifest = readPluginManifest(plugin.path)?.manifest
+    const nativePath = manifest?.mods ?? "mods/manifest.json"
+    if (existsSync(join(plugin.path, nativePath))) {
+      try {
+        const file = resolveModFile(
+          plugin.path,
+          normalizePluginRelativePath(nativePath) ?? nativePath
+        )
+        if (
+          statSync(file).size <= 32768 &&
+          JSON.parse(readFileSync(file, "utf8")).apiVersion === "cmb.mods/v2"
+        )
+          return true
+      } catch {
+        return true
+      }
+    }
+    try {
+      const hooksPath = manifest?.hooks ?? "hooks/hooks.json"
+      if (!existsSync(join(plugin.path, hooksPath))) return false
+      const hooks = resolveModFile(plugin.path, normalizePluginRelativePath(hooksPath) ?? hooksPath)
+      return (
+        existsSync(hooks) &&
+        statSync(hooks).size <= 32768 &&
+        Object.hasOwn(JSON.parse(readFileSync(hooks, "utf8")), "modules")
+      )
+    } catch {
+      return false
+    }
+  }
+
   private sources(): ModPluginSource[] {
     return this.host
       .plugins()
-      .filter((plugin) => {
-        const manifest = readPluginManifest(plugin.path)?.manifest
-        const nativePath = manifest?.mods ?? "mods/manifest.json"
-        if (existsSync(join(plugin.path, nativePath))) {
-          try {
-            const file = resolveModFile(
-              plugin.path,
-              normalizePluginRelativePath(nativePath) ?? nativePath
-            )
-            if (
-              statSync(file).size <= 32768 &&
-              JSON.parse(readFileSync(file, "utf8")).apiVersion === "cmb.mods/v2"
-            )
-              return true
-          } catch {
-            return true
-          }
-        }
-        try {
-          const hooksPath = manifest?.hooks ?? "hooks/hooks.json"
-          if (!existsSync(join(plugin.path, hooksPath))) return false
-          const hooks = resolveModFile(
-            plugin.path,
-            normalizePluginRelativePath(hooksPath) ?? hooksPath
-          )
-          return (
-            existsSync(hooks) &&
-            statSync(hooks).size <= 32768 &&
-            Object.hasOwn(JSON.parse(readFileSync(hooks, "utf8")), "modules")
-          )
-        } catch {
-          return false
-        }
-      })
+      .filter((plugin) => this.isSource(plugin))
       .sort((a, b) => a.id.localeCompare(b.id))
+  }
+
+  private hasSources(): boolean {
+    return this.host.plugins().some((plugin) => this.isSource(plugin))
   }
 
   async status(workspace: string): Promise<FunctionPluginStatus[]> {
@@ -656,7 +659,7 @@ export class FunctionModsManager {
   }
 
   async commands(workspace: string, threadId: string): Promise<ModCommandDescriptor[]> {
-    if (!this.host.enabled(workspace) || this.sources().length === 0) return []
+    if (!this.host.enabled(workspace) || !this.hasSources()) return []
     if (
       !this.sessions.has(JSON.stringify([workspace, threadId])) &&
       !(await this.status(workspace)).some((item) => item.state === "ready")
@@ -816,7 +819,7 @@ export class FunctionModsManager {
   ): Promise<ModObject> {
     if (
       !this.host.enabled(workspace) ||
-      this.sources().length === 0 ||
+      !this.hasSources() ||
       (!this.sessions.has(JSON.stringify([workspace, threadId])) &&
         !(await this.status(workspace)).some((item) => item.state === "ready"))
     )
@@ -836,7 +839,7 @@ export class FunctionModsManager {
   ): Promise<ModObject> {
     if (
       !this.host.enabled(workspace) ||
-      this.sources().length === 0 ||
+      !this.hasSources() ||
       (!this.sessions.has(JSON.stringify([workspace, threadId])) &&
         !(await this.status(workspace)).some((item) => item.state === "ready"))
     )
@@ -886,7 +889,7 @@ export class FunctionModsManager {
           matchesEventPattern(registration.pattern, event)
         )
     )
-    if (!noLoadedHandler && this.sources().length === 0) return runCore(input, signal)
+    if (!noLoadedHandler && !this.hasSources()) return runCore(input, signal)
     const ready =
       this.sessions.has(JSON.stringify([workspace, threadId])) ||
       (await this.status(workspace)).some((item) => item.state === "ready")
@@ -939,7 +942,7 @@ export class FunctionModsManager {
     input: FunctionTurnStart,
     signal: AbortSignal
   ): Promise<void> {
-    if (!this.host.enabled(workspace) || this.sources().length === 0) return
+    if (!this.host.enabled(workspace) || !this.hasSources()) return
     if (
       !this.sessions.has(JSON.stringify([workspace, threadId])) &&
       !(await this.status(workspace)).some((entry) => entry.state === "ready")
@@ -958,7 +961,7 @@ export class FunctionModsManager {
     core: FunctionStreamOptions["core"],
     signal: AbortSignal
   ): Promise<ModHookStream> {
-    if (!this.host.enabled(workspace) || this.sources().length === 0)
+    if (!this.host.enabled(workspace) || !this.hasSources())
       return this.emptyStep(input, core, signal)
     const entry = await this.session(workspace, threadId)
     if (!this.host.enabled(workspace) || this.sessions.get(JSON.stringify([workspace, threadId])) !== entry)
@@ -1433,7 +1436,7 @@ export class FunctionModsManager {
   async registeredTools(workspace: string, threadId: string): Promise<RegisteredFunctionTool[]> {
     if (
       !this.host.enabled(workspace) ||
-      this.sources().length === 0 ||
+      !this.hasSources() ||
       (!this.sessions.has(JSON.stringify([workspace, threadId])) &&
         !(await this.status(workspace)).some((item) => item.state === "ready"))
     )
@@ -1517,7 +1520,7 @@ export class FunctionModsManager {
     threadId: string,
     component: FunctionUiSite
   ): Promise<string | null> {
-    if (this.closed || !this.host.enabled(workspace) || this.sources().length === 0) return null
+    if (this.closed || !this.host.enabled(workspace) || !this.hasSources()) return null
     functionUiSite(component)
     this.host.assertThread?.(workspace, threadId)
     if (this.pendingSiteMounts.size >= 32) throw new ModFunctionError("MODS_UI_SITE_MOUNT_CAPACITY")
