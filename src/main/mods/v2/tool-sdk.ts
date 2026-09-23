@@ -2,8 +2,11 @@ import type { ModObject, ModJson } from "../../../shared/mods/types"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { encodeModJson } from "../../../shared/mods/validation"
 
+import { requestUserInputSchema } from "../../agent/tools/user-input-schema"
+
 // Names map to host-owned adapters. No plugin-provided executable or adapter is accepted.
 const tools: Record<string, { target: string; required: string[]; optional: string[] }> = {
+  request_user_input: { target: "host:request_user_input", required: ["questions"], optional: [] },
   read_file: { target: "host:read_file", required: ["file_path"], optional: ["offset", "limit"] },
   write_file: { target: "host:write_file", required: ["file_path", "content"], optional: [] },
   edit_file: {
@@ -52,6 +55,16 @@ export function functionToolTarget(input: ModObject): { target: string; args: Mo
   delete args.tool
   delete args.tool_use_id
   delete args.agentId
+  if (input.tool === "request_user_input") {
+    const parsed = requestUserInputSchema.safeParse(args)
+    if (
+      encodeModJson(args).length > 16000 ||
+      Object.keys(args).some((k) => k !== "questions") ||
+      !parsed.success
+    )
+      throw new ModFunctionError("MODS_TOOL_ARGUMENTS")
+    return { target: spec.target, args: parsed.data }
+  }
   if (
     encodeModJson(args).length > 16000 ||
     Object.keys(args).some((k) => !spec.required.includes(k) && !spec.optional.includes(k)) ||

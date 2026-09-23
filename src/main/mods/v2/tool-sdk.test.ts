@@ -72,3 +72,31 @@ it("validates operation results without accepting malformed context or flags", (
   for (const result of invalid)
     expect(() => validateFunctionToolResult(result)).toThrow("MODS_TOOL_RESULT")
 })
+
+it("validates the same native question schema and forbids SDK timeout or scope injection", () => {
+  const questions = [
+    {
+      id: "choice",
+      header: "Choice",
+      question: "Continue?",
+      options: [
+        { label: "Yes", description: "Continue" },
+        { label: "No", description: "Stop" }
+      ]
+    }
+  ]
+  expect(functionToolTarget({ tool: "request_user_input", questions })).toEqual({
+    target: "host:request_user_input",
+    args: { questions }
+  })
+  const invalid: ModObject[] = [
+    { questions: [] },
+    { questions, autoResolutionMs: 30000 },
+    { questions, threadId: "other" },
+    { questions: [{ ...questions[0], options: [] }] }
+  ]
+  for (const args of invalid)
+    expect(() => functionToolTarget({ tool: "request_user_input", ...args })).toThrow(
+      "MODS_TOOL_ARGUMENTS"
+    )
+})

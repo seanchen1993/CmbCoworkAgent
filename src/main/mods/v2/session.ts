@@ -86,6 +86,7 @@ import { parseCompletionPolicy, type CompletionPolicy } from "../../../shared/mo
 import { CompletionBudget, withCompletionBudget } from "./completion-budget"
 import { FunctionUiFeedback } from "./ui-feedback"
 import { FunctionUiLog } from "./ui-log"
+import { functionAskInput, functionAskAnswer } from "./ui-ask"
 import {
   functionLogSnapshot,
   validateFunctionLog,
@@ -1197,6 +1198,22 @@ export class FunctionSession {
         throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
       validateFunctionModelText(result.value)
       return result.value
+    }
+    if (method === "ui.ask") {
+      const input = functionAskInput(args)
+      const answer = await this.capability(
+        plugin,
+        "tool.call",
+        [input],
+        callSignal,
+        source,
+        depth,
+        turnHeld,
+        logSignal
+      )
+      callSignal.throwIfAborted()
+      this.assertLive(plugin)
+      return functionAskAnswer(answer)
     }
     if (method === "tool.call") {
       if (!isModObject(args[0]) || args.length !== 1)

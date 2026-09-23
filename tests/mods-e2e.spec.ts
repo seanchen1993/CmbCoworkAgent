@@ -25,6 +25,7 @@ import { verifySvg } from "./support/mods-svg-e2e"
 import { verifyCommandOutput } from "./support/mods-command-output-e2e"
 import { verifyCompletionFreshness } from "./support/mods-completion-freshness-e2e"
 import { verifyClassicOutput } from "./support/mods-classic-output-e2e"
+import { verifyUiAsk } from "./support/mods-ui-ask-e2e"
 import { verifyUiLog } from "./support/mods-ui-log-e2e"
 import { verifyUiFeedback } from "./support/mods-ui-feedback-e2e"
 import { verifyToolSites } from "./support/mods-tool-sites-e2e"
@@ -38,7 +39,7 @@ const binary = packagedDir
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
-const focus = ["status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output", "completion-freshness", "ui-log"].includes(requestedFocus)
+const focus = ["status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output", "completion-freshness", "ui-log", "ui-ask"].includes(requestedFocus)
   ? requestedFocus : undefined
 const artifacts = join(
   root, "output/mods-validation",
@@ -174,7 +175,9 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "ui-log")
+      if (focus === "ui-ask")
+        await verifyUiAsk(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
+      else if (focus === "ui-log")
         await verifyUiLog(page!, workspace, artifacts, join(isolated, "data/logs/main.log"), modelServer.requests, until, pass)
       else if (focus === "completion-freshness")
         await verifyCompletionFreshness(page!, workspace, artifacts, modelServer.requests, until, pass)
@@ -3083,6 +3086,7 @@ async function main(): Promise<void> {
     await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyCompletionFreshness(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyUiLog(page!, workspace, artifacts, join(isolated, "data/logs/main.log"), modelServer.requests, until, pass)
+    await verifyUiAsk(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})

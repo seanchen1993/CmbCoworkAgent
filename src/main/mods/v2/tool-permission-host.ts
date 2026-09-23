@@ -71,6 +71,8 @@ export async function queryFunctionToolPermission(
     async (tool, value) => {
       if (!tool.startsWith("host:")) return { decision: "allow" }
       assertPlainThread(threadId)
+      // The standalone host provides this native UI tool; permission queries never open it.
+      if (tool === "host:request_user_input") return { decision: "allow" }
       const query = LocalSandbox.createPermissionProbe({
         rootDir: workspace,
         runId: threadId,

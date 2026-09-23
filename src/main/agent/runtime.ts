@@ -183,6 +183,7 @@ import {
   upsertThreadMessages
 } from "../db/index"
 import { createRequestUserInputTool } from "./tools/user-input-tool"
+import { functionUserInputInvoker } from "../mods/v2/native-user-input"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
 import { createTaskMmdMiddleware } from "./task-mmd/middleware"
@@ -5415,6 +5416,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     ]),
     modReadOnly,
     modManagedExecution: managedExecution,
+    modUserInput: options.enableRequestUserInput
+      ? functionUserInputInvoker({
+          threadId: options.threadId,
+          interactionWaitHooks: options.interactionWaitHooks,
+          requestUserInputConfig: options.requestUserInputConfig
+        })
+      : undefined,
     worktreeIsolation: options.worktreeIsolation,
     virtualMode: false,
     // Native Git in an isolated worktree runs through the normal shell path.

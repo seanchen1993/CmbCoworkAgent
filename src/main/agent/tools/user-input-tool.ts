@@ -1,80 +1,13 @@
 import { tool } from "langchain"
 import { randomUUID } from "node:crypto"
-import { z } from "zod"
+import {
+  requestUserInputSchema,
+  requestUserInputWithAutoResolutionSchema
+} from "./user-input-schema"
 import { requestUserInput, UserInputRequestRejectedError } from "../../services/user-input"
 import type { RuntimeInteractionWaitHooks } from "../runtime"
 import type { UserInputQuestion } from "../../types"
 import type { HarnessRequestUserInputConfig } from "../../../shared/harness-board-types"
-
-const optionSchema = z.object({
-  label: z.string().min(1).max(80).describe("User-facing label, 1-5 words."),
-  description: z
-    .string()
-    .min(1)
-    .max(240)
-    .describe("One short sentence explaining impact/tradeoff if selected.")
-})
-
-const questionSchema = z.object({
-  header: z
-    .string()
-    .min(1)
-    .max(12)
-    .describe("Short header label shown in the UI, 12 or fewer chars."),
-  id: z
-    .string()
-    .min(1)
-    .regex(/^[a-z][a-z0-9_]*$/)
-    .describe("Stable identifier for mapping answers, snake_case."),
-  question: z.string().min(1).max(500).describe("Single-sentence prompt shown to the user."),
-  options: z
-    .array(optionSchema)
-    .min(2)
-    .max(5)
-    .describe(
-      "Provide 2-5 mutually exclusive choices. Put the recommended option first and suffix its label with '(Recommended)'. Do not include a free-form choice such as 'Other', 'I want to add more', or 'Custom answer'; the client adds a text entry automatically."
-    )
-})
-
-const questionsSchema = z.object({
-  questions: z
-    .array(questionSchema)
-    .min(1)
-    .max(10)
-    .describe("Questions to show the user. Prefer 1 and do not exceed 10.")
-})
-
-function validateQuestionIds(
-  input: { questions: Array<{ id: string }> },
-  ctx: z.RefinementCtx
-): void {
-  const seen = new Set<string>()
-  input.questions.forEach((question, index) => {
-    if (seen.has(question.id)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["questions", index, "id"],
-        message: `Duplicate question id: ${question.id}`
-      })
-    }
-    seen.add(question.id)
-  })
-}
-
-const requestUserInputSchema = questionsSchema.superRefine(validateQuestionIds)
-const requestUserInputWithAutoResolutionSchema = questionsSchema
-  .extend({
-    autoResolutionMs: z
-      .number()
-      .int()
-      .min(30_000)
-      .max(240_000)
-      .optional()
-      .describe(
-        "Automatically resolve after 30,000-240,000 milliseconds when the question is useful but non-blocking. Omit this when explicit user input is required."
-      )
-  })
-  .superRefine(validateQuestionIds)
 
 const additionalTextDescription =
   "A submitted option answer may include additionalText, an optional user-entered clarification that supplements rather than replaces the selected option; the client provides this capability automatically, so do not add it to the question options."
@@ -98,7 +31,7 @@ function removeFreeformOptions(questions: UserInputQuestion[]): UserInputQuestio
   }))
 }
 
-interface RequestUserInputToolContext {
+export interface RequestUserInputToolContext {
   threadId: string
   abortSignal?: AbortSignal
   allowDeferredRenderer?: boolean

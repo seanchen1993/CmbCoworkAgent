@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { getEnabledHooks, getWindowsSandboxMode } from "../storage"
 import { ModError } from "./errors"
+import { functionUserInputInvoker } from "./v2/native-user-input"
 import { ensureCodexExe } from "../agent/codex-sandbox-binary"
 
 /** Plain project sessions can run explicit native-tool commands without invoking a model. */
@@ -33,6 +34,7 @@ export async function bindStandaloneModCommand(
     hookTurnId: turnId,
     aclOwnerId,
     modCommandOnly: true,
+    modUserInput: functionUserInputInvoker({ threadId }),
     onModBinding: (dispose) => {
       release = dispose
     },

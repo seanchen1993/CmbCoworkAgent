@@ -210,7 +210,10 @@ export function attachModBackend(
   instance: object,
   binding: () => ModThreadBinding,
   owner = binding(),
-  options: { managedExecution?: boolean } = {}
+  options: {
+    managedExecution?: boolean
+    userInput?: (input: ModObject, signal: AbortSignal) => Promise<string>
+  } = {}
 ): () => void {
   const record = instance as Record<string, unknown>
   const originalMethods = new Map<string, (...args: unknown[]) => Promise<unknown>>()
@@ -268,16 +271,43 @@ export function attachModBackend(
       ...(typeof record.queryToolPermission === "function"
         ? {
             queryTool: (tool: string, input: Record<string, unknown>) =>
-              Reflect.apply(
-                record.queryToolPermission as (
-                  ...args: unknown[]
-                ) => Promise<import("../../shared/tool-permission").ToolPermissionResult>,
-                instance,
-                [tool.replace(/^host:/, ""), input]
-              )
+              tool === "host:request_user_input"
+                ? Promise.resolve(
+                    options.userInput
+                      ? { decision: "allow" as const }
+                      : { decision: "deny" as const, reason: "MODS_TOOL_UNAVAILABLE" }
+                  )
+                : Reflect.apply(
+                    record.queryToolPermission as (
+                      ...args: unknown[]
+                    ) => Promise<import("../../shared/tool-permission").ToolPermissionResult>,
+                    instance,
+                    [tool.replace(/^host:/, ""), input]
+                  )
           }
         : {}),
       invokeTool: async (toolId, args) => {
+        if (toolId === "host:request_user_input") {
+          const manager = getModsManager()
+          const invoke = options.userInput
+          if (!manager || !invoke) throw new ModError("MODS_TOOL_UNAVAILABLE")
+          const context = getModCallContext()
+          const scope = binding()
+          const signals = [context?.signal, scope.signal].filter(
+            (value): value is AbortSignal => !!value
+          )
+          const signal = signals.length ? AbortSignal.any(signals) : new AbortController().signal
+          return manager.dispatch(scope, toolId, args, async (input) => {
+            signal.throwIfAborted()
+            context?.assertLive?.()
+            scope.runtimeAuthority?.assertLive()
+            const result = await invoke(input as ModObject, signal)
+            signal.throwIfAborted()
+            context?.assertLive?.()
+            scope.runtimeAuthority?.assertLive()
+            return result
+          })
+        }
         if (toolId === "host:task_output" && typeof record.getTaskOutput === "function") {
           const manager = getModsManager()
           if (!manager || typeof args.task_id !== "string")

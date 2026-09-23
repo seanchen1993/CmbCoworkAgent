@@ -130,3 +130,11 @@ it("records ToolGroup as a tested desktop adaptation with native row limits", ()
   expect(site.implementationStatus).toBe("adapted")
   expect(JSON.stringify(site)).toContain("tool-group")
 })
+
+it("marks ui.ask as native single-selection adaptation with evidence", () => {
+  const declarations: Array<Record<string, unknown>> = []
+  collect(matrix, declarations)
+  const item = declarations.find((item) => item.name === "ui.ask")!
+  expect(item.implementationStatus).toBe("adapted")
+  expect(JSON.stringify(item)).toContain("ui-ask")
+})

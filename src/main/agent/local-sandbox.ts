@@ -1,3 +1,6 @@
+import type { ModObject } from "../../shared/mods/types"
+import { beforeModToolExecution } from "../mods/execution-error"
+import { ModPermissionError } from "../mods/errors"
 import { applyClassicToolOutput } from "../hooks/tool-output"
 import { attachModBackend, protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
 import { currentFunctionBackgroundOwner } from "../mods/v2/background-owner"
@@ -79,7 +82,7 @@ import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { detectToolFailure, hasFailureFired, markFailureFired } from "../hooks/tool-failure"
-import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
+import { HookHaltError, isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   formatFailureFuseWarning,
@@ -355,6 +358,7 @@ export interface LocalSandboxOptions {
   modReadOnly?: boolean
   /** Match the runtime's foreground-only shell behavior for SDK calls too. */
   modManagedExecution?: boolean
+  modUserInput?: (input: ModObject, signal: AbortSignal) => Promise<string>
   modRuntimeAuthority?: ModRuntimeAuthority
   /** Host-created command-only context; a model turn replaces it with its own full runtime. */
   modCommandOnly?: boolean
@@ -2152,13 +2156,53 @@ export class LocalSandbox
             readOnlyShellExecutionContext.getStore() === true
         }
       }
-      const release = attachModBackend(this, binding, {
-        ...owner,
-        runtimeAuthority,
-        readOnly: options.modReadOnly === true || this.readOnlyShellEnforced
-      }, { managedExecution: options.modManagedExecution })
+      const userInput = options.modUserInput
+      const release = attachModBackend(
+        this,
+        binding,
+        {
+          ...owner,
+          runtimeAuthority,
+          readOnly: options.modReadOnly === true || this.readOnlyShellEnforced
+        },
+        {
+          managedExecution: options.modManagedExecution,
+          userInput: userInput
+            ? (input, signal) => this.runModUserInput(userInput, input, signal)
+            : undefined
+        }
+      )
       options.onModBinding?.(release)
     }
+  }
+
+  /** SDK questions retain the same classic pre/post gates as other native SDK tools. */
+  private async runModUserInput(
+    invoke: NonNullable<LocalSandboxOptions["modUserInput"]>,
+    input: ModObject,
+    signal: AbortSignal
+  ): Promise<string> {
+    const effective = await beforeModToolExecution(async () => {
+      signal.throwIfAborted()
+      try {
+        const pre = await this.runPreToolUseHookForTool("request_user_input", input)
+        if (pre?.blocked || pre?.decision === "block")
+          throw new HookHaltError({
+            hookEvent: "PreToolUse",
+            result: pre,
+            fallbackReason: "request_user_input was blocked by a hook"
+          })
+        signal.throwIfAborted()
+        return LocalSandbox.mergeUpdatedInput(input, pre?.updatedInput)
+      } catch (error) {
+        if (isHookHaltError(error))
+          throw new ModPermissionError(await publishCurrentModResult(error.reason))
+        throw error
+      }
+    })
+    const result = await invoke(effective, signal)
+    signal.throwIfAborted()
+    return this.applyPostToolUseHookToText("request_user_input", effective, result)
   }
 
   /** The probe exposes only a query closure: no setup, hooks, ACLs, adapter binding or tools. */

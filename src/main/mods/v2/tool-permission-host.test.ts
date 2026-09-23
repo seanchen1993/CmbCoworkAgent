@@ -118,3 +118,21 @@ it("uses the active scope's aliases exclusively and cannot recover stale context
   })
   expect(peek).not.toHaveBeenCalled()
 })
+
+it("queries a cold native question without constructing a filesystem probe or opening a dialog", async () => {
+  const questions = [
+    {
+      id: "q",
+      header: "Choice",
+      question: "Continue?",
+      options: [
+        { label: "Yes", description: "Continue" },
+        { label: "No", description: "Stop" }
+      ]
+    }
+  ]
+  expect(await call("request_user_input", { questions })).toEqual({ decision: "allow" })
+  expect(plain).toHaveBeenCalledWith("thread")
+  expect(probe).not.toHaveBeenCalled()
+  expect(discover).not.toHaveBeenCalled()
+})
