@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
-  "date": "2026-09-23",
-  "codeBaseline": "03cdbdc9",
+  "date": "2026-09-24",
+  "codeBaseline": "1fa0e52e",
   "upstream": {
     "versionInDeclaration": "2.1.277",
     "revision": "bf7d404e26a5fb6167d21b46c93a2bf6c22ab274",
@@ -15,7 +15,7 @@
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",
-    "scope": "isolated runtime, desktop commands, Pane/Client, native tool SDK, registered tools in main and explicitly host-bound shared task agents, host-bound main-agent model stream/turn.step and adapted model fork/classify, model-raised tool hooks and configured text model completions, named MCP SDK through scoped host connections; B3-B8 remain incomplete; MCP tool.call routing and scoped permission metadata; explicit grant/execution workspace separation, runtime tool restrictions and private instance lifetimes",
+    "scope": "Desktop application adaptation: isolated Function runtime, host-bound session/model/tool/MCP operations, real dynamic context provenance, bounded desktop sites and Client lifecycles, classic production triggers identified individually; original completion loop with application project rules, durable bound evidence and optional pinned Autobiz stage commits. Partial and unsupported rows remain explicit; not full Claude parity or universal business acceptance.",
     "desktopEvents": [
       "session.start",
       "engine.create (bounded per-session noun fold)",
@@ -193,7 +193,7 @@
         "100000 scanned messages, 1 MiB cold row; cancellation and scope/config invalidation enforced"
       ],
       "upstreamConformanceAdded": 4,
-      "validation": "focused controller, SDK, host, checkpoint, archive-compensation, summary/full breakdown, occupied-lease and archive-retry tests pass; Mods v2 plus shared Mods v2 suite 364/364, process E2E 37/37 and desktop E2E 64/64 pass; v27 full Vitest is 3610/26/5 with no unhandled error; usage-breakdown 1000-sample records remain in output/mods-v2-validation/v26-*",
+      "validation": "Historical v27: 364/364 targeted, process37 and desktop64. Current dynamic breakdown provenance is covered by usage SDK/live host tests and the desktop suite; these estimates are not provider cost accounting. Latest overall validation and unresolved release gates are documented in docs/mods-v2-status-2026-09-24.md.",
       "fullParity": false
     },
     "toolPermission": {
@@ -264,6 +264,29 @@
       "ui": "Client background frames use fresh read-only host entries instead of retaining an expired click's write authority",
       "evidence": "real deepagents/QuickJS/LocalSandbox tests and Electron HTTP/utilityProcess Explore task; upstream conformance remains 39 cases",
       "fullParity": false
+    },
+    "applicationCompletionRules": {
+      "classification": "CMB application extension; not an upstream compatibility claim",
+      "guide": "docs/mods-v2-application-completion-rules.md",
+      "scope": "Project/plugin-owned off/report/check/repair rules; file/diff/Feature/project selection; code review, native project tests and pinned upstream validator; monotonic time and persistent model budgets; capture/check/repair/validator/transition evidence; original lease, authority and runtime cancellation; compiler-derived opt-in stage commits",
+      "evidence": [
+        "src/main/mods/v2/application-completion-policy.test.ts",
+        "src/main/mods/v2/completion-operation.test.ts",
+        "src/main/mods/control-store-crash.test.ts",
+        "src/main/mods/v2/autobiz-completion.integration.test.ts",
+        "tests/support/mods-autobiz-stage-e2e.ts",
+        "tests/support/mods-application-policy-e2e.ts"
+      ],
+      "limits": [
+        "One opt-in real-provider CSV export task passed automatic repair, seven independent business assertions, pinned upstream validation and one native checkpoint commit. Contract fixtures remain separate; this is not general business acceptance.",
+        "Unknown state commit remains blocked for journal inspection; not an all-workspace filesystem transaction.",
+        "Formal performance gates are not accepted; CI installer is not yet delivered."
+      ],
+      "realBusinessEvidence": {
+        "test": "tests/mods-business-demo.spec.ts",
+        "report": "output/mods-v2-validation/2026-09-24-real-business-demo.md",
+        "scope": "Opt-in real deepseek-v4-flash run, original permission/completion loop, unchanged protected requirements/tests, one repair and one checkpoint commit; project rule off/on, not global switch performance."
+      }
     }
   },
   "meaning": {

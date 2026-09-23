@@ -1,5 +1,14 @@
 # Mods v2 当前实现状态与目标差距
 
+> 2026-09-24：最新已实现能力、验证结果和未完成项见[当前实施状态](mods-v2-status-2026-09-24.md)。下方旧批次数字和缺口保留为历史记录，不代表最新代码。
+
+> 2026-09-23 续作：以下验证数字是历史基线。最新代码和未提交状态以
+> [续做快照](mods-v2-next-iteration-handoff-2026-09-22.md) 为准；官方参考已更新到
+> Claude Code v2.1.278（声明头 2.1.277），见[契约审查](mods-v2-claude-latest-audit-2026-09-22.md)。
+> 主 Agent 模型流、fork/classify、agent.offer 已进入生产链；动态来源、classic 严格
+> schema/legacy next 链、engine noun 正在完成最终集成验证。历史 omission 不能继续当作
+> 当前代码结论，也不能将局部测试视为全量兼容或业务验收。
+
 **更新时间：** 2026-09-18  
 **代码分支：** `codex/mods-v2`  
 **当前提交：** `e1302c01 feat(mods): add live usage breakdown e2e coverage`  

@@ -1,12 +1,12 @@
 # 函数 Mods 开发与当前支持范围
 
-当前分支实现了标准函数插件的加载、授权、直接命令、交互 Pane/Client、原生工具调用、自定义工具注册和独立文本模型请求。目标兼容版本固定为 Claude Code
-2.1.273；这不是全部 Mods API 已经可用的声明。实现和验证状态见
-[实施记录](mods-v2-implementation-2026-09-16.md)。
+当前分支实现了标准函数插件的加载、授权、直接命令、交互 Pane/Client、原生工具调用、自定义工具注册、独立文本模型请求与主 Agent 流式控制，以及应用项目完成规则。目标兼容版本固定为 Claude Code
+v2.1.278（官方声明文件头为 2.1.277）；这不是全部 Mods API 已经可用的声明。实现和验证状态见
+[最新契约审查](mods-v2-claude-latest-audit-2026-09-22.md)及[兼容差异表](mods-v2-compatibility-matrix.json)。
 
 ## 在应用里使用
 
-1. 打开有项目目录的会话，进入“自定义 → 插件”。
+1. 打开有项目目录的会话，进入“自定义 → Function Mods”。
 2. 点击“安装示范插件”，启用项目 Mods，在 `function-commands` 一行授权显示的版本。
 3. 返回会话，输入 `/claw-info 我的备注`。命令在输入框上方显示项目、会话和本会话查询次数。
 4. 可以在模型运行时使用这条命令；页面重载保留计数。应用重启或重新授权会重建模块实例，
@@ -297,7 +297,8 @@ return { text }
 服务未返回用量时显示“未返回”，不能视为零消耗。调用记录只保留提示词摘要，不保存原文或密钥。
 启用内容保护时，模型完整文本先经保护，再进入插件后置 hook 和界面。
 本次新增模型权限使旧授权摘要失效，需要在 Mods 页重新批准明确列出的能力。
-`model.fork/classify`、主会话模型流和 `turn.step` 尚未接通，不能由此推断它们已支持。
+`model.fork/classify` 与主会话 `turn.step` 已通过独立的宿主边界接入；它们不是上述单次
+`model.complete` 的别名，具体上下文、预算及差异见[主模型 step 说明](mods-v2-model-step-2026-09-23.md)。
 
 ## 插件状态
 
@@ -365,15 +366,18 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 普通 `next` 始终绑定原分发；SDK 使用异步延续自己的调用身份，失效调用不能借用新回调。
 
 **当前仍是桌面 Pane 子集**：仅 inline 位置与 Box/Text/Button/Input/Select/Link/Code 的
-明确属性白名单及下述 Client；Code 当前是普通源文本。未交付其余 13 个渲染位置、Svg、diff
-高亮、自定义构造器 hook、实际尺寸上报、聚焦/快捷键/hover/scroll/holdToasts。
+明确属性白名单及下述 Client。Code 支持源代码高亮、行号、折行和统一 diff；路径仅作语言
+推断，不读文件。Pane/Client 提供有界焦点和滚动事件。其余 13 个渲染位置、Svg、自定义
+构造器 hook、实际尺寸上报、快捷键及 hover 仍未交付；`holdToasts` 明确报不支持。
 `ui.invalidate` 目前仅支持 `ui.render`。面板回调可以 `await $.command.run({ command, args })`：
 普通命令等待统一会话队列，`immediate: true` 命令可以在模型运行时查询。返回值保持 SDK 原样，
 任务栏保留执行记录。回调等待期间仍可重绘进度；用户关闭面板或撤销授权会取消其未执行任务。
 已经开始的任务取消后保留待核查状态，不重放。插件自己的 `$.ui.close` 不会取消自己的回调。
 命令处理器内直接或间接等待 `$.command.run` 仍被拒绝，避免在已持有执行权时等待自身队列。
-`focus`/`autoFocus`、`Code.language/path/startLine` 等当前不会产生完整上游效果，不能据此
-声明所有桌面属性兼容。插件中的 async/await 和异步生成器在载入时编译为 Promise 延续；
+`focus: true` 申请一次键盘焦点，宿主会避免打断用户编辑，选择首个 `autoFocus` 控件；重绘
+不会重新抢焦点，关闭或换代会使请求失效。见[焦点范围](mods-v2-pane-focus-2026-09-23.md)
+及[Code 范围](mods-v2-code-ui-2026-09-23.md)，不能据此声明所有桌面属性兼容。
+插件中的 async/await 和异步生成器在载入时编译为 Promise 延续；
 动态创建的原生 async 函数不保证保留该上下文，应使用源码中声明的异步函数。
 
 ## 检查和边界
@@ -381,11 +385,13 @@ on("ui.render", { component: "Pane", requestId: "board" }, ($, e) => {
 构建后运行 `node bin/cli.js plugin check <目录>` 可检查包、快照摘要和事件注册。
 它不是授权，也不证明所用宿主能力全部已经接入。`inspect` 输出相同范围的检查报告。
 
-当前尚不能用这一入口交付官方完整 diff、`engine.create` 能力提供方、
-网络 SDK、`fs.write` 与祖先指令读取、配置表单或完整 classic 事件。主 Agent 的
+`engine.create` 已支持有界的跨插件 JSON 方法提供方，见[构建与限制](mods-v2-engine-nouns-2026-09-23.md)。
+当前尚不能用这一入口交付官方完整多站点 diff、网络 SDK、`fs.write` 与祖先指令读取、
+配置表单或完整 classic 事件；经典 Hook 的逐事件范围见[契约表](mods-v2-classic-contract-2026-09-23.md)。主 Agent 的
 `turn.step` 已经过宿主 opaque-frame 边界，`model.fork` 使用清洗后的实时会话快照，
-`model.classify` 使用固定宿主提示；这些是 adapted desktop 能力，插件不能改写模型/effort，
-也不会获得工具、凭据或未发布 provider 流。模型选择和流式兼容差异仍应按兼容矩阵查看。
+`model.classify` 使用固定宿主提示；这些是 adapted desktop 能力。每个主模型 step 可选择
+已配置模型和明确支持的 effort，未知值拒绝；插件不会获得凭据或未发布 provider 流。
+模型选择和流式兼容差异仍应按兼容矩阵查看。
 命令文本以桌面结果区呈现；终端的显示宽度与布局不能等同于 Electron 窗口尺寸。
 
 运行中最多保留 6 个函数会话，每个会话最多 8 个插件；单命令参数上限为 32000 字符。
@@ -452,7 +458,9 @@ const answer = await $.tool.call({ tool: "write_file", file_path: "notes.md", co
 
 当前可调用 `read_file/write_file/edit_file/ls/glob/grep/execute/task_output`，名称、参数、
 `result` 使用本工程原生工具格式；还不是 Claude 的 `Read/Bash` 等内置工具 schema。
-只允许相应适配器已支持的字段，未支持的后台执行选项明确拒绝。输入最多 16000 字符；
+`execute` 支持 `run_in_background`，`task_output` 支持 `block/timeout`。后台任务仍绑定
+原 run lease、runtime、授权与用户取消信号；撤权、关闭、换代或 lease 释放主动终止。
+受管执行保持前台语义。仅允许相应适配器已支持的字段，未知选项明确拒绝。输入最多 16000 字符；
 这不是 `fs.write` 的实现。插件工具注册见上文；模型发起的工具调用也会进入同一 hook 链。
 
 SDK 发起的 `tool.call` 经过函数 hook 链，允许改写普通参数、拒绝、短路及有界多次 `next`；
@@ -491,4 +499,5 @@ hook 中嵌套 SDK 读取复用当前执行权，写入仍需要存活的用户�
 多工具同轮上下文合计上限 128000 字符。宿主策略继续检查实际参数和最终输出。
 
 本批接入工程现有的模型工具入口，并未把原生工具换成 Claude 的 Read/Bash schema，
-工具注册和 MCP SDK 见上文；主模型流 hook 仍待完成。当前宿主修订 v18，需要重新批准。
+工具注册和 MCP SDK 见上文；主模型流已通过宿主边界接入。升级宿主能力会改变授权摘要，
+须重新批准，不能沿用旧摘要静默取得新增能力。

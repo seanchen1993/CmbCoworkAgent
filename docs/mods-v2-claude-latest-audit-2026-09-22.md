@@ -15,7 +15,7 @@
 
 | 官方方向 | 本工程处理 | 当前状态 |
 | --- | --- | --- |
-| `agent.offer` 返回 `{ isOffered }`，并与 `agent.spawn` 分开 | 事件名已进入事件目录；生产 Agent offer 入口仍待宿主接线 | partial |
+| `agent.offer` 返回 `{ isOffered }`，并与 `agent.spawn` 分开 | `ee7302e5` 已接入生产 registry filtering 和 provider pinning；其余 spawn/opaque agent 能力单独标记 | adapted |
 | `classic.*` 作为一等事件命名空间，`classic.PreToolUse` 保留特殊 envelope | 事件目录已覆盖最新事件；传统 Hook runner 保留并补齐 once 并发、失败重试和 session generation 语义；避免自动双执行仍需逐个生产入口接线 | adapted/partial |
 | `turn.step` 是唯一流式事件，允许 text/thinking/tool/input/stop 与 opaque chunk | 主 Agent 流已走宿主边界；插件保留的 opaque frame 有数量上限，长流不会因累计序号误拒绝 | adapted |
 | `model.fork` 使用 host transcript snapshot；`model.classify` 只接收文本、标签和模型选项 | 已绑定 live snapshot、authority、generation、取消和发布前复核；模型/effort rewrite 仍按本工程边界拒绝 | adapted |
