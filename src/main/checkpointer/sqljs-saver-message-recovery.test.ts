@@ -1074,6 +1074,141 @@ describe("SqlJsSaver checkpoint message integrity", () => {
     await saver.close()
   })
 
+  it("measures shared snapshot payloads once per root retention scan", async () => {
+    const threadId = "shared-retention-payloads"
+    const saver = new SqlJsSaver(databasePath(), undefined, { maxRootCheckpoints: 32 })
+    const messages: unknown[] = []
+    try {
+      for (let index = 0; index < 20; index++) {
+        messages.push(message(`u-${index}`, "shared payload".repeat(100)))
+        await saver.put(
+          config(threadId, index ? `cp-${index - 1}` : undefined),
+          checkpoint(`cp-${index}`, index, [...messages]),
+          metadata
+        )
+      }
+      const internal = saverInternals(saver)
+      if (!internal.db) throw new Error("expected initialized checkpoint database")
+      const adapter = internal.db
+      const native = (adapter as unknown as { native: DatabaseSync }).native
+      let payloadReads = 0
+      native.function("measured_payload_length", (value) => {
+        payloadReads++
+        if (typeof value === "string") return [...value].length
+        if (value instanceof Uint8Array) return value.byteLength
+        throw new Error("expected a serialized snapshot payload")
+      })
+      const originalExec = adapter.exec.bind(adapter)
+      adapter.exec = ((sql, bindings) =>
+        originalExec(
+          sql.replace(
+            /LENGTH\(COALESCE\(((?:\w+\.)?suffix), ''\)\)/g,
+            "measured_payload_length(COALESCE($1, ''))"
+          ),
+          bindings
+        )) as NativeSqliteAdapter["exec"]
+      try {
+        internal.pruneRootCheckpoints(threadId, adapter)
+      } finally {
+        adapter.exec = originalExec
+      }
+      expect(payloadReads).toBeGreaterThan(0)
+      expect(payloadReads).toBeLessThanOrEqual(20)
+      for (let index = 0; index < 20; index++) {
+        const tuple = await saver.getTuple(config(threadId, `cp-${index}`))
+        expect(tuple?.checkpoint.channel_values.messages).toEqual(messages.slice(0, index + 1))
+      }
+    } finally {
+      await saver.close()
+    }
+  })
+
+  it.each(["shared", "cycle", "missing"])(
+    "preserves scoped retention byte accounting for a %s ancestry",
+    async (shape) => {
+      const threadId = "retention-byte-accounting"
+      const saver = new SqlJsSaver(databasePath(), undefined, { maxRootCheckpoints: 32 })
+      try {
+        const messages = [message("u-0", "消息🙂"), message("a-1"), message("u-2")]
+        for (let index = 0; index < 3; index++) {
+          await saver.put(
+            config(threadId, index ? `cp-${index - 1}` : undefined),
+            checkpoint(`cp-${index}`, index, messages.slice(0, index + 1)),
+            completedBoundaryMetadata
+          )
+        }
+        for (const [thread, namespace] of [
+          ["other-thread", ""],
+          [threadId, "child"]
+        ]) {
+          await saver.put(
+            config(thread, undefined, namespace),
+            checkpoint("cp-0", 0, [message("u-0", "unrelated".repeat(1000))]),
+            metadata
+          )
+        }
+        const internal = saverInternals(saver)
+        if (!internal.db) throw new Error("expected initialized checkpoint database")
+        const adapter = internal.db
+        const native = (adapter as unknown as { native: DatabaseSync }).native
+        if (shape === "cycle")
+          native
+            .prepare(
+              "UPDATE checkpoint_message_snapshots SET parent_checkpoint_id = 'cp-2' WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = 'cp-0'"
+            )
+            .run(threadId)
+        if (shape === "missing")
+          native
+            .prepare(
+              "DELETE FROM checkpoint_message_snapshots WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = 'cp-1'"
+            )
+            .run(threadId)
+        const snapshots = native
+          .prepare(
+            "SELECT checkpoint_id, parent_checkpoint_id, LENGTH(COALESCE(suffix, '')) AS bytes FROM checkpoint_message_snapshots WHERE thread_id = ? AND checkpoint_ns = ''"
+          )
+          .all(threadId) as Array<{
+          checkpoint_id: string
+          parent_checkpoint_id: string | null
+          bytes: number
+        }>
+        const roots = native
+          .prepare(
+            "SELECT checkpoint_id, LENGTH(COALESCE(checkpoint, '')) + LENGTH(COALESCE(metadata, '')) AS bytes FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_ts DESC, checkpoint_id DESC"
+          )
+          .all(threadId) as Array<{ checkpoint_id: string; bytes: number }>
+        const expected = roots.map((root) => {
+          const seen = new Set<string>()
+          let id: string | null = root.checkpoint_id
+          let bytes = root.bytes
+          while (id && !seen.has(id)) {
+            seen.add(id)
+            const snapshot = snapshots.find((row) => row.checkpoint_id === id)
+            if (!snapshot) break
+            bytes += snapshot.bytes
+            id = snapshot.parent_checkpoint_id
+          }
+          return [root.checkpoint_id, 1, bytes]
+        })
+        const originalExec = adapter.exec.bind(adapter)
+        let actual: unknown
+        adapter.exec = ((sql, bindings) => {
+          const result = originalExec(sql, bindings)
+          if (sql.includes("message_payload AS (")) actual = result[0]?.values
+          return result
+        }) as NativeSqliteAdapter["exec"]
+        try {
+          internal.pruneRootCheckpoints(threadId, adapter)
+        } finally {
+          adapter.exec = originalExec
+        }
+        expect(actual).toEqual(expected)
+      } finally {
+        await saver.close()
+      }
+    }
+  )
+
   it("holds the root retention scan and delete under one writer transaction", async () => {
     const path = databasePath()
     const threadId = "root-retention-transaction"
@@ -1105,7 +1240,7 @@ describe("SqlJsSaver checkpoint message integrity", () => {
     let competingWriteBlocked = false
     adapter.exec = ((sql, bindings) => {
       const result = originalExec(sql, bindings)
-      if (sql.includes("WITH RECURSIVE message_chain")) {
+      if (sql.includes("message_payload AS (") && sql.includes("FROM checkpoints AS checkpoint")) {
         try {
           competitorInsert.run(
             "cp-root-competing",

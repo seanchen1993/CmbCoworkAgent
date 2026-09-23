@@ -1465,29 +1465,29 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       database.run("BEGIN IMMEDIATE")
       transactionStarted = true
       const result = database.exec(
-        `WITH RECURSIVE message_chain(
+        `WITH RECURSIVE snapshot_sizes AS MATERIALIZED (
+           SELECT checkpoint_id, parent_checkpoint_id, LENGTH(COALESCE(suffix, '')) AS payload_bytes
+           FROM checkpoint_message_snapshots
+           WHERE thread_id = ? AND checkpoint_ns = ''
+         ), message_chain(
            root_checkpoint_id, checkpoint_id, parent_checkpoint_id, payload_bytes
          ) AS (
            SELECT checkpoint.checkpoint_id,
                   snapshot.checkpoint_id,
                   snapshot.parent_checkpoint_id,
-                  LENGTH(COALESCE(snapshot.suffix, ''))
+                  snapshot.payload_bytes
            FROM checkpoints AS checkpoint
-           JOIN checkpoint_message_snapshots AS snapshot
-             ON snapshot.thread_id = checkpoint.thread_id
-            AND snapshot.checkpoint_ns = checkpoint.checkpoint_ns
-            AND snapshot.checkpoint_id = checkpoint.checkpoint_id
+           JOIN snapshot_sizes AS snapshot
+             ON snapshot.checkpoint_id = checkpoint.checkpoint_id
            WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ''
            UNION
            SELECT chain.root_checkpoint_id,
                   parent.checkpoint_id,
                   parent.parent_checkpoint_id,
-                  LENGTH(COALESCE(parent.suffix, ''))
+                  parent.payload_bytes
            FROM message_chain AS chain
-           JOIN checkpoint_message_snapshots AS parent
-             ON parent.thread_id = ?
-            AND parent.checkpoint_ns = ''
-            AND parent.checkpoint_id = chain.parent_checkpoint_id
+           JOIN snapshot_sizes AS parent
+             ON parent.checkpoint_id = chain.parent_checkpoint_id
          ), message_payload AS (
            SELECT root_checkpoint_id, SUM(payload_bytes) AS payload_bytes
            FROM message_chain
