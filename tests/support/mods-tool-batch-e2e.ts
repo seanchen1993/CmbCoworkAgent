@@ -67,9 +67,10 @@ export async function verifyToolBatch(
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("Tool batch E2E", { exact: true }).first().click()
   const composer = page.locator("textarea.composer-textarea")
+  const submit = page.locator("form").filter({ has: composer }).locator('button[type="submit"]')
   const send = async (text: string) => {
     await composer.fill(text)
-    await composer.press("Enter")
+    await submit.click()
   }
   const logs = () => page.evaluate((id) => window.api.mods.logs(id), threadId)
   const prompt = "[mods-tool-batch] inspect both files"

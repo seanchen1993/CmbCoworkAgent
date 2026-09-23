@@ -1274,10 +1274,12 @@ async function main(): Promise<void> {
     const codePane = page!.locator("section").filter({ hasText: "Code E2E" }).last()
     await codePane.waitFor()
     await codePane.locator(".shiki").waitFor()
-    const tokenColors = await codePane.locator(".shiki .line span").evaluateAll((tokens) =>
-      [...new Set(tokens.map((token) => getComputedStyle(token).color))]
-    )
-    assert.ok(tokenColors.length > 1, "source tokens use the application's actual syntax colors")
+    await until(async () => {
+      const tokenColors = await codePane.locator(".shiki .line span").evaluateAll((tokens) =>
+        [...new Set(tokens.map((token) => getComputedStyle(token).color))]
+      )
+      return tokenColors.length > 1
+    }, "source tokens use the application's actual syntax colors")
     assert.equal(await codePane.locator(".shiki").evaluate((element) =>
       getComputedStyle(element.parentElement!).counterReset), "mod-line 41")
     assert.deepEqual(await codePane.locator('[data-code-kind="remove"] > span').allTextContents(), ["1", "", "-"])
