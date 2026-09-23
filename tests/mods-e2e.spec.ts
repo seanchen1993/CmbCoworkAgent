@@ -23,6 +23,7 @@ import { verifyStatusSites } from "./support/mods-status-sites-e2e"
 import { verifyMessageSites } from "./support/mods-message-sites-e2e"
 import { verifySvg } from "./support/mods-svg-e2e"
 import { verifyCommandOutput } from "./support/mods-command-output-e2e"
+import { verifyClassicOutput } from "./support/mods-classic-output-e2e"
 import { verifyUiFeedback } from "./support/mods-ui-feedback-e2e"
 import { verifyToolSites } from "./support/mods-tool-sites-e2e"
 import AdmZip from "adm-zip"
@@ -35,7 +36,7 @@ const binary = packagedDir
   : (localRequire("electron") as string)
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
-const focus = ["status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback"].includes(requestedFocus)
+const focus = ["status-sites", "message-sites", "svg", "command-output", "tool-sites", "ui-feedback", "classic-output"].includes(requestedFocus)
   ? requestedFocus : undefined
 const artifacts = join(
   root, "output/mods-validation",
@@ -171,7 +172,9 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "ui-feedback")
+      if (focus === "classic-output")
+        await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass)
+      else if (focus === "ui-feedback")
         await verifyUiFeedback(page!, root, workspace, artifacts, until, pass)
       else if (focus === "tool-sites")
         await verifyToolSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
@@ -3071,6 +3074,7 @@ async function main(): Promise<void> {
     await verifyCommandOutput(page!, root, workspace, artifacts, until, pass)
     await verifyToolSites(page!, root, workspace, artifacts, modelServer.requests, until, pass)
     await verifyUiFeedback(page!, root, workspace, artifacts, until, pass)
+    await verifyClassicOutput(page!, root, workspace, artifacts, modelServer.requests, until, pass)
     console.log(JSON.stringify({ checks, timings, isolated }, null, 2))
   } catch (error) {
     await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {})

@@ -1,3 +1,4 @@
+import { applyClassicToolOutput } from "../hooks/tool-output"
 import { attachModBackend, protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
 import { currentFunctionBackgroundOwner } from "../mods/v2/background-owner"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
@@ -773,6 +774,7 @@ export class LocalSandbox
   >(result: T, postResult: HookResult | null, fileOpLabel: string): T {
     if (!postResult) return result
     throwIfHookHalt("PostToolUse", postResult, `${fileOpLabel} was stopped by a PostToolUse hook`)
+    result = applyClassicToolOutput(result, postResult)
     const notes: string[] = []
     if (!postResult.suppressOutput && postResult.stdout) {
       notes.push(`[Hook output]\n${postResult.stdout}`)
@@ -813,6 +815,7 @@ export class LocalSandbox
   ): ExecuteResponse {
     if (!postResult) return result
     throwIfHookHalt("PostToolUse", postResult, "execute was stopped by a PostToolUse hook")
+    result = applyClassicToolOutput(result, postResult)
     const parts: string[] = []
     if (!postResult.suppressOutput && postResult.stdout) {
       parts.push(`[Hook output]\n${postResult.stdout}`)
@@ -3190,7 +3193,8 @@ export class LocalSandbox
     })
     throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
     const feedback = LocalSandbox.formatPostHookTextFeedback(postResult)
-    return publishCurrentModResult(feedback ? `${toolResult}\n\n${feedback}` : toolResult)
+    const presented = applyClassicToolOutput(toolResult, postResult)
+    return publishCurrentModResult(feedback ? `${presented}\n\n${feedback}` : presented)
   }
 
   private getSkillHookKey(skill: SkillLifecycleMatch): string {

@@ -1,3 +1,4 @@
+import { applyClassicToolOutput } from "../hooks/tool-output"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
@@ -1649,14 +1650,15 @@ export function createScopedMcpCapabilityService(
           const feedback = [hookFeedback, failureFuseFeedback].filter(Boolean).join("\n\n")
           const isError =
             result.isError || postResult?.decision === "block" || postResult?.continue === false
+          const presented = applyClassicToolOutput(result, postResult, { mcp: true })
           return {
-            ...result,
+            ...presented,
             isError,
-            text: feedback ? `${result.text}\n\n${feedback}` : result.text,
+            text: feedback ? `${presented.text}\n\n${feedback}` : presented.text,
             contentBlocks:
-              feedback && result.contentBlocks
-                ? [...result.contentBlocks, { type: "text", text: feedback }]
-                : result.contentBlocks
+              feedback && presented.contentBlocks
+                ? [...presented.contentBlocks, { type: "text", text: feedback }]
+                : presented.contentBlocks
           }
         }
       )

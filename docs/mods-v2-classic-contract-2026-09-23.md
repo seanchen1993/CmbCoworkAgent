@@ -5,6 +5,10 @@
 审计对象是 Mods 工作树 `ed89c24f` 之后的本轮改动，不涉及 UAT 工作树。本文是分项证据，
 总状态以 `mods-v2-compatibility-matrix.json` 为准。**Classic 整体仍为 partial**。
 
+2026-09-23追加：Function PostToolUse 的 updatedToolOutput / updatedMCPToolOutput 已接入
+真实工具结果投影，见 [输出效果适配](mods-v2-classic-output-2026-09-23.md)。下文“尚未消费”
+是原审计时间点；除这两个字段外的差异仍未解决，传统配置脚本解析器未随之扩展。
+
 ## 33 个事件的实际状态
 
 “生产触发”表示找到应用真实调用点，不代表该事件所有官方字段、结果效果和时序已完整实现。

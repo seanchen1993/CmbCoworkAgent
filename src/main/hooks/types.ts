@@ -237,6 +237,9 @@ export interface HookResult {
   /** Optional skill to load as remediation guidance when the hook fires. */
   requiredSkill?: string
   updatedInput?: Record<string, unknown> // PreToolUse: modify tool args
+  /** Function Mods PostToolUse presentation effects; never execution or checkpoint facts. */
+  updatedToolOutput?: unknown
+  updatedMCPToolOutput?: unknown
   suppressOutput?: boolean // suppress tool output from agent context
   /** If false, agent halts the entire turn (not just this tool). */
   continue?: boolean

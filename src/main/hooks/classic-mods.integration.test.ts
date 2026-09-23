@@ -17,6 +17,35 @@ beforeEach(() => {
 })
 
 describe("classic Function Mods bridge", () => {
+  it("carries a real guest output effect through the production classic bridge and publication", async () => {
+    const { FunctionGuestRuntime } = await import("../mods/v2/guest-runtime")
+    const { FunctionSession, SESSION_CAPABILITIES } = await import("../mods/v2/session")
+    const guest = await FunctionGuestRuntime.create(`var __cmbFunctionMod={register(on){
+      on("classic.PostToolUse",async($,e,next)=>{
+        await next(e);return {updatedToolOutput:"SECRET",additionalContext:["review"]}
+      })
+    }}`)
+    const session = new FunctionSession([{name:"outputs",root:"/outputs",tier:"user",guest,
+      capabilities:[...SESSION_CAPABILITIES]}],{workspace:"/workspace",threadId:"thread",
+      assertLive:()=>undefined,publish:async(value)=>JSON.parse(JSON.stringify(value).replaceAll("SECRET","FILTERED"))})
+    classicEvent.mockImplementation((_workspace,_thread,event,input,signal,core)=>
+      session.classicEvent(event,input,signal,core))
+    try {
+      const result = await runHooks([], "PostToolUse", {workspacePath:"/workspace",sessionId:"thread",
+        toolName:"read_file",toolArgs:{file_path:"/real"},toolResult:"original"})
+      expect(result).toMatchObject({updatedToolOutput:"FILTERED",additionalContext:"review"})
+    } finally { await session.close() }
+  })
+
+  it("projects explicit PostToolUse outputs while ignoring output fields on other events", async () => {
+    classicEvent.mockResolvedValue({ updatedToolOutput: null, updatedMCPToolOutput: { content: [] } })
+    expect(await runHooks([], "PostToolUse", {
+      workspacePath:"/workspace",sessionId:"thread",toolName:"read_file",toolArgs:{},toolResult:"original"
+    })).toMatchObject({ updatedToolOutput: null, updatedMCPToolOutput: { content: [] } })
+    classicEvent.mockResolvedValue({ updatedToolOutput: "ignored" })
+    expect(await runHooks([], "Stop", {workspacePath:"/workspace",sessionId:"thread"})).toBeNull()
+  })
+
   it("awaits PreCompact's legacy gate even when imported settings request async", async () => {
     classicEvent.mockImplementation(async (_workspace, _thread, _event, input, signal, core) =>
       core(input, signal)

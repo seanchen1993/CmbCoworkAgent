@@ -1,4 +1,5 @@
 import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
+import { applyClassicToolOutput } from "../hooks/tool-output"
 import { ToolMessage } from "@langchain/core/messages"
 import { Command, isCommand } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
@@ -444,7 +445,8 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
             const feedback = buildPostHookFeedback(
               mergeFailureFuseWarning(postResult, failureFuseDecision)
             )
-            return feedback ? appendFeedbackToResult(result, feedback, toolCall?.id) : result
+            const presented = applyClassicToolOutput(result, postResult, { toolCallId: toolCall?.id })
+            return feedback ? appendFeedbackToResult(presented, feedback, toolCall?.id) : presented
           })
         }
       )

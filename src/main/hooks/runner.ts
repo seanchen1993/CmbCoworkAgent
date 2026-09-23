@@ -1525,6 +1525,10 @@ function projectClassicResult(event: HookEvent, value: ModObject): HookResult | 
     systemMessage: typeof value.systemMessage === "string" ? value.systemMessage : undefined,
     requiredSkill: typeof value.requiredSkill === "string" ? value.requiredSkill : undefined,
     suppressOutput: value.suppressOutput === true ? true : undefined,
+    ...(event === "PostToolUse" && value.updatedToolOutput !== undefined
+      ? { updatedToolOutput: value.updatedToolOutput } : {}),
+    ...(event === "PostToolUse" && value.updatedMCPToolOutput !== undefined
+      ? { updatedMCPToolOutput: value.updatedMCPToolOutput } : {}),
     updatedInput:
       value.updatedInput && typeof value.updatedInput === "object" && !Array.isArray(value.updatedInput)
         ? (value.updatedInput as Record<string, unknown>)
@@ -1539,7 +1543,9 @@ function projectClassicResult(event: HookEvent, value: ModObject): HookResult | 
     result.systemMessage !== undefined ||
     result.requiredSkill !== undefined ||
     result.suppressOutput !== undefined ||
-    result.updatedInput !== undefined
+    result.updatedInput !== undefined ||
+    result.updatedToolOutput !== undefined ||
+    result.updatedMCPToolOutput !== undefined
   return hasPayload ? result : null
 }
 
@@ -1599,6 +1605,8 @@ async function runClassicFunctionHook(
       continue: native.continue === false ? false : projected?.continue,
       stopReason: native.stopReason ?? projected?.stopReason,
       updatedInput: projected?.updatedInput,
+      ...(projected?.updatedToolOutput !== undefined ? { updatedToolOutput: projected.updatedToolOutput } : {}),
+      ...(projected?.updatedMCPToolOutput !== undefined ? { updatedMCPToolOutput: projected.updatedMCPToolOutput } : {}),
       additionalContext: projected?.additionalContext
     }
     return projected
