@@ -8,6 +8,8 @@
 
 ## 应用已具备的能力
 
+- 关闭经典Function桥时直接保留原生Hook路径，继续检查取消/session变化；全局及项目关闭时原生HTTP拒绝各只执行一次。完整Electron228与全hooks68通过，性能尾延迟仍未全部达标。
+
 - [Client并发忙态](mods-v2-client-busy-2026-09-24.md)：真实输入迟到不再提前解锁仍等待宿主的按钮/提交/选择；关闭和新实例的状态隔离保持。不是原长稳ACK丢失根因声明。
 
 - [Guest 代码生成限制](mods-v2-guest-codegen-2026-09-24.md)：在 hooks/Client 插件代码运行前拒绝 eval/Function 及间接构造器路径，保留正常函数、生成器和异步 SDK；宿主修订 v63 绑定批准摘要。只影响 Function Mods 的 QuickJS，未修改应用 JavaScript 环境。
@@ -31,6 +33,7 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| 关闭经典桥 / Mods60 | 156文件1378项、utility44、完整Electron228、全hooks10文件68项、Node/Web/helper types与差量lint通过；正式ingress关闭2/10仍失败，保留失败，不称最终性能通过 |
 | Client忙态 / Mods59 | 先旧普通Electron真实并发断言失败，再专项4项通过；完整Mods152文件1333项、utility44、完整Electron226全通过。新UI构建性能smoke +65.2ms、qualified=false/passed=false；不描述为新构建正式性能通过 |
 | Actions包内门禁 | Windows既有打包后新增ASAR/Electron验证，失败阻断该job发布，限定上传回执/PNG；runner/workflow/staging 18项、helper types与差量lint通过。未push/触发Actions，实际新包与安装验收未完成 |
 | Guest 代码生成限制 | 先真实guest红4/1、旧普通Electron执行字符串红；窄测4文件39项通过，Node/Web/helper types与修改行ESLint通过，新普通Electron专项5通过；完整Mods57含renderer为151文件1329项通过，真实utility42与完整Electron223通过；独占性能结果见独立报告 |
@@ -60,7 +63,7 @@
 | 真实业务演示 | 实际 deepseek-v4-flash、原审批与 Agent 修复循环；规则关闭时真实缺陷未修，开启后 1 次自动修复、7 项独立业务断言通过，真实 validator 通过后仅推进 1 次 checkpoint。受保护需求/测试/脚本未变；不是全面业务能力证明，见[演示报告](../output/mods-v2-validation/2026-09-24-real-business-demo.md) |
 | TypeScript / ESLint | 授权查询复用：Node/Web通过，ESLint无错误、新测试无警告，control-store原3个警告经HEAD比较未增加。此前各能力helper类型和历史格式警告详见各自报告 |
 | 全仓回归 | 先前完整 Vitest 存在基线失败；隔离后剩 26 项已在旧基线复现，standalone 84 命令初次 78 通过、6 失败，修复 2 个本分支差异后相关整套通过，其余 4 个在旧基线复现；不能称全仓全绿 |
-| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照最新a447abe0复检有4/10组超预算（最大project-off +10.7681% / +0.2379ms），整体未通过；修复前3c569546冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
+| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照关闭经典桥修复后复检有2/10组超预算（最大project-off +7.7271% / +0.1760ms），之前a447abe0的4/10失败保留，整体未通过；修复前3c569546冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
 
 7363ce1e 已更正 metadata/write 两个 Electron helper 的撤权参数，并增加实际授权状态断言：新专项 5+7 检查通过。旧测试只证明 session 失效，不能冒称撤销了持久化 grant，见[更正报告](../output/mods-v2-validation/2026-09-24-function-revocation-e2e-correction.md)。
 

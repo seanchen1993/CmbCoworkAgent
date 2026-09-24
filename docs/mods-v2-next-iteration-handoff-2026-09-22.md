@@ -1,3 +1,26 @@
+## 2026-09-24 关闭经典桥已完成回归，提交后继续Base64（最新）
+
+- 当前HEAD329ff86d，99277完整228通过，7844已exit2无运行进程：正式ingress两组关闭失败（round1global+6.58375%/.1461ms；round4project+7.72709%/.1760ms），单插件五轮通过。报告2026-09-24-classic-disabled.md完整保留，未放宽门槛。
+- 本次提交仅classic修复3源/测试文件+classic-output helper+status/handoff/report；Base64新红测及未接线helpers保持未提交。下一接root focus/full与process入口，旧ordinary跑Base64真实Electron红，随后应用ignored source draft+bootstrap注入、宿主v64、两行matrix，持续实现验证。
+- 性能尾延迟仍未达标，不归因为已证实噪声；最终代码可预先提高样本精度，不重复盲跑/删除失败。仍需正式desktop/两小时长稳/Actions实际包，UAT和共享依赖不动。
+
+## 2026-09-24 关闭经典桥完整228通过，正式性能复检中（最新）
+
+- HEAD329ff86d；生产仅runner.ts6行关闭桥快速返回，既有Stop mock修正；新classic-disabled.test.ts5项、新classic-output helper两种off原生HTTP精确1次。
+- 99277exit0：Mods60 156/1378、utility44、完整Electron228；ordinary out恢复，另存dated结果。7844前段全hooks10/68、helper最终types/差量lint通过，现唯一运行正式ingress，日志2026-09-24-classic-disabled-ingress.log。不再并行构建、测试或format；期间未接线base64 process helper轻量ESLint在初段执行，正式报告须如实标注，不声称绝对无其他进程。
+- 7844退出后读完整矩阵结果填2026-09-24-classic-disabled.md/status并独立提交当前classic组。不要把未实现base64文件加入该commit。
+- 下一能力真实QuickJS基线7红（2026-09-24-base64-red.log，缺atob/btoa），未提交未接线：guest-base64.test.ts、tests/fixtures/mods-v2/base64-probes.ts、tests/support/mods-base64-e2e.ts、tests/support/function-base64-process.ts。测试/helper已format；没有实现生产或改matrix/宿主revision。
+- Base64 ignored设计及实现草稿2026-09-24-base64-design-draft.md /base64-source-draft.txt；官方v280声明11240-11241，WHATWG HTML/Infra已查。当前helper无root/process入口，先在本classic提交后接root focus/full及process入口并用旧ordinary跑真实Electron RED，再copy source+bootstrap注入+v64+matrix两行，窄测/types/lint/utility/fullElectron/perf。标准Latin1、padding/ASCII空白、错误/512KiB上限、只读global，DOMException类仍unsupported差异需注明；不开放Host/Buffer/I/O，不把bytes读取顺带称实现。
+- 不动UAT/共享依赖/本地NSIS，不派agents，不问继续、不结束任务。
+
+## 2026-09-24 关闭经典桥修复完整回归中（最新）
+
+- HEAD329ff86d；生产未提交仅runner.ts关闭路径6行；新classic-disabled测试5项，既有Stop mock修正关闭不返回guest。新增classic-output真实HTTP原生拒绝在两种off各执行1次。
+- 5文件49窄测、Node/Web types、差量lint通过。普通Electron先5项通过（含默认off、nativeon/off及新增两种off），后旧MCP场景缺test-only mods-e2e.js exit1，已换正确完整驱动。
+- 唯一运行exec99277：Mods60（附4个hook和5renderer文件）→utility→完整Electron；日志2026-09-24-mods60.log /classic-disabled-process.log /classic-disabled-full-electron.log。冻结生产/driver，不并发build/perf。
+- 报告草稿2026-09-24-classic-disabled.md。结束后补完整数字、helper最终types/lint、所有hooks回归，独占正式ingress复检；按结果处理，不改门槛。随后独立提交，再持续剩余门禁/兼容能力。
+- 旧正式ingress4/10关闭失败已独立提交329ff86d，桌面3c正式通过仅其构建，最新busy构建smoke失败。两小时ACK6408失败仍未定位；不宣称修复其根因，不动UAT、共享依赖或本地NSIS，不派agents、不问继续。
+
 ## 2026-09-24 正式入口结束，开始关闭经典桥回归（最新）
 
 - HEAD a447abe0；exec29180 exit2，已无运行进程。5轮/38515事件，qualified=true/budgetsPassed=false；单插件五轮通过，关闭4/10失败，0发现/0 runtime。完整证据与报告2026-09-24-v63-ingress-formal.md保留。

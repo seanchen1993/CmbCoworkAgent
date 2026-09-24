@@ -781,8 +781,8 @@ it("marks Stop feedback only while the Mods bridge is enabled", async () => {
   const context={workspacePath:"/workspace",sessionId:"thread"}
   modsEnabled.mockReturnValue(false)
   const off=await runHooks([],"Stop",context)
-  expect(off?.additionalContext).toBe("check tests")
-  expect(off?.stopFeedbackContinuation).toBeUndefined()
+  expect(off).toBeNull()
+  expect(classicEvent).not.toHaveBeenCalled()
   modsEnabled.mockReturnValue(true)
   expect(await runHooks([],"Stop",context)).toMatchObject({additionalContext:"check tests",stopFeedbackContinuation:true})
 })

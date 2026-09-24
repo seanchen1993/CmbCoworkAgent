@@ -1619,6 +1619,12 @@ async function runClassicFunctionHook(
   if (!CLASSIC_HOOK_EVENTS.has(event) || !context.workspacePath || !context.sessionId) return legacy()
   const manager = getModsManager()
   if (!manager) return legacy()
+  if (!manager.isEnabled(context.workspacePath)) {
+    // Disabled Mods must preserve native hook results without a guest schema round trip.
+    const result = await legacy()
+    assertCurrent()
+    return result
+  }
   const signal = context.signal ?? getModCallContext()?.signal ?? new AbortController().signal
   signal.throwIfAborted()
   assertCurrent()

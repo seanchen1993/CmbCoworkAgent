@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { createServer } from "node:http"
 import AdmZip from "adm-zip"
 import type { Page, ElectronApplication } from "playwright"
 
@@ -101,6 +102,77 @@ export async function verifyClassicOutput(
       JSON.stringify({ on, off, actualFileUnchanged: true }, null, 2)
     )
     pass("same native task with Mods off restores original model output")
+    let nativeCalls = 0
+    const nativeInputs: unknown[] = []
+    const nativeHook = createServer(async (request, response) => {
+      let body = ""
+      for await (const chunk of request) body += chunk.toString()
+      nativeInputs.push(JSON.parse(body))
+      nativeCalls++
+      response.writeHead(200, { "Content-Type": "application/json" })
+      response.end(
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: "NATIVE_DISABLED_POLICY"
+          }
+        })
+      )
+    })
+    await new Promise<void>((resolve, reject) => {
+      nativeHook.once("error", reject)
+      nativeHook.listen(0, "127.0.0.1", resolve)
+    })
+    let nativeHookId: string | undefined
+    try {
+      const address = nativeHook.address()
+      assert(address && typeof address !== "string")
+      nativeHookId = (
+        await page.evaluate(
+          (url) =>
+            window.api.hooks.create({
+              event: "PreToolUse",
+              matcher: "read_file",
+              type: "http",
+              url,
+              enabled: true
+            }),
+          `http://127.0.0.1:${address.port}/native`
+        )
+      ).id
+      for (const [index, mode] of ["global-off", "project-off"].entries()) {
+        await page.evaluate(
+          async ({ id, mode }) => {
+            await window.api.mods.configure(id, mode === "global-off", false)
+            await window.api.mods.configureGlobal(mode !== "global-off")
+          },
+          { id: threadId, mode }
+        )
+        const start = requests.length
+        const calls = nativeCalls
+        await run(3 + index)
+        const result = lastTool(start)
+        assert(result.includes("NATIVE_DISABLED_POLICY"), result)
+        assert(!result.includes("ORIGINAL_TOOL_RESULT"), result)
+        assert(!result.includes("CLASSIC_MODEL_REPLACEMENT"), result)
+        assert.equal(nativeCalls - calls, 1, "native policy must execute exactly once")
+        assert.equal(readFileSync(join(project, "claw-notes"), "utf8"), "ORIGINAL_TOOL_RESULT")
+        pass(`${mode} preserves the native HTTP deny gate exactly once before the model read`)
+      }
+      writeFileSync(
+        join(artifacts, "classic-disabled-native-evidence.json"),
+        JSON.stringify({ nativeCalls, nativeInputs }, null, 2)
+      )
+    } finally {
+      try {
+        if (nativeHookId) await page.evaluate((id) => window.api.hooks.delete(id), nativeHookId)
+      } finally {
+        nativeHook.closeAllConnections()
+        await new Promise<void>((resolve) => nativeHook.close(() => resolve()))
+        await page.evaluate((id) => window.api.mods.configure(id, true, true), threadId)
+      }
+    }
     await page.evaluate(() => window.api.mods.configureGlobal(true))
     await app.evaluate(
       ({ dialog }, entry) => {
