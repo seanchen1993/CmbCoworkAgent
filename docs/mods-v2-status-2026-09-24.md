@@ -1,12 +1,14 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `40fabd88` 后的文件读取模式修复（宿主修订v65），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `2ce87e81` 后的 Pane 焦点资源清理（宿主修订v65），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
 兼容表已逐项补足范围说明，共245条：49 adapted、155 partial、41 unsupported、0 full。15个classic事件仍仅schema/手动分发；详见[兼容边界复核](mods-v2-compatibility-review-2026-09-24.md)。没有把未实现项列为完成。
 
 长稳探针已补有界可信原生事件和失败快照；节点替换测量缺陷先红再绿，真实24事件/3重载及50历史/200确认通过。原6408事件实际确认丢失仍未定位，不能据此宣称两小时门禁通过。
 
 ## 应用已具备的能力
+
+- [Pane 焦点生命周期](mods-v2-pane-focus-lifecycle-2026-09-24.md)：关闭/替换后移除旧请求 ID，保留当前及已结束请求的去重，卸载清理；实际 React 关闭回归先失败再修复。窄测78、类型/Lint、普通焦点专项及最终完整Electron236通过；不宣称旧长稳 ACK 问题已定位。
 
 - [文件读取模式](mods-v2-file-read-options-2026-09-24.md)：默认/显式text保留到operation，非法选项及不支持的bytes在真实host读取前拒绝，Hook改写同样校验；保留旧path-only改写与强制发布过滤。未实现二进制读取，仍partial/bounded。
 
@@ -68,8 +70,8 @@
 | 配置 Electron | 10 检查通过，包含四模式/范围、阶段配置、清除推进及真正 Electron 重启后的项目规则/管理锁 |
 | 真实业务演示 | 实际 deepseek-v4-flash、原审批与 Agent 修复循环；规则关闭时真实缺陷未修，开启后 1 次自动修复、7 项独立业务断言通过，真实 validator 通过后仅推进 1 次 checkpoint。受保护需求/测试/脚本未变；不是全面业务能力证明，见[演示报告](../output/mods-v2-validation/2026-09-24-real-business-demo.md) |
 | TypeScript / ESLint | 授权查询复用：Node/Web通过，ESLint无错误、新测试无警告，control-store原3个警告经HEAD比较未增加。此前各能力helper类型和历史格式警告详见各自报告 |
-| 全仓回归 | 先前完整 Vitest 存在基线失败；隔离后剩 26 项已在旧基线复现，standalone 84 命令初次 78 通过、6 失败，修复 2 个本分支差异后相关整套通过，其余 4 个在旧基线复现；不能称全仓全绿 |
-| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照关闭经典桥修复后复检有2/10组超预算（最大project-off +7.7271% / +0.1760ms），之前a447abe0的4/10失败保留，整体未通过；修复前3c569546冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
+| 全仓回归 | 当前核心收尾代码已重新运行：606文件597通过/9失败，4732通过/26失败/5跳过；26个失败名称与旧0273980c复现清单完全一致，新增失败项0。当前84条独立命令复检80通过/4失败，失败命令及实际断言与旧基线一致，零超时/中断。先前完整 Vitest 存在基线失败；隔离后剩 26 项已在旧基线复现，standalone 84 命令初次 78 通过、6 失败，修复 2 个本分支差异后相关整套通过，其余 4 个在旧基线复现；不能称全仓全绿 |
+| 性能 | 当前核心代码正式桌面测量qualified=true/passed=false：TTFT p95 156.6→211.2ms（+54.6ms，超过40ms），吞吐比0.9974499119、两组300秒CPU差+0.1216494852百分点达标；110请求/关闭开启各50样本完整保留，TTFT优化后续处理，不能称整项通过。最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照关闭经典桥修复后复检有2/10组超预算（最大project-off +7.7271% / +0.1760ms），之前a447abe0的4/10失败保留，整体未通过；修复前3c569546冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
 
 7363ce1e 已更正 metadata/write 两个 Electron helper 的撤权参数，并增加实际授权状态断言：新专项 5+7 检查通过。旧测试只证明 session 失效，不能冒称撤销了持久化 grant，见[更正报告](../output/mods-v2-validation/2026-09-24-function-revocation-e2e-correction.md)。
 
@@ -77,14 +79,15 @@
 
 正式长稳原始失败及内存测量边界见[失败记录](../output/mods-v2-validation/2026-09-24-desktop-soak-failure.md)。命令历史50条与CommandOutput旧32槽冲突已独立复现；不能据此直接认定点击超时原因。
 
-## 仍未完成的工作
+## 本轮收尾与后续优化
 
 2026-09-24 用户明确允许延期复杂且不影响正常使用的边界功能。后续按[核心交付范围](mods-v2-core-delivery-scope-2026-09-24.md)收尾，兼容缺口保留原状态；不取消权限、证据、checkpoint 正确性或失败记录。
 
-1. 继续处理兼容矩阵中未接入的生产事件与剩余 SDK/UI 差异；[SDK 逐项边界](mods-v2-sdk-boundaries-2026-09-24.md)已区分已有受限实现与未开放接口。主动 `$.ui.focus` 已接入原生桌面 Pane 及其 Client 控件，仍不支持 AbovePrompt/非桌面目标；`$.ui.scroll` 已接入原生 Pane 的测量、实际位置确认与 end 跟随，其他 site/转录/Client key 和 person wheel 新契约仍未对齐；以字段、时序、错误/取消和实测证据为准，不批量升级 partial。
-2. checkpoint 已具备只读恢复核对界面；未知提交的自动协调/回滚仍未提供，外部文件竞争必须保留保守失败边界。
-3. 桌面性能正式v63基线已通过；ingress关闭性能、长稳门禁及最终代码检视仍需完成，全仓既有失败仍须单独标注。
-4. [GitHub Actions包内门禁](mods-v2-actions-package-validation.md)已接线并完成runner回归，实际Actions安装包和安装验证仍待执行；本地NSIS不作为开发阻断，不把普通构建/Node夹具通过描述成已交付安装包。
+1. 本轮：Pane 最小资源清理修复的整套 Electron236已通过，正式性能完整采集但TTFT超预算，保留后续优化项，功能修复独立提交。全仓单测和84条独立命令已重新验证，没有新增失败项；原26项单测及4条独立命令的基线失败仍保留。
+2. 本轮：记录最终代码的正式性能及长稳结果，不能借用旧v63桌面通过结果或将smoke当正式通过。既有ingress关闭超预算、ACK6408超时和中断运行均保留，失败按实际原因处理。
+3. 本轮：[GitHub Actions包内门禁](mods-v2-actions-package-validation.md)已接线并完成runner回归，实际Actions安装包与包内验证待执行；本地NSIS不作为开发阻断。普通构建、Node夹具或unpacked运行不等同安装/卸载验收。
+4. 后续：兼容矩阵中未接入的15个classic生产事件、未开放SDK及复杂UI边界暂缓，见[SDK逐项边界](mods-v2-sdk-boundaries-2026-09-24.md)。保留当前桌面Pane/Client焦点、Pane滚动与end跟随；AbovePrompt、非桌面目标、完整转录/Client key及person wheel新契约不批量升级兼容状态。
+5. 后续：未知checkpoint提交的自动协调/回滚和整个工作区原子事务暂缓；现有只读恢复核对、外部竞争拒绝、旧PASS失效和不重复推进的要求继续生效。
 
 ## Claude 参考与差异
 

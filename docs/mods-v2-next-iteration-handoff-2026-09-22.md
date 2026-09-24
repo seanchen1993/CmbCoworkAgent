@@ -1,3 +1,39 @@
+## 2026-09-24 23:31 核心性能完整但TTFT未达标，准备提交/Actions（最新）
+
+- HEAD2ce87e81，Pane组待独立提交；核心生产仅FunctionPanes8行，types/lint/78窄测/21matrix/utility46/普通焦点3+9+9/最终完整Electron236均通过。全仓4732通过/26旧失败/5跳过，独立80/84，失败断言全与已复现旧基线一致。无需重复这些已完成检查。
+- 87595已exit1，当前无运行测试。15-15-19-538Z-full-7ae669bf正式性能qualified=true/passed=false：TTFT p95 156.6→211.2/+54.6ms（超过40ms），p50140.8→197.2；吞吐0.9974499119、两组300秒CPU差+.1216494852达标，110实际请求、各50样本完整。报告已写，不改门槛/不盲重跑，不把旧v63通过套用当前代码。用户允许核心优先、后续优化，TTFT优化如实列为未完成项，继续可审查核心版本与包内验证。
+- 下一独立提交Pane组10文件：FunctionPanes/helper/root、guide/authoring/sdk-boundaries/matrix/status/handoff、forced report Markdown。只加列举文件，不加raw log/JSON/bundle。当前source已冻结验证，只有轻量文档更新。提交后记录新SHA，然后推codex/mods-v2并workflow_dispatch build-electron.yml，跟踪真实run/head/artifact；不建tag、不合并main或UAT。
+- GitHub GCM只读API已验证canPush=true、workflow active；remote该分支不存在；未push/dispatch。凭据只在内存发送api.github.com，绝不打印/存盘。没有gh，无需安装插件。Actions允许与后续本机正式ingress/soak并行，本机重负载保持串行。
+- 最终ingress预定5x5000/100、5%/15ms阈值和带诊断2h/10k/40切换仍未跑；旧关闭2/10失败、旧ACK6408丢失全保留。尤其不能声称Pane清理解决ACK根因。遇到真实功能失败仍需诊断修复；复杂无关边界按core-delivery-scope延期。
+- 不派agents、不问继续、不在提交后停下；不动UAT/共享依赖/本地NSIS。最终包内测试不等同NSIS安装/卸载，报告区分功能/性能/包。
+## 2026-09-24 23:15 最终完整236通过，正式性能中（最新）
+
+- HEAD2ce87e81；未提交Pane最小清理组，生产仅FunctionPanes8行。62352已exit0：matrix21、utilityProcess46、完整Electron实际236全部通过，ordinary恢复且无mods-e2e.js，回执另存2026-09-24-pane-lifecycle-final-full-electron-result.json。
+- 当前唯一exec87595：node tests/run-mods-desktop-soak.mjs --performance，日志2026-09-24-core-final-desktop-performance.log。正式50/50+两组300秒idle，保持40ms/0.95/0.5门槛，生产/driver冻结，无并行build/test/format/source编辑。等退出后读该新目录desktop-performance-result.json全部指标/qualified/passed，不能用旧v63或smoke结果替代。
+- 当前核心生产代码全仓验证已完成：606文件597通过/9失败，4732通过/26失败/5跳过；84独立命令80通过/4旧失败。与旧0273980c已复现清单和实际断言一致，新增失败项0、无脚本超时。不要重跑已通过整套。窄测78、Node/Web/helper types/3文件diff lint、新普通Pane3+原生焦点9+Client焦点9全通过。
+- 性能完成后更新2026-09-24-pane-focus-lifecycle.md/status/handoff，独立提交Pane组9文件左右（FunctionPanes/helper/root、guide、authoring、matrix、status、handoff、forced Markdown report）。authoring现引用已核对v280和core范围。只加Markdown报告，不加log/JSON/生成文件。
+- 然后按用户Actions打包要求推codex/mods-v2分支、手动dispatch现有build-electron.yml，跟踪具体head SHA及artifact。只读GCM/API访问此前成功canPush=true；remote尚无该分支，没push/dispatch/PR/tag。无需gh/插件；凭据仅内存，绝不输出/写文件。普通branch不会触发tag release，不动main/UAT/本地NSIS。
+- 最终正式ingress按预定5x5000/100（旧5%/15ms）和带诊断2h/10k/40重载仍待执行；可与远程Actions并行，本机重负载必须串行。若仅性能预算失败保留并定位，不改变指标或为追PASS盲跑；用户已允许复杂边界及后续优化延期，但不得把失败写成通过。旧ACK6408真实丢失未证明原因，不直接归因本次焦点清理。
+- 核心功能不再扩展，复杂SDK/15个schema-only经典事件/非桌面UI等按core-delivery-scope延期。无agents，不问继续，不在批次停下。性能耗时约15分钟，可轻量读检视/文档，不修改运行代码。
+## 2026-09-24 23:00 全仓失败对照完成，最终Electron运行（最新）
+
+- HEAD仍2ce87e81，未提交仅Pane8行清理+helper/root/guide/matrix/status/handoff/authoring。scope延期文档254c2db5已提交，fs.read2ce87e81已提交。用户最新要求核心优先，复杂边界可延期，不再扩展低收益接口。
+- 7844已exit1：当前最终生产代码全仓Vitest606文件，597通过/9失败，4732通过/26失败/5跳过；core-final-vitest-comparison.json显示26个失败与已在0273980c复现的清单逐项一致，newFailures=[]、absentPriorFailures=[]、fileErrors=[]。日志/JSON保留，不称全仓全绿。
+- 21176已exit1：84独立命令80通过，4失败均与旧基线相同：agent-registry、sandbox-elevated三个source contracts、IM remote approval Windows路径、IM Zhaohu journey。对照command清单及实际断言一致，零超时/中断。workflow-worktree66项exit0/239秒。证据core-final-standalone/results.json及comparison.json。未改测试断言/旧模块来消除失败。
+- 当前唯一exec62352：最终matrix21和真实utilityProcess46已通过，正在完整Electron，日志pane-lifecycle-final-matrix/process/full-electron。等待完全退出，包括恢复ordinary。最终预期236只是预期，读取output/mods-validation/e2e/result.json实际数字并另存dated回执。功能和driver冻结，暂不并行构建/性能。
+- 此前38827 types/lint/78窄测全通过；当前新ordinary实际Pane-lifecycle3、imperative-focus9、client-focus9已全部通过。helper的settled旧快照去重/unmount也已通过。Matrix只Pane加说明和evidence、codeBaseline2ce87e81，状态保持；authoring从旧v278更新到已核对v280及核心范围链接，未重新追逐新边界。
+- 下一最终Electron退出→性能回检并整理Pane报告/status/handoff→独立提交Pane。可以将后续正式desktop/ingress/2hsoak作为最终冻结代码门禁，不为每个文档改动重复全部测试；任何失败保留并诊断，不改阈值/不冒充正式通过。
+- GitHub现有GCM非交互凭据只读验证成功，仓库seanchen1993/CmbCoworkAgent公开、canPush=true、build-electron.yml active；远程尚无codex/mods-v2分支。没push/dispatch/PR/tag；后续代码验证和独立提交完成后，可按用户Actions打包要求推该分支并workflow_dispatch，普通branch不创建tag release。凭据仅内存使用，勿输出/保存。无需安装gh/插件，不用本地NSIS，不动UAT。
+- 如果最终要跑84脚本，ignored run-core-final-standalone.cjs已执行完，不要重复；它从package.json展开84条命令，与旧链完全一致。core-final全仓已完成，只有后续代码改变/新失败才重复必要范围。无agents、不问继续、不停在提交边界。
+## 2026-09-24 22:45 核心范围已收敛，Pane最小修复全仓回归中（最新）
+
+- HEAD2ce87e81：254c2db5提交核心优先/复杂边界延期说明；2ce87e81独立提交fs.read v65组12文件。用户允许延期不影响正常使用的复杂边界，但不取消权限/证据/checkpoint正确性或失败记录。
+- 未提交Pane生产仅FunctionPanes.tsx新增8行：按当前focusRequest IDs修剪attemptedFocus、cleanup清空、loadedThread guard。真实React iframe第一轮fixture attach竞态，补等待后red2明确关闭第一个Pane仍保留focus-request-0；生产补丁后green。新helper还覆盖32次开关、settled→stale pending去重、属性切换和unmount。宿主回执受控，不能冒充真实guest/业务。主ChatContainer本有threadId key，非主应用跨线程漏洞，更不是旧ACK6408根因。
+- 38827已exit0：7文件78真实guest/session/renderer窄测、Node/Web/helper types、3文件修改行lint通过（FunctionPanes与新helper零warning，根E2E80旧warning无新增）。新ordinary构建后实际专项：Pane lifecycle3、imperative-focus9、client-focus9均通过，包括撤权/取消/重载/off及原生composer对照。
+- 当前唯一exec7844：已完成上述build+3专项，现在运行全仓vitest --maxWorkers=4，日志2026-09-24-core-final-vitest.log、最终JSON同名.json。生产/driver冻结。等退出，逐项对照旧0273980c已复现26项基线；不要把所有失败预先归因基线。旧JSON为2026-09-23-full-vitest-2.json、committed-baseline-six.json/chrome.json，最终difference空的comparison只对应旧轮次。
+- 后续真实utility46及完整Electron（新增helper2个功能检查，预期236但必须读实际回执）、性能回检/报告/独立提交。最终正式ingress/desktop/长稳及全仓standalone基线对照仍待完成；可依核心优先策略避免无意义重复整套，但不能把短测代替正式通过。
+- GitHub只读API已验证：现有Git Credential Manager非交互凭据可读seanchen1993/CmbCoworkAgent，canPush=true，build-electron.yml active。没有安装gh/插件，没有显示或保存凭据，没有push/dispatch。后续可用现有git凭据在内存中调用api.github.com，普通branch手动Actions不触发tag release。需等代码完成再推分支/打包，不做本地NSIS，不动UAT。
+- 文档新增pane-focus-lifecycle guide/report及Pane矩阵evidence（状态不升级）。当前报告仍待最终结果。无agents，不问继续，不停批次。
 ## 2026-09-24 22:35 核心优先，读取修复准备提交（最新）
 
 - 用户最新明确：复杂且不影响正常使用的边界功能可延期，优先主要能力。新增core-delivery-scope文档，不扩展低收益SDK/15个schema-only事件/非桌面UI，不改兼容事实；权限/证据/checkpoint正确性不延期。

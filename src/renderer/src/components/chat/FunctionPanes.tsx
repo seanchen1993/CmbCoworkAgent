@@ -292,6 +292,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
   useEffect(() => {
     const probes = focusProbes.current
     const steps = focusSteps.current
+    const attempts = attemptedFocus.current
     const changed = (): void => {
       focusEpoch.current++
     }
@@ -307,6 +308,7 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
       loadedThread.current = undefined
       probes.clear()
       steps.clear()
+      attempts.clear()
       window.removeEventListener("focusin", focusChanged, true)
       window.removeEventListener("pointerdown", changed, true)
       window.removeEventListener("keydown", changed, true)
@@ -379,6 +381,12 @@ export function FunctionPanes({ threadId }: { threadId: string }): React.JSX.Ele
     }
   }, [panes, threadId])
   useEffect(() => {
+    if (loadedThread.current !== threadId) return
+    const currentIds = new Set(
+      panes.flatMap((pane) => (pane.focusRequest ? [pane.focusRequest.id] : []))
+    )
+    for (const id of attemptedFocus.current)
+      if (!currentIds.has(id)) attemptedFocus.current.delete(id)
     for (const pane of panes) {
       const request = pane.focusRequest
       if (!request?.pending || attemptedFocus.current.has(request.id)) continue

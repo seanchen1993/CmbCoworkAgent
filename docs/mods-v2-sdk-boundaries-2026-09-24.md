@@ -1,6 +1,6 @@
 # SDK 实际边界与待实现项
 
-参考仍固定为 Claude Code v2.1.278，声明头 2.1.277。本次逐项核对 SDK 声明、生产 `SESSION_CAPABILITIES`、guest 构造器和宿主消费者；[兼容矩阵](mods-v2-compatibility-matrix.json)保留每个成员的状态。源码里出现事件名，或测试能够手动 dispatch，并不能证明 SDK 可调用。
+参考固定为 Claude Code v2.1.280，声明头 2.1.277，与 v2.1.278 声明逐字节相同，见[参考复核](mods-v2-claude-reference-2026-09-24.md)。本次逐项核对 SDK 声明、生产 `SESSION_CAPABILITIES`、guest 构造器和宿主消费者；[兼容矩阵](mods-v2-compatibility-matrix.json)保留每个成员的状态。源码里出现事件名，或测试能够手动 dispatch，并不能证明 SDK 可调用。未开放的复杂边界接口按[核心交付范围](mods-v2-core-delivery-scope-2026-09-24.md)延期。
 
 ## 已有受限实现
 

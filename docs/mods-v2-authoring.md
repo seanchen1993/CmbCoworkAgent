@@ -1,8 +1,9 @@
 # 函数 Mods 开发与当前支持范围
 
 当前分支实现了标准函数插件的加载、授权、直接命令、交互 Pane/Client、原生工具调用、自定义工具注册、独立文本模型请求与主 Agent 流式控制，以及应用项目完成规则。目标兼容版本固定为 Claude Code
-v2.1.278（官方声明文件头为 2.1.277）；这不是全部 Mods API 已经可用的声明。实现和验证状态见
-[最新契约审查](mods-v2-claude-latest-audit-2026-09-22.md)及[兼容差异表](mods-v2-compatibility-matrix.json)。
+v2.1.280（官方声明文件头为 2.1.277，与 v2.1.278 声明相同）；这不是全部 Mods API 已经可用的声明。实现和验证状态见
+[参考复核](mods-v2-claude-reference-2026-09-24.md)及[兼容差异表](mods-v2-compatibility-matrix.json)。
+本轮优先完成常用能力，复杂边界兼容暂缓，范围见[核心交付说明](mods-v2-core-delivery-scope-2026-09-24.md)。
 
 ## 在应用里使用
 

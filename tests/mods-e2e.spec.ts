@@ -10,6 +10,7 @@ import { verifyAgentList } from "./support/mods-agent-list-e2e"
 import { verifyFileWrite } from "./support/mods-file-write-e2e"
 import { verifyFileMetadata } from "./support/mods-file-metadata-e2e"
 import { verifyFileReadOptions } from "./support/mods-file-read-options-e2e"
+import { verifyPaneFocusLifecycle } from "./support/mods-pane-focus-lifecycle-e2e"
 import { verifyBackgroundTimeout } from "./support/mods-background-timeout-e2e"
 import { verifyImperativeScroll } from "./support/mods-imperative-scroll-e2e"
 import { verifyImperativeFocus } from "./support/mods-imperative-focus-e2e"
@@ -75,6 +76,7 @@ const focus = [
   "agent-list",
   "file-metadata",
   "file-read-options",
+  "pane-focus-lifecycle",
   "file-write",
   "background-timeout",
   "imperative-scroll",
@@ -276,6 +278,10 @@ async function main(): Promise<void> {
       timings.scope = "Focused site Electron regression; not the full integrated suite"
       if (focus === "file-read-options") {
         await verifyFileReadOptions(page!, workspace, artifacts, modelServer.requests, until, pass)
+        return
+      }
+      if (focus === "pane-focus-lifecycle") {
+        await verifyPaneFocusLifecycle(page!, until, pass)
         return
       }
       if (focus === "base64") {
@@ -3252,6 +3258,7 @@ async function main(): Promise<void> {
     await verifyClientBusy(page!, workspace, artifacts, until, pass)
     await verifyBase64(page!, workspace, artifacts, until, pass)
     await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
+    await verifyPaneFocusLifecycle(page!, until, pass)
     await verifyAgentList(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyFileWrite(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyFileMetadata(page!, workspace, artifacts, modelServer.requests, until, pass)
