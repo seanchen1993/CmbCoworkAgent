@@ -2,16 +2,18 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-24",
-  "codeBaseline": "7ae3c6ab",
+  "codeBaseline": "3c569546",
   "upstream": {
+    "releaseVersion": "2.1.280",
     "versionInDeclaration": "2.1.277",
-    "revision": "bf7d404e26a5fb6167d21b46c93a2bf6c22ab274",
+    "revision": "56f36532530f88b572854538d685fcf781141e8c",
     "declarationSha256": "AC107A37C08AD46F8632EDC1639B13A740FAE0B8249A2245532ADFD325E57D0D",
-    "source": "https://github.com/anthropics/claude-code/blob/v2.1.278/mods/types/claude-code.d.ts",
+    "source": "https://github.com/anthropics/claude-code/blob/v2.1.280/mods/types/claude-code.d.ts",
     "runtimePreviouslyVerified": "2.1.272",
     "runtime273Verified": true,
     "runtime273VerificationScope": "52 usage-operation/turn-lifecycle/session-metadata/session-state/permission-query/command/stream/basic-SDK/state/read-only-file/held-command/desktop-tree/captured-SDK/Client-descriptor/tool-SDK-envelope/model-completion-operation/engine-tool-ingress/tool-registration-operation/MCP-operation conformance cases in real plugin test; usage and turn lifecycle use mocked lower engine, not actual upstream transport; not full API or product parity",
-    "latestAudit": "docs/mods-v2-claude-latest-audit-2026-09-22.md"
+    "declarationUnchangedSince": "2.1.278",
+    "latestAudit": "docs/mods-v2-claude-reference-2026-09-24.md"
   },
   "currentImplementation": {
     "branch": "codex/mods-v2",

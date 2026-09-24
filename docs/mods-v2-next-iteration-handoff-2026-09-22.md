@@ -1,3 +1,17 @@
+## 2026-09-24 官方v280复核完成与正式桌面性能通过（最新）
+
+- 提交前HEAD3c569546。v2.1.280官方tag56f36532530f88b572854538d685fcf781141e8c，声明499059字节/SHA与v278完全相同，header仍277；README仅telemetry收紧built-in/拒绝installed/batch。新reference guide/matrix元数据/status/report，2文件6窄测通过。未安装/执行280 CLI，不升级245项兼容状态。
+- exec70692已exit0，当前无运行进程。冻结v63正式desktop-performance-2026-09-24T06-25-53-608Z-full-5f99565a qualified=true/passed=true：50+50样本、110实际provider请求、TTFT p95 187.1→212.8 +25.7ms、吞吐.994926868、CPU差-.063675564（均300s）。旧失败记录保留，不能据此清除ingress关闭失败/2h长稳失败。随后单独补正式结果报告提交。
+- 未提交 tests/support/mods-client-busy-e2e.ts 尚未接根驱动/未运行；下一先加focus/full入口，用旧普通构建跑实际RED，再按结果修复FunctionClient晚输入回调清busy的风险。候选pending计数不改服务端授权/队列/超时。不是原6408根因证明。
+- 持续完成，UAT/共享依赖/本地NSIS不动，不派agents，不问继续。
+
+## 2026-09-24 v63正式性能运行与Client并发回归准备（最新）
+
+- 当前HEAD3c569546，可信DOM/失败证据已独立提交。唯一运行exec70692：node tests/run-mods-desktop-soak.mjs --performance，日志2026-09-24-desktop-performance-v63-full.log，冻结目录desktop-performance-2026-09-24T06-25-53-608Z-full-5f99565a。当前关闭5分钟窗口已完成，开启窗口运行；等进程退出，不并行build/重测试，不改生产/已冻结driver。
+- 唯一未提交测试 tests/support/mods-client-busy-e2e.ts（尚未导入根驱动/尚未执行）。源码FunctionClient.control(change)不置busy但finally却清busy，可能抢先解锁另一press；已准备真实guest ui.input sleep1000/ui.press sleep2000、可信fill/click、250ms忙态持续观察以及off/reopen的回归，**未证明旧实现失败，未改生产，不能声称bug修复或原6408根因**。
+- 性能结束后先根E2E加client-busy focus + full入口、运行旧普通构建保留真正RED，再决定最小pending非change计数修复。随后types/lint/真实guest/session/完整Electron及性能回检、独立提交。源审阅候选见ignored2026-09-24-client-busy-review-draft.md。
+- 之后继续长稳正式两小时10k、剩余兼容SDK/UI和Actions包内门禁。仍不动UAT/共享依赖/本地NSIS、不派agents、不问继续、不停止批次。
+
 ## 2026-09-24 长稳点击证据完成验证并独立提交（最新）
 
 - 当前 HEAD dc30e72e，兼容范围复核已提交。当前未提交仅 tests：latency 探针当前同 Pane 活按钮匹配、可信 input/pointer/click 最后16条、Client/handle/disabled/focus、ACK白名单；soak catch保留失败快照。应用生产代码没有改动。

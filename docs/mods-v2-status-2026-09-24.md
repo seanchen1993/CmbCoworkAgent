@@ -73,4 +73,4 @@
 
 ## Claude 参考与差异
 
-当前固定官方参考为 v2.1.278，声明文件头 2.1.277，提交 `bf7d404e26a5fb6167d21b46c93a2bf6c22ab274`。详见[最新参考审查](mods-v2-claude-latest-audit-2026-09-22.md)及[逐项兼容矩阵](mods-v2-compatibility-matrix.json)。completion.check、应用项目规则和 Autobiz adapter 是本应用扩展，不构成 Claude 同名兼容声明。
+2026-09-24复核官方参考为 v2.1.280，提交 `56f36532530f88b572854538d685fcf781141e8c`；声明文件头仍2.1.277，与v2.1.278逐字节相同。README收紧内建telemetry范围，详见[最新参考复核](mods-v2-claude-reference-2026-09-24.md)及[逐项兼容矩阵](mods-v2-compatibility-matrix.json)。completion.check、应用项目规则和 Autobiz adapter 是本应用扩展，不构成 Claude 同名兼容声明。
