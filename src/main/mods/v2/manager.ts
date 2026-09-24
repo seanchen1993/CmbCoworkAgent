@@ -21,6 +21,7 @@ import type { ModControlStore, ModGrant } from "../control-store"
 import type { ModPluginSource } from "../manager"
 import type {
   ModCommandDescriptor,
+  ModUiChangeScope,
   ModJson,
   ModProjection,
   ModObject
@@ -113,7 +114,7 @@ interface FunctionManagerHost {
   plugins(): ModPluginSource[]
   enabled(workspace: string): boolean
   publish(workspace: string, value: ModJson, signal: AbortSignal): Promise<ModJson>
-  changed(threadId: string): void
+  changed(threadId: string, scope?: ModUiChangeScope): void
   assertThread?(workspace: string, threadId: string): void
   prepareSessionTitle?(
     workspace: string,
@@ -623,7 +624,7 @@ export class FunctionModsManager {
             assertLive(plugin)
             return result
           },
-          uiChanged: () => this.host.changed(threadId),
+          uiChanged: (scope) => this.host.changed(threadId, scope),
           loadClient: async (name, module) => {
             const snapshot = current.snapshots.get(name)
             if (!snapshot || !Object.hasOwn(snapshot.compiled.clients, module))

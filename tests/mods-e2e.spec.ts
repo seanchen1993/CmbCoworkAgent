@@ -1,3 +1,4 @@
+import { verifyUiNotification } from "./support/mods-ui-notification-e2e"
 import { verifyClientFocus } from "./support/mods-client-focus-e2e"
 import { verifyUiInvalidate } from "./support/mods-ui-invalidate-e2e"
 import { verifyAgentList } from "./support/mods-agent-list-e2e"
@@ -58,6 +59,7 @@ const binary = packagedDir
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
 const focus = [
+  "ui-notification",
   "client-focus",
   "ui-invalidate",
   "agent-list",
@@ -248,7 +250,9 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "client-focus") {
+      if (focus === "ui-notification") {
+        await verifyUiNotification(page!, workspace, artifacts, until, pass)
+      } else if (focus === "client-focus") {
         await verifyClientFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
       } else if (focus === "ui-invalidate") {
         await verifyUiInvalidate(page!, workspace, artifacts, until, pass)
@@ -3205,6 +3209,7 @@ async function main(): Promise<void> {
     await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyUiInvalidate(page!, workspace, artifacts, until, pass)
+    await verifyUiNotification(page!, workspace, artifacts, until, pass)
     await verifyClientFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyAgentList(page!, workspace, artifacts, modelServer.requests, until, pass)

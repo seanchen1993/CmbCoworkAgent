@@ -14,7 +14,7 @@ import { FunctionUiNotices, type FunctionNoticeDialogAccess } from "./ui-notice"
 import { validateFunctionNotice } from "../../../shared/mods/v2/ui-notice"
 import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import { ModFunctionError, isModObject } from "../../../shared/mods/v2/contracts"
-import type { ModJson, ModObject } from "../../../shared/mods/types"
+import type { ModJson, ModObject, ModUiChangeScope } from "../../../shared/mods/types"
 import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import { FunctionDispatcher, type FunctionPlugin } from "./dispatcher"
@@ -130,7 +130,7 @@ export interface FunctionSessionHost {
   compactSession?(instructions: string, signal: AbortSignal): Promise<ModJson>
   abortTurn?(plugin: FunctionPlugin, turnId: string, signal: AbortSignal): Promise<void>
   assertLive(plugin?: FunctionPlugin): void
-  uiChanged?(): void
+  uiChanged?(scope?: ModUiChangeScope): void
   dialogs?: FunctionNoticeDialogAccess
   debugLog?(plugin: string, text: string): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
@@ -245,7 +245,7 @@ export class FunctionSession {
       clients: this.clients,
       plugins,
       assertLive: () => this.assertLive(),
-      changed: () => this.host.uiChanged?.(),
+      changed: (scope) => this.host.uiChanged?.(scope),
       publish: (value) => this.host.publish(value, this.controller.signal),
       dispatch: (event, input, presentation) =>
         this.dispatch(

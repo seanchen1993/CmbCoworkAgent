@@ -1,6 +1,13 @@
 /** Maximum number of command jobs exposed by the retained project history. */
 export const MOD_COMMAND_HISTORY_LIMIT = 50
 
+/** Missing scope retains the original global notification, including legacy Mods. */
+export type ModUiChangeScope = "panes"
+export interface ModUiChangeEvent {
+  threadId: string
+  scope?: ModUiChangeScope
+}
+
 export const MODS_API_VERSION = "cmb.mods/v1" as const
 
 export type ModJson = null | boolean | number | string | ModJson[] | ModObject

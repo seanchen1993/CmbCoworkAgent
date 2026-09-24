@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-24",
-  "codeBaseline": "971d1261",
+  "codeBaseline": "faff7fa1",
   "upstream": {
     "versionInDeclaration": "2.1.277",
     "revision": "bf7d404e26a5fb6167d21b46c93a2bf6c22ab274",
@@ -627,8 +627,8 @@
   ],
   "clientSurface": [
     {"name": "elements", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
-    {"name": "state", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
-    {"name": "setState", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
+    {"name": "state", "target": "desktop-client-vm-state", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"], "availability": "bounded", "note": "Client-local VM state survives its live instance and renderer reload, but is not durable restart storage. setState schedules a bounded redraw; only Client-local updates send panes-scoped notifications, while explicit ui.invalidate retains global site refresh. Existing render-loop and lifecycle limits remain.", "implementation": ["src/main/mods/v2/client-bootstrap.ts", "src/main/mods/v2/clients.ts", "src/main/mods/v2/panes.ts"], "evidence": ["src/main/mods/v2/clients.test.ts", "src/main/mods/v2/client-lifecycle.test.ts", "src/main/mods/v2/ui-notification.test.ts", "src/renderer/src/lib/function-site-notification.test.ts", "tests/support/mods-ui-notification-e2e.ts", "docs/mods-v2-ui-notifications-2026-09-24.md"]},
+    {"name": "setState", "target": "desktop-client-vm-state", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"], "availability": "bounded", "note": "Client-local VM state survives its live instance and renderer reload, but is not durable restart storage. setState schedules a bounded redraw; only Client-local updates send panes-scoped notifications, while explicit ui.invalidate retains global site refresh. Existing render-loop and lifecycle limits remain.", "implementation": ["src/main/mods/v2/client-bootstrap.ts", "src/main/mods/v2/clients.ts", "src/main/mods/v2/panes.ts"], "evidence": ["src/main/mods/v2/clients.test.ts", "src/main/mods/v2/client-lifecycle.test.ts", "src/main/mods/v2/ui-notification.test.ts", "src/renderer/src/lib/function-site-notification.test.ts", "tests/support/mods-ui-notification-e2e.ts", "docs/mods-v2-ui-notifications-2026-09-24.md"]},
     {"name": "columns", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
     {"name": "rows", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},
     {"name": "every", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"]},

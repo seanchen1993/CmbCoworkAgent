@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import type { ModJson, ModObject } from "../../../shared/mods/types"
+import type { ModJson, ModObject, ModUiChangeScope } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
 import {
   ModFunctionError,
@@ -38,7 +38,7 @@ export interface PaneHost {
   clients?: import("./clients").FunctionClients
   plugins: readonly FunctionPlugin[]
   assertLive(): void
-  changed(): void
+  changed(scope?: ModUiChangeScope): void
   publish(value: ModJson): Promise<ModJson>
   site?(pane: FunctionPaneSnapshot): { component: string; props: ModObject }
   renderCore?(input: ModObject): Promise<ModJson>
@@ -67,6 +67,7 @@ export class FunctionPanes {
   private readonly retired = new Set<string>()
   private notification?: ReturnType<typeof setTimeout>
   private notificationDeadline = 0
+  private notificationScope?: ModUiChangeScope
   private closed = false
 
   readonly scroll: FunctionScrollRequests
@@ -223,15 +224,21 @@ export class FunctionPanes {
     )
   }
 
-  private changed(delay = 100): void {
+  private changed(delay = 100, scope?: ModUiChangeScope): void {
     if (this.closed) return
+    // Merge before the deadline fast path: an earlier Client frame must never hide
+    // an explicit global invalidation, in either arrival order.
+    if (!this.notification) this.notificationScope = scope
+    else if (scope === undefined) this.notificationScope = undefined
     const deadline = performance.now() + delay
     if (this.notification && this.notificationDeadline <= deadline) return
     clearTimeout(this.notification)
     this.notificationDeadline = deadline
     this.notification = setTimeout(() => {
+      const scope = this.notificationScope
       this.notification = undefined
-      if (!this.closed) this.host.changed()
+      this.notificationScope = undefined
+      if (!this.closed) this.host.changed(scope)
     }, delay)
     this.notification.unref()
   }
@@ -239,7 +246,7 @@ export class FunctionPanes {
   notify(): void {
     // Client frames are already bounded by their host scheduler. Batch them for one
     // frame without delaying interactive feedback behind ordinary pane invalidations.
-    this.changed(16)
+    this.changed(16, "panes")
   }
 
   open(plugin: string, input: ModObject): void {

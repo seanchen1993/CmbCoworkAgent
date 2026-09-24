@@ -6,7 +6,12 @@ import type {
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
-import type { ModCard, ModProjection, ModWorkspaceStatus } from "../shared/mods/types"
+import type {
+  ModCard,
+  ModProjection,
+  ModWorkspaceStatus,
+  ModUiChangeEvent
+} from "../shared/mods/types"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import {
   isWindowCloseBehavior,
@@ -3134,8 +3139,9 @@ const api = {
       ipcRenderer.on("mods:jobs-changed", listener)
       return () => ipcRenderer.removeListener("mods:jobs-changed", listener)
     },
-    onCardsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void => callback(value)
+    onCardsChanged: (callback: (event: ModUiChangeEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: ModUiChangeEvent): void =>
+        callback(value)
       ipcRenderer.on("mods:cards-changed", listener)
       return () => ipcRenderer.removeListener("mods:cards-changed", listener)
     }

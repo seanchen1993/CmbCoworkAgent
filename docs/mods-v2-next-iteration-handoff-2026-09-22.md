@@ -1,3 +1,34 @@
+## 2026-09-24 Client 通知范围完成验证，独立提交（最新）
+
+- 提交前HEADfaff7fa1。仅Client独立notify发panes scope，原timer全局优先合并、scope经原Session/Manager/IPC/preload到FunctionSite，后者忽略明确panes。没有新host authority，revision仍v62。代码/回归/指南/状态/矩阵state/setState边界/报告一并提交。
+- 先红5失败/1通过→窄测6文件30通过；完整Mods54（含5 renderer）149文件1314项PASS，utility41 PASS。Node/Web/helper types及diff lint12文件0error/修改行无诊断。真实旧包scope缺失红→新Electron通知专项4PASS；又Client焦点9/重绘6/desktop-history4 PASS（真实50条输出、4Clients、200ACK、reload/off）。
+- 20133 exit0，performance smoke desktop-performance-2026-09-24T04-49-32-229Z-smoke-29ff9710：TTFT110.2→176.5(+66.3)ms，吞吐.992658，约1sidle差+.582357，qualified=false/passed=false。不能宣称解决TTFT或正式长稳。最终matrix证据/renderer通知3测试通过（87242exit0），截图已查看。无运行build/tests/perf。
+- 提交后继续公开h/Fragment：先真实guest/Client红→共享readonly factory aliases，Fragment列布局需修原私有Box默认row（不能仅给旧函数改名就宣称兼容）；保留private编译别名、树/owner/预算约束。string tags仍不可假称支持；globals实际probe后再审计。ignored public-jsx-design-draft.md说明固定官方11141/11150。
+- 剩余矩阵99条planned-adapter无note（244总claims）需逐项核查；inventory与contract-audit/matrix-ui-client-notes草稿在ignored output。不可把SDK本地实现当同名engine/operation生产触发。
+- 长稳原6407/77分钟ACK超时需可信click/busy/实例/handle诊断；正式TTFT+67.7、ingress off、其它契约与GitHub Actions安装门禁未完成。不停批次，不动UAT/共享依赖、不派agent/push/本地NSIS。
+
+## 2026-09-24 Client 通知范围最终验证中（最新）
+
+- HEAD faff7fa1，通知scope改动仍未提交。生产8文件（types/panes/session/manager/IPC/preload/FunctionSite）、new main+renderer tests、新普通Electron helper/root分支/文档报告。authority不扩大，revision仍v62。原global优先计时合并、V1缺省/显式invalidate/site动作/配置保留。
+- 窄测先5fail/1pass红→6文件30绿；renderer窄测调用生产组件订阅但用最小React hook/bridge夹具，20条Client事件不再增加siteRender；未知scope仍按global。实际guest Session Client变更发panes，explicit SDK发global。Node/Web/helper types通过；diff lint12文件0error/修改行无diagnostic（旧warnings保留）。
+- 新普通Electron先旧包3条缺scope红→新包4PASS（48806 exit0），包含实际IPC/Client计数/PromptHint/CommandOutput/global refresh/reload/off，未替换bridge。Mods54完整4workers149files1314tests PASS、utility41 PASS（13077 exit0）。
+- **唯一运行exec20133**：client-focus9、ui-invalidate6、desktop-history4已通过，历史场景50条输出/4Clients/200确认+reload/off；当前自动进入独占performance smoke（ui-notification-performance.log），poll到exit。无其它进程。生产/测试冻结，之后补实际perf数值、finaldiff/matrix证据窄测、report/status/handoff并独立commit，不停。
+- 已更新docs mods-v2-ui-notifications-2026-09-24.md、status、矩阵state/setState两条bounded具体边界（无持久化restart承诺）、report草稿；修复status旧remaining段“Client目标不支持”的过时文字。报告不借旧完整Electron204，不宣称正式性能/长稳通过。
+- 下一可实施公开h/Fragment：ignored public-jsx-design-draft.md，未跑红/未实现。真实官方h/Fragment存在，private Fragment目前Box props{}(row)不等同官方column，需先失败测试再实现readonly alias/column，手写string tags仍应明确bounded拒绝。不把JSX编译可用当public globals可用。globals需真实guest/Client/utility probe。
+- 只读矩阵inventory共有244claims、99条planned-adapter无note，集中engine/operation/UI/Client/globals/behavior；ignored remaining-claims-inventory.json。之后逐项人工实现/证据审查，不能批量复制SDK可用性到operation/engine。正式TTFT/ingress关闭/长稳ACK、剩余契约与GitHub Actions安装门禁继续。
+- UAT/共享依赖未触碰，无agents/push/本地NSIS。
+
+## 2026-09-24 Client 刷新通知范围实现中（最新）
+
+- HEAD faff7fa1：Client主动焦点v62已独立提交（Mods53 144/1298、process41、新Electron9+旧focus9/invalidate6、types/lint；smoke+51.8 false/false）。当前未提交通知scope优化，无host authority扩大，修订仍v62。
+- 新main ui-notification.test.ts + renderer function-site-notification.test.ts先红5失败/1通过（实际Client Session→通知缺scope；真实FunctionSite订阅逻辑20条Client消息多发2次siteRender）。实现后与原site生命周期/队列/content及invalidate合计6文件30项窄测PASS。
+- 最小生产改动：shared ModUiChangeScope/Event；仅panes.notify传panes，原定时合并all优先且deadline不延后；Session/Manager/IPС/preload原链传scope；FunctionSite仅忽略明确panes。V1缺省、显式invalidate、site动作、配置、其它消费者保留原行为。无授权缓存/额外队列/新guest API。
+- 新Electron helper ui-notification：真实安装Client本地计数+PromptHint/CommandOutput；公共onCardsChanged只读监听，不替换bridge。普通旧v62包红（三条event均无scope）。Node/Web/helper types PASS、diff lint12文件0error/修改行无warning（旧IPC29/session2/preload dts9/preload22/root88保留）。
+- **唯一运行exec48806**：已普通新build成功，正在/即将ui-notification专项Electron，日志ui-notification-electron-green.log/artifacts。poll到exit；生产/测试暂冻结。测试一项初始挂载数量假设已按真实初始数量+1修正，未改应用迎合测试。
+- 后续：完成专项→代码复核→完整Mods54四worker并包含renderer通知/site/lifetime/queue/focus→utility41→普通包client-focus、ui-invalidate、desktop-history相关E2E→独占performance smoke→report/status/guide/handoff独立commit。新报告/文档尚未写；不能把源码路径优化当TTFT或长稳已通过。
+- 长稳仍6407事件/约77分钟ACK超时未定位；ignored soak-click-diagnostics-draft.md需可信click/aria-disabled/实例/handle证据后修复，不能盲目放开busy或延长超时。正式性能/其余SDK/classic/矩阵/Actions安装门禁仍继续。
+- 不碰UAT/共享依赖，无agents/push/NSIS，用户要求连续实现不能停批次边界。
+
 ## 2026-09-24 Client 主动焦点 v62 完成验证，独立提交（最新）
 
 - 提交前HEAD971d1261。本次Client主动焦点v62，真实实例/控件handle/双ACK，相关代码、测试、文档、矩阵与报告独立提交。红14→新15+原30+renderer2=47窄测绿；Mods53含renderer 144/1298、utility41 PASS；Node/Web/helper/diff lint通过（旧E2E88warning）。

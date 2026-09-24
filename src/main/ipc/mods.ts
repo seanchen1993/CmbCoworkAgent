@@ -335,7 +335,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       },
       scheduleCommand: (workspace, threadId, command, signal, run) =>
         scheduleFunctionCommand(queue, workspace, threadId, command, signal, run),
-      changed: (threadId) => window()?.webContents.send("mods:cards-changed", { threadId })
+      changed: (threadId, scope) =>
+        window()?.webContents.send("mods:cards-changed", {
+          threadId,
+          ...(scope === "panes" ? { scope } : {})
+        })
     },
     () => new FunctionRuntimeClient(join(__dirname, "function-mod-host.js"))
   )

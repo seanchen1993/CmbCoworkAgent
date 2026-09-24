@@ -227,7 +227,7 @@ export function FunctionSite({
     }
     refreshRef.current = update
     const stop = window.api.mods.onCardsChanged((event) => {
-      if (event.threadId === threadId) {
+      if (event.threadId === threadId && event.scope !== "panes") {
         lifetime.invalidate()
         update()
       }

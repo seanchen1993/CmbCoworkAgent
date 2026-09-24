@@ -1035,7 +1035,9 @@ interface CustomAPI {
     jobs(threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]>
     cancelJob(threadId: string, id: string): Promise<void>
     onJobsChanged(callback: (event: { threadId: string }) => void): () => void
-    onCardsChanged(callback: (event: { threadId: string }) => void): () => void
+    onCardsChanged(
+      callback: (event: import("../shared/mods/types").ModUiChangeEvent) => void
+    ): () => void
   }
   agent: {
     invoke: (
