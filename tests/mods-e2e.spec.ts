@@ -1,3 +1,4 @@
+import { verifyGuestCodegen } from "./support/mods-guest-codegen-e2e"
 import { verifyPublicJsx } from "./support/mods-public-jsx-e2e"
 import { verifyUiNotification } from "./support/mods-ui-notification-e2e"
 import { verifyClientFocus } from "./support/mods-client-focus-e2e"
@@ -60,6 +61,7 @@ const binary = packagedDir
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
 const focus = [
+  "guest-codegen",
   "public-jsx",
   "ui-notification",
   "client-focus",
@@ -252,7 +254,9 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "public-jsx") {
+      if (focus === "guest-codegen") {
+        await verifyGuestCodegen(page!, workspace, artifacts, until, pass)
+      } else if (focus === "public-jsx") {
         await verifyPublicJsx(page!, workspace, artifacts, until, pass)
       } else if (focus === "ui-notification") {
         await verifyUiNotification(page!, workspace, artifacts, until, pass)
@@ -3213,6 +3217,7 @@ async function main(): Promise<void> {
     await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyUiInvalidate(page!, workspace, artifacts, until, pass)
+    await verifyGuestCodegen(page!, workspace, artifacts, until, pass)
     await verifyPublicJsx(page!, workspace, artifacts, until, pass)
     await verifyUiNotification(page!, workspace, artifacts, until, pass)
     await verifyClientFocus(page!, workspace, artifacts, modelServer.requests, until, pass)

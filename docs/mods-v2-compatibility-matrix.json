@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-24",
-  "codeBaseline": "10337a4d",
+  "codeBaseline": "9dd039a3",
   "upstream": {
     "versionInDeclaration": "2.1.277",
     "revision": "bf7d404e26a5fb6167d21b46c93a2bf6c22ab274",
@@ -655,6 +655,7 @@
     {"name": "performance", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]}
   ],
   "behaviorContracts": [
+    {"name": "guest-string-code-generation", "target": "quickjs-pre-plugin-constructor-guard", "implementationStatus": "adapted", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"], "note": "Hooks and Client reject string eval/Function through direct, bound, Reflect.construct and ordinary/async/generator/async-generator constructor paths before plugin registration. Getter-only globals and constructor properties resist replacement. Native host evalCode remains for approved source and controlled invocations; this does not claim full upstream globals or exact error identity. Original declarations, generators, async SDK and lifetime guards remain. Host revision v63 binds the changed contract into approval digests.", "implementation": ["src/main/mods/v2/guest-codegen.ts", "src/main/mods/v2/guest-runtime.ts", "src/shared/mods/v2/contracts.ts"], "evidence": ["src/main/mods/v2/guest-codegen.test.ts", "src/main/mods/v2/guest-runtime.test.ts", "tests/support/function-mods-process-entry.ts", "tests/support/mods-guest-codegen-e2e.ts", "docs/mods-v2-guest-codegen-2026-09-24.md"]},
     {"name": "register/on/options", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B1", "acceptance": ["A01"], "differences": ["D10"]},
     {"name": "matcher/glob/depth/regex-budget", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
     {"name": "registration.catch/failure-policy", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A03"], "differences": ["D02"]},

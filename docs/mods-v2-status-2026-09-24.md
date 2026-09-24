@@ -1,9 +1,10 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `10337a4d`（随后公开 JSX factory 见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `9dd039a3`（随后 guest 字符串代码生成限制见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
 ## 应用已具备的能力
 
+- [Guest 代码生成限制](mods-v2-guest-codegen-2026-09-24.md)：在 hooks/Client 插件代码运行前拒绝 eval/Function 及间接构造器路径，保留正常函数、生成器和异步 SDK；宿主修订 v63 绑定批准摘要。只影响 Function Mods 的 QuickJS，未修改应用 JavaScript 环境。
 - 独立 utility process / QuickJS、插件摘要授权、真实 FunctionSession、runtime authority、generation 和原线程 run lease。取消、撤权、替换和关闭会中止旧操作；关闭模块不扫描插件、不创建 Mods runtime。
 - 主 Agent 的真实模型流与 turn.step，受限 model.fork/classify，实际 agent registry 的 agent.offer；不能把模型文本中的 PASS 当作测试回执。
 - [实际子 Agent 实例](mods-v2-agent-list-2026-09-24.md)：当前观察周期内 shared child 的真实 ID、元数据、父子关系和 running/completed/failed/killed；原取消/撤权和发布复核，超限拒绝查询但不阻断原任务。不是全部执行器任务目录，仍 partial/bounded。
@@ -24,6 +25,7 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| Guest 代码生成限制 | 先真实guest红4/1、旧普通Electron执行字符串红；窄测4文件39项通过，Node/Web/helper types与修改行ESLint通过，新普通Electron专项5通过；完整Mods57含renderer为151文件1329项通过，真实utility42与完整Electron223通过；独占性能结果见独立报告 |
 | 公开 JSX factory | guest、loader、旧Surface均有先失败测试；相关3文件22项、完整Mods56含renderer为150文件1323项及真实utilityProcess通过；最终普通包公开JSX5/通知范围4/Client焦点9通过，smoke TTFT+65.4ms且qualified=false/passed=false；详见独立报告 |
 | Client 通知范围 | 先红后绿，相关6文件30项窄测；Mods54含5个renderer文件149文件1314项及utility41通过；普通旧包IPC范围红→新普通包专项4通过；Client焦点9/重绘6/50条历史200确认专项4通过；smoke TTFT+66.3ms，qualified=false/passed=false，详见独立报告 |
 | Client 主动焦点 | 真实guest/session先14项红，扩展后新15+原30+renderer2共47窄测通过；完整Mods53含renderer为144文件1298项、utilityProcess41项通过；新实际Electron专项9检查通过；原生焦点9/重绘6专项通过；性能smoke TTFT+51.8ms，qualified=false/passed=false；不借用v61完整204作为v62全量结果 |

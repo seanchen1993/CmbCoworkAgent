@@ -174,10 +174,15 @@ describe("persistent function guest frame boundaries", () => {
     const runtime = await guest(`on("command.run", async ($,e) => ({
       frozen:Object.isFrozen(e)&&Object.isFrozen(e.nested),
       globals:[typeof process,typeof require,typeof fetch,typeof Bun,typeof document],
-      escaped:({}).constructor.constructor("return typeof process")()
+      generation:(()=>{try {({}).constructor.constructor("return typeof process")();return "executed"}
+        catch(error){return error.message}})()
     }))`)
     expect(await runtime.invoke("0", { nested: { ok: true } }, async () => ({}), options)).toEqual({
-      value: { frozen: true, globals: Array(5).fill("undefined"), escaped: "undefined" }
+      value: {
+        frozen: true,
+        globals: Array(5).fill("undefined"),
+        generation: "MODS_CODE_GENERATION_DENIED"
+      }
     })
   })
   it("evaluates regular expression matchers inside the bounded guest", async () => {

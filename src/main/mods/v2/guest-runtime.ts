@@ -18,6 +18,7 @@ import {
   type FunctionRegistration
 } from "../../../shared/mods/v2/contracts"
 import { FUNCTION_GUEST_BOOTSTRAP } from "./guest-bootstrap"
+import { FUNCTION_CODEGEN_GUARD } from "./guest-codegen"
 import { modCompiler } from "../loader"
 
 let compiledBootstrap: string | undefined
@@ -95,6 +96,7 @@ export class FunctionGuestRuntime {
         target: "es2016"
       }).code
       const program = compiler.transformSync(code, { target: "es2016" }).code
+      guest.evaluate(FUNCTION_CODEGEN_GUARD).dispose()
       guest.evaluate(compiledBootstrap).dispose()
       guest.evaluate(program).dispose()
       const registration = guest.evaluate(

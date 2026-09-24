@@ -1,3 +1,30 @@
+## 2026-09-24 v63 代码生成限制完成验证并独立提交（最新）
+
+- 提交前HEAD9dd039a3。v63 trusted原生guard在任意plugin代码前锁eval/Function及普通/async/generator/async-generator原型constructor；正常函数/生成器/SDK续接保留。宿主revision绑定批准摘要，主进程/renderer/V1/共享依赖不变。guide/status/matrix/report一并提交。
+- 先真实guest红4/1→39窄测绿；旧ordinary Electron executed2红→新专项5绿。Node/Web/helper types与diff lint9文件通过（旧root88warning）；完整Mods57含renderer151文件1329项、utility42、完整Electron223全通过（1391exit0，已恢复ordinaryout），截图已查看。
+- 独占perf68315exit0：desktop-performance-2026-09-24T05-50-19-079Z-smoke-7efe62b5，TTFT126.2→163.8(+37.6)ms，吞吐.993970，约1sidle差+1.916739，整体qualified=false/passed=false，stream子项true不能当正式PASS。完整Electron关闭读p95-0.6929%单次对照不能抹去正式多轮ingress失败。当前无运行tests/build/perf。
+- **下一立即继续**：兼容矩阵96条planned/no-note逐项审计。先增加失败的全面边界说明测试和真实guest/Client全局可用性测试，然后应用/复核ignored草稿：engine-claims-draft27、operation-claims-draft32、behavior-claims-draft12、global-claims-draft11，加旧matrix-ui-client-notes-draft16中仍pending14。所有source/test路径已校验，证明路径存在不等于语义完整；unsupported条目明确缺生产入口，不能复制SDK同名当engine事件。
+- 真实hooks+Client剩余11globals均undefined，remaining-globals-probe.json只读探针不是最终验收。草稿保持未应用，正式回归需新测试，不能声称已经完成。source审查更新在contract-audit-draft末尾，旧h/invalidate描述已过时。
+- Actions包内runner候选写在actions-package-draft.md：Windows现有CMB_MODS_PACKAGED_DIR真实ASAR/无testbridge/E2E可以接到打包后上传前；不可把unpacked当NSIS安装。未改workflow/未push/未触发。另长稳可信click/busy/handle诊断、正式TTFT/ingress/2小时10k门禁仍未完成。
+- 继续工作，不停批次，不问继续，不动UAT/共享依赖，不派agents，不本地NSIS。
+
+## 2026-09-24 v63 新普通 Electron 通过，完整回归中（最新）
+
+- HEAD9dd039a3。未提交guest-codegen-v63：生产guest-codegen.ts原生guard+guest-runtime启动接入+shared revision；新guest6及原runtime测试更新；9路径fixture、utility新增1检查、Electron新helper/root入口、guide/matrix新adapted契约/report草稿。
+- 先真实guest红4/1，修复后39窄测PASS；ordinary旧包真实executed2红→新包guest-codegen专项5PASS（86185exit0），实际UI截图已查看。Node/Web/helper types和9文件diff lint通过（旧root88warning）；TypeScript QuickJS Result测试改unwrapResult安全释放，不影响生产。
+- **唯一运行exec1391**：完整Mods57 maxWorkers4（含5renderer）→utilityProcess→完整Electron tests/run-mods-e2e.mjs（结束会恢复普通out）。生产/测试冻结，poll到exit。不能在其间build/perf或改测试。随后独占performance smoke、实际counts/报告/status/handoff/代码复核、独立commit；不在提交后停止。
+- 新报告output/mods-v2-validation/2026-09-24-guest-codegen.md仍待填最终结果；矩阵仅新行为条目adapted，不宣称全部globals兼容。官方固定参考v2.1.278。
+- 下一逐项matrix96条planned无note审计/实现：ignored drafts含16 UI/Client源码边界但部分已过时（h/Fragment和invalidate已实现），必须先失败test再更正，不机械复制SDK→engine。随后正式TTFT/ingress/长稳ACK与Actions安装门禁，不放松预算/guard。
+- UAT/共享依赖未改，无agents/push/本地NSIS。
+
+## 2026-09-24 guest 字符串代码生成限制验证中（最新）
+
+- HEAD9dd039a3（公开JSX已独立提交）。当前未提交v63 codegen boundary：trusted原生guard在bootstrap/plugin前执行，锁global eval/Function及四类函数原型constructor，保留Function.prototype和普通函数/生成器/异步SDK；主进程/renderer/V1不改。不得简单关闭Eval intrinsic，它连host evalCode都禁止。
+- 新真实guest/Client先红4fail/1pass（最初测试自身用了禁止JSON key prototype，已改prototypeKept再红）；实现后4文件39PASS，含原async-scope16/guest-runtime11/publicJSX6与新6。旧ordinary Electron真实执行2而非拒绝红（84194exit1），失败保留。
+- **唯一运行exec85685**：helper tsc→Node/Web types→diff lint→普通build→guest-codegen Electron；生产/测试冻结到结果。第一次helper闭包digest可undefined已用narrowed局部const修复。utility入口新增一个真实codegen检查（预计42，待实际执行），不是stubs。
+- 新docs mods-v2-guest-codegen-2026-09-24.md写边界；矩阵/status/report待实际验证后更新。下一完整Mods（含renderer）及utility、新普通包publicJSX/Client焦点等回归、独占perf/report/独立commit，然后继续remaining。
+- 原正式TTFT/ingress关闭/长稳6407 ACK/Actions安装门禁仍失败未完。UAT/共享依赖未碰，不派agents/push/NSIS，不停批次。
+
 ## 2026-09-24 公开 JSX factory 完成验证并独立提交（最新）
 
 - 提交前HEAD10337a4d。公开h/Fragment readonly getter与原编译别名共享，Fragment列布局；安装扫描补h(Client,literal)及原digest/路径检查；旧独立Surface移除重复定义复用共享factory，保留状态/回调/timer。无authority扩大，v62。
