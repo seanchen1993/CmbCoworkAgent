@@ -1,3 +1,8 @@
+import {
+  functionFileWriteInput,
+  validateFunctionFileWriteInput,
+  assertFunctionFileWriteResult
+} from "./file-write"
 import { functionScrollInput } from "../../../shared/mods/v2/ui-scroll"
 import { functionFocusInput } from "../../../shared/mods/v2/ui-focus"
 import { FunctionUiNotices, type FunctionNoticeDialogAccess } from "./ui-notice"
@@ -28,6 +33,7 @@ export const SESSION_CAPABILITIES = [
   ...BASIC_CAPABILITIES,
   ...FUNCTION_UI_CAPABILITIES,
   "tool.call",
+  "fs.write",
   "tool.register",
   "tool.list",
   "tool.check",
@@ -67,7 +73,11 @@ import { constrainToolPermission, type ToolPermissionResult } from "../../../sha
 import { validateRegisteredToolInput } from "./tool-schema"
 import { functionCallAgent, withFunctionAgentExecution } from "./host-call"
 import { dispatchFunctionStream, type FunctionStreamOptions, type ModHookStream } from "./stream-dispatcher"
-import { currentFunctionExecution, assertFunctionPublicationScope } from "./execution-context"
+import {
+  currentFunctionExecution,
+  assertFunctionPublicationScope,
+  withFunctionWriteLease
+} from "./execution-context"
 import { functionMcpToolName } from "./mcp-names"
 import type {
   FunctionTurnStart,
@@ -739,6 +749,7 @@ export class FunctionSession {
       operation: isOperation,
       ...(event === "command.run" ||
       event === "tool.call" ||
+      event === "fs.write" ||
       event === "model.complete" ||
       event === "model.classify" ||
       event === "model.fork" ||
@@ -750,7 +761,7 @@ export class FunctionSession {
       normalizeInput: (name, value) =>
         name === "tool.register"
           ? functionToolSpec(value)
-          : FILE_CAPABILITIES.some((method) => method === name) &&
+          : (name === "fs.write" || FILE_CAPABILITIES.some((method) => method === name)) &&
               typeof value.path === "string" &&
               value.path !== ""
             ? { ...value, path: resolve(this.host.cwd?.() ?? this.host.workspace, value.path) }
@@ -758,6 +769,7 @@ export class FunctionSession {
       validateInput: (name, value) => {
         validateClassicInput(name, value)
         validateBasicInput(name, value)
+        if (name === "fs.write") validateFunctionFileWriteInput(value)
         validateFunctionTurnInput(name, value)
         if (name === "tool.register") functionToolSpec(value)
         if (name === "tool.call") {
@@ -1252,6 +1264,49 @@ export class FunctionSession {
       callSignal.throwIfAborted()
       this.assertLive(plugin)
       return functionAskAnswer(answer)
+    }
+    if (method === "fs.write") {
+      const answer = await this.dispatch(
+        method,
+        functionFileWriteInput(args),
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: async (input, signal) => {
+            this.assertLive(plugin)
+            if (!this.host.callTool) throw new ModFunctionError("MODS_TOOL_UNAVAILABLE")
+            const agentId = functionCallAgent(this.host.workspace, this.host.threadId)
+            // The native host owns approval, lease, final parameters and the durable receipt.
+            const result = await withFunctionWriteLease(
+              this.host.workspace,
+              this.host.threadId,
+              () =>
+                this.host.callTool!(
+                  plugin,
+                  {
+                    tool: "write_file",
+                    file_path: input.path,
+                    content: input.text,
+                    tool_use_id: randomUUID(),
+                    ...(agentId !== "main" ? { agentId } : {})
+                  },
+                  signal
+                )
+            )
+            signal.throwIfAborted()
+            this.assertLive(plugin)
+            assertFunctionFileWriteResult(result)
+            return undefined
+          }
+        },
+        turnHeld ?? "fs.write"
+      )
+      if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof answer.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
+      return undefined
     }
     if (method === "tool.call") {
       if (!isModObject(args[0]) || args.length !== 1)

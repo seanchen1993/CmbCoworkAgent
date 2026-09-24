@@ -12,6 +12,7 @@
 | `session.surface/surfaces/authorize` | 桌面固定值；authorize 为 null。不是动态终端/移动端发现或上游账号授权。 |
 | `store.get/set/delete/keys` | SQLite JSON 持久化，按项目与插件隔离；区分未设置与 null，保留插入顺序，受容量/键名限制。不能写宿主验收证据。 |
 | `fs.read/list/exists/stat` | 原生权限约束下的项目内读取；读取最多 512 KiB，目录访问最多 1024 项。路径替换检查和发布过滤仍适用。stat/list 提供实际 isLink；stat 的 resolve=true 返回项目内 canonical realPath，并在发布等待后复核身份。详见[文件元数据](mods-v2-file-metadata-2026-09-24.md)。 |
+| `fs.write` | 显式非 immediate 用户命令、实际线程租约和原生 write_file 审批；16K JSON 参数上限。审批前后复核原租约实例、授权与 runtime。hook 短路返回不能充当实际写入回执，见[文件写入](mods-v2-file-write-2026-09-24.md)。 |
 | `command.register/list/run` | 插件命令注册表；不是全部原生命令目录。原调度与 lease 生效，持有 turn 的回调不能等待新的排队命令。 |
 | `tool.list/check/call/register` | 当前宿主目录、权限及有界注册 schema；query 不执行或授权。工具参数及名称使用本应用契约，不能用同名宣称 Claude 工具完全一致。`task_output` 轮询按单调期限等待，系统墙钟回拨不延长 timeout；后台进程仍要求实际 runtime/lease，冷命令不能凭授权摘要启动无所有者进程。 |
 | `mcp.call` | 当前连接代际、唯一 provider 和真实审批/回执；不接收 guest 提供的连接与凭据，不自动重试丢失的写响应。 |
@@ -22,7 +23,7 @@
 
 ## 尚未开放的 SDK
 
-`audio.play/speak`、`prompt.submit/fill/suggest`、`config.list/set`、`agent.spawn/list`、`fs.write/ancestors`、`clock.after/every`、`http.fetch`、`process.run`、`settings.read`、`env.get/set` 尚未进入生产 guest 的 SDK 能力列表。相邻功能不能替代这些接口：例如经审批的 `tool.call(write_file)` 不等同于 `fs.write`，`agent.offer` 或 `model.fork` 也不等同于 `agent.spawn`。
+`audio.play/speak`、`prompt.submit/fill/suggest`、`config.list/set`、`agent.spawn/list`、`fs.ancestors`、`clock.after/every`、`http.fetch`、`process.run`、`settings.read`、`env.get/set` 尚未进入生产 guest 的 SDK 能力列表。相邻功能不能替代这些接口：例如 `agent.offer` 或 `model.fork` 不等同于 `agent.spawn`。
 
 这些是实际未完成项。矩阵中的 partial 不表示已经有可调用的实现；`availability: unavailable` 明确区分“接口待接线”与“已有实现但语义受限”。
 

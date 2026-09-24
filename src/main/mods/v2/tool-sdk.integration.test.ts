@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import type { DatabaseSync } from "node:sqlite"
 import { encodeModJson } from "../../../shared/mods/validation"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
@@ -32,7 +32,8 @@ afterEach(async () => {
 async function fixture(
   blockedToolNames = new Set<string>(),
   managedExecution = false,
-  approved = true
+  approved = true,
+  beforeApproval?: () => void
 ) {
   const root = mkdtempSync(join(tmpdir(), "mods-tool-sdk-"))
   const workspace = join(root, "project")
@@ -44,7 +45,10 @@ async function fixture(
   const manager = new ModsManager(
     join(root, "control.sqlite"),
     () => [],
-    async () => approved,
+    async () => {
+      beforeApproval?.()
+      return approved
+    },
     () => {}
   )
   const previous = getModsManager()
@@ -85,6 +89,10 @@ async function fixture(
     on("session.start",async($,e,next)=>{await $.command.register({name:"tools",description:"Native tools"});return next(e)});
     on("command.run",{command:"tools"},async($,e)=>{
       const input=JSON.parse(e.args); const check=input.check; delete input.check;
+      if(input.sdkWrite) {
+        const value=await $.fs.write(input.path,input.text);
+        return {text:JSON.stringify({returnedVoid:value===undefined})}
+      }
       return {text:JSON.stringify(check ? await $.tool.check({tool:input.tool,input:input.input}) : await $.tool.call(input))};
     });
   }}`)
@@ -737,3 +745,69 @@ it("keeps native reads and their output unchanged with the project gate disabled
   expect(bind).not.toHaveBeenCalled()
   expect(f.manager.store.audit(f.grant.workspace)).toEqual([])
 })
+
+it("writes an actual file through fs.write, the original native approval and durable receipt", async () => {
+  const f = await fixture()
+  const file = join(f.workspace, "nested", "written.md")
+  expect(await f.run({ sdkWrite: true, path: file, text: "REAL_NATIVE_WRITE" })).toEqual({
+    returnedVoid: true
+  })
+  expect(readFileSync(file, "utf8")).toBe("REAL_NATIVE_WRITE")
+  const writes = f.manager.store
+    .audit(f.grant.workspace)
+    .filter((row) => row.toolId === "host:write_file")
+  expect(writes).toHaveLength(1)
+  expect(writes[0]).toMatchObject({
+    status: "succeeded",
+    identity: { modId: f.grant.modId, threadId: f.threadId }
+  })
+  expect(writes[0].finalArgsHash).toBeTruthy()
+})
+
+it.each(["approval", "write_file", "lease", "revoke", "read-only"])(
+  "does not write through fs.write when the original %s boundary rejects it",
+  async (reason) => {
+    const f = await fixture(new Set([reason]), false, reason !== "approval")
+    const file = join(f.workspace, "forbidden.md")
+    if (reason === "lease") releaseLocalThreadRunLease(f.threadId, "mods", "run")
+    if (reason === "revoke") f.manager.revoke(f.workspace, f.grant.modId)
+    if (reason === "read-only") f.sandbox.setReadOnlyShellEnforced(true)
+    await expect(f.run({ sdkWrite: true, path: file, text: "must not write" })).rejects.toThrow()
+    expect(existsSync(file)).toBe(false)
+    expect(f.manager.store.audit(f.grant.workspace).some((row) => row.status === "succeeded")).toBe(
+      false
+    )
+  }
+)
+
+it.each(["release", "handoff", "revoke", "cancel"])(
+  "refuses native SDK write when %s happens during approval",
+  async (action) => {
+    const approval = vi.fn(() => {
+      if (action === "release") releaseLocalThreadRunLease(f.threadId, "mods", "run")
+      else if (action === "handoff")
+        expect(
+          claimLocalThreadRunLease({
+            threadId: f.threadId,
+            owner: "mods",
+            runId: "replacement",
+            handoffFromRunId: "run"
+          }).acquired
+        ).toBe(true)
+      else if (action === "revoke") f.manager.revoke(f.workspace, f.grant.modId)
+      else f.commandController.abort()
+    })
+    const f = await fixture(new Set(), false, true, approval)
+    const file = join(f.workspace, "late-write.md")
+    await expect(f.run({ sdkWrite: true, path: file, text: "must not write" })).rejects.toThrow()
+    expect(approval).toHaveBeenCalledOnce()
+    if (action === "revoke")
+      expect(f.manager.store.getGrant(f.grant.workspace, f.grant.modId)?.enabled).toBe(false)
+    expect(existsSync(file)).toBe(false)
+    expect(
+      f.manager.store
+        .audit(f.manager.workspaceKey(f.workspace))
+        .filter((row) => row.toolId === "host:write_file" && row.status === "succeeded")
+    ).toHaveLength(0)
+  }
+)

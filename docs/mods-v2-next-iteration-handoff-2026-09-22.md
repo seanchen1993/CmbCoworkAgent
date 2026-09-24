@@ -1,3 +1,30 @@
+## 2026-09-24 08:38 fs.write 验证收口并继续 agent.list（最新）
+
+- 提交前 HEAD **fbbc988e**。fs.write/v58 经原审批/ModsManager/LocalSandbox/receipt，入口真实 lease 实例与 live 同thread/workspace fence；先红再修释放、同ID同时间戳 ABA、跨scope和expired continuation。指南/SDK表/矩阵partial+bounded/状态/报告已更新，全部本次单独提交。
+- **最终 Mods48 139files1235PASS exec53547 exit0已poll**；窄测57（含32真实runtime authority）、审批最终7、utility process41、原lease standalone6、Node/Web/helper类型、ESLint无新增、diffcheck通过。**完整Electron192PASS exec10251 exit0且普通out恢复**：早于最终同scope继承补丁；该补丁后普通build和focused写入Electron **7checksPASS exec55029 exit0**。不要将两者顺序写反。
+- 独占perf smoke **21647 exit0已poll**：`desktop-performance-2026-09-24T00-35-51-318Z-smoke-fbb63130/`，qualified=false/passed=false，TTFTp95 off109.3/on178.9(+69.6)ms，吞吐1.006525，约1s idle delta2.158447；不冒称正式性能通过。报告 `2026-09-24-file-write.md`。
+- **当前无运行 tests/build/E2E/perf**。先提交 fs.write，再立即下一能力 **agent.list 实际子任务列表**，不要停。设计 `output/mods-v2-validation/2026-09-24-agent-list-design.md`、session测试草案 `agent-list-session-tests-draft.txt`（尚未复制到src/未跑红/尚未实现）。下一步先真实guest/session红，新增host实例表 lifecycle失败测试，再接生产。不要把 agent.offer 定义目录当运行实例；SoloTaskTraceManager是可选telemetry，不适合权威源。
+- 已只读定位：runtime.ts `wrapTaskToolWithOwnerMetadata` (~2090)有真实ownerId/taskInput(description/subagent_type)，`runModTask`(~3039)→ModsManager.withSharedAgent(~1227)持有parent authority并创建child runtime/turn；可追加可选metadata参数保持旧调用。通过独立有界host表、实际开始/终结/取消与identity fence供查询，不改原task结果或权限。`src/shared/mods/v2/agent.ts`已有offer校验，可加list结构；Session/FunctionModsManager/IPC host需listAgents专用桥及原publish/authority检查。`manager.invalidateAll`由global off调用，configure/closeThread/close也需清理；sameID latefinish不得覆盖新记录。最多近期若干记录须明确bounded，预算超限不能阻断原task，query不能伪造完整列表。
+- 原生集成可扩 `src/main/mods/runtime-authority.test.ts`真实deepagents child(~846)取列表含actual ID/type/parent/status；Electron已有真实sharedchild及cancel/refusal在 tests/mods-e2e.spec.ts (~2600–2765)，模型server支持 [mods-child]/[child-stall]/[child-refusal]；新增独立helper/focus或扩原场景，避免外部模型额外花费。实际host状态与插件可改写的查询展示分开，列表不是业务PASS/执行授权。
+- 剩余正式TTFT/ingress关闭预算、2h10000soak、其余classic/SDK、Actions最终安装验证继续待办；只Mods v2、不碰UAT/共享依赖，不派agent、不本地NSIS、不push。
+
+## 2026-09-24 08:24 fs.write 完整回归进行中（最新，继续勿停）
+
+- HEAD **fbbc988e**，未提交 fs.write/v58 源码与 tests/docs/matrix；两次实际租约问题已经红→绿（物理 lease 缺失、同 ID/相同时间戳 ABA）。lease 捕获改为私有 activeLeases 实例判定，不依赖时间戳，不改变旧 claim/release API。报告 `2026-09-24-file-write.md` 已草写。
+- **Mods47 139files1233PASS exec7849 exit0已poll**，实际 utility process41、旧 local-thread-run-lease standalone6、Node/Web/helper类型通过。lint0errors：basic-sdk2/session2/E2E runner92与HEAD一样，新模块0warning。窄测4files75、审批最终2files7（49非目标skip）通过；最初测试store.revoke误用已经类型检查发现改manager.revoke，并增加实际enabled=false断言，重新验证。
+- 最新 ordinary focused Electron **7checksPASS exec74979 exit0**，真实磁盘/最终审批/receipt、拒绝/immediate/自动hook/撤权/off原生读，截图已看。旧包Electron红存在（not a function）。
+- **唯一运行 exec10251完整Electron**：`2026-09-24-fs-write-full-electron.log`，artifacts同前缀`-artifacts/`。当前约293秒，尚未结束；runner最终restore普通out，必须poll。其他tests/build/perf均没有运行，源码/测试冻结直到这个结束。
+- **检视新发现尚未落实测试**：physicalLeases仅保存guard函数，nested withFunctionExecution变到另一个thread/workspace却leased=true时，可能继承旧scope guard而误认新scope有lease。草案 `fs-write-cross-scope-test-draft.txt` 在忽略区，尚未加src/跑红。等10251结束后复制到file-write-lease.test.ts跑红；修继承时同时要求inherited workspace/thread与scope一致，否则不给旧guard（显式withFresh可走合法新入口），保持same-scope不能刷新旧lease。再类型/lint/窄测与最终整套验证（之前整套不能冒称包含补丁）。必要的质量修复，不删弱断言。
+- 确认最终整套后独占标准perf smoke并填报告/status/handoff、独立commit，然后继续 **agent.list真实子任务列表**：只读设计 `2026-09-24-agent-list-design.md`，未加测试/未实现，runtime.wrapTaskToolWithOwnerMetadata -> runModTask -> manager.withSharedAgent已有真实ownerId/type/child lifecycle，可增加真正host实例元数据表，不把agent.offer定义目录冒充运行子Agent。不要停在commit边界。
+- 仍未完成正式TTFT/ingress off预算、2h10000soak、其余classic/SDK、Actions最终安装验证。UAT/共享node_modules/本地NSIS不动，不派agent、不push。
+
+## 2026-09-24 08:12 fs.write 原生链路与真实租约复核（最新，继续勿停）
+
+- HEAD **fbbc988e**，grant query 已提交。未提交 fs.write：原 SDK/Session → fs.write hooks → 既有 host.callTool/write_file/ModsManager/审批/LocalSandbox/receipt；v58，原 16K 参数预算。新 file-write 模块、unit/真实 guest-session/native 和 Electron helper，矩阵/指南/报告尚待更新。
+- 先 session 红、真实 Electron 旧包 red（not a function）、真实 native lease case red（释放物理租约但逻辑 leased=true 仍写入）。新增 execution-context 捕获入口真实租约，并只在新 fs.write 活跃调用中复核原 runId/owner/acquiredAt；原 manager assertEpoch 将在审批和落盘边界复核，不绕开原工具。
+- 最新 **exec60406 exit0 已 poll：4files71PASS**，包括 file-write、file-write-lease、execution-context、tool-sdk.integration 全套。下一步补真实审批等待中的释放/交接，再类型/lint/build/focused Electron；helper尚未校验。ordinary out仍是 fbbc988e 旧包，仅用于 Electron 红测。
+- 当前无运行测试/build/E2E/perf。production/test 未冻结，尚不能跑最终整套。完成后 full Mods/真实 process/完整 Electron/独占性能 smoke、报告/矩阵/独立 commit，继续剩余功能。正式 TTFT/ingress off、2h10000 soak、剩余 classic/SDK、Actions最终安装仍未完成。只 Mods v2，不动 UAT/依赖，不派 agent、不本地 NSIS、不 push。
+
 ## 2026-09-24 07:56 授权查询复用验收收口，立即继续 fs.write（最新）
 
 - 本提交前HEAD **be5dd56b**；本次grant prepared query源码/真实SQLite与guest测试、状态/报告收口单独提交。完整Electron **186checksPASS exec80399 exit0已poll**，ordinaryout恢复。Mods46 136/1207 +renderer1/2、process41、最终Node/Web、无新增lint全部通过；细节见下段。

@@ -69,6 +69,12 @@ export function getLocalThreadRunLease(threadId: string): LocalThreadRunLease | 
   return lease ? copyLease(lease) : undefined
 }
 
+/** Capture physical ownership without allowing release/reacquire to revive an old continuation. */
+export function captureLocalThreadRunLease(threadId: string): (() => boolean) | undefined {
+  const lease = activeLeases.get(threadId)
+  return lease ? () => activeLeases.get(threadId) === lease : undefined
+}
+
 export function claimLocalThreadRunLease(
   input: ClaimLocalThreadRunLeaseInput
 ): LocalThreadRunLeaseClaim {

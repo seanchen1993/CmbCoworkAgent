@@ -1,3 +1,4 @@
+import { captureLocalThreadRunLease } from "../../agent/thread-run-lease"
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks"
 import type { ModCommandQueue } from "../command-queue"
 import { classifyModTool } from "../engine"
@@ -18,6 +19,39 @@ interface FunctionExecution {
 }
 
 const context = new AsyncLocalStorage<FunctionExecution>()
+// Host-entry snapshots, never supplied by a plugin or refreshed by a nested continuation.
+const physicalLeases = new WeakMap<FunctionExecution, (() => boolean) | undefined>()
+const writeLease = new AsyncLocalStorage<{
+  workspace: string
+  threadId: string
+  lease: () => boolean
+}>()
+
+function assertWriteLease(workspace: string, threadId: string, lease: () => boolean): void {
+  if (!lease()) throw new ModFunctionError("MODS_FS_WRITE_LEASE")
+  const active = context.getStore()
+  if (active?.workspace !== workspace || active.threadId !== threadId)
+    throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+}
+
+/** Strengthen only the file-write operation; native authorization calls recheck this fence. */
+export async function withFunctionWriteLease<T>(
+  workspace: string,
+  threadId: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const scope = functionExecutionScope(workspace, threadId)
+  if (!scope?.userInitiated || scope.immediate)
+    throw new ModFunctionError("MODS_WRITE_REQUIRES_USER_ACTION")
+  const lease = physicalLeases.get(scope)
+  if (!scope.leased || !lease) throw new ModFunctionError("MODS_FS_WRITE_LEASE")
+  assertWriteLease(workspace, threadId, lease)
+  return writeLease.run({ workspace, threadId, lease }, async () => {
+    const value = await run()
+    assertWriteLease(workspace, threadId, lease)
+    return value
+  })
+}
 const cancellationReceipts = new WeakSet<FunctionExecution>()
 
 /** Called by the host only after its exact active-turn cancellation has succeeded. */
@@ -57,6 +91,12 @@ export function functionExecutionScope(
   threadId: string
 ): Readonly<FunctionExecution> | undefined {
   const scope = context.getStore()
+  const fence = writeLease.getStore()
+  if (fence) {
+    if (fence.workspace !== workspace || fence.threadId !== threadId)
+      throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
+    assertWriteLease(workspace, threadId, fence.lease)
+  }
   if (scope && !scope.active) throw new ModFunctionError("MODS_CALL_SCOPE_EXPIRED")
   if (scope && (scope.workspace !== workspace || scope.threadId !== threadId))
     throw new ModFunctionError("MODS_CALL_SCOPE_CHANGED")
@@ -98,6 +138,18 @@ export async function withFunctionExecution<T>(
   const inherited = context.getStore()
   const runtimeAuthority = input.runtimeAuthority ?? inherited?.runtimeAuthority
   const scope = { ...input, runtimeAuthority, active: true }
+  // Only a live continuation in the same host scope may carry or acquire write ownership.
+  // A deliberate cross-scope entry must use withFreshFunctionExecution.
+  const sameLiveScope =
+    !inherited ||
+    (inherited.active &&
+      inherited.workspace === scope.workspace &&
+      inherited.threadId === scope.threadId)
+  if (scope.leased && sameLiveScope)
+    physicalLeases.set(
+      scope,
+      inherited?.leased ? physicalLeases.get(inherited) : captureLocalThreadRunLease(scope.threadId)
+    )
   try {
     return await context.run(scope, () => {
       functionExecutionScope(input.workspace, input.threadId)

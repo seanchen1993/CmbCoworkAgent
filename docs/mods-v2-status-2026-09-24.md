@@ -1,11 +1,12 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `be5dd56b`（随后授权查询编译复用见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `fbbc988e`（随后 fs.write 见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
 ## 应用已具备的能力
 
 - 独立 utility process / QuickJS、插件摘要授权、真实 FunctionSession、runtime authority、generation 和原线程 run lease。取消、撤权、替换和关闭会中止旧操作；关闭模块不扫描插件、不创建 Mods runtime。
 - 主 Agent 的真实模型流与 turn.step，受限 model.fork/classify，实际 agent registry 的 agent.offer；不能把模型文本中的 PASS 当作测试回执。
+- [文件写入 SDK](mods-v2-file-write-2026-09-24.md)：显式用户非 immediate 命令通过原生审批/write_file/receipt；真实租约实例、同项目/线程且仍活跃的作用域复核。审批期撤权/取消/释放或交接拒绝落盘；晚到拒绝不承诺回滚。保留原参数上限，仍 partial/bounded。
 - [文件元数据](mods-v2-file-metadata-2026-09-24.md)：项目内 stat/list 的真实 isLink、可选 canonical realPath、严格 resolve 选项与发布后节点/目标复核，保留旧 hook 形状；文件 SDK 仍 partial/bounded。
 - session 读取、显式压缩与 checkpoint、真实模型请求的 MCP/memory/skills/agents 动态来源 breakdown；token 估算与 provider usage 分列，无成本数据时不伪造费用。
 - 内建工具使用本应用的真实参数和权限；注册工具支持有界 JSON Schema，包括本地 defs 引用。不宣称 Claude 工具名称、所有 schema 关键字与输入输出完全等价。
@@ -18,6 +19,8 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| fs.write | 完整 Electron 192 检查通过；该轮早于最终跨作用域租约补丁，补丁后的实际 Electron 写入专项另有 7 检查通过。最终 Mods48 139 文件 1235 项通过；真实 utility process 41 与原 lease standalone 6 通过 |
+| Mods47 | 139 文件 1233 项通过，随后跨作用域/已结束调用两个红测修复后，相关 4 文件 57 项通过；最终完整回归见报告 |
 | Mods46 | 默认 Mods 范围136文件1207通过，另 renderer 滚动竞态1文件2通过；外部SQLite撤权/epoch/摘要变化与连接生命周期覆盖 |
 | Mods45 | 136 文件、1205 测试全部通过，包含文件元数据、并发替换/取消/撤权与真实 guest/session |
 | Mods44 | 135 文件、1197 测试全部通过，新增真实 guest/session 后台任务冻结/回拨墙钟超时回归 |
