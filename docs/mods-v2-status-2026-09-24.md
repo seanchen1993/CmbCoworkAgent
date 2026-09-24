@@ -60,7 +60,7 @@
 | 真实业务演示 | 实际 deepseek-v4-flash、原审批与 Agent 修复循环；规则关闭时真实缺陷未修，开启后 1 次自动修复、7 项独立业务断言通过，真实 validator 通过后仅推进 1 次 checkpoint。受保护需求/测试/脚本未变；不是全面业务能力证明，见[演示报告](../output/mods-v2-validation/2026-09-24-real-business-demo.md) |
 | TypeScript / ESLint | 授权查询复用：Node/Web通过，ESLint无错误、新测试无警告，control-store原3个警告经HEAD比较未增加。此前各能力helper类型和历史格式警告详见各自报告 |
 | 全仓回归 | 先前完整 Vitest 存在基线失败；隔离后剩 26 项已在旧基线复现，standalone 84 命令初次 78 通过、6 失败，修复 2 个本分支差异后相关整套通过，其余 4 个在旧基线复现；不能称全仓全绿 |
-| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照仍有 1/10 组超预算（project-off +14.584% / +0.3574ms），整体未通过；修复前3c569546冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
+| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照最新a447abe0复检有4/10组超预算（最大project-off +10.7681% / +0.2379ms），整体未通过；修复前3c569546冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
 
 7363ce1e 已更正 metadata/write 两个 Electron helper 的撤权参数，并增加实际授权状态断言：新专项 5+7 检查通过。旧测试只证明 session 失效，不能冒称撤销了持久化 grant，见[更正报告](../output/mods-v2-validation/2026-09-24-function-revocation-e2e-correction.md)。
 

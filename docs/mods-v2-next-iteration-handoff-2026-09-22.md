@@ -1,3 +1,14 @@
+## 2026-09-24 正式入口结束，开始关闭经典桥回归（最新）
+
+- HEAD a447abe0；exec29180 exit2，已无运行进程。5轮/38515事件，qualified=true/budgetsPassed=false；单插件五轮通过，关闭4/10失败，0发现/0 runtime。完整证据与报告2026-09-24-v63-ingress-formal.md保留。
+- 下一增加runHooks关闭/无manager存量结果一致性、无投影、取消/重启/重新开启回归，再最小调整关闭路径。未证明根因，不降低门槛，不停在批次。随后types/lint/guest/full Electron/性能、正式长稳和剩余兼容能力。
+
+## 2026-09-24 正式入口矩阵运行中（最新）
+
+- HEAD a447abe0；唯一运行 exec29180，日志2026-09-24-v63-ingress-formal.log，目录v2-ingress-2026-09-24T07-11-37-215Z-matrix-d3700f26。冻结5轮1000样本/100预热，无并行重测试或生产变更。
+- 截至第4轮，关闭对照已有project-off第1/3轮和global-off第2轮超过5%门槛；保留完整失败证据，等待退出后诊断，不改变门槛或删除样本。
+- 后续继续新UI构建正式desktop性能、带诊断两小时长稳及剩余兼容能力。Actions已接线但未触发，不能宣称真实包通过。不动UAT/共享依赖，无agents。
+
 ## 2026-09-24 Client并发修复已提交，Actions包内门禁完成接线（最新）
 
 - 当前HEAD83e3da32，Client busy非change pending计数已独立提交：真实red2→专项4；Mods59 152/1333、utility44、完整Electron226通过（90522exit0，ordinaryout已恢复）。此前status/handoff更新脚本误找不存在的Mods58表格行而中断，代码和完整报告已正确提交；本次补齐全局status/handoff实际结果。
