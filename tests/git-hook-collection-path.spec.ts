@@ -27,6 +27,7 @@ let findPendingGensForFile!: AdoptionIndexModule["findPendingGensForFile"]
 let CMBDEVCLAW_INTERNAL_GIT_ENV!: GitHookServiceModule["CMBDEVCLAW_INTERNAL_GIT_ENV"]
 let installGitHooks!: GitHookServiceModule["installGitHooks"]
 let syncGitHookEvents!: GitHookServiceModule["syncGitHookEvents"]
+let syncRegisteredGitHookEvents!: GitHookServiceModule["syncRegisteredGitHookEvents"]
 let uninstallGitHooks!: GitHookServiceModule["uninstallGitHooks"]
 
 const execFileAsync = promisify(execFile)
@@ -138,8 +139,16 @@ async function listDirs(dir: string): Promise<string[]> {
 async function readReadySnapshot(repo: string): Promise<{
   name: string
   meta: {
+    schemaVersion?: number
     commitSha?: string
     gitRoot?: string
+    gitCommonDir?: string
+    branch?: string
+    commitTimeMs?: number
+    filesChanged?: number
+    insertions?: number
+    deletions?: number
+    remoteUrl?: string
     files?: Array<{ absPath: string; relPath?: string; blobFile?: string; deleted?: boolean }>
   }
 }> {
@@ -216,6 +225,216 @@ async function testExternalCommandCommitWithCodeGenIsCollectedByHook(): Promise<
       assert(processed.length === 1, "external command snapshot with code_gen should be processed")
       assert(skipped.length === 0, "external command snapshot with code_gen should not be skipped")
     })
+  })
+}
+
+/**
+ * The script-driven worktree flow: create a linked worktree, generate + commit
+ * in it, merge, delete the worktree — then consume the snapshot afterwards.
+ *
+ * Consumption is never synchronous with any of that (2-minute sweep, and the
+ * app may not even be running), so by the time we get here the work tree is
+ * gone. Every git call the consumer used to make ran with that path as cwd and
+ * failed at spawn with ENOENT, which is why merging first does not help on its
+ * own: the commit stays perfectly reachable while the process cannot start.
+ *
+ * So this locks two things down:
+ *  - the hook records commit stats / branch / remote / committer date at commit
+ *    time, while the work tree still exists;
+ *  - consumption completes through the recorded common dir, so the snapshot
+ *    reaches `processed` instead of being stuck in `ready` forever.
+ */
+async function testWorktreeCommitIsCollectedAfterWorktreeRemoval(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    await initializeAdoptionTracker()
+    await withTempRepo("git-hook-worktree", async (repo) => {
+      const status = await installGitHooks(repo)
+      assert(status.state === "installed", `expected installed hook, got ${status.state}`)
+
+      const worktreeParent = await mkdtemp(join(tmpdir(), "git-hook-worktree-wt-"))
+      const worktree = join(await realpath(worktreeParent), "wt")
+      await git(repo, ["worktree", "add", "-q", "-b", "feat", worktree])
+
+      try {
+        const filePath = join(worktree, "generated.ts")
+        const generatedContent = "export const worktreeValue = 1\n"
+        recordGen({
+          threadId: "worktree-test-thread",
+          workspacePath: worktree,
+          filePath,
+          tool: "write_file",
+          generatedContent
+        })
+        await sleep(250)
+
+        await writeFile(filePath, generatedContent)
+        // Start from a registered, already-synced worktree so the root and
+        // reconciler caches are warm when the script removes it later.
+        const registryPath = join(testDataRoot, "git-hooks", "repos.json")
+        const registered = JSON.parse(await readFile(registryPath, "utf-8").catch(() => "[]"))
+        const root = await git(worktree, ["rev-parse", "--show-toplevel"])
+        const now = new Date().toISOString()
+        registered.push({ gitRoot: root, enabled: true, registeredAt: now, updatedAt: now })
+        await writeFile(registryPath, JSON.stringify(registered))
+        await syncRegisteredGitHookEvents()
+
+        await git(worktree, ["add", "generated.ts"])
+        await git(worktree, ["commit", "-q", "-m", "worktree commit with codegen"])
+        const sha = await git(worktree, ["rev-parse", "HEAD"])
+
+        // Captured at commit time — this is what makes the snapshot survive.
+        const snapshot = await readReadySnapshot(worktree)
+        assert(
+          snapshot.meta.schemaVersion === 2,
+          `expected schemaVersion 2, got ${snapshot.meta.schemaVersion}`
+        )
+        assert(
+          normalizePathForAssert(snapshot.meta.gitCommonDir || "") ===
+            normalizePathForAssert(join(repo, ".git")),
+          `gitCommonDir should be the main repo's .git, got ${snapshot.meta.gitCommonDir}`
+        )
+        assert(snapshot.meta.branch === "feat", `expected branch feat, got ${snapshot.meta.branch}`)
+        assert(
+          snapshot.meta.filesChanged === 1 && snapshot.meta.insertions === 1,
+          `expected 1 file / 1 insertion, got ${snapshot.meta.filesChanged}/${snapshot.meta.insertions}`
+        )
+        assert(
+          typeof snapshot.meta.commitTimeMs === "number" && snapshot.meta.commitTimeMs > 0,
+          `expected a committer date, got ${snapshot.meta.commitTimeMs}`
+        )
+        // Defined-but-empty, not undefined: that is what tells the consumer the
+        // hook already answered this question and it must not ask live git.
+        assert(
+          snapshot.meta.remoteUrl === "",
+          `repo has no origin, expected "", got ${JSON.stringify(snapshot.meta.remoteUrl)}`
+        )
+
+        // Merge, then delete the work tree — the guaranteed order in the flow
+        // this covers. The branch (and therefore the commit) stays reachable.
+        await git(repo, ["merge", "--no-ff", "-q", "-m", "merge feat", "feat"])
+        await git(repo, ["worktree", "remove", "--force", worktree])
+        assert(!existsSync(worktree), "work tree should be gone before consumption")
+
+        await syncRegisteredGitHookEvents()
+        await sleep(250)
+
+        const remainingReady = await listDirs(join(repoEventsDir(worktree), "ready"))
+        const processed = await listDirs(join(repoEventsDir(worktree), "processed"))
+        const skipped = await listDirs(join(repoEventsDir(worktree), "skipped"))
+        assert(
+          remainingReady.length === 0,
+          `deleted work tree must not strand its snapshot in ready (${remainingReady.length} left)`
+        )
+        assert(processed.length === 1, `snapshot should be processed, got ${processed.length}`)
+        assert(skipped.length === 0, `snapshot should not be skipped, got ${skipped.length}`)
+
+        const processedShas = JSON.parse(
+          await readFile(join(repoEventsDir(worktree), "processed-commits.json"), "utf-8")
+        ) as string[]
+        assert(processedShas.includes(sha), `processed set should contain ${sha}`)
+        assert(
+          findPendingGensForFile(filePath, 0).length === 0,
+          "the pending gen should have been measured against the worktree commit"
+        )
+
+        await syncRegisteredGitHookEvents()
+        const remainingRepos = JSON.parse(await readFile(registryPath, "utf-8")) as Array<{
+          gitRoot: string
+        }>
+        assert(
+          !remainingRepos.some(
+            (entry) => normalizePathForAssert(entry.gitRoot) === normalizePathForAssert(root)
+          ),
+          "the removed worktree should retire after its ready snapshot was consumed"
+        )
+      } finally {
+        await cleanupRepoEvents(worktree).catch(() => undefined)
+        await removeTempDir(worktreeParent).catch(() => undefined)
+      }
+    })
+  })
+}
+
+/**
+ * The common-dir fallback must land in the RIGHT repository.
+ *
+ * `dirname(commonDir)` is the main work tree for the ordinary `<repo>/.git`
+ * layout, but a bare repository can sit inside another repository
+ * (`<outer>/inner.git`). Then the parent is a perfectly valid git repo — just
+ * not this one — so every commit verification fails against it and the
+ * snapshot sits in `ready` forever, which is the exact failure this whole
+ * change exists to remove.
+ */
+async function testCommonDirFallbackPicksTheRightRepository(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    await initializeAdoptionTracker()
+    const parentDir = await realpath(await mkdtemp(join(tmpdir(), "git-hook-nested-")))
+    const source = join(parentDir, "source")
+    const outer = join(parentDir, "outer")
+    const bare = join(outer, "inner.git")
+    const worktree = join(parentDir, "wt")
+    let resolvedWorktree = ""
+
+    try {
+      await mkdir(source, { recursive: true })
+      await initRepo(source)
+      // An ordinary repository that merely CONTAINS the bare one.
+      await mkdir(outer, { recursive: true })
+      await initRepo(outer)
+      await git(parentDir, ["clone", "-q", "--bare", source, bare])
+      await git(bare, ["worktree", "add", "-q", "-b", "feat", worktree])
+      await git(worktree, ["config", "user.email", "test@example.com"])
+      await git(worktree, ["config", "user.name", "Test"])
+
+      const status = await installGitHooks(worktree)
+      assert(status.state === "installed", `expected installed hook, got ${status.state}`)
+
+      const filePath = join(worktree, "nested.ts")
+      const generatedContent = "export const nestedValue = 1\n"
+      recordGen({
+        threadId: "nested-test-thread",
+        workspacePath: worktree,
+        filePath,
+        tool: "write_file",
+        generatedContent
+      })
+      await sleep(250)
+
+      await writeFile(filePath, generatedContent)
+      await git(worktree, ["add", "nested.ts"])
+      await git(worktree, ["commit", "-q", "-m", "nested bare worktree commit"])
+      resolvedWorktree = await git(worktree, ["rev-parse", "--show-toplevel"])
+
+      const snapshot = await readReadySnapshot(resolvedWorktree)
+      assert(
+        normalizePathForAssert(snapshot.meta.gitCommonDir || "") === normalizePathForAssert(bare),
+        `gitCommonDir should be the bare repo, got ${snapshot.meta.gitCommonDir}`
+      )
+
+      await git(bare, ["worktree", "remove", "--force", worktree])
+      assert(!existsSync(worktree), "work tree should be gone before consumption")
+
+      await syncGitHookEvents(resolvedWorktree)
+      await sleep(250)
+
+      const ready = await listDirs(join(repoEventsDir(resolvedWorktree), "ready"))
+      const processed = await listDirs(join(repoEventsDir(resolvedWorktree), "processed"))
+      assert(
+        ready.length === 0,
+        `snapshot must not be stranded when a sibling repo shadows the common dir (${ready.length} left)`
+      )
+      assert(processed.length === 1, `snapshot should be processed, got ${processed.length}`)
+      assert(
+        findPendingGensForFile(filePath, 0).length === 0,
+        "the pending gen should have been measured"
+      )
+    } finally {
+      await uninstallGitHooks(bare).catch(() => undefined)
+      if (resolvedWorktree) await cleanupRepoEvents(resolvedWorktree).catch(() => undefined)
+      await cleanupRepoEvents(source).catch(() => undefined)
+      await cleanupRepoEvents(outer).catch(() => undefined)
+      await removeTempDir(parentDir).catch(() => undefined)
+    }
   })
 }
 
@@ -366,6 +585,7 @@ async function run(): Promise<void> {
       CMBDEVCLAW_INTERNAL_GIT_ENV,
       installGitHooks,
       syncGitHookEvents,
+      syncRegisteredGitHookEvents,
       uninstallGitHooks
     } = gitHookService)
 
@@ -373,6 +593,10 @@ async function run(): Promise<void> {
     console.log("PASS external command commit without code_gen is skipped")
     await testExternalCommandCommitWithCodeGenIsCollectedByHook()
     console.log("PASS external command commit with code_gen is collected through Git hook")
+    await testWorktreeCommitIsCollectedAfterWorktreeRemoval()
+    console.log("PASS worktree commit is collected after the worktree is merged and removed")
+    await testCommonDirFallbackPicksTheRightRepository()
+    console.log("PASS common dir fallback picks the right repository, not a containing one")
     await testGitPanelPathSkipsHookAndUsesDirectStagedCapture()
     console.log("PASS Git Panel collection path skips hook and uses direct staged capture")
     await testCoreHooksPathInWorkspaceIsNotModified()

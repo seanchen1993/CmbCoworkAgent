@@ -67,6 +67,7 @@ import {
   type DashboardProjectModeFeatureNode,
   type DashboardProjectModeOperationalDetailScope,
   type DashboardProjectModeOperationalDetails,
+  type DashboardProjectModeStageAnalysis,
   type DashboardPluginAggregate,
   type DashboardProjectModeData,
   type DashboardAwardSkillContribution,
@@ -1093,7 +1094,7 @@ const USER_LIST_EXPORT_MAX_PAGES = 100
 const USER_TRACE_PAGE_SIZE = 10
 const SKILL_TRACE_PAGE_SIZE = 10
 const PROJECT_TRACE_PAGE_SIZE = 10
-const PROJECT_TRACE_TRIGGER_SCOPE: DashboardTraceTriggerScope = "active"
+const PROJECT_TRACE_TRIGGER_SCOPE: DashboardTraceTriggerScope = "all"
 
 type DashboardSubPage =
   | { kind: "main" }
@@ -2744,6 +2745,8 @@ export function DashboardView(): React.JSX.Element {
     selectedOrgLv1List,
     fromLeanProjectsOnly,
     setFromLeanProjectsOnly,
+    createdInRangeProjectsOnly,
+    setCreatedInRangeProjectsOnly,
     orgOptions,
     loading,
     userStatsLoading,
@@ -2766,6 +2769,10 @@ export function DashboardView(): React.JSX.Element {
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,
     selectProjectModeCodeSource,
+    knowledgeCommitRate,
+    knowledgeCommitRateLoading,
+    knowledgeCommitRateError,
+    fetchKnowledgeCommitRate,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,
@@ -3152,10 +3159,17 @@ export function DashboardView(): React.JSX.Element {
     skillEvalScopeOptions
   ])
 
-  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选 /「仅精益项目」开关变化时重拉。
+  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选 /「仅精益项目」/「仅本期新建」
+  // 开关变化时重拉。
   useEffect(() => {
     if (activeMainTab !== "project-mode" || !projectModeAllowed) return
-    void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
+    void fetchProjectMode(
+      range,
+      granularity,
+      selectedOrgLv1List,
+      fromLeanProjectsOnly,
+      createdInRangeProjectsOnly
+    )
   }, [
     activeMainTab,
     fetchProjectMode,
@@ -3163,8 +3177,15 @@ export function DashboardView(): React.JSX.Element {
     projectModeAllowed,
     range,
     selectedOrgLv1List,
-    fromLeanProjectsOnly
+    fromLeanProjectsOnly,
+    createdInRangeProjectsOnly
   ])
+
+  // 「知识文档入库率」只随时间范围 / 室筛选变化，不挂「仅精益项目」「仅本期新建」开关。
+  useEffect(() => {
+    if (activeMainTab !== "project-mode" || !projectModeAllowed) return
+    void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
+  }, [activeMainTab, fetchKnowledgeCommitRate, projectModeAllowed, range, selectedOrgLv1List])
 
   // 研发效能 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
   // 不挂「仅精益项目」开关——该范围在后端固定，不随开关变化。
@@ -3740,7 +3761,14 @@ export function DashboardView(): React.JSX.Element {
       clearSkillEval()
     }
     if (activeMainTab === "project-mode") {
-      void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
+      void fetchProjectMode(
+        range,
+        granularity,
+        selectedOrgLv1List,
+        fromLeanProjectsOnly,
+        createdInRangeProjectsOnly
+      )
+      void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
     }
     if (activeMainTab === "efficiency") {
       void fetchEfficiency(range, selectedOrgLv1List)
@@ -3750,12 +3778,14 @@ export function DashboardView(): React.JSX.Element {
     activeMainTab,
     clearSkillEval,
     fetchProjectMode,
+    fetchKnowledgeCommitRate,
     fetchEfficiency,
     granularity,
     range,
     refresh,
     selectedOrgLv1List,
-    fromLeanProjectsOnly
+    fromLeanProjectsOnly,
+    createdInRangeProjectsOnly
   ])
 
   const handleProjectOpenTraces = useCallback(
@@ -3806,6 +3836,20 @@ export function DashboardView(): React.JSX.Element {
         throw new Error(res.error ?? "获取运行明细失败")
       }
       return res.data as DashboardProjectModeOperationalDetails
+    },
+    [range, selectedOrgLv1List]
+  )
+
+  // 单项目的阶段耗时分析，跟随面板当前时间范围与室筛选。
+  const loadProjectStageAnalysis = useCallback(
+    async (projectId: string): Promise<DashboardProjectModeStageAnalysis> => {
+      const res = await window.api.dashboard.projectModeStageAnalysis(projectId, range, {
+        upperOrgLv1: selectedOrgLv1List
+      })
+      if (!res.success || !res.data) {
+        throw new Error(res.error ?? "获取阶段耗时分析失败")
+      }
+      return res.data as DashboardProjectModeStageAnalysis
     },
     [range, selectedOrgLv1List]
   )
@@ -4258,14 +4302,41 @@ export function DashboardView(): React.JSX.Element {
     setProjectTracePage(1)
   }, [])
 
+  const loadProjectUserThreadTraces = useCallback(
+    async (threadId: string): Promise<DashboardTraceDetail[]> =>
+      unwrapThreadTracesResponse(
+        await window.api.dashboard.threadTraces(threadId, {
+          scope: "project",
+          range,
+          triggerScope: userDetailTraceTriggerScope
+        })
+      ),
+    [range, userDetailTraceTriggerScope]
+  )
   const loadProjectThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
-      // 同上：失败抛出，交给 TraceExplorer 显示并允许重试，别缓存成空成功。
+      if (!projectTraceProject) return []
       return unwrapThreadTracesResponse(
-        await window.api.dashboard.threadTraces(threadId, { scope: "project" })
+        await window.api.dashboard.threadTraces(threadId, {
+          scope: "project",
+          projectId: projectTraceProject.projectId,
+          range,
+          featureSlug: projectTraceFeature?.slug,
+          nodeName: projectTraceNode?.nodeName,
+          nodeStatus: projectTraceStatus ?? undefined,
+          stageBucket: projectTraceStageBucket ?? undefined,
+          triggerScope: PROJECT_TRACE_TRIGGER_SCOPE
+        })
       )
     },
-    []
+    [
+      projectTraceProject,
+      range,
+      projectTraceFeature,
+      projectTraceNode,
+      projectTraceStatus,
+      projectTraceStageBucket
+    ]
   )
 
   const subPageDetailSapId = subPage.kind === "user-detail" ? subPage.sapId : null
@@ -4811,7 +4882,8 @@ export function DashboardView(): React.JSX.Element {
     try {
       const exportDataResult = await window.api.dashboard.projectModeExportData(range, {
         upperOrgLv1: selectedOrgLv1List,
-        fromLeanOnly: fromLeanProjectsOnly
+        fromLeanOnly: fromLeanProjectsOnly,
+        createdInRangeOnly: createdInRangeProjectsOnly
       })
       if (!exportDataResult.success || !exportDataResult.data) {
         throw new Error(exportDataResult.error ?? "获取项目导出明细失败")
@@ -5017,6 +5089,7 @@ export function DashboardView(): React.JSX.Element {
     range,
     selectedOrgLv1List,
     fromLeanProjectsOnly,
+    createdInRangeProjectsOnly,
     marketSkillMap,
     skillUploaderProfiles
   ])
@@ -5208,7 +5281,7 @@ export function DashboardView(): React.JSX.Element {
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
             onExportPage={handleUserTraceExport}
             exporting={userDetailTraceExporting}
-            loadThreadTraces={subPage.projectMode ? loadProjectThreadTraces : undefined}
+            loadThreadTraces={subPage.projectMode ? loadProjectUserThreadTraces : undefined}
           />
         </ScrollArea>
       ) : (
@@ -5258,6 +5331,9 @@ export function DashboardView(): React.JSX.Element {
                 codeStatsOverride={projectModeCodeStatsOverride}
                 codeStatsLoading={projectModeCodeStatsLoading}
                 onCodeSourceChange={selectProjectModeCodeSource}
+                knowledgeCommitRate={knowledgeCommitRate}
+                knowledgeCommitRateLoading={knowledgeCommitRateLoading}
+                knowledgeCommitRateError={knowledgeCommitRateError}
                 headerAction={
                   <div className="flex items-center gap-2">
                     <Button
@@ -5270,6 +5346,17 @@ export function DashboardView(): React.JSX.Element {
                     >
                       <Filter className="size-3.5" />
                       仅精益项目
+                    </Button>
+                    <Button
+                      variant={createdInRangeProjectsOnly ? "default" : "outline"}
+                      size="sm"
+                      className="gap-1.5 text-xs"
+                      onClick={() => setCreatedInRangeProjectsOnly((v) => !v)}
+                      disabled={projectModeLoading}
+                      title="仅统计创建时间落在当前所选时间范围内的项目"
+                    >
+                      <Filter className="size-3.5" />
+                      仅本期新建
                     </Button>
                     <Button
                       variant="outline"
@@ -5296,6 +5383,7 @@ export function DashboardView(): React.JSX.Element {
                 onOpenProjectCommits={handleProjectOpenProjectCommits}
                 loadFeatureNodes={loadProjectFeatureNodes}
                 loadOperationalDetails={loadProjectOperationalDetails}
+                loadStageAnalysis={loadProjectStageAnalysis}
                 loadPluginAggregate={loadPluginAggregateNodes}
                 fetchAdapterProjectPage={fetchAdapterProjectPage}
                 onSkillClick={handleSkillClick}

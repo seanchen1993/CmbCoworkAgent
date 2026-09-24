@@ -70,6 +70,24 @@ export interface DashboardEsWorkerQuerySuccess {
   }
 }
 
+/**
+ * 序列化后的 cause 链节点。
+ *
+ * worker 只能回传可结构化克隆的值，Error 的 `cause` 不在其中：`postMessage` 一个
+ * Error 只剩 message / stack / name，cause 会被整条丢掉。而每节点的真实失败原因
+ * （`ES 400: <ES 自己的报错>`、`fetch failed`、`ETIMEDOUT`）恰恰只存在 cause 里，
+ * runDashboardEsQuery 把它们收拢成一句面向用户的「请检查网络连接后重试」时，也
+ * 只是挂在 cause 上。所以必须显式摊平成普通对象，否则主进程侧的
+ * getErrorDetail 沿 cause 找不到东西，日志就会打成
+ * 「All 2 ES nodes failed. Last error: 请检查网络连接后重试」——把真正的原因用
+ * 提示语盖掉，排查无从下手。
+ */
+export interface DashboardEsWorkerErrorCause {
+  code?: string
+  message: string
+  cause?: DashboardEsWorkerErrorCause
+}
+
 export interface DashboardEsWorkerQueryFailure {
   type: "query-result"
   requestId: number
@@ -78,6 +96,7 @@ export interface DashboardEsWorkerQueryFailure {
     code: string
     message: string
     stack?: string
+    cause?: DashboardEsWorkerErrorCause
   }
 }
 

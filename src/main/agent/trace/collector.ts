@@ -1083,16 +1083,27 @@ export class TraceCollector {
       )
     }, 0)
     const metadataToolCallCounts = this.nodes.reduce((sum, node) => {
+      if (["message", "error", "cancel"].includes(node.type)) return sum
       const count = node.metadata?.toolCallCount
       if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) return sum
       return sum + Math.floor(count)
+    }, 0)
+    // Child terminal nodes carry the whole run's total, while LLM nodes carry
+    // per-call counts. Adding the two doubles every tool once LLM tracing is on.
+    const terminalToolCallCount = this.nodes.reduce((max, node) => {
+      if (!["message", "error", "cancel"].includes(node.type)) return max
+      const count = node.metadata?.toolCallCount
+      return typeof count === "number" && Number.isFinite(count) && count > 0
+        ? Math.max(max, Math.floor(count))
+        : max
     }, 0)
     return Math.max(
       this.observedToolCallCount,
       stepToolCalls,
       nodeToolCalls,
       metadataToolCalls,
-      metadataToolCallCounts
+      metadataToolCallCounts,
+      terminalToolCallCount
     )
   }
 

@@ -5,6 +5,7 @@ import {
   Layers,
   Activity,
   MessagesSquare,
+  Timer,
   ArrowDownToLine,
   ArrowUpFromLine,
   ArrowUp,
@@ -16,6 +17,7 @@ import {
   Loader2,
   AlertCircle,
   Plug,
+  BookOpenCheck,
   Code2,
   Gauge,
   GitCommit,
@@ -67,6 +69,8 @@ import type {
   DashboardProjectModeOperationalDetailScope,
   DashboardProjectModeOperationalDetails,
   DashboardProjectModeOperationalDetailsLoader,
+  DashboardProjectModeStageAnalysis,
+  DashboardProjectModeStageAnalysisLoader,
   DashboardProjectModeOrgDistributionItem,
   DashboardProjectModeProject,
   DashboardProjectModeProjectCounts,
@@ -82,11 +86,16 @@ import type {
   DashboardStageBucketStat
 } from "../use-dashboard"
 import { formatTopUserOrgName } from "../use-dashboard"
+import { ProjectStageAnalysisDialog } from "../ProjectStageAnalysisDialog"
 import {
   STAGE_BUCKET_HINTS,
   STAGE_BUCKET_LABELS,
   type StageBucket
 } from "../../../../../shared/harness-stage-bucket"
+import type {
+  DashboardKnowledgeCommitRate,
+  DashboardKnowledgeCommitRateUnavailableReason
+} from "../../../../../shared/dashboard-knowledge-commit-rate"
 
 const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   inclusiveEffectiveGeneratedLines: 0,
@@ -951,6 +960,10 @@ function StageBucketCaliberHint(): React.JSX.Element {
         </div>
       ))}
       <div className="opacity-80">每格依次为「对话数 · 生成行数 · 总量口径提交采纳率」。</div>
+      <div className="opacity-80">
+        对话数与列表「对话数」同口径，仅统计主动触发的主 Agent 轮次，不含子 Agent；
+        生成行数则统计全部产出，含子 Agent 写入的代码。
+      </div>
     </div>
   )
 }
@@ -1029,6 +1042,113 @@ function ProjectStageAdoptionRates({
             <span className="font-medium text-foreground">
               {formatPercent(stats?.inclusiveAdoptionRate)}
             </span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+/** 后端没回 runCost 时的零值（老版本主进程、或快照阶段还没 enrich 完）。 */
+const EMPTY_RUN_COST = {
+  toolCalls: 0,
+  modelCalls: 0,
+  totalTokens: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  userInputRequests: 0,
+  userInputRequestDocs: 0
+} as const
+
+/**
+ * 运行开销单元格：两行「标签 + 数值」，和隔壁「系统约束 / 运行时 Hook」同款排版。
+ *
+ * incomplete 标记用的是 `~` 前缀而不是变色或图标：这一列是右对齐的等宽数字，
+ * 加图标会破坏对齐，变色在浅色主题下又太弱。`~` 直接长在数字前面，一眼能看出
+ * 「这是个下限」，鼠标悬停有完整说明。
+ */
+function RunCostPair({
+  rows
+}: {
+  rows: Array<{ label: string; value: string; incomplete?: boolean }>
+}): React.JSX.Element {
+  return (
+    <div className="flex flex-col items-end gap-0.5">
+      {rows.map(({ label, value, incomplete }) => (
+        <span
+          key={label}
+          className="inline-flex items-center gap-1.5 whitespace-nowrap text-[10px] text-muted-foreground"
+          title={
+            incomplete
+              ? `${label}：所选时间范围内包含没有该统计字段的历史会话，这里显示的是下限`
+              : undefined
+          }
+        >
+          <span className="font-medium text-foreground/80">{label}</span>
+          <span className={incomplete ? "text-muted-foreground" : "font-medium text-foreground"}>
+            {incomplete ? `~${value}` : value}
+          </span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/** 两桶内占比：分母只取 Harness + VibeCoding 合计；合计为 0 时没有占比可言。 */
+function bucketLineShare(lines: number, comparedLines: number): number | null {
+  return comparedLines > 0 ? lines / comparedLines : null
+}
+
+/**
+ * Harness vs VibeCoding 采纳行数对比，与采纳率列同一组 stage×skill 分桶。
+ *
+ * 占比分母只取这两桶之和，未归因桶不参与：它装的是没有 harnessNodeStatus 的历史/未开
+ * 阶段事件，摊进分母会把对比稀释成「历史数据占比」。被排除的行数写在 title 里备查。
+ *
+ * 采纳行数是 `adoptedLines`，即已与 commit 配对测量过的生成行；两桶同口径，所以对比
+ * 公平，但绝对值低于实际写进仓库的行数。
+ */
+function ProjectStageAdoptedLines({
+  buckets
+}: {
+  buckets: DashboardStageBuckets
+}): React.JSX.Element {
+  const unattributedLines = buckets.unattributed.codeStats?.adoptedLines ?? 0
+  const rows: Array<{
+    bucket: StageBucket
+    shortLabel: string
+    dot: string
+    lines: number
+  }> = [
+    {
+      bucket: "plugin_constrained",
+      shortLabel: "Harness",
+      dot: "bg-emerald-500",
+      lines: buckets.pluginConstrained.codeStats?.adoptedLines ?? 0
+    },
+    {
+      bucket: "vibecoding",
+      shortLabel: "VibeCoding",
+      dot: "bg-violet-500",
+      lines: buckets.vibecoding.codeStats?.adoptedLines ?? 0
+    }
+  ]
+  const comparedLines = rows.reduce((acc, row) => acc + row.lines, 0)
+  return (
+    <div className="flex flex-col items-end gap-0.5 whitespace-nowrap">
+      {rows.map(({ bucket, shortLabel, dot, lines }) => {
+        const share = formatPercent(bucketLineShare(lines, comparedLines))
+        return (
+          <span
+            key={bucket}
+            className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"
+            title={`${STAGE_BUCKET_LABELS[bucket]}：采纳 ${formatNumber(lines)} 行，占两桶合计 ${formatNumber(comparedLines)} 行的 ${share}。未归因另有 ${formatNumber(unattributedLines)} 行，不计入分母。`}
+          >
+            <span className={`size-1.5 rounded-full ${dot}`} />
+            <span>{shortLabel}</span>
+            <span className="font-medium text-foreground">{formatLineCount(lines)}</span>
+            <span>行</span>
+            <span>{share}</span>
           </span>
         )
       })}
@@ -1289,6 +1409,7 @@ function ProjectRow({
   onOpenTraces,
   onOpenFeatureCommits,
   onOpenProjectCommits,
+  onOpenStageAnalysis,
   loadFeatureNodes,
   loadOperationalDetails
 }: {
@@ -1304,6 +1425,7 @@ function ProjectRow({
   ) => void
   onOpenFeatureCommits: (feature: DashboardProjectModeFeature) => void
   onOpenProjectCommits: (pushedOnly?: boolean) => void
+  onOpenStageAnalysis: () => void
   loadFeatureNodes: (
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
@@ -1332,6 +1454,7 @@ function ProjectRow({
   const creatorId = project.creatorSapId || project.creatorYstId || ""
   const creatorDepartment = formatProjectCreatorDepartment(project)
   const createdAt = formatProjectCreatedAt(project.lifecycleCreatedAt)
+  const runCost = project.runCost ?? EMPTY_RUN_COST
 
   return (
     <>
@@ -1355,7 +1478,9 @@ function ProjectRow({
                   {project.name}
                 </span>
               </div>
-              {(project.systemName || project.systemConstraintEverLoadedSuccessfully) && (
+              {(project.systemName ||
+                project.systemConstraintEverLoadedSuccessfully ||
+                project.managedRunEverStarted) && (
                 <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
                   {project.systemName && (
                     <span className="min-w-0 truncate" title={project.systemName}>
@@ -1369,6 +1494,15 @@ function ProjectRow({
                       title="该项目至少有一次会话完整加载系统约束"
                     >
                       约束加载
+                    </Badge>
+                  )}
+                  {project.managedRunEverStarted && (
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 border-primary/40 bg-primary/10 px-1.5 py-0 text-[10px] font-medium text-primary normal-case tracking-normal"
+                      title="该项目至少开启过一次托管运行。这是终身标记，不受所选时间范围影响，所以可能标签亮着而「托管运行次数」为 0"
+                    >
+                      托管运行
                     </Badge>
                   )}
                 </div>
@@ -1470,6 +1604,9 @@ function ProjectRow({
           <ProjectStageAdoptionRates buckets={project.stageBuckets} />
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
+          <ProjectStageAdoptedLines buckets={project.stageBuckets} />
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
           {project.systemConstraintReads || project.hookExecutions ? (
             <OperationalTelemetry
               constraint={project.systemConstraintReads}
@@ -1484,6 +1621,31 @@ function ProjectRow({
             <span className="text-muted-foreground">—</span>
           )}
         </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          {(project.managedRunCount ?? 0) > 0 ? (
+            <span className="font-medium text-foreground">
+              {formatNumber(project.managedRunCount ?? 0)}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          <RunCostPair
+            rows={[
+              { label: "工具", value: formatNumber(runCost.toolCalls) },
+              { label: "模型", value: formatNumber(runCost.modelCalls) }
+            ]}
+          />
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          <RunCostPair
+            rows={[
+              { label: "输入", value: formatCompact(runCost.inputTokens) },
+              { label: "输出", value: formatCompact(runCost.outputTokens) }
+            ]}
+          />
+        </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
           {creatorId && creatorId !== creatorName ? (
@@ -1495,18 +1657,32 @@ function ProjectRow({
           {createdAt}
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-right">
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-            disabled={project.conversationCount === 0}
-            onClick={(event) => {
-              event.stopPropagation()
-              onOpenTraces()
-            }}
-          >
-            <MessagesSquare className="size-3.5 shrink-0" />
-            查看对话
-          </button>
+          <div className="flex flex-col items-end gap-1">
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+              disabled={project.conversationCount === 0}
+              onClick={(event) => {
+                event.stopPropagation()
+                onOpenTraces()
+              }}
+            >
+              <MessagesSquare className="size-3.5 shrink-0" />
+              查看对话
+            </button>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+              disabled={project.conversationCount === 0}
+              onClick={(event) => {
+                event.stopPropagation()
+                onOpenStageAnalysis()
+              }}
+            >
+              <Timer className="size-3.5 shrink-0" />
+              阶段耗时
+            </button>
+          </div>
         </td>
       </tr>
       {expanded && (
@@ -1772,6 +1948,7 @@ function ProjectListSection({
   onOpenProjectCommits,
   loadFeatureNodes,
   loadOperationalDetails,
+  loadStageAnalysis,
   lockedAdapterName
 }: {
   projectCounts?: DashboardProjectModeProjectCounts
@@ -1810,6 +1987,8 @@ function ProjectListSection({
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
   loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
+  /** 不传则不显示「阶段耗时」入口（插件「项目数」弹窗等嵌入场景用不到）。 */
+  loadStageAnalysis?: DashboardProjectModeStageAnalysisLoader
   /** 嵌入模式：锁定到该插件名（隐藏标题与插件下拉，强制按此插件过滤）。用于插件「项目数」弹窗。 */
   lockedAdapterName?: string
 }): React.JSX.Element {
@@ -1820,6 +1999,45 @@ function ProjectListSection({
   const [departmentQuery, setDepartmentQuery] = useState("")
   const [adapterName, setAdapterName] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  // 阶段耗时弹窗：懒加载，每次打开重新拉（时间范围/室筛选变了结果就该变）。
+  const [stageAnalysisProject, setStageAnalysisProject] =
+    useState<DashboardProjectModeProject | null>(null)
+  const [stageAnalysis, setStageAnalysis] = useState<DashboardProjectModeStageAnalysis | null>(null)
+  const [stageAnalysisLoading, setStageAnalysisLoading] = useState(false)
+  const [stageAnalysisError, setStageAnalysisError] = useState<string | null>(null)
+
+  const openStageAnalysis = useCallback(
+    (project: DashboardProjectModeProject) => {
+      if (!loadStageAnalysis) return
+      setStageAnalysisProject(project)
+      setStageAnalysis(null)
+      setStageAnalysisError(null)
+      setStageAnalysisLoading(true)
+      const requestedProjectId = project.projectId
+      void loadStageAnalysis(requestedProjectId)
+        .then((data) => {
+          // 请求飞行期间用户可能已经点开了另一个项目，迟到的响应不能覆盖当前的。
+          setStageAnalysisProject((current) => {
+            if (current?.projectId === requestedProjectId) {
+              setStageAnalysis(data)
+              setStageAnalysisLoading(false)
+            }
+            return current
+          })
+        })
+        .catch((error: unknown) => {
+          setStageAnalysisProject((current) => {
+            if (current?.projectId === requestedProjectId) {
+              setStageAnalysisError(error instanceof Error ? error.message : String(error))
+              setStageAnalysisLoading(false)
+            }
+            return current
+          })
+        })
+    },
+    [loadStageAnalysis]
+  )
+
   // null = 用所在 tab 的默认排序；非空 = 用户显式选择。
   const [sortBy, setSortBy] = useState<DashboardProjectModeProjectSortKey | null>(null)
   const [sortOrder, setSortOrder] = useState<DashboardProjectModeProjectSortOrder>("desc")
@@ -1851,7 +2069,7 @@ function ProjectListSection({
   const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
   const pageData = projectPages[tab]
   const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
-  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 16 : 15
+  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 20 : 19
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
@@ -1986,7 +2204,7 @@ function ProjectListSection({
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
             项目、插件、项目状态、特性数为当前状态；对话数、DEV 阶段轮次数、DEV
             关联特性数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
-            流程采纳率、系统约束读取与运行时 Hook
+            流程采纳率与采纳行数对比、系统约束读取与运行时 Hook
             按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
           </p>
         </>
@@ -2065,7 +2283,7 @@ function ProjectListSection({
         <table
           className={cn(
             "w-full table-fixed text-xs",
-            showSuspectedTechnicalDetailMetric ? "min-w-[2410px]" : "min-w-[2270px]"
+            showSuspectedTechnicalDetailMetric ? "min-w-[2968px]" : "min-w-[2828px]"
           )}
         >
           {/*
@@ -2074,6 +2292,11 @@ function ProjectListSection({
            * width, so Chromium may collapse the department/action columns before
            * the horizontal scroller is needed. The fixed grid makes overflow land
            * on the existing scroll container instead of turning text vertical.
+           *
+           * 这里的 <col> 个数必须和表头单元格个数一一对应，见 project-mode-table-columns
+           * 的用例。少一个 col 不会报错，但从缺口那一列起后面全部左移一格：列宽对不上
+           * 内容，nowrap 的表头会溢出盖住右边的列，最后一列只能分到剩下的零头。加列时
+           * 记得同步这里、tableColumnCount 和上面的 min-w。
            */}
           <colgroup>
             <col className="w-[300px]" />
@@ -2086,8 +2309,13 @@ function ProjectListSection({
             <col className="w-[160px]" />
             <col className="w-[160px]" />
             <col className="w-[142px]" />
-            <col className="w-[178px]" />
             <col className="w-[190px]" />
+            <col className="w-[202px]" />
+            <col className="w-[190px]" />
+            <col className="w-[110px]" />
+            <col className="w-[120px]" />
+            {/* Token 输入 / 输出：表头比原来的「Token / 请求问答」多一个空格，120px 差 1px */}
+            <col className="w-[128px]" />
             <col className="w-[110px]" />
             <col className="w-[210px]" />
             <col className="w-[140px]" />
@@ -2154,9 +2382,33 @@ function ProjectListSection({
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="按流程阶段归因拆分的采纳行数对比。占比分母为 Harness + VibeCoding 两桶之和，不含未归因；采纳行数仅统计已与 commit 配对测量过的生成行"
+              >
+                Harness / VibeCoding 采纳行数
+              </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
                 title="所选时间范围内，插件系统约束文件的有效读取次数与项目模式运行时 Hook 触发次数"
               >
                 系统约束 / 运行时 Hook
+              </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="所选时间范围内开启的托管运行次数。项目名旁的「托管运行」标签是终身标记，不受时间范围影响，所以可能标签亮着而这里是 0"
+              >
+                托管运行次数
+              </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="所选时间范围内，该项目所有 trace 的工具与模型调用总次数，包含 Team、Workflow 等子 Agent 及后台任务。主、子 Agent 各统计自身调用。"
+              >
+                工具 / 模型调用
+              </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="所选时间范围内，该项目所有主、子 Agent 及后台任务消耗的 Token。输入与输出分开统计，两者之和小于总量——差额是缓存读取与缓存创建。"
+              >
+                Token 输入 / 输出
               </th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
@@ -2186,6 +2438,7 @@ function ProjectListSection({
                 }
                 onOpenFeatureCommits={(feature) => onOpenFeatureCommits(project, feature)}
                 onOpenProjectCommits={(pushedOnly) => onOpenProjectCommits(project, pushedOnly)}
+                onOpenStageAnalysis={() => openStageAnalysis(project)}
                 loadFeatureNodes={(feature) => loadFeatureNodes(project, feature)}
                 loadOperationalDetails={loadOperationalDetails}
               />
@@ -2255,6 +2508,23 @@ function ProjectListSection({
           </div>
         )}
       </div>
+      {stageAnalysisProject ? (
+        <ProjectStageAnalysisDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) {
+              setStageAnalysisProject(null)
+              setStageAnalysis(null)
+              setStageAnalysisError(null)
+              setStageAnalysisLoading(false)
+            }
+          }}
+          projectName={stageAnalysisProject.name}
+          analysis={stageAnalysis}
+          loading={stageAnalysisLoading}
+          error={stageAnalysisError}
+        />
+      ) : null}
     </section>
   )
 }
@@ -2950,6 +3220,44 @@ function AdapterProjectsDialogBody({
   )
 }
 
+// 知识文档入库率给不出数时，卡片副行的短说明和小 i 里的详细原因。
+const KNOWLEDGE_COMMIT_RATE_UNAVAILABLE: Record<
+  DashboardKnowledgeCommitRateUnavailableReason,
+  { sub: string; detail: string }
+> = {
+  multipleRooms: {
+    sub: "多选室时不展示",
+    detail: "接口只返回比率、不带分子分母，多个室的比率没法合并，请只选一个室。"
+  },
+  unclassified: { sub: "未归类没有室编号", detail: "「未归类」不是一个室，接口无从查询。" },
+  roomNotMapped: { sub: "未配置室编号", detail: "该室还没有配置室编号，暂时查不了。" },
+  noAccess: { sub: "仅可查看本室", detail: "非管理员只能查看本室的知识文档入库率。" }
+}
+
+function describeKnowledgeCommitRate(
+  data: DashboardKnowledgeCommitRate | null,
+  loading: boolean,
+  error: string | null
+): { sub?: string; detail?: string } {
+  if (loading) return { sub: "加载中…" }
+  if (error) return { sub: "获取失败", detail: `获取失败：${error}` }
+  if (data?.unavailableReason) return KNOWLEDGE_COMMIT_RATE_UNAVAILABLE[data.unavailableReason]
+  if (data && data.rate === null) return { sub: "暂无数据" }
+  return {}
+}
+
+function KnowledgeCommitRateHint({ detail }: { detail?: string }): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">知识文档入库率</div>
+      <div className="space-y-1 text-[11px] text-muted-foreground">
+        <div>AI修改的知识库内容被用户提交的百分比</div>
+        {detail ? <div>{detail}</div> : null}
+      </div>
+    </div>
+  )
+}
+
 export function ProjectModePanel({
   data,
   loading,
@@ -2958,6 +3266,9 @@ export function ProjectModePanel({
   codeStatsOverride,
   codeStatsLoading,
   onCodeSourceChange,
+  knowledgeCommitRate,
+  knowledgeCommitRateLoading,
+  knowledgeCommitRateError,
   headerAction,
   projectPages,
   projectPageLoading,
@@ -2968,6 +3279,7 @@ export function ProjectModePanel({
   onOpenProjectCommits,
   loadFeatureNodes,
   loadOperationalDetails,
+  loadStageAnalysis,
   loadPluginAggregate,
   fetchAdapterProjectPage,
   onSkillClick,
@@ -2990,6 +3302,10 @@ export function ProjectModePanel({
   codeStatsLoading: boolean
   /** 切换 source 下拉（null = 全部来源）。 */
   onCodeSourceChange: (source: string | null) => void
+  /** 知识文档入库率，来自知识库服务，只随时间范围和室筛选变化。 */
+  knowledgeCommitRate: DashboardKnowledgeCommitRate | null
+  knowledgeCommitRateLoading: boolean
+  knowledgeCommitRateError: string | null
   headerAction?: ReactNode
   projectPages: Partial<
     Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
@@ -3024,6 +3340,7 @@ export function ProjectModePanel({
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
   loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
+  loadStageAnalysis: DashboardProjectModeStageAnalysisLoader
   loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
   /** 插件「项目数」弹窗复用项目列表所需的分页拉取器（按当前时间范围，调用方注入插件名/版本）。 */
   fetchAdapterProjectPage: (
@@ -3077,6 +3394,11 @@ export function ProjectModePanel({
   const projectCounts = data?.projectCounts
   const archivedCount = projectCounts?.archived ?? 0
   const archivedFeatureCount = projectCounts?.archivedFeatureCount ?? 0
+  const knowledgeCommitRateStatus = describeKnowledgeCommitRate(
+    knowledgeCommitRate,
+    knowledgeCommitRateLoading,
+    knowledgeCommitRateError
+  )
 
   return (
     <div className="space-y-6">
@@ -3090,7 +3412,8 @@ export function ProjectModePanel({
           <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
             <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
-              「仅精益项目」命中的项目数量已超过单次统计上限，下方汇总指标（对话数、代码采纳等）可能不完整。请缩小时间范围或叠加部门
+              筛选开关（仅精益项目 /
+              仅本期新建）命中的项目数量已超过单次统计上限，下方汇总指标（对话数、代码采纳等）可能不完整。请缩小时间范围或叠加部门
               / 室筛选后再查看。
             </span>
           </div>
@@ -3246,6 +3569,14 @@ export function ProjectModePanel({
                 color="bg-indigo-500"
                 hint={codeStats ? <MeasuredAdoptionTooltip data={codeStats} /> : undefined}
               />
+              <StatCard
+                icon={BookOpenCheck}
+                label="知识文档入库率"
+                value={formatPercent(knowledgeCommitRate?.rate)}
+                sub={knowledgeCommitRateStatus.sub}
+                color="bg-orange-500"
+                hint={<KnowledgeCommitRateHint detail={knowledgeCommitRateStatus.detail} />}
+              />
             </div>
             <CodeAdoptionFunnel data={funnelData} onFirstStageClick={onFunnelFirstStageClick} />
           </div>
@@ -3351,6 +3682,7 @@ export function ProjectModePanel({
         onOpenProjectCommits={onOpenProjectCommits}
         loadFeatureNodes={loadFeatureNodes}
         loadOperationalDetails={loadOperationalDetails}
+        loadStageAnalysis={loadStageAnalysis}
       />
 
       {/* Adapter (plugin) distribution — 紧随项目列表之后 */}

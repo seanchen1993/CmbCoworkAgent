@@ -1735,6 +1735,9 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   const systemConstraintFirstLoadedAt = normalizeText(value.systemConstraintFirstLoadedAt)
     .trim()
     .slice(0, 128)
+  const managedRunFirstStartedAt = normalizeText(value.managedRunFirstStartedAt)
+    .trim()
+    .slice(0, 128)
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
   const now = new Date().toISOString()
 
@@ -1752,6 +1755,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
       HARNESS_PROJECT_PATH_MAX_CHARS
     ),
     ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
+    ...(managedRunFirstStartedAt ? { managedRunFirstStartedAt } : {}),
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
@@ -3441,6 +3445,36 @@ export async function markHarnessProjectSystemConstraintsLoaded(
     store.projects[index] = {
       ...store.projects[index],
       systemConstraintFirstLoadedAt: firstLoadedAt
+    }
+    return true
+  })
+}
+
+/**
+ * 记录项目第一次开启托管运行。口径和上面那个系统约束标记完全一致：单调、只写一次、
+ * 不碰 lifecycle.updateAt，免得埋点把项目列表的排序搅乱。
+ *
+ * 看板的「托管运行」标签读的是这个标记而不是事件，理由是它能回填——托管运行的记录本
+ * 来就落在 `<工作区>/.cmbdevclaw/managed-runs/` 下，启动时扫一遍就能把存量项目标上。
+ * 若改从事件推，上线当天所有老项目都是灭的，看板会显示成没人用托管。
+ */
+export async function markHarnessProjectManagedRunStarted(
+  projectId: string,
+  startedAt = new Date().toISOString()
+): Promise<boolean> {
+  const id = normalizeText(projectId).trim()
+  if (!id) return false
+
+  return mutateProjectStore((store) => {
+    const index = store.projects.findIndex((item) => item.projectId === id)
+    if (index === -1 || store.projects[index].managedRunFirstStartedAt) return false
+    const parsedStartedAt = new Date(startedAt)
+    const firstStartedAt = Number.isNaN(parsedStartedAt.getTime())
+      ? new Date().toISOString()
+      : parsedStartedAt.toISOString()
+    store.projects[index] = {
+      ...store.projects[index],
+      managedRunFirstStartedAt: firstStartedAt
     }
     return true
   })

@@ -1,0 +1,162 @@
+import { mainAgentConversationAggs } from "./dashboard-stage-buckets"
+/**
+ * 项目模式的「运行开销」：工具调用数、模型调用数、Token（总量 / 输入 / 输出）、
+ * 请求用户回答次数。
+ *
+ * 全都是 trace 顶层标量，直接 sum 就行，不用碰 `_raw`：
+ *
+ *   totalToolCalls        —— collector 取五个信号的 max（见 getTotalToolCalls），最准的那个
+ *   modelCallCount        —— 服务端存的标量，取自客户端实时累加的 totalModelCalls
+ *   totalTokens           —— 输入+输出+缓存
+ *   totalInputTokens      —— 只算输入，不含缓存
+ *   totalOutputTokens     —— 只算输出
+ *   userInputRequestCount —— 本轮调用 request_user_input 的次数。**索引里没有这个字段**，见下。
+ *
+ * ── userInputRequestCount 目前取不到值 ─────────────────────────
+ *
+ * 这个字段采集侧从未写入：`AgentTrace` 上没有它，`src/main/agent/` 下也没有任何赋值。
+ * 它只以两种形式存在——看板读 `_raw` 时现算的 `countUserInputRequests(nodes)`（数
+ * trace 树里的 request_user_input 工具节点），以及这里这个聚合字段名。所以 sum 恒为 0，
+ * value_count 也恒为 0，界面上的列已经撤掉。
+ *
+ * 原先这段注释写的是「会话记录列表（`_raw` 被排除的预览路径）照样能正确显示它们，说明
+ * 索引里确实有」。这个推断不成立：预览路径走的是 `asNumber(source.userInputRequestCount)`，
+ * 缺字段时返回 0，不抛错也不留空，看起来就像正常显示了，而 0 对「问答次数」又是个合理
+ * 的值，于是没人发现。
+ *
+ * 对照 `modelCallCount` 可以看清区别：客户端送的是 `totalModelCalls`，服务端存成
+ * `modelCallCount`，**客户端送了原料**所以服务端派生得出来。用户提问次数没有对应的原料
+ * 标量，服务端手里只有一份去重过的 `toolNames` 名字数组（客户端 standard-turn-stream
+ * 用的是 Set，同一轮调五次只留一个名字），能回答「用没用过」，回答不了「用了几次」。
+ *
+ * 聚合和覆盖度探针都保留着：等采集侧补上这个标量，恢复展示只需要改界面，而那之后老 trace
+ * 仍然没有该字段，正需要探针把「下限」标出来。
+ *
+ * ── 为什么每个 sum 都配一个 value_count ──────────────────────────
+ *
+ * ES 的 sum 对「字段不存在」返回 0，不是 null。这两个字段是 forward-only 的，老 trace
+ * 上没有，所以时间范围一旦跨到字段上线之前，sum 会**悄悄少算且不报错**。
+ *
+ * value_count 数的是真正带该字段的文档数。它明显小于桶的 doc_count，就说明这段时间里
+ * 混着没有该字段的老数据，界面该标注「部分数据缺失」，而不是把一个偏小的数当真值展示。
+ *
+ * 这个坑在本仓库已经踩过一次：Token 总量的兜底写成 `asNumber(sum, 输入+输出)`，而 sum
+ * 缺字段时返回 0（有限数），兜底分支永远走不到，那一列长期恒显 0。见 dashboard-token-totals.ts。
+ */
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {}
+}
+
+function asCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return 0
+  return value
+}
+
+/** 每项指标对应的 trace 字段。改名时这里和下面的 agg 键是一一对应的。 */
+const RUN_COST_FIELDS = {
+  toolCalls: "totalToolCalls",
+  modelCalls: "modelCallCount",
+  totalTokens: "totalTokens",
+  inputTokens: "totalInputTokens",
+  outputTokens: "totalOutputTokens",
+  userInputRequests: "userInputRequestCount"
+} as const
+
+export type ProjectModeRunCostKey = keyof typeof RUN_COST_FIELDS
+
+export interface ProjectModeRunCost {
+  toolCalls: number
+  modelCalls: number
+  totalTokens: number
+  /**
+   * 输入 / 输出分开的 token。
+   *
+   * 两者之和不一定等于 totalTokens：后者还含缓存读取与缓存创建，而那两项的定价和
+   * 含义都不同，不该混进「模型读了多少、写了多少」里。
+   */
+  inputTokens: number
+  outputTokens: number
+  userInputRequests: number
+  /**
+   * 带 userInputRequestCount 字段的文档数。小于同桶的 traceDocs 时，说明这段
+   * 时间里有老 trace 没这个字段，上面的 userInputRequests 是个下限而不是真值。
+   *
+   * 这只识别字段缺失，无法识别历史上采集遗漏却已写成 0 的模型指标。
+   */
+  userInputRequestDocs: number
+  /** Number of traces in the cost scope, including child agents. */
+  traceDocs?: number
+}
+
+export const EMPTY_PROJECT_MODE_RUN_COST: ProjectModeRunCost = {
+  toolCalls: 0,
+  modelCalls: 0,
+  totalTokens: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  userInputRequests: 0,
+  userInputRequestDocs: 0
+}
+
+/**
+ * 各项 sum + 一个覆盖度探针。
+ *
+ * 放在项目或阶段桶内，与主 Agent 对话数过滤器平级。每条 trace 只记录自己的开销，
+ * 因此这里必须包含主、子 Agent；不能用对话轮数的过滤器排除实际执行工作。
+ */
+export function buildProjectModeRunCostAggs(): Record<string, unknown> {
+  return {
+    run_cost_trace_docs: { value_count: { field: "traceId" } },
+    run_cost_tool_calls: { sum: { field: RUN_COST_FIELDS.toolCalls } },
+    run_cost_model_calls: { sum: { field: RUN_COST_FIELDS.modelCalls } },
+    run_cost_total_tokens: { sum: { field: RUN_COST_FIELDS.totalTokens } },
+    run_cost_input_tokens: { sum: { field: RUN_COST_FIELDS.inputTokens } },
+    run_cost_output_tokens: { sum: { field: RUN_COST_FIELDS.outputTokens } },
+    run_cost_user_input_requests: { sum: { field: RUN_COST_FIELDS.userInputRequests } },
+    run_cost_user_input_docs: { value_count: { field: RUN_COST_FIELDS.userInputRequests } }
+  }
+}
+
+/** Keep project costs outside the root-only conversation filter. */
+export function buildProjectModeConversationAndCostAggs(
+  conversations: Record<string, unknown>
+): Record<string, unknown> {
+  return { ...mainAgentConversationAggs(conversations), ...buildProjectModeRunCostAggs() }
+}
+
+/** 从项目或阶段的全量 trace 桶里读出各项。桶不存在时全零。 */
+export function parseProjectModeRunCost(container: unknown): ProjectModeRunCost {
+  const bucket = asRecord(container)
+  return {
+    ...(bucket.run_cost_trace_docs
+      ? { traceDocs: asCount(asRecord(bucket.run_cost_trace_docs).value) }
+      : {}),
+    toolCalls: asCount(asRecord(bucket.run_cost_tool_calls).value),
+    modelCalls: asCount(asRecord(bucket.run_cost_model_calls).value),
+    totalTokens: asCount(asRecord(bucket.run_cost_total_tokens).value),
+    inputTokens: asCount(asRecord(bucket.run_cost_input_tokens).value),
+    outputTokens: asCount(asRecord(bucket.run_cost_output_tokens).value),
+    userInputRequests: asCount(asRecord(bucket.run_cost_user_input_requests).value),
+    userInputRequestDocs: asCount(asRecord(bucket.run_cost_user_input_docs).value)
+  }
+}
+
+/**
+ * 「请求用户回答次数」这个数是不是完整的。
+ *
+ * traceDocs 是开销范围内的文档数；旧响应缺少它时才用 conversationCount。文档数不足说明有老 trace
+ * 不带这个字段，展示时要标注，而不是让人把下限当真值。
+ *
+ * 轮次数为 0 时没有什么可缺的，返回 true。
+ */
+export function isUserInputRequestCountComplete(
+  runCost: ProjectModeRunCost,
+  conversationCount: number
+): boolean {
+  const expectedDocs = runCost.traceDocs ?? conversationCount
+  if (expectedDocs <= 0) return true
+  return runCost.userInputRequestDocs >= expectedDocs
+}

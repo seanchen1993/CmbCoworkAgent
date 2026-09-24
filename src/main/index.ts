@@ -385,7 +385,8 @@ import { configureManagedRunProjectDirectories } from "./harness-board/managed-r
 import {
   getHarnessProjectRootPath,
   initializeHarnessManagedRunProjectDirectories,
-  listHarnessManagedRunProjectDirectories
+  listHarnessManagedRunProjectDirectories,
+  markHarnessProjectManagedRunStarted
 } from "./harness-board/service"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
@@ -1126,7 +1127,14 @@ if (browserNativeMessagingHostLaunch) {
     await initializeDatabase()
     initializeNotificationRuntime()
     await notificationService.recover()
-    if (harnessConfigAvailable) recoverManagedRunsAtStartup()
+    if (harnessConfigAvailable) {
+      // 回填「托管运行」标签：磁盘上已有托管记录的项目，在本次升级之前跑过但没有标记。
+      // 标记是单调的，重复写是空操作，所以每次启动都跑一遍也没关系。不 await，不挡启动。
+      const { projectIdsWithRuns } = recoverManagedRunsAtStartup()
+      for (const projectId of projectIdsWithRuns) {
+        void markHarnessProjectManagedRunStarted(projectId).catch(() => undefined)
+      }
+    }
     cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)

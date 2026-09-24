@@ -1,3 +1,4 @@
+import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
   AppNotification,
   AppDecisionInput,
@@ -3960,10 +3961,21 @@ const api = {
       ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
     projectModeCodeStats: (
       range: { from: string; to: string },
-      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      opts:
+        | {
+            upperOrgLv1?: string | string[] | null
+            fromLeanOnly?: boolean | null
+            createdInRangeOnly?: boolean | null
+          }
+        | undefined,
       source: string | null
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
+    knowledgeCommitRate: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:knowledgeCommitRate", range, opts),
     efficiency: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
@@ -4002,7 +4014,11 @@ const api = {
       ipcRenderer.invoke("dashboard:projectModeProjects", range, options),
     projectModeExportData: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+        fromLeanOnly?: boolean | null
+        createdInRangeOnly?: boolean | null
+      }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
     projectModeTraces: (
@@ -4035,6 +4051,12 @@ const api = {
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeOperationalDetails", scope, range, opts),
+    projectModeStageAnalysis: (
+      projectId: string,
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeStageAnalysis", projectId, range, opts),
     pluginAggregate: (
       adapterName: string,
       range: { from: string; to: string }
@@ -4235,7 +4257,7 @@ const api = {
       ipcRenderer.invoke("dashboard:skillRecentTraces", skill, range, limit, mode, triggerScope),
     threadTraces: (
       threadId: string,
-      options?: { scope?: "platform" | "project" }
+      options?: DashboardThreadTraceScope
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:threadTraces", threadId, options),
     marketSkillRecentTraces: (

@@ -1,3 +1,37 @@
+import type { DashboardThreadTraceScope } from "../../shared/dashboard-thread-trace-scope"
+import { STAGE_BUCKET_LABELS } from "../../shared/harness-stage-bucket"
+import {
+  buildChatTriggeredTraceFilter,
+  stageBucketTraceFilterClause
+} from "./dashboard-stage-buckets"
+
+/** Keep detail requests inside the same project/time/stage scope as their list.
+ * Active child traces inherit the chat trigger; do not filter them out as roots. */
+export function buildThreadTraceScopeFilters(
+  options?: DashboardThreadTraceScope
+): Record<string, unknown>[] {
+  const filters: Record<string, unknown>[] = []
+  if (options?.range)
+    filters.push({ range: { startedAt: { gte: options.range.from, lte: options.range.to } } })
+  for (const [field, value] of [
+    ["harnessProjectId", options?.projectId],
+    ["harnessFeatureSlug", options?.featureSlug],
+    ["harnessNodeStatus", options?.nodeStatus]
+  ]) {
+    if (value?.trim()) filters.push({ term: { [field!]: value.trim() } })
+  }
+  if (options?.nodeName?.trim()) {
+    filters.push(
+      options.nodeName.trim() === STAGE_BUCKET_LABELS.unattributed
+        ? { bool: { must_not: { exists: { field: "harnessNodeName" } } } }
+        : { term: { harnessNodeName: options.nodeName.trim() } }
+    )
+  }
+  if (options?.stageBucket) filters.push(stageBucketTraceFilterClause(options.stageBucket))
+  if (options?.triggerScope === "active") filters.push(buildChatTriggeredTraceFilter())
+  return filters
+}
+
 /**
  * 运营面板「按会话分页」(thread 视图) 的查询构造与响应切片。
  *
@@ -58,6 +92,24 @@ export function threadListBucketsNeeded(page: number, pageSize: number): number 
  * 没有 `_raw` 时 modelCallCount / userInputRequestCount 只能取自索引字段；索引里
  * 若没有则回落 0，与 normalizeTraceDetail 既有的 fallback 分支口径一致。
  */
+/**
+ * 模型调用次数：标量优先，`modelCalls` 数组只作兜底。
+ *
+ * 和本模块同源的问题——「`_raw` 在不在」不该改变一个指标的口径。这里的标量是
+ * 服务端的 `modelCallCount`（取自客户端实时累加的 `totalModelCalls`），或本地
+ * AgentTrace 上的 `totalModelCalls` 本身；数组则停在 TRACE_MAX_MODEL_CALLS(64)，
+ * 而且 sanitizer 可能把它整个清空。
+ *
+ * 原先写成三元式「有数组就用数组长度」，于是 `_raw` 一加载就丢掉准确值，空数组
+ * 还因为 `Array.isArray([])` 为真而直接算 0、连兜底都绕过，长会话被少算一个数量级。
+ *
+ * 标量为 0 是权威结果，不当缺失处理；只有不是有限数（老文档没这个字段）才回退。
+ */
+export function resolveModelCallCount(scalar: unknown, modelCalls: unknown): number {
+  if (typeof scalar === "number" && Number.isFinite(scalar)) return scalar
+  return Array.isArray(modelCalls) ? modelCalls.length : 0
+}
+
 export function threadListPreviewSourceIncludes(fullIncludes: readonly string[]): string[] {
   const includes = fullIncludes.filter((field) => field !== TRACE_RAW_SOURCE_FIELD)
   for (const extra of ["modelCallCount", "userInputRequestCount"]) {

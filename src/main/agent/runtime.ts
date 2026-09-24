@@ -1,3 +1,5 @@
+import { randomUUID } from "crypto"
+import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
@@ -371,7 +373,7 @@ import {
   WorkerValuesSnapshotAccumulator,
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
-import { setAdoptionContext } from "../services/adoption-tracker"
+import { syncSubagentSkillAttribution } from "./turn-attribution"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
@@ -6422,7 +6424,16 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       workerTracer.setUsedSkills(usedSkills)
       workerTracer.setSkillSource(skillSource)
       workerTracer.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
-      setAdoptionContext(workerInput.workerThreadId, { usedSkills, skillSource })
+      // Workers own their own thread, so recordGen reads the worker's adoption
+      // context. Resolve the fallback chain (this run → this worker thread →
+      // the coordinator thread) instead of publishing the bare detector result,
+      // which drops attribution the coordinator had already established.
+      syncSubagentSkillAttribution({
+        threadId: workerInput.workerThreadId,
+        parentThreadId: workerInput.parentThreadId,
+        currentRunSkills: usedSkills,
+        currentRunSkillSource: skillSource
+      })
     }
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
@@ -6537,6 +6548,17 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         )
         workerRuntimeTraceContext = workerTracer?.getTraceContext() ?? traceContext
       }
+      const workerPromptMessage = new HumanMessage({
+        content: effectiveWorkerPrompt,
+        id: randomUUID()
+      })
+      const workerTraceRecorder = workerTracer
+        ? new TurnTraceRecorder({
+            tracer: workerTracer,
+            userMessageId: workerPromptMessage.id,
+            requireUserMessageAnchor: true
+          })
+        : undefined
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
         callbacks: [],
@@ -6554,6 +6576,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
               stream: { mode: mode as "messages" | "values", data }
             })
           }
+          if (mode === "values") workerTraceRecorder?.onRawValues(data)
           const valuesContext = workerValuesSnapshotAccumulator?.createContext(mode, data)
           runTraceSideEffect("CoordinatorWorker Skill observer", () => {
             if (observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)) {
@@ -6681,10 +6704,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             onFailureFuseNotice
           })
 
-          workerStream = await workerAgent.stream(
-            { messages: [new HumanMessage(effectiveWorkerPrompt)] },
-            streamConfig
-          )
+          workerStream = await workerAgent.stream({ messages: [workerPromptMessage] }, streamConfig)
           usedWorkerModelId = candidateId
           runTraceSideEffect("CoordinatorWorker", () => workerTracer?.setModelId(candidateId))
           break

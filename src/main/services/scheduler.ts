@@ -11,6 +11,7 @@ import {
 import { getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { TraceCollector } from "../agent/trace/collector"
+import { TurnTraceRecorder } from "../agent/trace/turn-trace-recorder"
 import {
   createAgentRuntime,
   closeCheckpointer,
@@ -365,6 +366,10 @@ async function executeTask(taskId: string): Promise<void> {
     const converter = new StreamConverter(schedulerRunId, userMessage.id)
     const serializeForRun = createStreamDataSerializer()
     const transcript = new ScheduledTranscript(threadId)
+    // 定时任务此前只建了 tracer 就再没喂过它：整个流式循环一次 recordModelCall /
+    // recordToolCall 都没有，于是上报的 trace 是个空壳——token、模型调用、工具调用
+    // 全是 0，看板上只有调用次数和时间是真的。这里接上聊天路径同一个记录器。
+    const traceRecorder = new TurnTraceRecorder({ tracer, userMessageId: userMessage.id })
 
     let lastAssistantText = ""
     try {
@@ -381,6 +386,12 @@ async function executeTask(taskId: string): Promise<void> {
       for await (const chunk of stream) {
         if (abortController.signal.aborted) break
         const [mode, data] = chunk as [string, unknown]
+        // 记录器要的是完整快照，不能复用下面那个 frame：serializeForRun 是为了压
+        // IPC 体积存在的，values 帧会被投影成 tail/append 增量，messages 帧还会把
+        // tool_calls 删掉。喂增量进去，输入上下文窗口取不全、工具调用也会丢。
+        // 这里按 standard-turn-stream 的同一做法，单独深拷一份原始 data；深拷本身
+        // 也是必需的，LangChain 的 message 实例不直接暴露记录器要读的 kwargs。
+        traceRecorder.onStreamChunk(mode, JSON.parse(JSON.stringify(data)))
         const frame = serializeForRun(mode, data)
         functionTurn.observeStream(mode, frame.data)
         const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame

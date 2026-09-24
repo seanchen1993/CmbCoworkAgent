@@ -265,7 +265,13 @@ export class DashboardEsWorkerClient {
       this.finishWorkerRequest(pending, { error: new DashboardEsRequestCancelledError() })
       return
     }
-    const error = new Error(response.error.message) as Error & { code?: string }
+    // cause 必须显式接回来：worker 侧已把链摊平成普通对象（见 protocol 的
+    // DashboardEsWorkerErrorCause），这里不接，esQuery 的 getErrorDetail 沿 cause
+    // 就找不到真实原因，日志只会剩下面向用户的那句提示语。
+    const error = new Error(
+      response.error.message,
+      response.error.cause ? { cause: response.error.cause } : undefined
+    ) as Error & { code?: string }
     error.name = response.error.code
     error.code = response.error.code
     this.finishWorkerRequest(pending, { error })

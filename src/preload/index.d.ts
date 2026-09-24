@@ -1,3 +1,5 @@
+import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
+import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
 import type {
   AppNotification,
   AppDecisionInput,
@@ -835,9 +837,18 @@ interface DashboardProjectModeProjectPageData {
   truncated: boolean
 }
 
-interface DashboardProjectModeProjectPageOptions {
+/**
+ * 项目运营概览的三个全局筛选口径。总览、代码指标换数、项目列表、导出共用同一组，
+ * 任何一处漏传都会让那块数据和其它块对不上。
+ */
+interface DashboardProjectModeFilterOptions {
   upperOrgLv1?: string | string[] | null
   fromLeanOnly?: boolean | null
+  /** 仅统计创建时间落在 range 内的项目；比较用的范围走同一次调用的 range 参数。 */
+  createdInRangeOnly?: boolean | null
+}
+
+interface DashboardProjectModeProjectPageOptions extends DashboardProjectModeFilterOptions {
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
@@ -952,6 +963,35 @@ interface DashboardProjectModeHookStats {
 interface DashboardProjectModeOperationalDetails {
   constraintFiles: Array<{ path: string; traceCount: number }>
   hookEvents: Array<{ event: string; count: number }>
+}
+
+interface DashboardProjectModeStageMetrics {
+  conversationCount: number
+  /** 归属到该阶段的 Agent 忙碌总时长，不是阶段的墙钟周期。 */
+  totalDurationMs: number
+  avgDurationMs: number
+  p95DurationMs: number
+  runCost: {
+    toolCalls: number
+    modelCalls: number
+    /** 总量，含缓存读取与创建，所以不等于 inputTokens + outputTokens。 */
+    totalTokens: number
+    inputTokens: number
+    outputTokens: number
+    userInputRequests: number
+    userInputRequestDocs: number
+    traceDocs?: number
+  }
+}
+
+interface DashboardProjectModeStageAnalysis {
+  projectId: string
+  total: DashboardProjectModeStageMetrics
+  stages: Array<{
+    nodeName: string
+    group: string | null
+    metrics: DashboardProjectModeStageMetrics
+  }>
 }
 
 interface DashboardProjectModeFeatureNode {
@@ -2638,17 +2678,21 @@ interface CustomAPI {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: DashboardProjectModeFilterOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
     projectModeCodeStats: (
       range: { from: string; to: string },
-      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      opts: DashboardProjectModeFilterOptions | undefined,
       source: string | null
     ) => Promise<{
       success: boolean
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
+    knowledgeCommitRate: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: DashboardKnowledgeCommitRate; error?: string }>
     efficiency: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
@@ -2672,7 +2716,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardProjectModeProjectPageData; error?: string }>
     projectModeExportData: (
       range: { from: string; to: string },
-      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+      opts?: DashboardProjectModeFilterOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
     projectModeTraces: (
       projectId: string,
@@ -2691,6 +2735,15 @@ interface CustomAPI {
     ) => Promise<{
       success: boolean
       data?: DashboardProjectModeOperationalDetails
+      error?: string
+    }>
+    projectModeStageAnalysis: (
+      projectId: string,
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: DashboardProjectModeStageAnalysis
       error?: string
     }>
     pluginAggregate: (
@@ -2831,7 +2884,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     threadTraces: (
       threadId: string,
-      options?: { scope?: "platform" | "project" }
+      options?: DashboardThreadTraceScope
     ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     marketSkillRecentTraces: (
       skill: string,
