@@ -52,7 +52,7 @@ import { useFeatureGate } from "@/lib/feature-gates"
 import {
   cleanupDeletedThreadIfResident,
   deleteThreadGroupSequentially,
-  hasRunningThreadForDeletion,
+  type ThreadGroupDeletionProgress,
   runBestEffortCommittedDeletionCleanups
 } from "@/lib/thread-group-deletion"
 import {
@@ -593,15 +593,14 @@ export function ThreadSidebar(): React.JSX.Element {
   const [forkDialogThread, setForkDialogThread] = useState<Thread | null>(null)
   const [projectToDelete, setProjectToDelete] = useState<ThreadProjectDeleteTarget | null>(null)
   const [confirmingProjectDeletion, setConfirmingProjectDeletion] = useState(false)
+  const [deletionProgress, setDeletionProgress] = useState<ThreadGroupDeletionProgress | null>(null)
   const [projectToRename, setProjectToRename] = useState<ThreadProject | null>(null)
   const exportingThreadIdRef = useRef<string | null>(null)
   const forkingThreadIdRef = useRef<string | null>(null)
   const projectDeletionInFlightRef = useRef(false)
   const projectDeletionSelectionInFlightRef = useRef(false)
   const threadStateSummariesRef = useRef(threadStateSummaries)
-  const streamLoadingStatesRef = useRef(allStreamLoadingStates)
   threadStateSummariesRef.current = threadStateSummaries
-  streamLoadingStatesRef.current = allStreamLoadingStates
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
   const {
@@ -1070,6 +1069,7 @@ export function ThreadSidebar(): React.JSX.Element {
 
     projectDeletionInFlightRef.current = true
     setConfirmingProjectDeletion(true)
+    setDeletionProgress(null)
     try {
       let latestSelection: ThreadGroupSelectionEntry[]
       try {
@@ -1092,17 +1092,6 @@ export function ThreadSidebar(): React.JSX.Element {
       const incarnationById = new Map(
         latestSelection.map((entry) => [entry.threadId, entry.incarnation] as const)
       )
-      if (
-        hasRunningThreadForDeletion(
-          latestIds,
-          threadStateSummariesRef.current,
-          streamLoadingStatesRef.current
-        )
-      ) {
-        toast.error("工作区内有运行中的任务，已取消删除")
-        return
-      }
-
       const result = await deleteThreadGroupSequentially(latestIds, {
         deleteThread: (threadId) =>
           deleteThread(threadId, {
@@ -1115,7 +1104,8 @@ export function ThreadSidebar(): React.JSX.Element {
           }),
         cleanupThread: (threadId) =>
           cleanupDeletedThreadIfResident(threadId, threadStateSummariesRef.current, cleanupThread),
-        markRead: () => undefined
+        markRead: () => undefined,
+        onProgress: setDeletionProgress
       })
       runBestEffortCommittedDeletionCleanups([
         {
@@ -1135,7 +1125,7 @@ export function ThreadSidebar(): React.JSX.Element {
         })
         const reason = result.error instanceof Error ? result.error.message : "删除失败"
         toast.error(
-          `已删除 ${result.deletedIds.length}/${latestIds.length} 个会话，剩余项可重试：${reason}`
+          `已删除 ${result.deletedIds.length}/${latestIds.length} 个会话，已跳过其余会话，可重试：${reason}`
         )
         return
       }
@@ -1500,15 +1490,11 @@ export function ThreadSidebar(): React.JSX.Element {
                                     icon={<Trash2 className="size-3" />}
                                     popoverContent={
                                       hasRunningThread
-                                        ? "工作区内有运行中的任务，无法删除"
+                                        ? "删除工作区会话（自动跳过运行中的任务）"
                                         : "删除工作区会话"
                                     }
-                                    disabled={hasRunningThread}
                                     stopPropagation
-                                    className={cn(
-                                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-destructive/10 hover:text-destructive",
-                                      hasRunningThread && "cursor-not-allowed !opacity-30"
-                                    )}
+                                    className="size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
                                     onClick={() => void openProjectDeleteDialog(project)}
                                   />
                                 </span>
@@ -1564,10 +1550,9 @@ export function ThreadSidebar(): React.JSX.Element {
                         <ContextMenuItem
                           variant="destructive"
                           onClick={() => void openProjectDeleteDialog(project)}
-                          disabled={hasRunningThread}
                         >
                           <Trash2 className="size-4 mr-2" />
-                          {hasRunningThread ? "运行中，无法删除工作区" : "删除工作区会话"}
+                          {hasRunningThread ? "删除工作区会话（跳过运行中）" : "删除工作区会话"}
                         </ContextMenuItem>
                       </ContextMenuContent>
                     </ContextMenu>
@@ -1743,6 +1728,7 @@ export function ThreadSidebar(): React.JSX.Element {
             : ""
         }
         confirming={confirmingProjectDeletion}
+        progress={deletionProgress}
         onOpenChange={(open) => {
           if (!open && !projectDeletionInFlightRef.current) setProjectToDelete(null)
         }}
