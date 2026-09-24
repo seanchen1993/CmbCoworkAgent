@@ -28,6 +28,13 @@ export function hasRunningThreadForDeletion(
   return false
 }
 
+export interface ThreadGroupDeletionProgress {
+  completed: number
+  total: number
+  deleted: number
+  skipped: number
+}
+
 export interface ThreadGroupDeletionResult {
   deletedIds: string[]
   remainingIds: string[]
@@ -68,21 +75,44 @@ export async function deleteThreadGroupSequentially(
     deleteThread: (threadId: string) => Promise<void>
     cleanupThread: (threadId: string) => void
     markRead: (threadId: string) => void
+    onProgress?: (progress: ThreadGroupDeletionProgress) => void
   }
 ): Promise<ThreadGroupDeletionResult> {
   const ids = Array.from(new Set(threadIds))
   const deletedIds: string[] = []
+  const remainingIds: string[] = []
+  let firstFailure: Pick<ThreadGroupDeletionResult, "failedId" | "error"> = {}
+  let lastProgressAt = -Infinity
+  const reportProgress = () => {
+    const completed = deletedIds.length + remainingIds.length
+    const now = Date.now()
+    // Large batches must not rerender the entire sidebar once per fast IPC.
+    if (completed !== ids.length && now - lastProgressAt < 100) return
+    lastProgressAt = now
+    runBestEffortCommittedDeletionCleanups([
+      {
+        label: "Failed to report deletion progress",
+        run: () =>
+          handlers.onProgress?.({
+            completed,
+            total: ids.length,
+            deleted: deletedIds.length,
+            skipped: remainingIds.length
+          })
+      }
+    ])
+  }
+  reportProgress()
   for (let index = 0; index < ids.length; index += 1) {
     const threadId = ids[index]
     try {
       await handlers.deleteThread(threadId)
     } catch (error) {
-      return {
-        deletedIds,
-        remainingIds: ids.slice(index),
-        failedId: threadId,
-        error
-      }
+      remainingIds.push(threadId)
+      if (!firstFailure.failedId) firstFailure = { failedId: threadId, error }
+      reportProgress()
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
+      continue
     }
 
     // The backend deletion is the commit boundary. Record it before local
@@ -105,6 +135,7 @@ export async function deleteThreadGroupSequentially(
         error
       })
     }
+    reportProgress()
     // Keep a large group delete from becoming one uninterrupted IPC burst.
     // Each thread still uses the mature single-delete transaction, while the
     // macrotask boundary lets renderer frames and main-process events run.
@@ -112,5 +143,5 @@ export async function deleteThreadGroupSequentially(
       await new Promise<void>((resolve) => setTimeout(resolve, 0))
     }
   }
-  return { deletedIds, remainingIds: [] }
+  return { deletedIds, remainingIds, ...firstFailure }
 }
