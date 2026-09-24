@@ -1,3 +1,8 @@
+## 2026-09-24 正式桌面性能报告单独提交（最新）
+
+- HEAD1be34d83已提交官方v280参考复核（类型与v278相同，仅README收紧内建telemetry）。本次仅正式v63性能报告/status/handoff，无生产改动；qualified=true/passed=true事实见2026-09-24-v63-formal-performance.md。旧full4失败、ingress关闭/2h长稳失败保留。
+- 当前无运行进程；未提交client-busy-e2e helper仍未接线/未运行。下一立刻加root focus/full入口并跑旧普通构建RED，按实际结果修复晚input清busy。完成独立验证/提交后继续其它能力，不停。
+
 ## 2026-09-24 官方v280复核完成与正式桌面性能通过（最新）
 
 - 提交前HEAD3c569546。v2.1.280官方tag56f36532530f88b572854538d685fcf781141e8c，声明499059字节/SHA与v278完全相同，header仍277；README仅telemetry收紧built-in/拒绝installed/batch。新reference guide/matrix元数据/status/report，2文件6窄测通过。未安装/执行280 CLI，不升级245项兼容状态。

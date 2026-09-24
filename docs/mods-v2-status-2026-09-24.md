@@ -56,7 +56,7 @@
 | 真实业务演示 | 实际 deepseek-v4-flash、原审批与 Agent 修复循环；规则关闭时真实缺陷未修，开启后 1 次自动修复、7 项独立业务断言通过，真实 validator 通过后仅推进 1 次 checkpoint。受保护需求/测试/脚本未变；不是全面业务能力证明，见[演示报告](../output/mods-v2-validation/2026-09-24-real-business-demo.md) |
 | TypeScript / ESLint | 授权查询复用：Node/Web通过，ESLint无错误、新测试无警告，control-store原3个警告经HEAD比较未增加。此前各能力helper类型和历史格式警告详见各自报告 |
 | 全仓回归 | 先前完整 Vitest 存在基线失败；隔离后剩 26 项已在旧基线复现，standalone 84 命令初次 78 通过、6 失败，修复 2 个本分支差异后相关整套通过，其余 4 个在旧基线复现；不能称全仓全绿 |
-| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照仍有 1/10 组超预算（project-off +14.584% / +0.3574ms），整体未通过；checkpoint 共享快照优化后正式桌面 full4 采样有效，CPU 增量 0.098856 单核百分点及吞吐比 0.996589 通过，TTFT p95 增量降到 67.7ms，仍超过 40ms 门槛；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
+| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照仍有 1/10 组超预算（project-off +14.584% / +0.3574ms），整体未通过；最新冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
 
 7363ce1e 已更正 metadata/write 两个 Electron helper 的撤权参数，并增加实际授权状态断言：新专项 5+7 检查通过。旧测试只证明 session 失效，不能冒称撤销了持久化 grant，见[更正报告](../output/mods-v2-validation/2026-09-24-function-revocation-e2e-correction.md)。
 
@@ -68,7 +68,7 @@
 
 1. 继续处理兼容矩阵中未接入的生产事件与剩余 SDK/UI 差异；[SDK 逐项边界](mods-v2-sdk-boundaries-2026-09-24.md)已区分已有受限实现与未开放接口。主动 `$.ui.focus` 已接入原生桌面 Pane 及其 Client 控件，仍不支持 AbovePrompt/非桌面目标；`$.ui.scroll` 已接入原生 Pane 的测量、实际位置确认与 end 跟随，其他 site/转录/Client key 和 person wheel 新契约仍未对齐；以字段、时序、错误/取消和实测证据为准，不批量升级 partial。
 2. checkpoint 已具备只读恢复核对界面；未知提交的自动协调/回滚仍未提供，外部文件竞争必须保留保守失败边界。
-3. 性能预算、长稳门禁及最终代码检视；全仓既有失败仍须单独标注。
+3. 桌面性能正式v63基线已通过；ingress关闭性能、长稳门禁及最终代码检视仍需完成，全仓既有失败仍须单独标注。
 4. GitHub Actions 安装包和安装验证；本地 NSIS 不作为当前开发阻断，也不把普通构建通过描述成已交付安装包。
 
 ## Claude 参考与差异
