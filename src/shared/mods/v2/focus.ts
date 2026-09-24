@@ -1,5 +1,25 @@
 import type { FunctionFocusTarget, FunctionPaneSnapshot, FunctionUiElement } from "./ui"
 
+/** Pin the first owned control in drawing order, independently of unrelated Client updates. */
+export function functionFocusHandle(
+  tree: FunctionUiElement | undefined,
+  target: Pick<FunctionFocusTarget, "plugin" | "element">
+): number | undefined {
+  if (!tree) return undefined
+  if (
+    ["Button", "Input", "Select"].includes(tree.type) &&
+    tree.press?.plugin === target.plugin &&
+    tree.props.key === target.element
+  )
+    return tree.press.handle
+  for (const child of tree.children ?? []) {
+    if (typeof child === "string") continue
+    const handle = functionFocusHandle(child, target)
+    if (handle !== undefined) return handle
+  }
+  return undefined
+}
+
 /** Draw order also covers isolated Client surfaces. Addresses always retain their owner. */
 export function functionFocusTargets(
   pane: Pick<FunctionPaneSnapshot, "tree" | "clients">

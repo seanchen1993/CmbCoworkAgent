@@ -6,6 +6,8 @@ import {
   type FunctionGuest
 } from "../../../shared/mods/v2/contracts"
 import { encodeModJson } from "../../../shared/mods/validation"
+import { functionFocusHandle } from "../../../shared/mods/v2/focus"
+import type { FunctionFocusAddress } from "../../../shared/mods/v2/ui-focus"
 import {
   validateFunctionTree,
   type FunctionClientAction,
@@ -89,6 +91,22 @@ export class FunctionClients {
         this.instances.delete(key)
         this.stop(instance)
       }
+  }
+
+  /** Read the live instance directly: a published Pane snapshot can lag a Client redraw. */
+  assertFocus(target: FunctionFocusAddress): void {
+    this.assert()
+    const instance = [...this.instances.values()].find(
+      (row) => row.pane === target.pane && row.snapshot.id === target.client
+    )
+    if (
+      !instance ||
+      instance.snapshot.plugin !== target.plugin ||
+      target.clientHandle === undefined ||
+      functionFocusHandle(instance.snapshot.tree, target) !== target.clientHandle
+    )
+      throw new ModFunctionError("MODS_UI_FOCUS_STALE")
+    this.assert(instance)
   }
 
   /** Pane core already ran ui.focus. Deliver its decision to the live isolated surface once. */

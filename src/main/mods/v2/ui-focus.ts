@@ -57,16 +57,34 @@ export class FunctionFocusRequests {
       typeof input.allowed !== "boolean" ||
       Object.keys(input).some(
         (key) =>
-          !["pane", "generation", "plugin", "element", "client", "id", "phase", "allowed"].includes(
-            key
-          )
+          ![
+            "pane",
+            "generation",
+            "plugin",
+            "element",
+            "client",
+            "clientHandle",
+            "id",
+            "phase",
+            "allowed"
+          ].includes(key)
       ) ||
-      (["pane", "generation", "plugin", "element", "client", "id", "phase"] as const).some(
-        (key) => input[key] !== request[key]
-      )
+      (
+        [
+          "pane",
+          "generation",
+          "plugin",
+          "element",
+          "client",
+          "clientHandle",
+          "id",
+          "phase"
+        ] as const
+      ).some((key) => input[key] !== request[key])
     )
       throw new ModFunctionError("MODS_UI_FOCUS_STALE")
     this.host.assertLive(entry.target)
+    this.host.assertLive(request)
     const accept = entry.accept
     entry.accept = undefined
     accept(input.allowed)

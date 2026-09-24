@@ -1,6 +1,6 @@
 # 主动 Pane 焦点 SDK
 
-固定参考 Claude Code v2.1.278，声明头 2.1.277。新增 `await $.ui.focus({ requestId, key })`，返回 `{}` 或 `{ deny: string }`。只接受这两个非空字符串字段。此次为 **partial / bounded**：只支持当前插件拥有的桌面 Pane 中原生 Button、Input、Select；AbovePrompt、Client 内目标及非桌面 surface 仍未开放。Client 和原有自动聚焦/焦点事件继续使用原适配器。
+固定参考 Claude Code v2.1.278，声明头 2.1.277。新增 `await $.ui.focus({ requestId, key })`，返回 `{}` 或 `{ deny: string }`。只接受这两个非空字符串字段。此次为 **partial / bounded**：支持当前插件拥有的桌面 Pane 中原生或 Client 内 Button、Input、Select；AbovePrompt 及非桌面 surface 仍未开放。原有自动聚焦与 Client 根焦点观察事件继续使用原适配器，不宣称完整嵌套 onFocus/onBlur 语义。
 
 ## 执行与权限
 
@@ -8,7 +8,13 @@
 
 renderer 再次检查当前绘制、真实键盘归属、窗口可见性、对话框、目标连接状态，以及人输入/焦点变动 epoch，实际调用 DOM focus 并确认 `document.activeElement` 后才回执。宿主收到匹配当前随机请求及阶段的回执才返回成功；发送请求不算完成，guest 不能补造实际确认。ACK 使用原线程 IPC 的独立入口，不排在正在等待它的回调队列之后。
 
-取消、撤权、关闭、同 id 重开、重绘、超时、线程变更、renderer 重载及用户竞争操作会中止或拒绝旧请求。总等待上限 5 秒，每个 Pane 同时最多一个请求；最多 8 个 Pane。缺少 renderer 回执及不返回的 Hook 均不会无限等待。旧授权摘要因 host revision v55 失效，新增 SDK 需要重新授权。
+取消、撤权、关闭、同 id 重开、重绘、超时、线程变更、renderer 重载及用户竞争操作会中止或拒绝旧请求。总等待上限 5 秒，每个 Pane 同时最多一个请求；最多 8 个 Pane。缺少 renderer 回执及不返回的 Hook 均不会无限等待。主动 SDK 最初使用 host revision v55；本次 Client 目标扩展为 v62，需要重新批准授权摘要。
+
+## Client 独立重绘
+
+Client 目标额外绑定真实实例 ID 和宿主从已发布绘制选取的控件句柄。原 Pane generation 不变时，Client 仍可独立改绘；每次 probe/apply 及 ACK 都读取私有实例表复核目标。删除后复用同名 key、控件变化、实例卸载、停止或替换都不能让旧请求通过；无关文字更新且原控件句柄仍有效时可以继续。目标经 Hook 改写后，ACK 同时复核初始目标和当前目标。
+
+renderer 检查实际 DOM 的 Client ID/owner/key/handle，然后沿用原归属与人意图检查；不接受插件自行证明焦点成功。父 ui.message 等待 SDK 时，确认仍走独立 IPC，不在同一个 Client 事件队列中再等待一次 focus 回调。宿主在最后复核拒绝已过期 ACK，但不承诺跨进程 DOM 移动与撤权的原子回滚。
 
 ## 忙碌期间的控件
 

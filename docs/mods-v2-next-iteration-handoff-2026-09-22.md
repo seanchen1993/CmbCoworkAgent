@@ -1,3 +1,20 @@
+## 2026-09-24 Client 主动焦点 v62 完成验证，独立提交（最新）
+
+- 提交前HEAD971d1261。本次Client主动焦点v62，真实实例/控件handle/双ACK，相关代码、测试、文档、矩阵与报告独立提交。红14→新15+原30+renderer2=47窄测绿；Mods53含renderer 144/1298、utility41 PASS；Node/Web/helper/diff lint通过（旧E2E88warning）。
+- 普通旧v61 Electron先真实deny红→新v62 Client专项9PASS；又原生focus9、invalidate6PASS。exec53187/76814/50615均exit0；当前无运行build/tests/perf。未把v61完整204借作本次完整Electron。
+- performance smoke desktop-performance-2026-09-24T04-30-54-105Z-smoke-381328bc：TTFT126.5→178.3(+51.8)ms、吞吐.992566、约1sidle差+2.165961，qualified=false/passed=false。正式性能/长稳/Actions未完成。
+- 提交后继续Client通知范围：仅panes.notify入口发panes scope，原计时队列all优先合并，原explicit ui.invalidate/site动作/V1缺省保持all。先加失败测试（两顺序coalescing、真实session、renderer真实组件订阅减少siteRender）再最小实现，之后真实Electron/回归/性能/report/独立commit；不用未经测量的路径推测宣称TTFT或长稳已解决。设计ignored ui-notification-design-draft.md。
+- 下一兼容矩阵审计/其余SDK与classic、长稳可信click诊断、正式性能、GitHub Actions包内安装验证仍继续。仅Mods工作树，无共享依赖变更/UAT/agents/push/本地NSIS，不问继续。
+
+## 2026-09-24 Client 主动焦点 v62 实现与验证中（最新）
+
+- HEAD 971d1261：ui.invalidate v61已独立提交（Mods52 142/1281、process41、完整Electron204、强化专项6、types/lint；smoke+50.3 qualifiedfalse/passedfalse）。提交后继续，当前未提交Client主动焦点v62。
+- 新client-focus.test.ts先14/14红；实现后15真实guest + 原focus30 + renderer2 = 窄测47 PASS。Client目标绑定实例ID/已发布控件handle，再对私有FunctionClients实例表核验；ACK同时核验原始与重写目标，DOM匹配handle。原自动焦点/忙态/Client队列与Agent原生执行不改。首次类型检查缺显式undefined返回已修；Node/Web/helper类型和diff lint通过（旧root E2E88warning不变）。中间格式脚本跨行fix产生语法残片已修，未影响最终测试结论。
+- 普通旧v61 Electron红测真实返回Element is not drawn by this plugin；普通新v62构建后专项9PASS（53187 exit0，client-focus-electron-green-artifacts），真实DOM/private handles、post→parent→SDK无死锁、晚空deny、native/Client互换、composer归属、人意图、reload、持久化revoke、另起pending再off无晚成功/无模型请求。截图已查看。
+- **唯一运行exec76814**：完整Mods53 maxWorkers4（额外renderer focus测试）→通过后自动真实utilityProcess。日志client-focus-mods53.log / client-focus-process.log。生产/测试冻结直到完成。下一步poll→顺序跑普通包imperative-focus与ui-invalidate专项存量回归→独占performance smoke→检视/报告/status/handoff独立commit。不必为未改生产重复完整204 Electron，但报告明确本次专项范围。
+- 文档imperative-focus/SDK boundaries/矩阵已更新（partial/bounded，Client根观察不是完整嵌套focus语义），正式验证报告尚未写。继续通知范围、剩余契约、正式长稳ACK定位/性能/Actions门禁，不停批次边界，不把未完写成全部完成。
+- UAT/共享依赖未碰，无agents/push/NSIS；所有exec明确Mods目录。
+
 ## 2026-09-24 ui.invalidate v61 已完成验证，独立提交（最新）
 
 - 提交前HEAD ae834f7d。v61真实ui.invalidate operation桥、14真实guest用例、Electron helper/指南/矩阵/status和报告一并提交；只支持ui.render，保留原dispatch、authority、void drain与取消语义。

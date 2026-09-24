@@ -18,7 +18,7 @@ import { FunctionScrollRequests } from "./ui-scroll"
 import type { FunctionScrollArgs, FunctionScrollOutcome } from "../../../shared/mods/v2/ui-scroll"
 import { FunctionFocusRequests } from "./ui-focus"
 import type { FunctionFocusAddress, FunctionFocusOutcome } from "../../../shared/mods/v2/ui-focus"
-import { functionFocusTargets } from "../../../shared/mods/v2/focus"
+import { functionFocusHandle, functionFocusTargets } from "../../../shared/mods/v2/focus"
 import type { FunctionPlugin } from "./dispatcher"
 
 export interface FunctionUiDispatch {
@@ -110,6 +110,10 @@ export class FunctionPanes {
           )
         )
           throw new ModFunctionError("MODS_UI_FOCUS_STALE")
+        if (target.client) {
+          if (!this.host.clients) throw new ModFunctionError("MODS_UI_FOCUS_STALE")
+          this.host.clients.assertFocus(target)
+        }
       },
       changed: () => this.changed(0)
     })
@@ -133,10 +137,23 @@ export class FunctionPanes {
       clients: pane.clients
     })
     const drawn = targets.find(
-      ({ target }) => !target.client && target.plugin === plugin && target.element === args.key
+      ({ target }) => target.plugin === plugin && target.element === args.key
     )?.target
     if (!drawn) return { deny: "Element is not drawn by this plugin" }
-    const address: FunctionFocusAddress = { ...drawn, pane: pane.key, generation: pane.generation }
+    const pin = (target: (typeof targets)[number]["target"]): FunctionFocusAddress => ({
+      ...target,
+      pane: pane.key,
+      generation: pane.generation,
+      ...(target.client
+        ? {
+            clientHandle: functionFocusHandle(
+              pane.clients?.find((client) => client.id === target.client)?.tree,
+              target
+            )
+          }
+        : {})
+    })
+    const address = pin(drawn)
     return this.focus.run(address, signal, (apply, focusSignal) =>
       operation(
         {
@@ -150,12 +167,11 @@ export class FunctionPanes {
         },
         async (input) => {
           const selected = targets.find(
-            ({ target }) =>
-              !target.client && target.plugin === plugin && target.element === input.element
+            ({ target }) => target.plugin === plugin && target.element === input.element
           )?.target
           if (!selected) return { deny: "Element is not drawn by this plugin" }
           return {
-            ...(await apply({ ...selected, pane: pane.key, generation: address.generation }))
+            ...(await apply(pin(selected)))
           }
         },
         focusSignal

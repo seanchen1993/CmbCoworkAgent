@@ -37,13 +37,15 @@ export function desktopAllowsPaneFocus(): boolean {
 
 export function paneFocusElement(
   section: HTMLElement,
-  target?: FunctionFocusTarget
+  target?: FunctionFocusTarget & { clientHandle?: number }
 ): HTMLElement | undefined {
   if (!target) return section
   return [...section.querySelectorAll<HTMLElement>("[data-function-control]")].find(
     (element) =>
       element.dataset.functionControl === target.element &&
       element.dataset.functionPlugin === target.plugin &&
+      (target.clientHandle === undefined ||
+        element.dataset.functionHandle === String(target.clientHandle)) &&
       element.closest<HTMLElement>("[data-function-client-instance]")?.dataset
         .functionClientInstance === target.client
   )

@@ -30,7 +30,7 @@
 
 ## 焦点与滚动：事件不等于主动调用
 
-当前 `ui.focus/ui.scroll` 事件、Pane `autoFocus` 和 Client 输入观察保留原受限适配。新增 **`$.ui.focus()` 的原生桌面 Pane 目标实现**，仍为 partial/bounded；通过真实 renderer 归属探测、原 dispatcher 最终决策和实际 DOM 回执完成，不支持 AbovePrompt、Client 内目标或非桌面 surface。详见[主动焦点说明](mods-v2-imperative-focus-2026-09-24.md)。
+当前 `ui.focus/ui.scroll` 事件、Pane `autoFocus` 和 Client 输入观察保留原受限适配。新增 **`$.ui.focus()` 的桌面 Pane 原生/Client 控件实现**，仍为 partial/bounded；通过真实 renderer 归属探测、原 dispatcher 最终决策和实际 DOM 回执完成，Client 目标绑定实例与控件句柄；不支持 AbovePrompt 或非桌面 surface。详见[主动焦点说明](mods-v2-imperative-focus-2026-09-24.md)。
 
 回执绕过正在等待 SDK 的回调队列，避免死锁；忙碌 Pane 控件保留焦点但阻止重复操作。关闭、重绘、取消、撤权、重载和竞争输入使旧请求失效。原 composer 和对话框优先。
 

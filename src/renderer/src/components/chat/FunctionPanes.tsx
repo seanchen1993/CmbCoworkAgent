@@ -48,6 +48,7 @@ function Field({
         <select
           data-function-control={String(node.props.key)}
           data-function-plugin={node.press?.plugin}
+          data-function-handle={node.press?.handle}
           aria-label={label}
           value={value}
           disabled={busy && !retainFocusWhileBusy}
@@ -90,6 +91,7 @@ function Field({
         <input
           data-function-control={String(node.props.key)}
           data-function-plugin={node.press?.plugin}
+          data-function-handle={node.press?.handle}
           aria-label={label}
           value={value}
           maxLength={10000}
@@ -113,6 +115,7 @@ function Field({
         aria-disabled={busy || undefined}
         data-function-control={String(node.props.key)}
         data-function-plugin={node.press?.plugin}
+        data-function-handle={node.press?.handle}
       >
         {String(node.props.submitLabel ?? "提交")}
       </Button>
@@ -212,6 +215,7 @@ export function Element({
       <Button
         data-function-control={String(node.props.key)}
         data-function-plugin={node.press?.plugin}
+        data-function-handle={node.press?.handle}
         size="sm"
         variant="outline"
         disabled={busy && !retainFocusWhileBusy}

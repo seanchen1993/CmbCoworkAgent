@@ -4,6 +4,8 @@ import { isModObject, ModFunctionError } from "./contracts"
 export interface FunctionFocusAddress extends FunctionFocusTarget {
   pane: string
   generation: string
+  /** Host-selected control identity, required only for independently redrawn Clients. */
+  clientHandle?: number
 }
 export interface FunctionFocusRequest extends FunctionFocusAddress {
   id: string

@@ -1,6 +1,6 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `ae834f7d`（随后 ui.invalidate 桥接见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `971d1261`（随后 Client 主动焦点见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
 ## 应用已具备的能力
 
@@ -12,6 +12,7 @@
 - session 读取、显式压缩与 checkpoint、真实模型请求的 MCP/memory/skills/agents 动态来源 breakdown；token 估算与 provider usage 分列，无成本数据时不伪造费用。
 - 内建工具使用本应用的真实参数和权限；注册工具支持有界 JSON Schema，包括本地 defs 引用。不宣称 Claude 工具名称、所有 schema 关键字与输入输出完全等价。
 - [UI 重绘 operation](mods-v2-ui-invalidate-2026-09-24.md)：void SDK 进入原 dispatch，before-next 拒绝、取消、撤权与关闭阻止迟到 core；仅 ui.render 范围，不回滚晚到拒绝前已发生的重绘失效。
+- [Client 主动焦点](mods-v2-imperative-focus-2026-09-24.md)：原 Pane SDK 扩展到同插件 Client 控件，绑定真实实例/控件句柄并复核原始与改写目标，实际 DOM 双确认保留键盘归属、人意图和生命周期约束。完整嵌套焦点观察与非桌面仍不支持。
 - Pane、十三个非 Pane 桌面站点、受限 Code/Svg、Client 生命周期和焦点/滚动。terminal/vscode/mobile 与不支持的站点不伪装成桌面兼容。
 - classic 生产触发器逐项记录。已补 PostToolBatch、InstructionsLoaded、UserPromptExpansion、sessionTitle、工具观察、Stop/StopFailure、Pre/PostCompact 等链路；仍未接入生产的事件明确保留 partial，不能凭手动 dispatch 宣称支持。
 - [应用项目完成规则](mods-v2-application-completion-rules.md)：四模式、四范围、检查选择、修复/时间/模型预算、项目持久化与执行证据。采集步骤具有开始/终结记录，真实进程退出后重新打开 SQLite 不会把中断当作 PASS。
@@ -21,6 +22,7 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| Client 主动焦点 | 真实guest/session先14项红，扩展后新15+原30+renderer2共47窄测通过；完整Mods53含renderer为144文件1298项、utilityProcess41项通过；新实际Electron专项9检查通过；原生焦点9/重绘6专项通过；性能smoke TTFT+51.8ms，qualified=false/passed=false；不借用v61完整204作为v62全量结果 |
 | ui.invalidate | 真实guest/session14项、完整Mods52四worker142文件1281项、utilityProcess41项通过；普通包专项6与完整Electron204检查通过，含等待中关闭；Node/Web/helper types及修改行ESLint通过。性能短测结果见独立报告，未替代正式门禁 |
 | 命令历史容量 | 新真实guest/session先红后绿，普通旧包Electron先红，新包50条历史/200次Client确认/重载/off专项4通过；完整Mods51四worker 141文件1267项通过、隔离manager47/真实utility41通过；完整Electron199通过；性能smoke TTFT +36.3ms，qualified=false/passed=false，不更新正式门禁。默认并行首轮两项5秒超时保留在报告 |
 | agent.list | 最终窄测 4 文件 65 项、Mods49 141 文件 1266 项、真实 utility process 41 通过；实际 Electron 专项 8 检查、完整 Electron 199 检查通过；独占性能 smoke TTFT p95 +69.0ms / 吞吐比0.997205，qualified=false、passed=false，不替代正式门禁 |
