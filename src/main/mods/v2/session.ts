@@ -793,6 +793,11 @@ export class FunctionSession {
         if (name === "mcp.call") functionMcpInput(value)
         if (name === "tool.check") functionToolCheckInput(value, true)
         if (name === "ui.open") validatePaneArgs(value)
+        if (
+          name === "ui.invalidate" &&
+          (value.event !== "ui.render" || Object.keys(value).some((key) => key !== "event"))
+        )
+          throw new ModFunctionError("MODS_UI_INVALIDATE_ARGUMENTS")
         if (name === "ui.toast" || name === "ui.status") validateFunctionFeedback(name, value)
         if (name === "ui.log") validateFunctionLog(value)
         if (name === "ui.notice") validateFunctionNotice(value)
@@ -859,6 +864,8 @@ export class FunctionSession {
         if (isOperation) {
           if (!isModObject(value)) throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (typeof value.deny === "string") return
+          if (name === "ui.invalidate" && value.value !== undefined)
+            throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (name === "agent.list") return validateFunctionAgentList(value.value)
           if (name === "model.complete") return validateFunctionModelText(value.value)
           if (
@@ -1527,9 +1534,29 @@ export class FunctionSession {
       return undefined
     }
     if (method === "ui.invalidate") {
-      if (args[0] !== "ui.render") throw new ModFunctionError("MODS_UI_INVALIDATE_UNAVAILABLE")
-      this.panes.invalidate()
-      this.sites.invalidate()
+      if (args.length !== 1 || args[0] !== "ui.render")
+        throw new ModFunctionError("MODS_UI_INVALIDATE_UNAVAILABLE")
+      const answer = await this.dispatch(
+        method,
+        { event: args[0] },
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: async (_value, signal) => {
+            signal.throwIfAborted()
+            this.assertLive(plugin)
+            this.panes.invalidate()
+            this.sites.invalidate()
+            return undefined
+          }
+        },
+        turnHeld
+      )
+      if (!isModObject(answer)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof answer.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", answer.deny)
       return undefined
     }
     if (method === "ui.scroll") {

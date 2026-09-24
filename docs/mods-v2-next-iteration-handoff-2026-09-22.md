@@ -1,3 +1,20 @@
+## 2026-09-24 ui.invalidate v61 已完成验证，独立提交（最新）
+
+- 提交前HEAD ae834f7d。v61真实ui.invalidate operation桥、14真实guest用例、Electron helper/指南/矩阵/status和报告一并提交；只支持ui.render，保留原dispatch、authority、void drain与取消语义。
+- 先红后绿；Mods52四worker142文件1281项PASS；utility41 PASS；Node/Web/helper types PASS。最终diff ESLint5文件0error/修改行0诊断（旧session2/rootE2E88warning保留）。普通包强化专项6PASS、完整Electron204PASS（25277 exit0，普通out恢复）。关闭是实际pending操作，不是已撤权后的空对照。
+- 独占performance smoke74104 exit0：desktop-performance-2026-09-24T04-14-05-033Z-smoke-9eaff6a2；TTFT127.9→178.2(+50.3)ms、吞吐.994378、约1sidle差+2.536284，qualified=false/passed=false。正式TTFT/ingress关闭/两小时长稳仍未通过，不能用短样本替代。
+- 当前无运行build/tests/perf。提交后立即复制ignored client-focus-session-tests-draft.txt到真正测试（移除草稿头），先跑红，再实现Client主动焦点。设计与Electron场景见2026-09-24-client-focus-design-draft.md / client-focus-electron-plan.md；尚未实施。后续通知范围/兼容矩阵/正式门禁继续，不停批次边界。
+- 长稳ACK丢失诊断草案soak-click-diagnostics-draft.md：需记录真实click与aria-disabled/实例/handle，不能盲目放开忙态/增加超时/宣称原因已找到。容量独立修复已ae834f7d。
+- UAT/共享node_modules未触碰，无本地NSIS/push/agents。
+
+## 2026-09-24 ui.invalidate v61 收口中（最新）
+
+- 当前 HEAD ae834f7d，v60 命令历史容量修复已独立提交；UAT 未触碰。未提交 v61 ui.invalidate 真实 operation 桥（保留原 dispatch/authority/取消/void drain，范围只有 ui.render）、真实 guest 14 项和 Electron helper、指南/矩阵。
+- 实际先红后绿；完整 Mods52 四 worker 142 文件/1281 项 PASS，utility process 41 PASS（exec92112 exit0）；Node/Web/helper types PASS，ESLint修改行无新增、全文件0error。普通 v61 build 和初版专项 Electron 5 检查 PASS。
+- 正在强化专项关闭对照：重批同digest后启动等待中的 redraw，直接 global off，核实具体job MODS_CANCELLED、无结果、超过delay后无迟到推进且原composer可用。随后专项/完整 Electron、独占 performance smoke、报告/status/handoff、独立提交。不可把无活动的关闭当取消证据。
+- 下一功能 Client imperative focus，ignored设计/真实guest测试草稿尚未复制执行；继而 scoped notifications/矩阵其余契约与正式门禁。不在批次边界停止。
+- 正式长稳原6407/77分钟 ACK超时仍未定位，容量修复不等于已解决；正式TTFT +67.7ms失败与ingress关闭对照、Actions安装验证仍未完成。不得宣称全面完成，不本地NSIS，不改共享依赖，不push。
+
 ## 2026-09-24 11:37 命令历史容量修复已完成验证，准备独立提交（最新）
 
 - 提交前HEAD0664963b；本次v60容量改动、窄测、desktop-history专项、文档和两份Markdown报告一起提交。真实guest红→75窄测绿；旧普通包专项红→新包4检查绿（50条历史/200次ACK/重载/off）；Mods51四worker141/1267PASS，默认并行首轮2个manager超时另隔离47PASS；utility41PASS；Node/Web/helper类型PASS；最终diff ESLint修改行0warning/全文件0error。

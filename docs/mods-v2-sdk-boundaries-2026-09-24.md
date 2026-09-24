@@ -18,7 +18,7 @@
 | `agent.list` | 当前观察生命周期内的真实 shared task 实例；原 id/type/description、父子关系及运行/完成/失败/取消状态。100 scope × 100 实例上限，超限拒绝查询，不阻止原任务；不枚举 opaque graph、独立 workflow worker 或 teammate，见[实例列表](mods-v2-agent-list-2026-09-24.md)。 |
 | `mcp.call` | 当前连接代际、唯一 provider 和真实审批/回执；不接收 guest 提供的连接与凭据，不自动重试丢失的写响应。 |
 | `clock.now/sleep` | now 是 epoch 墙钟；sleep 受本次 dispatch 的取消和预算约束。独立 guest `options.signal` 尚未作为独立取消域传输。runtime 内部 deadline 使用单调时钟。 |
-| `ui.resolve/invalidate/open/close` | 受限桌面树及 Pane；invalidate 仅接受 ui.render。不存在任意 DOM、终端 docking 或全部上游选项支持。 |
+| `ui.resolve/invalidate/open/close` | 受限桌面树及 Pane；invalidate 仅接受 ui.render，现已接入真实operation Hook及取消/撤权复核，见[重绘控制说明](mods-v2-ui-invalidate-2026-09-24.md)。不存在任意 DOM、终端 docking 或全部上游选项支持。 |
 
 模型 fork/classify、上下文 breakdown、原生问题/通知/日志、十三个非 Pane 站点和 Client 的边界继续见各自指南及矩阵证据，不能由这张表推导为全面兼容。
 
