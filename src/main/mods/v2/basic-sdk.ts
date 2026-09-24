@@ -32,6 +32,12 @@ export const SESSION_CAPABILITIES = [
   ...FILE_CAPABILITIES
 ] as const
 
+function validateReadMode(mode: ModJson | undefined): void {
+  // Byte publication needs its own mandatory filtering contract; never substitute UTF-8 text.
+  if (mode === "bytes") throw new ModFunctionError("MODS_FS_BYTES_UNSUPPORTED")
+  if (mode !== undefined && mode !== "text") throw new ModFunctionError("MODS_FS_OPTIONS")
+}
+
 /** SDK positional arguments become the same structured input a hook receives in Claude. */
 export function basicSdkInput(method: string, args: ModJson[]): ModObject {
   if (method === "session.compact") {
@@ -43,6 +49,17 @@ export function basicSdkInput(method: string, args: ModJson[]): ModObject {
     if (args[0] === undefined) return {}
     if (!isModObject(args[0])) throw new ModFunctionError("MODS_SESSION_USAGE_ARGUMENT")
     return args[0]
+  }
+  if (method === "fs.read") {
+    const options = args[1]
+    if (
+      args.length > 2 ||
+      (options !== undefined &&
+        (!isModObject(options) || Object.keys(options).some((key) => key !== "as")))
+    )
+      throw new ModFunctionError("MODS_FS_OPTIONS")
+    validateReadMode(isModObject(options) ? options.as : undefined)
+    return { path: args[0], as: "text" }
   }
   if (method === "fs.stat") {
     const options = args[1]
@@ -93,6 +110,7 @@ export function validateBasicInput(name: string, value: ModObject): void {
     throw new ModFunctionError("MODS_FS_PATH")
   if (name === "fs.stat" && value.resolve !== undefined && typeof value.resolve !== "boolean")
     throw new ModFunctionError("MODS_FS_OPTIONS")
+  if (name === "fs.read") validateReadMode(value.as)
   if (name.startsWith("store.") && name !== "store.keys" && typeof value.key !== "string")
     throw new ModFunctionError("MODS_STORE_KEY")
   if (name === "store.set" && !Object.hasOwn(value, "value"))

@@ -505,3 +505,5 @@ hook 中嵌套 SDK 读取复用当前执行权，写入仍需要存活的用户�
 ## Guest 字节字符串 Base64
 
 hooks与Client可用只读全局 `atob` / `btoa`；示例 `atob(btoa("hello"))` 返回 `hello`。btoa只接受Latin1字节字符串，中文应先由业务明确编码，不能把它当作UTF-8转换器。512 Ki字符上限、原VM计算/内存预算及InvalidCharacterError类型差异见[Base64使用范围](mods-v2-base64-2026-09-24.md)。这不会开放Node/Buffer或二进制文件读取权限。
+
+文件读取可显式指定 `{as:"text"}`，操作事件含as字段；非法选项或尚未支持的bytes模式明确拒绝，详见[读取模式与差异](mods-v2-file-read-options-2026-09-24.md)。

@@ -1,12 +1,14 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `d89c8e0d` 后的Base64能力（关闭经典桥已修复，宿主修订v64），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `40fabd88` 后的文件读取模式修复（宿主修订v65），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
 兼容表已逐项补足范围说明，共245条：49 adapted、155 partial、41 unsupported、0 full。15个classic事件仍仅schema/手动分发；详见[兼容边界复核](mods-v2-compatibility-review-2026-09-24.md)。没有把未实现项列为完成。
 
 长稳探针已补有界可信原生事件和失败快照；节点替换测量缺陷先红再绿，真实24事件/3重载及50历史/200确认通过。原6408事件实际确认丢失仍未定位，不能据此宣称两小时门禁通过。
 
 ## 应用已具备的能力
+
+- [文件读取模式](mods-v2-file-read-options-2026-09-24.md)：默认/显式text保留到operation，非法选项及不支持的bytes在真实host读取前拒绝，Hook改写同样校验；保留旧path-only改写与强制发布过滤。未实现二进制读取，仍partial/bounded。
 
 - [Guest Base64](mods-v2-base64-2026-09-24.md)：hooks/独立Client中只读atob/btoa，真实字节向量、padding/错误及原型修改回归；纯guest计算，保持资源限制，不增加宿主权限。仍partial，不包含DOMException或文件bytes读取。
 
@@ -35,6 +37,7 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| 文件读取模式 / Mods62 | 先真实guest/session 14红1兼容绿、旧普通Electron模式断言红；相关56窄测、新普通Electron3、164文件1424项、utility46、完整Electron234、Node/Web/helper types及差量lint通过。后续检视发现显式undefined回归，先真实guest/Electron红再补桥接；补后78窄测、Mods63 164/1425与utility46通过；最终Electron首轮223项后被整套15分钟watchdog中断，改普通完整套件20分钟后最终234检查通过并恢复ordinary，单项/业务/性能门槛未变。首个正式性能在未完成idle窗口时主动中断，不算预算结论；最终正式桌面性能因会话中断无完整回执；随后smoke TTFT +51.3ms、qualified=false/passed=false，不算性能通过 |
 | Base64 / Mods61 | 先真实QuickJS及旧Electron失败，再163文件1409项、utility46、完整Electron232通过；Node/Web/helper types和差量lint通过，性能回检记录见独立报告，不替代正式发布门禁 |
 | 关闭经典桥 / Mods60 | 156文件1378项、utility44、完整Electron228、全hooks10文件68项、Node/Web/helper types与差量lint通过；正式ingress关闭2/10仍失败，保留失败，不称最终性能通过 |
 | Client忙态 / Mods59 | 先旧普通Electron真实并发断言失败，再专项4项通过；完整Mods152文件1333项、utility44、完整Electron226全通过。新UI构建性能smoke +65.2ms、qualified=false/passed=false；不描述为新构建正式性能通过 |
@@ -75,6 +78,8 @@
 正式长稳原始失败及内存测量边界见[失败记录](../output/mods-v2-validation/2026-09-24-desktop-soak-failure.md)。命令历史50条与CommandOutput旧32槽冲突已独立复现；不能据此直接认定点击超时原因。
 
 ## 仍未完成的工作
+
+2026-09-24 用户明确允许延期复杂且不影响正常使用的边界功能。后续按[核心交付范围](mods-v2-core-delivery-scope-2026-09-24.md)收尾，兼容缺口保留原状态；不取消权限、证据、checkpoint 正确性或失败记录。
 
 1. 继续处理兼容矩阵中未接入的生产事件与剩余 SDK/UI 差异；[SDK 逐项边界](mods-v2-sdk-boundaries-2026-09-24.md)已区分已有受限实现与未开放接口。主动 `$.ui.focus` 已接入原生桌面 Pane 及其 Client 控件，仍不支持 AbovePrompt/非桌面目标；`$.ui.scroll` 已接入原生 Pane 的测量、实际位置确认与 end 跟随，其他 site/转录/Client key 和 person wheel 新契约仍未对齐；以字段、时序、错误/取消和实测证据为准，不批量升级 partial。
 2. checkpoint 已具备只读恢复核对界面；未知提交的自动协调/回滚仍未提供，外部文件竞争必须保留保守失败边界。

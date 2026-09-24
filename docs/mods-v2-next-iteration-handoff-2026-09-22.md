@@ -1,3 +1,68 @@
+## 2026-09-24 22:35 核心优先，读取修复准备提交（最新）
+
+- 用户最新明确：复杂且不影响正常使用的边界功能可延期，优先主要能力。新增core-delivery-scope文档，不扩展低收益SDK/15个schema-only事件/非桌面UI，不改兼容事实；权限/证据/checkpoint正确性不延期。
+- fs.read最终234完整Electron已exit0并恢复ordinary；Mods63 164/1425、utility46、78窄测、types/lint通过。正式67586在会话中断后失联，无exit/progress/result，22:32确认owned进程均不存在，不算PASS。09-29-56-122Z-full-22ea4e75保留。
+- 新smoke9429已exit0，14-32-40-730Z-smoke-2947657d：TTFT +51.3ms、吞吐1.0039996667、约1秒CPU差+1.2327168060，qualified=false/passed=false。当前无运行测试/构建。报告已更新；先独立提交scope文档，再fs.read组（12文件），不加原始log/JSON/生成产物。
+- 下一接Pane焦点集合实际React测试：ignored draft.ts已通过types未运行，先复制tests/support并接独立focus跑红。修复仅清理不再活跃的request ID及生命周期guard。新只读事实：ChatContainer.tsx:8356已经按threadId给FunctionPanes设置key，因此主应用线程切换会重挂载；不要把未guard的组件属性重用断言冒称当前应用真实跨线程漏洞。反复同线程打开/关闭焦点请求的Set残留仍需实际复现。不是旧ACK6408根因。
+- 继续最小修复/回归/独立提交，最终代码再统一正式性能、长稳、全仓基线对照和Actions实际包。不得在批次停止，不问继续，不派agents，不动UAT/共享依赖/本地NSIS。
+## 2026-09-24 fs.read最终234完整通过，正式桌面性能运行中（最新）
+
+- HEAD40fabd88；未提交fs.read v65组。75814已经exit0：最终完整Electron234检查通过，ordinary恢复且无mods-e2e.js，dated JSON为2026-09-24-file-read-options-final-full-electron2-result.json。最终Mods63为164/1425，utility46，窄测6文件78，Node/Web/helper types及6文件修改行lint通过。此前223/900秒中断和60831格式失败保留，不能删除历史。
+- 唯一运行exec67586：node tests/run-mods-desktop-soak.mjs --performance，日志2026-09-24-v65-final-formal-performance.log。正式50关闭/50开启、两个300秒idle，原40ms/0.95/0.5门槛不变。生产/driver冻结，无并行build、测试、格式化或source修改。可读检视及轻量文档。等待退出，读新目录desktop-performance-result.json的qualified/passed和全部数值，不凭exit0或中间PASS判断。
+- 性能结束后整理2026-09-24-file-read-options.md、status及本handoff，再独立提交fs.read 12文件组（basic-sdk/bootstrap/contracts、新unit、新helper/root、authoring/matrix/guide/status/handoff/report）；只force-add Markdown报告，不加日志/JSON/生成文件。性能失败保留并定位，别盲重跑或放宽阈值。
+- 下一先处理Pane焦点生命周期质量问题，再最终ingress5x5000/100与2h10k/40切换，避免最终门禁先于已知待修问题。ignored草稿2026-09-24-pane-focus-lifecycle-helper-draft.ts已格式化且helper types通过，仍未执行/接线/修改生产；相邻review.md记录真实React iframe的Set留存及thread切换测试设计。先接独立focus在旧ordinary跑红，再最小修复，不声称是旧ACK6408根因。草稿不纳入fs.read commit。
+- 后续还需最终全仓测试与已确认基线失败对照、实际Actions包/安装验收。gh不在PATH、无GitHub MCP；未push/触发远程。不中止、不问继续、不派agents、不碰UAT/共享依赖/本地NSIS。先前正式ingress和ACK6408失败均保留。
+## 2026-09-24 最终Electron因整体期限中断，完整套件20分钟重跑（最新）
+
+- HEAD40fabd88；未提交fs.read v65组。最终生产不再修改，Mods63已164/1425、utility46、6文件78窄测、Node/Web/helper types/差量lint及普通Electron3通过。
+- 75841已exit1且ordinary恢复：完整Electron实际223项（纠正口头222）最后PASS895737ms；900秒外层watchdog先关闭app，下一StopFeedback审批报MODS_HOST_UNRESPONSIVE。无此前断言失败。保存final-full-electron-timeout-result.json及完整log，不称整套PASS。
+- 仅tests/mods-e2e.spec.ts外层普通full期限15→20分钟（!focus&&!packagedDir）；单项15/30/45秒、SDK/业务预算、packaged/专项15分钟、formal30分钟与soak期限完全未改。6文件diff lint通过。不要把这一总套件时间维护混成性能阈值调整。
+- 当前唯一exec75814：只重跑完整Electron，日志2026-09-24-file-read-options-final-full-electron2.log，结束会恢复ordinary。生产未变，勿重跑已经通过的Mods/types/utility。等exit并保存final2 dated JSON、更新报告；随后原预定formal desktop新日志v65-final-formal-performance，再report/status/单独提交fs.read组，然后ingress5x5000/100、2h10k40重载及Actions实包。
+- 65719正式desktop第一次因发现undefined源码回归主动STOP/exit1，无完成idle数据；原目录08-43-54-982Z-full-6b182d4b保留，不算预算结果。旧正式ingress/ACK6408失败保持。
+- Pane lifecycle新helper只在ignored draft.txt中、未接线/运行，不能纳入此commit或称修复。无agents，不动UAT/共享依赖/本地NSIS，不问继续。
+
+## 2026-09-24 fs.read最终桥接补丁完整回归中（最新）
+
+- HEAD40fabd88，未提交fs.read v65组。10702退出0：补undefined后6文件78窄测、Node/Web/helper types、6文件diff lint（basic旧2、root旧88 warning无新增）、普通Electron专项3均通过，ordinary已构建。代码只有basic-sdk18行+bootstrap一行fs.stat||fs.read条件+revision；不改ProjectFunctionFiles或原权限路径。
+- 当前唯一exec75841：Mods63已164文件1425项通过，utility46通过，正在完整Electron；日志2026-09-24-mods63.log、file-read-options-final-process.log、file-read-options-final-full-electron.log。生产/driver冻结。完结后复制output/mods-validation/e2e/result.json为2026-09-24-file-read-options-final-full-electron-result.json，确认恢复ordinary，读实际数字。
+- 当前最终完整Electron较前轮慢约100秒，尚未失败；原全套watchdog900秒未改，不提前放宽或干预正在运行的测试。关注最终退出事实，不把中间PASS当整套成功。
+- 新未执行Pane生命周期helper仅存ignored草稿2026-09-24-pane-focus-lifecycle-helper-draft.txt，不修改生产/当前driver，也不纳入本次提交。
+- 之前17182完整164/1424+utility46+Electron234属于补undefined前，已保存历史dated JSON；不能当最终桥接补丁全量。新预期164/1425及234仅预期。16测试含显式undefined正常、null/bytes/非法模式拒绝，保留旧path-only改写。
+- 正式性能65719已因该独立源码检视回归主动STOP，exit1/首个idle未完成；目录08-43-54-982Z-full-6b182d4b完整保留，无预算结论。当前无性能在跑。最终75841退出后按原预定参数重跑formal desktop（新日志需用v65-final-formal-performance避免覆盖），读完整结果再补report/status/独立提交fs.read组。
+- 后续继续预定ingress5x5000/100、2h10k/40切换与实际Actions包；不改门槛、不删旧失败，不动UAT/共享依赖/本地NSIS，不派agents、不问继续。gh不在PATH且无可用GitHub MCP（只读发现），以后实际Actions可再考虑受权browser/CLI途径；当前没push/触发远程。
+
+## 2026-09-24 检视发现并修复fs.read可选undefined，最终回归重做（最新）
+
+- HEAD40fabd88。17182完整164/1424+utility46+Electron234与ordinary恢复已完成，但之后找到显式undefined回归；旧全量只属于补丁前，不能作最终代码PASS。
+- 正式desktop65719已主动STOP并exit1：目录08-43-54-982Z-full-6b182d4b，首个idle窗口尚未完成。因独立源码检视发现fs.read少了fs.stat已有的undefined省略，非按性能结果挑样本；完整快照/STOP/日志保留。没有性能预算结论。
+- 新真实guest用例1红15绿、旧普通Electron optional返回MODS_FS_OPTIONS红，随后guest-bootstrap仅扩展fs.stat条件同时包含fs.read（args.length===2且args[1]===undefined时省略），显式null仍拒绝，v65不变（尚未提交/发布）。新6文件78窄测通过。
+- 当前唯一运行exec10702：最终Node/Web/helper types→6文件diff lint→ordinary build→undefined新Electron专项。日志file-read-options-final-types /undefined-helper-types /undefined-lint /undefined-build /undefined-electron-green。等待退出，随后完整Mods63含hooks+5renderer（预期164/1425）、utility46、完整Electron（仍234但新增optional语义assert），普通out恢复并另存final dated结果。不要用预计数字报告通过。
+- 完成后重启相同预定参数正式desktop，再填报告/status/独立提交fs.read组（这次包括guest-bootstrap），然后ingress5x5000/100、两小时10k40重载，持续任务。矩阵两行partial、指南与失败报告已补undefined说明。
+- 无其他运行进程/agents。不动UAT/共享依赖/本地NSIS。不询问继续。焦点集合可疑点仍只读设计，尚未实现；旧正式ingress与ACK6408失败保留。
+
+## 2026-09-24 文件读取模式完整234通过，正式桌面性能中（最新）
+
+- HEAD40fabd88；未提交fs.read v65。17182已退出0：Mods62 164/1424、utility46、完整Electron234，ordinary恢复，dated JSON副本已保存；Node/Web/helper types、差量lint和普通专项3通过，先红事实完整保留在2026-09-24-file-read-options.md。
+- 唯一运行exec65719：`node tests/run-mods-desktop-soak.mjs --performance`，正式50/50+2x300s，日志2026-09-24-v65-formal-performance.log。新snapshot自动生成，冻结生产/driver，不并发build/tests/format/源代码编辑；可读检视及轻量文档。需等退出后读取desktop-performance-result.json，不能把进行中或exit0短测当PASS。
+- 完成后将正式性能结果补本次report/status/handoff，单独提交文件读取模式组（basic-sdk/contracts、15项新unit、root与新helper、authoring/matrix/guide/status/handoff/report；不加日志或生成文件）。然后按预定方案继续ingress5x5000/100及带诊断2h10k40重载；不要停止在提交边界。
+- 预定方案2026-09-24-next-formal-gates-protocol.md；旧正式ingress4/10及2/10、旧ACK6408失败全保留。新焦点集合可疑点及真实React iframe回归设计在2026-09-24-pane-focus-lifecycle-review.md，仅只读未复现/未修。剩余classic触发器边界复核在2026-09-24-classic-trigger-review.md，不把schema-only升级实现。
+- 不动UAT/共享依赖/本地NSIS，不派agents，不询问继续。Actions接线已完成但实际包/安装验收未做；当前能力与最终交付区分。
+
+## 2026-09-24 文件读取模式完整Electron进行中（最新）
+
+- HEAD40fabd88，未提交fs.read v65。55415的普通Electron失败仅fixture Windows大小写期望；按原ModsManager.workspaceKey使用realpath+Windows小写后相同构建green2三项通过。最终helper types和5文件diff lint通过。
+- 唯一运行exec17182：Mods62已164文件1424项通过，utility46通过，现完整Electron进行中（log 2026-09-24-file-read-options-full-electron.log）。冻结生产/driver，无并行重测试。结束后保存output/mods-validation/e2e/result.json dated副本，确认ordinary恢复；不能用预计234写最终PASS。
+- 下一正式测量已在2026-09-24-next-formal-gates-protocol.md预定：先既有formal desktop50/50+2x300s，再ingress5轮5000样本/100预热（不改5%/15ms门槛、保留旧1000失败），再2h/10k/40重载有诊断soak。逐项退出后读事实，失败先分析不盲跑。全部串行，不动UAT/共享依赖/本地NSIS。
+- 只读发现attemptedFocus集合未修剪/跨thread初始focus effect缺loadedThread guard，记录2026-09-24-pane-focus-lifecycle-review.md，未改生产/未证明内存或旧ACK6408根因；旧soak没有focus:true。不要冒称已修。
+- 当前仍需fs.read性能/报告/status/独立提交和正式发布门禁。两小时旧profile保持只读；其失败截图ACK3=1601、日志11条STALE是更早的Pane动作，仍无根因证明。不中止任务、不问继续、不派agents。
+
+## 2026-09-24 Base64已提交，文件读取模式修复验证中（最新）
+
+- HEAD40fabd88（Base6415文件独立提交，Mods61 163/1409、utility46、Electron232，独占smoke未达标证据完整保留）。
+- fs.read先15项14红1旧兼容绿，旧普通Electron红明确bytes/invalid/unknown/rewritten返回文本；已最小实现basic-sdk default/as:text + MODS_FS_OPTIONS/bytes明确MODS_FS_BYTES_UNSUPPORTED，宿主v65。相关4文件56绿，Node/Web/helper types和5文件diff lint通过（旧2/88warning无新增）。矩阵两行仍partial；新增guide和报告。
+- 唯一运行55415：types已过、lint已过，正在普通build→新Electron focus file-read-options；日志2026-09-24-file-read-options-build.log /file-read-options-electron-green.log。结束后读回执、跑完整Mods含全hooks/5renderer（预计164/1424）、utility46、完整Electron（预计234），恢复ordinary后正式桌面性能/ingress/长稳；别用预计值写PASS。
+- 当前文件修改未提交；无新增agents、不动UAT/共享依赖/本地NSIS。完成提交后持续剩余功能/正式门禁，不在批次停下。
+
 ## 2026-09-24 Base64完整验收已记录，准备独立提交并继续文件参数（最新）
 
 - 当前HEADd89c8e0d，Base64生产v64及文档待本次独立提交。43451已退出0：Mods61 163/1409、utility46、完整Electron232，普通out恢复；结果已另存dated JSON。最终helper types再通过。

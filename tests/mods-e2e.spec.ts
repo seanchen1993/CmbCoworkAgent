@@ -9,6 +9,7 @@ import { verifyUiInvalidate } from "./support/mods-ui-invalidate-e2e"
 import { verifyAgentList } from "./support/mods-agent-list-e2e"
 import { verifyFileWrite } from "./support/mods-file-write-e2e"
 import { verifyFileMetadata } from "./support/mods-file-metadata-e2e"
+import { verifyFileReadOptions } from "./support/mods-file-read-options-e2e"
 import { verifyBackgroundTimeout } from "./support/mods-background-timeout-e2e"
 import { verifyImperativeScroll } from "./support/mods-imperative-scroll-e2e"
 import { verifyImperativeFocus } from "./support/mods-imperative-focus-e2e"
@@ -73,6 +74,7 @@ const focus = [
   "ui-invalidate",
   "agent-list",
   "file-metadata",
+  "file-read-options",
   "file-write",
   "background-timeout",
   "imperative-scroll",
@@ -166,14 +168,20 @@ async function until(check: () => Promise<boolean>, label: string): Promise<void
   throw Error(`Timeout: ${label}`)
 }
 async function main(): Promise<void> {
-  const watchdog = setTimeout(() => {
-    console.error("E2E deadline exceeded")
-    void app?.close()
-  // The integrated suite now includes full compaction and three status-site
-  // scenarios plus classic event lifecycles. Individual waits retain their 30/45-second failure bounds.
-  }, focus === "desktop-soak"
-    ? desktopSoakOptions({smoke:process.env.CMB_MODS_SOAK_SMOKE}).durationMs + 900_000
-    : focus === "desktop-performance" ? 1_800_000 : 900_000)
+  const functionalDeadline = !focus && !packagedDir ? 1_200_000 : 900_000
+  // The full suite combines dozens of installed projects and lifecycle scenarios.
+  // Individual waits, packaged checks and formal performance/soak deadlines remain independent.
+  const watchdog = setTimeout(
+    () => {
+      console.error("E2E deadline exceeded")
+      void app?.close()
+    },
+    focus === "desktop-soak"
+      ? desktopSoakOptions({ smoke: process.env.CMB_MODS_SOAK_SMOKE }).durationMs + 900_000
+      : focus === "desktop-performance"
+        ? 1_800_000
+        : functionalDeadline
+  )
   try {
     console.log("STEP launch")
     app = await _electron.launch({
@@ -266,6 +274,10 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
+      if (focus === "file-read-options") {
+        await verifyFileReadOptions(page!, workspace, artifacts, modelServer.requests, until, pass)
+        return
+      }
       if (focus === "base64") {
         await verifyBase64(page!, workspace, artifacts, until, pass)
       } else if (focus === "client-busy") {
@@ -3243,6 +3255,7 @@ async function main(): Promise<void> {
     await verifyAgentList(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyFileWrite(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyFileMetadata(page!, workspace, artifacts, modelServer.requests, until, pass)
+    await verifyFileReadOptions(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyBackgroundTimeout(
       app!,
       page!,
