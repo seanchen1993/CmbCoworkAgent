@@ -1,3 +1,11 @@
+## 2026-09-24 Client busy真实复现修复，全量回归中（最新）
+
+- 当前HEADbfbb7d45（官方v280参考1be34d83、v63正式性能报告bfbb7d45已独立提交）。未提交生产仅FunctionClient.tsx pending非change操作计数；root新增client-busy focus/full入口和新真实helper。Input第一次fixture缺onSubmit失败不作RED，补fixture后旧ordinary真实red2断言late input提前解锁失败，再改生产。
+- helper/Node/Web types、diff lint3文件（旧root88warnings无新增）、新普通Electron4项通过（91461exit0）；实际busy截图已看。专项含真实ui.input sleep1000/ui.press sleep2000重叠、off取消、原composer、换新Client不受旧pending推进。测试末尾代码检视补configureGlobal(true)恢复套件状态。
+- **唯一运行exec90522**：完整Mods59 maxWorkers4含5renderer → utility44 →完整Electron tests/run-mods-e2e.mjs，最终会恢复ordinary out。生产/测试冻结到退出。随后独占perf smoke、必要相关专项、最终diff lint/报告/独立提交；不能停止。
+- 2026-09-24-client-busy.md报告已填有效red/types/focused绿，full/perf待填。正式桌面性能3c569546冻结基线qualified=true/passed=true已记录，不能等同本次renderer新构建全部性能；ingress关闭与2小时10k仍未完成。busy缺陷不是原6408根因证明。
+- 继续剩余兼容生产触发器/SDK/UI、正式长稳和Actions包内验证，不动UAT/共享依赖/本地NSIS、不派agents/不问继续。
+
 ## 2026-09-24 正式桌面性能报告单独提交（最新）
 
 - HEAD1be34d83已提交官方v280参考复核（类型与v278相同，仅README收紧内建telemetry）。本次仅正式v63性能报告/status/handoff，无生产改动；qualified=true/passed=true事实见2026-09-24-v63-formal-performance.md。旧full4失败、ingress关闭/2h长稳失败保留。

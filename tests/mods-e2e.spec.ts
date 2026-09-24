@@ -1,4 +1,5 @@
 import { verifyDesktopLatencyDiagnostics } from "./support/mods-desktop-latency-e2e"
+import { verifyClientBusy } from "./support/mods-client-busy-e2e"
 import { verifyGuestCodegen } from "./support/mods-guest-codegen-e2e"
 import { verifyPublicJsx } from "./support/mods-public-jsx-e2e"
 import { verifyUiNotification } from "./support/mods-ui-notification-e2e"
@@ -62,6 +63,7 @@ const binary = packagedDir
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
 const focus = [
+  "client-busy",
   "desktop-latency",
   "guest-codegen",
   "public-jsx",
@@ -262,7 +264,9 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "guest-codegen") {
+      if (focus === "client-busy") {
+        await verifyClientBusy(page!, workspace, artifacts, until, pass)
+      } else if (focus === "guest-codegen") {
         await verifyGuestCodegen(page!, workspace, artifacts, until, pass)
       } else if (focus === "public-jsx") {
         await verifyPublicJsx(page!, workspace, artifacts, until, pass)
@@ -3229,6 +3233,7 @@ async function main(): Promise<void> {
     await verifyPublicJsx(page!, workspace, artifacts, until, pass)
     await verifyUiNotification(page!, workspace, artifacts, until, pass)
     await verifyClientFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
+    await verifyClientBusy(page!, workspace, artifacts, until, pass)
     await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyAgentList(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyFileWrite(app!, page!, workspace, artifacts, modelServer.requests, until, pass)

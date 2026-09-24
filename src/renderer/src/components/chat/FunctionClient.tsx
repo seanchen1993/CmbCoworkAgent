@@ -36,7 +36,8 @@ export function FunctionClient({
   const moveValue = useRef<ModObject | undefined>(undefined)
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
-  const [busy, setBusy] = useState(false)
+  const [pendingControls, setPendingControls] = useState(0)
+  const busy = pendingControls > 0
   const [error, setError] = useState("")
   useEffect(() => {
     mounted.current = true
@@ -86,14 +87,16 @@ export function FunctionClient({
   }, [send, snapshot.error])
   const control: Control = async (control, kind, value) => {
     if (kind === "close" || !control?.press) return
-    if (kind !== "change") setBusy(true)
+    const blocksControls = kind !== "change"
+    if (blocksControls) setPendingControls((pending) => pending + 1)
     setError("")
     try {
       await send(kind, value, control.press.handle)
     } catch {
       if (mounted.current) setError("组件已更新或停止，请在当前画面重试。")
     } finally {
-      if (mounted.current) setBusy(false)
+      // An earlier input reply must not release a different, still-pending press/submit/select.
+      if (mounted.current && blocksControls) setPendingControls((pending) => pending - 1)
     }
   }
   const pointer = (event: React.PointerEvent<HTMLDivElement>, type: string): void => {
