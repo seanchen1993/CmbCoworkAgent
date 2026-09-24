@@ -17,7 +17,8 @@ export async function verifyDesktopSoak(
   artifacts: string,
   until: (check: () => Promise<boolean>, label: string) => Promise<void>,
   pass: (label: string) => void,
-  performanceOnly = false
+  performanceOnly = false,
+  historyRegression = false
 ): Promise<void> {
   const options = desktopSoakOptions({ smoke: process.env.CMB_MODS_SOAK_SMOKE })
   const project = join(workspace, "desktop-soak")
@@ -166,6 +167,42 @@ export async function verifyDesktopSoak(
   await open()
   await page.screenshot({ path: join(artifacts, "desktop-soak-four-panes.png") })
   pass("eight installed and approved guests execute; four real Client panes render")
+  if (historyRegression) {
+    // Saturate the actual persisted history before exercising Client events. This is a
+    // bounded regression scenario, never a substitute for the timed two-hour workload.
+    for (let cycle = 0; cycle < 6; cycle++) await open()
+    assert.equal((await page.evaluate((id) => window.api.mods.jobs(id), id)).length, 50)
+    await until(async () => {
+      const sites = page.locator('[data-function-site="CommandOutput"]')
+      return (
+        (await sites.count()) === 50 &&
+        (await sites.filter({ hasText: "插件界面未能绘制" }).count()) === 0
+      )
+    }, "all retained command outputs render without site capacity errors")
+    await page.screenshot({ path: join(artifacts, "desktop-history-fifty-jobs.png") })
+    pass("all 50 retained command outputs render with four live Clients")
+    for (let event = 1; event <= 200; event++) {
+      const pane = (event - 1) % 4
+      await page
+        .getByRole("textbox", { name: `Soak note ${pane}`, exact: true })
+        .fill(`history-${event}`)
+      await page.getByRole("button", { name: `Soak increment ${pane}`, exact: true }).click()
+      await page.getByText(`ACK_${pane}:${++counts[pane]}`, { exact: true }).waitFor()
+    }
+    assert.equal(
+      await page.getByText("插件界面未能绘制，已恢复默认内容。", { exact: true }).count(),
+      0
+    )
+    await off()
+    await page.evaluate(() => window.api.mods.configureGlobal(true))
+    await select()
+    await open()
+    for (let pane = 0; pane < 4; pane++)
+      await page.getByText(`ACK_${pane}:50`, { exact: true }).waitFor()
+    await off()
+    pass("200 Client acknowledgements survive full command history, reload and off")
+    return
+  }
   if (performanceOnly) {
     await verifyDesktopPerformance({
       app,

@@ -1,3 +1,6 @@
+/** Maximum number of command jobs exposed by the retained project history. */
+export const MOD_COMMAND_HISTORY_LIMIT = 50
+
 export const MODS_API_VERSION = "cmb.mods/v1" as const
 
 export type ModJson = null | boolean | number | string | ModJson[] | ModObject

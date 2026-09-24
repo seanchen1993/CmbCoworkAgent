@@ -836,3 +836,32 @@ it.each(["ToolGroup", "AskUserQuestion"] as const)(
     expect(state.get("clicked")).toBe(true)
   }
 )
+
+it("renders both output blocks for the entire retained command history without exhausting sites", async () => {
+  const { session } = await fixture("")
+  const owners: string[] = []
+  // The public history returns at most 50 jobs, each with a result and/or an error block.
+  for (let index = 0; index < 100; index++) {
+    const owner = await session.sites.mount("CommandOutput")
+    owners.push(owner)
+    const result = await session.sites.render(owner, {
+      command: "history",
+      args: "***",
+      text: `entry-${index}`,
+      isErrored: index % 2 === 1
+    })
+    expect(drawnText(result.tree)).toContain(`entry-${index}`)
+  }
+  await expect(session.sites.mount("CommandOutput")).rejects.toThrow("MODS_UI_SITE_LIMIT")
+  await session.sites.unmount(owners[0])
+  const replacement = await session.sites.mount("CommandOutput")
+  expect(replacement).not.toBe(owners[0])
+  await expect(
+    session.sites.render(owners[0], {
+      command: "history",
+      args: "***",
+      text: "obsolete",
+      isErrored: false
+    })
+  ).rejects.toThrow("MODS_UI_SITE_CLOSED")
+})

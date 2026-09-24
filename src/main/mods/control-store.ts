@@ -10,6 +10,7 @@ import type {
   ModCommandJob,
   ModArtifact
 } from "../../shared/mods/types"
+import { MOD_COMMAND_HISTORY_LIMIT } from "../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
 import { ModError } from "./errors"
 import { FunctionStateStore } from "./v2/state-store"
@@ -142,17 +143,17 @@ export class ModControlStore {
       .run(job.id, job.threadId, text, job.createdAt)
     this.db
       .prepare(
-        "DELETE FROM mods_jobs WHERE thread_id=? AND json_extract(payload,'$.state') NOT IN ('queued','running') AND id NOT IN (SELECT id FROM mods_jobs WHERE thread_id=? ORDER BY at DESC,rowid DESC LIMIT 50)"
+        "DELETE FROM mods_jobs WHERE thread_id=? AND json_extract(payload,'$.state') NOT IN ('queued','running') AND id NOT IN (SELECT id FROM mods_jobs WHERE thread_id=? ORDER BY at DESC,rowid DESC LIMIT ?)"
       )
-      .run(job.threadId, job.threadId)
+      .run(job.threadId, job.threadId, MOD_COMMAND_HISTORY_LIMIT)
   }
 
   jobs(threadId: string): ModCommandJob[] {
     return this.db
       .prepare(
-        "SELECT payload FROM mods_jobs WHERE thread_id=? ORDER BY at DESC,rowid DESC LIMIT 50"
+        "SELECT payload FROM mods_jobs WHERE thread_id=? ORDER BY at DESC,rowid DESC LIMIT ?"
       )
-      .all(threadId)
+      .all(threadId, MOD_COMMAND_HISTORY_LIMIT)
       .map((row) => parseModJson(String(row.payload)) as unknown as ModCommandJob)
   }
 

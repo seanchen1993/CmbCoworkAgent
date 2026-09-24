@@ -64,6 +64,7 @@ const focus = [
   "imperative-focus",
   "desktop-performance",
   "desktop-soak",
+  "desktop-history",
   "status-sites",
   "message-sites",
   "svg",
@@ -211,11 +212,27 @@ async function main(): Promise<void> {
       return id
     }, workspace)
     if (focus && !packagedDir) {
-      if (focus === "desktop-soak" || focus === "desktop-performance") {
-        timings.scope = focus === "desktop-performance"
-          ? "Whole desktop idle CPU and paired model/IPC streaming"
-          : "Whole desktop soak; separate from streaming and idle CPU gates"
-        await verifyDesktopSoak(app!, page!, workspace, artifacts, until, pass, focus === "desktop-performance")
+      if (
+        focus === "desktop-soak" ||
+        focus === "desktop-performance" ||
+        focus === "desktop-history"
+      ) {
+        timings.scope =
+          focus === "desktop-performance"
+            ? "Whole desktop idle CPU and paired model/IPC streaming"
+            : focus === "desktop-history"
+              ? "Bounded command history and Client regression; not a formal soak"
+              : "Whole desktop soak; separate from streaming and idle CPU gates"
+        await verifyDesktopSoak(
+          app!,
+          page!,
+          workspace,
+          artifacts,
+          until,
+          pass,
+          focus === "desktop-performance",
+          focus === "desktop-history"
+        )
         return
       }
       modelServer = await startModsModelServer()

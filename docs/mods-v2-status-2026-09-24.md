@@ -1,6 +1,6 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `7363ce1e`（随后 agent.list 见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `0664963b`（随后命令历史容量修复见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
 ## 应用已具备的能力
 
@@ -20,6 +20,7 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| 命令历史容量 | 新真实guest/session先红后绿，普通旧包Electron先红，新包50条历史/200次Client确认/重载/off专项4通过；完整Mods51四worker 141文件1267项通过、隔离manager47/真实utility41通过；完整Electron199通过；性能smoke TTFT +36.3ms，qualified=false/passed=false，不更新正式门禁。默认并行首轮两项5秒超时保留在报告 |
 | agent.list | 最终窄测 4 文件 65 项、Mods49 141 文件 1266 项、真实 utility process 41 通过；实际 Electron 专项 8 检查、完整 Electron 199 检查通过；独占性能 smoke TTFT p95 +69.0ms / 吞吐比0.997205，qualified=false、passed=false，不替代正式门禁 |
 | fs.write | 完整 Electron 192 检查通过；该轮早于最终跨作用域租约补丁，补丁后的实际 Electron 写入专项另有 7 检查通过。最终 Mods48 139 文件 1235 项通过；真实 utility process 41 与原 lease standalone 6 通过 |
 | Mods47 | 139 文件 1233 项通过，随后跨作用域/已结束调用两个红测修复后，相关 4 文件 57 项通过；最终完整回归见报告 |
@@ -41,11 +42,13 @@
 | 真实业务演示 | 实际 deepseek-v4-flash、原审批与 Agent 修复循环；规则关闭时真实缺陷未修，开启后 1 次自动修复、7 项独立业务断言通过，真实 validator 通过后仅推进 1 次 checkpoint。受保护需求/测试/脚本未变；不是全面业务能力证明，见[演示报告](../output/mods-v2-validation/2026-09-24-real-business-demo.md) |
 | TypeScript / ESLint | 授权查询复用：Node/Web通过，ESLint无错误、新测试无警告，control-store原3个警告经HEAD比较未增加。此前各能力helper类型和历史格式警告详见各自报告 |
 | 全仓回归 | 先前完整 Vitest 存在基线失败；隔离后剩 26 项已在旧基线复现，standalone 84 命令初次 78 通过、6 失败，修复 2 个本分支差异后相关整套通过，其余 4 个在旧基线复现；不能称全仓全绿 |
-| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照仍有 1/10 组超预算（project-off +14.584% / +0.3574ms），整体未通过；checkpoint 共享快照优化后正式桌面 full4 采样有效，CPU 增量 0.098856 单核百分点及吞吐比 0.996589 通过，TTFT p95 增量降到 67.7ms，仍超过 40ms 门槛；两小时/10000 事件正式 soak 尚未完成 |
+| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照仍有 1/10 组超预算（project-off +14.584% / +0.3574ms），整体未通过；checkpoint 共享快照优化后正式桌面 full4 采样有效，CPU 增量 0.098856 单核百分点及吞吐比 0.996589 通过，TTFT p95 增量降到 67.7ms，仍超过 40ms 门槛；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
 
 7363ce1e 已更正 metadata/write 两个 Electron helper 的撤权参数，并增加实际授权状态断言：新专项 5+7 检查通过。旧测试只证明 session 失效，不能冒称撤销了持久化 grant，见[更正报告](../output/mods-v2-validation/2026-09-24-function-revocation-e2e-correction.md)。
 
 报告保存在 `output/mods-v2-validation/`，每份标明对应代码、范围和失败。契约测试中的本地 HTTP 模型服务与业务产物夹具不能算真实业务验收；上表单列的真实业务演示使用实际 provider 与独立业务断言。checkpoint 提交现保存开始、成功、失败与已写入但权限失效的中断事实，重启不自动重放未知操作。
+
+正式长稳原始失败及内存测量边界见[失败记录](../output/mods-v2-validation/2026-09-24-desktop-soak-failure.md)。命令历史50条与CommandOutput旧32槽冲突已独立复现；不能据此直接认定点击超时原因。
 
 ## 仍未完成的工作
 

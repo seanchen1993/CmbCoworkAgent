@@ -1,5 +1,5 @@
 import { requestUserInputSchema } from "../../user-input-schema"
-import type { ModObject } from "../types"
+import { MOD_COMMAND_HISTORY_LIMIT, type ModObject } from "../types"
 import { encodeModJson } from "../validation"
 import { isModObject, ModFunctionError } from "./contracts"
 import { validateFunctionTree, type FunctionUiElement } from "./ui"
@@ -21,6 +21,8 @@ export const FUNCTION_UI_SITES = [
 ] as const
 export type FunctionUiSite = (typeof FUNCTION_UI_SITES)[number]
 export const FUNCTION_DURATION_SITE_LIMIT = 32
+// Each retained job can show a result and an error block; other transcript sites stay at 32.
+export const FUNCTION_COMMAND_OUTPUT_SITE_LIMIT = MOD_COMMAND_HISTORY_LIMIT * 2
 
 export function functionUiSite(value: unknown): FunctionUiSite {
   if (!FUNCTION_UI_SITES.some((site) => site === value))

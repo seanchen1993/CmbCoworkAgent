@@ -6,8 +6,9 @@
 
 只读事实为 `command`、`args`、`isErrored`；不提供终端 `onScreen`。现有任务记录故意
 不保存原始参数，所以 `args` 统一为 `***`，不从命令输出推测或新增保存敏感参数。
-每类32个owner；超过10000字符的结果保留原生。未接入非Mods内建命令的其他展示路径，
-不宣称所有本地slash输出均已拦截。状态为 `adapted`，宿主修订v39须重新批准摘要。
+CommandOutput 上限为100个owner，对应最多50条历史任务各自的结果和错误块；
+其他消息位置仍为32个。超过10000字符的结果保留原生。未接入非Mods内建命令的其他展示路径，
+不宣称所有本地slash输出均已拦截。状态为 `adapted`，宿主修订v60须重新批准摘要。
 
 ```ts
 on("ui.render", { component: "CommandOutput" }, ($, e, next) =>

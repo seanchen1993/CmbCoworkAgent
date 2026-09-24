@@ -8,6 +8,7 @@ import {
   functionSiteProps,
   functionUiSite,
   FUNCTION_DURATION_SITE_LIMIT,
+  FUNCTION_COMMAND_OUTPUT_SITE_LIMIT,
   validateFunctionSiteTree,
   type FunctionUiSite
 } from "../../../shared/mods/v2/sites"
@@ -94,7 +95,9 @@ export class FunctionUiSites {
       ) {
         if (
           [...this.slots.values()].filter((entry) => entry.component === component).length >=
-          FUNCTION_DURATION_SITE_LIMIT
+          (component === "CommandOutput"
+            ? FUNCTION_COMMAND_OUTPUT_SITE_LIMIT
+            : FUNCTION_DURATION_SITE_LIMIT)
         )
           throw new ModFunctionError("MODS_UI_SITE_LIMIT")
       } else {

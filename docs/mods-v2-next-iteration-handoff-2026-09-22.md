@@ -1,3 +1,55 @@
+## 2026-09-24 11:37 命令历史容量修复已完成验证，准备独立提交（最新）
+
+- 提交前HEAD0664963b；本次v60容量改动、窄测、desktop-history专项、文档和两份Markdown报告一起提交。真实guest红→75窄测绿；旧普通包专项红→新包4检查绿（50条历史/200次ACK/重载/off）；Mods51四worker141/1267PASS，默认并行首轮2个manager超时另隔离47PASS；utility41PASS；Node/Web/helper类型PASS；最终diff ESLint修改行0warning/全文件0error。
+- 完整Electron199PASS，exec50520 exit0，ordinaryout已恢复。独占perf smoke exec1392 exit0；artifact desktop-performance-2026-09-24T03-33-48-052Z-smoke-d62b16ab，TTFT159.3→195.6(+36.3)ms，吞吐.994613，约1sidle差-3.035371；qualified=false/passed=false，不能据此推翻正式TTFT+67.7失败或归因优化收益。
+- 目前无测试/build/E2E/perf运行。提交后继续ui.invalidate operation，ignored ui-invalidate-session-tests-draft.txt已有新增skip/late-deny/invalidrewrite/nonvoid草稿但尚未执行；ui-invalidate-electron-plan.md记录真实Electron场景。先复制测试跑红再实现，别停在commit边界。之后Client focus、通知范围/兼容矩阵与剩余门禁。
+- 原正式长稳6407/25/77分钟失败尚未解决；容量冲突已确认独立修复，ACK超时不能直接归为已修好。保留原profile/失败artifact，见2026-09-24-desktop-soak-failure.md。后续需点击路径诊断及正式长稳。UAT/共享依赖未触碰，无本地NSIS/push。
+
+## 2026-09-24 11:18 命令历史容量修复验证中（最新，继续任务）
+
+- HEAD仍0664963b；未提交v60 CommandOutput容量修复：共享history上限50，SQL保持50，CommandOutput上限2×50（每job结果/错误两块），其他位置32不变。sites新增真实guest测试先红后75项窄测绿。普通旧v59 Electron新desktop-history focus先红（50行容量错误），新普通v60专项4检查通过，含200次Client确认+重载+off。不是原77分钟长稳已修复证明。
+- Node/Web/helper types通过，ESLint0error/新diff行0warning；全文件旧prettier警告按message分组会变化，baseline脚本报差异不等于新增（已核对）。docs guide/matrix/status及两份ignored正式报告待最终补验证结果。
+- Mods50首次默认并行：141files，1265PASS/2个manager.test.ts 5秒timeout（注册工具冷启动、changed source approval）。原限制未改。隔离manager47PASS（45.39s），真实utility process41PASS，exec92352已exit0。
+- **唯一正在运行exec50520**：先完整Mods51 `npm run test:mods -- --maxWorkers=4`，通过才自动进入完整Electron `node tests/run-mods-e2e.mjs`。日志 `2026-09-24-site-history-mods51.log` / `2026-09-24-site-history-full-electron.log`，artifacts同前缀。poll到退出；冻结生产/测试，不并行其他build/E2E/perf。随后独占 `node tests/run-mods-desktop-soak.mjs --smoke --performance`、补报告并单独commit，不停在批次边界。
+- 长稳原失败6407/25/77分钟，profile只读数据已核实counter=[1602,1602,1602,1601]（不是仅漏显示）。主日志有大量SITE_LIMIT；最后15s无Client IPC error。容量冲突确认独立修复，但原ACK超时原因仍待进一步诊断，禁止宣称全部长稳通过。报告 `2026-09-24-desktop-soak-failure.md` 已写测量/限制。
+- 下一功能：真实 `ui.invalidate` operation bridge（现SDK直接core没有hook），然后Client imperative focus。ignored草稿tests/设计参前段，尚未复制/跑红。继续用户全能力目标，UAT/共享依赖不碰，不派agent，不本地NSIS/push/问继续。
+
+## 2026-09-24 正式长稳失败，正在定位（最新）
+
+- HEAD 0664963b。exec88533 已 exit1，无运行测试；不要继续轮询或盲目重跑。正式长稳完成6407次操作/25次切换/4637035ms（约77分钟），第6408次 Soak3 等待 ACK_3:1602 超时15s，qualified=false。
+- 原artifact desktop-soak-2026-09-24T01-39-36-251Z-full-a535898b；隔离profile C:/Users/87624/AppData/Local/Temp/cmb-mods-e2e-eYAm4L 保留只读。main.log/.1 与renderer.log位于data/logs；失败截图含CommandOutput绘制错误，日志大量MODS_UI_SITE_LIMIT。当前确认CommandOutput最大32个site而jobs保留50，正在检查是否另有点击失败原因，不能直接归因为同一个问题。
+- 生产/测试未改；仅handoff与ignored分析草稿。下一步日志/持久化证据定位→失败回归→最小修复→完整验证→独立提交，然后继续ui.invalidate/Client focus等能力。不增加超时掩盖失败，不动UAT/共享依赖，不本地打包。
+
+## 2026-09-24 10:42 正式长稳过半（最新，实际测试不能停）
+
+- HEAD **0664963b**。**唯一实际执行进程仍 exec88533**，已5000 events/20 cycles/3606563ms（约一小时），141个GC窗口，无失败；再运行约一小时至11:40后，不是完成。无active functions cell；用write_stdin88533 ≤50000ms后读log尾部。上一个cell1915早已仅终止轮询包装，勿再wait它。
+- 原artifact **output/mods-v2-validation/desktop-soak-2026-09-24T01-39-36-251Z-full-a535898b/**，log **2026-09-24-desktop-soak-full1.log**。生产/驱动/bundle/共享依赖未改，无其他tests/build/E2E/perf。只改handoff tracked，所有候选为ignored草稿，不能算实现或PASS。
+- 轻量后处理 **analyze-desktop-soak.cjs** 读现有progress，输出同artifact **desktop-soak-analysis.json**。最新第五千 live renderer GC后heap p50 16.920/max17.173MiB（前四千p50:15.781,16.212,16.513,16.715）；主进程第五千WSS p50 553.832/max563.840MiB；全样本inputPaint p95约9.8ms、clickACK p95约379.1ms。20个off窗口Function utility为0；尚不判内存通过，GC后heap有缓慢增长，RSS非GC堆。完整跑完再分析所有窗口，不可仅qualified声明全性能通过。
+- 下一功能优先 **ui.invalidate operation桥**：ignored **ui-invalidate-session-tests-draft.txt**（真实guest+SDK，未执行），修了取消用settled/finally不留未处理拒绝。现session.ts1529直接invalidate，没有同名operation hook；official5614 {event}/void。须先复制test跑红，再原dispatch/skip/held/cancel/void结果验证实现，仅ui.render范围。之后 **Client主动focus**：**client-focus-session-tests-draft.txt** 与 **2026-09-24-client-focus-design-draft.md**，前段详细设计；尚未实施/跑红。
+- **2026-09-24-contract-audit-draft.md**已补ui.resolve SDK vsenginehook、无trigger事件、Actions既有上传无Mods包内step、公开h/Fragment候选、ingress关闭测量边界。**matrix-ui-client-notes-draft.json**有16条UI/Client具体范围+source/test引用（未改正式matrix）。之后审计要先matrix失败测试并补真正guest globals probe，不能直接从SDK复制operation结论。
+- 新 **2026-09-24-ui-notification-design-draft.md**：潜在性能优化，FunctionClient变更→panes.notify→uiChanged→cards-changed广播所有FunctionSite含最多50命令行。只是源码调用路径，尚未测归因/实施。必须保留explicit ui.invalidate全局合并通知（sites.invalidate自身不广播、靠Pane那一条）与legacy缺省广播。最小候选仅Client notify标panes-only，在原changed定时合并队列中all优先，FunctionSite忽略panes-only；其他Pane change不动。先测试真实session通知/合并升级+Electron实际siteRender计数，后证实收益，不缓存授权/删保护。
+- 長稳退出→分析/正式报告/status/handoff独立commit→持续实施上述功能，每项红→代码检视→窄测/类型/lint/guest/process/Electron→性能smoke→单独commit。剩余TTFT+67.7、ingress关闭1/10、未支持契约、Actions installer验证不能冒称完成。UAT/共享依赖不碰、不派agent、不本地NSIS/push，不结束询问继续。
+
+## 2026-09-24 10:10 正式长稳继续，后续功能已只读审查（最新）
+
+- HEAD **0664963b**，仅此handoff tracked modified。**真实长稳 exec88533 仍运行**，截至日志2400 events/9 cycles/约28.8分钟；预计11:40后完成。原artifact/log路径见下段。**functions exec轮询cell1915已terminate，仅终止包装轮询，不是实际88533测试**；目前没有运行functions cell，后续直接write_stdin88533，每次<=50秒并读log尾部。不要重复启动测试、STOP或停止actualsoak。
+- 被测生产源码/驱动/bundle/依赖均未改，UAT未触碰；长稳仍独占，无其他tests/build/E2E/perf。期间只做只读源码/官方固定声明/工作流审查与忽略区草稿。
+- 忽略区 **client-focus-session-tests-draft.txt**：为 src/main/mods/v2/client-focus.test.ts 准备的真实guest/session红测草稿，**尚未复制/运行**。覆盖SDK双ACK、Client post→父hook→focus不得同Client queue死锁、独立key重绘/删除复用/stable control无关text更新、native↔Client目标改写。设计文档 **2026-09-24-client-focus-design-draft.md** 已补更小方案：地址加仅Client的clientHandle，原私有instance/handle核实，renderer data-function-handle匹配，ACK检查当前selected request而非只initial target。既有renderer Client路径已经retainFocusWhileBusy，勿重复改busy行为。
+- 更优下一功能顺序：**先ui.invalidate operation真实桥，再Client focus**。审查发现原session.ts1529直接invalidate无operation dispatch，但matrix operation误写adapted。有固定官方5614行输入{event}、void证据；先加真实guest hook+SDK红，再原dispatch/skip/turnHeld/取消复核，支持仍仅ui.render。具体失败场景在 **2026-09-24-contract-audit-draft.md**。该草稿还记录SDK.ui.resolve可读不等于engine ui.resolve生产表hook、V1 prompt.context不得混用、多个无生产trigger行须明确availability。
+- 忽略区 **analyze-desktop-soak.cjs**：轻量只读已有progress JSON后处理，输出同artifact desktop-soak-analysis.json（中间status running/qualifiedfalse不是最终）。截至1900事件输入paint p95约9.9ms，click-to-hostACK p95 354ms；主进程WSS首千峰490MiB，次段551MiB，非强制GC堆、不能直接判泄漏或稳定。实际jobs有50条保留上限，不能把增长简单解释成无限jobs。长稳完毕用完整GC窗口/阶段/每千块重新分析，保留RSS与GC区别，不能仅qualified就宣布全性能通过。已观测Function utility每off退出；legacy CMB Mods不是该断言对象。
+- Actions只读确认：build-electron.yml已有Windows installer/unpacked上传，尚无Mods包内E2E step；现有CMB_MODS_PACKAGED_DIR可用于CI实际ASAR/公开UI验证，installer安装验证另计。当前不改/触发Actions、不本地NSIS，功能优先。
+- 长稳退出后补正式报告/status/handoff、独立commit，然后继续先红测试实施上述两个能力、矩阵审计；不要在批次边界停。正式TTFT+67.7/最近smoke+69、ingress off1/10及其余兼容/Actions安装门禁仍未完成。
+
+## 2026-09-24 09:41 正式两小时长稳已经启动（最新，继续勿停）
+
+- **HEAD 0664963b feat(mods): expose native shared agent instances**，agent.list/v59 已独立提交，提交后工作树干净。验证：Mods49默认141/1266、narrow65、process41、Node/Web/helper/lint、原生四个standalone、完整Electron199（86475 exit0普通out恢复）、最终专项8（77129 exit0强化具体job失败/取消/无结果），smoke+69ms false/false（25810 exit0）。报告/指南/兼容表已提交，细节前段。
+- **唯一运行 exec88533，正式长稳**：`node tests/run-mods-desktop-soak.mjs` 无args，日志 `output/mods-v2-validation/2026-09-24-desktop-soak-full1.log`。冻结目录 **`output/mods-v2-validation/desktop-soak-2026-09-24T01-39-36-251Z-full-a535898b/`**，普通包/head/driver/bundle hash由runner记录，smoke=false。已build并启动，尚未完成！预计2小时真实负载，10000events/40reloads/8guests/4Clients。先看progress JSON与log尾部，再poll session（每次不超过60秒）。约60秒给用户简洁真实进度，继续任务不要提前最终答复。
+- **长稳独占**：在88533退出前不要运行其他tests/build/E2E/perf，不改被测driver或共享依赖/普通包。不创建STOP、不终止，除非用户要求或实际故障需要；不把qualified等同于全部内存/性能通过。成功后分析desktop-soak-progress.json/summary.json中的GC窗口、进程及输入/ACK时序，记录正式证据并更新status/report、单独提交。
+- 可以轻量只读代码/文档审查。下一契约审计草案 `output/mods-v2-validation/2026-09-24-contract-audit-draft.md` 仅忽略区，未实施/未加测试。现matrix除了SDK(full audit a99c330f)之外，engine/operation、desktopElements/clientSurface/globals/behaviorContracts仍有planned-adapter/no-evidence。审计要区分availability bounded/compiler/metadata/unavailable与full/adapted/partial/unsupported。旧V1 engine.ts prompt.context 不代表Function Mods同名事件有生产触发。
+- 实际源码核对：guest-ui私有 __functionJsx/Fragment由loader编译；公开h/Fragment和其它host同名global不能据此宣称可用。guest-runtime没有注入TextEncoder/URL/crypto/performance等web globals，需结束长稳后真实guest/utility probe再定范围。Client state/every/post等边界和证据已写草案。官方TaskCreated/Completed不等于agent.list；fs.ancestors不等于文件名枚举。未新增这些功能。
+- 长稳之后继续先失败测试，再补矩阵可调用性/余下功能，不能把文档审计当功能实现。正式TTFT+67.7/最近smoke+69、ingress off1/10、remainingclassic/SDK、Actions安装仍未完成。真实Autobiz单任务演示已有证据。
+- 仅Mods v2；UAT/共享node_modules不动，不派agent、不本地NSIS/push。用户要求连续实现，不停批次边界。
+
 ## 2026-09-24 09:39 agent.list 收口，下一步正式长稳（最新，继续勿停）
 
 - 本次提交前 HEAD **7363ce1e**。agent.list/v59 新生产能力、真实guest/native测试与Electron helper、指南/矩阵/SDK边界/status/report 本次独立提交。
