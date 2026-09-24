@@ -1,3 +1,11 @@
+## 2026-09-24 Client并发修复已提交，Actions包内门禁完成接线（最新）
+
+- 当前HEAD83e3da32，Client busy非change pending计数已独立提交：真实red2→专项4；Mods59 152/1333、utility44、完整Electron226通过（90522exit0，ordinaryout已恢复）。此前status/handoff更新脚本误找不存在的Mods58表格行而中断，代码和完整报告已正确提交；本次补齐全局status/handoff实际结果。
+- 最终helper types、6文件差量lint通过（root旧88warnings无新增）。27807exit0，新普通smoke07-06-01-731Z-smoke-1ba715da：TTFT+65.2/吞吐.996833/约1s idle差+2.061336，qualified=false/passed=false。正式桌面通过仍只对应修复前3c569546冻结构建。
+- 本次CI独立组：build-electron.yml Windows打包后、上传/release前运行已有包验证；新run-mods-packaged-e2e.ts绑定EXE/ASAR指纹，真实child退出、完整回执、超时、文件变化、旧输出保护；只上传两JSON/PNG。runner缺入口红、workflow缺gate红；最终3文件18项（9runner含真实CLI/1workflow/8staging）、helper types/lint通过。未push/触发Actions/真实包验收，未本地NSIS；不能拿Node夹具替代包/业务PASS。
+- 当前无运行进程。下一独占正式ingress关闭矩阵（沿用5轮1000/100门槛，不删失败），随后新UI构建正式desktop性能及带诊断的两小时10k。SDK/UI/classic仍按矩阵partial/unsupported如实保留，不把同名或schema-only当实现。
+- 当前无agents，UAT/共享依赖不动，不问继续、不停批次。所有正式失败原始证据保留。
+
 ## 2026-09-24 Client busy真实复现修复，全量回归中（最新）
 
 - 当前HEADbfbb7d45（官方v280参考1be34d83、v63正式性能报告bfbb7d45已独立提交）。未提交生产仅FunctionClient.tsx pending非change操作计数；root新增client-busy focus/full入口和新真实helper。Input第一次fixture缺onSubmit失败不作RED，补fixture后旧ordinary真实red2断言late input提前解锁失败，再改生产。

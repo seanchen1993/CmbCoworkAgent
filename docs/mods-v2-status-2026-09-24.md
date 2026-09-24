@@ -1,12 +1,14 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `dc30e72e`（本次仅补长稳测试诊断，生产仍v63），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `83e3da32`（Client并发忙态已修复，宿主修订仍v63），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
 兼容表已逐项补足范围说明，共245条：49 adapted、153 partial、43 unsupported、0 full。15个classic事件仍仅schema/手动分发；详见[兼容边界复核](mods-v2-compatibility-review-2026-09-24.md)。没有把未实现项列为完成。
 
 长稳探针已补有界可信原生事件和失败快照；节点替换测量缺陷先红再绿，真实24事件/3重载及50历史/200确认通过。原6408事件实际确认丢失仍未定位，不能据此宣称两小时门禁通过。
 
 ## 应用已具备的能力
+
+- [Client并发忙态](mods-v2-client-busy-2026-09-24.md)：真实输入迟到不再提前解锁仍等待宿主的按钮/提交/选择；关闭和新实例的状态隔离保持。不是原长稳ACK丢失根因声明。
 
 - [Guest 代码生成限制](mods-v2-guest-codegen-2026-09-24.md)：在 hooks/Client 插件代码运行前拒绝 eval/Function 及间接构造器路径，保留正常函数、生成器和异步 SDK；宿主修订 v63 绑定批准摘要。只影响 Function Mods 的 QuickJS，未修改应用 JavaScript 环境。
 - 独立 utility process / QuickJS、插件摘要授权、真实 FunctionSession、runtime authority、generation 和原线程 run lease。取消、撤权、替换和关闭会中止旧操作；关闭模块不扫描插件、不创建 Mods runtime。
@@ -29,6 +31,8 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| Client忙态 / Mods59 | 先旧普通Electron真实并发断言失败，再专项4项通过；完整Mods152文件1333项、utility44、完整Electron226全通过。新UI构建性能smoke +65.2ms、qualified=false/passed=false；不描述为新构建正式性能通过 |
+| Actions包内门禁 | Windows既有打包后新增ASAR/Electron验证，失败阻断该job发布，限定上传回执/PNG；runner/workflow/staging 18项、helper types与差量lint通过。未push/触发Actions，实际新包与安装验收未完成 |
 | Guest 代码生成限制 | 先真实guest红4/1、旧普通Electron执行字符串红；窄测4文件39项通过，Node/Web/helper types与修改行ESLint通过，新普通Electron专项5通过；完整Mods57含renderer为151文件1329项通过，真实utility42与完整Electron223通过；独占性能结果见独立报告 |
 | 公开 JSX factory | guest、loader、旧Surface均有先失败测试；相关3文件22项、完整Mods56含renderer为150文件1323项及真实utilityProcess通过；最终普通包公开JSX5/通知范围4/Client焦点9通过，smoke TTFT+65.4ms且qualified=false/passed=false；详见独立报告 |
 | Client 通知范围 | 先红后绿，相关6文件30项窄测；Mods54含5个renderer文件149文件1314项及utility41通过；普通旧包IPC范围红→新普通包专项4通过；Client焦点9/重绘6/50条历史200确认专项4通过；smoke TTFT+66.3ms，qualified=false/passed=false，详见独立报告 |
@@ -56,7 +60,7 @@
 | 真实业务演示 | 实际 deepseek-v4-flash、原审批与 Agent 修复循环；规则关闭时真实缺陷未修，开启后 1 次自动修复、7 项独立业务断言通过，真实 validator 通过后仅推进 1 次 checkpoint。受保护需求/测试/脚本未变；不是全面业务能力证明，见[演示报告](../output/mods-v2-validation/2026-09-24-real-business-demo.md) |
 | TypeScript / ESLint | 授权查询复用：Node/Web通过，ESLint无错误、新测试无警告，control-store原3个警告经HEAD比较未增加。此前各能力helper类型和历史格式警告详见各自报告 |
 | 全仓回归 | 先前完整 Vitest 存在基线失败；隔离后剩 26 项已在旧基线复现，standalone 84 命令初次 78 通过、6 失败，修复 2 个本分支差异后相关整套通过，其余 4 个在旧基线复现；不能称全仓全绿 |
-| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照仍有 1/10 组超预算（project-off +14.584% / +0.3574ms），整体未通过；最新冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
+| 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照仍有 1/10 组超预算（project-off +14.584% / +0.3574ms），整体未通过；修复前3c569546冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
 
 7363ce1e 已更正 metadata/write 两个 Electron helper 的撤权参数，并增加实际授权状态断言：新专项 5+7 检查通过。旧测试只证明 session 失效，不能冒称撤销了持久化 grant，见[更正报告](../output/mods-v2-validation/2026-09-24-function-revocation-e2e-correction.md)。
 
@@ -69,7 +73,7 @@
 1. 继续处理兼容矩阵中未接入的生产事件与剩余 SDK/UI 差异；[SDK 逐项边界](mods-v2-sdk-boundaries-2026-09-24.md)已区分已有受限实现与未开放接口。主动 `$.ui.focus` 已接入原生桌面 Pane 及其 Client 控件，仍不支持 AbovePrompt/非桌面目标；`$.ui.scroll` 已接入原生 Pane 的测量、实际位置确认与 end 跟随，其他 site/转录/Client key 和 person wheel 新契约仍未对齐；以字段、时序、错误/取消和实测证据为准，不批量升级 partial。
 2. checkpoint 已具备只读恢复核对界面；未知提交的自动协调/回滚仍未提供，外部文件竞争必须保留保守失败边界。
 3. 桌面性能正式v63基线已通过；ingress关闭性能、长稳门禁及最终代码检视仍需完成，全仓既有失败仍须单独标注。
-4. GitHub Actions 安装包和安装验证；本地 NSIS 不作为当前开发阻断，也不把普通构建通过描述成已交付安装包。
+4. [GitHub Actions包内门禁](mods-v2-actions-package-validation.md)已接线并完成runner回归，实际Actions安装包和安装验证仍待执行；本地NSIS不作为开发阻断，不把普通构建/Node夹具通过描述成已交付安装包。
 
 ## Claude 参考与差异
 

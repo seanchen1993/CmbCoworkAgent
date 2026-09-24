@@ -526,6 +526,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Validate the exact Windows package produced above; do not rebuild or install here.
+      # A failed check blocks uploads/release. Linux keeps its existing native/GLIBC checks.
+      - name: Validate Mods in Windows package
+        if: matrix.platform == 'win'
+        timeout-minutes: 20
+        shell: pwsh
+        run: node --import tsx scripts/run-mods-packaged-e2e.ts "dist/win-unpacked" "output/mods-v2-validation/actions-packaged"
+
+      - name: Upload Mods package validation evidence
+        if: always() && matrix.platform == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMBDevClaw-win-mods-validation-${{ steps.pkg.outputs.version }}
+          path: |
+            output/mods-v2-validation/actions-packaged/packaged-validation.json
+            output/mods-v2-validation/actions-packaged/result.json
+            output/mods-v2-validation/actions-packaged/*.png
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
