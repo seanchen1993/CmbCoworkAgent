@@ -12,6 +12,16 @@ async function create(body: string) {
 afterEach(() => instances.splice(0).forEach((instance) => instance.dispose()))
 
 describe("isolated Client surface", () => {
+  it("reuses the shared public factories without replacing their readonly bindings", async () => {
+    const client = await create(`const {Text}=surface.elements;
+      return h(Fragment,null,h(Text,null,String(h===__functionJsx&&Fragment===__functionFragment)));`)
+    const snapshot = await client.update({ kind: "render", props: {}, columns: 10, rows: 5 })
+    expect(snapshot.tree).toMatchObject({
+      type: "Box",
+      props: { flexDirection: "column" },
+      children: [{ type: "Text", children: ["true"] }]
+    })
+  })
   it("keeps state across props/resize and accepts repeated fresh actions", async () => {
     const client = await create(`const {Box,Text,Button}=surface.elements;
       if(surface.state===undefined)surface.setState(0);

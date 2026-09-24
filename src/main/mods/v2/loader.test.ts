@@ -24,34 +24,37 @@ afterEach(async () => {
 })
 
 describe("function plugin snapshot loader", () => {
-  it("captures Client modules in the grant digest and rejects dynamic or escaping paths", async () => {
-    const source = `export function register(on){on("ui.render",($,e)=>{
-      const {Client: Panel}=$.ui.resolve(e);return Panel({key:"board",module:"./board.tsx"})
+  it.each(["Panel", "h", "__functionJsx"])(
+    "captures %s Client modules in the grant digest and rejects dynamic or escaping paths",
+    async (factory) => {
+      const source = `export function register(on){on("ui.render",($,e)=>{
+      const {Client: Panel}=$.ui.resolve(e);return ${factory}(${factory === "Panel" ? "" : "Panel,"}{key:"board",module:"./board.tsx"})
     })}`
-    const root = await plugin(source)
-    await writeFile(
-      join(root, "hooks/board.tsx"),
-      `export default function Board(_,s){const {Text}=s.elements;return <Text>A</Text>}`
-    )
-    const first = await compileFunctionPlugin(root)
-    expect(Object.keys(first.clients)).toEqual(["hooks/board.tsx"])
-    expect(first.code).toContain("hooks/board.tsx")
-    await writeFile(
-      join(root, "hooks/board.tsx"),
-      `export default function Board(_,s){const {Text}=s.elements;return <Text>B</Text>}`
-    )
-    expect((await compileFunctionPlugin(root)).digest).not.toBe(first.digest)
-    await writeFile(
-      join(root, "hooks/register.ts"),
-      source.replace('module:"./board.tsx"', "module:e.path")
-    )
-    await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_CLIENT_MODULE_LITERAL")
-    await writeFile(
-      join(root, "hooks/register.ts"),
-      source.replace("./board.tsx", "../../outside.tsx")
-    )
-    await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_PATH_INVALID")
-  })
+      const root = await plugin(source)
+      await writeFile(
+        join(root, "hooks/board.tsx"),
+        `export default function Board(_,s){const {Text}=s.elements;return <Text>A</Text>}`
+      )
+      const first = await compileFunctionPlugin(root)
+      expect(Object.keys(first.clients)).toEqual(["hooks/board.tsx"])
+      expect(first.code).toContain("hooks/board.tsx")
+      await writeFile(
+        join(root, "hooks/board.tsx"),
+        `export default function Board(_,s){const {Text}=s.elements;return <Text>B</Text>}`
+      )
+      expect((await compileFunctionPlugin(root)).digest).not.toBe(first.digest)
+      await writeFile(
+        join(root, "hooks/register.ts"),
+        source.replace('module:"./board.tsx"', "module:e.path")
+      )
+      await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_CLIENT_MODULE_LITERAL")
+      await writeFile(
+        join(root, "hooks/register.ts"),
+        source.replace("./board.tsx", "../../outside.tsx")
+      )
+      await expect(compileFunctionPlugin(root)).rejects.toThrow("MODS_PATH_INVALID")
+    }
+  )
   it("loads the real Claude package layout and reports registration without granting permissions", async () => {
     const report = await checkFunctionPlugin(resolve("tests/fixtures/mods-v2/conformance"))
     expect(report).toMatchObject({ valid: true, authorized: false, profile: "claude-code/2.1.278" })

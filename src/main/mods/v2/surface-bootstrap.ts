@@ -60,11 +60,7 @@ export const SURFACE_BOOTSTRAP = String.raw`
     onPointer(fn){onPointer=fn;return ()=>{if(onPointer===fn)onPointer=undefined;}},
     post(data){message=data;}
   });
-  define(globalThis,"h",{value:(tag,input,...nested)=>{
-    if(typeof tag!=="function")throw Error("MODS_UI_TAG");
-    return tag({...input,children:nested.length?nested:input?.children});
-  }});
-  define(globalThis,"Fragment",{value:input=>elements.Box(input)});
+  // FunctionGuestRuntime already installs the shared readonly JSX factories.
   define(globalThis,"__cmbFunctionMod",{value:{register(on){
     on("surface.update",($,e)=>{
       message=undefined;

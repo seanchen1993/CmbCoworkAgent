@@ -1,6 +1,6 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `faff7fa1`（随后 Client 通知范围优化见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `10337a4d`（随后公开 JSX factory 见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
 ## 应用已具备的能力
 
@@ -12,6 +12,7 @@
 - session 读取、显式压缩与 checkpoint、真实模型请求的 MCP/memory/skills/agents 动态来源 breakdown；token 估算与 provider usage 分列，无成本数据时不伪造费用。
 - 内建工具使用本应用的真实参数和权限；注册工具支持有界 JSON Schema，包括本地 defs 引用。不宣称 Claude 工具名称、所有 schema 关键字与输入输出完全等价。
 - [UI 重绘 operation](mods-v2-ui-invalidate-2026-09-24.md)：void SDK 进入原 dispatch，before-next 拒绝、取消、撤权与关闭阻止迟到 core；仅 ui.render 范围，不回滚晚到拒绝前已发生的重绘失效。
+- [公开 JSX factory](mods-v2-public-jsx-2026-09-24.md)：hooks/Client 的 readonly h/Fragment 与原编译别名共享实现，Fragment 列布局；直接 h(Client, literalProps) 在安装扫描时纳入批准摘要，动态/越界路径拒绝。旧独立 Surface 复用工厂且保留状态/计时器；string tags、任意 factory 别名与完整 upstream JSX 类型声明仍未支持。
 - [Client 通知范围](mods-v2-ui-notifications-2026-09-24.md)：独立Client更新不再触发无关FunctionSite查询；原合并队列全局优先，显式重绘/站点动作/配置/旧Mods通知保持原行为。未绕过授权或发布复核。
 - [Client 主动焦点](mods-v2-imperative-focus-2026-09-24.md)：原 Pane SDK 扩展到同插件 Client 控件，绑定真实实例/控件句柄并复核原始与改写目标，实际 DOM 双确认保留键盘归属、人意图和生命周期约束。完整嵌套焦点观察与非桌面仍不支持。
 - Pane、十三个非 Pane 桌面站点、受限 Code/Svg、Client 生命周期和焦点/滚动。terminal/vscode/mobile 与不支持的站点不伪装成桌面兼容。
@@ -23,6 +24,7 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| 公开 JSX factory | guest、loader、旧Surface均有先失败测试；相关3文件22项、完整Mods56含renderer为150文件1323项及真实utilityProcess通过；最终普通包公开JSX5/通知范围4/Client焦点9通过，smoke TTFT+65.4ms且qualified=false/passed=false；详见独立报告 |
 | Client 通知范围 | 先红后绿，相关6文件30项窄测；Mods54含5个renderer文件149文件1314项及utility41通过；普通旧包IPC范围红→新普通包专项4通过；Client焦点9/重绘6/50条历史200确认专项4通过；smoke TTFT+66.3ms，qualified=false/passed=false，详见独立报告 |
 | Client 主动焦点 | 真实guest/session先14项红，扩展后新15+原30+renderer2共47窄测通过；完整Mods53含renderer为144文件1298项、utilityProcess41项通过；新实际Electron专项9检查通过；原生焦点9/重绘6专项通过；性能smoke TTFT+51.8ms，qualified=false/passed=false；不借用v61完整204作为v62全量结果 |
 | ui.invalidate | 真实guest/session14项、完整Mods52四worker142文件1281项、utilityProcess41项通过；普通包专项6与完整Electron204检查通过，含等待中关闭；Node/Web/helper types及修改行ESLint通过。性能短测结果见独立报告，未替代正式门禁 |

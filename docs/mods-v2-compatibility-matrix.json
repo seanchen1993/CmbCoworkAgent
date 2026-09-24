@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "implementation-in-progress-not-full-parity",
   "date": "2026-09-24",
-  "codeBaseline": "faff7fa1",
+  "codeBaseline": "10337a4d",
   "upstream": {
     "versionInDeclaration": "2.1.277",
     "revision": "bf7d404e26a5fb6167d21b46c93a2bf6c22ab274",
@@ -639,9 +639,9 @@
     {"name": "onScroll", "target": "desktop-client-adapter", "implementationStatus": "adapted", "batch": "B5", "acceptance": ["A02", "A08"], "differences": ["D09"], "note": "Host routes wheel lifecycle data through ui.scroll with bounded deltas and offsets.", "evidence": ["src/main/mods/v2/clients.test.ts", "src/main/mods/v2/client-lifecycle.test.ts", "tests/mods-e2e.spec.ts"]}
   ],
   "globals": [
-    {"name": "h", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A01", "A02"], "differences": ["D10"]},
-    {"name": "Fragment", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A01", "A02"], "differences": ["D10"]},
-    {"name": "JSX", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A01", "A02"], "differences": ["D10"]},
+    {"name": "h", "target": "desktop-public-jsx", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A01", "A02"], "differences": ["D10"], "availability": "bounded", "note": "Public h is the same getter-only factory as compiled __functionJsx in hooks and isolated Client VMs. Function constructors only; string tags reject MODS_UI_TAG. Existing child normalization, callback ownership and tree budgets remain. This does not implement arbitrary DOM or every upstream factory overload. Approval-time Client module discovery supports direct h(Client, literalProps) and destructured Client aliases, not arbitrary factory aliases or globalThis.h.", "implementation": ["src/main/mods/v2/guest-ui.ts", "src/main/mods/v2/client-loader.ts"], "evidence": ["src/main/mods/v2/public-jsx.test.ts", "src/main/mods/v2/loader.test.ts", "tests/support/mods-public-jsx-e2e.ts", "docs/mods-v2-public-jsx-2026-09-24.md"]},
+    {"name": "Fragment", "target": "desktop-public-jsx", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A01", "A02"], "differences": ["D10"], "availability": "bounded", "note": "Public Fragment and compiled __functionFragment return a column Box in hooks and Client VMs. Actual Electron layout and original callback/lifecycle paths are tested; this is a desktop data tree, not terminal/mobile rendering.", "implementation": ["src/main/mods/v2/guest-ui.ts", "src/main/mods/v2/client-loader.ts"], "evidence": ["src/main/mods/v2/public-jsx.test.ts", "src/main/mods/v2/loader.test.ts", "tests/support/mods-public-jsx-e2e.ts", "docs/mods-v2-public-jsx-2026-09-24.md"]},
+    {"name": "JSX", "target": "tsx-compilation-metadata", "implementationStatus": "partial", "batch": "B5", "acceptance": ["A01", "A02"], "differences": ["D10"], "availability": "metadata", "note": "JSX is an upstream TypeScript namespace, not a runtime global. The existing TSX bundler uses private factory aliases shared with public h/Fragment and supports constructor components and fragments. The complete upstream declaration namespace/type checking is not shipped or claimed; intrinsic string tags remain rejected.", "implementation": ["src/main/mods/v2/guest-ui.ts", "src/main/mods/v2/loader.ts", "src/main/mods/v2/client-loader.ts"], "evidence": ["src/main/mods/v2/public-jsx.test.ts", "src/main/mods/v2/loader.test.ts", "tests/support/mods-public-jsx-e2e.ts", "docs/mods-v2-public-jsx-2026-09-24.md"]},
     {"name": "AbortSignal", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
     {"name": "AbortController", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},
     {"name": "TextEncoder", "target": "planned-adapter", "implementationStatus": "partial", "batch": "B2", "acceptance": ["A01", "A02"], "differences": ["D10"]},

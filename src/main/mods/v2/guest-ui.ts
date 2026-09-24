@@ -15,13 +15,19 @@ export const FUNCTION_UI_BOOTSTRAP = String.raw`
     }
     return result;
   }
-  define(globalThis, "__functionJsx", { value: (tag, props, ...children) => {
+  const uiJsx = (tag, props, ...children) => {
     if (typeof tag !== "function") throw Error("MODS_UI_TAG");
     return tag({ ...props, ...(children.length ? { children } : {}) });
-  }});
-  define(globalThis, "__functionFragment", { value: props => ({
-    type: "Box", props: {}, children: uiChildren(props?.children)
-  }) });
+  };
+  const uiFragment = props => ({
+    type: "Box", props: { flexDirection: "column" }, children: uiChildren(props?.children)
+  });
+  // Public classic-JSX globals share the same bounded constructors as compiled TSX.
+  // Getter-only bindings also prevent QuickJS from redefining a global data value.
+  define(globalThis, "h", { get: () => uiJsx });
+  define(globalThis, "Fragment", { get: () => uiFragment });
+  define(globalThis, "__functionJsx", { get: () => uiJsx });
+  define(globalThis, "__functionFragment", { get: () => uiFragment });
   function uiElements(meta, input) {
     if (!input || input.surface !== "desktop" ||
         !${JSON.stringify(["Pane", ...FUNCTION_UI_SITES])}.includes(input.component) ||

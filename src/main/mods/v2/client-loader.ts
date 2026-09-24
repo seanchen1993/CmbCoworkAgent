@@ -53,7 +53,9 @@ export function resolveClientModules(
   const modules = new Set<string>()
   for (const node of ast) {
     if (node.type !== "CallExpression") continue
-    const jsx = node.callee.type === "Identifier" && node.callee.name === "__functionJsx"
+    const jsx =
+      node.callee.type === "Identifier" &&
+      (node.callee.name === "__functionJsx" || node.callee.name === "h")
     if (!constructor(jsx ? node.arguments[0] : node.callee)) continue
     const props = node.arguments[jsx ? 1 : 0]
     if (props?.type !== "ObjectExpression") throw Error("MODS_CLIENT_MODULE_LITERAL")

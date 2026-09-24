@@ -1,3 +1,27 @@
+## 2026-09-24 公开 JSX factory 完成验证并独立提交（最新）
+
+- 提交前HEAD10337a4d。公开h/Fragment readonly getter与原编译别名共享，Fragment列布局；安装扫描补h(Client,literal)及原digest/路径检查；旧独立Surface移除重复定义复用共享factory，保留状态/回调/timer。无authority扩大，v62。
+- 三轮真实失败先行：新guest6红；Electron发现Client模块漏扫描→loader h红；完整Mods55旧Surface3红→新增Surface断言共4红。分别修复后窄测22PASS，完整Mods56含5renderer共150文件1323项PASS，utility41（31524exit0）。最终Node/Web/helper types及8文件diff lint通过（83234exit0，旧root88warning）。
+- 最终普通build后Electron公开JSX5/通知4/Client焦点9PASS；performance smoke77934exit0，desktop-performance-2026-09-24T05-18-48-487Z-smoke-362d2291：TTFT112.8→178.2(+65.4)ms、吞吐.993766、约1sidle差+2.033015，qualified=false/passed=false。截图已查看。当前无运行tests/build/perf。
+- guide/status/matrix h/Fragment partial-bounded与JSX partial-metadata/report2026-09-24-public-jsx.md一并提交。下一继续guest字符串代码生成边界，先真实失败测试，再trusted原生guard（不能esbuild降级native async原型定位）；ignored codegen-design-draft.md和两份QuickJS probe说明关闭Eval intrinsic会破坏host evalCode。尚未实现，不宣称已完成。
+- 其余矩阵96条planned/no-note、正式TTFT/ingress关闭/两小时ACK丢失与GitHub Actions包内安装门禁继续。原真实Autobiz演示已完成但不代替这些门禁。不停止、不问继续，不动UAT/共享依赖、不派agent/push/本地NSIS。
+
+## 2026-09-24 公开 JSX 集成缺口修复后回归中（最新）
+
+- HEAD10337a4d，公开 factory 能力未提交。h/Fragment readonly getter + column；Electron发现 h(Client,literal) 未纳入批准时扫描，先loader红1/11绿，再补client-loader识别h，原digest变化/动态越界拒绝都保留。真实新普通Electron5检查通过，91567exit0，截图已查看。
+- 完整Mods55先149files/1319PASS但旧独立Surface3失败，因SURFACE_BOOTSTRAP重定义readonlyglobals。新增该入口共享factory回归先4红，再移除重复factory定义，保留原状态/回调/timer。窄测loader+public+surface3文件22PASS。
+- **唯一运行exec31524**：完整Mods56（含5renderer）→通过后utility41；production/tests冻结到结束。之前types/lint36781 exit0，新增surface修改后需最终复核。下一顺序ordinarybuild/Electron public-jsx+通知+Client焦点→独占performance smoke→文档矩阵/status/report/handoff独立commit，不能停止。
+- 新报告2026-09-24-public-jsx.md草稿，最终结果待填。矩阵h/Fragment partial/bounded，JSX partial/metadata，实际实现paths已修为loader.ts/client-loader.ts，官方stringtag不支持需明示。无authority扩张，rev仍v62。
+- 下一候选guest字符串代码生成：官方禁止但当前constructor.constructor实际可执行；只读probe发现关闭QuickJS Eval intrinsic会连host evalCode都禁止，不能简单切开关。ignored2026-09-24-codegen-design-draft.md记录设计，尚未实施/测试，不能声称完成。
+- 正式TTFT、ingress关闭、长稳ACK、剩余矩阵与Actions安装门禁仍未完成。不改UAT/共享依赖、不派agents/push/本地NSIS。
+
+## 2026-09-24 公开 h / Fragment 验证中（最新）
+
+- 当前 HEAD 10337a4d；Client 通知范围已独立提交。未提交公开 h / Fragment：真实 hooks 与 Client 共用 readonly getter factory，Fragment 列布局，保留 constructor-only、树/owner/generation/预算与原私有别名，无新 authority，仍 v62。
+- 实际先 6 项失败，再 6 项通过；旧普通 Electron globals undefined 红。QuickJS 全局 data descriptor 不可配置却允许改 value 已真实复现，改用不可配置 getter 后真实 redefine/set/delete 拒绝且 aliases 相同。不能宣称其它 guest globals 都不可变。
+- Node/Web/helper types 通过（94197 exit0），diff lint 4 文件 0 error / 修改行无诊断，旧 E2E 88 warnings 保留。当前唯一 exec23074 普通 build → public-jsx Electron；生产/测试冻结到结果。随后完整 Mods、utility41、相关 Electron 和 performance smoke、矩阵边界/状态/报告并独立提交，然后继续其它契约和正式门禁。
+- 当前正式 TTFT / ingress 关闭 / 2 小时长稳 ACK 丢失 / Actions 安装门禁仍未完成；不以 smoke 替代正式验收。UAT、共享依赖未修改，无 agents/push/本地 NSIS。
+
 ## 2026-09-24 Client 通知范围完成验证，独立提交（最新）
 
 - 提交前HEADfaff7fa1。仅Client独立notify发panes scope，原timer全局优先合并、scope经原Session/Manager/IPC/preload到FunctionSite，后者忽略明确panes。没有新host authority，revision仍v62。代码/回归/指南/状态/矩阵state/setState边界/报告一并提交。
