@@ -617,7 +617,7 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
         projectName: "支付项目",
         featureName: "快捷支付",
         threadTitle: "实现会话",
-        outcome: "已批准（APP）",
+        outcome: "已批准（桌面）",
         outcomeStyle: "approved"
       })
     ],
@@ -859,12 +859,29 @@ async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<vo
   })
   const humanCalls: unknown[] = []
   const bizCalls: unknown[] = []
+  const replies: Array<{ deliveryId: string; text: string }> = []
   const human = interactions.register({
     kind: "human_gate",
     threadId: "thread-1",
     principalId: ROUTE.principalId,
     conversationKey: ROUTE.conversationKey,
     requestRef: "gate-1",
+    targetLabel: "特性：快捷支付"
+  })
+  const rejectedHuman = interactions.register({
+    kind: "human_gate",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "gate-2",
+    targetLabel: "特性：快捷支付"
+  })
+  const failedHuman = interactions.register({
+    kind: "human_gate",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "gate-3",
     targetLabel: "特性：快捷支付"
   })
   const retry = interactions.register({
@@ -875,6 +892,14 @@ async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<vo
     requestRef: "retry-1",
     targetLabel: "特性：快捷支付"
   })
+  const failedRetry = interactions.register({
+    kind: "biz_retry",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "retry-2",
+    targetLabel: "特性：快捷支付"
+  })
   const router = new ImCardReceiptRouter({
     cards,
     approvals: { resolveCardClick: async () => "unused" },
@@ -882,16 +907,23 @@ async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<vo
     humanGates: {
       resolveCardDecision: async (input) => {
         humanCalls.push(input)
-        return "Human Gate 已批准。"
+        return input.notificationId === "gate-3" ? "该决策已处理或当前渠道已失效。" : null
       }
     },
     managedBizRetries: {
       resolveCardDecision: async (input) => {
         bizCalls.push(input)
-        return "已在当前托管会话继续执行。"
+        return input.notificationId === "retry-2" ? "该决策已处理或当前渠道已失效。" : null
       }
     },
-    events: { enqueueProactiveReplies: async () => [] },
+    events: {
+      enqueueProactiveReplies: async (rows) => {
+        replies.push(
+          ...rows.map((row) => ({ deliveryId: row.deliveryId, text: row.message.content }))
+        )
+        return []
+      }
+    },
     warn: () => undefined
   })
 
@@ -901,6 +933,28 @@ async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<vo
     interactionId: human.interactionId,
     kind: "human_gate",
     tag: `${human.tag}:approve`,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-human-gate-reject",
+    interactionId: rejectedHuman.interactionId,
+    kind: "human_gate",
+    tag: `${rejectedHuman.tag}:reject`,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-human-gate-failed",
+    interactionId: failedHuman.interactionId,
+    kind: "human_gate",
+    tag: `${failedHuman.tag}:approve`,
     principalId: ROUTE.principalId,
     conversationKey: ROUTE.conversationKey,
     feedback: [],
@@ -922,6 +976,17 @@ async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<vo
   })
   await router.handle({
     schemaVersion: 1,
+    receiptId: "receipt-biz-retry-failed",
+    interactionId: failedRetry.interactionId,
+    kind: "biz_retry",
+    tag: failedRetry.tag,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [{ key: BIZ_RETRY_CHOICE_KEY, value: "stop" }],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
     receiptId: "receipt-biz-retry-invalid-message",
     interactionId: retry.interactionId,
     kind: "biz_retry",
@@ -935,12 +1000,35 @@ async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<vo
     occurredAt: new Date().toISOString()
   })
 
-  assert.deepEqual(humanCalls, [{ notificationId: "gate-1", decision: "approve" }])
+  assert.deepEqual(humanCalls, [
+    { notificationId: "gate-1", decision: "approve" },
+    { notificationId: "gate-2", decision: "reject" },
+    { notificationId: "gate-3", decision: "approve" }
+  ])
+  assert.deepEqual(gateway.acknowledged.slice(0, 3), [
+    "receipt-human-gate",
+    "receipt-human-gate-reject",
+    "receipt-human-gate-failed"
+  ])
+  assert.ok(replies.some((reply) => reply.text.includes("该决策已处理或当前渠道已失效")))
+  assert.ok(!replies.some((reply) => reply.deliveryId === "card-receipt:receipt-human-gate"))
+  assert.ok(!replies.some((reply) => reply.deliveryId === "card-receipt:receipt-human-gate-reject"))
+  assert.ok(!replies.some((reply) => reply.deliveryId === "card-receipt:receipt-biz-retry"))
+  assert.ok(replies.some((reply) => reply.deliveryId === "card-receipt:receipt-biz-retry-failed"))
+  assert.ok(
+    replies.some((reply) => reply.deliveryId === "card-receipt:receipt-biz-retry-invalid-message")
+  )
   assert.deepEqual(bizCalls, [
     {
       notificationId: "retry-1",
       choice: "continue",
       message: "继续修复测试",
+      principalId: ROUTE.principalId,
+      conversationKey: ROUTE.conversationKey
+    },
+    {
+      notificationId: "retry-2",
+      choice: "stop",
       principalId: ROUTE.principalId,
       conversationKey: ROUTE.conversationKey
     }

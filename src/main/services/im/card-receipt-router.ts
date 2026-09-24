@@ -57,7 +57,7 @@ export class ImCardReceiptRouter {
    * oldest entries are the safest to forget — the gateway stops redelivering
    * once a receipt is acknowledged, so an id this old is not coming back.
    */
-  private readonly appliedReceipts = new Map<string, string>()
+  private readonly appliedReceipts = new Map<string, string | null>()
   /** Two frames for one receipt can arrive together; apply them in order. */
   private handling: Promise<void> = Promise.resolve()
 
@@ -108,10 +108,8 @@ export class ImCardReceiptRouter {
   }
 
   private async handleOne(receipt: RemoteImCardReceiptV1): Promise<void> {
-    // The decision and its answer are acknowledged separately. Applying a click
-    // twice would decide twice; failing to tell the reader anything leaves them
-    // staring at a card that did nothing. So a redelivery re-sends the answer
-    // this receipt already earned, and never re-applies it.
+    // Applying a click twice would decide twice. Remember its result so a
+    // redelivery only retries an explanation when one is needed.
     let message = this.appliedReceipts.get(receipt.receiptId)
     if (message === undefined) {
       try {
@@ -127,14 +125,13 @@ export class ImCardReceiptRouter {
       }
     }
 
-    // Only acknowledged once the answer is durably queued. Acknowledging a
-    // reply that never persisted stops the gateway redelivering, and the press
-    // then looks to the reader like it did nothing at all.
-    if (!(await this.reply(receipt, message))) return
+    // Successful project decision card clicks are shown on the updated card.
+    // Other outcomes still need their explanation queued before acknowledgement.
+    if (message !== null && !(await this.reply(receipt, message))) return
     await this.dependencies.cards.acknowledgeReceipt(receipt.receiptId)
   }
 
-  private async apply(receipt: RemoteImCardReceiptV1): Promise<string> {
+  private async apply(receipt: RemoteImCardReceiptV1): Promise<string | null> {
     const resolved = this.dependencies.cards.interactions.resolveTag(receipt.tag)
     if (!resolved) {
       // The card outlived its request: the desktop restarted, or the run ended

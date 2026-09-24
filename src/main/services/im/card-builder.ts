@@ -361,7 +361,7 @@ function harnessDecisionContext(context: HarnessDecisionCardContext): CardCompon
   return kvComponent([
     { title: "项目", value: context.projectName },
     { title: "特性", value: context.featureName },
-    { title: "来源", value: context.threadTitle }
+    { title: "来源会话", value: context.threadTitle }
   ])
 }
 
@@ -381,7 +381,7 @@ export function buildHumanGateCard(input: HumanGateCardInput): CardComponent[] {
       style: EXCLUSION_STYLE_ACCEPT_REJECT,
       list: [
         {
-          content: "批准推进",
+          content: "批准",
           action: BUTTON_ACTION_FEEDBACK,
           tag: `${input.tag}:approve`,
           style: 1,
@@ -422,38 +422,33 @@ export function buildBizRetryCard(input: BizRetryCardInput): CardComponent[] {
     kvComponent([
       { title: "当前阶段", value: input.stageName },
       { title: "阶段状态", value: input.stageStatus },
-      { title: "上下文", value: input.contextUsage }
+      { title: "上下文", value: input.contextUsage },
+      { title: "触发原因", value: input.reason },
+      { title: "模型返回", value: input.assistantTail || "（无可展示内容）" }
     ]),
-    contentComponent(
-      [
-        `触发原因：${input.reason}`,
-        "模型返回：",
-        input.assistantTail || "（无可展示内容）",
-        input.nextActionText
-      ].flatMap((value) => value.split("\n"))
-    ),
+    contentComponent(input.nextActionText.split("\n")),
     {
       type: "interactive",
       id: FORM_COMPONENT_ID,
       inputControlArray: [
         {
           subType: "listSelector",
-          title: "操作",
-          promptText: "选择如何继续托管运行",
+          title: "可选操作",
+          promptText: "托管运行已被挂起，请选择下一步行为",
           feedbackKey: BIZ_RETRY_CHOICE_KEY,
           required: true,
           selectModel: LIST_SELECT_CUSTOM_OPTIONS,
           isMultiple: false,
           optionArray: [
-            { text: "在当前会话继续托管", value: "continue" },
-            { text: "开启新会话继续托管", value: "new_thread" },
-            { text: "停止托管运行", value: "stop" }
+            { text: "在当前会话继续", value: "continue" },
+            { text: "开启新会话", value: "new_thread" },
+            { text: "终止运行", value: "stop" }
           ]
         },
         {
           subType: "inputBox",
           title: "继续消息",
-          promptText: "仅在当前会话继续时生效；不填则继续当前任务",
+          promptText: "选择在当前会话继续时可以输入自定义用户消息",
           feedbackKey: BIZ_RETRY_MESSAGE_KEY,
           required: false,
           minLine: OTHER_INPUT_MIN_LINE,

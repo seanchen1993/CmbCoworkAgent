@@ -490,7 +490,8 @@ for (const source of ["human_gate", "biz_retry"] as const) {
 
       expect(dependencies.cardResolveDetached).toHaveBeenCalledTimes(1)
       const rendered = JSON.stringify(dependencies.cardResolveDetached.mock.calls[0]?.[1])
-      expect(rendered).toContain("APP")
+      expect(rendered).toContain("桌面")
+      expect(rendered).not.toContain("APP")
       expect(rendered).not.toContain("interactive")
     })
     if (source === "biz_retry") {
@@ -509,11 +510,14 @@ for (const source of ["human_gate", "biz_retry"] as const) {
 
         const interaction = dependencies.cardInteractions.get("truncated-card")
         const components = interaction?.content as Array<Record<string, unknown>>
-        const rendered = components
-          .filter((component) => component.type === "content")
-          .flatMap((component) => component.list as Array<{ content: string }>)
-          .map((item) => item.content)
-          .join("\n")
+        const modelRow = components
+          .filter((component) => component.type === "kv")
+          .flatMap(
+            (component) =>
+              component.list as Array<{ title: string; value: Array<{ content: string }> }>
+          )
+          .find((item) => item.title === "模型返回：")
+        const rendered = modelRow?.value.map((item) => item.content).join("\n") ?? ""
         expect(rendered).toContain(IM_REPLY_TRUNCATION_NOTICE)
         expect(rendered).toContain("开".repeat(300))
         expect(rendered).toContain("尾".repeat(300))
@@ -553,8 +557,57 @@ for (const source of ["human_gate", "biz_retry"] as const) {
 
       expect(dependencies.cardResolveDetached).toHaveBeenCalledTimes(1)
       const rendered = JSON.stringify(dependencies.cardResolveDetached.mock.calls[0]?.[1])
-      expect(rendered).toContain("APP")
+      expect(rendered).toContain("桌面")
+      expect(rendered).not.toContain("APP")
       expect(rendered).not.toContain("interactive")
+    })
+    it("directs a disabled 招乎 card to 桌面", async () => {
+      dependencies.cardAccepted = true
+      const gate = await import("./im/human-gate-adapter")
+      const retry = await import("./im/biz-retry-adapter")
+      gate.initializeImHumanGateChannel()
+      retry.initializeImBizRetryChannel()
+      create(source, "disabled-card")
+      await vi.waitFor(() => expect(dependencies.cardPublish).toHaveBeenCalledTimes(1))
+
+      service.disableChannel("disabled-card", "im")
+
+      expect(dependencies.cardResolveDetached).toHaveBeenCalledTimes(1)
+      const rendered = JSON.stringify(dependencies.cardResolveDetached.mock.calls[0]?.[1])
+      expect(rendered).toContain("请在桌面处理")
+      expect(rendered).toContain("招乎渠道已关闭")
+      expect(rendered).not.toContain("招呼")
+      expect(rendered).not.toContain("APP")
+    })
+    it("labels an IM card decision as 招乎", async () => {
+      dependencies.cardAccepted = true
+      const gate = await import("./im/human-gate-adapter")
+      const retry = await import("./im/biz-retry-adapter")
+      gate.initializeImHumanGateChannel()
+      retry.initializeImBizRetryChannel()
+      actions.registerNotificationActions(source, async (notification, input, origin) => ({
+        applied: service.finish(notification.notificationId, {
+          status: "resolved",
+          reasonCode: "user_decision",
+          result: "done",
+          action: input.action,
+          channel: origin.channel
+        }),
+        message: "done"
+      }))
+      create(source, "im-card")
+      await vi.waitFor(() => expect(dependencies.cardPublish).toHaveBeenCalledTimes(1))
+
+      await actions.decideNotification(
+        { notificationId: "im-card", action: source === "human_gate" ? "approve" : "continue" },
+        { channel: "im" }
+      )
+
+      expect(dependencies.cardResolveDetached).toHaveBeenCalledTimes(1)
+      const rendered = JSON.stringify(dependencies.cardResolveDetached.mock.calls[0]?.[1])
+      expect(rendered).toContain("招乎")
+      expect(rendered).not.toContain("招呼")
+      expect(rendered).not.toContain("APP")
     })
     it("IM completion removes the APP pending message and rejects repeated IM/APP decisions", async () => {
       const { onNotificationProjectionChanged } = await import("./notification-read-model")
