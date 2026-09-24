@@ -102,6 +102,7 @@ import {
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { stopWatching } from "../services/workspace-watcher"
+import { isThreadDeletionBusy } from "./thread-deletion-busy"
 import { isExternallyManagedThreadRunBusy } from "../services/thread-external-run-busy"
 import { threadMetadataMatchesGroupSelector } from "../services/thread-group-selector"
 import type {
@@ -3883,14 +3884,17 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           throw new Error("会话已变更或已移出分组，请重新确认。")
         }
         if (options?.requireIdle) {
-          const workspacePath =
-            typeof metadata!.workspacePath === "string" ? metadata!.workspacePath : null
-          const agentMode = getAgentModeFromMetadata(metadata!)
           if (
-            isExternallyManagedThreadRunBusy(threadId, metadata!) ||
-            (await isThreadForkBusy({ threadId, workspacePath, agentMode }))
+            await isThreadDeletionBusy(threadId, {
+              hasActiveRun: hasActiveAgentRun,
+              isAborting: isActiveAgentRunAborting,
+              waitForSettlement: waitForActiveAgentRunToSettle,
+              hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata!),
+              hasWorkflowRun: (id) => workflowRunManager.isActive(id),
+              hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id)
+            })
           ) {
-            throw new Error("会话仍在运行或有待处理结果，已停止批量删除。")
+            throw new Error("会话仍在运行，已跳过该会话。")
           }
         }
         while (deletingThreads.has(threadId)) {

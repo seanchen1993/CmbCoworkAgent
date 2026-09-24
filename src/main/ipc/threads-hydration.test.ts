@@ -54,10 +54,13 @@ describe("threads:get hydration contract", () => {
       handler.indexOf("withThreadMutationLeaseLock(lease")
     )
     expect(handler).toContain("if (options?.requireIdle)")
-    expect(handler.indexOf("isThreadForkBusy(")).toBeLessThan(
+    expect(handler.indexOf("isThreadDeletionBusy(")).toBeLessThan(
       handler.indexOf("performThreadDeletion(event, threadId, options?.groupGuard)")
     )
-    expect(handler).toContain("isExternallyManagedThreadRunBusy(threadId, metadata!)")
+    expect(handler).toContain("isExternallyManagedThreadRunBusy(id, metadata!)")
+    expect(handler).not.toContain("isThreadForkBusy(")
+    expect(handler).not.toContain("restoreWorkersForThread")
+    expect(handler).not.toContain("isBusyForThreadAsync")
     const deleteIndex = source.indexOf("dbDeleteThread(threadId)")
     const forgetIndex = source.indexOf("forgetLegacySubagentTranscriptMigration(threadId)")
     expect(deleteIndex).toBeGreaterThanOrEqual(0)

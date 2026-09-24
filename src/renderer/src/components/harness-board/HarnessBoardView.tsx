@@ -104,6 +104,7 @@ import {
 import {
   cleanupDeletedThreadIfResident,
   deleteThreadGroupSequentially,
+  type ThreadGroupDeletionProgress,
   hasRunningThreadForDeletion,
   runBestEffortCommittedDeletionCleanups
 } from "@/lib/thread-group-deletion"
@@ -8194,10 +8195,9 @@ function ProjectFeatureSidebar({
                         className="size-6 shrink-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
                         title={
                           hasRunningGroupSession
-                            ? "项目内有运行中的会话，无法删除"
+                            ? "删除项目会话（自动跳过运行中的任务）"
                             : "删除项目全部会话"
                         }
-                        disabled={hasRunningGroupSession}
                         onClick={(event) => {
                           event.stopPropagation()
                           onDeleteThreadGroup({
@@ -8346,10 +8346,9 @@ function ProjectFeatureSidebar({
                                   className="size-6 shrink-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
                                   title={
                                     hasRunningFeatureSession
-                                      ? "特性组内有运行中的会话，无法删除"
+                                      ? "删除特性组会话（自动跳过运行中的任务）"
                                       : "删除特性组全部会话"
                                   }
-                                  disabled={hasRunningFeatureSession}
                                   onClick={(event) => {
                                     event.stopPropagation()
                                     onDeleteThreadGroup({
@@ -8639,6 +8638,7 @@ export function HarnessBoardView({
   const [threadGroupDeleteTarget, setThreadGroupDeleteTarget] =
     useState<ProjectThreadGroupDeleteTarget | null>(null)
   const [confirmingThreadGroupDeletion, setConfirmingThreadGroupDeletion] = useState(false)
+  const [deletionProgress, setDeletionProgress] = useState<ThreadGroupDeletionProgress | null>(null)
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const [creatingProjectSessionProjectId, setCreatingProjectSessionProjectId] = useState<
     string | null
@@ -8647,7 +8647,6 @@ export function HarnessBoardView({
   const threadGroupDeletionInFlightRef = useRef(false)
   const threadGroupSelectionInFlightRef = useRef(false)
   const deletionThreadStatesRef = useRef(allThreadStates)
-  const deletionStreamLoadingStatesRef = useRef(allStreamLoadingStates)
   const forkingThreadIdRef = useRef<string | null>(null)
   const projectsRef = useRef(projects)
   const detailsByProjectIdRef = useRef(detailsByProjectId)
@@ -8707,7 +8706,6 @@ export function HarnessBoardView({
   deployUnitMappingsRef.current = deployUnitMappings
   leanTokenConfigRef.current = leanTokenConfig
   deletionThreadStatesRef.current = allThreadStates
-  deletionStreamLoadingStatesRef.current = allStreamLoadingStates
 
   const flushEnterpriseProjectDetailQueue = useCallback(() => {
     enterpriseProjectDetailTimerRef.current = null
@@ -11375,6 +11373,7 @@ export function HarnessBoardView({
     const target = threadGroupDeleteTarget
     threadGroupDeletionInFlightRef.current = true
     setConfirmingThreadGroupDeletion(true)
+    setDeletionProgress(null)
     try {
       let latestSelection: ThreadGroupSelectionEntry[]
       try {
@@ -11397,17 +11396,6 @@ export function HarnessBoardView({
       const incarnationById = new Map(
         latestSelection.map((entry) => [entry.threadId, entry.incarnation] as const)
       )
-      if (
-        hasRunningThreadForDeletion(
-          latestThreadIds,
-          deletionThreadStatesRef.current,
-          deletionStreamLoadingStatesRef.current
-        )
-      ) {
-        toast.error("分组内有运行中的会话，已取消删除")
-        return
-      }
-
       const result = await deleteThreadGroupSequentially(latestThreadIds, {
         deleteThread: (threadId) =>
           deleteThread(threadId, {
@@ -11420,7 +11408,8 @@ export function HarnessBoardView({
           }),
         cleanupThread: (threadId) =>
           cleanupDeletedThreadIfResident(threadId, deletionThreadStatesRef.current, cleanupThread),
-        markRead: () => undefined
+        markRead: () => undefined,
+        onProgress: setDeletionProgress
       })
       runBestEffortCommittedDeletionCleanups([
         {
@@ -11457,7 +11446,7 @@ export function HarnessBoardView({
         })
         const reason = result.error instanceof Error ? result.error.message : "删除失败"
         toast.error(
-          `已删除 ${result.deletedIds.length}/${latestThreadIds.length} 个会话，剩余项可重试：${reason}`
+          `已删除 ${result.deletedIds.length}/${latestThreadIds.length} 个会话，已跳过其余会话，可重试：${reason}`
         )
         return
       }
@@ -11562,6 +11551,7 @@ export function HarnessBoardView({
             : ""
         }
         confirming={confirmingThreadGroupDeletion}
+        progress={deletionProgress}
         onOpenChange={(open) => {
           if (!open && !threadGroupDeletionInFlightRef.current) setThreadGroupDeleteTarget(null)
         }}
