@@ -501,3 +501,7 @@ hook 中嵌套 SDK 读取复用当前执行权，写入仍需要存活的用户�
 本批接入工程现有的模型工具入口，并未把原生工具换成 Claude 的 Read/Bash schema，
 工具注册和 MCP SDK 见上文；主模型流已通过宿主边界接入。升级宿主能力会改变授权摘要，
 须重新批准，不能沿用旧摘要静默取得新增能力。
+
+## Guest 字节字符串 Base64
+
+hooks与Client可用只读全局 `atob` / `btoa`；示例 `atob(btoa("hello"))` 返回 `hello`。btoa只接受Latin1字节字符串，中文应先由业务明确编码，不能把它当作UTF-8转换器。512 Ki字符上限、原VM计算/内存预算及InvalidCharacterError类型差异见[Base64使用范围](mods-v2-base64-2026-09-24.md)。这不会开放Node/Buffer或二进制文件读取权限。

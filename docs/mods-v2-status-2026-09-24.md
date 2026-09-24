@@ -1,12 +1,14 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `83e3da32`（Client并发忙态已修复，宿主修订仍v63），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `d89c8e0d` 后的Base64能力（关闭经典桥已修复，宿主修订v64），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
-兼容表已逐项补足范围说明，共245条：49 adapted、153 partial、43 unsupported、0 full。15个classic事件仍仅schema/手动分发；详见[兼容边界复核](mods-v2-compatibility-review-2026-09-24.md)。没有把未实现项列为完成。
+兼容表已逐项补足范围说明，共245条：49 adapted、155 partial、41 unsupported、0 full。15个classic事件仍仅schema/手动分发；详见[兼容边界复核](mods-v2-compatibility-review-2026-09-24.md)。没有把未实现项列为完成。
 
 长稳探针已补有界可信原生事件和失败快照；节点替换测量缺陷先红再绿，真实24事件/3重载及50历史/200确认通过。原6408事件实际确认丢失仍未定位，不能据此宣称两小时门禁通过。
 
 ## 应用已具备的能力
+
+- [Guest Base64](mods-v2-base64-2026-09-24.md)：hooks/独立Client中只读atob/btoa，真实字节向量、padding/错误及原型修改回归；纯guest计算，保持资源限制，不增加宿主权限。仍partial，不包含DOMException或文件bytes读取。
 
 - 关闭经典Function桥时直接保留原生Hook路径，继续检查取消/session变化；全局及项目关闭时原生HTTP拒绝各只执行一次。完整Electron228与全hooks68通过，性能尾延迟仍未全部达标。
 
@@ -33,6 +35,7 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| Base64 / Mods61 | 先真实QuickJS及旧Electron失败，再163文件1409项、utility46、完整Electron232通过；Node/Web/helper types和差量lint通过，性能回检记录见独立报告，不替代正式发布门禁 |
 | 关闭经典桥 / Mods60 | 156文件1378项、utility44、完整Electron228、全hooks10文件68项、Node/Web/helper types与差量lint通过；正式ingress关闭2/10仍失败，保留失败，不称最终性能通过 |
 | Client忙态 / Mods59 | 先旧普通Electron真实并发断言失败，再专项4项通过；完整Mods152文件1333项、utility44、完整Electron226全通过。新UI构建性能smoke +65.2ms、qualified=false/passed=false；不描述为新构建正式性能通过 |
 | Actions包内门禁 | Windows既有打包后新增ASAR/Electron验证，失败阻断该job发布，限定上传回执/PNG；runner/workflow/staging 18项、helper types与差量lint通过。未push/触发Actions，实际新包与安装验收未完成 |

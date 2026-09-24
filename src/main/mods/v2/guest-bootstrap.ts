@@ -1,5 +1,6 @@
 import { FUNCTION_ASYNC_SCOPE } from "./async-scope"
 import { FUNCTION_UI_BOOTSTRAP } from "./guest-ui"
+import { FUNCTION_BASE64_GLOBALS } from "./guest-base64"
 
 /** Only evaluated in QuickJS. No host closures or objects are handed to plugin code. */
 export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
@@ -14,6 +15,7 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
   const ownKeys = Object.keys.bind(Object);
   ${FUNCTION_ASYNC_SCOPE}
   ${FUNCTION_UI_BOOTSTRAP}
+  ${FUNCTION_BASE64_GLOBALS}
   const handlers = new Map();
   const signals = new Map();
   const registrations = [];

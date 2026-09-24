@@ -1,3 +1,19 @@
+## 2026-09-24 Base64完整验收已记录，准备独立提交并继续文件参数（最新）
+
+- 当前HEADd89c8e0d，Base64生产v64及文档待本次独立提交。43451已退出0：Mods61 163/1409、utility46、完整Electron232，普通out恢复；结果已另存dated JSON。最终helper types再通过。
+- 73290独占性能smoke已退出0，目录08-16-04-456Z-smoke-b36447c4：TTFT125→181.5/+56.5ms、吞吐1.0028474744、约1秒idle差+1.3164426829，qualified=false/passed=false，不能称性能PASS。完整报告2026-09-24-base64.md。
+- 下一未提交未运行：src/main/mods/v2/file-read-options.test.ts（15个真实guest/session/文件案例）、tests/support/mods-file-read-options-e2e.ts（未接root）。先独立提交Base64（排除这两文件），再format/tests红、接root跑旧ordinary Electron红，随后basic-sdk严格as参数（text默认；bytes明确unsupported），v65，绿测/types/lint/utility/完整Electron/性能。路径在session.normalizeInput后为绝对路径，测试已对应。
+- 仍需正式desktop/更高预定样本ingress/带诊断两小时10k与Actions实际包。旧失败全保留，不改门槛，不动UAT/共享依赖/本地NSIS，不派agents、不询问继续。
+
+## 2026-09-24 v64 Base64已实现并通过专项，完整回归中（最新）
+
+- HEADd89c8e0d（关闭经典桥已独立提交）。唯一运行exec43451：Mods61全hooks/5renderer→utility新增两项→完整Electron；日志2026-09-24-mods61.log /base64-process.log /base64-full-electron.log。冻结生产/driver，不并行build/perf。
+- Base64生产guest-base64.ts纯guest算法，guest-bootstrap注入，FUNCTION_HOST_REVISION guest-base64-globals-v64；getter-only atob/btoa、Latin1/forgiving padding/ASCII空白、512KiB code units、错误名称差异，无host/RPC。矩阵仅两行unsupported→partial/bounded（49adapted155partial41unsupported0full）。
+- 先真实QuickJS7红；旧ordinaryElectron首个红空文本JSON失败，补结构化missing后red2明确缺atob/btoa。实现后8codec+6codegen+3global+21matrix共38绿；Node/Web/helper types、9文件diff lint通过（根旧88warning无新增）。
+- 新普通Electron首绿fixture裸typeof require受esbuild局部shim影响而失败，改globalThis真实全局检查后同构建green2五项通过：实际SDK续接/Client交互/重载/持久化撤权/重建/off；截图已查看。未改production来迎合shim断言。报告2026-09-24-base64.md。
+- 后续等43451退出、保存dated Electron结果，完成独占性能smoke/全量数字及报告/status/handoff更新、单独提交全部Base64组。期间继续只读检视/未导入准备。不能把部分测试标为最终发布。
+- 性能尚欠：classic修复后正式ingress2/10失败（+6.58%/.1461和+7.73%/.176）；旧4/10失败保留。最终精度可预先增加样本，不能修改5%门槛或删失败。桌面正式pass仍只3c冻结v63；最新最终构建未测。两小时10k旧ACK6408真实丢失未定位。Actions只接线未push/触发/安装验收。继续任务，不动UAT/共享依赖/本地NSIS，不派agents、不问继续。
+
 ## 2026-09-24 关闭经典桥已完成回归，提交后继续Base64（最新）
 
 - 当前HEAD329ff86d，99277完整228通过，7844已exit2无运行进程：正式ingress两组关闭失败（round1global+6.58375%/.1461ms；round4project+7.72709%/.1760ms），单插件五轮通过。报告2026-09-24-classic-disabled.md完整保留，未放宽门槛。
