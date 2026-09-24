@@ -131,6 +131,11 @@ export async function startModsModelServer() {
       (userPrompt?.includes("[mods-child]") || userPrompt?.includes("[mods-child-worker]"))
     ) {
       const child = userPrompt.includes("[mods-child-worker]")
+      const agentList = userPrompt.includes("[mods-agent-list]")
+      const agentListProbe = body.tools.some(
+        (entry: { function?: { name?: string } }) =>
+          entry.function?.name === "mcp__agent-instances__probe"
+      )
       const completed = body.messages?.at(-1)?.role === "tool"
       if (child && completed && userPrompt.includes("[child-refusal]")) {
         event([
@@ -170,12 +175,19 @@ export async function startModsModelServer() {
                     id: child ? "mods-child-inspect" : "mods-child-task",
                     type: "function",
                     function: child
-                      ? { name: "mcp__host-foundation__probe", arguments: '{"mode":"child"}' }
+                      ? agentList
+                        ? agentListProbe
+                          ? { name: "mcp__agent-instances__probe", arguments: "{}" }
+                          : {
+                              name: "read_file",
+                              arguments: JSON.stringify({ file_path: "claw-notes" })
+                            }
+                        : { name: "mcp__host-foundation__probe", arguments: '{"mode":"child"}' }
                       : {
                           name: "task",
                           arguments: JSON.stringify({
                             subagent_type: "Explore",
-                            description: `[mods-child-worker] ${userPrompt.includes("[child-stall]") ? "[stall]" : ""} ${userPrompt.includes("[child-refusal]") ? "[child-refusal]" : ""} Inspect using the registered probe`
+                            description: `[mods-child-worker] ${agentList ? "[mods-agent-list] " : ""}${userPrompt.includes("[child-stall]") ? "[stall]" : ""} ${userPrompt.includes("[child-refusal]") ? "[child-refusal]" : ""} Inspect using the registered probe`
                           })
                         }
                   }

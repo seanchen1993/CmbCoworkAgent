@@ -1,3 +1,4 @@
+import { queryFunctionAgentList } from "../mods/v2/agent-list-host"
 import { prepareFunctionSessionTitle } from "../mods/v2/session-title"
 import { nativeFunctionDialogAccess } from "../mods/v2/native-dialog-access"
 import { compactFunctionSession, queryFunctionSessionRead } from "../mods/v2/session-read-host"
@@ -236,6 +237,12 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           instructions,
           signal
         ),
+      listAgents: (workspace, threadId, signal) =>
+        queryFunctionAgentList(manager, workspace, threadId, signal, (bound) => {
+          if (writableThreadScope(threadId) !== workspace)
+            throw new ModError("MODS_CALL_SCOPE_CHANGED")
+          if (!bound) assertStandaloneThread(threadId)
+        }),
       listTools: async (workspace, threadId, signal) => {
         signal.throwIfAborted()
         if (writableThreadScope(threadId) !== workspace)

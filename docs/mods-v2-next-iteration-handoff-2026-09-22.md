@@ -1,3 +1,51 @@
+## 2026-09-24 09:39 agent.list 收口，下一步正式长稳（最新，继续勿停）
+
+- 本次提交前 HEAD **7363ce1e**。agent.list/v59 新生产能力、真实guest/native测试与Electron helper、指南/矩阵/SDK边界/status/report 本次独立提交。
+- **Mods49 默认141files1266PASS**（比Mods48少额外renderer1file2tests的范围差异已注明，不是删测试）；最终narrow4/65、process41、Node/Web/helper、ESLint无新增、四个存量standalone通过。**完整Electron第二轮199PASS exec86475 exit0且ordinaryout恢复**。首轮虚拟化DOM计数超时已用新增持久化assistant ID修复，保持原生文件读取/idle/可见答案断言；之后又加强具体撤权job failed/MODS_CANCELLED/无result断言，最终focused8PASS **77129 exit0**。应用代码始终未为测试失败改行为。
+- 独占标准performance smoke **25810 exit0**，目录 `desktop-performance-2026-09-24T01-36-25-341Z-smoke-56bdf39f/`：qualified=false/passed=false；TTFT p95 110.7→179.7(+69.0)ms，吞吐0.997205，约1s idle delta1.898952；不计正式性能通过。新报告 `2026-09-24-agent-list.md` 已填。
+- **当前没有运行tests/build/E2E/perf**。提交后马上运行正式 `node tests/run-mods-desktop-soak.mjs` 无args，2h/10000events/40reloads/8guests/4Clients。需独占，不并行其他tests/build/E2E/perf，不用smoke替代。runner冻结实际ordinary包，记录HEAD/driver/bundle SHA。运行后记录exec session/输出目录，约60秒有意义进度；不提前报完成。可同时轻量源码/文档审查，不能改正在测的驱动。
+- 下一审计草案 `output/mods-v2-validation/2026-09-24-contract-audit-draft.md`（忽略区，尚未实施/加测试）：matrix剩余planned-adapter/no-evidence、Client实际边界、guest全局可用性、classic任务语义。非guest的host同名API不能当支持。长稳结束后先失败测试，再实施审计/后续功能。正式TTFT/ingress off、其余classic/SDK、Actions安装仍未完成。
+- UAT/共享node_modules不动，不派agent、不本地NSIS、不push；用户要求连续完成，不停批次边界。
+
+## 2026-09-24 09:30 agent.list 全量首轮失败修正，第二轮进行中（最新）
+
+- HEAD 7363ce1e；全部 agent.list/v59 未提交。Mods49 141/1266、narrow65、process41、Node/Web/helper/lint、四个原生standalone均通过，无新增应用代码变更。
+- **首轮 full Electron exec38472 exit1**，ordinaryout已恢复。在新helper最后off对照等待可见MODS_CHILD_OK数量增长时超时；failure.png显示原任务/原native read已DONE。历史消息虚拟化会卸载旧行，DOM总数量不能作为新完成证据。已改helper task()为原threads.getMessages得到新增持久化assistant答案ID，并保留idle、最新可见答案和实际模型请求含OFF_READ断言，未改应用/模型协议行为、未放宽超时。
+- 修后helper type/lint通过；**focused green-3 8PASS exec68680 exit0**。**唯一运行 exec86475**：完整Electron第二轮 `2026-09-24-agent-list-full-electron-2.log` / `-artifacts/`，目前约323秒无失败。必须poll到结束并确认普通out恢复，禁止重叠build/perf。
+- 等第二轮结束，独占标准perf smoke，更新report/status/handoff后单独commitagent.list；随后正式 `node tests/run-mods-desktop-soak.mjs` 无args，2h/10000真实事件。已向用户说明将执行，不用smoke代替。长稳需独占，无其他tests/build/E2E/perf。
+- 下一只读兼容审计草案 `output/mods-v2-validation/2026-09-24-contract-audit-draft.md`（忽略区、未提交、不是完成证据）：剩余matrix计划占位、Client实际约束、guest vs host globals、TaskCreated不同于shared child、ancestors的真实语义。尚未增加审计测试/改对应matrix，不可误报已完成。
+- 剩余正式TTFT/ingress关闭预算、真实soak、其余classic/SDK、Actions安装仍未完成；UAT/共享依赖不碰、不派agent、不本地NSIS/push。
+
+## 2026-09-24 09:18 agent.list 全量 Electron 进行中（最新，继续勿停）
+
+- HEAD **7363ce1e**，agent.list/v59 尚未提交，代码冻结。最终窄测65通过；**Mods49 141files1266PASS exec22369 exit0**；真实 utility process41 **exec28781 exit0**。最终 Node/Web/helper **98607 exit0**；tracked/new ESLint基线比较 **35524 exit0**，0错误/无新增警告；7新文件0warning；diffcheck通过。存量 architecture/toolguard/lease/subagent-observability 四个 standalone **15692 exit0**，均通过。
+- **唯一运行 exec38472**：完整 `node tests/run-mods-e2e.mjs`，日志 `2026-09-24-agent-list-full-electron.log`，artifacts同前缀`-artifacts/`。当前约437秒、暂无失败，必须等普通out恢复且exit再跑build/性能。agent.list专项8PASS与元数据/写入真正撤权5/7PASS均已确认，见前段。实际实例截图已看。
+- 新指南、matrix、SDK表、status和agent-list报告均已更新到目前事实；完整Electron/性能待填。接着独占标准perf smoke、补报告/快照，单独提交 agent.list，不停边界。
+- 已向用户说明下一步补正式长稳门禁：`node tests/run-mods-desktop-soak.mjs` 无args，2h/10000events/40reloads/8guests/4Clients；必须独占，不与tests/build/E2E/performance同时运行，不能smoke替代。可在长稳期间做轻量只读审查/文档，不改正在测的驱动；runner冻结真实普通包。
+- 下一质量任务：矩阵 desktopElements/clientSurface/globals/behaviorContracts 及部分engine/operation仍保留历史planned-adapter/no-evidence。不是凭名称可声明兼容；需人工对照实际guest/runtime/消费者、逐项补availability与语义/错误取消/测试证据，缺少生产触发器的classic不能冒称可用。SDK审计a99c330f已完成一部分，其余未做。尚未新增测试/实施此审计。
+- 正式TTFT/ingress off仍失败、2hsoak未执行、其余未支持SDK/classic及Actions最终安装仍待完成。不派agent、不碰UAT/共享node_modules、不本地NSIS、不push。
+
+## 2026-09-24 09:05 agent.list 最终验证与撤权证据更正（最新，继续勿停）
+
+- HEAD **7363ce1e**，此前 fs.write **0ec2e228**。7363ce1e 单独更正旧 file-metadata/file-write Electron 撤权：API 第二参数是模块 name，旧测试错传 pluginId 只使 session 失效，未真正撤销 grant。现在用 name 并断言 needs-approval，实际 Electron metadata 5 / write 7 PASS；旧报告已注明限制，新 correction 报告已提交。不改生产撤权 API。
+- 未提交 **agent.list/v59**：真实 shared child 实例表及原 runtime 开始/终结/取消接线、guest/session/IPC 只读 SDK、原发布/权限边界、上下文与容量边界、独立 Electron helper。最终窄测 **4 files / 65 PASS，exec56554 exit0**。初期宿主/真实 guest/session/旧 Electron 包均先红，详见新报告。
+- 实际 focused Electron **8 checks PASS exec58966 exit0**（green-2 日志/artifacts），包括真实 DeepAgents running/completed、失败、取消后 killed、renderer reload、真正撤权状态和关闭模块原任务对照。普通 out 已含 v59。前轮撤权测试失败促成上述独立修正。当前无 build/E2E/perf 在跑。
+- 新指南 docs/mods-v2-agent-list-2026-09-24.md、SDK 边界表、兼容矩阵、新验证报告已草写；status 待补。表只记录当前观察周期 shared child，不含 opaque/workflow/teammates/重启历史；100 scopes × 100 agents 超限查询明确失败，原任务继续，global overflow 需要全清。只能 partial/bounded，不是业务 PASS。
+- 当前最终 diff 格式/检视与类型/lint进行中，然后冻结源码和测试跑全量 Mods、真实 utility process、完整 Electron、独占标准 perf smoke。补报告/status/快照并独立提交，再继续剩余能力，不在批次边界停。Node22，UAT/共享 node_modules 不动，不派 agent、不本地 NSIS、不 push。
+- 仍未完成正式 TTFT/ingress off 预算、2h/10000 真实 soak、剩余 classic/SDK 和 GitHub Actions 安装产物验证。真实 Autobiz 单任务演示已有证据，不冒称全面验收。
+
+## 2026-09-24 08:51 agent.list 已接宿主，实际 Electron 首轮进行中（最新，继续勿停）
+
+- HEAD **0ec2e228** fs.write 已独立提交，清洁后开始 agent.list。fs.write最终 Mods48 139/1235、完整Electron192（末补丁前）+末补丁focused7、process41/lease6/类型/无新增lint；独占smoke+69.6ms false/false。报告已提交。
+- **未提交 agent.list/v59**：新增 shared agent-list.ts 类型/严格参数+结果，Session能力/operation、FunctionModsManager host桥、IPC queryFunctionAgentList；原 ModsManager 新有界 FunctionAgentInstances host表，runtime.wrapTaskToolWithOwnerMetadata把真实 description/type传withSharedAgent。记录实际id、type、description、parentId、可确认spawnedBy、running/completed/failed/killed。原runtime resource撤销标killed，晚finish不能覆写新id；configure/globalinvalidate/closeThread/close清表。100scope×100agents，超限query明确失败但原任务不因表满停止；非shared/opaque/workflow/teammates/重启恢复尚不覆盖，必须partial/bounded。
+- `agent-instances.ts` entry已经显式只保留workspace/threadId，不spread整个parent runtime authority（避免留存授权对象）。metadata/result边界仍需最终检视：当前info字符串上限id512/description4000/type256/status64，未validmeta就表unavailable；scope满globaloverflow直到clearall，文档需解释。没有持久化runtime状态或guest自报PASS。
+- 失败先行：真实guest/session3红缺SDK；host表缺module红；native actual manager3红缺list API；publication helper缺module红；最初SDKresult validator误验证operation envelope导致2红，改检查value.value并保留emptydeny后过。最初native Error测试误期待原异常字符串，原dispatcher正确返回MODS_DOWNSTREAM_REJECTED，已按原契约修测试。
+- 最近窄测 **3files52PASS exec24509 exit0已poll**：真实runtime-authority40（包含actual DeepAgents task内SDK读取running与结束completed、native failed/killed/nested parent、publish等待cancel/disable/revoke/replace/workspace5）；guest/session5；host表7。Node类型 **12692 exit0**（早于helper最后少量改动）；新模块ESLint0，tracked diff格式已跑一次，但E2E接线/modelserver之后未最终lint。
+- Electron helper `tests/support/mods-agent-list-e2e.ts` 新增，focus白名单与分支/完整入口已接。真实旧ordinaryout v58：第一次忘白名单进入full缺mods-e2e.js，只是harness失败；修白名单后 **red-2** 实际 `ERROR:cannot read property list of undefined`，不是假设。helper types0/newhelper lint0。
+- **唯一运行 exec25983**：`npm run build`→focused agent-list Electron。日志 `2026-09-24-agent-list-build.log` / `2026-09-24-agent-list-electron-green.log`，artifacts `2026-09-24-agent-list-electron-green-artifacts/`。先poll结果，禁止别的build/E2E/perf重叠。未跑full Mods/Electron/perf。生产代码在该build/E2E期间别改。
+- helper安装独立agent-instances插件/普通thread开子Agent，冷list空不调模型、真实nativechild probe list同id running→completed、provider refusal failed、stall时immediate命令查running/原停止后killed、reload再查询、延迟命令撤权、globaloff原child+read_file对照。model-server在原[mods-child]分支仅增加[mods-agent-list]标记：有mcp__agent-instances__probe时用它，否则原native read_file；其他旧child流程不变。stall检测使用实际child tool-result请求+[mods-child-worker] [mods-agent-list] [stall]，不依赖隐藏的子任务DOM文字。
+- 下一步修Electron实测问题，补schema/容量/元数据与scope进一步回归、最终Node/Web/helper/ESLint基线对比，matrix SDK和engine行与指南/status/report（尚未更新）+v59，然后冻结源跑full Mods/utility process/fullElectron，独占smoke，单独commit并继续剩余能力。原正式TTFT/ingress off、2h10000soak、remainingclassic/SDK、Actions安装仍未完成。仅Mods v2；UAT/依赖不动、不派agent/本地NSIS/push。
+
 ## 2026-09-24 08:38 fs.write 验证收口并继续 agent.list（最新）
 
 - 提交前 HEAD **fbbc988e**。fs.write/v58 经原审批/ModsManager/LocalSandbox/receipt，入口真实 lease 实例与 live 同thread/workspace fence；先红再修释放、同ID同时间戳 ABA、跨scope和expired continuation。指南/SDK表/矩阵partial+bounded/状态/报告已更新，全部本次单独提交。

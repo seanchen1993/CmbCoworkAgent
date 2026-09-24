@@ -1,4 +1,9 @@
 import {
+  validateFunctionAgentList,
+  validateFunctionAgentListInput,
+  type FunctionAgentInfo
+} from "../../../shared/mods/v2/agent-list"
+import {
   functionFileWriteInput,
   validateFunctionFileWriteInput,
   assertFunctionFileWriteResult
@@ -34,6 +39,7 @@ export const SESSION_CAPABILITIES = [
   ...FUNCTION_UI_CAPABILITIES,
   "tool.call",
   "fs.write",
+  "agent.list",
   "tool.register",
   "tool.list",
   "tool.check",
@@ -141,6 +147,7 @@ export interface FunctionSessionHost {
     signal: AbortSignal,
     registered?: RegisteredFunctionTool
   ): Promise<ToolPermissionResult>
+  listAgents?(signal: AbortSignal): Promise<FunctionAgentInfo[]>
   listTools?(signal: AbortSignal): Promise<FunctionToolInfo[]>
   filterTools?(tools: FunctionToolInfo[]): FunctionToolInfo[]
   assertToolNameAvailable?(plugin: string, name: string): void
@@ -770,6 +777,7 @@ export class FunctionSession {
         validateClassicInput(name, value)
         validateBasicInput(name, value)
         if (name === "fs.write") validateFunctionFileWriteInput(value)
+        if (name === "agent.list") validateFunctionAgentListInput(value)
         validateFunctionTurnInput(name, value)
         if (name === "tool.register") functionToolSpec(value)
         if (name === "tool.call") {
@@ -851,6 +859,7 @@ export class FunctionSession {
         if (isOperation) {
           if (!isModObject(value)) throw new ModFunctionError("MODS_OPERATION_RESULT")
           if (typeof value.deny === "string") return
+          if (name === "agent.list") return validateFunctionAgentList(value.value)
           if (name === "model.complete") return validateFunctionModelText(value.value)
           if (
             name === "model.classify" &&
@@ -1129,6 +1138,32 @@ export class FunctionSession {
       if (typeof result.deny === "string")
         throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
       validateFunctionMcpResult(result.value)
+      return result.value
+    }
+    if (method === "agent.list") {
+      if (args.length) throw new ModFunctionError("MODS_AGENT_LIST_ARGUMENTS")
+      const result = await this.dispatch(
+        method,
+        {},
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1,
+        {
+          plugin,
+          core: async (_input, signal) => {
+            if (!this.host.listAgents) throw new ModFunctionError("MODS_AGENT_LIST_UNAVAILABLE")
+            const rows = await this.host.listAgents(signal)
+            signal.throwIfAborted()
+            this.assertLive(plugin)
+            return rows as unknown as ModJson
+          }
+        },
+        turnHeld
+      )
+      if (!isModObject(result)) throw new ModFunctionError("MODS_OPERATION_RESULT")
+      if (typeof result.deny === "string")
+        throw new ModFunctionError("MODS_OPERATION_DENIED", result.deny)
+      validateFunctionAgentList(result.value)
       return result.value
     }
     if (method === "tool.register" || method === "tool.list") {

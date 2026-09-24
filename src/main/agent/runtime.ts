@@ -2096,7 +2096,7 @@ function taskInvocationOwnerId(config: { toolCall?: { id?: unknown }; toolCallId
  * @langchain/core tools `invoke`), preserving its Command/result contract.
  */
 export type ModTaskExecution = <T>(
-  input: { agentId: string; subagentType?: string; signal?: AbortSignal },
+  input: { agentId: string; subagentType?: string; description?: string; signal?: AbortSignal },
   run: () => Promise<T>
 ) => Promise<T>
 
@@ -2169,6 +2169,8 @@ export function wrapTaskToolWithOwnerMetadata(
                 agentId: ownerId ?? `mod-task:${invocationOwner.stationarity}`,
                 subagentType:
                   typeof taskInput.subagent_type === "string" ? taskInput.subagent_type : undefined,
+                description:
+                  typeof taskInput.description === "string" ? taskInput.description : undefined,
                 signal: config?.signal
               },
               execute
@@ -3053,7 +3055,10 @@ function assembleDeepAgent(
                 readOnlyShellExecutionContext.getStore() === true || access?.readOnly === true,
                 run
               ),
-            modTurnRunId
+            modTurnRunId,
+            input.subagentType
+              ? { type: input.subagentType, description: input.description ?? "" }
+              : undefined
           )
         }
       : undefined

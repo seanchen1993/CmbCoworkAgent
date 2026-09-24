@@ -1,3 +1,4 @@
+import type { FunctionAgentInfo } from "../../../shared/mods/v2/agent-list"
 import { ApplicationCompletionPolicies } from "./application-completion-policy"
 import { inspectAutobizRecovery } from "./autobiz-recovery"
 import type { FunctionSessionTitleUpdate } from "./session-title"
@@ -142,6 +143,11 @@ interface FunctionManagerHost {
   ): Promise<ModJson>
   dialogs?(workspace: string, threadId: string): import("./ui-notice").FunctionNoticeDialogAccess
   fileScope?(workspace: string, threadId: string): FunctionFileScope
+  listAgents?(
+    workspace: string,
+    threadId: string,
+    signal: AbortSignal
+  ): Promise<FunctionAgentInfo[]>
   listTools?(workspace: string, threadId: string, signal: AbortSignal): Promise<FunctionToolInfo[]>
   filterTools?(workspace: string, threadId: string, tools: FunctionToolInfo[]): FunctionToolInfo[]
   assertToolNameAvailable?(workspace: string, threadId: string, plugin: string, name: string): void
@@ -515,6 +521,14 @@ export class FunctionModsManager {
             const value = await this.host.compactSession(workspace, threadId, instructions, signal)
             assertLive()
             const result = await this.host.publish(workspace, value, signal)
+            assertLive()
+            return result
+          },
+          listAgents: async (signal) => {
+            assertLive()
+            if (!this.host.listAgents) throw new ModFunctionError("MODS_AGENT_LIST_UNAVAILABLE")
+            const result = await this.host.listAgents(workspace, threadId, signal)
+            signal.throwIfAborted()
             assertLive()
             return result
           },

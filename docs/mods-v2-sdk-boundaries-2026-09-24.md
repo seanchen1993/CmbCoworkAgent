@@ -15,6 +15,7 @@
 | `fs.write` | 显式非 immediate 用户命令、实际线程租约和原生 write_file 审批；16K JSON 参数上限。审批前后复核原租约实例、授权与 runtime。hook 短路返回不能充当实际写入回执，见[文件写入](mods-v2-file-write-2026-09-24.md)。 |
 | `command.register/list/run` | 插件命令注册表；不是全部原生命令目录。原调度与 lease 生效，持有 turn 的回调不能等待新的排队命令。 |
 | `tool.list/check/call/register` | 当前宿主目录、权限及有界注册 schema；query 不执行或授权。工具参数及名称使用本应用契约，不能用同名宣称 Claude 工具完全一致。`task_output` 轮询按单调期限等待，系统墙钟回拨不延长 timeout；后台进程仍要求实际 runtime/lease，冷命令不能凭授权摘要启动无所有者进程。 |
+| `agent.list` | 当前观察生命周期内的真实 shared task 实例；原 id/type/description、父子关系及运行/完成/失败/取消状态。100 scope × 100 实例上限，超限拒绝查询，不阻止原任务；不枚举 opaque graph、独立 workflow worker 或 teammate，见[实例列表](mods-v2-agent-list-2026-09-24.md)。 |
 | `mcp.call` | 当前连接代际、唯一 provider 和真实审批/回执；不接收 guest 提供的连接与凭据，不自动重试丢失的写响应。 |
 | `clock.now/sleep` | now 是 epoch 墙钟；sleep 受本次 dispatch 的取消和预算约束。独立 guest `options.signal` 尚未作为独立取消域传输。runtime 内部 deadline 使用单调时钟。 |
 | `ui.resolve/invalidate/open/close` | 受限桌面树及 Pane；invalidate 仅接受 ui.render。不存在任意 DOM、终端 docking 或全部上游选项支持。 |
@@ -23,7 +24,7 @@
 
 ## 尚未开放的 SDK
 
-`audio.play/speak`、`prompt.submit/fill/suggest`、`config.list/set`、`agent.spawn/list`、`fs.ancestors`、`clock.after/every`、`http.fetch`、`process.run`、`settings.read`、`env.get/set` 尚未进入生产 guest 的 SDK 能力列表。相邻功能不能替代这些接口：例如 `agent.offer` 或 `model.fork` 不等同于 `agent.spawn`。
+`audio.play/speak`、`prompt.submit/fill/suggest`、`config.list/set`、`agent.spawn`、`fs.ancestors`、`clock.after/every`、`http.fetch`、`process.run`、`settings.read`、`env.get/set` 尚未进入生产 guest 的 SDK 能力列表。相邻功能不能替代这些接口：例如 `agent.offer` 或 `model.fork` 不等同于 `agent.spawn`。
 
 这些是实际未完成项。矩阵中的 partial 不表示已经有可调用的实现；`availability: unavailable` 明确区分“接口待接线”与“已有实现但语义受限”。
 

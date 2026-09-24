@@ -1,11 +1,12 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `fbbc988e`（随后 fs.write 见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `7363ce1e`（随后 agent.list 见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
 
 ## 应用已具备的能力
 
 - 独立 utility process / QuickJS、插件摘要授权、真实 FunctionSession、runtime authority、generation 和原线程 run lease。取消、撤权、替换和关闭会中止旧操作；关闭模块不扫描插件、不创建 Mods runtime。
 - 主 Agent 的真实模型流与 turn.step，受限 model.fork/classify，实际 agent registry 的 agent.offer；不能把模型文本中的 PASS 当作测试回执。
+- [实际子 Agent 实例](mods-v2-agent-list-2026-09-24.md)：当前观察周期内 shared child 的真实 ID、元数据、父子关系和 running/completed/failed/killed；原取消/撤权和发布复核，超限拒绝查询但不阻断原任务。不是全部执行器任务目录，仍 partial/bounded。
 - [文件写入 SDK](mods-v2-file-write-2026-09-24.md)：显式用户非 immediate 命令通过原生审批/write_file/receipt；真实租约实例、同项目/线程且仍活跃的作用域复核。审批期撤权/取消/释放或交接拒绝落盘；晚到拒绝不承诺回滚。保留原参数上限，仍 partial/bounded。
 - [文件元数据](mods-v2-file-metadata-2026-09-24.md)：项目内 stat/list 的真实 isLink、可选 canonical realPath、严格 resolve 选项与发布后节点/目标复核，保留旧 hook 形状；文件 SDK 仍 partial/bounded。
 - session 读取、显式压缩与 checkpoint、真实模型请求的 MCP/memory/skills/agents 动态来源 breakdown；token 估算与 provider usage 分列，无成本数据时不伪造费用。
@@ -19,6 +20,7 @@
 
 | 验证 | 已知结果与边界 |
 | --- | --- |
+| agent.list | 最终窄测 4 文件 65 项、Mods49 141 文件 1266 项、真实 utility process 41 通过；实际 Electron 专项 8 检查、完整 Electron 199 检查通过；独占性能 smoke TTFT p95 +69.0ms / 吞吐比0.997205，qualified=false、passed=false，不替代正式门禁 |
 | fs.write | 完整 Electron 192 检查通过；该轮早于最终跨作用域租约补丁，补丁后的实际 Electron 写入专项另有 7 检查通过。最终 Mods48 139 文件 1235 项通过；真实 utility process 41 与原 lease standalone 6 通过 |
 | Mods47 | 139 文件 1233 项通过，随后跨作用域/已结束调用两个红测修复后，相关 4 文件 57 项通过；最终完整回归见报告 |
 | Mods46 | 默认 Mods 范围136文件1207通过，另 renderer 滚动竞态1文件2通过；外部SQLite撤权/epoch/摘要变化与连接生命周期覆盖 |
@@ -29,7 +31,7 @@
 | Mods38 | 130 文件、1087 测试通过，覆盖原生 checkpoint 权限桥及单调完成预算 |
 | Mods39 | 130 文件，1103 通过、4 失败；错误顺序兼容修复后两个相关文件 67/67 通过，其余 128 文件此前通过 |
 | 完整 Electron grant-query | 186检查通过，普通out恢复；授权查询复用保留撤权/取消/重载及原生执行/关闭对照 |
-| 完整 Electron file-metadata | 186 检查通过，普通 out 恢复；真实链接、改写、项目边界、撤权和关闭原生读对照，另真实 utility process 41 检查通过 |
+| 完整 Electron file-metadata | 186 检查通过，普通 out 恢复；真实链接、改写、项目边界和关闭原生读对照，另真实 utility process 41 检查通过；旧 helper 的撤权只使 session 失效，真正撤权已在 7363ce1e 更正并重跑 5 项通过 |
 | 完整 Electron background-timeout | 182 检查通过；实际后台超时、关闭原生执行对照及此前功能全部回归，普通 out 恢复 |
 | 完整 Electron scroll | 最终滚动/focus/存量业务链路 180 检查通过，含取消/重绘、持续跟随、竞争、重载、撤权与关闭对照 |
 | 完整 Electron focus-2 | 172 检查通过；随后空 deny 修复的最新普通构建专项 9 检查通过，真实 DOM、取消/撤权/重载和关闭对照保留 |
@@ -40,6 +42,8 @@
 | TypeScript / ESLint | 授权查询复用：Node/Web通过，ESLint无错误、新测试无警告，control-store原3个警告经HEAD比较未增加。此前各能力helper类型和历史格式警告详见各自报告 |
 | 全仓回归 | 先前完整 Vitest 存在基线失败；隔离后剩 26 项已在旧基线复现，standalone 84 命令初次 78 通过、6 失败，修复 2 个本分支差异后相关整套通过，其余 4 个在旧基线复现；不能称全仓全绿 |
 | 性能 | 最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照仍有 1/10 组超预算（project-off +14.584% / +0.3574ms），整体未通过；checkpoint 共享快照优化后正式桌面 full4 采样有效，CPU 增量 0.098856 单核百分点及吞吐比 0.996589 通过，TTFT p95 增量降到 67.7ms，仍超过 40ms 门槛；两小时/10000 事件正式 soak 尚未完成 |
+
+7363ce1e 已更正 metadata/write 两个 Electron helper 的撤权参数，并增加实际授权状态断言：新专项 5+7 检查通过。旧测试只证明 session 失效，不能冒称撤销了持久化 grant，见[更正报告](../output/mods-v2-validation/2026-09-24-function-revocation-e2e-correction.md)。
 
 报告保存在 `output/mods-v2-validation/`，每份标明对应代码、范围和失败。契约测试中的本地 HTTP 模型服务与业务产物夹具不能算真实业务验收；上表单列的真实业务演示使用实际 provider 与独立业务断言。checkpoint 提交现保存开始、成功、失败与已写入但权限失效的中断事实，重启不自动重放未知操作。
 

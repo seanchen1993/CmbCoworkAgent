@@ -1,3 +1,4 @@
+import { queryFunctionAgentList } from "./v2/agent-list-host"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
@@ -857,7 +858,7 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
     on("tool.call",{tool:"mcp__demo__inspect"},async($,e)=>{
       const read=await $.tool.call({tool:"read_file",file_path:"name.txt"});
       return {result:{agent:e.agentId,read:read.text,cwd:await $.session.cwd(),
-        file:await $.fs.read("name.txt"),tools:await $.tool.list()}};
+        file:await $.fs.read("name.txt"),tools:await $.tool.list(),agents:await $.agent.list()}};
     });
   }}`)
   const registered = new FunctionRegisteredTools(f.manager.store, {
@@ -892,6 +893,7 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
           scope.queryTool
         )
       },
+      listAgents: async (signal) => f.manager.listFunctionAgents(f.workspace, "thread", signal),
       listTools: async () =>
         f.manager.functionToolCatalog(f.workspace, "thread", currentFunctionExecution()?.agentId),
       filterTools: (tools) => f.manager.filterFunctionTools(f.workspace, "thread", tools),
@@ -1057,6 +1059,19 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
       file: "isolated checkout",
       cwd: f.manager.workspaceKey(f.executionWorkspace)
     })
+    expect(value.agents).toEqual([
+      { id: "task-child", description: "Inspect the checkout", type: "Explore", status: "running" }
+    ])
+    expect(
+      f.manager.listFunctionAgents(f.workspace, "thread", new AbortController().signal)
+    ).toEqual([
+      {
+        id: "task-child",
+        description: "Inspect the checkout",
+        type: "Explore",
+        status: "completed"
+      }
+    ])
     expect(value.read).toContain("isolated checkout")
     expect(value.tools.map((tool: { name: string }) => tool.name)).not.toContain(
       "mcp__demo__forbidden"
@@ -1379,3 +1394,116 @@ it("keeps live catalogs at capacity and only reclaims expired entries without bo
     "MODS_TOOL_CONTEXT_REQUIRED"
   )
 })
+
+it("lists actual shared child instances with lifecycle status and parent identity", async () => {
+  const f = fixture()
+  const parent = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+  const rows = () =>
+    f.manager.listFunctionAgents(f.workspace, "thread", new AbortController().signal)
+  expect(rows()).toEqual([])
+  const access = { blockedToolNames: new Set<string>(), readOnly: true }
+  await f.manager.withSharedAgent(
+    parent,
+    "listed-child",
+    undefined,
+    access,
+    async () => {
+      expect(rows()).toEqual([
+        { id: "listed-child", description: "Inspect", type: "Explore", status: "running" }
+      ])
+      const child = currentFunctionExecution()!.runtimeAuthority!
+      await f.manager.withSharedAgent(
+        child,
+        "nested-child",
+        undefined,
+        access,
+        async () => {
+          expect(rows().find((row) => row.id === "nested-child")).toMatchObject({
+            parentId: "listed-child",
+            status: "running"
+          })
+        },
+        undefined,
+        { description: "Nested", type: "Explore" }
+      )
+    },
+    undefined,
+    { description: "Inspect", type: "Explore" }
+  )
+  expect(rows().map((row) => row.status)).toEqual(["completed", "completed"])
+  f.manager.configure(f.workspace, false, false)
+  expect(() => rows()).toThrow()
+  f.manager.configure(f.workspace, true, false)
+  expect(rows()).toEqual([])
+})
+it.each(["failed", "killed"] as const)(
+  "lists the actual shared child %s result without changing the thrown task error",
+  async (status) => {
+    const f = fixture()
+    const parent = f.manager.functionUserScope(f.workspace, "thread").runtimeAuthority!
+    const controller = new AbortController()
+    const error = new Error("native child failed")
+    await expect(
+      f.manager.withSharedAgent(
+        parent,
+        "terminal-child",
+        controller.signal,
+        { blockedToolNames: new Set<string>(), readOnly: true },
+        async () => {
+          if (status === "killed") controller.abort()
+          throw error
+        },
+        undefined,
+        { description: "Terminal", type: "Explore" }
+      )
+    ).rejects.toBe(error)
+    expect(
+      f.manager.listFunctionAgents(f.workspace, "thread", new AbortController().signal)[0].status
+    ).toBe(status)
+  }
+)
+
+it.each(["cancel", "disable", "revoke", "replace", "workspace"])(
+  "does not publish agent instances after %s while filtering",
+  async (action) => {
+    const f = fixture()
+    const controller = new AbortController()
+    let changed = false
+    let resume!: () => void
+    const pending = new Promise<void>((resolve) => {
+      resume = resolve
+    })
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    vi.spyOn(f.manager, "publish").mockImplementationOnce(async (_workspace, value) => {
+      entered()
+      await pending
+      return value
+    })
+    const result = queryFunctionAgentList(
+      f.manager,
+      f.workspace,
+      "thread",
+      controller.signal,
+      () => {
+        if (changed) throw Error("workspace changed")
+      }
+    )
+    const rejected = expect(result).rejects.toThrow()
+    await started
+    if (action === "cancel") controller.abort()
+    else if (action === "disable") f.manager.configure(f.workspace, false, false)
+    else if (action === "revoke") f.manager.revoke(f.workspace, f.grant.modId)
+    else if (action === "replace")
+      f.manager.createRuntimeAuthority({
+        workspace: f.workspace,
+        threadId: "thread",
+        turnId: "replacement"
+      })
+    else changed = true
+    resume()
+    await rejected
+  }
+)

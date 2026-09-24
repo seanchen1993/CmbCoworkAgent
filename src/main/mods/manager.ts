@@ -1,3 +1,5 @@
+import { FunctionAgentInstances } from "./v2/agent-instances"
+import type { FunctionAgentInfo } from "../../shared/mods/v2/agent-list"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync, realpathSync, writeFileSync } from "node:fs"
 import { basename } from "node:path"
@@ -130,6 +132,7 @@ interface StoredCard {
 }
 
 export class ModsManager {
+  private readonly agentInstances = new FunctionAgentInstances()
   private readonly childTurnObservers = new WeakMap<
     ModRuntimeAuthority,
     FunctionChildTurnObserver
@@ -406,6 +409,7 @@ export class ModsManager {
   }
 
   closeFunctionThread(threadId: string): void {
+    this.agentInstances.clear(undefined, threadId)
     this.functionTurns.invalidate(undefined, threadId)
     this.invalidateFunctionReads(threadId)
     this.runtimeAuthorities.closeThread(threadId)
@@ -739,6 +743,7 @@ export class ModsManager {
 
   /** Abort and discard all legacy Mod runtime state after the application switch changes. */
   invalidateAll(): void {
+    this.agentInstances.clear()
     this.functionTurns.invalidate()
     this.invalidateFunctionReads()
     this.functionLifecycle?.invalidateAll?.()
@@ -879,6 +884,7 @@ export class ModsManager {
       [`epoch:${key}`]: String(next.epoch)
     })
     this.settings.set(key, next)
+    this.agentInstances.clear(key)
     this.functionTurns.invalidate(key)
     this.functionLifecycle?.invalidate(key)
     this.clearActions(key)
@@ -1230,7 +1236,8 @@ export class ModsManager {
       | { blockedToolNames: ReadonlySet<string>; readOnly: boolean; tools?: FunctionToolInfo[] }
       | undefined,
     run: () => Promise<T>,
-    parentRunId?: string
+    parentRunId?: string,
+    metadata?: { description: string; type: string }
   ): Promise<T> {
     parent.assertLive()
     const parentBinding = this.bindings.get(`${parent.threadId}:${parent.agentId}`)
@@ -1273,6 +1280,7 @@ export class ModsManager {
     }
     const releases: Array<() => void> = []
     let turn: FunctionChildTurnObserver | undefined
+    let finishAgent: ((status: "completed" | "failed" | "killed") => void) | undefined
     let completed = false
     try {
       releases.push(this.bindThread(binding))
@@ -1296,6 +1304,23 @@ export class ModsManager {
         )
       }
       if (this.isEnabled(parent.workspace)) {
+        if (metadata) {
+          const modId = getModCallContext()?.identity.modId
+          finishAgent = this.agentInstances.start(parent, {
+            id: agentId,
+            description: metadata.description,
+            type: metadata.type,
+            ...(parent.agentId !== "main" ? { parentId: parent.agentId } : {}),
+            ...(modId?.startsWith("function:")
+              ? { spawnedBy: modId.slice("function:".length) }
+              : {})
+          })
+          releases.push(
+            this.runtimeAuthorities.registerResource(instance.authority, () =>
+              finishAgent?.("killed")
+            )
+          )
+        }
         turn = this.functionTurns.startChild({
           ...identity,
           runId: `child:${identity.turnId}`,
@@ -1319,6 +1344,7 @@ export class ModsManager {
       return result
     } finally {
       try {
+        finishAgent?.(binding.signal?.aborted ? "killed" : completed ? "completed" : "failed")
         turn?.finish(completed ? "answer" : "error")
       } finally {
         this.childTurnObservers.delete(instance.authority)
@@ -1331,6 +1357,19 @@ export class ModsManager {
         instance.release()
       }
     }
+  }
+
+  /** Real shared child loops only; a definition catalogue never stands in for instances. */
+  listFunctionAgents(
+    workspace: string,
+    threadId: string,
+    signal: AbortSignal
+  ): FunctionAgentInfo[] {
+    signal.throwIfAborted()
+    workspace = this.workspaceKey(workspace)
+    if (!this.isEnabled(workspace)) throw new ModError("MODS_DISABLED")
+    this.functionRuntimeScope(workspace, threadId).assertLive()
+    return this.agentInstances.list({ workspace, threadId })
   }
 
   /** Capture a live adapter instance for cwd/file SDK calls, without creating a runtime. */
@@ -2725,6 +2764,7 @@ export class ModsManager {
   }
 
   close(): void {
+    this.agentInstances.clear()
     this.functionTurns.close()
     this.invalidateFunctionReads()
     this.runtimeAuthorities.close()

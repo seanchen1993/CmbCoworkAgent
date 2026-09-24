@@ -1,3 +1,4 @@
+import { verifyAgentList } from "./support/mods-agent-list-e2e"
 import { verifyFileWrite } from "./support/mods-file-write-e2e"
 import { verifyFileMetadata } from "./support/mods-file-metadata-e2e"
 import { verifyBackgroundTimeout } from "./support/mods-background-timeout-e2e"
@@ -55,6 +56,7 @@ const binary = packagedDir
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
 const focus = [
+  "agent-list",
   "file-metadata",
   "file-write",
   "background-timeout",
@@ -225,7 +227,9 @@ async function main(): Promise<void> {
         await window.api.models.setDefault("custom:mods-model-fixture")
       }, modelServer.url)
       timings.scope = "Focused site Electron regression; not the full integrated suite"
-      if (focus === "file-write") {
+      if (focus === "agent-list") {
+        await verifyAgentList(page!, workspace, artifacts, modelServer.requests, until, pass)
+      } else if (focus === "file-write") {
         await verifyFileWrite(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
       } else if (focus === "file-metadata") {
         await verifyFileMetadata(page!, workspace, artifacts, modelServer.requests, until, pass)
@@ -3176,6 +3180,7 @@ async function main(): Promise<void> {
     await verifyQuestionSite(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyUiNotice(page!, workspace, artifacts, modelServer.requests, until, pass, app!)
     await verifyImperativeFocus(page!, workspace, artifacts, modelServer.requests, until, pass)
+    await verifyAgentList(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyFileWrite(app!, page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyFileMetadata(page!, workspace, artifacts, modelServer.requests, until, pass)
     await verifyBackgroundTimeout(
