@@ -43,6 +43,16 @@ import {
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
 import { emptyOrgValueClauses, isMissingOrgValue, readOrgText } from "./dashboard-org-fields"
+import {
+  computeKnowledgeCommitRate,
+  formatKnowledgeApiTime,
+  getKnowledgeCommitRateUrl,
+  getKnowledgeRoomOrgIds,
+  mockKnowledgeCommitRate,
+  requestKnowledgeCommitRate,
+  resolveKnowledgeCommitRateScope
+} from "./dashboard-knowledge-commit-rate"
+import type { DashboardKnowledgeCommitRate } from "../../shared/dashboard-knowledge-commit-rate"
 import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
   matchesProjectModeCreatedAtRange,
@@ -14132,6 +14142,43 @@ async function fetchProjectModeCodeStatsBySource(
   return { codeStats: code.overall, skillCodeStats: code.skillOverall }
 }
 
+/** 知识文档入库率。只看时间范围和室，不受「来源」「仅精益项目」「仅本期新建」影响。 */
+async function fetchKnowledgeCommitRate(
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined
+): Promise<DashboardKnowledgeCommitRate> {
+  const access = requireDashboardProjectModeAccess()
+  const url = getKnowledgeCommitRateUrl()
+  if (!url) throw new Error("未配置知识文档入库率接口地址（VITE_KNOWLEDGE_COMMIT_RATE_URL）")
+  const scope = resolveKnowledgeCommitRateScope({
+    requestedRooms: normalizeUpperOrgLv1List(opts?.upperOrgLv1),
+    admin: isDashboardProjectModeAdmin(access),
+    ownRoom: access.upperOrgLv1,
+    unclassifiedRoom: DASHBOARD_UNCLASSIFIED_ORG
+  })
+  const startTime = formatKnowledgeApiTime(range.from)
+  const endTime = formatKnowledgeApiTime(range.to)
+  const signal = getDashboardRequestSignal()
+  return computeKnowledgeCommitRate(scope, getKnowledgeRoomOrgIds, (orgId) =>
+    requestKnowledgeCommitRate(url, { orgId, startTime, endTime }, signal)
+  )
+}
+
+/** 开发环境连不上内网：范围规则和室编号映射照常走，只把接口换成假值。 */
+function fetchMockKnowledgeCommitRate(
+  opts: OrgFilterOptions | undefined
+): Promise<DashboardKnowledgeCommitRate> {
+  const scope = resolveKnowledgeCommitRateScope({
+    requestedRooms: normalizeUpperOrgLv1List(opts?.upperOrgLv1),
+    admin: true,
+    ownRoom: "",
+    unclassifiedRoom: DASHBOARD_UNCLASSIFIED_ORG
+  })
+  return computeKnowledgeCommitRate(scope, getKnowledgeRoomOrgIds, async (orgId) =>
+    mockKnowledgeCommitRate(orgId)
+  )
+}
+
 interface ProjectModeTracesOptions {
   limit?: number
   page?: number
@@ -15291,6 +15338,22 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchProjectModeCodeStatsBySource(range, opts, source) }
       } catch (e) {
         logDashboardRequestError("projectModeCodeStats", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeCommitRate",
+    async (_, range: TimeRange, opts: OrgFilterOptions | undefined) => {
+      try {
+        const data = import.meta.env.DEV
+          ? await fetchMockKnowledgeCommitRate(opts)
+          : await fetchKnowledgeCommitRate(range, opts)
+        return { success: true, data }
+      } catch (e) {
+        logDashboardRequestError("knowledgeCommitRate", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

@@ -17,6 +17,7 @@ import {
   Loader2,
   AlertCircle,
   Plug,
+  BookOpenCheck,
   Code2,
   Gauge,
   GitCommit,
@@ -91,6 +92,10 @@ import {
   STAGE_BUCKET_LABELS,
   type StageBucket
 } from "../../../../../shared/harness-stage-bucket"
+import type {
+  DashboardKnowledgeCommitRate,
+  DashboardKnowledgeCommitRateUnavailableReason
+} from "../../../../../shared/dashboard-knowledge-commit-rate"
 
 const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   inclusiveEffectiveGeneratedLines: 0,
@@ -3215,6 +3220,44 @@ function AdapterProjectsDialogBody({
   )
 }
 
+// 知识文档入库率给不出数时，卡片副行的短说明和小 i 里的详细原因。
+const KNOWLEDGE_COMMIT_RATE_UNAVAILABLE: Record<
+  DashboardKnowledgeCommitRateUnavailableReason,
+  { sub: string; detail: string }
+> = {
+  multipleRooms: {
+    sub: "多选室时不展示",
+    detail: "接口只返回比率、不带分子分母，多个室的比率没法合并，请只选一个室。"
+  },
+  unclassified: { sub: "未归类没有室编号", detail: "「未归类」不是一个室，接口无从查询。" },
+  roomNotMapped: { sub: "未配置室编号", detail: "该室还没有配置室编号，暂时查不了。" },
+  noAccess: { sub: "仅可查看本室", detail: "非管理员只能查看本室的知识文档入库率。" }
+}
+
+function describeKnowledgeCommitRate(
+  data: DashboardKnowledgeCommitRate | null,
+  loading: boolean,
+  error: string | null
+): { sub?: string; detail?: string } {
+  if (loading) return { sub: "加载中…" }
+  if (error) return { sub: "获取失败", detail: `获取失败：${error}` }
+  if (data?.unavailableReason) return KNOWLEDGE_COMMIT_RATE_UNAVAILABLE[data.unavailableReason]
+  if (data && data.rate === null) return { sub: "暂无数据" }
+  return {}
+}
+
+function KnowledgeCommitRateHint({ detail }: { detail?: string }): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-medium text-foreground">知识文档入库率</div>
+      <div className="space-y-1 text-[11px] text-muted-foreground">
+        <div>AI修改的知识库内容被用户提交的百分比</div>
+        {detail ? <div>{detail}</div> : null}
+      </div>
+    </div>
+  )
+}
+
 export function ProjectModePanel({
   data,
   loading,
@@ -3223,6 +3266,9 @@ export function ProjectModePanel({
   codeStatsOverride,
   codeStatsLoading,
   onCodeSourceChange,
+  knowledgeCommitRate,
+  knowledgeCommitRateLoading,
+  knowledgeCommitRateError,
   headerAction,
   projectPages,
   projectPageLoading,
@@ -3256,6 +3302,10 @@ export function ProjectModePanel({
   codeStatsLoading: boolean
   /** 切换 source 下拉（null = 全部来源）。 */
   onCodeSourceChange: (source: string | null) => void
+  /** 知识文档入库率，来自知识库服务，只随时间范围和室筛选变化。 */
+  knowledgeCommitRate: DashboardKnowledgeCommitRate | null
+  knowledgeCommitRateLoading: boolean
+  knowledgeCommitRateError: string | null
   headerAction?: ReactNode
   projectPages: Partial<
     Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
@@ -3344,6 +3394,11 @@ export function ProjectModePanel({
   const projectCounts = data?.projectCounts
   const archivedCount = projectCounts?.archived ?? 0
   const archivedFeatureCount = projectCounts?.archivedFeatureCount ?? 0
+  const knowledgeCommitRateStatus = describeKnowledgeCommitRate(
+    knowledgeCommitRate,
+    knowledgeCommitRateLoading,
+    knowledgeCommitRateError
+  )
 
   return (
     <div className="space-y-6">
@@ -3513,6 +3568,14 @@ export function ProjectModePanel({
                 }
                 color="bg-indigo-500"
                 hint={codeStats ? <MeasuredAdoptionTooltip data={codeStats} /> : undefined}
+              />
+              <StatCard
+                icon={BookOpenCheck}
+                label="知识文档入库率"
+                value={formatPercent(knowledgeCommitRate?.rate)}
+                sub={knowledgeCommitRateStatus.sub}
+                color="bg-orange-500"
+                hint={<KnowledgeCommitRateHint detail={knowledgeCommitRateStatus.detail} />}
               />
             </div>
             <CodeAdoptionFunnel data={funnelData} onFirstStageClick={onFunnelFirstStageClick} />

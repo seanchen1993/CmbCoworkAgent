@@ -1,4 +1,5 @@
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
+import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
 import type {
   AppNotification,
   AppDecisionInput,
@@ -2686,6 +2687,10 @@ interface CustomAPI {
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
+    knowledgeCommitRate: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: DashboardKnowledgeCommitRate; error?: string }>
     efficiency: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }

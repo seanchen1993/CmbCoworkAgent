@@ -2768,6 +2768,10 @@ export function DashboardView(): React.JSX.Element {
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,
     selectProjectModeCodeSource,
+    knowledgeCommitRate,
+    knowledgeCommitRateLoading,
+    knowledgeCommitRateError,
+    fetchKnowledgeCommitRate,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,
@@ -3138,6 +3142,12 @@ export function DashboardView(): React.JSX.Element {
     fromLeanProjectsOnly,
     createdInRangeProjectsOnly
   ])
+
+  // 「知识文档入库率」只随时间范围 / 室筛选变化，不挂「仅精益项目」「仅本期新建」开关。
+  useEffect(() => {
+    if (activeMainTab !== "project-mode" || !projectModeAllowed) return
+    void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
+  }, [activeMainTab, fetchKnowledgeCommitRate, projectModeAllowed, range, selectedOrgLv1List])
 
   // 研发效能 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
   // 不挂「仅精益项目」开关——该范围在后端固定，不随开关变化。
@@ -3720,6 +3730,7 @@ export function DashboardView(): React.JSX.Element {
         fromLeanProjectsOnly,
         createdInRangeProjectsOnly
       )
+      void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
     }
     if (activeMainTab === "efficiency") {
       void fetchEfficiency(range, selectedOrgLv1List)
@@ -3729,6 +3740,7 @@ export function DashboardView(): React.JSX.Element {
     activeMainTab,
     clearSkillEval,
     fetchProjectMode,
+    fetchKnowledgeCommitRate,
     fetchEfficiency,
     granularity,
     range,
@@ -5265,6 +5277,9 @@ export function DashboardView(): React.JSX.Element {
                 codeStatsOverride={projectModeCodeStatsOverride}
                 codeStatsLoading={projectModeCodeStatsLoading}
                 onCodeSourceChange={selectProjectModeCodeSource}
+                knowledgeCommitRate={knowledgeCommitRate}
+                knowledgeCommitRateLoading={knowledgeCommitRateLoading}
+                knowledgeCommitRateError={knowledgeCommitRateError}
                 headerAction={
                   <div className="flex items-center gap-2">
                     <Button

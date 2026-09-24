@@ -9,6 +9,7 @@ import type {
   LocalGeneratedLineStatus,
   LocalGenAdoptionLines
 } from "../../../../shared/adoption-trace-types"
+import type { DashboardKnowledgeCommitRate } from "../../../../shared/dashboard-knowledge-commit-rate"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -2336,6 +2337,7 @@ const DASHBOARD_HOOK_REQUEST_FAMILIES = [
   "dashboard:orgOptions",
   "dashboard:projectMode",
   "dashboard:projectModeCodeStats",
+  "dashboard:knowledgeCommitRate",
   "dashboard:projectModeProjects",
   "dashboard:projectModeTraces",
   "dashboard:projectModeFeatureNodes",
@@ -2398,6 +2400,11 @@ export function useDashboard() {
     skillCodeStats: DashboardCodeStats | null
   } | null>(null)
   const [projectModeCodeStatsLoading, setProjectModeCodeStatsLoading] = useState(false)
+  // 「知识文档入库率」来自知识库服务而非 ES，单独取数，失败或慢都不拖累面板其它部分。
+  const [knowledgeCommitRate, setKnowledgeCommitRate] =
+    useState<DashboardKnowledgeCommitRate | null>(null)
+  const [knowledgeCommitRateLoading, setKnowledgeCommitRateLoading] = useState(false)
+  const [knowledgeCommitRateError, setKnowledgeCommitRateError] = useState<string | null>(null)
   // 顶部全量组织（LV1）筛选可选项，随时间范围刷新。
   const [orgOptions, setOrgOptions] = useState<string[]>([])
 
@@ -2407,6 +2414,7 @@ export function useDashboard() {
   const orgOptionsFetchIdRef = useRef(0)
   const projectModeFetchIdRef = useRef(0)
   const projectModeCodeStatsFetchIdRef = useRef(0)
+  const knowledgeCommitRateFetchIdRef = useRef(0)
   const efficiencyFetchIdRef = useRef(0)
   const projectModeProjectPageFetchIdRef = useRef<
     Record<DashboardProjectModeProjectStatus, number>
@@ -2420,6 +2428,7 @@ export function useDashboard() {
       orgOptionsFetchIdRef.current += 1
       projectModeFetchIdRef.current += 1
       projectModeCodeStatsFetchIdRef.current += 1
+      knowledgeCommitRateFetchIdRef.current += 1
       projectModeProjectPageFetchIdRef.current.active += 1
       projectModeProjectPageFetchIdRef.current.archived += 1
       if (typeof window.api.dashboard.cancelRequests === "function") {
@@ -2631,6 +2640,26 @@ export function useDashboard() {
     },
     [range, selectedOrgLv1List, fromLeanProjectsOnly, createdInRangeProjectsOnly]
   )
+
+  // 「知识文档入库率」随时间范围 / 室筛选重拉。旧值属于上一组筛选，开始取数时先清掉，
+  // 免得新筛选下短暂显示旧数字。带版本号防竞态。
+  const fetchKnowledgeCommitRate = useCallback(async (r: TimeRange, orgList: string[]) => {
+    const id = ++knowledgeCommitRateFetchIdRef.current
+    setKnowledgeCommitRate(null)
+    setKnowledgeCommitRateError(null)
+    setKnowledgeCommitRateLoading(true)
+    try {
+      const result = await window.api.dashboard.knowledgeCommitRate(r, { upperOrgLv1: orgList })
+      if (id !== knowledgeCommitRateFetchIdRef.current || isCancelledDashboardResult(result)) return
+      if (!result.success) throw new Error(result.error ?? "获取知识文档入库率失败")
+      setKnowledgeCommitRate(result.data ?? null)
+    } catch (e) {
+      if (id !== knowledgeCommitRateFetchIdRef.current) return
+      setKnowledgeCommitRateError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (id === knowledgeCommitRateFetchIdRef.current) setKnowledgeCommitRateLoading(false)
+    }
+  }, [])
 
   const fetchProjectModeProjectPage = useCallback(
     async (
@@ -2945,6 +2974,10 @@ export function useDashboard() {
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,
     selectProjectModeCodeSource,
+    knowledgeCommitRate,
+    knowledgeCommitRateLoading,
+    knowledgeCommitRateError,
+    fetchKnowledgeCommitRate,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,
