@@ -700,12 +700,9 @@ export function GitPanelView({
     selectionScopeRef.current = activeRepositoryPath
     setSelectedFilePaths((prev) => {
       if (files.length === 0) return new Set()
+      if (scopeChanged) return new Set()
       const filePaths = files.map((file) => file.path)
-      const next = new Set([...prev].filter((path) => filePaths.includes(path)))
-      if (scopeChanged || prev.size === 0 || next.size === 0) {
-        return new Set(filePaths)
-      }
-      return next
+      return new Set([...prev].filter((path) => filePaths.includes(path)))
     })
   }, [activeRepositoryPath, visibleDiffFiles])
 
