@@ -18,6 +18,7 @@
 | 技能系统 | 内置与自定义技能加载、启停、上传（`.md/.zip`）、删除；在线技能提案与确认 |
 | MCP 扩展 | MCP 连接器管理、连通性测试、懒加载工具检索 |
 | 插件系统 | 插件安装（ZIP/目录）、启停、卸载；插件内 `skills` 与 `.mcp.json` 自动注册 |
+| Function Mods | 项目授权的隔离函数插件、命令、工具、交互面板与完成检查规则；默认关闭，按版本摘要明确授权 |
 | Hook 系统 | 全局、工作区、插件、技能 Hook；支持 Claude Code hooks settings、`SKILL.md` frontmatter、`once`、`onBlock` 与强制修订/停止 |
 | 自优化 | Trace 收集与回放、候选技能生成、审批后写回技能目录 |
 | 定时任务 | 按频率自动触发 Agent 执行（once/manual/hourly/daily/weekdays/weekly/interval） |
@@ -25,6 +26,18 @@
 | Memory | 本地记忆文件管理、索引检索、启停控制 |
 | ChatX 机器人 | WebSocket 收消息、Agent 处理、HTTP 回传结果，支持多机器人并发配置 |
 | 可视化视图 | Thread 视图、Kanban 视图、自定义中心（技能/MCP/插件/沙箱/自优化等） |
+
+## Function Mods 使用
+
+打开项目会话，进入「自定义 → Function Mods」，解锁管理设置并明确开启后安装、批准插件。
+命令与面板示例见[使用和开发指南](docs/mods-v2-authoring.md)；自动检查、修复次数及预算配置见
+[项目完成检查规则](docs/mods-v2-application-completion-rules.md)。可选的
+[Autobiz 真实任务演示](docs/mods-v2-real-business-demo.md)使用原 Agent 修复循环和固定版本 validator。
+
+Claude Mods 的逐项支持范围见[兼容矩阵](docs/mods-v2-compatibility-matrix.json)，
+本轮优先交付常用能力，复杂边界按[核心范围](docs/mods-v2-core-delivery-scope-2026-09-24.md)延期。
+测试结果、性能欠账与限制见[实施状态](docs/mods-v2-status-2026-09-24.md)。安装包由 GitHub Actions
+构建，Windows 上传前运行[真实包内验证](docs/mods-v2-actions-package-validation.md)。
 
 ## 技术架构
 

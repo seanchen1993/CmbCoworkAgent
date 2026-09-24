@@ -1,5 +1,7 @@
 # Claude Mods 兼容边界复核
 
+> 下文保留 `7ae3c6ab` 的历史审查。后续已核对 [v2.1.280 官方参考](mods-v2-claude-reference-2026-09-24.md)，并实现有界 [atob/btoa](mods-v2-base64-2026-09-24.md)。当前矩阵为 49 adapted、155 partial、41 unsupported、0 full；当前能力、Actions 结果及未通过门禁以[实施状态](mods-v2-status-2026-09-24.md)为准。
+
 基线7ae3c6ab，固定参考Claude Code v2.1.278（声明头2.1.277）。完整逐项表为[兼容矩阵](mods-v2-compatibility-matrix.json)。本轮审查文档及新增边界测试，没有修改应用运行时代码。
 
 矩阵共245条声明：49 adapted、153 partial、43 unsupported、0 full。96条缺少范围说明的计划占位已逐项复核；另15条已有缺口说明的classic记录改为schema-only标签，状态仍partial，没有把它们标成已接入生产。所有声明都有实际范围说明；这不等于全部能力实现或发布门禁通过。

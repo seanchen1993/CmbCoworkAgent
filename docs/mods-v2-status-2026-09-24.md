@@ -1,10 +1,10 @@
-# Mods v2 实施状态 — 2026-09-24
+# Mods v2 实施状态 — 2026-09-25 收尾
 
-代码基线 `2ce87e81` 后的 Pane 焦点资源清理（宿主修订v65），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `971f6d80` 的 Pane 焦点资源清理（宿主修订v65），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；核心交付及完整验证见[本轮汇总](../output/mods-v2-validation/2026-09-25-core-delivery-validation.md)，不代表全部发布门禁通过。
 
 兼容表已逐项补足范围说明，共245条：49 adapted、155 partial、41 unsupported、0 full。15个classic事件仍仅schema/手动分发；详见[兼容边界复核](mods-v2-compatibility-review-2026-09-24.md)。没有把未实现项列为完成。
 
-长稳探针已补有界可信原生事件和失败快照；节点替换测量缺陷先红再绿，真实24事件/3重载及50历史/200确认通过。原6408事件实际确认丢失仍未定位，不能据此宣称两小时门禁通过。
+最终两小时桌面工作量已完成：10000次确认、40轮关闭/重载，41个关闭窗口无Function Mods utility，正常退出后只读数据库计数一致。输入绘制p95为17.4ms，但330个慢样本仍保留；GC后堆中位数持续增长，内存稳定性尚未通过验收。旧6408确认丢失本次未复现，不能认定原根因已定位。
 
 ## 应用已具备的能力
 
@@ -43,7 +43,7 @@
 | Base64 / Mods61 | 先真实QuickJS及旧Electron失败，再163文件1409项、utility46、完整Electron232通过；Node/Web/helper types和差量lint通过，性能回检记录见独立报告，不替代正式发布门禁 |
 | 关闭经典桥 / Mods60 | 156文件1378项、utility44、完整Electron228、全hooks10文件68项、Node/Web/helper types与差量lint通过；正式ingress关闭2/10仍失败，保留失败，不称最终性能通过 |
 | Client忙态 / Mods59 | 先旧普通Electron真实并发断言失败，再专项4项通过；完整Mods152文件1333项、utility44、完整Electron226全通过。新UI构建性能smoke +65.2ms、qualified=false/passed=false；不描述为新构建正式性能通过 |
-| Actions包内门禁 | Windows既有打包后新增ASAR/Electron验证，失败阻断该job发布，限定上传回执/PNG；runner/workflow/staging 18项、helper types与差量lint通过。未push/触发Actions，实际新包与安装验收未完成 |
+| Actions包内门禁 | Windows既有打包后新增ASAR/Electron验证，失败阻断该job发布，限定上传回执/PNG；runner/workflow/staging 18项、helper types与差量lint通过。核心971f6d80的Actions 36021056459已success，Windows/Linux安装包与unpacked产物已上传；真实Windows生产包9检查通过，验证ZIP摘要匹配GitHub。见[交付证据](../output/mods-v2-validation/2026-09-24-core-actions-delivery.md)。未验证NSIS安装/卸载或Linux桌面运行 |
 | Guest 代码生成限制 | 先真实guest红4/1、旧普通Electron执行字符串红；窄测4文件39项通过，Node/Web/helper types与修改行ESLint通过，新普通Electron专项5通过；完整Mods57含renderer为151文件1329项通过，真实utility42与完整Electron223通过；独占性能结果见独立报告 |
 | 公开 JSX factory | guest、loader、旧Surface均有先失败测试；相关3文件22项、完整Mods56含renderer为150文件1323项及真实utilityProcess通过；最终普通包公开JSX5/通知范围4/Client焦点9通过，smoke TTFT+65.4ms且qualified=false/passed=false；详见独立报告 |
 | Client 通知范围 | 先红后绿，相关6文件30项窄测；Mods54含5个renderer文件149文件1314项及utility41通过；普通旧包IPC范围红→新普通包专项4通过；Client焦点9/重绘6/50条历史200确认专项4通过；smoke TTFT+66.3ms，qualified=false/passed=false，详见独立报告 |
@@ -71,7 +71,7 @@
 | 真实业务演示 | 实际 deepseek-v4-flash、原审批与 Agent 修复循环；规则关闭时真实缺陷未修，开启后 1 次自动修复、7 项独立业务断言通过，真实 validator 通过后仅推进 1 次 checkpoint。受保护需求/测试/脚本未变；不是全面业务能力证明，见[演示报告](../output/mods-v2-validation/2026-09-24-real-business-demo.md) |
 | TypeScript / ESLint | 授权查询复用：Node/Web通过，ESLint无错误、新测试无警告，control-store原3个警告经HEAD比较未增加。此前各能力helper类型和历史格式警告详见各自报告 |
 | 全仓回归 | 当前核心收尾代码已重新运行：606文件597通过/9失败，4732通过/26失败/5跳过；26个失败名称与旧0273980c复现清单完全一致，新增失败项0。当前84条独立命令复检80通过/4失败，失败命令及实际断言与旧基线一致，零超时/中断。先前完整 Vitest 存在基线失败；隔离后剩 26 项已在旧基线复现，standalone 84 命令初次 78 通过、6 失败，修复 2 个本分支差异后相关整套通过，其余 4 个在旧基线复现；不能称全仓全绿 |
-| 性能 | 当前核心代码正式桌面测量qualified=true/passed=false：TTFT p95 156.6→211.2ms（+54.6ms，超过40ms），吞吐比0.9974499119、两组300秒CPU差+0.1216494852百分点达标；110请求/关闭开启各50样本完整保留，TTFT优化后续处理，不能称整项通过。最新正式 ingress 的单插件 p95 五轮均低于 15ms，但关闭对照关闭经典桥修复后复检有2/10组超预算（最大project-off +7.7271% / +0.1760ms），之前a447abe0的4/10失败保留，整体未通过；修复前3c569546冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；正式 soak 在6407事件/25次切换/约77分钟时因Client确认超时失败，尚未通过两小时/10000事件门禁 |
+| 性能 | 当前核心代码正式桌面测量qualified=true/passed=false：TTFT p95 156.6→211.2ms（+54.6ms，超过40ms），吞吐比0.9974499119、两组300秒CPU差+0.1216494852百分点达标；110请求/关闭开启各50样本完整保留，TTFT优化后续处理，不能称整项通过。最终971f6d80正式ingress按预定5轮/5000样本/100预热完成：178515事件，qualified=true/budgetsPassed=true，单插件p95为12.9915–13.5970ms，十组关闭对照均低于5%（最大+3.3066% / +0.0722ms），关闭0扫描/0runtime。见[最终入口报告](../output/mods-v2-validation/2026-09-24-core-final-ingress.md)。此前关闭经典桥修复后2/10、a447abe0的4/10失败保留，不宣称已证明旧失败为噪声；修复前3c569546冻结v63正式桌面门禁qualified=true/passed=true：关闭/开启各50样本，TTFT p95 +25.7ms、吞吐比0.994927、两组300秒CPU差-0.063676百分点；[正式报告](../output/mods-v2-validation/2026-09-24-v63-formal-performance.md)保留此前full4 +67.7ms失败，未将通过归因于单一改动；旧正式soak在6407事件/25次切换/约77分钟时因Client确认超时失败，原记录保留；最终971f6d80已完成120.11分钟/10000确认/40轮重载并exit0，41个关闭窗口Function utility为0，退出后数据库4x2500与50条成功命令一致。输入绘制p95 17.4ms，但330个慢样本及GC堆中位数15.781588→18.041830MiB持续增长仍待定位，内存稳定性未通过验收，见[完整长稳报告](../output/mods-v2-validation/2026-09-25-core-final-soak.md) |
 
 7363ce1e 已更正 metadata/write 两个 Electron helper 的撤权参数，并增加实际授权状态断言：新专项 5+7 检查通过。旧测试只证明 session 失效，不能冒称撤销了持久化 grant，见[更正报告](../output/mods-v2-validation/2026-09-24-function-revocation-e2e-correction.md)。
 
@@ -79,13 +79,13 @@
 
 正式长稳原始失败及内存测量边界见[失败记录](../output/mods-v2-validation/2026-09-24-desktop-soak-failure.md)。命令历史50条与CommandOutput旧32槽冲突已独立复现；不能据此直接认定点击超时原因。
 
-## 本轮收尾与后续优化
+## 核心交付与后续优化
 
 2026-09-24 用户明确允许延期复杂且不影响正常使用的边界功能。后续按[核心交付范围](mods-v2-core-delivery-scope-2026-09-24.md)收尾，兼容缺口保留原状态；不取消权限、证据、checkpoint 正确性或失败记录。
 
-1. 本轮：Pane 最小资源清理修复的整套 Electron236已通过，正式性能完整采集但TTFT超预算，保留后续优化项，功能修复独立提交。全仓单测和84条独立命令已重新验证，没有新增失败项；原26项单测及4条独立命令的基线失败仍保留。
-2. 本轮：记录最终代码的正式性能及长稳结果，不能借用旧v63桌面通过结果或将smoke当正式通过。既有ingress关闭超预算、ACK6408超时和中断运行均保留，失败按实际原因处理。
-3. 本轮：[GitHub Actions包内门禁](mods-v2-actions-package-validation.md)已接线并完成runner回归，实际Actions安装包与包内验证待执行；本地NSIS不作为开发阻断。普通构建、Node夹具或unpacked运行不等同安装/卸载验收。
+1. 本轮：Pane 最小资源清理修复的整套 Electron236已通过，正式性能完整采集但TTFT超预算，保留后续优化项，功能修复已在971f6d80独立提交。全仓单测和84条独立命令已重新验证，没有新增失败项；原26项单测及4条独立命令的基线失败仍保留。
+2. 已记录：最终入口五轮预算通过；两小时10000确认/40轮重载及退出后持久化核对通过。TTFT +54.6ms超预算、慢绘制区间与GC堆持续增长仍需后续定位，不能称全部性能/内存门禁通过。既有ingress关闭超预算、ACK6408超时和中断运行均保留。
+3. 本轮：[GitHub Actions包内门禁](mods-v2-actions-package-validation.md)已接线并完成runner回归，实际Actions运行36021056459已成功，Windows/Linux安装包已产出，Windows生产包9检查通过；本地NSIS不作为开发阻断。普通构建、Node夹具或unpacked运行不等同安装/卸载验收。
 4. 后续：兼容矩阵中未接入的15个classic生产事件、未开放SDK及复杂UI边界暂缓，见[SDK逐项边界](mods-v2-sdk-boundaries-2026-09-24.md)。保留当前桌面Pane/Client焦点、Pane滚动与end跟随；AbovePrompt、非桌面目标、完整转录/Client key及person wheel新契约不批量升级兼容状态。
 5. 后续：未知checkpoint提交的自动协调/回滚和整个工作区原子事务暂缓；现有只读恢复核对、外部竞争拒绝、旧PASS失效和不重复推进的要求继续生效。
 

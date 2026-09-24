@@ -1,3 +1,74 @@
+## 2026-09-25 核心收尾验证完成（最新）
+
+- 功能代码最终commit971f6d80467031a7f888c33485f5a79fbe68b678，分支codex/mods-v2，已推送并由Actions打包。当前后续提交只有文档/兼容矩阵元数据/Markdown报告；文档提交号可git log -1读取，不能与功能SHA混用。UAT工作树未修改或合并。
+- exec75186及监控cell178已完整退出0，没有仍运行的本轮测试。正式soak7206327ms/120.11min、10000确认、40轮关闭重载、4x2500、282GC窗口，qualified=true。41个off窗口Function Mods utility为0；关闭面板/命令查询为空。旧6408丢失本次未复现，不认定原始根因已定位。
+- 应用退出后原生SQLite只读复核mods-control.sqlite：4个count=2500、50个job全succeeded，DB SHA前后相同。分析和只读脚本均exit0；最终389应用文件+9driver指纹全部匹配运行前。raw JSON/log/PNG/快照及三个分析脚本保留忽略目录，不提交。
+- 输入DOM第二帧p95 17.4ms，click→宿主ACK p95 297ms；330条/3.3%慢输入仍保留，max1854.5ms。每千live GC堆中位数15.781588→18.041830MiB持续上升、peak18.357109MiB，内存稳定性未通过验收，归因待定位。不能把qualified/exit0写成全部长稳PASS。额外一次CDP只读诊断已披露，旧失败全部保留。
+- 最终入口5x5000/100已qualified/budgetsPassed，178515事件，单插件12.9915–13.5970ms，off最大+3.3066%且0扫描/0runtime。正式桌面TTFT+54.6ms超40ms仍未达标，CPU/吞吐达标。按用户核心优先，保留性能/内存和复杂边界后续优化，不降低阈值。
+- Actions36021056459已success，精确功能SHA971f6d80；Win/Linux安装包产出、Windows生产ASAR9检查通过，验证ZIP独立SHA匹配GitHub。未做NSIS安装/卸载或Linux桌面运行验收，无tag/PR/release/merge，本地不重新NSIS打包，文档变化不重dispatch。
+- 核心功能回归236完整Electron、78相关窄测、utility46、Node/Web/helper类型与差量lint通过；全仓4732通过/26旧失败/5跳过，84独立80通过/4旧失败，均无新增失败。最终文档矩阵2文件21项通过，9文档58本地链接无缺失，生产diff为空、diff-check通过。兼容矩阵245行49adapted155partial41unsupported0full未升级，date25/codeBaseline971及真实Actions证据已更新。
+- 完整汇总output/mods-v2-validation/2026-09-25-core-delivery-validation.md；详细core-final-soak.md、core-soak-observations.md、24日core-final-ingress.md及core-actions-delivery.md。使用入口README、authoring与application-completion-rules，当前状态docs/mods-v2-status-2026-09-24.md（标题25日收尾）。后续如继续，依据core-delivery-scope的延期范围及真实性能缺口推进，不扩展低收益API，不重跑已完成套件来代替定位。
+- 不派agents、不问继续、不碰UAT或共享依赖。本轮收尾提交只加入明确docs和以上5份Markdown报告，不含原始证据或诊断脚本。
+## 2026-09-25 01:49 长稳最后阶段（最新）
+
+- 功能HEAD971f6d80未变，唯一exec75186仍正式soak，已9200事件/36cycles/110.41min，counts[2300,2300,2300,2300]，无丢ACK。当前functions cell178为最后一组12x45s监控，先wait178；此前176/169等均已结束。预计01:57完整退出，不提前PASS，也不再启动其他重测试。
+- 最终目录、只读数据库路径、两个已准备但尚未执行的分析脚本、更新报告/矩阵窄测/commit/push顺序见紧随其后的01:42说明。尤其只有取得75186真正exit后才能运行analyze和durable-read。保持原两小时/1万/40轮目标，memory单独评价；TTFT超预算及慢帧记录保留。生产、driver和依赖全程未改，待提交仅文档/矩阵元数据及Markdown报告。
+- 无需再做本地NSIS、重dispatch Actions、全仓/完整Electron/类型检查。结束后完成数据核对、最终报告、21矩阵测试/链接/diff-review、只提交明确文档和force-add Markdown报告并push codex/mods-v2，然后给出核心交付及剩余性能/兼容边界的真实结论。不派agent、不问继续、不动UAT。
+## 2026-09-25 01:42 长稳8700，收尾脚本已准备（最新）
+
+- 正式soak唯一exec75186继续，冻结功能HEAD971f6d80；当前8700/10000、34/40cycles、104.41min，counts[2175,2175,2175,2175]。已越过旧6408失败位置，未复现丢ACK，但不认定旧根因已解决。目录desktop-soak-2026-09-24T15-55-37-149Z-full-b4241798，预计01:57附近结束。当前functions cell176是12轮每45s监控，先wait176；不要并发poll同session。
+- 两个忽略目录中的脚本已准备但尚未运行：2026-09-25-core-soak-analyze.cjs读取最终progress/summary/exit/run，输出core-final-soak-analysis.json并断言2h/10k/40/4x2500/41off窗口0Function utility；统计全部slow ranges和每千live GC中位数/峰值，不自动memory PASS。2026-09-25-core-soak-durable-read.cjs须在应用退出后，用Node22 node:sqlite DatabaseSync({readOnly:true})直接只读 C:\Users\87624\AppData\Local\Temp\cmb-mods-e2e-cBGZqe\data\mods-control.sqlite，断言4个count=2500、50个job均succeeded、DB SHA前后相同；输出core-final-soak-durable-state.json。不要用ModControlStore写构造器，也不是cmbcoworkagent.sqlite。两个脚本仅诊断，不提交。
+- 结束后先取得75186实际exit及raw summary；若失败保留诊断、处理真实问题，别伪造PASS。若成功顺序运行上面两个脚本，检查每个结果。可用functions store modsSoakMonitor继续读进度，modsSoakExit仅真正退出才设置。
+- 仍未改生产、driver、依赖，无本机并行重测试/构建/大下载。docs兼容矩阵已date25/codeBaseline971/Actions真实证据3行更新，状态不升级；最终soak结束后才跑既有2文件21矩阵测试。完整236、78/types/lint、全仓4732+26旧失败/84独立80+4旧失败均已完成，勿重跑。
+- 最后新增2026-09-25-core-final-soak.md详报，更新core-delivery-validation草稿的pending、observations顶部最终链接、status/handoff；保留TTFT+54.6ms超标、旧失败、330个慢帧/额外CDP只读诊断、GC增长观察及所有边界。工作量通过不等于memory通过。Actions36021056459实际成功、Windows9项及ZIP SHA已核对，包版本代码仍971f6d80，无须本地NSIS或重dispatch，未做NSIS安装卸载。
+- 做矩阵窄测、改动doc链接/JSON/git diff-check和代码diff为空复核，再只stage明确docs与force-add新Markdown报告，独立commit并push codex/mods-v2。不能加入raw JSON/log/ZIP/PNG/诊断脚本，不改或合并UAT，不派agents、不问继续。复杂边界已获准延期。
+## 2026-09-25 01:12 长稳6200，兼容表已更新Actions证据（最新）
+
+- 唯一exec75186正式soak仍在运行，当前6200/10000事件、24/40cycles、74.41min、counts[1550,1550,1550,1550]。仍未丢ACK。目录desktop-soak-2026-09-24T15-55-37-149Z-full-b4241798，冻结功能HEAD971f6d80。当前监控functions cell166运行，每45s read-only poll后yield，先wait166；不要并发poll同session。
+- docs/mods-v2-compatibility-matrix.json现已修改3行：date25日、codeBaseline971f6d80、最后production-package-and-conformance行加入真实Actions36021056459/Windows9检查/ZIP digest，补scripts runner与2个tests及core-actions-delivery.md evidence。仍partial，245条49/155/41/0不变。之前“matrix尚未改”的记录已过时；最后只需在soak结束后跑原2文件21矩阵测试，禁止与长稳并行重测试。
+- 汇总草稿2026-09-25-core-delivery-validation.md已含此前全部功能/基线/Actions/ingress结果，soak仍pending；收尾补完整actual summary/exit/GC趋势和spikes，建议另写core-final-soak.md详细报告并链接。前5000慢绘制>100ms共330，max1854.5；GC仍缓慢上升，不自动memory PASS。全部样本保留，仅一次额外只读CDP诊断披露见observations。
+- 生产和driver始终未改，本机没有新构建/测试/大下载。正式入口已qualified/budgetsPassed，正式桌面TTFT+54.6ms仍失败。Actions产物已成功且验证ZIP已SHA核对，无需本地NSIS或重dispatch；未跑NSIS安装/卸载，不借包内9项冒充安装验收。
+- 结束后：读取所有actual结果→分析内存/慢样本/关闭窗口→补25日报告、status/handoff→21矩阵测试和文档链接/diff检查→显式stage docs与force-add仅Markdown报告→独立commit、push同分支。不要提交raw JSON/ZIP/PNG/log或诊断脚本，不重跑已通过的236完整Electron/78/types/lint/全仓与84独立。
+- 仍无agents，不问继续，不动UAT/共享依赖。复杂边界按用户最新核心优先延期。
+## 2026-09-25 00:58 长稳过半，待最终报告和矩阵元数据收尾（最新）
+
+- 唯一测试exec75186仍运行；冻结head971f6d80、driver和依赖未变。desktop-soak-2026-09-24T15-55-37-149Z-full-b4241798到5000事件/20cycles/60.11min，counts[1250,1250,1250,1250]；20个off窗口Function Mods utility为0。完整10k/40/2h未结束，不提前PASS。
+- 当前functions cell159为12轮监控（每45s poll一次75186再读progress），先wait159避免并发poll同一session。可复用functions store modsSoakMonitor；退出码仅真正结束时存modsSoakExit。预计01:57左右结束；原总期限135分钟（约02:11），不得为拿PASS延长。只有文档轻量编辑和只读文件检查，未并行构建测试或大下载。
+- 前5000样本有330个inputPaintMs>100、max1854.5ms。900–1000及后续慢区间均保留；并非停止执行，每100才写progress。仅一次16:11:24Z额外CDP只读采集/截图已披露，晚于自然恢复，不能归因。前4千live GC堆中位数15.782/16.477/16.646/16.846MiB，仍上升，不能称memory PASS。详细2026-09-25-core-soak-observations.md。
+- 新增汇总草稿2026-09-25-core-delivery-validation.md：功能/存量/Actions/ingress已确认，soak仍明确pending。结束后填实际summary/exit/GC趋势/慢样本，报告功能、预算、内存分别判定；旧ACK6408失败不归因已定位。TTFT+54.6ms仍超40/后续优化；其余主功能及236完整Electron已通过，不重复全套。
+- 最终还要更新docs/mods-v2-compatibility-matrix.json顶层date=2026-09-25、codeBaseline=971f6d80；最后production-package-and-conformance行目前仍说Actions待验证，应改为实际run36021056459/Windows9检查及artifact已产出，NSIS安装/卸载和Linux桌面未验证；保留partial/245行49adapted155partial41unsupported0full。不升级状态。可加scripts/run-mods-packaged-e2e.ts实现、tests/browser/mods-packaged-runner.test.ts及mods-packaged-workflow.test.ts、实际Markdown交付报告evidence。evidence测试允许Markdown/https但须至少有测试路径。最终改完跑既有2文件21矩阵测试，文档链接/diff-check即可；无生产修改无需再完整types/Electron。
+- 当前未提交仅README、5篇现有docs（package/status/compat-review/handoff等）和4份新Markdown报告（Actions/ingress/soak-observations/core-delivery-validation）。matrix尚未改。最终填齐结果、更新status及handoff、显式stage这些docs和force-add报告、独立commit并push同分支。生产SHA与Actions包仍971f6d80，文档提交不重dispatch。Actions已成功且验证ZIP SHA核对；不用本地NSIS或全局安装，没tag/PR/merge。
+- 不派agent、不问继续、不碰UAT/共享依赖。复杂兼容边界已按用户要求延期，不再扩展接口。
+## 2026-09-25 00:17 长稳继续，保留慢绘制区间（最新）
+
+- HEAD971f6d80，生产及driver冻结；唯一exec75186仍正式soak。目录desktop-soak-2026-09-24T15-55-37-149Z-full-b4241798，runner1100、Electron12564/renderer16508、profile C:\Users\87624\AppData\Local\Temp\cmb-mods-e2e-cBGZqe。开始15:56:34.643Z，当前1600事件/6cycles/19.21min，counts[400,400,400,400]，未丢ACK。预计北京时间01:57以后完整退出，不能提前PASS。
+- 900后进度文件曾超过2分钟不更新，误以为可能卡住，实际每事件绘制变慢（每100才保存）。950/1000 GC持续有记录，931/960/964输入→第二帧1854.5/1842.4/1756.4ms，click→ACK141.1/138.4/144.8ms。1000后自然重载恢复；1100已正常。原样保留，不排除慢样本，不归因OS或插件。
+- 16:11:24Z仅一次外接CDP只读probe/controls及截图（晚于16:10:46自然恢复），未点击/重载/改配置。2026-09-25-soak-readonly-diagnostic.cjs/json及soak-stall.png保留忽略目录；过程观察Markdown已新增，待报告提交。此额外诊断可能影响邻近性能，最终披露，不重跑以筛选PASS。旧ACK6408原因仍未知。
+- functions store modsSoakMonitor含session/cwd/read-only progress命令，可复用。当前functions cell144按12轮，每轮write_stdin45s后读progress再yield_control，可能仍运行；先functions.wait144，不能并发poll同session。若已结束重开轻量poll。最新状态也存modsSoakLatest，真正exec退出才存modsSoakExit。
+- 上一条最终ingress已通过、Actions已成功仍有效；两份24日报告及25日过程记录、README和5篇文档待提交。正式桌面TTFT+54.6ms超标，后续优化；不做新边界能力。持续观测soak，若真正失败保存诊断再修功能，完成后评估GC趋势并写25日报告、更新状态、单独提交push文档。无需重跑功能236、窄测78/types/lint、全仓及84独立旧基线对照。
+- 不派agent、不问继续、不碰UAT/共享依赖/本地NSIS、不在测试时重构或大型下载。
+## 2026-09-24 23:57 最终入口通过，两小时长稳正在运行（最新）
+
+- HEAD971f6d80已推，生产及driver冻结。91181已exit0：预定5轮5000/100 ingress全完成，178515事件/1270095ms、qualified=true/budgetsPassed=true；单插件12.9915–13.5970ms，10组off均<5%，最大3.3066%/.0722ms，每组0扫描/0runtime，activeCount0。报告2026-09-24-core-final-ingress.md待force-add，旧1000样本失败继续保留。
+- 当前唯一重负载exec75186：node tests/run-mods-desktop-soak.mjs。日志2026-09-24-core-final-soak.log，目录desktop-soak-2026-09-24T15-55-37-149Z-full-b4241798。普通build已成功、无测试桥，8真实guest/4Pane正式2h/10000事件/40次off-reload。每100事件写desktop-soak-progress.json，每50事件强制GC；等待退出及summary/exit，再判定工作量与ACK，memory需独立评估。不要并行大型下载/测试/构建/改source，不用短测冒充正式通过。
+- Actions36021056459已全部success，Windows包内9检查通过、Win/Linux安装包产出；小型验证ZIP SHA核对通过，细节core-actions-delivery.md。未跑NSIS安装/卸载，不需本地打包。原正式桌面TTFT+54.6ms仍失败/待优化，不必盲跑。
+- 文档待提交：README入口、package-validation、status、compatibility-review历史标记、handoff、两份新Markdown报告。仅文档，6文件46链接已核对无缺失（后加ingress再检）；无需重新整套测试。原所有功能236/fullrepo4732+26旧失败/84独立80+4旧失败已完成，不重复。
+- 下一监控soak（预计北京时间9月25日01:57附近），失败按真实诊断处理，不能称旧ACK6408已定位；完整后写新日期报告与最终状态、提交pushDocs。可在测试后下载installer核对digest，但不可把包内运行等同NSIS安装/卸载。复杂边界延期照core-delivery-scope。无agents、不问继续、不动UAT。
+## 2026-09-24 23:52 Actions实际成功，入口矩阵最后一轮（最新）
+
+- HEAD仍971f6d80、已推origin/codex/mods-v2。Actions36021056459全部success：manylinux、Windows、Linux。真实Windows包内9检查通过；EXE/ASAR指纹、准确artifact ID/digest及边界已写output/mods-v2-validation/2026-09-24-core-actions-delivery.md（待force-add，仅Markdown）。验证ZIP 318838字节已下载、SHA与GitHub完全匹配，读取2份JSON并查看焦点/Code图；未下载大型installer/unpacked，未做NSIS安装/卸载，不必为交付再本地打包。
+- 此刻唯一exec91181正式ingress仍运行，目录15-33-41-877Z-matrix-78223f8e；四轮单插件和关闭全部达标，最后一轮未完，不能提前整项PASS。冻结代码，等exit/result再记录。后续串行node tests/run-mods-desktop-soak.mjs，2h/10000/40切换，维持预定协议。
+- Docs尚未提交：README新增使用入口、actions-package-validation及status更新实际成功、handoff、新Actions Markdown报告。只有文档变更；可以等最终结果一并提交，不需重新跑完整功能测试。不要提交raw JSON/ZIP/PNG/日志或生成物。
+- 正式TTFT +54.6ms超40ms仍失败，按用户核心优先保留后续优化；旧6408丢ACK根因仍未知，不能归因Pane修复。长稳若失败必须诊断真实功能问题；memory只资格不自动PASS。没有agents、不问继续、不动UAT/共享依赖。
+## 2026-09-24 23:34 核心已提交推送，Actions与最终ingress进行中（最新）
+
+- HEAD971f6d80467031a7f888c33485f5a79fbe68b678（971f6d80），Pane资源清理10文件已独立提交；2ce87e81文件模式修复、254c2db5核心优先说明此前已提交。已成功push到origin/codex/mods-v2，远程新分支，未合并main/UAT、无tag/PR。
+- GitHub Actions已实际dispatch，HTTP204，run id36021056459，https://github.com/seanchen1993/CmbCoworkAgent/actions/runs/36021056459，head SHA精确971f6d80。最初queued；回执core-actions-dispatch.json/core-actions-run.json。后续用GCM现有凭据仅内存请求api.github.com读取run/jobs/artifacts；别重复dispatch，不打印/保存token。打包与包内验收结果尚未知。
+- 当前唯一本机exec91181：node --import tsx tests/run-mods-v2-ingress-performance.ts --rounds=5 --samples=5000 --warmups=100。日志2026-09-24-core-final-ingress.log；冻结目录v2-ingress-2026-09-24T15-33-41-877Z-matrix-78223f8e，runner3516/electron11344，head971f6d80。外层原定1小时期限足够，0/1/8插件及project/global-off按原5%/15ms预算，禁止并行本机重测/构建/生产修改。约25分钟，等完整exit/result再判断，保留全部轮次及旧1000样本4/10、2/10失败。
+- 87595正式桌面已完整失败并写入已提交Pane报告：qualified=true/passed=false，TTFT +54.6ms超40ms；CPU+.1216494852/吞吐.9974499119达标，110请求各50样本。按用户核心优先、后续优化保留TTFT待优化，不改门槛/不刷通过。
+- 核心验证均已完成：全仓4732通过/26旧失败/5跳过，独立80/84且4旧断言同基线；窄测78、types/lint、matrix21、utility46、普通3+9+9、完整Electron236通过、ordinary恢复。不要重复这些整套（除非真正新代码/失败）；实际Autobiz业务演示仍以前述真实报告为证，不跑高用量模型来替代回归。
+- 下一等ingress结束记录结果，然后本机串行跑带诊断正式2h/10k/40切换soak，旧ACK6408实际丢失仍未定位、不能说Pane清理已解决；remote Actions可同时进行。下载/检视包证据与installer按实际结果，unpacked检查不等同NSIS安装/卸载。本地不做NSIS。
+- 后续只核心正确性/实际失败修复及交付，不追未开放SDK/15个schema-only classic/非桌面等已延期边界。源码/driver保持冻结；可轻量文档、read-only API。没有agents，不问继续，不在批次停下，不动UAT/共享依赖。
 ## 2026-09-24 23:31 核心性能完整但TTFT未达标，准备提交/Actions（最新）
 
 - HEAD2ce87e81，Pane组待独立提交；核心生产仅FunctionPanes8行，types/lint/78窄测/21matrix/utility46/普通焦点3+9+9/最终完整Electron236均通过。全仓4732通过/26旧失败/5跳过，独立80/84，失败断言全与已复现旧基线一致。无需重复这些已完成检查。
