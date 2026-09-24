@@ -1,3 +1,4 @@
+import { verifyDesktopLatencyDiagnostics } from "./support/mods-desktop-latency-e2e"
 import { verifyGuestCodegen } from "./support/mods-guest-codegen-e2e"
 import { verifyPublicJsx } from "./support/mods-public-jsx-e2e"
 import { verifyUiNotification } from "./support/mods-ui-notification-e2e"
@@ -61,6 +62,7 @@ const binary = packagedDir
 const isolated = mkdtempSync(join(tmpdir(), "cmb-mods-e2e-"))
 const requestedFocus = process.env.CMB_MODS_E2E_FOCUS ?? ""
 const focus = [
+  "desktop-latency",
   "guest-codegen",
   "public-jsx",
   "ui-notification",
@@ -222,6 +224,12 @@ async function main(): Promise<void> {
       return id
     }, workspace)
     if (focus && !packagedDir) {
+      if (focus === "desktop-latency") {
+        timings.scope = "Trusted DOM measurement regression; not guest or business acceptance"
+        await page!.reload()
+        await verifyDesktopLatencyDiagnostics(page!, pass)
+        return
+      }
       if (
         focus === "desktop-soak" ||
         focus === "desktop-performance" ||

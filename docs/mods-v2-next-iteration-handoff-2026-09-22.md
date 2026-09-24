@@ -1,3 +1,11 @@
+## 2026-09-24 长稳点击证据完成验证并独立提交（最新）
+
+- 当前 HEAD dc30e72e，兼容范围复核已提交。当前未提交仅 tests：latency 探针当前同 Pane 活按钮匹配、可信 input/pointer/click 最后16条、Client/handle/disabled/focus、ACK白名单；soak catch保留失败快照。应用生产代码没有改动。
+- 首次新 Electron 因 addInitScript 尚未进入当前文档而 __name 失败，修正专用入口 reload 后，真实旧探针在实际 ACK 已出现时仍 timeout 5000（red2）；新探针5项通过。此为测量缺陷，不能称原正式6408事件真实ACK丢失已修复。
+- helper/Node/Web types及diff lint4文件通过（77106exit0）；新普通build、真实8guest/4Client soak smoke24确认3循环、history50条200确认4项均通过（32241exit0）。报告2026-09-24-desktop-latency.md；应用无改动，不把复用v63完整回归标为新跑。当前无运行进程。
+- 下一正式性能门禁重新测当前v63（此前正式基线早于多轮修复，最新smoke TTFT+37.6但未qualified）；同期仅可做只读/轻量CI准备，不跑重测试或改生产/冻结驱动。随后两小时10k/Actions包内门禁。
+- 不改变原完成循环、authority、超时、忙状态或重试；不触碰UAT/共享依赖/本地NSIS，不派agents、不问继续。
+
 ## 2026-09-24 兼容范围复核完成验证并独立提交（最新）
 
 - 提交前HEAD7ae3c6ab；本次无应用生产代码改动。矩阵96条无note占位补足具体source/语义/缺口，另15classic改schema-only（仍partial metadata，生产触发器未补）。245条49adapted/153partial/43unsupported/0full，不能称全面实现。

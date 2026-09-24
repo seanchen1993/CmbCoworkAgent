@@ -6,7 +6,11 @@ import AdmZip from "adm-zip"
 import type { ElectronApplication, Page } from "playwright"
 import { desktopSoakOptions, qualifiesDesktopSoak } from "./mods-desktop-soak-options"
 import { summarizeSamples } from "./mods-v2-performance"
-import { beginDesktopLatency, finishDesktopLatency } from "./mods-desktop-latency"
+import {
+  beginDesktopLatency,
+  finishDesktopLatency,
+  readDesktopLatency
+} from "./mods-desktop-latency"
 import { verifyDesktopPerformance } from "./mods-desktop-performance-e2e"
 
 /** Whole application workload. No test IPC bridge, direct guest dispatcher or fake store. */
@@ -318,6 +322,12 @@ export async function verifyDesktopSoak(
   } catch (error) {
     status = "failed"
     save()
+    // Preserve the original failure even if the renderer exited before evidence can be read.
+    const latency = await readDesktopLatency(page, true).catch(() => ({ unavailable: true }))
+    writeFileSync(
+      join(artifacts, "desktop-soak-failure.json"),
+      JSON.stringify({ completed, counts, latency }, null, 2)
+    )
     throw error
   }
 }
