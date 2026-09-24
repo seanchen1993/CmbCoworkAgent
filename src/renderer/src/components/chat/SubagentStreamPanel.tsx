@@ -14,6 +14,7 @@ import {
 } from "@/lib/message-display-visibility"
 import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
 import {
+  applySubagentTranscriptStartTime,
   getSubagentTranscriptsFromThreadValues,
   mergeSubagentTranscriptPages,
   reconcileTranscriptToolCallsWithResults,
@@ -174,10 +175,13 @@ export function SubagentStreamPanel(): React.JSX.Element {
     [fullMessages, messageWindowEnd, transcriptProjection.contentVersion]
   )
   const isTailWindow = messageWindow.end >= fullMessages.length
-  const messages = useMemo(
-    () => reconcileTranscriptToolCallsWithResults(messageWindow.messages),
-    [messageWindow.messages]
-  )
+  const messages = useMemo(() => {
+    const reconciled = reconcileTranscriptToolCallsWithResults(messageWindow.messages)
+    return applySubagentTranscriptStartTime(
+      reconciled,
+      currentSubagent?.startedAt ?? subagentFocusView?.startedAt
+    )
+  }, [currentSubagent?.startedAt, messageWindow.messages, subagentFocusView?.startedAt])
   const loadEarlier = useCallback(async (): Promise<void> => {
     if (
       loadingEarlier ||
