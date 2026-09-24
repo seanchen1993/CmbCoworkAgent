@@ -1,6 +1,8 @@
 # Mods v2 实施状态 — 2026-09-24
 
-代码基线 `9dd039a3`（随后 guest 字符串代码生成限制见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+代码基线 `7ae3c6ab`（随后兼容边界复核见本次提交），分支 `codex/mods-v2`，仅修改 `C:\ai\CmbCoworkAgent-mods-v2`。UAT 工作树未修改或合并。本文替代旧文档中“当前状态”的历史数字；不代表最终发布通过。
+
+兼容表已逐项补足范围说明，共245条：49 adapted、153 partial、43 unsupported、0 full。15个classic事件仍仅schema/手动分发；详见[兼容边界复核](mods-v2-compatibility-review-2026-09-24.md)。没有把未实现项列为完成。
 
 ## 应用已具备的能力
 

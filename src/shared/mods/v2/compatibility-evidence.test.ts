@@ -2,6 +2,26 @@ import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { expect, it } from "vitest"
 
+it("gives every compatibility claim a reviewed scope instead of a planned placeholder", () => {
+  const matrix: unknown = JSON.parse(
+    readFileSync(resolve("docs/mods-v2-compatibility-matrix.json"), "utf8")
+  )
+  const missing: string[] = []
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) return value.forEach(visit)
+    if (!value || typeof value !== "object") return
+    const row = value as Record<string, unknown>
+    if (typeof row.implementationStatus === "string" && typeof row.target === "string") {
+      const scope = row.note ?? row.notes
+      if (row.target === "planned-adapter" || typeof scope !== "string" || !scope.trim())
+        missing.push(String(row.name))
+    }
+    Object.values(row).forEach(visit)
+  }
+  visit(matrix)
+  expect(missing).toEqual([])
+})
+
 it("describes partial SDK members with concrete availability and a source boundary", () => {
   const matrix = JSON.parse(
     readFileSync(resolve("docs/mods-v2-compatibility-matrix.json"), "utf8")

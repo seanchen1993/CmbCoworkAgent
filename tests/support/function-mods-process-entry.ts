@@ -18,6 +18,7 @@ import { ModControlStore } from "../../src/main/mods/control-store"
 import { CLIENT_BOOTSTRAP } from "../../src/main/mods/v2/client-bootstrap"
 import { checkEngineNouns } from "./function-engine-nouns-process"
 import { CODEGEN_PROBE_COUNT, CODEGEN_PROBE_SOURCE } from "../fixtures/mods-v2/codegen-probes"
+import { checkGlobalAvailability } from "./function-global-availability-process"
 
 const root = resolve(process.argv[2])
 const client = new FunctionRuntimeClient(join(__dirname, "function-mod-host.cjs"))
@@ -26,6 +27,7 @@ let temporaryProject: string | undefined
 let paneStore: ModControlStore | undefined
 void app.whenReady().then(async () => {
   try {
+    checks.push(...(await checkGlobalAvailability(client, root)))
     const codegenGuest = await client.load(`${CODEGEN_PROBE_SOURCE}
       var __cmbFunctionMod={register(on){on("command.run",()=>codegenProbe())}}`)
     const codegenResult = await codegenGuest.invoke("0", {}, async () => ({}), {

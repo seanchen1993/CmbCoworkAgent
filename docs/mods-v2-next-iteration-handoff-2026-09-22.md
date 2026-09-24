@@ -1,3 +1,13 @@
+## 2026-09-24 兼容范围复核完成验证并独立提交（最新）
+
+- 提交前HEAD7ae3c6ab；本次无应用生产代码改动。矩阵96条无note占位补足具体source/语义/缺口，另15classic改schema-only（仍partial metadata，生产触发器未补）。245条49adapted/153partial/43unsupported/0full，不能称全面实现。
+- 先新范围+globals测试3fail/3pass，再4文件25绿。真实hooks/Client剩余11globals确实不存在；SDK/operation不可用成员负测合并实际SDK，不从宿主同名API推断guest存在。utility额外真实hooks/Client两项探针。
+- 完整Mods58含5renderer152文件1333项、utility44（64064exit0）；Node/Web/helper types及diff lint4文件0error/0warning（84280exit0）；ordinary v63 codegen5/publicJSX5与最终matrix25通过（26501exit0）。当前无运行tests/build/perf。
+- guide mods-v2-compatibility-review-2026-09-24.md、matrix/status/report同提交。应用源码与已全量Electron223及perf smoke的v63相同，报告复用精确生产基线的性能事实而非重复短测；正式TTFT/ingress关闭/2小时长稳仍未通过。
+- 下一继续剩余门禁：先长稳可信DOM click/aria-disabled/instance/handle/target诊断（不得仅猜busy或放开原guard/延长timeout/重试丢失click），定位原6407/77分钟ACK超时，再正式2小时10k。source FunctionClient.control 的change不置busy但finally清busy；实际Input只有onSubmit、change仍会进入host.control并重绘；未确认任何根因。现有soak-latency只记初始button引用的click，失败时无诊断，需补证据。
+- Actions package候选见ignored actions-package-draft.md；仅Windows现有包内E2E，不能把unpacked启动当installer安装。没改workflow/未触发/push，本地NSIS/共享依赖/UAT不能碰。其余已标unsupported/partial的能力仍为真实差异，不把schema手动dispatch或plugin check当最终业务验收。
+- 用户要求持续实现，不停批次、不问继续、不派agents。
+
 ## 2026-09-24 v63 代码生成限制完成验证并独立提交（最新）
 
 - 提交前HEAD9dd039a3。v63 trusted原生guard在任意plugin代码前锁eval/Function及普通/async/generator/async-generator原型constructor；正常函数/生成器/SDK续接保留。宿主revision绑定批准摘要，主进程/renderer/V1/共享依赖不变。guide/status/matrix/report一并提交。
