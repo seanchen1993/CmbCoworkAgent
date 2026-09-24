@@ -36,7 +36,7 @@ export function resolveHarnessDecisionCard(input: {
   kind: HarnessDecisionResolvedCardInput["kind"]
   describeOutcome: (
     notification: AppNotification,
-    channelLabel: "APP" | "招乎"
+    channelLabel: "桌面" | "招乎"
   ) => HarnessDecisionOutcome
 }): void {
   const interaction = imCardPublisher.interactions.findByRequestRef(
@@ -46,10 +46,10 @@ export function resolveHarnessDecisionCard(input: {
 
   const disabled = input.notification.status === "pending" && input.notification.disabledTargets?.im
   const described = disabled
-    ? { outcome: "已转至 APP 处理", outcomeStyle: "neutral" as const }
+    ? { outcome: "请在桌面处理", outcomeStyle: "neutral" as const }
     : input.describeOutcome(
         input.notification,
-        input.notification.channel === "desktop" ? "APP" : "招乎"
+        input.notification.channel === "desktop" ? "桌面" : "招乎"
       )
 
   imCardPublisher.resolveDetached(
@@ -58,7 +58,7 @@ export function resolveHarnessDecisionCard(input: {
       ...input.context,
       kind: input.kind,
       ...described,
-      detail: disabled ? "IM 渠道已关闭，请在 APP 中处理。" : input.notification.result
+      detail: disabled ? "招乎渠道已关闭，请在桌面处理。" : input.notification.result
     })
   )
 }

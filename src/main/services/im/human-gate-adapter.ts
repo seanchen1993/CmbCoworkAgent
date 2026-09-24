@@ -128,10 +128,10 @@ export class ImHumanGateAdapter {
   async resolveCardDecision(input: {
     notificationId: string
     decision: "approve" | "reject"
-  }): Promise<string> {
+  }): Promise<string | null> {
     const result = await this.resolveDecision(input)
     if (!result.applied) return result.message
-    return input.decision === "approve" ? "Human Gate 已批准。" : "Human Gate 已拒绝。"
+    return null
   }
 
   private resolveDecision(input: { notificationId: string; decision: "approve" | "reject" }) {

@@ -173,14 +173,15 @@ export class ImBizRetryAdapter {
     return result.message
   }
 
-  resolveCardDecision(input: {
+  async resolveCardDecision(input: {
     notificationId: string
     choice: ManagedBizRetryChoice
     message?: string
     principalId: string
     conversationKey: string
-  }): Promise<string> {
-    return this.resolveDecision(input).then((result) => result.message)
+  }): Promise<string | null> {
+    const result = await this.resolveDecision(input)
+    return result.applied ? null : result.message
   }
 
   private resolveDecision(input: {

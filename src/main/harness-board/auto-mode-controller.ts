@@ -991,7 +991,7 @@ export async function resolveManagedBizRetryDecision(
     if (input.choice !== "stop" && isManagedRunStopRequested(run)) {
       return { applied: false, message: "托管运行正在停止，请等待结束。" }
     }
-    const channelLabel = input.channel === "im" ? "招乎" : "APP"
+    const channelLabel = input.channel === "im" ? "招乎" : "桌面"
     if (
       input.choice !== "stop" &&
       harnessNotifications
