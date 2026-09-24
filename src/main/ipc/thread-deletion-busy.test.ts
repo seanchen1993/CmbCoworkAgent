@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { isThreadDeletionBusy } from "./thread-deletion-busy"
+import { assertThreadDeletionWorkspace, isThreadDeletionBusy } from "./thread-deletion-busy"
 
 function idleRuntime() {
   return {
@@ -13,6 +13,22 @@ function idleRuntime() {
 }
 
 describe("deletion runtime guard", () => {
+  it.each([undefined, null, "", "  ", 123])(
+    "rejects unknown workspace %s before destructive teardown",
+    (path) => {
+      for (const mode of ["workflow", "coordinator"] as const) {
+        expect(() => assertThreadDeletionWorkspace(mode, path)).toThrow("缺少工作区路径")
+      }
+      expect(() => assertThreadDeletionWorkspace("normal", path)).not.toThrow()
+    }
+  )
+
+  it.each(["normal", "workflow", "coordinator"] as const)(
+    "allows %s with a known workspace to reach the durable worktree guard",
+    (mode) => {
+      expect(() => assertThreadDeletionWorkspace(mode, "C:/project")).not.toThrow()
+    }
+  )
   it("allows idle tasks without loading historical results or requiring a workspace", async () => {
     const runtime = idleRuntime()
     await expect(isThreadDeletionBusy("idle", runtime)).resolves.toBe(false)
