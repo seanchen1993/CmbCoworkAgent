@@ -138,10 +138,17 @@ export async function verifyFileMetadata(
       ),
     "metadata middleware is waiting"
   )
-  await page.evaluate(({ id, pluginId }) => window.api.mods.revokeFunction(id, pluginId), {
+  await page.evaluate(({ id, name }) => window.api.mods.revokeFunction(id, name), {
     id: threadId,
-    pluginId: mod.pluginId
+    name: mod.name
   })
+  assert.equal(
+    (await page.evaluate((id) => window.api.mods.status(id), threadId)).functionMods?.find(
+      (row) => row.name === mod.name
+    )?.state,
+    "needs-approval"
+  )
+
   await until(
     async () => (await jobs()).every((job) => job.state !== "running" && job.state !== "queued"),
     "revocation settles the in-flight metadata command"

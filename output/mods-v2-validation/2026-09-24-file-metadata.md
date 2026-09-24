@@ -1,5 +1,7 @@
 # 文件 SDK 元数据验证 — 2026-09-24
 
+> 2026-09-24 证据更正：初版 Electron helper 将安装 ID 传给接收插件名称的 revokeFunction，实际只证明会话失效取消，未证明持久授权撤销。现改用插件名称，并断言状态为 needs-approval；实际重跑结果见[撤权验证更正](2026-09-24-function-revocation-e2e-correction.md)。既有 native/guest 撤权测试不受此测试传参问题影响。
+
 基线 `f06fead5`；仅 Mods v2 工作树。官方固定参考 v2.1.278，补 fs.stat 的 resolve 参数、stat/list 的 isLink 和受限 canonical realPath，保持原权限/发布过滤/项目边界。host revision 更新为 desktop-file-metadata-v57。未扩大 fs.write/ancestors/bytes，矩阵仍 partial/bounded。
 
 ## 失败先行与实现

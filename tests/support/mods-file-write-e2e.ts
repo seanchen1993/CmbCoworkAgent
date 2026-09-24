@@ -168,10 +168,17 @@ export async function verifyFileWrite(
         ),
       "write hook awaiting revocation"
     )
-    await page.evaluate(({ id, pluginId }) => window.api.mods.revokeFunction(id, pluginId), {
+    await page.evaluate(({ id, name }) => window.api.mods.revokeFunction(id, name), {
       id,
-      pluginId: mod.pluginId
+      name: mod.name
     })
+    assert.equal(
+      (await page.evaluate((id) => window.api.mods.status(id), id)).functionMods?.find(
+        (row) => row.name === mod.name
+      )?.state,
+      "needs-approval"
+    )
+
     await until(
       async () => (await jobs()).every((job) => job.state !== "queued" && job.state !== "running"),
       "revoked write command settles"

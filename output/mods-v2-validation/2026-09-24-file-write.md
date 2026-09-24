@@ -1,5 +1,7 @@
 # fs.write 原生文件写入验证 — 2026-09-24
 
+> 2026-09-24 证据更正：初版 Electron helper 将安装 ID 传给接收插件名称的 revokeFunction，实际只证明会话失效取消，未证明持久授权撤销。现改用插件名称，并断言状态为 needs-approval；实际重跑结果见[撤权验证更正](2026-09-24-function-revocation-e2e-correction.md)。既有 native/guest 撤权测试不受此测试传参问题影响。
+
 基线 fbbc988e，工作树 C:/ai/CmbCoworkAgent-mods-v2 / codex/mods-v2。本次新增 SDK 写入经原 FunctionSession、ModsManager、审批、LocalSandbox、runtime/authority 和实际线程租约；host revision v58。没有更改 UAT 或共享 node_modules，安装交付继续使用 GitHub Actions。
 
 ## 失败先行与修复
