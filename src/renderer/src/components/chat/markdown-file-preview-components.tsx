@@ -1,9 +1,9 @@
 import { isValidElement, useEffect, useMemo, useState, type ReactNode } from "react"
 import type { Components } from "react-markdown"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { isLocalFileLikeHref, normalizePreviewFileHref } from "@/lib/markdown-file-preview-links"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
-import { useAppStore } from "@/lib/store"
 import { useThreadStateSelector } from "@/lib/thread-context"
 import type { FileInfo } from "@/types"
 
@@ -173,9 +173,6 @@ function MarkdownFilePreviewLink({
   threadId: string
   children: ReactNode
 }): React.JSX.Element {
-  const setRightModule = useAppStore((state) => state.setRightModule)
-  const setRightPanelCollapsed = useAppStore((state) => state.setRightPanelCollapsed)
-
   const link = (
     <a
       href={href}
@@ -185,8 +182,10 @@ function MarkdownFilePreviewLink({
         event.stopPropagation()
         event.nativeEvent.stopImmediatePropagation()
         try {
-          setRightPanelCollapsed(false)
-          setRightModule("preview")
+          // Let the overlay coordinator choose between the standard right panel
+          // and the resource drawer. Updating the collapsed state directly here
+          // can unmount the only request listener before it consumes this event.
+          openResourcePanelOverlay("preview")
           emitOpenResourcePreview({
             threadId,
             filePath: previewPath,
@@ -226,7 +225,7 @@ export function useMarkdownFilePreviewComponents({
 }): Components {
   const shouldResolveInlineFiles = Boolean(threadId && text.includes("`"))
   const workspacePath = useThreadStateSelector(
-    shouldResolveInlineFiles ? (threadId ?? null) : null,
+    threadId ?? null,
     (state) => state.workspacePath
   )
   const workspaceFiles =
@@ -279,21 +278,9 @@ export function useMarkdownFilePreviewComponents({
         if (!threadId || !previewPath) {
           if (isLocalFileLikeHref(href)) {
             return (
-              <a
-                href={href}
-                {...props}
-                onClick={(event) => {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  try {
-                    props.onClick?.(event)
-                  } catch (error) {
-                    console.error("[MarkdownFilePreviewLink] Failed to handle local file link:", error)
-                  }
-                }}
-              >
+              <span title="文件路径暂不可预览" {...props}>
                 {children}
-              </a>
+              </span>
             )
           }
           return (
