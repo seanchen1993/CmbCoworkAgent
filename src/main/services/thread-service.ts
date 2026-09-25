@@ -5,6 +5,7 @@ import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import {
   buildHarnessFeatureAgentContext,
   requireHarnessFeatureWorkspace,
+  resolveHarnessFeatureCurrentStage,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
 } from "../harness-board/service"
 import { getOpenworkDir } from "../storage"
@@ -30,8 +31,15 @@ export async function createThreadService(
       ? (nextMetadata.harnessFeature as Record<string, unknown>)
       : undefined
   if (harnessFeatureMetadata) {
+    const projectId = harnessFeatureMetadata.projectId
+    const slug = harnessFeatureMetadata.slug
+    const launchStage =
+      typeof projectId === "string" && typeof slug === "string"
+        ? await resolveHarnessFeatureCurrentStage(projectId, slug)
+        : null
     nextMetadata.harnessFeature = {
       ...harnessFeatureMetadata,
+      ...(launchStage?.name ? { launchStageName: launchStage.name } : {}),
       requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
     }
   }
@@ -66,7 +74,7 @@ export async function createThreadService(
     })
     if (harnessFeatureMetadata && harnessContext?.agentConfig?.toolConfig?.requestUserInput) {
       nextMetadata.harnessFeature = {
-        ...harnessFeatureMetadata,
+        ...(nextMetadata.harnessFeature as Record<string, unknown>),
         requestUserInputConfig: harnessContext.agentConfig.toolConfig.requestUserInput
       }
     }
