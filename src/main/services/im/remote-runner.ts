@@ -87,6 +87,7 @@ import {
   resolveImProjectModeReplyContext,
   type ImProjectModeReplyContext
 } from "./project-reply-context"
+import { projectThreadAliasParts } from "./thread-alias"
 import {
   imRemoteInteractionRouteRegistry,
   type ImRemoteInteractionRouteRegistry
@@ -1394,6 +1395,9 @@ export class ImRemoteRunner {
     // point at it. A revoked grant still reaches /切换, which explains itself.
     const thread = this.dependencies.getThread(snapshot.threadId)
     if (!thread) return prefix
+    if (projectThreadAliasParts(thread)) {
+      return [prefix, "回复不会发到这个会话。要继续它，请发送 /会话 后选择。"].join("\n")
+    }
     const name = (thread.title?.trim() || snapshot.title || "").trim()
     if (!name) return prefix
     return [prefix, `回复不会发到这个会话。要继续它，请发送 /切换 ${name}`].join("\n")
