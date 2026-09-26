@@ -8,7 +8,6 @@ import {
   PinOff,
   Loader2,
   AlertCircle,
-  Briefcase,
   LayoutDashboard,
   Workflow,
   BarChart3,
@@ -21,7 +20,10 @@ import {
   Download,
   GitFork,
   MessageSquare,
-  HeartPulse
+  HeartPulse,
+  Clock,
+  ShoppingBag,
+  Settings
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -502,6 +504,8 @@ export function ThreadSidebar(): React.JSX.Element {
     previousThreadId,
     pendingEvolution,
     setShowCustomizeView,
+    showCustomizeView,
+    setMainView,
     showKanbanView,
     setShowKanbanView,
     showHarnessBoardView,
@@ -528,6 +532,8 @@ export function ThreadSidebar(): React.JSX.Element {
       previousThreadId: state.previousThreadId,
       pendingEvolution: state.pendingEvolution,
       setShowCustomizeView: state.setShowCustomizeView,
+      showCustomizeView: state.showCustomizeView,
+      setMainView: state.setMainView,
       showKanbanView: state.showKanbanView,
       setShowKanbanView: state.setShowKanbanView,
       showHarnessBoardView: state.showHarnessBoardView,
@@ -1176,8 +1182,8 @@ export function ThreadSidebar(): React.JSX.Element {
     <aside className="flex h-full w-full flex-col border-r border-border bg-sidebar overflow-hidden">
       {/* New Thread Button - with dynamic safe area padding when zoomed out */}
       <div
-        className="p-1 space-y-1.5"
-        style={{ paddingTop: "calc(8px + var(--sidebar-safe-padding, 0px))" }}
+        className="p-1 pb-0.5 space-y-1.5"
+        style={{ paddingTop: "max(4px, var(--sidebar-safe-padding, 0px))" }}
       >
         <div
           role="tablist"
@@ -1244,36 +1250,50 @@ export function ThreadSidebar(): React.JSX.Element {
               </div>
               <span className="text-muted-foreground">新任务</span>
             </Button>
+          </>
+        ) : null}
+      </div>
+
+      {activeSidebarTab === "project" ? (
+        <div id="harness-sidebar-portal" className="flex min-h-0 flex-1 flex-col" />
+      ) : activeSidebarTab === "chat" ? (
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="space-y-0.5 px-1 pb-1">
             <Button
               variant="ghost"
               size="sm"
               className={cn(
                 "w-full justify-start gap-2 text-sm font-semibold",
-                mainView === "customize" && "bg-muted"
+                mainView === "scheduled" && "bg-muted"
               )}
-              onClick={() => {
-                setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)
-              }}
+              aria-current={mainView === "scheduled" ? "page" : undefined}
+              onClick={() => setMainView("scheduled")}
             >
-              <div
-                className={cn(
-                  "flex size-5 items-center justify-center rounded-full ring-1 transition-colors",
-                  mainView === "customize"
-                    ? "bg-amber-500/20 ring-amber-500/25 text-amber-700 dark:bg-amber-400/20 dark:ring-amber-400/30 dark:text-amber-200"
-                    : "bg-amber-500/12 ring-amber-500/20 text-amber-700 dark:bg-amber-400/15 dark:ring-amber-400/20 dark:text-amber-300"
-                )}
-              >
-                <Briefcase className="size-3" />
+              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                <Clock className="size-3" />
               </div>
               <span
-                className={cn(
-                  "flex-1 text-left",
-                  mainView === "customize" ? "text-foreground" : "text-muted-foreground"
-                )}
+                className={mainView === "scheduled" ? "text-foreground" : "text-muted-foreground"}
               >
-                自定义
+                自动化
               </span>
-              {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "w-full justify-start gap-2 text-sm font-semibold",
+                mainView === "market" && "bg-muted"
+              )}
+              aria-current={mainView === "market" ? "page" : undefined}
+              onClick={() => setMainView("market")}
+            >
+              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+                <ShoppingBag className="size-3" />
+              </div>
+              <span className={mainView === "market" ? "text-foreground" : "text-muted-foreground"}>
+                应用市场
+              </span>
             </Button>
             <Button
               variant="ghost"
@@ -1309,14 +1329,7 @@ export function ThreadSidebar(): React.JSX.Element {
                 <span className="text-muted-foreground">运营面板</span>
               </Button>
             )}
-          </>
-        ) : null}
-      </div>
-
-      {activeSidebarTab === "project" ? (
-        <div id="harness-sidebar-portal" className="flex min-h-0 flex-1 flex-col" />
-      ) : activeSidebarTab === "chat" ? (
-        <>
+          </div>
           <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
             <span className="min-w-0 flex-1 truncate">工作区 {threadProjects.length}</span>
             <IconPopoverButton
@@ -1354,7 +1367,7 @@ export function ThreadSidebar(): React.JSX.Element {
           </div>
 
           {/* Thread List */}
-          <ScrollArea className="flex-1 min-h-0">
+          <div className="min-w-0">
             <div className="px-2 pb-2 space-y-1 overflow-hidden">
               {visibleProjectWindow.items.map((project) => {
                 const isCollapsed = collapsedProjectKeys.has(project.key)
@@ -1664,32 +1677,48 @@ export function ThreadSidebar(): React.JSX.Element {
                 <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无任务</div>
               )}
             </div>
-          </ScrollArea>
-        </>
+          </div>
+        </ScrollArea>
       ) : (
         <div className="min-h-0 flex-1" />
       )}
 
-      <div className="px-3 py-2.5 flex items-center justify-center gap-1.5 select-none">
-        <CmbDevClawLogo className="size-5 shrink-0 object-contain" />
-        <div className="flex items-baseline">
-          <span
-            className="text-[14px] text-foreground/70"
-            style={{ fontFamily: "'Inter', ui-sans-serif, sans-serif" }}
-          >
-            CMBDev
-          </span>
-          <span
-            className="text-[14px] text-red-500/80"
-            style={{ fontFamily: "'Inter', ui-sans-serif, sans-serif" }}
-          >
-            Claw
-          </span>
-          <span className="ml-1 text-[9px] text-foreground tabular-nums">
-            {version || __APP_VERSION__}
-          </span>
-          <UpdateActionButton variant="tag" className="ml-1" />
+      <div className="grid grid-cols-[28px_minmax(0,1fr)_28px] items-center gap-x-0.5 px-3 py-2.5 select-none">
+        <div aria-hidden="true" />
+        <div className="flex min-w-0 flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5">
+          <div className="flex max-w-full min-w-0 items-center gap-1.5">
+            <CmbDevClawLogo className="size-5 shrink-0 object-contain" />
+            <span
+              className="min-w-0 truncate whitespace-nowrap text-[14px] text-foreground/70"
+              style={{ fontFamily: "'Inter', ui-sans-serif, sans-serif" }}
+            >
+              CMBDev<span className="text-red-500/80">Claw</span>
+            </span>
+          </div>
+          <div className="flex max-w-full flex-wrap items-baseline justify-center gap-x-1 gap-y-0.5">
+            <span className="shrink-0 text-[9px] text-foreground tabular-nums">
+              {version || __APP_VERSION__}
+            </span>
+            <UpdateActionButton variant="tag" />
+          </div>
         </div>
+        {activeSidebarTab === "chat" ? (
+          <div className="relative size-7">
+            <IconPopoverButton
+              icon={<Settings className="size-4" />}
+              popoverContent="自定义设置"
+              aria-label="自定义设置"
+              aria-current={showCustomizeView ? "page" : undefined}
+              className={cn("size-7 p-0", showCustomizeView && "bg-muted text-foreground")}
+              onClick={() => setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)}
+            />
+            {pendingEvolution && (
+              <span className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-orange-500" />
+            )}
+          </div>
+        ) : (
+          <div aria-hidden="true" />
+        )}
       </div>
       {forkDialogThread ? (
         <ThreadForkCheckpointDialog
