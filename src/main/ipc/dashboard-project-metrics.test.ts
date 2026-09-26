@@ -264,7 +264,7 @@ describe("项目明细导出列", () => {
         .items[0],
       prjCode: "P-001",
       prjName: "示例项目",
-      developmentMode: "non_devclaw",
+      developmentMode: "non_devclaw" as const,
       plugins: [],
       roomName: "研发室",
       groupName: "一组",
