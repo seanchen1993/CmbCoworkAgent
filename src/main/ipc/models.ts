@@ -7,6 +7,7 @@ import {
   type IpcMainInvokeEvent
 } from "electron"
 import Store from "electron-store"
+import { userIdentityKey } from "../../shared/user-identity"
 import { randomUUID } from "crypto"
 import { getPersistedThreadWorkspaceBindings, getThreadCore as getThreadCoreSync } from "../db"
 import * as fs from "fs/promises"
@@ -3825,6 +3826,7 @@ import {
   upsertCustomModelConfig,
   deleteCustomModelConfig,
   upsertUserInfoConfig,
+  type UserInfoConfig,
   getUserInfo,
   getStoredDefaultModelId,
   getGlobalRoutingMode,
@@ -3970,8 +3972,19 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "models:upsertUserInfo",
-    async (_event, config: Omit<CustomModelConfig, "id"> & { id?: string }) => {
+    async (_event, config: Omit<UserInfoConfig, "id"> & { id?: string }) => {
+      let previousIdentity = userIdentityKey(null)
+      try {
+        previousIdentity = userIdentityKey(getUserInfo())
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error
+      }
       const id = upsertUserInfoConfig(config)
+      if (previousIdentity !== userIdentityKey(config)) {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send("models:userInfoChanged")
+        }
+      }
       void builtinRobotManager.refreshIdentity()
       return { id }
     }

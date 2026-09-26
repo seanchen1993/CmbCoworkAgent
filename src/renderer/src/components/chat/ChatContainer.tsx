@@ -4390,6 +4390,7 @@ export function ChatContainer({
       lastTouchY = nextTouchY
     }
     const detachFromKeyboardScroll = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView) return
       if (!chatRootRef.current || chatRootRef.current.offsetParent === null) return
       if (
         !chatRootRef.current.contains(document.activeElement) &&
@@ -4865,6 +4866,7 @@ export function ChatContainer({
   // only one ChatContainer is mounted per panel (keyed + conditionally rendered).
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView) return
       if (!((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F"))) return
       const root = chatRootRef.current
       if (!root || root.offsetParent === null) return

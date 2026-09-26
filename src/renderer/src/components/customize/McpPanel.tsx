@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { notifyMarketPublished, notifyMcpInstallationChanged } from "@/lib/market-change-events"
 import { Plug, Plus, Search, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -70,7 +71,7 @@ export function McpPanel(): React.JSX.Element {
   const [publishTarget, setPublishTarget] = useState<MarketPublishTarget | null>(null)
   const [publishMode, setPublishMode] = useState<"upload" | "update">("upload")
   const [marketMcpMap, setMarketMcpMap] = useState<Record<string, MarketItem>>({})
-  const [uploadedMcpNames, setUploadedMcpNames] = useState<Set<string>>(() =>
+  const [uploadedMcpNames] = useState<Set<string>>(() =>
     readUploadedItemNamesFromStorage("mcp")
   )
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -145,6 +146,7 @@ export function McpPanel(): React.JSX.Element {
   const handleMcpDelete = useCallback(async (connector: McpConnectorConfig) => {
     try {
       await window.api.mcp.delete(connector.id)
+      notifyMcpInstallationChanged()
       setSelectedMcpConnector((prev) => (prev?.id === connector.id ? null : prev))
       const updated = await window.api.mcp.list()
       setMcpConnectors(updated)
@@ -154,6 +156,7 @@ export function McpPanel(): React.JSX.Element {
   }, [])
 
   const handleMcpAddSuccess = useCallback(async (preferredConnectorName?: string) => {
+    notifyMcpInstallationChanged()
     try {
       const updated = await window.api.mcp.list()
       setMcpConnectors(updated)
@@ -323,13 +326,17 @@ export function McpPanel(): React.JSX.Element {
           if (!open) setPublishTarget(null)
         }}
         onSuccess={({ name, mode }) => {
-          setUploadedMcpNames(readUploadedItemNamesFromStorage("mcp"))
-          void loadMarketMcps()
+          notifyMarketPublished("mcp")
           toast.success(
             mode === "update"
               ? `MCP 连接器「${name}」更新发布成功，已跳转到应用市场。`
               : `MCP 连接器「${name}」发布成功，已跳转到应用市场。`
           )
+          useAppStore.setState({
+            marketInitialTab: "mcp",
+            marketInitialSkillSearchQuery: name.trim(),
+            marketInitialSkillDetailName: null
+          })
           setShowCustomizeView(true, "market")
         }}
       />

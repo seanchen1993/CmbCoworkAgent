@@ -80,7 +80,7 @@ async function boot() {
   })
   page = app.windows()[0]
   await page.waitForFunction(() => Boolean(window.api?.mods))
-  await page.getByRole("button", { name: "自定义", exact: true }).click()
+  await page.getByRole("button", { name: "自定义设置", exact: true }).click()
   await page.getByRole("button", { name: "Function Mods", exact: true }).click()
   await page.locator("[data-mods-settings]").waitFor()
 }
@@ -198,7 +198,7 @@ async function main() {
     assert(plugin)
     const row = page!.locator('[data-installed-mod-id="' + plugin.id + '"]')
     await row.getByRole("button", { name: "卸载", exact: true }).click()
-    const dialog = page!.getByRole("dialog")
+    const dialog = page!.getByRole("dialog", { name: "卸载 Mods 插件", exact: true })
     await dialog.getByRole("button", { name: "取消", exact: true }).click()
     assert((await getPlugins()).some((p) => p.id === plugin.id))
     pass(

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { notifyMarketPublished } from "@/lib/market-change-events"
 import {
   ExternalLink,
   FileEdit,
@@ -426,7 +427,7 @@ export function PluginsPanel(): React.JSX.Element {
   // "not market" so offline users still see their local plugins' internals.
   const [marketPluginsLoaded, setMarketPluginsLoaded] = useState(false)
   const [marketPluginsLoadFailed, setMarketPluginsLoadFailed] = useState(false)
-  const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
+  const [uploadedPluginNames] = useState<Set<string>>(() =>
     readUploadedItemNamesFromStorage("plugin")
   )
   const [localUploadedPluginNames, setLocalUploadedPluginNames] = useState<Set<string>>(() =>
@@ -1003,13 +1004,17 @@ export function PluginsPanel(): React.JSX.Element {
           if (!open) setPublishTarget(null)
         }}
         onSuccess={({ name, mode }) => {
-          setUploadedPluginNames(readUploadedItemNamesFromStorage("plugin"))
-          void loadMarketPlugins()
+          notifyMarketPublished("plugin")
           toast.success(
             mode === "update"
               ? `Plugin「${name}」更新发布成功，已跳转到应用市场。`
               : `Plugin「${name}」发布成功，已跳转到应用市场。`
           )
+          useAppStore.setState({
+            marketInitialTab: "plugin",
+            marketInitialSkillSearchQuery: name.trim(),
+            marketInitialSkillDetailName: null
+          })
           setShowCustomizeView(true, "market")
         }}
       />

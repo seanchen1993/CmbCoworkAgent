@@ -1566,6 +1566,11 @@ const api = {
     getUserInfo: (): Promise<UserInfoConfig | null> => {
       return ipcRenderer.invoke("models:getUserInfo") as Promise<UserInfoConfig | null>
     },
+    onUserInfoChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on("models:userInfoChanged", handler)
+      return () => ipcRenderer.removeListener("models:userInfoChanged", handler)
+    },
     deleteCustomConfig: (id: string): Promise<void> => {
       return ipcRenderer.invoke("models:deleteCustomConfig", id) as Promise<void>
     },

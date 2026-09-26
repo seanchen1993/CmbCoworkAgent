@@ -1445,6 +1445,7 @@ interface CustomAPI {
     }) => Promise<{ id: string }>
     upsertUserInfo: (config: UserInfoConfig) => Promise<{ id: string }>
     getUserInfo: () => Promise<UserInfoConfig | null>
+    onUserInfoChanged: (callback: () => void) => () => void
     deleteCustomConfig: (id: string) => Promise<void>
     testConnection: (params: {
       id?: string
