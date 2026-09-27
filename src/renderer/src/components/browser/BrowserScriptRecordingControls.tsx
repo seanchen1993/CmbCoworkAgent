@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { flushSync } from "react-dom"
 import { toast } from "sonner"
+import { useAppStore } from "@/lib/store"
 import {
   extractScriptRecordingVariables,
   generateScriptRecording,
@@ -81,6 +82,7 @@ export function BrowserScriptRecordingControls({
   threadId,
   workspacePath
 }: BrowserScriptRecordingControlsProps): React.JSX.Element {
+  const showCustomizeView = useAppStore((state) => state.showCustomizeView)
   const [scriptRecording, setScriptRecording] =
     useState<BrowserRecordingSession>(EMPTY_SCRIPT_RECORDING)
   const [hasPendingUnsaved, setHasPendingUnsaved] = useState(false)
@@ -979,7 +981,7 @@ export function BrowserScriptRecordingControls({
       </div>
 
       <BrowserScriptRecordingResultDialog
-        open={recordingDialogOpen}
+        open={recordingDialogOpen && !showCustomizeView}
         onOpenChange={(open) => {
           if (!open) {
             resetSaveForm()
@@ -1014,6 +1016,7 @@ export function BrowserScriptRecordingControls({
 
       <BrowserRecordingListDialog
         open={scriptLibraryOpen}
+        visible={!showCustomizeView}
         onOpenChange={setScriptLibraryOpen}
         isLoading={isScriptLibraryLoading}
         error={scriptLibraryError}
@@ -1031,7 +1034,7 @@ export function BrowserScriptRecordingControls({
       />
 
       <BrowserScriptVariableDialog
-        open={scriptVariableDialogOpen}
+        open={scriptVariableDialogOpen && !showCustomizeView}
         variables={scriptVariables}
         values={scriptVariableValues}
         isSubmitting={isVariableSubmissionSubmitting}

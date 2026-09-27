@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useShallow } from "zustand/react/shallow"
-import { subscribeSkillCatalogInvalidation } from "@/lib/app-catalog-cache"
+import { revalidateSkillCatalog, subscribeSkillCatalogInvalidation } from "@/lib/app-catalog-cache"
 import { onMarketPublished, onMcpInstallationChanged } from "@/lib/market-change-events"
 import {
   Search,
@@ -1351,11 +1351,39 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
   }, [])
 
   const installationRequests = useRef({ skill: 0, mcp: 0, plugin: 0 })
+  const skillListFallback = useRef<Promise<SkillMetadata[]> | null>(null)
   const loadInstalledSkills = useCallback(async () => {
     const request = ++installationRequests.current.skill
     try {
-      if (window.api?.skills?.list) {
-        const skillsMetadata = await window.api.skills.list()
+      if (window.api?.skills?.catalog) {
+        // Share the settings/chat catalog and its Worker cancellation instead of
+        // starting a separate full-directory scan for each invalidation event.
+        const catalog = await revalidateSkillCatalog(useAppStore.getState().pluginVersion).catch(
+          (error: unknown) => {
+            // Cancellation is not a catalog failure and must not start a full scan.
+            if (error instanceof Error && error.message.includes("superseded")) throw error
+            return null
+          }
+        )
+        if (request !== installationRequests.current.skill) return
+        let skillsMetadata: SkillMetadata[]
+        if (catalog && !catalog.truncated) {
+          skillsMetadata = catalog.localSkills
+        } else {
+          // Missing rows in a truncated/failed catalog cannot prove uninstallation.
+          // Only the newest caller may read again after an in-flight full scan.
+          if (skillListFallback.current) {
+            await skillListFallback.current.catch(() => undefined)
+            if (request !== installationRequests.current.skill) return
+          }
+          const pending = window.api.skills.list()
+          skillListFallback.current = pending
+          try {
+            skillsMetadata = await pending
+          } finally {
+            skillListFallback.current = null
+          }
+        }
         if (request !== installationRequests.current.skill) return
         const skillNames = skillsMetadata.map((skill) => skill.name)
         const uploadedNames = readUploadedSkillNamesFromStorage()
@@ -1373,6 +1401,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
         setInstalledSkills(skillNames)
       }
     } catch (error) {
+      if (request !== installationRequests.current.skill) return
       console.error("Failed to load installed skills:", error)
     }
   }, [])
@@ -1408,9 +1437,13 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
   // Installation changes update badges without reloading remote lists or files.
   useEffect(() => {
     void loadInstalledSkills()
-    return subscribeSkillCatalogInvalidation(() => {
+    const unsubscribe = subscribeSkillCatalogInvalidation(() => {
       void loadInstalledSkills()
     })
+    return () => {
+      unsubscribe()
+      installationRequests.current.skill += 1
+    }
   }, [loadInstalledSkills])
 
   useEffect(() => {
@@ -1863,13 +1896,30 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
     )
   }, [activeTab, currentData, loading])
 
-  const selectedItem =
+  const selectedItemSource =
     selectedItemKey !== null
       ? currentData.find((item) => getItemKey(item) === selectedItemKey) ||
         (selectedItemSnapshot && getItemKey(selectedItemSnapshot) === selectedItemKey
           ? selectedItemSnapshot
           : null)
       : null
+  // Organization details use a snapshot; installation flags must follow the live catalog.
+  const selectedItem =
+    selectedItemSource && activeTab === ORG_SKILL_MARKET_TYPE
+      ? {
+          ...selectedItemSource,
+          ...buildMarketInstalledFlags(
+            selectedItemSource,
+            ORG_SKILL_MARKET_TYPE,
+            installedSkills.some(
+              (name) =>
+                name === selectedItemSource.name ||
+                name === selectedItemSource.chinese_name ||
+                selectedItemSource.filename?.includes(name)
+            )
+          )
+        }
+      : selectedItemSource
   const selectedSkillMetrics =
     activeTab === "skill" && selectedItem
       ? getSkillMetricByName(skillUsageSummary, selectedItem.name)

@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button"
+import { useAppStore } from "@/lib/store"
 import type { ThreadGroupDeletionProgress } from "@/lib/thread-group-deletion"
 import {
   Dialog,
@@ -28,8 +29,9 @@ export function ThreadGroupDeleteDialog({
   onOpenChange,
   onConfirm
 }: ThreadGroupDeleteDialogProps): React.JSX.Element {
+  const showCustomizeView = useAppStore((state) => state.showCustomizeView)
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open && !showCustomizeView} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>

@@ -375,9 +375,9 @@ const electronAPI = {
       value
     ) as Promise<AgentRuntimeSettings>,
   onNotifyMsg: (callback: (msg: string) => void) => {
-    ipcRenderer.on("notify-login-msg", (_event, data) => {
-      callback(data)
-    })
+    const handler = (_event: unknown, data: string): void => callback(data)
+    ipcRenderer.on("notify-login-msg", handler)
+    return () => ipcRenderer.removeListener("notify-login-msg", handler)
   },
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => ipcRenderer.send(channel, ...args),

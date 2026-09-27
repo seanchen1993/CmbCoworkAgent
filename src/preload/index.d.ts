@@ -237,7 +237,7 @@ interface ElectronAPI {
   setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
-  onNotifyMsg: (callback: (msg: string) => void) => void
+  onNotifyMsg: (callback: (msg: string) => void) => () => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
     on: (channel: string, listener: (...args: unknown[]) => void) => () => void
