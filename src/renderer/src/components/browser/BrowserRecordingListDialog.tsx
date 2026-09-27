@@ -18,6 +18,7 @@ import { BrowserScriptEditor } from "./BrowserScriptEditor"
 
 export interface BrowserRecordingListDialogProps {
   open: boolean
+  visible?: boolean
   onOpenChange: (open: boolean) => void
   isPlaybackRunning: boolean
   isLoading: boolean
@@ -69,6 +70,7 @@ interface DetailDraftState {
 
 export function BrowserRecordingListDialog({
   open,
+  visible = true,
   onOpenChange,
   isPlaybackRunning,
   isLoading,
@@ -266,7 +268,8 @@ export function BrowserRecordingListDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    // 设置只遮住弹层，不改变 open，避免触发上面的草稿重置和文件重读。
+    <Dialog open={open && visible} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[88vh] max-w-[1300px] gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
         <DialogHeader className="border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">

@@ -830,7 +830,12 @@ export function GitPanelView({
 
   const loadFileDiff = useCallback(
     async (filePath: string): Promise<void> => {
-      if (!threadId || !filePath || diffLoadingPath === filePath) return
+      if (
+        !threadId ||
+        !filePath ||
+        useAppStore.getState().showCustomizeView ||
+        diffLoadingPathRef.current === filePath
+      ) return
       const requestDiffId = diffRequestIdRef.current
       const requestFileDiffId = ++fileDiffRequestIdRef.current
       const requestThreadId = threadId
@@ -848,7 +853,8 @@ export function GitPanelView({
         return
       }
 
-      // 清除旧缓存，开始加载新文件
+      // 内容和缓存路径一起失效，避免 A → B 加载中 → A 时误命中已清空的 A。
+      loadedDiffPathRef.current = null
       setCurrentFileDiff(null)
       setDiffFileError(null)
       diffLoadingPathRef.current = filePath
@@ -872,6 +878,8 @@ export function GitPanelView({
         }
       } catch (e) {
         if (!isLatestFileRequest()) return
+        // 失败也算本轮已读取，避免错误/加载状态变化触发连续请求；刷新时清除此记录。
+        loadedDiffPathRef.current = filePath
         setDiffFileError(e instanceof Error ? e.message : "加载文件 diff 失败")
       } finally {
         if (isLatestFileRequest()) {
@@ -887,7 +895,7 @@ export function GitPanelView({
         }
       }
     },
-    [threadId, diffLoadingPath, repositories, refresh]
+    [threadId, repositories, refresh]
   )
 
   const toggleFileExpanded = useCallback(
@@ -899,11 +907,11 @@ export function GitPanelView({
   )
 
   useEffect(() => {
-    // 刷新后只有当前展开文件需要重新加载，且仅当未缓存过或文件列表已更新时
-    if (!expandedFilePath) return
-    if (loadedDiffPathRef.current === expandedFilePath && !diffFileError) return
+    // 设置期间不发起单文件读取；返回后只补未读取或刷新失效的当前文件。
+    if (showCustomizeView || !expandedFilePath) return
+    if (loadedDiffPathRef.current === expandedFilePath) return
     void loadFileDiff(expandedFilePath)
-  }, [expandedFilePath, loadFileDiff, diffFileError, diffReloadVersion])
+  }, [showCustomizeView, expandedFilePath, loadFileDiff, diffReloadVersion])
 
   const toggleFileSelected = useCallback((filePath: string): void => {
     setSelectedFilePaths((prev) => {
