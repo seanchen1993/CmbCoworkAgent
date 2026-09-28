@@ -404,7 +404,7 @@ async function testACardSubmitBindsExactlyWhatTypingWouldBind(): Promise<void> {
       featureSlug: "feature-pay"
     })
     const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
-    const featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+    let featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
 
     // An index the list never offered is refused by the selection context, not
     // by the card — the same refusal a typed number out of range earns.
@@ -448,7 +448,10 @@ async function testACardSubmitBindsExactlyWhatTypingWouldBind(): Promise<void> {
     assert.equal(context.createdThreadMetadata.length, 1)
 
     // And an explicit mode reaches the same place the typed word reaches.
-    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    featureIndex = selectionIndexContaining(
+      await router.handle({ ...commandInput, command: parseImCommand("/会话")! }),
+      "（特性，可创建新会话）"
+    )
     const team = await router.resolveTargetBindCard({
       ...commandInput,
       feedback: [
@@ -489,7 +492,7 @@ async function testBindModeOnlyAppliesWhereASessionIsCreated(): Promise<void> {
       featureSlug: "feature-pay"
     })
     const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
-    const featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+    let featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
     // The list is what a person reads immediately before typing /绑定, so the
     // mode has to be offered here and not only under /帮助.
     assert(sessions.includes(`/绑定 <编号> Solo / Multi / Team / Workflow`), sessions)
@@ -516,7 +519,10 @@ async function testBindModeOnlyAppliesWhereASessionIsCreated(): Promise<void> {
     // Solo and Multi are the same mode and differ only in subagents. Naming
     // just the mode would let Solo become Multi, because thread-service turns
     // subagents on whenever nobody said otherwise — so both fields travel.
-    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    featureIndex = selectionIndexContaining(
+      await router.handle({ ...commandInput, command: parseImCommand("/会话")! }),
+      "（特性，可创建新会话）"
+    )
     const solo = await router.handle({
       ...commandInput,
       command: parseImCommand(`/绑定 ${featureIndex} SOLO`)!
@@ -525,7 +531,10 @@ async function testBindModeOnlyAppliesWhereASessionIsCreated(): Promise<void> {
     assert.equal(context.createdThreadMetadata.at(-1)?.subagentsEnabled, false)
     assert(solo.includes("Solo 会话"), solo)
 
-    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    featureIndex = selectionIndexContaining(
+      await router.handle({ ...commandInput, command: parseImCommand("/会话")! }),
+      "（特性，可创建新会话）"
+    )
     const multi = await router.handle({
       ...commandInput,
       command: parseImCommand(`/绑定 ${featureIndex} multi`)!
@@ -536,7 +545,10 @@ async function testBindModeOnlyAppliesWhereASessionIsCreated(): Promise<void> {
     // A Feature that configures nothing: no word, no config, and the shared
     // path's own fallback is what the four words call Multi.
     context.setFeatureConfiguredAgentMode(null)
-    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    featureIndex = selectionIndexContaining(
+      await router.handle({ ...commandInput, command: parseImCommand("/会话")! }),
+      "（特性，可创建新会话）"
+    )
     const unconfigured = await router.handle({
       ...commandInput,
       command: parseImCommand(`/绑定 ${featureIndex}`)!
@@ -1000,11 +1012,45 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
         candidate.kind === "thread_grant" && candidate.threadId === "desktop-project-thread"
     )
     assert(projectModeGrant, "an existing Project Mode thread can be granted as a thread")
+    assert.equal(projectModeGrant.label, "快捷支付", "older sessions fall back to the Feature name")
     assert.deepEqual(
       JSON.parse(context.threads.get("desktop-project-thread")!.metadata!),
       projectModeMetadata,
       "granting a Project Mode thread preserves its harness context"
     )
+    context.makeThread("project-stage-a", {
+      ...projectModeMetadata,
+      harnessFeature: { ...projectModeMetadata.harnessFeature, launchStageName: "Dev-代码实现" }
+    })
+    context.makeThread("project-stage-b", {
+      ...projectModeMetadata,
+      harnessFeature: { ...projectModeMetadata.harnessFeature, launchStageName: "Dev-代码实现" }
+    })
+    context.makeThread("project-stage-c", {
+      ...projectModeMetadata,
+      harnessFeature: { ...projectModeMetadata.harnessFeature, launchStageName: "Dev-代码实现" }
+    })
+    context.threads.get("project-stage-a")!.updated_at = Date.parse("2026-07-23T08:01:00Z")
+    context.threads.get("project-stage-b")!.updated_at = Date.parse("2026-07-23T08:02:00Z")
+    context.threads.get("project-stage-c")!.updated_at = Date.parse("2026-07-23T08:01:15Z")
+    await context.access.enableThread({ route, threadId: "project-stage-a" })
+    await context.access.enableThread({ route, threadId: "project-stage-b" })
+    await context.access.enableThread({ route, threadId: "project-stage-c" })
+    const stageTargets = (await context.access.listAuthorizedTargets(route)).filter(
+      (candidate) =>
+        candidate.kind === "thread_grant" && candidate.threadId.startsWith("project-stage-")
+    )
+    assert.deepEqual(
+      stageTargets.map((candidate) => candidate.label),
+      [
+        "快捷支付 · Dev-代码实现 · 07-23 16:01:00",
+        "快捷支付 · Dev-代码实现 · 07-23 16:01:15",
+        "快捷支付 · Dev-代码实现 · 07-23 16:02"
+      ]
+    )
+    await context.access.disableThread("project-stage-a")
+    await context.access.disableThread("project-stage-b")
+    await context.access.disableThread("project-stage-c")
     await context.access.disableThread("desktop-project-thread")
 
     const transientlyBusyAccess = new ImRemoteAccessService({

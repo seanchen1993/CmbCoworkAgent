@@ -1,4 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useShallow } from "zustand/react/shallow"
+import { revalidateSkillCatalog, subscribeSkillCatalogInvalidation } from "@/lib/app-catalog-cache"
+import { onMarketPublished, onMcpInstallationChanged } from "@/lib/market-change-events"
 import {
   Search,
   ShoppingBag,
@@ -877,7 +880,7 @@ function isAllowedDetailFile(type: MarketItemType, filename: string): boolean {
   return ext === "json"
 }
 
-export function MarketPanel(): React.JSX.Element {
+export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element {
   const {
     marketInitialSkillCategory,
     marketInitialSkillSearchQuery,
@@ -885,8 +888,20 @@ export function MarketPanel(): React.JSX.Element {
     setMarketInitialSkillDetailName,
     marketInitialSkillFilters,
     marketInitialTab,
-    bumpPluginVersion
-  } = useAppStore()
+    bumpPluginVersion,
+    pluginVersion
+  } = useAppStore(
+    useShallow((state) => ({
+      marketInitialSkillCategory: state.marketInitialSkillCategory,
+      marketInitialSkillSearchQuery: state.marketInitialSkillSearchQuery,
+      marketInitialSkillDetailName: state.marketInitialSkillDetailName,
+      setMarketInitialSkillDetailName: state.setMarketInitialSkillDetailName,
+      marketInitialSkillFilters: state.marketInitialSkillFilters,
+      marketInitialTab: state.marketInitialTab,
+      bumpPluginVersion: state.bumpPluginVersion,
+      pluginVersion: state.pluginVersion
+    }))
+  )
   const [activeTab, setActiveTab] = useState<MarketItemType>("skill")
   const [searchQueries, setSearchQueries] = useState<Record<MarketItemType, string>>({
     skill: "",
@@ -1335,11 +1350,41 @@ export function MarketPanel(): React.JSX.Element {
     }
   }, [])
 
-  // 新增：加载已安装的skills列表
-  const loadInstalledSkills = async () => {
+  const installationRequests = useRef({ skill: 0, mcp: 0, plugin: 0 })
+  const skillListFallback = useRef<Promise<SkillMetadata[]> | null>(null)
+  const loadInstalledSkills = useCallback(async () => {
+    const request = ++installationRequests.current.skill
     try {
-      if (window.api?.skills?.list) {
-        const skillsMetadata = await window.api.skills.list()
+      if (window.api?.skills?.catalog) {
+        // Share the settings/chat catalog and its Worker cancellation instead of
+        // starting a separate full-directory scan for each invalidation event.
+        const catalog = await revalidateSkillCatalog(useAppStore.getState().pluginVersion).catch(
+          (error: unknown) => {
+            // Cancellation is not a catalog failure and must not start a full scan.
+            if (error instanceof Error && error.message.includes("superseded")) throw error
+            return null
+          }
+        )
+        if (request !== installationRequests.current.skill) return
+        let skillsMetadata: SkillMetadata[]
+        if (catalog && !catalog.truncated) {
+          skillsMetadata = catalog.localSkills
+        } else {
+          // Missing rows in a truncated/failed catalog cannot prove uninstallation.
+          // Only the newest caller may read again after an in-flight full scan.
+          if (skillListFallback.current) {
+            await skillListFallback.current.catch(() => undefined)
+            if (request !== installationRequests.current.skill) return
+          }
+          const pending = window.api.skills.list()
+          skillListFallback.current = pending
+          try {
+            skillsMetadata = await pending
+          } finally {
+            skillListFallback.current = null
+          }
+        }
+        if (request !== installationRequests.current.skill) return
         const skillNames = skillsMetadata.map((skill) => skill.name)
         const uploadedNames = readUploadedSkillNamesFromStorage()
         const uploadedPaths = readLocalUploadedSkillPathSetFromStorage()
@@ -1356,41 +1401,71 @@ export function MarketPanel(): React.JSX.Element {
         setInstalledSkills(skillNames)
       }
     } catch (error) {
+      if (request !== installationRequests.current.skill) return
       console.error("Failed to load installed skills:", error)
     }
-  }
+  }, [])
 
-  // 新增：加载已安装的MCPs列表
-  const loadInstalledMcps = async () => {
+  const loadInstalledMcps = useCallback(async () => {
+    const request = ++installationRequests.current.mcp
     try {
       if (window.api?.mcp?.list) {
         const mcpsMetadata = await window.api.mcp.list()
+        if (request !== installationRequests.current.mcp) return
         const mcpNames = mcpsMetadata.map((mcp) => mcp.name)
         setInstalledMcps(mcpNames)
       }
     } catch (error) {
       console.error("Failed to load installed mcps:", error)
     }
-  }
+  }, [])
 
-  // 新增：加载已安装的Plugins列表
-  const loadInstalledPlugins = async () => {
+  const loadInstalledPlugins = useCallback(async () => {
+    const request = ++installationRequests.current.plugin
     try {
       if (window.api?.plugins?.list) {
         const pluginsMetadata = await window.api.plugins.list()
+        if (request !== installationRequests.current.plugin) return
         const pluginNames = pluginsMetadata.map((plugin) => plugin.name)
         setInstalledPlugins(pluginNames)
       }
     } catch (error) {
       console.error("Failed to load installed plugins:", error)
     }
-  }
+  }, [])
 
-  // 在组件��载时获取已安装的skills、MCPs和Plugins列表
+  // Installation changes update badges without reloading remote lists or files.
   useEffect(() => {
-    loadInstalledSkills()
-    loadInstalledMcps()
-    loadInstalledPlugins()
+    void loadInstalledSkills()
+    const unsubscribe = subscribeSkillCatalogInvalidation(() => {
+      void loadInstalledSkills()
+    })
+    return () => {
+      unsubscribe()
+      installationRequests.current.skill += 1
+    }
+  }, [loadInstalledSkills])
+
+  useEffect(() => {
+    void loadInstalledMcps()
+    return onMcpInstallationChanged(() => {
+      void loadInstalledMcps()
+    })
+  }, [loadInstalledMcps])
+
+  useEffect(() => {
+    void loadInstalledPlugins()
+  }, [loadInstalledPlugins, pluginVersion])
+
+  useEffect(
+    () => onMarketPublished((type) => {
+      // A different tab loads on navigation; the current tab needs invalidation.
+      if (type === activeTab) setReloadToken((value) => value + 1)
+    }),
+    [activeTab]
+  )
+
+  useEffect(() => {
     void loadDashboardPermission()
     void loadCurrentUserUploadCandidates()
   }, [loadDashboardPermission, loadCurrentUserUploadCandidates])
@@ -1412,7 +1487,11 @@ export function MarketPanel(): React.JSX.Element {
       resetDetailState()
       setCategoryFilter(null)
       setPendingInitialCategoryFilter(null)
-      setSearchQueryForTab(marketInitialTab as MarketItemType, detailName || "")
+      setUploadFilterModes([])
+      setSearchQueryForTab(
+        marketInitialTab as MarketItemType,
+        detailName || marketInitialSkillSearchQuery?.trim() || ""
+      )
       useAppStore.setState({
         marketInitialTab: null,
         marketInitialSkillDetailName: null,
@@ -1475,11 +1554,14 @@ export function MarketPanel(): React.JSX.Element {
         return {
           ...item,
           canDelete: localStorageHelper.canDeleteItem(item.name, "skill"),
+          installDisabledReason: uploadedSkillNames.has(normalizeSkillName(item.name))
+            ? uploadedSkillDisabledReason
+            : undefined,
           ...buildMarketInstalledFlags(item, "skill", isInstalled)
         }
       })
     )
-  }, [installedSkills])
+  }, [installedSkills, uploadedSkillNames, uploadedSkillDisabledReason])
 
   useEffect(() => {
     installedSkillsRef.current = installedSkills
@@ -1551,7 +1633,6 @@ export function MarketPanel(): React.JSX.Element {
           toast.success(
             `已为您更新并安装「${item.name}」到${getMarketTypeLabel(activeTab)}，请新开一个会话试试效果。`
           )
-          await loadInstalledPlugins()
           bumpPluginVersion()
           triggerReload()
         } else {
@@ -1636,6 +1717,7 @@ export function MarketPanel(): React.JSX.Element {
 
   // Load data for current tab
   useEffect(() => {
+    let cancelled = false
     const getMarketDataByTab = async (tab: MarketItemType): Promise<MarketApiResponse> => {
       switch (tab) {
         case "mcp":
@@ -1692,6 +1774,7 @@ export function MarketPanel(): React.JSX.Element {
       try {
         if (activeTab === "skill") {
           const skillRes = await getAllSkills()
+          if (cancelled) return
           if ((!skillRes.success || !skillRes.data) && USE_MARKET_MOCK_ON_ERROR) {
             console.warn(
               `[MarketPanel] getAllSkills failed, fallback to mock data. error=${skillRes.error}`
@@ -1719,6 +1802,7 @@ export function MarketPanel(): React.JSX.Element {
         }
 
         let response = await getMarketDataByTab(activeTab)
+        if (cancelled) return
 
         if ((!response.success || !response.data) && USE_MARKET_MOCK_ON_ERROR) {
           console.warn(
@@ -1734,6 +1818,7 @@ export function MarketPanel(): React.JSX.Element {
 
         setTabData(activeTab, addItemFlags(response.data || [], activeTab))
       } catch (error) {
+        if (cancelled) return
         console.error("Failed to load market data:", error)
         if (USE_MARKET_MOCK_ON_ERROR) {
           console.warn(`[MarketPanel] Exception on ${activeTab}, fallback to mock data.`, error)
@@ -1745,11 +1830,14 @@ export function MarketPanel(): React.JSX.Element {
           setTabData(activeTab, [])
         }
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
 
     loadData()
+    return () => {
+      cancelled = true
+    }
   }, [activeTab, reloadToken, uploadedSkillDisabledReason])
 
   useEffect(() => {
@@ -1808,13 +1896,30 @@ export function MarketPanel(): React.JSX.Element {
     )
   }, [activeTab, currentData, loading])
 
-  const selectedItem =
+  const selectedItemSource =
     selectedItemKey !== null
       ? currentData.find((item) => getItemKey(item) === selectedItemKey) ||
         (selectedItemSnapshot && getItemKey(selectedItemSnapshot) === selectedItemKey
           ? selectedItemSnapshot
           : null)
       : null
+  // Organization details use a snapshot; installation flags must follow the live catalog.
+  const selectedItem =
+    selectedItemSource && activeTab === ORG_SKILL_MARKET_TYPE
+      ? {
+          ...selectedItemSource,
+          ...buildMarketInstalledFlags(
+            selectedItemSource,
+            ORG_SKILL_MARKET_TYPE,
+            installedSkills.some(
+              (name) =>
+                name === selectedItemSource.name ||
+                name === selectedItemSource.chinese_name ||
+                selectedItemSource.filename?.includes(name)
+            )
+          )
+        }
+      : selectedItemSource
   const selectedSkillMetrics =
     activeTab === "skill" && selectedItem
       ? getSkillMetricByName(skillUsageSummary, selectedItem.name)
@@ -2257,7 +2362,6 @@ export function MarketPanel(): React.JSX.Element {
           await deleteInstalledMarketPlugin(existingPlugin)
         }
         marketInstalledVersionStorage.removeVersion(itemName, activeTab)
-        await loadInstalledPlugins()
         bumpPluginVersion()
       }
       setSelectedItemSnapshot((prev) =>
@@ -2368,7 +2472,6 @@ export function MarketPanel(): React.JSX.Element {
           } else if (activeTab === "mcp") {
             await loadInstalledMcps()
           } else if (activeTab === "plugin") {
-            await loadInstalledPlugins()
             bumpPluginVersion()
           }
         }
@@ -3192,4 +3295,4 @@ export function MarketPanel(): React.JSX.Element {
       )}
     </div>
   )
-}
+})

@@ -4,7 +4,6 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
-  Clock,
   Code2,
   GitBranch,
   HeartPulse,
@@ -14,7 +13,6 @@ import {
   Plug,
   Puzzle,
   Sparkles,
-  ShoppingBag,
   Shield,
   Cpu,
   CircleUser,
@@ -35,9 +33,6 @@ const AppearancePanel = lazy(() =>
   import("./AppearancePanel").then((m) => ({ default: m.AppearancePanel }))
 )
 const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
-const ScheduledPanel = lazy(() =>
-  import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
-)
 const MemoryPanel = lazy(() => import("./MemoryPanel").then((m) => ({ default: m.MemoryPanel })))
 const TaskMmdPanel = lazy(() => import("./TaskMmdPanel").then((m) => ({ default: m.TaskMmdPanel })))
 const HeartbeatPanel = lazy(() =>
@@ -45,7 +40,6 @@ const HeartbeatPanel = lazy(() =>
 )
 const PluginsPanel = lazy(() => import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel })))
 const ModsPanel = lazy(() => import("./ModsPanel").then((m) => ({ default: m.ModsPanel })))
-const MarketPanel = lazy(() => import("./MarketPanel").then((m) => ({ default: m.MarketPanel })))
 const SandboxPanel = lazy(() => import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel })))
 const EvolutionPanel = lazy(() =>
   import("./EvolutionPanel").then((m) => ({ default: m.EvolutionPanel }))
@@ -73,11 +67,9 @@ type CustomizeTab =
   | "connectors"
   | "plugins"
   | "mods"
-  | "scheduled"
   | "heartbeat"
   | "memory"
   | "taskMmd"
-  | "market"
   | "sandbox"
   | "evolution"
   | "robot"
@@ -114,8 +106,6 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
       { tab: "mods", label: "Function Mods", icon: Webhook },
-      { tab: "scheduled", label: "定时任务", icon: Clock },
-      { tab: "market", label: "应用市场", icon: ShoppingBag },
       { tab: "sandbox", label: "沙盒环境", icon: Shield }
     ]
   },
@@ -243,12 +233,12 @@ export function CustomizeView(): React.JSX.Element {
             variant="ghost"
             size="sm"
             className="h-7 w-9 p-0"
-            aria-label="返回会话"
+            aria-label="返回应用"
             onClick={() => setShowCustomizeView(false)}
           >
             <ArrowLeft className="size-6" strokeWidth={1} />
           </Button>
-          <span className="text-base font-bold">自定义</span>
+          <span className="text-base font-bold">返回应用</span>
         </div>
         <nav className="min-h-0 flex-1 px-3 pb-3 space-y-3 overflow-y-auto">
           {MENU_GROUPS.map((group) => {
@@ -301,16 +291,12 @@ export function CustomizeView(): React.JSX.Element {
           <div className="flex flex-1 min-w-0 min-h-0 overflow-y-auto">
             <ModsPanel threadId={currentThreadId} />
           </div>
-        ) : activeTab === "scheduled" ? (
-          <ScheduledPanel />
         ) : activeTab === "heartbeat" ? (
           <HeartbeatPanel />
         ) : activeTab === "memory" ? (
           <MemoryPanel workspacePath={currentWorkspacePath} />
         ) : activeTab === "taskMmd" ? (
           <TaskMmdPanel currentThreadId={currentThreadId} threads={threads} />
-        ) : activeTab === "market" ? (
-          <MarketPanel />
         ) : activeTab === "evolution" ? (
           <EvolutionPanel />
         ) : activeTab === "robot" ? (
