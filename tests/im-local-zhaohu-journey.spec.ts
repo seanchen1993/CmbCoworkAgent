@@ -635,7 +635,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     const featureTarget = journey.conversations.getActiveTarget(CONVERSATION_KEY)
     assert.equal(featureTarget?.kind, "thread")
     if (featureTarget?.kind !== "thread") throw new Error("Feature Thread target expected")
-    assert(featureTarget.title.startsWith("Thread "))
+    assert.equal(featureTarget.title, "快捷支付")
     const featureMetadata = JSON.parse(
       journey.threads.get(featureTarget.threadId)!.metadata!
     ) as Record<string, unknown>
@@ -661,11 +661,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
 
     const featureMessage = await journey.send("检查 Feature 当前状态")
     await journey.waitForEventState(featureMessage.event.eventId, "completed")
-    assert(
-      journey
-        .eventReplyText(featureMessage.event.eventId)
-        .startsWith("【会话：检查 Feature 当前状态】")
-    )
+    assert(journey.eventReplyText(featureMessage.event.eventId).startsWith("【项目模式会话返回】"))
 
     const longTask = await journey.send("运行一个长任务")
     await journey.waitForEventState(longTask.event.eventId, "executing")
@@ -683,13 +679,13 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     journey.releaseLongTask()
     await journey.waitForEventState(longTask.event.eventId, "completed")
     const longReply = journey.eventReplyText(longTask.event.eventId)
-    assert(longReply.includes("【会话：检查 Feature 当前状态】"))
+    assert(longReply.includes("【项目模式会话返回】"))
     assert(longReply.includes("非当前绑定会话"))
     assert(!journey.eventReplyText(queuedInbox.event.eventId).includes("非当前绑定会话"))
 
     const sessions = await journey.send("/会话")
     const sessionsText = journey.eventReplyText(sessions.event.eventId)
-    assert(sessionsText.includes("检查 Feature 当前状态（项目会话）"))
+    assert(sessionsText.includes("快捷支付（项目会话）"))
     const ordinaryIndex = selectionIndexContaining(sessionsText, "桌面排障会话（普通会话）")
     const ordinaryBind = await journey.send(`/绑定 ${ordinaryIndex}`)
     assert(journey.eventReplyText(ordinaryBind.event.eventId).includes("桌面排障会话"))
