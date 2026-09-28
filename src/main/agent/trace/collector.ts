@@ -15,6 +15,10 @@
  */
 
 import { createHash } from "crypto"
+import { TraceToolUsageCounter } from "./tool-usage"
+import { TraceStageUsageCounter } from "./stage-usage"
+import { registerTraceStageUsage, unregisterTraceStageUsage } from "./stage-usage-registry"
+import type { TraceCallStage } from "../../../shared/trace-stage-usage"
 import { join } from "path"
 import { homedir } from "os"
 import { lstat, opendir, readFile, rename, rmdir, unlink, writeFile } from "fs/promises"
@@ -738,6 +742,8 @@ export class TraceCollector {
    * operations dashboard aggregates.
    */
   private observedToolCallCount = 0
+  private readonly toolUsageCounter = new TraceToolUsageCounter()
+  private readonly stageUsageCounter = new TraceStageUsageCounter()
   private observedModelCallCount = 0
   private observedInputTokens = 0
   private observedOutputTokens = 0
@@ -770,6 +776,7 @@ export class TraceCollector {
     this.harnessAdapterPromise = this.harnessFeature
       ? getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId).catch(() => null)
       : Promise.resolve(null)
+    if (this.harnessFeature) registerTraceStageUsage(this.traceId, this.stageUsageCounter)
     this.observability = buildObservabilityContext(this.traceId, this.threadId, options)
     this.includeSkillEval = options.includeSkillEval ?? this.observability.traceKind === "root"
     this.startedAt = nowIsoLocal()
@@ -1098,6 +1105,7 @@ export class TraceCollector {
         : max
     }, 0)
     return Math.max(
+      this.toolUsageCounter.totalCalls,
       this.observedToolCallCount,
       stepToolCalls,
       nodeToolCalls,
@@ -1183,6 +1191,8 @@ export class TraceCollector {
 
   /** Record one LLM run (input context + output message). */
   recordModelCall(call: TraceModelCall): void {
+    if (this.harnessFeature)
+      this.stageUsageCounter.recordModel(call.messageId, call.tokenUsage, call.stageAttribution)
     this.observedModelCallCount += 1
     const usage = call.tokenUsage
     if (usage) {
@@ -1282,6 +1292,7 @@ export class TraceCollector {
   }
 
   addToolNode(params: {
+    stageAttribution?: TraceCallStage
     name: string
     input?: unknown
     parentId?: string
@@ -1290,6 +1301,15 @@ export class TraceCollector {
     startedAt?: string
     metadata?: Record<string, unknown>
   }): string {
+    // Record before node caps. Call IDs also dedupe repeated stream snapshots.
+    const usageKey = params.toolCallId
+      ? `call:${params.toolCallId}`
+      : params.llmMessageId
+        ? `message:${params.llmMessageId}:${params.metadata?.index ?? 0}`
+        : `node:${uuid()}`
+    this.toolUsageCounter.observe(usageKey, params.name || "unknown")
+    if (this.harnessFeature)
+      this.stageUsageCounter.recordTool(usageKey, params.name || "unknown", params.stageAttribution)
     if (params.toolCallId) {
       const existing = this.toolNodeByCallId.get(params.toolCallId)
       if (existing) {
@@ -1518,9 +1538,21 @@ export class TraceCollector {
   }
 
   private async finishOnce(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
+    unregisterTraceStageUsage(this.traceId)
     const endedAt = nowIsoLocal()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
     const totalToolCalls = this.getTotalToolCalls()
+    const toolUsage = this.toolUsageCounter.snapshot(totalToolCalls)
+    const stageUsage = this.harnessFeature
+      ? this.stageUsageCounter.snapshot({
+          toolCalls: totalToolCalls,
+          modelCalls: this.observedModelCallCount,
+          inputTokens: this.observedInputTokens,
+          outputTokens: this.observedOutputTokens,
+          totalTokens: this.observedTotalTokens
+        })
+      : undefined
+    if (stageUsage && !toolUsage.toolUsageComplete) stageUsage.stageUsageComplete = false
 
     // Resolve skill versions and merge into "name-version" format
     let skillAuthorByRawName: Record<string, string | undefined> = {}
@@ -1669,6 +1701,8 @@ export class TraceCollector {
         boundedErrorMessage
       ),
       totalToolCalls,
+      ...toolUsage,
+      ...stageUsage,
       outcome,
       ...(boundedErrorMessage ? { errorMessage: boundedErrorMessage } : {}),
       usedSkills: usedSkillsWithVersions,

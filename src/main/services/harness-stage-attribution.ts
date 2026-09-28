@@ -15,6 +15,13 @@ const cache = new HarnessStageAttributionCache({
 
 export type { HarnessStageAttribution }
 
+export function getHarnessStageAttributionForCall(
+  projectId: string,
+  featureSlug: string
+): Promise<HarnessStageAttribution> {
+  return cache.getForCall(projectId, featureSlug)
+}
+
 export function primeHarnessStageAttribution(
   projectId: string,
   featureSlug: string,

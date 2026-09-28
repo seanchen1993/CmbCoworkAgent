@@ -1,3 +1,4 @@
+import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import { randomUUID } from "crypto"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 /* eslint-disable @typescript-eslint/no-unused-vars */
@@ -6733,6 +6734,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     : combinedAgentsPrompt
 
   const agent = createDeepAgent({
+    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,

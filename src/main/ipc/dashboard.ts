@@ -1,3 +1,11 @@
+import { queryWithStageUsageMappingFallback } from "./project-mode-stage-usage"
+import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
+import {
+  buildToolUsageAggs,
+  parseToolUsageAggs,
+  resolveUserInputRequestCount,
+  type DashboardToolUsageCoverage
+} from "../../shared/dashboard-tool-usage"
 import type { DashboardThreadTraceScope } from "../../shared/dashboard-thread-trace-scope"
 /**
  * Dashboard IPC Handlers
@@ -250,7 +258,7 @@ function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error
     return new Error("本次查询返回的数据量过大，请缩小时间范围或减少每页条数后重试")
   }
   console.warn(`[Dashboard] All ${nodes.length} ES nodes failed. Last error:`, detail)
-  return new Error("请检查网络连接后重试")
+  return new Error("请检查网络连接后重试", { cause: lastError })
 }
 
 async function esQuery(
@@ -490,6 +498,7 @@ interface DashboardTraceDetail {
   modelCallCount: number
   /** 本次 trace 中调用 request_user_input（向用户提问）的次数。 */
   userInputRequestCount: number
+  userInputRequestCountComplete?: boolean
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
@@ -2398,6 +2407,7 @@ function dashboardTraceSourceIncludes(): string[] {
     "workflowAgentLabel",
     "outcome",
     "totalToolCalls",
+    "userInputRequestCount",
     "totalInputTokens",
     "totalOutputTokens",
     "totalTokens",
@@ -2551,7 +2561,11 @@ function getTotalHits(raw: EsSearchResponse, fallback: number): number {
   return fallback
 }
 
-/** 统计 trace 树中 request_user_input 工具节点的数量（向用户提问的次数）。 */
+function hasUserInputCount(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+}
+
+/** Legacy node count is only a lower bound when raw trace details were truncated. */
 function countUserInputRequests(nodes: TraceNode[] | undefined): number {
   if (!Array.isArray(nodes)) return 0
   return nodes.filter((node) => node.type === "tool" && node.name === "request_user_input").length
@@ -2623,7 +2637,14 @@ function normalizeTraceDetail(
       // 绕过了回退，长会话直接少算成个位数。服务端存的 modelCallCount 取自客户端
       // 的 totalModelCalls（实时计数，不受上限影响），才是该用的那个值。
       modelCallCount: resolveModelCallCount(source.modelCallCount, trace.modelCalls),
-      userInputRequestCount: countUserInputRequests(nodes),
+      userInputRequestCount: resolveUserInputRequestCount(
+        source.userInputRequestCount,
+        trace.userInputRequestCount,
+        countUserInputRequests(nodes)
+      ),
+      userInputRequestCountComplete:
+        hasUserInputCount(source.userInputRequestCount) ||
+        hasUserInputCount(trace.userInputRequestCount),
       totalInputTokens,
       totalOutputTokens,
       totalTokens,
@@ -2664,6 +2685,7 @@ function normalizeTraceDetail(
     totalToolCalls: asNumber(source.totalToolCalls),
     modelCallCount: asNumber(source.modelCallCount),
     userInputRequestCount: asNumber(source.userInputRequestCount),
+    userInputRequestCountComplete: hasUserInputCount(source.userInputRequestCount),
     totalInputTokens: fallbackInputTokens,
     totalOutputTokens: fallbackOutputTokens,
     totalTokens: asNumber(source.totalTokens, fallbackInputTokens + fallbackOutputTokens),
@@ -2702,7 +2724,12 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     // 本地 AgentTrace 上 totalModelCalls 一定在（collector 实时累加），数组长度
     // 只作为上线前旧数据的兜底——理由同 normalizeTraceDetail。
     modelCallCount: resolveModelCallCount(trace.totalModelCalls, trace.modelCalls),
-    userInputRequestCount: countUserInputRequests(nodes),
+    userInputRequestCount: resolveUserInputRequestCount(
+      undefined,
+      trace.userInputRequestCount,
+      countUserInputRequests(nodes)
+    ),
+    userInputRequestCountComplete: hasUserInputCount(trace.userInputRequestCount),
     totalInputTokens: usage.totalInputTokens,
     totalOutputTokens: usage.totalOutputTokens,
     totalTokens: usage.totalTokens || usage.totalInputTokens + usage.totalOutputTokens,
@@ -3037,6 +3064,16 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
 // Dashboard data fetchers
 // ─────────────────────────────────────────────────────────
 
+async function queryToolUsage(
+  body: Record<string, unknown>,
+  options?: Parameters<typeof esQuery>[2]
+): Promise<unknown> {
+  return queryWithToolUsageMappingFallback(
+    (query) => esQuery(getEsIndex("trace"), query, options),
+    body
+  )
+}
+
 async function fetchOverview(
   range: TimeRange,
   granularity: Granularity,
@@ -3063,32 +3100,11 @@ async function fetchOverview(
       total_input_tokens: { sum: { field: "totalInputTokens" } },
       total_output_tokens: { sum: { field: "totalOutputTokens" } },
       total_skills: { cardinality: { field: "usedSkills" } },
-      total_tools: { cardinality: { field: "toolNames" } },
       total_skill_calls: { value_count: { field: "usedSkills" } },
-      total_tool_calls: { value_count: { field: "toolNames" } },
       by_skill: { terms: { field: "usedSkills", size: rankingTopSize } },
       by_skill_all: { terms: { field: "usedSkills", size: rankingSearchSize } },
       skill_source: { terms: { field: "skillSource", size: rankingSearchSize } },
-      by_tool: {
-        terms: {
-          field: "toolNames",
-          size: rankingTopSize,
-          exclude: filteredToolExcludes
-        }
-      },
-      by_tool_filtered_all: {
-        terms: {
-          field: "toolNames",
-          size: rankingSearchSize,
-          exclude: filteredToolExcludes
-        }
-      },
-      by_tool_all: {
-        terms: { field: "toolNames", size: rankingTopSize }
-      },
-      by_tool_all_full: {
-        terms: { field: "toolNames", size: rankingSearchSize }
-      },
+      ...buildToolUsageAggs(filteredToolExcludes),
       trend: {
         date_histogram: {
           field: "startedAt",
@@ -3159,7 +3175,7 @@ async function fetchOverview(
   }
 
   const [traceRaw, codeRaw] = await Promise.all([
-    esQuery(getEsIndex("trace"), traceBody, {
+    queryToolUsage(traceBody, {
       projection: { kind: "overview-trace", granularity },
       outputByteLimit: DASHBOARD_HOME_RANKING_QUERY_OUTPUT_BYTE_LIMIT
     }),
@@ -11284,6 +11300,7 @@ interface ProjectModeToolCount {
 }
 
 interface ProjectModeToolUsage {
+  toolUsageCoverage?: DashboardToolUsageCoverage
   byTool: ProjectModeToolCount[]
   byToolAll: ProjectModeToolCount[]
   byToolFilteredAll: ProjectModeToolCount[]
@@ -12707,18 +12724,6 @@ function projectFeatureKey(projectId: string, featureSlug: string): string {
   return JSON.stringify([projectId, featureSlug])
 }
 
-/** Convert a `terms toolNames` bucket list into a {tool,count}[] ranking. */
-function parseToolCountBuckets(raw: unknown): ProjectModeToolCount[] {
-  if (!Array.isArray(raw)) return []
-  const result: ProjectModeToolCount[] = []
-  for (const bucket of raw) {
-    const b = asRecord(bucket)
-    const tool = asString(b.key)
-    if (tool) result.push({ tool, count: asNumber(b.doc_count) })
-  }
-  return result
-}
-
 function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
   if (!Array.isArray(raw)) return []
   const result: ProjectModeTopUser[] = []
@@ -12809,14 +12814,7 @@ async function fetchProjectModeUsage(
           }
         }
       },
-      total_tools: { cardinality: { field: "toolNames" } },
-      tool_call_count: { value_count: { field: "toolNames" } },
-      by_tool: { terms: { field: "toolNames", size: 20, exclude: FILTERED_TOOL_EXCLUDES } },
-      by_tool_filtered_all: {
-        terms: { field: "toolNames", size: 1000, exclude: FILTERED_TOOL_EXCLUDES }
-      },
-      by_tool_all: { terms: { field: "toolNames", size: 20 } },
-      by_tool_all_full: { terms: { field: "toolNames", size: 1000 } },
+      ...buildToolUsageAggs(FILTERED_TOOL_EXCLUDES),
       // 插件维度的对话数与三桶同口径：主动触发的主 Agent root trace，与项目列表
       // 的「对话数」一致。不收进 filter 的话，一次用户轮次派出的每个子代理都会
       // 各记一次对话，插件之间的对比就成了「谁更爱派子代理」。
@@ -12832,7 +12830,7 @@ async function fetchProjectModeUsage(
       }
     }
   }
-  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const raw = (await queryToolUsage(body)) as EsSearchResponse
   const aggs = asRecord(raw.aggregations)
 
   const totalInputTokens = asNumber(asRecord(aggs.total_input_tokens).value)
@@ -12898,14 +12896,7 @@ async function fetchProjectModeUsage(
     distinctSkillCount: topSkills.length || asNumber(asRecord(aggs.distinct_skills).value),
     topSkills,
     topUsers: parseProjectModeTopUserBuckets(asRecord(aggs.top_users).buckets),
-    tools: {
-      byTool: parseToolCountBuckets(asRecord(aggs.by_tool).buckets),
-      byToolAll: parseToolCountBuckets(asRecord(aggs.by_tool_all).buckets),
-      byToolFilteredAll: parseToolCountBuckets(asRecord(aggs.by_tool_filtered_all).buckets),
-      byToolAllFull: parseToolCountBuckets(asRecord(aggs.by_tool_all_full).buckets),
-      totalTools: asNumber(asRecord(aggs.total_tools).value),
-      totalToolCalls: asNumber(asRecord(aggs.tool_call_count).value)
-    },
+    tools: parseToolUsageAggs(aggs),
     adapters
   }
 }
@@ -14477,7 +14468,10 @@ async function fetchProjectModeStageAnalysis(
     },
     aggs: buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT)
   }
-  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const raw = (await queryWithStageUsageMappingFallback(
+    query => esQuery(getEsIndex("trace"), query), body,
+    buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT, false)
+  )) as EsSearchResponse
   return parseProjectModeStageAnalysis(
     normalizedProjectId,
     asRecord(raw.aggregations)

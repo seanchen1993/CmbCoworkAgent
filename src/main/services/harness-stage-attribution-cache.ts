@@ -22,6 +22,7 @@ interface HarnessStageCacheEntry {
   resolvedAt: number
   lastAccessAt: number
   inFlight?: Promise<RefreshOutcome>
+  callRetryAfter?: number
 }
 
 interface HarnessStageAttributionCacheOptions {
@@ -147,6 +148,31 @@ export class HarnessStageAttributionCache {
     // Never attach the previous stage after a failed/continually invalidated
     // refresh. Keeping the entry dirty lets a later code mutation retry.
     return emptyAttribution()
+  }
+
+  /** A dashboard observation must not stall a model/tool on an unavailable adapter. */
+  async getForCall(projectId: string, featureSlug: string): Promise<HarnessStageAttribution> {
+    const identity = normalizeIdentity(projectId, featureSlug)
+    if (!identity) return emptyAttribution()
+    const entry = this.getOrCreate(identity)
+    entry.lastAccessAt = this.now()
+    if (this.isFresh(entry)) return copyAttribution(entry.snapshot as HarnessStageAttribution)
+    if (!entry.inFlight && this.now() < (entry.callRetryAfter ?? 0)) return emptyAttribution()
+    const refresh = this.getForCodeGeneration(projectId, featureSlug).then((value) => {
+      if (!value.nodeName) entry.callRetryAfter = this.now() + 1_000
+      return value
+    })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        refresh,
+        new Promise<HarnessStageAttribution>((resolve) => {
+          timer = setTimeout(() => resolve(emptyAttribution()), 200)
+        })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
 
   private isFresh(entry: HarnessStageCacheEntry): boolean {

@@ -1,3 +1,4 @@
+import type { DashboardToolUsageCoverage } from "../shared/dashboard-tool-usage"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type {
   AppNotification,
@@ -341,6 +342,7 @@ interface DashboardTraceDetail {
   totalToolCalls: number
   modelCallCount: number
   userInputRequestCount: number
+  userInputRequestCountComplete?: boolean
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
@@ -717,6 +719,7 @@ interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
 }
 
 interface DashboardProjectModeToolUsage {
+  toolUsageCoverage?: DashboardToolUsageCoverage
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
   byToolFilteredAll: Array<{ tool: string; count: number }>
@@ -971,7 +974,7 @@ interface DashboardProjectModeStageMetrics {
   runCost: {
     toolCalls: number
     modelCalls: number
-    /** 总量，含缓存读取与创建，所以不等于 inputTokens + outputTokens。 */
+    /** 模型上报的总量；缓存子集不重复相加。 */
     totalTokens: number
     inputTokens: number
     outputTokens: number
@@ -982,6 +985,13 @@ interface DashboardProjectModeStageMetrics {
 }
 
 interface DashboardProjectModeStageAnalysis {
+  costAttribution?: {
+    callStartTraceCount: number
+    turnStartTraceCount: number
+    tokenUsageReportedCalls: number
+    modelCalls: number
+    truncated: boolean
+  }
   projectId: string
   total: DashboardProjectModeStageMetrics
   stages: Array<{

@@ -1629,7 +1629,16 @@ function ProjectRow({
           <RunCostPair
             rows={[
               { label: "工具", value: formatNumber(runCost.toolCalls) },
-              { label: "模型", value: formatNumber(runCost.modelCalls) }
+              { label: "模型", value: formatNumber(runCost.modelCalls) },
+              {
+                label: "请求输入",
+                value:
+                  project.userInputRequestCountComplete === true
+                    ? formatNumber(runCost.userInputRequests)
+                    : runCost.userInputRequestDocs > 0
+                      ? `≥${formatNumber(runCost.userInputRequests)}`
+                      : "—"
+              }
             ]}
           />
         </td>
@@ -3656,6 +3665,7 @@ export function ProjectModePanel({
             byToolAllFull={tools.byToolAllFull}
             totalTools={tools.totalTools}
             totalToolCalls={tools.totalToolCalls}
+            toolUsageCoverage={tools.toolUsageCoverage}
           />
         </div>
       </section>

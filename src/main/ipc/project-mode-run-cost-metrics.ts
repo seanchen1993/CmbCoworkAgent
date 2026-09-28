@@ -5,43 +5,16 @@ import { mainAgentConversationAggs } from "./dashboard-stage-buckets"
  *
  * 全都是 trace 顶层标量，直接 sum 就行，不用碰 `_raw`：
  *
- *   totalToolCalls        —— collector 取五个信号的 max（见 getTotalToolCalls），最准的那个
+ *   totalToolCalls        —— collector 多路计数信号取 max（见 getTotalToolCalls），最准的那个
  *   modelCallCount        —— 服务端存的标量，取自客户端实时累加的 totalModelCalls
- *   totalTokens           —— 输入+输出+缓存
- *   totalInputTokens      —— 只算输入，不含缓存
+ *   totalTokens           —— 模型返回的总量，缺省时按输入+输出累计
+ *   totalInputTokens      —— 模型上报的输入量（缓存子集不重复相加）
  *   totalOutputTokens     —— 只算输出
- *   userInputRequestCount —— 本轮调用 request_user_input 的次数。**索引里没有这个字段**，见下。
+ *   userInputRequestCount —— 采集端完整观察工具调用后输出的请求输入次数。
  *
- * ── userInputRequestCount 目前取不到值 ─────────────────────────
- *
- * 这个字段采集侧从未写入：`AgentTrace` 上没有它，`src/main/agent/` 下也没有任何赋值。
- * 它只以两种形式存在——看板读 `_raw` 时现算的 `countUserInputRequests(nodes)`（数
- * trace 树里的 request_user_input 工具节点），以及这里这个聚合字段名。所以 sum 恒为 0，
- * value_count 也恒为 0，界面上的列已经撤掉。
- *
- * 原先这段注释写的是「会话记录列表（`_raw` 被排除的预览路径）照样能正确显示它们，说明
- * 索引里确实有」。这个推断不成立：预览路径走的是 `asNumber(source.userInputRequestCount)`，
- * 缺字段时返回 0，不抛错也不留空，看起来就像正常显示了，而 0 对「问答次数」又是个合理
- * 的值，于是没人发现。
- *
- * 对照 `modelCallCount` 可以看清区别：客户端送的是 `totalModelCalls`，服务端存成
- * `modelCallCount`，**客户端送了原料**所以服务端派生得出来。用户提问次数没有对应的原料
- * 标量，服务端手里只有一份去重过的 `toolNames` 名字数组（客户端 standard-turn-stream
- * 用的是 Set，同一轮调五次只留一个名字），能回答「用没用过」，回答不了「用了几次」。
- *
- * 聚合和覆盖度探针都保留着：等采集侧补上这个标量，恢复展示只需要改界面，而那之后老 trace
- * 仍然没有该字段，正需要探针把「下限」标出来。
- *
- * ── 为什么每个 sum 都配一个 value_count ──────────────────────────
- *
- * ES 的 sum 对「字段不存在」返回 0，不是 null。这两个字段是 forward-only 的，老 trace
- * 上没有，所以时间范围一旦跨到字段上线之前，sum 会**悄悄少算且不报错**。
- *
- * value_count 数的是真正带该字段的文档数。它明显小于桶的 doc_count，就说明这段时间里
- * 混着没有该字段的老数据，界面该标注「部分数据缺失」，而不是把一个偏小的数当真值展示。
- *
- * 这个坑在本仓库已经踩过一次：Token 总量的兜底写成 `asNumber(sum, 输入+输出)`，而 sum
- * 缺字段时返回 0（有限数），兜底分支永远走不到，那一列长期恒显 0。见 dashboard-token-totals.ts。
+ * 字段缺失表示历史或不完整采集，不能解释为零。覆盖度以同范围所有 trace 为分母。
+ * 采集端从同一工具计数器生成标量与每工具汇总，服务端必须显式透传此字段。
+
  */
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -74,8 +47,8 @@ export interface ProjectModeRunCost {
   /**
    * 输入 / 输出分开的 token。
    *
-   * 两者之和不一定等于 totalTokens：后者还含缓存读取与缓存创建，而那两项的定价和
-   * 含义都不同，不该混进「模型读了多少、写了多少」里。
+   * totalTokens 优先使用模型返回的总量；缓存可能已经包含在 inputTokens 中，
+   * 不应再次加到输入或总量。
    */
   inputTokens: number
   outputTokens: number
