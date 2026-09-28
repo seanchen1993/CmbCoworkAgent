@@ -29,12 +29,14 @@ import {
   buildAnsweredCard,
   buildApprovalCard,
   buildBizRetryCard,
+  buildBoundCard,
   buildExpiredCard,
   buildHarnessDecisionResolvedCard,
   buildHumanGateCard,
   buildQuestionCard,
   buildResolvedCard,
   buildTargetBindCard,
+  IM_CARD_TEXT_MODE_HINT,
   QUESTION_OTHER_SUFFIX,
   TARGET_BIND_MODE_INHERIT,
   TARGET_BIND_MODE_KEY,
@@ -665,6 +667,106 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
 }
 
 /**
+ * Every card that waits on the reader says what to do when it is cut short,
+ * and says it where the cut does not reach.
+ *
+ * Only the reader can see that the client shortened a card, so the pointer to
+ * /文字模式 has to be on the card itself — directly under the header of title,
+ * status and source, because everything after that is body, and the body is
+ * what runs long. A finished card goes without: its request is over, and the
+ * switch would re-send nothing for it.
+ */
+function testEveryPendingCardPointsAtTextModeAboveItsBody(): void {
+  const isHint = (component: CardComponent): boolean =>
+    component.type === "content" &&
+    (component.list as ReadonlyArray<{ content: string }>).some(
+      (line) => line.content === IM_CARD_TEXT_MODE_HINT
+    )
+  const context = { projectName: "支付项目", featureName: "快捷支付", threadTitle: "实现会话" }
+  const pending: Array<[string, CardComponent[]]> = [
+    [
+      "approval",
+      buildApprovalCard({
+        targetLabel: "会话：你好",
+        operation: "写文件",
+        detail: "src/a.ts",
+        tag: "tag",
+        allowedDecisions: ["approve", "reject"]
+      })
+    ],
+    [
+      "question",
+      buildQuestionCard({
+        targetLabel: "会话：你好",
+        tag: "tag",
+        questions: [
+          { key: "q0", header: "标题", question: "问题？", options: [{ label: "甲" }] },
+          // Answered rows are body too; the pointer stays above them.
+          { key: "q1", header: "已答", question: "问题？", options: [], answered: true }
+        ]
+      })
+    ],
+    ["human gate", buildHumanGateCard({ ...context, message: "请检查阶段产物", tag: "tag" })],
+    [
+      "biz retry",
+      buildBizRetryCard({
+        ...context,
+        reason: "业务状态未推进",
+        stageName: "开发",
+        stageStatus: "in_progress",
+        contextUsage: "42%",
+        assistantTail: "等待用户决定",
+        nextActionText: "可创建新会话继续",
+        tag: "tag"
+      })
+    ]
+  ]
+  for (const [name, components] of pending) {
+    assert.equal(components.filter(isHint).length, 1, `${name}: point at /文字模式 exactly once`)
+    assert.deepEqual(
+      components.slice(0, components.findIndex(isHint)).map((component) => component.type),
+      ["title", "status", "kv"],
+      `${name}: the pointer must sit right under the header, above anything that runs long`
+    )
+  }
+
+  const finished: Array<[string, CardComponent[]]> = [
+    [
+      "resolved",
+      buildResolvedCard({
+        targetLabel: "会话：你好",
+        operation: "写文件",
+        outcome: "已批准",
+        outcomeStyle: "approved"
+      })
+    ],
+    [
+      "answered",
+      buildAnsweredCard({
+        targetLabel: "会话：你好",
+        answers: [{ header: "标题", answer: "甲" }],
+        outcome: "已回答"
+      })
+    ],
+    [
+      "harness resolved",
+      buildHarnessDecisionResolvedCard({
+        ...context,
+        kind: "biz_retry",
+        outcome: "已停止托管（招乎）",
+        outcomeStyle: "neutral"
+      })
+    ],
+    ["expired", buildExpiredCard("approval", "会话：你好")],
+    ["bound", buildBoundCard({ targetLabel: "会话：你好", outcome: "已切换" })]
+  ]
+  for (const [name, components] of finished) {
+    assert.ok(!components.some(isHint), `${name}: nothing on a finished card is re-sent`)
+  }
+  console.log("PASS testEveryPendingCardPointsAtTextModeAboveItsBody")
+}
+
+/**
  * The target list's option values are the numbers the text list prints.
  *
  * That equality is the whole safety story for this card: a submit is resolved
@@ -1134,7 +1236,10 @@ async function testAnUnreadableReplyModeStillSendsTheCard(): Promise<void> {
   })
   assert.notEqual(await publisher.publish(approvalCardInput()), null)
   assert.equal(gateway.sent.length, 1)
-  assert(warnings.some((message) => message.includes("reply mode")), warnings.join("\n"))
+  assert(
+    warnings.some((message) => message.includes("reply mode")),
+    warnings.join("\n")
+  )
   console.log("PASS testAnUnreadableReplyModeStillSendsTheCard")
 }
 
@@ -1584,6 +1689,7 @@ async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<vo
 async function main(): Promise<void> {
   testEveryBuiltCardSatisfiesTheContract()
   testEveryKvRowIsShapedTheWayTheClientParses()
+  testEveryPendingCardPointsAtTextModeAboveItsBody()
   testTheTargetListOffersExactlyThePrintedNumbers()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
   testARefusedSubmitLeavesTheFormUsable()

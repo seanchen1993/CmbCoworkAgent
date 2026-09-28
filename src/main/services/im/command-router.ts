@@ -357,7 +357,13 @@ export class ImCommandRouter {
     // never finalizes is redelivered when its 90-second lease expires, which
     // republishes this card forever. So the card replaces the numbered list,
     // never the answer itself.
-    if (card) return "可切换的目标见上方卡片，选好点「切换」即可。"
+    //
+    // The answer is also where a list the client cut short finds its way out.
+    // It takes two steps: /文字模式 re-sends what waits on a decision, and a
+    // list is not that, so the reader asks for it again once text is on.
+    if (card) {
+      return "可切换的目标见上方卡片，选好点「切换」即可。显示不全时先发 /文字模式，再发 /会话 查看文字列表。"
+    }
 
     return [
       "可用目标：",
