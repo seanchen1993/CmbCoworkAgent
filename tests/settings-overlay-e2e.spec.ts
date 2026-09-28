@@ -427,6 +427,10 @@ async function main(): Promise<void> {
     await page.getByRole("button", { name: "安装", exact: true }).waitFor()
     pass("deleting a plugin in settings updates the retained market installation state")
 
+    await page.getByRole("tab", { name: "Skills", exact: true }).click()
+    await page.getByRole("button", { name: "全部项目", exact: true }).click()
+    await page.getByRole("button", { name: "精品", exact: true }).click()
+    await page.keyboard.press("Escape")
     await open()
     const skillSettings = page.getByRole("dialog", { name: "设置", exact: true })
     await skillSettings.getByRole("button", { name: "技能", exact: true }).click()
@@ -436,10 +440,11 @@ async function main(): Promise<void> {
     await page.locator("#description").fill("Skill published from settings")
     await page.locator("#guidance").fill("Use this test skill")
     await page.getByRole("button", { name: "一键发布", exact: true }).click()
+    await page.getByRole("button", { name: "全部项目", exact: true }).waitFor()
     await page.getByRole("heading", { name: "overlay-publish-skill", exact: true }).waitFor()
     await page.getByText("Skill published from settings", { exact: true }).waitFor()
     assert.equal(await page.getByRole("button", { name: "返回应用", exact: true }).count(), 0)
-    pass("publishing a skill from settings opens its refreshed market result")
+    pass("publishing a skill from settings clears the featured filter and opens its market result")
 
     await page.getByRole("tab", { name: "组织级技能", exact: true }).click()
     await page.getByRole("heading", { name: orgSkillName, exact: true }).click()
