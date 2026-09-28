@@ -471,11 +471,19 @@ export class ImCommandRouter {
       (target): target is Extract<ImAuthorizedRemoteTarget, { kind: "thread_grant" }> =>
         target.kind === "thread_grant"
     )
-    const exact = sessions.filter((target) => normalizeTargetName(target.label) === query)
+    const exact = sessions.filter(
+      (target) =>
+        normalizeTargetName(target.label) === query ||
+        (target.sourceTitle && normalizeTargetName(target.sourceTitle) === query)
+    )
     const matches =
       exact.length > 0
         ? exact
-        : sessions.filter((target) => normalizeTargetName(target.label).includes(query))
+        : sessions.filter(
+            (target) =>
+              normalizeTargetName(target.label).includes(query) ||
+              (target.sourceTitle && normalizeTargetName(target.sourceTitle).includes(query))
+          )
 
     if (matches.length === 0) {
       const feature = targets.find(
