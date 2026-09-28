@@ -633,7 +633,13 @@ function isTextBundleFile(filePath: string): boolean {
 async function loadSkills(
   dirPath: string,
   source: "project" | "user" = "project",
-  options: { maxDepth?: number; idPrefix?: string; pluginId?: string; pluginName?: string } = {}
+  options: {
+    maxDepth?: number
+    idPrefix?: string
+    pluginId?: string
+    pluginName?: string
+    isProjectModePlugin?: boolean
+  } = {}
 ): Promise<SkillMetadata[]> {
   const skills: SkillMetadata[] = []
 
@@ -661,7 +667,10 @@ async function loadSkills(
             ? frontmatter["allowed-tools"].split(/\s+/)
             : undefined,
           pluginId: options.pluginId,
-          pluginName: options.pluginName
+          pluginName: options.pluginName,
+          ...(options.isProjectModePlugin === undefined
+            ? {}
+            : { isProjectModePlugin: options.isProjectModePlugin })
         })
       } catch (e) {
         console.warn(`[Skills] Failed to parse skill at ${skill.skillMdPath}:`, e)
@@ -731,7 +740,8 @@ export async function listPluginSkills(): Promise<SkillMetadata[]> {
         maxDepth: source.maxDepth,
         idPrefix: `plugin:${source.pluginId}/`,
         pluginId: source.pluginId,
-        pluginName: source.pluginName
+        pluginName: source.pluginName,
+        isProjectModePlugin: source.isProjectModePlugin
       })
       for (const s of skills) {
         byPluginSkill.set(`${source.pluginId}:${normalizeSkillId(s.id || s.name)}`, s)

@@ -28,6 +28,7 @@ declare global {
     chatNavigationFixture: {
       mountList(count: number): void
       mountSearch(kind: SearchCase): void
+      mountFileLinks(): void
       hideRow?: () => void
       tick?: () => void
       finishHydration?: () => void
@@ -266,6 +267,20 @@ function ListFixture({ count }: { count: number }): React.JSX.Element {
   )
 }
 
+function FileLinkFixture(): React.JSX.Element {
+  return (
+    <div data-testid="file-link-fixture">
+      <StreamingMarkdown threadId="file-link-thread">
+        {`无代码片段的文件链接：
+
+[drive](C:/workspace/src/index.ts:12)
+
+[custom](codex-file:///C:/workspace/src/data.json)`}
+      </StreamingMarkdown>
+    </div>
+  )
+}
+
 let root: Root | undefined
 function mount(component: React.ReactNode): void {
   root?.unmount()
@@ -277,6 +292,7 @@ function mount(component: React.ReactNode): void {
 window.chatNavigationFixture = {
   mountList: (count) => mount(<ListFixture count={count} />),
   mountSearch: (kind) => mount(<SearchFixture kind={kind} />),
+  mountFileLinks: () => mount(<FileLinkFixture />),
   async stressSearch() {
     const body = `needle\n\n${"A **formatted** paragraph with `code`.\n\n".repeat(8000)}`
     const blocks = Array.from({ length: 32 }, () => ({ type: "text", text: body }))

@@ -411,14 +411,12 @@ export function projectChatSkillCatalog(
   const availableLocalSkills = snapshot.localSkills.filter(
     (skill) => skill.source === "project" || skill.source === "user"
   )
-  // Until a bound project is resolved, expose no plugin-owned skill. Showing
-  // every plugin would violate the harness binding while its catalog is loading.
-  const visiblePluginSkills = harnessScoped && !preferredPlugin ? [] : snapshot.pluginSkills
   const skills = mergeChatSkills(
     availableLocalSkills,
-    visiblePluginSkills,
+    snapshot.pluginSkills,
     snapshot.disabledSkillIds,
-    preferredPlugin
+    preferredPlugin,
+    harnessScoped
   ).sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
   const projection = { skills, disabledSkillIds: snapshot.disabledSkillIds }
   projections.set(key, projection)

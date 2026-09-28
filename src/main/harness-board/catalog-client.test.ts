@@ -1,6 +1,23 @@
 import { EventEmitter } from "node:events"
 import type { Worker } from "node:worker_threads"
-import { describe, expect, it } from "vitest"
+import { mkdtemp, readdir, rm } from "node:fs/promises"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+const storage = vi.hoisted(() => ({ root: "" }))
+vi.mock("../storage", () => ({ getOpenworkDir: () => storage.root }))
+beforeEach(async () => {
+  storage.root = await mkdtemp(join(tmpdir(), "harness-catalog-client-"))
+})
+afterEach(async () => {
+  try {
+    // Read-only client tests must not initialize or migrate any stores.
+    expect(await readdir(storage.root)).toEqual([])
+  } finally {
+    await rm(storage.root, { recursive: true, force: true })
+  }
+})
 import { HarnessCatalogCancelledError, HarnessCatalogClient } from "./catalog-client"
 
 class FakeCatalogWorker extends EventEmitter {
@@ -9,6 +26,10 @@ class FakeCatalogWorker extends EventEmitter {
 
   postMessage(message: Record<string, unknown>): void {
     this.requests.push(message)
+  }
+
+  async waitForRequests(count: number): Promise<void> {
+    await vi.waitFor(() => expect(this.requests).toHaveLength(count))
   }
 
   unref(): this {
@@ -53,6 +74,7 @@ describe("Harness catalog worker client", () => {
     await new Promise((resolve) => setTimeout(resolve, 5))
     expect(ticks).toBeGreaterThan(0)
 
+    await worker.waitForRequests(2)
     const request = worker.requests.at(-1)!
     worker.emit("message", {
       type: "read-page-result",
@@ -88,10 +110,11 @@ describe("Harness catalog worker client", () => {
     const worker = new FakeCatalogWorker()
     const client = new HarnessCatalogClient(async () => worker as unknown as Worker)
     const first = client.readProjectContexts(["old"], "renderer:detail")
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await worker.waitForRequests(1)
     const second = client.readProjectContexts(["new"], "renderer:detail")
     await expect(first).rejects.toBeInstanceOf(HarnessCatalogCancelledError)
 
+    await worker.waitForRequests(2)
     const request = worker.requests.at(-1)!
     worker.emit("message", {
       type: "read-project-contexts-result",
@@ -111,13 +134,14 @@ describe("Harness catalog worker client", () => {
     const client = new HarnessCatalogClient(async () => worker as unknown as Worker)
     const scope = "harness-dialog-tips:7"
     const first = client.readDialogTips("project-a", "feature-a", scope)
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await worker.waitForRequests(1)
     const firstRequest = worker.requests[0]!
     const second = client.readDialogTips("project-b", "feature-b", scope)
 
     await expect(first).rejects.toBeInstanceOf(HarnessCatalogCancelledError)
     expect(Atomics.load(new Int32Array(firstRequest.cancelBuffer as SharedArrayBuffer), 0)).toBe(1)
 
+    await worker.waitForRequests(2)
     const secondRequest = worker.requests[1]!
     worker.emit("message", {
       type: "read-dialog-tips-result",
@@ -139,13 +163,13 @@ describe("Harness catalog worker client", () => {
     const singleScope = "harness-project-detail:7:single:context"
 
     const firstBatch = client.readProjectContexts(["batch-1"], batchScope)
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await worker.waitForRequests(1)
     resolveProjectContexts(worker, 0, "batch-1")
     await expect(firstBatch).resolves.toMatchObject({ projects: { "batch-1": null } })
 
     const single = client.readProjectContexts(["single"], singleScope)
     const nextBatch = client.readProjectContexts(["batch-2"], batchScope)
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await worker.waitForRequests(3)
     resolveProjectContexts(worker, 1, "single")
     resolveProjectContexts(worker, 2, "batch-2")
 
@@ -164,12 +188,12 @@ describe("Harness catalog worker client", () => {
     })
 
     const crashed = client.readProjectContexts(["first"], "renderer:detail")
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await firstWorker.waitForRequests(1)
     firstWorker.emit("error", new Error("intentional catalog crash"))
     await expect(crashed).rejects.toThrow("intentional catalog crash")
 
     const retried = client.readProjectContexts(["second"], "renderer:detail")
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await replacement.waitForRequests(1)
     const request = replacement.requests.at(-1)!
     replacement.emit("message", {
       type: "read-project-contexts-result",
@@ -189,7 +213,7 @@ describe("Harness catalog worker client", () => {
     const worker = new FakeCatalogWorker()
     const client = new HarnessCatalogClient(async () => worker as unknown as Worker)
     const pending = client.readProjectContexts(["project"], "renderer:integrity")
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await worker.waitForRequests(1)
     const request = worker.requests.at(-1)!
 
     worker.emit("message", {
@@ -221,12 +245,12 @@ describe("Harness catalog worker client", () => {
     })
 
     const exited = client.readProjectContexts(["first"], "renderer:clean-exit")
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await firstWorker.waitForRequests(1)
     firstWorker.emit("exit", 0)
     await expect(exited).rejects.toThrow("exited: 0")
 
     const retried = client.readProjectContexts(["second"], "renderer:clean-exit")
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await replacement.waitForRequests(1)
     resolveProjectContexts(replacement, 0, "second")
     await expect(retried).resolves.toMatchObject({ projects: { second: null } })
     expect(starts).toBe(2)
@@ -239,9 +263,10 @@ describe("Harness catalog worker client", () => {
     const workerStarting = new Promise<Worker>((resolve) => {
       resolveWorker = resolve
     })
-    const client = new HarnessCatalogClient(() => workerStarting)
+    const startWorker = vi.fn(() => workerStarting)
+    const client = new HarnessCatalogClient(startWorker)
     const pending = client.readProjectContexts(["project"], "renderer:detail")
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await vi.waitFor(() => expect(startWorker).toHaveBeenCalledOnce())
 
     const closing = client.close()
     resolveWorker(worker as unknown as Worker)

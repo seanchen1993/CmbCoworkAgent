@@ -639,6 +639,10 @@ export function BuiltinRobotPanel(): React.JSX.Element {
               招乎只展示会话、项目与 Feature 名称；本地绝对路径、插件路径和工作区配置不会上传。
             </p>
 
+            <p className="text-xs leading-5 text-muted-foreground">
+              在招乎发送 /帮助 查看全部指令；卡片显示不全时，发送 /文字模式 改用文字。
+            </p>
+
             <div className="flex items-start justify-between gap-4 rounded-md border border-status-warning/30 bg-status-warning/5 p-3">
               <div>
                 <p className="text-sm font-medium">允许从招乎批准工具调用</p>

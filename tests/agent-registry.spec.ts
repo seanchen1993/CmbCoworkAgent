@@ -947,7 +947,7 @@ Use this tool to run commands, scripts, tests, builds, and other shell operation
   )
   assert(
     RUNTIME_SRC.includes(
-      '...(mainFilesystemEnabled ? [createFsMiddleware("\\n")] : []),\n      ...postFsToolDocStripMiddleware,'
+      '...(mainFilesystemEnabled ? [createFsMiddleware("\\n", mainToolStrategy)] : []),\n      ...postFsToolDocStripMiddleware,'
     ),
     "post-FS strip runs immediately after the deepagents fs middleware"
   )

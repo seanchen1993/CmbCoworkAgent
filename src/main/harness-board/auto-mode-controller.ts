@@ -1,3 +1,4 @@
+import { requireHarnessFeatureWorkspace } from "./service"
 import type { ManagedBizRetryDecisionInput, ManagedHumanGateDecisionInput, ManagedHumanGateConflictInput } from "./notification-operation-types"
 import { harnessNotifications } from "./notifications"
 import { BrowserWindow } from "electron"
@@ -579,7 +580,8 @@ async function inspectAndLaunch(
   run: ManagedRunSnapshot,
   delivery: AgentRunDelivery,
   sourceEvent: ManagedRunSourceRef,
-  terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">
+  terminal?: Pick<AgentTurnEndEvent, "outcome" | "endReason" | "contextUsage">,
+  initialUserMessage?: string
 ): Promise<void> {
   if (isManagedRunStopRequested(run)) return
   const feature = await inspectHarnessManagedFeatureStatus(run.projectId, run.featureId)
@@ -671,6 +673,9 @@ async function inspectAndLaunch(
   }
 
   const nextAction = toManagedRunSessionAction(feature.nextAction)
+  if (initialUserMessage?.trim()) {
+    nextAction.userMessage = initialUserMessage.trim()
+  }
   const workspacePath = decidedRun.workspacePath?.trim()
   if (!workspacePath) {
     await markTerminal(
@@ -752,6 +757,8 @@ async function inspectAndLaunch(
 
 export async function startManagedRun(input: ManagedRunStartRequest): Promise<ManagedRunSummary> {
   return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
+    // The persisted workspace is a configuration gate. A user-confirmed override remains valid.
+    await requireHarnessFeatureWorkspace(input.projectId, input.featureId)
     const workspacePath = typeof input.workspacePath === "string" ? input.workspacePath.trim() : ""
     if (!workspacePath) {
       throw new Error("请选择本次托管使用的会话工作区")
@@ -780,7 +787,13 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     void markHarnessProjectManagedRunStarted(created.projectId)
     publishManagedRunChanged(lastRunSummary(created))
     try {
-      await inspectAndLaunch(created, input.delivery, sourceEvent)
+      await inspectAndLaunch(
+        created,
+        input.delivery,
+        sourceEvent,
+        undefined,
+        input.initialUserMessage
+      )
     } catch (error) {
       const failed = recordManagedRunDecision({
         run: created,
@@ -987,7 +1000,7 @@ export async function resolveManagedBizRetryDecision(
     if (input.choice !== "stop" && isManagedRunStopRequested(run)) {
       return { applied: false, message: "托管运行正在停止，请等待结束。" }
     }
-    const channelLabel = input.channel === "im" ? "招乎" : "APP"
+    const channelLabel = input.channel === "im" ? "招乎" : "桌面"
     if (
       input.choice !== "stop" &&
       harnessNotifications

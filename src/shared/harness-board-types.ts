@@ -120,12 +120,25 @@ export interface HarnessKnowledgePreviewResult {
   error?: string
 }
 
+/** Single-directory feature snapshot; never refreshed from the global repository catalog. */
 export interface HarnessDeployUnitMapping {
   deployUnitIdMapping: string
   deployUnitId: string
   localRepoPath: string
   description?: string
 }
+
+/** Global multi-directory catalog entry used when configuring a feature. */
+export interface HarnessDeployUnitConfig {
+  deployUnitIdMapping: string
+  deployUnitId: string
+  description?: string
+  repositoryPaths: Array<{ pathId: string; localRepoPath: string }>
+}
+
+export type HarnessSessionWorkspace =
+  | { source: "directory"; path: string }
+  | { source: "deployUnit"; deployUnitId: string }
 
 export interface HarnessLeanTokenConfig {
   leanToken: string
@@ -171,6 +184,7 @@ export interface HarnessFeatureDeployUnitBinding {
   projectId: string
   featureId: string
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+  sessionWorkspace?: HarnessSessionWorkspace
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
   imManagementEnabled?: boolean
 }
@@ -222,7 +236,6 @@ export interface HarnessProjectMetadata {
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
   /** First feature-session run whose complete system-constraint set loaded successfully. */
   systemConstraintFirstLoadedAt?: string
   /** 该项目第一次开启托管运行的时间。与上面那个约束标记同样是单调的，只写一次。 */
@@ -247,7 +260,6 @@ export interface HarnessProjectCreateInput {
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
 }
 
 export interface HarnessEnterpriseProjectSearchInput {
@@ -366,6 +378,7 @@ export interface HarnessProjectReviewResult {
 }
 
 export interface HarnessFeatureCreateInput {
+  sessionWorkspace: HarnessSessionWorkspace
   projectId: string
   feature: string
   selectedDeployUnits?: HarnessDeployUnitMapping[]
@@ -383,6 +396,7 @@ export interface HarnessFeatureCreateResult {
 }
 
 export interface HarnessFeatureDeployUnitUpdateInput {
+  sessionWorkspace: HarnessSessionWorkspace
   projectId: string
   featureId: string
   selectedDeployUnits: HarnessDeployUnitMapping[]
@@ -410,6 +424,7 @@ export interface ManagedRunStartInput {
   projectId: string
   featureId: string
   workspacePath: string
+  initialUserMessage?: string
 }
 
 export interface ManagedRunStartValidationInput {
@@ -463,7 +478,6 @@ export interface HarnessProjectMetadataUpdateInput {
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
 }
 
 export interface HarnessProjectListItem {
@@ -476,7 +490,6 @@ export interface HarnessProjectListItem {
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
   systemConstraintFirstLoadedAt?: string
   managedRunFirstStartedAt?: string
   harnessAdapter: {
@@ -820,7 +833,6 @@ export interface HarnessProjectDetailViewModel {
     systemId: string
     systemName: string
     workspacePath: string
-    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -1018,7 +1030,6 @@ export interface HarnessRunDetailViewModel {
     projectDir: string
     systemId: string
     workspacePath: string
-    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -1045,6 +1056,8 @@ export interface HarnessRunDetailViewModel {
     overallStatus?: HarnessStatus
     skipNodeAvailable: boolean
     selectedDeployUnits: HarnessDeployUnitMapping[]
+    sessionWorkspace?: HarnessSessionWorkspace
+    resolvedSessionWorkspacePath?: string
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]

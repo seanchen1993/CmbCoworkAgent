@@ -112,9 +112,32 @@ export class ImDesktopCompletionObserver {
     }
 
     const projectContext = await resolveImProjectModeReplyContext({ metadata: threadMetadata })
+    // 桌面发起的结果同样要标出它不是当前绑定的会话。IM 发起的走 remote-runner，模式
+    // 通知走 notification-pump，那两条都算了这个标志，只有这条漏了——于是从桌面发起的
+    // 任何结果推到招乎都不带提示。而这条路恰恰最需要它:读者根本没在招乎里发起过这一
+    // 轮，也就没有任何理由知道它来自哪个会话，落在一串对话里就像是当前会话的回复。
+    //
+    // 比 threadId 而不是 targetId:桌面会话不一定在 im_targets 里登记过，它只要有一个
+    // grant 就能把结果推过来，那种情况下根本没有 targetId 可比。三种 target 快照都带
+    // threadId，比它对三种绑定是同一套逻辑。
+    //
+    // 用 getSelectedTarget 而不是 getActiveTarget:后者在目标不是 active 时会抛，把提示
+    // 连同异常一起吞掉——绑定的授权一失效就不再标注，而那恰恰是最该标注的时候。
+    // getSelectedTarget 不管状态都把行返回，绑定关系本身和它可不可用是两件事。
+    //
+    // 注意不能反过来把"取不到"当成"不是当前绑定":挂掉的那个目标完全可能就是本会话，
+    // 那样会凭空多出一行假提示。要判的始终是身份，不是状态。
+    let switched = false
+    try {
+      const bound = this.dependencies.conversations.getSelectedTarget(grant.conversationKey)
+      switched = Boolean(bound && bound.snapshot.threadId !== threadId)
+    } catch (error) {
+      // 只兜数据库读失败。这行提示是附加信息，不该因为它把一条真实的结果拦在外面。
+      this.dependencies.warn("Desktop completion could not read the bound target.", error)
+    }
     const prefix = projectContext
-      ? imProjectModeReplyPrefix(projectContext)
-      : imThreadReplyPrefix(threadTitle)
+      ? imProjectModeReplyPrefix({ ...projectContext, switched })
+      : imThreadReplyPrefix(threadTitle, switched)
 
     const deliveryId = `desktop-turn:${threadId}:${finalAssistantMessageId}`
     await this.dependencies.events.enqueueProactiveReplies(

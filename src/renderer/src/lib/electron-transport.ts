@@ -62,6 +62,7 @@ type AgentIPCEvent = Parameters<Parameters<typeof window.api.agent.streamAgent>[
 
 interface ElectronIPCTransportOptions {
   managedAutoSendRunId?: string
+  onManagedAutoSendRunTerminal?: (runId: string) => void
 }
 
 /**
@@ -1458,6 +1459,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
           isDone = true
           terminalReceived = true
+          if (managedAutoSendRunId) {
+            this.options.onManagedAutoSendRunTerminal?.(managedAutoSendRunId)
+          }
         }
         enqueueStreamEvent(sdkEvent)
         if (terminalReceived) break

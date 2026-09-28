@@ -1,5 +1,6 @@
 import type {
   ProjectMetricFilters,
+  ProjectMetricIssueCategoryCount,
   ProjectMetricListOptions,
   ProjectMetricProjectItem,
   ProjectMetricProjectsData,
@@ -47,9 +48,13 @@ interface FactProject {
   roomName: string
   groupName: string
   bugNum: number | null
+  kenanIssueCount: number | null
+  kenanIssueCategories: ProjectMetricIssueCategoryCount[]
   notAdjustFuns: number | null
   createDate: string | null
   firstStStartDate: string | null
+  firstStEndDate: string | null
+  firstUatStartDate: string | null
   firstOnlineDate: string | null
   approvedDate: string | null
 }
@@ -82,9 +87,13 @@ const FACT_SOURCE_INCLUDES = [
   "roomName",
   "groupName",
   "bugNum",
+  "kenanIssueCount",
+  "kenanIssueCategoryCount",
   "notAdjustFuns",
   "createDate",
   "firstStStartDate",
+  "firstStEndDate",
+  "firstUatStartDate",
   "firstOnlineDate",
   "approvedDate"
 ]
@@ -212,8 +221,10 @@ function buildFactBaseFilters(
     { range: { [dateField]: projectDateRange(filters.range) } }
   ]
   const rooms = effectiveRoomNames(uniqueSorted(filters.upperOrgLv1 ?? []), allowedRoomNames)
+  const groups = uniqueSorted(filters.groupNames ?? [])
   const phases = uniqueSorted(filters.phaseStatuses ?? [])
   if (rooms !== null) result.push(matchNoneOrTerms("roomName", rooms))
+  if (groups.length > 0) result.push({ terms: { groupName: groups } })
   if (phases.length > 0) result.push({ terms: { phaseStatus: phases } })
 
   const minimum = filters.functionPointMin
@@ -225,6 +236,31 @@ function buildFactBaseFilters(
     result.push({ range: { notAdjustFuns: { lte: maximum } } })
   }
   return result
+}
+
+export async function fetchProjectMetricGroupOptions(
+  filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">,
+  deps: ProjectMetricDependencies
+): Promise<string[]> {
+  if (!filters.upperOrgLv1?.length) return []
+  const raw = (await queryProjectMetricEs(deps, "项目组可选项", deps.factIndex, {
+    size: 0,
+    query: {
+      bool: {
+        filter: buildFactBaseFilters(
+          { range: filters.range, upperOrgLv1: filters.upperOrgLv1 },
+          deps.allowedRoomNames
+        )
+      }
+    },
+    aggs: { groups: { terms: { field: "groupName", size: 1000 } } }
+  })) as EsResponse
+  const aggregation = nestedRecord(asRecord(raw.aggregations), "groups")
+  if (asNumber(aggregation.sum_other_doc_count) > 0) {
+    throw new Error("项目组数量超过筛选上限，组列表不完整")
+  }
+  const buckets = Array.isArray(aggregation.buckets) ? aggregation.buckets : []
+  return uniqueSorted(buckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean))
 }
 
 async function fetchLeanSnapshotState(deps: ProjectMetricDependencies): Promise<LeanSnapshotState> {
@@ -310,6 +346,20 @@ function summaryAggs(): Record<string, unknown> {
   return {
     avg_bug_count: { avg: { field: "bugNum" } },
     bug_sample_count: { value_count: { field: "bugNum" } },
+    sum_kenan_issue_count: { sum: { field: "kenanIssueCount" } },
+    kenan_issue_categories: {
+      nested: { path: "kenanIssueCategoryCount" },
+      aggs: {
+        by_category: {
+          terms: {
+            field: "kenanIssueCategoryCount.category",
+            size: 1000,
+            order: { _key: "asc" }
+          },
+          aggs: { issue_count: { sum: { field: "kenanIssueCategoryCount.count" } } }
+        }
+      }
+    },
     avg_function_points: { avg: { field: "notAdjustFuns" } },
     function_point_sample_count: { value_count: { field: "notAdjustFuns" } },
     defect_density_valid: {
@@ -324,6 +374,7 @@ function summaryAggs(): Record<string, unknown> {
       }
     },
     test_lead_valid: durationAgg("createDate", "firstStStartDate"),
+    uat_lead_valid: durationAgg("createDate", "firstUatStartDate"),
     delivery_valid: durationAgg("approvedDate", "firstOnlineDate")
   }
 }
@@ -370,9 +421,21 @@ function parseFactProject(hit: EsHit): FactProject | null {
     roomName: asString(source.roomName),
     groupName: asString(source.groupName),
     bugNum: asNullableNumber(source.bugNum),
+    kenanIssueCount: asNullableNumber(source.kenanIssueCount),
+    kenanIssueCategories: (Array.isArray(source.kenanIssueCategoryCount)
+      ? source.kenanIssueCategoryCount
+      : []
+    )
+      .map((item) => {
+        const category = asRecord(item)
+        return { category: asString(category.category), count: asNumber(category.count) }
+      })
+      .filter((item) => item.category && item.count > 0),
     notAdjustFuns: asNullableNumber(source.notAdjustFuns),
     createDate: asNullableString(source.createDate),
     firstStStartDate: asNullableString(source.firstStStartDate),
+    firstStEndDate: asNullableString(source.firstStEndDate),
+    firstUatStartDate: asNullableString(source.firstUatStartDate),
     firstOnlineDate: asNullableString(source.firstOnlineDate),
     approvedDate: asNullableString(source.approvedDate)
   }
@@ -419,16 +482,39 @@ function parseSummaryGroup(
   const densityBug = asNumber(nestedRecord(density, "sum_bug_count").value)
   const densityFp = asNumber(nestedRecord(density, "sum_function_points").value)
   const testLead = nestedRecord(bucket, "test_lead_valid")
+  const uatLead = nestedRecord(bucket, "uat_lead_valid")
   const delivery = nestedRecord(bucket, "delivery_valid")
   const testLeadSeconds = nullableAggValue(testLead, "avg_seconds")
+  const uatLeadSeconds = nullableAggValue(uatLead, "avg_seconds")
   const deliverySeconds = nullableAggValue(delivery, "avg_seconds")
+  const projectCount = asNumber(bucket.doc_count)
+  const categories = nestedRecord(nestedRecord(bucket, "kenan_issue_categories"), "by_category")
+  if (asNumber(categories.sum_other_doc_count) > 0) {
+    throw new Error("非功能问题类别过多，类别汇总不完整")
+  }
+  const categoryBuckets = Array.isArray(categories.buckets) ? categories.buckets : []
   return {
     developmentMode,
-    projectCount: asNumber(bucket.doc_count),
+    projectCount,
     avgBugCount: nullableAggValue(bucket, "avg_bug_count"),
+    avgKenanIssueCount: ratio(
+      asNumber(nestedRecord(bucket, "sum_kenan_issue_count").value),
+      projectCount,
+      1
+    ),
+    kenanIssueCategories: categoryBuckets
+      .map((item) => {
+        const record = asRecord(item)
+        return {
+          category: asString(record.key),
+          count: asNumber(nestedRecord(record, "issue_count").value)
+        }
+      })
+      .filter((item) => item.category && item.count > 0),
     avgFuncPointCount: nullableAggValue(bucket, "avg_function_points"),
     defectDensityPer100Fp: ratio(densityBug, densityFp, 100),
     avgTestLeadDays: testLeadSeconds === null ? null : testLeadSeconds / 86_400,
+    avgUatLeadDays: uatLeadSeconds === null ? null : uatLeadSeconds / 86_400,
     avgDeliveryDays: deliverySeconds === null ? null : deliverySeconds / 86_400,
     avgInputTokens: developmentMode === "devclaw" ? 0 : null,
     avgOutputTokens: developmentMode === "devclaw" ? 0 : null,
@@ -437,9 +523,11 @@ function parseSummaryGroup(
     outputTokensPerAdoptedLine: developmentMode === "devclaw" ? 0 : null,
     samples: {
       bug: asNumber(nestedRecord(bucket, "bug_sample_count").value),
+      kenanIssue: projectCount,
       functionPoint: asNumber(nestedRecord(bucket, "function_point_sample_count").value),
       defectDensity: asNumber(density.doc_count),
       testLead: asNumber(testLead.doc_count),
+      uatLead: asNumber(uatLead.doc_count),
       delivery: asNumber(delivery.doc_count),
       token: 0,
       codeLines: 0,
@@ -649,6 +737,7 @@ function buildProjectItem(
   const tokens =
     devclaw && tokensByHarness ? sumTokens(snapshot, tokensByHarness, fact.prjCode) : null
   const testLeadMs = millisBetween(fact.createDate, fact.firstStStartDate)
+  const uatLeadMs = millisBetween(fact.createDate, fact.firstUatStartDate)
   const deliveryMs = millisBetween(fact.approvedDate, fact.firstOnlineDate)
   return {
     ...fact,
@@ -660,6 +749,7 @@ function buildProjectItem(
         : null,
     pushedAdoptedLines,
     testLeadDays: testLeadMs === null ? null : testLeadMs / DAY_MS,
+    uatLeadDays: uatLeadMs === null ? null : uatLeadMs / DAY_MS,
     deliveryDays: deliveryMs === null ? null : deliveryMs / DAY_MS,
     totalInputTokens: tokens?.input ?? null,
     totalOutputTokens: tokens?.output ?? null,
@@ -734,7 +824,10 @@ function factSort(options: ProjectMetricListOptions): Record<string, unknown>[] 
       { prjCode: { order: "asc" } }
     ]
   }
-  const field = options.sortBy === "bugNum" ? "bugNum" : "notAdjustFuns"
+  const field =
+    options.sortBy === "bugNum" || options.sortBy === "kenanIssueCount"
+      ? options.sortBy
+      : "notAdjustFuns"
   return [{ [field]: { order, missing: "_last" } }, { prjCode: { order: "asc" } }]
 }
 
@@ -970,6 +1063,7 @@ export function makeMockProjectMetricTrend(
                 ? null
                 : group.defectDensityPer100Fp * factor * factor,
             avgTestLeadDays: group.avgTestLeadDays === null ? null : group.avgTestLeadDays * factor,
+            avgUatLeadDays: group.avgUatLeadDays === null ? null : group.avgUatLeadDays * factor,
             avgDeliveryDays: group.avgDeliveryDays === null ? null : group.avgDeliveryDays * factor,
             avgInputTokens: group.avgInputTokens === null ? null : group.avgInputTokens * factor,
             avgOutputTokens: group.avgOutputTokens === null ? null : group.avgOutputTokens * factor,
@@ -1015,8 +1109,10 @@ export async function fetchProjectMetricProjects(
   const departmentKeywordFilter = buildDepartmentKeywordFilter(options.departmentKeyword)
   if (departmentKeywordFilter) factFilters.push(departmentKeywordFilter)
 
-  const pageSize = normalizePageSize(options.pageSize)
-  const page = normalizePage(options.page, pageSize)
+  const pageSize = options.exportAll
+    ? PROJECT_METRIC_JOIN_KEY_LIMIT
+    : normalizePageSize(options.pageSize)
+  const page = options.exportAll ? 1 : normalizePage(options.page, pageSize)
   const derivedSortBy = isDerivedMetricSort(options.sortBy) ? options.sortBy : null
   const derivedSort = derivedSortBy !== null
   const applicationFiltered = derivedSort || tokenConsumptionFiltered
@@ -1058,7 +1154,9 @@ export async function fetchProjectMetricProjects(
     total: applicationFiltered ? ordered.length : actualTotal,
     page,
     pageSize,
-    truncated: snapshot.truncated || (applicationFiltered && actualTotal > facts.length)
+    truncated:
+      snapshot.truncated ||
+      ((applicationFiltered || Boolean(options.exportAll)) && actualTotal > facts.length)
   }
 }
 
@@ -1072,9 +1170,20 @@ export function makeMockProjectMetricSummary(
         developmentMode: "devclaw",
         projectCount: pluginSelected ? 18 : 42,
         avgBugCount: 6.4,
+        avgKenanIssueCount: 1.5,
+        kenanIssueCategories: pluginSelected
+          ? [
+              { category: "安全", count: 18 },
+              { category: "性能", count: 9 }
+            ]
+          : [
+              { category: "安全", count: 42 },
+              { category: "性能", count: 21 }
+            ],
         avgFuncPointCount: 112.8,
         defectDensityPer100Fp: 5.67,
         avgTestLeadDays: 24.6,
+        avgUatLeadDays: 28.4,
         avgDeliveryDays: 18.2,
         avgInputTokens: 678_571,
         avgOutputTokens: 56_190,
@@ -1083,9 +1192,11 @@ export function makeMockProjectMetricSummary(
         outputTokensPerAdoptedLine: 10.97,
         samples: {
           bug: pluginSelected ? 18 : 42,
+          kenanIssue: pluginSelected ? 18 : 42,
           functionPoint: pluginSelected ? 17 : 40,
           defectDensity: pluginSelected ? 17 : 39,
           testLead: pluginSelected ? 16 : 38,
+          uatLead: pluginSelected ? 15 : 36,
           delivery: pluginSelected ? 16 : 37,
           token: pluginSelected ? 18 : 42,
           codeLines: pluginSelected ? 18 : 42,
@@ -1096,9 +1207,15 @@ export function makeMockProjectMetricSummary(
         developmentMode: "non_devclaw",
         projectCount: 136,
         avgBugCount: 8.9,
+        avgKenanIssueCount: 2,
+        kenanIssueCategories: [
+          { category: "安全", count: 180 },
+          { category: "性能", count: 92 }
+        ],
         avgFuncPointCount: 105.2,
         defectDensityPer100Fp: 8.46,
         avgTestLeadDays: 31.4,
+        avgUatLeadDays: 35.2,
         avgDeliveryDays: 22.8,
         avgInputTokens: null,
         avgOutputTokens: null,
@@ -1107,9 +1224,11 @@ export function makeMockProjectMetricSummary(
         outputTokensPerAdoptedLine: null,
         samples: {
           bug: 136,
+          kenanIssue: 136,
           functionPoint: 129,
           defectDensity: 126,
           testLead: 121,
+          uatLead: 118,
           delivery: 124,
           token: 0,
           codeLines: 0,
@@ -1132,14 +1251,22 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     roomName: "零售基础客群经营开发室(成都)",
     groupName: "经营分析一组",
     bugNum: 6,
+    kenanIssueCount: 3,
+    kenanIssueCategories: [
+      { category: "安全", count: 2 },
+      { category: "性能", count: 1 }
+    ],
     notAdjustFuns: 348.12,
     defectDensityPer100Fp: 1.72,
     pushedAdoptedLines: 6000,
     createDate: "2026-07-06 00:00:00",
     firstStStartDate: "2026-07-27 09:44:49",
+    firstStEndDate: "2026-07-27 10:20:07",
+    firstUatStartDate: "2026-07-31 00:00:00",
     firstOnlineDate: "2026-08-03 00:00:00",
     approvedDate: "2026-07-06 00:00:00",
     testLeadDays: 21.41,
+    uatLeadDays: 25,
     deliveryDays: 28,
     totalInputTokens: 2_400_000,
     totalOutputTokens: 180_000,
@@ -1156,14 +1283,19 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     roomName: "零售客户经营开发室",
     groupName: "经营分析二组",
     bugNum: 3,
+    kenanIssueCount: 1,
+    kenanIssueCategories: [{ category: "性能", count: 1 }],
     notAdjustFuns: 126.5,
     defectDensityPer100Fp: 2.37,
     pushedAdoptedLines: 3000,
     createDate: "2026-07-12 00:00:00",
     firstStStartDate: "2026-07-30 10:00:00",
+    firstStEndDate: "2026-07-31 17:00:00",
+    firstUatStartDate: "2026-08-04 00:00:00",
     firstOnlineDate: "2026-08-08 00:00:00",
     approvedDate: "2026-07-15 00:00:00",
     testLeadDays: 18.42,
+    uatLeadDays: 23,
     deliveryDays: 24,
     totalInputTokens: 1_860_000,
     totalOutputTokens: 142_000,
@@ -1180,14 +1312,19 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     roomName: "渠道应用研发室",
     groupName: "渠道研发一组",
     bugNum: 9,
+    kenanIssueCount: 0,
+    kenanIssueCategories: [],
     notAdjustFuns: null,
     defectDensityPer100Fp: null,
     pushedAdoptedLines: null,
     createDate: "2026-07-18 00:00:00",
     firstStStartDate: "2026-08-02 09:30:00",
+    firstStEndDate: "2026-08-03 17:00:00",
+    firstUatStartDate: null,
     firstOnlineDate: null,
     approvedDate: "2026-07-20 00:00:00",
     testLeadDays: 15.4,
+    uatLeadDays: null,
     deliveryDays: null,
     totalInputTokens: null,
     totalOutputTokens: null,
@@ -1196,6 +1333,18 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     tokensPerAdoptedLine: null
   }
 ]
+
+export function makeMockProjectMetricGroupOptions(
+  filters: Pick<ProjectMetricFilters, "upperOrgLv1">
+): string[] {
+  if (!filters.upperOrgLv1?.length) return []
+  const rooms = new Set(filters.upperOrgLv1)
+  return uniqueSorted(
+    MOCK_PROJECTS.filter((project) => rooms.has(project.roomName)).map(
+      (project) => project.groupName
+    )
+  )
+}
 
 export function makeMockProjectMetricProjects(
   filters: ProjectMetricFilters,
@@ -1207,6 +1356,8 @@ export function makeMockProjectMetricProjects(
   const adapterName = asString(filters.adapterName)
   const tokenConsumptionFiltered = hasTokenConsumptionFilter(filters)
   const filtered = MOCK_PROJECTS.filter((item) => mode === "all" || item.developmentMode === mode)
+    .filter((item) => !filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(item.roomName))
+    .filter((item) => !filters.groupNames?.length || filters.groupNames.includes(item.groupName))
     .filter((item) => !adapterName || item.plugins.includes(adapterName))
     .filter(
       (item) =>
@@ -1241,8 +1392,10 @@ export function makeMockProjectMetricProjects(
     }
     return left.prjCode.localeCompare(right.prjCode)
   })
-  const pageSize = normalizePageSize(options.pageSize)
-  const page = normalizePage(options.page, pageSize)
+  const pageSize = options.exportAll
+    ? PROJECT_METRIC_JOIN_KEY_LIMIT
+    : normalizePageSize(options.pageSize)
+  const page = options.exportAll ? 1 : normalizePage(options.page, pageSize)
   return {
     items: sorted.slice((page - 1) * pageSize, page * pageSize),
     total: sorted.length,

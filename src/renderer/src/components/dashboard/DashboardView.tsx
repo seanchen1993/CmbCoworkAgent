@@ -85,6 +85,7 @@ import {
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
 import { EfficiencyPanel } from "./panels/EfficiencyPanel"
+import { ProjectMetricGroupFilter } from "./panels/ProjectMetricGroupFilter"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
 import { toolRankingCountLabel } from "../../../../shared/dashboard-tool-usage"
@@ -805,13 +806,13 @@ function TimeControlBar({
   }
 
   return (
-    <div className="flex items-center gap-3 px-6 py-3 border-b border-border bg-background/80 backdrop-blur-sm">
+    <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-border bg-background/80 backdrop-blur-sm">
       {/* Granularity tabs */}
-      <div className="flex items-center rounded-lg border border-border overflow-hidden">
+      <div className="flex shrink-0 items-center rounded-lg border border-border overflow-hidden">
         {GRANULARITY_OPTIONS.map((opt) => (
           <button
             key={opt.value}
-            className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`whitespace-nowrap px-3 py-1.5 text-xs font-medium transition-colors ${
               granularity === opt.value
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-muted/50"
@@ -833,7 +834,7 @@ function TimeControlBar({
 
       {/* Navigation arrows (not for custom) */}
       {granularity !== "custom" && (
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           <Button variant="ghost" size="icon-sm" onClick={() => onNavigate("prev")}>
             <ChevronLeft className="size-4" />
           </Button>
@@ -848,7 +849,7 @@ function TimeControlBar({
 
       {/* Custom date picker */}
       {granularity === "custom" && showDatePicker && (
-        <div className="flex flex-col gap-1">
+        <div className="flex shrink-0 flex-col gap-1">
           <div className="flex items-center gap-2">
             <input
               type="date"
@@ -888,7 +889,7 @@ function TimeControlBar({
       )}
 
       {granularity === "custom" && !showDatePicker && (
-        <span className="text-xs text-foreground font-medium">
+        <span className="shrink-0 whitespace-nowrap text-xs text-foreground font-medium">
           {formatRangeLabel(range.from, range.to, granularity)}
           <button className="ml-2 text-primary underline" onClick={() => setShowDatePicker(true)}>
             修改
@@ -904,7 +905,7 @@ function TimeControlBar({
       <Button
         variant="ghost"
         size="sm"
-        className="gap-1.5 text-xs"
+        className="shrink-0 gap-1.5 text-xs"
         onClick={onRefresh}
         disabled={loading}
       >
@@ -976,7 +977,7 @@ function OrgFilterBar({
         : `已选 ${value.length} 个室`
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
       <Building2 className="size-3.5 text-muted-foreground" />
       <span className="text-xs text-muted-foreground">室筛选</span>
       <Popover open={open} onOpenChange={setOpen}>
@@ -2772,6 +2773,10 @@ export function DashboardView(): React.JSX.Element {
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,
     selectProjectModeCodeSource,
+    knowledgeCommitRate,
+    knowledgeCommitRateLoading,
+    knowledgeCommitRateError,
+    fetchKnowledgeCommitRate,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,
@@ -2791,6 +2796,44 @@ export function DashboardView(): React.JSX.Element {
   const [exporting, setExporting] = useState(false)
   const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
+  const [projectModeAllowed, setProjectModeAllowed] = useState(false)
+  const [selectedGroupNames, setSelectedGroupNames] = useState<string[]>([])
+  const [groupOptions, setGroupOptions] = useState<string[]>([])
+  const [groupOptionsLoading, setGroupOptionsLoading] = useState(false)
+  const [groupOptionsError, setGroupOptionsError] = useState<string | null>(null)
+  useEffect(() => {
+    setSelectedGroupNames([])
+    setGroupOptions([])
+  }, [selectedOrgLv1List])
+  useEffect(() => {
+    if (activeMainTab !== "efficiency" || !projectModeAllowed || selectedOrgLv1List.length === 0) {
+      setGroupOptionsLoading(false)
+      return
+    }
+    let cancelled = false
+    setGroupOptionsLoading(true)
+    setGroupOptionsError(null)
+    void window.api.dashboard
+      .projectMetricGroupOptions({ range, upperOrgLv1: selectedOrgLv1List })
+      .then((result) => {
+        if (cancelled) return
+        if (!result.success) throw new Error(result.error || "获取项目组失败")
+        const options = result.data ?? []
+        setGroupOptions(options)
+        setSelectedGroupNames((current) => current.filter((group) => options.includes(group)))
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setGroupOptions([])
+        setGroupOptionsError(error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        if (!cancelled) setGroupOptionsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeMainTab, projectModeAllowed, projectMetricRefreshKey, range, selectedOrgLv1List])
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
   const [traceEvolverReviewAdmin, setTraceEvolverReviewAdmin] = useState(false)
@@ -2813,7 +2856,6 @@ export function DashboardView(): React.JSX.Element {
       analysisRevealClicksRef.current = 0
     }, 600)
   }, [])
-  const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   // 评奖辅助看板访问门禁（仅 DASHBOARD_AWARDS_ADMIN 名单）。
   const [awardsAdmin, setAwardsAdmin] = useState(false)
   // 技能评估 tab 访问门禁（仅 DASHBOARD_SKILL_EVAL 白名单）。
@@ -3142,6 +3184,12 @@ export function DashboardView(): React.JSX.Element {
     fromLeanProjectsOnly,
     createdInRangeProjectsOnly
   ])
+
+  // 「知识文档入库率」只随时间范围 / 室筛选变化，不挂「仅精益项目」「仅本期新建」开关。
+  useEffect(() => {
+    if (activeMainTab !== "project-mode" || !projectModeAllowed) return
+    void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
+  }, [activeMainTab, fetchKnowledgeCommitRate, projectModeAllowed, range, selectedOrgLv1List])
 
   // 研发效能 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
   // 不挂「仅精益项目」开关——该范围在后端固定，不随开关变化。
@@ -3724,6 +3772,7 @@ export function DashboardView(): React.JSX.Element {
         fromLeanProjectsOnly,
         createdInRangeProjectsOnly
       )
+      void fetchKnowledgeCommitRate(range, selectedOrgLv1List)
     }
     if (activeMainTab === "efficiency") {
       void fetchEfficiency(range, selectedOrgLv1List)
@@ -3733,6 +3782,7 @@ export function DashboardView(): React.JSX.Element {
     activeMainTab,
     clearSkillEval,
     fetchProjectMode,
+    fetchKnowledgeCommitRate,
     fetchEfficiency,
     granularity,
     range,
@@ -5110,12 +5160,28 @@ export function DashboardView(): React.JSX.Element {
         }
         orgFilter={
           subPage.kind === "main" ? (
-            <OrgFilterBar
-              value={selectedOrgLv1List}
-              options={orgOptions}
-              loading={loading}
-              onChange={setOrgFilter}
-            />
+            <>
+              <OrgFilterBar
+                value={selectedOrgLv1List}
+                options={orgOptions}
+                loading={loading}
+                onChange={(rooms) => {
+                  setSelectedGroupNames([])
+                  setGroupOptions([])
+                  setOrgFilter(rooms)
+                }}
+              />
+              {activeMainTab === "efficiency" && projectModeAllowed ? (
+                <ProjectMetricGroupFilter
+                  value={selectedGroupNames}
+                  options={groupOptions}
+                  loading={groupOptionsLoading}
+                  disabled={selectedOrgLv1List.length === 0}
+                  error={groupOptionsError}
+                  onChange={setSelectedGroupNames}
+                />
+              ) : null}
+            </>
           ) : null
         }
       />
@@ -5274,6 +5340,9 @@ export function DashboardView(): React.JSX.Element {
                 codeStatsOverride={projectModeCodeStatsOverride}
                 codeStatsLoading={projectModeCodeStatsLoading}
                 onCodeSourceChange={selectProjectModeCodeSource}
+                knowledgeCommitRate={knowledgeCommitRate}
+                knowledgeCommitRateLoading={knowledgeCommitRateLoading}
+                knowledgeCommitRateError={knowledgeCommitRateError}
                 headerAction={
                   <div className="flex items-center gap-2">
                     <Button
@@ -5358,6 +5427,7 @@ export function DashboardView(): React.JSX.Element {
               error={efficiencyError}
               range={range}
               upperOrgLv1={selectedOrgLv1List}
+              groupNames={selectedGroupNames}
               projectMetricRefreshKey={projectMetricRefreshKey}
             />
           ) : (

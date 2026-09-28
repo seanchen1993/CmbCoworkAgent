@@ -1,3 +1,4 @@
+import { assertHarnessConfigAvailable, FEATURE_V2_FILE } from "./config-v2"
 import { join } from "node:path"
 import type { Worker } from "node:worker_threads"
 import { getOpenworkDir } from "../storage"
@@ -76,6 +77,8 @@ export class HarnessCatalogClient {
   }
 
   private async getWorker(): Promise<Worker> {
+    // Main-process availability is checked for every request, including a reused worker instance.
+    assertHarnessConfigAvailable()
     if (this.closing) throw new Error("Harness catalog worker client is closing")
     if (this.worker) return this.worker
     if (this.workerPromise) return this.workerPromise
@@ -194,11 +197,7 @@ export class HarnessCatalogClient {
           ...(options.featureSlug
             ? {
                 featureSlug: options.featureSlug,
-                featureBindingStorePath: join(openworkDir, "harness-board-features.json"),
-                deployUnitMappingStorePath: join(
-                  openworkDir,
-                  "harness-deployUnitId-mapping.json"
-                )
+                featureBindingStorePath: join(openworkDir, FEATURE_V2_FILE)
               }
             : {}),
           maxResponseBytes: HARNESS_CATALOG_MAX_RESPONSE_BYTES,

@@ -94,7 +94,8 @@ export async function resolveHarnessNextActionSkill(
     availableSkills,
     pluginSkills,
     new Set(disabledList.map(normalizeSkillId)),
-    preferredPlugin
+    preferredPlugin,
+    true
   )
-  return selectSkillForSlashName(merged, slashSkill, preferredPlugin)
+  return selectSkillForSlashName(merged, slashSkill, preferredPlugin, true)
 }

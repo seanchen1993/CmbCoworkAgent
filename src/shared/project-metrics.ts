@@ -3,6 +3,7 @@ export type ProjectMetricDevelopmentMode = "devclaw" | "non_devclaw"
 export interface ProjectMetricFilters {
   range: { from: string; to: string }
   upperOrgLv1?: string[]
+  groupNames?: string[]
   phaseStatuses?: string[]
   functionPointMin?: number | null
   functionPointMax?: number | null
@@ -12,6 +13,7 @@ export interface ProjectMetricFilters {
 }
 
 export interface ProjectMetricListOptions {
+  exportAll?: boolean
   developmentMode?: "all" | ProjectMetricDevelopmentMode
   keyword?: string
   departmentKeyword?: string
@@ -20,6 +22,7 @@ export interface ProjectMetricListOptions {
   sortBy?:
     | "deliveryDays"
     | "bugNum"
+    | "kenanIssueCount"
     | "notAdjustFuns"
     | "pushedAdoptedLines"
     | "tokensPerAdoptedLine"
@@ -28,22 +31,32 @@ export interface ProjectMetricListOptions {
 
 export interface ProjectMetricSamples {
   bug: number
+  kenanIssue: number
   functionPoint: number
   defectDensity: number
   testLead: number
+  uatLead: number
   delivery: number
   token: number
   codeLines: number
   tokensPerLine: number
 }
 
+export interface ProjectMetricIssueCategoryCount {
+  category: string
+  count: number
+}
+
 export interface ProjectMetricSummaryGroup {
   developmentMode: ProjectMetricDevelopmentMode
   projectCount: number
   avgBugCount: number | null
+  avgKenanIssueCount: number | null
+  kenanIssueCategories: ProjectMetricIssueCategoryCount[]
   avgFuncPointCount: number | null
   defectDensityPer100Fp: number | null
   avgTestLeadDays: number | null
+  avgUatLeadDays: number | null
   avgDeliveryDays: number | null
   avgInputTokens: number | null
   avgOutputTokens: number | null
@@ -79,14 +92,19 @@ export interface ProjectMetricProjectItem {
   roomName: string
   groupName: string
   bugNum: number | null
+  kenanIssueCount: number | null
+  kenanIssueCategories: ProjectMetricIssueCategoryCount[]
   notAdjustFuns: number | null
   defectDensityPer100Fp: number | null
   pushedAdoptedLines: number | null
   createDate: string | null
   firstStStartDate: string | null
+  firstStEndDate: string | null
+  firstUatStartDate: string | null
   firstOnlineDate: string | null
   approvedDate: string | null
   testLeadDays: number | null
+  uatLeadDays: number | null
   deliveryDays: number | null
   totalInputTokens: number | null
   totalOutputTokens: number | null

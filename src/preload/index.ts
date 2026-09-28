@@ -15,7 +15,7 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
+import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 import type {
   Thread,
   Message,
@@ -155,6 +155,7 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
@@ -286,6 +287,7 @@ const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed
 const GIT_CHANGE_NOTICE_GET_CHANNEL = "app:get-git-change-notice-enabled"
 const GIT_CHANGE_NOTICE_SET_CHANNEL = "app:set-git-change-notice-enabled"
 const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_TOOL_STRATEGY_SET_CHANNEL = "app:set-agent-tool-strategy"
 const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
 const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
@@ -355,6 +357,8 @@ const electronAPI = {
     ipcRenderer.invoke(GIT_CHANGE_NOTICE_SET_CHANNEL, enabled) as Promise<boolean>,
   getAgentRuntimeSettings: (): Promise<AgentRuntimeSettings> =>
     ipcRenderer.invoke(AGENT_RUNTIME_SETTINGS_GET_CHANNEL) as Promise<AgentRuntimeSettings>,
+  setAgentToolStrategy: (value: AgentToolStrategy): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(AGENT_TOOL_STRATEGY_SET_CHANNEL, value) as Promise<AgentRuntimeSettings>,
   setAgentRuntimeRecursionLimit: (value: number): Promise<AgentRuntimeSettings> =>
     ipcRenderer.invoke(
       AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
@@ -3967,11 +3971,20 @@ const api = {
       source: string | null
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
+    knowledgeCommitRate: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:knowledgeCommitRate", range, opts),
     efficiency: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:efficiency", range, opts),
+    projectMetricGroupOptions: (
+      filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
+    ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricGroupOptions", filters),
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -4381,17 +4394,17 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
-    getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
+    getDeployUnitMappings: (): Promise<HarnessDeployUnitConfig[]> =>
       ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
-        HarnessDeployUnitMapping[]
+        HarnessDeployUnitConfig[]
       >,
     getLeanTokenConfig: (): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke("harnessBoard:getLeanTokenConfig") as Promise<HarnessLeanTokenConfig>,
     saveDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ): Promise<HarnessDeployUnitMapping[]> =>
+      mappings: HarnessDeployUnitConfig[]
+    ): Promise<HarnessDeployUnitConfig[]> =>
       ipcRenderer.invoke("harnessBoard:saveDeployUnitMappings", mappings) as Promise<
-        HarnessDeployUnitMapping[]
+        HarnessDeployUnitConfig[]
       >,
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke(

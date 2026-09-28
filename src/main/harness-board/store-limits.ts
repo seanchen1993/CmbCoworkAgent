@@ -3,6 +3,8 @@ export const HARNESS_PROJECT_STORE_MAX_PROJECTS = 2_048
 export const HARNESS_PROJECT_TEXT_MAX_CHARS = 8 * 1024
 export const HARNESS_PROJECT_PATH_MAX_CHARS = 8 * 1024
 export const HARNESS_PROJECT_DESCRIPTION_MAX_CHARS = 16 * 1024
+export const HARNESS_CONFIG_V2_STORE_MAX_BYTES = 2 * 1024 * 1024
+export const HARNESS_FEATURE_BINDING_MAX_ENTRIES = 4_096
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)
@@ -53,7 +55,6 @@ export function assertHarnessProjectFieldBudgets(value: unknown): void {
   for (const [label, field] of [
     ["Harness project workspace path", value.workspacePath],
     ["Harness legacy project workspace path", oldWorkspace.path],
-    ["Harness project session workspace path", value.sessionWorkspacePath],
     ["Harness project creator pathName", creator.pathName]
   ] as const) {
     assertStringBudget(field, HARNESS_PROJECT_PATH_MAX_CHARS, label)

@@ -383,7 +383,8 @@ describe("application catalog cache", () => {
       skill(`plugin-${index}`, {
         id: `plugin-${index}`,
         pluginId: index % 2 === 0 ? "bound" : "other",
-        pluginName: index % 2 === 0 ? "Bound" : "Other"
+        pluginName: index % 2 === 0 ? "Bound" : "Other",
+        isProjectModePlugin: true
       })
     )
     const snapshot = await revalidateSkillCatalog("version-a", async () => ({
@@ -415,6 +416,39 @@ describe("application catalog cache", () => {
       disabledSkillIds: []
     }))
     expect(next).not.toBe(snapshot)
+  })
+
+  it("keeps non-project plugin skills visible in a harness projection", async () => {
+    const snapshot = await revalidateSkillCatalog("mixed-plugin-mode", async () => ({
+      localSkills: [],
+      pluginSkills: [
+        skill("bound-project", {
+          pluginId: "bound",
+          pluginName: "Bound",
+          isProjectModePlugin: true
+        }),
+        skill("other-project", {
+          pluginId: "other",
+          pluginName: "Other",
+          isProjectModePlugin: true
+        }),
+        skill("other-shared", {
+          pluginId: "other",
+          pluginName: "Other",
+          isProjectModePlugin: false
+        })
+      ],
+      disabledSkillIds: []
+    }))
+
+    const unresolved = projectChatSkillCatalog(snapshot, { harnessScoped: true })
+    expect(unresolved.skills.map((item) => item.name)).toEqual(["other-shared"])
+
+    const bound = projectChatSkillCatalog(snapshot, {
+      harnessScoped: true,
+      preferredPlugin: { id: "bound" }
+    })
+    expect(bound.skills.map((item) => item.name)).toEqual(["bound-project", "other-shared"])
   })
 
   it("dedupes plugin and market catalogs for same-version panel remounts", async () => {

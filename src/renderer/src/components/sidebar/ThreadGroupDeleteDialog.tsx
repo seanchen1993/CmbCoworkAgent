@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button"
+import type { ThreadGroupDeletionProgress } from "@/lib/thread-group-deletion"
 import {
   Dialog,
   DialogContent,
@@ -13,6 +14,7 @@ interface ThreadGroupDeleteDialogProps {
   title: string
   description: string
   confirming?: boolean
+  progress?: ThreadGroupDeletionProgress | null
   onOpenChange: (open: boolean) => void
   onConfirm: () => void
 }
@@ -22,6 +24,7 @@ export function ThreadGroupDeleteDialog({
   title,
   description,
   confirming = false,
+  progress,
   onOpenChange,
   onConfirm
 }: ThreadGroupDeleteDialogProps): React.JSX.Element {
@@ -32,6 +35,11 @@ export function ThreadGroupDeleteDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
+        <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
+          {confirming && progress
+            ? `已处理 ${progress.completed}/${progress.total}，已删除 ${progress.deleted}，已跳过 ${progress.skipped}`
+            : "运行中或删除失败的会话将保留，其余会话继续删除。"}
+        </p>
         <DialogFooter>
           <Button variant="outline" disabled={confirming} onClick={() => onOpenChange(false)}>
             取消

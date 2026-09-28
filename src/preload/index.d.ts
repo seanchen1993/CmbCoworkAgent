@@ -1,5 +1,6 @@
 import type { DashboardToolUsageCoverage } from "../shared/dashboard-tool-usage"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
+import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
 import type {
   AppNotification,
   AppDecisionInput,
@@ -122,6 +123,7 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitConfig,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
@@ -211,7 +213,7 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
-import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
+import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -232,6 +234,7 @@ interface ElectronAPI {
   getGitChangeNoticeEnabled: () => Promise<boolean>
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
+  setAgentToolStrategy: (value: AgentToolStrategy) => Promise<AgentRuntimeSettings>
   setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
@@ -2696,10 +2699,17 @@ interface CustomAPI {
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
+    knowledgeCommitRate: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: DashboardKnowledgeCommitRate; error?: string }>
     efficiency: (
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
+    projectMetricGroupOptions: (
+      filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
+    ) => Promise<{ success: boolean; data?: string[]; error?: string }>
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>
@@ -2981,11 +2991,11 @@ interface CustomAPI {
     }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
-    getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
+    getDeployUnitMappings: () => Promise<HarnessDeployUnitConfig[]>
     getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
     saveDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ) => Promise<HarnessDeployUnitMapping[]>
+      mappings: HarnessDeployUnitConfig[]
+    ) => Promise<HarnessDeployUnitConfig[]>
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>

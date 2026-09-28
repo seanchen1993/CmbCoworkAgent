@@ -901,6 +901,7 @@ export interface SubagentFocusView {
   subagentId: string
   name: string
   description: string
+  startedAt?: Date
   status?: "pending" | "running" | "completed" | "failed" | "cancelled"
 }
 

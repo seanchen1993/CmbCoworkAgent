@@ -15,6 +15,7 @@ import {
 } from "./card-interaction-store"
 import { getThread } from "../../db"
 import { trackEvent } from "../event-reporter"
+import { imConversationStateStore } from "./conversation-state"
 import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
 
 /**
@@ -44,11 +45,11 @@ function reportCardDelivered(
 /**
  * Publishes interaction cards, and never lets one fail loudly.
  *
- * Every caller has already queued the durable text notice with its short code
- * before reaching here. A card that cannot be built, sent or updated therefore
- * costs the reader a nicer affordance and nothing else — so this module reports
- * failure by returning null and logging, never by throwing into a gate's
- * publication path where it could strand a run that waits forever.
+ * Callers retain a durable text notice with its short code as a fallback. A
+ * card that cannot be built, sent or updated therefore costs the reader a nicer
+ * affordance and nothing else — so this module reports failure by returning
+ * null and logging, never by throwing into a gate's publication path where it
+ * could strand a run that waits forever.
  */
 
 type CardWarn = (message: string, error?: unknown) => void
@@ -57,6 +58,8 @@ interface CardPublisherDependencies {
   gateway: ImGatewayClientPort
   interactions: ImCardInteractionStore
   isThreadLive: (threadId: string) => boolean
+  /** True when the reader chose text notices for this conversation (/文字模式). */
+  usesTextReplies: (conversationKey: string) => boolean
   createIdempotencyKey: () => string
   warn: CardWarn
 }
@@ -74,6 +77,9 @@ export class ImCardPublisher {
       gateway: overrides.gateway ?? unavailableImGatewayClient,
       interactions: overrides.interactions ?? imCardInteractionStore,
       isThreadLive: overrides.isThreadLive ?? ((threadId) => Boolean(getThread(threadId))),
+      usesTextReplies:
+        overrides.usesTextReplies ??
+        ((conversationKey) => imConversationStateStore.getReplyMode(conversationKey) === "text"),
       createIdempotencyKey:
         overrides.createIdempotencyKey ??
         (() => `card:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`),
@@ -87,6 +93,16 @@ export class ImCardPublisher {
 
   get interactions(): ImCardInteractionStore {
     return this.dependencies.interactions
+  }
+
+  private readsAsText(conversationKey: string): boolean {
+    try {
+      return this.dependencies.usesTextReplies(conversationKey)
+    } catch (error) {
+      // An unreadable preference falls back to the default, which is the card.
+      this.dependencies.warn("Zhaohu reply mode could not be read; sending the card.", error)
+      return false
+    }
   }
 
   /**
@@ -118,6 +134,14 @@ export class ImCardPublisher {
     // in the store before its first await, or a terminal update racing the send
     // finds nothing to address and the card's real outcome is lost.
     void this.retryPendingClosures()
+    // The reader chose text for this conversation (/文字模式). Null is the same
+    // answer a refused card gets, so every caller falls back to the text notice
+    // it already builds — that fallback is the whole of text mode, for all five
+    // kinds at once. Checked after the upkeep above, because cards sent before
+    // the switch still need their closures retried; and synchronously, so the
+    // first await still comes after register. Not reported as a failed card:
+    // no card was attempted.
+    if (this.readsAsText(input.conversationKey)) return null
     const interaction = this.dependencies.interactions.register({
       kind: input.kind,
       threadId: input.threadId,

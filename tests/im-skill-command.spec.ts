@@ -46,6 +46,9 @@ function skill(
     version: "v1.0.0",
     pluginId: input.pluginId,
     pluginName: input.pluginName,
+    ...(input.isProjectModePlugin === undefined
+      ? {}
+      : { isProjectModePlugin: input.isProjectModePlugin }),
     metadata: input.metadata,
     allowedTools: input.allowedTools
   }
@@ -145,13 +148,22 @@ async function testProjectPluginScopeAndUnknownCompatibility(): Promise<void> {
         name: "bound",
         path: "/tmp/im-skill-catalog/bound/SKILL.md",
         pluginId: "plugin-a",
-        pluginName: "插件 A"
+        pluginName: "插件 A",
+        isProjectModePlugin: true
       }),
       skill({
         name: "foreign",
         path: "/tmp/im-skill-catalog/foreign/SKILL.md",
         pluginId: "plugin-b",
-        pluginName: "插件 B"
+        pluginName: "插件 B",
+        isProjectModePlugin: true
+      }),
+      skill({
+        name: "shared",
+        path: "/tmp/im-skill-catalog/shared/SKILL.md",
+        pluginId: "plugin-b",
+        pluginName: "插件 B",
+        isProjectModePlugin: false
       })
     ]
   })
@@ -162,6 +174,9 @@ async function testProjectPluginScopeAndUnknownCompatibility(): Promise<void> {
   const foreign = await commands.prepareForExecution({ message: "/foreign 执行", target: TARGET })
   assert.equal(foreign.explicitSkill, undefined)
   assert.equal(foreign.visibleText, "/foreign 执行")
+
+  const shared = await commands.prepareForExecution({ message: "/shared 执行", target: TARGET })
+  assert.equal(shared.explicitSkill?.name, "shared")
 }
 
 async function testMarkerSpoofAndSlashEscape(): Promise<void> {

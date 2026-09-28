@@ -20,15 +20,23 @@ import {
   assertRemoteImCardUpdateV1,
   type RemoteImCardReceiptV1,
   type RemoteImCardSendV1,
-  type RemoteImCardUpdateV1
+  type RemoteImCardUpdateV1,
+  type RemoteImReplyV1
 } from "../src/shared/im-gateway-contract"
 import {
+  BIZ_RETRY_CHOICE_KEY,
+  BIZ_RETRY_MESSAGE_KEY,
   buildAnsweredCard,
   buildApprovalCard,
+  buildBizRetryCard,
+  buildBoundCard,
   buildExpiredCard,
+  buildHarnessDecisionResolvedCard,
+  buildHumanGateCard,
   buildQuestionCard,
   buildResolvedCard,
   buildTargetBindCard,
+  IM_CARD_TEXT_MODE_HINT,
   QUESTION_OTHER_SUFFIX,
   TARGET_BIND_MODE_INHERIT,
   TARGET_BIND_MODE_KEY,
@@ -45,7 +53,9 @@ import type { ImPersistenceDependencies } from "../src/main/services/im/persiste
 import { ImRemoteApprovalAuditStore } from "../src/main/services/im/remote-approval-audit-store"
 import { ImRemoteApprovalService } from "../src/main/services/im/remote-approval-service"
 import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
+import { buildImProactiveReplies } from "../src/main/services/im/reply-segmentation"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
+import { ImWithheldTextNotices } from "../src/main/services/im/withheld-text-notices"
 
 const ROUTE = { principalId: "principal-1", conversationKey: "conversation-1" }
 
@@ -407,8 +417,7 @@ async function testAnUnsendableCardLeavesTheShortCodeWorking(): Promise<void> {
     // after it — which is the whole point of waiting for the outbox here rather
     // than reading it the moment the send is observed.
     await waitFor(
-      () =>
-        context.events.listOutbox().some((row) => row.deliveryId === "approval-request:req-1"),
+      () => context.events.listOutbox().some((row) => row.deliveryId === "approval-request:req-1"),
       "the fallback notice"
     )
     // The gate is still answerable: no interaction is retained, and the refused
@@ -581,6 +590,42 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
         outcome: "已回答"
       })
     ],
+    [
+      "human gate",
+      buildHumanGateCard({
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        message: "请检查阶段产物",
+        tag: "tag"
+      })
+    ],
+    [
+      "biz retry",
+      buildBizRetryCard({
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        reason: "业务状态未推进",
+        stageName: "开发",
+        stageStatus: "in_progress",
+        contextUsage: "42%",
+        assistantTail: "等待用户决定",
+        nextActionText: "可创建新会话继续",
+        tag: "tag"
+      })
+    ],
+    [
+      "harness resolved",
+      buildHarnessDecisionResolvedCard({
+        kind: "human_gate",
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        outcome: "已批准（桌面）",
+        outcomeStyle: "approved"
+      })
+    ],
     ["expired", buildExpiredCard("approval", "会话：你好")]
   ]
 
@@ -589,7 +634,10 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
     assert.ok(kvComponents.length > 0, `${name} card is expected to carry a kv component`)
     for (const kv of kvComponents) {
       const rows = kv.list as ReadonlyArray<{ title: unknown; value: unknown }>
-      assert.ok(Array.isArray(rows) && rows.length > 0, `${name}: kv.list must be a non-empty array`)
+      assert.ok(
+        Array.isArray(rows) && rows.length > 0,
+        `${name}: kv.list must be a non-empty array`
+      )
       for (const row of rows) {
         assert.equal(typeof row.title, "string", `${name}: kv row title must be a string`)
         // The client puts nothing between key and value, so the key carries the
@@ -616,6 +664,106 @@ function testEveryKvRowIsShapedTheWayTheClientParses(): void {
     }
   }
   console.log("PASS testEveryKvRowIsShapedTheWayTheClientParses")
+}
+
+/**
+ * Every card that waits on the reader says what to do when it is cut short,
+ * and says it where the cut does not reach.
+ *
+ * Only the reader can see that the client shortened a card, so the pointer to
+ * /文字模式 has to be on the card itself — directly under the header of title,
+ * status and source, because everything after that is body, and the body is
+ * what runs long. A finished card goes without: its request is over, and the
+ * switch would re-send nothing for it.
+ */
+function testEveryPendingCardPointsAtTextModeAboveItsBody(): void {
+  const isHint = (component: CardComponent): boolean =>
+    component.type === "content" &&
+    (component.list as ReadonlyArray<{ content: string }>).some(
+      (line) => line.content === IM_CARD_TEXT_MODE_HINT
+    )
+  const context = { projectName: "支付项目", featureName: "快捷支付", threadTitle: "实现会话" }
+  const pending: Array<[string, CardComponent[]]> = [
+    [
+      "approval",
+      buildApprovalCard({
+        targetLabel: "会话：你好",
+        operation: "写文件",
+        detail: "src/a.ts",
+        tag: "tag",
+        allowedDecisions: ["approve", "reject"]
+      })
+    ],
+    [
+      "question",
+      buildQuestionCard({
+        targetLabel: "会话：你好",
+        tag: "tag",
+        questions: [
+          { key: "q0", header: "标题", question: "问题？", options: [{ label: "甲" }] },
+          // Answered rows are body too; the pointer stays above them.
+          { key: "q1", header: "已答", question: "问题？", options: [], answered: true }
+        ]
+      })
+    ],
+    ["human gate", buildHumanGateCard({ ...context, message: "请检查阶段产物", tag: "tag" })],
+    [
+      "biz retry",
+      buildBizRetryCard({
+        ...context,
+        reason: "业务状态未推进",
+        stageName: "开发",
+        stageStatus: "in_progress",
+        contextUsage: "42%",
+        assistantTail: "等待用户决定",
+        nextActionText: "可创建新会话继续",
+        tag: "tag"
+      })
+    ]
+  ]
+  for (const [name, components] of pending) {
+    assert.equal(components.filter(isHint).length, 1, `${name}: point at /文字模式 exactly once`)
+    assert.deepEqual(
+      components.slice(0, components.findIndex(isHint)).map((component) => component.type),
+      ["title", "status", "kv"],
+      `${name}: the pointer must sit right under the header, above anything that runs long`
+    )
+  }
+
+  const finished: Array<[string, CardComponent[]]> = [
+    [
+      "resolved",
+      buildResolvedCard({
+        targetLabel: "会话：你好",
+        operation: "写文件",
+        outcome: "已批准",
+        outcomeStyle: "approved"
+      })
+    ],
+    [
+      "answered",
+      buildAnsweredCard({
+        targetLabel: "会话：你好",
+        answers: [{ header: "标题", answer: "甲" }],
+        outcome: "已回答"
+      })
+    ],
+    [
+      "harness resolved",
+      buildHarnessDecisionResolvedCard({
+        ...context,
+        kind: "biz_retry",
+        outcome: "已停止托管（招乎）",
+        outcomeStyle: "neutral"
+      })
+    ],
+    ["expired", buildExpiredCard("approval", "会话：你好")],
+    ["bound", buildBoundCard({ targetLabel: "会话：你好", outcome: "已切换" })]
+  ]
+  for (const [name, components] of finished) {
+    assert.ok(!components.some(isHint), `${name}: nothing on a finished card is re-sent`)
+  }
+  console.log("PASS testEveryPendingCardPointsAtTextModeAboveItsBody")
 }
 
 /**
@@ -737,6 +885,44 @@ function testEveryBuiltCardSatisfiesTheContract(): void {
     }
   ])
 
+  for (const [kind, content] of [
+    [
+      "human_gate",
+      buildHumanGateCard({
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        message: "请检查阶段产物",
+        tag: "h".repeat(32)
+      })
+    ],
+    [
+      "biz_retry",
+      buildBizRetryCard({
+        projectName: "支付项目",
+        featureName: "快捷支付",
+        threadTitle: "实现会话",
+        reason: "业务状态未推进",
+        stageName: "开发",
+        stageStatus: "in_progress",
+        contextUsage: "42%",
+        assistantTail: "等待用户决定",
+        nextActionText: "可创建新会话继续",
+        tag: "i".repeat(32)
+      })
+    ]
+  ] as const) {
+    assertRemoteImCardSendV1({
+      schemaVersion: 1,
+      interactionId: `interaction-${kind}`,
+      conversationKey: ROUTE.conversationKey,
+      idempotencyKey: `idem-${kind}`,
+      tag: kind === "human_gate" ? "h".repeat(32) : "i".repeat(32),
+      kind,
+      content
+    })
+  }
+
   // Zhaohu 6.22 shows 30 controls, and the tool caps questions at 10 — two per
   // question, so the count is never the binding limit. Size is: 10 questions
   // with five fully-described options each is past the 15000-character cap.
@@ -750,7 +936,7 @@ function testEveryBuiltCardSatisfiesTheContract(): void {
           key: `q${index}`,
           header: "题".repeat(12),
           question: "问".repeat(500),
-          options: Array.from({ length: 5 }, (_ignored, option) => ({
+          options: Array.from({ length: 5 }, () => ({
             label: "选".repeat(80),
             description: "述".repeat(240)
           }))
@@ -760,6 +946,199 @@ function testEveryBuiltCardSatisfiesTheContract(): void {
     "the largest form the question tool can ask for must be refused locally, not sent"
   )
   console.log("PASS testEveryBuiltCardSatisfiesTheContract")
+}
+
+async function testProjectDecisionReceiptsUseTheirExistingAdapters(): Promise<void> {
+  const interactions = new ImCardInteractionStore(
+    (() => {
+      let sequence = 0
+      return () => `project-interaction-${++sequence}`
+    })()
+  )
+  const gateway = new RecordingGateway()
+  const cards = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions,
+    isThreadLive: () => true,
+    warn: () => undefined
+  })
+  const humanCalls: unknown[] = []
+  const bizCalls: unknown[] = []
+  const replies: Array<{ deliveryId: string; text: string }> = []
+  const human = interactions.register({
+    kind: "human_gate",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "gate-1",
+    targetLabel: "特性：快捷支付"
+  })
+  const rejectedHuman = interactions.register({
+    kind: "human_gate",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "gate-2",
+    targetLabel: "特性：快捷支付"
+  })
+  const failedHuman = interactions.register({
+    kind: "human_gate",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "gate-3",
+    targetLabel: "特性：快捷支付"
+  })
+  const retry = interactions.register({
+    kind: "biz_retry",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "retry-1",
+    targetLabel: "特性：快捷支付"
+  })
+  const failedRetry = interactions.register({
+    kind: "biz_retry",
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "retry-2",
+    targetLabel: "特性：快捷支付"
+  })
+  const router = new ImCardReceiptRouter({
+    cards,
+    approvals: { resolveCardClick: async () => "unused" },
+    userInput: { resolveCardAnswers: async () => "unused" },
+    humanGates: {
+      resolveCardDecision: async (input) => {
+        humanCalls.push(input)
+        return input.notificationId === "gate-3" ? "该决策已处理或当前渠道已失效。" : null
+      }
+    },
+    managedBizRetries: {
+      resolveCardDecision: async (input) => {
+        bizCalls.push(input)
+        return input.notificationId === "retry-2" ? "该决策已处理或当前渠道已失效。" : null
+      }
+    },
+    events: {
+      enqueueProactiveReplies: async (rows) => {
+        replies.push(
+          ...rows.map((row) => ({ deliveryId: row.deliveryId, text: row.message.content }))
+        )
+        return []
+      }
+    },
+    warn: () => undefined
+  })
+
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-human-gate",
+    interactionId: human.interactionId,
+    kind: "human_gate",
+    tag: `${human.tag}:approve`,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-human-gate-reject",
+    interactionId: rejectedHuman.interactionId,
+    kind: "human_gate",
+    tag: `${rejectedHuman.tag}:reject`,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-human-gate-failed",
+    interactionId: failedHuman.interactionId,
+    kind: "human_gate",
+    tag: `${failedHuman.tag}:approve`,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-biz-retry",
+    interactionId: retry.interactionId,
+    kind: "biz_retry",
+    tag: retry.tag,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [
+      { key: BIZ_RETRY_CHOICE_KEY, value: "continue" },
+      { key: BIZ_RETRY_MESSAGE_KEY, value: "继续修复测试" }
+    ],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-biz-retry-failed",
+    interactionId: failedRetry.interactionId,
+    kind: "biz_retry",
+    tag: failedRetry.tag,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [{ key: BIZ_RETRY_CHOICE_KEY, value: "stop" }],
+    occurredAt: new Date().toISOString()
+  })
+  await router.handle({
+    schemaVersion: 1,
+    receiptId: "receipt-biz-retry-invalid-message",
+    interactionId: retry.interactionId,
+    kind: "biz_retry",
+    tag: retry.tag,
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    feedback: [
+      { key: BIZ_RETRY_CHOICE_KEY, value: "stop" },
+      { key: BIZ_RETRY_MESSAGE_KEY, value: "这条消息不能随停止操作提交" }
+    ],
+    occurredAt: new Date().toISOString()
+  })
+
+  assert.deepEqual(humanCalls, [
+    { notificationId: "gate-1", decision: "approve" },
+    { notificationId: "gate-2", decision: "reject" },
+    { notificationId: "gate-3", decision: "approve" }
+  ])
+  assert.deepEqual(gateway.acknowledged.slice(0, 3), [
+    "receipt-human-gate",
+    "receipt-human-gate-reject",
+    "receipt-human-gate-failed"
+  ])
+  assert.ok(replies.some((reply) => reply.text.includes("该决策已处理或当前渠道已失效")))
+  assert.ok(!replies.some((reply) => reply.deliveryId === "card-receipt:receipt-human-gate"))
+  assert.ok(!replies.some((reply) => reply.deliveryId === "card-receipt:receipt-human-gate-reject"))
+  assert.ok(!replies.some((reply) => reply.deliveryId === "card-receipt:receipt-biz-retry"))
+  assert.ok(replies.some((reply) => reply.deliveryId === "card-receipt:receipt-biz-retry-failed"))
+  assert.ok(
+    replies.some((reply) => reply.deliveryId === "card-receipt:receipt-biz-retry-invalid-message")
+  )
+  assert.deepEqual(bizCalls, [
+    {
+      notificationId: "retry-1",
+      choice: "continue",
+      message: "继续修复测试",
+      principalId: ROUTE.principalId,
+      conversationKey: ROUTE.conversationKey
+    },
+    {
+      notificationId: "retry-2",
+      choice: "stop",
+      principalId: ROUTE.principalId,
+      conversationKey: ROUTE.conversationKey
+    }
+  ])
+  console.log("PASS testProjectDecisionReceiptsUseTheirExistingAdapters")
 }
 
 /**
@@ -797,6 +1176,175 @@ function testAnUnresolvedReceiptIsAValidPayload(): void {
  * in-memory store — and the only way to reach this path is for the interaction
  * to be absent from that store, so it returned before reaching the gateway.
  */
+function approvalCardInput() {
+  return {
+    kind: "approval" as const,
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "A1B2C3",
+    targetLabel: "会话：桌面会话",
+    build: (tag: string) =>
+      buildApprovalCard({
+        targetLabel: "会话：桌面会话",
+        operation: "写入文件",
+        detail: "写入文件：src/billing.ts",
+        tag,
+        allowedDecisions: ["approve", "reject"]
+      })
+  }
+}
+
+/**
+ * Text mode is the publisher answering null before any card exists — nothing
+ * registered, nothing sent — which every caller already reads as "send the
+ * text notice". That is the whole mechanism, for all five kinds at once.
+ */
+async function testTextModeSendsNoCard(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const interactions = new ImCardInteractionStore()
+  let textMode = true
+  const publisher = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions,
+    isThreadLive: () => true,
+    usesTextReplies: () => textMode,
+    warn: () => undefined
+  })
+  assert.equal(await publisher.publish(approvalCardInput()), null)
+  assert.equal(gateway.sent.length, 0, "text mode sends no card")
+  assert.equal(interactions.list().length, 0, "and registers none: there is nothing to address")
+
+  textMode = false
+  assert.notEqual(await publisher.publish(approvalCardInput()), null)
+  assert.equal(gateway.sent.length, 1, "switching back needs nothing but the mode")
+  console.log("PASS testTextModeSendsNoCard")
+}
+
+/** An unreadable preference reads as the default. The reader keeps the card. */
+async function testAnUnreadableReplyModeStillSendsTheCard(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const warnings: string[] = []
+  const publisher = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions: new ImCardInteractionStore(),
+    isThreadLive: () => true,
+    usesTextReplies: () => {
+      throw new Error("database closed")
+    },
+    warn: (message) => warnings.push(message)
+  })
+  assert.notEqual(await publisher.publish(approvalCardInput()), null)
+  assert.equal(gateway.sent.length, 1)
+  assert(
+    warnings.some((message) => message.includes("reply mode")),
+    warnings.join("\n")
+  )
+  console.log("PASS testAnUnreadableReplyModeStillSendsTheCard")
+}
+
+function withheldNotice(id: string, conversationKey = ROUTE.conversationKey): RemoteImReplyV1[] {
+  return buildImProactiveReplies({
+    deliveryId: `human-gate:${id}`,
+    conversationKey,
+    text: `【项目模式需要审批】${id}\n/门禁批准 CODE-${id}`
+  })
+}
+
+function recordingOutbox() {
+  const outbox = {
+    enqueued: [] as string[],
+    failed: [] as string[],
+    throwNext: false,
+    async enqueueProactiveReplies(replies: readonly RemoteImReplyV1[]) {
+      if (outbox.throwNext) {
+        outbox.throwNext = false
+        throw new Error("disk full")
+      }
+      outbox.enqueued.push(replies[0]!.deliveryId)
+      return replies.map((reply) => ({ outboxId: `${reply.deliveryId}:${reply.segment.index}` }))
+    },
+    async markOutboxFailed(outboxId: string, reasonCode: string) {
+      outbox.failed.push(`${outboxId}:${reasonCode}`)
+    }
+  }
+  return outbox
+}
+
+/**
+ * The shared store behind the Human Gate and Biz Retry adapters: each notice
+ * goes out once, only for the conversation that switched, and never for a gate
+ * that has closed.
+ */
+async function testWithheldNoticesGoOutOnceForTheirOwnConversation(): Promise<void> {
+  const notices = new ImWithheldTextNotices()
+  const outbox = recordingOutbox()
+  const open = new Set(["gate-1", "gate-2", "gate-elsewhere"])
+  notices.withhold("gate-1", withheldNotice("gate-1"))
+  notices.withhold("gate-closed", withheldNotice("gate-closed"))
+  notices.withhold("gate-2", withheldNotice("gate-2"))
+  notices.withhold("gate-elsewhere", withheldNotice("gate-elsewhere", "conversation-other"))
+  notices.withhold("gate-forgotten", withheldNotice("gate-forgotten"))
+  notices.forget("gate-forgotten")
+  const resend = (conversationKey: string) =>
+    notices.resend({
+      conversationKey,
+      isOpen: (id) => open.has(id),
+      closedReasonCode: "HUMAN_GATE_ALREADY_RESOLVED",
+      warn: () => undefined,
+      events: outbox as never
+    })
+
+  assert.deepEqual(await resend(ROUTE.conversationKey), { resent: 2, failed: 0 })
+  assert.deepEqual(outbox.enqueued, ["human-gate:gate-1", "human-gate:gate-2"])
+  assert.deepEqual(await resend(ROUTE.conversationKey), { resent: 0, failed: 0 }, "once")
+  assert.deepEqual(
+    await resend("conversation-other"),
+    { resent: 1, failed: 0 },
+    "another conversation's notice waits for its own switch"
+  )
+  console.log("PASS testWithheldNoticesGoOutOnceForTheirOwnConversation")
+}
+
+/** A gate decided while its notice was being queued must not arrive looking open. */
+async function testANoticeWhoseGateClosesMidwayIsWithdrawn(): Promise<void> {
+  const notices = new ImWithheldTextNotices()
+  const outbox = recordingOutbox()
+  let checks = 0
+  notices.withhold("gate-racing", withheldNotice("gate-racing"))
+  const result = await notices.resend({
+    conversationKey: ROUTE.conversationKey,
+    // Open when checked before queueing, closed by the time it is checked after.
+    isOpen: () => (checks += 1) === 1,
+    closedReasonCode: "HUMAN_GATE_ALREADY_RESOLVED",
+    warn: () => undefined,
+    events: outbox as never
+  })
+  assert.deepEqual(result, { resent: 0, failed: 0 })
+  assert.deepEqual(outbox.failed, ["human-gate:gate-racing:0:HUMAN_GATE_ALREADY_RESOLVED"])
+  console.log("PASS testANoticeWhoseGateClosesMidwayIsWithdrawn")
+}
+
+/** A failed resend is counted, so the reply can say so, and kept for the next try. */
+async function testAFailedResendIsKeptForTheNextTry(): Promise<void> {
+  const notices = new ImWithheldTextNotices()
+  const outbox = recordingOutbox()
+  notices.withhold("gate-1", withheldNotice("gate-1"))
+  const resend = () =>
+    notices.resend({
+      conversationKey: ROUTE.conversationKey,
+      isOpen: () => true,
+      closedReasonCode: "HUMAN_GATE_ALREADY_RESOLVED",
+      warn: () => undefined,
+      events: outbox as never
+    })
+  outbox.throwNext = true
+  assert.deepEqual(await resend(), { resent: 0, failed: 1 })
+  assert.deepEqual(await resend(), { resent: 1, failed: 0 }, "the next /文字模式 开 sends it")
+  assert.deepEqual(outbox.enqueued, ["human-gate:gate-1"])
+  console.log("PASS testAFailedResendIsKeptForTheNextTry")
+}
+
 async function testAForgottenCardIsActuallyClosed(): Promise<void> {
   const gateway = new RecordingGateway()
   const publisher = new ImCardPublisher({
@@ -1141,9 +1689,11 @@ async function testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued(): Promise<vo
 async function main(): Promise<void> {
   testEveryBuiltCardSatisfiesTheContract()
   testEveryKvRowIsShapedTheWayTheClientParses()
+  testEveryPendingCardPointsAtTextModeAboveItsBody()
   testTheTargetListOffersExactlyThePrintedNumbers()
   testTheQuestionFormMirrorsTheTextEscapeHatch()
   testARefusedSubmitLeavesTheFormUsable()
+  await testProjectDecisionReceiptsUseTheirExistingAdapters()
   await testTheCardCarriesTheSameGateAsTheShortCode()
   await testASecondClickFindsTheCodeAlreadySpent()
   await testAClickFromAnotherPrincipalIsRefused()
@@ -1156,6 +1706,11 @@ async function main(): Promise<void> {
   await testAStaleCloseCannotOverwriteADecision()
   await testAnUnconfirmedClosureIsRetried()
   await testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued()
+  await testTextModeSendsNoCard()
+  await testAnUnreadableReplyModeStillSendsTheCard()
+  await testWithheldNoticesGoOutOnceForTheirOwnConversation()
+  await testANoticeWhoseGateClosesMidwayIsWithdrawn()
+  await testAFailedResendIsKeptForTheNextTry()
 }
 
 void main().catch((error) => {
