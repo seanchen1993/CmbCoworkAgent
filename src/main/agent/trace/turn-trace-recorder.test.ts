@@ -378,6 +378,9 @@ describe("child model usage", () => {
       expect(trace.totalOutputTokens).toBe(105)
       expect(trace.totalTokens).toBe(465)
       expect(trace.totalToolCalls).toBe(1)
+      expect(trace.toolUsageComplete).toBe(true)
+      expect(trace.toolUsage).toEqual([{ name: LS_CALL.name, count: 1 }])
+      expect(trace.userInputRequestCount).toBe(0)
     }
   )
 

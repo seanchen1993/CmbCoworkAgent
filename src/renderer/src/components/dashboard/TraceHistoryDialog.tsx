@@ -1004,6 +1004,10 @@ export function TraceExplorer({
     metricMode === "thread"
       ? (selectedThreadGroup?.totalUserInputRequests ?? 0)
       : (selectedTrace?.userInputRequestCount ?? 0)
+  const metricUserInputComplete =
+    metricMode === "thread"
+      ? selectedThreadGroup?.traces.every((trace) => trace.userInputRequestCountComplete === true)
+      : selectedTrace?.userInputRequestCountComplete === true
   const metricDurationMs =
     metricMode === "thread"
       ? (selectedThreadGroup?.totalDurationMs ?? 0)
@@ -1238,7 +1242,11 @@ export function TraceExplorer({
                   <div>
                     <p className="text-[10px] text-muted-foreground">请求用户输入</p>
                     <p className="whitespace-nowrap text-[12px] font-semibold">
-                      {metricUserInputRequests}
+                      {metricUserInputComplete
+                        ? metricUserInputRequests
+                        : metricUserInputRequests > 0
+                          ? `≥${metricUserInputRequests}`
+                          : "—"}
                     </p>
                   </div>
                 </div>

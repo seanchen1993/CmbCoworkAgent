@@ -6,6 +6,13 @@ import {
 } from "./project-mode-run-cost-metrics"
 import type { ProjectModeRunCost } from "./project-mode-run-cost-metrics"
 import { extractHarnessNodeGroup } from "../../shared/harness-stage-bucket"
+import {
+  legacyStageCostAgg,
+  stageUsageAgg,
+  readStageUsage,
+  readLegacyStageCost,
+  addStageCosts
+} from "./project-mode-stage-usage"
 
 /**
  * 单个项目的「阶段耗时分析」：把这个项目在所选时间范围内的轮次按工作流阶段拆开，
@@ -68,6 +75,13 @@ export interface ProjectModeStageRow {
 }
 
 export interface ProjectModeStageAnalysis {
+  costAttribution?: {
+    callStartTraceCount: number
+    turnStartTraceCount: number
+    tokenUsageReportedCalls: number
+    modelCalls: number
+    truncated: boolean
+  }
   projectId: string
   /** 全项目合计，弹窗顶部展示；不等于各阶段之和的场景见下面的注释。 */
   total: ProjectModeStageMetrics
@@ -110,17 +124,24 @@ function metricsAggs(): Record<string, unknown> {
  */
 export function buildProjectModeStageAnalysisAggs(
   unattributedNodeName: string,
-  nodeLimit: number
+  nodeLimit: number,
+  includeStageUsage = true
 ): Record<string, unknown> {
   return {
     ...metricsAggs(),
+    ...(includeStageUsage ? { stage_usage: stageUsageAgg(unattributedNodeName, nodeLimit) } : {}),
     by_node: {
       terms: {
         field: "harnessNodeName",
         size: Math.max(1, nodeLimit),
         missing: unattributedNodeName
       },
-      aggs: metricsAggs()
+      aggs: includeStageUsage
+        ? {
+            ...mainAgentConversationAggs(durationAggs()),
+            legacy_cost: legacyStageCostAgg()
+          }
+        : metricsAggs()
     }
   }
 }
@@ -161,15 +182,31 @@ export function parseProjectModeStageAnalysis(
           return {
             nodeName,
             group: extractHarnessNodeGroup(nodeName),
-            metrics: parseMetrics(bucket)
+            metrics: { ...parseMetrics(bucket), runCost: readLegacyStageCost(bucket) }
           }
         })
         .filter((stage) => stage.nodeName.length > 0)
-        .sort((a, b) => b.metrics.totalDurationMs - a.metrics.totalDurationMs)
     : []
 
+  const { costs, ...costAttribution } = readStageUsage(container)
+  const stagesByName = new Map(stages.map((stage) => [stage.nodeName, stage]))
+  for (const [nodeName, runCost] of costs) {
+    const existing = stagesByName.get(nodeName)
+    if (existing) existing.metrics.runCost = addStageCosts(existing.metrics.runCost, runCost)
+    else
+      stages.push({
+        nodeName,
+        group: extractHarnessNodeGroup(nodeName),
+        metrics: { ...emptyMetrics(), runCost }
+      })
+  }
+  stages.sort(
+    (a, b) =>
+      b.metrics.totalDurationMs - a.metrics.totalDurationMs || a.nodeName.localeCompare(b.nodeName)
+  )
   return {
     projectId,
+    costAttribution,
     total:
       Array.isArray(nodeBuckets) || container.doc_count !== undefined
         ? parseMetrics(container)

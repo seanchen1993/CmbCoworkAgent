@@ -70,8 +70,10 @@ describe("阶段分析的聚合条件", () => {
     }
   })
 
-  it("运行开销各项也按阶段拆，Token 含输入与输出", () => {
-    const stageAggs = (aggs.by_node as { aggs: Record<string, unknown> }).aggs
+  it("旧统计开销按开始阶段拆，新统计使用独立阶段汇总", () => {
+    const stageAggs = (aggs.by_node as { aggs: { legacy_cost: { aggs: Record<string, unknown> } } })
+      .aggs.legacy_cost.aggs
+    expect(aggs).toHaveProperty("stage_usage")
     expect(stageAggs).toHaveProperty("run_cost_tool_calls")
     expect(stageAggs).toHaveProperty("run_cost_model_calls")
     expect(stageAggs).toHaveProperty("run_cost_total_tokens")

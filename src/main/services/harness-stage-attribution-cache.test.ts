@@ -16,6 +16,44 @@ function deferred<T>(): {
 }
 
 describe("HarnessStageAttributionCache", () => {
+  it("bounds call-start lookup latency, shares refreshes and never returns dirty snapshots", async () => {
+    vi.useFakeTimers()
+    try {
+      let resolve!: (stage: HarnessResolvedStage) => void
+      const resolver = vi.fn(
+        () =>
+          new Promise<HarnessResolvedStage>((done) => {
+            resolve = done
+          })
+      )
+      const cache = new HarnessStageAttributionCache({ resolver })
+      cache.prime("p", "f", { name: "plan", status: "进行中" })
+      expect((await cache.getForCall("p", "f")).nodeName).toBe("plan")
+      cache.markDirty("p", "f")
+      const first = cache.getForCall("p", "f")
+      const second = cache.getForCall("p", "f")
+      await vi.advanceTimersByTimeAsync(200)
+      expect(await first).toEqual({ nodeName: null, nodeStatus: null })
+      expect(await second).toEqual({ nodeName: null, nodeStatus: null })
+      expect(resolver).toHaveBeenCalledTimes(1)
+      resolve({ name: "dev", status: "进行中" })
+      await vi.advanceTimersByTimeAsync(0)
+      expect((await cache.getForCall("p", "f")).nodeName).toBe("dev")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("backs off unavailable adapters instead of spawning one inspection per call", async () => {
+    let now = 0
+    const resolver = vi.fn(async () => null)
+    const cache = new HarnessStageAttributionCache({ resolver, now: () => now })
+    for (let i = 0; i < 20; i++) await cache.getForCall("p", "f")
+    expect(resolver).toHaveBeenCalledTimes(1)
+    now = 1001
+    await cache.getForCall("p", "f")
+    expect(resolver).toHaveBeenCalledTimes(2)
+  })
   it("reuses a fresh turn-start or Feature-page snapshot", async () => {
     const resolver = vi.fn(
       async (): Promise<HarnessResolvedStage | null> => ({

@@ -119,6 +119,17 @@ function StageRow({
       </td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtCount(metrics.runCost.modelCalls)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtCount(metrics.runCost.toolCalls)}</td>
+      <td
+        className="px-3 py-2 text-right tabular-nums"
+        title="request_user_input 工具调用次数；≥ 表示仅覆盖部分 Trace，— 表示没有完整采集数据"
+      >
+        {metrics.runCost.userInputRequestDocs >=
+        (metrics.runCost.traceDocs ?? metrics.conversationCount)
+          ? fmtCount(metrics.runCost.userInputRequests)
+          : metrics.runCost.userInputRequestDocs > 0
+            ? `≥${fmtCount(metrics.runCost.userInputRequests)}`
+            : "—"}
+      </td>
     </tr>
   )
 }
@@ -159,7 +170,16 @@ export function ProjectStageAnalysisDialog({
           （每轮对话从发起到结束），
           <strong className="font-bold text-foreground">按该轮开始时特性所处的阶段归属</strong>。
           轮次和耗时只统计主动触发的主 Agent 会话；工具、模型调用与 Token 包含同范围内所有主、子
-          Agent。
+          Agent。开销按各次调用开始时的阶段归属，无法确定的归入未归因；历史或不完整采集仍按该轮开始阶段归属。
+          {analysis?.costAttribution && (
+            <div className="mt-1">
+              调用阶段统计覆盖 {fmtCount(analysis.costAttribution.callStartTraceCount)} 条 Trace；
+              按轮次开始阶段统计 {fmtCount(analysis.costAttribution.turnStartTraceCount)} 条。
+              {analysis.costAttribution.tokenUsageReportedCalls < analysis.costAttribution.modelCalls &&
+                " 部分模型调用未完整返回 Token 用量，Token 仅汇总已上报部分。"}
+              {analysis.costAttribution.truncated && " 阶段数量超出展示上限，以下阶段合计可能小于项目总计。"}
+            </div>
+          )}
         </div>
 
         {loading && !analysis ? (
@@ -173,7 +193,7 @@ export function ProjectStageAnalysisDialog({
           </div>
         ) : !total || stages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center py-16 text-sm text-muted-foreground">
-            当前时间范围内该项目没有主 Agent 会话
+            当前时间范围内该项目没有阶段统计数据
           </div>
         ) : (
           <>
@@ -212,6 +232,7 @@ export function ProjectStageAnalysisDialog({
                   <col className="w-[96px]" />
                   <col className="w-[84px]" />
                   <col className="w-[84px]" />
+                  <col className="w-[84px]" />
                 </colgroup>
                 <thead className="sticky top-0 bg-muted/60 backdrop-blur">
                   <tr className="whitespace-nowrap border-b border-border text-muted-foreground">
@@ -232,18 +253,19 @@ export function ProjectStageAnalysisDialog({
                     </th>
                     <th
                       className="px-3 py-2 text-right font-medium"
-                      title="送进模型的 token，不含缓存读取"
+                      title="模型上报的输入 Token，缓存按模型返回口径计入，不重复相加"
                     >
                       输入 Token
                     </th>
                     <th
                       className="px-3 py-2 text-right font-medium"
-                      title="模型生成的 token。它和输入之和不等于总量，总量还含缓存"
+                      title="模型上报的输出 Token"
                     >
                       输出 Token
                     </th>
                     <th className="px-3 py-2 text-right font-medium">模型调用</th>
                     <th className="px-3 py-2 text-right font-medium">工具调用</th>
+                    <th className="px-3 py-2 text-right font-medium">请求输入</th>
                   </tr>
                 </thead>
                 <tbody>

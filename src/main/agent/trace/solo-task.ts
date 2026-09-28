@@ -1,3 +1,4 @@
+import { captureTraceCallStage } from "./stage-usage-registry"
 import { createMiddleware } from "langchain"
 import type { TraceCollectorOptions } from "./collector"
 import {
@@ -402,6 +403,7 @@ export class SoloTaskTraceManager {
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)
 
+    const stageAttribution = await captureTraceCallStage(this.getTraceContextForOwner(ownerId))
     let llmNodeId: string | undefined
     const startedAt = nowIsoLocal()
     this.runSideEffect("SoloTask model start", () => {
@@ -442,6 +444,7 @@ export class SoloTaskTraceManager {
         const tokenUsage = responseTokenUsage(responseRecord)
 
         entry.tracer.recordModelCall({
+          stageAttribution,
           ...(messageId ? { messageId } : {}),
           startedAt,
           inputMessages,
@@ -490,6 +493,7 @@ export class SoloTaskTraceManager {
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)
 
+    const stageAttribution = await captureTraceCallStage(this.getTraceContextForOwner(ownerId))
     const toolCall = asRecord(request.toolCall) ?? {}
     const toolCallId = typeof toolCall.id === "string" ? toolCall.id : undefined
     const toolName = typeof toolCall.name === "string" && toolCall.name ? toolCall.name : "unknown"
@@ -504,6 +508,7 @@ export class SoloTaskTraceManager {
         if (readPath && entry.skillUsageDetector.onReadFilePath(readPath)) this.syncSkills(entry)
       }
       toolNodeId = entry.tracer.addToolNode({
+        stageAttribution,
         name: toolName,
         input: toolArgs,
         toolCallId,

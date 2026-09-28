@@ -1,3 +1,4 @@
+import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import { randomUUID } from "crypto"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { foregroundToolPolicy } from "./foreground-tool-policy"
@@ -7244,6 +7245,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   }
 
   const agent = createDeepAgent({
+    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
     model,
     summarizationModel: contextCompactionModel,
     tools: mainTools,

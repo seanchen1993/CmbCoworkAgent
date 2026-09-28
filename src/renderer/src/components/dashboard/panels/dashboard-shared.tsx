@@ -1,3 +1,4 @@
+import type { DashboardToolUsageCoverage } from "../../../../../shared/dashboard-tool-usage"
 /**
  * Shared dashboard presentation pieces reused across panels (operations
  * overview + project-mode overview) so both render skill/tool rankings and the
@@ -300,9 +301,13 @@ export function SearchableRankingPanel({
   headerActions,
   titleTooltipContent,
   renderNameAddon,
-  className
+  className,
+  metricNote,
+  hideCallTotal = false
 }: {
   title: string
+  metricNote?: string
+  hideCallTotal?: boolean
   totalKinds: number
   totalCalls: number
   defaultItems: RankingItem[]
@@ -344,18 +349,26 @@ export function SearchableRankingPanel({
             </span>
           </div>
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span>
-              <span className="font-semibold text-foreground">{totalKinds}</span> 种
-            </span>
-            <span className="text-border">|</span>
-            <span>
-              共 <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span>{" "}
-              次调用
-            </span>
+            {hideCallTotal ? (
+              <span>暂无完整计数</span>
+            ) : (
+              <>
+                <span>
+                  <span className="font-semibold text-foreground">{totalKinds}</span> 种
+                </span>
+                <span className="text-border">|</span>
+                <span>
+                  共{" "}
+                  <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span>{" "}
+                  次调用
+                </span>
+              </>
+            )}
           </div>
         </div>
         {headerActions}
       </div>
+      {metricNote ? <p className="mb-2 text-[10px] text-muted-foreground">{metricNote}</p> : null}
 
       <div className="mb-3 flex shrink-0 items-center gap-2">
         <div className="relative flex-1">
@@ -1077,7 +1090,8 @@ export function ToolRankingPanel({
   byToolFilteredAll,
   byToolAllFull,
   totalTools,
-  totalToolCalls
+  totalToolCalls,
+  toolUsageCoverage
 }: {
   byTool: ToolRankingDatum[]
   byToolAll: ToolRankingDatum[]
@@ -1085,27 +1099,44 @@ export function ToolRankingPanel({
   byToolAllFull: ToolRankingDatum[]
   totalTools: number
   totalToolCalls: number
+  toolUsageCoverage?: DashboardToolUsageCoverage
 }): React.JSX.Element {
   const [showAll, setShowAll] = useState(false)
-  const defaultItems: RankingItem[] = (showAll ? byToolAll : byTool).map((item) => ({
+  const coverage = toolUsageCoverage
+  const defaultItems: RankingItem[] = (
+    coverage?.available ? (showAll ? byToolAll : byTool) : []
+  ).map((item) => ({
     name: item.tool,
     count: item.count
   }))
   const searchItems: RankingItem[] = (
-    showAll
-      ? byToolAllFull.length > 0
-        ? byToolAllFull
-        : byToolAll
-      : byToolFilteredAll.length > 0
-        ? byToolFilteredAll
-        : byTool
+    !coverage?.available
+      ? []
+      : showAll
+        ? byToolAllFull.length > 0
+          ? byToolAllFull
+          : byToolAll
+        : byToolFilteredAll.length > 0
+          ? byToolFilteredAll
+          : byTool
   ).map((item) => ({ name: item.tool, count: item.count }))
-  const totalKinds = searchItems.length > 0 ? searchItems.length : totalTools
-  const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : totalToolCalls
+  const totalKinds = showAll ? totalTools : (toolUsageCoverage?.filteredTools ?? 0)
+  const totalCalls = showAll ? totalToolCalls : (toolUsageCoverage?.filteredCalls ?? 0)
+  const unavailable =
+    !coverage?.available || (coverage.traceCount > 0 && coverage.completeTraceCount === 0)
+  const metricNote = !coverage?.available
+    ? "当前范围暂无工具调用次数数据。"
+    : `按实际记录的工具调用次数统计；完整采集 ${coverage.completeTraceCount}/${coverage.traceCount} 条 Trace。` +
+      (coverage.completeTraceCount < coverage.traceCount
+        ? "旧版或采集不完整的 Trace 未计入，当前为已知下限。"
+        : "") +
+      (coverage.rankingTruncated ? "排行仅返回前 1000 种工具，合计包含全部工具。" : "")
 
   return (
     <SearchableRankingPanel
       title="Tool 使用"
+      metricNote={metricNote}
+      hideCallTotal={unavailable}
       totalKinds={totalKinds}
       totalCalls={totalCalls}
       defaultItems={defaultItems}

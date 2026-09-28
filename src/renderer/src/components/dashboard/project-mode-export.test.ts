@@ -136,14 +136,18 @@ describe("project-mode Excel export", () => {
     // 三个量各导一列：输入+输出 = 3.708M < 总量 3.94M，差额是缓存读取与创建。
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("输入 Token")]).toBe(3_210_000)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("输出 Token")]).toBe(498_000)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求输入次数（不完整时为下限）")]).toBe(
+      project.runCost!.userInputRequests
+    )
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求输入统计完整")]).toBe(
+      project.userInputRequestCountComplete ? "是" : "否"
+    )
   })
 
-  it("不再导出请求用户回答次数", () => {
-    // `userInputRequestCount` 采集侧从未写入，索引里没有这个字段，sum 恒为 0。
-    // 导出里留一列恒 0 比界面上留一列更糟：它会被下载、粘进报表、当成真值参与计算。
-    // 等采集侧补上标量再加回来，连同那列「是否完整」的下限标注。
+  it("exports input requests with explicit coverage, rather than calling them answers", () => {
+    expect(PROJECT_MODE_PROJECT_EXPORT_HEADER).toContain("请求输入次数（不完整时为下限）")
+    expect(PROJECT_MODE_PROJECT_EXPORT_HEADER).toContain("请求输入统计完整")
     expect(PROJECT_MODE_PROJECT_EXPORT_HEADER).not.toContain("请求用户回答次数")
-    expect(PROJECT_MODE_PROJECT_EXPORT_HEADER).not.toContain("请求用户回答次数是否完整")
   })
 
   it("后端没回 runCost 时各项都是 0，不是 undefined", () => {

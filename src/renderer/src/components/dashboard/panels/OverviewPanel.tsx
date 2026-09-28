@@ -278,6 +278,7 @@ export function OverviewPanel({
           byToolAllFull={data.byToolAllFull}
           totalTools={data.totalTools}
           totalToolCalls={data.totalToolCalls}
+          toolUsageCoverage={data.toolUsageCoverage}
         />
       </div>
 

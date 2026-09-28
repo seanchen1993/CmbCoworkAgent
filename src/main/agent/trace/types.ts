@@ -16,6 +16,8 @@
 // Primitive building blocks
 // ─────────────────────────────────────────────────────────
 
+import type { TraceCallStage, TraceStageUsageSnapshot } from "../../../shared/trace-stage-usage"
+
 /** A single tool invocation captured within a trace step. */
 export interface TraceToolCall {
   /** Tool name, e.g. "read_file", "manage_skill" */
@@ -85,6 +87,7 @@ export interface TraceTokenUsage {
 
 /** One LLM run (inputs -> output), similar to LangSmith run records. */
 export interface TraceModelCall {
+  stageAttribution?: TraceCallStage
   /** Stable AI message id when available */
   messageId?: string
   /** ISO timestamp when this call was recorded */
@@ -455,7 +458,7 @@ export interface TraceSkillEvalExtension {
  * readable and is migrated at startup) under:
  *   ~/.cmbcoworkagent/traces/{threadId}/{traceId}.jsonl
  */
-export interface AgentTrace {
+export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   /** Unique trace ID (UUID v4) */
   traceId: string
   /** Thread the trace belongs to */
@@ -563,6 +566,12 @@ export interface AgentTrace {
   nodes?: TraceNode[]
   /** Total number of tool calls across all steps */
   totalToolCalls: number
+  /** Versioned per-tool counts, independent of retained tool nodes. */
+  toolUsageSchemaVersion?: 1
+  toolUsageComplete?: boolean
+  toolUsage?: Array<{ name: string; count: number }>
+  /** Tool invocations, not the number of questions or submitted answers. */
+  userInputRequestCount?: number
   /** How the run ended */
   outcome: TraceOutcome
   /** Any error message if outcome === 'error' */

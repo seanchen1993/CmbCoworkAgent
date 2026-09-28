@@ -7,6 +7,7 @@ import {
 import { isPlausibleToolName } from "../../../shared/tool-name"
 import { nowIsoLocal } from "../../util/local-time"
 import { normalizeTraceTokenUsage } from "./token-usage"
+import { readModelCallStage, type TraceCallStage } from "../../../shared/trace-stage-usage"
 import type { TraceChatMessage, TraceNodeStatus, TraceToolCall, TraceTokenUsage } from "./types"
 
 /**
@@ -42,6 +43,7 @@ export interface TraceToolCallLike {
 
 /** The slice of TraceCollector this module records through. */
 export interface TurnTraceCollector {
+  getTraceContext?(): { traceId: string }
   setModelName(name: string): void
   beginStep(): void
   recordToolCall(call: TraceToolCall): void
@@ -54,6 +56,7 @@ export interface TurnTraceCollector {
     metadata?: Record<string, unknown>
   }): string
   recordModelCall(call: {
+    stageAttribution?: TraceCallStage
     messageId?: string
     startedAt: string
     inputMessages: TraceChatMessage[]
@@ -299,6 +302,10 @@ export function recordAssistantMessageTrace(input: {
   const content = extractTraceText(kwargs.content)
 
   tracer.recordModelCall({
+    stageAttribution: readModelCallStage(
+      responseMetadata?.cmbTraceStage,
+      tracer.getTraceContext?.().traceId
+    ),
     messageId: providerMessageId || messageKey,
     startedAt: nowIsoLocal(),
     inputMessages,

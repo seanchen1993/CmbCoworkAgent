@@ -1,3 +1,4 @@
+import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
@@ -3511,6 +3512,8 @@ export async function skipHarnessRunNode(
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     throw new Error(`跳过节点失败：${raw}`)
+  } finally {
+    markHarnessStageAttributionDirty(projectId, slug)
   }
 
   return {
