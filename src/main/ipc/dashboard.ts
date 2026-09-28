@@ -7580,6 +7580,110 @@ function mockProjectMatchesOrg(org: string, selectedOrgs: string[]): boolean {
   )
 }
 
+/** [工具名, 用过它的 Trace 数, 完整采集 Trace 里的调用次数] */
+type MockToolUsageRow = [tool: string, traces: number, calls: number]
+
+const MOCK_OVERVIEW_TOOL_USAGE: MockToolUsageRow[] = [
+  ["read_file", 1823, 8460],
+  ["write_file", 1245, 3120],
+  ["execute", 987, 4210],
+  ["grep", 876, 2950],
+  ["glob", 654, 1380],
+  ["git_workflow", 412, 690],
+  ["manage_skill", 298, 402],
+  ["edit_file", 267, 1130],
+  ["manage_scheduler", 241, 318],
+  ["web_search", 198, 455],
+  ["list_directory", 187, 263],
+  ["db_query", 163, 388],
+  ["task", 156, 171],
+  ["task_output", 148, 166],
+  ["create_pr", 134, 139],
+  ["search_tool", 128, 205],
+  ["run_tests", 112, 297],
+  ["search_code", 98, 244],
+  ["code_exec", 92, 150],
+  ["prepare_save_code_exec_tool", 81, 84],
+  ["notify", 76, 93],
+  ["query_logs", 68, 141],
+  ["schema_check", 59, 72],
+  ["request_user_input", 54, 71],
+  ["open_preview", 53, 61],
+  ["analyze_diff", 47, 58],
+  ["format_code", 42, 49],
+  ["lint_fix", 36, 57],
+  ["dependency_audit", 31, 33],
+  ["deploy_check", 26, 31],
+  ["trace_lookup", 19, 27],
+  ["ticket_update", 12, 14],
+  ["mcp_sqlQuery", 11, 23],
+  ["browser_visualDiff", 9, 12],
+  ["workflow_template", 7, 7]
+]
+
+const MOCK_PROJECT_TOOL_USAGE: MockToolUsageRow[] = [
+  ["git_workflow", 142, 236],
+  ["execute", 120, 488],
+  ["read_file", 96, 540],
+  ["manage_skill", 88, 104],
+  ["edit_file", 71, 263],
+  ["manage_scheduler", 61, 72],
+  ["grep", 58, 187],
+  ["write_file", 52, 96],
+  ["db_query", 44, 91],
+  ["create_pr", 33, 35],
+  ["request_user_input", 29, 37],
+  ["search_code", 21, 48]
+]
+
+/**
+ * DEV mock 里工具调用次数从 30 天前开始有：结束时间更早的范围只有旧数据，Tool 排行会退回
+ * 「用过该工具的 Trace 数」。选一个 30 天前的时间段就能看到这种情况。
+ */
+function mockRangeHasToolUsageCounts(range: TimeRange): boolean {
+  return new Date(range.to).getTime() >= Date.now() - 30 * 24 * 60 * 60 * 1000
+}
+
+/** 与 buildToolUsageAggs 同结构的 ES 聚合结果，mock 走和线上一样的解析。 */
+function makeMockToolUsageAggs(
+  rows: MockToolUsageRow[],
+  traceCount: number,
+  completeTraceCount: number
+): Record<string, unknown> {
+  const excluded = new Set(FILTERED_TOOL_EXCLUDES)
+  const filtered = rows.filter(([tool]) => !excluded.has(tool))
+  const counted = completeTraceCount > 0
+  const nested = (subset: MockToolUsageRow[]): Record<string, unknown> => ({
+    doc_count: counted ? subset.reduce((sum, [, traces]) => sum + traces, 0) : 0,
+    calls: { value: counted ? subset.reduce((sum, [, , calls]) => sum + calls, 0) : 0 },
+    kinds: { value: counted ? subset.length : 0 },
+    by_name: {
+      sum_other_doc_count: 0,
+      buckets: counted
+        ? [...subset]
+            .sort((a, b) => b[2] - a[2])
+            .map(([key, traces, calls]) => ({ key, doc_count: traces, calls: { value: calls } }))
+        : []
+    }
+  })
+  const byTraces = (subset: MockToolUsageRow[]): Record<string, unknown> => ({
+    sum_other_doc_count: 0,
+    buckets: [...subset]
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, traces]) => ({ key, doc_count: traces }))
+  })
+  return {
+    tool_usage_trace_docs: { value: traceCount },
+    tool_usage_complete: {
+      doc_count: completeTraceCount,
+      usage: { ...nested(rows), filtered: nested(filtered) }
+    },
+    tool_usage_legacy_kinds: { value: rows.length },
+    tool_usage_legacy_all: byTraces(rows),
+    tool_usage_legacy_filtered: byTraces(filtered)
+  }
+}
+
 function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
   const from = new Date(range.from)
   const to = new Date(range.to)
@@ -7629,9 +7733,7 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
         total_input_tokens: { value: 2_340_000 },
         total_output_tokens: { value: 890_000 },
         total_skills: { value: 20 },
-        total_tools: { value: 27 },
         total_skill_calls: { value: 2022 },
-        total_tool_calls: { value: 6538 },
         code_generated_lines: { value: 4820 },
         code_deleted_lines: { value: 930 },
         code_measured_generated_lines: { value: 3900 },
@@ -7814,106 +7916,11 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             }
           ]
         },
-        by_tool: {
-          buckets: [
-            { key: "git_workflow", doc_count: 412 },
-            { key: "manage_skill", doc_count: 298 },
-            { key: "manage_scheduler", doc_count: 241 },
-            { key: "web_search", doc_count: 198 },
-            { key: "db_query", doc_count: 163 },
-            { key: "create_pr", doc_count: 134 },
-            { key: "run_tests", doc_count: 112 },
-            { key: "search_code", doc_count: 98 },
-            { key: "notify", doc_count: 76 },
-            { key: "query_logs", doc_count: 68 },
-            { key: "schema_check", doc_count: 59 },
-            { key: "open_preview", doc_count: 53 },
-            { key: "analyze_diff", doc_count: 47 },
-            { key: "format_code", doc_count: 42 },
-            { key: "lint_fix", doc_count: 36 },
-            { key: "dependency_audit", doc_count: 31 },
-            { key: "deploy_check", doc_count: 26 },
-            { key: "trace_lookup", doc_count: 19 },
-            { key: "ticket_update", doc_count: 12 }
-          ]
-        },
-        by_tool_filtered_all: {
-          buckets: [
-            { key: "git_workflow", doc_count: 412 },
-            { key: "manage_skill", doc_count: 298 },
-            { key: "manage_scheduler", doc_count: 241 },
-            { key: "web_search", doc_count: 198 },
-            { key: "db_query", doc_count: 163 },
-            { key: "create_pr", doc_count: 134 },
-            { key: "run_tests", doc_count: 112 },
-            { key: "search_code", doc_count: 98 },
-            { key: "notify", doc_count: 76 },
-            { key: "query_logs", doc_count: 68 },
-            { key: "schema_check", doc_count: 59 },
-            { key: "open_preview", doc_count: 53 },
-            { key: "analyze_diff", doc_count: 47 },
-            { key: "format_code", doc_count: 42 },
-            { key: "lint_fix", doc_count: 36 },
-            { key: "dependency_audit", doc_count: 31 },
-            { key: "deploy_check", doc_count: 26 },
-            { key: "trace_lookup", doc_count: 19 },
-            { key: "ticket_update", doc_count: 12 },
-            { key: "mcp_sqlQuery", doc_count: 11 },
-            { key: "browser_visualDiff", doc_count: 9 },
-            { key: "workflow_template", doc_count: 7 }
-          ]
-        },
-        by_tool_all: {
-          buckets: [
-            { key: "read_file", doc_count: 1823 },
-            { key: "write_file", doc_count: 1245 },
-            { key: "execute", doc_count: 987 },
-            { key: "grep", doc_count: 876 },
-            { key: "glob", doc_count: 654 },
-            { key: "git_workflow", doc_count: 412 },
-            { key: "manage_skill", doc_count: 298 },
-            { key: "edit_file", doc_count: 267 },
-            { key: "manage_scheduler", doc_count: 241 },
-            { key: "web_search", doc_count: 198 },
-            { key: "list_directory", doc_count: 187 },
-            { key: "db_query", doc_count: 163 },
-            { key: "task", doc_count: 156 },
-            { key: "task_output", doc_count: 148 },
-            { key: "create_pr", doc_count: 134 },
-            { key: "search_tool", doc_count: 128 },
-            { key: "run_tests", doc_count: 112 },
-            { key: "search_code", doc_count: 98 },
-            { key: "code_exec", doc_count: 92 }
-          ]
-        },
-        by_tool_all_full: {
-          buckets: [
-            { key: "read_file", doc_count: 1823 },
-            { key: "write_file", doc_count: 1245 },
-            { key: "execute", doc_count: 987 },
-            { key: "grep", doc_count: 876 },
-            { key: "glob", doc_count: 654 },
-            { key: "git_workflow", doc_count: 412 },
-            { key: "manage_skill", doc_count: 298 },
-            { key: "edit_file", doc_count: 267 },
-            { key: "manage_scheduler", doc_count: 241 },
-            { key: "web_search", doc_count: 198 },
-            { key: "list_directory", doc_count: 187 },
-            { key: "db_query", doc_count: 163 },
-            { key: "task", doc_count: 156 },
-            { key: "task_output", doc_count: 148 },
-            { key: "create_pr", doc_count: 134 },
-            { key: "search_tool", doc_count: 128 },
-            { key: "run_tests", doc_count: 112 },
-            { key: "search_code", doc_count: 98 },
-            { key: "code_exec", doc_count: 92 },
-            { key: "prepare_save_code_exec_tool", doc_count: 81 },
-            { key: "notify", doc_count: 76 },
-            { key: "query_logs", doc_count: 68 },
-            { key: "schema_check", doc_count: 59 },
-            { key: "open_preview", doc_count: 53 }
-          ]
-        },
+        ...makeMockToolUsageAggs(
+          MOCK_OVERVIEW_TOOL_USAGE,
+          1247,
+          mockRangeHasToolUsageCounts(range) ? 1103 : 0
+        ),
         trend: { buckets: trend }
       }
     },
@@ -9484,36 +9491,13 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       aggScale
     ),
     tools: deepScaleMockMetrics(
-      {
-        byTool: [
-          { tool: "git_workflow", count: 142 },
-          { tool: "manage_skill", count: 88 },
-          { tool: "manage_scheduler", count: 61 },
-          { tool: "db_query", count: 44 },
-          { tool: "create_pr", count: 33 }
-        ],
-        byToolAll: [
-          { tool: "git_workflow", count: 142 },
-          { tool: "execute", count: 120 },
-          { tool: "read_file", count: 96 },
-          { tool: "manage_skill", count: 88 }
-        ],
-        byToolFilteredAll: [
-          { tool: "git_workflow", count: 142 },
-          { tool: "manage_skill", count: 88 },
-          { tool: "manage_scheduler", count: 61 },
-          { tool: "db_query", count: 44 },
-          { tool: "create_pr", count: 33 }
-        ],
-        byToolAllFull: [
-          { tool: "git_workflow", count: 142 },
-          { tool: "execute", count: 120 },
-          { tool: "read_file", count: 96 },
-          { tool: "manage_skill", count: 88 }
-        ],
-        totalTools: 23,
-        totalToolCalls: 1842
-      },
+      parseToolUsageAggs(
+        makeMockToolUsageAggs(
+          MOCK_PROJECT_TOOL_USAGE,
+          128,
+          mockRangeHasToolUsageCounts(range) ? 117 : 0
+        )
+      ),
       aggScale
     ),
     analytics: buildProjectModeMockAnalytics(projects),
@@ -14469,8 +14453,13 @@ async function fetchProjectModeStageAnalysis(
     aggs: buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT)
   }
   const raw = (await queryWithStageUsageMappingFallback(
-    query => esQuery(getEsIndex("trace"), query), body,
-    buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT, false)
+    (query) => esQuery(getEsIndex("trace"), query),
+    body,
+    buildProjectModeStageAnalysisAggs(
+      UNATTRIBUTED_NODE_NAME,
+      PROJECT_MODE_FEATURE_SLUG_LIMIT,
+      false
+    )
   )) as EsSearchResponse
   return parseProjectModeStageAnalysis(
     normalizedProjectId,

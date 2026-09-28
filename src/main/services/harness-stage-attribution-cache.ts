@@ -37,6 +37,7 @@ type RefreshOutcome = "resolved" | "unavailable" | "invalidated"
 const DEFAULT_MAX_CLEAN_AGE_MS = 30_000
 const DEFAULT_MAX_ENTRIES = 256
 const MAX_REFRESH_ATTEMPTS = 2
+const CALL_RETRY_BACKOFF_MS = 1_000
 
 function normalizeIdentity(
   projectId: string,
@@ -150,7 +151,15 @@ export class HarnessStageAttributionCache {
     return emptyAttribution()
   }
 
-  /** A dashboard observation must not stall a model/tool on an unavailable adapter. */
+  /**
+   * The stage at the moment a model or tool call starts.
+   *
+   * Callers start this together with the call and read it after the call, so the adapter
+   * inspection runs alongside the call instead of in front of it. The version is taken
+   * synchronously, before the first await, and an answer only counts if nothing
+   * invalidated the entry after that: an inspection that finishes after a later change may
+   * describe the later stage, so the call stays unattributed rather than taking it.
+   */
   async getForCall(projectId: string, featureSlug: string): Promise<HarnessStageAttribution> {
     const identity = normalizeIdentity(projectId, featureSlug)
     if (!identity) return emptyAttribution()
@@ -158,21 +167,23 @@ export class HarnessStageAttributionCache {
     entry.lastAccessAt = this.now()
     if (this.isFresh(entry)) return copyAttribution(entry.snapshot as HarnessStageAttribution)
     if (!entry.inFlight && this.now() < (entry.callRetryAfter ?? 0)) return emptyAttribution()
-    const refresh = this.getForCodeGeneration(projectId, featureSlug).then((value) => {
-      if (!value.nodeName) entry.callRetryAfter = this.now() + 1_000
-      return value
-    })
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        refresh,
-        new Promise<HarnessStageAttribution>((resolve) => {
-          timer = setTimeout(() => resolve(emptyAttribution()), 200)
-        })
-      ])
-    } finally {
-      if (timer) clearTimeout(timer)
+
+    const callVersion = entry.version
+    for (let attempt = 0; attempt < MAX_REFRESH_ATTEMPTS; attempt += 1) {
+      const outcome = await this.refresh(entry)
+      if (outcome === "resolved" && entry.cleanVersion === callVersion && entry.snapshot) {
+        return copyAttribution(entry.snapshot)
+      }
+      if (outcome === "unavailable") {
+        // One inspection per backoff window while the adapter is down, not one per call.
+        entry.callRetryAfter = this.now() + CALL_RETRY_BACKOFF_MS
+        return emptyAttribution()
+      }
+      // Invalidated after this call started: anything read now is a later stage. An
+      // inspection that was already stale when the call started gets one retry.
+      if (entry.version !== callVersion) return emptyAttribution()
     }
+    return emptyAttribution()
   }
 
   private isFresh(entry: HarnessStageCacheEntry): boolean {
