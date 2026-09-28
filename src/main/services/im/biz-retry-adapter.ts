@@ -23,6 +23,19 @@ import {
 } from "./harness-decision-card"
 import { notificationService } from "../notification-service"
 import { isNotificationVisible } from "../notification-read-model"
+import {
+  conversationSwitchedToText,
+  ImWithheldTextNotices,
+  type ImTextResendResult
+} from "./withheld-text-notices"
+
+const warn = (message: string, error?: unknown): void =>
+  console.warn(`[IM] Managed Biz Retry: ${message}`, error ?? "")
+
+function isOpenForIm(decisionId: string): boolean {
+  const current = notificationService.get(decisionId)
+  return isNotificationPendingForTarget(current, "im") && isNotificationVisible(current)
+}
 
 const BIZ_RETRY_SEGMENTATION = {
   maxSegments: 1,
@@ -36,7 +49,20 @@ export class ImBizRetryAdapter {
   private readonly codes = new ImDecisionCodeRegistry("托管")
   private readonly replies = createDecisionReplyDrainer("Managed Biz Retry")
   private readonly cardContexts = new Map<string, HarnessDecisionCardContext>()
+  private readonly withheld = new ImWithheldTextNotices()
   registerReplyDrainer = this.replies.register
+
+  /** See ImWithheldTextNotices: the notices whose cards went out instead. */
+  async resendPendingAsText(conversationKey: string): Promise<ImTextResendResult> {
+    const result = await this.withheld.resend({
+      conversationKey,
+      isOpen: isOpenForIm,
+      closedReasonCode: "BIZ_RETRY_ALREADY_RESOLVED",
+      warn
+    })
+    if (result.resent > 0) this.replies.drain()
+    return result
+  }
 
   async publish(notification: HarnessNotification): Promise<void> {
     if (notification.type !== "biz_retry") return
@@ -102,6 +128,12 @@ export class ImBizRetryAdapter {
       "",
       nextActionText
     ].join("\n")
+    const notice = buildImProactiveReplies({
+      deliveryId: `managed-biz-retry:${decisionId}`,
+      conversationKey: route.conversationKey,
+      text,
+      segmentation: BIZ_RETRY_SEGMENTATION
+    })
     const card = await imCardPublisher.publish({
       kind: "biz_retry",
       threadId: originThreadId,
@@ -125,6 +157,14 @@ export class ImBizRetryAdapter {
             kind: "biz_retry"
           })
         }
+        return
+      }
+      // Kept for /文字模式: the reader may find the card cut short by the
+      // client and ask for this instead — or already has, while the card was
+      // in flight, and then it is handed over now.
+      this.withheld.withhold(decisionId, notice)
+      if (conversationSwitchedToText(route.conversationKey, warn)) {
+        await this.resendPendingAsText(route.conversationKey)
       }
       return
     }
@@ -135,14 +175,7 @@ export class ImBizRetryAdapter {
       return
     }
     try {
-      await imEventStore.enqueueProactiveReplies(
-        buildImProactiveReplies({
-          deliveryId: `managed-biz-retry:${decisionId}`,
-          conversationKey: route.conversationKey,
-          text,
-          segmentation: BIZ_RETRY_SEGMENTATION
-        })
-      )
+      await imEventStore.enqueueProactiveReplies(notice)
       this.replies.drain()
       return
     } catch (error) {
@@ -208,6 +241,7 @@ export class ImBizRetryAdapter {
 
   endNotification(notification: AppNotification): void {
     this.codes.removeNotification(notification.notificationId)
+    this.withheld.forget(notification.notificationId)
     const context = this.cardContexts.get(notification.notificationId)
     this.cardContexts.delete(notification.notificationId)
     if (!context) return

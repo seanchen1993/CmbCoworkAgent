@@ -20,12 +20,38 @@ import {
 } from "./harness-decision-card"
 import { notificationService } from "../notification-service"
 import { isNotificationVisible } from "../notification-read-model"
+import {
+  conversationSwitchedToText,
+  ImWithheldTextNotices,
+  type ImTextResendResult
+} from "./withheld-text-notices"
+
+const warn = (message: string, error?: unknown): void =>
+  console.warn(`[IM] Human Gate: ${message}`, error ?? "")
+
+function isOpenForIm(gateId: string): boolean {
+  const current = notificationService.get(gateId)
+  return isNotificationPendingForTarget(current, "im") && isNotificationVisible(current)
+}
 
 export class ImHumanGateAdapter {
   private readonly codes = new ImDecisionCodeRegistry("门禁")
   private readonly replies = createDecisionReplyDrainer("Human Gate")
   private readonly cardContexts = new Map<string, HarnessDecisionCardContext>()
+  private readonly withheld = new ImWithheldTextNotices()
   registerReplyDrainer = this.replies.register
+
+  /** See ImWithheldTextNotices: the notices whose cards went out instead. */
+  async resendPendingAsText(conversationKey: string): Promise<ImTextResendResult> {
+    const result = await this.withheld.resend({
+      conversationKey,
+      isOpen: isOpenForIm,
+      closedReasonCode: "HUMAN_GATE_ALREADY_RESOLVED",
+      warn
+    })
+    if (result.resent > 0) this.replies.drain()
+    return result
+  }
 
   async publish(gate: HarnessHumanGateSnapshot): Promise<void> {
     const route = resolveImDecisionRoute(gate.sourceThreadId)
@@ -59,6 +85,11 @@ export class ImHumanGateAdapter {
       `/门禁批准 ${code}`,
       `/门禁拒绝 ${code}`
     ].join("\n")
+    const notice = buildImProactiveReplies({
+      deliveryId: `human-gate:${gate.gateId}`,
+      conversationKey: route.conversationKey,
+      text
+    })
     const card = await imCardPublisher.publish({
       kind: "human_gate",
       threadId: gate.sourceThreadId,
@@ -82,6 +113,14 @@ export class ImHumanGateAdapter {
             kind: "human_gate"
           })
         }
+        return
+      }
+      // Kept for /文字模式: the reader may find the card cut short by the
+      // client and ask for this instead — or already has, while the card was
+      // in flight, and then it is handed over now.
+      this.withheld.withhold(gate.gateId, notice)
+      if (conversationSwitchedToText(route.conversationKey, warn)) {
+        await this.resendPendingAsText(route.conversationKey)
       }
       return
     }
@@ -92,13 +131,7 @@ export class ImHumanGateAdapter {
       return
     }
     try {
-      await imEventStore.enqueueProactiveReplies(
-        buildImProactiveReplies({
-          deliveryId: `human-gate:${gate.gateId}`,
-          conversationKey: route.conversationKey,
-          text
-        })
-      )
+      await imEventStore.enqueueProactiveReplies(notice)
       this.replies.drain()
     } catch (error) {
       this.codes.removeNotification(gate.gateId)
@@ -143,6 +176,7 @@ export class ImHumanGateAdapter {
 
   endNotification(notification: AppNotification): void {
     this.codes.removeNotification(notification.notificationId)
+    this.withheld.forget(notification.notificationId)
     const context = this.cardContexts.get(notification.notificationId)
     this.cardContexts.delete(notification.notificationId)
     if (!context) return

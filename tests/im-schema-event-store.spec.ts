@@ -498,6 +498,14 @@ async function testSingleDesktopSchemaMigrationPreservesLegacyRows(): Promise<vo
       )[0]?.values[0],
       ["principal-1", "active", 1]
     )
+    // The rebuild copies only the columns it lists, and the reply mode is not
+    // among them: the legacy row has to come out of it on the default.
+    assert.equal(
+      database.exec(
+        "SELECT reply_mode FROM im_conversations WHERE conversation_key = 'conversation-legacy'"
+      )[0]?.values[0]?.[0],
+      "card"
+    )
     assert(
       !columns("im_feature_grants").includes("conversation_key"),
       "Feature grants must migrate from conversation scope to principal scope"
@@ -507,6 +515,61 @@ async function testSingleDesktopSchemaMigrationPreservesLegacyRows(): Promise<vo
         "SELECT principal_id, project_id, feature_slug, state FROM im_feature_grants WHERE grant_id = 'feature-grant-legacy'"
       )[0]?.values[0],
       ["principal-1", "project-1", "feature-1", "active"]
+    )
+  } finally {
+    database.close()
+  }
+}
+
+/**
+ * /文字模式 is a column on the conversation. A database from before it gains
+ * the column with every conversation on the default — cards — and nothing but
+ * the two modes can be written to it.
+ */
+async function testReplyModeMigratesToCardsAndRejectsAnythingElse(): Promise<void> {
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  try {
+    // The current shape, from before the column existed: the ensureColumn path,
+    // not the device_epoch rebuild.
+    database.run(`
+      CREATE TABLE im_conversations (
+        conversation_key TEXT PRIMARY KEY,
+        principal_id TEXT NOT NULL,
+        active_target_id TEXT,
+        state TEXT NOT NULL CHECK(state IN ('active', 'suspended', 'revoked')),
+        last_received_seq INTEGER NOT NULL DEFAULT 0 CHECK(last_received_seq >= 0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(principal_id, conversation_key)
+      )
+    `)
+    database.run(
+      "INSERT INTO im_conversations VALUES ('conversation-existing', 'principal-1', NULL, 'active', 3, 10, 11)"
+    )
+    ensureImServiceSchema(database)
+    ensureImServiceSchema(database)
+
+    const store = new ImConversationStateStore({
+      getDatabase: () => database,
+      markDirty: () => undefined,
+      flushStrict: async () => undefined,
+      now: () => 20
+    })
+    assert.equal(store.getReplyMode("conversation-existing"), "card")
+    assert.equal(store.getReplyMode("conversation-unknown"), "card", "unknown reads as the default")
+    await store.setReplyMode("conversation-existing", "text")
+    assert.equal(store.getReplyMode("conversation-existing"), "text")
+    assert.deepEqual(
+      database.exec(
+        "SELECT last_received_seq FROM im_conversations WHERE conversation_key = 'conversation-existing'"
+      )[0]?.values[0],
+      [3],
+      "the migration keeps the row it found"
+    )
+    assert.throws(
+      () => database.run("UPDATE im_conversations SET reply_mode = 'rich'"),
+      /CHECK constraint failed/u
     )
   } finally {
     database.close()
@@ -1001,6 +1064,7 @@ async function main(): Promise<void> {
     testRemoteControlSchemaMigrationPreservesV1Rows,
     testFeatureGrantPrincipalScopeMigration,
     testSingleDesktopSchemaMigrationPreservesLegacyRows,
+    testReplyModeMigratesToCardsAndRejectsAnythingElse,
     testDurableDedupAndImmutableSnapshot,
     testPermitStateMachineAndAtomicOutbox,
     testFlushFailureIsNeverAcknowledgedAsDurable,

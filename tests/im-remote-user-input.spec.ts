@@ -109,15 +109,24 @@ async function createContext(
     })(),
     () => clock.now
   )
-  const cardSends = { accept: true, sent: 0, cards: [] as Array<{ tag: string; json: string }> }
+  const cardSends = {
+    accept: true,
+    sent: 0,
+    cards: [] as Array<{ tag: string; json: string }>,
+    /** When set, a send stays in flight until it resolves. */
+    hold: null as Promise<void> | null
+  }
   const cards = new ImCardPublisher({
     interactions: cardInteractions,
     createIdempotencyKey: () => `card-idem-${cardUpdates.length}`,
+    // This test's own store; the default reads the module singleton.
+    usesTextReplies: (conversationKey) => conversations.getReplyMode(conversationKey) === "text",
     gateway: {
       isAuthenticated: () => true,
       sendCard: async (card: { tag: string; content: unknown }) => {
         cardSends.sent += 1
         cardSends.cards.push({ tag: card.tag, json: JSON.stringify(card.content) })
+        if (cardSends.hold) await cardSends.hold
         return cardSends.accept
           ? ({ state: "accepted" } as const)
           : ({ state: "rejected", reasonCode: "CARD_REJECTED" } as const)
@@ -212,6 +221,7 @@ async function createContext(
     root,
     database,
     clock,
+    conversations,
     events,
     service,
     responses,
@@ -554,7 +564,173 @@ async function testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled(): Promis
   }
 }
 
+/** See the approval spec: the send happens inside emit, the recording after it. */
+function settle(): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0))
+}
+
+function twoQuestionRequest(requestId: string): UserInputRequest {
+  return userInputRequest({
+    requestId,
+    questions: [
+      ...userInputRequest({ requestId: "template" }).questions,
+      {
+        header: "范围",
+        id: "export_scope",
+        question: "需要导出哪些数据？",
+        options: [
+          { label: "全部 (Recommended)", description: "导出全部可见数据。" },
+          { label: "本月", description: "只导出本月数据。" }
+        ]
+      }
+    ]
+  })
+}
+
+/**
+ * /文字模式 hands over the question the card stood in for, once, with the
+ * card's own code — answering it is answering the question, as it always was.
+ */
+async function testAHeldBackQuestionIsResentOnceAsText(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = userInputRequest({ requestId: "request-held" })
+    await context.publish(request)
+    await settle()
+    assert.equal(context.deliveryText(request.requestId), "", "a delivered card sends no notice")
+
+    assert.deepEqual(await context.service.resendPendingAsText(ROUTE.conversationKey), {
+      resent: 1,
+      failed: 0
+    })
+    const text = context.deliveryText(request.requestId)
+    assert(text.includes("导出格式用哪种？"), text)
+    assert(text.includes("/回答 A1B2C3 <编号>"), text)
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "a notice goes out once"
+    )
+    assert.equal(
+      await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+      "已从招乎提交回答，任务将继续执行。"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** A question answered before the switch has nothing to hand over. */
+async function testAnAnsweredQuestionIsNotResent(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = userInputRequest({ requestId: "request-answered" })
+    await context.publish(request)
+    await settle()
+    context.removePending()
+    assert.deepEqual(await context.service.resendPendingAsText(ROUTE.conversationKey), {
+      resent: 0,
+      failed: 0
+    })
+    assert.equal(context.deliveryText(request.requestId), "")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Answering by code rotates it and moves to the next question, which arrives
+ * as the reply to /回答. The held-back notice is the first question with the
+ * first code: sending it then would hand the reader a dead code.
+ */
+async function testAQuestionBeingAnsweredIsNotResent(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = twoQuestionRequest("request-midway")
+    await context.publish(request)
+    await settle()
+    const next = await context.service.resolveAnswer({ argument: "A1B2C3 2", ...ROUTE })
+    assert(next.includes("/回答 D4E5F6 <编号>"), "precondition: answering has begun")
+    assert.deepEqual(await context.service.resendPendingAsText(ROUTE.conversationKey), {
+      resent: 0,
+      failed: 0
+    })
+    assert.equal(context.deliveryText(request.requestId), "", "the dead code never goes out")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** In text mode the question never becomes a card: it is the text notice from the start. */
+async function testTextModeAsksInText(): Promise<void> {
+  const context = await createContext()
+  try {
+    await context.conversations.setReplyMode(ROUTE.conversationKey, "text")
+    const request = userInputRequest({ requestId: "request-text-mode" })
+    context.emit(request)
+    await waitFor(
+      () => context.deliveryText(request.requestId).includes("/回答 A1B2C3"),
+      "the text notice"
+    )
+    assert.equal(context.cardSends.sent, 0, "text mode sends no card")
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "nothing was held back"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** The switch landing while the card is in flight: see the approval spec. */
+async function testASwitchDuringTheCardSendStillHandsTheQuestionOver(): Promise<void> {
+  const context = await createContext()
+  let release!: () => void
+  context.cardSends.hold = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  try {
+    const request = userInputRequest({ requestId: "request-in-flight" })
+    await context.publish(request)
+    await context.conversations.setReplyMode(ROUTE.conversationKey, "text")
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "precondition: the switch's own resend cannot see this question yet"
+    )
+    release()
+    await waitFor(
+      () => context.deliveryText(request.requestId).includes("/回答 A1B2C3"),
+      "the question handing itself over once its card lands"
+    )
+    await settle()
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "handed over once, not held back as well"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function main(): Promise<void> {
+  await testAHeldBackQuestionIsResentOnceAsText()
+  await testAnAnsweredQuestionIsNotResent()
+  await testAQuestionBeingAnsweredIsNotResent()
+  await testTextModeAsksInText()
+  await testASwitchDuringTheCardSendStillHandsTheQuestionOver()
   await testPromptAndSingleUseOptionAnswer()
   await testARefusedCardStillDeliversTheWholeQuestion()
   await testMultipleQuestionsRotateCodeAndAcceptCustomText()

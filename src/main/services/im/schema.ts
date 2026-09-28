@@ -51,6 +51,20 @@ function rebuildWithoutLegacyColumn(input: {
   input.database.run(`DROP TABLE ${legacyTable}`)
 }
 
+/**
+ * How gates reach this conversation: as interactive cards, or as the plain text
+ * notices with short codes that predate them. Cards are the default; the reader
+ * chooses text with /文字模式 when the Zhaohu client cannot show a card in full.
+ *
+ * ensureColumn below is what guarantees the column: it runs on every start,
+ * after the device_epoch rebuild, so it reaches fresh, existing and rebuilt
+ * databases alike, and every existing row takes the default. It is declared
+ * here as well, as the other added columns are, so a fresh database's table
+ * definition is complete.
+ */
+const CONVERSATION_REPLY_MODE_DECLARATION =
+  "TEXT NOT NULL DEFAULT 'card' CHECK(reply_mode IN ('card', 'text'))"
+
 function createConversationsTable(database: SqlJsDatabase): void {
   database.run(`
     CREATE TABLE IF NOT EXISTS im_conversations (
@@ -59,6 +73,7 @@ function createConversationsTable(database: SqlJsDatabase): void {
       active_target_id TEXT,
       state TEXT NOT NULL CHECK(state IN ('active', 'suspended', 'revoked')),
       last_received_seq INTEGER NOT NULL DEFAULT 0 CHECK(last_received_seq >= 0),
+      reply_mode ${CONVERSATION_REPLY_MODE_DECLARATION},
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       UNIQUE(principal_id, conversation_key)
@@ -297,6 +312,8 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
     ],
     create: createConversationsTable
   })
+  // After the rebuild, so it inspects the table that survives it.
+  ensureColumn(database, "im_conversations", "reply_mode", CONVERSATION_REPLY_MODE_DECLARATION)
 
   createTargetsTable(database)
   ensureTargetsSupportThread(database)

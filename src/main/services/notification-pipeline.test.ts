@@ -13,7 +13,8 @@ const dependencies = vi.hoisted(() => ({
   threadMessages: [] as Array<{ role: string; content: string }>,
   cardInteractions: new Map<string, Record<string, unknown>>(),
   cardPublish: vi.fn(),
-  cardResolveDetached: vi.fn()
+  cardResolveDetached: vi.fn(),
+  replyMode: "card" as "card" | "text"
 }))
 vi.mock("../db", () => ({
   getDb: () => dependencies.database,
@@ -31,7 +32,8 @@ vi.mock("./im/remote-access-service", () => ({
 }))
 vi.mock("./im/conversation-state", () => ({
   imConversationStateStore: {
-    getConversation: dependencies.conversation
+    getConversation: dependencies.conversation,
+    getReplyMode: () => dependencies.replyMode
   }
 }))
 vi.mock("./im/card-publisher", () => ({
@@ -67,6 +69,7 @@ beforeEach(async () => {
   })
   dependencies.conversation.mockReturnValue({ state: "active", principalId: "user" })
   dependencies.cardAccepted = false
+  dependencies.replyMode = "card"
   dependencies.threadMessages.length = 0
   dependencies.cardInteractions.clear()
   dependencies.cardPublish.mockImplementation(
@@ -493,6 +496,48 @@ for (const source of ["human_gate", "biz_retry"] as const) {
       expect(rendered).toContain("桌面")
       expect(rendered).not.toContain("APP")
       expect(rendered).not.toContain("interactive")
+    })
+    const deliveryId = (id: string) =>
+      source === "human_gate" ? `human-gate:${id}` : `managed-biz-retry:${id}`
+    const decisionCommand = source === "human_gate" ? /门禁批准 [A-F0-9]{6}/ : /停止托管运行 [A-F0-9]{6}/
+    async function cardAdapter() {
+      dependencies.cardAccepted = true
+      const gate = await import("./im/human-gate-adapter")
+      const retry = await import("./im/biz-retry-adapter")
+      gate.initializeImHumanGateChannel()
+      retry.initializeImBizRetryChannel()
+      return source === "human_gate" ? gate.imHumanGateAdapter : retry.imBizRetryAdapter
+    }
+    it("hands over the text its card stood in for, once, when the reader switches to text", async () => {
+      const adapter = await cardAdapter()
+      create(source, "held-message")
+      await vi.waitFor(() => expect(dependencies.cardPublish).toHaveBeenCalledTimes(1))
+      expect(dependencies.enqueue).not.toHaveBeenCalled()
+
+      // Retried until the card's confirmation has recorded the notice; a call
+      // made before that finds nothing and consumes nothing.
+      await vi.waitFor(async () =>
+        expect(await adapter.resendPendingAsText("chat")).toEqual({ resent: 1, failed: 0 })
+      )
+      expect(dependencies.enqueue).toHaveBeenCalledTimes(1)
+      const [replies] = dependencies.enqueue.mock.calls[0] as [Array<{ deliveryId: string }>]
+      expect(replies[0]?.deliveryId).toBe(deliveryId("held-message"))
+      expect(JSON.stringify(replies)).toMatch(decisionCommand)
+
+      expect(await adapter.resendPendingAsText("chat")).toEqual({ resent: 0, failed: 0 })
+      expect(await adapter.resendPendingAsText("elsewhere")).toEqual({ resent: 0, failed: 0 })
+      expect(dependencies.enqueue).toHaveBeenCalledTimes(1)
+    })
+    it("hands the text over at once when the switch landed while the card was in flight", async () => {
+      // The card was already on its way; by its confirmation the mode is text.
+      dependencies.replyMode = "text"
+      const adapter = await cardAdapter()
+      create(source, "in-flight-message")
+      await vi.waitFor(() => expect(dependencies.enqueue).toHaveBeenCalledTimes(1))
+      const [replies] = dependencies.enqueue.mock.calls[0] as [Array<{ deliveryId: string }>]
+      expect(replies[0]?.deliveryId).toBe(deliveryId("in-flight-message"))
+      expect(await adapter.resendPendingAsText("chat")).toEqual({ resent: 0, failed: 0 })
+      expect(dependencies.enqueue).toHaveBeenCalledTimes(1)
     })
     if (source === "biz_retry") {
       it("uses the text reply truncation strategy for the card's assistant message", async () => {
