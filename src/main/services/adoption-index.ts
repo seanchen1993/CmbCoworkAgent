@@ -487,6 +487,17 @@ export interface AdoptionMeasurementWrite {
   detailsLimits?: AdoptLineDetailsLimits
 }
 
+/** A per-file rollup event (`code_commit_file`) derived from several measurement writes. */
+export interface AdoptionFileEventWrite {
+  /**
+   * Every generation the rollup was computed from. The event is enqueued only
+   * when all of them close in the same transaction; otherwise the transaction
+   * fails so the job re-measures without the generations measured elsewhere.
+   */
+  genEventIds: string[]
+  outboxEvent: EventOutboxInput
+}
+
 export interface AdoptionMeasurementCommitResult {
   success: boolean
   measuredCount: number
@@ -1247,7 +1258,8 @@ export function enqueueEventOutbox(event: EventOutboxInput, flushNow = true): bo
  */
 export function commitAdoptionMeasurements(
   writes: AdoptionMeasurementWrite[],
-  commitJobId?: string
+  commitJobId?: string,
+  fileEvents: AdoptionFileEventWrite[] = []
 ): AdoptionMeasurementCommitResult {
   if (!db) return { success: false, measuredCount: 0, enqueuedCount: 0 }
   let measuredCount = 0
@@ -1255,6 +1267,7 @@ export function commitAdoptionMeasurements(
   let detailsLimits: AdoptLineDetailsLimits | undefined
   try {
     db.run("BEGIN TRANSACTION")
+    const closedGenEventIds = new Set<string>()
     for (const write of writes) {
       db.run(
         `UPDATE gen_events
@@ -1264,12 +1277,20 @@ export function commitAdoptionMeasurements(
         [write.genEventId]
       )
       if (db.getRowsModified() <= 0) continue
+      closedGenEventIds.add(write.genEventId)
       measuredCount += 1
       if (write.details) insertAdoptLineDetailsRow(write.genEventId, write.details)
       if (write.detailsLimits) detailsLimits = write.detailsLimits
       if (write.outboxEvent) {
         if (insertOutboxEventUnsafe(write.outboxEvent)) enqueuedCount += 1
       }
+    }
+    for (const fileEvent of fileEvents) {
+      const stale = fileEvent.genEventIds.find((id) => !closedGenEventIds.has(id))
+      if (stale !== undefined) {
+        throw new Error(`file rollup is stale: generation ${stale} was measured concurrently`)
+      }
+      if (insertOutboxEventUnsafe(fileEvent.outboxEvent)) enqueuedCount += 1
     }
     if (commitJobId) {
       const now = Date.now()

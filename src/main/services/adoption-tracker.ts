@@ -31,7 +31,16 @@
 
 import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises"
 import { existsSync, mkdirSync, statSync } from "fs"
-import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve as resolvePath,
+  sep
+} from "path"
 import { createHash, randomUUID } from "crypto"
 import { execFile } from "child_process"
 import { promisify } from "util"
@@ -67,6 +76,15 @@ import {
 } from "./change-kind-classifier"
 import { getTestCodeMatchRule, type TestCodeMatchRule } from "./adoption-file-policy"
 import {
+  countAddedNonBlankLines,
+  emptyCommitFileDiff,
+  formatLineRanges,
+  placeAgentLines,
+  readCommitFileDiffs,
+  type CommitFileDiff,
+  type CommittedLineIndex
+} from "./commit-file-agent-lines"
+import {
   cleanupAdoptionDeliveryRecords,
   closeAdoptionIndex,
   commitAdoptionMeasurements,
@@ -101,6 +119,7 @@ import {
   trimToRowCap,
   vacuumAdoptionIndex,
   type AdoptLineDetailsInput,
+  type AdoptionFileEventWrite,
   type AdoptionMeasurementWrite,
   type CommitJobStatus,
   type CommitJobRow,
@@ -582,6 +601,24 @@ function computeLineHashes(content: string): Uint32Array {
     hashes.push(fnv1a32(norm))
   }
   return new Uint32Array(hashes)
+}
+
+/** `computeLineHashes` plus the physical line number of every hashed line. */
+function computeCommittedLineIndex(content: string): CommittedLineIndex {
+  const lines = content.split(/\r?\n/)
+  const lineNumbers: number[] = []
+  const hashes: number[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const norm = normalizeLine(lines[i])
+    if (norm.length === 0) continue
+    lineNumbers.push(i + 1)
+    hashes.push(fnv1a32(norm))
+  }
+  return {
+    lineNumbers: Uint32Array.from(lineNumbers),
+    hashes: Uint32Array.from(hashes),
+    totalLines: lines.length
+  }
 }
 
 interface LineEntry {
@@ -1650,6 +1687,109 @@ interface MeasureOpts {
    * or comparing hashes. Used by the commit path for files staged as deletions.
    */
   stagedDeleted?: boolean
+  /** Git root the commit belongs to; `code_commit_file.filePath` is relative to it. */
+  repoRoot?: string
+  /**
+   * This file's slice of the commit diff, used only to place agent lines. Null
+   * or absent when git could not provide it; counts never depend on it.
+   */
+  fileDiff?: CommitFileDiff | null
+}
+
+/** One file's terminal adoption writes, plus its `code_commit_file` rollup when it has one. */
+interface FileMeasurement {
+  writes: AdoptionMeasurementWrite[]
+  fileEvent?: AdoptionFileEventWrite
+}
+
+/** Sums over the `code_adopt` events one file emits for one commit. */
+interface CommitFileRollup {
+  generatedLineCount: number
+  effectiveGeneratedLineCount: number
+  adoptedLineCount: number
+  genEventIds: string[]
+}
+
+function addToCommitFileRollup(
+  rollup: CommitFileRollup,
+  genEventId: string,
+  counts: { generated: number; effective: number; adopted: number | null }
+): void {
+  // Mirrors the dashboard's per-commit sums, which skip adopt events without
+  // an adoptedLineCount (skipped_large), so the two always agree.
+  if (counts.adopted === null) return
+  rollup.generatedLineCount += counts.generated
+  rollup.effectiveGeneratedLineCount += counts.effective
+  rollup.adoptedLineCount += counts.adopted
+  rollup.genEventIds.push(genEventId)
+}
+
+/** Hash → how many copies of that line the measurement consumed as adopted. */
+function consumedHashCounts(
+  before: Map<number, number>,
+  after: Map<number, number>
+): Map<number, number> {
+  const consumed = new Map<number, number>()
+  for (const [hash, count] of before) {
+    const used = count - (after.get(hash) ?? 0)
+    if (used > 0) consumed.set(hash, used)
+  }
+  return consumed
+}
+
+/**
+ * Build the `code_commit_file` event: one file of one commit, its agent line
+ * count (the same sums as its `code_adopt` events) and where those lines sit
+ * in the committed file. Placement never changes a count.
+ */
+function buildCommitFileEvent(args: {
+  commitSha: string
+  absPath: string
+  relPath: string
+  rollup: CommitFileRollup
+  committedLines: CommittedLineIndex | null
+  adoptedCounts: Map<number, number>
+  fileDiff: CommitFileDiff | null
+  measuredAt: number
+}): CoworkEvent {
+  const { commitSha, absPath, relPath, rollup, committedLines, adoptedCounts, measuredAt } = args
+  // A binary-looking diff carries no line numbers; treat it like a missing diff.
+  const fileDiff = args.fileDiff && !args.fileDiff.binary ? args.fileDiff : null
+  const placement = committedLines
+    ? placeAgentLines(committedLines, adoptedCounts, fileDiff ? fileDiff.addedRanges : null)
+    : { lineNumbers: [], outsideDiff: fileDiff ? 0 : null }
+  const { ranges, truncated } = formatLineRanges(placement.lineNumbers)
+  const addedNonBlankLineCount = !fileDiff
+    ? null
+    : committedLines
+      ? countAddedNonBlankLines(committedLines, fileDiff.addedRanges)
+      : 0
+  return buildEvent("code_commit_file", "code_adoption", {
+    schemaVersion: 1,
+    commitSha,
+    filePath: relPath,
+    language: extname(absPath).slice(1).toLowerCase() || null,
+    fileDeleted: committedLines === null,
+    agentLineCount: rollup.adoptedLineCount,
+    agentLineRanges: ranges,
+    agentLineRangesTruncated: truncated,
+    lineMapping: fileDiff ? "diff" : "file_order",
+    agentLineCountOutsideDiff: placement.outsideDiff,
+    generatedLineCount: rollup.generatedLineCount,
+    effectiveGeneratedLineCount: rollup.effectiveGeneratedLineCount,
+    addedLineCount: fileDiff?.addedLineCount ?? null,
+    addedNonBlankLineCount,
+    deletedLineCount: fileDiff?.deletedLineCount ?? null,
+    genEventIds: rollup.genEventIds,
+    measuredAt: new Date(measuredAt).toISOString()
+  })
+}
+
+/** Repository-relative path with `/` separators, or null when `absPath` is outside `repoRoot`. */
+function toRepoRelativePath(repoRoot: string, absPath: string): string | null {
+  const rel = relative(resolvePath(repoRoot), absPath)
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null
+  return rel.replace(/\\/g, "/")
 }
 
 /**
@@ -1819,13 +1959,16 @@ function buildLocalAdoptLineDetailsRow(args: {
  * window) and build their terminal writes. The caller persists every returned
  * measured marker and immutable outbox event in one SQLite transaction.
  *
+ * With a commit sha, the file's `code_adopt` events are also rolled up into one
+ * `code_commit_file` event that says where the adopted lines sit.
+ *
  * Only commit-driven measurements remain — the 10-min timer was retired for
  * being the dominant I/O spike source with marginal value over L1 + L3.
  */
 async function buildMeasurementsForFile(
   filePath: string,
   opts?: MeasureOpts
-): Promise<AdoptionMeasurementWrite[]> {
+): Promise<FileMeasurement> {
   const absPath = resolvePath(filePath)
   const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
   const maxCreated = resolveMaxGenCreatedAt(opts?.commitTimeMs)
@@ -1833,7 +1976,7 @@ async function buildMeasurementsForFile(
   console.log(
     `[AdoptionTracker] buildMeasurementsForFile: absPath=${absPath} pendingGens=${pendingRows.length} commitSha=${opts?.commitSha ?? "none"} commitTimeMs=${opts?.commitTimeMs ?? "none"} stagedDeleted=${opts?.stagedDeleted ?? false}`
   )
-  if (pendingRows.length === 0) return []
+  if (pendingRows.length === 0) return { writes: [] }
 
   // Concurrent measurement of the same pending rows could build two different
   // event ids before either transaction closes the rows. Retry the owning job
@@ -1845,10 +1988,17 @@ async function buildMeasurementsForFile(
 
   try {
     let currentHashCounts: Map<number, number> | null = null
+    let committedLines: CommittedLineIndex | null = null
     let missingCurrentContent = false
     const supersededHashCounts = new Map<number, number>()
     const localTraceRelPath = opts?.commitSha ? await resolveLocalTraceRelPath(absPath) : null
     const writes: AdoptionMeasurementWrite[] = []
+    const rollup: CommitFileRollup = {
+      generatedLineCount: 0,
+      effectiveGeneratedLineCount: 0,
+      adoptedLineCount: 0,
+      genEventIds: []
+    }
 
     if (!opts?.stagedDeleted) {
       let current = opts?.currentContent
@@ -1862,9 +2012,12 @@ async function buildMeasurementsForFile(
 
       if (!missingCurrentContent && current !== undefined) {
         const currentText = Buffer.isBuffer(current) ? decodeCodeBuffer(current) : current
-        currentHashCounts = buildLineHashCounts(computeLineHashes(currentText))
+        committedLines = computeCommittedLineIndex(currentText)
+        currentHashCounts = buildLineHashCounts(committedLines.hashes)
       }
     }
+    // Snapshot before generations consume it; the difference is what was adopted.
+    const committedHashCounts = currentHashCounts ? new Map(currentHashCounts) : null
 
     let sawFullRewrite = false
     for (const pending of pendingRows) {
@@ -1888,6 +2041,11 @@ async function buildMeasurementsForFile(
               localTraceRelPath
             )
           )
+          addToCommitFileRollup(rollup, pending.event_id, {
+            generated: storedHashes.length,
+            effective: 0,
+            adopted: 0
+          })
         } else {
           writes.push({ genEventId: pending.event_id })
         }
@@ -2016,6 +2174,11 @@ async function buildMeasurementsForFile(
             }
           : {})
       })
+      addToCommitFileRollup(rollup, pending.event_id, {
+        generated: generatedLineCount,
+        effective: effectiveLineCount,
+        adopted: adoptedLineCount
+      })
 
       console.log(
         `[AdoptionTracker] measure verdict=${verdict} genEventId=${pending.event_id} file=${absPath} generatedLines=${generatedLineCount} effectiveLines=${effectiveLineCount} adoptedLines=${adoptedLineCount} commitSha=${opts?.commitSha ?? "none"} threadId=${pending.thread_id ?? "none"}`
@@ -2033,7 +2196,43 @@ async function buildMeasurementsForFile(
       // row is a pre-rewrite draft that cannot have survived — void it next.
       if (pending.tool === "write_file") sawFullRewrite = true
     }
-    return writes
+
+    const commitSha = opts?.commitSha?.trim()
+    if (!commitSha || rollup.genEventIds.length === 0) return { writes }
+    const relPath =
+      (opts?.repoRoot ? toRepoRelativePath(opts.repoRoot, absPath) : null) ?? localTraceRelPath
+    if (!relPath) {
+      console.warn(
+        `[AdoptionTracker] code_commit_file skipped — no repository-relative path: file=${absPath} commitSha=${commitSha}`
+      )
+      return { writes }
+    }
+    const measuredAt = Date.now()
+    const fileEvent = buildCommitFileEvent({
+      commitSha,
+      absPath,
+      relPath,
+      rollup,
+      committedLines,
+      adoptedCounts:
+        committedHashCounts && currentHashCounts
+          ? consumedHashCounts(committedHashCounts, currentHashCounts)
+          : new Map(),
+      fileDiff: opts?.fileDiff ?? null,
+      measuredAt
+    })
+    console.log(
+      `[AdoptionTracker] code_commit_file: file=${relPath} commitSha=${commitSha} agentLines=${rollup.adoptedLineCount} lineMapping=${String(fileEvent.properties?.lineMapping)} outsideDiff=${String(fileEvent.properties?.agentLineCountOutsideDiff)}`
+    )
+    return {
+      writes,
+      fileEvent: {
+        // Every generation this rollup read, including ones without an adopt
+        // event: the rollup is only valid if all of them close in one transaction.
+        genEventIds: writes.map((write) => write.genEventId),
+        outboxEvent: toOutboxEvent(fileEvent, measuredAt)
+      }
+    }
   } finally {
     inFlightFileMeasurements.delete(absPath)
   }
@@ -2462,7 +2661,42 @@ async function captureSnapshotsFromCommit(job: CommitJobRow): Promise<StagedSnap
   return snapshots.filter((snapshot): snapshot is StagedSnapshot => snapshot !== undefined)
 }
 
-async function runCommitJob(jobId: string, suppliedSnapshots?: StagedSnapshot[]): Promise<boolean> {
+/**
+ * Read the commit's diff for the files that still have pending generations. It
+ * only places agent lines, so every failure degrades to null (lines placed by
+ * file content alone) and never fails the job or changes a count.
+ */
+async function readPendingCommitFileDiffs(
+  job: CommitJobRow,
+  absPaths: string[],
+  gitCwd?: string
+): Promise<Map<string, CommitFileDiff> | null> {
+  const pendingPaths = new Set(
+    listPendingGenPaths(Date.now() - GEN_ATTRIBUTION_WINDOW_MS).map((row) => row.file_path)
+  )
+  const relPaths: string[] = []
+  for (const absPath of absPaths) {
+    if (!pendingPaths.has(absPath)) continue
+    const relPath = toRepoRelativePath(job.repo_path, absPath)
+    if (relPath) relPaths.push(relPath)
+  }
+  if (relPaths.length === 0) return null
+  // The job's work tree may be gone (a removed linked worktree); the commit is
+  // still readable from the main checkout that shares its object store.
+  const cwd = gitCwd && !existsSync(job.repo_path) ? gitCwd : job.repo_path
+  const startedAt = Date.now()
+  const diffs = await readCommitFileDiffs({ cwd, commitSha: job.commit_sha, relPaths })
+  console.log(
+    `[AdoptionTracker] commit diff: commitSha=${job.commit_sha} files=${relPaths.length} ok=${diffs !== null} durationMs=${Date.now() - startedAt}`
+  )
+  return diffs
+}
+
+async function runCommitJob(
+  jobId: string,
+  suppliedSnapshots?: StagedSnapshot[],
+  gitCwd?: string
+): Promise<boolean> {
   const initial = getCommitJob(jobId)
   if (!initial) return false
   if (initial.status === "completed") return true
@@ -2474,23 +2708,38 @@ async function runCommitJob(jobId: string, suppliedSnapshots?: StagedSnapshot[])
     const job = getCommitJob(jobId)
     if (!job) throw new Error(`commit job disappeared: ${jobId}`)
     const snapshots = suppliedSnapshots ?? (await captureSnapshotsFromCommit(job))
-    const writes: AdoptionMeasurementWrite[] = []
+    const measurable: StagedSnapshot[] = []
     const seenPaths = new Set<string>()
     for (const snapshot of snapshots) {
       const absPath = resolvePath(snapshot.absPath)
       if (!isCodeFile(absPath) || seenPaths.has(absPath)) continue
       seenPaths.add(absPath)
-      writes.push(
-        ...(await buildMeasurementsForFile(absPath, {
-          ...(snapshot.stagedContent === null
-            ? { stagedDeleted: true }
-            : { currentContent: snapshot.stagedContent }),
-          commitSha: job.commit_sha,
-          commitTimeMs: job.commit_time_ms ?? undefined
-        }))
-      )
+      measurable.push({ absPath, stagedContent: snapshot.stagedContent })
     }
-    const result = commitAdoptionMeasurements(writes, jobId)
+    const fileDiffs = await readPendingCommitFileDiffs(
+      job,
+      measurable.map((snapshot) => snapshot.absPath),
+      gitCwd
+    )
+    const writes: AdoptionMeasurementWrite[] = []
+    const fileEvents: AdoptionFileEventWrite[] = []
+    for (const snapshot of measurable) {
+      const relPath = toRepoRelativePath(job.repo_path, snapshot.absPath)
+      const measurement = await buildMeasurementsForFile(snapshot.absPath, {
+        ...(snapshot.stagedContent === null
+          ? { stagedDeleted: true }
+          : { currentContent: snapshot.stagedContent }),
+        commitSha: job.commit_sha,
+        commitTimeMs: job.commit_time_ms ?? undefined,
+        repoRoot: job.repo_path,
+        // A file missing from a successful diff is unchanged against the first
+        // parent (a merge brought it in), so it simply has no added lines.
+        fileDiff: fileDiffs && relPath ? (fileDiffs.get(relPath) ?? emptyCommitFileDiff()) : null
+      })
+      writes.push(...measurement.writes)
+      if (measurement.fileEvent) fileEvents.push(measurement.fileEvent)
+    }
+    const result = commitAdoptionMeasurements(writes, jobId, fileEvents)
     if (!result.success) throw new Error("failed to persist adoption measurement transaction")
     if (result.enqueuedCount > 0) scheduleOutboxDrain()
     console.log(
@@ -2510,11 +2759,12 @@ async function runCommitJob(jobId: string, suppliedSnapshots?: StagedSnapshot[])
 
 function runCommitJobDeduped(
   jobId: string,
-  suppliedSnapshots?: StagedSnapshot[]
+  suppliedSnapshots?: StagedSnapshot[],
+  gitCwd?: string
 ): Promise<boolean> {
   const existing = inFlightCommitJobs.get(jobId)
   if (existing) return existing
-  const task = runCommitJob(jobId, suppliedSnapshots).catch((e) => {
+  const task = runCommitJob(jobId, suppliedSnapshots, gitCwd).catch((e) => {
     console.warn(`[AdoptionTracker] unexpected commit job failure: jobId=${jobId}`, e)
     return false
   })
@@ -2559,7 +2809,7 @@ export async function measureForCommit(
   console.log(
     `[AdoptionTracker] measureForCommit: jobId=${job.job_id} snapshotCount=${snapshots.length} commitSha=${job.commit_sha} commitTimeMs=${job.commit_time_ms ?? "none"}`
   )
-  return runCommitJobDeduped(job.job_id, snapshots.length > 0 ? snapshots : undefined)
+  return runCommitJobDeduped(job.job_id, snapshots.length > 0 ? snapshots : undefined, gitCwd)
 }
 
 export function hasPendingGenerationsForCommit(
