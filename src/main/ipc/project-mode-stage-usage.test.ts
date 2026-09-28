@@ -106,4 +106,25 @@ describe("mixed-version stage cost queries", () => {
     )
     expect(failed).toHaveBeenCalledTimes(1)
   })
+
+  it("recognises the mapping error inside the worker's flattened cause chain", async () => {
+    const legacy = buildProjectModeStageAnalysisAggs("未归因", 50, false)
+    const body = { size: 0, aggs: buildProjectModeStageAnalysisAggs("未归因", 50) }
+    // esQuery on the worker path: the ES body sits in a plain-object cause, not an Error.
+    const fromWorker = new Error("请检查网络连接后重试", {
+      cause: {
+        code: "DASHBOARD_ES_HTTP_ERROR",
+        message:
+          'ES 400: {"error":{"root_cause":[{"reason":"[nested] nested path [stageUsage] is not nested"}]'
+      }
+    })
+    const execute = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("请检查网络连接后重试", { cause: fromWorker }))
+      .mockResolvedValueOnce({ ok: true })
+    await expect(queryWithStageUsageMappingFallback(execute, body, legacy)).resolves.toEqual({
+      ok: true
+    })
+    expect(execute.mock.calls[1][0]).toEqual({ ...body, aggs: legacy })
+  })
 })

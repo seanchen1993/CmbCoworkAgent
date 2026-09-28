@@ -303,11 +303,12 @@ export function SearchableRankingPanel({
   renderNameAddon,
   className,
   metricNote,
-  hideCallTotal = false
+  callTotalLabel
 }: {
   title: string
   metricNote?: string
-  hideCallTotal?: boolean
+  /** Replaces "共 N 次调用" when the counts are not invocations. */
+  callTotalLabel?: string
   totalKinds: number
   totalCalls: number
   defaultItems: RankingItem[]
@@ -349,20 +350,17 @@ export function SearchableRankingPanel({
             </span>
           </div>
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            {hideCallTotal ? (
-              <span>暂无完整计数</span>
+            <span>
+              <span className="font-semibold text-foreground">{totalKinds}</span> 种
+            </span>
+            <span className="text-border">|</span>
+            {callTotalLabel ? (
+              <span>{callTotalLabel}</span>
             ) : (
-              <>
-                <span>
-                  <span className="font-semibold text-foreground">{totalKinds}</span> 种
-                </span>
-                <span className="text-border">|</span>
-                <span>
-                  共{" "}
-                  <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span>{" "}
-                  次调用
-                </span>
-              </>
+              <span>
+                共 <span className="font-semibold text-foreground">{formatNumber(totalCalls)}</span>{" "}
+                次调用
+              </span>
             )}
           </div>
         </div>
@@ -1102,41 +1100,37 @@ export function ToolRankingPanel({
   toolUsageCoverage?: DashboardToolUsageCoverage
 }): React.JSX.Element {
   const [showAll, setShowAll] = useState(false)
-  const coverage = toolUsageCoverage
-  const defaultItems: RankingItem[] = (
-    coverage?.available ? (showAll ? byToolAll : byTool) : []
-  ).map((item) => ({
+  // Counts are invocations only when the data says so; otherwise they are trace counts.
+  const calls = toolUsageCoverage?.metric === "calls" ? toolUsageCoverage : undefined
+  const defaultItems: RankingItem[] = (showAll ? byToolAll : byTool).map((item) => ({
     name: item.tool,
     count: item.count
   }))
   const searchItems: RankingItem[] = (
-    !coverage?.available
-      ? []
-      : showAll
-        ? byToolAllFull.length > 0
-          ? byToolAllFull
-          : byToolAll
-        : byToolFilteredAll.length > 0
-          ? byToolFilteredAll
-          : byTool
+    showAll
+      ? byToolAllFull.length > 0
+        ? byToolAllFull
+        : byToolAll
+      : byToolFilteredAll.length > 0
+        ? byToolFilteredAll
+        : byTool
   ).map((item) => ({ name: item.tool, count: item.count }))
-  const totalKinds = showAll ? totalTools : (toolUsageCoverage?.filteredTools ?? 0)
+  const totalKinds = showAll ? totalTools : (toolUsageCoverage?.filteredTools ?? searchItems.length)
   const totalCalls = showAll ? totalToolCalls : (toolUsageCoverage?.filteredCalls ?? 0)
-  const unavailable =
-    !coverage?.available || (coverage.traceCount > 0 && coverage.completeTraceCount === 0)
-  const metricNote = !coverage?.available
-    ? "当前范围暂无工具调用次数数据。"
-    : `按实际记录的工具调用次数统计；完整采集 ${coverage.completeTraceCount}/${coverage.traceCount} 条 Trace。` +
-      (coverage.completeTraceCount < coverage.traceCount
+  const metricNote = calls
+    ? `按实际记录的工具调用次数统计；完整采集 ${calls.completeTraceCount}/${calls.traceCount} 条 Trace。` +
+      (calls.completeTraceCount < calls.traceCount
         ? "旧版或采集不完整的 Trace 未计入，当前为已知下限。"
         : "") +
-      (coverage.rankingTruncated ? "排行仅返回前 1000 种工具，合计包含全部工具。" : "")
+      (calls.rankingTruncated ? "排行仅返回前 1000 种工具，合计包含全部工具。" : "")
+    : "当前范围没有完整的调用次数数据，排行按用过该工具的 Trace 数统计，不是调用次数。" +
+      (toolUsageCoverage?.rankingTruncated ? "排行仅返回前 1000 种工具。" : "")
 
   return (
     <SearchableRankingPanel
       title="Tool 使用"
       metricNote={metricNote}
-      hideCallTotal={unavailable}
+      callTotalLabel={calls ? undefined : "按 Trace 数排行"}
       totalKinds={totalKinds}
       totalCalls={totalCalls}
       defaultItems={defaultItems}

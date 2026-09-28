@@ -16,32 +16,56 @@ function deferred<T>(): {
 }
 
 describe("HarnessStageAttributionCache", () => {
-  it("bounds call-start lookup latency, shares refreshes and never returns dirty snapshots", async () => {
-    vi.useFakeTimers()
-    try {
-      let resolve!: (stage: HarnessResolvedStage) => void
-      const resolver = vi.fn(
-        () =>
-          new Promise<HarnessResolvedStage>((done) => {
-            resolve = done
-          })
-      )
-      const cache = new HarnessStageAttributionCache({ resolver })
-      cache.prime("p", "f", { name: "plan", status: "进行中" })
-      expect((await cache.getForCall("p", "f")).nodeName).toBe("plan")
-      cache.markDirty("p", "f")
-      const first = cache.getForCall("p", "f")
-      const second = cache.getForCall("p", "f")
-      await vi.advanceTimersByTimeAsync(200)
-      expect(await first).toEqual({ nodeName: null, nodeStatus: null })
-      expect(await second).toEqual({ nodeName: null, nodeStatus: null })
-      expect(resolver).toHaveBeenCalledTimes(1)
-      resolve({ name: "dev", status: "进行中" })
-      await vi.advanceTimersByTimeAsync(0)
-      expect((await cache.getForCall("p", "f")).nodeName).toBe("dev")
-    } finally {
-      vi.useRealTimers()
-    }
+  it("reads the call-start stage alongside the call and shares one inspection", async () => {
+    const lookup = deferred<HarnessResolvedStage | null>()
+    const resolver = vi.fn(() => lookup.promise)
+    const cache = new HarnessStageAttributionCache({ resolver })
+    cache.prime("p", "f", { name: "plan", status: "进行中" })
+    expect((await cache.getForCall("p", "f")).nodeName).toBe("plan")
+    expect(resolver).not.toHaveBeenCalled()
+
+    cache.markDirty("p", "f")
+    const first = cache.getForCall("p", "f")
+    const second = cache.getForCall("p", "f")
+    expect(resolver).toHaveBeenCalledTimes(1)
+    lookup.resolve({ name: "dev", status: "进行中" })
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { nodeName: "dev", nodeStatus: "进行中" },
+      { nodeName: "dev", nodeStatus: "进行中" }
+    ])
+  })
+
+  it("leaves a call unattributed when the stage changes after the call started", async () => {
+    const lookup = deferred<HarnessResolvedStage | null>()
+    const resolver = vi.fn(() => lookup.promise)
+    const cache = new HarnessStageAttributionCache({ resolver })
+    cache.markDirty("p", "f")
+    const call = cache.getForCall("p", "f")
+    // The call itself moves the workflow on while the inspection is still running.
+    cache.markDirty("p", "f")
+    lookup.resolve({ name: "dev", status: "进行中" })
+    await expect(call).resolves.toEqual({ nodeName: null, nodeStatus: null })
+    // No second inspection on this call's behalf: its start is already in the past.
+    expect(resolver).toHaveBeenCalledTimes(1)
+  })
+
+  it("retries once for an inspection that went stale before the call started", async () => {
+    const stale = deferred<HarnessResolvedStage | null>()
+    const current = deferred<HarnessResolvedStage | null>()
+    const resolver = vi
+      .fn<() => Promise<HarnessResolvedStage | null>>()
+      .mockImplementationOnce(() => stale.promise)
+      .mockImplementationOnce(() => current.promise)
+    const cache = new HarnessStageAttributionCache({ resolver })
+    cache.markDirty("p", "f")
+    const earlier = cache.getForCall("p", "f")
+    cache.markDirty("p", "f")
+    const later = cache.getForCall("p", "f")
+    stale.resolve({ name: "plan", status: "进行中" })
+    await expect(earlier).resolves.toEqual({ nodeName: null, nodeStatus: null })
+    await vi.waitFor(() => expect(resolver).toHaveBeenCalledTimes(2))
+    current.resolve({ name: "dev", status: "进行中" })
+    await expect(later).resolves.toEqual({ nodeName: "dev", nodeStatus: "进行中" })
   })
 
   it("backs off unavailable adapters instead of spawning one inspection per call", async () => {

@@ -20,6 +20,7 @@ export class TraceStageUsageCounter {
     string,
     { stage: TraceCallStage; name?: string; started?: boolean }
   >()
+  private readonly pending = new Set<Promise<void>>()
   private overflow = false
 
   bindModel(messageId: string, stage: TraceCallStage): void {
@@ -58,18 +59,38 @@ export class TraceStageUsageCounter {
 
   /** May arrive after the values snapshot first observed the tool intent. */
   bindTool(key: string, stage: TraceCallStage): void {
-    key = callKey(key)
-    const previous = this.tools.get(key)
-    if (previous?.started) return
-    if (previous?.name !== undefined) {
-      this.addTool(previous.stage, previous.name, -1)
-      this.addTool(stage, previous.name, 1)
+    if (this.reserveToolStart(key)) this.moveTool(callKey(key), stage)
+  }
+
+  /**
+   * The stage lookup runs alongside the tool, so the start is claimed now (a repeated
+   * start cannot re-attribute) and the count moves once the lookup resolves.
+   */
+  bindToolLater(key: string, stage: Promise<TraceCallStage>): void {
+    if (!this.reserveToolStart(key)) return
+    const hashed = callKey(key)
+    const moved = stage.then(
+      (resolved) => this.moveTool(hashed, resolved),
+      () => undefined
+    )
+    this.pending.add(moved)
+    void moved.then(() => this.pending.delete(moved))
+  }
+
+  /** Let lookups still in flight land before a snapshot, without waiting on a stuck one. */
+  async settle(graceMs: number): Promise<void> {
+    if (this.pending.size === 0) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.all([...this.pending]),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, graceMs)
+        })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
     }
-    if (!previous && this.tools.size >= MAX_CALLS) {
-      this.overflow = true
-      return
-    }
-    this.tools.set(key, { ...previous, stage: { ...stage }, started: true })
   }
 
   recordTool(key: string, name: string, stage?: TraceCallStage): void {
@@ -115,6 +136,29 @@ export class TraceStageUsageCounter {
       stageUsageComplete: complete,
       stageUsage: rows.map((row) => ({ ...row }))
     }
+  }
+
+  private reserveToolStart(key: string): boolean {
+    key = callKey(key)
+    const previous = this.tools.get(key)
+    if (previous?.started) return false
+    if (!previous && this.tools.size >= MAX_CALLS) {
+      this.overflow = true
+      return false
+    }
+    this.tools.set(key, { ...previous, stage: previous?.stage ?? {}, started: true })
+    return true
+  }
+
+  /** Move an already counted call to its start stage; a call not yet seen just remembers it. */
+  private moveTool(key: string, stage: TraceCallStage): void {
+    const entry = this.tools.get(key)
+    if (!entry) return
+    if (entry.name !== undefined) {
+      this.addTool(entry.stage, entry.name, -1)
+      this.addTool(stage, entry.name, 1)
+    }
+    entry.stage = { ...stage }
   }
 
   private addTool(stage: TraceCallStage, name: string, delta: number): void {

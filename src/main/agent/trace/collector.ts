@@ -17,7 +17,11 @@
 import { createHash } from "crypto"
 import { TraceToolUsageCounter } from "./tool-usage"
 import { TraceStageUsageCounter } from "./stage-usage"
-import { registerTraceStageUsage, unregisterTraceStageUsage } from "./stage-usage-registry"
+import {
+  CALL_STAGE_SETTLE_MS,
+  registerTraceStageUsage,
+  unregisterTraceStageUsage
+} from "./stage-usage-registry"
 import type { TraceCallStage } from "../../../shared/trace-stage-usage"
 import { join } from "path"
 import { homedir } from "os"
@@ -1292,7 +1296,8 @@ export class TraceCollector {
   }
 
   addToolNode(params: {
-    stageAttribution?: TraceCallStage
+    /** A pending lookup when the node is added at tool start; the count moves once it lands. */
+    stageAttribution?: TraceCallStage | Promise<TraceCallStage>
     name: string
     input?: unknown
     parentId?: string
@@ -1308,8 +1313,15 @@ export class TraceCollector {
         ? `message:${params.llmMessageId}:${params.metadata?.index ?? 0}`
         : `node:${uuid()}`
     this.toolUsageCounter.observe(usageKey, params.name || "unknown")
-    if (this.harnessFeature)
-      this.stageUsageCounter.recordTool(usageKey, params.name || "unknown", params.stageAttribution)
+    if (this.harnessFeature) {
+      const stage = params.stageAttribution
+      if (stage instanceof Promise) {
+        this.stageUsageCounter.recordTool(usageKey, params.name || "unknown")
+        this.stageUsageCounter.bindToolLater(usageKey, stage)
+      } else {
+        this.stageUsageCounter.recordTool(usageKey, params.name || "unknown", stage)
+      }
+    }
     if (params.toolCallId) {
       const existing = this.toolNodeByCallId.get(params.toolCallId)
       if (existing) {
@@ -1541,6 +1553,8 @@ export class TraceCollector {
     unregisterTraceStageUsage(this.traceId)
     const endedAt = nowIsoLocal()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
+    // Tool stages resolve alongside the tools; give the last few a moment to land.
+    if (this.harnessFeature) await this.stageUsageCounter.settle(CALL_STAGE_SETTLE_MS)
     const totalToolCalls = this.getTotalToolCalls()
     const toolUsage = this.toolUsageCounter.snapshot(totalToolCalls)
     const stageUsage = this.harnessFeature

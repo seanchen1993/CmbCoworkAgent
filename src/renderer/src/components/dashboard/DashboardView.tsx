@@ -87,6 +87,7 @@ import { ProjectModePanel } from "./panels/ProjectModePanel"
 import { EfficiencyPanel } from "./panels/EfficiencyPanel"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
+import { toolRankingCountLabel } from "../../../../shared/dashboard-tool-usage"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
@@ -268,7 +269,10 @@ function buildDashboardAnalysisPanelSnapshot({
           totalSkills: overview.totalSkills,
           totalSkillCalls: overview.totalSkillCalls,
           totalTools: overview.totalTools,
-          totalToolCalls: overview.totalToolCalls,
+          // 没有完整计数时排行是「用过该工具的 Trace 数」，调用总数未知，不能给 0。
+          toolRankingMetric: overview.toolUsageCoverage?.metric ?? "traces",
+          totalToolCalls:
+            overview.toolUsageCoverage?.metric === "calls" ? overview.totalToolCalls : null,
           codeGeneratedLines: overview.codeGeneratedLines,
           codeMeasuredGeneratedLines: overview.codeMeasuredGeneratedLines,
           codeEffectiveGeneratedLines: overview.codeEffectiveGeneratedLines,
@@ -4576,6 +4580,10 @@ export function DashboardView(): React.JSX.Element {
 
       // 1. Overview summary
       if (overview) {
+        // 没有完整计数时，Tool 排行是「用过该工具的 Trace 数」，调用总数未知。
+        const toolCountLabel = toolRankingCountLabel(overview.toolUsageCoverage)
+        const toolCallTotal =
+          overview.toolUsageCoverage?.metric === "calls" ? overview.totalToolCalls : "暂无完整计数"
         sheets.push({
           name: "使用概览",
           header: ["指标", "值"],
@@ -4609,7 +4617,7 @@ export function DashboardView(): React.JSX.Element {
             ["Skill 种类数", overview.totalSkills],
             ["Skill 调用次数", overview.totalSkillCalls],
             ["Tool 种类数", overview.totalTools],
-            ["Tool 调用次数", overview.totalToolCalls]
+            ["Tool 调用次数", toolCallTotal]
           ]
         })
 
@@ -4673,10 +4681,10 @@ export function DashboardView(): React.JSX.Element {
         if (exportFilteredTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(已过滤)",
-            header: ["排名", "Tool", "调用次数"],
+            header: ["排名", "Tool", toolCountLabel],
             rows: [
               ["Tool 种类数", overview.totalTools, ""],
-              ["Tool 调用次数", overview.totalToolCalls, ""],
+              ["Tool 调用次数", toolCallTotal, ""],
               ["", "", ""],
               ...exportFilteredTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
@@ -4689,10 +4697,10 @@ export function DashboardView(): React.JSX.Element {
         if (exportAllTools.length > 0) {
           sheets.push({
             name: "Tool使用排行(全部)",
-            header: ["排名", "Tool", "调用次数"],
+            header: ["排名", "Tool", toolCountLabel],
             rows: [
               ["Tool 种类数", overview.totalTools, ""],
-              ["Tool 调用次数", overview.totalToolCalls, ""],
+              ["Tool 调用次数", toolCallTotal, ""],
               ["", "", ""],
               ...exportAllTools.map((t, i) => [i + 1, t.tool, t.count])
             ]
@@ -4998,10 +5006,11 @@ export function DashboardView(): React.JSX.Element {
         projectMode.tools.byToolFilteredAll.length > 0
           ? projectMode.tools.byToolFilteredAll
           : projectMode.tools.byTool
+      const toolCountLabel = toolRankingCountLabel(projectMode.tools.toolUsageCoverage)
       if (exportFilteredTools.length > 0) {
         sheets.push({
           name: "项目Tool使用排行(已过滤)",
-          header: ["排名", "Tool", "调用次数"],
+          header: ["排名", "Tool", toolCountLabel],
           rows: exportFilteredTools.map((tool, index) => [index + 1, tool.tool, tool.count])
         })
       }
@@ -5013,7 +5022,7 @@ export function DashboardView(): React.JSX.Element {
       if (exportAllTools.length > 0) {
         sheets.push({
           name: "项目Tool使用排行(全部)",
-          header: ["排名", "Tool", "调用次数"],
+          header: ["排名", "Tool", toolCountLabel],
           rows: exportAllTools.map((tool, index) => [index + 1, tool.tool, tool.count])
         })
       }

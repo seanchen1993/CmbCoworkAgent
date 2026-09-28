@@ -33,6 +33,32 @@ describe("call-stage counters", () => {
     })
   })
 
+  it("moves a tool once its call-start lookup lands, and ignores a repeated start", async () => {
+    const c = new TraceStageUsageCounter()
+    let answer!: (stage: { nodeName: string }) => void
+    c.recordTool("call:t1", "request_user_input")
+    c.bindToolLater(
+      "call:t1",
+      new Promise((resolve) => {
+        answer = resolve
+      })
+    )
+    c.bindToolLater("call:t1", Promise.resolve({ nodeName: "retry" }))
+    const counted = { ...totals, toolCalls: 1 }
+    // Until the lookup answers, the call stays in the unattributed bucket.
+    expect(c.snapshot(counted).stageUsage).toEqual([
+      expect.objectContaining({ toolCalls: 1, userInputRequests: 1 })
+    ])
+    expect(c.snapshot(counted).stageUsage[0].nodeName).toBeUndefined()
+    answer({ nodeName: "dev" })
+    await c.settle(1000)
+    const snapshot = c.snapshot(counted)
+    expect(snapshot.stageUsageComplete).toBe(true)
+    expect(snapshot.stageUsage).toEqual([
+      expect.objectContaining({ nodeName: "dev", toolCalls: 1, userInputRequests: 1 })
+    ])
+  })
+
   it("keeps unknown stages and missing token usage visible without inventing the turn-start stage", () => {
     const c = new TraceStageUsageCounter()
     c.recordModel("no-start")

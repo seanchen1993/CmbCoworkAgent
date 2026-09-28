@@ -1,3 +1,4 @@
+import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import {
   buildProjectModeRunCostAggs,
   parseProjectModeRunCost,
@@ -131,15 +132,7 @@ export async function queryWithStageUsageMappingFallback<T>(
   try {
     return await execute(body)
   } catch (error) {
-    const messages: string[] = []
-    let current = error
-    for (let i = 0; i < 6 && current instanceof Error; i++) {
-      messages.push(current.message)
-      current = current.cause
-    }
-    const message = messages.join(" ")
-    if (!/stageUsage/.test(message) || !/nested.*(path|type)|not.*nested/i.test(message))
-      throw error
+    if (!isNestedMappingError(error, "stageUsage")) throw error
     return execute({ ...body, aggs: legacyAggs })
   }
 }
