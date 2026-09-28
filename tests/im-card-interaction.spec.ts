@@ -20,7 +20,8 @@ import {
   assertRemoteImCardUpdateV1,
   type RemoteImCardReceiptV1,
   type RemoteImCardSendV1,
-  type RemoteImCardUpdateV1
+  type RemoteImCardUpdateV1,
+  type RemoteImReplyV1
 } from "../src/shared/im-gateway-contract"
 import {
   BIZ_RETRY_CHOICE_KEY,
@@ -50,7 +51,9 @@ import type { ImPersistenceDependencies } from "../src/main/services/im/persiste
 import { ImRemoteApprovalAuditStore } from "../src/main/services/im/remote-approval-audit-store"
 import { ImRemoteApprovalService } from "../src/main/services/im/remote-approval-service"
 import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
+import { buildImProactiveReplies } from "../src/main/services/im/reply-segmentation"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
+import { ImWithheldTextNotices } from "../src/main/services/im/withheld-text-notices"
 
 const ROUTE = { principalId: "principal-1", conversationKey: "conversation-1" }
 
@@ -1071,6 +1074,172 @@ function testAnUnresolvedReceiptIsAValidPayload(): void {
  * in-memory store — and the only way to reach this path is for the interaction
  * to be absent from that store, so it returned before reaching the gateway.
  */
+function approvalCardInput() {
+  return {
+    kind: "approval" as const,
+    threadId: "thread-1",
+    principalId: ROUTE.principalId,
+    conversationKey: ROUTE.conversationKey,
+    requestRef: "A1B2C3",
+    targetLabel: "会话：桌面会话",
+    build: (tag: string) =>
+      buildApprovalCard({
+        targetLabel: "会话：桌面会话",
+        operation: "写入文件",
+        detail: "写入文件：src/billing.ts",
+        tag,
+        allowedDecisions: ["approve", "reject"]
+      })
+  }
+}
+
+/**
+ * Text mode is the publisher answering null before any card exists — nothing
+ * registered, nothing sent — which every caller already reads as "send the
+ * text notice". That is the whole mechanism, for all five kinds at once.
+ */
+async function testTextModeSendsNoCard(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const interactions = new ImCardInteractionStore()
+  let textMode = true
+  const publisher = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions,
+    isThreadLive: () => true,
+    usesTextReplies: () => textMode,
+    warn: () => undefined
+  })
+  assert.equal(await publisher.publish(approvalCardInput()), null)
+  assert.equal(gateway.sent.length, 0, "text mode sends no card")
+  assert.equal(interactions.list().length, 0, "and registers none: there is nothing to address")
+
+  textMode = false
+  assert.notEqual(await publisher.publish(approvalCardInput()), null)
+  assert.equal(gateway.sent.length, 1, "switching back needs nothing but the mode")
+  console.log("PASS testTextModeSendsNoCard")
+}
+
+/** An unreadable preference reads as the default. The reader keeps the card. */
+async function testAnUnreadableReplyModeStillSendsTheCard(): Promise<void> {
+  const gateway = new RecordingGateway()
+  const warnings: string[] = []
+  const publisher = new ImCardPublisher({
+    gateway: gateway as never,
+    interactions: new ImCardInteractionStore(),
+    isThreadLive: () => true,
+    usesTextReplies: () => {
+      throw new Error("database closed")
+    },
+    warn: (message) => warnings.push(message)
+  })
+  assert.notEqual(await publisher.publish(approvalCardInput()), null)
+  assert.equal(gateway.sent.length, 1)
+  assert(warnings.some((message) => message.includes("reply mode")), warnings.join("\n"))
+  console.log("PASS testAnUnreadableReplyModeStillSendsTheCard")
+}
+
+function withheldNotice(id: string, conversationKey = ROUTE.conversationKey): RemoteImReplyV1[] {
+  return buildImProactiveReplies({
+    deliveryId: `human-gate:${id}`,
+    conversationKey,
+    text: `【项目模式需要审批】${id}\n/门禁批准 CODE-${id}`
+  })
+}
+
+function recordingOutbox() {
+  const outbox = {
+    enqueued: [] as string[],
+    failed: [] as string[],
+    throwNext: false,
+    async enqueueProactiveReplies(replies: readonly RemoteImReplyV1[]) {
+      if (outbox.throwNext) {
+        outbox.throwNext = false
+        throw new Error("disk full")
+      }
+      outbox.enqueued.push(replies[0]!.deliveryId)
+      return replies.map((reply) => ({ outboxId: `${reply.deliveryId}:${reply.segment.index}` }))
+    },
+    async markOutboxFailed(outboxId: string, reasonCode: string) {
+      outbox.failed.push(`${outboxId}:${reasonCode}`)
+    }
+  }
+  return outbox
+}
+
+/**
+ * The shared store behind the Human Gate and Biz Retry adapters: each notice
+ * goes out once, only for the conversation that switched, and never for a gate
+ * that has closed.
+ */
+async function testWithheldNoticesGoOutOnceForTheirOwnConversation(): Promise<void> {
+  const notices = new ImWithheldTextNotices()
+  const outbox = recordingOutbox()
+  const open = new Set(["gate-1", "gate-2", "gate-elsewhere"])
+  notices.withhold("gate-1", withheldNotice("gate-1"))
+  notices.withhold("gate-closed", withheldNotice("gate-closed"))
+  notices.withhold("gate-2", withheldNotice("gate-2"))
+  notices.withhold("gate-elsewhere", withheldNotice("gate-elsewhere", "conversation-other"))
+  notices.withhold("gate-forgotten", withheldNotice("gate-forgotten"))
+  notices.forget("gate-forgotten")
+  const resend = (conversationKey: string) =>
+    notices.resend({
+      conversationKey,
+      isOpen: (id) => open.has(id),
+      closedReasonCode: "HUMAN_GATE_ALREADY_RESOLVED",
+      warn: () => undefined,
+      events: outbox as never
+    })
+
+  assert.deepEqual(await resend(ROUTE.conversationKey), { resent: 2, failed: 0 })
+  assert.deepEqual(outbox.enqueued, ["human-gate:gate-1", "human-gate:gate-2"])
+  assert.deepEqual(await resend(ROUTE.conversationKey), { resent: 0, failed: 0 }, "once")
+  assert.deepEqual(
+    await resend("conversation-other"),
+    { resent: 1, failed: 0 },
+    "another conversation's notice waits for its own switch"
+  )
+  console.log("PASS testWithheldNoticesGoOutOnceForTheirOwnConversation")
+}
+
+/** A gate decided while its notice was being queued must not arrive looking open. */
+async function testANoticeWhoseGateClosesMidwayIsWithdrawn(): Promise<void> {
+  const notices = new ImWithheldTextNotices()
+  const outbox = recordingOutbox()
+  let checks = 0
+  notices.withhold("gate-racing", withheldNotice("gate-racing"))
+  const result = await notices.resend({
+    conversationKey: ROUTE.conversationKey,
+    // Open when checked before queueing, closed by the time it is checked after.
+    isOpen: () => (checks += 1) === 1,
+    closedReasonCode: "HUMAN_GATE_ALREADY_RESOLVED",
+    warn: () => undefined,
+    events: outbox as never
+  })
+  assert.deepEqual(result, { resent: 0, failed: 0 })
+  assert.deepEqual(outbox.failed, ["human-gate:gate-racing:0:HUMAN_GATE_ALREADY_RESOLVED"])
+  console.log("PASS testANoticeWhoseGateClosesMidwayIsWithdrawn")
+}
+
+/** A failed resend is counted, so the reply can say so, and kept for the next try. */
+async function testAFailedResendIsKeptForTheNextTry(): Promise<void> {
+  const notices = new ImWithheldTextNotices()
+  const outbox = recordingOutbox()
+  notices.withhold("gate-1", withheldNotice("gate-1"))
+  const resend = () =>
+    notices.resend({
+      conversationKey: ROUTE.conversationKey,
+      isOpen: () => true,
+      closedReasonCode: "HUMAN_GATE_ALREADY_RESOLVED",
+      warn: () => undefined,
+      events: outbox as never
+    })
+  outbox.throwNext = true
+  assert.deepEqual(await resend(), { resent: 0, failed: 1 })
+  assert.deepEqual(await resend(), { resent: 1, failed: 0 }, "the next /文字模式 开 sends it")
+  assert.deepEqual(outbox.enqueued, ["human-gate:gate-1"])
+  console.log("PASS testAFailedResendIsKeptForTheNextTry")
+}
+
 async function testAForgottenCardIsActuallyClosed(): Promise<void> {
   const gateway = new RecordingGateway()
   const publisher = new ImCardPublisher({
@@ -1431,6 +1600,11 @@ async function main(): Promise<void> {
   await testAStaleCloseCannotOverwriteADecision()
   await testAnUnconfirmedClosureIsRetried()
   await testAReceiptIsNotAcknowledgedUntilItsAnswerIsQueued()
+  await testTextModeSendsNoCard()
+  await testAnUnreadableReplyModeStillSendsTheCard()
+  await testWithheldNoticesGoOutOnceForTheirOwnConversation()
+  await testANoticeWhoseGateClosesMidwayIsWithdrawn()
+  await testAFailedResendIsKeptForTheNextTry()
 }
 
 void main().catch((error) => {

@@ -1248,7 +1248,207 @@ async function testExplicitRetryCreatesNewEventWithOriginalSnapshot(): Promise<v
   }
 }
 
+type TextModeContext = Awaited<ReturnType<typeof createContext>>
+
+/**
+ * A router whose resend is recorded, and a card publisher that reads the reply
+ * mode from this test's own store — the default reads the module singleton,
+ * which is the same store in production but a different one here.
+ */
+function textModeRouter(
+  context: TextModeContext,
+  resend: (conversationKey: string) => Promise<{ resent: number; failed: number }> = async () => ({
+    resent: 0,
+    failed: 0
+  })
+): { router: ImCommandRouter; sentCards: string[]; resendCalls: string[] } {
+  const sentCards: string[] = []
+  const resendCalls: string[] = []
+  const cards = new ImCardPublisher({
+    interactions: new ImCardInteractionStore(),
+    createIdempotencyKey: () => `idem-${sentCards.length}`,
+    usesTextReplies: (conversationKey) =>
+      context.conversations.getReplyMode(conversationKey) === "text",
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async (card: { content: unknown }) => {
+        sentCards.push(JSON.stringify(card.content))
+        return { state: "accepted" } as const
+      }
+    } as never,
+    warn: () => undefined
+  })
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    cards,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null,
+    resendPendingAsText: async (conversationKey) => {
+      resendCalls.push(conversationKey)
+      return resend(conversationKey)
+    },
+    warn: () => undefined
+  })
+  return { router, sentCards, resendCalls }
+}
+
+const TEXT_MODE_ROUTE = { conversationKey: "conversation-1", principalId: "principal-1" }
+
+function sendCommand(router: ImCommandRouter, text: string): Promise<string> {
+  return router.handle({ ...TEXT_MODE_ROUTE, command: parseImCommand(text)! })
+}
+
+/**
+ * /文字模式 is a switch, like a phone's night mode: the first send turns text
+ * on, the next turns it off. A switch is only usable if every reply names the
+ * mode now in force and the way back.
+ */
+async function testTheTextModeCommandIsASwitch(): Promise<void> {
+  const context = await createContext()
+  const { router, resendCalls } = textModeRouter(context)
+  try {
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "card", "cards are the default")
+
+    const on = await sendCommand(router, "/文字模式")
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "text")
+    assert(on.includes("已切换为文字模式"), on)
+    assert(on.includes("再发一次 /文字模式 可切回卡片"), on)
+    assert.deepEqual(resendCalls, ["conversation-1"], "switching to text sends what the cards held back")
+
+    const off = await sendCommand(router, "/文字模式")
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "card")
+    assert(off.includes("已切回卡片模式"), off)
+    assert.equal(resendCalls.length, 1, "switching back sends nothing: the text is already in the chat")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * 开 and 关 state the mode instead of flipping it, so sending one twice is
+ * harmless. 开 in text mode still resends: that is how a reader recovers a
+ * notice whose first resend failed.
+ */
+async function testExplicitOnAndOffNeverFlipBack(): Promise<void> {
+  const context = await createContext()
+  const { router, resendCalls } = textModeRouter(context)
+  try {
+    assert.equal(await sendCommand(router, "/文字模式 关"), "当前已经是卡片模式。")
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "card")
+
+    await sendCommand(router, "/文字模式 开")
+    const again = await sendCommand(router, "/文字模式 开")
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "text", "a second 开 is not a toggle")
+    assert(again.startsWith("当前已经是文字模式。"), again)
+    assert.equal(resendCalls.length, 2, "开 while already in text mode retries the resend")
+
+    await sendCommand(router, "/文字模式 关")
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "card")
+
+    const usage = await sendCommand(router, "/文字模式 卡片")
+    assert(usage.startsWith("用法："), usage)
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "card", "a bad argument changes nothing")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** The reply accounts for every held-back notice: resent, failed, or not attempted. */
+async function testTheSwitchReportsWhatWasResent(): Promise<void> {
+  const counted = await createContext()
+  try {
+    const { router } = textModeRouter(counted, async () => ({ resent: 2, failed: 1 }))
+    const answer = await sendCommand(router, "/文字模式")
+    assert(answer.includes("当前有 2 条待处理，已用文字重发。"), answer)
+    assert(answer.includes("另有 1 条重发失败，可发送 /文字模式 开 再试一次。"), answer)
+  } finally {
+    counted.database.close()
+    await rm(counted.root, { recursive: true, force: true })
+  }
+
+  const quiet = await createContext()
+  try {
+    const { router } = textModeRouter(quiet)
+    const answer = await sendCommand(router, "/文字模式")
+    assert(!answer.includes("待处理"), "nothing pending means nothing to report")
+  } finally {
+    quiet.database.close()
+    await rm(quiet.root, { recursive: true, force: true })
+  }
+
+  // A resend that throws must not undo the switch the reader asked for.
+  const broken = await createContext()
+  try {
+    const { router } = textModeRouter(broken, async () => {
+      throw new Error("disk full")
+    })
+    const answer = await sendCommand(router, "/文字模式")
+    assert.equal(broken.conversations.getReplyMode("conversation-1"), "text")
+    assert(answer.includes("已切换为文字模式"), answer)
+    assert(answer.includes("重发待处理时出错，可发送 /文字模式 开 再试一次。"), answer)
+  } finally {
+    broken.database.close()
+    await rm(broken.root, { recursive: true, force: true })
+  }
+}
+
+async function testCurrentStatusNamesTheReplyMode(): Promise<void> {
+  const context = await createContext()
+  const { router } = textModeRouter(context)
+  try {
+    await sendCommand(router, "/收件箱")
+    assert((await sendCommand(router, "/当前")).includes("展示方式：卡片"))
+    await sendCommand(router, "/文字模式")
+    assert((await sendCommand(router, "/当前")).includes("展示方式：文字"))
+    assert((await sendCommand(router, "/帮助")).includes("/文字模式"), "/帮助 lists the command")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * In text mode the /会话 list goes out as the numbered text it always was, and
+ * no card is sent — the publisher refuses, and the router's own fallback does
+ * the rest. This is the path every card kind takes, checked end to end on one.
+ */
+async function testTextModeSendsTheTargetListAsText(): Promise<void> {
+  const context = await createContext()
+  const { router, sentCards } = textModeRouter(context)
+  try {
+    await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    await sendCommand(router, "/文字模式")
+    const answer = await sendCommand(router, "/会话")
+    assert.equal(sentCards.length, 0, "text mode sends no card")
+    assert(/^1\. /mu.test(answer), answer)
+    assert(answer.includes("/绑定"), "the typed command is the way to choose")
+
+    await sendCommand(router, "/文字模式")
+    await sendCommand(router, "/会话")
+    assert.equal(sentCards.length, 1, "back in card mode the list is a card again")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 const tests: Array<[string, () => Promise<void>]> = [
+  ["testTheTextModeCommandIsASwitch", testTheTextModeCommandIsASwitch],
+  ["testExplicitOnAndOffNeverFlipBack", testExplicitOnAndOffNeverFlipBack],
+  ["testTheSwitchReportsWhatWasResent", testTheSwitchReportsWhatWasResent],
+  ["testCurrentStatusNamesTheReplyMode", testCurrentStatusNamesTheReplyMode],
+  ["testTextModeSendsTheTargetListAsText", testTextModeSendsTheTargetListAsText],
   ["testSwitchBackByTheNameTheReplyAlreadyShows", testSwitchBackByTheNameTheReplyAlreadyShows],
   ["testBindModeOnlyAppliesWhereASessionIsCreated", testBindModeOnlyAppliesWhereASessionIsCreated],
   ["testACardSubmitBindsExactlyWhatTypingWouldBind", testACardSubmitBindsExactlyWhatTypingWouldBind],

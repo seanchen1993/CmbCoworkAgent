@@ -10,6 +10,7 @@ import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getThread } from "../../db"
 import { getBuiltinRobotSettings } from "../../storage"
 import type { ApprovalRequest } from "../../types"
+import type { RemoteImReplyV1 } from "../../../shared/im-gateway-contract"
 import { buildApprovalCard, buildResolvedCard, type CardComponent } from "./card-builder"
 import { imCardPublisher, type ImCardPublisher } from "./card-publisher"
 import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
@@ -24,6 +25,7 @@ import { imRemoteGrantStore, type ImRemoteGrantStore } from "./remote-grant-stor
 import { imFeatureReplyPrefix, imInboxReplyPrefix, imThreadReplyPrefix } from "./reply-context"
 import { buildImProactiveReplies, IM_REPLY_TRUNCATION_NOTICE } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
+import type { ImTextResendResult } from "./withheld-text-notices"
 
 /**
  * Approval short codes carry no deadline of their own.
@@ -56,6 +58,16 @@ interface RemoteApprovalCode {
   summary: string
   allowedDecisions: ReadonlyArray<"approve" | "reject">
   route: RemoteApprovalRoute
+  /**
+   * The text notice a delivered card stood in for, exactly as built.
+   *
+   * Set only when the card went out and the text did not. /文字模式 sends it,
+   * then clears it, so switching back and forth never sends it twice. Stored
+   * rather than rebuilt: the resend has to be byte for byte what this gate
+   * would have sent, because the outbox rejects a delivery id that comes back
+   * with different content. It lives on the code, so it goes when the code goes.
+   */
+  withheldNotice?: RemoteImReplyV1[]
 }
 
 interface ApprovalPresentation {
@@ -481,6 +493,62 @@ export class ImRemoteApprovalService {
       : "已从招乎拒绝，本次工具调用不会执行。"
   }
 
+  /**
+   * Sends as text every gate in this conversation whose card stood in for its
+   * notice, and returns how many went out.
+   *
+   * Each is the notice the gate would have sent had there been no card — same
+   * text, same short code, same delivery id — so answering it by typing works
+   * exactly as it always has. The card stays live: whichever the reader uses
+   * first decides the gate, and the other is told the code is spent.
+   */
+  async resendPendingAsText(conversationKey: string): Promise<ImTextResendResult> {
+    let resent = 0
+    let failed = 0
+    for (const code of [...this.codes.values()]) {
+      const notice = code.withheldNotice
+      if (!notice || code.route.conversationKey !== conversationKey) continue
+      // Cleared before the first await, so nothing that runs meanwhile can
+      // send the same notice a second time.
+      code.withheldNotice = undefined
+      if (!this.dependencies.broker.get(code.requestId)) continue
+      try {
+        const outbox = await this.dependencies.events.enqueueProactiveReplies(notice)
+        // The check the original text path makes: a gate decided while this
+        // was being queued must not arrive afterwards looking open.
+        if (!this.dependencies.broker.get(code.requestId)) {
+          await Promise.all(
+            outbox.map((record) =>
+              this.dependencies.events.markOutboxFailed(
+                record.outboxId,
+                "APPROVAL_ALREADY_RESOLVED"
+              )
+            )
+          )
+          continue
+        }
+        resent += 1
+      } catch (error) {
+        // Put back, so the next /文字模式 开 can try this one again.
+        code.withheldNotice = notice
+        failed += 1
+        this.dependencies.warn("Withheld approval notice could not be resent.", error)
+      }
+    }
+    if (resent > 0) this.drainReplies()
+    return { resent, failed }
+  }
+
+  private switchedToText(conversationKey: string): boolean {
+    try {
+      return this.dependencies.conversations.getReplyMode(conversationKey) === "text"
+    } catch (error) {
+      // Kept either way; only the immediate handover is skipped.
+      this.dependencies.warn("Reply mode could not be read.", error)
+      return false
+    }
+  }
+
   private async handlePending(registration: Readonly<ApprovalBrokerRegistration>): Promise<void> {
     const settings = this.dependencies.getSettings()
     if (!settings.enabled || !settings.remoteApprovalEnabled) return
@@ -560,6 +628,18 @@ export class ImRemoteApprovalService {
         // Revokes the code and closes the card it addresses, which is why this
         // is the shared helper rather than a delete plus a close written again.
         this.removeRequestCodes(registration.request.id)
+        return
+      }
+      // Kept for /文字模式: the reader may find the card cut short by the
+      // client and ask for this instead.
+      if (code) code.withheldNotice = replies
+      // Or they already have: the switch can land while this card is in
+      // flight, and the resend that came with it could not see a gate not yet
+      // recorded. Hand it over now. Through the resend rather than the text
+      // path below, because a failure there revokes the code — and here the
+      // card carrying that code is live and still answers the gate.
+      if (this.switchedToText(route.conversationKey)) {
+        await this.resendPendingAsText(route.conversationKey)
       }
       return
     }

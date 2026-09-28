@@ -38,6 +38,7 @@ import {
 } from "./remote-user-input-service"
 import { imHumanGateAdapter, type ImHumanGateAdapter } from "./human-gate-adapter"
 import { imBizRetryAdapter, type ImBizRetryAdapter } from "./biz-retry-adapter"
+import type { ImTextResendResult } from "./withheld-text-notices"
 import type { ManagedBizRetryChoice } from "../../../shared/harness-notifications"
 
 export type ImCommandName =
@@ -57,6 +58,7 @@ export type ImCommandName =
   | "managed_continue"
   | "managed_new_thread"
   | "switch_target"
+  | "text_mode"
   | "retired"
 
 export interface ParsedImCommand {
@@ -82,7 +84,8 @@ const COMMANDS = new Map<string, ImCommandName>([
   ["停止托管运行", "managed_stop"],
   ["在当前会话继续托管", "managed_continue"],
   ["开启新会话继续托管", "managed_new_thread"],
-  ["切换", "switch_target"]
+  ["切换", "switch_target"],
+  ["文字模式", "text_mode"]
 ])
 
 export function parseImCommand(message: string): ParsedImCommand | null {
@@ -108,6 +111,11 @@ interface ImCommandRouterDependencies {
   getCurrentEventId: (conversationKey: string, threadId?: string) => string | null
   getThread: typeof getThread
   cards: ImCardPublisher
+  /**
+   * Sends as text every open gate in this conversation whose card went out in
+   * its place, across all four kinds.
+   */
+  resendPendingAsText: (conversationKey: string) => Promise<ImTextResendResult>
   warn: (message: string, error?: unknown) => void
 }
 
@@ -193,6 +201,23 @@ export class ImCommandRouter {
       getCurrentEventId: dependencies.getCurrentEventId ?? (() => null),
       getThread: dependencies.getThread ?? getThread,
       cards: dependencies.cards ?? imCardPublisher,
+      resendPendingAsText:
+        dependencies.resendPendingAsText ??
+        (async (conversationKey) => {
+          const results = await Promise.all([
+            imRemoteApprovalService.resendPendingAsText(conversationKey),
+            imRemoteUserInputService.resendPendingAsText(conversationKey),
+            imHumanGateAdapter.resendPendingAsText(conversationKey),
+            imBizRetryAdapter.resendPendingAsText(conversationKey)
+          ])
+          return results.reduce(
+            (sum, result) => ({
+              resent: sum.resent + result.resent,
+              failed: sum.failed + result.failed
+            }),
+            { resent: 0, failed: 0 }
+          )
+        }),
       warn:
         dependencies.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
     }
@@ -237,6 +262,8 @@ export class ImCommandRouter {
           return await this.resolveManagedBizRetry(input, "new_thread")
         case "switch_target":
           return await this.switchToNamedTarget(input, input.command.argument)
+        case "text_mode":
+          return await this.switchReplyMode(input.conversationKey, input.command.argument)
         case "retired":
           return "/项目 和 /功能 已合并为 /会话，请发送 /会话 查看已在桌面授权的目标。"
       }
@@ -286,6 +313,7 @@ export class ImCommandRouter {
       "/goal <目标> — 启动长期任务",
       "/goal 或 /goal status|pause|resume|clear — 查看或控制当前 Goal",
       "/当前 — 查看目标、运行和队列状态",
+      "/文字模式 — 审批、提问等改用文字发送（带短码），再发一次切回卡片；也可用 /文字模式 开|关 直接指定",
       "/停止 — 只停止当前由 IM 发起的任务",
       "/批准 <审批短码> — 一次性批准工具调用（需在桌面设置中开启）",
       "/拒绝 <审批短码> — 拒绝工具调用（需在桌面设置中开启）",
@@ -569,7 +597,69 @@ export class ImCommandRouter {
       `当前目标：【${targetLabel(target)}】${selected?.state === "active" ? "" : "（授权不可用，请重新绑定或切回收件箱）"}`,
       `运行状态：${runningEventId ? "IM 任务执行中" : lease?.owner === "desktop" ? "桌面任务执行中" : lease?.owner === "scheduler" ? "定时任务执行中" : lease?.owner === "mods" ? "Mods 命令执行中" : "空闲"}`,
       `排队消息：${queued}`,
-      `桌面交互：${interaction}`
+      `桌面交互：${interaction}`,
+      `展示方式：${this.dependencies.conversations.getReplyMode(conversationKey) === "text" ? "文字" : "卡片"}`
+    ].join("\n")
+  }
+
+  /**
+   * /文字模式: a switch, like a phone's night mode — the command names the mode
+   * that is off by default, and sending it again turns it off.
+   *
+   * A bare switch is what a Zhaohu menu button can send, which is the point of
+   * it; 开 and 关 exist for anyone who would rather state the mode than flip
+   * it, and make a repeated send harmless. Every reply names the mode now in
+   * force, since a switch is only usable if you can tell which way it went.
+   *
+   * Switching to text also sends what the cards stood in for, because the card
+   * that prompted the switch is usually still open and cut short. Switching
+   * back sends nothing: the text already in the chat carries every open gate
+   * in full, with its code.
+   */
+  private async switchReplyMode(conversationKey: string, argument: string): Promise<string> {
+    const current = this.dependencies.conversations.getReplyMode(conversationKey)
+    const requested =
+      argument === ""
+        ? current === "text"
+          ? "card"
+          : "text"
+        : argument === "开"
+          ? "text"
+          : argument === "关"
+            ? "card"
+            : null
+    if (!requested) {
+      return "用法：/文字模式 在卡片和文字之间切换；/文字模式 开 或 /文字模式 关 直接指定。"
+    }
+    if (requested === "card") {
+      if (current === "card") return "当前已经是卡片模式。"
+      await this.dependencies.conversations.setReplyMode(conversationKey, "card")
+      return "已切回卡片模式：之后的审批、提问等以卡片发送；已经用文字发出的不会再补发卡片。"
+    }
+    if (current !== "text") {
+      await this.dependencies.conversations.setReplyMode(conversationKey, "text")
+    }
+    // Also run when already in text mode: an explicit 开 is how a reader
+    // recovers a notice whose resend failed the first time.
+    let result: ImTextResendResult = { resent: 0, failed: 0 }
+    let resendThrew = false
+    try {
+      result = await this.dependencies.resendPendingAsText(conversationKey)
+    } catch (error) {
+      resendThrew = true
+      this.dependencies.warn("Pending gates could not be resent as text.", error)
+    }
+    return [
+      current === "text"
+        ? "当前已经是文字模式。"
+        : "已切换为文字模式：之后的审批、提问、门禁、托管介入都以文字发送，带短码。",
+      ...(result.resent > 0 ? [`当前有 ${result.resent} 条待处理，已用文字重发。`] : []),
+      ...(resendThrew
+        ? ["重发待处理时出错，可发送 /文字模式 开 再试一次。"]
+        : result.failed > 0
+          ? [`另有 ${result.failed} 条重发失败，可发送 /文字模式 开 再试一次。`]
+          : []),
+      ...(current === "text" ? [] : ["再发一次 /文字模式 可切回卡片。"])
     ].join("\n")
   }
 
