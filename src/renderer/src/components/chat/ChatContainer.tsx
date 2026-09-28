@@ -1641,8 +1641,18 @@ function SystemPromptPreviewButton({
         sideOffset={8}
         className="w-[420px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border-border bg-popover p-0 shadow-xl"
       >
-        <div className="border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
-          {loading ? "加载中..." : `更新时间：${updatedAtLabel}`}
+        <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+          <span>{loading ? "加载中..." : `更新时间：${updatedAtLabel}`}</span>
+          <button
+            type="button"
+            disabled={loading || !prompt}
+            onClick={() => void navigator.clipboard.writeText(prompt || "").catch(() => {})}
+            className="rounded p-1 hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-50"
+            title="复制系统提示词"
+            aria-label="复制系统提示词"
+          >
+            <Copy className="size-3.5" />
+          </button>
         </div>
         <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5 text-popover-foreground">
           {prompt || "暂无系统提示词；请先运行一次当前会话。"}
