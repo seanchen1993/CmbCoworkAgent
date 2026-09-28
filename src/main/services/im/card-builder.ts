@@ -102,6 +102,24 @@ function kvTitle(title: string): string {
  */
 const KV_SOURCE_TITLE = "来源"
 
+/**
+ * Where a live card sends a reader who cannot see all of it.
+ *
+ * The client shortens cards by its own rules — a content component past 100
+ * lines, a kv key past 9 characters, and whatever else it does not document —
+ * and tells nobody, so only the reader can know. /文字模式 answers the very
+ * card the line sits on: switching re-sends every pending notice as text.
+ *
+ * Under the header and above the body: the body is what runs long, and
+ * however the client shortens an overlong card, the top is what stays in view.
+ * Terminal cards go without — nothing on them is waiting to be re-sent.
+ */
+export const IM_CARD_TEXT_MODE_HINT = "显示不全？发送 /文字模式 改为文字"
+
+function textModeHintComponent(): CardComponent {
+  return contentComponent([IM_CARD_TEXT_MODE_HINT], 1)
+}
+
 export interface ApprovalCardInput {
   /** Where this gate came from — the reader must never have to guess. */
   targetLabel: string
@@ -147,6 +165,7 @@ export function buildApprovalCard(input: ApprovalCardInput): CardComponent[] {
       { title: KV_SOURCE_TITLE, value: input.targetLabel },
       { title: "操作", value: input.operation }
     ]),
+    textModeHintComponent(),
     contentComponent(input.detail.split("\n").filter((line) => line.length > 0))
   ]
   if (buttons.length > 0) {
@@ -269,7 +288,8 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
   const components: CardComponent[] = [
     titleComponent("需要你的选择"),
     statusComponent("待回答", STATUS_STYLE.orange),
-    kvComponent([{ title: KV_SOURCE_TITLE, value: input.targetLabel }])
+    kvComponent([{ title: KV_SOURCE_TITLE, value: input.targetLabel }]),
+    textModeHintComponent()
   ]
 
   const answered = input.questions.filter((question) => question.answered)
@@ -375,6 +395,7 @@ export function buildHumanGateCard(input: HumanGateCardInput): CardComponent[] {
     titleComponent("项目模式需要审批"),
     statusComponent("待处理", STATUS_STYLE.orange),
     harnessDecisionContext(input),
+    textModeHintComponent(),
     contentComponent(input.message.split("\n").filter((line) => line.length > 0)),
     {
       type: "exclusionOperate",
@@ -419,6 +440,7 @@ export function buildBizRetryCard(input: BizRetryCardInput): CardComponent[] {
     titleComponent("托管运行需要介入"),
     statusComponent("待选择", STATUS_STYLE.orange),
     harnessDecisionContext(input),
+    textModeHintComponent(),
     kvComponent([
       { title: "当前阶段", value: input.stageName },
       { title: "阶段状态", value: input.stageStatus },

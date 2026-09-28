@@ -1418,6 +1418,9 @@ async function testCurrentStatusNamesTheReplyMode(): Promise<void> {
  * In text mode the /会话 list goes out as the numbered text it always was, and
  * no card is sent — the publisher refuses, and the router's own fallback does
  * the rest. This is the path every card kind takes, checked end to end on one.
+ *
+ * Back in card mode, the reply under the card is the way here: the switch does
+ * not re-send a list, so it has to name both steps.
  */
 async function testTextModeSendsTheTargetListAsText(): Promise<void> {
   const context = await createContext()
@@ -1435,8 +1438,9 @@ async function testTextModeSendsTheTargetListAsText(): Promise<void> {
     assert(answer.includes("/绑定"), "the typed command is the way to choose")
 
     await sendCommand(router, "/文字模式")
-    await sendCommand(router, "/会话")
+    const underTheCard = await sendCommand(router, "/会话")
     assert.equal(sentCards.length, 1, "back in card mode the list is a card again")
+    assert(underTheCard.includes("先发 /文字模式，再发 /会话"), underTheCard)
   } finally {
     context.database.close()
     await rm(context.root, { recursive: true, force: true })
