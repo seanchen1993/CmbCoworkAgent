@@ -83,13 +83,15 @@ export function ScheduledPanel(): React.JSX.Element {
   }, [keepAwake])
 
   useEffect(() => {
-    window.api.models.list().then((configs) => {
+    const loadModels = () => window.api.models.list().then((configs) => {
       const map = new Map<string, string>()
       for (const c of configs) {
         map.set(c.id, c.name)
       }
       if (mountedRef.current) setModelMap(map)
     }).catch(console.error)
+    void loadModels()
+    return window.api.models.onChanged(() => { void loadModels() })
   }, [])
 
   const loadTasks = useCallback(async () => {

@@ -1895,6 +1895,7 @@ export function ChatContainer({
     patchThreadMetadata,
     generateTitleForFirstMessage,
     setShowCustomizeView,
+    showCustomizeView,
     rightPanelCollapsed,
     pluginVersion,
     requestOpenRightPanelSystemConstraints
@@ -1907,6 +1908,7 @@ export function ChatContainer({
       patchThreadMetadata: state.patchThreadMetadata,
       generateTitleForFirstMessage: state.generateTitleForFirstMessage,
       setShowCustomizeView: state.setShowCustomizeView,
+      showCustomizeView: state.showCustomizeView,
       rightPanelCollapsed: state.rightPanelCollapsed,
       pluginVersion: state.pluginVersion,
       requestOpenRightPanelSystemConstraints: state.requestOpenRightPanelSystemConstraints
@@ -4390,6 +4392,7 @@ export function ChatContainer({
       lastTouchY = nextTouchY
     }
     const detachFromKeyboardScroll = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView) return
       if (!chatRootRef.current || chatRootRef.current.offsetParent === null) return
       if (
         !chatRootRef.current.contains(document.activeElement) &&
@@ -4865,6 +4868,7 @@ export function ChatContainer({
   // only one ChatContainer is mounted per panel (keyed + conditionally rendered).
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView) return
       if (!((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F"))) return
       const root = chatRootRef.current
       if (!root || root.offsetParent === null) return
@@ -7725,6 +7729,7 @@ export function ChatContainer({
       {/* Skill creation confirmation dialog */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
+        visible={!showCustomizeView}
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
@@ -7737,7 +7742,7 @@ export function ChatContainer({
       />
 
       <Dialog
-        open={!!messageForkTarget}
+        open={!!messageForkTarget && !showCustomizeView}
         onOpenChange={(open) => {
           if (!open && !isMessageForkBusy) resetMessageForkDialog()
         }}
@@ -9064,7 +9069,8 @@ export function ChatContainer({
                       </div>
                       <AgentGitCommitDialog
                         key={agentCommitApproval?.id ?? "agent-commit-idle"}
-                        open={Boolean(agentCommitApproval)}
+                        // Portal 不受工作区 inert 限制；设置期间只隐藏，保留待审批请求。
+                        open={Boolean(agentCommitApproval) && !showCustomizeView}
                         threadId={threadId}
                         workspacePath={workspacePath}
                         suggestedMessage={agentCommitApproval?.suggestedCommitMessage}

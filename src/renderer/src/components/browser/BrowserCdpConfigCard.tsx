@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Check, Loader2 } from "lucide-react"
 import { toast } from "sonner"
+import { useAppStore } from "@/lib/store"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -32,6 +33,7 @@ export function BrowserCdpConfigCard({
   description = "在这里手动开启内置浏览器",
   title = "控制配置"
 }: BrowserCdpConfigCardProps): React.JSX.Element {
+  const showCustomizeView = useAppStore((state) => state.showCustomizeView)
   const [cdpConfig, setCdpConfig] = useState<BrowserCdpConfig | null>(null)
   const [isSavingCdpConfig, setIsSavingCdpConfig] = useState(false)
   const [restartDialogOpen, setRestartDialogOpen] = useState(false)
@@ -206,7 +208,7 @@ export function BrowserCdpConfigCard({
         </div>
       </div>
 
-      <Dialog open={restartDialogOpen} onOpenChange={handleRestartDialogOpenChange}>
+      <Dialog open={restartDialogOpen && !showCustomizeView} onOpenChange={handleRestartDialogOpenChange}>
         <DialogContent className="sm:max-w-md">
           {isRestartingApp ? (
             <>

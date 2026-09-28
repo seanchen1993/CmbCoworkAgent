@@ -375,9 +375,9 @@ const electronAPI = {
       value
     ) as Promise<AgentRuntimeSettings>,
   onNotifyMsg: (callback: (msg: string) => void) => {
-    ipcRenderer.on("notify-login-msg", (_event, data) => {
-      callback(data)
-    })
+    const handler = (_event: unknown, data: string): void => callback(data)
+    ipcRenderer.on("notify-login-msg", handler)
+    return () => ipcRenderer.removeListener("notify-login-msg", handler)
   },
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => ipcRenderer.send(channel, ...args),
@@ -1565,6 +1565,11 @@ const api = {
     },
     getUserInfo: (): Promise<UserInfoConfig | null> => {
       return ipcRenderer.invoke("models:getUserInfo") as Promise<UserInfoConfig | null>
+    },
+    onUserInfoChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on("models:userInfoChanged", handler)
+      return () => ipcRenderer.removeListener("models:userInfoChanged", handler)
     },
     deleteCustomConfig: (id: string): Promise<void> => {
       return ipcRenderer.invoke("models:deleteCustomConfig", id) as Promise<void>
