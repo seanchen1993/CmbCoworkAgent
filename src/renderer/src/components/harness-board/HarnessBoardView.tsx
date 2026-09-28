@@ -3623,13 +3623,6 @@ function FeatureCreateDialog({
       })
       .catch((error) => toast.error(cleanIpcError(error)))
   }
-  const usesDeployUnitWorkspace =
-    workspace.source === "deployUnit" &&
-    selectableDeployUnitMappings.some(
-      (mapping) =>
-        selectedDeployUnitIds.has(mapping.deployUnitIdMapping) &&
-        mapping.deployUnitId === workspace.deployUnitId
-    )
   const rowClassName =
     "grid min-w-[calc(41.5rem+var(--feature-extra-width))] grid-cols-[1rem_minmax(0,1fr)_19rem_var(--feature-actions-width)] items-center gap-2 rounded-sm border border-transparent px-2 py-2 text-sm transition-colors hover:bg-muted/60"
   const defaultTab = "deploy-units"
@@ -3706,37 +3699,6 @@ function FeatureCreateDialog({
         </div>
       </div>
       <div className="max-h-72 overflow-auto rounded-md border border-border bg-background px-3 py-2">
-        <div className={rowClassName}>
-          <input
-            type="checkbox"
-            checked
-            disabled
-            aria-label="会话工作区必填"
-            className="size-4 shrink-0 accent-muted-foreground"
-          />
-          <span className="col-start-2 min-w-0 truncate">会话工作区</span>
-          <Input
-            ref={workspaceInputRef}
-            readOnly
-            value={workspacePath}
-            title={workspacePath}
-            placeholder="选择主要代码仓库路径"
-            aria-label="会话工作区"
-            aria-required="true"
-            disabled={creating || usesDeployUnitWorkspace}
-            className={cn(
-              "min-w-0 cursor-pointer border-border bg-transparent px-2 text-sm font-normal shadow-none hover:bg-background-interactive focus-visible:ring-2",
-              workspacePath && "truncate text-left [direction:rtl]"
-            )}
-            onClick={pickWorkspace}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault()
-                pickWorkspace()
-              }
-            }}
-          />
-        </div>
         {deployUnitMappingsLoading ? (
           <div className="flex min-h-20 items-center justify-center text-sm text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" />
@@ -3945,6 +3907,30 @@ function FeatureCreateDialog({
               aria-invalid={featureNameError ? true : undefined}
             />
             {featureNameError && <span className="text-status-critical">{featureNameError}</span>}
+          </label>
+          <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+            会话工作区 *
+            <Input
+              ref={workspaceInputRef}
+              readOnly
+              value={workspacePath}
+              title={workspacePath}
+              placeholder="请选择会话工作区路径"
+              aria-label="会话工作区"
+              aria-required="true"
+              disabled={creating}
+              className={cn(
+                "min-w-0 cursor-pointer bg-background text-foreground shadow-none focus-visible:border-ring focus-visible:ring-0",
+                workspacePath && "truncate text-left [direction:rtl]"
+              )}
+              onClick={pickWorkspace}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault()
+                  pickWorkspace()
+                }
+              }}
+            />
           </label>
           <TooltipProvider delayDuration={150}>
             <Tabs
