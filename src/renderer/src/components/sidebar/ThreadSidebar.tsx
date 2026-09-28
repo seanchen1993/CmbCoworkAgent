@@ -486,7 +486,34 @@ function areThreadListItemPropsEqual(
 
 export const ThreadListItem = memo(ThreadListItemImpl, areThreadListItemPropsEqual)
 
-export function ThreadSidebar(): React.JSX.Element {
+function SidebarSettingsButton(): React.JSX.Element {
+  const { showCustomizeView, pendingEvolution, setShowCustomizeView } = useAppStore(
+    useShallow((state) => ({
+      showCustomizeView: state.showCustomizeView,
+      pendingEvolution: state.pendingEvolution,
+      setShowCustomizeView: state.setShowCustomizeView
+    }))
+  )
+
+  return (
+    <div className="relative size-7">
+      <IconPopoverButton
+        icon={<Settings className="size-4" />}
+        popoverContent="自定义设置"
+        aria-label="自定义设置"
+        aria-current={showCustomizeView ? "page" : undefined}
+        className={cn("size-7 p-0", showCustomizeView && "bg-muted text-foreground")}
+        onClick={() => setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)}
+      />
+      {pendingEvolution && (
+        <span className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-orange-500" />
+      )}
+    </div>
+  )
+}
+
+// Settings visibility only changes the footer button, not the task list.
+export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   const {
     threads,
     currentThreadId,
@@ -502,9 +529,6 @@ export function ThreadSidebar(): React.JSX.Element {
     touchThreadSummaries,
     mainView,
     previousThreadId,
-    pendingEvolution,
-    setShowCustomizeView,
-    showCustomizeView,
     setMainView,
     showKanbanView,
     setShowKanbanView,
@@ -530,9 +554,6 @@ export function ThreadSidebar(): React.JSX.Element {
       touchThreadSummaries: state.touchThreadSummaries,
       mainView: state.mainView,
       previousThreadId: state.previousThreadId,
-      pendingEvolution: state.pendingEvolution,
-      setShowCustomizeView: state.setShowCustomizeView,
-      showCustomizeView: state.showCustomizeView,
       setMainView: state.setMainView,
       showKanbanView: state.showKanbanView,
       setShowKanbanView: state.setShowKanbanView,
@@ -1702,23 +1723,7 @@ export function ThreadSidebar(): React.JSX.Element {
             <UpdateActionButton variant="tag" />
           </div>
         </div>
-        {activeSidebarTab === "chat" ? (
-          <div className="relative size-7">
-            <IconPopoverButton
-              icon={<Settings className="size-4" />}
-              popoverContent="自定义设置"
-              aria-label="自定义设置"
-              aria-current={showCustomizeView ? "page" : undefined}
-              className={cn("size-7 p-0", showCustomizeView && "bg-muted text-foreground")}
-              onClick={() => setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)}
-            />
-            {pendingEvolution && (
-              <span className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-orange-500" />
-            )}
-          </div>
-        ) : (
-          <div aria-hidden="true" />
-        )}
+        {activeSidebarTab === "chat" ? <SidebarSettingsButton /> : <div aria-hidden="true" />}
       </div>
       {forkDialogThread ? (
         <ThreadForkCheckpointDialog
@@ -1773,4 +1778,4 @@ export function ThreadSidebar(): React.JSX.Element {
       />
     </aside>
   )
-}
+})
