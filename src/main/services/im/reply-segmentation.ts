@@ -3,6 +3,7 @@ import {
   IM_GATEWAY_SCHEMA_VERSION,
   IM_REPLY_MAX_SEGMENT_CHARACTERS,
   IM_REPLY_MAX_SEGMENTS,
+  type RemoteImReplyFormat,
   type RemoteImReplyV1
 } from "../../../shared/im-gateway-contract"
 import type { ImEventRecord } from "./event-store"
@@ -129,8 +130,170 @@ export function segmentImReplyText(text: string, options: SegmentImReplyOptions 
   return chunks.map((chunk, index) => `${visibleSegmentPrefix(prefix, index, count)}${chunk}`)
 }
 
+/** A fence line: up to three spaces, then three or more backticks or tildes. */
+const FENCE_LINE = /^( {0,3})(`{3,}|~{3,})(.*)$/u
+
+interface ImOpenFence {
+  /** The line that opened it, reused verbatim to reopen it in the next segment. */
+  opener: string
+  indent: string
+  marker: string
+}
+
+function fenceAfter(chunk: string, open: ImOpenFence | null): ImOpenFence | null {
+  let fence = open
+  for (const line of chunk.split("\n")) {
+    const match = FENCE_LINE.exec(line)
+    if (!match) continue
+    const [, indent, marker, rest] = match
+    if (!fence) {
+      // A backtick fence's info string cannot contain a backtick; such a line
+      // is inline code, not an opener.
+      if (marker.startsWith("`") && rest.includes("`")) continue
+      fence = { opener: line, indent, marker }
+    } else if (
+      marker[0] === fence.marker[0] &&
+      marker.length >= fence.marker.length &&
+      rest.trim() === ""
+    ) {
+      fence = null
+    }
+  }
+  return fence
+}
+
+/**
+ * Prefix lines and the [i/n] marker each stand in their own paragraph. Joined
+ * to the body by a single newline, a renderer that folds soft breaks runs them
+ * into the first line, and a marker in front of "# 标题" stops it being one.
+ */
+function markdownSegmentHeader(prefix: string, index: number, count: number): string {
+  const parts = index === 0 ? prefix.split("\n").filter((line) => line.trim()) : []
+  if (count > 1) parts.push(`[${index + 1}/${count}]`)
+  return parts.length > 0 ? `${parts.join("\n\n")}\n\n` : ""
+}
+
+/** Prefers a paragraph break, then whatever takeAtBoundary would take. */
+function takeMarkdownAtBoundary(
+  points: string[],
+  maxCharacters: number
+): { head: string; tail: string[] } {
+  if (points.length <= maxCharacters) return { head: points.join(""), tail: [] }
+  const lowerBound = Math.max(1, Math.floor(maxCharacters * 0.45))
+  for (let index = maxCharacters - 1; index >= lowerBound; index -= 1) {
+    if (points[index] === "\n" && points[index - 1] === "\n") {
+      return { head: points.slice(0, index).join("").trimEnd(), tail: points.slice(index + 1) }
+    }
+  }
+  return takeAtBoundary(points, maxCharacters)
+}
+
+/**
+ * One segment's body within `budget`, closing a code fence the cut leaves open
+ * and reopening the one the previous segment closed. Shrinks and cuts again
+ * when the closing fence would not fit.
+ */
+function cutMarkdownSegment(
+  points: string[],
+  reopen: ImOpenFence | null,
+  budget: number
+): { body: string; tail: string[]; open: ImOpenFence | null } {
+  const opener = reopen ? `${reopen.opener}\n` : ""
+  let room = budget - lengthOf(opener)
+  for (;;) {
+    if (room < 1) throw new Error("Reply segment is too small for its code fence")
+    const { head, tail } = takeMarkdownAtBoundary(points, room)
+    const open = fenceAfter(head, reopen)
+    const closing = open ? `\n${open.indent}${open.marker}` : ""
+    const body = `${opener}${head}${closing}`
+    if (lengthOf(body) <= budget) return { body, tail, open }
+    room -= lengthOf(closing)
+  }
+}
+
+/**
+ * segmentImReplyText for Markdown: every segment becomes its own card, so each
+ * has to render on its own. The header stands apart (see
+ * markdownSegmentHeader), and a cut inside a fenced code block closes the
+ * fence in one segment and reopens it, info string and all, in the next —
+ * otherwise the rest of one card renders as code, or the code as prose.
+ *
+ * The same content goes out unconverted when the reply is sent as text, so
+ * nothing here may depend on it being rendered.
+ */
+export function segmentImMarkdownText(
+  text: string,
+  options: Omit<SegmentImReplyOptions, "singleSegmentOverflow"> = {}
+): string[] {
+  const maxCharacters = options.maxCharacters ?? IM_REPLY_MAX_SEGMENT_CHARACTERS
+  const maxSegments = options.maxSegments ?? IM_REPLY_MAX_SEGMENTS
+  const prefix = options.prefix?.trim() ?? ""
+  if (!Number.isSafeInteger(maxCharacters) || maxCharacters < 32) {
+    throw new Error("maxCharacters must be an integer of at least 32")
+  }
+  if (!Number.isSafeInteger(maxSegments) || maxSegments < 1 || maxSegments > 8) {
+    throw new Error("maxSegments must be between 1 and 8")
+  }
+
+  const normalized = text.trim() || "处理完成。"
+  const singleHeader = markdownSegmentHeader(prefix, 0, 1)
+  if (lengthOf(singleHeader) + lengthOf(normalized) <= maxCharacters) {
+    return [`${singleHeader}${normalized}`]
+  }
+
+  // As in segmentImReplyText: budget against the widest header any segment
+  // can get, so the count decided afterwards cannot push one over the limit.
+  const headerBudget = Math.max(
+    lengthOf(markdownSegmentHeader(prefix, 0, 8)),
+    lengthOf(markdownSegmentHeader(prefix, 7, 8))
+  )
+  const budget = maxCharacters - headerBudget
+  if (budget < 1) throw new Error("Reply prefix leaves no room for content")
+
+  const bodies: string[] = []
+  let remaining = codePoints(normalized)
+  let reopen: ImOpenFence | null = null
+  let lastStart = remaining
+  let lastReopen: ImOpenFence | null = null
+  while (remaining.length > 0 && bodies.length < maxSegments) {
+    lastStart = remaining
+    lastReopen = reopen
+    const cut = cutMarkdownSegment(remaining, reopen, budget)
+    bodies.push(cut.body)
+    remaining = cut.tail
+    reopen = cut.open
+  }
+
+  if (remaining.length > 0) {
+    const notice = `\n\n${IM_REPLY_TRUNCATION_NOTICE}`
+    const cut = cutMarkdownSegment(lastStart, lastReopen, budget - lengthOf(notice))
+    bodies[bodies.length - 1] = `${cut.body}${notice}`
+  }
+
+  const count = bodies.length
+  return bodies.map((body, index) => `${markdownSegmentHeader(prefix, index, count)}${body}`)
+}
+
 export function eventShortCode(eventId: string): string {
   return createHash("sha256").update(eventId, "utf8").digest("hex").slice(0, 8).toUpperCase()
+}
+
+/**
+ * "markdown" is for what the Agent wrote, and only that: it lets the gateway
+ * show the reply as a Markdown card. Notices and command replies stay "text" —
+ * they are written for a plain chat line, and a stray `*` or `_` in a thread
+ * title would otherwise be read as emphasis.
+ */
+function segmentFor(
+  format: RemoteImReplyFormat,
+  text: string,
+  options: SegmentImReplyOptions
+): string[] {
+  if (format === "text") return segmentImReplyText(text, options)
+  if (options.singleSegmentOverflow) {
+    throw new Error("singleSegmentOverflow is only defined for text replies")
+  }
+  return segmentImMarkdownText(text, options)
 }
 
 export function buildImEventReplies(input: {
@@ -138,9 +301,11 @@ export function buildImEventReplies(input: {
   text: string
   prefix?: string
   deliveryId?: string
+  format?: RemoteImReplyFormat
 }): RemoteImReplyV1[] {
   const deliveryId = input.deliveryId ?? `${input.event.eventId}:reply`
-  const segments = segmentImReplyText(input.text, { prefix: input.prefix })
+  const format = input.format ?? "text"
+  const segments = segmentFor(format, input.text, { prefix: input.prefix })
   return segments.map((content, index) => ({
     schemaVersion: IM_GATEWAY_SCHEMA_VERSION,
     deliveryId,
@@ -148,7 +313,7 @@ export function buildImEventReplies(input: {
     conversationKey: input.event.conversationKey,
     idempotencyKey: `${deliveryId}:reply:${index}`,
     segment: { index, count: segments.length },
-    message: { type: "text", content }
+    message: { type: format, content }
   }))
 }
 
@@ -158,10 +323,12 @@ export function buildImProactiveReplies(input: {
   text: string
   prefix?: string
   segmentation?: Omit<SegmentImReplyOptions, "prefix">
+  format?: RemoteImReplyFormat
 }): RemoteImReplyV1[] {
   const deliveryId = input.deliveryId.trim()
   if (!deliveryId) throw new Error("deliveryId is required")
-  const segments = segmentImReplyText(input.text, {
+  const format = input.format ?? "text"
+  const segments = segmentFor(format, input.text, {
     ...input.segmentation,
     prefix: input.prefix
   })
@@ -171,6 +338,6 @@ export function buildImProactiveReplies(input: {
     conversationKey: input.conversationKey,
     idempotencyKey: `${deliveryId}:reply:${index}`,
     segment: { index, count: segments.length },
-    message: { type: "text", content }
+    message: { type: format, content }
   }))
 }

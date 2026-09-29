@@ -781,7 +781,8 @@ export class ImRemoteModeNotificationPump {
           text,
           prefix: projectContext
             ? imProjectModeReplyPrefix({ ...projectContext, switched })
-            : imTargetReplyPrefix(notice.targetSnapshot, { switched, threadTitle })
+            : imTargetReplyPrefix(notice.targetSnapshot, { switched, threadTitle }),
+          format: "markdown"
         })
       )
     } catch (error) {

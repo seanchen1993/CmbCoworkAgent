@@ -313,7 +313,7 @@ export class ImCommandRouter {
       "/goal <目标> — 启动长期任务",
       "/goal 或 /goal status|pause|resume|clear — 查看或控制当前 Goal",
       "/当前 — 查看目标、运行和队列状态",
-      "/文字模式 — 审批、提问等改用文字发送（带短码），再发一次切回卡片；也可用 /文字模式 开|关 直接指定",
+      "/文字模式 — 回答、审批、提问等都改用文字发送（审批类带短码），再发一次切回卡片；也可用 /文字模式 开|关 直接指定",
       "/停止 — 只停止当前由 IM 发起的任务",
       "/批准 <审批短码> — 一次性批准工具调用（需在桌面设置中开启）",
       "/拒绝 <审批短码> — 拒绝工具调用（需在桌面设置中开启）",
@@ -648,7 +648,7 @@ export class ImCommandRouter {
     if (requested === "card") {
       if (current === "card") return "当前已经是卡片模式。"
       await this.dependencies.conversations.setReplyMode(conversationKey, "card")
-      return "已切回卡片模式：之后的审批、提问等以卡片发送；已经用文字发出的不会再补发卡片。"
+      return "已切回卡片模式：之后的回答、审批、提问等以卡片发送；已经用文字发出的不会再补发卡片。"
     }
     if (current !== "text") {
       await this.dependencies.conversations.setReplyMode(conversationKey, "text")
@@ -666,7 +666,7 @@ export class ImCommandRouter {
     return [
       current === "text"
         ? "当前已经是文字模式。"
-        : "已切换为文字模式：之后的审批、提问、门禁、托管介入都以文字发送，带短码。",
+        : "已切换为文字模式：之后的回答原样以文字发送，审批、提问、门禁、托管介入也以文字发送，带短码。",
       ...(result.resent > 0 ? [`当前有 ${result.resent} 条待处理，已用文字重发。`] : []),
       ...(resendThrew
         ? ["重发待处理时出错，可发送 /文字模式 开 再试一次。"]

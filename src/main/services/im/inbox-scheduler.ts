@@ -194,7 +194,8 @@ export async function executeImInboxScheduledTask(
         deliveryId,
         conversationKey: delivery.conversationKey,
         text,
-        prefix: imInboxReplyPrefix()
+        prefix: imInboxReplyPrefix(),
+        format: "markdown"
       })
     )
     await replyClient.sendPending()
