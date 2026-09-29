@@ -48,6 +48,16 @@ export type RemoteImAckV1 =
     }
   | { type: "busy"; eventId: string; leaseId: string }
 
+/**
+ * "markdown" is content the gateway may render as a Markdown card. It is only
+ * ever sent on a connection whose WELCOME agreed to markdown-reply-v1; every
+ * other connection gets the same content as "text", unconverted.
+ */
+export type RemoteImReplyFormat = "text" | "markdown"
+
+/** HELLO extension; see RemoteImReplyFormat. */
+export const IM_MARKDOWN_REPLY_EXTENSION = "markdown-reply-v1"
+
 export interface RemoteImReplyV1 {
   schemaVersion: typeof IM_GATEWAY_SCHEMA_VERSION
   deliveryId: string
@@ -55,7 +65,7 @@ export interface RemoteImReplyV1 {
   conversationKey: string
   idempotencyKey: string
   segment: { index: number; count: number }
-  message: { type: "text"; content: string }
+  message: { type: RemoteImReplyFormat; content: string }
 }
 
 export type GatewayReasonCodeV1 =
@@ -266,8 +276,11 @@ export function assertRemoteImReplyV1(value: unknown): asserts value is RemoteIm
 
   const message = requireRecord(reply.message, "reply.message")
   assertExactKeys(message, ["type", "content"], [], "reply.message")
-  if (message.type !== "text") {
-    throw new ImGatewayContractError("INVALID_PAYLOAD", "reply.message.type must be text")
+  if (message.type !== "text" && message.type !== "markdown") {
+    throw new ImGatewayContractError(
+      "INVALID_PAYLOAD",
+      "reply.message.type must be text or markdown"
+    )
   }
   const content = requireNonEmptyString(message.content, "reply.message.content")
   if (unicodeCharacterLength(content) > IM_REPLY_MAX_SEGMENT_CHARACTERS) {

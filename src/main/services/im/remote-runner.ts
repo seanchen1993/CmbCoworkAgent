@@ -1125,7 +1125,8 @@ export class ImRemoteRunner {
       const replies = buildImEventReplies({
         event: executing,
         text: result,
-        prefix: this.terminalPrefixForEvent(executing, projectReplyContext)
+        prefix: this.terminalPrefixForEvent(executing, projectReplyContext),
+        format: "markdown"
       })
       const completed = await this.dependencies.eventStore.completeEvent(
         executing.eventId,

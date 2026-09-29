@@ -61,7 +61,7 @@ JWT 的 issuer、JWKS URI、audience、主体 claim、允许算法等是部署�
 
 | type                              | payload                                                                          |
 | --------------------------------- | -------------------------------------------------------------------------------- |
-| `WELCOME`                         | `sessionId/principalId/serverTime/heartbeatIntervalSeconds`                      |
+| `WELCOME`                         | `sessionId/principalId/serverTime/heartbeatIntervalSeconds`；协商成功时另带 `protocolExtensions[]` |
 | `REMOTE_EVENT`                    | `{event: RemoteImEventV1}`                                                       |
 | `PERMIT_RESULT`                   | GRANTED: `eventId/status/leaseId/expiresAt`；DENIED: `eventId/status/reasonCode` |
 | `LEASE_REVOKED`                   | `eventId/reasonCode`                                                             |
@@ -75,6 +75,11 @@ JWT 的 issuer、JWKS URI、audience、主体 claim、允许算法等是部署�
 客户端只有在 `HELLO.protocolExtensions` 声明 `sync-default-route-v1` 后才允许网关返回该字段；
 旧网关忽略扩展声明，旧客户端不会收到新增字段。
 `heartbeatIntervalSeconds` 范围为 5～300。
+
+`markdown-reply-v1`：客户端每次 `HELLO` 都声明它；网关支持且开关打开时，`WELCOME` 带
+`protocolExtensions: ["markdown-reply-v1"]`，该连接此后可以发 `message.type = "markdown"` 的回复。
+`WELCOME` 没带时客户端只发 `text`。已发布的客户端按固定键表校验 `WELCOME`，所以网关只把这个
+键给声明了它的客户端。协商按连接生效，重连即重新协商。
 
 ### RemoteImEventV1
 
@@ -110,6 +115,11 @@ JWT 的 issuer、JWKS URI、audience、主体 claim、允许算法等是部署�
 - `eventId` 对 scheduler 或 Desktop 主动消息可缺省；
 - `segment.index` 从 0 开始，`count` 为 1～8，且 `index < count`；
 - Desktop 单段最多 2,800 Unicode code points；平台发送上限仍是 3,000 个字符。
+- `message.type` 为 `text`，或本连接已协商 `markdown-reply-v1` 时为 `markdown`。只有 Agent 的
+  回答标成 Markdown；系统提示和指令回复始终是 `text`。会话处于 `/文字模式` 时 Markdown 回复也按
+  `text` 发，内容原样不转换。`markdown` 与 `text` 长度上限相同，卡片被平台拒绝时网关用同一段内容
+  改走文本接口。
+- 幂等只看内容不看类型：同一段先以 `markdown`、后以 `text` 重发是同一条回复。
 
 ## 4. 招乎上行 webhook 契约（已内嵌）
 
