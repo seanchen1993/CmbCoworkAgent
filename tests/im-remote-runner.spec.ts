@@ -290,7 +290,11 @@ async function testSuccessfulRunAndDurableOutbox(): Promise<void> {
     assert.equal(executions, 1)
     assert.equal(context.events.getEvent(queued.eventId)?.state, "completed")
     assert.equal(context.events.listOutbox("sent").length, 1)
-    assert.equal(gateway.replies[0].message.content, "【远程收件箱】\n完成回复")
+    // The Agent's answer is queued as Markdown, with the prefix in a paragraph
+    // of its own — and still goes out as text on a gateway that never agreed.
+    assert.equal(context.events.listOutbox("sent")[0].contentFormat, "markdown")
+    assert.equal(gateway.replies[0].message.type, "text")
+    assert.equal(gateway.replies[0].message.content, "【远程收件箱】\n\n完成回复")
     assert.equal(gateway.acknowledgements.at(-1)?.type, "completed")
     assert.equal(getLocalThreadRunLease(target.threadId), undefined)
   } finally {
@@ -377,7 +381,7 @@ async function runForeignOwnerReleaseWakeScenario(
     // And the run that finally happens uses a permit acquired for it, not one
     // taken minutes earlier on an attempt that never ran.
     assert.equal(gateway.permitAcquisitions, 1)
-    assert.equal(gateway.replies.at(-1)?.message.content, `【远程收件箱】\n${owner} released`)
+    assert.equal(gateway.replies.at(-1)?.message.content, `【远程收件箱】\n\n${owner} released`)
   } finally {
     await queue.stop()
     releaseLocalThreadRunLease(target.threadId, owner, foreignRunId)

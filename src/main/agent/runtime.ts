@@ -31,7 +31,6 @@ import {
   createFilesystemMiddleware,
   createSubAgentMiddleware,
   createPatchToolCallsMiddleware,
-  createSkillsMiddleware,
   createMemoryMiddleware,
   GENERAL_PURPOSE_SUBAGENT,
   StateBackend
@@ -89,7 +88,7 @@ import {
 } from "./local-sandbox"
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
-import { combineSkillMiddlewareSources } from "./skill-sources"
+import { combineSkillMiddlewareSources, createRefreshingSkillsMiddleware } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import {
   isSkillVisibleForProjectMode,
@@ -2438,7 +2437,7 @@ function assembleDeepAgent(
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
+      ? [createRefreshingSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
       : []
 
   const memoryMiddlewareArray =
@@ -2451,7 +2450,7 @@ function assembleDeepAgent(
   const processedSubagents = subagents.map((subagent: any) => {
     if (Runnable.isRunnable(subagent)) return subagent
     if (!("skills" in subagent) || subagent.skills?.length === 0) return subagent
-    const subagentSkillsMiddleware = createSkillsMiddleware({
+    const subagentSkillsMiddleware = createRefreshingSkillsMiddleware({
       backend: filesystemBackend,
       sources: subagent.skills ?? []
     })

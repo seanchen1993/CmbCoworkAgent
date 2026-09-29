@@ -159,6 +159,16 @@ export class ImFeatureBindingService {
     }))
   }
 
+  /** Display name only; existing authorized sessions may outlive an active Feature. */
+  async getFeatureTitles(projectId: string): Promise<Map<string, string>> {
+    try {
+      const detail = await this.dependencies.getProjectDetail(projectId)
+      return new Map(detail.runs.map((run) => [run.slug, run.title.trim() || run.slug]))
+    } catch {
+      return new Map()
+    }
+  }
+
   // Validate current access eligibility only. Thread creation and execution load
   // the plugin context when they actually consume its prompt and agent config.
   async validateFeature(

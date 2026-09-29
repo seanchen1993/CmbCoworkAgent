@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import WebSocket from "ws"
 import {
+  IM_MARKDOWN_REPLY_EXTENSION,
   ImGatewayContractError,
   assertRemoteImCardReceiptV1,
   assertRemoteImEventV1,
@@ -175,6 +176,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private authenticationRefreshRetryAttempt = 0
   private helloCommandId: string | null = null
   private syncCommandId: string | null = null
+  /** Set by this connection's WELCOME only; every new connection starts at text. */
+  private markdownReplies = false
   private readonly permitCommands = new Map<string, PendingCommand<ImExecutionPermitResult>>()
   private readonly permitCommandByEvent = new Map<string, string>()
   private readonly replyCommands = new Map<string, PendingCommand<ImReplySubmissionResult>>()
@@ -211,6 +214,10 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     return this.status.connectionState === "online" && Boolean(this.status.sessionId)
   }
 
+  supportsMarkdownReplies(): boolean {
+    return this.markdownReplies
+  }
+
   start(): void {
     if (!this.stopped) return
     this.stopped = false
@@ -225,6 +232,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.authenticationRefreshRetryAttempt = 0
     this.helloCommandId = null
     this.syncCommandId = null
+    this.markdownReplies = false
     this.clearTimers()
     this.rejectPending(
       new ImGatewayCommandError("统一机器人连接已断开", { reasonCode: "DESKTOP_OFFLINE" })
@@ -500,6 +508,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     const generation = ++this.connectionGeneration
     this.helloCommandId = null
     this.syncCommandId = null
+    this.markdownReplies = false
     const url = this.options.url()?.trim()
     const token = this.options.token()?.trim()
     if (!url || !token) {
@@ -572,7 +581,9 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       this.helloCommandId = this.sendEnvelope("HELLO", {
         appVersion: this.options.appVersion,
         capabilities: this.options.capabilities ?? ["inbox", "feature", "scheduler", "hitl"],
-        protocolExtensions: [DEFAULT_ROUTE_SYNC_EXTENSION]
+        // Asking is safe on every gateway: released ones ignore extensions they
+        // do not know, and only a gateway that knows this one answers it.
+        protocolExtensions: [DEFAULT_ROUTE_SYNC_EXTENSION, IM_MARKDOWN_REPLY_EXTENSION]
       })
     })
     socket.on("message", (data) => {
@@ -693,7 +704,13 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       case "WELCOME": {
         assertOnlyKeys(
           payload,
-          ["sessionId", "principalId", "serverTime", "heartbeatIntervalSeconds"],
+          [
+            "sessionId",
+            "principalId",
+            "serverTime",
+            "heartbeatIntervalSeconds",
+            "protocolExtensions"
+          ],
           "WELCOME payload"
         )
         if (!commandId || commandId !== this.helloCommandId) {
@@ -704,6 +721,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         const principalId = nonEmptyString(payload.principalId)
         const serverTime = nonEmptyString(payload.serverTime)
         const heartbeatIntervalSeconds = positiveInteger(payload.heartbeatIntervalSeconds)
+        const extensions = payload.protocolExtensions
         if (
           !sessionId ||
           !principalId ||
@@ -711,10 +729,18 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           !Number.isFinite(Date.parse(serverTime)) ||
           !heartbeatIntervalSeconds ||
           heartbeatIntervalSeconds < 5 ||
-          heartbeatIntervalSeconds > 300
+          heartbeatIntervalSeconds > 300 ||
+          (extensions !== undefined &&
+            (!Array.isArray(extensions) ||
+              extensions.some((extension) => typeof extension !== "string")))
         ) {
           throw new ImGatewayProtocolError("WELCOME payload is invalid")
         }
+        this.markdownReplies =
+          Array.isArray(extensions) && extensions.includes(IM_MARKDOWN_REPLY_EXTENSION)
+        console.log(
+          `[IM] Gateway session ${sessionId}: Agent replies go out as ${this.markdownReplies ? "markdown" : "text"}.`
+        )
         if (this.connectTimer) clearTimeout(this.connectTimer)
         this.connectTimer = undefined
         this.reconnectAttempt = 0
