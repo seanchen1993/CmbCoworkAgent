@@ -13,6 +13,9 @@ export const DEFAULT_IM_CHANNEL_ID: ImChannelId = "zhaohu"
  * limits. A future multi-channel gateway should select these per channel.
  */
 export const IM_REPLY_MAX_SEGMENT_CHARACTERS = 2_800
+// The Java gateway also checks String.length() before either the text API or a
+// Markdown card can use the segment. Supplementary characters take two units.
+export const IM_REPLY_MAX_SEGMENT_UTF16_CHARACTERS = 3_000
 export const IM_REPLY_MAX_SEGMENTS = 8
 
 /**
@@ -287,6 +290,12 @@ export function assertRemoteImReplyV1(value: unknown): asserts value is RemoteIm
     throw new ImGatewayContractError(
       "INVALID_PAYLOAD",
       `reply.message.content exceeds ${IM_REPLY_MAX_SEGMENT_CHARACTERS} Unicode characters`
+    )
+  }
+  if (content.length > IM_REPLY_MAX_SEGMENT_UTF16_CHARACTERS) {
+    throw new ImGatewayContractError(
+      "INVALID_PAYLOAD",
+      `reply.message.content exceeds ${IM_REPLY_MAX_SEGMENT_UTF16_CHARACTERS} UTF-16 code units`
     )
   }
 }
