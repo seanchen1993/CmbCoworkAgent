@@ -21,7 +21,11 @@ import {
   segmentImMarkdownText,
   segmentImReplyText
 } from "../src/main/services/im/reply-segmentation"
-import type { RemoteImReplyV1 } from "../src/shared/im-gateway-contract"
+import {
+  assertRemoteImReplyV1,
+  IM_REPLY_MAX_SEGMENT_UTF16_CHARACTERS,
+  type RemoteImReplyV1
+} from "../src/shared/im-gateway-contract"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
 import { ImReplyClient } from "../src/main/services/im/reply-client"
 import { getEventReporter, setEventReporter } from "../src/main/services/event-reporter"
@@ -119,7 +123,13 @@ async function testManagedInboxCreationAndReuse(): Promise<void> {
 
 function testReplySegmentationAndStableEnvelope(): void {
   const emojiText = "😀".repeat(2_799)
-  assert.equal(Array.from(segmentImReplyText(emojiText)[0]).length, 2_799)
+  const emojiSegments = segmentImReplyText(emojiText)
+  assert(emojiSegments.length > 1)
+  assert.equal(
+    emojiSegments.map((segment) => segment.replace(/^\[\d\/\d\] /u, "")).join(""),
+    emojiText
+  )
+  assert(emojiSegments.every((segment) => segment.length <= IM_REPLY_MAX_SEGMENT_UTF16_CHARACTERS))
 
   const prefixed = segmentImReplyText("甲".repeat(7_000), { prefix: "【项目 / 功能】" })
   assert(prefixed.length > 1)
@@ -147,6 +157,30 @@ function testReplySegmentationAndStableEnvelope(): void {
   assert.deepEqual(replay, first)
   assert.equal(first[0].segment.index, 0)
   assert(first.every((reply) => reply.segment.count === first.length))
+  for (const reply of buildImEventReplies({ event, text: emojiText })) {
+    assertRemoteImReplyV1(reply)
+  }
+  assert.throws(
+    () =>
+      assertRemoteImReplyV1({
+        ...first[0],
+        message: { type: "text", content: "😀".repeat(2_000) }
+      }),
+    /UTF-16/u
+  )
+  const uniqueSupplementary = Array.from({ length: 2_000 }, (_unused, index) =>
+    String.fromCodePoint(0x1f300 + index)
+  ).join("")
+  const singleOverflow = segmentImReplyText(uniqueSupplementary, {
+    maxSegments: 1,
+    singleSegmentOverflow: { minimumHeadCharacters: 300, minimumTailCharacters: 300 }
+  })[0]
+  const [head, tail] = singleOverflow.split(`\n\n${IM_REPLY_TRUNCATION_NOTICE}\n\n`)
+  assert(head && tail)
+  assert(uniqueSupplementary.startsWith(head))
+  assert(uniqueSupplementary.endsWith(tail))
+  assert(Array.from(head).length + Array.from(tail).length < 2_000)
+  assert(singleOverflow.length <= IM_REPLY_MAX_SEGMENT_UTF16_CHARACTERS)
   assert.equal(eventShortCode("event-stable-id"), eventShortCode("event-stable-id"))
   assert.match(eventShortCode("event-stable-id"), /^[A-F0-9]{8}$/)
 
@@ -235,6 +269,30 @@ function testMarkdownSegmentsRenderOnTheirOwn(): void {
   assert(withCode.at(-1)!.endsWith("结尾"))
   // A replay must match the durable outbox byte for byte.
   assert.deepEqual(segmentImMarkdownText(source, { prefix: "【会话：排障】" }), withCode)
+
+  const tableRows = Array.from(
+    { length: 350 },
+    (_unused, index) => `| row${index} | ${"值".repeat(8)} |`
+  )
+  const tableHeader = "| 名称 | 内容 |\n| --- | --- |\n"
+  const tableSegments = segmentImMarkdownText(`${tableHeader}${tableRows.join("\n")}`)
+  assert(tableSegments.length > 1)
+  for (const segment of tableSegments) {
+    assert.match(segment, /^\[\d\/\d\]\n\n\| 名称 \| 内容 \|\n\| --- \| --- \|\n/u)
+    assert(segment.length <= IM_REPLY_MAX_SEGMENT_UTF16_CHARACTERS)
+  }
+  const joinedTable = tableSegments.join("\n")
+  for (const row of tableRows) {
+    assert.equal(joinedTable.split(row).length - 1, 1, `table row must remain whole: ${row}`)
+  }
+
+  const emojiMarkdown = segmentImMarkdownText("😀".repeat(2_000))
+  assert(emojiMarkdown.length > 1)
+  assert.equal(
+    emojiMarkdown.map((segment) => segment.replace(/^\[\d\/\d\]\n\n/u, "")).join(""),
+    "😀".repeat(2_000)
+  )
+  assert(emojiMarkdown.every((segment) => segment.length <= IM_REPLY_MAX_SEGMENT_UTF16_CHARACTERS))
 
   const endless = segmentImMarkdownText(`\`\`\`\n${"代码\n".repeat(20_000)}\`\`\``)
   assert.equal(endless.length, 8)
