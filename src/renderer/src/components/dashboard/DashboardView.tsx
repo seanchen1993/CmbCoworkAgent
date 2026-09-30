@@ -3060,6 +3060,8 @@ export function DashboardView(): React.JSX.Element {
     useState<DashboardTraceTriggerScope>("active")
   const [userDetailTraceExporting, setUserDetailTraceExporting] = useState(false)
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
+  const [marketSkillItems, setMarketSkillItems] = useState<MarketItem[]>([])
+  const [marketSkillsError, setMarketSkillsError] = useState<string | null>(null)
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
     Record<string, SkillUploaderProfile>
@@ -3207,18 +3209,26 @@ export function DashboardView(): React.JSX.Element {
     // 个人构建技能名集：取应用市场（marketApi.getSkills）条目名，后端按名聚合并按名回传。
     const personalSkillNames = Array.from(
       new Set(
-        Array.from(marketSkillMap.values())
-          .map((item) => item.name?.trim() || "")
+        marketSkillItems
+          .map((item) => item.name?.trim() || item.filename?.trim() || "")
           .filter(Boolean)
       )
     )
 
     async function loadSkillContribs(): Promise<void> {
       if (marketSkillsLoading) return
+      if (marketSkillsError) {
+        if (!cancelled) {
+          setAwardSkillsError(marketSkillsError)
+          setAwardSkillsLoading(false)
+        }
+        return
+      }
       if (personalSkillNames.length === 0) {
         if (!cancelled) {
           setAwardSkillContribs([])
           setAwardSkillsError(null)
+          setAwardSkillsLoading(false)
         }
         return
       }
@@ -3246,6 +3256,17 @@ export function DashboardView(): React.JSX.Element {
       }
     }
 
+    void loadSkillContribs()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeMainTab, awardsAdmin, range, marketSkillItems, marketSkillsLoading, marketSkillsError])
+
+  // 应用奖不依赖市场列表，避免市场加载期间重复触发全量查询。
+  useEffect(() => {
+    if (activeMainTab !== "awards" || !awardsAdmin) return
+    let cancelled = false
     async function loadUserApps(): Promise<void> {
       if (!cancelled) {
         setAwardUsersLoading(true)
@@ -3268,13 +3289,11 @@ export function DashboardView(): React.JSX.Element {
       }
     }
 
-    void loadSkillContribs()
     void loadUserApps()
-
     return () => {
       cancelled = true
     }
-  }, [activeMainTab, awardsAdmin, range, marketSkillMap, marketSkillsLoading])
+  }, [activeMainTab, awardsAdmin, range])
 
   // 团队标杆奖懒加载：拉取室/组指标后，按上传时间过滤市场技能，再按作者归属补「贡献技能数 / 覆盖数」。
   useEffect(() => {
@@ -3283,6 +3302,13 @@ export function DashboardView(): React.JSX.Element {
 
     async function loadTeam(): Promise<void> {
       if (marketSkillsLoading) return
+      if (marketSkillsError) {
+        if (!cancelled) {
+          setAwardTeamError(marketSkillsError)
+          setAwardTeamLoading(false)
+        }
+        return
+      }
       if (!cancelled) {
         setAwardTeamLoading(true)
         setAwardTeamError(null)
@@ -3297,7 +3323,7 @@ export function DashboardView(): React.JSX.Element {
         const rawRows = (result.data as DashboardAwardTeamBenchmarkRow[]) ?? []
         const knownShiList = rawRows.map((row) => row.shi).filter(Boolean)
         const knownGroupsByShi = buildKnownTeamGroupsByShi(rawRows)
-        const uploadedInRangeSkills = Array.from(marketSkillMap.values()).filter((item) =>
+        const uploadedInRangeSkills = marketSkillItems.filter((item) =>
           isMarketSkillUploadedInRange(item, range)
         )
         const skillContribs = buildTeamSkillContributions(
@@ -3319,7 +3345,8 @@ export function DashboardView(): React.JSX.Element {
         if (coverageGroups.length > 0) {
           const cov = await window.api.dashboard.awardsTeamSkillCoverage(range, coverageGroups)
           if (cancelled) return
-          if (cov.success) coverageByOrg = (cov.data as Record<string, number>) ?? {}
+          if (!cov.success) throw new Error(cov.error || "获取技能覆盖数据失败")
+          coverageByOrg = (cov.data as Record<string, number>) ?? {}
         }
 
         const enriched: TeamBenchmarkRow[] = rawRows.map((row) => ({
@@ -3330,8 +3357,7 @@ export function DashboardView(): React.JSX.Element {
             const key = child.group ? teamOrgContributionKey(row.shi, child.group) : ""
             return {
               ...child,
-              contributedSkillCount:
-                skillContribs.byOrg.get(key)?.contributedSkillKeys.size ?? 0,
+              contributedSkillCount: skillContribs.byOrg.get(key)?.contributedSkillKeys.size ?? 0,
               skillCoverageShiCount: coverageByOrg[key] ?? 0,
               children: undefined
             }
@@ -3355,8 +3381,9 @@ export function DashboardView(): React.JSX.Element {
     activeMainTab,
     awardsAdmin,
     range,
-    marketSkillMap,
+    marketSkillItems,
     marketSkillsLoading,
+    marketSkillsError,
     skillUploaderProfiles
   ])
 
@@ -3604,14 +3631,20 @@ export function DashboardView(): React.JSX.Element {
         const result = await marketApi.getSkills()
         if (cancelled) return
         if (result.success && result.data) {
+          setMarketSkillsError(
+            result.hasNextPage ? "技能市场列表未完整返回，无法生成完整评奖结果" : null
+          )
+          setMarketSkillItems(result.data)
           setMarketSkillKeys(buildMarketSkillKeySet(result.data))
           setMarketSkillMap(buildMarketSkillMap(result.data))
           void loadUploaderProfiles(result.data)
           return
         }
+        setMarketSkillsError(result.error || "获取技能市场数据失败")
         console.warn("[Dashboard] Failed to load marketplace skills:", result.error)
       } catch (error) {
         if (!cancelled) {
+          setMarketSkillsError(error instanceof Error ? error.message : String(error))
           console.warn("[Dashboard] Failed to load marketplace skills:", error)
         }
       } finally {
