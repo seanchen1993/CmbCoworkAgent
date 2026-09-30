@@ -1,5 +1,5 @@
 import React from "react"
-import { Loader2 } from "lucide-react"
+import { Info, Loader2 } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -162,54 +162,38 @@ export function ProjectStageAnalysisDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[85vh] w-[95vw] max-w-[1400px] flex-col">
         <DialogHeader>
-          <DialogTitle className="text-base">阶段耗时分析</DialogTitle>
+          <DialogTitle className="flex items-center gap-1.5 text-base">
+            阶段耗时分析
+            <span className="group relative inline-flex">
+              <button
+                type="button"
+                aria-label="查看阶段耗时统计说明"
+                aria-describedby="project-stage-analysis-help"
+                className="inline-flex size-5 items-center justify-center text-muted-foreground hover:text-foreground focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                <Info className="size-3.5" />
+              </button>
+              <span
+                id="project-stage-analysis-help"
+                role="tooltip"
+                className="pointer-events-none invisible absolute left-0 top-full z-[60] w-96 max-w-[calc(100vw-4rem)] rounded-md border bg-popover px-2.5 py-1.5 text-left text-xs font-normal leading-relaxed text-popover-foreground opacity-0 shadow-md transition-opacity group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100"
+              >
+                耗时统计主 Agent
+                会话从发起到结束的工作时间，按经过的阶段拆分；一轮跨多个阶段，每个阶段各计 1
+                轮，因此阶段轮次之和可能大于总轮次。工具、模型调用及 Token 汇总主、子
+                Agent，按调用开始时的阶段归属；旧记录按轮次开始阶段归属，无法确定的计入「未归因」。
+                {analysis?.costAttribution &&
+                  analysis.costAttribution.tokenUsageReportedCalls <
+                    analysis.costAttribution.modelCalls &&
+                  " 部分模型调用未返回 Token 用量。"}
+                {(analysis?.costAttribution?.truncated ||
+                  analysis?.durationAttribution?.truncated) &&
+                  " 阶段数量超出展示上限，阶段合计可能小于项目总计。"}
+              </span>
+            </span>
+          </DialogTitle>
           <DialogDescription className="truncate">{projectName}</DialogDescription>
         </DialogHeader>
-
-        {/*
-          口径说明放在最显眼的位置，不折叠也不塞进 tooltip：每轮从发起到结束的
-          耗时不是阶段从进入到退出的自然历时，读错了就会得出错误结论。
-        */}
-        <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-          <div>
-            <span className="font-medium text-foreground">轮次与耗时：</span>
-            只统计主动触发的主 Agent 会话。每轮从发起到结束的耗时按期间观察到的阶段变化拆分。
-            <strong className="font-bold text-foreground">
-              一轮经过多个阶段时，每个阶段各计 1 轮
-            </strong>
-            ，因此阶段轮次相加可能大于项目总轮次。旧记录仍按该轮开始时的阶段归属。
-            这里统计的是会话工作时间，不是阶段从进入到退出的历时。
-          </div>
-          <div className="mt-1">
-            <span className="font-medium text-foreground">调用与 Token：</span>
-            汇总同一项目和时间范围内主、子 Agent 的调用。完整记录按每次调用开始时的阶段归属；
-            历史或未完整记录按该轮开始时的阶段归属；无法确定阶段的计入「未归因」。Token
-            只汇总模型已上报的用量。
-          </div>
-          <div className="mt-1">
-            <span className="font-medium text-foreground">请求输入：</span>
-            统计向用户请求补充信息的次数；「≥」表示仅覆盖部分记录，「—」表示没有可用的完整记录。
-          </div>
-          {analysis?.costAttribution && (
-            <div className="mt-1">
-              阶段归因覆盖：按调用开始阶段统计{" "}
-              {fmtCount(analysis.costAttribution.callStartTraceCount)} 条记录； 按整轮开始阶段统计{" "}
-              {fmtCount(analysis.costAttribution.turnStartTraceCount)} 条记录。
-              {analysis.costAttribution.tokenUsageReportedCalls <
-                analysis.costAttribution.modelCalls && " 部分模型调用未返回 Token 用量。"}
-              {analysis.costAttribution.truncated &&
-                " 阶段数量超出展示上限，以下阶段合计可能小于项目总计。"}
-            </div>
-          )}
-          {analysis?.durationAttribution && (
-            <div className="mt-1">
-              轮次与耗时覆盖：按阶段变化拆分 {fmtCount(analysis.durationAttribution.splitTurnCount)}{" "}
-              轮； 按开始阶段统计 {fmtCount(analysis.durationAttribution.legacyTurnCount)} 轮。
-              {analysis.durationAttribution.truncated &&
-                " 阶段数量超出展示上限，阶段合计可能小于项目总计。"}
-            </div>
-          )}
-        </div>
 
         {loading && !analysis ? (
           <div className="flex flex-1 items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
