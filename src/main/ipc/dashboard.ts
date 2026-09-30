@@ -6998,9 +6998,9 @@ function parseTeamBenchmarkTraceBucket(
   }
 }
 
-/** 组织桶 join key：室 或 室␀组。 */
+/** 室与组使用独立键；空组桶也不能覆盖室级汇总。 */
 function teamOrgKey(shi: string, group?: string): string {
-  return group ? `${shi}\u0000${group}` : shi
+  return JSON.stringify(group === undefined ? ["room", shi] : ["group", shi, group])
 }
 
 /**
@@ -7084,7 +7084,7 @@ async function fetchAwardTeamBenchmark(
   )
   const totalPerCapitaUsage = totalUsers > 0 ? totalUsage / totalUsers : 0
   const ownerKey = (key: Record<string, unknown>): string =>
-    teamOrgKey(asString(key.shi), asString(key.group))
+    teamOrgKey(asString(key.shi), "group" in key ? asString(key.group) : undefined)
   const codeByOrg = new Map<string, DashboardCodeStats>()
   for (const bucket of [...eventRooms, ...eventGroups]) {
     codeByOrg.set(ownerKey(asRecord(bucket.key)), normalizeCodeStatsFromContainer(bucket))

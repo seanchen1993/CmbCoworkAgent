@@ -5,6 +5,7 @@ import * as helpers from "./dashboard-awards-skill"
 import { buildSkillUsageMatchFilter } from "./dashboard-skill-usage"
 import { normalizeSkillQueryName } from "../utils/skill-identifiers"
 import { isMissingOrgValue } from "./dashboard-org-fields"
+import { makeDashboardCodeStats } from "./dashboard-code-stats"
 
 type Row = Record<string, unknown>
 function record(value: unknown): Row {
@@ -330,6 +331,79 @@ describe("award fetcher integration", () => {
       distinctSkillsUsed: 1,
       codeStats: { generatedLines: 80 }
     })
+  })
+
+  it("keeps room totals when an empty group would otherwise overwrite code stats and duplicate users", async () => {
+    const codeStats = (
+      adoptedLines: number,
+      effectiveGeneratedLines: number,
+      inclusiveEffectiveGeneratedLines: number,
+      pushedAdoptedLines: number,
+      pushedEffectiveGeneratedLines: number
+    ) =>
+      makeDashboardCodeStats({
+        generatedLines: inclusiveEffectiveGeneratedLines,
+        measuredGeneratedLines: effectiveGeneratedLines,
+        effectiveGeneratedLines,
+        adoptedLines,
+        deletedLines: 0,
+        pushedAdoptedLines,
+        pushedEffectiveGeneratedLines
+      })
+    const groups = [
+      { group: "g1", codeStats: codeStats(24002, 28015, 76918, 20598, 23950) },
+      { group: "g2", codeStats: codeStats(72074, 78220, 111532, 66436, 71783) },
+      { group: "g3", codeStats: codeStats(57476, 60607, 90940, 52923, 56002) },
+      { group: "", codeStats: codeStats(1308, 1783, 1966, 1141, 1557) }
+    ]
+    const roomCode = codeStats(154860, 168625, 281356, 141098, 153292)
+    const fixtures = {
+      "trace:shi": [{ key: { shi: "room" }, usage_count: { value: 80 } }],
+      "trace:shi,group": groups.map(({ group }) => ({
+        key: { shi: "room", group },
+        usage_count: { value: group === "" ? 30 : group === "g3" ? 10 : 20 }
+      })),
+      "trace:shi,user": [
+        { key: { shi: "room", user: "u1" }, doc_count: 50 },
+        { key: { shi: "room", user: "u2" }, doc_count: 20 },
+        { key: { shi: "room", user: "u3" }, doc_count: 10 }
+      ],
+      "trace:shi,group,user": [
+        { key: { shi: "room", group: "g1", user: "u1" }, doc_count: 20 },
+        { key: { shi: "room", group: "g2", user: "u2" }, doc_count: 20 },
+        { key: { shi: "room", group: "g3", user: "u3" }, doc_count: 10 },
+        { key: { shi: "room", group: "", user: "u1" }, doc_count: 30 }
+      ],
+      "trace:shi,skill": [{ key: { shi: "room", skill: "review-v1" } }],
+      "trace:shi,group,skill": [{ key: { shi: "room", group: "", skill: "review-v1" } }],
+      "event:shi": [{ key: { shi: "room" }, codeStats: roomCode }],
+      "event:shi,group": groups.map(({ group, codeStats }) => ({
+        key: { shi: "room", group },
+        codeStats
+      }))
+    }
+    const [row] = await fetchers(
+      pagedQuery(fixtures, {
+        total_usage: { value: 80 },
+        real_users: { total_users: { value: 3 } }
+      })
+    ).fetchAwardTeamBenchmark(range)
+    expect(row).toMatchObject({
+      usageCount: 80,
+      userCount: 3,
+      perCapitaUsage: 80 / 3,
+      aboveAvgUserCount: 1,
+      distinctSkillsUsed: 1,
+      codeStats: roomCode
+    })
+    expect(row.children).toHaveLength(3)
+    expect(row.children).toEqual(
+      expect.arrayContaining(
+        groups
+          .slice(0, 3)
+          .map(({ group, codeStats }) => expect.objectContaining({ group, codeStats }))
+      )
+    )
   })
 
   it("counts a covered room once across versions and excludes skills with a similar prefix", async () => {
