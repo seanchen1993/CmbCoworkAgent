@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 import * as helpers from "./dashboard-awards-skill"
+import { buildSkillUsageMatchFilter } from "./dashboard-skill-usage"
 import { normalizeSkillQueryName } from "../utils/skill-identifiers"
 import { isMissingOrgValue } from "./dashboard-org-fields"
 
@@ -14,6 +15,8 @@ interface AwardRow {
   children?: AwardRow[]
 }
 interface AwardFetchers {
+  fetchSkillUsageSummary: (range: unknown, granularity: string, names: string[]) => Promise<unknown>
+  fetchSkillUserStats: (range: unknown, granularity: string, name: string) => Promise<unknown>
   fetchAwardSkillContributions: (range: unknown, names: string[]) => Promise<AwardRow[]>
   fetchAwardUserApplications: (range: unknown) => Promise<AwardRow[]>
   fetchAwardTeamBenchmark: (range: unknown) => Promise<AwardRow[]>
@@ -26,16 +29,31 @@ const range = { from: "2026-09-01", to: "2026-09-30" }
 const source = readFileSync(new URL("./dashboard.ts", import.meta.url), "utf8")
 const start = source.indexOf("async function fetchAwardComposite(")
 const end = source.indexOf("/** `_source` fields needed to render a Commit", start)
+function sourceBetween(start: string, end: string): string {
+  const offset = source.indexOf(start)
+  const stop = source.indexOf(end, offset)
+  if (offset < 0 || stop < 0) throw new Error(`Missing fetcher source: ${start}`)
+  return source.slice(offset, stop)
+}
 // Execute the actual fetchers with fixture ES responses, without loading Electron or starting the app.
-const compiled = ts.transpileModule(source.slice(start, end), {
+const usageSource = [
+  sourceBetween("function buildSkillUsageWildcardFilter(", "const SKILL_EVAL_STATS_PAGE_SIZE"),
+  sourceBetween("async function fetchSkillUsageSummary(", "async function fetchSkillEvalSummary("),
+  sourceBetween("async function fetchSkillUserStats(", "async function fetchUserProfilesBySapIds(")
+].join("\n")
+const compiled = ts.transpileModule(usageSource + source.slice(start, end), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
 }).outputText
 function fetchers(esQuery: (index: string, body: Row) => Promise<unknown>): AwardFetchers {
   const deps = {
     ...helpers,
+    buildSkillUsageMatchFilter,
     esQuery,
     getEsIndex: (index: string) => index,
     requireDashboardAwardsAccess: () => {},
+    requireDashboardAccess: () => {},
+    buildNonEmptyYstIdFilter: () => ({ exists: { field: "ystId" } }),
+    buildEmptyYstIdFilter: () => ({ term: { ystId: "" } }),
     timeRangeFilter: (field: string, value: unknown) => ({ range: { [field]: value } }),
     buildNonEmptyOrgLevelFilter: (field: string) => ({ exists: { field } }),
     buildProjectModeCodeAggs: () => ({
@@ -53,7 +71,7 @@ function fetchers(esQuery: (index: string, body: Row) => Promise<unknown>): Awar
   }
   return new Function(
     ...Object.keys(deps),
-    `${compiled}\nreturn { fetchAwardSkillContributions, fetchAwardUserApplications, fetchAwardTeamBenchmark, fetchAwardTeamSkillCoverage }`
+    `${compiled}\nreturn { fetchSkillUsageSummary, fetchSkillUserStats, fetchAwardSkillContributions, fetchAwardUserApplications, fetchAwardTeamBenchmark, fetchAwardTeamSkillCoverage }`
   )(...Object.values(deps)) as AwardFetchers
 }
 
@@ -85,6 +103,102 @@ function pagedQuery(
 }
 
 describe("award fetcher integration", () => {
+  it("agrees with marketplace counts for nonstandard versions and overlapping aliases", async () => {
+    const traces = Array.from({ length: 117 }, (_, i) => ({
+      ystId: `user${i % 20}`,
+      usedSkills:
+        i === 0
+          ? ["requirement"]
+          : i === 1
+            ? ["requirement-v1", "Requirement-v2"]
+            : i < 104
+              ? ["requirement-v1.0.0"]
+              : ["requirement-v1.0.0_202609"]
+    }))
+    const bodies: Row[] = []
+    const query = async (index: string, body: Row): Promise<Row> => {
+      bodies.push(body)
+      const filters = record(record(record(record(body.aggs).by_skill).filters).filters)
+      expect(Object.keys(filters)).toEqual(["requirement"])
+      const buckets = Object.fromEntries(
+        Object.entries(filters).map(([key, filter]) => {
+          const clauses = record(record(filter).bool).should as Row[]
+          const matches = traces.filter(
+            (trace) =>
+              index === "trace" &&
+              clauses.some((clause) => {
+                if (clause.term)
+                  return trace.usedSkills.includes(String(Object.values(record(clause.term))[0]))
+                const prefix = String(Object.values(record(clause.prefix))[0])
+                return trace.usedSkills.some((name) => name.startsWith(prefix))
+              })
+          )
+          const users = new Set(matches.map((trace) => trace.ystId)).size
+          return [
+            key,
+            {
+              doc_count: matches.length,
+              unique_users: { count: { value: users } },
+              real_users: { users: { value: users } }
+            }
+          ]
+        })
+      )
+      return { aggregations: { by_skill: { buckets } } }
+    }
+    const api = fetchers(query)
+    const names = ["Requirement-v1.0.0", "requirement-v2.0.0"]
+    const market = record(await api.fetchSkillUsageSummary(range, "month", names))
+    const marketBuckets = record(record(record(market.aggregations).by_skill).buckets)
+    expect(marketBuckets.requirement).toMatchObject({
+      doc_count: 117,
+      unique_users: { count: { value: 20 } }
+    })
+    const awards = await api.fetchAwardSkillContributions(range, names)
+    expect(awards).toHaveLength(1)
+    expect(awards[0]).toMatchObject({ skillKey: "requirement", callCount: 117, userCount: 20 })
+    const marketBody = bodies[0]
+    const awardTraceBody = bodies[1]
+    expect(awardTraceBody.query).toEqual(marketBody.query)
+    expect(record(record(awardTraceBody.aggs).by_skill).filters).toEqual(
+      record(record(marketBody.aggs).by_skill).filters
+    )
+  })
+
+  it("uses the marketplace rule for user details, including bare names", async () => {
+    let request: Row = {}
+    const query = async (_index: string, body: Row): Promise<Row> => {
+      request = body
+      return {}
+    }
+    await fetchers(query).fetchSkillUserStats(range, "month", "Requirement-v1.0.0")
+    const clauses = record(record(request.query).bool).must as Row[]
+    const [candidate] = helpers.groupAwardSkillCandidates(["Requirement-v1.0.0"])
+    const expected = helpers.buildAwardSkillMatchFilter(candidate, [
+      "usedSkills",
+      "usedSkills.keyword"
+    ])
+    expect(clauses.at(-1)).toEqual(expected)
+    expect(JSON.stringify(request.aggs)).toContain(JSON.stringify(expected))
+  })
+
+  it("normalizes skill identifiers once when a base name also ends in a number", async () => {
+    let request: Row = {}
+    const query = async (_index: string, body: Row): Promise<Row> => {
+      request = body
+      return {}
+    }
+    await fetchers(query).fetchSkillUsageSummary(range, "month", ["schema-3.0-v1.0+build.7"])
+    const filters = record(record(record(record(request.aggs).by_skill).filters).filters)
+    expect(Object.keys(filters)).toEqual(["schema-3.0"])
+    expect(filters["schema-3.0"]).toEqual(
+      helpers.buildAwardSkillMatchFilter(
+        helpers.groupAwardSkillCandidates(["schema-3.0-v1.0+build.7"])[0],
+        ["usedSkills", "usedSkills.keyword"]
+      )
+    )
+  })
+
   it("returns skills after position 300 and aggregates all versions in one filter bucket", async () => {
     const names = [
       ...Array.from({ length: 350 }, (_, i) => `skill-item${i}`),
