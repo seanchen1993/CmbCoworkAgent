@@ -86,6 +86,8 @@ import {
   type OpenResourcePreviewDetail
 } from "@/lib/resource-preview-events"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
+import type { ResourcePanelInlinePreview } from "@/lib/resource-panel-overlay-events"
+import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
@@ -353,6 +355,9 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 interface RightPanelProps {
   threadId?: string | null
   moduleMode: "work" | "preview" | "git" | "browser"
+  previewOnly?: boolean
+  browserInitialUrl?: string | null
+  inlinePreview?: ResourcePanelInlinePreview | null
   showSystemConstraints?: boolean
   resourcePreviewRequest?: OpenResourcePreviewDetail | null
   onResourcePreviewRequestHandled?: () => void
@@ -525,6 +530,9 @@ const RightPanelStreamEffects = memo(function RightPanelStreamEffects({
 export function RightPanel({
   threadId,
   moduleMode,
+  previewOnly = false,
+  browserInitialUrl = null,
+  inlinePreview = null,
   showSystemConstraints = false,
   resourcePreviewRequest = null,
   onResourcePreviewRequestHandled,
@@ -2058,13 +2066,44 @@ export function RightPanel({
             <BrowserPanel
               threadId={currentThreadId ?? null}
               workspacePath={workspacePath ?? null}
+              initialUrl={browserInitialUrl}
               onFullscreenChange={onBrowserFullscreenChange}
             />
           </Suspense>
         </div>
       )}
 
-      {moduleMode === "preview" && (
+      {moduleMode === "preview" && inlinePreview && (
+        <div className="flex min-h-0 flex-1 flex-col rounded-2xl bg-background-elevated">
+          <div className="flex min-h-0 flex-1 flex-col bg-background-elevated">
+            <div className="flex h-9 shrink-0 items-center border-b border-border/70 px-3">
+              <span
+                className="truncate text-xs font-semibold text-foreground"
+                title={inlinePreview.title}
+              >
+                {inlinePreview.title}
+              </span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {inlinePreview.error ? (
+                <p className="p-4 text-xs text-destructive">{inlinePreview.error}</p>
+              ) : inlinePreview.content ? (
+                <MarkdownPreview
+                  content={inlinePreview.content}
+                  showHeader={false}
+                  showModeToggle={false}
+                  whiteBackground
+                  className="text-foreground"
+                />
+              ) : (
+                <p className="p-4 text-xs text-muted-foreground">暂无需求文档内容</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {moduleMode === "preview" && !inlinePreview && (
         <div className="flex min-h-0 flex-1 flex-col rounded-2xl bg-background-elevated">
           <div
             data-testid="resource-preview-surface"
@@ -2085,7 +2124,7 @@ export function RightPanel({
                 reloadToken={previewReloadToken}
                 onReload={() => setPreviewReloadToken((v) => v + 1)}
                 onFullscreenChange={onPreviewFullscreenChange}
-                onHidePreview={onRequestWorkMode}
+                onHidePreview={previewOnly ? undefined : onRequestWorkMode}
               />
             ) : (
               <div className="flex h-full min-h-0 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),var(--background)] dark:bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.10),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.10),transparent_42%),var(--background)]">
@@ -3026,7 +3065,7 @@ function PluginRunArtifactsContent({
   )
 }
 
-function ResourcePreview({
+export function ResourcePreview({
   filePath,
   workspacePathKind,
   workspacePath,
@@ -3349,12 +3388,18 @@ type TreeNode = WorkspaceFileTreeNode
 // panel does not rebuild/sort a 50k-file tree.
 const fileTreeCache = new WeakMap<FileInfo[], TreeNode[]>()
 
-function FileTree({
+export function FileTree({
   files,
-  threadId
+  threadId,
+  selectedPath,
+  onFileSelect,
+  initialExpandedPaths = []
 }: {
   files: FileInfo[]
   threadId: string | null
+  selectedPath?: string | null
+  onFileSelect?: (path: string) => void
+  initialExpandedPaths?: string[]
 }): React.JSX.Element {
   const openFile = useThreadActions(threadId)?.openFile
   const workspacePath = useThreadStateSelector(threadId, (state) => state.workspacePath) ?? ""
@@ -3365,7 +3410,7 @@ function FileTree({
   } | null>(null)
   const tree =
     projectedTree ?? (fallbackProjection?.files === files ? fallbackProjection.tree : null)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initialExpandedPaths))
 
   useEffect(() => {
     if (projectedTree) return
@@ -3409,6 +3454,8 @@ function FileTree({
         expanded={expanded}
         onToggle={toggleExpand}
         openFile={openFile}
+        selectedPath={selectedPath}
+        onFileSelect={onFileSelect}
         workspacePath={workspacePath}
       />
     </div>
@@ -3423,6 +3470,8 @@ function FileTreeNodeList({
   expanded,
   onToggle,
   openFile,
+  selectedPath,
+  onFileSelect,
   workspacePath
 }: {
   nodes: TreeNode[]
@@ -3430,6 +3479,8 @@ function FileTreeNodeList({
   expanded: Set<string>
   onToggle: (path: string) => void
   openFile?: (path: string, name: string) => void
+  selectedPath?: string | null
+  onFileSelect?: (path: string) => void
   workspacePath: string
 }): React.JSX.Element {
   const nodesPageKey = `${nodes.length}:${nodes[0]?.path ?? ""}:${nodes.at(-1)?.path ?? ""}`
@@ -3450,6 +3501,8 @@ function FileTreeNodeList({
           expanded={expanded}
           onToggle={onToggle}
           openFile={openFile}
+          selectedPath={selectedPath}
+          onFileSelect={onFileSelect}
           workspacePath={workspacePath}
         />
       ))}
@@ -3495,6 +3548,8 @@ const FileTreeNode = memo(
     expanded,
     onToggle,
     openFile,
+    selectedPath,
+    onFileSelect,
     workspacePath
   }: {
     node: TreeNode
@@ -3502,6 +3557,8 @@ const FileTreeNode = memo(
     expanded: Set<string>
     onToggle: (path: string) => void
     openFile?: (path: string, name: string) => void
+    selectedPath?: string | null
+    onFileSelect?: (path: string) => void
     workspacePath: string
   }): React.JSX.Element {
     useSyncExternalStore(
@@ -3528,6 +3585,8 @@ const FileTreeNode = memo(
     const handleClick = (): void => {
       if (node.is_dir) {
         onToggle(node.path)
+      } else if (onFileSelect) {
+        onFileSelect(node.path)
       } else if (openFile) {
         // Open file in a new tab
         openFile(node.path, node.name)
@@ -3539,7 +3598,8 @@ const FileTreeNode = memo(
         <div
           onClick={handleClick}
           className={cn(
-            "flex items-center gap-1.5 py-1 pr-3 text-xs hover:bg-background-interactive cursor-pointer"
+            "flex items-center gap-1.5 py-1 pr-3 text-xs hover:bg-background-interactive cursor-pointer",
+            selectedPath === node.path && "bg-background-interactive text-foreground"
           )}
           style={{ paddingLeft }}
         >
@@ -3579,6 +3639,8 @@ const FileTreeNode = memo(
             expanded={expanded}
             onToggle={onToggle}
             openFile={openFile}
+            selectedPath={selectedPath}
+            onFileSelect={onFileSelect}
             workspacePath={workspacePath}
           />
         )}
@@ -3594,6 +3656,8 @@ const FileTreeNode = memo(
       // Expanded nodes render children that need the latest Set reference
       (!isExpanded || prevProps.expanded === nextProps.expanded) &&
       prevProps.openFile === nextProps.openFile &&
+      prevProps.selectedPath === nextProps.selectedPath &&
+      prevProps.onFileSelect === nextProps.onFileSelect &&
       prevProps.onToggle === nextProps.onToggle &&
       prevProps.workspacePath === nextProps.workspacePath &&
       prevProps.depth === nextProps.depth

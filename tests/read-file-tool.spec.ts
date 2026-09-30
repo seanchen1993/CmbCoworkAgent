@@ -1466,7 +1466,7 @@ async function testRuntimeReadFileToolPatchDefaultsAndTrims(): Promise<void> {
     options?: { maxFormattedContentChars?: number; includeLookahead?: boolean }
   }> = []
   const backend: ReadableFilesystemBackend = {
-    read(filePath, offset, limit, options) {
+    readText(filePath, offset, limit, options) {
       calls.push({ filePath, offset, limit, options })
       return Array.from({ length: (limit ?? 0) + 1 }, (_, index) => {
         return `${(index + 1).toString().padStart(6)}\tline-${index + 1}`
@@ -1474,7 +1474,7 @@ async function testRuntimeReadFileToolPatchDefaultsAndTrims(): Promise<void> {
     }
   }
   const middleware = createFilesystemMiddleware({
-    backend
+    backend: backend as never
   }) as unknown as PatchRuntimeReadFileToolParams["middleware"]
   patchRuntimeReadFileTool({ middleware, filesystemBackend: backend })
   const readTool = findReadFileTool(middleware)
@@ -1513,14 +1513,14 @@ async function testRuntimeReadFileToolPatchDefaultsAndTrims(): Promise<void> {
 async function testRuntimeReadFileToolPassesOutputCharBudget(): Promise<void> {
   const observed: { maxFormattedContentChars?: number; includeLookahead?: boolean } = {}
   const backend: ReadableFilesystemBackend = {
-    read(_filePath, _offset, _limit, options) {
+    readText(_filePath, _offset, _limit, options) {
       observed.maxFormattedContentChars = options?.maxFormattedContentChars
       observed.includeLookahead = options?.includeLookahead
       return "     1\tok"
     }
   }
   const middleware = createFilesystemMiddleware({
-    backend
+    backend: backend as never
   }) as unknown as PatchRuntimeReadFileToolParams["middleware"]
   patchRuntimeReadFileTool({
     middleware,
@@ -1540,13 +1540,13 @@ async function testRuntimeReadFileToolPassesOutputCharBudget(): Promise<void> {
 async function testRuntimeReadFileToolUsesDefaultCharBudget(): Promise<void> {
   const observed: { maxFormattedContentChars?: number } = {}
   const backend: ReadableFilesystemBackend = {
-    read(_filePath, _offset, _limit, options) {
+    readText(_filePath, _offset, _limit, options) {
       observed.maxFormattedContentChars = options?.maxFormattedContentChars
       return `     1\t${"x".repeat(90_000)}`
     }
   }
   const middleware = createFilesystemMiddleware({
-    backend
+    backend: backend as never
   }) as unknown as PatchRuntimeReadFileToolParams["middleware"]
   patchRuntimeReadFileTool({ middleware, filesystemBackend: backend })
   const readTool = findReadFileTool(middleware)
@@ -1568,7 +1568,7 @@ async function testRuntimeReadFileToolUsesDefaultCharBudget(): Promise<void> {
 
 async function testRuntimeReadFileToolPreservesHookFeedback(): Promise<void> {
   const backend: ReadableFilesystemBackend = {
-    read() {
+    readText() {
       return [
         "[Lines 1-3 of 5. Use offset=3 to read more.]",
         "     1\talpha",
@@ -1581,7 +1581,7 @@ async function testRuntimeReadFileToolPreservesHookFeedback(): Promise<void> {
     }
   }
   const middleware = createFilesystemMiddleware({
-    backend
+    backend: backend as never
   }) as unknown as PatchRuntimeReadFileToolParams["middleware"]
   patchRuntimeReadFileTool({ middleware, filesystemBackend: backend })
   const readTool = findReadFileTool(middleware)
@@ -1606,7 +1606,7 @@ async function testRuntimeReadFileToolFactoryReceivesGraphState(): Promise<void>
     observed.state = config.state
     observed.store = config.store
     return {
-      read(_filePath, _offset, limit) {
+      readText(_filePath, _offset, limit) {
         observed.limit = limit
         return "     1\tok"
       }

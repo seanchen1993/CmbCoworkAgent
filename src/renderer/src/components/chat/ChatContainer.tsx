@@ -237,6 +237,7 @@ import {
 import {
   getSubmitInFlightReleaseVersion,
   releaseSubmitInFlightLock,
+  sharedSubmitInFlightLockRef,
   shouldQueueBehindInFlightSubmit,
   shouldUseSubmitInFlightLock,
   subscribeSubmitInFlightRelease,
@@ -845,7 +846,11 @@ interface AgentStreamValues {
   todos?: Array<{ id?: string; content?: string; status?: string }>
 }
 
-export type ChatSurface = "default" | "harness-project" | "harness-feature-session"
+export type ChatSurface =
+  | "default"
+  | "harness-project"
+  | "harness-feature-session"
+  | "requirement-session"
 
 interface ChatSurfaceConfig {
   showWelcomeHeadline: boolean
@@ -865,6 +870,11 @@ const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
     showHarnessDialogTips: true
   },
   "harness-feature-session": {
+    showWelcomeHeadline: false,
+    showWelcomeSkillTabs: false,
+    showHarnessDialogTips: false
+  },
+  "requirement-session": {
     showWelcomeHeadline: false,
     showWelcomeSkillTabs: false,
     showHarnessDialogTips: false
@@ -991,7 +1001,10 @@ type PendingAttachmentInput =
 // all ChatContainer instances is safe: different threads never collide, and if
 // two instances ever pointed at the SAME thread, sharing the lock is the
 // correct behavior anyway.
-const submitInFlightLockStore: SubmitInFlightLockRef = { current: new Set<string>() }
+// The instance itself lives in submit-in-flight-lock.ts so that non-ChatContainer
+// submitters (visual-edit's useVisualEditSubmit) contend on the SAME lock rather
+// than a second, independent Set.
+const submitInFlightLockStore: SubmitInFlightLockRef = sharedSubmitInFlightLockRef
 // Distinguishes a live Enter/send that is still preparing its payload from other
 // users of the shared submit lock (notably the queue pump). A second Enter during
 // this preparation window is a duplicate gesture and must be rejected; a genuinely
@@ -1689,6 +1702,7 @@ export function ChatContainer({
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
   const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
   const readOnly = Boolean(resolvedReadOnlyReason)
+  const isRequirementMode = surface === "requirement-session"
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
@@ -5116,7 +5130,11 @@ export function ChatContainer({
       return "任务运行中，可使用取消按钮停止当前任务"
     }
     if (hasPendingFilePayload) return "输入消息或直接发送文件..."
-    if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；@ 引用文件；Shift + Enter 换行"
+    if (!goal) {
+      return isRequirementMode
+        ? "补充需求背景、目标或验收标准；Shift + Enter 换行"
+        : "向 CMBDevClaw 提问；Shift + Enter 换行"
+    }
     if (goal.status === "active") {
       return "输入新消息会暂停当前 Goal；查看详情用 /goal status"
     }
@@ -5240,7 +5258,10 @@ export function ChatContainer({
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
-    async (content: string, options: { id?: string } = {}): Promise<Message> => {
+    async (
+      content: string,
+      options: { id?: string; contextLabel?: "requirement-workbench" } = {}
+    ): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
         id: options.id ?? crypto.randomUUID(),
@@ -5248,7 +5269,8 @@ export function ChatContainer({
         content,
         created_at: userStartAt,
         start_at: userStartAt,
-        end_at: userStartAt
+        end_at: userStartAt,
+        ...(options.contextLabel ? { contextLabel: options.contextLabel } : {})
       }
       appendMessage(userMessage)
       return userMessage
@@ -9014,7 +9036,7 @@ export function ChatContainer({
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
                           {isLoading ? (
                             <>
-                              {(canSubmitGoalCommandWhileLoading || isModCommandInput) && (
+                              {!isRequirementMode && (canSubmitGoalCommandWhileLoading || isModCommandInput) && (
                                 <button
                                   type="submit"
                                   disabled={isModCommandInput ? slash.mode.kind === "slash" : goalSendButtonDisabledWhileLoading}
@@ -9039,7 +9061,7 @@ export function ChatContainer({
                             </>
                           ) : (
                             <>
-                              {hasRunningCoordinatorWorker && (
+                              {!isRequirementMode && hasRunningCoordinatorWorker && (
                                 <TooltipProvider delayDuration={0}>
                                   <Tooltip>
                                     <TooltipTrigger asChild>

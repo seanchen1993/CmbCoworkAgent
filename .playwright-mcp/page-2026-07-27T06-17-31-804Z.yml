@@ -1,0 +1,24 @@
+- generic [ref=f1e2]:
+  - link "Skip to content" [ref=f1e3] [cursor=pointer]:
+    - /url: "#start-of-content"
+  - main [ref=f1e7]:
+    - generic [ref=f1e10]:
+      - complementary "Copilot navigation":
+        - generic: New chat
+        - generic: Agents
+        - generic: Spaces
+        - generic: Spark
+        - generic: Preview
+      - button "Toggle sidebar" [ref=f1e13] [cursor=pointer]
+      - generic [ref=f1e21]:
+        - heading "Copilot cloud agent handles routine tasks so you can focus on core work" [level=2] [ref=f1e22]
+        - paragraph [ref=f1e23]: Save time by offloading testing, dependency upgrades, migrations and maintenance to agents. Create pull requests from Copilot Chat, CLI, IDEs or assign an Issue to Copilot to get started.
+        - link "View Copilot cloud agent capabilities" [ref=f1e25] [cursor=pointer]:
+          - /url: https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-coding-agent
+        - region [ref=f1e26]:
+          - generic [ref=f1e30]:
+            - generic [ref=f1e31]:
+              - heading "Copilot cloud agent access unavailable for plan" [level=2] [ref=f1e33]
+              - generic [ref=f1e34]: Available on paid plans. Try it with Copilot Pro — free for 30 days.
+            - link "Start free trial" [ref=f1e37] [cursor=pointer]:
+              - /url: https://github.com/github-copilot/pro

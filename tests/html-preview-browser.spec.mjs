@@ -34,12 +34,12 @@ try {
     })
   })
 
-  async function mount(html, files = {}) {
+  async function mount(html, files = {}, staticPreview = false) {
     const built = await page.evaluate(
-      async ({ html, files }) => {
+      async ({ html, files, staticPreview }) => {
         window.previewStatus = []
         const reads = []
-        const result = await window.PreviewBuilder.buildHtmlPreviewDocument({
+        const options = {
           html,
           htmlPath: "pages/index.html",
           runtimeId: "browser-preview",
@@ -47,10 +47,16 @@ try {
             reads.push(path)
             return files[path] ?? null
           }
-        })
+        }
+        const result = staticPreview
+          ? {
+              srcDoc: await window.PreviewBuilder.buildStaticHtmlPreviewDocument(options),
+              issues: []
+            }
+          : await window.PreviewBuilder.buildHtmlPreviewDocument(options)
         document.querySelector("iframe")?.remove()
         const iframe = document.createElement("iframe")
-        iframe.setAttribute("sandbox", "allow-scripts")
+        iframe.setAttribute("sandbox", staticPreview ? "allow-same-origin" : "allow-scripts")
         iframe.style.cssText = "height:600px;width:1000px"
         const loaded = new Promise((resolve) => {
           iframe.onload = resolve
@@ -60,7 +66,7 @@ try {
         await loaded
         return { ...result, reads }
       },
-      { html, files }
+      { html, files, staticPreview }
     )
     return { ...built, frame: page.frameLocator("iframe") }
   }
@@ -228,6 +234,74 @@ try {
         false,
         "a blocked image is a resource issue, not a JavaScript initialization error"
       )
+    }
+  )
+  await check(
+    "static annotation preview exposes its DOM but never runs document scripts",
+    async () => {
+      await page.evaluate(() => {
+        window.annotationScriptProbe = "UNCHANGED"
+      })
+      const { frame } = await mount(
+        `<body><button id="annotate" onclick="parent.annotationScriptProbe='HANDLER'">ANNOTATE</button>
+      <script>parent.annotationScriptProbe='SCRIPT'</script></body>`,
+        {},
+        true
+      )
+      assert.equal(await frame.locator("script").count(), 0)
+      assert.equal(await frame.locator("button").getAttribute("onclick"), null)
+      await frame.getByRole("button", { name: "ANNOTATE" }).click()
+      assert.equal(await page.evaluate(() => window.annotationScriptProbe), "UNCHANGED")
+      assert.equal(
+        await page.evaluate(
+          () =>
+            document.querySelector("iframe").contentDocument.getElementById("annotate").textContent
+        ),
+        "ANNOTATE"
+      )
+    }
+  )
+
+  await check(
+    "static annotation preview keeps bounded sibling CSS without active content or networking",
+    async () => {
+      const { reads, frame } = await mount(
+        `<head>
+      <link rel="stylesheet" href="site.css"><link rel="stylesheet" href="../private.css">
+      <meta http-equiv="refresh" content="0;url=https://preview-security.invalid/static-refresh"></head>
+      <body><main id="static">STATIC</main><img src="https://preview-security.invalid/static-image">
+      <iframe src="https://preview-security.invalid/static-frame"></iframe>
+      <a href="https://preview-security.invalid/static-link">LINK</a>
+      <form action="https://preview-security.invalid/static-form"></form></body>`,
+        {
+          "pages/site.css":
+            "#static{color:rgb(17,34,51)}\n</style><script>parent.annotationScriptProbe='CSS'</script><style>"
+        },
+        true
+      )
+      assert.deepEqual(reads, ["pages/site.css"])
+      assert.equal(
+        await frame.locator("#static").evaluate((element) => getComputedStyle(element).color),
+        "rgb(17, 34, 51)"
+      )
+      assert.equal(await frame.locator("script, iframe, meta[http-equiv=refresh]").count(), 0)
+      assert.equal(await frame.locator("a").getAttribute("href"), null)
+      assert.equal(await frame.locator("form").getAttribute("action"), null)
+      assert.equal(await page.evaluate(() => window.annotationScriptProbe), "UNCHANGED")
+      assert.deepEqual(network, [])
+    }
+  )
+
+  await check(
+    "returning from annotation to interactive preview restores an opaque origin",
+    async () => {
+      const { frame } = await mount(`<body><main id="result"></main><script>
+      try { parent.annotationScriptProbe='LEAK'; document.getElementById('result').textContent='LEAK' }
+      catch { document.getElementById('result').textContent='ISOLATED_AGAIN' }
+    </script></body>`)
+      assert.equal(await frame.locator("#result").textContent(), "ISOLATED_AGAIN")
+      assert.equal(await page.evaluate(() => window.annotationScriptProbe), "UNCHANGED")
+      assert.equal(await page.locator("iframe").getAttribute("sandbox"), "allow-scripts")
     }
   )
   console.log(`ALL PASS ${passed} HTML browser regressions`)

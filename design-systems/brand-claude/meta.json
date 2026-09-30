@@ -1,0 +1,8 @@
+{
+  "name": "Claude",
+  "description": "A warm-canvas editorial interface for Anthropic's Claude product. The system anchors on a tinted cream canvas with serif display headlines, warm coral CTAs, and dark navy product surfaces (code editor mockups, model showcase cards). Brand voltage comes from the cream/coral pairing — deliberately warm and humanist where most AI brands use cool blue + slate. Type voice runs a slab-serif display (\"Copernicus\" / Tiempos Headline) for h1/h2 and a humanist sans for body. The signature Anthropic black-radial-spike mark anchors the wordmark.",
+  "category": "AI & LLM Platforms",
+  "source": "awesome-design-md",
+  "origin": "https://github.com/VoltAgent/awesome-design-md/tree/main/design-md/claude",
+  "license": "MIT"
+}

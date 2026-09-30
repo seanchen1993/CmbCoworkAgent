@@ -178,3 +178,7 @@ export async function buildHtmlPreviewDocument({
   }
   throw new Error("HTML 预览文档无法安全解析")
 }
+
+// Design/annotation previews remain script-free; interactive previews keep their opaque origin.
+export { buildStaticHtmlPreviewDocument, inlineHtmlSiblingAssets } from "./static-html-srcdoc"
+export type { StaticHtmlPreviewDocumentOptions, InlineHtmlSiblingAssetsOptions } from "./static-html-srcdoc"

@@ -23,6 +23,7 @@ interface CustomModelDialogProps {
   selectedModelId?: string
   onModelSaved?: (modelId: string) => void
   onOpenChange: (open: boolean) => void
+  showRoutingTier?: boolean
 }
 
 type ThinkingEffort = "low" | "high" | "max"
@@ -303,7 +304,8 @@ export function CustomModelDialog({
   open,
   selectedModelId,
   onModelSaved,
-  onOpenChange
+  onOpenChange,
+  showRoutingTier = true
 }: CustomModelDialogProps): React.JSX.Element {
   const [config, setConfig] = useState<CustomConfig>(() => emptyConfig(FALLBACK_LIMITS))
   const [showKey, setShowKey] = useState(false)
@@ -1085,28 +1087,30 @@ export function CustomModelDialog({
                 </div>
               )}
 
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">智能路由档位</label>
-                <div className="flex gap-2">
-                  {(["premium", "economy"] as const).map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => setConfig((c) => ({ ...c, tier: t }))}
-                      className={`flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                        config.tier === t
-                          ? "border-primary bg-primary/10 text-primary"
-                          : "border-border text-muted-foreground hover:bg-muted"
-                      }`}
-                    >
-                      {t === "premium" ? "⚡ 强力 — 复杂任务" : "🌿 经济 — 简单任务"}
-                    </button>
-                  ))}
+              {showRoutingTier && (
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-muted-foreground">智能路由档位</label>
+                  <div className="flex gap-2">
+                    {(["premium", "economy"] as const).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setConfig((c) => ({ ...c, tier: t }))}
+                        className={`flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                          config.tier === t
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "border-border text-muted-foreground hover:bg-muted"
+                        }`}
+                      >
+                        {t === "premium" ? "⚡ 强力 — 复杂任务" : "🌿 经济 — 简单任务"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs leading-tight text-muted-foreground">
+                    开启智能路由后，系统会根据任务复杂度自动选择对应档位的模型
+                  </p>
                 </div>
-                <p className="text-xs leading-tight text-muted-foreground">
-                  开启智能路由后，系统会根据任务复杂度自动选择对应档位的模型
-                </p>
-              </div>
+              )}
 
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">默认使用</label>

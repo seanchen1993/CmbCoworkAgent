@@ -2,6 +2,10 @@ export type SubmitInFlightLockRef = {
   current: Set<string>
 }
 
+export const sharedSubmitInFlightLockRef: SubmitInFlightLockRef = {
+  current: new Set<string>()
+}
+
 type SubmitInFlightReleaseStore = {
   listenersByKey: Map<string, Set<() => void>>
   versionsByKey: Map<string, number>

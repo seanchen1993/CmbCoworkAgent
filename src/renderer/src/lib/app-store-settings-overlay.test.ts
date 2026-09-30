@@ -11,6 +11,7 @@ describe("settings overlay navigation", () => {
     "scheduled",
     "market",
     "kanban",
+    "design",
     "dashboard",
     "harness",
     "claudecode"
@@ -62,6 +63,15 @@ describe("settings overlay navigation", () => {
     useAppStore.getState().setShowCustomizeView(true, "market")
     expect(useAppStore.getState()).toMatchObject({ mainView: "market", showCustomizeView: false })
   })
+
+  for (const view of ["scheduled", "market"] as const) {
+    it(`clears the design route flag when navigating to ${view}`, () => {
+      useAppStore.getState().setMainView("design")
+      expect(useAppStore.getState().showDesignView).toBe(true)
+      useAppStore.getState().setMainView(view)
+      expect(useAppStore.getState()).toMatchObject({ mainView: view, showDesignView: false })
+    })
+  }
 
   it("ignores a dashboard permission response from a previous account", async () => {
     let resolve!: (allowed: boolean) => void

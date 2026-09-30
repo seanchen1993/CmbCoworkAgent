@@ -129,10 +129,5 @@ export function useBrowserViewLifecycle({
       if (requestedThreadId && !activeThreadId) return
       onRequestBrowserPanel()
     })
-  }, [
-    currentThreadId,
-    harnessSessionThreadId,
-    mainView,
-    onRequestBrowserPanel
-  ])
+  }, [currentThreadId, harnessSessionThreadId, mainView, onRequestBrowserPanel])
 }

@@ -1,0 +1,40 @@
+- generic [ref=f2e2]:
+  - generic [ref=f2e3]:
+    - link "Skip to content" [ref=f2e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=f2e6]
+  - main [ref=f2e9]:
+    - generic [ref=f2e10]:
+      - heading "Sign in to GitHub" [level=1] [ref=f2e20]
+      - generic [ref=f2e22]:
+        - generic [ref=f2e23]:
+          - generic [ref=f2e24]: Username or email address
+          - textbox "Username or email address" [ref=f2e25]
+        - generic [ref=f2e26]:
+          - generic [ref=f2e27]: Password
+          - textbox "Password" [ref=f2e28]
+          - link "Forgot password?" [ref=f2e29] [cursor=pointer]:
+            - /url: /password_reset
+        - button "Sign in" [ref=f2e31] [cursor=pointer]
+      - paragraph [ref=f2e34]:
+        - text: New to GitHub?
+        - link "Create an account" [ref=f2e35] [cursor=pointer]:
+          - /url: /signup?return_to=https%3A%2F%2Fgithub.com%2Fseanchen1993%2FCmbCoworkAgent%2Factions%2Fworkflows%2Fbuild-electron.yml&source=login
+  - contentinfo [ref=f2e36]:
+    - list [ref=f2e37]:
+      - listitem [ref=f2e38]:
+        - link "Terms" [ref=f2e39] [cursor=pointer]:
+          - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+      - listitem [ref=f2e40]:
+        - link "Privacy" [ref=f2e41] [cursor=pointer]:
+          - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+      - listitem [ref=f2e42]:
+        - link "Docs" [ref=f2e43] [cursor=pointer]:
+          - /url: https://docs.github.com
+      - listitem [ref=f2e44]:
+        - link "Contact GitHub Support" [ref=f2e45] [cursor=pointer]:
+          - /url: https://support.github.com
+      - listitem [ref=f2e46]:
+        - button "Manage cookies" [ref=f2e48] [cursor=pointer]
+      - listitem [ref=f2e49]:
+        - button "Do not share my personal information" [ref=f2e51] [cursor=pointer]

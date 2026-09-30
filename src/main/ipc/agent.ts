@@ -138,6 +138,7 @@ import {
   getHookLoggingConfig
 } from "../storage"
 import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
+import { getRequirementRuntimeOptions } from "../agent/library/requirement-mode"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { imDesktopCompletionObserver } from "../services/im/desktop-completion"
@@ -6977,6 +6978,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               console.warn("[Agent] Failed to parse thread metadata, using empty object")
           })
           metadata = parsedThreadMetadata.metadata
+          const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
           ensureThreadForkBoundaryMarkerEra(threadId, metadata)
           console.log("[Agent] Thread metadata:", metadata)
 
@@ -7942,8 +7944,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 runExecutionContext.source === "im"
                   ? runExecutionContext.interactionWaitHooks
                   : undefined,
-              extraSystemPrompt: runExecutionContext.extraSystemPrompt,
               agentMode: effectiveAgentMode,
+              ...requirementRuntimeOptions,
+              extraSystemPrompt:
+                [runExecutionContext.extraSystemPrompt, requirementRuntimeOptions.extraSystemPrompt]
+                  .filter((prompt): prompt is string => typeof prompt === "string" && prompt.length > 0)
+                  .join("\n\n") || undefined,
               traceContext: runtimeTraceContext,
               soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -10113,6 +10119,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.warn("[Agent] Failed to parse thread metadata, using empty object")
       })
       let metadata = parsedThreadMetadata.metadata
+      const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
       let harnessAgentContext: HarnessAgentContext
@@ -10835,6 +10842,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortSignal: abortController.signal,
               ...foregroundToolPolicy(resumeAgentMode, metadata),
               agentMode: resumeAgentMode,
+              ...requirementRuntimeOptions,
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -11477,6 +11485,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.warn("[Agent] Failed to parse thread metadata, using empty object")
     })
     const metadata = parsedThreadMetadata.metadata
+    const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = parsedThreadMetadata.workspacePath
     const modelId = parsedThreadMetadata.modelId
@@ -12001,6 +12010,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortSignal: abortController.signal,
               ...foregroundToolPolicy(interruptAgentMode, metadata),
               agentMode: interruptAgentMode,
+              ...requirementRuntimeOptions,
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),

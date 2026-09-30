@@ -2836,7 +2836,7 @@ function testSubmitInFlightLockSurvivesRemount(): void {
   // this as the same-shaped gap D+E had already fixed for queueAutoDrainSuppressed.
   assertIncludes(
     chat,
-    "const submitInFlightLockStore: SubmitInFlightLockRef = { current: new Set<string>() }",
+    "const submitInFlightLockStore: SubmitInFlightLockRef = sharedSubmitInFlightLockRef",
     "the lock store is a module-level constant, not created inside the component"
   )
   assertNotIncludes(

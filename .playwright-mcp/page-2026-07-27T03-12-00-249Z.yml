@@ -1,0 +1,151 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner "Global navigation menu" [ref=e8]:
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - button "Open menu" [ref=e12] [cursor=pointer]
+          - link "Homepage (g then d)" [ref=e15] [cursor=pointer]:
+            - /url: /
+        - generic [ref=e18]:
+          - navigation "Breadcrumbs" [ref=e19]:
+            - list [ref=e20]:
+              - listitem [ref=e21]:
+                - link "Dashboard" [ref=e22] [cursor=pointer]:
+                  - /url: https://github.com/
+          - button "Search or jump to… (forward slash)" [ref=e24] [cursor=pointer]
+        - generic [ref=e27]:
+          - link "You have unread notifications (g then n)" [ref=e28] [cursor=pointer]:
+            - /url: /notifications
+          - button "Open user navigation menu" [ref=e32] [cursor=pointer]:
+            - img "User avatar" [ref=e33]
+  - generic [ref=e38]:
+    - generic [ref=e40]:
+      - main [ref=e42]:
+        - generic [ref=e44]:
+          - heading "Dashboard" [level=1] [ref=e45]
+          - generic [ref=e46]:
+            - generic [ref=e50]:
+              - generic [ref=e52]:
+                - heading "Good morning, qyang7!" [level=2] [ref=e54]
+                - generic [ref=e55]:
+                  - generic [ref=e56]: Preview
+                  - generic [ref=e58]:
+                    - text: ·
+                    - button "Give feedback" [ref=e59] [cursor=pointer]
+              - generic [ref=e63]:
+                - status [ref=e64]
+                - textbox "Ask anything or type @ to add context" [ref=e67]
+                - generic [ref=e68]:
+                  - button "Ask" [ref=e71] [cursor=pointer]
+                  - generic [ref=e74]:
+                    - button "Select repositories to attach to conversation" [ref=e75] [cursor=pointer]
+                    - button "Add files, and spaces" [ref=e78] [cursor=pointer]
+                  - generic [ref=e81]:
+                    - 'button "Model: Auto" [ref=e83] [cursor=pointer]':
+                      - generic [ref=e85]:
+                        - generic [ref=e86]: "Model:"
+                        - generic [ref=e87]: Auto
+                    - button "View token usage" [ref=e88] [cursor=pointer]
+                    - button "Send now (enter)" [ref=e92] [cursor=pointer]
+              - heading "Chat commands" [level=2] [ref=e95]
+              - list [ref=e97]:
+                - listitem [ref=e98]:
+                  - button "Agent" [ref=e99] [cursor=pointer]
+                - listitem [ref=e102]:
+                  - button "Create issue" [ref=e103] [cursor=pointer]
+                - listitem [ref=e106]:
+                  - button "Write code" [ref=e107] [cursor=pointer]
+                - listitem [ref=e110]:
+                  - button "Git" [ref=e111] [cursor=pointer]
+                - listitem [ref=e114]:
+                  - button "Pull requests" [ref=e115] [cursor=pointer]
+            - generic [ref=e119]:
+              - generic [ref=e121]:
+                - generic [ref=e122]:
+                  - heading "Pull requests" [level=3] [ref=e123]
+                  - generic [ref=e125]:
+                    - link "View all pull requests" [ref=e126] [cursor=pointer]:
+                      - /url: /pulls
+                      - text: View all
+                      - generic [ref=e127]: pull requests
+                    - button "Pull request options" [ref=e128] [cursor=pointer]
+                - list "Pull requests" [ref=e131]:
+                  - listitem "No pull requests found, try a different filter." [ref=e132]:
+                    - paragraph [ref=e134]:
+                      - generic [ref=e135]: No pull requests found, try a different filter.
+              - generic [ref=e137]:
+                - generic [ref=e138]:
+                  - heading "Issues" [level=3] [ref=e139]
+                  - generic [ref=e141]:
+                    - link "View all issues" [ref=e142] [cursor=pointer]:
+                      - /url: /issues
+                      - text: View all
+                      - generic [ref=e143]: issues
+                    - button "Issue options" [ref=e144] [cursor=pointer]
+                - list "Issues" [ref=e147]:
+                  - listitem "No issues found, try a different filter." [ref=e148]:
+                    - paragraph [ref=e150]:
+                      - generic [ref=e151]: No issues found, try a different filter.
+      - complementary "Explore" [ref=e152]:
+        - generic [ref=e153]:
+          - heading "Latest from our changelog" [level=2] [ref=e154]
+          - list [ref=e155]:
+            - listitem [ref=e156]:
+              - generic [ref=e160]:
+                - generic [ref=e161]: Jul 25, 20262 days ago
+                - link "Claude Opus 5 is now available in GitHub Copilot" [ref=e162] [cursor=pointer]:
+                  - /url: https://github.blog/changelog/2026-07-24-claude-opus-5-is-now-available-in-github-copilot
+            - listitem [ref=e163]:
+              - generic [ref=e167]:
+                - generic [ref=e168]: Jul 24, 20263 days ago
+                - link "Copilot cloud agent for Linear is now generally available" [ref=e169] [cursor=pointer]:
+                  - /url: https://github.blog/changelog/2026-07-23-copilot-cloud-agent-for-linear-is-now-generally-available
+            - listitem [ref=e170]:
+              - generic [ref=e174]:
+                - generic [ref=e175]: Jul 24, 20263 days ago
+                - link "GitHub MCP Server supports the next MCP specification" [ref=e176] [cursor=pointer]:
+                  - /url: https://github.blog/changelog/2026-07-23-github-mcp-server-supports-the-next-mcp-specification
+            - listitem [ref=e177]:
+              - generic [ref=e181]:
+                - generic [ref=e182]: Jul 24, 20263 days ago
+                - 'link "GitHub Mobile: Fix failing Actions checks with Copilot cloud agent" [ref=e183] [cursor=pointer]':
+                  - /url: https://github.blog/changelog/2026-07-23-github-mobile-fix-failing-actions-checks-with-copilot-cloud-agent
+          - link "View changelog →" [ref=e185] [cursor=pointer]:
+            - /url: https://github.blog/changelog
+    - contentinfo [ref=e186]:
+      - heading "Footer" [level=2] [ref=e187]
+      - generic [ref=e188]:
+        - generic [ref=e189]:
+          - link "GitHub Homepage" [ref=e190] [cursor=pointer]:
+            - /url: https://github.com
+          - generic [ref=e193]: © 2026 GitHub, Inc.
+        - navigation "Footer" [ref=e194]:
+          - heading "Footer navigation" [level=3] [ref=e195]
+          - list "Footer navigation" [ref=e196]:
+            - listitem [ref=e197]:
+              - link "Terms" [ref=e198] [cursor=pointer]:
+                - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+            - listitem [ref=e199]:
+              - link "Privacy" [ref=e200] [cursor=pointer]:
+                - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+            - listitem [ref=e201]:
+              - link "Security" [ref=e202] [cursor=pointer]:
+                - /url: https://github.com/security
+            - listitem [ref=e203]:
+              - link "Status" [ref=e204] [cursor=pointer]:
+                - /url: https://www.githubstatus.com/
+            - listitem [ref=e205]:
+              - link "Community" [ref=e206] [cursor=pointer]:
+                - /url: https://github.community/
+            - listitem [ref=e207]:
+              - link "Docs" [ref=e208] [cursor=pointer]:
+                - /url: https://docs.github.com/
+            - listitem [ref=e209]:
+              - link "Contact" [ref=e210] [cursor=pointer]:
+                - /url: https://support.github.com?tags=dotcom-footer
+            - listitem [ref=e211]:
+              - button "Manage cookies" [ref=e213] [cursor=pointer]
+            - listitem [ref=e214]:
+              - button "Do not share my personal information" [ref=e216] [cursor=pointer]

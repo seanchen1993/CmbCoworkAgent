@@ -12,15 +12,19 @@ import {
 } from "react"
 import {
   Briefcase,
+  ClipboardList,
   Eye,
   GitBranch,
   Globe2,
   GripVertical,
   Loader2,
+  MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
-  PanelRightOpen
+  PanelRightOpen,
+  Palette,
+  Workflow
 } from "lucide-react"
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
 import { SettingsOverlay } from "@/components/customize/SettingsOverlay"
@@ -52,6 +56,16 @@ const MarketPanel = lazy(() =>
 )
 const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
+)
+const DesignModeEntryView = lazy(() =>
+  import("@/components/design/DesignModeEntryView").then((m) => ({
+    default: m.DesignModeEntryView
+  }))
+)
+const RequirementEntryView = lazy(() =>
+  import("@/components/requirement/RequirementEntryView").then((m) => ({
+    default: m.RequirementEntryView
+  }))
 )
 import { ResizeHandle } from "@/components/ui/resizable"
 import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
@@ -251,6 +265,7 @@ function App(): React.JSX.Element {
     setRightModule,
     setBrowserCdpConfig,
     setPendingEvolution,
+    setMainView,
     workerFocusView,
     subagentFocusView,
     workflowAgentFocusView,
@@ -282,6 +297,7 @@ function App(): React.JSX.Element {
       setRightModule: state.setRightModule,
       setBrowserCdpConfig: state.setBrowserCdpConfig,
       setPendingEvolution: state.setPendingEvolution,
+      setMainView: state.setMainView,
       workerFocusView: state.workerFocusView,
       subagentFocusView: state.subagentFocusView,
       workflowAgentFocusView: state.workflowAgentFocusView,
@@ -382,6 +398,20 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
+  const projectModeEnabled = true
+  const [activeModeTab, setActiveModeTab] = useState<"design" | "requirements">("design")
+  const selectDesignProjectMode = useCallback(() => {
+    if (!projectModeEnabled) return
+    setMainView("harness")
+  }, [projectModeEnabled, setMainView])
+  const selectDesignHistory = useCallback(() => {
+    setActiveModeTab("design")
+    setMainView("design")
+  }, [setMainView])
+  const selectRequirementHistory = useCallback(() => {
+    setActiveModeTab("requirements")
+    setMainView("design")
+  }, [setMainView])
 
   // Keep the route consumed by the expensive center/right surfaces atomic. A
   // task click updates the lightweight sidebar immediately, while React may
@@ -391,6 +421,7 @@ function App(): React.JSX.Element {
   const selectedRenderRoute = useMemo(
     () => ({
       mainView,
+      modeTab: activeModeTab,
       threadId: currentThreadId,
       harnessSessionThreadId,
       workerFocusView,
@@ -398,6 +429,7 @@ function App(): React.JSX.Element {
       workflowAgentFocusView
     }),
     [
+      activeModeTab,
       currentThreadId,
       harnessSessionThreadId,
       mainView,
@@ -1095,7 +1127,7 @@ function App(): React.JSX.Element {
       <div className="isolate flex flex-col h-screen overflow-hidden bg-background">
         {/* Titlebar - logo centered, right panel toggle on right */}
         <div className="flex h-9 w-full shrink-0 app-drag-region items-center border-b border-border">
-          {/* Left: sidebar toggle */}
+          {/* Left: sidebar toggle and mode navigation */}
           <div
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
@@ -1128,6 +1160,66 @@ function App(): React.JSX.Element {
                 )}
               </button>
             )}
+            <div role="tablist" aria-label="工作模式" className="ml-1 flex h-9 items-center gap-1">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "thread"}
+                onClick={() => setMainView("thread")}
+                className={`${panelToggleBaseClass} ${
+                  mainView === "thread" ? moduleActiveClass : moduleInactiveClass
+                }`}
+              >
+                <MessageSquare size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>对话模式</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "harness"}
+                aria-disabled={!projectModeEnabled}
+                onClick={selectDesignProjectMode}
+                title={projectModeEnabled ? "切换到项目模式" : "项目模式暂未开放"}
+                className={`${panelToggleBaseClass} ${
+                  projectModeEnabled
+                    ? mainView === "harness"
+                      ? moduleActiveClass
+                      : moduleInactiveClass
+                    : "cursor-not-allowed text-muted-foreground/50"
+                }`}
+              >
+                <Workflow size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>项目模式</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "design" && activeModeTab === "design"}
+                onClick={selectDesignHistory}
+                className={`${panelToggleBaseClass} ${
+                  mainView === "design" && activeModeTab === "design"
+                    ? moduleActiveClass
+                    : moduleInactiveClass
+                }`}
+              >
+                <Palette size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>设计模式</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "design" && activeModeTab === "requirements"}
+                onClick={selectRequirementHistory}
+                className={`${panelToggleBaseClass} ${
+                  mainView === "design" && activeModeTab === "requirements"
+                    ? moduleActiveClass
+                    : moduleInactiveClass
+                }`}
+              >
+                <ClipboardList size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>需求模式</span>
+              </button>
+            </div>
           </div>
           {/* Center: logo + title */}
           <div
@@ -1260,7 +1352,8 @@ function App(): React.JSX.Element {
           >
             {renderedMainView !== "claudecode" &&
             renderedMainView !== "dashboard" &&
-            renderedMainView !== "harness" ? (
+            renderedMainView !== "harness" &&
+            renderedMainView !== "design" ? (
               <div
                 ref={rightPanelSplitRef}
                 className="relative flex flex-1 overflow-hidden bg-grid-subtle"
@@ -1371,6 +1464,25 @@ function App(): React.JSX.Element {
               </div>
             ) : null}
 
+            {renderedMainView === "design" && (
+              <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+                <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+                  <Suspense
+                    fallback={
+                      <div className="flex flex-1 items-center justify-center">
+                        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                      </div>
+                    }
+                  >
+                    {renderedRoute.modeTab === "requirements" ? (
+                      <RequirementEntryView />
+                    ) : (
+                      <DesignModeEntryView />
+                    )}
+                  </Suspense>
+                </main>
+              </div>
+            )}
             {/* Dashboard 面板 */}
             {renderedMainView === "dashboard" && dashboardAllowed === true && (
               <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">

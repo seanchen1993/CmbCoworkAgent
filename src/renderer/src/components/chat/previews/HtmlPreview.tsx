@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { StaticHtmlPreview, type StaticHtmlPreviewProps } from "./StaticHtmlPreview"
+import { PenLine } from "lucide-react"
 import { CodeViewer } from "@/components/tabs/CodeViewer"
 import { buildHtmlPreviewDocument, type HtmlPreviewDocument } from "@/lib/html-srcdoc"
 import { isHtmlPreviewRuntimeStatus } from "../../../../../shared/html-preview-runtime"
 
 interface HtmlPreviewProps {
+  visualEdit?: StaticHtmlPreviewProps["visualEdit"]
   content: string
   path?: string
   fillHeight?: boolean
@@ -171,9 +174,26 @@ export function HtmlPreview(props: HtmlPreviewProps): React.JSX.Element {
   const { content, path, fillHeight = false, showHeader = true, showModeToggle = true } = props
   const [internalViewMode, setInternalViewMode] = useState<"preview" | "source">("preview")
   const currentViewMode = props.viewMode ?? internalViewMode
+  const [annotationMode, setAnnotationMode] = useState(false)
+  useEffect(() => setAnnotationMode(false), [content, path, props.visualEdit?.threadId])
+  if (annotationMode && props.visualEdit && currentViewMode === "preview") {
+    return (
+      <div className={fillHeight ? "flex h-full min-h-0 flex-col" : ""}>
+        <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2 text-xs text-muted-foreground">
+          <span>静态标注：页面脚本已暂停</span>
+          <button type="button" onClick={() => setAnnotationMode(false)}>
+            返回交互预览
+          </button>
+        </div>
+        <div className={fillHeight ? "min-h-0 flex-1" : ""}>
+          <StaticHtmlPreview {...props} viewMode="preview" />
+        </div>
+      </div>
+    )
+  }
   return (
     <div
-      className={`rounded-sm border border-border bg-background ${fillHeight ? "h-full min-h-0 flex flex-col" : ""}`}
+      className={`relative rounded-sm border border-border bg-background ${fillHeight ? "h-full min-h-0 flex flex-col" : ""}`}
     >
       {showHeader && (
         <div className="flex shrink-0 items-center justify-between gap-2 px-2 py-1 border-b border-border bg-background-elevated">
@@ -209,6 +229,18 @@ export function HtmlPreview(props: HtmlPreviewProps): React.JSX.Element {
             </div>
           )}
         </div>
+      )}
+      {props.visualEdit && currentViewMode === "preview" && (
+        <button
+          type="button"
+          disabled={props.visualEdit.submitDisabled}
+          title={props.visualEdit.submitDisabledReason || "暂停页面脚本并进入静态标注"}
+          className="absolute right-3 top-10 z-20 inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs disabled:opacity-50"
+          onClick={() => setAnnotationMode(true)}
+        >
+          <PenLine className="size-3.5" />
+          标注修改
+        </button>
       )}
       {/* Source mode unmounts the runtime, listeners and timers; preview restarts a fresh sandbox. */}
       {currentViewMode === "preview" ? (

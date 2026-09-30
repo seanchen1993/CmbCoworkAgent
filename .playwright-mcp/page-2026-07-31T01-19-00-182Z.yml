@@ -1,0 +1,74 @@
+- generic [ref=e5]:
+  - banner [ref=e6]:
+    - heading "创建你的账户" [level=1] [ref=e7]
+    - paragraph [ref=e8]: 加入探索者社区，开启你的旅程
+  - generic [ref=e12]:
+    - progressbar [ref=e13]
+    - generic [ref=e14]:
+      - generic [ref=e15]: 基本信息
+      - generic [ref=e16]: 个人资料
+      - generic [ref=e17]: 偏好设置
+      - generic [ref=e18]: 完成
+  - generic [ref=e19]:
+    - tablist [ref=e20]:
+      - tab "基本信息" [ref=e21] [cursor=pointer]
+      - tab "个人资料" [ref=e22] [cursor=pointer]
+      - tab "偏好设置" [ref=e23] [cursor=pointer]
+    - generic [ref=e24]:
+      - generic [ref=e25]:
+        - generic [ref=e26]: 用户名 (支持自动补全)
+        - combobox "用户名 (支持自动补全)" [ref=e27]
+      - generic [ref=e28]:
+        - generic [ref=e29]:
+          - generic [ref=e30]: 邮箱
+          - textbox "邮箱" [ref=e31]:
+            - /placeholder: you@example.com
+        - generic [ref=e32]:
+          - generic [ref=e33]: 手机号
+          - textbox "手机号" [ref=e34]:
+            - /placeholder: "13800138000"
+      - generic [ref=e35]:
+        - generic [ref=e36]: 密码
+        - generic [ref=e37]:
+          - textbox "密码" [ref=e38]:
+            - /placeholder: 至少8位，含字母和数字
+          - button "显示" [ref=e39] [cursor=pointer]
+        - paragraph [ref=e45]: 密码强度：未输入
+      - generic [ref=e46]:
+        - generic [ref=e47]: 确认密码
+        - textbox "确认密码" [ref=e48]:
+          - /placeholder: 再次输入密码
+      - generic [ref=e49]:
+        - generic [ref=e50]: 个人网站 (可选)
+        - textbox "个人网站 (可选)" [ref=e51]:
+          - /placeholder: https://yoursite.com
+      - generic [ref=e52]:
+        - generic [ref=e53]: 验证码
+        - generic [ref=e54]:
+          - textbox "验证码" [ref=e55]:
+            - /placeholder: 输入右侧验证码
+          - generic "点击刷新" [ref=e56] [cursor=pointer]
+      - generic [ref=e58]:
+        - generic [ref=e59] [cursor=pointer]:
+          - checkbox "我已阅读并同意 《用户协议》 和 《隐私政策》" [ref=e60]
+          - generic [ref=e61]:
+            - text: 我已阅读并同意
+            - link "《用户协议》" [ref=e62]:
+              - /url: "#"
+            - text: 和
+            - link "《隐私政策》" [ref=e63]:
+              - /url: "#"
+        - generic [ref=e64] [cursor=pointer]:
+          - checkbox "愿意接收产品更新和活动邮件通知" [ref=e65]
+          - text: 愿意接收产品更新和活动邮件通知
+    - text: 增强账户安全性 ▸ ▸ ▸
+    - generic [ref=e66]: 或使用以下方式注册
+    - generic [ref=e67]:
+      - button "微信" [ref=e68] [cursor=pointer]
+      - button "GitHub" [ref=e69] [cursor=pointer]
+      - button "Google" [ref=e70] [cursor=pointer]
+    - button "完成注册" [ref=e72] [cursor=pointer]
+  - contentinfo [ref=e73]:
+    - text: 已有账户？
+    - link "立即登录" [ref=e74] [cursor=pointer]:
+      - /url: "#"

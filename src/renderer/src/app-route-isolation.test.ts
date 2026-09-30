@@ -24,6 +24,7 @@ describe("App route isolation", () => {
     expect(appSource).toContain("const selectedRenderRoute = useMemo(")
     expect(appSource).toContain("const renderedRoute = useDeferredValue(selectedRenderRoute)")
     expect(appSource).toContain("threadId: currentThreadId")
+    expect(appSource).toContain("modeTab: activeModeTab")
     expect(appSource).toContain("harnessSessionThreadId,")
     expect(appSource).toContain("workerFocusView,")
     expect(appSource).toContain("subagentFocusView,")
@@ -38,6 +39,7 @@ describe("App route isolation", () => {
     expect(surface).toContain("threadId={renderedThreadId}")
     expect(surface).toContain("threadId={renderedHarnessSessionThreadId}")
     expect(surface).toContain("aria-busy={renderRoutePending}")
+    expect(surface).toContain('renderedRoute.modeTab === "requirements"')
   })
 
   it("keeps navigation usable while stale task controls are shielded", () => {

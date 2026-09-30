@@ -9,6 +9,7 @@ import { contextBridge, ipcRenderer, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import type { ModCard, ModProjection, ModWorkspaceStatus } from "../shared/mods/types"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
+import type { RequirementRuntimeItem } from "../main/ipc/requirements"
 import {
   isWindowCloseBehavior,
   type CloseToTrayPromptAction,
@@ -2294,7 +2295,24 @@ const api = {
     },
     supportedExtensions: (): Promise<string[]> => {
       return ipcRenderer.invoke("file:supportedExtensions")
-    }
+    },
+    selectCode: (): Promise<{ canceled: boolean; filePaths: string[] }> =>
+      ipcRenderer.invoke("file:select-code"),
+    selectPrototypeZip: (): Promise<{ canceled: boolean; filePaths: string[] }> =>
+      ipcRenderer.invoke("file:select-prototype-zip"),
+    readText: (
+      filePath: string
+    ): Promise<{ success: boolean; filename?: string; content?: string; error?: string }> =>
+      ipcRenderer.invoke("file:read-text", filePath),
+    readDataUrl: (
+      filePath: string
+    ): Promise<{
+      success: boolean
+      filename?: string
+      dataUrl?: string
+      size?: number
+      error?: string
+    }> => ipcRenderer.invoke("file:read-data-url", filePath)
   },
   skills: {
     catalog: {
@@ -4613,6 +4631,460 @@ const api = {
       ipcRenderer.on("harnessBoard:managedRunThreadCreated", handler)
       return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
     }
+  },
+  design: {
+    generate: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: {
+        type: string
+        token?: string
+        html?: string
+        error?: string
+        event?: unknown
+        artifactPath?: string
+        metadata?: unknown
+      }) => void,
+      modelId?: string,
+      history?: Array<{ role: "user" | "assistant"; content: string }>,
+      tabId?: string
+    ): (() => void) => {
+      const channel = `design:stream:${sessionId}`
+      const handler = (
+        _: unknown,
+        data: {
+          type: string
+          token?: string
+          html?: string
+          error?: string
+          event?: unknown
+          artifactPath?: string
+          metadata?: unknown
+        }
+      ): void => {
+        onEvent(data)
+        if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
+          if (data.type === "error") {
+            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
+          }
+          ipcRenderer.removeListener(channel, handler)
+        }
+      }
+      ipcRenderer.on(channel, handler)
+      ipcRenderer.send("design:generate", { sessionId, prompt, modelId, history, tabId })
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    storeHtml: (tabId: string, html: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("design:store-html", tabId, html),
+    saveArtifact: (
+      tabId: string,
+      html: string,
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
+    ): Promise<{ success: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke("design:save-artifact", {
+        tabId,
+        html,
+        workspacePath,
+        metadata
+      }) as Promise<{
+        success: boolean
+        filePath?: string
+        error?: string
+      }>,
+    saveArtifactFile: (
+      filePath: string,
+      html: string,
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
+    ): Promise<{ success: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke("design:save-artifact-file", {
+        filePath,
+        html,
+        workspacePath,
+        metadata
+      }) as Promise<{
+        success: boolean
+        filePath?: string
+        error?: string
+      }>,
+    importFromUrl: (
+      url: string
+    ): Promise<{
+      success: boolean
+      html?: string
+      finalUrl?: string
+      title?: string
+      error?: string
+    }> =>
+      ipcRenderer.invoke("design:import-url", { url }) as Promise<{
+        success: boolean
+        html?: string
+        finalUrl?: string
+        title?: string
+        error?: string
+      }>,
+    importPrototypeZip: (
+      filePath: string
+    ): Promise<{
+      success: boolean
+      html?: string
+      title?: string
+      imageCount?: number
+      metadataCount?: number
+      error?: string
+    }> =>
+      ipcRenderer.invoke("design:import-prototype-zip", { filePath }) as Promise<{
+        success: boolean
+        html?: string
+        title?: string
+        imageCount?: number
+        metadataCount?: number
+        error?: string
+      }>,
+    syncContextFiles: (params: {
+      workspacePath?: string
+      designSessionId?: string
+      kind: "attachments" | "code"
+      files: Array<{ filename: string; sourcePath?: string; content?: string }>
+    }): Promise<{
+      success: boolean
+      dirPath?: string
+      files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+      error?: string
+    }> =>
+      ipcRenderer.invoke("design:sync-context-files", params) as Promise<{
+        success: boolean
+        dirPath?: string
+        files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+        error?: string
+      }>,
+    readArtifact: (
+      tabId: string,
+      workspacePath?: string
+    ): Promise<{ success: boolean; filePath?: string; html?: string; error?: string }> =>
+      ipcRenderer.invoke("design:read-artifact", { tabId, workspacePath }) as Promise<{
+        success: boolean
+        filePath?: string
+        html?: string
+        error?: string
+      }>,
+    readArtifactFile: (
+      filePath: string,
+      workspacePath?: string
+    ): Promise<{ success: boolean; filePath?: string; html?: string; error?: string }> =>
+      ipcRenderer.invoke("design:read-artifact-file", { filePath, workspacePath }) as Promise<{
+        success: boolean
+        filePath?: string
+        html?: string
+        error?: string
+      }>,
+    getArtifactPackageInfo: (
+      filePath: string,
+      workspacePath?: string
+    ): Promise<{
+      success: boolean
+      filePath?: string
+      dirPath?: string
+      relatedFileCount?: number
+      error?: string
+    }> =>
+      ipcRenderer.invoke("design:get-artifact-package-info", {
+        filePath,
+        workspacePath
+      }) as Promise<{
+        success: boolean
+        filePath?: string
+        dirPath?: string
+        relatedFileCount?: number
+        error?: string
+      }>,
+    exportArtifactPackage: (
+      filePath: string,
+      workspacePath?: string
+    ): Promise<{
+      success: boolean
+      fileName?: string
+      buffer?: ArrayBuffer
+      relatedFileCount?: number
+      error?: string
+    }> =>
+      ipcRenderer.invoke("design:export-artifact-package", { filePath, workspacePath }) as Promise<{
+        success: boolean
+        fileName?: string
+        buffer?: ArrayBuffer
+        relatedFileCount?: number
+        error?: string
+      }>,
+    listSystems: (): Promise<
+      Array<{
+        id: string
+        name: string
+        description: string
+        category?: string
+        source?: string
+        origin?: string
+        license?: string
+        path: string
+        tokens?: {
+          bg: string
+          surface: string
+          fg: string
+          muted: string
+          border: string
+          accent: string
+        }
+      }>
+    > => ipcRenderer.invoke("design:list-systems"),
+    listTemplates: (): Promise<
+      Array<{
+        name: string
+        description: string
+        path: string
+        mode: string
+        platform: string | null
+        scenario: string
+        previewHtml: string
+        previewPath: string
+      }>
+    > => ipcRenderer.invoke("design:list-templates"),
+    /**
+     * Full Agent Runtime path — gives Design access to Skills, MCP tools,
+     * Hooks, Approvals and context summarisation.
+     * Uses tabId as the LangGraph thread ID so multi-turn is handled natively
+     * by the checkpoint store (no manual apiHistory management needed).
+     */
+    agentGenerate: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: {
+        type: string
+        token?: string
+        html?: string
+        error?: string
+        event?: unknown
+        artifactPath?: string
+        metadata?: unknown
+      }) => void,
+      tabId: string,
+      modelId?: string,
+      imageData?: string,
+      mimeType?: string,
+      currentHtml?: string,
+      skill?: { name: string; path: string },
+      workspacePath?: string,
+      artifactId?: string,
+      sourceArtifactPath?: string,
+      designSessionId?: string,
+      designSystemId?: string
+    ): (() => void) => {
+      const channel = `design:stream:${sessionId}`
+      const handler = (
+        _: unknown,
+        data: {
+          type: string
+          token?: string
+          html?: string
+          error?: string
+          event?: unknown
+          artifactPath?: string
+          metadata?: unknown
+        }
+      ): void => {
+        onEvent(data)
+        if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
+          if (data.type === "error") {
+            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
+          }
+          ipcRenderer.removeListener(channel, handler)
+        }
+      }
+      ipcRenderer.on(channel, handler)
+      ipcRenderer.send("design:agent-generate", {
+        sessionId,
+        prompt,
+        modelId,
+        tabId,
+        imageData,
+        mimeType,
+        currentHtml,
+        skill,
+        workspacePath,
+        artifactId,
+        sourceArtifactPath,
+        designSessionId,
+        designSystemId
+      })
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    askQuestions: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: { type: string; questions?: unknown[]; error?: string }) => void,
+      modelId?: string,
+      designSystemId?: string
+    ): (() => void) => {
+      const channel = `design:questions:${sessionId}`
+      const handler = (
+        _: unknown,
+        data: { type: string; questions?: unknown[]; error?: string }
+      ): void => {
+        onEvent(data)
+        if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
+          if (data.type === "error") {
+            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
+          }
+          ipcRenderer.removeListener(channel, handler)
+        }
+      }
+      ipcRenderer.on(channel, handler)
+      ipcRenderer.send("design:ask-questions", { sessionId, prompt, modelId, designSystemId })
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    generateFromImage: (
+      sessionId: string,
+      prompt: string,
+      imageData: string,
+      mimeType: string,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
+      modelId?: string,
+      designSystemId?: string
+    ): (() => void) => {
+      const channel = `design:image-stream:${sessionId}`
+      const handler = (
+        _: unknown,
+        data: { type: string; token?: string; html?: string; error?: string }
+      ): void => {
+        onEvent(data)
+        if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
+          if (data.type === "error") {
+            ipcRenderer.invoke("design:cancel", sessionId).catch(() => undefined)
+          }
+          ipcRenderer.removeListener(channel, handler)
+        }
+      }
+      ipcRenderer.on(channel, handler)
+      ipcRenderer.send("design:generate-from-image", {
+        sessionId,
+        prompt,
+        imageData,
+        mimeType,
+        modelId,
+        designSystemId
+      })
+      return () => ipcRenderer.removeListener(channel, handler)
+    },
+    cancel: (sessionId: string): Promise<void> => ipcRenderer.invoke("design:cancel", sessionId),
+    saveVariant: (variantId: string, html: string): Promise<{ filePath: string }> =>
+      ipcRenderer.invoke("design:save-variant", variantId, html)
+  },
+  requirements: {
+    list: (): Promise<RequirementRuntimeItem[]> => ipcRenderer.invoke("requirements:list"),
+    getToken: () =>
+      ipcRenderer.invoke("requirements:get-token") as Promise<{
+        success: boolean
+        token: string
+        error?: string
+      }>,
+    saveToken: (token: string) =>
+      ipcRenderer.invoke("requirements:save-token", token) as Promise<{
+        success: boolean
+        error?: string
+      }>,
+    create: (payload: {
+      systemId: string
+      title: string
+      workDir: string
+      source: {
+        type: "file" | "text" | "link"
+        fileName: string
+        sourcePath?: string
+        url?: string
+        content?: string
+        bytes?: ArrayBuffer
+        initialDescription?: string
+      }
+    }) =>
+      ipcRenderer.invoke("requirements:create", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    getWorkDir: (): Promise<string | null> => ipcRenderer.invoke("requirements:get-work-dir"),
+    selectWorkDir: (): Promise<{ success: boolean; workDir?: string | null; error?: string }> =>
+      ipcRenderer.invoke("requirements:select-work-dir"),
+    delete: (reqId: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("requirements:delete", reqId),
+    openWorkDir: (reqId: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("requirements:open-work-dir", reqId),
+    getSourcePreview: (reqId: string) =>
+      ipcRenderer.invoke("requirements:get-source-preview", reqId) as Promise<{
+        success: boolean
+        content?: string
+        error?: string
+      }>,
+    attachThread: (payload: { reqId: string; threadId: string }) =>
+      ipcRenderer.invoke("requirements:attach-thread", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    detachThread: (payload: { reqId: string; threadId: string }) =>
+      ipcRenderer.invoke("requirements:detach-thread", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    beginManifestSync: (payload: { reqId: string; threadId: string; requestId: string }) =>
+      ipcRenderer.invoke("requirements:begin-manifest-sync", payload) as Promise<{
+        success: boolean
+        error?: string
+      }>,
+    rename: (payload: { reqId: string; title: string }) =>
+      ipcRenderer.invoke("requirements:rename", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    savePrd: (payload: {
+      reqId: string
+      version: string
+      modules: Array<{
+        moduleId: string
+        name: string
+        content: string
+        description?: string
+        keywords?: string[]
+      }>
+    }) =>
+      ipcRenderer.invoke("requirements:save-prd", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    syncManifest: (payload: {
+      reqId: string
+      manifest: unknown
+      threadId?: string
+      requestId?: string
+    }) =>
+      ipcRenderer.invoke("requirements:sync-manifest", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    saveFiles: (payload: {
+      workspacePath: string
+      requirementId: string
+      source?: { filename: string; sourcePath?: string; content?: string }
+      prd?: { filename: string; content: string }
+    }): Promise<{ success: boolean; sourcePath?: string; prdPath?: string; error?: string }> =>
+      ipcRenderer.invoke("requirements:save-files", payload) as Promise<{
+        success: boolean
+        sourcePath?: string
+        prdPath?: string
+        error?: string
+      }>
   },
   app: {
     restart: (): Promise<void> => ipcRenderer.invoke("app:restart") as Promise<void>

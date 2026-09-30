@@ -1,0 +1,80 @@
+- generic [ref=f1e5]:
+  - banner [ref=f1e6]:
+    - heading "创建你的账户" [level=1] [ref=f1e7]
+    - paragraph [ref=f1e8]: 加入探索者社区，开启你的旅程
+  - generic [ref=f1e12]:
+    - progressbar [ref=f1e13]
+    - generic [ref=f1e14]:
+      - generic [ref=f1e15]: 基本信息
+      - generic [ref=f1e16]: 个人资料
+      - generic [ref=f1e17]: 偏好设置
+      - generic [ref=f1e18]: 完成
+  - generic [ref=f1e19]:
+    - tablist [ref=f1e20]:
+      - tab "基本信息" [ref=f1e21] [cursor=pointer]
+      - tab "个人资料" [ref=f1e22] [cursor=pointer]
+      - tab "偏好设置" [ref=f1e23] [cursor=pointer]
+    - generic [ref=f1e24]:
+      - generic [ref=f1e25]:
+        - generic [ref=f1e26]: 用户名 (支持自动补全)
+        - combobox "用户名 (支持自动补全)" [ref=f1e27]: test
+      - generic [ref=f1e28]:
+        - generic [ref=f1e29]:
+          - generic [ref=f1e30]: 邮箱
+          - textbox "邮箱" [ref=f1e31]:
+            - /placeholder: you@example.com
+            - text: test@qq.com
+        - generic [ref=f1e32]:
+          - generic [ref=f1e33]: 手机号
+          - textbox "手机号" [ref=f1e34]:
+            - /placeholder: "13800138000"
+            - text: "18766542345"
+      - generic [ref=f1e35]:
+        - generic [ref=f1e36]: 密码
+        - generic [ref=f1e37]:
+          - textbox "密码" [ref=f1e38]:
+            - /placeholder: 至少8位，含字母和数字
+            - text: Test123.
+          - button "显示" [ref=f1e39] [cursor=pointer]
+        - paragraph [ref=f1e45]: 密码强度：强
+      - generic [ref=f1e46]:
+        - generic [ref=f1e47]: 确认密码
+        - textbox "确认密码" [ref=f1e48]:
+          - /placeholder: 再次输入密码
+          - text: Test123.
+      - generic [ref=f1e49]:
+        - generic [ref=f1e50]: 个人网站 (可选)
+        - textbox "个人网站 (可选)" [ref=f1e51]:
+          - /placeholder: https://yoursite.com
+          - text: http://www.baidu.com
+      - generic [ref=f1e52]:
+        - generic [ref=f1e53]: 验证码
+        - generic [ref=f1e54]:
+          - textbox "验证码" [ref=f1e55]:
+            - /placeholder: 输入右侧验证码
+            - text: WYCM
+          - generic "点击刷新" [ref=f1e56] [cursor=pointer]
+      - generic [ref=f1e58]:
+        - generic [ref=f1e59] [cursor=pointer]:
+          - checkbox "我已阅读并同意 《用户协议》 和 《隐私政策》" [checked] [active] [ref=f1e60]
+          - generic [ref=f1e61]:
+            - text: 我已阅读并同意
+            - link "《用户协议》" [ref=f1e62]:
+              - /url: "#"
+            - text: 和
+            - link "《隐私政策》" [ref=f1e63]:
+              - /url: "#"
+        - generic [ref=f1e64] [cursor=pointer]:
+          - checkbox "愿意接收产品更新和活动邮件通知" [ref=f1e65]
+          - text: 愿意接收产品更新和活动邮件通知
+    - text: 增强账户安全性 ▸ ▸ ▸
+    - generic [ref=f1e66]: 或使用以下方式注册
+    - generic [ref=f1e67]:
+      - button "微信" [ref=f1e68] [cursor=pointer]
+      - button "GitHub" [ref=f1e69] [cursor=pointer]
+      - button "Google" [ref=f1e70] [cursor=pointer]
+    - button "完成注册" [ref=f1e72] [cursor=pointer]
+  - contentinfo [ref=f1e73]:
+    - text: 已有账户？
+    - link "立即登录" [ref=f1e74] [cursor=pointer]:
+      - /url: "#"

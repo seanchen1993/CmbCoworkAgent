@@ -1,6 +1,9 @@
 import { resolveWorkerSnapshotContent } from "./worker-message-content"
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
+// Relative, not "@/": store.ts is loaded by tsx-run specs (via electron-transport)
+// where the "@/" alias isn't resolvable, and this is a runtime (non-type) import.
+import { clearVisualEditAnnotationsForThread } from "../components/visual-edit/visual-edit-store"
 import type {
   Thread,
   ModelConfig,
@@ -857,6 +860,7 @@ type MainView =
   | "scheduled"
   | "market"
   | "kanban"
+  | "design"
   | "harness"
   | "claudecode"
   | "dashboard"
@@ -1067,6 +1071,9 @@ interface AppState {
   // Kanban actions
   setShowKanbanView: (show: boolean) => void
   setShowSubagentsInKanban: (show: boolean) => void
+  //design actions
+  showDesignView: boolean
+  setShowDesignView: (show: boolean) => void
 
   // Harness board actions
   setShowHarnessBoardView: (show: boolean) => void
@@ -1174,6 +1181,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   mainView: "thread",
   showKanbanView: false,
   showSubagentsInKanban: true,
+  showDesignView: false,
   showHarnessBoardView: false,
   showClaudeCodeView: false,
   showDashboardView: false,
@@ -1353,6 +1361,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? {}
         : {
             showKanbanView: false,
+            showDesignView: false,
             showHarnessBoardView: false,
             showCustomizeView: false,
             showClaudeCodeView: false,
@@ -1412,6 +1421,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? {}
         : {
             showKanbanView: false,
+            showDesignView: false,
             showHarnessBoardView: false,
             showCustomizeView: false,
             showClaudeCodeView: false,
@@ -1450,6 +1460,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // the commit acknowledgement so that stale page cannot resurrect the row.
       markThreadDirectoryMutation(threadId)
       console.log("[Store] Thread deleted from backend")
+      clearVisualEditAnnotationsForThread(threadId)
       // The draft-message queue is persisted to localStorage independent of the
       // DB thread record (thread-context.tsx's persistQueuedMessages) so it
       // survives reloads; nothing else clears that key, so it would otherwise
@@ -2098,6 +2109,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         showClaudeCodeView: true,
         showKanbanView: false,
+        showDesignView: false,
         showHarnessBoardView: false,
         showCustomizeView: false,
         showDashboardView: false,
@@ -2153,6 +2165,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: true,
         showClaudeCodeView: false,
         showKanbanView: false,
+        showDesignView: false,
         showHarnessBoardView: false,
         showCustomizeView: false,
         mainView: "dashboard",
@@ -2183,6 +2196,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const prev = get().previousThreadId || get().currentThreadId
       set({
         showKanbanView: true,
+        showDesignView: false,
         showHarnessBoardView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
@@ -2212,12 +2226,45 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ showSubagentsInKanban: show })
   },
 
+  setShowDesignView: (show) => {
+    if (show) {
+      const prev = get().previousThreadId || get().currentThreadId
+      set({
+        mainView: "design",
+        showDesignView: true,
+        showCustomizeView: false,
+        showKanbanView: false,
+        showHarnessBoardView: false,
+        showClaudeCodeView: false,
+        showDashboardView: false,
+        rightPanelCollapsed: true,
+        previousThreadId: prev,
+        currentThreadId: null,
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
+      })
+    } else {
+      const restored = get().previousThreadId
+      const chatThreadId = resolveChatThreadId(get().threads, restored)
+      set({
+        mainView: "thread",
+        showDesignView: false,
+        currentThreadId: chatThreadId,
+        previousThreadId: null
+      })
+    }
+  },
+
   // Harness board actions
   setShowHarnessBoardView: (show: boolean) => {
     if (show) {
       const prev = get().previousThreadId || get().currentThreadId
       set({
         showHarnessBoardView: true,
+        showDesignView: false,
         showKanbanView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
@@ -2281,6 +2328,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (view === "scheduled" || view === "market") {
       set({
         mainView: view,
+        showDesignView: false,
         showCustomizeView: false,
         showKanbanView: false,
         showHarnessBoardView: false,
@@ -2301,6 +2349,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         mainView: "kanban",
         showKanbanView: true,
+        showDesignView: false,
         showHarnessBoardView: false,
         showCustomizeView: false,
         showClaudeCodeView: false,
@@ -2325,12 +2374,33 @@ export const useAppStore = create<AppState>((set, get) => ({
       return
     }
 
+    if (view === "design") {
+      const prev = get().previousThreadId || get().currentThreadId
+      set({
+        mainView: "design",
+        showDesignView: true,
+        showCustomizeView: false,
+        showKanbanView: false,
+        showHarnessBoardView: false,
+        showClaudeCodeView: false,
+        showDashboardView: false,
+        previousThreadId: prev,
+        currentThreadId: null,
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
+      })
+      return
+    }
     if (view === "dashboard") {
       if (get().dashboardAllowed !== true) return
       const prev = get().previousThreadId || get().currentThreadId
       set({
         mainView: "dashboard",
         showDashboardView: true,
+        showDesignView: false,
         showCustomizeView: false,
         showKanbanView: false,
         showHarnessBoardView: false,
@@ -2351,6 +2421,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         mainView: "claudecode",
         showClaudeCodeView: true,
+        showDesignView: false,
         showCustomizeView: false,
         showKanbanView: false,
         showHarnessBoardView: false,
@@ -2371,6 +2442,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         mainView: "harness",
         showHarnessBoardView: true,
+        showDesignView: false,
         showCustomizeView: false,
         showKanbanView: false,
         showClaudeCodeView: false,
@@ -2392,6 +2464,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       mainView: "thread",
       showCustomizeView: false,
       showKanbanView: false,
+      showDesignView: false,
       showHarnessBoardView: false,
       showClaudeCodeView: false,
       showDashboardView: false,

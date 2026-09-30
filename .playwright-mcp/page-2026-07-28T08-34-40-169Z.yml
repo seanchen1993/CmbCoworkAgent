@@ -1,0 +1,792 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner "Global navigation menu" [ref=e8]:
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - button "Open menu" [ref=e12] [cursor=pointer]
+          - link "Homepage (g then d)" [ref=e15] [cursor=pointer]:
+            - /url: /
+        - generic [ref=e18]:
+          - navigation "Breadcrumbs" [ref=e19]:
+            - list [ref=e20]:
+              - listitem [ref=e21]:
+                - group [ref=e22]:
+                  - button "1 more breadcrumb items" [ref=e23] [cursor=pointer]
+              - listitem [ref=e29]:
+                - link "CmbCoworkAgent" [ref=e30] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent
+                - button "Switch repository (option shift r)" [ref=e33] [cursor=pointer]
+          - button "Search or jump to… (forward slash)" [ref=e36] [cursor=pointer]
+        - generic [ref=e39]:
+          - link "You have unread notifications (g then n)" [ref=e40] [cursor=pointer]:
+            - /url: /notifications
+          - button "Open user navigation menu" [ref=e44] [cursor=pointer]:
+            - img "User avatar" [ref=e45]
+      - heading "Repository navigation" [level=2] [ref=e46]
+      - navigation "Repository" [ref=e47]:
+        - list [ref=e48]:
+          - listitem [ref=e49]:
+            - link "Code" [ref=e50] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent
+          - listitem [ref=e52]:
+            - link "Pull requests" [ref=e53] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/pulls
+          - listitem [ref=e55]:
+            - link "Agents" [ref=e56] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/agents?author=qyang7
+          - listitem [ref=e58]:
+            - link "Actions" [ref=e59] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/actions
+          - listitem [ref=e61]:
+            - link "Projects" [ref=e62] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/projects
+        - button "More items" [ref=e66] [cursor=pointer]:
+          - generic [ref=e69]:
+            - text: More
+            - generic [ref=e70]: items
+  - main [ref=e74]:
+    - generic [ref=e87]:
+      - generic [ref=e90]:
+        - generic [ref=e94]:
+          - generic [ref=e96]:
+            - 'button "Watch: Participating in seanchen1993/CmbCoworkAgent. Click to change subscription settings." [ref=e99] [cursor=pointer]':
+              - generic [ref=e100]:
+                - generic [ref=e101]: Watch
+                - generic:
+                  - generic: "0"
+                  - generic: (0)
+            - link "Fork your own copy of seanchen1993/CmbCoworkAgent" [ref=e103] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/fork
+            - generic [ref=e105]:
+              - button "Star this repository" [ref=e107] [cursor=pointer]
+              - button "Add this repository to a list" [ref=e111] [cursor=pointer]
+          - heading "License" [level=3] [ref=e112]
+          - link "MIT license" [ref=e114] [cursor=pointer]:
+            - /url: /seanchen1993/CmbCoworkAgent/blob/main/LICENSE
+          - generic [ref=e117]:
+            - heading "Contributing" [level=3] [ref=e118]
+            - link "Contributing" [ref=e120] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/blob/main/CONTRIBUTING.md
+            - heading "Security policy" [level=3] [ref=e123]
+            - link "Security policy" [ref=e125] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/blob/main/SECURITY.md
+            - list "Repository details" [ref=e128]:
+              - listitem [ref=e129] [cursor=pointer]: 7 stars
+              - listitem [ref=e132] [cursor=pointer]: 191 forks
+              - listitem [ref=e135] [cursor=pointer]: 0 watching
+              - listitem [ref=e138] [cursor=pointer]:
+                - strong [ref=e141]: "122"
+                - text: Branches
+              - listitem [ref=e142] [cursor=pointer]:
+                - strong [ref=e145]: "9"
+                - text: Tags
+              - listitem [ref=e146] [cursor=pointer]: Activity
+            - generic [ref=e153]:
+              - text: Public repository · Forked from
+              - link "langchain-ai/openwork" [ref=e154] [cursor=pointer]:
+                - /url: /langchain-ai/openwork
+        - heading "seanchen1993/CmbCoworkAgent" [level=1] [ref=e156]
+      - generic [ref=e157]:
+        - generic [ref=e160]:
+          - generic [ref=e161]:
+            - generic [ref=e162]:
+              - generic [ref=e163]:
+                - link "codex/recover-in-app-browser-mcp" [ref=e166] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/codex/recover-in-app-browser-mcp
+                - text: had recent pushes 53 minutes ago
+              - link "Compare & pull request" [ref=e167] [cursor=pointer]:
+                - /url: /seanchen1993/CmbCoworkAgent/compare/codex/recover-in-app-browser-mcp?expand=1
+            - generic [ref=e170]:
+              - generic [ref=e171]:
+                - link "feature/style4" [ref=e174] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/feature/style4
+                - text: had recent pushes 25 minutes ago
+              - link "Compare & pull request" [ref=e175] [cursor=pointer]:
+                - /url: /seanchen1993/CmbCoworkAgent/compare/feature/style4?expand=1
+          - generic [ref=e178]:
+            - button "main branch" [ref=e181] [cursor=pointer]:
+              - generic [ref=e182]: main
+            - generic [ref=e186]:
+              - button "Code" [ref=e187] [cursor=pointer]
+              - button "Open more actions menu" [ref=e191] [cursor=pointer]
+          - generic [ref=e194]:
+            - generic [ref=e195]:
+              - text: This branch is
+              - link "2248 commits ahead of" [ref=e196] [cursor=pointer]:
+                - /url: /seanchen1993/CmbCoworkAgent/compare/langchain-ai%3Aopenwork%3Amain...main
+              - text: and
+              - link "11 commits behind" [ref=e197] [cursor=pointer]:
+                - /url: /seanchen1993/CmbCoworkAgent/compare/main...langchain-ai%3Aopenwork%3Amain
+              - generic [ref=e198]: langchain-ai/openwork:main
+              - text: .
+            - generic [ref=e199]:
+              - button "Contribute" [ref=e200] [cursor=pointer]
+              - button "Sync fork" [ref=e203] [cursor=pointer]
+          - generic [ref=e206]:
+            - generic [ref=e207]:
+              - heading "Folders and files" [level=2] [ref=e208]
+              - table "Folders and files" [ref=e209]:
+                - rowgroup:
+                  - row "Name Last commit date":
+                    - columnheader "Name"
+                    - columnheader "Last commit date"
+                - rowgroup [ref=e210]:
+                  - row [ref=e211]:
+                    - cell "Latest commit w876249494 commits by w876249494 Jul 15, 20262 weeks ago History Open commit details View commit history for this file." [ref=e212]:
+                      - generic [ref=e213]:
+                        - heading "Latest commit" [level=2] [ref=e214]
+                        - generic [ref=e215]:
+                          - generic [ref=e217]:
+                            - link [ref=e218] [cursor=pointer]:
+                              - /url: /w876249494
+                              - img "w876249494" [ref=e219]
+                            - link "commits by w876249494" [ref=e220] [cursor=pointer]:
+                              - /url: /seanchen1993/CmbCoworkAgent/commits?author=w876249494
+                              - text: w876249494
+                          - generic "Jul 15, 2026, 11:41 GMT+8" [ref=e222]: Jul 15, 20262 weeks ago
+                        - generic [ref=e224]:
+                          - heading "History" [level=2] [ref=e225]
+                          - button "Open commit details" [ref=e227] [cursor=pointer]
+                          - link "View commit history for this file." [ref=e231] [cursor=pointer]:
+                            - /url: /seanchen1993/CmbCoworkAgent/commits/main/
+                  - row [ref=e233]:
+                    - cell [ref=e234]:
+                      - link ".github, (Directory)" [ref=e241] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/.github
+                        - text: .github
+                    - cell "Jul 14, 20262 weeks ago" [ref=e242]
+                  - row [ref=e244]:
+                    - cell [ref=e245]:
+                      - link ".omc, (Directory)" [ref=e252] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/.omc
+                        - text: .omc
+                    - cell "Jun 25, 2026last month" [ref=e253]
+                  - row [ref=e255]:
+                    - cell [ref=e256]:
+                      - link "bin, (Directory)" [ref=e263] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/bin
+                        - text: bin
+                    - cell "Jan 19, 20266 months ago" [ref=e264]
+                  - row [ref=e266]:
+                    - cell [ref=e267]:
+                      - link "build, (Directory)" [ref=e274] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/build
+                        - text: build
+                    - cell "Mar 22, 20264 months ago" [ref=e275]
+                  - row [ref=e277]:
+                    - cell [ref=e278]:
+                      - link "docs, (Directory)" [ref=e285] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/docs
+                        - text: docs
+                    - cell "Jul 15, 20262 weeks ago" [ref=e286]
+                  - row [ref=e288]:
+                    - cell [ref=e289]:
+                      - link "examples, (Directory)" [ref=e296] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/examples
+                        - text: examples
+                    - cell "Jul 2, 2026last month" [ref=e297]
+                  - row [ref=e299]:
+                    - cell [ref=e300]:
+                      - link "manual-tests, (Directory)" [ref=e307] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/manual-tests
+                        - text: manual-tests
+                    - cell "Jun 26, 2026last month" [ref=e308]
+                  - row [ref=e310]:
+                    - cell [ref=e311]:
+                      - link "pets, (Directory)" [ref=e318] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/pets
+                        - text: pets
+                    - cell "May 19, 20262 months ago" [ref=e319]
+                  - row [ref=e321]:
+                    - cell [ref=e322]:
+                      - link "resources/bin, (Directory)" [ref=e329] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/resources/bin
+                        - text: resources/bin
+                    - cell "Jun 8, 2026last month" [ref=e330]
+                  - row [ref=e332]:
+                    - cell [ref=e333]:
+                      - link "scripts, (Directory)" [ref=e340] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/tree/main/scripts
+                        - text: scripts
+                    - cell "Jun 15, 2026last month" [ref=e341]
+                  - row [ref=e343]:
+                    - cell [ref=e344] [cursor=pointer]:
+                      - button "View all files" [ref=e346]
+            - generic [ref=e348]:
+              - generic [ref=e349]:
+                - heading "Repository files navigation" [level=2] [ref=e350]
+                - navigation "Repository files" [ref=e351]:
+                  - list [ref=e352]:
+                    - listitem [ref=e353]:
+                      - link "README" [ref=e354] [cursor=pointer]:
+                        - /url: "#"
+                    - listitem [ref=e356]:
+                      - link "Contributing" [ref=e357] [cursor=pointer]:
+                        - /url: "#"
+                    - listitem [ref=e359]:
+                      - link "License" [ref=e360] [cursor=pointer]:
+                        - /url: "#"
+                    - listitem [ref=e362]:
+                      - link "Security" [ref=e363] [cursor=pointer]:
+                        - /url: "#"
+                - button "Edit file" [ref=e365] [cursor=pointer]
+                - button "Outline" [ref=e368] [cursor=pointer]
+              - article [ref=e372]:
+                - generic [ref=e373]:
+                  - heading "CMBDevClaw" [level=1] [ref=e374]
+                  - 'link "Permalink: CMBDevClaw" [ref=e375] [cursor=pointer]':
+                    - /url: "#cmbdevclaw"
+                - paragraph [ref=e378]:
+                  - text: 基于
+                  - code [ref=e379]: Electron + React + TypeScript + DeepAgents/LangChain
+                  - text: 的本地 AI Agent 桌面应用，面向工程研发场景，提供对话式协作、工作区读写、命令执行、技能系统、MCP 扩展、定时任务、心跳巡检与远端机器人联动能力。
+                - paragraph [ref=e380]:
+                  - link [ref=e381] [cursor=pointer]:
+                    - /url: /seanchen1993/CmbCoworkAgent/blob/main/docs/screenshot.png
+                    - img "CMBDevClaw screenshot" [ref=e382]
+                - generic [ref=e383]:
+                  - paragraph [ref=e384]: Caution
+                  - paragraph [ref=e387]: 应用可执行本地命令并读写工作区文件。请仅在可信项目目录中使用，并在高风险命令前进行审批确认。
+                - generic [ref=e388]:
+                  - heading "核心功能" [level=2] [ref=e389]
+                  - 'link "Permalink: 核心功能" [ref=e390] [cursor=pointer]':
+                    - /url: "#核心功能"
+                - table [ref=e394]:
+                  - rowgroup [ref=e395]:
+                    - row [ref=e396]:
+                      - columnheader "模块" [ref=e397]
+                      - columnheader "能力" [ref=e398]
+                  - rowgroup [ref=e399]:
+                    - row [ref=e400]:
+                      - cell "多线程对话" [ref=e401]
+                      - cell "线程创建/切换/重命名/删除，首条消息自动生成标题，流式输出" [ref=e402]
+                    - row [ref=e403]:
+                      - cell "工作区管理" [ref=e404]
+                      - cell "绑定线程工作目录、文件树浏览、代码/图片/PDF 预览、Git Worktree 创建与提交" [ref=e405]
+                    - row [ref=e406]:
+                      - cell "Agent 执行" [ref=e407]
+                      - cell "基于 DeepAgents + LangChain 的工具调用，支持文件操作、命令执行、子代理、浏览器工具" [ref=e408]
+                    - row [ref=e409]:
+                      - cell "安全执行" [ref=e410]
+                      - cell "命令安全分级（safe/needs_approval/forbidden）、审批缓存、永久规则、沙箱模式" [ref=e411]
+                    - row [ref=e412]:
+                      - cell "技能系统" [ref=e413]
+                      - cell [ref=e414]:
+                        - text: 内置与自定义技能加载、启停、上传（
+                        - code [ref=e415]: .md/.zip
+                        - text: ）、删除；在线技能提案与确认
+                    - row [ref=e416]:
+                      - cell "MCP 扩展" [ref=e417]
+                      - cell "MCP 连接器管理、连通性测试、懒加载工具检索" [ref=e418]
+                    - row [ref=e419]:
+                      - cell "插件系统" [ref=e420]
+                      - cell [ref=e421]:
+                        - text: 插件安装（ZIP/目录）、启停、卸载；插件内
+                        - code [ref=e422]: skills
+                        - text: 与
+                        - code [ref=e423]: .mcp.json
+                        - text: 自动注册
+                    - row [ref=e424]:
+                      - cell "Hook 系统" [ref=e425]
+                      - cell [ref=e426]:
+                        - text: 全局、工作区、插件、技能 Hook；支持 Claude Code hooks settings、
+                        - code [ref=e427]: SKILL.md
+                        - text: frontmatter、
+                        - code [ref=e428]: once
+                        - text: 、
+                        - code [ref=e429]: onBlock
+                        - text: 与强制修订/停止
+                    - row [ref=e430]:
+                      - cell "自优化" [ref=e431]
+                      - cell "Trace 收集与回放、候选技能生成、审批后写回技能目录" [ref=e432]
+                    - row [ref=e433]:
+                      - cell "定时任务" [ref=e434]
+                      - cell "按频率自动触发 Agent 执行（once/manual/hourly/daily/weekdays/weekly/interval）" [ref=e435]
+                    - row [ref=e436]:
+                      - cell "Heartbeat" [ref=e437]
+                      - cell [ref=e438]:
+                        - text: 固定线程心跳巡检、
+                        - code [ref=e439]: HEARTBEAT.md
+                        - text: 驱动、静默 ACK 过滤与通知
+                    - row [ref=e440]:
+                      - cell "Memory" [ref=e441]
+                      - cell "本地记忆文件管理、索引检索、启停控制" [ref=e442]
+                    - row [ref=e443]:
+                      - cell "ChatX 机器人" [ref=e444]
+                      - cell "WebSocket 收消息、Agent 处理、HTTP 回传结果，支持多机器人并发配置" [ref=e445]
+                    - row [ref=e446]:
+                      - cell "可视化视图" [ref=e447]
+                      - cell "Thread 视图、Kanban 视图、自定义中心（技能/MCP/插件/沙箱/自优化等）" [ref=e448]
+                - generic [ref=e449]:
+                  - heading "技术架构" [level=2] [ref=e450]
+                  - 'link "Permalink: 技术架构" [ref=e451] [cursor=pointer]':
+                    - /url: "#技术架构"
+                - generic [ref=e454]:
+                  - heading "分层设计" [level=3] [ref=e455]
+                  - 'link "Permalink: 分层设计" [ref=e456] [cursor=pointer]':
+                    - /url: "#分层设计"
+                - list [ref=e459]:
+                  - listitem [ref=e460]:
+                    - paragraph [ref=e461]:
+                      - strong [ref=e462]: Renderer（React）
+                    - list [ref=e463]:
+                      - listitem [ref=e464]:
+                        - text: 负责 UI、交互与状态管理（
+                        - code [ref=e465]: zustand
+                        - text: + Thread Context）
+                      - listitem [ref=e466]:
+                        - text: 通过
+                        - code [ref=e467]: window.api
+                        - text: 访问主进程能力
+                  - listitem [ref=e468]:
+                    - paragraph [ref=e469]:
+                      - strong [ref=e470]: Preload（contextBridge）
+                    - list [ref=e471]:
+                      - listitem [ref=e472]: 对 IPC 通道做统一封装
+                      - listitem [ref=e473]:
+                        - text: 按业务域暴露 API：
+                        - code [ref=e474]: agent / threads / models / workspace / skills / mcp / sandbox / optimizer ...
+                  - listitem [ref=e475]:
+                    - paragraph [ref=e476]:
+                      - strong [ref=e477]: Main（Electron）
+                    - list [ref=e478]:
+                      - listitem [ref=e479]:
+                        - text: IPC 路由层：
+                        - code [ref=e480]: src/main/ipc/*
+                      - listitem [ref=e481]:
+                        - text: Agent Runtime：
+                        - code [ref=e482]: src/main/agent/runtime.ts
+                      - listitem [ref=e483]:
+                        - text: 服务层：
+                        - code [ref=e484]: scheduler / heartbeat / chatx / workspace-watcher / notify
+                      - listitem [ref=e485]:
+                        - text: 持久化层：
+                        - code [ref=e486]: sql.js + 文件存储（~/.cmbcoworkagent）
+                - generic [ref=e487]:
+                  - heading "运行链路" [level=3] [ref=e488]
+                  - 'link "Permalink: 运行链路" [ref=e489] [cursor=pointer]':
+                    - /url: "#运行链路"
+                - region "mermaid rendered output container" [ref=e492]:
+                  - generic [ref=e493]:
+                    - generic [ref=e494]:
+                      - group [ref=e495]:
+                        - button "Open dialog" [ref=e496] [cursor=pointer]
+                      - button "Copy mermaid code" [ref=e499] [cursor=pointer]
+                    - iframe [ref=e504]:
+                      - generic [ref=f2e1]:
+                        - document [ref=f2e5]:
+                          - generic [ref=f2e19]:
+                            - paragraph [ref=f2e26]: User
+                            - paragraph [ref=f2e33]: Renderer React
+                            - paragraph [ref=f2e40]: Preload contextBridge
+                            - paragraph [ref=f2e47]: IPC Handlers
+                            - paragraph [ref=f2e54]: Agent Runtime
+                            - paragraph [ref=f2e61]: Background Services
+                            - paragraph [ref=f2e68]: LocalSandbox
+                            - paragraph [ref=f2e75]: MCP Client
+                            - paragraph [ref=f2e82]: Skills
+                            - paragraph [ref=f2e89]: Memory Tools
+                            - paragraph [ref=f2e96]: Per-thread Checkpointer
+                            - paragraph [ref=f2e103]: sql.js threads DB
+                            - paragraph [ref=f2e110]: ~/.cmbcoworkagent JSON/MD
+                        - generic [ref=f2e111]:
+                          - button "Zoom in" [ref=f2e112] [cursor=pointer]
+                          - button "Zoom out" [ref=f2e116] [cursor=pointer]
+                          - button "Reset view" [ref=f2e120] [cursor=pointer]
+                          - button "Pan up" [ref=f2e123] [cursor=pointer]
+                          - button "Pan down" [ref=f2e126] [cursor=pointer]
+                          - button "Pan left" [ref=f2e129] [cursor=pointer]
+                          - button "Pan right" [ref=f2e132] [cursor=pointer]
+                - generic [ref=e505]:
+                  - heading "关键模块说明" [level=2] [ref=e506]
+                  - 'link "Permalink: 关键模块说明" [ref=e507] [cursor=pointer]':
+                    - /url: "#关键模块说明"
+                - table [ref=e511]:
+                  - rowgroup [ref=e512]:
+                    - row [ref=e513]:
+                      - columnheader "路径" [ref=e514]
+                      - columnheader "说明" [ref=e515]
+                  - rowgroup [ref=e516]:
+                    - row [ref=e517]:
+                      - cell [ref=e518]:
+                        - code [ref=e519]: src/main/index.ts
+                      - cell "Electron 主进程入口，窗口生命周期、IPC 注册、后台服务启动" [ref=e520]
+                    - row [ref=e521]:
+                      - cell [ref=e522]:
+                        - code [ref=e523]: src/preload/index.ts
+                      - cell "渲染进程 API 桥接" [ref=e524]
+                    - row [ref=e525]:
+                      - cell [ref=e526]:
+                        - code [ref=e527]: src/main/agent/runtime.ts
+                      - cell "Agent 组装：模型、工具、技能、MCP、记忆、checkpointer、沙箱" [ref=e528]
+                    - row [ref=e529]:
+                      - cell [ref=e530]:
+                        - code [ref=e531]: src/main/agent/local-sandbox.ts
+                      - cell "文件与命令执行后端、Windows 沙箱适配、Hook 执行" [ref=e532]
+                    - row [ref=e533]:
+                      - cell [ref=e534]:
+                        - code [ref=e535]: src/main/agent/tool-orchestrator.ts
+                      - cell "审批编排与执行策略（命令/文件写入审批）" [ref=e536]
+                    - row [ref=e537]:
+                      - cell [ref=e538]:
+                        - code [ref=e539]: src/main/agent/exec-policy.ts
+                      - cell "命令安全策略引擎（危险命令识别）" [ref=e540]
+                    - row [ref=e541]:
+                      - cell [ref=e542]:
+                        - code [ref=e543]: src/main/ipc/*.ts
+                      - cell "各业务域 IPC：线程、模型、工作区、技能、MCP、插件、任务、心跳、沙箱、优化等" [ref=e544]
+                    - row [ref=e545]:
+                      - cell [ref=e546]:
+                        - code [ref=e547]: src/main/services/*.ts
+                      - cell "定时调度、心跳、ChatX、通知、标题生成等服务" [ref=e548]
+                    - row [ref=e549]:
+                      - cell [ref=e550]:
+                        - code [ref=e551]: src/main/storage.ts
+                      - cell "本地配置与业务数据文件读写" [ref=e552]
+                    - row [ref=e553]:
+                      - cell [ref=e554]:
+                        - code [ref=e555]: src/main/db/index.ts
+                      - cell "sql.js 线程元数据存储" [ref=e556]
+                    - row [ref=e557]:
+                      - cell [ref=e558]:
+                        - code [ref=e559]: src/renderer/src/App.tsx
+                      - cell "顶层布局（Thread / Kanban / Customize）" [ref=e560]
+                    - row [ref=e561]:
+                      - cell [ref=e562]:
+                        - code [ref=e563]: src/renderer/src/components/customize/*
+                      - cell "自定义中心各能力面板" [ref=e564]
+                    - row [ref=e565]:
+                      - cell [ref=e566]:
+                        - code [ref=e567]: docs/claude-code-push-commit-tech-reference.md
+                      - cell [ref=e568]:
+                        - text: Claude Code
+                        - code [ref=e569]: commit/push
+                        - text: 技术方案分析与本项目落地参考
+                - generic [ref=e570]:
+                  - heading "数据存储" [level=2] [ref=e571]
+                  - 'link "Permalink: 数据存储" [ref=e572] [cursor=pointer]':
+                    - /url: "#数据存储"
+                - paragraph [ref=e575]:
+                  - text: 应用主数据目录：
+                  - code [ref=e576]: ~/.cmbcoworkagent
+                - list [ref=e577]:
+                  - listitem [ref=e578]:
+                    - code [ref=e579]: cmbcoworkagent.sqlite
+                    - text: ：线程元数据数据库（sql.js）
+                  - listitem [ref=e580]:
+                    - code [ref=e581]: threads/*.sqlite
+                    - text: ：按线程的 LangGraph checkpoint
+                  - listitem [ref=e582]:
+                    - code [ref=e583]: custom-models.json
+                    - text: ：模型配置
+                  - listitem [ref=e584]:
+                    - code [ref=e585]: mcp-connectors.json
+                    - text: ：MCP 连接器
+                  - listitem [ref=e586]:
+                    - code [ref=e587]: plugins.json
+                    - text: +
+                    - code [ref=e588]: plugins/
+                    - text: ：插件元数据与内容
+                  - listitem [ref=e589]:
+                    - code [ref=e590]: scheduled-tasks.json
+                    - text: +
+                    - code [ref=e591]: task-runs.json
+                    - text: ：定时任务配置与执行记录
+                  - listitem [ref=e592]:
+                    - code [ref=e593]: heartbeat-config.json
+                    - text: +
+                    - code [ref=e594]: HEARTBEAT.md
+                    - text: ：心跳配置与内容
+                  - listitem [ref=e595]:
+                    - code [ref=e596]: chatx-config.json
+                    - text: ：机器人配置
+                  - listitem [ref=e597]:
+                    - code [ref=e598]: sandbox-settings.json
+                    - text: +
+                    - code [ref=e599]: approval-rules.json
+                    - text: ：沙箱模式与审批规则
+                  - listitem [ref=e600]:
+                    - code [ref=e601]: memory/
+                    - text: ：记忆文件与索引
+                - generic [ref=e602]:
+                  - heading "项目结构" [level=2] [ref=e603]
+                  - 'link "Permalink: 项目结构" [ref=e604] [cursor=pointer]':
+                    - /url: "#项目结构"
+                - generic [ref=e607]:
+                  - code [ref=e609]: "src/ main/ # Electron 主进程、IPC、Agent Runtime、服务、存储 preload/ # contextBridge API 暴露 renderer/ # React 前端 src/components/ # chat/sidebar/panels/customize/kanban/tabs/ui skills/ # 内置技能 resources/ # 平台资源与二进制 tests/ # 测试用例（当前示例：diff panel）"
+                  - button "Copy code to clipboard" [ref=e611] [cursor=pointer]
+                - generic [ref=e615]:
+                  - heading "快速开始" [level=2] [ref=e616]
+                  - 'link "Permalink: 快速开始" [ref=e617] [cursor=pointer]':
+                    - /url: "#快速开始"
+                - generic [ref=e620]:
+                  - heading "环境要求" [level=3] [ref=e621]
+                  - 'link "Permalink: 环境要求" [ref=e622] [cursor=pointer]':
+                    - /url: "#环境要求"
+                - list [ref=e625]:
+                  - listitem [ref=e626]:
+                    - text: Node.js
+                    - code [ref=e627]: ">=18 <24"
+                  - listitem [ref=e628]:
+                    - text: Windows 环境必须使用 Node.js
+                    - code [ref=e629]: 20.x
+                  - listitem [ref=e630]:
+                    - text: npm
+                    - code [ref=e631]: ">=10"
+                - generic [ref=e632]:
+                  - heading "本地开发" [level=3] [ref=e633]
+                  - 'link "Permalink: 本地开发" [ref=e634] [cursor=pointer]':
+                    - /url: "#本地开发"
+                - generic [ref=e637]:
+                  - generic [ref=e638]: npm install npm run dev
+                  - button "Copy code to clipboard" [ref=e640] [cursor=pointer]
+                - generic [ref=e644]:
+                  - heading "打包构建" [level=3] [ref=e645]
+                  - 'link "Permalink: 打包构建" [ref=e646] [cursor=pointer]':
+                    - /url: "#打包构建"
+                - generic [ref=e649]:
+                  - generic [ref=e650]: npm run build npm run dist
+                  - button "Copy code to clipboard" [ref=e652] [cursor=pointer]
+                - generic [ref=e656]:
+                  - heading "常用脚本" [level=2] [ref=e657]
+                  - 'link "Permalink: 常用脚本" [ref=e658] [cursor=pointer]':
+                    - /url: "#常用脚本"
+                - table [ref=e662]:
+                  - rowgroup [ref=e663]:
+                    - row [ref=e664]:
+                      - columnheader "命令" [ref=e665]
+                      - columnheader "说明" [ref=e666]
+                  - rowgroup [ref=e667]:
+                    - row [ref=e668]:
+                      - cell [ref=e669]:
+                        - code [ref=e670]: npm run dev
+                      - cell "启动开发环境（electron-vite）" [ref=e671]
+                    - row [ref=e672]:
+                      - cell [ref=e673]:
+                        - code [ref=e674]: npm run build
+                      - cell "构建 main/preload/renderer" [ref=e675]
+                    - row [ref=e676]:
+                      - cell [ref=e677]:
+                        - code [ref=e678]: npm run dist
+                      - cell "构建并使用 electron-builder 打包" [ref=e679]
+                    - row [ref=e680]:
+                      - cell [ref=e681]:
+                        - code [ref=e682]: npm run lint
+                      - cell "ESLint 检查" [ref=e683]
+                    - row [ref=e684]:
+                      - cell [ref=e685]:
+                        - code [ref=e686]: npm run typecheck
+                      - cell "TS 类型检查（node + web）" [ref=e687]
+                    - row [ref=e688]:
+                      - cell [ref=e689]:
+                        - code [ref=e690]: npm run format
+                      - cell "Prettier 格式化" [ref=e691]
+                - generic [ref=e692]:
+                  - heading "开发者工具日志开关（F12）" [level=2] [ref=e693]
+                  - 'link "Permalink: 开发者工具日志开关（F12）" [ref=e694] [cursor=pointer]':
+                    - /url: "#开发者工具日志开关f12"
+                - paragraph [ref=e697]: 渲染进程日志在 DevTools Console 中默认关闭，不会持续打印。需要排查问题时，可在 F12 Console 手动执行：
+                - table [ref=e699]:
+                  - rowgroup [ref=e700]:
+                    - row [ref=e701]:
+                      - columnheader "命令" [ref=e702]
+                      - columnheader "作用" [ref=e703]
+                  - rowgroup [ref=e704]:
+                    - row [ref=e705]:
+                      - cell [ref=e706]:
+                        - code [ref=e707]: window.logOn()
+                      - cell "开启日志打印" [ref=e708]
+                    - row [ref=e709]:
+                      - cell [ref=e710]:
+                        - code [ref=e711]: window.logOff()
+                      - cell "关闭日志打印" [ref=e712]
+                    - row [ref=e713]:
+                      - cell [ref=e714]:
+                        - code [ref=e715]: window.logState()
+                      - cell [ref=e716]:
+                        - text: 查看当前是否开启（
+                        - code [ref=e717]: true/false
+                        - text: ）
+                - paragraph [ref=e718]:
+                  - text: 也可以通过
+                  - code [ref=e719]: .env
+                  - text: 控制启动时默认状态：
+                - list [ref=e720]:
+                  - listitem [ref=e721]:
+                    - code [ref=e722]: VITE_CONSOLE_LOG_DEFAULT_ON=true
+                    - text: ：默认开启日志打印
+                  - listitem [ref=e723]:
+                    - text: 不配置或设为
+                    - code [ref=e724]: "false"
+                    - text: ：默认关闭日志打印
+                - generic [ref=e725]:
+                  - heading "环境变量" [level=2] [ref=e726]
+                  - 'link "Permalink: 环境变量" [ref=e727] [cursor=pointer]':
+                    - /url: "#环境变量"
+                - paragraph [ref=e730]:
+                  - code [ref=e731]: .env
+                  - text: 示例（按需配置）：
+                - table [ref=e733]:
+                  - rowgroup [ref=e734]:
+                    - row [ref=e735]:
+                      - columnheader "变量" [ref=e736]
+                      - columnheader "说明" [ref=e737]
+                  - rowgroup [ref=e738]:
+                    - row [ref=e739]:
+                      - cell [ref=e740]:
+                        - code [ref=e741]: VITE_API_BASE_URL
+                      - cell "后端 API 基地址（市场、版本、上报等）" [ref=e742]
+                    - row [ref=e743]:
+                      - cell [ref=e744]:
+                        - code [ref=e745]: VITE_RENDER_URL
+                      - cell "可选：渲染进程远端地址" [ref=e746]
+                    - row [ref=e747]:
+                      - cell [ref=e748]:
+                        - code [ref=e749]: VITE_CHATX_WS_URL
+                      - cell "ChatX WebSocket 地址" [ref=e750]
+                    - row [ref=e751]:
+                      - cell [ref=e752]:
+                        - code [ref=e753]: VITE_CHATX_HTTP_URL
+                      - cell "ChatX HTTP 回调地址" [ref=e754]
+                    - row [ref=e755]:
+                      - cell [ref=e756]:
+                        - code [ref=e757]: VITE_CHATX_CHANNEL
+                      - cell "ChatX channel" [ref=e758]
+                    - row [ref=e759]:
+                      - cell [ref=e760]:
+                        - code [ref=e761]: VITE_CHATX_CALLBACK_URL
+                      - cell "机器人平台回调地址基址" [ref=e762]
+                    - row [ref=e763]:
+                      - cell [ref=e764]:
+                        - code [ref=e765]: VITE_LOGIN_PT
+                      - cell "登录环境标识" [ref=e766]
+                    - row [ref=e767]:
+                      - cell [ref=e768]:
+                        - code [ref=e769]: VITE_INTRUCTION_URL
+                      - cell "使用说明地址（前端展示）" [ref=e770]
+                    - row [ref=e771]:
+                      - cell [ref=e772]:
+                        - code [ref=e773]: VITE_APP_DOWNLOAD_URL
+                      - cell "应用下载地址（前端展示）" [ref=e774]
+                    - row [ref=e775]:
+                      - cell [ref=e776]:
+                        - code [ref=e777]: VITE_CONSOLE_LOG_DEFAULT_ON
+                      - cell [ref=e778]:
+                        - text: DevTools Console 日志默认开关（
+                        - code [ref=e779]: true/1/on/yes
+                        - text: 为开启）
+                - generic [ref=e780]:
+                  - heading "安全建议" [level=2] [ref=e781]
+                  - 'link "Permalink: 安全建议" [ref=e782] [cursor=pointer]':
+                    - /url: "#安全建议"
+                - list [ref=e785]:
+                  - listitem [ref=e786]:
+                    - text: 默认保持沙箱模式开启，非必要不要切换到
+                    - code [ref=e787]: none
+                    - text: 。
+                  - listitem [ref=e788]:
+                    - text: 对
+                    - code [ref=e789]: git push --force
+                    - text: 、删除类命令、脚本下载执行类命令保持人工审批。
+                  - listitem [ref=e790]: 工作区建议使用独立目录，避免将敏感目录直接暴露给 Agent。
+                  - listitem [ref=e791]: 定时任务与远端机器人建议最小权限配置（模型、目录、连接器按需开通）。
+                - generic [ref=e792]:
+                  - heading "License" [level=2] [ref=e793]
+                  - 'link "Permalink: License" [ref=e794] [cursor=pointer]':
+                    - /url: "#license"
+                - paragraph [ref=e797]:
+                  - text: MIT，详见
+                  - link "LICENSE" [ref=e798] [cursor=pointer]:
+                    - /url: /seanchen1993/CmbCoworkAgent/blob/main/LICENSE
+                  - text: 。
+        - generic [ref=e801]:
+          - generic [ref=e802]:
+            - heading [level=2] [ref=e803]:
+              - link "Releases" [ref=e805] [cursor=pointer]:
+                - /url: /seanchen1993/CmbCoworkAgent/releases
+            - link "9tags" [ref=e806] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/tags
+            - link "Create a new release" [ref=e810] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/releases/new
+          - generic [ref=e811]:
+            - heading [level=2] [ref=e812]:
+              - link "Packages" [ref=e814] [cursor=pointer]:
+                - /url: /users/seanchen1993/packages?repo_name=CmbCoworkAgent
+            - generic [ref=e815]:
+              - text: No packages published
+              - link "Publish your first package" [ref=e816] [cursor=pointer]:
+                - /url: /seanchen1993/CmbCoworkAgent/packages
+          - generic [ref=e817]:
+            - heading "Contributors" [level=2] [ref=e818]
+            - generic [ref=e819]: No contributors
+          - generic [ref=e820]:
+            - heading "Languages" [level=2] [ref=e821]
+            - generic [ref=e823]:
+              - 'progressbar "TypeScript: 96.2%" [ref=e824]'
+              - 'progressbar "JavaScript: 2.3%" [ref=e825]'
+              - 'progressbar "Python: 0.7%" [ref=e826]'
+              - 'progressbar "HTML: 0.5%" [ref=e827]'
+              - 'progressbar "CSS: 0.3%" [ref=e828]'
+              - 'progressbar "PowerShell: 0%"'
+            - list [ref=e829]:
+              - listitem [ref=e830]:
+                - generic [ref=e831]:
+                  - generic [ref=e833]: TypeScript
+                  - generic [ref=e834]: 96.2%
+              - listitem [ref=e835]:
+                - generic [ref=e836]:
+                  - generic [ref=e838]: JavaScript
+                  - generic [ref=e839]: 2.3%
+              - listitem [ref=e840]:
+                - generic [ref=e841]:
+                  - generic [ref=e843]: Python
+                  - generic [ref=e844]: 0.7%
+              - listitem [ref=e845]:
+                - generic [ref=e846]:
+                  - generic [ref=e848]: HTML
+                  - generic [ref=e849]: 0.5%
+              - listitem [ref=e850]:
+                - generic [ref=e851]:
+                  - generic [ref=e853]: CSS
+                  - generic [ref=e854]: 0.3%
+              - listitem [ref=e855]:
+                - generic [ref=e856]:
+                  - generic [ref=e858]: PowerShell
+                  - generic [ref=e859]: 0%
+  - contentinfo [ref=e861]:
+    - heading "Footer" [level=2] [ref=e862]
+    - generic [ref=e863]:
+      - generic [ref=e864]:
+        - link "GitHub Homepage" [ref=e865] [cursor=pointer]:
+          - /url: https://github.com
+        - generic [ref=e868]: © 2026 GitHub, Inc.
+      - navigation "Footer" [ref=e869]:
+        - heading "Footer navigation" [level=3] [ref=e870]
+        - list "Footer navigation" [ref=e871]:
+          - listitem [ref=e872]:
+            - link "Terms" [ref=e873] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+          - listitem [ref=e874]:
+            - link "Privacy" [ref=e875] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+          - listitem [ref=e876]:
+            - link "Security" [ref=e877] [cursor=pointer]:
+              - /url: https://github.com/security
+          - listitem [ref=e878]:
+            - link "Status" [ref=e879] [cursor=pointer]:
+              - /url: https://www.githubstatus.com/
+          - listitem [ref=e880]:
+            - link "Community" [ref=e881] [cursor=pointer]:
+              - /url: https://github.community/
+          - listitem [ref=e882]:
+            - link "Docs" [ref=e883] [cursor=pointer]:
+              - /url: https://docs.github.com/
+          - listitem [ref=e884]:
+            - link "Contact" [ref=e885] [cursor=pointer]:
+              - /url: https://support.github.com?tags=dotcom-footer
+          - listitem [ref=e886]:
+            - button "Manage cookies" [ref=e888] [cursor=pointer]
+          - listitem [ref=e889]:
+            - button "Do not share my personal information" [ref=e891] [cursor=pointer]

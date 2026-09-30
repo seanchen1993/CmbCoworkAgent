@@ -36,6 +36,7 @@ import {
   type SandboxBackendProtocol,
   type GrepMatch,
   type FileInfo,
+  type FileData,
   type FileUploadResponse,
   type FileOperationError
 } from "deepagents"
@@ -4201,7 +4202,7 @@ export class LocalSandbox
    *  - Multi-encoding decoding via iconv-lite
    *  - Binary file detection as fallback when jschardet fails
    */
-  async read(
+  async readText(
     filePath: string,
     offset = 0,
     limit = READ_FILE_DEFAULT_LIMIT,
@@ -4421,6 +4422,41 @@ export class LocalSandbox
         LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
         `Error reading file '${effectiveFilePath}': ${msg}`
       )
+    }
+  }
+
+  async read(
+    filePath: string,
+    offset = 0,
+    limit = READ_FILE_DEFAULT_LIMIT,
+    options: LocalSandboxReadFileOptions = {}
+  ): Promise<string> {
+    return await this.readText(filePath, offset, limit, options)
+  }
+
+  async readRaw(filePath: string): Promise<FileData> {
+    if (this.isHiddenSkillPath(filePath)) {
+      throw new Error(`Error reading file '${filePath}': skill is disabled`)
+    }
+    if (this.isBlockedBySandbox(filePath)) {
+      throw new Error(`Error: Access denied — '${filePath}' is restricted by sandbox policy.`)
+    }
+    const resolvedPath = this._resolvePath(filePath)
+    const ext = path.extname(resolvedPath).toLowerCase()
+    if (LocalSandbox.KNOWN_BINARY_EXTENSIONS.has(ext)) {
+      throw new Error(`Cannot read binary file type: ${ext}`)
+    }
+    const { buffer } = await this.readResolvedFileBuffer(
+      resolvedPath,
+      filePath,
+      this._maxFileSizeBytes
+    )
+    const stat = await fs.stat(resolvedPath)
+    const content = iconv.decode(buffer, this.detectEncoding(buffer, ext))
+    return {
+      content: content.split("\n"),
+      created_at: stat.birthtime.toISOString(),
+      modified_at: stat.mtime.toISOString()
     }
   }
 

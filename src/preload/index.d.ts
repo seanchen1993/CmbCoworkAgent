@@ -7,6 +7,7 @@ import type {
 } from "../shared/app-notifications"
 import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
+import type { RequirementRuntimeItem } from "../main/ipc/requirements"
 import type {
   WorkflowWorktreeAction,
   WorkflowWorktreeActionResponse
@@ -1791,6 +1792,18 @@ interface CustomAPI {
       title?: string
     }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
+    selectCode: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    selectPrototypeZip: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    readText: (
+      filePath: string
+    ) => Promise<{ success: boolean; filename?: string; content?: string; error?: string }>
+    readDataUrl: (filePath: string) => Promise<{
+      success: boolean
+      filename?: string
+      dataUrl?: string
+      size?: number
+      error?: string
+    }>
   }
   skills: {
     catalog: {
@@ -2263,6 +2276,269 @@ interface CustomAPI {
       filePath: string,
       content: string
     ) => Promise<{ success: boolean; error?: string }>
+  }
+  chatx: {
+    getConfig: () => Promise<ChatXConfig>
+    saveConfig: (updates: Partial<ChatXConfig>) => Promise<void>
+    restart: () => Promise<void>
+    cancelByThread: (threadId: string) => Promise<boolean>
+  }
+  design: {
+    generate: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: {
+        type: string
+        token?: string
+        html?: string
+        error?: string
+        event?: unknown
+        artifactPath?: string
+        metadata?: unknown
+      }) => void,
+      modelId?: string,
+      history?: Array<{ role: "user" | "assistant"; content: string }>,
+      tabId?: string
+    ) => () => void
+    storeHtml: (tabId: string, html: string) => Promise<{ ok: boolean }>
+    saveArtifact: (
+      tabId: string,
+      html: string,
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
+    ) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    saveArtifactFile: (
+      filePath: string,
+      html: string,
+      workspacePath?: string,
+      metadata?: Record<string, unknown>
+    ) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    importFromUrl: (url: string) => Promise<{
+      success: boolean
+      html?: string
+      finalUrl?: string
+      title?: string
+      error?: string
+    }>
+    importPrototypeZip: (filePath: string) => Promise<{
+      success: boolean
+      html?: string
+      title?: string
+      imageCount?: number
+      metadataCount?: number
+      error?: string
+    }>
+    syncContextFiles: (params: {
+      workspacePath?: string
+      designSessionId?: string
+      kind: "attachments" | "code"
+      files: Array<{ filename: string; sourcePath?: string; content?: string }>
+    }) => Promise<{
+      success: boolean
+      dirPath?: string
+      files?: Array<{ sourcePath: string; targetPath: string; filename: string }>
+      error?: string
+    }>
+    readArtifact: (
+      tabId: string,
+      workspacePath?: string
+    ) => Promise<{
+      success: boolean
+      filePath?: string
+      html?: string
+      metadata?: unknown
+      error?: string
+    }>
+    readArtifactFile: (
+      filePath: string,
+      workspacePath?: string
+    ) => Promise<{
+      success: boolean
+      filePath?: string
+      html?: string
+      metadata?: unknown
+      error?: string
+    }>
+    getArtifactPackageInfo: (
+      filePath: string,
+      workspacePath?: string
+    ) => Promise<{
+      success: boolean
+      filePath?: string
+      dirPath?: string
+      relatedFileCount?: number
+      error?: string
+    }>
+    exportArtifactPackage: (
+      filePath: string,
+      workspacePath?: string
+    ) => Promise<{
+      success: boolean
+      fileName?: string
+      buffer?: ArrayBuffer
+      relatedFileCount?: number
+      error?: string
+    }>
+    listSystems: () => Promise<
+      Array<{
+        id: string
+        name: string
+        description: string
+        category?: string
+        source?: string
+        origin?: string
+        license?: string
+        path: string
+        tokens?: {
+          bg: string
+          surface: string
+          fg: string
+          muted: string
+          border: string
+          accent: string
+        }
+      }>
+    >
+    listTemplates: () => Promise<
+      Array<{
+        name: string
+        description: string
+        path: string
+        mode: string
+        platform: string | null
+        scenario: string
+        previewHtml: string
+        previewPath: string
+      }>
+    >
+    agentGenerate: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: {
+        type: string
+        token?: string
+        html?: string
+        error?: string
+        event?: unknown
+        artifactPath?: string
+        metadata?: unknown
+      }) => void,
+      tabId: string,
+      modelId?: string,
+      imageData?: string,
+      mimeType?: string,
+      currentHtml?: string,
+      skill?: { name: string; path: string },
+      workspacePath?: string,
+      artifactId?: string,
+      sourceArtifactPath?: string,
+      designSessionId?: string,
+      designSystemId?: string
+    ) => () => void
+    askQuestions: (
+      sessionId: string,
+      prompt: string,
+      onEvent: (event: { type: string; questions?: unknown[]; error?: string }) => void,
+      modelId?: string,
+      designSystemId?: string
+    ) => () => void
+    generateFromImage: (
+      sessionId: string,
+      prompt: string,
+      imageData: string,
+      mimeType: string,
+      onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
+      modelId?: string,
+      designSystemId?: string
+    ) => () => void
+    cancel: (sessionId: string) => Promise<void>
+    saveVariant: (variantId: string, html: string) => Promise<{ filePath: string }>
+  }
+  requirements: {
+    list: () => Promise<RequirementRuntimeItem[]>
+    getToken: () => Promise<{ success: boolean; token: string; error?: string }>
+    saveToken: (token: string) => Promise<{ success: boolean; error?: string }>
+    create: (payload: {
+      systemId: string
+      title: string
+      workDir: string
+      source: {
+        type: "file" | "text" | "link"
+        fileName: string
+        sourcePath?: string
+        url?: string
+        content?: string
+        bytes?: ArrayBuffer
+        initialDescription?: string
+      }
+    }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
+    getWorkDir: () => Promise<string | null>
+    selectWorkDir: () => Promise<{ success: boolean; workDir?: string | null; error?: string }>
+    delete: (reqId: string) => Promise<{ success: boolean; error?: string }>
+    openWorkDir: (reqId: string) => Promise<{ success: boolean; error?: string }>
+    getSourcePreview: (reqId: string) => Promise<{
+      success: boolean
+      content?: string
+      error?: string
+    }>
+    attachThread: (payload: { reqId: string; threadId: string }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
+    detachThread: (payload: { reqId: string; threadId: string }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
+    beginManifestSync: (payload: {
+      reqId: string
+      threadId: string
+      requestId: string
+    }) => Promise<{
+      success: boolean
+      error?: string
+    }>
+    rename: (payload: { reqId: string; title: string }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
+    savePrd: (payload: {
+      reqId: string
+      version: string
+      modules: Array<{
+        moduleId: string
+        name: string
+        content: string
+        description?: string
+        keywords?: string[]
+      }>
+    }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
+    syncManifest: (payload: {
+      reqId: string
+      manifest: unknown
+      threadId?: string
+      requestId?: string
+    }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
+    saveFiles: (payload: {
+      workspacePath: string
+      requirementId: string
+      source?: { filename: string; sourcePath?: string; content?: string }
+      prd?: { filename: string; content: string }
+    }) => Promise<{ success: boolean; sourcePath?: string; prdPath?: string; error?: string }>
   }
   sandbox: {
     getMode: () => Promise<"none" | "unelevated" | "readonly" | "elevated">

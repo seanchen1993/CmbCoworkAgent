@@ -336,6 +336,11 @@ import {
   type CoordinatorWorkerTurnPlanningState
 } from "./coordinator-mode"
 import {
+  createAllowedSkillsBackend,
+  parseAllowedNames,
+  resolveAllowedSkillRootDirs
+} from "./library/requirement-mode"
+import {
   coordinatorWorkerManager,
   type CoordinatorWorkerSnapshot,
   type CoordinatorWorkerContinuationIntent,
@@ -2322,6 +2327,7 @@ function assembleDeepAgent(
     name,
     memory,
     skills,
+    allowedSkillRootDirs,
     filesystemSystemPrompt,
     summarizationTrigger,
     summarizationKeep,
@@ -2434,9 +2440,13 @@ function assembleDeepAgent(
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
+  const skillsBackend =
+    allowedSkillRootDirs !== undefined
+      ? createAllowedSkillsBackend(filesystemBackend, skills ?? [], allowedSkillRootDirs)
+      : filesystemBackend
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createRefreshingSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
+      ? [createRefreshingSkillsMiddleware({ backend: skillsBackend, sources: skills })]
       : []
 
   const memoryMiddlewareArray =
@@ -4197,7 +4207,7 @@ export interface ModelRetryHooks {
  * does not poison the next one (avoids the "stuck signal" pitfall that
  * happens when SDK-level timeout aborts the shared signal).
  */
-function createRetryingFetch(
+export function createRetryingFetch(
   hooks?: ModelRetryHooks,
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
   capture?: { threadId?: string }
@@ -4828,6 +4838,10 @@ export interface CreateAgentRuntimeOptions {
   soloTaskTraceManager?: SoloTaskTraceManager
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
   disableSubagents?: boolean
+  /** Explicit session skill allowlist. Undefined preserves all available skills; [] hides all. */
+  allowedSkillNames?: string[]
+  /** Explicit session expert allowlist. Undefined preserves all available experts; [] disables all. */
+  allowedExpertNames?: string[]
   /** Optional filesystem access limits for leaf runtimes: coordinator async
    * workers (workload/ownedFiles) or registry agents (disallowedTools/shellAccess). */
   filesystemAccess?: CoordinatorWorkerFilesystemAccess
@@ -5097,6 +5111,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     traceContext,
     soloTaskTraceManager,
     disableSubagents = false,
+    allowedSkillNames,
+    allowedExpertNames,
     disableMcpTools = false,
     blockedToolNames = [],
     onHookResult,
@@ -5192,6 +5208,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // and every leaf runtime through the existing mainSubagentsEnabled policy.
   const projectModeTaskSubagentConfig =
     runtimePolicy.isProjectMode && mainSubagentsEnabled ? subagentConfig : undefined
+  // Session-scoped expert allowlist. Requirement conversations persist
+  // `allowedExperts` in thread metadata; undefined keeps the full registry.
+  const sessionAllowedExpertNames =
+    allowedExpertNames ?? parseAllowedNames(runtimeThreadMetadata, "allowedExperts")
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -5287,18 +5307,21 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return undefined
     }
   }
-  const registrySubagentSpecs = mainSubagentsEnabled
-    ? (await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)).map(
-        (profile) => ({
-          name: profile.name,
-          description: profile.description,
-          systemPrompt: profile.systemPrompt,
-          disallowedTools: profile.disallowedTools,
-          shellAccess: profile.shellAccess,
-          model: resolveRegistryModelInstance(profile.model)
-        })
-      )
+  const allRegistryProfiles = mainSubagentsEnabled
+    ? await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)
     : []
+  const registryProfiles =
+    sessionAllowedExpertNames === undefined
+      ? allRegistryProfiles
+      : allRegistryProfiles.filter((profile) => sessionAllowedExpertNames.includes(profile.name))
+  const registrySubagentSpecs = registryProfiles.map((profile) => ({
+    name: profile.name,
+    description: profile.description,
+    systemPrompt: profile.systemPrompt,
+    disallowedTools: profile.disallowedTools,
+    shellAccess: profile.shellAccess,
+    model: resolveRegistryModelInstance(profile.model)
+  }))
 
   const checkpointer = await getCheckpointer(threadId)
   console.log("[Runtime] Checkpointer ready for thread:", threadId)
@@ -5804,6 +5827,12 @@ The workspace root is: ${fileRoot}`
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
+  const sessionAllowedSkillNames =
+    allowedSkillNames ?? parseAllowedNames(runtimeThreadMetadata, "allowedSkills")
+  const allowedSkillRootDirs =
+    sessionAllowedSkillNames === undefined
+      ? undefined
+      : await resolveAllowedSkillRootDirs(allSkillsSources, sessionAllowedSkillNames)
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
   backend.setSkillLifecycleRegistry(
@@ -7384,8 +7413,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent:
-      !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
+      sessionAllowedExpertNames === undefined &&
+      !isCoordinatorMode &&
+      isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
     skills: mainSkillSources,
+    allowedSkillRootDirs,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO
     // mode it skips initial approvals but still prompts before sandbox escape.

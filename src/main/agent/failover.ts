@@ -266,6 +266,11 @@ const RETRYABLE_NETWORK_CODES = new Set([
   "EAI_AGAIN"
 ])
 
+// NOTE: no "terminated"/"disconnected" here on purpose. Stream-disconnect text is
+// matched earlier by isStreamDisconnectLikeError, which walks the cause chain and
+// lets cancellation win — a provider wrapping an AbortError in
+// TypeError("terminated") must stay non-retryable. A blunt substring match here
+// would re-mark those as retryable after that check already rejected them.
 const RETRYABLE_MESSAGE_PATTERNS = [
   "timeout",
   "fetch failed",

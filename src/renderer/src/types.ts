@@ -350,6 +350,8 @@ export interface Message {
   end_at?: Date
   goal_id?: string | null
   active_window_id?: string | null
+  /** Optional visual context label for auto-generated requirement turns. */
+  contextLabel?: "requirement-workbench"
 }
 
 /**
@@ -368,6 +370,7 @@ export interface Message {
 export interface QueuedMessage {
   id: string
   text: string
+  contextLabel?: "requirement-workbench"
   attachmentModelBlocks?: string
   attachmentDisplayPrefix?: string
   skillBlock?: string

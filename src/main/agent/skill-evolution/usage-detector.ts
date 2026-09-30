@@ -133,7 +133,11 @@ export class SkillUsageDetector {
     for (const skill of skills) {
       const skillName = typeof skill.name === "string" ? skill.name.trim() : ""
       const skillPath = typeof skill.path === "string" ? normalizePath(skill.path.trim()) : ""
-      const { identifier: skillIdentifier, evolved } = resolveSkillInfo(skillName, skill.version, skillPath)
+      const { identifier: skillIdentifier, evolved } = resolveSkillInfo(
+        skillName,
+        skill.version,
+        skillPath
+      )
       if (!skillName || !skillPath || !skillIdentifier) continue
 
       const pluginSource = findPluginSkillSource(skillPath)
@@ -183,9 +187,14 @@ export class SkillUsageDetector {
 
     const skillDocPath = `${rootDir}/SKILL.md`
     const fallbackName = rootDir.split("/").filter(Boolean).at(-1) ?? ""
-    const { identifier: skillIdentifier, evolved } = resolveSkillInfo(fallbackName, undefined, skillDocPath, {
-      fallbackWhenUnreadable: false
-    })
+    const { identifier: skillIdentifier, evolved } = resolveSkillInfo(
+      fallbackName,
+      undefined,
+      skillDocPath,
+      {
+        fallbackWhenUnreadable: false
+      }
+    )
     if (!skillIdentifier) {
       this.localSkillLookupCache.set(rootDir, null)
       return null
@@ -194,6 +203,25 @@ export class SkillUsageDetector {
     this.registerSkillPath(skillDocPath, skillIdentifier, evolved)
     this.localSkillLookupCache.set(rootDir, skillIdentifier)
     return skillIdentifier
+  }
+
+  getSkillNameForReadFilePath(rawPath: string): string {
+    const normalized = normalizePath(rawPath.trim())
+    if (!normalized) return ""
+
+    const localSkillIdentifier = this.resolveLocalSkillIdentifier(normalized)
+    if (localSkillIdentifier) return localSkillIdentifier
+
+    const exactMatch = this.loadedSkillsByDocPath.get(normalized)
+    if (exactMatch) return exactMatch
+
+    for (const [rootDir, skillName] of this.loadedSkillsByRootDir.entries()) {
+      if (normalized === rootDir || normalized.startsWith(`${rootDir}/`)) {
+        return skillName
+      }
+    }
+
+    return ""
   }
 
   private markSkillUsed(skillIdentifier: string): void {
@@ -213,30 +241,11 @@ export class SkillUsageDetector {
    * events in the same turn carry the skill attribution).
    */
   onReadFilePath(rawPath: string): boolean {
-    const normalized = normalizePath(rawPath.trim())
-    if (!normalized) return false
-
     const priorSize = this.usedSkillNames.size
+    const skillName = this.getSkillNameForReadFilePath(rawPath)
+    if (!skillName) return false
 
-    const localSkillIdentifier = this.resolveLocalSkillIdentifier(normalized)
-    if (localSkillIdentifier) {
-      this.markSkillUsed(localSkillIdentifier)
-      return this.usedSkillNames.size > priorSize
-    }
-
-    const exactMatch = this.loadedSkillsByDocPath.get(normalized)
-    if (exactMatch) {
-      this.markSkillUsed(exactMatch)
-      return this.usedSkillNames.size > priorSize
-    }
-
-    for (const [rootDir, skillName] of this.loadedSkillsByRootDir.entries()) {
-      if (normalized === rootDir || normalized.startsWith(`${rootDir}/`)) {
-        this.markSkillUsed(skillName)
-      }
-    }
-    if (this.usedSkillNames.size > priorSize) return true
-
+    this.markSkillUsed(skillName)
     return this.usedSkillNames.size > priorSize
   }
 

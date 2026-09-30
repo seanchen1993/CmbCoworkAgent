@@ -376,6 +376,8 @@ import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
+import { registerDesignHandlers } from "./ipc/design"
+import { registerRequirementHandlers } from "./ipc/requirements"
 import { closeDashboardEsWorker } from "./services/dashboard-es-client"
 import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
@@ -736,7 +738,7 @@ function createWindow(): void {
       sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
-    autoHideMenuBar: ![".166", ".147", ".216", ".215", ".225", "201.99"].some((ip) =>
+    autoHideMenuBar: ![".166", ".147", ".216", ".215", ".225", "201.99", ".163"].some((ip) =>
       getLocalIP().includes(ip)
     ) // 自动隐藏菜单栏
   })
@@ -1171,6 +1173,8 @@ if (browserNativeMessagingHostLaunch) {
     registerCodeExecToolsHandlers(ipcMain)
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
+    registerDesignHandlers()
+    registerRequirementHandlers(ipcMain)
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
     registerNotificationHandlers(ipcMain)

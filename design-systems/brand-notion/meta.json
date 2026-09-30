@@ -1,0 +1,8 @@
+{
+  "name": "Notion",
+  "description": "Notion presents itself as the all-in-one workspace through a confident, illustration-rich brand voice — anchored by a deep navy hero band ({colors.brand-navy}) decorated with brand-colored sticky-note dots and mesh wire illustrations, a signature purple pill primary CTA ({colors.primary}), and a rich palette of pastel-tinted feature cards that echo the colorful database properties of the live product. The system uses a Notion-Sans (Inter-based) typeface across every UI surface, anchors a 4-tier pricing comparison (Free / Plus / Business / Enterprise), and presents the live workspace UI mockup directly inside the hero band. Coverage spans homepage, Enterprise, Product AI, Product Agents, Startups, and Pricing surfaces.",
+  "category": "Productivity & SaaS",
+  "source": "awesome-design-md",
+  "origin": "https://github.com/VoltAgent/awesome-design-md/tree/main/design-md/notion",
+  "license": "MIT"
+}

@@ -1,0 +1,137 @@
+- generic [ref=f1e4]:
+  - generic:
+    - generic [ref=f1e7]:
+      - link "新闻" [ref=f1e8] [cursor=pointer]:
+        - /url: http://news.baidu.com
+      - link "hao123" [ref=f1e9] [cursor=pointer]:
+        - /url: https://www.hao123.com?src=from_pc_logon
+      - link "地图" [ref=f1e10] [cursor=pointer]:
+        - /url: http://map.baidu.com
+      - link "贴吧" [ref=f1e11] [cursor=pointer]:
+        - /url: http://tieba.baidu.com/
+      - link "视频" [ref=f1e12] [cursor=pointer]:
+        - /url: https://haokan.baidu.com/?sfrom=baidu-top
+      - link "图片" [ref=f1e13] [cursor=pointer]:
+        - /url: http://image.baidu.com/
+      - link "网盘" [ref=f1e14] [cursor=pointer]:
+        - /url: https://pan.baidu.com?from=1026962h
+      - link "文库" [ref=f1e15] [cursor=pointer]:
+        - /url: https://wenku.baidu.com/?fr=bdpcindex
+      - link "文心" [ref=f1e16] [cursor=pointer]:
+        - /url: https://chat.baidu.com/search?isShowHello=1&pd=csaitab&setype=csaitab&extParamsJson=%7B%22enter_type%22%3A%22home_tab%22%7D
+      - link "百度搭子" [ref=f1e17] [cursor=pointer]:
+        - /url: https://dumate.cn?track=bdsy
+      - link "更多" [ref=f1e19] [cursor=pointer]:
+        - /url: http://www.baidu.com/more/
+    - generic [ref=f1e20]:
+      - generic [ref=f1e23]:
+        - link "上海 32°" [ref=f1e24] [cursor=pointer]:
+          - /url: //www.baidu.com/s?tn=baidutop10&rsv_idx=2&rsv_dl=iweather&wd=上海天气预报
+          - generic [ref=f1e25]:
+            - generic [ref=f1e26]: 上海
+            - generic [ref=f1e27]: 32°
+        - generic [ref=f1e29]: 优
+      - generic [ref=f1e33] [cursor=pointer]: 通知
+      - generic [ref=f1e37] [cursor=pointer]: 设置
+      - link "asmmlions" [ref=f1e38] [cursor=pointer]:
+        - /url: https://www.baidu.com/my/index
+  - generic [ref=f1e42]:
+    - generic [ref=f1e44]:
+      - generic [ref=f1e45]:
+        - generic:
+          - link "点击一下，了解更多":
+            - /url: //www.baidu.com/s?wd=%E7%99%BE%E5%BA%A6%E7%83%AD%E6%90%9C&sa=ire_dl_gh_logo_texing&rsv_dl=igh_logo_pc
+      - generic [ref=f1e51]:
+        - generic [ref=f1e54]:
+          - textbox "西湖大学报考分析" [ref=f1e56]
+          - button "百度一下" [ref=f1e83] [cursor=pointer]
+        - link "复杂问题就找文心助手，深入思考回答更优 " [ref=f1e87] [cursor=pointer]:
+          - /url: https://chat.baidu.com/search?extParams=%7B%22enter_type%22%3A%22home_operate%22%7D&isShowHello=1
+          - generic [ref=f1e89]:
+            - generic [ref=f1e90]: 复杂问题就找文心助手，深入思考回答更优
+            - generic [ref=f1e91]: 
+    - paragraph
+  - generic [ref=f1e97]:
+    - generic [ref=f1e98]: 常用应用
+    - generic [ref=f1e107]:
+      - generic [ref=f1e108]:
+        - link "百度热搜" [ref=f1e109] [cursor=pointer]:
+          - /url: https://top.baidu.com/board?platform=pc&sa=pcindex_entry
+          - generic "百度热搜" [ref=f1e110]: 
+        - generic [ref=f1e111] [cursor=pointer]:
+          - generic [ref=f1e112]: 
+          - text: 换一换
+      - list:
+        - listitem [ref=f1e113]:
+          - link " 推进基础教育扩优提质" [ref=f1e114] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E6%8E%A8%E8%BF%9B%E5%9F%BA%E7%A1%80%E6%95%99%E8%82%B2%E6%89%A9%E4%BC%98%E6%8F%90%E8%B4%A8&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e115]: 
+            - text: 推进基础教育扩优提质
+        - listitem [ref=f1e117]:
+          - link "5 邓煜得知获奖时在看恋爱向小说" [ref=f1e118] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E9%82%93%E7%85%9C%E5%BE%97%E7%9F%A5%E8%8E%B7%E5%A5%96%E6%97%B6%E5%9C%A8%E7%9C%8B%E6%81%8B%E7%88%B1%E5%90%91%E5%B0%8F%E8%AF%B4&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e119]: "5"
+            - text: 邓煜得知获奖时在看恋爱向小说
+          - generic [ref=f1e120]: 新
+        - listitem [ref=f1e121]:
+          - link "1 王虹13岁跳级上高中 16岁上北大" [ref=f1e122] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E7%8E%8B%E8%99%B913%E5%B2%81%E8%B7%B3%E7%BA%A7%E4%B8%8A%E9%AB%98%E4%B8%AD+16%E5%B2%81%E4%B8%8A%E5%8C%97%E5%A4%A7&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e123]: "1"
+            - text: 王虹13岁跳级上高中 16岁上北大
+          - generic [ref=f1e124]: 热
+        - listitem [ref=f1e125]:
+          - link "6 四预警齐发！台风红霞将登陆" [ref=f1e126] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E5%9B%9B%E9%A2%84%E8%AD%A6%E9%BD%90%E5%8F%91%EF%BC%81%E5%8F%B0%E9%A3%8E%E7%BA%A2%E9%9C%9E%E5%B0%86%E7%99%BB%E9%99%86&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e127]: "6"
+            - text: 四预警齐发！台风红霞将登陆
+        - listitem [ref=f1e129]:
+          - link "2 工龄有多值钱" [ref=f1e130] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E5%B7%A5%E9%BE%84%E6%9C%89%E5%A4%9A%E5%80%BC%E9%92%B1&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e131]: "2"
+            - text: 工龄有多值钱
+          - generic [ref=f1e132]: 热
+        - listitem [ref=f1e133]:
+          - link "7 赛里木湖景区回应工作人员殴打司机" [ref=f1e134] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E8%B5%9B%E9%87%8C%E6%9C%A8%E6%B9%96%E6%99%AF%E5%8C%BA%E5%9B%9E%E5%BA%94%E5%B7%A5%E4%BD%9C%E4%BA%BA%E5%91%98%E6%AE%B4%E6%89%93%E5%8F%B8%E6%9C%BA&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e135]: "7"
+            - text: 赛里木湖景区回应工作人员殴打司机
+          - generic [ref=f1e136]: 新
+        - listitem [ref=f1e137]:
+          - link "3 未来5年我们的出行将有新变化" [ref=f1e138] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E6%9C%AA%E6%9D%A55%E5%B9%B4%E6%88%91%E4%BB%AC%E7%9A%84%E5%87%BA%E8%A1%8C%E5%B0%86%E6%9C%89%E6%96%B0%E5%8F%98%E5%8C%96&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e139]: "3"
+            - text: 未来5年我们的出行将有新变化
+        - listitem [ref=f1e141]:
+          - link "8 马克龙打电话祝贺王虹获奖" [ref=f1e142] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E9%A9%AC%E5%85%8B%E9%BE%99%E6%89%93%E7%94%B5%E8%AF%9D%E7%A5%9D%E8%B4%BA%E7%8E%8B%E8%99%B9%E8%8E%B7%E5%A5%96&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e143]: "8"
+            - text: 马克龙打电话祝贺王虹获奖
+        - listitem [ref=f1e145]:
+          - link "4 韦东奕曾连续多天听王虹讲座" [ref=f1e146] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E9%9F%A6%E4%B8%9C%E5%A5%95%E6%9B%BE%E8%BF%9E%E7%BB%AD%E5%A4%9A%E5%A4%A9%E5%90%AC%E7%8E%8B%E8%99%B9%E8%AE%B2%E5%BA%A7&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e147]: "4"
+            - text: 韦东奕曾连续多天听王虹讲座
+          - generic [ref=f1e148]: 新
+        - listitem [ref=f1e149]:
+          - link "9 菲律宾 你到底想干什么" [ref=f1e150] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E8%8F%B2%E5%BE%8B%E5%AE%BE+%E4%BD%A0%E5%88%B0%E5%BA%95%E6%83%B3%E5%B9%B2%E4%BB%80%E4%B9%88&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=f1e151]: "9"
+            - text: 菲律宾 你到底想干什么
+  - generic [ref=f1e156]:
+    - paragraph [ref=f1e157]:
+      - link "关于百度" [ref=f1e158] [cursor=pointer]:
+        - /url: //home.baidu.com
+    - paragraph [ref=f1e159]:
+      - link "About Baidu" [ref=f1e160] [cursor=pointer]:
+        - /url: http://ir.baidu.com
+    - paragraph [ref=f1e161]:
+      - link "使用百度前必读" [ref=f1e162] [cursor=pointer]:
+        - /url: //www.baidu.com/duty
+    - paragraph [ref=f1e163]:
+      - link "帮助中心" [ref=f1e164] [cursor=pointer]:
+        - /url: https://help.baidu.com/question?prod_id=1
+    - paragraph [ref=f1e165]:
+      - link "企业推广" [ref=f1e166] [cursor=pointer]:
+        - /url: https://e.baidu.com/?refer=1271
+    - generic [ref=f1e167]: 
+    - generic [ref=f1e168]: 

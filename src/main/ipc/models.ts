@@ -111,6 +111,53 @@ import {
 const execFileAsync = promisify(execFile)
 
 const MAX_WORKTREES = 10
+const MAX_INLINE_DATA_URL_FILE_SIZE = 2 * 1024 * 1024
+
+function getDataUrlMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase()
+  switch (ext) {
+    case ".apng":
+      return "image/apng"
+    case ".avif":
+      return "image/avif"
+    case ".bmp":
+      return "image/bmp"
+    case ".gif":
+      return "image/gif"
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg"
+    case ".png":
+      return "image/png"
+    case ".svg":
+    case ".svgz":
+      return "image/svg+xml"
+    case ".webp":
+      return "image/webp"
+    case ".ico":
+      return "image/x-icon"
+    case ".woff":
+      return "font/woff"
+    case ".woff2":
+      return "font/woff2"
+    case ".ttf":
+      return "font/ttf"
+    case ".otf":
+      return "font/otf"
+    case ".eot":
+      return "application/vnd.ms-fontobject"
+    case ".json":
+      return "application/json"
+    case ".txt":
+      return "text/plain"
+    case ".csv":
+      return "text/csv"
+    case ".xml":
+      return "application/xml"
+    default:
+      return "application/octet-stream"
+  }
+}
 const GLOBAL_WORKSPACE_MUTATION_KEY = "\0global-workspace"
 const workspaceMutationGate = new LatestRequestGate()
 
@@ -6130,6 +6177,91 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         : {})
     }
   })
+
+  // Open native file picker for code files (关联代码 modal)
+  ipcMain.handle("file:select-code", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return { canceled: true, filePaths: [] }
+    const result = await dialog.showOpenDialog(win, {
+      properties: ["openFile", "multiSelections"],
+      title: "选择代码文件",
+      filters: [
+        { name: "代码文件", extensions: ["ts", "tsx", "js", "jsx", "css", "scss", "less", "py", "vue", "html", "json", "md", "txt", "yaml", "yml", "sh"] },
+        { name: "所有文件", extensions: ["*"] },
+      ]
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, filePaths: [] }
+    }
+    return { canceled: false, filePaths: result.filePaths }
+  })
+
+  ipcMain.handle("file:select-prototype-zip", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return { canceled: true, filePaths: [] }
+    const result = await dialog.showOpenDialog(win, {
+      properties: ["openFile"],
+      title: "选择 Pixso 原型图压缩包",
+      filters: [
+        { name: "ZIP 压缩包", extensions: ["zip"] },
+        { name: "所有文件", extensions: ["*"] },
+      ]
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true, filePaths: [] }
+    }
+    return { canceled: false, filePaths: result.filePaths }
+  })
+
+  // Read any file as plain UTF-8 text (for code context)
+  ipcMain.handle(
+    "file:read-text",
+    async (_event, filePath: string): Promise<{ success: boolean; filename?: string; content?: string; error?: string }> => {
+      try {
+        const fs = await import("fs/promises")
+        const path = await import("path")
+        const stat = await fs.stat(filePath)
+        if (stat.size > 5 * 1024 * 1024) {
+          return { success: false, error: "文件超过 5 MB 限制" }
+        }
+        const content = await fs.readFile(filePath, "utf-8")
+        const filename = path.basename(filePath)
+        return { success: true, filename, content }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "读取文件失败" }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "file:read-data-url",
+    async (_event, filePath: string): Promise<{ success: boolean; filename?: string; dataUrl?: string; size?: number; error?: string }> => {
+      try {
+        const fullPath = path.resolve(filePath)
+        const stat = await fs.stat(fullPath)
+        if (!stat.isFile()) {
+          return { success: false, error: "只能读取普通文件" }
+        }
+        if (stat.size > MAX_INLINE_DATA_URL_FILE_SIZE) {
+          return {
+            success: false,
+            error: `文件超过 ${(MAX_INLINE_DATA_URL_FILE_SIZE / 1024 / 1024).toFixed(0)} MB 内联限制`
+          }
+        }
+
+        const buffer = await fs.readFile(fullPath)
+        const mimeType = getDataUrlMimeType(fullPath)
+        return {
+          success: true,
+          filename: path.basename(fullPath),
+          dataUrl: `data:${mimeType};base64,${buffer.toString("base64")}`,
+          size: stat.size,
+        }
+      } catch (e) {
+        return { success: false, error: e instanceof Error ? e.message : "读取文件失败" }
+      }
+    }
+  )
 
   // Get supported file extensions
   ipcMain.handle("file:supportedExtensions", async () => {
