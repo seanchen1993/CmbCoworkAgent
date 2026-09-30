@@ -133,6 +133,11 @@ describe("TraceCollector completion", () => {
       expect(trace.stageUsage?.find((row) => row.nodeName === "dev")?.toolCalls).toBe(1)
       expect(trace.stageUsage?.find((row) => row.nodeName === "review")?.totalTokens).toBe(12)
       expect(trace.stageUsage?.find((row) => !row.nodeName)).toBeUndefined()
+      expect(trace.stageDurationComplete).toBe(true)
+      expect(trace.stageDuration?.map((row) => row.nodeName)).toEqual(["plan", "dev", "review"])
+      expect(trace.stageDuration?.reduce((sum, row) => sum + row.durationMs, 0)).toBe(
+        trace.durationMs
+      )
     }
   )
   it("retains call-stage totals through content truncation, cloud sanitization and child traces", async () => {
@@ -173,6 +178,8 @@ describe("TraceCollector completion", () => {
         }))
       )
       expect(sanitizeTraceForCloudUpload(trace).stageUsage).toEqual(trace.stageUsage)
+      expect(sanitizeTraceForCloudUpload(trace).stageDuration).toEqual(trace.stageDuration)
+      if (traceKind === "subagent") expect(trace.stageDuration).toBeUndefined()
       expect(getTraceStageUsage(tracer.getTraceContext().traceId)).toBeUndefined()
     }
   })

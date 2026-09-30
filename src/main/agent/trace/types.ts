@@ -572,6 +572,10 @@ export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   toolUsage?: Array<{ name: string; count: number }>
   /** Tool invocations, not the number of questions or submitted answers. */
   userInputRequestCount?: number
+  /** Root-turn elapsed time by observed project stage; each row is counted once per turn. */
+  stageDurationSchemaVersion?: 1
+  stageDurationComplete?: boolean
+  stageDuration?: Array<{ nodeName: string; durationMs: number }>
   /** How the run ended */
   outcome: TraceOutcome
   /** Any error message if outcome === 'error' */

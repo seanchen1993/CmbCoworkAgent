@@ -563,6 +563,7 @@ export interface DashboardProjectModeStageMetrics {
   totalDurationMs: number
   avgDurationMs: number
   p95DurationMs: number
+  p95Available?: boolean
   runCost: {
     toolCalls: number
     modelCalls: number
@@ -585,6 +586,7 @@ export interface DashboardProjectModeStageRow {
 }
 
 export interface DashboardProjectModeStageAnalysis {
+  durationAttribution?: { splitTurnCount: number; legacyTurnCount: number; truncated: boolean }
   costAttribution?: {
     callStartTraceCount: number
     turnStartTraceCount: number

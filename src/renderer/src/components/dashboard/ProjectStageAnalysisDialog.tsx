@@ -110,7 +110,12 @@ function StageRow({
           {fmtDuration(metrics.avgDurationMs)}
         </span>
       </td>
-      <td className="px-3 py-2 text-right tabular-nums">{fmtDuration(metrics.p95DurationMs)}</td>
+      <td
+        className="px-3 py-2 text-right tabular-nums"
+        title={metrics.p95Available === false ? "新旧统计口径混合，暂不显示 P95" : undefined}
+      >
+        {metrics.p95Available === false ? "—" : fmtDuration(metrics.p95DurationMs)}
+      </td>
       <td className="px-3 py-2 text-right tabular-nums">
         {fmtTokens(metrics.runCost.inputTokens)}
       </td>
@@ -121,7 +126,7 @@ function StageRow({
       <td className="px-3 py-2 text-right tabular-nums">{fmtCount(metrics.runCost.toolCalls)}</td>
       <td
         className="px-3 py-2 text-right tabular-nums"
-        title="request_user_input 工具调用次数；≥ 表示仅覆盖部分 Trace，— 表示没有完整采集数据"
+        title="向用户请求补充信息的次数；≥ 表示仅覆盖部分记录，— 表示没有完整记录"
       >
         {metrics.runCost.userInputRequestDocs >=
         (metrics.runCost.traceDocs ?? metrics.conversationCount)
@@ -162,22 +167,46 @@ export function ProjectStageAnalysisDialog({
         </DialogHeader>
 
         {/*
-          口径说明放在最显眼的位置，不折叠也不塞进 tooltip：这里的耗时是 Agent 忙碌
-          时长，不是阶段的墙钟周期，两者能差一个数量级，读错了结论就反了。
+          口径说明放在最显眼的位置，不折叠也不塞进 tooltip：每轮从发起到结束的
+          耗时不是阶段从进入到退出的自然历时，读错了就会得出错误结论。
         */}
         <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-          耗时统计的是 <span className="font-medium text-foreground">Agent 实际工作时长</span>
-          （每轮对话从发起到结束），
-          <strong className="font-bold text-foreground">按该轮开始时特性所处的阶段归属</strong>。
-          轮次和耗时只统计主动触发的主 Agent 会话；工具、模型调用与 Token 包含同范围内所有主、子
-          Agent。开销按各次调用开始时的阶段归属，无法确定的归入未归因；历史或不完整采集仍按该轮开始阶段归属。
+          <div>
+            <span className="font-medium text-foreground">轮次与耗时：</span>
+            只统计主动触发的主 Agent 会话。每轮从发起到结束的耗时按期间观察到的阶段变化拆分。
+            <strong className="font-bold text-foreground">
+              一轮经过多个阶段时，每个阶段各计 1 轮
+            </strong>
+            ，因此阶段轮次相加可能大于项目总轮次。旧记录仍按该轮开始时的阶段归属。
+            这里统计的是会话工作时间，不是阶段从进入到退出的历时。
+          </div>
+          <div className="mt-1">
+            <span className="font-medium text-foreground">调用与 Token：</span>
+            汇总同一项目和时间范围内主、子 Agent 的调用。完整记录按每次调用开始时的阶段归属；
+            历史或未完整记录按该轮开始时的阶段归属；无法确定阶段的计入「未归因」。Token
+            只汇总模型已上报的用量。
+          </div>
+          <div className="mt-1">
+            <span className="font-medium text-foreground">请求输入：</span>
+            统计向用户请求补充信息的次数；「≥」表示仅覆盖部分记录，「—」表示没有可用的完整记录。
+          </div>
           {analysis?.costAttribution && (
             <div className="mt-1">
-              调用阶段统计覆盖 {fmtCount(analysis.costAttribution.callStartTraceCount)} 条 Trace；
-              按轮次开始阶段统计 {fmtCount(analysis.costAttribution.turnStartTraceCount)} 条。
-              {analysis.costAttribution.tokenUsageReportedCalls < analysis.costAttribution.modelCalls &&
-                " 部分模型调用未完整返回 Token 用量，Token 仅汇总已上报部分。"}
-              {analysis.costAttribution.truncated && " 阶段数量超出展示上限，以下阶段合计可能小于项目总计。"}
+              阶段归因覆盖：按调用开始阶段统计{" "}
+              {fmtCount(analysis.costAttribution.callStartTraceCount)} 条记录； 按整轮开始阶段统计{" "}
+              {fmtCount(analysis.costAttribution.turnStartTraceCount)} 条记录。
+              {analysis.costAttribution.tokenUsageReportedCalls <
+                analysis.costAttribution.modelCalls && " 部分模型调用未返回 Token 用量。"}
+              {analysis.costAttribution.truncated &&
+                " 阶段数量超出展示上限，以下阶段合计可能小于项目总计。"}
+            </div>
+          )}
+          {analysis?.durationAttribution && (
+            <div className="mt-1">
+              轮次与耗时覆盖：按阶段变化拆分 {fmtCount(analysis.durationAttribution.splitTurnCount)}{" "}
+              轮； 按开始阶段统计 {fmtCount(analysis.durationAttribution.legacyTurnCount)} 轮。
+              {analysis.durationAttribution.truncated &&
+                " 阶段数量超出展示上限，阶段合计可能小于项目总计。"}
             </div>
           )}
         </div>
@@ -257,10 +286,7 @@ export function ProjectStageAnalysisDialog({
                     >
                       输入 Token
                     </th>
-                    <th
-                      className="px-3 py-2 text-right font-medium"
-                      title="模型上报的输出 Token"
-                    >
+                    <th className="px-3 py-2 text-right font-medium" title="模型上报的输出 Token">
                       输出 Token
                     </th>
                     <th className="px-3 py-2 text-right font-medium">模型调用</th>
