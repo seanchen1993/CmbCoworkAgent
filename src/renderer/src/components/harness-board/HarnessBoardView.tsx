@@ -85,7 +85,9 @@ import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
 import { ThreadForkCheckpointDialog } from "@/components/sidebar/ThreadForkCheckpointDialog"
 import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteDialog"
-import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
+import { KnowledgeBaseSelector } from "@/components/harness-board/KnowledgeBaseSelector"
+import { KnowledgeBaseSyncPanel } from "@/components/harness-board/KnowledgeBaseSyncPanel"
+import { useKnowledgeBases } from "@/components/harness-board/useKnowledgeBases"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ArtifactAccumulationButton } from "./ArtifactAccumulationButton"
 import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
@@ -181,6 +183,7 @@ import {
   type HarnessSessionWorkspace,
   type ManagedRunViewStatus
 } from "../../../../shared/harness-board-types"
+import type { KnowledgeBaseListResult } from "../../../../shared/knowledge-base-types"
 import {
   HARNESS_PROJECT_DETAIL_BATCH_SIZE,
   MAX_HARNESS_PROJECT_DETAIL_CACHE_ENTRIES,
@@ -310,7 +313,8 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
     description: "",
     systemId: "",
     systemName: "",
-    workspacePath: ""
+    workspacePath: "",
+    knowledgeBaseIds: []
   }
 }
 
@@ -717,6 +721,7 @@ function makeDeletedProjectSidebarItem(
     systemId: "",
     systemName: "",
     workspacePath: "",
+    knowledgeBaseIds: [],
     harnessAdapter: {
       id: "",
       name: "",
@@ -1004,7 +1009,8 @@ function toProjectMetadataForm(project: HarnessProjectListItem): HarnessProjectM
     description: project.description,
     systemId: project.systemId,
     systemName: project.systemName,
-    workspacePath: project.workspacePath
+    workspacePath: project.workspacePath,
+    knowledgeBaseIds: project.knowledgeBaseIds
   }
 }
 
@@ -2852,6 +2858,7 @@ function ProjectFormDialog({
   creating,
   form,
   registry,
+  knowledgeBases,
   installingPluginNames,
   error,
   verification,
@@ -2865,6 +2872,7 @@ function ProjectFormDialog({
   creating: boolean
   form: HarnessProjectCreateInput
   registry: ProjectModeAdapterItem[]
+  knowledgeBases: KnowledgeBaseListResult | null
   installingPluginNames: Set<string>
   error: string | null
   verification: EnterpriseProjectCodeVerification
@@ -3035,6 +3043,16 @@ function ProjectFormDialog({
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
               </label>
+              <KnowledgeBaseSelector
+                items={knowledgeBases?.knowledgeBases ?? []}
+                selectedIds={form.knowledgeBaseIds ?? []}
+                supportsKnowledgeBaseContext={
+                  selectedAdapter?.supportsKnowledgeBaseContext === true
+                }
+                disabled={creating}
+                portalContainer={dialogPortalContainer}
+                onChange={(knowledgeBaseIds) => onChange({ ...form, knowledgeBaseIds })}
+              />
               <ProjectWorkspaceField
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
@@ -3090,6 +3108,7 @@ function ProjectEditDialog({
   saving,
   form,
   registry,
+  knowledgeBases,
   installingPluginNames,
   error,
   verification,
@@ -3102,6 +3121,7 @@ function ProjectEditDialog({
   saving: boolean
   form: HarnessProjectMetadataUpdateInput
   registry: ProjectModeAdapterItem[]
+  knowledgeBases: KnowledgeBaseListResult | null
   installingPluginNames: Set<string>
   error: string | null
   verification: EnterpriseProjectCodeVerification
@@ -3250,6 +3270,16 @@ function ProjectEditDialog({
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
               </label>
+              <KnowledgeBaseSelector
+                items={knowledgeBases?.knowledgeBases ?? []}
+                selectedIds={form.knowledgeBaseIds ?? []}
+                supportsKnowledgeBaseContext={
+                  selectedAdapter?.supportsKnowledgeBaseContext === true
+                }
+                disabled={saving}
+                portalContainer={dialogPortalContainer}
+                onChange={(knowledgeBaseIds) => onChange({ ...form, knowledgeBaseIds })}
+              />
               <ProjectWorkspaceField
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
@@ -3533,8 +3563,6 @@ function FeatureCreateDialog({
   selectedWorkflowNodeIds,
   agentsReadyDeployUnits,
   localAgentmdDeployUnitMappings,
-  publicConstraintsSyncAvailable,
-  syncingPublicConstraints,
   rows,
   deployUnitMappingsLoading,
   selectedDeployUnitIds,
@@ -3546,7 +3574,6 @@ function FeatureCreateDialog({
   onWorkflowNodeToggle,
   onDeployUnitToggle,
   onOpenDeployUnitSettings,
-  onSyncPublicConstraints,
   onSubmit
 }: {
   workspace: HarnessSessionWorkspace
@@ -3562,8 +3589,6 @@ function FeatureCreateDialog({
   selectedWorkflowNodeIds: Set<string>
   agentsReadyDeployUnits: string[]
   localAgentmdDeployUnitMappings: string[]
-  publicConstraintsSyncAvailable: boolean
-  syncingPublicConstraints: boolean
   rows: HarnessDeployUnitMapping[]
   deployUnitMappingsLoading: boolean
   selectedDeployUnitIds: Set<string>
@@ -3575,7 +3600,6 @@ function FeatureCreateDialog({
   onWorkflowNodeToggle: (nodeId: string, checked: boolean) => void
   onDeployUnitToggle: (deployUnitIdMapping: string, checked: boolean) => void
   onOpenDeployUnitSettings: () => void
-  onSyncPublicConstraints: () => void
   onSubmit: () => void
 }): React.JSX.Element {
   const [pathPickerId, setPathPickerId] = useState<string | null>(null)
@@ -3683,19 +3707,6 @@ function FeatureCreateDialog({
           >
             管理发布单元
           </Button>
-          {publicConstraintsSyncAvailable && (
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              className="h-auto min-w-0 px-0 py-0 text-xs"
-              disabled={syncingPublicConstraints || creating}
-              onClick={onSyncPublicConstraints}
-            >
-              {syncingPublicConstraints && <Loader2 className="mr-1 size-3 animate-spin" />}
-              拉取最新公共系统约束
-            </Button>
-          )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <div className="text-xs text-muted-foreground">已选择 {selectedDeployUnitCount} 个发布单元</div>
@@ -3908,7 +3919,7 @@ function FeatureCreateDialog({
           className="grid min-h-0 min-w-0 gap-4 overflow-x-hidden overflow-y-auto py-1"
           onSubmit={(event) => {
             event.preventDefault()
-            if (syncingPublicConstraints || !workspacePath.trim()) return
+            if (!workspacePath.trim()) return
             onSubmit()
           }}
         >
@@ -4020,7 +4031,6 @@ function FeatureCreateDialog({
               type="submit"
               disabled={
                 creating ||
-                syncingPublicConstraints ||
                 (!editing && workflowLoading) ||
                 !featureName.trim() ||
                 !workspacePath.trim() ||
@@ -5825,188 +5835,6 @@ function ProjectReviewSummary({
   )
 }
 
-function ProjectConstraintSyncPanel({
-  registry,
-  hasMore,
-  loadingMore,
-  syncingAdapterIds,
-  syncedPaths,
-  expandedAdapterIds,
-  knowledgePreviews,
-  loadingKnowledgePreviewAdapterIds,
-  selectedKnowledgePreviewPaths,
-  onSync,
-  onToggleKnowledgePreview,
-  onRefreshKnowledgePreview,
-  onSelectKnowledgePreviewPath,
-  onLoadMore
-}: {
-  registry: HarnessAdapterRegistryItem[]
-  hasMore: boolean
-  loadingMore: boolean
-  syncingAdapterIds: Set<string>
-  syncedPaths: Record<string, string>
-  expandedAdapterIds: Set<string>
-  knowledgePreviews: Record<string, HarnessKnowledgePreviewResult>
-  loadingKnowledgePreviewAdapterIds: Set<string>
-  selectedKnowledgePreviewPaths: Record<string, string | null>
-  onSync: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
-  onToggleKnowledgePreview: (adapter: HarnessAdapterRegistryItem) => void
-  onRefreshKnowledgePreview: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
-  onSelectKnowledgePreviewPath: (adapter: HarnessAdapterRegistryItem, path: string | null) => void
-  onLoadMore: () => void
-}): React.JSX.Element {
-  const adapters = registry.filter((adapter) => adapter.boardCompatibility.compatible)
-
-  return (
-    <section className="rounded-md border border-border bg-background shadow-sm">
-      <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h2 className="text-sm font-semibold text-foreground">拉取公共系统约束</h2>
-        <Button
-          type="button"
-          variant="link"
-          size="sm"
-          className="h-auto min-w-0 px-0 py-0 text-xs"
-          onClick={() => {
-            void window.electron.openManagedLink("knowledgeGuide")
-          }}
-        >
-          知识库使用指引
-        </Button>
-      </div>
-      <div className="space-y-3 p-4">
-        {adapters.length === 0 ? (
-          <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
-            暂无支持项目模式的插件。
-          </div>
-        ) : (
-          <>
-            {adapters.map((adapter) => {
-              const syncing = syncingAdapterIds.has(adapter.id)
-              const disabled = syncing || !adapter.pullKnowledgeAvailable
-              const syncedPath = syncedPaths[adapter.id]
-              const expanded = expandedAdapterIds.has(adapter.id)
-              return (
-                <div
-                  key={adapter.id}
-                  className="min-w-0 rounded-md border border-border bg-muted/20 px-4 py-3"
-                >
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={expanded}
-                    className="flex min-w-0 cursor-pointer items-center justify-between gap-4 rounded-sm outline-none transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring"
-                    onClick={() => onToggleKnowledgePreview(adapter)}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter" && event.key !== " ") return
-                      event.preventDefault()
-                      onToggleKnowledgePreview(adapter)
-                    }}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <AdapterOptionHeader adapter={adapter} />
-                        {adapter.useScenario && (
-                          <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                            {adapter.useScenario}
-                          </span>
-                        )}
-                      </div>
-                      <AdapterPublisherInfo adapter={adapter} className="mt-1" />
-                      {adapter.description && (
-                        <div
-                          className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground"
-                          title={adapter.description}
-                        >
-                          {adapter.description}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      {syncedPath && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          title={syncedPath}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            void openPathInFileManager(syncedPath, "无法打开项目约束目录")
-                          }}
-                        >
-                          <FolderOpen className="size-3.5" />
-                        </Button>
-                      )}
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        title={expanded ? "收起知识库预览" : "展开知识库预览"}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          onToggleKnowledgePreview(adapter)
-                        }}
-                      >
-                        {expanded ? (
-                          <ChevronDown className="size-3.5" />
-                        ) : (
-                          <ChevronRight className="size-3.5" />
-                        )}
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="gap-2"
-                        disabled={disabled}
-                        title={
-                          adapter.pullKnowledgeAvailable
-                            ? "拉取最新公共系统约束"
-                            : "插件未配置 pull_knowledge"
-                        }
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          void onSync(adapter)
-                        }}
-                      >
-                        {syncing ? (
-                          <Loader2 className="size-4 animate-spin" />
-                        ) : (
-                          <RefreshCw className="size-4" />
-                        )}
-                        拉取最新约束
-                      </Button>
-                    </div>
-                  </div>
-                  {expanded && (
-                    <KnowledgePreviewPanel
-                      preview={knowledgePreviews[adapter.id] ?? null}
-                      loading={loadingKnowledgePreviewAdapterIds.has(adapter.id)}
-                      selectedPath={selectedKnowledgePreviewPaths[adapter.id] ?? null}
-                      onSelectPath={(path) => onSelectKnowledgePreviewPath(adapter, path)}
-                      onRefresh={() => onRefreshKnowledgePreview(adapter)}
-                    />
-                  )}
-                </div>
-              )
-            })}
-            {hasMore && (
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full"
-                disabled={loadingMore}
-                onClick={onLoadMore}
-              >
-                {loadingMore && <Loader2 className="mr-2 size-4 animate-spin" />}
-                加载更多插件
-              </Button>
-            )}
-          </>
-        )}
-      </div>
-    </section>
-  )
-}
 
 function ProjectDetailPage({
   project,
@@ -6018,6 +5846,8 @@ function ProjectDetailPage({
   loading,
   creatingFeature,
   creatingSystemConstraintUpdate,
+  knowledgeSyncing,
+  knowledgeWriteAvailable,
   leanToken,
   leanTokenLoading,
   onBackToList,
@@ -6038,6 +5868,8 @@ function ProjectDetailPage({
   loading: boolean
   creatingFeature: boolean
   creatingSystemConstraintUpdate: boolean
+  knowledgeSyncing: boolean
+  knowledgeWriteAvailable?: boolean
   leanToken: string
   leanTokenLoading: boolean
   onBackToList: () => void
@@ -6063,7 +5895,10 @@ function ProjectDetailPage({
   const projectRootPath = resolveProjectRootPath(project)
   const hasProjectCode = project.projectCode.trim().length > 0
   const hasLeanToken = leanToken.trim().length > 0
-  const canOpenSystemConstraintUpdate = hasProjectCode && hasLeanToken && !leanTokenLoading
+  const hasKnowledgePath =
+    knowledgeWriteAvailable ?? Boolean(detail?.systemConstraintUpdate?.knowledgePath)
+  const canOpenSystemConstraintUpdate =
+    hasProjectCode && hasLeanToken && !leanTokenLoading && hasKnowledgePath && !knowledgeSyncing
   const openProjectWorkspaceInFileManager = useCallback((): void => {
     void openPathInFileManager(projectRootPath, "无法打开项目工作区")
   }, [projectRootPath])
@@ -6106,13 +5941,19 @@ function ProjectDetailPage({
                     </span>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" sideOffset={6}>
-                    {!hasProjectCode
-                      ? "请先编辑项目信息，填写项目编号"
-                      : !hasLeanToken
-                        ? "请先配置精益平台token"
-                        : leanTokenLoading
-                          ? "正在加载配置..."
-                          : "沉淀本项目的变更，更新知识库"}
+                    {knowledgeSyncing
+                      ? "知识库正在同步，请稍后再运行沉淀任务"
+                      : !hasProjectCode
+                        ? "请先编辑项目信息，填写项目编号"
+                        : !hasKnowledgePath
+                          ? project.knowledgeBaseIds.length === 0
+                            ? "请先在项目设置中配置知识库"
+                            : "知识沉淀工作区不可用，请前往公共系统约束 Tab 下载或处理"
+                          : !hasLeanToken
+                            ? "请先配置精益平台token"
+                            : leanTokenLoading
+                              ? "正在加载配置..."
+                              : "沉淀本项目的变更，更新知识库"}
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -8643,8 +8484,7 @@ export function HarnessBoardView({
   const [projectPageCursor, setProjectPageCursor] = useState(0)
   const [projectPageHistory, setProjectPageHistory] = useState<number[]>([0])
   const [projectNextCursor, setProjectNextCursor] = useState<number | null>(null)
-  const [registryNextCursor, setRegistryNextCursor] = useState<number | null>(null)
-  const [loadingMoreRegistry, setLoadingMoreRegistry] = useState(false)
+  const [, setRegistryNextCursor] = useState<number | null>(null)
   const [catalogSummary, setCatalogSummary] = useState<HarnessBoardCatalogPageResult["summary"]>({
     totalProjects: initialCatalogSnapshot?.projects.length ?? 0,
     matchedProjects: initialCatalogSnapshot?.projects.length ?? 0,
@@ -8722,12 +8562,18 @@ export function HarnessBoardView({
     useState<string[]>([])
   const [selectedDeployUnitIds, setSelectedDeployUnitIds] = useState<Set<string>>(new Set())
   const [projectModeTab, setProjectModeTab] = useState("projects")
-  const [syncingProjectConstraintAdapterIds, setSyncingProjectConstraintAdapterIds] = useState<
-    Set<string>
-  >(new Set())
-  const [syncedProjectConstraintPaths, setSyncedProjectConstraintPaths] = useState<
-    Record<string, string>
-  >({})
+  const {
+    result: knowledgeBaseResult,
+    loading: knowledgeBaseLoading,
+    load: loadKnowledgeBases
+  } = useKnowledgeBases(
+    projectModeTab === "constraint-sync" ||
+      dialogOpen ||
+      editingProject !== null ||
+      selectedProjectId !== null,
+    cleanIpcError
+  )
+  const [syncingKnowledgeBaseIds, setSyncingKnowledgeBaseIds] = useState<Set<string>>(new Set())
   const [expandedKnowledgePreviewAdapterIds, setExpandedKnowledgePreviewAdapterIds] = useState<
     Set<string>
   >(new Set())
@@ -9217,18 +9063,15 @@ export function HarnessBoardView({
     ]
   )
 
-  const loadKnowledgePreview = useCallback(
-    async (adapter: HarnessAdapterRegistryItem): Promise<void> => {
-      if (loadingKnowledgePreviewAdapterIds.has(adapter.id)) return
-
-      setLoadingKnowledgePreviewAdapterIds((current) => new Set(current).add(adapter.id))
+  const loadKnowledgeBasePreview = useCallback(
+    async (idKey: string): Promise<void> => {
+      if (loadingKnowledgePreviewAdapterIds.has(idKey)) return
+      setLoadingKnowledgePreviewAdapterIds((current) => new Set(current).add(idKey))
       try {
-        const preview = await window.api.harnessBoard.getKnowledgePreview(adapter.id)
-        if (!boardMountedRef.current) return
-        setKnowledgePreviewsByAdapterId((current) => ({
-          ...current,
-          [adapter.id]: preview
-        }))
+        const preview = await window.api.harnessBoard.getKnowledgePreview(idKey)
+        if (boardMountedRef.current) {
+          setKnowledgePreviewsByAdapterId((current) => ({ ...current, [idKey]: preview }))
+        }
       } catch (error) {
         const message = cleanIpcError(error)
         if (boardMountedRef.current && !/superseded|cancelled|aborted/i.test(message)) {
@@ -9238,7 +9081,7 @@ export function HarnessBoardView({
         if (boardMountedRef.current) {
           setLoadingKnowledgePreviewAdapterIds((current) => {
             const next = new Set(current)
-            next.delete(adapter.id)
+            next.delete(idKey)
             return next
           })
         }
@@ -9247,76 +9090,53 @@ export function HarnessBoardView({
     [loadingKnowledgePreviewAdapterIds]
   )
 
-  const handleToggleKnowledgePreview = useCallback(
-    (adapter: HarnessAdapterRegistryItem): void => {
-      const expanded = expandedKnowledgePreviewAdapterIds.has(adapter.id)
+  const handleToggleKnowledgeBasePreview = useCallback(
+    (idKey: string): void => {
+      const expanded = expandedKnowledgePreviewAdapterIds.has(idKey)
       setExpandedKnowledgePreviewAdapterIds((current) => {
         const next = new Set(current)
-        if (expanded) {
-          next.delete(adapter.id)
-        } else {
-          next.add(adapter.id)
-        }
+        if (expanded) next.delete(idKey)
+        else next.add(idKey)
         return next
       })
-
-      if (!expanded && !knowledgePreviewsByAdapterId[adapter.id]) {
-        void loadKnowledgePreview(adapter)
+      if (!expanded && !knowledgePreviewsByAdapterId[idKey]) {
+        void loadKnowledgeBasePreview(idKey)
       }
     },
-    [expandedKnowledgePreviewAdapterIds, knowledgePreviewsByAdapterId, loadKnowledgePreview]
+    [expandedKnowledgePreviewAdapterIds, knowledgePreviewsByAdapterId, loadKnowledgeBasePreview]
   )
 
-  const handleSelectKnowledgePreviewPath = useCallback(
-    (adapter: HarnessAdapterRegistryItem, path: string | null): void => {
-      setSelectedKnowledgePreviewPaths((current) => ({
-        ...current,
-        [adapter.id]: path
-      }))
-    },
-    []
-  )
-
-  const syncProjectConstraints = useCallback(
-    async (adapter: HarnessAdapterRegistryItem): Promise<boolean> => {
-      if (!adapter.pullKnowledgeAvailable) return false
-      if (syncingProjectConstraintAdapterIds.has(adapter.id)) return false
-
-      setSyncingProjectConstraintAdapterIds((current) => new Set(current).add(adapter.id))
+  const handleSyncKnowledgeBase = useCallback(
+    async (idKey: string): Promise<void> => {
+      if (syncingKnowledgeBaseIds.has(idKey)) return
+      setSyncingKnowledgeBaseIds((current) => new Set(current).add(idKey))
       try {
-        const result = await window.api.harnessBoard.syncProjectConstraints(adapter.id)
-        const syncedPath = result.path
-        if (syncedPath) {
-          setSyncedProjectConstraintPaths((current) => ({
-            ...current,
-            [adapter.id]: syncedPath
-          }))
-        }
-        toast.success(result.message || `已更新「${adapter.name}」项目约束`)
-        return true
+        const result = await window.api.harnessBoard.syncKnowledgeBase(idKey)
+        if (result.status === "failed") toast.error(result.message)
+        else if (result.status === "paused" || result.status === "partial")
+          toast.warning(result.message)
+        else toast.success(result.message)
       } catch (error) {
         toast.error(cleanIpcError(error))
-        return false
+        return
       } finally {
-        setSyncingProjectConstraintAdapterIds((current) => {
+        setSyncingKnowledgeBaseIds((current) => {
           const next = new Set(current)
-          next.delete(adapter.id)
+          next.delete(idKey)
           return next
         })
+        await loadKnowledgeBases()
+      }
+      if (expandedKnowledgePreviewAdapterIds.has(idKey)) {
+        void loadKnowledgeBasePreview(idKey)
       }
     },
-    [syncingProjectConstraintAdapterIds]
-  )
-
-  const handleSyncProjectConstraints = useCallback(
-    async (adapter: HarnessAdapterRegistryItem): Promise<void> => {
-      const synced = await syncProjectConstraints(adapter)
-      if (!synced) return
-
-      setExpandedKnowledgePreviewAdapterIds((current) => new Set(current).add(adapter.id))
-      await loadKnowledgePreview(adapter)
-    },
-    [loadKnowledgePreview, syncProjectConstraints]
+    [
+      expandedKnowledgePreviewAdapterIds,
+      loadKnowledgeBasePreview,
+      loadKnowledgeBases,
+      syncingKnowledgeBaseIds
+    ]
   )
 
   const refreshFeaturePublicConstraints = useCallback(
@@ -9333,37 +9153,6 @@ export function HarnessBoardView({
     },
     []
   )
-
-  const findAdapterForProject = useCallback(
-    (project: HarnessProjectListItem): HarnessAdapterRegistryItem | null => {
-      return (
-        adapterRegistry.find(
-          (adapter) =>
-            adapter.id === project.harnessAdapter.id || adapter.name === project.harnessAdapter.name
-        ) ?? null
-      )
-    },
-    [adapterRegistry]
-  )
-
-  const handleSyncFeaturePublicConstraints = useCallback(async (): Promise<void> => {
-    const project = featureDialogProject
-    if (!project) return
-    const adapter = findAdapterForProject(project)
-    if (!adapter?.pullKnowledgeAvailable) {
-      toast.error("当前插件不支持同步公共约束")
-      return
-    }
-    const synced = await syncProjectConstraints(adapter)
-    if (synced) {
-      await refreshFeaturePublicConstraints(project.projectId, featureWorkflowRequestIdRef.current)
-    }
-  }, [
-    featureDialogProject,
-    findAdapterForProject,
-    refreshFeaturePublicConstraints,
-    syncProjectConstraints
-  ])
 
   const loadProjectDetail = useCallback(
     async (
@@ -9669,29 +9458,6 @@ export function HarnessBoardView({
       active = false
     }
   }, [])
-
-  const loadMoreRegistry = useCallback(async (): Promise<void> => {
-    if (registryNextCursor === null || loadingMoreRegistry) return
-    setLoadingMoreRegistry(true)
-    try {
-      const page = await window.api.harnessBoard.catalogPage({
-        requestScope: "board-registry",
-        includeProjects: false,
-        registryCursor: registryNextCursor,
-        registryLimit: 64
-      })
-      setAdapterRegistry((current) => {
-        const byId = new Map(current.map((adapter) => [adapter.id, adapter]))
-        for (const adapter of page.registry) byId.set(adapter.id, adapter)
-        return Array.from(byId.values())
-      })
-      setRegistryNextCursor(page.registryNextCursor)
-    } catch (error) {
-      setLoadError(cleanIpcError(error))
-    } finally {
-      setLoadingMoreRegistry(false)
-    }
-  }, [loadingMoreRegistry, registryNextCursor])
 
   useEffect(() => {
     boardMountedRef.current = true
@@ -11132,37 +10898,6 @@ export function HarnessBoardView({
         const response = await installMarketPluginUpdate(updateInfo.item)
         if (response.success) {
           bumpPluginVersion()
-          try {
-            const refreshedRegistry = (
-              await window.api.harnessBoard.catalogPage({
-                requestScope: "board-registry",
-                includeProjects: false,
-                registryLimit: 64,
-                query: project.harnessAdapter.name
-              })
-            ).registry
-            const adapterNameCandidates = new Set(
-              [
-                project.harnessAdapter.name,
-                updateInfo.itemName,
-                updateInfo.item.name,
-                updateInfo.item.id,
-                updateInfo.item.chinese_name
-              ]
-                .map((value) => normalizeAdapterMarketName(value))
-                .filter(Boolean)
-            )
-            const updatedAdapter = refreshedRegistry.find(
-              (adapter) =>
-                adapterNameCandidates.has(normalizeAdapterMarketName(adapter.name)) ||
-                adapterNameCandidates.has(normalizeAdapterMarketName(adapter.id))
-            )
-            if (updatedAdapter?.pullKnowledgeAvailable) {
-              await syncProjectConstraints(updatedAdapter)
-            }
-          } catch (syncError) {
-            toast.error(`插件已更新，但自动拉取公共系统约束失败：${cleanIpcError(syncError)}`)
-          }
           toast.success(
             `已为您更新并安装「${updateInfo.itemName}」到插件，请新开一个会话试试效果。`
           )
@@ -11179,7 +10914,7 @@ export function HarnessBoardView({
         })
       }
     },
-    [bumpPluginVersion, syncProjectConstraints, updatingPluginNames]
+    [bumpPluginVersion, updatingPluginNames]
   )
 
   const openFeatureDetail = useCallback(
@@ -11251,9 +10986,13 @@ export function HarnessBoardView({
         return
       setCreatingProjectSessionProjectId(knowledgeDialogProject.projectId)
       try {
+        const workspace = await window.api.harnessBoard.prepareKnowledgeDeposition(
+          knowledgeDialogProject.projectId
+        )
+        if (workspace.warning) toast.warning(workspace.warning)
         const thread = await createThread(
           {
-            workspacePath: knowledgeDialogConfig.knowledgePath ?? null,
+            workspacePath: workspace.path,
             disableAgentsPrompt: true,
             harnessProjectSession: {
               projectId: knowledgeDialogProject.projectId,
@@ -11925,14 +11664,6 @@ export function HarnessBoardView({
   const fallbackFeatureSummary = selectedFeatureProjectDetail?.runs.find(
     (run) => run.slug === selectedFeature?.slug
   )
-  const featureDialogAdapter = useMemo(
-    () => (featureDialogProject ? findAdapterForProject(featureDialogProject) : null),
-    [featureDialogProject, findAdapterForProject]
-  )
-  const featurePublicConstraintsSyncing = featureDialogAdapter
-    ? syncingProjectConstraintAdapterIds.has(featureDialogAdapter.id)
-    : false
-
   useEffect(() => {
     if (selectedFeature) return
     onActiveSessionThreadChange?.(selectedProjectSession?.threadId ?? null)
@@ -11975,8 +11706,6 @@ export function HarnessBoardView({
           selectedWorkflowNodeIds={selectedWorkflowNodeIds}
           agentsReadyDeployUnits={featureAgentsReadyDeployUnits}
           localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
-          publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
-          syncingPublicConstraints={featurePublicConstraintsSyncing}
           rows={featureMappings}
           catalogUnits={deployUnitMappings}
           workspace={featureWorkspace}
@@ -11992,7 +11721,6 @@ export function HarnessBoardView({
           onWorkflowNodeToggle={handleWorkflowNodeToggle}
           onDeployUnitToggle={handleDeployUnitToggle}
           onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
-          onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
           onSubmit={handleSubmitFeatureDialog}
         />
         {sidebarDeleteDialog}
@@ -12033,6 +11761,22 @@ export function HarnessBoardView({
           creatingSystemConstraintUpdate={
             creatingProjectSessionProjectId === selectedProject.projectId
           }
+          knowledgeWriteAvailable={
+            knowledgeBaseResult
+              ? knowledgeBaseResult.knowledgeBases.some(
+                  (item) =>
+                    selectedProject.knowledgeBaseIds.includes(item.idKey) &&
+                    item.workspaces.some(
+                      (workspace) => workspace.role === "write" && workspace.localValid
+                    )
+                )
+              : undefined
+          }
+          knowledgeSyncing={
+            knowledgeBaseResult?.writeSyncingIds.some((id) =>
+              selectedProject.knowledgeBaseIds.includes(id)
+            ) === true
+          }
           leanToken={leanTokenConfig.leanToken}
           leanTokenLoading={leanTokenLoading}
           onBackToList={handleBackToProjectList}
@@ -12058,8 +11802,6 @@ export function HarnessBoardView({
           selectedWorkflowNodeIds={selectedWorkflowNodeIds}
           agentsReadyDeployUnits={featureAgentsReadyDeployUnits}
           localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
-          publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
-          syncingPublicConstraints={featurePublicConstraintsSyncing}
           rows={featureMappings}
           catalogUnits={deployUnitMappings}
           workspace={featureWorkspace}
@@ -12075,7 +11817,6 @@ export function HarnessBoardView({
           onWorkflowNodeToggle={handleWorkflowNodeToggle}
           onDeployUnitToggle={handleDeployUnitToggle}
           onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
-          onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
           onSubmit={handleSubmitFeatureDialog}
         />
         <ProjectEditDialog
@@ -12083,6 +11824,7 @@ export function HarnessBoardView({
           saving={savingEdit}
           form={editForm}
           registry={projectDialogAdapterRegistry}
+          knowledgeBases={knowledgeBaseResult}
           installingPluginNames={updatingPluginNames}
           error={editError}
           verification={editProjectVerification}
@@ -12361,21 +12103,22 @@ export function HarnessBoardView({
             </TabsContent>
 
             <TabsContent value="constraint-sync" className="mt-0">
-              <ProjectConstraintSyncPanel
-                registry={adapterRegistry}
-                hasMore={registryNextCursor !== null}
-                loadingMore={loadingMoreRegistry}
-                syncingAdapterIds={syncingProjectConstraintAdapterIds}
-                syncedPaths={syncedProjectConstraintPaths}
-                expandedAdapterIds={expandedKnowledgePreviewAdapterIds}
-                knowledgePreviews={knowledgePreviewsByAdapterId}
-                loadingKnowledgePreviewAdapterIds={loadingKnowledgePreviewAdapterIds}
-                selectedKnowledgePreviewPaths={selectedKnowledgePreviewPaths}
-                onSync={handleSyncProjectConstraints}
-                onToggleKnowledgePreview={handleToggleKnowledgePreview}
-                onRefreshKnowledgePreview={loadKnowledgePreview}
-                onSelectKnowledgePreviewPath={handleSelectKnowledgePreviewPath}
-                onLoadMore={() => void loadMoreRegistry()}
+              <KnowledgeBaseSyncPanel
+                result={knowledgeBaseResult}
+                loading={knowledgeBaseLoading}
+                syncingIds={syncingKnowledgeBaseIds}
+                expandedIds={expandedKnowledgePreviewAdapterIds}
+                previews={knowledgePreviewsByAdapterId}
+                loadingPreviewIds={loadingKnowledgePreviewAdapterIds}
+                selectedPreviewPaths={selectedKnowledgePreviewPaths}
+                onRefreshAll={() => loadKnowledgeBases(true)}
+                onSync={handleSyncKnowledgeBase}
+                onTogglePreview={handleToggleKnowledgeBasePreview}
+                onRefreshPreview={loadKnowledgeBasePreview}
+                onSelectPreviewPath={(idKey, path) =>
+                  setSelectedKnowledgePreviewPaths((current) => ({ ...current, [idKey]: path }))
+                }
+                onOpenPath={(path) => void openPathInFileManager(path, "无法打开知识库目录")}
               />
             </TabsContent>
           </Tabs>
@@ -12392,8 +12135,6 @@ export function HarnessBoardView({
         selectedWorkflowNodeIds={selectedWorkflowNodeIds}
         agentsReadyDeployUnits={featureAgentsReadyDeployUnits}
         localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
-        publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
-        syncingPublicConstraints={featurePublicConstraintsSyncing}
         rows={featureMappings}
         catalogUnits={deployUnitMappings}
         workspace={featureWorkspace}
@@ -12409,7 +12150,6 @@ export function HarnessBoardView({
         onWorkflowNodeToggle={handleWorkflowNodeToggle}
         onDeployUnitToggle={handleDeployUnitToggle}
         onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
-        onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
         onSubmit={handleSubmitFeatureDialog}
       />
       <ProjectFormDialog
@@ -12417,6 +12157,7 @@ export function HarnessBoardView({
         creating={creating}
         form={form}
         registry={projectDialogAdapterRegistry}
+        knowledgeBases={knowledgeBaseResult}
         installingPluginNames={updatingPluginNames}
         error={formError}
         verification={createProjectVerification}
@@ -12431,6 +12172,7 @@ export function HarnessBoardView({
         saving={savingEdit}
         form={editForm}
         registry={projectDialogAdapterRegistry}
+        knowledgeBases={knowledgeBaseResult}
         installingPluginNames={updatingPluginNames}
         error={editError}
         verification={editProjectVerification}

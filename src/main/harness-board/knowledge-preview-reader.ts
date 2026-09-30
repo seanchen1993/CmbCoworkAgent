@@ -1,38 +1,22 @@
-import { getMarketContentStoredLimit, readContentFileSync } from "../services/market-content"
-import { existsSync, opendirSync, realpathSync, statSync, type Dirent } from "node:fs"
-import { basename, isAbsolute, join, relative, resolve } from "node:path"
+import { existsSync, opendirSync, statSync, type Dirent } from "node:fs"
+import { isAbsolute, join, resolve } from "node:path"
 import { serialize } from "node:v8"
 import type { HarnessKnowledgePreviewResult } from "../../shared/harness-board-types"
-import type { PluginMetadata } from "../types"
 import {
   HARNESS_KNOWLEDGE_PREVIEW_MAX_DEPTH,
   HARNESS_KNOWLEDGE_PREVIEW_MAX_DIRENTS,
   HARNESS_KNOWLEDGE_PREVIEW_MAX_DIRECTORIES,
   HARNESS_KNOWLEDGE_PREVIEW_MAX_DIRECTORY_ENTRIES,
   HARNESS_KNOWLEDGE_PREVIEW_MAX_FILES,
-  type HarnessKnowledgePreviewSource
+  type HarnessKnowledgeBasePreviewTarget
 } from "./knowledge-preview-protocol"
 
-const BOARD_CONFIG_REL_PATH = join("board_core", "board_config.json")
-const APP_BOARD_API_VERSION = 1
-const MAX_PLUGIN_STORE_BYTES = 8 * 1024 * 1024
-const MAX_BOARD_CONFIG_BYTES = 1024 * 1024
-const MAX_LEAN_TOKEN_STORE_BYTES = 64 * 1024
 const MAX_TEXT = 8_192
-
-interface KnowledgeBoardConfig {
-  apiVersion?: unknown
-  inspectCommands?: unknown
-}
 
 interface PendingDirectory {
   fullPath: string
   relativePath: string
   depth: number
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
 }
 
 function boundedText(value: unknown, max = MAX_TEXT): string {
@@ -43,95 +27,6 @@ function throwIfCancelled(cancelFlag?: Int32Array): void {
   if (cancelFlag && Atomics.load(cancelFlag, 0) !== 0) {
     throw new DOMException("Harness knowledge preview was superseded", "AbortError")
   }
-}
-
-function readBoundedJson(path: string, maxBytes: number, label: string): unknown {
-  if (!existsSync(path)) return null
-  const stats = statSync(path)
-  if (!stats.isFile()) return null
-  if (stats.size > getMarketContentStoredLimit(path, maxBytes))
-    throw new Error(`${label} exceeded ${maxBytes} bytes`)
-  const content = readContentFileSync(path)
-  if (content.byteLength > maxBytes) throw new Error(`${label} exceeded ${maxBytes} bytes`)
-  return JSON.parse(content.toString("utf8")) as unknown
-}
-
-function readPlugins(path: string): PluginMetadata[] {
-  const parsed = readBoundedJson(path, MAX_PLUGIN_STORE_BYTES, "Harness plugin store")
-  if (!Array.isArray(parsed)) return []
-  return parsed
-    .slice(0, 10_000)
-    .filter(
-      (row): row is PluginMetadata =>
-        isRecord(row) &&
-        typeof row.id === "string" &&
-        typeof row.name === "string" &&
-        typeof row.path === "string"
-    )
-}
-
-function readBoardConfig(pluginPath: string): KnowledgeBoardConfig | null {
-  const parsed = readBoundedJson(
-    join(pluginPath, BOARD_CONFIG_REL_PATH),
-    MAX_BOARD_CONFIG_BYTES,
-    "Harness board config"
-  )
-  return isRecord(parsed) ? parsed : null
-}
-
-function readLeanToken(path: string): string {
-  try {
-    const parsed = readBoundedJson(path, MAX_LEAN_TOKEN_STORE_BYTES, "Harness lean token store")
-    return isRecord(parsed) ? boundedText(parsed.leanToken, MAX_TEXT).trim() : ""
-  } catch {
-    return ""
-  }
-}
-
-function adapterMatches(plugin: PluginMetadata, adapterId: string): boolean {
-  return plugin.id === adapterId || plugin.name === adapterId || basename(plugin.path) === adapterId
-}
-
-function isPathInside(parent: string, child: string): boolean {
-  const relativePath = relative(parent, child)
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  )
-}
-
-function knowledgePathTemplate(config: KnowledgeBoardConfig | null): string {
-  if (!config || !isRecord(config.inspectCommands)) return ""
-  const platform = config.inspectCommands[process.platform]
-  if (!isRecord(platform)) return ""
-  return boundedText(platform.knowledge_path).trim()
-}
-
-function resolveKnowledgePath(
-  template: string,
-  plugin: PluginMetadata,
-  source: HarnessKnowledgePreviewSource
-): string {
-  const replacements: Record<string, string> = {
-    pluginWorkspace: source.openworkDir,
-    project: "project-constraints",
-    projectDir: "project-constraints",
-    projectCode: plugin.id,
-    leanToken: readLeanToken(source.leanTokenStorePath),
-    feature: "",
-    selectedDeployUnits: "",
-    sessionWorkspacePath: "",
-    pluginPath: plugin.path,
-    mode: "pullKnowledge",
-    workflowTemplate: "",
-    workflowNodes: "",
-    nodeId: ""
-  }
-  const replaced = template.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
-    (_placeholder, key: string) => replacements[key] ?? ""
-  )
-  return isAbsolute(replaced) ? resolve(replaced) : resolve(plugin.path, replaced)
 }
 
 function formatError(error: unknown): string {
@@ -221,10 +116,7 @@ function scanKnowledgeFiles(
         truncated = true
       }
     } catch (scanError) {
-      error = appendError(
-        error,
-        `${directory.fullPath}: ${formatError(scanError)}`
-      )
+      error = appendError(error, `${directory.fullPath}: ${formatError(scanError)}`)
       continue
     } finally {
       try {
@@ -287,100 +179,42 @@ function scanKnowledgeFiles(
   return { files, ...(error ? { error } : {}) }
 }
 
-export function readHarnessKnowledgePreview(
-  adapterId: string,
-  source: HarnessKnowledgePreviewSource,
+export function readKnowledgeBasePreview(
+  target: HarnessKnowledgeBasePreviewTarget,
   maxResponseBytes: number,
   cancelFlag?: Int32Array
 ): HarnessKnowledgePreviewResult {
   throwIfCancelled(cancelFlag)
-  const normalizedAdapterId = boundedText(adapterId, 512).trim()
-  const plugin = readPlugins(source.pluginStorePath).find(
-    (candidate) => adapterMatches(candidate, normalizedAdapterId)
-  )
-  if (!plugin) throw new Error("插件未安装或不支持项目模式")
-
-  throwIfCancelled(cancelFlag)
-  const config = readBoardConfig(plugin.path)
-  if (!config) throw new Error("插件未提供项目看板配置")
-  const apiVersion = Number(config.apiVersion)
-  if (!Number.isInteger(apiVersion) || apiVersion !== APP_BOARD_API_VERSION) {
-    throw new Error("插件与当前客户端的项目看板 API 版本不兼容")
+  const idKey = boundedText(target.idKey, 512).trim()
+  const name = boundedText(target.name, 1_024).trim()
+  const knowledgePath = resolve(target.path)
+  if (!idKey || !name || !isAbsolute(target.path)) {
+    throw new Error("知识库预览目标无效")
   }
-
-  const resultBase = {
-    adapterId: boundedText(plugin.id, 512),
-    adapterName: boundedText(plugin.name, 1_024)
-  }
-  const template = knowledgePathTemplate(config)
-  if (!template) {
-    return { ...resultBase, configured: false, exists: false, files: [] }
-  }
-
-  const knowledgePath = resolveKnowledgePath(template, plugin, source)
-  const pluginRoot = resolve(plugin.path)
-  if (!isPathInside(pluginRoot, knowledgePath)) {
-    return {
-      ...resultBase,
-      configured: true,
-      exists: false,
-      files: [],
-      error: "外部 knowledge_path 未经用户授权；请将知识目录放在插件目录内"
-    }
-  }
-  throwIfCancelled(cancelFlag)
   if (!existsSync(knowledgePath)) {
-    return {
-      ...resultBase,
-      configured: true,
-      exists: false,
-      path: knowledgePath,
-      files: []
-    }
+    return { exists: false, path: knowledgePath, files: [] }
   }
-
   try {
-    const [realPluginRoot, realKnowledgePath] = [
-      realpathSync(pluginRoot),
-      realpathSync(knowledgePath)
-    ]
-    if (!isPathInside(realPluginRoot, realKnowledgePath)) {
+    if (!statSync(knowledgePath).isDirectory()) {
       return {
-        ...resultBase,
-        configured: true,
-        exists: false,
-        files: [],
-        error: "knowledge_path 的符号链接目标超出插件目录"
-      }
-    }
-    const stats = statSync(knowledgePath)
-    if (!stats.isDirectory()) {
-      return {
-        ...resultBase,
-        configured: true,
         exists: false,
         path: knowledgePath,
         files: [],
-        error: "knowledge_path 不是目录"
+        error: "知识库路径不是目录"
       }
     }
   } catch (error) {
     return {
-      ...resultBase,
-      configured: true,
       exists: false,
       path: knowledgePath,
       files: [],
-      error: `无法读取 knowledge_path：${formatError(error)}`
+      error: `无法读取知识库路径：${formatError(error)}`
     }
   }
-
   const scanned = scanKnowledgeFiles(knowledgePath, cancelFlag)
   throwIfCancelled(cancelFlag)
   return boundResponse(
     {
-      ...resultBase,
-      configured: true,
       exists: true,
       path: knowledgePath,
       files: scanned.files,

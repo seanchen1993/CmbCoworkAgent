@@ -409,6 +409,10 @@ import {
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { startHarnessStatusReporter } from "./services/harness-status-reporter"
+import {
+  startKnowledgeBaseManager,
+  stopKnowledgeBaseManager
+} from "./services/knowledge-base-manager"
 import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
 import {
   startRegisteredGitHookEventSync,
@@ -1175,6 +1179,7 @@ if (browserNativeMessagingHostLaunch) {
       acknowledgeUiGuide(getDb(), config)
     )
     registerHarnessBoardHandlers(ipcMain)
+    startKnowledgeBaseManager()
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
     registerPathOpenersHandlers(ipcMain)
@@ -1703,6 +1708,7 @@ if (browserNativeMessagingHostLaunch) {
     stopHookConfigWatcher()
     stopAllWatching()
     stopRegisteredGitHookEventSync()
+    stopKnowledgeBaseManager()
     stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
     try {

@@ -17,6 +17,7 @@ import {
   getHarnessDynamicWorkflowConfig,
   deleteHarnessProject,
   getHarnessProjectDetail,
+  prepareHarnessKnowledgeDeposition,
   getHarnessProjectDetails,
   getHarnessLocalAgentmdDeployUnitMappings,
   getHarnessProjectPublicAgentmdDeployUnits,
@@ -28,7 +29,6 @@ import {
   saveHarnessLeanTokenConfig,
   setHarnessFeatureImManagement,
   skipHarnessRunNode,
-  syncHarnessProjectConstraints,
   updateHarnessFeatureDeployUnits,
   updateHarnessProjectMetadata,
   resolveHarnessRunDetailCurrentStage
@@ -39,7 +39,7 @@ import {
 } from "../harness-board/catalog-client"
 import {
   cancelHarnessKnowledgePreviewOwner,
-  readHarnessKnowledgePreviewInWorker
+  readKnowledgeBasePreviewInWorker
 } from "../harness-board/knowledge-preview-client"
 import {
   cancelHarnessEnterpriseRequestScope,
@@ -62,6 +62,11 @@ import { managedRunController } from "../harness-board/managed-run-controller"
 import { assertHarnessProjectCanBeDeleted } from "../harness-board/project-deletion-gate"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
+import {
+  listKnowledgeBases,
+  refreshKnowledgeBases,
+  syncKnowledgeBase
+} from "../services/knowledge-base-manager"
 import { materializeHarnessFeatureThreadGrant } from "../services/im/feature-thread-grant"
 import { builtinRobotManager } from "../services/im/manager"
 import {
@@ -84,7 +89,6 @@ import type {
   HarnessPipelineQueryInput,
   HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -110,6 +114,10 @@ import type {
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
+import type {
+  KnowledgeBaseListResult,
+  KnowledgeBaseSyncResult
+} from "../../shared/knowledge-base-types"
 import {
   EXTERNAL_FILE_READ_GRANT_TTL_MS,
   issueExternalFileReadGrant,
@@ -332,22 +340,47 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  ipcMain.handle("harnessBoard:listKnowledgeBases", (): Promise<KnowledgeBaseListResult> => {
+    return listKnowledgeBases()
+  })
+
+  ipcMain.handle("harnessBoard:refreshKnowledgeBases", (): Promise<KnowledgeBaseListResult> => {
+    return refreshKnowledgeBases()
+  })
+
+  ipcMain.handle("harnessBoard:prepareKnowledgeDeposition", (_event, projectId: string) => {
+    return prepareHarnessKnowledgeDeposition(projectId)
+  })
+
   ipcMain.handle(
-    "harnessBoard:syncProjectConstraints",
-    async (_event, adapterId: string): Promise<HarnessProjectConstraintSyncResult> => {
-      return syncHarnessProjectConstraints(adapterId)
+    "harnessBoard:syncKnowledgeBase",
+    (_event, idKey: string): Promise<KnowledgeBaseSyncResult> => {
+      return syncKnowledgeBase(idKey)
     }
   )
 
   ipcMain.handle(
     "harnessBoard:getKnowledgePreview",
-    async (event, adapterId: string): Promise<HarnessKnowledgePreviewResult> => {
+    async (event, idKey: string): Promise<HarnessKnowledgePreviewResult> => {
       ensureEnterpriseSenderCleanup(event)
-      const normalizedAdapterId =
-        typeof adapterId === "string" ? adapterId.trim().slice(0, 512) : ""
-      if (!normalizedAdapterId) throw new Error("Harness adapter id is required")
-      const scope = `harness-knowledge:${event.sender.id}:${normalizedAdapterId}`
-      const preview = await readHarnessKnowledgePreviewInWorker(normalizedAdapterId, scope)
+      const normalizedId = typeof idKey === "string" ? idKey.trim().slice(0, 512) : ""
+      if (!normalizedId) throw new Error("知识库 idKey 不能为空")
+      const item = (await listKnowledgeBases()).knowledgeBases.find(
+        (candidate) => candidate.idKey === normalizedId
+      )
+      if (!item) throw new Error("知识库配置不存在")
+      if (!item.localValid) {
+        return {
+          exists: false,
+          path: item.localPath,
+          files: []
+        }
+      }
+      const scope = `harness-knowledge:${event.sender.id}:${normalizedId}`
+      const preview = await readKnowledgeBasePreviewInWorker(
+        { idKey: item.idKey, name: item.name, path: item.localPath },
+        scope
+      )
       if (!preview.exists || !preview.path) return preview
       const previewablePaths = preview.files.filter((file) => !file.is_dir).map((file) => file.path)
       if (previewablePaths.length === 0) return preview
@@ -359,7 +392,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         preview.path,
         event.sender.id,
         previewablePaths,
-        `harness-knowledge:${adapterId}`
+        `harness-knowledge:${idKey}`
       )
       if ("error" in issued) {
         return {

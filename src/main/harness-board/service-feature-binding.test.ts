@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
   featureExists: true,
   projectExists: true,
   artifactConfig: undefined as unknown,
+  sessionContextCommand: "",
   inspect: vi.fn()
 }))
 vi.mock("../storage", () => ({ getOpenworkDir: () => state.root }))
@@ -25,6 +26,7 @@ vi.mock("./catalog-client", () => ({
               projectCode: "project",
               projectDir: "project",
               workspacePath: state.root,
+              knowledgeBaseIds: ["bound-knowledge"],
               lifecycle: { status: "active" },
               "harness-adapter": { id: "plugin", name: "plugin", type: "plugin" }
             },
@@ -32,6 +34,7 @@ vi.mock("./catalog-client", () => ({
             leanToken: "test-token",
             projectDirectoryExists: true,
             selectedDeployUnits: [],
+            sessionContextInjectionSource: state.sessionContextCommand ? "plugin" : "cmbdevclaw",
             configSnapshot: {
               error: null,
               value: {
@@ -41,7 +44,8 @@ vi.mock("./catalog-client", () => ({
                   [process.platform]: {
                     project_status: `${process.execPath} --version`,
                     feature_status: `${process.execPath} --version`,
-                    system_prompt_inject: "workspace=${sessionWorkspacePath}"
+                    system_prompt_inject: "workspace=${sessionWorkspacePath}",
+                    session_context_inject: state.sessionContextCommand
                   }
                 }
               }
@@ -101,6 +105,7 @@ beforeEach(async () => {
   state.featureExists = true
   state.projectExists = true
   state.artifactConfig = undefined
+  state.sessionContextCommand = ""
   state.inspect.mockClear()
 })
 afterAll(() => rm(state.root, { recursive: true, force: true }))
@@ -192,6 +197,50 @@ describe("plugin workspace placeholder", () => {
       expect(context?.systemPromptInject).toBe(`workspace=${workspacePath}`)
     }
   )
+
+  it("warns without blocking an injection command when bound read content is unavailable", async () => {
+    vi.stubEnv("CMB_COWORK_AGENT_HOME", state.root)
+    const script = join(state.root, "knowledge-injection.cjs")
+    const argsPath = join(state.root, "knowledge-args.json")
+    await rm(join(state.root, "knowledge-state.json"), { force: true })
+    await writeFile(
+      script,
+      `require("node:fs").writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2))); console.log(JSON.stringify({ok:true,sessionContext:""}));`
+    )
+    state.sessionContextCommand = `"${process.execPath}" "${script}" --knowledge-path '\${knowledgePath}'`
+    try {
+      const context = await buildHarnessFeatureAgentContext({
+        harnessFeature: { projectId: "p", slug: "f" }
+      })
+      expect(JSON.parse(await readFile(argsPath, "utf8"))).toEqual(["--knowledge-path", "[]"])
+      expect(context?.sessionContextInjectWarning).toBe(
+        "项目绑定的知识库当前不可用，本次会话未加载知识库"
+      )
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("runs an existing plugin command without reading corrupt knowledge state when the placeholder is absent", async () => {
+    vi.stubEnv("CMB_COWORK_AGENT_HOME", state.root)
+    const script = join(state.root, "session-context.cjs")
+    const marker = join(state.root, "session-context-ran")
+    await writeFile(join(state.root, "knowledge-state.json"), "invalid JSON")
+    await writeFile(
+      script,
+      `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran"); console.log(JSON.stringify({ok:true,sessionContext:""}));`
+    )
+    state.sessionContextCommand = `"${process.execPath}" "${script}"`
+    try {
+      const context = await buildHarnessFeatureAgentContext({
+        harnessFeature: { projectId: "p", slug: "f" }
+      })
+      expect(await readFile(marker, "utf8")).toBe("ran")
+      expect(context?.sessionContextInjectWarning).toBeUndefined()
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
 })
 
 describe("opaque legacy project workspace", () => {

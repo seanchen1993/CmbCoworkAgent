@@ -67,8 +67,7 @@ async function makeCatalog(size: number): Promise<{ projects: string; plugins: s
       apiVersion: 1,
       inspectCommands: {
         [process.platform]: {
-          session_context_inject: "run",
-          pull_knowledge: "pull",
+          session_context_inject: "run --knowledge-path '${knowledgePath}'",
           dialog_tips: "Project ${projectCode} feature ${feature} token ${leanToken}"
         }
       }
@@ -156,6 +155,8 @@ describe("Harness catalog reader", () => {
     })
     expect(first.projects).toHaveLength(64)
     expect(first.registry).toHaveLength(64)
+    expect(first.registry[0]?.supportsKnowledgeBaseContext).toBe(true)
+    expect(first.projects[0]?.supportsKnowledgeBaseContext).toBe(true)
     expect(first.summary.totalProjects).toBe(1_000)
     expect(first.summary.totalRegistry).toBe(1_000)
     expect(first.projectNextCursor).toBe(64)

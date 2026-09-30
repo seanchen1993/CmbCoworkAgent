@@ -17,6 +17,13 @@ import {
   MISSING_FEATURE_WORKSPACE
 } from "../../shared/harness-feature-workspace"
 import { formatGmt8Timestamp } from "../../shared/gmt8-time"
+import {
+  assertSelectableKnowledgeBaseIds,
+  prepareKnowledgeDeposition,
+  resolveKnowledgeDepositionPath,
+  resolveProjectKnowledgeBases
+} from "../services/knowledge-base-manager"
+import type { KnowledgeDepositionWorkspace } from "../../shared/knowledge-base-types"
 import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
 import { createHash } from "crypto"
@@ -96,7 +103,6 @@ import type {
   HarnessFeatureStatus,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessProjectCreatorMetadata,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
@@ -181,7 +187,6 @@ type HarnessInspectCommandName =
   | "dynamicWorkflow"
   | "skipNode"
   | "sessionContext"
-  | "pullKnowledge"
 type HarnessInspectCommandConfigKey =
   | "project_status"
   | "feature_status"
@@ -190,13 +195,12 @@ type HarnessInspectCommandConfigKey =
   | "dynamic_workflow"
   | "skip_node"
   | "session_context_inject"
-  | "pull_knowledge"
+type HarnessTemplateMode = HarnessInspectCommandName | "pullKnowledge"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
   | "system_prompt_inject"
   | "plugin_dir_hook"
   | "dialog_tips"
-  | "knowledge_path"
 
 const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   HarnessInspectCommandName,
@@ -208,8 +212,7 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   createFeature: "create_feature",
   dynamicWorkflow: "dynamic_workflow",
   skipNode: "skip_node",
-  sessionContext: "session_context_inject",
-  pullKnowledge: "pull_knowledge"
+  sessionContext: "session_context_inject"
 }
 
 interface ConfiguredHarnessInvocation {
@@ -267,6 +270,7 @@ interface HarnessCommandParseOptions {
   workflowNodes?: string
   nodeId?: string
   eventJson?: string
+  knowledgePathJson?: string
   preserveMissingPlaceholders?: boolean
 }
 
@@ -276,7 +280,6 @@ const HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE = join(getOpenworkDir(), FEATURE_
 const HARNESS_LEAN_TOKEN_FILE = join(getOpenworkDir(), "leanstar-config.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
-const HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS = 45_000
 const HARNESS_ADAPTER_MAX_BUFFER = HARNESS_ADAPTER_DETAIL_MAX_INPUT_BYTES
 const HARNESS_INVOCATION_MAX_CONCURRENCY = 2
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
@@ -542,19 +545,6 @@ function readBoardConfigPlatformTextFromValue(
   return command || null
 }
 
-function hasPullKnowledgeCommand(
-  _plugin: PluginMetadata,
-  configSnapshot?: HarnessBoardConfigReadSnapshot
-): boolean {
-  if (configSnapshot) {
-    return (
-      !configSnapshot.error &&
-      readBoardConfigPlatformTextFromValue(configSnapshot.value, "pull_knowledge") !== null
-    )
-  }
-  return false
-}
-
 function pluginToHarnessAdapter(
   plugin: PluginMetadata,
   configSnapshot?: HarnessBoardConfigReadSnapshot
@@ -568,7 +558,6 @@ function pluginToHarnessAdapter(
     type: "plugin",
     description: normalizeText(plugin.description),
     ...(useScenario ? { useScenario } : {}),
-    pullKnowledgeAvailable: hasPullKnowledgeCommand(plugin, configSnapshot),
     boardCompatibility: evaluateBoardPluginCompatibility(
       plugin,
       normalizeText(plugin.name) || id,
@@ -914,7 +903,7 @@ function tokenizeInspectCommand(command: string): string[] {
 function replaceHarnessConfigPlaceholders(
   value: string,
   project: HarnessProjectMetadata,
-  mode: HarnessInspectCommandName,
+  mode: HarnessTemplateMode,
   cwd: string,
   options: HarnessCommandParseOptions = {}
 ): string {
@@ -934,10 +923,11 @@ function replaceHarnessConfigPlaceholders(
     workflowTemplate: options.workflowTemplate ?? "",
     workflowNodes: options.workflowNodes ?? "",
     nodeId: options.nodeId ?? "",
-    eventJson: options.eventJson ?? ""
+    eventJson: options.eventJson ?? "",
+    knowledgePath: options.knowledgePathJson ?? "[]"
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId|eventJson)\}/g,
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId|eventJson|knowledgePath)\}/g,
     (placeholder: string, key: string) => {
       const replacement = replacements[key]
       if (replacement) return replacement
@@ -1613,7 +1603,7 @@ function normalizeWorkflowNextAction(value: unknown): HarnessWorkflowNextAction 
 function resolveHarnessDialogTipsTemplate(
   template: string,
   project: HarnessProjectMetadata,
-  mode: HarnessInspectCommandName,
+  mode: HarnessTemplateMode,
   cwd: string,
   options: HarnessCommandParseOptions = {}
 ): string | undefined {
@@ -1623,7 +1613,7 @@ function resolveHarnessDialogTipsTemplate(
 function resolveHarnessNextActionTemplate(
   value: unknown,
   project: HarnessProjectMetadata,
-  mode: HarnessInspectCommandName,
+  mode: HarnessTemplateMode,
   cwd: string,
   options: HarnessCommandParseOptions = {},
   config: { replaceUserMessagePlaceholders?: boolean } = {}
@@ -1744,7 +1734,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     .trim()
     .slice(0, 128)
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
-  const now = new Date().toISOString()
+  const now = formatGmt8Timestamp()
 
   return {
     projectId: value.projectId.slice(0, HARNESS_PROJECT_TEXT_MAX_CHARS),
@@ -1759,6 +1749,12 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
       0,
       HARNESS_PROJECT_PATH_MAX_CHARS
     ),
+    knowledgeBaseIds: Array.isArray(value.knowledgeBaseIds)
+      ? value.knowledgeBaseIds
+          .filter((id): id is string => typeof id === "string" && Boolean(id.trim()))
+          .slice(0, 1)
+          .map((id) => id.trim())
+      : [],
     ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
     ...(managedRunFirstStartedAt ? { managedRunFirstStartedAt } : {}),
     "harness-adapter": {
@@ -2419,27 +2415,6 @@ function makeWatchRefs(slug?: string): HarnessWatchRef[] {
     : [{ path: `${base}/STATE.md`, purpose: "run-list" }]
 }
 
-function resolveProjectKnowledgePath(
-  project: HarnessProjectMetadata,
-  cwd: string,
-  config: Record<string, unknown> | null,
-  options: HarnessCommandParseOptions = {}
-): string | null {
-  const rawPath = readBoardConfigPlatformTextFromValue(config, "knowledge_path")
-  if (!rawPath) return null
-
-  const replaced = replaceHarnessConfigPlaceholders(
-    rawPath,
-    project,
-    "pullKnowledge",
-    cwd,
-    options
-  ).trim()
-  if (!replaced) return null
-
-  return isAbsolute(replaced) ? resolve(replaced) : resolve(cwd, replaced)
-}
-
 interface HarnessProjectConfigContext {
   plugin: PluginMetadata | null
   configSnapshot?: HarnessBoardConfigReadSnapshot
@@ -2530,10 +2505,10 @@ function projectConfigContextFromWorker(
   }
 }
 
-function resolveSystemConstraintUpdateConfig(
+async function resolveSystemConstraintUpdateConfig(
   project: HarnessProjectMetadata,
   context?: HarnessProjectConfigContext
-): HarnessProjectDetailViewModel["systemConstraintUpdate"] | undefined {
+): Promise<HarnessProjectDetailViewModel["systemConstraintUpdate"] | undefined> {
   try {
     if (!context?.plugin || context.configSnapshot?.error) return undefined
     const cwd = context.plugin.path
@@ -2557,13 +2532,15 @@ function resolveSystemConstraintUpdateConfig(
         { replaceUserMessagePlaceholders: true }
       ) ?? {}
 
-    const knowledgePath = resolveProjectKnowledgePath(project, cwd, config, {
-      leanToken: context.leanToken
-    })
-    return {
-      syncType: "invoke_session",
-      nextAction,
-      ...(knowledgePath ? { knowledgePath } : {})
+    try {
+      const knowledgePath = await resolveKnowledgeDepositionPath(project.knowledgeBaseIds ?? [])
+      return { syncType: "invoke_session", nextAction, knowledgePath }
+    } catch (error) {
+      return {
+        syncType: "invoke_session",
+        nextAction,
+        knowledgeUnavailableReason: error instanceof Error ? error.message : "知识沉淀工作区不可用"
+      }
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to resolve system constraint update config:", {
@@ -2572,6 +2549,14 @@ function resolveSystemConstraintUpdateConfig(
     })
     return undefined
   }
+}
+
+export async function prepareHarnessKnowledgeDeposition(
+  projectId: string
+): Promise<KnowledgeDepositionWorkspace> {
+  const project = (await readProjectStore()).projects.find((item) => item.projectId === projectId)
+  if (!project) throw new Error("项目不存在")
+  return prepareKnowledgeDeposition(project.knowledgeBaseIds ?? [])
 }
 
 function resolveArtifactAccumulationConfig(
@@ -2596,7 +2581,7 @@ function resolveArtifactAccumulationConfig(
   return nextAction ? { syncType: "invoke_session", nextAction } : undefined
 }
 
-function makeProjectDetailViewModel(
+async function makeProjectDetailViewModel(
   project: HarnessProjectMetadata,
   data: {
     workflow: HarnessWorkflow
@@ -2606,8 +2591,8 @@ function makeProjectDetailViewModel(
     error: string | null
   },
   context?: HarnessProjectConfigContext
-): HarnessProjectDetailViewModel {
-  const systemConstraintUpdate = resolveSystemConstraintUpdateConfig(project, context)
+): Promise<HarnessProjectDetailViewModel> {
+  const systemConstraintUpdate = await resolveSystemConstraintUpdateConfig(project, context)
   const runs = data.runs.map((run) => {
     const managedRunStatus: ManagedRunViewStatus | undefined = managedRunStore.getLatestRun(
       project.projectId,
@@ -2855,6 +2840,18 @@ async function readHarnessFeatureSessionContextAgentPrompt(
   }
 
   try {
+    const command = readBoardConfigPlatformTextFromValue(
+      context.configSnapshot?.value ?? null,
+      "session_context_inject"
+    )
+    const knowledgeBases = command?.includes("${knowledgePath}")
+      ? await resolveProjectKnowledgeBases(project.knowledgeBaseIds ?? [])
+      : undefined
+    const knowledgePathJson = knowledgeBases ? JSON.stringify(knowledgeBases) : undefined
+    const knowledgeWarning =
+      knowledgeBases?.length === 0 && project.knowledgeBaseIds?.length
+        ? "项目绑定的知识库当前不可用，本次会话未加载知识库"
+        : undefined
     const configured = buildConfiguredHarnessInvocationFromContext(
       project,
       context,
@@ -2866,7 +2863,8 @@ async function readHarnessFeatureSessionContextAgentPrompt(
           featureId,
           options.selectedDeployUnits
         )),
-        sessionWorkspacePath: options.sessionWorkspacePath
+        sessionWorkspacePath: options.sessionWorkspacePath,
+        knowledgePathJson
       }
     )
     const result = await runHarnessJsonInvocation(configured, "sessionContext")
@@ -2890,11 +2888,13 @@ async function readHarnessFeatureSessionContextAgentPrompt(
     if (!sessionContext) {
       return {
         agentmdLoadStatus,
+        ...(knowledgeWarning ? { warning: knowledgeWarning } : {}),
         ...(agentConfig ? { agentConfig } : {})
       }
     }
     return {
       prompt: sessionContext,
+      ...(knowledgeWarning ? { warning: knowledgeWarning } : {}),
       agentmdLoadStatus,
       ...(agentConfig ? { agentConfig } : {})
     }
@@ -3295,6 +3295,7 @@ export async function createHarnessProject(
   validateProjectCodeUnique(input.projectCode, store)
   validateProjectDirUnique(input.projectDir, input.workspacePath, store)
   const harnessAdapter = await resolveHarnessAdapter(input.adapterId, input.adapterType)
+  const knowledgeBaseIds = await assertSelectableKnowledgeBaseIds(input.knowledgeBaseIds)
   const project: HarnessProjectMetadata = {
     projectId: uuid(),
     name: input.name.trim(),
@@ -3305,11 +3306,12 @@ export async function createHarnessProject(
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
     workspacePath: input.workspacePath.trim(),
+    knowledgeBaseIds,
     "harness-adapter": harnessAdapter,
     creator: getCurrentProjectCreator(),
     lifecycle: {
       status: "active",
-      createAt: new Date().toISOString()
+      createAt: formatGmt8Timestamp()
     }
   }
   normalizeProject(project)
@@ -3463,7 +3465,7 @@ export async function getHarnessDynamicWorkflowConfig(
  */
 export async function markHarnessProjectSystemConstraintsLoaded(
   projectId: string,
-  loadedAt = new Date().toISOString()
+  loadedAt = formatGmt8Timestamp()
 ): Promise<boolean> {
   const id = normalizeText(projectId).trim()
   if (!id) return false
@@ -3472,9 +3474,11 @@ export async function markHarnessProjectSystemConstraintsLoaded(
     const index = store.projects.findIndex((item) => item.projectId === id)
     if (index === -1 || store.projects[index].systemConstraintFirstLoadedAt) return false
     const parsedLoadedAt = new Date(loadedAt)
-    const firstLoadedAt = Number.isNaN(parsedLoadedAt.getTime())
-      ? new Date().toISOString()
-      : parsedLoadedAt.toISOString()
+    const firstLoadedAt = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(loadedAt)
+      ? loadedAt
+      : Number.isNaN(parsedLoadedAt.getTime())
+        ? formatGmt8Timestamp()
+        : formatGmt8Timestamp(parsedLoadedAt)
     store.projects[index] = {
       ...store.projects[index],
       systemConstraintFirstLoadedAt: firstLoadedAt
@@ -3523,6 +3527,13 @@ export async function updateHarnessProjectMetadata(
     if (index === -1) throw new Error("Project not found")
     validateProjectCodeUnique(input.projectCode, store, projectId)
     const existing = store.projects[index]
+    const knowledgeBaseIds =
+      input.knowledgeBaseIds === undefined
+        ? (existing.knowledgeBaseIds ?? [])
+        : await assertSelectableKnowledgeBaseIds(
+            input.knowledgeBaseIds,
+            existing.knowledgeBaseIds ?? []
+          )
     const existingAdapter = existing["harness-adapter"]
     const harnessAdapter =
       existingAdapter.type === input.adapterType && existingAdapter.id === input.adapterId.trim()
@@ -3545,8 +3556,9 @@ export async function updateHarnessProjectMetadata(
       systemId: input.systemId.trim(),
       systemName: input.systemName.trim(),
       workspacePath: existing.workspacePath,
+      knowledgeBaseIds,
       "harness-adapter": harnessAdapter,
-      lifecycle: { ...existing.lifecycle, updateAt: new Date().toISOString() }
+      lifecycle: { ...existing.lifecycle, updateAt: formatGmt8Timestamp() }
     }
     store.projects[index] = updated
     return normalizeProject(updated)!
@@ -3562,7 +3574,7 @@ export async function archiveHarnessProject(projectId: string): Promise<HarnessP
       lifecycle: {
         ...store.projects[index].lifecycle,
         status: "archived",
-        updateAt: new Date().toISOString()
+        updateAt: formatGmt8Timestamp()
       }
     }
     store.projects[index] = archived
@@ -3577,101 +3589,6 @@ export async function deleteHarnessProject(projectId: string): Promise<HarnessPr
     const [deleted] = store.projects.splice(index, 1)
     return normalizeProject(deleted)!
   })
-}
-
-async function findCompatibleKnowledgePlugin(adapterId: string): Promise<{
-  plugin: PluginMetadata
-  adapter: HarnessAdapterRegistryItem
-  config: Record<string, unknown>
-}> {
-  const normalizedAdapterId = normalizeText(adapterId).trim()
-  const plugin = getPlugins().find((item) => pluginMatchesAdapterId(item, normalizedAdapterId))
-  if (!plugin) {
-    throw new Error("插件未安装或不支持项目模式")
-  }
-
-  const config = await readBoardConfig(plugin.path)
-  if (!config) throw new Error("插件未安装或不支持项目模式")
-  const adapter = pluginToHarnessAdapter(plugin, { value: config, error: null })
-  if (!adapter.boardCompatibility.compatible) {
-    throw new Error(adapter.boardCompatibility.message || adapter.boardCompatibility.label)
-  }
-
-  return { plugin, adapter, config }
-}
-
-function createKnowledgeCommandProject(
-  plugin: PluginMetadata,
-  adapter: HarnessAdapterRegistryItem
-): HarnessProjectMetadata {
-  return {
-    projectId: "__project_constraints__",
-    name: adapter.name,
-    description: adapter.description,
-    projectCode: adapter.id,
-    projectFromLean: false,
-    projectDir: "project-constraints",
-    systemId: "",
-    systemName: "",
-    workspacePath: getOpenworkDir(),
-    "harness-adapter": pluginToHarnessAdapterSnapshot(plugin),
-    lifecycle: {
-      status: "active",
-      createAt: ""
-    }
-  }
-}
-
-export async function syncHarnessProjectConstraints(
-  adapterId: string
-): Promise<HarnessProjectConstraintSyncResult> {
-  const { plugin, adapter, config } = await findCompatibleKnowledgePlugin(adapterId)
-  const configuredCommand = readBoardConfigPlatformTextFromValue(config, "pull_knowledge")
-  if (!configuredCommand) {
-    throw new Error(`插件未配置 inspectCommands.${process.platform}.pull_knowledge，请检查插件设置`)
-  }
-
-  const commandProject = createKnowledgeCommandProject(plugin, adapter)
-  const configured: ConfiguredHarnessInvocation = {
-    cwd: plugin.path,
-    invocation: parseInspectCommand(
-      configuredCommand,
-      commandProject,
-      "pullKnowledge",
-      plugin.path,
-      {
-        leanToken: (await readLeanTokenStore()).leanToken
-      }
-    )
-  }
-
-  const stdoutBuffer = await runHarnessInvocationAsync(
-    configured,
-    harnessCommandLogOptions("pullKnowledge", adapter.name),
-    HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS
-  )
-  const raw = decodeAdapterBuffer(stdoutBuffer).trim()
-  let message = ""
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw) as unknown
-  } catch {
-    throw new Error("公共系统约束同步返回格式异常")
-  }
-  if (!isObject(parsed) || typeof parsed.ok !== "boolean") {
-    throw new Error("公共系统约束同步返回格式异常")
-  }
-  message = normalizeText(parsed.message).trim()
-  const outputPath = normalizeText(parsed.path).trim()
-  if (!parsed.ok) {
-    throw new Error(message || "公共系统约束同步失败")
-  }
-  return {
-    adapterId: adapter.id,
-    adapterName: adapter.name,
-    ...(message ? { message } : {}),
-    ...(outputPath ? { path: outputPath } : {})
-  }
 }
 
 export async function getHarnessProjectDetail(
@@ -3747,12 +3664,12 @@ async function runInspectAdapterBatch(
   }
 }
 
-function makeProjectErrorDetail(
+async function makeProjectErrorDetail(
   project: HarnessProjectMetadata,
   label: string,
   error: string,
   context?: HarnessProjectConfigContext
-): HarnessProjectDetailViewModel {
+): Promise<HarnessProjectDetailViewModel> {
   return makeProjectDetailViewModel(
     project,
     {
@@ -3766,10 +3683,10 @@ function makeProjectErrorDetail(
   )
 }
 
-function makeArchivedProjectDetail(
+async function makeArchivedProjectDetail(
   project: HarnessProjectMetadata,
   context?: HarnessProjectConfigContext
-): HarnessProjectDetailViewModel {
+): Promise<HarnessProjectDetailViewModel> {
   return makeProjectDetailViewModel(
     project,
     {
@@ -3850,7 +3767,7 @@ async function loadHarnessProjectDetails(
     configContextByProjectId.set(project.projectId, configContext)
     projectDirectoryExistsById.set(project.projectId, workerContext.projectDirectoryExists)
     if (project.lifecycle.status === "archived") {
-      result[project.projectId] = makeArchivedProjectDetail(project, configContext)
+      result[project.projectId] = await makeArchivedProjectDetail(project, configContext)
       continue
     }
 
@@ -3861,7 +3778,7 @@ async function loadHarnessProjectDetails(
       configSnapshot
     )
     if (!compatibility.compatible) {
-      result[project.projectId] = makeProjectErrorDetail(
+      result[project.projectId] = await makeProjectErrorDetail(
         project,
         compatibility.label,
         compatibility.message || "项目使用的插件与当前 APP 不兼容。",
@@ -3872,7 +3789,7 @@ async function loadHarnessProjectDetails(
     if (!plugin) continue
 
     if (!projectDirectoryExistsById.get(project.projectId)) {
-      result[project.projectId] = makeProjectErrorDetail(
+      result[project.projectId] = await makeProjectErrorDetail(
         project,
         "项目目录不存在",
         projectDirectoryMissingMessage(project),
@@ -3923,7 +3840,7 @@ async function loadHarnessProjectDetails(
           const projectDir = projectDirectoryName(project)
           const projectData = snapshot.projects[projectDir]
           if (!projectData) {
-            result[project.projectId] = makeProjectErrorDetail(
+            result[project.projectId] = await makeProjectErrorDetail(
               project,
               "Inspect 读取失败",
               `读取项目状态失败：Inspect adapter 未返回项目文件夹 ${projectDir} 的状态`,
@@ -3932,7 +3849,7 @@ async function loadHarnessProjectDetails(
             continue
           }
 
-          result[project.projectId] = makeProjectDetailViewModel(
+          result[project.projectId] = await makeProjectDetailViewModel(
             project,
             {
               workflow,
@@ -3947,7 +3864,7 @@ async function loadHarnessProjectDetails(
       } catch (error) {
         if (signal.aborted) throw harnessDetailCancelledError()
         for (const project of batch) {
-          result[project.projectId] = makeProjectErrorDetail(
+          result[project.projectId] = await makeProjectErrorDetail(
             project,
             "Inspect 读取失败",
             formatProjectDetailError(project, error),

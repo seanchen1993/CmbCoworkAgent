@@ -3846,6 +3846,7 @@ import {
   DEFAULT_THINKING_EFFORT
 } from "../storage"
 import { builtinRobotManager } from "../services/im/manager"
+import { refreshKnowledgeBasesInBackground } from "../services/knowledge-base-manager"
 import type { BuiltinModelOverride, CustomModelConfig, ThinkingEffort } from "../storage"
 import {
   getBuiltinModelPublicConfigs,
@@ -3986,6 +3987,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
       }
       void builtinRobotManager.refreshIdentity()
+      refreshKnowledgeBasesInBackground()
       return { id }
     }
   )

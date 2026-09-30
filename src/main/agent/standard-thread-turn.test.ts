@@ -7,6 +7,9 @@ const harnessServiceMocks = vi.hoisted(() => ({
   resolveHarnessFeatureCurrentStage: vi.fn()
 }))
 
+const knowledgeMocks = vi.hoisted(() => ({ isKnowledgeDepositionBlocked: vi.fn(() => false) }))
+vi.mock("../services/knowledge-base-manager", () => knowledgeMocks)
+
 vi.mock("../harness-board/service", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../harness-board/service")>()),
   ...harnessServiceMocks
@@ -29,6 +32,7 @@ import {
 describe("getHarnessAgentContext", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    knowledgeMocks.isKnowledgeDepositionBlocked.mockReturnValue(false)
     harnessServiceMocks.readHarnessFeatureMetadata.mockReturnValue({
       projectId: "project-1",
       slug: "feature-1"
@@ -104,6 +108,21 @@ describe("getHarnessAgentContext", () => {
     harnessServiceMocks.buildHarnessFeatureAgentContext.mockResolvedValue(null)
 
     await expect(getHarnessAgentContext({})).resolves.toEqual({})
+  })
+
+  it("refuses a deposition turn while its knowledge directory is synchronizing", async () => {
+    knowledgeMocks.isKnowledgeDepositionBlocked.mockReturnValue(true)
+    const metadata = {
+      harnessProjectSession: { projectId: "project-1", kind: "system-constraints-update" }
+    }
+    await expect(
+      getHarnessAgentContext(metadata, { workspacePath: "/knowledge/kb" })
+    ).rejects.toThrow("知识库正在同步")
+    expect(knowledgeMocks.isKnowledgeDepositionBlocked).toHaveBeenCalledWith(
+      metadata,
+      "/knowledge/kb"
+    )
+    expect(harnessServiceMocks.buildHarnessFeatureAgentContext).not.toHaveBeenCalled()
   })
 
   it("resolves the bound adapter for a project session without a feature", async () => {

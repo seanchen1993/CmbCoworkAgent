@@ -118,7 +118,6 @@ import type {
   HarnessPipelineQueryInput,
   HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult,
@@ -159,6 +158,11 @@ import type {
   HarnessBoardCatalogPageInput,
   HarnessBoardCatalogPageResult
 } from "../shared/harness-board-types"
+import type {
+  KnowledgeBaseListResult,
+  KnowledgeBaseSyncResult,
+  KnowledgeDepositionWorkspace
+} from "../shared/knowledge-base-types"
 import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
@@ -3035,8 +3039,11 @@ interface CustomAPI {
       mappings: HarnessDeployUnitConfig[]
     ) => Promise<HarnessDeployUnitConfig[]>
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
-    syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
-    getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
+    listKnowledgeBases: () => Promise<KnowledgeBaseListResult>
+    refreshKnowledgeBases: () => Promise<KnowledgeBaseListResult>
+    prepareKnowledgeDeposition: (projectId: string) => Promise<KnowledgeDepositionWorkspace>
+    syncKnowledgeBase: (idKey: string) => Promise<KnowledgeBaseSyncResult>
+    getKnowledgePreview: (idKey: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (

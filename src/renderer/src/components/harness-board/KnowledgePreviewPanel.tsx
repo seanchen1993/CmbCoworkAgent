@@ -240,8 +240,6 @@ export function KnowledgePreviewPanel({
         </div>
       ) : !preview ? (
         <KnowledgePreviewEmpty icon={<FolderOpen className="size-5" />} text="展开后加载系统约束预览。" />
-      ) : !preview.configured ? (
-        <KnowledgePreviewEmpty icon={<AlertCircle className="size-5" />} text="暂无知识库" />
       ) : blockingError ? (
         <KnowledgePreviewEmpty icon={<AlertCircle className="size-5" />} text={preview.error ?? "知识库预览失败"} />
       ) : !preview.exists ? (

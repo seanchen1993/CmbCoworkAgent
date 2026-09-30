@@ -145,7 +145,6 @@ import type {
   HarnessPipelineQueryInput,
   HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult,
@@ -183,6 +182,11 @@ import type {
   ManagedRunSummary,
   ManagedRunThreadCreatedEvent
 } from "../shared/harness-board-types"
+import type {
+  KnowledgeBaseListResult,
+  KnowledgeBaseSyncResult,
+  KnowledgeDepositionWorkspace
+} from "../shared/knowledge-base-types"
 import {
   AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
   type ManagedAutoSendStreamStartEvent
@@ -4445,15 +4449,21 @@ const api = {
         "harnessBoard:saveLeanTokenConfig",
         input
       ) as Promise<HarnessLeanTokenConfig>,
-    syncProjectConstraints: (adapterId: string): Promise<HarnessProjectConstraintSyncResult> =>
+    listKnowledgeBases: (): Promise<KnowledgeBaseListResult> =>
+      ipcRenderer.invoke("harnessBoard:listKnowledgeBases") as Promise<KnowledgeBaseListResult>,
+    refreshKnowledgeBases: (): Promise<KnowledgeBaseListResult> =>
+      ipcRenderer.invoke("harnessBoard:refreshKnowledgeBases") as Promise<KnowledgeBaseListResult>,
+    prepareKnowledgeDeposition: (projectId: string): Promise<KnowledgeDepositionWorkspace> =>
+      ipcRenderer.invoke("harnessBoard:prepareKnowledgeDeposition", projectId),
+    syncKnowledgeBase: (idKey: string): Promise<KnowledgeBaseSyncResult> =>
       ipcRenderer.invoke(
-        "harnessBoard:syncProjectConstraints",
-        adapterId
-      ) as Promise<HarnessProjectConstraintSyncResult>,
-    getKnowledgePreview: (adapterId: string): Promise<HarnessKnowledgePreviewResult> =>
+        "harnessBoard:syncKnowledgeBase",
+        idKey
+      ) as Promise<KnowledgeBaseSyncResult>,
+    getKnowledgePreview: (idKey: string): Promise<HarnessKnowledgePreviewResult> =>
       ipcRenderer.invoke(
         "harnessBoard:getKnowledgePreview",
-        adapterId
+        idKey
       ) as Promise<HarnessKnowledgePreviewResult>,
     cancelKnowledgePreviewRequests: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelKnowledgePreviewRequests") as Promise<void>,

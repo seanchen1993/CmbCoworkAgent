@@ -46,6 +46,7 @@ import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
 import { createAgentRuntime, type CreateAgentRuntimeOptions, type DeepAgent } from "./runtime"
 import { assertLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
 import { primeHarnessStageAttribution } from "../services/harness-stage-attribution"
+import { isKnowledgeDepositionBlocked } from "../services/knowledge-base-manager"
 import {
   formatSkillUseBlock as formatTrustedSkillUseBlock,
   type SkillUseBlockMetadata
@@ -241,6 +242,11 @@ export async function getHarnessAgentContext(
           harnessAdapterVersion: adapter.version
         }
       : featureIdentity
+  }
+  if (isKnowledgeDepositionBlocked(metadata, options.workspacePath ?? metadata.workspacePath)) {
+    throw new HarnessAgentContextUnavailableError("知识库正在同步，请稍后再运行沉淀任务。", {
+      harnessProjectId: projectSessionProjectId
+    })
   }
   const isHarnessProjectSession = Boolean(harnessProjectSession)
   const harnessFeature = readHarnessFeatureMetadata(metadata)
