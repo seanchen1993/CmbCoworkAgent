@@ -59,7 +59,7 @@ describe("award skill candidates", () => {
     const filter = buildAwardSkillMatchFilter(candidate, ["usedSkills", "usedSkills.keyword"]) as {
       bool: { should: Array<Record<string, Record<string, string>>> }
     }
-    // Lucene regex queries match the entire term; evaluate these simple expressions likewise.
+    // Check match semantics here; tests/dashboard-awards-lucene.spec.ts validates actual Lucene parsing.
     const matches = (name: string): boolean =>
       filter.bool.should.some((clause) =>
         clause.term
@@ -73,7 +73,9 @@ describe("award skill candidates", () => {
       "code.review-v1",
       "code.review-V2.3",
       "code.review-1.2.3",
-      "code.review-v3.1.2-beta"
+      "code.review-v3.1.2-beta",
+      "code.review-v3.1.2-beta-fix",
+      "code.review-v1.0+build.7"
     ])
       expect(matches(name), name).toBe(true)
     for (const name of [
