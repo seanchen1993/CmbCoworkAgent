@@ -1,3 +1,11 @@
+import {
+  buildAwardSkillMatchFilter,
+  groupAwardSkillCandidates,
+  mapAwardBatches,
+  fetchAllAwardCompositeBuckets,
+  countAwardDistinctSkills,
+  readCompleteAwardAggregation
+} from "./dashboard-awards-skill"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
 import {
@@ -1834,25 +1842,6 @@ function buildVersionedSkillUsagePrefixFilter(skillName: string): Record<string,
 
 function buildVersionPrefix(skillName: string): string {
   return `${skillName}-v`
-}
-
-/**
- * code 事件侧（`properties.usedSkills`）的技能命中过滤，匹配裸名或 `name-v*` 全部版本，
- * 与 trace 侧 buildSkillUsageWildcardFilter 同口径，用于评奖看板按技能聚合入库率。
- */
-function buildEventSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
-  const versionPrefix = buildVersionPrefix(skillName)
-  return {
-    bool: {
-      should: [
-        { term: { "properties.usedSkills": skillName } },
-        { term: { "properties.usedSkills.keyword": skillName } },
-        { prefix: { "properties.usedSkills": versionPrefix } },
-        { prefix: { "properties.usedSkills.keyword": versionPrefix } }
-      ],
-      minimum_should_match: 1
-    }
-  }
 }
 
 const SKILL_EVAL_STATS_PAGE_SIZE = 500
@@ -6760,109 +6749,109 @@ async function fetchSkillDetail(
   }
 }
 
+async function fetchAwardComposite(
+  index: "trace" | "event",
+  body: Record<string, unknown>,
+  aggregation: string
+): Promise<Record<string, unknown>[]> {
+  return fetchAllAwardCompositeBuckets(body, aggregation, (page) =>
+    esQuery(getEsIndex(index), page)
+  )
+}
+
 // ── 评奖辅助看板 fetchers ───────────────────────────────────────
-// 单批技能命名桶上限（避免聚合体过大）。个人技能数远小于此。
-const AWARD_SKILL_CONTRIBUTION_LIMIT = 300
-// 应用奖榜返回的个人数上限（多列展示、不自动排名，前端可自行排序/裁剪 Top10）。
-const AWARD_USER_APPLICATION_LIMIT = 100
+// 限制单次请求大小，全部候选分批查询。
+const AWARD_QUERY_BATCH_SIZE = 100
+const AWARD_COMPOSITE_PAGE_SIZE = 500
 
 /**
  * 技能贡献奖：对给定「个人构建」技能名集，按技能聚合跨室数 / 使用人数 / 调用数（trace 侧）
- * 与整体入库统计（code 事件侧）。两侧均用 filters 命名桶单次聚合，避免逐技能查询。
+ * 与整体入库统计（code 事件侧）。同一技能的多个版本合并为一行，两侧分批聚合全部候选。
  */
 async function fetchAwardSkillContributions(
   range: TimeRange,
   skillNames: string[]
 ): Promise<DashboardAwardSkillContribution[]> {
   requireDashboardAwardsAccess()
-  // 保留前端传入的原始名作为回传 key（供前端 join 市场展示字段），内部用归一化名建 ES 过滤。
-  const seen = new Set<string>()
-  const entries: Array<{ key: string; norm: string }> = []
-  for (const raw of Array.isArray(skillNames) ? skillNames : []) {
-    const key = String(raw || "").trim()
-    if (!key || seen.has(key)) continue
-    const norm = normalizeSkillQueryName(key)
-    if (!norm) continue
-    seen.add(key)
-    entries.push({ key, norm })
-    if (entries.length >= AWARD_SKILL_CONTRIBUTION_LIMIT) break
-  }
-  if (entries.length === 0) return []
-
-  // trace 侧：每个技能一个命名 filter 桶，统计去重室 / 去重用户；调用数取桶 doc_count。
-  const traceFilters: Record<string, unknown> = {}
-  for (const { key, norm } of entries) traceFilters[key] = buildSkillUsageWildcardFilter(norm)
-  const traceBody = {
-    size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
-    aggs: {
-      by_skill: {
-        filters: { filters: traceFilters },
-        aggs: {
-          // cardinality 不支持 exclude，所以先用 filter 桶把「未归类」挡在外面再去重。
-          // 空串和采集占位串都是字段里实际存在的值，直接 cardinality 会各自算成一个室，
-          // 把「跨室使用」抬高一到两格。
-          real_org: {
-            filter: buildNonEmptyOrgLevelFilter("upperOrgLv1"),
-            aggs: { cross_org: { cardinality: { field: "upperOrgLv1" } } }
-          },
-          users: { cardinality: { field: "ystId" } }
-        }
-      }
-    }
-  }
-
-  // code 事件侧：每个技能一个命名 filter 桶，桶内复用 perBucketAggs 得入库统计。
+  const entries = groupAwardSkillCandidates(skillNames)
   const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
     null,
     range,
     []
   )
-  const eventFilters: Record<string, unknown> = {}
-  for (const { key, norm } of entries) eventFilters[key] = buildEventSkillUsageWildcardFilter(norm)
-  const eventBody = {
-    size: 0,
-    query: {
-      bool: {
-        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
-        minimum_should_match: 1
+  const batches = await mapAwardBatches(entries, AWARD_QUERY_BATCH_SIZE, async (batch) => {
+    const traceFilters = Object.fromEntries(
+      batch.map((entry) => [
+        entry.key,
+        buildAwardSkillMatchFilter(entry, ["usedSkills", "usedSkills.keyword"])
+      ])
+    )
+    const eventFilters = Object.fromEntries(
+      batch.map((entry) => [
+        entry.key,
+        buildAwardSkillMatchFilter(entry, [
+          "properties.usedSkills",
+          "properties.usedSkills.keyword"
+        ])
+      ])
+    )
+    const [traceRaw, eventRaw] = await Promise.all([
+      esQuery(getEsIndex("trace"), {
+        size: 0,
+        query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+        aggs: {
+          by_skill: {
+            filters: { filters: traceFilters },
+            aggs: {
+              real_org: {
+                filter: buildNonEmptyOrgLevelFilter("upperOrgLv1"),
+                aggs: { cross_org: { cardinality: { field: "upperOrgLv1" } } }
+              },
+              real_users: {
+                filter: {
+                  bool: {
+                    filter: [{ exists: { field: "ystId" } }],
+                    must_not: [{ term: { ystId: "" } }]
+                  }
+                },
+                aggs: { users: { cardinality: { field: "ystId" } } }
+              }
+            }
+          }
+        }
+      }),
+      esQuery(getEsIndex("event"), {
+        size: 0,
+        query: {
+          bool: {
+            should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+            minimum_should_match: 1
+          }
+        },
+        aggs: { by_skill: { filters: { filters: eventFilters }, aggs: perBucketAggs } }
+      })
+    ])
+    const traceBuckets = asRecord(readCompleteAwardAggregation(traceRaw, "by_skill").buckets)
+    const eventBuckets = asRecord(readCompleteAwardAggregation(eventRaw, "by_skill").buckets)
+    return batch.map(({ key }) => {
+      if (!traceBuckets[key] || !eventBuckets[key]) throw new Error("评奖查询缺少技能统计结果")
+      const tBucket = asRecord(traceBuckets[key])
+      const eBucket = asRecord(eventBuckets[key])
+      return {
+        skillKey: key,
+        crossOrgCount: asNumber(asRecord(asRecord(tBucket.real_org).cross_org).value),
+        userCount: asNumber(asRecord(asRecord(tBucket.real_users).users).value),
+        callCount: asNumber(tBucket.doc_count),
+        codeStats: asNumber(eBucket.doc_count) > 0 ? normalizeCodeStatsFromContainer(eBucket) : null
       }
-    },
-    aggs: {
-      by_skill: { filters: { filters: eventFilters }, aggs: perBucketAggs }
-    }
-  }
-
-  const [traceRaw, eventRaw] = await Promise.all([
-    esQuery(getEsIndex("trace"), traceBody),
-    esQuery(getEsIndex("event"), eventBody)
-  ])
-
-  const traceBuckets = asRecord(
-    asRecord(asRecord(asRecord(traceRaw).aggregations).by_skill).buckets
-  )
-  const eventBuckets = asRecord(
-    asRecord(asRecord(asRecord(eventRaw).aggregations).by_skill).buckets
-  )
-
-  return entries.map(({ key }) => {
-    const tBucket = asRecord(traceBuckets[key])
-    const eBucket = asRecord(eventBuckets[key])
-    const codeStats =
-      asNumber(eBucket.doc_count) > 0 ? normalizeCodeStatsFromContainer(eBucket) : null
-    return {
-      skillKey: key,
-      crossOrgCount: asNumber(asRecord(asRecord(tBucket.real_org).cross_org).value),
-      userCount: asNumber(asRecord(tBucket.users).value),
-      callCount: asNumber(tBucket.doc_count),
-      codeStats
-    }
+    })
   })
+  return batches.flat()
 }
 
 /**
  * 技能应用奖榜：按个人（ystId）聚合深度使用指标（trace 侧）+ 个人入库统计（code 事件侧）。
- * 不自动排名；trace 按调用数取前 N 人，code 入库按 ystId join。
+ * 分页读取全部用户，code 入库按 ystId join；技能种类按基础名去重。
  */
 async function fetchAwardUserApplications(
   range: TimeRange
@@ -6882,7 +6871,10 @@ async function fetchAwardUserApplications(
     },
     aggs: {
       users: {
-        terms: { field: "ystId", size: AWARD_USER_APPLICATION_LIMIT, order: { _count: "desc" } },
+        composite: {
+          size: AWARD_COMPOSITE_PAGE_SIZE,
+          sources: [{ user: { terms: { field: "ystId" } } }]
+        },
         aggs: {
           latest_user_info: {
             top_hits: {
@@ -6893,7 +6885,6 @@ async function fetchAwardUserApplications(
               }
             }
           },
-          skill_count: { cardinality: { field: "usedSkills" } },
           skill_usage_total: { value_count: { field: "usedSkills" } },
           tool_calls: { sum: { field: "totalToolCalls" } },
           thread_count: { cardinality: { field: "threadId" } },
@@ -6917,32 +6908,47 @@ async function fetchAwardUserApplications(
       }
     },
     aggs: {
-      users: { terms: { field: "ystId", size: 2000 }, aggs: perBucketAggs }
+      users: {
+        composite: {
+          size: AWARD_COMPOSITE_PAGE_SIZE,
+          sources: [{ user: { terms: { field: "ystId" } } }]
+        },
+        aggs: perBucketAggs
+      }
     }
   }
 
-  const [traceRaw, eventRaw] = await Promise.all([
-    esQuery(getEsIndex("trace"), traceBody),
-    esQuery(getEsIndex("event"), eventBody)
+  const skillBody = {
+    size: 0,
+    query: traceBody.query,
+    aggs: {
+      users: {
+        composite: {
+          size: AWARD_COMPOSITE_PAGE_SIZE,
+          sources: [
+            { user: { terms: { field: "ystId" } } },
+            { skill: { terms: { field: "usedSkills" } } }
+          ]
+        }
+      }
+    }
+  }
+  const [traceList, eventList, skillList] = await Promise.all([
+    fetchAwardComposite("trace", traceBody, "users"),
+    fetchAwardComposite("event", eventBody, "users"),
+    fetchAwardComposite("trace", skillBody, "users")
   ])
-
-  // 个人入库统计按 ystId 建索引，供 trace 用户榜 join。
+  const skillCounts = countAwardDistinctSkills(skillList, (key) => asString(key.user))
   const codeByYst = new Map<string, DashboardCodeStats>()
-  const eventUsers = asRecord(asRecord(asRecord(eventRaw).aggregations).users)
-  const eventList = Array.isArray(eventUsers.buckets) ? eventUsers.buckets : []
-  for (const b of eventList) {
-    const bucket = asRecord(b)
-    const yst = asString(bucket.key)
-    if (!yst) continue
-    codeByYst.set(yst, normalizeCodeStatsFromContainer(bucket))
+  for (const bucket of eventList) {
+    const yst = asString(asRecord(bucket.key).user)
+    if (yst) codeByYst.set(yst, normalizeCodeStatsFromContainer(bucket))
   }
 
-  const traceUsers = asRecord(asRecord(asRecord(traceRaw).aggregations).users)
-  const traceList = Array.isArray(traceUsers.buckets) ? traceUsers.buckets : []
   return traceList
     .map((b): DashboardAwardUserApplication | null => {
       const bucket = asRecord(b)
-      const yst = asString(bucket.key)
+      const yst = asString(asRecord(bucket.key).user)
       if (!yst) return null
       const hits = asRecord(asRecord(bucket.latest_user_info).hits).hits
       const firstHit = asRecord(Array.isArray(hits) ? hits[0] : undefined)
@@ -6955,7 +6961,7 @@ async function fetchAwardUserApplications(
         upperOrgLv0: readOrgText(src.upperOrgLv0),
         upperOrgLv1: readOrgText(src.upperOrgLv1),
         callCount: asNumber(bucket.doc_count),
-        skillCount: asNumber(asRecord(bucket.skill_count).value),
+        skillCount: skillCounts.get(yst) ?? 0,
         skillUsageCount: asNumber(asRecord(bucket.skill_usage_total).value),
         toolCallCount: asNumber(asRecord(bucket.tool_calls).value),
         threadCount: asNumber(asRecord(bucket.thread_count).value),
@@ -6970,11 +6976,7 @@ async function fetchAwardUserApplications(
 function teamBenchmarkTraceMetricAggs(): Record<string, unknown> {
   return {
     usage_count: { value_count: { field: "traceId" } },
-    user_count: { cardinality: { field: "ystId" } },
-    skill_usage_count: { value_count: { field: "usedSkills" } },
-    distinct_skills: { cardinality: { field: "usedSkills" } },
-    // 各用户使用次数（doc_count），用于统计「超过人均次数的人数」。
-    users: { terms: { field: "ystId", size: 5000 } }
+    skill_usage_count: { value_count: { field: "usedSkills" } }
   }
 }
 
@@ -6982,7 +6984,11 @@ function teamBenchmarkTraceMetricAggs(): Record<string, unknown> {
  * 把一个组织桶（含 teamBenchmarkTraceMetricAggs）解析为标杆奖行的 trace 侧部分。
  * 本行内使用次数超过本行人均的用户计入 aboveAvgUserCount。
  */
-function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
+function parseTeamBenchmarkTraceBucket(
+  bucket: Record<string, unknown>,
+  userCounts: number[],
+  distinctSkills: number
+): {
   usageCount: number
   userCount: number
   perCapitaUsage: number
@@ -6991,19 +6997,16 @@ function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
   distinctSkillsUsed: number
 } {
   const usageCount = asNumber(asRecord(bucket.usage_count).value, asNumber(bucket.doc_count))
-  const userCount = asNumber(asRecord(bucket.user_count).value)
+  const userCount = userCounts.length
   const perCapitaUsage = userCount > 0 ? usageCount / userCount : 0
-  const userBuckets = asRecord(bucket.users).buckets
-  const aboveAvgUserCount = Array.isArray(userBuckets)
-    ? userBuckets.filter((u) => asNumber(asRecord(u).doc_count) > perCapitaUsage).length
-    : 0
+  const aboveAvgUserCount = userCounts.filter((count) => count > perCapitaUsage).length
   return {
     usageCount,
     userCount,
     perCapitaUsage,
     aboveAvgUserCount,
     skillUsageCount: asNumber(asRecord(bucket.skill_usage_count).value),
-    distinctSkillsUsed: asNumber(asRecord(bucket.distinct_skills).value)
+    distinctSkillsUsed: distinctSkills
   }
 }
 
@@ -7011,9 +7014,6 @@ function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
 function teamOrgKey(shi: string, group?: string): string {
   return group ? `${shi}\u0000${group}` : shi
 }
-
-const TEAM_BENCHMARK_SHI_LIMIT = 200
-const TEAM_BENCHMARK_GROUP_LIMIT = 500
 
 /**
  * 团队标杆奖：按 室(upperOrgLv1) → 组(upperOrgLv0) 两级聚合使用深度（trace 侧）+ 代码产出（event 侧）。
@@ -7024,173 +7024,182 @@ async function fetchAwardTeamBenchmark(
 ): Promise<DashboardAwardTeamBenchmarkRow[]> {
   requireDashboardAwardsAccess()
 
-  const traceBody = {
-    size: 0,
-    query: {
-      bool: {
-        filter: [
-          timeRangeFilter("startedAt", range),
-          // 原先这里内联了「exists + 非空串」，和 buildNonEmptyOrgLevelFilter 是同一件
-          // 事，换成共用的那个，采集占位串才不会在这里独占一行排行。
-          buildNonEmptyOrgLevelFilter("upperOrgLv1")
-        ]
-      }
-    },
-    aggs: {
-      // 全员基线：总使用次数 / 总去重用户 → 总量人均使用次数。
-      total_usage: { value_count: { field: "traceId" } },
-      total_users: { cardinality: { field: "ystId" } },
-      by_shi: {
-        terms: { field: "upperOrgLv1", size: TEAM_BENCHMARK_SHI_LIMIT },
-        aggs: {
-          ...teamBenchmarkTraceMetricAggs(),
-          by_group: {
-            terms: { field: "upperOrgLv0", size: TEAM_BENCHMARK_GROUP_LIMIT },
-            aggs: teamBenchmarkTraceMetricAggs()
-          }
-        }
-      }
+  const traceQuery = {
+    bool: {
+      filter: [timeRangeFilter("startedAt", range), buildNonEmptyOrgLevelFilter("upperOrgLv1")]
     }
   }
-
   const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
     null,
     range,
     []
   )
-  const eventBody = {
+  const eventQuery = {
+    bool: {
+      should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+      minimum_should_match: 1
+    }
+  }
+  const roomSources = [{ shi: { terms: { field: "upperOrgLv1" } } }]
+  const groupSources = [...roomSources, { group: { terms: { field: "upperOrgLv0" } } }]
+  const userSource = { user: { terms: { field: "ystId" } } }
+  const skillSource = { skill: { terms: { field: "usedSkills" } } }
+  const compositeBody = (
+    sources: Record<string, unknown>[],
+    query: Record<string, unknown>,
+    aggs?: Record<string, unknown>
+  ): Record<string, unknown> => ({
     size: 0,
-    query: {
-      bool: {
-        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
-        minimum_should_match: 1
-      }
-    },
+    query,
     aggs: {
-      by_shi: {
-        terms: { field: "upperOrgLv1", size: TEAM_BENCHMARK_SHI_LIMIT },
-        aggs: {
-          ...perBucketAggs,
-          by_group: {
-            terms: { field: "upperOrgLv0", size: TEAM_BENCHMARK_GROUP_LIMIT },
-            aggs: perBucketAggs
-          }
-        }
+      items: { composite: { size: AWARD_COMPOSITE_PAGE_SIZE, sources }, ...(aggs ? { aggs } : {}) }
+    }
+  })
+  // 分别分页读取室、组、用户、技能，避免嵌套 terms 的容量截断与桶数膨胀。
+  const queries: Array<{ index: "trace" | "event"; body: Record<string, unknown> }> = [
+    {
+      index: "trace",
+      body: compositeBody(roomSources, traceQuery, teamBenchmarkTraceMetricAggs())
+    },
+    {
+      index: "trace",
+      body: compositeBody(groupSources, traceQuery, teamBenchmarkTraceMetricAggs())
+    },
+    { index: "trace", body: compositeBody([...roomSources, userSource], traceQuery) },
+    { index: "trace", body: compositeBody([...groupSources, userSource], traceQuery) },
+    { index: "trace", body: compositeBody([...roomSources, skillSource], traceQuery) },
+    { index: "trace", body: compositeBody([...groupSources, skillSource], traceQuery) },
+    { index: "event", body: compositeBody(roomSources, eventQuery, perBucketAggs) },
+    { index: "event", body: compositeBody(groupSources, eventQuery, perBucketAggs) }
+  ]
+  const results = await mapAwardBatches(queries, 1, async ([query]) =>
+    fetchAwardComposite(query.index, query.body, "items")
+  )
+  const [rooms, groups, roomUsers, groupUsers, roomSkills, groupSkills, eventRooms, eventGroups] =
+    results
+  const totalsRaw = await esQuery(getEsIndex("trace"), {
+    size: 0,
+    query: traceQuery,
+    aggs: {
+      total_usage: { value_count: { field: "traceId" } },
+      real_users: {
+        filter: {
+          bool: { filter: [{ exists: { field: "ystId" } }], must_not: [{ term: { ystId: "" } }] }
+        },
+        aggs: { total_users: { cardinality: { field: "ystId" } } }
       }
     }
-  }
-
-  const [traceRaw, eventRaw] = await Promise.all([
-    esQuery(getEsIndex("trace"), traceBody),
-    esQuery(getEsIndex("event"), eventBody)
-  ])
-
-  // 代码统计按 室 / 室␀组 建索引，供 trace 行 join。
-  const codeByOrg = new Map<string, DashboardCodeStats>()
-  const eventShiBuckets = asRecord(asRecord(asRecord(eventRaw).aggregations).by_shi).buckets
-  for (const sb of Array.isArray(eventShiBuckets) ? eventShiBuckets : []) {
-    const shiBucket = asRecord(sb)
-    const shi = asString(shiBucket.key)
-    if (isMissingOrgValue(shi)) continue
-    codeByOrg.set(teamOrgKey(shi), normalizeCodeStatsFromContainer(shiBucket))
-    const groupBuckets = asRecord(shiBucket.by_group).buckets
-    for (const gb of Array.isArray(groupBuckets) ? groupBuckets : []) {
-      const groupBucket = asRecord(gb)
-      const group = asString(groupBucket.key)
-      if (isMissingOrgValue(group)) continue
-      codeByOrg.set(teamOrgKey(shi, group), normalizeCodeStatsFromContainer(groupBucket))
-    }
-  }
-
-  const traceAggs = asRecord(asRecord(traceRaw).aggregations)
-  const totalUsage = asNumber(asRecord(traceAggs.total_usage).value)
-  const totalUsers = asNumber(asRecord(traceAggs.total_users).value)
-  // 总量人均使用次数 = 全员总使用次数 / 全员去重用户数，仅作全局参考。
+  })
+  const totalUsage = asNumber(readCompleteAwardAggregation(totalsRaw, "total_usage").value)
+  const totalUsers = asNumber(
+    asRecord(readCompleteAwardAggregation(totalsRaw, "real_users").total_users).value
+  )
   const totalPerCapitaUsage = totalUsers > 0 ? totalUsage / totalUsers : 0
-
-  const shiBuckets = asRecord(traceAggs.by_shi).buckets
-  return (Array.isArray(shiBuckets) ? shiBuckets : [])
-    .map((sb): DashboardAwardTeamBenchmarkRow | null => {
-      const shiBucket = asRecord(sb)
-      const shi = asString(shiBucket.key)
-      if (isMissingOrgValue(shi)) return null
-      const groupBuckets = asRecord(shiBucket.by_group).buckets
-      const children = (Array.isArray(groupBuckets) ? groupBuckets : [])
-        .map((gb): DashboardAwardTeamBenchmarkRow | null => {
-          const groupBucket = asRecord(gb)
-          const group = asString(groupBucket.key)
-          if (isMissingOrgValue(group)) return null
-          return {
-            shi,
-            group,
-            ...parseTeamBenchmarkTraceBucket(groupBucket),
-            totalPerCapitaUsage,
-            codeStats: codeByOrg.get(teamOrgKey(shi, group)) ?? null
-          }
-        })
-        .filter((x): x is DashboardAwardTeamBenchmarkRow => x !== null)
-      return {
-        shi,
-        ...parseTeamBenchmarkTraceBucket(shiBucket),
-        totalPerCapitaUsage,
-        codeStats: codeByOrg.get(teamOrgKey(shi)) ?? null,
-        children
-      }
+  const ownerKey = (key: Record<string, unknown>): string =>
+    teamOrgKey(asString(key.shi), asString(key.group))
+  const codeByOrg = new Map<string, DashboardCodeStats>()
+  for (const bucket of [...eventRooms, ...eventGroups]) {
+    codeByOrg.set(ownerKey(asRecord(bucket.key)), normalizeCodeStatsFromContainer(bucket))
+  }
+  const userCountsByOrg = new Map<string, number[]>()
+  for (const bucket of [...roomUsers, ...groupUsers]) {
+    const key = asRecord(bucket.key)
+    if (!asString(key.user)) continue
+    const owner = ownerKey(key)
+    const counts = userCountsByOrg.get(owner) ?? []
+    counts.push(asNumber(bucket.doc_count))
+    userCountsByOrg.set(owner, counts)
+  }
+  const distinctSkills = countAwardDistinctSkills([...roomSkills, ...groupSkills], ownerKey)
+  const parseRow = (bucket: Record<string, unknown>): DashboardAwardTeamBenchmarkRow => {
+    const key = asRecord(bucket.key)
+    const shi = asString(key.shi)
+    const group = asString(key.group)
+    const owner = ownerKey(key)
+    return {
+      shi,
+      ...(group ? { group } : {}),
+      ...parseTeamBenchmarkTraceBucket(
+        bucket,
+        userCountsByOrg.get(owner) ?? [],
+        distinctSkills.get(owner) ?? 0
+      ),
+      totalPerCapitaUsage,
+      codeStats: codeByOrg.get(owner) ?? null
+    }
+  }
+  const childrenByShi = new Map<string, DashboardAwardTeamBenchmarkRow[]>()
+  for (const bucket of groups) {
+    const row = parseRow(bucket)
+    if (isMissingOrgValue(row.shi) || isMissingOrgValue(row.group)) continue
+    const children = childrenByShi.get(row.shi) ?? []
+    children.push(row)
+    childrenByShi.set(row.shi, children)
+  }
+  return rooms
+    .map((bucket) => {
+      const row = parseRow(bucket)
+      return { ...row, children: childrenByShi.get(row.shi) ?? [] }
     })
-    .filter((x): x is DashboardAwardTeamBenchmarkRow => x !== null)
+    .filter((row) => !isMissingOrgValue(row.shi))
 }
 
 /**
  * 团队标杆奖·技能试用覆盖室数：给定每个室「贡献技能名集」，返回该室技能被多少个去重室（upperOrgLv1）试用过。
- * 单次查询用命名 filter 桶（每室一桶，usedSkills 命中该室技能集），桶内 cardinality(upperOrgLv1)。
+ * 分页枚举室与技能，按技能基础名匹配，精确统计去重室数。
  */
 async function fetchAwardTeamSkillCoverage(
   range: TimeRange,
   groups: Array<{ shi: string; skillNames: string[] }>
 ): Promise<Record<string, number>> {
   requireDashboardAwardsAccess()
-  const filters: Record<string, unknown> = {}
-  for (const g of Array.isArray(groups) ? groups : []) {
-    const shi = String(g?.shi || "").trim()
-    const names = Array.isArray(g?.skillNames) ? g.skillNames : []
-    if (!shi || names.length === 0) continue
-    const should = names.flatMap((raw) => {
-      const norm = normalizeSkillQueryName(raw)
-      if (!norm) return []
-      const wildcard = `${escapeWildcard(norm)}**`
-      return [
-        { wildcard: { usedSkills: wildcard } },
-        { wildcard: { "usedSkills.keyword": wildcard } }
-      ]
-    })
-    if (should.length === 0) continue
-    filters[shi] = { bool: { should, minimum_should_match: 1 } }
+  const skillOwners = new Map<string, Set<string>>()
+  const coveredRooms = new Map<string, Set<string>>()
+  for (const group of Array.isArray(groups) ? groups : []) {
+    const owner = String(group?.shi || "").trim()
+    if (!owner) continue
+    const candidates = groupAwardSkillCandidates(group.skillNames)
+    if (candidates.length === 0) continue
+    coveredRooms.set(owner, coveredRooms.get(owner) ?? new Set<string>())
+    for (const candidate of candidates) {
+      const owners = skillOwners.get(candidate.key) ?? new Set<string>()
+      owners.add(owner)
+      skillOwners.set(candidate.key, owners)
+    }
   }
-  if (Object.keys(filters).length === 0) return {}
-
-  const body = {
-    size: 0,
-    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
-    aggs: {
-      by_shi: {
-        filters: { filters },
-        // 同 cross_org：先挡掉「未归类」再去重，否则空串和采集占位串各算一个室。
-        aggs: {
-          real_org: {
-            filter: buildNonEmptyOrgLevelFilter("upperOrgLv1"),
-            aggs: { covered_shi: { cardinality: { field: "upperOrgLv1" } } }
+  if (skillOwners.size === 0) return {}
+  // 枚举室×技能后按基础名匹配，版本不重复计室，也避免巨大的 bool 技能列表。
+  const buckets = await fetchAwardComposite(
+    "trace",
+    {
+      size: 0,
+      query: {
+        bool: {
+          filter: [timeRangeFilter("startedAt", range), buildNonEmptyOrgLevelFilter("upperOrgLv1")]
+        }
+      },
+      aggs: {
+        items: {
+          composite: {
+            size: AWARD_COMPOSITE_PAGE_SIZE,
+            sources: [
+              { shi: { terms: { field: "upperOrgLv1" } } },
+              { skill: { terms: { field: "usedSkills" } } }
+            ]
           }
         }
       }
-    }
+    },
+    "items"
+  )
+  for (const bucket of buckets) {
+    const key = asRecord(bucket.key)
+    const room = asString(key.shi)
+    if (isMissingOrgValue(room)) continue
+    const skill = normalizeSkillQueryName(asString(key.skill)).toLowerCase()
+    for (const owner of skillOwners.get(skill) ?? []) coveredRooms.get(owner)?.add(room)
   }
-  const raw = await esQuery(getEsIndex("trace"), body)
-  const buckets = asRecord(asRecord(asRecord(asRecord(raw).aggregations).by_shi).buckets)
-  const result: Record<string, number> = {}
-  for (const shi of Object.keys(filters)) {
-    result[shi] = asNumber(asRecord(asRecord(asRecord(buckets[shi]).real_org).covered_shi).value)
-  }
-  return result
+  return Object.fromEntries(Array.from(coveredRooms, ([owner, rooms]) => [owner, rooms.size]))
 }
 
 /** `_source` fields needed to render a Commit 明细 row (shared by commit-detail fetchers). */
@@ -10717,7 +10726,9 @@ function makeMockAwardSkillContributions(skillNames: string[]): DashboardAwardSk
   const names = (Array.isArray(skillNames) ? skillNames : [])
     .map((s) => String(s || "").trim())
     .filter(Boolean)
-  const seedNames = names.length > 0 ? names : ["code-review", "spec-writer", "db-migrate"]
+  const seedNames = groupAwardSkillCandidates(
+    names.length > 0 ? names : ["code-review", "spec-writer", "db-migrate"]
+  ).map((entry) => entry.key)
   return seedNames.map((name) => {
     const seed = Array.from(name).reduce((acc, c) => acc + c.charCodeAt(0), 0)
     return {
@@ -15744,7 +15755,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:awardsSkillContributions",
     async (_, range: TimeRange, skillNames: string[]) => {
       if (import.meta.env.DEV) {
@@ -15753,37 +15765,46 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       try {
         return { success: true, data: await fetchAwardSkillContributions(range, skillNames) }
       } catch (e) {
-        console.error("[Dashboard] awardsSkillContributions error:", e)
+        logDashboardRequestError("awardsSkillContributions", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
   )
 
-  _ipcMain.handle("dashboard:awardsUserApplications", async (_, range: TimeRange) => {
-    if (import.meta.env.DEV) {
-      return { success: true, data: makeMockAwardUserApplications() }
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:awardsUserApplications",
+    async (_, range: TimeRange) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockAwardUserApplications() }
+      }
+      try {
+        return { success: true, data: await fetchAwardUserApplications(range) }
+      } catch (e) {
+        logDashboardRequestError("awardsUserApplications", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-    try {
-      return { success: true, data: await fetchAwardUserApplications(range) }
-    } catch (e) {
-      console.error("[Dashboard] awardsUserApplications error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
+  )
 
-  _ipcMain.handle("dashboard:awardsTeamBenchmark", async (_, range: TimeRange) => {
-    if (import.meta.env.DEV) {
-      return { success: true, data: makeMockAwardTeamBenchmark() }
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:awardsTeamBenchmark",
+    async (_, range: TimeRange) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockAwardTeamBenchmark() }
+      }
+      try {
+        return { success: true, data: await fetchAwardTeamBenchmark(range) }
+      } catch (e) {
+        logDashboardRequestError("awardsTeamBenchmark", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
     }
-    try {
-      return { success: true, data: await fetchAwardTeamBenchmark(range) }
-    } catch (e) {
-      console.error("[Dashboard] awardsTeamBenchmark error:", e)
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
+  )
 
-  _ipcMain.handle(
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:awardsTeamSkillCoverage",
     async (_, range: TimeRange, groups: Array<{ shi: string; skillNames: string[] }>) => {
       if (import.meta.env.DEV) {
@@ -15797,7 +15818,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       try {
         return { success: true, data: await fetchAwardTeamSkillCoverage(range, groups) }
       } catch (e) {
-        console.error("[Dashboard] awardsTeamSkillCoverage error:", e)
+        logDashboardRequestError("awardsTeamSkillCoverage", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
