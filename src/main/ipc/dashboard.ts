@@ -141,6 +141,7 @@ import {
 import {
   isDashboardEsRequestCancelled,
   isDashboardEsResponseTooLarge,
+  getDashboardEsHttpErrorStatus,
   isDashboardEsWorkerUnavailable,
   queryDashboardEsInWorker
 } from "../services/dashboard-es-client"
@@ -276,6 +277,12 @@ function makeEsUnavailableError(nodes: string[], lastError: Error | null): Error
   if (isDashboardEsResponseTooLarge(lastError)) {
     console.warn("[Dashboard] ES response too large:", detail)
     return new Error("本次查询返回的数据量过大，请缩小时间范围或减少每页条数后重试")
+  }
+  if (getDashboardEsHttpErrorStatus(lastError) === 400) {
+    console.warn("[Dashboard] ES rejected query parameters:", detail)
+    return new Error("统计查询失败：ES 拒绝了查询参数（HTTP 400），请检查客户端版本或索引配置", {
+      cause: lastError
+    })
   }
   console.warn(`[Dashboard] All ${nodes.length} ES nodes failed. Last error:`, detail)
   return new Error("请检查网络连接后重试", { cause: lastError })

@@ -38,7 +38,9 @@ export function buildAwardSkillMatchFilter(
       const escaped = base.replace(/[\\.?+*|{}[\]()"#@&<>~]/g, "\\$&")
       should.push(
         { term: { [field]: base } },
-        { regexp: { [field]: `${escaped}-[vV]?[0-9]+(\\.[0-9]+){0,3}([-+][0-9A-Za-z.-]+)?` } }
+        // Lucene treats a trailing '-' as the start of a range, unlike JavaScript.
+        // Keep the literal hyphen first in the suffix character class.
+        { regexp: { [field]: `${escaped}-[vV]?[0-9]+(\\.[0-9]+){0,3}([-+][-0-9A-Za-z.]+)?` } }
       )
     }
     for (const identifier of candidate.identifiers) {
