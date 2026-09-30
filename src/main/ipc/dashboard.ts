@@ -6,6 +6,7 @@ import {
   countAwardDistinctSkills,
   readCompleteAwardAggregation
 } from "./dashboard-awards-skill"
+import { buildSkillUsageMatchFilter } from "./dashboard-skill-usage"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
 import {
@@ -1820,35 +1821,8 @@ function buildUserListSearchFilter(keyword: string): Record<string, unknown> | n
  * 使用 prefix 兼容 `技能名-v版本` 这一类上报格式，避免宽泛 wildcard 扫描。
  */
 function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
-  const versionPrefix = buildVersionPrefix(skillName)
-  return {
-    bool: {
-      should: [
-        { term: { usedSkills: skillName } },
-        { term: { "usedSkills.keyword": skillName } },
-        { prefix: { usedSkills: versionPrefix } },
-        { prefix: { "usedSkills.keyword": versionPrefix } }
-      ],
-      minimum_should_match: 1
-    }
-  }
-}
-
-function buildVersionedSkillUsagePrefixFilter(skillName: string): Record<string, unknown> {
-  const versionPrefix = buildVersionPrefix(skillName)
-  return {
-    bool: {
-      should: [
-        { prefix: { usedSkills: versionPrefix } },
-        { prefix: { "usedSkills.keyword": versionPrefix } }
-      ],
-      minimum_should_match: 1
-    }
-  }
-}
-
-function buildVersionPrefix(skillName: string): string {
-  return `${skillName}-v`
+  const [candidate] = groupAwardSkillCandidates([skillName])
+  return buildSkillUsageMatchFilter(candidate?.bases ?? [], ["usedSkills", "usedSkills.keyword"])
 }
 
 const SKILL_EVAL_STATS_PAGE_SIZE = 500
@@ -4260,10 +4234,17 @@ async function fetchSkillUsageSummary(
   void granularity
   // 模式 A：前端传入技能名列表，使用 filters 精确按“技能维度”统计。
   // 这样可以直接得到每个技能的用户数，避免按版本桶二次合并带来的误差。
-  const normalizedSkillNames = normalizeSkillQueryNames(skillNames)
-  if (normalizedSkillNames.length > 0) {
+  const candidates = groupAwardSkillCandidates(Array.isArray(skillNames) ? skillNames : []).slice(
+    0,
+    1000
+  )
+  if (candidates.length > 0) {
+    // 同一基础技能只生成一个桶，防止多个名称/版本命中同一 trace 后二次累加。
     const filters = Object.fromEntries(
-      normalizedSkillNames.map((skillName) => [skillName, buildSkillUsageWildcardFilter(skillName)])
+      candidates.map((candidate) => [
+        candidate.key,
+        buildSkillUsageMatchFilter(candidate.bases, ["usedSkills", "usedSkills.keyword"])
+      ])
     )
     // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
     const body = {
@@ -5774,7 +5755,7 @@ async function fetchSkillUserStats(
   // 统计指标不做组织级数据权限过滤。
   const traceAccessFilter = null
   void granularity
-  const skillFilter = buildVersionedSkillUsagePrefixFilter(skillName)
+  const skillFilter = buildSkillUsageWildcardFilter(skillName)
   const body = {
     size: 0,
     // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。

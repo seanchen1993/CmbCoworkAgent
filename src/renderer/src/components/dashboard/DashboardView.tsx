@@ -87,6 +87,7 @@ import { ProjectModePanel } from "./panels/ProjectModePanel"
 import { EfficiencyPanel } from "./panels/EfficiencyPanel"
 import { ProjectMetricGroupFilter } from "./panels/ProjectMetricGroupFilter"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
+import { formatAwardAdoptionExportValues } from "@/lib/award-code-adoption"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
 import { toolRankingCountLabel } from "../../../../shared/dashboard-tool-usage"
 import { ModelPanel } from "./panels/ModelPanel"
@@ -3418,7 +3419,7 @@ export function DashboardView(): React.JSX.Element {
     })
   }, [awardSkillContribs, marketSkillMap, skillUploaderProfiles])
 
-  // 评奖辅助看板导出：两个 sheet（技能贡献奖 / 技能应用奖），口径同界面，四个入库率全列。
+  // 评奖辅助看板导出：三个奖项，四个入库率及分子分母同界面。
   const handleAwardsExport = useCallback(async () => {
     setExporting(true)
     try {
@@ -3454,10 +3455,7 @@ export function DashboardView(): React.JSX.Element {
           r.crossOrgCount >= 2 ? "是" : "否",
           r.userCount,
           r.callCount,
-          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
-          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+          ...formatAwardAdoptionExportValues(r.codeStats)
         ])
       })
 
@@ -3491,10 +3489,7 @@ export function DashboardView(): React.JSX.Element {
           r.toolCallCount,
           r.threadCount,
           r.featureCount,
-          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
-          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
-          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+          ...formatAwardAdoptionExportValues(r.codeStats)
         ])
       })
 
@@ -3512,10 +3507,7 @@ export function DashboardView(): React.JSX.Element {
             row.skillCoverageShiCount === null ? "" : row.skillCoverageShiCount,
             row.skillUsageCount,
             row.codeStats?.adoptedLines ?? 0,
-            formatPercent(row.codeStats?.measuredAdoptionRate ?? null),
-            formatPercent(row.codeStats?.pushedAdoptionRate ?? null),
-            formatPercent(row.codeStats?.inclusiveAdoptionRate ?? null),
-            formatPercent(row.codeStats?.inclusivePushedAdoptionRate ?? null)
+            ...formatAwardAdoptionExportValues(row.codeStats)
           ])
         }
         emit(shiRow, false)

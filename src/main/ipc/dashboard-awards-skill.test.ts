@@ -54,37 +54,52 @@ describe("award skill candidates", () => {
     expect(candidates[0].key).toBe("code-review")
   })
 
-  it("matches versions without including unrelated skills sharing the prefix", () => {
+  it("matches the marketplace bare-name and lowercase-v prefix rule for all versions", () => {
     const [candidate] = groupAwardSkillCandidates(["code.review-v3"])
     const filter = buildAwardSkillMatchFilter(candidate, ["usedSkills", "usedSkills.keyword"]) as {
       bool: { should: Array<Record<string, Record<string, string>>> }
     }
-    // Check match semantics here; tests/dashboard-awards-lucene.spec.ts validates actual Lucene parsing.
     const matches = (name: string): boolean =>
       filter.bool.should.some((clause) =>
         clause.term
           ? Object.values(clause.term).includes(name)
-          : Object.values(clause.regexp).some((pattern) =>
-              new RegExp(`^(?:${pattern})$`).test(name)
-            )
+          : Object.values(clause.prefix).some((prefix) => name.startsWith(prefix))
       )
     for (const name of [
       "code.review",
       "code.review-v1",
-      "code.review-V2.3",
-      "code.review-1.2.3",
       "code.review-v3.1.2-beta",
       "code.review-v3.1.2-beta-fix",
-      "code.review-v1.0+build.7"
+      "code.review-v1.0+build.7",
+      "code.review-v1.0.0_202609",
+      "code.review-v1.2.3.4.5",
+      "code.review-vlatest",
+      // This broad prefix is deliberately retained to agree with marketplace usage.
+      "code.review-vendor"
     ])
       expect(matches(name), name).toBe(true)
     for (const name of [
       "code.review-helper",
-      "code.review-vendor",
+      "code.review-V2.3",
+      "code.review-1.2.3",
       "codeXreview-v1",
       "code.review-helper-v1"
     ])
       expect(matches(name), name).toBe(false)
+  })
+
+  it("does not add exact-version exceptions that marketplace usage would not match", () => {
+    const [candidate] = groupAwardSkillCandidates(["code-review-1.2.3"])
+    const filter = buildAwardSkillMatchFilter(candidate, ["properties.usedSkills"])
+    expect(filter).toEqual({
+      bool: {
+        should: [
+          { term: { "properties.usedSkills": "code-review" } },
+          { prefix: { "properties.usedSkills": "code-review-v" } }
+        ],
+        minimum_should_match: 1
+      }
+    })
   })
 
   it("does not return partial results when a later batch fails", async () => {

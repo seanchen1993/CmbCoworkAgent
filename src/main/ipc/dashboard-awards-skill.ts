@@ -1,53 +1,36 @@
 import { normalizeSkillIdentifierText, normalizeSkillQueryName } from "../utils/skill-identifiers"
+import { buildSkillUsageMatchFilter } from "./dashboard-skill-usage"
 
 export interface AwardSkillCandidate {
   /** One row per base skill, regardless of marketplace versions or name casing. */
   key: string
   bases: string[]
-  identifiers: string[]
 }
 
 export function groupAwardSkillCandidates(names: string[]): AwardSkillCandidate[] {
-  const groups = new Map<string, { bases: Set<string>; identifiers: Set<string> }>()
+  const groups = new Map<string, Set<string>>()
   for (const raw of Array.isArray(names) ? names : []) {
     const identifier = normalizeSkillIdentifierText(String(raw || ""))
     const base = normalizeSkillQueryName(identifier)
     if (!base) continue
     const key = base.toLowerCase()
-    const group = groups.get(key) ?? { bases: new Set<string>(), identifiers: new Set<string>() }
-    group.bases.add(base)
-    group.bases.add(key)
-    group.identifiers.add(identifier)
+    const group = groups.get(key) ?? new Set<string>()
+    group.add(base)
+    group.add(key)
     groups.set(key, group)
   }
   return Array.from(groups, ([key, group]) => ({
     key,
-    bases: Array.from(group.bases),
-    identifiers: Array.from(group.identifiers)
+    bases: Array.from(group)
   }))
 }
 
-/** Match bare names and versions without including other skills sharing a prefix. */
+/** Awards use the same bare-name / version-prefix rule as marketplace usage. */
 export function buildAwardSkillMatchFilter(
   candidate: AwardSkillCandidate,
   fields: readonly string[]
 ): Record<string, unknown> {
-  const should: Record<string, unknown>[] = []
-  for (const field of fields) {
-    for (const base of candidate.bases) {
-      const escaped = base.replace(/[\\.?+*|{}[\]()"#@&<>~]/g, "\\$&")
-      should.push(
-        { term: { [field]: base } },
-        // Lucene treats a trailing '-' as the start of a range, unlike JavaScript.
-        // Keep the literal hyphen first in the suffix character class.
-        { regexp: { [field]: `${escaped}-[vV]?[0-9]+(\\.[0-9]+){0,3}([-+][-0-9A-Za-z.]+)?` } }
-      )
-    }
-    for (const identifier of candidate.identifiers) {
-      if (!candidate.bases.includes(identifier)) should.push({ term: { [field]: identifier } })
-    }
-  }
-  return { bool: { should, minimum_should_match: 1 } }
+  return buildSkillUsageMatchFilter(candidate.bases, fields)
 }
 
 /** At most two batches run at once. A failure rejects the entire result. */

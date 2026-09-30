@@ -20,6 +20,11 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import {
+  AWARD_ADOPTION_FIELDS as ADOPTION_FIELDS,
+  formatAwardAdoptionLines,
+  formatAwardAdoptionPercent
+} from "@/lib/award-code-adoption"
 import { formatTopUserOrgName } from "../use-dashboard"
 import type {
   DashboardAwardSkillContribution,
@@ -72,32 +77,25 @@ const CONTRIBUTION_PAGE_SIZE = 50
 /** 技能应用奖展示上限。 */
 const APPLICATION_TOP_N = 20
 
-/** 四个 AI 代码入库率口径（与项目运营概览同口径），统一在两张表展示。 */
-const ADOPTION_FIELDS: Array<{
-  key: string
-  group: string
-  metric: string
-  field: keyof DashboardCodeStats
-}> = [
-  { key: "measured", group: "提交口径", metric: "提交", field: "measuredAdoptionRate" },
-  { key: "pushed", group: "提交口径", metric: "入库", field: "pushedAdoptionRate" },
-  { key: "inclusive", group: "总量口径", metric: "提交", field: "inclusiveAdoptionRate" },
-  {
-    key: "inclusivePushed",
-    group: "总量口径",
-    metric: "入库",
-    field: "inclusivePushedAdoptionRate"
-  }
-]
-
 function formatNumber(value: number): string {
   if (!Number.isFinite(value)) return "0"
   return new Intl.NumberFormat("zh-CN").format(Math.round(value))
 }
 
-function formatPercent(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return "—"
-  return `${(value * 100).toFixed(1)}%`
+function AdoptionValue({
+  codeStats,
+  metric
+}: {
+  codeStats: DashboardCodeStats | null
+  metric: (typeof ADOPTION_FIELDS)[number]
+}): React.JSX.Element {
+  const lines = formatAwardAdoptionLines(codeStats, metric)
+  return (
+    <div className="whitespace-nowrap">
+      <div>{formatAwardAdoptionPercent(codeStats?.[metric.field])}</div>
+      {lines ? <div className="text-[11px] font-normal text-muted-foreground">{lines}</div> : null}
+    </div>
+  )
 }
 
 function rateOf(codeStats: DashboardCodeStats | null, field: keyof DashboardCodeStats): number {
@@ -407,7 +405,7 @@ function ContributionTable({
                         a.key === "inclusivePushed" ? "font-medium text-foreground" : undefined
                       )}
                     >
-                      {formatPercent(row.codeStats?.[a.field] as number | null | undefined)}
+                      <AdoptionValue codeStats={row.codeStats} metric={a} />
                     </td>
                   ))}
                 </tr>
@@ -634,7 +632,7 @@ function ApplicationTable({
                       a.key === "inclusivePushed" ? "font-medium text-foreground" : undefined
                     )}
                   >
-                    {formatPercent(row.codeStats?.[a.field] as number | null | undefined)}
+                    <AdoptionValue codeStats={row.codeStats} metric={a} />
                   </td>
                 ))}
               </tr>
@@ -780,7 +778,7 @@ function TeamBenchmarkTable({
             a.key === "inclusivePushed" ? "font-medium text-foreground" : undefined
           )}
         >
-          {formatPercent(row.codeStats?.[a.field] as number | null | undefined)}
+          <AdoptionValue codeStats={row.codeStats} metric={a} />
         </td>
       ))}
     </>
