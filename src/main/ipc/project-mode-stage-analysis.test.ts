@@ -56,9 +56,10 @@ describe("阶段分析的聚合条件", () => {
 
   it("全项目和每个阶段都带耗时统计，不只是总和", () => {
     // 只有 sum 的话，阶段排名基本等于轮次排名，回答不了「哪个阶段慢」。
-    for (const scope of [aggs, (aggs.by_node as { aggs: Record<string, unknown> }).aggs]) {
+    const nodeAggs = (aggs.by_node as { aggs: Record<string, unknown> }).aggs
+    for (const scoped of [aggs.main_agent_conversations, nodeAggs.legacy_conversations]) {
       const main = (
-        scope.main_agent_conversations as {
+        scoped as {
           aggs: Record<string, { stats?: { field: string }; percentiles?: { field: string } }>
         }
       ).aggs
@@ -68,6 +69,7 @@ describe("阶段分析的聚合条件", () => {
       expect(stats.stats?.field).toBe("durationMs")
       expect(percentiles.percentiles?.field).toBe("durationMs")
     }
+    expect(aggs).toHaveProperty("stage_duration.aggs.usage.aggs.by_node")
   })
 
   it("旧统计开销按开始阶段拆，新统计使用独立阶段汇总", () => {
@@ -83,6 +85,15 @@ describe("阶段分析的聚合条件", () => {
     expect(stageAggs).toHaveProperty("run_cost_user_input_requests")
   })
 
+  it("旧索引缺少调用嵌套字段时仍避免把新版耗时重复算进开始阶段", () => {
+    const fallback = buildProjectModeStageAnalysisAggs(UNATTRIBUTED, 50, false, true)
+    const nodeAggs = (fallback.by_node as { aggs: Record<string, unknown> }).aggs
+    expect(fallback).not.toHaveProperty("stage_usage")
+    expect(fallback).toHaveProperty("stage_duration")
+    expect(nodeAggs).toHaveProperty("legacy_conversations.filter.bool.must_not")
+    expect(nodeAggs).toHaveProperty("run_cost_tool_calls")
+  })
+
   it("不再按工具分桶", () => {
     // 这一列曾经存在，但两个数都错：terms 的 doc_count 是「多少轮用过」而不是调用
     // 次数，而 exclude 又把 read_file / edit_file 这些大头全过滤掉了，于是「562 次
@@ -93,6 +104,65 @@ describe("阶段分析的聚合条件", () => {
 })
 
 describe("阶段分析的解析", () => {
+  it("新轮次跨阶段时分别计数，耗时拆分，历史轮次保留开始阶段", () => {
+    const parsed = parseProjectModeStageAnalysis("p", {
+      main_agent_conversations: { doc_count: 2, duration_stats: { sum: 6000, avg: 3000 } },
+      by_node: {
+        buckets: [
+          {
+            key: "plan",
+            legacy_conversations: {
+              doc_count: 1,
+              duration_stats: { sum: 1000, avg: 1000 },
+              duration_percentiles: { values: { "95.0": 1000 } }
+            }
+          },
+          {
+            key: "dev",
+            legacy_conversations: {
+              doc_count: 0,
+              duration_stats: { sum: 0, avg: null },
+              duration_percentiles: { values: { "95.0": null } }
+            }
+          }
+        ]
+      },
+      stage_duration: {
+        doc_count: 1,
+        usage: {
+          by_node: {
+            buckets: [
+              {
+                key: "plan",
+                doc_count: 1,
+                duration_stats: { sum: 2000 },
+                duration_percentiles: { values: { "95.0": 2000 } }
+              },
+              {
+                key: "dev",
+                doc_count: 1,
+                duration_stats: { sum: 3000 },
+                duration_percentiles: { values: { "95.0": 3000 } }
+              }
+            ]
+          }
+        }
+      }
+    })
+    expect(parsed.durationAttribution).toMatchObject({ splitTurnCount: 1, legacyTurnCount: 1 })
+    expect(parsed.stages.find((x) => x.nodeName === "plan")?.metrics).toMatchObject({
+      conversationCount: 2,
+      totalDurationMs: 3000,
+      avgDurationMs: 1500,
+      p95Available: false
+    })
+    expect(parsed.stages.find((x) => x.nodeName === "dev")?.metrics).toMatchObject({
+      conversationCount: 1,
+      totalDurationMs: 3000,
+      p95Available: true,
+      p95DurationMs: 3000
+    })
+  })
   it("阶段按总忙碌时长倒序，最吃时间的排最前", () => {
     const parsed = parseProjectModeStageAnalysis("p1", {
       main_agent_conversations: {

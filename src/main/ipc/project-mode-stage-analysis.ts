@@ -1,4 +1,8 @@
-import { mainAgentConversationAggs, readMainAgentConversations } from "./dashboard-stage-buckets"
+import {
+  mainAgentConversationAggs,
+  projectModeMainAgentConversationFilter,
+  readMainAgentConversations
+} from "./dashboard-stage-buckets"
 import {
   buildProjectModeRunCostAggs,
   parseProjectModeRunCost,
@@ -20,8 +24,7 @@ import {
  *
  * ── 一个必须说清楚的口径 ──────────────────────────────────────
  *
- * trace 上的 harnessNodeName 记的是「这轮对话开始时，特性处在哪个阶段」。所以这里
- * 的耗时是**归属到该阶段的 Agent 忙碌时长**，不是「这个阶段花了多久」。
+ * 新 trace 按主会话期间观察到的阶段变化拆分忙碌时长；旧 trace 回退到开始阶段。
  *
  * 两者能差一个数量级：一个阶段可能跨三天，其中 Agent 只跑了 20 分钟。要算阶段真实
  * 墙钟耗时，得有阶段流转的时间戳，而节点状态是从工作区文件里读出来的，应用只是观察
@@ -63,6 +66,8 @@ export interface ProjectModeStageMetrics {
   avgDurationMs: number
   /** 单轮耗时的 P95。轮次太少时 ES 给的是近似值，展示要留意。 */
   p95DurationMs: number
+  /** Mixed old/new durations cannot be merged into an exact ES percentile. */
+  p95Available?: boolean
   runCost: ProjectModeRunCost
 }
 
@@ -75,6 +80,7 @@ export interface ProjectModeStageRow {
 }
 
 export interface ProjectModeStageAnalysis {
+  durationAttribution?: { splitTurnCount: number; legacyTurnCount: number; truncated: boolean }
   costAttribution?: {
     callStartTraceCount: number
     turnStartTraceCount: number
@@ -116,6 +122,40 @@ function metricsAggs(): Record<string, unknown> {
   }
 }
 
+const completeStageDurationFilter = {
+  bool: {
+    filter: [{ term: { stageDurationSchemaVersion: 1 } }, { term: { stageDurationComplete: true } }]
+  }
+}
+
+function splitDurationAgg(unattributed: string, limit: number): Record<string, unknown> {
+  return {
+    filter: {
+      bool: { filter: [projectModeMainAgentConversationFilter(), completeStageDurationFilter] }
+    },
+    aggs: {
+      usage: {
+        nested: { path: "stageDuration" },
+        aggs: {
+          by_node: {
+            terms: {
+              field: "stageDuration.nodeName",
+              missing: unattributed,
+              size: Math.max(1, limit)
+            },
+            aggs: {
+              duration_stats: { stats: { field: "stageDuration.durationMs" } },
+              duration_percentiles: {
+                percentiles: { field: "stageDuration.durationMs", percents: [...DURATION_PERCENTS] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 /**
  * 弹窗的聚合树直接放在项目范围内：开销包含子 Agent，对话数与耗时仅取主 Agent。
  *
@@ -125,23 +165,33 @@ function metricsAggs(): Record<string, unknown> {
 export function buildProjectModeStageAnalysisAggs(
   unattributedNodeName: string,
   nodeLimit: number,
-  includeStageUsage = true
+  includeStageUsage = true,
+  includeStageDuration = true
 ): Record<string, unknown> {
   return {
     ...metricsAggs(),
     ...(includeStageUsage ? { stage_usage: stageUsageAgg(unattributedNodeName, nodeLimit) } : {}),
+    ...(includeStageDuration
+      ? { stage_duration: splitDurationAgg(unattributedNodeName, nodeLimit) }
+      : {}),
     by_node: {
       terms: {
         field: "harnessNodeName",
         size: Math.max(1, nodeLimit),
         missing: unattributedNodeName
       },
-      aggs: includeStageUsage
-        ? {
-            ...mainAgentConversationAggs(durationAggs()),
-            legacy_cost: legacyStageCostAgg()
-          }
-        : metricsAggs()
+      aggs: {
+        legacy_conversations: {
+          filter: {
+            bool: {
+              filter: [projectModeMainAgentConversationFilter()],
+              ...(includeStageDuration ? { must_not: [completeStageDurationFilter] } : {})
+            }
+          },
+          aggs: durationAggs()
+        },
+        ...(includeStageUsage ? { legacy_cost: legacyStageCostAgg() } : buildProjectModeRunCostAggs())
+      }
     }
   }
 }
@@ -158,6 +208,19 @@ function parseMetrics(container: unknown): ProjectModeStageMetrics {
     // ES 在桶为空时给 null，桶里只有一条时给那一条的值。两种都不是错误。
     p95DurationMs: asCount(percentileValues["95.0"]),
     runCost: parseProjectModeRunCost(bucket)
+  }
+}
+
+function parseLegacyDuration(container: unknown): ProjectModeStageMetrics {
+  const bucket = asRecord(container)
+  const stats = asRecord(bucket.duration_stats)
+  const values = asRecord(asRecord(bucket.duration_percentiles).values)
+  return {
+    ...emptyMetrics(),
+    conversationCount: asCount(bucket.doc_count),
+    totalDurationMs: asCount(stats.sum),
+    avgDurationMs: asCount(stats.avg),
+    p95DurationMs: asCount(values["95.0"])
   }
 }
 
@@ -182,7 +245,12 @@ export function parseProjectModeStageAnalysis(
           return {
             nodeName,
             group: extractHarnessNodeGroup(nodeName),
-            metrics: { ...parseMetrics(bucket), runCost: readLegacyStageCost(bucket) }
+            metrics: {
+              ...(bucket.legacy_conversations
+                ? parseLegacyDuration(bucket.legacy_conversations)
+                : parseMetrics(bucket)),
+              runCost: readLegacyStageCost(bucket)
+            }
           }
         })
         .filter((stage) => stage.nodeName.length > 0)
@@ -190,6 +258,33 @@ export function parseProjectModeStageAnalysis(
 
   const { costs, ...costAttribution } = readStageUsage(container)
   const stagesByName = new Map(stages.map((stage) => [stage.nodeName, stage]))
+  const durationScope = asRecord(container.stage_duration)
+  const splitBuckets = asRecord(asRecord(durationScope.usage).by_node).buckets
+  if (Array.isArray(splitBuckets))
+    for (const value of splitBuckets) {
+      const bucket = asRecord(value)
+      const nodeName = asText(bucket.key)
+      if (!nodeName) continue
+      const splitCount = asCount(bucket.doc_count)
+      const splitStats = asRecord(bucket.duration_stats)
+      const splitSum = asCount(splitStats.sum)
+      const splitP95 = asCount(asRecord(asRecord(bucket.duration_percentiles).values)["95.0"])
+      let row = stagesByName.get(nodeName)
+      if (!row) {
+        row = { nodeName, group: extractHarnessNodeGroup(nodeName), metrics: emptyMetrics() }
+        stages.push(row)
+        stagesByName.set(nodeName, row)
+      }
+      const oldCount = row.metrics.conversationCount
+      row.metrics.conversationCount += splitCount
+      row.metrics.totalDurationMs += splitSum
+      row.metrics.avgDurationMs =
+        row.metrics.conversationCount > 0
+          ? row.metrics.totalDurationMs / row.metrics.conversationCount
+          : 0
+      row.metrics.p95Available = oldCount === 0 || splitCount === 0
+      row.metrics.p95DurationMs = oldCount === 0 ? splitP95 : row.metrics.p95DurationMs
+    }
   for (const [nodeName, runCost] of costs) {
     const existing = stagesByName.get(nodeName)
     if (existing) existing.metrics.runCost = addStageCosts(existing.metrics.runCost, runCost)
@@ -206,6 +301,14 @@ export function parseProjectModeStageAnalysis(
   )
   return {
     projectId,
+    durationAttribution: {
+      splitTurnCount: asCount(durationScope.doc_count),
+      legacyTurnCount: Math.max(
+        0,
+        asCount(readMainAgentConversations(container).doc_count) - asCount(durationScope.doc_count)
+      ),
+      truncated: asCount(asRecord(asRecord(durationScope.usage).by_node).sum_other_doc_count) > 0
+    },
     costAttribution,
     total:
       Array.isArray(nodeBuckets) || container.doc_count !== undefined

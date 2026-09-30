@@ -1,4 +1,4 @@
-import { queryWithStageUsageMappingFallback } from "./project-mode-stage-usage"
+import { isNestedMappingError } from "./dashboard-es-nested-mapping"
 import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
 import {
   buildToolUsageAggs,
@@ -8920,8 +8920,31 @@ function makeMockProjectModeStageAnalysis(projectId: string): ProjectModeStageAn
   total.avgDurationMs =
     total.conversationCount > 0 ? Math.round(total.totalDurationMs / total.conversationCount) : 0
   total.p95DurationMs = 96_000
+  // One mock turn crossed two stages: stage counts may exceed the project total.
+  stages[0].metrics.conversationCount += 1
+  stages[0].metrics.avgDurationMs =
+    stages[0].metrics.totalDurationMs / stages[0].metrics.conversationCount
 
-  return { projectId, total, stages }
+  // DEV 同样展示新旧 Trace 混合时的归因覆盖说明，避免只在生产数据里出现。
+  const traceCount = total.conversationCount + Math.ceil(total.conversationCount / 4)
+  const callStartTraceCount = Math.round(traceCount * 0.7)
+  return {
+    projectId,
+    total,
+    stages,
+    durationAttribution: {
+      splitTurnCount: Math.round(total.conversationCount * 0.7),
+      legacyTurnCount: Math.round(total.conversationCount * 0.3),
+      truncated: false
+    },
+    costAttribution: {
+      callStartTraceCount,
+      turnStartTraceCount: traceCount - callStartTraceCount,
+      tokenUsageReportedCalls: total.runCost.modelCalls,
+      modelCalls: total.runCost.modelCalls,
+      truncated: false
+    }
+  }
 }
 
 function makeMockProjectModeOperationalDetails(
@@ -14501,19 +14524,25 @@ async function fetchProjectModeStageAnalysis(
     },
     aggs: buildProjectModeStageAnalysisAggs(UNATTRIBUTED_NODE_NAME, PROJECT_MODE_FEATURE_SLUG_LIMIT)
   }
-  const raw = (await queryWithStageUsageMappingFallback(
-    (query) => esQuery(getEsIndex("trace"), query),
-    body,
-    buildProjectModeStageAnalysisAggs(
-      UNATTRIBUTED_NODE_NAME,
-      PROJECT_MODE_FEATURE_SLUG_LIMIT,
-      false
-    )
-  )) as EsSearchResponse
-  return parseProjectModeStageAnalysis(
-    normalizedProjectId,
-    asRecord(raw.aggregations)
-  )
+  const execute = async (usage: boolean, duration: boolean): Promise<EsSearchResponse> => {
+    try {
+      return (await esQuery(getEsIndex("trace"), {
+        ...body,
+        aggs: buildProjectModeStageAnalysisAggs(
+          UNATTRIBUTED_NODE_NAME,
+          PROJECT_MODE_FEATURE_SLUG_LIMIT,
+          usage,
+          duration
+        )
+      })) as EsSearchResponse
+    } catch (error) {
+      if (duration && isNestedMappingError(error, "stageDuration")) return execute(usage, false)
+      if (usage && isNestedMappingError(error, "stageUsage")) return execute(false, duration)
+      throw error
+    }
+  }
+  const raw = await execute(true, true)
+  return parseProjectModeStageAnalysis(normalizedProjectId, asRecord(raw.aggregations))
 }
 
 /**

@@ -17,6 +17,11 @@
 import { createHash } from "crypto"
 import { TraceToolUsageCounter } from "./tool-usage"
 import { TraceStageUsageCounter } from "./stage-usage"
+import { TraceStageDuration } from "./stage-duration"
+import {
+  observeHarnessStage,
+  settleHarnessStageObservations
+} from "../../services/harness-stage-attribution"
 import {
   CALL_STAGE_SETTLE_MS,
   registerTraceStageUsage,
@@ -748,6 +753,9 @@ export class TraceCollector {
   private observedToolCallCount = 0
   private readonly toolUsageCounter = new TraceToolUsageCounter()
   private readonly stageUsageCounter = new TraceStageUsageCounter()
+  private readonly stageDuration: TraceStageDuration | undefined
+  private readonly stopObservingStage: (() => void) | undefined
+  private stageDurationEndedAt: number | undefined
   private observedModelCallCount = 0
   private observedInputTokens = 0
   private observedOutputTokens = 0
@@ -784,6 +792,25 @@ export class TraceCollector {
     this.observability = buildObservabilityContext(this.traceId, this.threadId, options)
     this.includeSkillEval = options.includeSkillEval ?? this.observability.traceKind === "root"
     this.startedAt = nowIsoLocal()
+    if (
+      this.harnessFeature &&
+      this.observability.traceKind === "root" &&
+      this.triggerSource === "chat"
+    ) {
+      this.stageDuration = new TraceStageDuration(
+        new Date(this.startedAt).getTime(),
+        this.harnessFeature.nodeName
+      )
+      this.stopObservingStage = observeHarnessStage(
+        this.harnessFeature.projectId,
+        this.harnessFeature.slug,
+        (at, nodeName) => {
+          if (this.stageDurationEndedAt === undefined || at <= this.stageDurationEndedAt) {
+            this.stageDuration?.observe(at, nodeName)
+          }
+        }
+      )
+    }
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
       id: this.rootNodeId,
@@ -1552,9 +1579,22 @@ export class TraceCollector {
   private async finishOnce(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
     unregisterTraceStageUsage(this.traceId)
     const endedAt = nowIsoLocal()
+    this.stageDurationEndedAt = new Date(endedAt).getTime()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
     // Tool stages resolve alongside the tools; give the last few a moment to land.
     if (this.harnessFeature) await this.stageUsageCounter.settle(CALL_STAGE_SETTLE_MS)
+    if (this.stageDuration && this.harnessFeature) {
+      const settled = await settleHarnessStageObservations(
+        this.harnessFeature.projectId,
+        this.harnessFeature.slug,
+        CALL_STAGE_SETTLE_MS
+      )
+      if (!settled) this.stageDuration.observe(this.stageDurationEndedAt, null)
+    }
+    this.stopObservingStage?.()
+    const stageDuration = this.stageDuration?.snapshot(
+      new Date(this.startedAt).getTime() + durationMs
+    )
     const totalToolCalls = this.getTotalToolCalls()
     const toolUsage = this.toolUsageCounter.snapshot(totalToolCalls)
     const stageUsage = this.harnessFeature
@@ -1717,6 +1757,7 @@ export class TraceCollector {
       totalToolCalls,
       ...toolUsage,
       ...stageUsage,
+      ...stageDuration,
       outcome,
       ...(boundedErrorMessage ? { errorMessage: boundedErrorMessage } : {}),
       usedSkills: usedSkillsWithVersions,
