@@ -20,6 +20,8 @@ F03 冻结的是接口/fixtures/参考模型，不是服务端或云 Runtime 实
 
 派发回执已确认：F03-A01 由 `/root/f03_contracts` 执行，指定模型 gpt-6.1-sol / xhigh，禁止派生。唯一可写代码目录为上述 F03 工作树，报告在其 `docs/devclaw-bot-delivery/attempts/F03-A01.md`。先保存检查点，再按 schema/生成器、API/Runtime fixtures、可执行参考模型分步交付；自测仅进入待审查。不要因基线文档仍写 ready 或报告尚未建立就重复派发。
 
+F03 首个 A01 检查点已由实施者保存，主代理核对实际文件存在；初始仅此报告未跟踪，还没有 schema/测试交付。实施者提出的两项设计澄清已回复并写入集成树设计：Upload.purpose 复用 ArtifactKind，提交校验 kind/purpose；Thread/Project Binding.provider 为已注册适配器 ProviderId，不与 Runtime 的 desktop/hosted 部署类型混用。此澄清不扩大实现范围。
+
 最新用户要求：改为每 2 小时触发一次，并继续任务。此前的 15 分钟配置已实际删除；本次经明确授权于 06:07 UTC 重新创建当前会话 heartbeat“DevClaw Bot 断点续跑”（ID `devclaw-bot`），回执 ACTIVE，每 2 小时触发。
 
 恢复历史：真实额度中断后接续原 F02 代理，保留 dirty diff 与失败测试历史；R1～R5 已由实施者修复，并经主代理独立验证关闭。06:34 UTC 额度接近限制，F03 仅完成工作树创建，没有发生派单；12:12 UTC 心跳核对 primary 已重置为 0%、secondary 仍为 93%、ordinaryUsageAllowed=true。新 primary 恢复时刻为 2026-10-01 17:12:21 UTC，secondary 为 2026-10-06 00:59:26 UTC。不得切换模型/账号、购买额度或使用重置权益。

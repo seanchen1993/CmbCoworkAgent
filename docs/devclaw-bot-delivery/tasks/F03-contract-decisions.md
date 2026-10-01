@@ -66,6 +66,8 @@ capability 使用封闭枚举：requirements.analyze、repository.read、prototy
 
 Group limits={maxHandoffs,maxRuns,maxTokens}。knowledgeRefs/repositoryRefs/blobRef/contextManifestRef/checkpointRef 均为不透明 ID，不是可任意 fetch 的 URL。requestedAction={capability,resourceRefs[],inputDigest}；entityRef={kind,id,version}，kind 为 bot/group/task/artifact/approval/run/delivery。provider/localThreadId 组合映射仅由有权适配器写入。
 
+实施前枚举澄清：UploadSession 和 CreateUpload 的 purpose 使用同一 ArtifactKind 定义（source/prd/assessment/prototype/development_handoff/verification），不复制第二份枚举。用途声明不授予成果权限；创建 Artifact 时必须核对 Upload 属于同一 Task、已 committed，且 Artifact.kind 与 purpose 一致。ThreadBinding/ProjectBinding.provider 为已注册会话/项目适配器的 ProviderId，复用 ID 的长度与字符限制；由有权服务端适配器写入，不是任意 URL，也不表示客户端可注册 provider。RuntimeNode/register.provider 则是 desktop/hosted 部署类型枚举。结构合法的 ProviderId 仍必须通过服务端注册与授权检查。
+
 ## 4. API 表面
 
 所有列表/数组有上限；读取接口响应仍鉴权。创建结果包含实体及版本；异步 Run、handoff、upload complete 返回 202 时明确只是 accepted/verifying。下面的 `input` 仅为表述简写：命令字段扁平化，包含 commandId / 需要时的 expectedVersion，不生成不透明 payload。
@@ -155,7 +157,7 @@ eventType/data 判别：progress={summary}；waiting_approval={approvalId}；art
 1. 未知字段、伪造 actorId、原文 token/authorization/endpoint/path 字段、无效时间/摘要/版本、未知模式/能力、Envelope 判别错误。
 2. 同一主体命令重放得到原结果；同 ID 异操作/路径/载荷拒绝；另一主体/空间不能拿回回执；重放前撤权拒绝；CAS 冲突无部分写入。
 3. 输入版本变化使旧批准失效；过期批准、非指定批准人、业务签字充当工具授权均拒绝；不同版本同 artifact 不可冒名替代。
-4. Upload 未 committed 不能创建成果；重复 complete 幂等；已正式提交版本不被第二次 upload 覆盖；baseVersion/CAS 冲突不可最后写入覆盖。
+4. Upload 未 committed、跨 Task 或 purpose/kind 不匹配时不能创建成果；重复 complete 幂等；已正式提交版本不被第二次 upload 覆盖；baseVersion/CAS 冲突不可最后写入覆盖。
 5. RunSpec 不能作为公网 CreateRun 请求越过解析；能力为各方交集；节点离线返回 waiting_node/CAPABILITY_UNAVAILABLE，不宣称执行成功。
 6. start ACK 丢失重复派发只产生一个 attempt；旧 fence/过期授权/伪造节点事件拒绝；事件重复同内容幂等、异内容冲突、序号缺口可检测。
 7. 取消与完成竞态、未知副作用后不自动重跑、节点离线不立即迁移、resume 能力不足拒绝。
