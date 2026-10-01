@@ -87,6 +87,9 @@ function optionalMmjModule() {
 
 export default defineConfig({
   main: {
+    // Preserve existing main env mapping, including VITE_LEANSTAR_REVIEW_GATEWAY_URL.
+    // The requirement gateway prefers runtime LEANSTAR_REVIEW_GATEWAY_URL.
+    envPrefix: ["MAIN_VITE_", "VITE_"],
     // Bundle all dependencies into the main process
     build: {
       lib: {

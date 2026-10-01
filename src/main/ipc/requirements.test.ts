@@ -10,6 +10,9 @@ import {
 import { tmpdir } from "os"
 import { join, resolve } from "path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import { RequirementCredentialStore } from "../services/requirements/credential-store"
+import { LeanstarRequirementGateway } from "../services/requirements/leanstar-gateway"
+import { isTrustedMainLogToggleRequest } from "../main-log-forwarding"
 
 const { openPath } = vi.hoisted(() => ({
   openPath: vi.fn(async () => "")
@@ -43,7 +46,19 @@ beforeAll(async () => {
   process.env.HOME = tempHome
   process.env.USERPROFILE = tempHome
   requirements = await import("./requirements")
-  requirements.registerRequirementHandlers(fakeIpcMain as never)
+  requirements.registerRequirementHandlers(fakeIpcMain as never, {
+    isTrustedEvent: () => true,
+    credentials: new RequirementCredentialStore({
+      directory: join(tempHome, "test-profile-credentials"),
+      legacyIndexPath: () => join(tempHome, ".cmbcoworkagent", "requirements", "index.json"),
+      safeStorage: {
+        isEncryptionAvailable: () => true,
+        encryptString: (value) => Buffer.from(value.split("").reverse().join("")),
+        decryptString: (value) => value.toString().split("").reverse().join("")
+      },
+      platform: "darwin"
+    })
+  })
 })
 
 afterAll(() => {
@@ -66,7 +81,7 @@ describe("requirement source preview", () => {
     const deleteRequirement = handlers.get("requirements:delete")
     const openWorkDir = handlers.get("requirements:open-work-dir")
     const syncManifest = handlers.get("requirements:sync-manifest")
-    const getToken = handlers.get("requirements:get-token")
+    const getCredentialStatus = handlers.get("requirements:get-credential-status")
     const saveToken = handlers.get("requirements:save-token")
     expect(create).toBeTypeOf("function")
     expect(getWorkDir).toBeTypeOf("function")
@@ -75,7 +90,8 @@ describe("requirement source preview", () => {
     expect(deleteRequirement).toBeTypeOf("function")
     expect(openWorkDir).toBeTypeOf("function")
     expect(syncManifest).toBeTypeOf("function")
-    expect(getToken).toBeTypeOf("function")
+    expect(getCredentialStatus).toBeTypeOf("function")
+    expect(handlers.has("requirements:get-token")).toBe(false)
     expect(saveToken).toBeTypeOf("function")
 
     const created = (await create!(null, {
@@ -246,26 +262,29 @@ describe("requirement source preview", () => {
     expect(index.list[0]).not.toHaveProperty("status")
     expect(index.list[0]).not.toHaveProperty("prdGenerated")
 
-    const emptyToken = (await getToken!(null)) as {
+    const emptyToken = (await getCredentialStatus!(null)) as {
       success: boolean
-      token: string
+      configured: boolean
       error?: string
     }
     expect(emptyToken.success, emptyToken.error).toBe(true)
-    expect(emptyToken.token).toBe("")
+    expect(emptyToken.configured).toBe(false)
     const tokenSaved = (await saveToken!(null, "  leanstar-token  ")) as {
       success: boolean
       error?: string
     }
     expect(tokenSaved.success, tokenSaved.error).toBe(true)
-    const configuredToken = (await getToken!(null)) as {
+    const configuredToken = (await getCredentialStatus!(null)) as {
       success: boolean
-      token: string
+      configured: boolean
+      credentialRef: string
       error?: string
     }
     expect(configuredToken.success, configuredToken.error).toBe(true)
-    expect(configuredToken.token).toBe("leanstar-token")
-    expect(JSON.parse(readFileSync(indexPath, "utf-8"))).toMatchObject({ token: "leanstar-token" })
+    expect(configuredToken.configured).toBe(true)
+    expect(configuredToken.credentialRef).toMatch(/^cred-/)
+    expect(JSON.stringify(configuredToken)).not.toContain("leanstar-token")
+    expect(JSON.parse(readFileSync(indexPath, "utf-8"))).not.toHaveProperty("token")
 
     writeFileSync(
       indexPath,
@@ -535,9 +554,7 @@ describe("requirement source preview", () => {
       reqId: string
       threadIds: string[]
     }>
-    expect(current.find((item) => item.reqId === legacyReqId)?.threadIds).toEqual([
-      "legacy-thread"
-    ])
+    expect(current.find((item) => item.reqId === legacyReqId)?.threadIds).toEqual(["legacy-thread"])
     expect(current.find((item) => item.reqId === "req-missing-thread-ids")?.threadIds).toEqual([])
 
     const persisted = JSON.parse(readFileSync(indexPath, "utf-8")) as {
@@ -549,5 +566,114 @@ describe("requirement source preview", () => {
 
     await remove!(null, legacyReqId)
     await remove!(null, "req-missing-thread-ids")
+  })
+})
+
+describe("requirement credential IPC trust and secret boundary", () => {
+  it("fails closed by default and rejects foreign WebContents, subframes, origins and documents", async () => {
+    const local = new Map<string, Handler>()
+    const ipc = { handle: (channel: string, handler: Handler) => local.set(channel, handler) }
+    const frame = { url: "http://localhost:5173/index.html" }
+    const contents = { getURL: () => "http://localhost:5173/index.html" }
+    const trustedEvent = { sender: contents, senderFrame: frame }
+    const indexPath = join(tempHome, ".cmbcoworkagent", "requirements", "index.json")
+    const fakeStorage = new RequirementCredentialStore({
+      directory: join(tempHome, "ipc-private-credentials"),
+      legacyIndexPath: () => indexPath,
+      safeStorage: {
+        isEncryptionAvailable: () => true,
+        encryptString: (value) => Buffer.from(value).reverse(),
+        decryptString: (value) => Buffer.from(value).reverse().toString()
+      },
+      platform: "darwin"
+    })
+    const channels = [
+      "requirements:get-credential-status",
+      "requirements:save-token",
+      "requirements:leanstar-query",
+      "requirements:prepare-publish",
+      "requirements:confirm-publish"
+    ]
+    requirements.registerRequirementHandlers(ipc as never, { credentials: fakeStorage })
+    for (const channel of channels)
+      expect(await local.get(channel)!(trustedEvent, {})).toMatchObject({
+        code: "UNTRUSTED_CALLER"
+      })
+    const fakeFetch = vi.fn(async () => Response.json({ content: [{ code: "safe" }], total: 1 }))
+    requirements.registerRequirementHandlers(ipc as never, {
+      credentials: fakeStorage,
+      gateway: new LeanstarRequirementGateway({
+        credentials: fakeStorage,
+        gatewayUrl: () => "https://fake.example.test",
+        fetch: fakeFetch as typeof fetch
+      }),
+      isTrustedEvent: (event) =>
+        isTrustedMainLogToggleRequest({
+          enabled: true,
+          expectedWebContents: contents,
+          sender: event.sender,
+          expectedMainFrame: frame,
+          senderFrame: event.senderFrame,
+          expectedRendererUrl: "http://localhost:5173/index.html",
+          senderUrl: contents.getURL(),
+          senderFrameUrl: event.senderFrame?.url
+        })
+    })
+    const untrusted = [
+      { sender: {}, senderFrame: frame },
+      { sender: contents, senderFrame: { ...frame } },
+      { sender: contents, senderFrame: undefined }
+    ]
+    for (const event of untrusted)
+      for (const channel of channels) {
+        expect(
+          await local.get(channel)!(event, {
+            expectedWebContents: contents,
+            expectedMainFrame: frame
+          })
+        ).toMatchObject({ code: "UNTRUSTED_CALLER" })
+      }
+    for (const badUrl of [
+      "http://evil.test/index.html",
+      "http://localhost:5173/foreign.html",
+      "http://localhost:9999/index.html"
+    ]) {
+      frame.url = badUrl
+      for (const channel of channels)
+        expect(await local.get(channel)!(trustedEvent, {})).toMatchObject({
+          code: "UNTRUSTED_CALLER"
+        })
+    }
+    frame.url = "http://localhost:5173/index.html"
+    const sentinel = "F02_IPC_FAKE_SECRET"
+    const logs = [vi.spyOn(console, "log"), vi.spyOn(console, "warn"), vi.spyOn(console, "error")]
+    try {
+      const saved = await local.get("requirements:save-token")!(trustedEvent, sentinel)
+      const status = await local.get("requirements:get-credential-status")!(trustedEvent)
+      const queried = await local.get("requirements:leanstar-query")!(trustedEvent, {
+        operation: "getNamespaceTree"
+      })
+      const publication = await local.get("requirements:prepare-publish")!(trustedEvent, {
+        reqId: "req-test",
+        threadId: "thread-test"
+      })
+      expect(saved).toMatchObject({ success: true, configured: true })
+      expect(status).toMatchObject({ success: true, configured: true })
+      expect(queried).toMatchObject({ success: true })
+      expect(publication).toMatchObject({ code: "CAPABILITY_UNAVAILABLE" })
+      expect(local.has("requirements:get-token")).toBe(false)
+      const modelSessionMemory = {
+        returned: [saved, status, queried, publication],
+        queued: [],
+        model: [],
+        session: [],
+        memory: []
+      }
+      expect(JSON.stringify(modelSessionMemory).includes(sentinel)).toBe(false)
+      expect(readFileSync(indexPath, "utf8").includes(sentinel)).toBe(false)
+      expect(JSON.stringify(logs.flatMap((log) => log.mock.calls)).includes(sentinel)).toBe(false)
+    } finally {
+      for (const log of logs) log.mockRestore()
+    }
   })
 })

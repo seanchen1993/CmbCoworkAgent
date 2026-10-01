@@ -52,8 +52,10 @@ import {
   getRequirementSessionCapabilities
 } from "./requirement-session-capabilities"
 
-const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
-const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
+type PublishApproval = Extract<
+  Awaited<ReturnType<typeof window.api.requirements.preparePublish>>,
+  { success: true }
+>["approval"]
 const REQUIREMENT_CONTINUATION_MESSAGE = "基于该需求已有资料和历史结论继续沟通。"
 
 type PreviewTab = "expert-process" | "source" | "prd" | "requirement-space"
@@ -262,6 +264,10 @@ function RequirementConversationSession({
   const [tokenDraft, setTokenDraft] = useState("")
   const [tokenSaving, setTokenSaving] = useState(false)
   const [hasStoredToken, setHasStoredToken] = useState(false)
+  const [publishApproval, setPublishApproval] = useState<{
+    approval: PublishApproval
+    commandId: string
+  } | null>(null)
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
   const [statusRefreshing, setStatusRefreshing] = useState(false)
   const focusExpertProcess = useCallback((): boolean => {
@@ -350,8 +356,6 @@ function RequirementConversationSession({
     setManifestThreadId(null)
     setSelectedPrdPath(null)
     setPreviewTab("source")
-    publishRequestQueuedRef.current = false
-    setPublishRequestQueued(false)
     observedSubagentStatesRef.current.clear()
   }, [threadId])
 
@@ -362,15 +366,6 @@ function RequirementConversationSession({
         : (requirement.threadIds[0] ?? null)
     )
   }, [activeThreadId, requirement.id, requirement.threadIds])
-
-  useEffect(() => {
-    const sessionPaused =
-      threadState?.queueAutoDrainSuppressed === true ||
-      threadState?.goalUi.goal?.status === "paused"
-    if (!sessionPaused || !publishRequestQueuedRef.current) return
-    publishRequestQueuedRef.current = false
-    setPublishRequestQueued(false)
-  }, [threadState?.goalUi.goal?.status, threadState?.queueAutoDrainSuppressed])
 
   const attachConversation = useCallback(
     async (
@@ -544,8 +539,8 @@ function RequirementConversationSession({
     let cancelled = false
     void (async () => {
       try {
-        const result = await window.api.requirements.getToken()
-        if (!cancelled) setHasStoredToken(result.success ? Boolean(result.token) : false)
+        const result = await window.api.requirements.getCredentialStatus()
+        if (!cancelled) setHasStoredToken(result.success && result.configured)
       } catch {
         if (!cancelled) setHasStoredToken(false)
       }
@@ -635,10 +630,6 @@ function RequirementConversationSession({
         }
         setRequirementSpaceManifest(manifest)
         setManifestThreadId(requestThreadId)
-        if (isRequirementSpacePublished(manifest)) {
-          publishRequestQueuedRef.current = false
-          setPublishRequestQueued(false)
-        }
         return manifest
       } catch (error) {
         if (!isCurrentRequest()) return null
@@ -670,78 +661,85 @@ function RequirementConversationSession({
 
     publishRequestQueuedRef.current = true
     setPublishRequestQueued(true)
-    let publishMessage = REQUIREMENT_SPACE_PUBLISH_MESSAGE
     try {
-      const tokenResult = await window.api.requirements.getToken()
-      const token = tokenResult.success ? tokenResult.token.trim() : ""
-      if (token) {
-        publishMessage = `${publishMessage}\n\n${LEANSTAR_TOKEN_MESSAGE_PREFIX}${token}`
-      }
-    } catch {
-      // A token is optional; publish requests must still be deliverable without one.
-    }
-    threadState.addQueuedMessage({
-      id: crypto.randomUUID(),
-      text: publishMessage,
-      created_at: new Date(),
-      updated_at: new Date()
-    })
-    toast.success("已向对话发送发布到需求空间请求")
-  }, [conversationLoading, requirementSpaceManifest, threadState])
-
-  const queueLeanstarToken = useCallback(
-    (token: string): void => {
-      const normalized = token.trim()
-      if (!threadState || !normalized) return
-      threadState.addQueuedMessage({
-        id: crypto.randomUUID(),
-        text: `${LEANSTAR_TOKEN_MESSAGE_PREFIX}${normalized}`,
-        created_at: new Date(),
-        updated_at: new Date()
-      })
-      toast.success("已向对话发送身份令牌")
-    },
-    [threadState]
-  )
-
-  const handleSendLeanstarToken = useCallback(async (): Promise<void> => {
-    if (!threadState || conversationLoading) return
-    setTokenSaving(true)
-    try {
-      const result = await window.api.requirements.getToken()
-      if (!result.success) throw new Error(result.error || "读取 Token 失败")
-      if (result.token) {
-        queueLeanstarToken(result.token)
+      if (!threadId) return
+      const result = await window.api.requirements.preparePublish({ reqId: requirement.id, threadId })
+      if (!result.success) {
+        toast.error(result.error)
         return
       }
-      setTokenDraft("")
-      setTokenDialogOpen(true)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "读取 Token 失败")
+      if (currentThreadIdRef.current !== threadId) return
+      setPublishApproval({ approval: result.approval, commandId: globalThis.crypto.randomUUID() })
+    } catch {
+      toast.error("无法准备发布请求")
     } finally {
-      setTokenSaving(false)
+      publishRequestQueuedRef.current = false
+      setPublishRequestQueued(false)
     }
-  }, [conversationLoading, queueLeanstarToken, threadState])
+  }, [conversationLoading, requirementSpaceManifest, threadState, threadId, requirement.id])
+
+  const handleConfirmRequirementPublish = useCallback(async (): Promise<void> => {
+    if (!publishApproval || publishRequestQueuedRef.current || conversationLoading) return
+    publishRequestQueuedRef.current = true
+    setPublishRequestQueued(true)
+    try {
+      const result = await window.api.requirements.confirmPublish({
+        ...publishApproval.approval,
+        commandId: publishApproval.commandId
+      })
+      if (!result.success) {
+        toast.error(result.error)
+        return
+      }
+      toast.success("发布已完成")
+      await loadRequirementSpaceManifest()
+    } catch {
+      toast.error("发布结果未知，请人工核对，不要自动重试")
+    } finally {
+      setPublishApproval(null)
+      publishRequestQueuedRef.current = false
+      setPublishRequestQueued(false)
+    }
+  }, [publishApproval, conversationLoading, loadRequirementSpaceManifest])
+
+  const handleConfigureLeanstarCredential = useCallback((): void => {
+    setTokenDraft("")
+    setTokenDialogOpen(true)
+  }, [])
+
+  const handleTokenDialogChange = useCallback((open: boolean): void => {
+    setTokenDraft("")
+    setTokenDialogOpen(open)
+  }, [])
 
   const handleConfirmLeanstarToken = useCallback(async (): Promise<void> => {
-    const token = tokenDraft.trim()
-    if (!token) {
-      toast.error("请填写精益之星身份令牌-Token")
+    if (!tokenDraft.trim()) {
+      toast.error("请填写需求凭据")
       return
     }
     setTokenSaving(true)
     try {
-      const result = await window.api.requirements.saveToken(token)
-      if (!result.success) throw new Error(result.error || "保存 Token 失败")
-      setHasStoredToken(true)
+      const result = await window.api.requirements.saveToken(tokenDraft.trim())
+      if (!result.success) {
+        toast.error(result.error)
+        return
+      }
+      setHasStoredToken(result.configured)
       setTokenDialogOpen(false)
-      queueLeanstarToken(token)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "保存 Token 失败")
+      toast.success("凭据已安全保存，不会发送到会话")
+    } catch {
+      toast.error("无法保存需求凭据")
     } finally {
+      setTokenDraft("")
       setTokenSaving(false)
     }
-  }, [queueLeanstarToken, tokenDraft])
+  }, [tokenDraft])
+
+  useEffect(() => {
+    setPublishApproval(null)
+    setTokenDraft("")
+    setTokenDialogOpen(false)
+  }, [threadId])
 
   const handleOpenLeanstarTokenPage = useCallback((): void => {
     const url = import.meta.env.VITE_LEANSTAR_PERSONAL_TOKEN_URL?.trim() || ""
@@ -905,11 +903,6 @@ function RequirementConversationSession({
       }
       if (isRequirementPrdGenerationCompleted(manifest)) {
         setPreviewTab("requirement-space")
-      }
-      // Reset publish queue when the conversation ended without a successful publish
-      if (!isRequirementSpacePublished(manifest)) {
-        publishRequestQueuedRef.current = false
-        setPublishRequestQueued(false)
       }
     }
 
@@ -1376,7 +1369,7 @@ function RequirementConversationSession({
                                         <Send className="size-3.5" />
                                       )}
                                       {publishRequestQueued
-                                        ? "发布请求已发送"
+                                        ? "正在处理发布"
                                         : "发布到需求空间3.0"}
                                     </Button>
                                   </span>
@@ -1420,14 +1413,14 @@ function RequirementConversationSession({
                                     variant="outline"
                                     disabled={conversationLoading || tokenSaving}
                                     className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
-                                    onClick={() => void handleSendLeanstarToken()}
+                                    onClick={handleConfigureLeanstarCredential}
                                   >
                                     {tokenSaving ? (
                                       <Loader2 className="size-3.5 animate-spin" />
                                     ) : (
                                       <KeyRound className="size-3.5" />
                                     )}
-                                    {hasStoredToken ? "发送Token身份令牌" : "获取Token身份令牌"}
+                                    {hasStoredToken ? "更新凭据" : "配置凭据"}
                                   </Button>
                                 </span>
                               </TooltipTrigger>
@@ -1524,16 +1517,53 @@ function RequirementConversationSession({
           </aside>
         </div>
       </div>
-      <Dialog open={tokenDialogOpen} onOpenChange={setTokenDialogOpen}>
+      <Dialog
+        open={Boolean(publishApproval)}
+        onOpenChange={(open) => {
+          if (!open && !publishRequestQueued) setPublishApproval(null)
+        }}
+      >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>精益之星身份令牌-Token</DialogTitle>
+            <DialogTitle>确认发布正式 PRD</DialogTitle>
             <DialogDescription>
-              填写 Token 后会保存到本地需求配置，并自动发送到当前会话。
+              仅发布以下固定输入。批准一分钟内有效；输入变化后必须重新确认。
+            </DialogDescription>
+          </DialogHeader>
+          <p className="break-all text-xs">
+            需求：{publishApproval?.approval.reqId}<br />
+            会话：{publishApproval?.approval.threadId}<br />
+            SHA-256：{publishApproval?.approval.inputDigest}
+          </p>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={publishRequestQueued}
+              onClick={() => setPublishApproval(null)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={publishRequestQueued || conversationLoading}
+              onClick={() => void handleConfirmRequirementPublish()}
+            >
+              确认发布
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={tokenDialogOpen} onOpenChange={handleTokenDialogChange}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>配置/更新需求凭据</DialogTitle>
+            <DialogDescription>
+              凭据仅保存在系统安全存储中，由受控查询和发布入口使用，不会发送到会话。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
             <Input
+              type="password"
+              autoComplete="off"
               value={tokenDraft}
               onChange={(event) => setTokenDraft(event.target.value)}
               placeholder="请输入 Token"
@@ -1558,7 +1588,7 @@ function RequirementConversationSession({
             <Button
               type="button"
               variant="outline"
-              onClick={() => setTokenDialogOpen(false)}
+              onClick={() => handleTokenDialogChange(false)}
               disabled={tokenSaving}
             >
               取消

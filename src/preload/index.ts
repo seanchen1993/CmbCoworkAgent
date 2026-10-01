@@ -10,6 +10,15 @@ import { randomUUID } from "node:crypto"
 import type { ModCard, ModProjection, ModWorkspaceStatus } from "../shared/mods/types"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type { RequirementRuntimeItem } from "../main/ipc/requirements"
+import type {
+  RequirementCredentialStatus,
+  LeanstarQuery,
+  RequirementResult,
+  PrepareRequirementPublish,
+  PreparedRequirementPublish,
+  ConfirmRequirementPublish,
+  RequirementPublishResult
+} from "../shared/requirement-credentials"
 import {
   isWindowCloseBehavior,
   type CloseToTrayPromptAction,
@@ -4980,17 +4989,18 @@ const api = {
   },
   requirements: {
     list: (): Promise<RequirementRuntimeItem[]> => ipcRenderer.invoke("requirements:list"),
-    getToken: () =>
-      ipcRenderer.invoke("requirements:get-token") as Promise<{
-        success: boolean
-        token: string
-        error?: string
-      }>,
+    getCredentialStatus: (): Promise<RequirementCredentialStatus> =>
+      ipcRenderer.invoke("requirements:get-credential-status"),
     saveToken: (token: string) =>
-      ipcRenderer.invoke("requirements:save-token", token) as Promise<{
-        success: boolean
-        error?: string
-      }>,
+      ipcRenderer.invoke("requirements:save-token", token) as Promise<RequirementCredentialStatus>,
+    queryLeanstar: (query: LeanstarQuery): Promise<RequirementResult<{ data: unknown }>> =>
+      ipcRenderer.invoke("requirements:leanstar-query", query),
+    preparePublish: (
+      payload: PrepareRequirementPublish
+    ): Promise<RequirementResult<{ approval: PreparedRequirementPublish }>> =>
+      ipcRenderer.invoke("requirements:prepare-publish", payload),
+    confirmPublish: (payload: ConfirmRequirementPublish): Promise<RequirementPublishResult> =>
+      ipcRenderer.invoke("requirements:confirm-publish", payload),
     create: (payload: {
       systemId: string
       title: string
