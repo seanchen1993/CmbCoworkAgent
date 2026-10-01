@@ -111,6 +111,8 @@ Group limits={maxHandoffs,maxRuns,maxTokens}。knowledgeRefs/repositoryRefs/blob
 - Attempt：dispatched → accepted → running；accepted/running 可 waiting_approval、cancel_requested、failed、outcome_unknown；dispatched 也可 cancel_requested/outcome_unknown；waiting_approval → running/cancel_requested/failed/outcome_unknown；running → succeeded；cancel_requested → cancelled/succeeded/failed/outcome_unknown；相同终态幂等，不能覆盖不同终态。
 - Delivery：pending → accepted / failed / outcome_unknown；accepted → delivered / failed / outcome_unknown；failed 可 pending（仅重发消息）；outcome_unknown 先对账。消息投递变化不得创建 Run/Attempt。
 - Approval：pending → approved/rejected/expired/invalidated；已批准输入或授权变化后 → invalidated。同一输入版本重复决定可返回原回执；相反决定、过期、撤权、不符版本拒绝。业务确认、技术确认和工具授权不可互相替代。
+- UploadSession：created → uploading/rejected/expired；uploading → verifying/rejected/expired；verifying → committed/rejected/expired。committed/rejected/expired 为终态，complete 的相同命令重试返回原回执，不重新开放内容覆盖。
+- Handoff：pending → accepted/rejected/cancelled；accepted → running/cancelled/outcome_unknown；running → completed/cancelled/outcome_unknown。outcome_unknown 仅通过对账进入 running/completed/rejected/cancelled，不重新创建交接或 Run；其他终态无普通后继。
 - PRD 更新后，不修改旧成果/旧交接；尚未发起的阶段要求重新确认，在途开发不偷偷换输入，产生新的变更请求。不得依靠清空 approvalIds 隐式绕过门禁。
 
 状态文件必须表达每个状态（包括空后继终态），以及 outcome_unknown 的特殊对账动作；不是测试中复制另一份枚举。跨对象规则必须配可执行参考模型与负向场景，明确该模型是契约验证参考而非生产授权引擎。
@@ -135,6 +137,10 @@ Runtime 主动出站连接至 `/api/bot/v1/runtime/ws`，transport 使用独立�
 | event | eventId, nodeId, runId, attemptId, eventSeq, leaseId, fence, authorizationVersion, occurredAt, eventType, data |
 | ack | eventId, runId, attemptId, eventSeq；是持久化后 ACK |
 | error | requestId, code, message, retryable；不传秘密 |
+
+`inspection.lastEventSeq` 是已确认事件的高水位，范围 0..9007199254740991；0 明确表示尚无事件。实际 event/ack 的 eventSeq 仍从 1 开始，不伪造第 1 条事件来表示空状态。inspection.status 使用 RunAttempt 的状态枚举。
+
+重复投递 start 必须复用同一 Run/Attempt/lease/fence。恢复执行不同于重复投递：只有在 Run 仍为非终态、旧执行确已停止、结果未知已对账且获准恢复后，才创建同节点的新 Attempt、分配更高 fence 和新 lease，以兼容的 checkpoint 发送 resume；Run 的输入快照不能随之改变。已成功、失败或取消的 Run 不能借 resume 回退；另起执行须走新的获准命令。仅仅重连不能重新执行工具。
 
 eventType/data 判别：progress={summary}；waiting_approval={approvalId}；artifact_committed={artifact:ArtifactVersionRef}；completed={outcome:succeeded/failed/cancelled/outcome_unknown, artifactVersions[], errorCode?}。普通进度不能伪装完成，已提交 artifact 引用必须存在且属于同 Task。业务事件 Event={eventId,spaceId,seq,occurredAt,kind,taskId?,runId?,entityRef}，kind 为 task_updated/artifact_committed/approval_updated/run_updated/delivery_updated；只携带授权后可见的引用，读取正文另行鉴权。
 

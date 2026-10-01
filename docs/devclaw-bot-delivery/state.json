@@ -68,7 +68,7 @@
       "wait_reason": "single_implementation_writer_F02"
     }
   ],
-  "next_action": "用户已明确改为每 2 小时触发并继续任务。额度已恢复，原 F02 代理已确认因额度错误停止，工作树及 A01 保留；接续原代理完成测试与 R4 内存边界，再独立审查。F03 等待 F02 交还。",
+  "next_action": "原 F02-A01 代理已接续并确认恢复，R4 内存分配修改已看到；继续完成负向测试与类型检查，再由主代理独立复验。F03 设计已补足上传/交接状态及 Runtime 空事件/恢复语义，等待 F02 交还后派发。",
   "quota_recovery": {
     "verified_at_utc": "2026-10-01T06:02:16Z",
     "ordinary_usage_allowed": true,

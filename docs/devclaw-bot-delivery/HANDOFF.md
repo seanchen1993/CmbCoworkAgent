@@ -20,6 +20,8 @@ F03 任务单及 `tasks/F03-contract-decisions.md` 已 ready；等待 F02 实施
 
 真实额度中断后已核对：集成 HEAD `5861d28c`，未提交内容仅为交付文档/审查记录；F02 HEAD 仍为 `f2f348a6`，存储、查询、发布、IPC 和 UI 的 dirty diff 与 A01 均保留，尚未验收。原代理状态为 errored（额度限制），并非仍在实施；06:02 UTC 适用额度 ordinaryUsageAllowed=true，窗口使用率 10% / 79%。接续原代理，不创建替代写者。初次 node/web 类型检查失败后的修复尚待复验；早期 R1～R3 修改已观察但待测试，R4 有界读取的实际内存占用待修复。
 
+后续进展：恢复记录与早期审查已保存于 `091eb77e`。通过只读进程检查未发现匹配的 vitest/tsc/tsx/electron-vite 测试进程；原 F02-A01 已明确确认从断点继续，主代理看到 R4 改为按 stat.size+1 分配并复制实际字节。所有修复仍待新增测试与最终独立复验。F03 派单前补足了上传/交接状态、inspection 无事件的 0 高水位以及恢复新 Attempt 的 fence 规则，没有启动额外实施写者。
+
 F02 新发现：除了两个 Token 入对话入口，还有 `requirements/index.json` 明文保存以及 renderer 直接取 Token 发起 Leanstar 查询。仓库不包含 `requirement-to-prd` 发布 Skill/脚本，已询问用户位置；当前范围先实现受控边界与 Mock 正负向验证，生产发布入口显式不可用，不猜接口。
 
 ## 下一步
