@@ -46,7 +46,7 @@
     },
     {
       "id": "F02",
-      "status": "implementing",
+      "status": "accepted",
       "spec": "tasks/F02.md",
       "attempt_id": "F02-A01",
       "agent_id": "/root/f02_credential_isolation",
@@ -54,6 +54,10 @@
       "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-f02/cmbCowork",
       "branch": "codex/devclaw-bot-f02",
       "baseline": "f2f348a6136e10cbae3373b1bf0199af34fdb17d",
+      "candidate_code_commit": "dec5cfd4dcbdfe6ea32d12ddfba8639ad63c5adf",
+      "candidate_head": "84741848cc921fe74d0389bde5e98c21a8ca4565",
+      "accepted_code_commit": "dec5cfd4dcbdfe6ea32d12ddfba8639ad63c5adf",
+      "acceptance_evidence": "reviews/F02-acceptance.md",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-f02/cmbCowork/docs/devclaw-bot-delivery/attempts/F02-A01.md",
       "wait_reason": null
     },
@@ -65,10 +69,10 @@
       "attempt_id": null,
       "agent_id": null,
       "worktree": null,
-      "wait_reason": "single_implementation_writer_F02"
+      "wait_reason": "awaiting_F02_integration_and_F03_worktree"
     }
   ],
-  "next_action": "原 F02-A01 代理已接续并确认恢复，R4 内存分配修改已看到；继续完成负向测试与类型检查，再由主代理独立复验。F03 设计已补足上传/交接状态及 Runtime 空事件/恢复语义，等待 F02 交还后派发。",
+  "next_action": "F02 真实 diff 与独立 74 项 Vitest、node/web tsc、五项需求脚本均通过。先合入固定提交 84741848 并核对集成结果，再为 F03 登记独立工作树及 attempt，单写者派发指定模型。",
   "quota_recovery": {
     "verified_at_utc": "2026-10-01T06:02:16Z",
     "ordinary_usage_allowed": true,

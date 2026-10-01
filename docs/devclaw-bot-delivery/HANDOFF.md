@@ -26,9 +26,13 @@ F02 新发现：除了两个 Token 入对话入口，还有 `requirements/index.
 
 ## 下一步
 
-1. 接续原 F02-A01 代理，从保留的 dirty diff 完成 R4、负向测试和类型检查；不重复执行已完成实现。
-2. 主代理审查实际 diff，独立运行关键测试；子代理自测只进入待审查。
-3. 验收 F02 后再派 F03；分别保留测试证据，不把 Mock 发布视为真实系统联调通过。
+F02-A01 已于本轮交回 review_pending：代码提交 `dec5cfd4dcbdfe6ea32d12ddfba8639ad63c5adf`，HEAD `84741848cc921fe74d0389bde5e98c21a8ca4565`（后续仅 attempt 报告）；工作树 clean，代理停止写入、无运行测试句柄。自测 74 项 Vitest、node/web tsc 和 5 个需求脚本退出 0，R5 通用发布拒绝错误已修正。尚未经过主代理独立测试，不可当作 accepted。
+
+主代理独立复验已完成：Vitest 20243（74/74）、node tsc 2899、web tsc 83805、五项 requirement 脚本循环 9241 均退出 0，句柄已关闭。实际 diff 与 R1～R5 已审查，F02 受控边界交付 accepted；详见 `reviews/F02-acceptance.md`。尚不代表真实发布联调或 OS keychain/Electron UI E2E 已验证。
+
+1. 将 F02 固定 HEAD `84741848` 合入集成分支，核对 source/test 内容及 Git。
+2. 为 F03 准备独立工作树，记录 attempt 与代理定位后，交 gpt-6.1-sol / xhigh 实施契约；仍只有一个实施写者。
+3. 保存 F03 检查点并独立验收，不把参考模型、Mock 发布或 schema 通过视为生产系统联调通过。
 4. 本轮仍只包含 F02＋F03，不自动进入整条路线。
 
 ## 必须保留的限制
