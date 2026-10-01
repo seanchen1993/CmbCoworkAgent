@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdtempSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { generate } from '../../scripts/generate-bot-contract-types.mjs'
 import { schemas, states, validator } from './schema-support.mjs'
 
@@ -28,4 +32,24 @@ test('deterministic generator rejects unsupported keyword, remote refs and open 
     mutation(changed['schemas.json'])
     assert.throws(() => generate(changed))
   }
+})
+
+test('actual generator CLI --check detects drift and never overwrites it', () => {
+  const scratch = mkdtempSync(join(tmpdir(),'bot-contract-drift-'))
+  try {
+    mkdirSync(join(scratch,'scripts'),{recursive:true})
+    mkdirSync(join(scratch,'contracts/bot/v1'),{recursive:true})
+    mkdirSync(join(scratch,'src/shared/bot'),{recursive:true})
+    copyFileSync(new URL('../../scripts/generate-bot-contract-types.mjs',import.meta.url),join(scratch,'scripts/generate-bot-contract-types.mjs'))
+    for (const name of ['schemas.json','state-transitions.json']) copyFileSync(new URL(`../../contracts/bot/v1/${name}`,import.meta.url),join(scratch,`contracts/bot/v1/${name}`))
+    const args = [join(scratch,'scripts/generate-bot-contract-types.mjs')]
+    assert.equal(spawnSync(process.execPath,args,{encoding:'utf8'}).status,0)
+    assert.equal(spawnSync(process.execPath,[...args,'--check'],{encoding:'utf8'}).status,0)
+    const output = join(scratch,'src/shared/bot/contracts.generated.ts')
+    writeFileSync(output,'// synthetic drift\n')
+    const failed = spawnSync(process.execPath,[...args,'--check'],{encoding:'utf8'})
+    assert.notEqual(failed.status,0)
+    assert.match(failed.stderr,/have drifted/)
+    assert.equal(readFileSync(output,'utf8'),'// synthetic drift\n')
+  } finally {rmSync(scratch,{recursive:true,force:true})}
 })

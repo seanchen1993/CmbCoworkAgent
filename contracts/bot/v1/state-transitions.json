@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:devclaw:bot:v1:states",
+  "$id": "https://contracts.devclaw.invalid/bot/v1/state-transitions.json",
   "$defs": {
     "TaskStatus": {"type":"string","enum":["draft","active","awaiting_business","awaiting_technical","handed_off","completed","cancelled"]},
     "StageStatus": {"type":"string","enum":["pending","active","waiting_confirmation","completed","cancelled"]},

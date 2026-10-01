@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, resolve, basename } from 'node:path'
 
@@ -40,6 +40,7 @@ export function generate(documents) {
       return refName(s.$ref, file)
     }
     if (isRoot) {
+      if (Object.keys(s).some(k => !['$schema','$id','$defs'].includes(k) && !rootExtensions.has(k))) throw new Error(`${location}: unsupported root shape`)
       for (const [name, child] of Object.entries(s.$defs ?? {})) visit(child, file, `${location}/$defs/${name}`)
       return ''
     }
@@ -51,13 +52,20 @@ export function generate(documents) {
       return `(${values.map((c, i) => visit(c, file, `${location}/${i}`)).join(s.oneOf ? ' | ' : ' & ')})`
     }
     if (s.const !== undefined) {
+      if (Object.keys(s).some(k => !['const','description','title','type'].includes(k))) throw new Error(`${location}: unsupported const siblings`)
       if (!['string','number','boolean'].includes(typeof s.const)) throw new Error(`${location}: unsupported const`)
       return JSON.stringify(s.const)
     }
     if (s.enum) {
+      if (Object.keys(s).some(k => !['enum','description','title','type'].includes(k))) throw new Error(`${location}: unsupported enum siblings`)
       if (!Array.isArray(s.enum) || !s.enum.length || s.enum.some(v => !['string','number','boolean'].includes(typeof v))) throw new Error(`${location}: unsupported enum`)
       return s.enum.map(v => JSON.stringify(v)).join(' | ')
     }
+    const shape = {
+      string:['minLength','maxLength','pattern','format'],integer:['minimum','maximum'],number:['minimum','maximum'],boolean:[],
+      array:['items','minItems','maxItems','uniqueItems'],object:['properties','required','additionalProperties']
+    }[s.type]
+    if (shape && Object.keys(s).some(k => !['type','description','title',...shape].includes(k))) throw new Error(`${location}: unsupported keyword placement for ${s.type}`)
     switch (s.type) {
       case 'string': return 'string'
       case 'integer': case 'number': return 'number'
@@ -96,4 +104,4 @@ export function main(args = process.argv.slice(2)) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main()
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main()
