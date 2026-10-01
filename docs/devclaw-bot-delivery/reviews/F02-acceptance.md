@@ -1,6 +1,6 @@
 # F02 主代理独立验收
 
-2026-10-01 14:31 CST · 状态：主代理独立复验通过，接受 F02 受控边界交付；待记录集成提交。
+2026-10-01 14:35 CST · 状态：主代理独立复验通过，F02 受控边界交付 accepted；集成提交 `77692fdfd2cefd3fe16bf34cc357df4db83abc2c`。
 
 ## 固定候选快照
 
@@ -31,6 +31,7 @@ Node：`/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node`，
 - 核对安装的 electron-vite 默认 main envPrefix 本来就是 MAIN_VITE_/VITE_；显式配置保持原映射，未新增依赖。
 - 前端测试执行实际回调/API，但不是完整 Electron 渲染或 OS 凭据交互测试；并未把受控发布边界验收为真实发布能力。
 - 复验后 F02 工作树仍 clean，代码提交未变化，四个主代理测试句柄均已关闭。
+- 合入后核对与 F02 HEAD 的差异仅为交付文档，source/test 无差异；在集成工作树再次运行相同 3 文件 Vitest，74/74 通过、退出 0。未将子代理自测替代主代理复验。
 
 ## 不得隐去的交付边界
 
