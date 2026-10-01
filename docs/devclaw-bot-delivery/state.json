@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "updated_on": "2026-10-01",
+  "project": "DevClaw Bot",
+  "phase": "delivery_setup",
+  "status": "waiting_scope_confirmation",
+  "integration": {
+    "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
+    "branch": "codex/devclaw-bot-integration",
+    "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
+    "last_accepted_commit": "9ba9aab084e499d45f2d61041ed3ec90fe1c0c0a"
+  },
+  "authorization": {
+    "approved_work": ["long_running_delivery_setup"],
+    "implementation_task_ids": [],
+    "scope_confirmed": false,
+    "explicit_user_pause": false,
+    "external_push_allowed": false,
+    "deployment_allowed": false,
+    "real_intranet_access_allowed": false,
+    "spending_or_quota_reset_allowed": false
+  },
+  "implementation_agent": {
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "xhigh",
+    "initial_concurrency": 1,
+    "spawn_descendants": false
+  },
+  "scheduler": {
+    "kind": "heartbeat",
+    "automation_id": "devclaw-bot",
+    "status": "PAUSED",
+    "pause_reason": "implementation_scope_not_confirmed",
+    "proposed_interval_minutes": 15,
+    "not_before_utc": null,
+    "last_run_outcome": "created_paused_not_executed"
+  },
+  "tasks": [
+    {
+      "id": "F01",
+      "status": "accepted",
+      "evidence": "../devclaw-bot-integration-record.md"
+    },
+    {
+      "id": "F02",
+      "status": "draft",
+      "spec": "tasks/F02.md",
+      "attempt_id": null,
+      "agent_id": null,
+      "worktree": null,
+      "wait_reason": "implementation_scope_not_confirmed"
+    },
+    {
+      "id": "F03",
+      "status": "draft",
+      "spec": "tasks/F03.md",
+      "attempt_id": null,
+      "agent_id": null,
+      "worktree": null,
+      "wait_reason": "implementation_scope_not_confirmed"
+    }
+  ],
+  "next_action": "确认首轮实施范围；主代理完成对应任务单接口设计后再派单。",
+  "recovery_notes": "当前没有运行中的实施代理或代码测试；不要将本状态文件视为全路线实施授权。"
+}
