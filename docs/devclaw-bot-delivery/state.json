@@ -3,7 +3,7 @@
   "updated_on": "2026-10-01",
   "project": "DevClaw Bot",
   "phase": "F02_F03",
-  "status": "planning_implementation",
+  "status": "implementing",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -44,23 +44,28 @@
     },
     {
       "id": "F02",
-      "status": "ready",
+      "status": "implementing",
       "spec": "tasks/F02.md",
-      "attempt_id": null,
-      "agent_id": null,
-      "worktree": null,
+      "attempt_id": "F02-A01",
+      "agent_id": "/root/f02_credential_isolation",
+      "agent_task_name": "f02_credential_isolation",
+      "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-f02/cmbCowork",
+      "branch": "codex/devclaw-bot-f02",
+      "baseline": "f2f348a6136e10cbae3373b1bf0199af34fdb17d",
+      "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-f02/cmbCowork/docs/devclaw-bot-delivery/attempts/F02-A01.md",
       "wait_reason": null
     },
     {
       "id": "F03",
-      "status": "draft",
+      "status": "ready",
       "spec": "tasks/F03.md",
+      "design": "tasks/F03-contract-decisions.md",
       "attempt_id": null,
       "agent_id": null,
       "worktree": null,
-      "wait_reason": "main_agent_contract_design"
+      "wait_reason": "single_implementation_writer_F02"
     }
   ],
-  "next_action": "完成 F02 任务单并创建独立工作树，派给 gpt-6.1-sol / xhigh；主代理同时设计 F03 契约，保持只有一个代码实施写者。",
+  "next_action": "F02-A01 正在独立工作树实施，F03 设计已 ready；收到 F02 待审查后检查实际 diff 并独立复验，再顺序派发 F03。",
   "recovery_notes": "已授权 F02/F03，不包含 F04 之后的实施或部署。派单前后核对 live agents，防止创建与登记之间中断导致重复写者。"
 }

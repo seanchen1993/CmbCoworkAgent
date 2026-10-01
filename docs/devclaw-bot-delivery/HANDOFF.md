@@ -12,6 +12,10 @@
 
 用户于 2026-10-01 回复“开始实施”，确认上一条建议的 F02＋F03 首轮范围。主代理已核对 F02 调用链，准备独立实施工作树；代理是否已创建须核对 `state.json` 与 live agents。
 
+F02-A01 已派发给 `/root/f02_credential_isolation`，模型 `gpt-6.1-sol` / `xhigh`。代码工作树 `/Users/heyirui/.codex/worktrees/devclaw-bot-f02/cmbCowork`，分支 `codex/devclaw-bot-f02`，基线 `f2f348a6136e10cbae3373b1bf0199af34fdb17d`。从集成树 APFS 克隆同版本 node_modules 已完成，未安装/更新依赖。主代理当前设计 F03；不要重复派发 F02。
+
+F03 任务单及 `tasks/F03-contract-decisions.md` 已 ready；等待 F02 实施者交还，仍只运行一个代码写者。冻结的是接口/fixtures/参考模型，不是服务端或云 Runtime 实现；不会把结构校验当作生产授权证明。
+
 已启用当前会话的“DevClaw Bot 断点续跑”，ID 为 `devclaw-bot`，15 分钟检查节奏，更新工具回执状态为 `ACTIVE`。未执行真实额度耗尽后的恢复演练，不重复创建配置。
 
 F02 新发现：除了两个 Token 入对话入口，还有 `requirements/index.json` 明文保存以及 renderer 直接取 Token 发起 Leanstar 查询。仓库不包含 `requirement-to-prd` 发布 Skill/脚本，已询问用户位置；当前范围先实现受控边界与 Mock 正负向验证，生产发布入口显式不可用，不猜接口。
