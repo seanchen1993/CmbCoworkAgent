@@ -9,6 +9,15 @@ import type { SubagentExportTarget } from "../shared/subagent-session-export"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type { RequirementRuntimeItem } from "../main/ipc/requirements"
 import type {
+  RequirementCredentialStatus,
+  LeanstarQuery,
+  RequirementResult,
+  PrepareRequirementPublish,
+  PreparedRequirementPublish,
+  ConfirmRequirementPublish,
+  RequirementPublishResult
+} from "../shared/requirement-credentials"
+import type {
   WorkflowWorktreeAction,
   WorkflowWorktreeActionResponse
 } from "../main/ipc/workflow-worktree-payload"
@@ -2456,8 +2465,13 @@ interface CustomAPI {
   }
   requirements: {
     list: () => Promise<RequirementRuntimeItem[]>
-    getToken: () => Promise<{ success: boolean; token: string; error?: string }>
-    saveToken: (token: string) => Promise<{ success: boolean; error?: string }>
+    getCredentialStatus: () => Promise<RequirementCredentialStatus>
+    saveToken: (token: string) => Promise<RequirementCredentialStatus>
+    queryLeanstar: (query: LeanstarQuery) => Promise<RequirementResult<{ data: unknown }>>
+    preparePublish: (
+      payload: PrepareRequirementPublish
+    ) => Promise<RequirementResult<{ approval: PreparedRequirementPublish }>>
+    confirmPublish: (payload: ConfirmRequirementPublish) => Promise<RequirementPublishResult>
     create: (payload: {
       systemId: string
       title: string

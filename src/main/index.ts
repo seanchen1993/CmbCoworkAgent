@@ -240,7 +240,7 @@ const forwardMainLogToRenderer = createMainLogForwarder({
     isTrustedRendererUrl(window.webContents.mainFrame?.url, trustedMainRendererUrl)
 })
 
-function isTrustedMainLogToggleEvent(event: IpcMainEvent, enabled: unknown): boolean {
+function isTrustedMainLogToggleEvent(event: Pick<IpcMainEvent, "sender" | "senderFrame">, enabled: unknown): boolean {
   try {
     const window = mainWindow
     if (!window || window.isDestroyed()) return false
@@ -1174,7 +1174,9 @@ if (browserNativeMessagingHostLaunch) {
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
     registerDesignHandlers()
-    registerRequirementHandlers(ipcMain)
+    registerRequirementHandlers(ipcMain, {
+      isTrustedEvent: (event) => isTrustedMainLogToggleEvent(event, true)
+    })
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
     registerNotificationHandlers(ipcMain)

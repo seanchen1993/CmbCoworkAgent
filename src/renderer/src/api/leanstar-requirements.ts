@@ -1,4 +1,4 @@
-const LEANSTAR_GATEWAY_URL = import.meta.env.VITE_LEANSTAR_REVIEW_GATEWAY_URL?.trim() || ""
+import type { LeanstarQuery } from "../../../shared/requirement-credentials"
 const USE_MOCK = import.meta.env.DEV || import.meta.env.VITE_LEANSTAR_REQUIREMENTS_MOCK === "true"
 
 export type DigitalProduct = {
@@ -348,40 +348,16 @@ const MOCK_NAMESPACE_TREE: NamespaceTreeNode[] = [
   }
 ]
 
-async function getToken(): Promise<string> {
-  const result = await window.api.requirements.getToken()
-  if (!result.success || !result.token.trim()) {
-    throw new Error(result.error || "请先配置 Leanstar Access Token")
-  }
-  return result.token.trim()
-}
-
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = await getToken()
-  if (!LEANSTAR_GATEWAY_URL) throw new Error("未配置 Leanstar 网关地址")
-  const response = await fetch(`${LEANSTAR_GATEWAY_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      "Ls-Access-Token": token,
-      ...(init.headers || {})
-    }
-  })
-
-  if (!response.ok) {
-    const message = await response.text().catch(() => "")
-    throw new Error(`Leanstar 请求失败（${response.status}）：${message || response.statusText}`)
-  }
-  return (await response.json()) as T
+async function request<T>(query: LeanstarQuery): Promise<T> {
+  const result = await window.api.requirements.queryLeanstar(query)
+  if (!result.success) throw new Error(result.error)
+  return result.data as T
 }
 
 export const leanstarRequirementsApi = {
   listDigitalProducts(): Promise<PageResponse<DigitalProduct>> {
     if (USE_MOCK) return Promise.resolve({ content: MOCK_PRODUCTS, total: MOCK_PRODUCTS.length })
-    return request<PageResponse<DigitalProduct>>("/api/requirement/digital-products/person/page", {
-      method: "POST",
-      body: JSON.stringify({ pageIndex: 1, pageSize: 50 })
-    })
+    return request<PageResponse<DigitalProduct>>({ operation: "listDigitalProducts" })
   },
 
   listProductRequirements(
@@ -392,34 +368,28 @@ export const leanstarRequirementsApi = {
       const content = MOCK_REQUIREMENTS[domainId] ?? []
       return Promise.resolve({ content, total: content.length })
     }
-    return request<ApiPageResponse<ProductRequirement>>(
-      "/api/requirement/product-requirements/page",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          pageIndex: 1,
-          pageSize: 15,
-          domain: { id: domainId, type: domainType }
-        })
-      }
-    ).then((result) => result.body ?? result)
+    return request<ApiPageResponse<ProductRequirement>>({
+      operation: "listProductRequirements",
+      domainId,
+      domainType
+    }).then((result) => result.body ?? result)
   },
 
   getImplementationDetail(code: string): Promise<{ subFrs?: ImplementationDetail[] }> {
     if (USE_MOCK) return Promise.resolve({ subFrs: MOCK_DETAILS[code] ?? [] })
-    return request<{ subFrs?: ImplementationDetail[] }>(
-      `/api/requirement/product-requirements/${encodeURIComponent(code)}/impl-detail`,
-      { method: "GET" }
-    )
+    return request<{ subFrs?: ImplementationDetail[] }>({
+      operation: "getImplementationDetail",
+      code
+    })
   },
 
   // 第三步：需求整体详情
   getRequirementDetail(code: string): Promise<RequirementDetail | null> {
     if (USE_MOCK) return Promise.resolve(MOCK_REQUIREMENT_DETAIL[code] ?? null)
-    return request<RequirementDetail | ApiDetailResponse>(
-      `/api/requirement/product-requirements/${encodeURIComponent(code)}/detail`,
-      { method: "GET" }
-    ).then((result) => {
+    return request<RequirementDetail | ApiDetailResponse>({
+      operation: "getRequirementDetail",
+      code
+    }).then((result) => {
       if (result && typeof result === "object" && "returnCode" in result) {
         return (result as ApiDetailResponse).body ?? null
       }
@@ -440,16 +410,14 @@ export const leanstarRequirementsApi = {
           : null
       )
     }
-    return request<ApiDocumentContentResponse>(
-      `/api/requirement/document-content/${encodeURIComponent(code)}`,
-      { method: "GET" }
-    ).then((result) => result.body ?? null)
+    return request<ApiDocumentContentResponse>({
+      operation: "getRequirementDocumentContent",
+      code
+    }).then((result) => result.body ?? null)
   },
 
   getNamespaceTree(): Promise<NamespaceTreeResponse> {
     if (USE_MOCK) return Promise.resolve({ namespaceTreeList: MOCK_NAMESPACE_TREE })
-    return request<NamespaceTreeResponse>("/api/leanstar/namespaces/tree", {
-      method: "GET"
-    })
+    return request<NamespaceTreeResponse>({ operation: "getNamespaceTree" })
   }
 }

@@ -1,9 +1,16 @@
-import { type IpcMain, dialog, shell } from "electron"
+import { type IpcMain, type IpcMainInvokeEvent, app, dialog, shell, safeStorage } from "electron"
 import * as fs from "fs/promises"
 import path from "path"
 import { randomUUID } from "crypto"
 import mammoth from "mammoth"
 import { getOpenworkDir } from "../storage"
+import { requirementFailure } from "../../shared/requirement-credentials"
+import { RequirementCredentialStore } from "../services/requirements/credential-store"
+import { LeanstarRequirementGateway } from "../services/requirements/leanstar-gateway"
+import {
+  RequirementPublishService,
+  type RequirementPublisher
+} from "../services/requirements/publisher"
 
 type RequirementSourceType = "file" | "text" | "link"
 
@@ -129,8 +136,16 @@ type RequirementsIndexFile = {
       prdManifestSynced?: boolean
     }
   >
-  token?: string
   lastWorkDir?: string
+}
+
+let credentialStore: RequirementCredentialStore
+function getCredentialStore(): RequirementCredentialStore {
+  return (credentialStore ??= new RequirementCredentialStore({
+    directory: path.join(app.getPath("userData"), "requirement-credentials"),
+    legacyIndexPath: () => path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME),
+    safeStorage
+  }))
 }
 
 function getRequirementThreadIds(item: {
@@ -249,7 +264,11 @@ async function migrateLegacyRequirementData(): Promise<void> {
       continue
     }
 
-    await writeJson(indexPath, { ...existingIndex, lastWorkDir, list: existingIndex.list ?? [] })
+    await getCredentialStore().updateLegacyIndex((current) => ({
+      ...current,
+      lastWorkDir: current.lastWorkDir || lastWorkDir,
+      list: current.list ?? []
+    }))
     existingIndex.lastWorkDir = lastWorkDir
     await fs.rm(settingsPath, { force: true })
   }
@@ -307,31 +326,10 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
 }
 
 async function writeRequirementIndex(list: RequirementIndexItem[]): Promise<void> {
-  const indexPath = path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME)
-  const existing = await readJson<RequirementsIndexFile>(indexPath, {})
-  await writeJson(indexPath, {
-    ...(existing.token ? { token: existing.token } : {}),
-    ...(existing.lastWorkDir ? { lastWorkDir: existing.lastWorkDir } : {}),
+  await getCredentialStore().updateLegacyIndex((existing) => ({
+    ...(typeof existing.lastWorkDir === "string" ? { lastWorkDir: existing.lastWorkDir } : {}),
     list
-  })
-}
-
-async function readRequirementToken(): Promise<string> {
-  await ensureRequirementDirs()
-  const data = await readJson<RequirementsIndexFile>(
-    path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME),
-    {}
-  )
-  return typeof data.token === "string" ? data.token.trim() : ""
-}
-
-async function saveRequirementToken(token: string): Promise<void> {
-  const normalized = token.trim()
-  if (!normalized) throw new Error("Token 不能为空")
-  await ensureRequirementDirs()
-  const indexPath = path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME)
-  const existing = await readJson<RequirementsIndexFile>(indexPath, {})
-  await writeJson(indexPath, { ...existing, token: normalized, list: existing.list ?? [] })
+  }))
 }
 
 async function getLastRequirementWorkDir(): Promise<string | null> {
@@ -353,13 +351,11 @@ async function getLastRequirementWorkDir(): Promise<string | null> {
 
 async function saveLastRequirementWorkDir(workDir: string): Promise<void> {
   await ensureRequirementDirs()
-  const indexPath = path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME)
-  const existing = await readJson<RequirementsIndexFile>(indexPath, {})
-  await writeJson(indexPath, {
+  await getCredentialStore().updateLegacyIndex((existing) => ({
     ...existing,
     lastWorkDir: workDir,
     list: existing.list ?? []
-  })
+  }))
 }
 
 async function resolveRequirementWorkDir(workDir: unknown): Promise<string> {
@@ -862,26 +858,73 @@ function ensureWorkspaceChild(workspacePath: string, childPath: string): string 
   return resolvedChild
 }
 
-export function registerRequirementHandlers(ipcMain: IpcMain): void {
-  ipcMain.handle("requirements:list", async () => listRequirements())
-  ipcMain.handle("requirements:get-token", async () => {
-    try {
-      return { success: true, token: await readRequirementToken() }
-    } catch (error) {
-      return {
-        success: false,
-        token: "",
-        error: error instanceof Error ? error.message : "读取 Token 失败"
-      }
+export function registerRequirementHandlers(
+  ipcMain: IpcMain,
+  options: {
+    isTrustedEvent?: (event: IpcMainInvokeEvent) => boolean
+    credentials?: RequirementCredentialStore
+    gateway?: LeanstarRequirementGateway
+    publisher?: RequirementPublisher
+  } = {}
+): void {
+  if (options.credentials) credentialStore = options.credentials
+  const credentials = getCredentialStore()
+  const gateway = options.gateway ?? new LeanstarRequirementGateway({
+    credentials,
+    // Runtime configuration takes priority; VITE compatibility is mapped explicitly at build time.
+    gatewayUrl: () =>
+      process.env.LEANSTAR_REVIEW_GATEWAY_URL || import.meta.env.VITE_LEANSTAR_REVIEW_GATEWAY_URL
+  })
+  const publishing = new RequirementPublishService({
+    credentials,
+    publisher: options.publisher,
+    findRequirement: async (reqId) => {
+      const item = (await readRequirementIndex()).find((entry) => entry.reqId === reqId)
+      return item ? { ...item, requirementPath: getRequirementRoot(item) } : undefined
     }
   })
-  ipcMain.handle("requirements:save-token", async (_event, token: string) => {
+  const trusted = (event: IpcMainInvokeEvent): boolean => {
     try {
-      await saveRequirementToken(token)
-      return { success: true }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : "保存 Token 失败" }
+      return options.isTrustedEvent?.(event) === true
+    } catch {
+      return false
     }
+  }
+  ipcMain.handle("requirements:list", async () => listRequirements())
+  ipcMain.handle("requirements:get-credential-status", async (event) => {
+    if (!trusted(event)) return requirementFailure("UNTRUSTED_CALLER")
+    try {
+      await ensureRequirementDirs()
+      return await credentials.status()
+    } catch {
+      return requirementFailure("STORAGE_FAILURE")
+    }
+  })
+  ipcMain.handle("requirements:save-token", async (event, token: unknown) => {
+    if (!trusted(event)) return requirementFailure("UNTRUSTED_CALLER")
+    try {
+      await ensureRequirementDirs()
+      return await credentials.save(token)
+    } catch {
+      return requirementFailure("STORAGE_FAILURE")
+    }
+  })
+  ipcMain.handle("requirements:leanstar-query", async (event, payload: unknown) => {
+    if (!trusted(event)) return requirementFailure("UNTRUSTED_CALLER")
+    try {
+      await ensureRequirementDirs()
+      return await gateway.query(payload)
+    } catch {
+      return requirementFailure("NETWORK_FAILURE")
+    }
+  })
+  ipcMain.handle("requirements:prepare-publish", async (event, payload: unknown) => {
+    if (!trusted(event)) return requirementFailure("UNTRUSTED_CALLER")
+    return publishing.prepare(payload)
+  })
+  ipcMain.handle("requirements:confirm-publish", async (event, payload: unknown) => {
+    if (!trusted(event)) return requirementFailure("UNTRUSTED_CALLER")
+    return publishing.confirm(payload)
   })
   ipcMain.handle("requirements:get-work-dir", async () => getLastRequirementWorkDir())
   ipcMain.handle("requirements:select-work-dir", async () => {
