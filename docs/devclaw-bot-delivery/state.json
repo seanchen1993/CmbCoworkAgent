@@ -35,7 +35,7 @@
     "pause_reason": null,
     "proposed_interval_minutes": 120,
     "not_before_utc": null,
-    "last_run_outcome": "quota_recovered_F03_prepared_for_dispatch",
+    "last_run_outcome": "quota_recovered_F03_A01_dispatched",
     "last_verified_at_utc": "2026-10-01T12:12:21Z"
   },
   "tasks": [
@@ -64,21 +64,21 @@
     },
     {
       "id": "F03",
-      "status": "ready",
+      "status": "implementing",
       "spec": "tasks/F03.md",
       "design": "tasks/F03-contract-decisions.md",
       "attempt_id": "F03-A01",
-      "agent_id": null,
+      "agent_id": "/root/f03_contracts",
       "agent_task_name": "f03_contracts",
       "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-f03/cmbCowork",
       "branch": "codex/devclaw-bot-f03",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-f03/cmbCowork/docs/devclaw-bot-delivery/attempts/F03-A01.md",
       "worktree_creation_operation_id": "2584a4c9-0fbe-4e34-8af7-b4985e7a3dca",
       "baseline": "77692fdfd2cefd3fe16bf34cc357df4db83abc2c",
-      "wait_reason": "dispatch_prepared_agent_not_yet_created"
+      "wait_reason": null
     }
   ],
-  "next_action": "12:12 UTC 核对额度已恢复，F03 工作树 clean、HEAD 77692fdf，既无 attempt 文件也无现有 F03 代理或该目录进程。已创建本地专属分支并克隆依赖，准备向 gpt-6.1-sol/xhigh 派 F03-A01；若在登记间中断必须先查 live agents，不重复派发。",
+  "next_action": "F03-A01 已派发给 /root/f03_contracts，唯一实施写者；先建立 A01，再按 schema/生成器、API/Runtime fixtures、可执行参考模型分步保存。主代理等可审阅快照做独立检查，不重复启动 F02/F03。",
   "quota_recovery": {
     "verified_at_utc": "2026-10-01T12:12:21Z",
     "ordinary_usage_allowed": true,
