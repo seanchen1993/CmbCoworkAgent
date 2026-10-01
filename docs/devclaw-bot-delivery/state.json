@@ -31,10 +31,12 @@
     "kind": "heartbeat",
     "automation_id": "devclaw-bot",
     "status": "ACTIVE",
+    "cancellation_reason": null,
     "pause_reason": null,
-    "proposed_interval_minutes": 15,
+    "proposed_interval_minutes": 120,
     "not_before_utc": null,
-    "last_run_outcome": "activated_after_user_authorization"
+    "last_run_outcome": "recreated_at_two_hours_by_explicit_user_request",
+    "last_verified_at_utc": "2026-10-01T06:07:12Z"
   },
   "tasks": [
     {
@@ -66,6 +68,13 @@
       "wait_reason": "single_implementation_writer_F02"
     }
   ],
-  "next_action": "F02-A01 正在独立工作树实施，F03 设计已 ready；收到 F02 待审查后检查实际 diff 并独立复验，再顺序派发 F03。",
+  "next_action": "用户已明确改为每 2 小时触发并继续任务。额度已恢复，原 F02 代理已确认因额度错误停止，工作树及 A01 保留；接续原代理完成测试与 R4 内存边界，再独立审查。F03 等待 F02 交还。",
+  "quota_recovery": {
+    "verified_at_utc": "2026-10-01T06:02:16Z",
+    "ordinary_usage_allowed": true,
+    "primary_used_percent": 10,
+    "secondary_used_percent": 79,
+    "previous_interruption": "主代理审批工具与 F02 子代理均遇到调用额度限制；失败的工具动作未执行，已有 dirty diff 保留。"
+  },
   "recovery_notes": "已授权 F02/F03，不包含 F04 之后的实施或部署。派单前后核对 live agents，防止创建与登记之间中断导致重复写者。"
 }

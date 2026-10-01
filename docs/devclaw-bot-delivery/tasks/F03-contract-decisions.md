@@ -20,7 +20,7 @@
 - 写命令含 `commandId`；改变已有对象或往对象追加内容，含该对象 `expectedVersion`。创建全新 Bot/Group/Task/Upload 不要伪造 version=0。POST /runs 的 expectedVersion 指 Task，不是尚未创建的 Run。
 - `commandId` 在 `(spaceId, authenticatedPrincipalId)` 范围去重；指纹包含 method、规范路径与规范 JSON body（不含 commandId），拒绝同 ID 不同操作/对象/载荷。服务端只在同一事务持久命令回执、变更与 Outbox 后返回成功。
 - 对相同命令返回原结果前仍重新鉴权，撤权不得通过重放取得历史内容；幂等查询必须先于 expectedVersion 的当前值比较，否则成功后的正常重试会误报版本冲突。保留期由服务端公布，过期命令不无条件当全新写入重放。
-- ID 为非空、最长 128 的不透明字符串，pattern `[A-Za-z0-9][A-Za-z0-9._:-]*`；版本、fence 和 eventSeq 为 1..9007199254740991 的整数。所有日期为 UTC `Z` 后缀 RFC3339，字节摘要使用 `sha256:` 加 64 位小写十六进制。
+- ID 为非空、最长 128 的不透明字符串，pattern `^[A-Za-z0-9][A-Za-z0-9._:-]*$`；版本、fence 和 eventSeq 为 1..9007199254740991 的整数。所有日期为 UTC `Z` 后缀 RFC3339，字节摘要使用 `sha256:` 加 64 位小写十六进制。
 - 对象一律封闭未知字段（additionalProperties:false；组合时正确使用 unevaluatedProperties）。不使用任意 `metadata`/`payload` map 隐藏未定义接口；可选字段省略，不在未说明时混用 null。
 - 字符串/数组有显式合理上限；文本内容不授予权限。Schema 的结构校验不保证自然语言没有秘密，Runtime/网关仍需独立脱敏和数据权限控制。
 - 错误响应：`{requestId,error:{code,message,retryable,currentVersion?,retryAfterSeconds?}}`。固定安全说明，不带异常栈、凭据或上游响应。未知副作用不标记 retryable=true。
@@ -60,7 +60,11 @@
 | RunSpec | schemaVersion=1, runId, attemptId, taskId, stageId, botVersionId, mode, contextManifestRef, inputArtifactVersions[], workspace:WorkspaceSpec, grant:GrantRef, credentialBindings[], approvalIds[], budget, deadline；由服务端解析并冻结，不接受客户端原样上报作为授权 |
 | Delivery | id, spaceId, runId, attemptId?, eventId, destinationRef, status, attempts；只表示消息交付 |
 
-capability 使用封闭枚举：requirements.analyze、repository.read、prototype.generate、workspace.write、command.execute、requirements.publish。请求能力与主体授权、Bot ceiling、Group/Task 资源授权、模式、节点、当前审批取交集。Group limits={maxHandoffs,maxRuns,maxTokens}。knowledgeRefs/repositoryRefs/blobRef/contextManifestRef/checkpointRef 均为不透明 ID，不是可任意 fetch 的 URL。
+capability 使用封闭枚举：requirements.analyze、repository.read、prototype.generate、workspace.write、command.execute、requirements.publish。请求能力与主体授权、Bot ceiling、Group/Task 资源授权、模式、节点、当前审批取交集。不得把交集外的请求能力静默降级后宣称原请求执行成功：应拒绝并说明缺少能力。
+
+模式能力上限：requirement 只支持 requirements.analyze 与有独立工具批准的 requirements.publish；assessment 只支持 repository.read；prototype 支持 prototype.generate 与限于原型工作区的 workspace.write；project 支持 repository.read、workspace.write、command.execute。需求成果写入属于受控模式产物 API，不意味着获得任意写应用代码能力。
+
+Group limits={maxHandoffs,maxRuns,maxTokens}。knowledgeRefs/repositoryRefs/blobRef/contextManifestRef/checkpointRef 均为不透明 ID，不是可任意 fetch 的 URL。requestedAction={capability,resourceRefs[],inputDigest}；entityRef={kind,id,version}，kind 为 bot/group/task/artifact/approval/run/delivery。provider/localThreadId 组合映射仅由有权适配器写入。
 
 ## 4. API 表面
 
@@ -75,7 +79,7 @@ capability 使用封闭枚举：requirements.analyze、repository.read、prototy
 | GET /groups/{groupId} | 路径 ID | Group |
 | PUT /groups/{groupId}/members | expectedVersion, bots, members | Group |
 | POST /tasks | groupId, title, goal, inputArtifactVersions | Task（201） |
-| GET /tasks/{taskId} | 路径 ID | Task |
+| GET /tasks/{taskId} | 路径 ID | task:Task + snapshotCursor（同一一致性快照的增量起点） |
 | POST /tasks/{taskId}/messages | expectedVersion, text, artifactVersions, targetBotId? | TaskMessage + taskVersion（201） |
 | POST /tasks/{taskId}/stage-transitions | expectedVersion, toStage, inputArtifactVersions, approvalIds | Task |
 | POST /uploads | taskId, purpose, fileName, mediaType, sizeBytes, digest | UploadSession（201） |
@@ -96,6 +100,8 @@ capability 使用封闭枚举：requirements.analyze、repository.read、prototy
 
 这里不提供有副作用的任意 tools API，也不在 F03 增加 IM binding 真接口。组建 Group 的权限不等于群管理员权限；后续群协议单独版本化，保持现有 IM V1 完全兼容。
 
+创建 Task 初始为 active，首个 requirement Stage 为 active，其余 stage 为 pending。事件首次读取未提供 after 时只取得当前 head cursor（events=[]），客户端从 Task 快照的 snapshotCursor 开始增量，不能拿“较晚查询的当前 cursor”覆盖旧快照起点而漏事件。每次读增量仍按当前权限过滤；cursor 不是权限凭证。
+
 ## 5. 状态和审批
 
 - Task：draft → active；active ↔ awaiting_business / awaiting_technical；active 或等待确认态可进入 handed_off（双确认），handed_off → completed；非终态可 cancelled。completed/cancelled 终态。阶段变更与 Task 状态分开，不允许模型自行确认。
@@ -111,7 +117,7 @@ capability 使用封闭枚举：requirements.analyze、repository.read、prototy
 
 ## 6. Runtime 协议
 
-Runtime 主动出站连接，transport 认证绑定 nodeId 与 spaceId。独立 protocol=`devclaw.bot.runtime`、schemaVersion=1。Envelope={protocol,schemaVersion,messageId,type,body}；body 为按 type 严格判别的封闭对象。拒绝外层版本错误、未知类型及 type/body 不匹配。
+Runtime 主动出站连接至 `/api/bot/v1/runtime/ws`，transport 使用独立节点凭据认证并绑定 nodeId 与 spaceId，不能复用客户端自报身份。该 WSS 握手边界在 OpenAPI 的升级说明中声明，消息验证由 Runtime schema 承担。独立 protocol=`devclaw.bot.runtime`、schemaVersion=1。Envelope={protocol,schemaVersion,messageId,type,body}；body 为按 type 严格判别的封闭对象。拒绝外层版本错误、未知类型及 type/body 不匹配。
 
 | type | body |
 | --- | --- |
