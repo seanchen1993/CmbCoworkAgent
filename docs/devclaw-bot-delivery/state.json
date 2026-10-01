@@ -2,18 +2,19 @@
   "schema_version": 1,
   "updated_on": "2026-10-01",
   "project": "DevClaw Bot",
-  "phase": "delivery_setup",
-  "status": "waiting_scope_confirmation",
+  "phase": "F02_F03",
+  "status": "planning_implementation",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "9ba9aab084e499d45f2d61041ed3ec90fe1c0c0a"
+    "last_accepted_commit": "fb1ecd34"
   },
   "authorization": {
-    "approved_work": ["long_running_delivery_setup"],
-    "implementation_task_ids": [],
-    "scope_confirmed": false,
+    "approved_work": ["long_running_delivery_setup", "F02", "F03"],
+    "implementation_task_ids": ["F02", "F03"],
+    "scope_confirmed": true,
+    "scope_confirmation": "2026-10-01 用户回复：开始实施；承接上一条建议的 F02＋F03 首轮范围。",
     "explicit_user_pause": false,
     "external_push_allowed": false,
     "deployment_allowed": false,
@@ -29,11 +30,11 @@
   "scheduler": {
     "kind": "heartbeat",
     "automation_id": "devclaw-bot",
-    "status": "PAUSED",
-    "pause_reason": "implementation_scope_not_confirmed",
+    "status": "ACTIVE",
+    "pause_reason": null,
     "proposed_interval_minutes": 15,
     "not_before_utc": null,
-    "last_run_outcome": "created_paused_not_executed"
+    "last_run_outcome": "activated_after_user_authorization"
   },
   "tasks": [
     {
@@ -43,12 +44,12 @@
     },
     {
       "id": "F02",
-      "status": "draft",
+      "status": "ready",
       "spec": "tasks/F02.md",
       "attempt_id": null,
       "agent_id": null,
       "worktree": null,
-      "wait_reason": "implementation_scope_not_confirmed"
+      "wait_reason": null
     },
     {
       "id": "F03",
@@ -57,9 +58,9 @@
       "attempt_id": null,
       "agent_id": null,
       "worktree": null,
-      "wait_reason": "implementation_scope_not_confirmed"
+      "wait_reason": "main_agent_contract_design"
     }
   ],
-  "next_action": "确认首轮实施范围；主代理完成对应任务单接口设计后再派单。",
-  "recovery_notes": "当前没有运行中的实施代理或代码测试；不要将本状态文件视为全路线实施授权。"
+  "next_action": "完成 F02 任务单并创建独立工作树，派给 gpt-6.1-sol / xhigh；主代理同时设计 F03 契约，保持只有一个代码实施写者。",
+  "recovery_notes": "已授权 F02/F03，不包含 F04 之后的实施或部署。派单前后核对 live agents，防止创建与登记之间中断导致重复写者。"
 }
