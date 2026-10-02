@@ -3,7 +3,7 @@
   "updated_on": "2026-10-02",
   "project": "DevClaw Bot",
   "phase": "F02_F03",
-  "status": "implementing",
+  "status": "integrating",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -64,7 +64,7 @@
     },
     {
       "id": "F03",
-      "status": "implementing",
+      "status": "accepted",
       "spec": "tasks/F03.md",
       "design": "tasks/F03-contract-decisions.md",
       "attempt_id": "F03-A01",
@@ -75,10 +75,13 @@
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-f03/cmbCowork/docs/devclaw-bot-delivery/attempts/F03-A01.md",
       "worktree_creation_operation_id": "2584a4c9-0fbe-4e34-8af7-b4985e7a3dca",
       "baseline": "77692fdfd2cefd3fe16bf34cc357df4db83abc2c",
-      "candidate_head": "d590146a106e5fab7f4f672d4050baa31caed15f",
+      "candidate_head": "0f1b6680fb5e26d49a0526652643ef365ba12cf3",
+      "candidate_code_commit": "731e0f92bea13bd3d01778f021a7c067fd3a5d29",
+      "accepted_code_commit": "731e0f92bea13bd3d01778f021a7c067fd3a5d29",
+      "acceptance_evidence": "reviews/F03-acceptance.md",
       "early_review": "reviews/F03-early-review.md",
-      "open_review_items": ["R1_actual_time_comparison", "R2_reconciliation_atomicity", "R3_delivery_resource_authorization", "R4_readonly_workspace_write_capability"],
-      "latest_independent_check": "2026-10-02T02:07:07Z C4 dirty: original R1-R4 reproductions now pass (exit 0); final candidate regression/acceptance still pending",
+      "open_review_items": [],
+      "latest_independent_check": "2026-10-02T02:11:50Z candidate 731e0f92: contracts 14659 exit 0 (24/24, --check, generated-type consumption), node tsc 76742 exit 0, web tsc 87248 exit 0, independent IM19 50051 exit 0; R1-R4 closed; all sessions closed",
       "recovery_snapshot": {
         "verified_at_utc": "2026-10-02T01:49:30Z",
         "agent_status": "errored_quota_confirmed_stopped_then_same_agent_followup_sent",
@@ -90,7 +93,7 @@
       "wait_reason": null
     }
   ],
-  "next_action": "已向同一 /root/f03_contracts 与 F03-A01 下发接续（无新代理），保留 d590146a 后全部 dirty/untracked。实施者落实两项已冻结语义并收齐回归证据（旧 IM 86442 结果未知），只交待审查，主代理另做独立审查/复验。",
+  "next_action": "F03已独立验收；本地合入候选0f1b6680（代码731e0f92）并复核集成树，再完成本轮F02/F03并暂停heartbeat，不派发后续路线。旧IM86442仍保持结果未知，正式独立IM证据为50051 exit0。",
   "quota_recovery": {
     "verified_at_utc": "2026-10-02T01:45:49Z",
     "ordinary_usage_allowed": true,
