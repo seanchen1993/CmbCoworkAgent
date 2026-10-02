@@ -18,6 +18,8 @@
 
 任务基线已提交为 `92bf93f111045fd3550a5e0e433c5d2555d592c6`。新 F05 工作树创建 operation `f28cc54c-acec-44e3-bb06-4a29d439f8ff` 已 completed，准确路径 `/Users/heyirui/.codex/worktrees/devclaw-bot-f05/cmbCowork`，初始 clean 且无 cwd 进程。计划唯一 attempt 为 F05-A01、代理名 f05_dev_environment；真实派发状态见 state/live agents，不因报告尚未出现就重复派发。
 
+派发回执已确认 `/root/f05_dev_environment`，指定 gpt-6.1-sol/xhigh，唯一写者。分支 `codex/devclaw-bot-f05` 已建立，依赖 APFS 克隆命令 32427 退出 0 且无残留句柄。实施者只修改指定文件，先记录 F05-A01 检查点；主代理等待实际交付并独立审查，不能把任务基线里仍写 ready 当作未派单。
+
 ## 当前验收状态
 
 **F02＋F03 首轮已完成，不再派发实施任务。** F03 经主代理独立验收，代码 `731e0f92bea13bd3d01778f021a7c067fd3a5d29`，最终候选 HEAD `0f1b6680fb5e26d49a0526652643ef365ba12cf3` 仅追加报告；本地合入为 `53a86a207b3f60a6b1e94e305d7f9b2eeb186c49`。实施者 completed、明确停止写入，工作树 clean。主代理契约 14659（24/24）、node 76742、web 87248、IM19 50051 均 exit 0；集成后 source/test/package 与候选完全相同（仅交付文档不同），集成契约入口 78073 再次 24/24 及类型消费 exit 0。全部句柄关闭，R1～R4 关闭；详见 `reviews/F03-acceptance.md`。
