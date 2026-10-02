@@ -1,6 +1,16 @@
 # 当前交接点
 
-更新日期：2026-10-02
+更新日期：2026-10-03（Asia/Shanghai）
+
+## 最新恢复点：F05 C 阶段额度恢复（优先于以下历史）
+
+2026-10-02 23:28:56 UTC，当前额度 ordinaryUsageAllowed=true，primary1% / secondary0%，分别重置于10-03 04:28:57 UTC及10-09 23:28:57 UTC。上轮主代理记录写入被自动审批的额度限制中止，没有执行；集成HEAD仍 `ab9927d4c7ec98f7381e85ddb886b9e873aa6194`，clean。这里是当前工具事实，不依据旧4:16AM错误盲等，也没有购买/重置/换模型。
+
+F05树仍是 `4ec5f78ffd3ff5800306bb4105c68f47c20ee5a7`，7个已跟踪修改＋6个未跟踪文件保留，尚未验收。原 `/root/f05_dev_environment` 明确errored额度停止；ps核对仅命中自身、F05/集成精确cwd无存活进程。旧测试21784/18562已不可读取，不能计作通过。接续同一代理与F05-A01，不创建新attempt/工作树/写者。
+
+限额前主代理已独立完成：doctor10652 exit0（真实Java/Javac8、MySQL5.7版本、Maven、JDBC8.0.33/class52）；mock3298 exit0，14/14含R1归属/R2原始头截断与生命周期。该证据已补入 `reviews/F05-review.md`，对应当时dirty快照，最终冻结后须复跑。真实数据库探针最后在SELECT1输出精确解析处排障；process.mjs已有stdout/stderr拆分未验收。下一步是原代理完成真实JDBC/事务/失败/中断收尾、README与完整自测，然后主代理独立复验。
+
+heartbeat实际配置仍ACTIVE/每4小时，范围F04/F05，不进入B01。F04平台BOM/S3/ES/维护责任人仍待确认，不伪报完成。禁止推送、部署、真实内网、付费；所有已存在代码和dirty成果保留。
 
 ## 最新阶段：F04/F05（以下旧阶段为历史）
 

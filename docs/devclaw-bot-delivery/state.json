@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "updated_on": "2026-10-02",
+  "updated_on": "2026-10-03",
   "project": "DevClaw Bot",
   "phase": "F04_F05_LOCAL_DEV",
-  "status": "implementing",
+  "status": "resuming",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -43,8 +43,8 @@
     "pause_reason": null,
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
-    "last_run_outcome": "F04_F05_authorized_java8_mysql57_heartbeat_resumed",
-    "last_verified_at_utc": "2026-10-02T15:26:31Z"
+    "last_run_outcome": "quota_restored_existing_f05_attempt_reconciled",
+    "last_verified_at_utc": "2026-10-02T23:30:00Z"
   },
   "tasks": [
     {
@@ -116,7 +116,7 @@
     },
     {
       "id": "F05",
-      "status": "implementing",
+      "status": "resuming",
       "spec": "tasks/F05.md",
       "attempt_id": "F05-A01",
       "agent_task_name": "f05_dev_environment",
@@ -127,20 +127,26 @@
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-f05/cmbCowork/docs/devclaw-bot-delivery/attempts/F05-A01.md",
       "worktree_creation_operation_id": "f28cc54c-acec-44e3-bb06-4a29d439f8ff",
       "review": "reviews/F05-review.md",
-      "latest_checkpoint": "B stage 4ec5f78ffd3ff5800306bb4105c68f47c20ee5a7: main config+HTTP 8/8 exit0, R1 standalone ownership probe exit0; R2 oversized raw headers hides Origin and returns200, independent assertion exit1 at15:47 UTC; all test servers closed. Child to fix R2 and finish real probe; not accepted",
-      "open_review_items": ["R1_persistent_regression_pending", "R2_raw_header_truncation_guard"]
+      "latest_checkpoint": "2026-10-02T23:28:56Z recovery: F05 HEAD4ec5f78f, 7 tracked modified +6 untracked preserved; old agent errored_quota confirmed stopped and no old processes; 21784/18562 unknown results. Prior main doctor10652/mock3298 exit0 restored to review; final real probe/candidate not accepted",
+      "open_review_items": [],
+      "remaining_acceptance": [
+        "final_candidate_diff_review",
+        "real_mysql_jdbc_transactions_and_lifecycle",
+        "final_mock_contract_node_web_regressions"
+      ],
+      "wait_reason": null
     }
   ],
-  "next_action": "F05-A01 已派发 /root/f05_dev_environment（gpt-6.1-sol/xhigh），唯一实施写者在独立 F05 树。读取其检查点和实际 diff，进行主代理独立审查/复验后再集成。不因报告缺失重建写者，F02/F03 不重做；本轮不扩至 B01，待平台项如实保留。",
+  "next_action": "接续原 /root/f05_dev_environment、同F05-A01，保留dirty代码。完成真实本地探针与自测后主代理独立验收；先核对live agent避免重复派发。不得进入B01或外部操作。",
   "quota_recovery": {
-    "verified_at_utc": "2026-10-02T15:21:00Z",
+    "verified_at_utc": "2026-10-02T23:28:56Z",
     "ordinary_usage_allowed": true,
-    "primary_used_percent": 10,
-    "primary_resets_at_utc": "2026-10-02T20:16:47Z",
-    "secondary_used_percent": 17,
-    "secondary_resets_at_utc": "2026-10-09T01:42:12Z",
-    "previous_interruption": "历史 F03 额度中断已在 2026-10-02 01:45 核对新窗口后恢复并完成；当前使用上方最新窗口值，不按旧 Oct6 提示重复等待。不购买/重置/换账号/换模型。"
+    "primary_used_percent": 1,
+    "primary_resets_at_utc": "2026-10-03T04:28:57Z",
+    "secondary_used_percent": 0,
+    "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
+    "previous_interruption": "F05实施与主代理审批曾因额度失败；当前新查询确认可用，没有购买/重置/换账号/模型。"
   },
-  "recovery_notes": "2026-10-02 新授权推进 F04/F05；首轮 F02/F03 已验收不重做。旧代理均 completed，精确 integration/F02/F03 cwd 的 lsof 无进程。JDK 8/Javac/Maven/MySQL binary 已实际核对；数据库还未启动。禁止推送、部署、内网和付费；派单前后核对实际写者。",
+  "recovery_notes": "F05 已停止的额度中断与真实探针测试失败分别处理；当前无相关存活进程、旧测试结果未知，不计作通过。集成上次写入未执行，已从工具证据恢复检查点。",
   "current_task_id": "F05"
 }

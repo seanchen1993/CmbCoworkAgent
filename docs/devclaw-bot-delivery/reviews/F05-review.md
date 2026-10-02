@@ -52,3 +52,17 @@ R1 实现已改为登记路径/inode/dev 并校验目录类型，临时根目录
 **R2 尚未关闭：原始 HTTP 头部过量导致安全字段被截断。** 独立 raw TCP 发送合法 `GET /dev/v1/session`、Host 与本实例合成 Bearer，随后 35 个 `X-Pad-N: a`，最后放 `Origin: https://evil.invalid`。当前 `maxHeadersCount=32` 使解析后的 `req.headers.origin` 消失，实际返回 **200**，预期拒绝，断言 exit 1。不是外部联网；URL 只作头部值，测试 server 在 finally 关闭。
 
 已发实施者：路由前拒绝超量/截断头部并为 Origin、身份头位于截断边界之后加入 raw TCP 回归。建议独立明确 431/400/403 拒绝均可，不能将 200 视为正确。不要仅增加计数上限而保留可绕过点。另建议显式 `MAVEN_SKIP_RC` 防止可选 Maven 版本检查读取全局 rc。该阶段还没有真实 MySQL/JDBC 结果。
+
+## C 中途独立复验（15:53～15:59 UTC，未冻结）
+
+本节原写入因自动审批工具额度失败而未执行；2026-10-02 23:28 UTC 恢复后依据本会话实际工具结果补录，不能混同为新的当前候选结果。
+
+- R2 首次修正仅检查 rawHeaders 数量，主代理 15:53 再测返回200、exit1，mock-server blob `87b94be369836779f81ab5f16629d9bcda0e93c0`。此前推断 rawHeaders 完整不成立，Node22 实际同时截断；已纠正并要求取消解析器 count 截断后自行限数量。
+- 随后修正保留 maxHeaderSize 字节上限，maxHeadersCount=0，完整 rawHeaders 在路由前超过32条即431；另显式50ms检查周期，使不完整headers约1秒退出。
+- 主代理 Node22 `deploy/dev/cli.mjs mock --profile dev`，3298 exit0，14/14、skip0，含R1持久负向用例、R2后置Origin/身份头、不完整headers期限、独立进程有限生命周期/SIGTERM和凭据轮换。执行时 mock-server blob `6fb41fdd5c7693f17a5b1bfd657d82b4a4fd9720`，process `992e009204319ef8aaab8e3b850605b8b73a1e35`，cli `aa5a00879eb3010694ff02dfe4f78560ad7c0344`，HEAD仍B提交且C dirty。R1/R2在该快照已复验，最终冻结后仍须重跑。
+- 主代理 `deploy/dev/cli.mjs doctor --profile dev` 加显式工具路径，10652 exit0，实际 Java/Javac1.8.0_482、Node22.22.2、MySQL5.7.24、Maven3.9.6、Connector/J8.0.33，class52真实编译运行。S3/ES disabled，身份/招乎/模型 mock 分类明确。
+- 实施者真实数据库探针尚在排障，不据doctor版本检查标为连接/事务验收。已允许显式 --mysql-messages，要求本人PID/socket/真实SQL就绪。新 process.mjs 已开始拆分stdout/stderr，但未完成最终验证。
+
+## 额度中断后核对（23:28 UTC）
+
+集成树 `ab9927d4` clean，证实前次受阻的记录写入/提交没有发生。F05仍为 `4ec5f78f`，7个已跟踪文件修改及6个未跟踪文件全部保留；原代理明确errored额度状态，相关ps只命中检查自身，精确cwd lsof无存活命令。旧句柄21784、18562均 Unknown process id，结果不可补记通过；后续需复跑这些纯本地合成验证。新额度 ordinaryUsageAllowed=true，primary1%、secondary0%；不购买/重置/更换账号或模型。
