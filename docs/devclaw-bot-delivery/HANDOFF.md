@@ -16,6 +16,8 @@
 
 下一步：提交任务单和状态 → 用准确提交创建独立 F05 工作树 → 记录 F05-A01 路径 → 派发指定子代理 → 检查实际 diff 并独立复验。实施者仅可改 deploy/dev、tests/bot/dev、package scripts 和自身 attempt，不改协调文档或现有代码/契约。完整验收门槛见 F05 任务单。
 
+任务基线已提交为 `92bf93f111045fd3550a5e0e433c5d2555d592c6`。新 F05 工作树创建 operation `f28cc54c-acec-44e3-bb06-4a29d439f8ff` 已 completed，准确路径 `/Users/heyirui/.codex/worktrees/devclaw-bot-f05/cmbCowork`，初始 clean 且无 cwd 进程。计划唯一 attempt 为 F05-A01、代理名 f05_dev_environment；真实派发状态见 state/live agents，不因报告尚未出现就重复派发。
+
 ## 当前验收状态
 
 **F02＋F03 首轮已完成，不再派发实施任务。** F03 经主代理独立验收，代码 `731e0f92bea13bd3d01778f021a7c067fd3a5d29`，最终候选 HEAD `0f1b6680fb5e26d49a0526652643ef365ba12cf3` 仅追加报告；本地合入为 `53a86a207b3f60a6b1e94e305d7f9b2eeb186c49`。实施者 completed、明确停止写入，工作树 clean。主代理契约 14659（24/24）、node 76742、web 87248、IM19 50051 均 exit 0；集成后 source/test/package 与候选完全相同（仅交付文档不同），集成契约入口 78073 再次 24/24 及类型消费 exit 0。全部句柄关闭，R1～R4 关闭；详见 `reviews/F03-acceptance.md`。

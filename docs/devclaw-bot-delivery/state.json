@@ -97,7 +97,7 @@
   ],
   "current_milestone": {
     "F04": { "status": "local_baseline_confirmed_platform_items_pending", "spec": "tasks/F04.md", "pending": ["internal_spring_boot_bom_and_maintenance_owner", "mysql_internal_patch_and_owner", "s3_product_and_capabilities", "es_version_and_acl", "real_gateway_implementation_and_group_protocol"] },
-    "F05": { "status": "ready", "spec": "tasks/F05.md", "attempt_id": "F05-A01", "agent_task_name": "f05_dev_environment", "agent_id": null, "worktree": null, "branch": null, "baseline": null, "attempt_report": null }
+    "F05": { "status": "ready", "spec": "tasks/F05.md", "attempt_id": "F05-A01", "agent_task_name": "f05_dev_environment", "agent_id": null, "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-f05/cmbCowork", "branch": "codex/devclaw-bot-f05", "baseline": "92bf93f111045fd3550a5e0e433c5d2555d592c6", "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-f05/cmbCowork/docs/devclaw-bot-delivery/attempts/F05-A01.md", "worktree_creation_operation_id": "f28cc54c-acec-44e3-bb06-4a29d439f8ff" }
   },
   "next_action": "提交 F04/F05 任务边界，创建独立 F05 工作树，再派发唯一 gpt-6.1-sol/xhigh 实施者。先核对实际创建结果和 live agents，未登记 agent 不等于未派发。F02/F03 不重做；本轮仅完成本地开发准备，未确认的平台项不伪报完成。",
   "quota_recovery": {
