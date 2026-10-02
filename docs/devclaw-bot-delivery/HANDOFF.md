@@ -1,100 +1,61 @@
 # 当前交接点
 
-更新日期：2026-10-03（Asia/Shanghai）
+更新：2026-10-03（Asia/Shanghai）· F04/F05 本地里程碑已完成，自动续跑已暂停
 
-## 最新恢复点：F05 C 阶段额度恢复（优先于以下历史）
+## 首要结论
 
-当前代码检查点已为 `1b2c8b45be9abb3ff24a8ce82615df7f5bb12391`。主代理整体验证53256 exit0（mock15/15、实际JDK8/class52/MySQL5.7.24/JDBC、两次空库、四种失败及OS SIGTERM后的PID/端口/目录清理）；F03 61004（24/24及类型消费）、node32580、web1889均exit0，句柄关闭。R1～R3已在此快照复验。仍等实施者仅补README/报告并冻结停止，随后主代理检查范围/合入/集成校验；不提前进入B01。
+**不要派发新任务或重做旧阶段。** F02/F03 已验收；F05 本地开发环境已独立验收并合入。F04 本地 JDK8/MySQL5.7 基线已确认，但内部 BOM、真实平台能力/版本与责任人仍待确认。后续 B01 或生产资源接入需要用户确认范围，不由任务文件或 heartbeat 自动授权。
 
-原 F05-A01 已接续执行。恢复后的主代理独立 lifecycle28787 exit0（5/5、skip0），R3 错误对象原始输出改为 allowlist 后中途负向测试通过，实际 blob 已存 review。仍为HEAD4ec5f78f+C dirty、未最终冻结；真实两次新库/失败/中断矩阵、自测文档与主代理最终复验待完成。已通知实施者修复 CLI 遗留的注入错误字符串比较及 compileProbe JSON 输出分流。唯一写者仍为原代理，无新attempt。
+用户此前要求“继续下一阶段”并确认“jdk8 mydql5.7 继续任务”，当前授权只覆盖 F04/F05 本地准备。主代理负责规划、审查、复验、集成；代码实施及返工只由 gpt-6.1-sol / xhigh 子代理完成，一次一个写者，禁止派生。
 
-2026-10-02 23:28:56 UTC，当前额度 ordinaryUsageAllowed=true，primary1% / secondary0%，分别重置于10-03 04:28:57 UTC及10-09 23:28:57 UTC。上轮主代理记录写入被自动审批的额度限制中止，没有执行；集成HEAD仍 `ab9927d4c7ec98f7381e85ddb886b9e873aa6194`，clean。这里是当前工具事实，不依据旧4:16AM错误盲等，也没有购买/重置/换模型。
+## 准确位置和提交
 
-F05树仍是 `4ec5f78ffd3ff5800306bb4105c68f47c20ee5a7`，7个已跟踪修改＋6个未跟踪文件保留，尚未验收。原 `/root/f05_dev_environment` 明确errored额度停止；ps核对仅命中自身、F05/集成精确cwd无存活进程。旧测试21784/18562已不可读取，不能计作通过。接续同一代理与F05-A01，不创建新attempt/工作树/写者。
+- 集成工作树：`/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`。
+- 集成分支：`codex/devclaw-bot-integration`；F05 合入提交：`54a58f856286e90e554d72f1ccdb9dc5fe1166eb`。后续主代理提交仅补交付状态/验收记录，以实际 Git 为准。
+- 初始 cwd `/Users/heyirui/.codex/worktrees/d12a/cmbCowork` 是旧树，不在其中实施。
+- F05 工作树：`/Users/heyirui/.codex/worktrees/devclaw-bot-f05/cmbCowork`，分支 `codex/devclaw-bot-f05`。
+- F05 代码：`1b2c8b45be9abb3ff24a8ce82615df7f5bb12391`；含README候选：`bb9e9441b6b26eb70533cb178ad51f646fe972d2`；报告-only最终HEAD：`56c93c71eca11b22d024e3d318b2beaf35640109`。
+- 原实施者 `/root/f05_dev_environment` 已completed并明确停止写入，树clean。只读lsof/ps未发现对应存活命令或测试服务；不因以后代理不可见而重建。
 
-限额前主代理已独立完成：doctor10652 exit0（真实Java/Javac8、MySQL5.7版本、Maven、JDBC8.0.33/class52）；mock3298 exit0，14/14含R1归属/R2原始头截断与生命周期。该证据已补入 `reviews/F05-review.md`，对应当时dirty快照，最终冻结后须复跑。真实数据库探针最后在SELECT1输出精确解析处排障；process.mjs已有stdout/stderr拆分未验收。下一步是原代理完成真实JDBC/事务/失败/中断收尾、README与完整自测，然后主代理独立复验。
+## 已交付和独立验证
 
-heartbeat实际配置仍ACTIVE/每4小时，范围F04/F05，不进入B01。F04平台BOM/S3/ES/维护责任人仍待确认，不伪报完成。禁止推送、部署、真实内网、付费；所有已存在代码和dirty成果保留。
+F05交付 dev-only 配置/doctor、合成身份、假招乎、确定性假模型、有限生命周期HTTP替身、隔离真实MySQL/JDBC兼容探针。Node22只做开发编排；生产方向仍为Java模块化单体、JDK8、MySQL5.7。
 
-## 最新阶段：F04/F05（以下旧阶段为历史）
+主代理已阅读实际实现和diff，R1目录归属、R2头部截断安全绕过、R3错误对象原始凭据输出均返工并独立复验关闭。修改仅允许目录与五个package脚本追加；原业务src、契约、测试脚本、锁文件和依赖未变。
 
-用户在 F02/F03 验收后要求“继续下一阶段”，并明确“jdk8 mydql5.7 继续任务”。当前授权扩至 F04 技术基线与 F05 本地开发环境，不进入 B01 或后续路线。任务单为 `tasks/F04.md`、`tasks/F05.md`。主代理仍只规划/审查，唯一实施者必须是 gpt-6.1-sol/xhigh、禁止派生。
+- 完整check53256：exit0，mock15/15、skip0；实际JDK8/class52、MySQL5.7.24、Connector/J8.0.33及两次独立空库SQL断言通过。
+- 真SQL覆盖中文/emoji utf8mb4、UTC/DATETIME(3)、双连接READ_COMMITTED、commit/rollback、唯一键、expectedVersion CAS、有限账号。
+- after-initialize/bootstrap/listen、实际mysqld启动失败、OS SIGTERM均验证本人PID退出、目录ENOENT、开放过的端口ECONNREFUSED；只回收本次合成临时资源，无遗留服务。
+- F03入口61004：exit0，24/24、生成器--check、正负类型消费；node32580/web1889 tsc均exit0。
+- 最终候选与上述实测代码仅README/报告不同。集成全部非docs内容与候选相同；docs差异是主代理协调记录及合入前已有F04技术栈确认。
+- 集成后mock71066再次exit0、15/15；F03入口直接exit0、24/24及类型消费。所有命令句柄关闭。真实数据库/node/web没有在合入后再重复跑，沿用已证明字节相同候选的独立结果。
 
-2026-10-02 15:26:31 UTC，同一个 devclaw-bot heartbeat 已原位恢复 ACTIVE，保留每 4 小时，prompt 更新为 F04/F05 边界；本轮验收后再次暂停。未创建重复任务。当前额度 ordinaryUsageAllowed=true，短窗口已用 10%、周窗口 17%；没有购买、重置、换模型或账号。
+完整命令/退出码/资源证据：`reviews/F05-acceptance.md`。
+中途失败与修复历史：`reviews/F05-review.md`、`attempts/F05-A01.md`。
+使用说明：仓库 `deploy/dev/README.md`。
 
-恢复前集成 HEAD 为 `7e5707c39442b97d2199e6f3f71986d226e171a5` 且 clean。旧 F02/F03 代理均 completed 并明确停止；integration/F02/F03 精确 cwd 的 lsof 无存活命令。本轮尚未创建 F05 实施工作树或派单（后续以 state、live agents 和真实 Git 为准）。
+## 自动续跑和额度恢复
 
-实测工具链：Corretto JDK/Javac 1.8.0_482 在 `corretto-1.8.0_482-1/Contents/Home` 可运行；java_home 列表里另一不带 -1 的残留目录不可作为执行路径。Maven 3.9.6 位于已有 `.m2/wrapper/dists` 缓存且在该 JDK 下启动成功；MySQL 客户端和 mysqld 均为 5.7.24。尚未创建/启动数据库，未触碰现有用户库。Docker/Podman 未发现。
+2026-10-02 23:54:03 UTC，原heartbeat `devclaw-bot` 已由App工具原位更新PAUSED，实际配置再次核对。保留每4小时、同一会话、原prompt和名称，没有重复创建。因为本轮里程碑完成而暂停，不是额度等待，不应由后续heartbeat自动恢复。
 
-本轮交付开发模拟器（测试身份、假招乎、假模型）及真实 JDK8/MySQL5.7 隔离兼容探针，Node22 只作开发编排，不改变 Java 生产服务方向。内部 Spring Boot BOM、真实 S3/ES/网关和平台责任人均未知，F04 只确认了本地基线，不能标为全部平台确认完成。生产服务骨架/CRUD、Runtime、S3 联调及真实发布均不在本轮。
+本次额度恢复确实接续了原F05-A01：先确认原代理errored停止、无旧进程、dirty成果保留，再查询当前额度可用后followup原代理；没有换账号/模型、购买/重置额度或新建写者绕过限制。上轮未写入的检查点已从实际工具证据恢复；旧未知测试结果没有计作通过，最终全部复跑。
 
-下一步：提交任务单和状态 → 用准确提交创建独立 F05 工作树 → 记录 F05-A01 路径 → 派发指定子代理 → 检查实际 diff 并独立复验。实施者仅可改 deploy/dev、tests/bot/dev、package scripts 和自身 attempt，不改协调文档或现有代码/契约。完整验收门槛见 F05 任务单。
+以后若用户授权新阶段，仍先阅读最新消息、README/state/任务单，再核对Git/代理/运行命令。额度未恢复不启动新实现，用户暂停/预算约束优先于记录。
 
-任务基线已提交为 `92bf93f111045fd3550a5e0e433c5d2555d592c6`。新 F05 工作树创建 operation `f28cc54c-acec-44e3-bb06-4a29d439f8ff` 已 completed，准确路径 `/Users/heyirui/.codex/worktrees/devclaw-bot-f05/cmbCowork`，初始 clean 且无 cwd 进程。计划唯一 attempt 为 F05-A01、代理名 f05_dev_environment；真实派发状态见 state/live agents，不因报告尚未出现就重复派发。
+## 外部待确认与能力边界
 
-派发回执已确认 `/root/f05_dev_environment`，指定 gpt-6.1-sol/xhigh，唯一写者。分支 `codex/devclaw-bot-f05` 已建立，依赖 APFS 克隆命令 32427 退出 0 且无残留句柄。实施者只修改指定文件，先记录 F05-A01 检查点；主代理等待实际交付并独立审查，不能把任务基线里仍写 ready 当作未派单。
+F04仍待：内部Spring Boot parent/BOM及补丁维护方；内网MySQL补丁/连接/备份策略；S3产品/签名/TLS/版本化能力；ES版本/ACL/分析器；真实Java网关和招乎群协议/维护方。未知如实保留，不要求把真实Token/账号发到聊天。
 
-## 当前验收状态
+当前没有生产Bot CRUD、真实企业认证、正式招乎接入、持久任务/Outbox、Runtime、S3/ES或发布联调。身份/招乎/模型mock，S3/ES disabled。仅实测当前macOS/POSIX工具组合；不宣称生产安全维护、Windows或SIGKILL/断电恢复通过。
 
-**F02＋F03 首轮已完成，不再派发实施任务。** F03 经主代理独立验收，代码 `731e0f92bea13bd3d01778f021a7c067fd3a5d29`，最终候选 HEAD `0f1b6680fb5e26d49a0526652643ef365ba12cf3` 仅追加报告；本地合入为 `53a86a207b3f60a6b1e94e305d7f9b2eeb186c49`。实施者 completed、明确停止写入，工作树 clean。主代理契约 14659（24/24）、node 76742、web 87248、IM19 50051 均 exit 0；集成后 source/test/package 与候选完全相同（仅交付文档不同），集成契约入口 78073 再次 24/24 及类型消费 exit 0。全部句柄关闭，R1～R4 关闭；详见 `reviews/F03-acceptance.md`。
+不得推送、部署、连接真实内网或执行付费操作，除非用户另行明确授权。禁止reset或清空任一工作树。
 
-2026-10-02 02:15:07 UTC，依据“本轮里程碑完成即停用”边界，原 heartbeat `devclaw-bot` 已原位改为 PAUSED，工具回执与实际配置均确认；保留用户最新每 4 小时频率，不是删除任务，也不是用户主动暂停工作。下一步需用户明确下一阶段范围，再决定是否恢复。不能把旧历史中的 ACTIVE/implementing 当作新派单依据。
+## 既有阶段
 
-## 最新恢复点（优先于下方历史）
+- F02受控发布凭据边界：代码`dec5cfd4`、最终HEAD`84741848`，合入`77692fdf`；独立74项Vitest、node/web、五项需求回归通过。生产发布连接器仍不可用，真实凭据历史风险需用户轮换；不重做。证据：`reviews/F02-acceptance.md`。
+- F03核心契约：代码`731e0f92`、最终HEAD`0f1b6680`，合入`53a86a20`；独立24项契约、node/web、IM19通过，不等于真实服务/数据库/Runtime实现。证据：`reviews/F03-acceptance.md`。
+- 原分支整合代码`4d778d28`；完整路线仍为规划，不能按队列自动执行。
 
-- 用户最新要求改为每 4 小时自动续跑并继续任务。2026-10-02 01:46 UTC 对同一个 `devclaw-bot` 原位更新，工具回执和配置均为 ACTIVE/4 小时；没有重复创建，没有扩大 F02/F03 范围。
-- 集成分支 `codex/devclaw-bot-integration` 恢复前 HEAD `54c177350c921ae9a9ece13b5dbe2a9a0f572572`，clean；F02 仍已验收，不重新派发。
-- 原 `/root/f03_contracts` 状态为 errored（旧错误为 Oct 6 08:59 额度恢复），不是正在写入。当前额度工具 01:45:49 UTC 返回 ordinaryUsageAllowed=true、primary 11%（reset 10-02 06:42:12 UTC）、secondary 2%（reset 10-09 01:42:12 UTC）。这是新的当前窗口事实；没有执行购买、重置、换模型或账号操作。
-- F03 实际分支 `codex/devclaw-bot-f03`，HEAD `d590146a106e5fab7f4f672d4050baa31caed15f`。A `18208efd`、B `d590146a` 已提交；C 参考模型/文档/回归仍有 11 个已跟踪修改和 7 个未跟踪文件，全部保留，未接受或集成。
-- 实际未跟踪文件为 `contracts/bot/v1/README.md` 及 `tests/bot/{check-contracts.mjs,model-command-artifact.spec.mjs,model-helpers.mjs,model-runtime.spec.mjs,reference-model.mjs,types-consumption.ts}`。已跟踪改动包含 schema/OpenAPI/fixtures/状态表/生成器/runner/package.json 和 A01 报告。
-- 子代理报告：契约入口 18/18、生成类型检查、node/web tsc 退出 0；IM 首次 1～16 通过，第 17 因 loopback listen EPERM 失败，第 18～19 未执行。后续 IM 句柄 `86442` 已无法读取（Unknown process id），因此结果未知，不能记为通过。精确 F03 cwd 的 lsof 无存活进程；可对这个无外部副作用的合成回归重新运行一次。
-- 主代理已在 `tasks/F03-contract-decisions.md` 冻结两项待决：严格 If-Match/真实字节上传指纹，以及成功 DevelopmentHandoff 原命令在 PRD 更新后的历史回执语义。由原 F03-A01 实施者落实；主代理不写实现代码。
-- 同一 F03 代理接续指令已发出（不是创建替代代理），要求先记录上述恢复事实，再修正语义/补测试，完整交回 review_pending。之后主代理检查实际 diff、独立复验。下方 2 小时/初始检查点段落均为历史，不能据此重复派单。
-- 主代理已执行合成诊断，复现 R1 时间字符串比较、R2 对账失败部分写入、R3 Delivery 缺少任务级授权、R4 只读工作区仍接受 workspace.write 四项问题，交原实施者修正；详见 `reviews/F03-early-review.md`。同时明确二进制 Content-Type 的真实输入来源，要求 OpenAPI 与参考模型一致。尚未关闭这些问题或验收 F03。
-- 02:07 UTC，主代理对 C4 dirty 模型独立复跑原 R1～R4 最小复现，四项断言均通过、退出 0；实施者仍在补持久测试/文档与完整回归。尚无最终候选提交，不据此提前验收或合并。
-- 最新代码候选已冻结为 `731e0f92bea13bd3d01778f021a7c067fd3a5d29`，22 个允许范围内文件；实施者只补报告、不再改代码。主代理独立契约入口 14659 退出 0（24/24、--check、类型正负消费），node tsc 76742 退出 0；web 87248 与独立 IM 最终结果须继续收齐。子代理自身 node/web/IM19 均已报告退出 0，但不能替代主代理证据。
+## 下一动作
 
-## 已确认
-
-- 用户希望主代理负责规划、派单及最后检查，代码实施交给 `gpt-6.1-sol` / `xhigh` 子代理。
-- 用户要求主代理或子代理遭遇 Token/调用额度限制后，额度恢复时能够继续任务。
-- 指定分支已整合，代码与文档分别提交为 `4d778d28`、`9ba9aab0`；验证范围见上级目录整合记录。
-
-## 当前正在做什么
-
-用户于 2026-10-01 回复“开始实施”，确认 F02＋F03 首轮范围。F02 已验收并合入，当前只准备 F03，不进入后续产品路线。恢复仍须核对 `state.json`、live agents 和实际 Git。
-
-F02-A01 由 `/root/f02_credential_isolation`（gpt-6.1-sol / xhigh）完成，当前代理 completed。工作树 `/Users/heyirui/.codex/worktrees/devclaw-bot-f02/cmbCowork` 保留在 HEAD `84741848`，代码提交 `dec5cfd4`。独立验收与集成证据见 `reviews/F02-acceptance.md`，不要重新派发 F02。
-
-F03 任务单及 `tasks/F03-contract-decisions.md` 已 ready。F03 工作树 `/Users/heyirui/.codex/worktrees/devclaw-bot-f03/cmbCowork` 已创建，基线 `77692fdf`，分支 `codex/devclaw-bot-f03`；APFS 克隆已有依赖，不联网安装。12:12 UTC 核对该树 clean、无 attempt 文件、无对应活跃进程、无 F03 代理。首个 attempt 定为 F03-A01，预定代理名 f03_contracts；派发结果须查 state/live agents，不凭此段认定已经创建。
-
-F03 冻结的是接口/fixtures/参考模型，不是服务端或云 Runtime 实现；仍只运行一个代码实施写者，不把结构校验当作生产授权证明。
-
-派发回执已确认：F03-A01 由 `/root/f03_contracts` 执行，指定模型 gpt-6.1-sol / xhigh，禁止派生。唯一可写代码目录为上述 F03 工作树，报告在其 `docs/devclaw-bot-delivery/attempts/F03-A01.md`。先保存检查点，再按 schema/生成器、API/Runtime fixtures、可执行参考模型分步交付；自测仅进入待审查。不要因基线文档仍写 ready 或报告尚未建立就重复派发。
-
-F03 首个 A01 检查点已由实施者保存，主代理核对实际文件存在；初始仅此报告未跟踪，还没有 schema/测试交付。实施者提出的两项设计澄清已回复并写入集成树设计：Upload.purpose 复用 ArtifactKind，提交校验 kind/purpose；Thread/Project Binding.provider 为已注册适配器 ProviderId，不与 Runtime 的 desktop/hosted 部署类型混用。此澄清不扩大实现范围。
-
-最新用户要求：改为每 2 小时触发一次，并继续任务。此前的 15 分钟配置已实际删除；本次经明确授权于 06:07 UTC 重新创建当前会话 heartbeat“DevClaw Bot 断点续跑”（ID `devclaw-bot`），回执 ACTIVE，每 2 小时触发。
-
-恢复历史：真实额度中断后接续原 F02 代理，保留 dirty diff 与失败测试历史；R1～R5 已由实施者修复，并经主代理独立验证关闭。06:34 UTC 额度接近限制，F03 仅完成工作树创建，没有发生派单；12:12 UTC 心跳核对 primary 已重置为 0%、secondary 仍为 93%、ordinaryUsageAllowed=true。新 primary 恢复时刻为 2026-10-01 17:12:21 UTC，secondary 为 2026-10-06 00:59:26 UTC。不得切换模型/账号、购买额度或使用重置权益。
-
-F02 新发现：除了两个 Token 入对话入口，还有 `requirements/index.json` 明文保存以及 renderer 直接取 Token 发起 Leanstar 查询。仓库不包含 `requirement-to-prd` 发布 Skill/脚本，已询问用户位置；当前范围先实现受控边界与 Mock 正负向验证，生产发布入口显式不可用，不猜接口。
-
-## 下一步
-
-最新集成基线：`77692fdfd2cefd3fe16bf34cc357df4db83abc2c`；source/test 与已验收 F02 快照一致，集成树额外复跑 74 项 Vitest 通过。F03 创建 operation `2584a4c9-0fbe-4e34-8af7-b4985e7a3dca` 已返回 completed，勿重复创建工作树。
-
-主代理独立复验已完成：Vitest 20243（74/74）、node tsc 2899、web tsc 83805、五项 requirement 脚本循环 9241 均退出 0，句柄已关闭。实际 diff 与 R1～R5 已审查，F02 受控边界交付 accepted；详见 `reviews/F02-acceptance.md`。尚不代表真实发布联调或 OS keychain/Electron UI E2E 已验证。
-
-1. 读取原 F03-A01 代理的检查点与真实 diff，确认是否在执行；中断时接续同一代理，不能重做已完成步骤。
-2. 对 F03 的 schema、类型生成、API/Runtime fixtures 与可执行状态模型逐项审查，禁止扩张到生产服务/数据库。
-3. 保存 F03 检查点并独立验收，不把参考模型、Mock 发布或 schema 通过视为生产系统联调通过。
-4. 本轮仍只包含 F02＋F03，不自动进入整条路线。
-
-## 必须保留的限制
-
-- F02 受控边界已验收集成，但生产发布连接器仍未配置；不使用真实 Token 测试，历史泄露凭据需要用户轮换。
-- 需求到原型的 selection 消费仍未接通；Java 服务端选择仍待确认。
-- 不推送、不部署、不连接内网、不自动购买额度或使用额度重置权益。
-- 额度耗尽、用户暂停、任务失败是不同状态。恢复时先确认旧代理/进程是否仍在写入，保留 dirty diff。
-- heartbeat 创建/启用状态由 `state.json` 和工具回执决定；不能仅凭说明文档认定自动续跑已经启动。
+等待用户确认下一阶段。需要恢复时只核对真实状态和授权，不重新启动已接受的F05，不自动创建B01写者。历史长交接文本保留在Git及分阶段review/attempt记录；本文件只保留当前有效交接点。

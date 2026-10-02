@@ -1,6 +1,6 @@
 # F05 独立验收
 
-2026-10-03（Asia/Shanghai）· 候选已验收，本地集成待核对
+2026-10-03（Asia/Shanghai）· 已独立验收并本地集成
 
 ## 结论与范围
 
@@ -75,4 +75,8 @@ F05_MAVEN=/Users/heyirui/.m2/wrapper/dists/apache-maven-3.9.6-bin/439sdfsg2nbdob
 
 ## 集成与续跑
 
-候选已独立验收，随后只做本地合入和集成内容/入口核对。完成本轮后原 heartbeat 原位暂停，保留四小时频率与当前范围，等待下一阶段授权。实际合入 SHA、复验退出码与工具暂停回执需补录，不能以此段计划当作已经执行。
+本地合入为 `54a58f856286e90e554d72f1ccdb9dc5fe1166eb`，无冲突。`git diff --exit-code 56c93c71 HEAD -- . ':(exclude)docs/**'` exit0，全部实现/测试/配置/package/deploy README 字节与验收候选相同。最初仅排除 delivery 文档的比较exit1，原因是集成树已有主代理 F04 技术栈确认文档 `docs/devclaw-bot-implementation-plan.md`；已实际检查该差异，并证实它相对合入前d39d8eb8没有变化，非实现冲突或代码遗漏。
+
+集成树再次执行 mock统一入口，71066 exit0（15/15、skip0）；F03入口直接结束exit0（24/24、生成器--check、正负类型消费）。真实数据库与node/web使用上方候选独立结果，因集成字节相同未重复整套运行；不宣称额外未执行的测试。所有句柄关闭。
+
+2026-10-02 23:54:03 UTC，原 `devclaw-bot` heartbeat 经 App 工具原位更新为PAUSED，工具回执及实际配置均确认；保留原名称、prompt、会话与每4小时频率，无重复任务。因本轮本地里程碑完成按既有约定暂停，不是用户撤销项目授权。管理方式经[官方定时任务说明](https://learn.chatgpt.com/docs/automations)核对；暂停事实以本次工具回执为证。不自动进入B01，等待用户决定下一阶段。
