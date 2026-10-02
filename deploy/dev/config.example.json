@@ -1,0 +1,6 @@
+{
+  "profile": "dev",
+  "host": "127.0.0.1",
+  "s3": "disabled",
+  "es": "disabled"
+}
