@@ -66,3 +66,7 @@ R1 实现已改为登记路径/inode/dev 并校验目录类型，临时根目录
 ## 额度中断后核对（23:28 UTC）
 
 集成树 `ab9927d4` clean，证实前次受阻的记录写入/提交没有发生。F05仍为 `4ec5f78f`，7个已跟踪文件修改及6个未跟踪文件全部保留；原代理明确errored额度状态，相关ps只命中检查自身，精确cwd lsof无存活命令。旧句柄21784、18562均 Unknown process id，结果不可补记通过；后续需复跑这些纯本地合成验证。新额度 ordinaryUsageAllowed=true，primary1%、secondary0%；不购买/重置/更换账号或模型。
+
+### R3：故障诊断不得保留原始凭据输出（恢复后代码审查）
+
+当前dirty的process.mjs将子进程原始输出附于error.childOutput；mysql-probe只对diagnostic脱敏，随后仍抛出带原始属性的同一Error。直接调用/测试框架打印错误时可能绕过CLI的安全输出。另diagnostic先截断4096再替换完整秘密，若截断发生在口令中间则前缀残留。已交原实施者修正：最终抛出的对象不得含raw输出，先脱敏后截断；涉及凭据的bootstrap错误不转储部分口令/原始SQL，使用安全阶段/退出码；stdout/stderr也要分别有界，并补合成错误回归。本项尚待独立复验，不表示发生了真实凭据外泄。
