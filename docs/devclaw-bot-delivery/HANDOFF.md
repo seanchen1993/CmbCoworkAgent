@@ -4,6 +4,10 @@
 
 ## 最新恢复点：F05 C 阶段额度恢复（优先于以下历史）
 
+当前代码检查点已为 `1b2c8b45be9abb3ff24a8ce82615df7f5bb12391`。主代理整体验证53256 exit0（mock15/15、实际JDK8/class52/MySQL5.7.24/JDBC、两次空库、四种失败及OS SIGTERM后的PID/端口/目录清理）；F03 61004（24/24及类型消费）、node32580、web1889均exit0，句柄关闭。R1～R3已在此快照复验。仍等实施者仅补README/报告并冻结停止，随后主代理检查范围/合入/集成校验；不提前进入B01。
+
+原 F05-A01 已接续执行。恢复后的主代理独立 lifecycle28787 exit0（5/5、skip0），R3 错误对象原始输出改为 allowlist 后中途负向测试通过，实际 blob 已存 review。仍为HEAD4ec5f78f+C dirty、未最终冻结；真实两次新库/失败/中断矩阵、自测文档与主代理最终复验待完成。已通知实施者修复 CLI 遗留的注入错误字符串比较及 compileProbe JSON 输出分流。唯一写者仍为原代理，无新attempt。
+
 2026-10-02 23:28:56 UTC，当前额度 ordinaryUsageAllowed=true，primary1% / secondary0%，分别重置于10-03 04:28:57 UTC及10-09 23:28:57 UTC。上轮主代理记录写入被自动审批的额度限制中止，没有执行；集成HEAD仍 `ab9927d4c7ec98f7381e85ddb886b9e873aa6194`，clean。这里是当前工具事实，不依据旧4:16AM错误盲等，也没有购买/重置/换模型。
 
 F05树仍是 `4ec5f78ffd3ff5800306bb4105c68f47c20ee5a7`，7个已跟踪修改＋6个未跟踪文件保留，尚未验收。原 `/root/f05_dev_environment` 明确errored额度停止；ps核对仅命中自身、F05/集成精确cwd无存活进程。旧测试21784/18562已不可读取，不能计作通过。接续同一代理与F05-A01，不创建新attempt/工作树/写者。

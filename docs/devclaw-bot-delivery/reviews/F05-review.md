@@ -70,3 +70,22 @@ R1 实现已改为登记路径/inode/dev 并校验目录类型，临时根目录
 ### R3：故障诊断不得保留原始凭据输出（恢复后代码审查）
 
 当前dirty的process.mjs将子进程原始输出附于error.childOutput；mysql-probe只对diagnostic脱敏，随后仍抛出带原始属性的同一Error。直接调用/测试框架打印错误时可能绕过CLI的安全输出。另diagnostic先截断4096再替换完整秘密，若截断发生在口令中间则前缀残留。已交原实施者修正：最终抛出的对象不得含raw输出，先脱敏后截断；涉及凭据的bootstrap错误不转储部分口令/原始SQL，使用安全阶段/退出码；stdout/stderr也要分别有界，并补合成错误回归。本项尚待独立复验，不表示发生了真实凭据外泄。
+
+### R3 中途独立复验（恢复后，仍未冻结）
+
+主代理已阅读新的 process/mysql-probe/probe-error/Java/CLI/mock 与测试实现。`run` 不再向 Error 附加原始输出；真实探针只重建 allowlist 阶段/原因/退出码，既不引用原 Error/cause，也不转储 SQL，双路输出共享字节预算。Node22 `--test tests/bot/dev/lifecycle.spec.mjs`，句柄28787 exit0，5/5、skip0，覆盖完整/截断合成秘密在 String/inspect/JSON 中不可见、临时目录归属、输出上限、失败编译、serve TTL/SIGTERM 清理。对应 blob：process `d33a8d7bfbfee78ec3730699c4296950dd77f327`，mysql-probe `d9b22c34b6e745407b237b900cc44d67e61f00c3`，probe-error `695c81de513b0031aac4612aa8b5f9d1ab7ec2ff`，lifecycle.spec `90485cb70c5f04cf70fb0f524f7ea8d12e08e56d`。
+
+另已通知实施者修正 CLI after-listen 注入故障仍比较旧 message，以及 compileProbe JSON 输出未使用 stdoutOnly；这些是当前在制阶段问题，最终真实入口必须独立复验。R3 中途负向测试通过不替代最终候选验收。
+
+## C2 独立整体验证启动
+
+实施快照 `1b2c8b45be9abb3ff24a8ce82615df7f5bb12391`，主代理已阅读新增 real-checks/real-child、Java 回环/字符集/CAS 断言及 CLI 结构化故障处理，旧 message 和 stdout 分流问题已修正。已要求实施者只补 README/报告、自测，代码变更须通知使本次结果失效。
+
+主代理启动：Node22 `deploy/dev/cli.mjs check --profile dev`＋显式 Java8/Javac/MySQL/mysqld/messages/JDBC/Maven 路径，句柄53256；F03入口61004；node tsc32580；web tsc1889。均为本地执行，尚待收齐最终退出码，不根据部分输出判定成功。检查期间没有交付 accepted 或集成。
+
+### C2 独立结果已收齐
+
+- 53256 exit0：mock15/15、skip0；doctor真实版本与class52均verified；两次独立空实例真实SQL全项通过（utf8mb4中文/emoji、UTC、DATETIME(3)、双连接RC/commit/rollback/唯一键/CAS/有限账号）；不是只看日志或版本。
+- 实例1本人PID32920/32924均退出，端口49856拒绝；实例2 PID32932/32945退出，端口49866拒绝，目录均ENOENT。after-initialize、after-bootstrap（32959）、after-listen（32967/32971，49874）、真实mysqld非法选项启动失败（32979）、OS SIGTERM（33002）均经真实进程与目录/端口独立断言通过。只清理本次合成临时资源。
+- 61004 exit0：F03 24/24、生成器--check、正负类型消费；32580 node tsc exit0；1889 web tsc exit0。全部主代理句柄关闭。
+- 仍待最终 README/报告候选确认、文件范围/脚本保留检查、写者停止和本地合入；不能以中途测试提前宣称完整产品已交付。

@@ -127,12 +127,12 @@
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-f05/cmbCowork/docs/devclaw-bot-delivery/attempts/F05-A01.md",
       "worktree_creation_operation_id": "f28cc54c-acec-44e3-bb06-4a29d439f8ff",
       "review": "reviews/F05-review.md",
-      "latest_checkpoint": "2026-10-02T23:28:56Z recovery: F05 HEAD4ec5f78f, 7 tracked modified +6 untracked preserved; old agent errored_quota confirmed stopped and no old processes; 21784/18562 unknown results. Prior main doctor10652/mock3298 exit0 restored to review; final real probe/candidate not accepted",
-      "open_review_items": ["R3_error_object_and_truncated_credentials_redaction"],
+      "latest_checkpoint": "C2 code 1b2c8b45be9abb3ff24a8ce82615df7f5bb12391: main check53256 exit0 mock15/15 + doctor + two fresh real DB + four failures + SIGTERM cleanup; F03 61004 exit0 24/24/check/types, node32580/web1889 exit0. Main handles closed. Final README/report/frozen candidate and scope checks pending; not accepted or integrated",
+      "open_review_items": [],
       "remaining_acceptance": [
         "final_candidate_diff_review",
-        "real_mysql_jdbc_transactions_and_lifecycle",
-        "final_mock_contract_node_web_regressions"
+        "final_readme_report_and_stopped_writer",
+        "local_integration_content_check"
       ],
       "wait_reason": null
     }
