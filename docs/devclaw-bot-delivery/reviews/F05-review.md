@@ -42,3 +42,13 @@ MySQL 5.7 客户端即使 `--no-defaults` 仍可能读取登录路径；`--no-lo
 实际提交 `8d08dca4cf1024bb166a783198ffb41d3cf60ddf`，测试前后 clean。主代理阅读 config/process/doctor 与 config.spec，使用 Node22 执行 `--test tests/bot/dev/config.spec.mjs`，3/3、skip 0、exit 0，无运行句柄。仅配置测试通过，不是 F05 最终验收。
 
 已向实施者提出 R1：`removePrivateTemp` 只靠路径前缀正则不能证明本次创建归属；需登记持有目录并拒绝外来同前缀目录，加入执行型负向测试。另提醒 macOS `/private/tmp` 的可移植性和 MySQL Unix socket 长度限制，以及异常/中断时先停自己子进程再清理。R1 待实现与主代理复验。
+
+## B 阶段独立检查（15:47 UTC）
+
+实际提交 `4ec5f78ffd3ff5800306bb4105c68f47c20ee5a7`，检查时 clean。主代理阅读 mock-server/process/mock.spec，Node22 执行 `--test tests/bot/dev/config.spec.mjs tests/bot/dev/mock.spec.mjs`，8/8、skip 0、exit 0；仅 loopback 随机端口，全部关闭。
+
+R1 实现已改为登记路径/inode/dev 并校验目录类型，临时根目录为 realpath(/tmp)。主代理独立新建一个非 helper 持有但同前缀的空临时目录，确认 helper 拒删且目录仍存在；helper 自建目录可以正常删除，exit 0。测试仅清理这两个合成空目录。仍待最终持久回归覆盖。
+
+**R2 尚未关闭：原始 HTTP 头部过量导致安全字段被截断。** 独立 raw TCP 发送合法 `GET /dev/v1/session`、Host 与本实例合成 Bearer，随后 35 个 `X-Pad-N: a`，最后放 `Origin: https://evil.invalid`。当前 `maxHeadersCount=32` 使解析后的 `req.headers.origin` 消失，实际返回 **200**，预期拒绝，断言 exit 1。不是外部联网；URL 只作头部值，测试 server 在 finally 关闭。
+
+已发实施者：路由前拒绝超量/截断头部并为 Origin、身份头位于截断边界之后加入 raw TCP 回归。建议独立明确 431/400/403 拒绝均可，不能将 200 视为正确。不要仅增加计数上限而保留可绕过点。另建议显式 `MAVEN_SKIP_RC` 防止可选 Maven 版本检查读取全局 rc。该阶段还没有真实 MySQL/JDBC 结果。
