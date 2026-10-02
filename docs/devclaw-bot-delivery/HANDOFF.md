@@ -12,7 +12,7 @@
 - 子代理报告：契约入口 18/18、生成类型检查、node/web tsc 退出 0；IM 首次 1～16 通过，第 17 因 loopback listen EPERM 失败，第 18～19 未执行。后续 IM 句柄 `86442` 已无法读取（Unknown process id），因此结果未知，不能记为通过。精确 F03 cwd 的 lsof 无存活进程；可对这个无外部副作用的合成回归重新运行一次。
 - 主代理已在 `tasks/F03-contract-decisions.md` 冻结两项待决：严格 If-Match/真实字节上传指纹，以及成功 DevelopmentHandoff 原命令在 PRD 更新后的历史回执语义。由原 F03-A01 实施者落实；主代理不写实现代码。
 - 同一 F03 代理接续指令已发出（不是创建替代代理），要求先记录上述恢复事实，再修正语义/补测试，完整交回 review_pending。之后主代理检查实际 diff、独立复验。下方 2 小时/初始检查点段落均为历史，不能据此重复派单。
-- 主代理已执行合成诊断，复现 R1 时间字符串比较、R2 对账失败部分写入、R3 Delivery 缺少任务级授权三项问题，交原实施者修正；详见 `reviews/F03-early-review.md`。同时明确二进制 Content-Type 的真实输入来源，要求 OpenAPI 与参考模型一致。尚未关闭这些问题或验收 F03。
+- 主代理已执行合成诊断，复现 R1 时间字符串比较、R2 对账失败部分写入、R3 Delivery 缺少任务级授权、R4 只读工作区仍接受 workspace.write 四项问题，交原实施者修正；详见 `reviews/F03-early-review.md`。同时明确二进制 Content-Type 的真实输入来源，要求 OpenAPI 与参考模型一致。尚未关闭这些问题或验收 F03。
 
 ## 已确认
 

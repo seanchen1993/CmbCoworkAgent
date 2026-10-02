@@ -11,8 +11,9 @@
 | R1 时间比较 | Upload expiresAt=`2026-10-01T12:00:00Z`，now=`2026-10-01T12:00:00.100Z`，实际 `putContent` 成功 | 按实际时间判断，不按 UTC 字符串字典序；统一批准/租约/命令/游标/上传/截止时间，验证等价表示及过期边界 |
 | R2 对账原子性 | `startAssessment` 后 Run=starting、Attempt=dispatched；可信 inspection=cancelled 且 lastEventSeq=0/current fence；抛 OUTCOME_UNKNOWN，但 Attempt 已变 accepted | 拒绝时对象、证据及计数不发生部分变更；不得放宽状态表来掩盖失败 |
 | R3 Delivery 当前授权 | Delivery 指向当前 Run/Attempt、failed；主体 `resources=[]` 后 retryDelivery 仍成功 | 通过 Run 回溯 Task/Group 做当前资源权限验证；拒绝撤权重发，仍不新增 Run/Attempt |
+| R4 工作区只读边界 | prototype 阶段具备准确 workspace.write 工具批准，但已解析 WorkspaceSpec.access=read；createRun 仍 queued | workspace.write 必须被只读工作区拒绝（FORBIDDEN），其他批准不能提升该资源访问边界；派发/恢复仍重新检查 |
 
-以上三项已发给原 `/root/f03_contracts` 修复/补回归，主代理不写实现。修复后的通过结论必须对应后续精确代码快照。
+以上四项已发给原 `/root/f03_contracts` 修复/补回归，主代理不写实现。修复后的通过结论必须对应后续精确代码快照。
 
 ## 接口语义已由主代理补充
 

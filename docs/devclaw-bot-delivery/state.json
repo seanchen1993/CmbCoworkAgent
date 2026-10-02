@@ -77,7 +77,7 @@
       "baseline": "77692fdfd2cefd3fe16bf34cc357df4db83abc2c",
       "candidate_head": "d590146a106e5fab7f4f672d4050baa31caed15f",
       "early_review": "reviews/F03-early-review.md",
-      "open_review_items": ["R1_actual_time_comparison", "R2_reconciliation_atomicity", "R3_delivery_resource_authorization"],
+      "open_review_items": ["R1_actual_time_comparison", "R2_reconciliation_atomicity", "R3_delivery_resource_authorization", "R4_readonly_workspace_write_capability"],
       "recovery_snapshot": {
         "verified_at_utc": "2026-10-02T01:49:30Z",
         "agent_status": "errored_quota_confirmed_stopped_then_same_agent_followup_sent",

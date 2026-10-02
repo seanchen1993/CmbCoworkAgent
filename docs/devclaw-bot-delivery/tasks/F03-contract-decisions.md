@@ -65,6 +65,8 @@ capability 使用封闭枚举：requirements.analyze、repository.read、prototy
 
 模式能力上限：requirement 只支持 requirements.analyze 与有独立工具批准的 requirements.publish；assessment 只支持 repository.read；prototype 支持 prototype.generate 与限于原型工作区的 workspace.write；project 支持 repository.read、workspace.write、command.execute。需求成果写入属于受控模式产物 API，不意味着获得任意写应用代码能力。
 
+已解析 WorkspaceSpec.access=read 时不得接受 workspace.write 请求，即使主体、Bot、模式、节点和工具批准都允许；拒绝码为 FORBIDDEN。派发/恢复仍须重新验证当前工作区资源访问边界，不能靠批准提升只读资源。此规则不等于给所有 command.execute 无差别新增写权限前提。
+
 Group limits={maxHandoffs,maxRuns,maxTokens}。knowledgeRefs/repositoryRefs/blobRef/contextManifestRef/checkpointRef 均为不透明 ID，不是可任意 fetch 的 URL。requestedAction={capability,resourceRefs[],inputDigest}；entityRef={kind,id,version}，kind 为 bot/group/task/artifact/approval/run/delivery。provider/localThreadId 组合映射仅由有权适配器写入。
 
 实施前枚举澄清：UploadSession 和 CreateUpload 的 purpose 使用同一 ArtifactKind 定义（source/prd/assessment/prototype/development_handoff/verification），不复制第二份枚举。用途声明不授予成果权限；创建 Artifact 时必须核对 Upload 属于同一 Task、已 committed，且 Artifact.kind 与 purpose 一致。ThreadBinding/ProjectBinding.provider 为已注册会话/项目适配器的 ProviderId，复用 ID 的长度与字符限制；由有权服务端适配器写入，不是任意 URL，也不表示客户端可注册 provider。RuntimeNode/register.provider 则是 desktop/hosted 部署类型枚举。结构合法的 ProviderId 仍必须通过服务端注册与授权检查。
