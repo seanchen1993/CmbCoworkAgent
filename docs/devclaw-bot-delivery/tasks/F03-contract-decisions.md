@@ -20,7 +20,7 @@
 - 写命令含 `commandId`；改变已有对象或往对象追加内容，含该对象 `expectedVersion`。创建全新 Bot/Group/Task/Upload 不要伪造 version=0。POST /runs 的 expectedVersion 指 Task，不是尚未创建的 Run。
 - `commandId` 在 `(spaceId, authenticatedPrincipalId)` 范围去重；指纹包含 method、规范路径与规范 JSON body（不含 commandId），拒绝同 ID 不同操作/对象/载荷。服务端只在同一事务持久命令回执、变更与 Outbox 后返回成功。
 - 对相同命令返回原结果前仍重新鉴权，撤权不得通过重放取得历史内容；幂等查询必须先于 expectedVersion 的当前值比较，否则成功后的正常重试会误报版本冲突。保留期由服务端公布，过期命令不无条件当全新写入重放。
-- 二进制 PUT 的 If-Match 使用严格强 ETag：双引号包裹无前导零的正十进制版本（如 `"1"`），解析后还须在安全整数范围内；不接受弱 ETag、星号或列表。指纹包含 method、规范路径、实际收到字节的 sha256、规范 mediaType 与 If-Match，不含 X-Command-Id；不能信任客户端自报摘要。v1 mediaType 为 schema 接受的无参数小写 type/subtype。读取与哈希仍受上传大小上限约束，重复请求也不能绕过；当前鉴权之后查同命令回执，再对新写执行 CAS。同 ID 改变字节、mediaType 或 If-Match 必须冲突。
+- 二进制 PUT 的 If-Match 使用严格强 ETag：双引号包裹无前导零的正十进制版本（如 `"1"`），解析后还须在安全整数范围内；不接受弱 ETag、星号或列表。指纹包含 method、规范路径、实际收到字节的 sha256、规范 mediaType 与 If-Match，不含 X-Command-Id；不能信任客户端自报摘要。v1 mediaType 取请求实际 Content-Type，为 schema 接受的无参数小写 type/subtype，且须与 UploadSession.mediaType 一致；不是另加的 JSON 字段，OpenAPI 与 fixture 必须表达同一传输约定，不能只声明 octet-stream 却在接收模型要求 text/plain。读取与哈希仍受上传大小上限约束，重复请求也不能绕过；当前鉴权之后查同命令回执，再对新写执行 CAS。同 ID 改变字节、mediaType 或 If-Match 必须冲突。
 - ID 为非空、最长 128 的不透明字符串，pattern `^[A-Za-z0-9][A-Za-z0-9._:-]*$`；版本、fence 和 eventSeq 为 1..9007199254740991 的整数。所有日期为 UTC `Z` 后缀 RFC3339，字节摘要使用 `sha256:` 加 64 位小写十六进制。
 - 对象一律封闭未知字段（additionalProperties:false；组合时正确使用 unevaluatedProperties）。不使用任意 `metadata`/`payload` map 隐藏未定义接口；可选字段省略，不在未说明时混用 null。
 - 字符串/数组有显式合理上限；文本内容不授予权限。Schema 的结构校验不保证自然语言没有秘密，Runtime/网关仍需独立脱敏和数据权限控制。
