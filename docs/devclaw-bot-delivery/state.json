@@ -78,6 +78,7 @@
       "candidate_head": "d590146a106e5fab7f4f672d4050baa31caed15f",
       "early_review": "reviews/F03-early-review.md",
       "open_review_items": ["R1_actual_time_comparison", "R2_reconciliation_atomicity", "R3_delivery_resource_authorization", "R4_readonly_workspace_write_capability"],
+      "latest_independent_check": "2026-10-02T02:07:07Z C4 dirty: original R1-R4 reproductions now pass (exit 0); final candidate regression/acceptance still pending",
       "recovery_snapshot": {
         "verified_at_utc": "2026-10-02T01:49:30Z",
         "agent_status": "errored_quota_confirmed_stopped_then_same_agent_followup_sent",
