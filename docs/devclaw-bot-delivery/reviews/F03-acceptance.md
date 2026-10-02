@@ -2,7 +2,7 @@
 
 2026-10-02 02:11:50 UTC · 主代理。
 
-结论：**F03 授权范围内的接口契约交付 accepted**。此时独立复验完成，等待本地集成及合入后核对；不代表真实 Bot 服务或云 Runtime 已完成。
+结论：**F03 授权范围内的接口契约交付 accepted，已本地集成并复核**；不代表真实 Bot 服务或云 Runtime 已完成。
 
 ## 代码快照与范围
 
@@ -44,3 +44,11 @@ IM 复验通过正常审批仅开放合成 127.0.0.1 回环监听，不连接真
 没有生产 HTTP/WSS 服务、MySQL/Outbox、S3 不可变、ES、真实 Runtime/节点停止、模型/内网、生产授权引擎或跨进程恢复联调；Java DTO 未生成或编译。不宣称生产 exactly-once。F02 的真实发布连接器仍 CAPABILITY_UNAVAILABLE，OS keychain/Electron E2E 仍未验证；这些限制不因 F03 schema 通过而消失。
 
 本轮仍只有 F02＋F03，不推送、不部署、不连接内网、不购买或重置额度。合入后记录实际 merge 提交和集成检查，再按约定停用本轮自动续跑，等待下一阶段授权。
+
+## 集成与收尾
+
+- merge 提交：`53a86a207b3f60a6b1e94e305d7f9b2eeb186c49`，分支 `codex/devclaw-bot-integration`，目录 `/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`。没有冲突，没有重写候选实现。
+- `git diff --exit-code 0f1b6680 HEAD -- . ':(exclude)docs/devclaw-bot-delivery'` exit 0：整个仓库除交付协调文档外与已独立测试候选相同。
+- 集成工作树另跑同一契约入口，句柄 `78073` exit 0：24/24、生成漂移检查、正负类型消费再次通过，句柄关闭。
+- 02:15:07 UTC 原自动任务 `devclaw-bot` 已按本轮完成边界改为 PAUSED，频率保留 4 小时；工具回执和配置确认。两名实施子代理均交还，没有残留实施或测试句柄，不继续 F04。
+- 代码和全部工作树保留，可按记录继续下一阶段；没有 push、部署或真实系统副作用。

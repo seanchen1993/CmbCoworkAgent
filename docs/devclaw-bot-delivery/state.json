@@ -3,12 +3,12 @@
   "updated_on": "2026-10-02",
   "project": "DevClaw Bot",
   "phase": "F02_F03",
-  "status": "integrating",
+  "status": "milestone_complete",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "77692fdfd2cefd3fe16bf34cc357df4db83abc2c"
+    "last_accepted_commit": "53a86a207b3f60a6b1e94e305d7f9b2eeb186c49"
   },
   "authorization": {
     "approved_work": ["long_running_delivery_setup", "F02", "F03"],
@@ -30,13 +30,13 @@
   "scheduler": {
     "kind": "heartbeat",
     "automation_id": "devclaw-bot",
-    "status": "ACTIVE",
+    "status": "PAUSED",
     "cancellation_reason": null,
-    "pause_reason": null,
+    "pause_reason": "F02_F03_milestone_completed_waiting_next_authorization",
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
-    "last_run_outcome": "cadence_updated_4h_quota_available_original_F03_A01_resumed",
-    "last_verified_at_utc": "2026-10-02T01:49:30Z"
+    "last_run_outcome": "F02_F03_verified_integrated_and_heartbeat_paused",
+    "last_verified_at_utc": "2026-10-02T02:15:07Z"
   },
   "tasks": [
     {
@@ -78,10 +78,12 @@
       "candidate_head": "0f1b6680fb5e26d49a0526652643ef365ba12cf3",
       "candidate_code_commit": "731e0f92bea13bd3d01778f021a7c067fd3a5d29",
       "accepted_code_commit": "731e0f92bea13bd3d01778f021a7c067fd3a5d29",
+      "integration_commit": "53a86a207b3f60a6b1e94e305d7f9b2eeb186c49",
       "acceptance_evidence": "reviews/F03-acceptance.md",
       "early_review": "reviews/F03-early-review.md",
       "open_review_items": [],
       "latest_independent_check": "2026-10-02T02:11:50Z candidate 731e0f92: contracts 14659 exit 0 (24/24, --check, generated-type consumption), node tsc 76742 exit 0, web tsc 87248 exit 0, independent IM19 50051 exit 0; R1-R4 closed; all sessions closed",
+      "integration_verification": "53a86a20: repository content equals candidate 0f1b6680 except delivery coordination docs (git diff exit 0 outside docs/devclaw-bot-delivery); integrated contracts 78073 exit 0 (24/24, --check, type consumption); all sessions closed",
       "recovery_snapshot": {
         "verified_at_utc": "2026-10-02T01:49:30Z",
         "agent_status": "errored_quota_confirmed_stopped_then_same_agent_followup_sent",
@@ -93,7 +95,7 @@
       "wait_reason": null
     }
   ],
-  "next_action": "F03已独立验收；本地合入候选0f1b6680（代码731e0f92）并复核集成树，再完成本轮F02/F03并暂停heartbeat，不派发后续路线。旧IM86442仍保持结果未知，正式独立IM证据为50051 exit0。",
+  "next_action": "本轮F02/F03已验收并本地集成完成；heartbeat已按里程碑边界暂停，保留每4小时频率。等待用户明确下一阶段目标/范围后再恢复，不派发F04或后续路线。不得推送、部署、连接内网或付费。",
   "quota_recovery": {
     "verified_at_utc": "2026-10-02T01:45:49Z",
     "ordinary_usage_allowed": true,
