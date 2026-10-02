@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.devclaw.invalid/bot/v1/state-transitions.json",
+  "$defs": {
+    "TaskStatus": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "active",
+        "awaiting_business",
+        "awaiting_technical",
+        "handed_off",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "StageStatus": {
+      "type": "string",
+      "enum": ["pending", "active", "waiting_confirmation", "completed", "cancelled"]
+    },
+    "RunStatus": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "waiting_node",
+        "starting",
+        "running",
+        "waiting_approval",
+        "cancel_requested",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "outcome_unknown"
+      ]
+    },
+    "AttemptStatus": {
+      "type": "string",
+      "enum": [
+        "dispatched",
+        "accepted",
+        "running",
+        "waiting_approval",
+        "cancel_requested",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "outcome_unknown"
+      ]
+    },
+    "DeliveryStatus": {
+      "type": "string",
+      "enum": ["pending", "accepted", "delivered", "failed", "outcome_unknown"]
+    },
+    "ApprovalStatus": {
+      "type": "string",
+      "enum": ["pending", "approved", "rejected", "expired", "invalidated"]
+    },
+    "UploadStatus": {
+      "type": "string",
+      "enum": ["created", "uploading", "verifying", "committed", "rejected", "expired"]
+    },
+    "HandoffStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "accepted",
+        "running",
+        "completed",
+        "rejected",
+        "cancelled",
+        "outcome_unknown"
+      ]
+    }
+  },
+  "x-state-transitions": {
+    "TaskStatus": {
+      "draft": ["active", "cancelled"],
+      "active": ["awaiting_business", "awaiting_technical", "handed_off", "cancelled"],
+      "awaiting_business": ["active", "handed_off", "cancelled"],
+      "awaiting_technical": ["active", "handed_off", "cancelled"],
+      "handed_off": ["completed", "cancelled"],
+      "completed": [],
+      "cancelled": []
+    },
+    "StageStatus": {
+      "pending": ["active", "cancelled"],
+      "active": ["waiting_confirmation", "completed", "cancelled"],
+      "waiting_confirmation": ["active", "completed", "cancelled"],
+      "completed": [],
+      "cancelled": []
+    },
+    "RunStatus": {
+      "queued": ["waiting_node", "starting", "cancel_requested"],
+      "waiting_node": ["starting", "cancel_requested"],
+      "starting": ["running", "failed", "outcome_unknown", "cancel_requested"],
+      "running": ["waiting_approval", "succeeded", "failed", "outcome_unknown", "cancel_requested"],
+      "waiting_approval": ["running", "failed", "cancel_requested", "outcome_unknown"],
+      "cancel_requested": ["cancelled", "succeeded", "failed", "outcome_unknown"],
+      "succeeded": [],
+      "failed": [],
+      "cancelled": [],
+      "outcome_unknown": []
+    },
+    "AttemptStatus": {
+      "dispatched": ["accepted", "cancel_requested", "outcome_unknown"],
+      "accepted": ["running", "waiting_approval", "cancel_requested", "failed", "outcome_unknown"],
+      "running": ["waiting_approval", "cancel_requested", "failed", "outcome_unknown", "succeeded"],
+      "waiting_approval": ["running", "cancel_requested", "failed", "outcome_unknown"],
+      "cancel_requested": ["cancelled", "succeeded", "failed", "outcome_unknown"],
+      "succeeded": [],
+      "failed": [],
+      "cancelled": [],
+      "outcome_unknown": []
+    },
+    "DeliveryStatus": {
+      "pending": ["accepted", "failed", "outcome_unknown"],
+      "accepted": ["delivered", "failed", "outcome_unknown"],
+      "delivered": [],
+      "failed": ["pending"],
+      "outcome_unknown": []
+    },
+    "ApprovalStatus": {
+      "pending": ["approved", "rejected", "expired", "invalidated"],
+      "approved": ["invalidated"],
+      "rejected": [],
+      "expired": [],
+      "invalidated": []
+    },
+    "UploadStatus": {
+      "created": ["uploading", "rejected", "expired"],
+      "uploading": ["verifying", "rejected", "expired"],
+      "verifying": ["committed", "rejected", "expired"],
+      "committed": [],
+      "rejected": [],
+      "expired": []
+    },
+    "HandoffStatus": {
+      "pending": ["accepted", "rejected", "cancelled"],
+      "accepted": ["running", "cancelled", "outcome_unknown"],
+      "running": ["completed", "cancelled", "outcome_unknown"],
+      "completed": [],
+      "rejected": [],
+      "cancelled": [],
+      "outcome_unknown": []
+    }
+  },
+  "x-reconciliation": {
+    "RunStatus": { "outcome_unknown": ["running", "succeeded", "failed", "cancelled"] },
+    "AttemptStatus": { "outcome_unknown": ["running", "succeeded", "failed", "cancelled"] },
+    "DeliveryStatus": { "outcome_unknown": ["pending", "accepted", "delivered", "failed"] },
+    "HandoffStatus": { "outcome_unknown": ["running", "completed", "rejected", "cancelled"] }
+  },
+  "x-mode-capabilities": {
+    "requirement": ["requirements.analyze", "requirements.publish"],
+    "assessment": ["repository.read"],
+    "prototype": ["prototype.generate", "workspace.write"],
+    "project": ["repository.read", "workspace.write", "command.execute"]
+  }
+}
