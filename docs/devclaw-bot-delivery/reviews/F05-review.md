@@ -36,3 +36,9 @@
 MySQL 5.7 客户端即使 `--no-defaults` 仍可能读取登录路径；`--no-login-paths` 是 8.2 新增。应在子进程的精简环境中以 `MYSQL_TEST_LOGIN_FILE` 指向本次私有临时目录的不存在路径，不修改 HOME 或用户登录文件。已发给实施者，待检查真实实现与负向测试。[5.7 环境变量](https://dev.mysql.com/doc/mysql-installation-excerpt/5.7/en/environment-variables.html)，[选项版本说明](https://dev.mysql.com/blog-archive/new-client-option-no-login-paths-turn-off-login-path-file-processing/)。
 
 本文件当前仅记录基线和审查计划，没有 F05 候选提交或通过结论。后续记录必须绑定实际代码 SHA/dirty 状态和命令退出码。
+
+## A 阶段独立检查（15:42 UTC）
+
+实际提交 `8d08dca4cf1024bb166a783198ffb41d3cf60ddf`，测试前后 clean。主代理阅读 config/process/doctor 与 config.spec，使用 Node22 执行 `--test tests/bot/dev/config.spec.mjs`，3/3、skip 0、exit 0，无运行句柄。仅配置测试通过，不是 F05 最终验收。
+
+已向实施者提出 R1：`removePrivateTemp` 只靠路径前缀正则不能证明本次创建归属；需登记持有目录并拒绝外来同前缀目录，加入执行型负向测试。另提醒 macOS `/private/tmp` 的可移植性和 MySQL Unix socket 长度限制，以及异常/中断时先停自己子进程再清理。R1 待实现与主代理复验。
