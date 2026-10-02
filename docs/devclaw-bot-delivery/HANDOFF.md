@@ -1,6 +1,17 @@
 # 当前交接点
 
-更新日期：2026-10-01
+更新日期：2026-10-02
+
+## 最新恢复点（优先于下方历史）
+
+- 用户最新要求改为每 4 小时自动续跑并继续任务。2026-10-02 01:46 UTC 对同一个 `devclaw-bot` 原位更新，工具回执和配置均为 ACTIVE/4 小时；没有重复创建，没有扩大 F02/F03 范围。
+- 集成分支 `codex/devclaw-bot-integration` 恢复前 HEAD `54c177350c921ae9a9ece13b5dbe2a9a0f572572`，clean；F02 仍已验收，不重新派发。
+- 原 `/root/f03_contracts` 状态为 errored（旧错误为 Oct 6 08:59 额度恢复），不是正在写入。当前额度工具 01:45:49 UTC 返回 ordinaryUsageAllowed=true、primary 11%（reset 10-02 06:42:12 UTC）、secondary 2%（reset 10-09 01:42:12 UTC）。这是新的当前窗口事实；没有执行购买、重置、换模型或账号操作。
+- F03 实际分支 `codex/devclaw-bot-f03`，HEAD `d590146a106e5fab7f4f672d4050baa31caed15f`。A `18208efd`、B `d590146a` 已提交；C 参考模型/文档/回归仍有 11 个已跟踪修改和 7 个未跟踪文件，全部保留，未接受或集成。
+- 实际未跟踪文件为 `contracts/bot/v1/README.md` 及 `tests/bot/{check-contracts.mjs,model-command-artifact.spec.mjs,model-helpers.mjs,model-runtime.spec.mjs,reference-model.mjs,types-consumption.ts}`。已跟踪改动包含 schema/OpenAPI/fixtures/状态表/生成器/runner/package.json 和 A01 报告。
+- 子代理报告：契约入口 18/18、生成类型检查、node/web tsc 退出 0；IM 首次 1～16 通过，第 17 因 loopback listen EPERM 失败，第 18～19 未执行。后续 IM 句柄 `86442` 已无法读取（Unknown process id），因此结果未知，不能记为通过。精确 F03 cwd 的 lsof 无存活进程；可对这个无外部副作用的合成回归重新运行一次。
+- 主代理已在 `tasks/F03-contract-decisions.md` 冻结两项待决：严格 If-Match/真实字节上传指纹，以及成功 DevelopmentHandoff 原命令在 PRD 更新后的历史回执语义。由原 F03-A01 实施者落实；主代理不写实现代码。
+- 同一 F03 代理接续指令已发出（不是创建替代代理），要求先记录上述恢复事实，再修正语义/补测试，完整交回 review_pending。之后主代理检查实际 diff、独立复验。下方 2 小时/初始检查点段落均为历史，不能据此重复派单。
 
 ## 已确认
 

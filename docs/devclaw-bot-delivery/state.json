@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_on": "2026-10-01",
+  "updated_on": "2026-10-02",
   "project": "DevClaw Bot",
   "phase": "F02_F03",
   "status": "implementing",
@@ -33,10 +33,10 @@
     "status": "ACTIVE",
     "cancellation_reason": null,
     "pause_reason": null,
-    "proposed_interval_minutes": 120,
+    "proposed_interval_minutes": 240,
     "not_before_utc": null,
-    "last_run_outcome": "quota_recovered_F03_A01_dispatched",
-    "last_verified_at_utc": "2026-10-01T12:12:21Z"
+    "last_run_outcome": "cadence_updated_4h_quota_available_original_F03_A01_resumed",
+    "last_verified_at_utc": "2026-10-02T01:49:30Z"
   },
   "tasks": [
     {
@@ -75,18 +75,27 @@
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-f03/cmbCowork/docs/devclaw-bot-delivery/attempts/F03-A01.md",
       "worktree_creation_operation_id": "2584a4c9-0fbe-4e34-8af7-b4985e7a3dca",
       "baseline": "77692fdfd2cefd3fe16bf34cc357df4db83abc2c",
+      "candidate_head": "d590146a106e5fab7f4f672d4050baa31caed15f",
+      "recovery_snapshot": {
+        "verified_at_utc": "2026-10-02T01:49:30Z",
+        "agent_status": "errored_quota_confirmed_stopped_then_same_agent_followup_sent",
+        "working_tree": "11 modified tracked files and 7 untracked files preserved; C reference-model work not committed or accepted",
+        "old_test_session": "86442 no longer available; result unknown, do not count as pass",
+        "process_check": "lsof exact F03 cwd returned no processes (exit 1, empty output)",
+        "pending_design_decisions": "Resolved in integration tasks/F03-contract-decisions.md: binary ETag/fingerprint and successful handoff historical replay"
+      },
       "wait_reason": null
     }
   ],
-  "next_action": "F03-A01 已派发给 /root/f03_contracts，唯一实施写者；先建立 A01，再按 schema/生成器、API/Runtime fixtures、可执行参考模型分步保存。主代理等可审阅快照做独立检查，不重复启动 F02/F03。",
+  "next_action": "已向同一 /root/f03_contracts 与 F03-A01 下发接续（无新代理），保留 d590146a 后全部 dirty/untracked。实施者落实两项已冻结语义并收齐回归证据（旧 IM 86442 结果未知），只交待审查，主代理另做独立审查/复验。",
   "quota_recovery": {
-    "verified_at_utc": "2026-10-01T12:12:21Z",
+    "verified_at_utc": "2026-10-02T01:45:49Z",
     "ordinary_usage_allowed": true,
-    "primary_used_percent": 0,
-    "primary_resets_at_utc": "2026-10-01T17:12:21Z",
-    "secondary_used_percent": 93,
-    "secondary_resets_at_utc": "2026-10-06T00:59:26Z",
-    "previous_interruption": "主代理审批工具与 F02 子代理均遇到调用额度限制；失败的工具动作未执行，已有 dirty diff 保留。"
+    "primary_used_percent": 11,
+    "primary_resets_at_utc": "2026-10-02T06:42:12Z",
+    "secondary_used_percent": 2,
+    "secondary_resets_at_utc": "2026-10-09T01:42:12Z",
+    "previous_interruption": "F03 原代理 errored 曾提示 Oct 6 08:59 恢复；本轮当前 usage 工具明确 ordinaryUsageAllowed=true、窗口为 11%/2% 且新 reset 时间，因此旧错误不再代表当前额度。不购买/重置/换账号/换模型。"
   },
   "recovery_notes": "已授权 F02/F03，不包含 F04 之后的实施或部署。派单前后核对 live agents，防止创建与登记之间中断导致重复写者。"
 }

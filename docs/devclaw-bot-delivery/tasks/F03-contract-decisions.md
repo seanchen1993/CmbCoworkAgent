@@ -20,6 +20,7 @@
 - 写命令含 `commandId`；改变已有对象或往对象追加内容，含该对象 `expectedVersion`。创建全新 Bot/Group/Task/Upload 不要伪造 version=0。POST /runs 的 expectedVersion 指 Task，不是尚未创建的 Run。
 - `commandId` 在 `(spaceId, authenticatedPrincipalId)` 范围去重；指纹包含 method、规范路径与规范 JSON body（不含 commandId），拒绝同 ID 不同操作/对象/载荷。服务端只在同一事务持久命令回执、变更与 Outbox 后返回成功。
 - 对相同命令返回原结果前仍重新鉴权，撤权不得通过重放取得历史内容；幂等查询必须先于 expectedVersion 的当前值比较，否则成功后的正常重试会误报版本冲突。保留期由服务端公布，过期命令不无条件当全新写入重放。
+- 二进制 PUT 的 If-Match 使用严格强 ETag：双引号包裹无前导零的正十进制版本（如 `"1"`），解析后还须在安全整数范围内；不接受弱 ETag、星号或列表。指纹包含 method、规范路径、实际收到字节的 sha256、规范 mediaType 与 If-Match，不含 X-Command-Id；不能信任客户端自报摘要。v1 mediaType 为 schema 接受的无参数小写 type/subtype。读取与哈希仍受上传大小上限约束，重复请求也不能绕过；当前鉴权之后查同命令回执，再对新写执行 CAS。同 ID 改变字节、mediaType 或 If-Match 必须冲突。
 - ID 为非空、最长 128 的不透明字符串，pattern `^[A-Za-z0-9][A-Za-z0-9._:-]*$`；版本、fence 和 eventSeq 为 1..9007199254740991 的整数。所有日期为 UTC `Z` 后缀 RFC3339，字节摘要使用 `sha256:` 加 64 位小写十六进制。
 - 对象一律封闭未知字段（additionalProperties:false；组合时正确使用 unevaluatedProperties）。不使用任意 `metadata`/`payload` map 隐藏未定义接口；可选字段省略，不在未说明时混用 null。
 - 字符串/数组有显式合理上限；文本内容不授予权限。Schema 的结构校验不保证自然语言没有秘密，Runtime/网关仍需独立脱敏和数据权限控制。
@@ -116,6 +117,8 @@ Group limits={maxHandoffs,maxRuns,maxTokens}。knowledgeRefs/repositoryRefs/blob
 - UploadSession：created → uploading/rejected/expired；uploading → verifying/rejected/expired；verifying → committed/rejected/expired。committed/rejected/expired 为终态，complete 的相同命令重试返回原回执，不重新开放内容覆盖。
 - Handoff：pending → accepted/rejected/cancelled；accepted → running/cancelled/outcome_unknown；running → completed/cancelled/outcome_unknown。outcome_unknown 仅通过对账进入 running/completed/rejected/cancelled，不重新创建交接或 Run；其他终态无普通后继。
 - PRD 更新后，不修改旧成果/旧交接；尚未发起的阶段要求重新确认，在途开发不偷偷换输入，产生新的变更请求。不得依靠清空 approvalIds 隐式绕过门禁。
+
+2026-10-02 重放边界澄清：已经成功的 DevelopmentHandoff，其原 commandId 与原载荷重试，在当前仍有权读取该任务和交接回执时返回原不可变回执；之后 PRD 更新、旧批准失效或当前 CAS 变化不重做已完成交接，也不把历史成功改判成 INPUT_CHANGED。新的 commandId 必须重新核对最新输入与双确认，不能使用旧批准创建新交接。参考模型须区分当前身份/资源可见性检查与“新写入”的输入/批准门禁，后者不能放在通用的回执查询前；撤权后历史回执仍不可读取。ApprovalDecision 的过期/失效拒绝是上面已定义的显式特殊规则，不因此放宽。补充测试应覆盖成功重放不新增交接/Run/ProjectBinding、新命令被旧输入/批准阻断，以及撤权后原命令被拒绝。
 
 状态文件必须表达每个状态（包括空后继终态），以及 outcome_unknown 的特殊对账动作；不是测试中复制另一份枚举。跨对象规则必须配可执行参考模型与负向场景，明确该模型是契约验证参考而非生产授权引擎。
 
