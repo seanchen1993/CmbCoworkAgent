@@ -909,6 +909,13 @@ export type UpdateGroupMembersRequest = {
   "members": GroupMembers;
 };
 
+export type UploadContentHeaders = {
+  "X-DevClaw-Space": Id;
+  "X-Command-Id": Id;
+  "If-Match": IfMatchVersion;
+  "Content-Type": MediaType;
+};
+
 export type UploadResult = {
   "upload": UploadSession;
 };

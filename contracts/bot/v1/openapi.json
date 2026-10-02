@@ -1,87 +1,893 @@
 {
-  "openapi":"3.1.0",
-  "info":{"title":"DevClaw Bot v1 (frozen contract, not a deployed service)","version":"1.0.0","description":"DTOs are references to one offline JSON Schema 2020-12 source. Commands require authenticated membership; body identity is forbidden. Reauthorize before replay; receipt lookup before current CAS. No production authorization or exactly-once claim."},
-  "jsonSchemaDialect":"https://json-schema.org/draft/2020-12/schema",
-  "servers":[{"url":"https://bot.devclaw.invalid"}],
-  "security":[{"bearerIdentity":[]}],
-  "paths": {
-    "/api/bot/v1/bots": {"parameters":[{"$ref":"#/components/parameters/Space"}],"post":{"operationId":"createBot","requestBody":{"$ref":"#/components/requestBodies/CreateBot"},"responses":{"201":{"$ref":"#/components/responses/Bot"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/bots/{botId}": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/BotId"}],"get":{"operationId":"getBot","responses":{"200":{"$ref":"#/components/responses/Bot"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/bots/{botId}/versions": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/BotId"}],"post":{"operationId":"createBotVersion","requestBody":{"$ref":"#/components/requestBodies/CreateBotVersion"},"responses":{"201":{"$ref":"#/components/responses/Bot"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/groups": {"parameters":[{"$ref":"#/components/parameters/Space"}],"post":{"operationId":"createGroup","description":"Group is independent of IM groups and Thread; target member principalIds require separate authorization.","requestBody":{"$ref":"#/components/requestBodies/CreateGroup"},"responses":{"201":{"$ref":"#/components/responses/Group"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/groups/{groupId}": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/GroupId"}],"get":{"operationId":"getGroup","responses":{"200":{"$ref":"#/components/responses/Group"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/groups/{groupId}/members": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/GroupId"}],"put":{"operationId":"updateGroupMembers","requestBody":{"$ref":"#/components/requestBodies/UpdateGroupMembers"},"responses":{"200":{"$ref":"#/components/responses/Group"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/tasks": {"parameters":[{"$ref":"#/components/parameters/Space"}],"post":{"operationId":"createTask","description":"Initial Task active; requirement Stage active, other Stages pending.","requestBody":{"$ref":"#/components/requestBodies/CreateTask"},"responses":{"201":{"$ref":"#/components/responses/Task"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/tasks/{taskId}": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/TaskId"}],"get":{"operationId":"getTask","description":"Task and snapshotCursor must come from the same consistent snapshot; use this cursor for subsequent increments.","responses":{"200":{"$ref":"#/components/responses/TaskSnapshot"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/tasks/{taskId}/messages": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/TaskId"}],"post":{"operationId":"createTaskMessage","description":"Appending a message does not authorize or create a Run.","requestBody":{"$ref":"#/components/requestBodies/CreateTaskMessage"},"responses":{"201":{"$ref":"#/components/responses/TaskMessage"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/tasks/{taskId}/stage-transitions": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/TaskId"}],"post":{"operationId":"transitionStage","requestBody":{"$ref":"#/components/requestBodies/TransitionStage"},"responses":{"200":{"$ref":"#/components/responses/Task"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/uploads": {"parameters":[{"$ref":"#/components/parameters/Space"}],"post":{"operationId":"createUpload","requestBody":{"$ref":"#/components/requestBodies/CreateUpload"},"responses":{"201":{"$ref":"#/components/responses/Upload"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/uploads/{uploadId}/content": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/UploadId"}],"put":{"operationId":"putUploadContent","description":"Authenticated binary proxy. No presigned S3 URL is returned to a model. X-Command-Id is part of command deduplication; binary fingerprint includes the verified byte digest, media type, If-Match and canonical path.","parameters":[{"name":"X-Command-Id","in":"header","required":true,"schema":{"$ref":"./schemas.json#/$defs/Id"}},{"name":"If-Match","in":"header","required":true,"schema":{"$ref":"./schemas.json#/$defs/IfMatchVersion"}}],"requestBody":{"required":true,"content":{"application/octet-stream":{"schema":{"$ref":"./schemas.json#/$defs/BinaryContent"}}}},"responses":{"200":{"$ref":"#/components/responses/Upload"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/uploads/{uploadId}/complete": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/UploadId"}],"post":{"operationId":"completeUpload","description":"202 means verifying only; 200 means committed after byte/type/safety verification. Replay does not reopen committed content.","requestBody":{"$ref":"#/components/requestBodies/CompleteUpload"},"responses":{"200":{"$ref":"#/components/responses/Upload"},"202":{"$ref":"#/components/responses/Upload"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/tasks/{taskId}/artifacts": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/TaskId"}],"post":{"operationId":"createArtifact","description":"Upload must be committed, belong to this Task, and have purpose equal to kind; purpose alone is not authorization.","requestBody":{"$ref":"#/components/requestBodies/CreateArtifact"},"responses":{"201":{"$ref":"#/components/responses/Artifact"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/artifacts/{artifactId}/versions": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/ArtifactId"}],"post":{"operationId":"createArtifactVersion","requestBody":{"$ref":"#/components/requestBodies/CreateArtifactVersion"},"responses":{"201":{"$ref":"#/components/responses/Artifact"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/artifacts/{artifactId}/versions/{versionId}": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/ArtifactId"},{"$ref":"#/components/parameters/VersionId"}],"get":{"operationId":"getArtifactVersion","responses":{"200":{"$ref":"#/components/responses/ArtifactVersion"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/artifacts/{artifactId}/versions/{versionId}/content": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/ArtifactId"},{"$ref":"#/components/parameters/VersionId"}],"get":{"operationId":"getArtifactContent","description":"Current authorization enforced for every download; binary proxy, not bucket/key, secret or long-lived URL.","responses":{"200":{"description":"Authorized immutable bytes","content":{"application/octet-stream":{"schema":{"$ref":"./schemas.json#/$defs/BinaryContent"}}}},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/tasks/{taskId}/approvals": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/TaskId"}],"post":{"operationId":"createApproval","requestBody":{"$ref":"#/components/requestBodies/CreateApproval"},"responses":{"201":{"$ref":"#/components/responses/Approval"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/approvals/{approvalId}/decisions": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/ApprovalId"}],"post":{"operationId":"decideApproval","requestBody":{"$ref":"#/components/requestBodies/DecideApproval"},"responses":{"200":{"$ref":"#/components/responses/ApprovalDecision"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/tasks/{taskId}/handoffs": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/TaskId"}],"post":{"operationId":"createHandoff","description":"202 accepts a pending handoff, not completed work.","requestBody":{"$ref":"#/components/requestBodies/CreateHandoff"},"responses":{"202":{"$ref":"#/components/responses/Handoff"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/tasks/{taskId}/development-handoffs": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/TaskId"}],"post":{"operationId":"createDevelopmentHandoff","description":"Immutable accurate input versions and two distinct approvals; does not automatically create a project or execute code.","requestBody":{"$ref":"#/components/requestBodies/CreateDevelopmentHandoff"},"responses":{"201":{"$ref":"#/components/responses/DevelopmentHandoff"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/runs": {"parameters":[{"$ref":"#/components/parameters/Space"}],"post":{"operationId":"createRun","description":"expectedVersion refers to Task. Server resolves Bot/config/context/grant/workspace; public callers cannot submit RunSpec. Missing capabilities fail explicitly; offline nodes wait, not succeed.","requestBody":{"$ref":"#/components/requestBodies/CreateRun"},"responses":{"202":{"$ref":"#/components/responses/Run"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/runs/{runId}": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/RunId"}],"get":{"operationId":"getRun","responses":{"200":{"$ref":"#/components/responses/RunDetail"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/runs/{runId}/cancel": {"parameters":[{"$ref":"#/components/parameters/Space"},{"$ref":"#/components/parameters/RunId"}],"post":{"operationId":"cancelRun","description":"202 means cancel_requested, not proof of stopped execution; completion can win the race.","requestBody":{"$ref":"#/components/requestBodies/CancelRun"},"responses":{"202":{"$ref":"#/components/responses/Run"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/events": {"parameters":[{"$ref":"#/components/parameters/Space"}],"get":{"operationId":"getEvents","description":"Without after, return empty events and current head cursor only. Each increment reauthorizes; cursor is not an access grant. Expired cursor returns 410 and requires resync.","parameters":[{"name":"after","in":"query","required":false,"schema":{"$ref":"./schemas.json#/$defs/Cursor"}},{"name":"limit","in":"query","required":false,"schema":{"$ref":"./schemas.json#/$defs/EventLimit"}}],"responses":{"200":{"$ref":"#/components/responses/Events"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"410":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}},
-    "/api/bot/v1/runtime/ws": {"get":{"operationId":"connectRuntime","security":[{"nodeCredential":[]}],"description":"Runtime initiates outbound WSS. Independent node credential binds authenticated nodeId and spaceId at handshake, never a client-reported body identity. Upgrade itself is not Runtime registration or execution success; every message validates runtime.schema.json. Reconnect does not execute tools.","responses":{"101":{"description":"WebSocket upgrade; messages use runtime.schema.json, no HTTP DTO body."},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"429":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}},"x-runtime-message-schema":{"$ref":"./runtime.schema.json"}}}
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DevClaw Bot v1 (frozen contract, not a deployed service)",
+    "version": "1.0.0",
+    "description": "DTOs are references to one offline JSON Schema 2020-12 source. Commands require authenticated membership; body identity is forbidden. Reauthorize before replay; receipt lookup before current CAS. No production authorization or exactly-once claim."
   },
-  "components": {
-    "securitySchemes":{"bearerIdentity":{"type":"http","scheme":"bearer","description":"Authenticated user/service identity, independently authorized per space/resource."},"nodeCredential":{"type":"http","scheme":"bearer","description":"Separate node identity credential bound to node and space; not an end-user bearer token."}},
-    "parameters": {
-      "Space":{"name":"X-DevClaw-Space","in":"header","required":true,"description":"Selector only; membership and permissions are checked by server.","schema":{"$ref":"./schemas.json#/$defs/Id"}},
-      "BotId":{"name":"botId","in":"path","required":true,"schema":{"$ref":"./schemas.json#/$defs/Id"}},
-      "GroupId":{"name":"groupId","in":"path","required":true,"schema":{"$ref":"./schemas.json#/$defs/Id"}},
-      "TaskId":{"name":"taskId","in":"path","required":true,"schema":{"$ref":"./schemas.json#/$defs/Id"}},
-      "UploadId":{"name":"uploadId","in":"path","required":true,"schema":{"$ref":"./schemas.json#/$defs/Id"}},
-      "ArtifactId":{"name":"artifactId","in":"path","required":true,"schema":{"$ref":"./schemas.json#/$defs/Id"}},
-      "VersionId":{"name":"versionId","in":"path","required":true,"schema":{"$ref":"./schemas.json#/$defs/Id"}},
-      "ApprovalId":{"name":"approvalId","in":"path","required":true,"schema":{"$ref":"./schemas.json#/$defs/Id"}},
-      "RunId":{"name":"runId","in":"path","required":true,"schema":{"$ref":"./schemas.json#/$defs/Id"}}
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "servers": [{ "url": "https://bot.devclaw.invalid" }],
+  "security": [{ "bearerIdentity": [] }],
+  "paths": {
+    "/api/bot/v1/bots": {
+      "parameters": [{ "$ref": "#/components/parameters/Space" }],
+      "post": {
+        "operationId": "createBot",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateBot" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/Bot" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
     },
-    "requestBodies": {
-      "CreateBot":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateBotRequest"}}}},
-      "CreateBotVersion":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateBotVersionRequest"}}}},
-      "CreateGroup":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateGroupRequest"}}}},
-      "UpdateGroupMembers":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/UpdateGroupMembersRequest"}}}},
-      "CreateTask":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateTaskRequest"}}}},
-      "CreateTaskMessage":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateTaskMessageRequest"}}}},
-      "TransitionStage":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/TransitionStageRequest"}}}},
-      "CreateUpload":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateUploadRequest"}}}},
-      "CompleteUpload":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CompleteUploadRequest"}}}},
-      "CreateArtifact":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateArtifactRequest"}}}},
-      "CreateArtifactVersion":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateArtifactVersionRequest"}}}},
-      "CreateApproval":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateApprovalRequest"}}}},
-      "DecideApproval":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/DecideApprovalRequest"}}}},
-      "CreateHandoff":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateHandoffRequest"}}}},
-      "CreateDevelopmentHandoff":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateDevelopmentHandoffRequest"}}}},
-      "CreateRun":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CreateRunRequest"}}}},
-      "CancelRun":{"required":true,"content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/CancelRunRequest"}}}}
+    "/api/bot/v1/bots/{botId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/BotId" }
+      ],
+      "get": {
+        "operationId": "getBot",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Bot" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
     },
-    "responses": {
-      "Error":{"description":"Safe error; no stack, credentials or upstream response. Code-to-status mapping is in x-error-status. OUTCOME_UNKNOWN must not advertise automatic retry.","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/ErrorResponse"}}}},
-      "Bot":{"description":"Bot and immutable configuration version","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/BotResult"}}}},
-      "Group":{"description":"Versioned independent collaboration Group","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/GroupResult"}}}},
-      "Task":{"description":"Authoritative versioned Task","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/TaskResult"}}}},
-      "TaskSnapshot":{"description":"Consistent Task and increment starting cursor","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/TaskSnapshotResult"}}}},
-      "TaskMessage":{"description":"Message and new Task CAS version","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/TaskMessageResult"}}}},
-      "Upload":{"description":"Upload state; no storage URL or credential","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/UploadResult"}}}},
-      "Artifact":{"description":"Artifact and immutable content version","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/ArtifactResult"}}}},
-      "ArtifactVersion":{"description":"Immutable ArtifactVersion metadata","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/ArtifactVersionResult"}}}},
-      "Approval":{"description":"Separate version-bound approval kind","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/ApprovalResult"}}}},
-      "ApprovalDecision":{"description":"Approval and server-attributed decision","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/ApprovalDecisionResult"}}}},
-      "Handoff":{"description":"Accepted pending partner handoff","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/HandoffResult"}}}},
-      "DevelopmentHandoff":{"description":"Immutable dual-confirmed package, not execution","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/DevelopmentHandoffResult"}}}},
-      "Run":{"description":"Run state, not implicit success","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/RunResult"}}}},
-      "RunDetail":{"description":"Run and distinct actual dispatch attempts","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/RunDetailResult"}}}},
-      "Events":{"description":"Authorized references and reliable next cursor","content":{"application/json":{"schema":{"$ref":"./schemas.json#/$defs/EventsResult"}}}}
+    "/api/bot/v1/bots/{botId}/versions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/BotId" }
+      ],
+      "post": {
+        "operationId": "createBotVersion",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateBotVersion" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/Bot" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/groups": {
+      "parameters": [{ "$ref": "#/components/parameters/Space" }],
+      "post": {
+        "operationId": "createGroup",
+        "description": "Group is independent of IM groups and Thread; target member principalIds require separate authorization.",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateGroup" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/Group" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/groups/{groupId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/GroupId" }
+      ],
+      "get": {
+        "operationId": "getGroup",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Group" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/groups/{groupId}/members": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/GroupId" }
+      ],
+      "put": {
+        "operationId": "updateGroupMembers",
+        "requestBody": { "$ref": "#/components/requestBodies/UpdateGroupMembers" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Group" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/tasks": {
+      "parameters": [{ "$ref": "#/components/parameters/Space" }],
+      "post": {
+        "operationId": "createTask",
+        "description": "Initial Task active; requirement Stage active, other Stages pending.",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateTask" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/Task" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/tasks/{taskId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/TaskId" }
+      ],
+      "get": {
+        "operationId": "getTask",
+        "description": "Task and snapshotCursor must come from the same consistent snapshot; use this cursor for subsequent increments.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/TaskSnapshot" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/tasks/{taskId}/messages": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/TaskId" }
+      ],
+      "post": {
+        "operationId": "createTaskMessage",
+        "description": "Appending a message does not authorize or create a Run.",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateTaskMessage" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/TaskMessage" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/tasks/{taskId}/stage-transitions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/TaskId" }
+      ],
+      "post": {
+        "operationId": "transitionStage",
+        "requestBody": { "$ref": "#/components/requestBodies/TransitionStage" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Task" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/uploads": {
+      "parameters": [{ "$ref": "#/components/parameters/Space" }],
+      "post": {
+        "operationId": "createUpload",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateUpload" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/Upload" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/uploads/{uploadId}/content": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/UploadId" }
+      ],
+      "put": {
+        "operationId": "putUploadContent",
+        "description": "Authenticated binary proxy, bounded by ByteSize even for repeated commands. Actual HTTP Content-Type is required, must validate MediaType (lowercase, no parameters) and equal UploadSession.mediaType. The */* range permits the declared file type, not arbitrary unvalidated headers. Fingerprint is scoped by space/authenticated principal and method/canonical path/real byte SHA-256/actual Content-Type/strong If-Match, excluding X-Command-Id. Current authorization precedes fingerprint/receipt lookup; original receipts precede new-write CAS. No presigned S3 URL is returned to a model.",
+        "x-request-headers-schema": { "$ref": "./schemas.json#/$defs/UploadContentHeaders" },
+        "parameters": [
+          {
+            "name": "X-Command-Id",
+            "in": "header",
+            "required": true,
+            "schema": { "$ref": "./schemas.json#/$defs/Id" }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "schema": { "$ref": "./schemas.json#/$defs/IfMatchVersion" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "*/*": {
+              "schema": { "$ref": "./schemas.json#/$defs/BinaryContent" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Upload" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/uploads/{uploadId}/complete": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/UploadId" }
+      ],
+      "post": {
+        "operationId": "completeUpload",
+        "description": "202 means verifying only; 200 means committed after byte/type/safety verification. Replay does not reopen committed content.",
+        "requestBody": { "$ref": "#/components/requestBodies/CompleteUpload" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Upload" },
+          "202": { "$ref": "#/components/responses/Upload" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/tasks/{taskId}/artifacts": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/TaskId" }
+      ],
+      "post": {
+        "operationId": "createArtifact",
+        "description": "Upload must be committed, belong to this Task, and have purpose equal to kind; purpose alone is not authorization.",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateArtifact" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/Artifact" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/artifacts/{artifactId}/versions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/ArtifactId" }
+      ],
+      "post": {
+        "operationId": "createArtifactVersion",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateArtifactVersion" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/Artifact" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/artifacts/{artifactId}/versions/{versionId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/ArtifactId" },
+        { "$ref": "#/components/parameters/VersionId" }
+      ],
+      "get": {
+        "operationId": "getArtifactVersion",
+        "responses": {
+          "200": { "$ref": "#/components/responses/ArtifactVersion" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/artifacts/{artifactId}/versions/{versionId}/content": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/ArtifactId" },
+        { "$ref": "#/components/parameters/VersionId" }
+      ],
+      "get": {
+        "operationId": "getArtifactContent",
+        "description": "Current authorization enforced for every download; binary proxy, not bucket/key, secret or long-lived URL.",
+        "responses": {
+          "200": {
+            "description": "Authorized immutable bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": { "$ref": "./schemas.json#/$defs/BinaryContent" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/tasks/{taskId}/approvals": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/TaskId" }
+      ],
+      "post": {
+        "operationId": "createApproval",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateApproval" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/Approval" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/approvals/{approvalId}/decisions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/ApprovalId" }
+      ],
+      "post": {
+        "operationId": "decideApproval",
+        "requestBody": { "$ref": "#/components/requestBodies/DecideApproval" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/ApprovalDecision" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/tasks/{taskId}/handoffs": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/TaskId" }
+      ],
+      "post": {
+        "operationId": "createHandoff",
+        "description": "202 accepts a pending handoff, not completed work.",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateHandoff" },
+        "responses": {
+          "202": { "$ref": "#/components/responses/Handoff" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/tasks/{taskId}/development-handoffs": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/TaskId" }
+      ],
+      "post": {
+        "operationId": "createDevelopmentHandoff",
+        "description": "New commands require current accurate input versions and distinct business/technical approvals. Original successful commandId and payload return the original immutable receipt after current Task/receipt read authorization, even if PRD versions, approvals or Task CAS changed; no new handoff, Run or ProjectBinding is created. Revoked access rejects replay. Does not automatically create a project or execute code.",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateDevelopmentHandoff" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/DevelopmentHandoff" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/runs": {
+      "parameters": [{ "$ref": "#/components/parameters/Space" }],
+      "post": {
+        "operationId": "createRun",
+        "description": "expectedVersion refers to Task. Server resolves Bot/config/context/grant/workspace; public callers cannot submit RunSpec. Missing capabilities fail explicitly; offline nodes wait, not succeed.",
+        "requestBody": { "$ref": "#/components/requestBodies/CreateRun" },
+        "responses": {
+          "202": { "$ref": "#/components/responses/Run" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/runs/{runId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/RunId" }
+      ],
+      "get": {
+        "operationId": "getRun",
+        "responses": {
+          "200": { "$ref": "#/components/responses/RunDetail" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/runs/{runId}/cancel": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Space" },
+        { "$ref": "#/components/parameters/RunId" }
+      ],
+      "post": {
+        "operationId": "cancelRun",
+        "description": "202 means cancel_requested, not proof of stopped execution; completion can win the race.",
+        "requestBody": { "$ref": "#/components/requestBodies/CancelRun" },
+        "responses": {
+          "202": { "$ref": "#/components/responses/Run" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/events": {
+      "parameters": [{ "$ref": "#/components/parameters/Space" }],
+      "get": {
+        "operationId": "getEvents",
+        "description": "Without after, return empty events and current head cursor only. Each increment reauthorizes; cursor is not an access grant. Expired cursor returns 410 and requires resync.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": { "$ref": "./schemas.json#/$defs/Cursor" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "$ref": "./schemas.json#/$defs/EventLimit" }
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Events" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "410": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/bot/v1/runtime/ws": {
+      "get": {
+        "operationId": "connectRuntime",
+        "security": [{ "nodeCredential": [] }],
+        "description": "Runtime initiates outbound WSS. Independent node credential binds authenticated nodeId and spaceId at handshake, never a client-reported body identity. Upgrade itself is not Runtime registration or execution success; every message validates runtime.schema.json. Reconnect does not execute tools.",
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade; messages use runtime.schema.json, no HTTP DTO body."
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        },
+        "x-runtime-message-schema": { "$ref": "./runtime.schema.json" }
+      }
     }
   },
-  "x-error-status":{"INVALID_PAYLOAD":400,"SCHEMA_VERSION_UNSUPPORTED":400,"UNAUTHENTICATED":401,"FORBIDDEN":403,"NOT_FOUND":404,"VERSION_CONFLICT":409,"COMMAND_CONFLICT":409,"COMMAND_EXPIRED":409,"INPUT_CHANGED":409,"APPROVAL_REQUIRED":409,"APPROVAL_EXPIRED":409,"NODE_OFFLINE":409,"CAPABILITY_UNAVAILABLE":409,"OUTCOME_UNKNOWN":409,"CURSOR_EXPIRED":410,"PAYLOAD_TOO_LARGE":413,"RATE_LIMITED":429,"DEPENDENCY_UNAVAILABLE":503}
+  "components": {
+    "securitySchemes": {
+      "bearerIdentity": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Authenticated user/service identity, independently authorized per space/resource."
+      },
+      "nodeCredential": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Separate node identity credential bound to node and space; not an end-user bearer token."
+      }
+    },
+    "parameters": {
+      "Space": {
+        "name": "X-DevClaw-Space",
+        "in": "header",
+        "required": true,
+        "description": "Selector only; membership and permissions are checked by server.",
+        "schema": { "$ref": "./schemas.json#/$defs/Id" }
+      },
+      "BotId": {
+        "name": "botId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "./schemas.json#/$defs/Id" }
+      },
+      "GroupId": {
+        "name": "groupId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "./schemas.json#/$defs/Id" }
+      },
+      "TaskId": {
+        "name": "taskId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "./schemas.json#/$defs/Id" }
+      },
+      "UploadId": {
+        "name": "uploadId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "./schemas.json#/$defs/Id" }
+      },
+      "ArtifactId": {
+        "name": "artifactId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "./schemas.json#/$defs/Id" }
+      },
+      "VersionId": {
+        "name": "versionId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "./schemas.json#/$defs/Id" }
+      },
+      "ApprovalId": {
+        "name": "approvalId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "./schemas.json#/$defs/Id" }
+      },
+      "RunId": {
+        "name": "runId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "./schemas.json#/$defs/Id" }
+      }
+    },
+    "requestBodies": {
+      "CreateBot": {
+        "required": true,
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/CreateBotRequest" } }
+        }
+      },
+      "CreateBotVersion": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/CreateBotVersionRequest" }
+          }
+        }
+      },
+      "CreateGroup": {
+        "required": true,
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/CreateGroupRequest" } }
+        }
+      },
+      "UpdateGroupMembers": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/UpdateGroupMembersRequest" }
+          }
+        }
+      },
+      "CreateTask": {
+        "required": true,
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/CreateTaskRequest" } }
+        }
+      },
+      "CreateTaskMessage": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/CreateTaskMessageRequest" }
+          }
+        }
+      },
+      "TransitionStage": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/TransitionStageRequest" }
+          }
+        }
+      },
+      "CreateUpload": {
+        "required": true,
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/CreateUploadRequest" } }
+        }
+      },
+      "CompleteUpload": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/CompleteUploadRequest" }
+          }
+        }
+      },
+      "CreateArtifact": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/CreateArtifactRequest" }
+          }
+        }
+      },
+      "CreateArtifactVersion": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/CreateArtifactVersionRequest" }
+          }
+        }
+      },
+      "CreateApproval": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/CreateApprovalRequest" }
+          }
+        }
+      },
+      "DecideApproval": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/DecideApprovalRequest" }
+          }
+        }
+      },
+      "CreateHandoff": {
+        "required": true,
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/CreateHandoffRequest" } }
+        }
+      },
+      "CreateDevelopmentHandoff": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/CreateDevelopmentHandoffRequest" }
+          }
+        }
+      },
+      "CreateRun": {
+        "required": true,
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/CreateRunRequest" } }
+        }
+      },
+      "CancelRun": {
+        "required": true,
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/CancelRunRequest" } }
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Safe error; no stack, credentials or upstream response. Code-to-status mapping is in x-error-status. OUTCOME_UNKNOWN must not advertise automatic retry.",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/ErrorResponse" } }
+        }
+      },
+      "Bot": {
+        "description": "Bot and immutable configuration version",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/BotResult" } }
+        }
+      },
+      "Group": {
+        "description": "Versioned independent collaboration Group",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/GroupResult" } }
+        }
+      },
+      "Task": {
+        "description": "Authoritative versioned Task",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/TaskResult" } }
+        }
+      },
+      "TaskSnapshot": {
+        "description": "Consistent Task and increment starting cursor",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/TaskSnapshotResult" } }
+        }
+      },
+      "TaskMessage": {
+        "description": "Message and new Task CAS version",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/TaskMessageResult" } }
+        }
+      },
+      "Upload": {
+        "description": "Upload state; no storage URL or credential",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/UploadResult" } }
+        }
+      },
+      "Artifact": {
+        "description": "Artifact and immutable content version",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/ArtifactResult" } }
+        }
+      },
+      "ArtifactVersion": {
+        "description": "Immutable ArtifactVersion metadata",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/ArtifactVersionResult" }
+          }
+        }
+      },
+      "Approval": {
+        "description": "Separate version-bound approval kind",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/ApprovalResult" } }
+        }
+      },
+      "ApprovalDecision": {
+        "description": "Approval and server-attributed decision",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/ApprovalDecisionResult" }
+          }
+        }
+      },
+      "Handoff": {
+        "description": "Accepted pending partner handoff",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/HandoffResult" } }
+        }
+      },
+      "DevelopmentHandoff": {
+        "description": "Immutable dual-confirmed package, not execution",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "./schemas.json#/$defs/DevelopmentHandoffResult" }
+          }
+        }
+      },
+      "Run": {
+        "description": "Run state, not implicit success",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/RunResult" } }
+        }
+      },
+      "RunDetail": {
+        "description": "Run and distinct actual dispatch attempts",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/RunDetailResult" } }
+        }
+      },
+      "Events": {
+        "description": "Authorized references and reliable next cursor",
+        "content": {
+          "application/json": { "schema": { "$ref": "./schemas.json#/$defs/EventsResult" } }
+        }
+      }
+    }
+  },
+  "x-error-status": {
+    "INVALID_PAYLOAD": 400,
+    "SCHEMA_VERSION_UNSUPPORTED": 400,
+    "UNAUTHENTICATED": 401,
+    "FORBIDDEN": 403,
+    "NOT_FOUND": 404,
+    "VERSION_CONFLICT": 409,
+    "COMMAND_CONFLICT": 409,
+    "COMMAND_EXPIRED": 409,
+    "INPUT_CHANGED": 409,
+    "APPROVAL_REQUIRED": 409,
+    "APPROVAL_EXPIRED": 409,
+    "NODE_OFFLINE": 409,
+    "CAPABILITY_UNAVAILABLE": 409,
+    "OUTCOME_UNKNOWN": 409,
+    "CURSOR_EXPIRED": 410,
+    "PAYLOAD_TOO_LARGE": 413,
+    "RATE_LIMITED": 429,
+    "DEPENDENCY_UNAVAILABLE": 503
+  }
 }
