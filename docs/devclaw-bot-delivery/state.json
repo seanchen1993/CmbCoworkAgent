@@ -2,8 +2,8 @@
   "schema_version": 1,
   "updated_on": "2026-10-02",
   "project": "DevClaw Bot",
-  "phase": "F02_F03",
-  "status": "milestone_complete",
+  "phase": "F04_F05_LOCAL_DEV",
+  "status": "ready",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -11,10 +11,10 @@
     "last_accepted_commit": "53a86a207b3f60a6b1e94e305d7f9b2eeb186c49"
   },
   "authorization": {
-    "approved_work": ["long_running_delivery_setup", "F02", "F03"],
-    "implementation_task_ids": ["F02", "F03"],
+    "approved_work": ["long_running_delivery_setup", "F02", "F03", "F04", "F05"],
+    "implementation_task_ids": ["F05"],
     "scope_confirmed": true,
-    "scope_confirmation": "2026-10-01 用户回复：开始实施；承接上一条建议的 F02＋F03 首轮范围。",
+    "scope_confirmation": "2026-10-02 用户在 F02/F03 完成后要求继续下一阶段，随后明确 jdk8 mydql5.7 继续任务；当前 F04/F05 本地开发准备，不包含 B01 或后续路线。",
     "explicit_user_pause": false,
     "external_push_allowed": false,
     "deployment_allowed": false,
@@ -30,13 +30,13 @@
   "scheduler": {
     "kind": "heartbeat",
     "automation_id": "devclaw-bot",
-    "status": "PAUSED",
+    "status": "ACTIVE",
     "cancellation_reason": null,
-    "pause_reason": "F02_F03_milestone_completed_waiting_next_authorization",
+    "pause_reason": null,
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
-    "last_run_outcome": "F02_F03_verified_integrated_and_heartbeat_paused",
-    "last_verified_at_utc": "2026-10-02T02:15:07Z"
+    "last_run_outcome": "F04_F05_authorized_java8_mysql57_heartbeat_resumed",
+    "last_verified_at_utc": "2026-10-02T15:26:31Z"
   },
   "tasks": [
     {
@@ -95,15 +95,19 @@
       "wait_reason": null
     }
   ],
-  "next_action": "本轮F02/F03已验收并本地集成完成；heartbeat已按里程碑边界暂停，保留每4小时频率。等待用户明确下一阶段目标/范围后再恢复，不派发F04或后续路线。不得推送、部署、连接内网或付费。",
+  "current_milestone": {
+    "F04": { "status": "local_baseline_confirmed_platform_items_pending", "spec": "tasks/F04.md", "pending": ["internal_spring_boot_bom_and_maintenance_owner", "mysql_internal_patch_and_owner", "s3_product_and_capabilities", "es_version_and_acl", "real_gateway_implementation_and_group_protocol"] },
+    "F05": { "status": "ready", "spec": "tasks/F05.md", "attempt_id": "F05-A01", "agent_task_name": "f05_dev_environment", "agent_id": null, "worktree": null, "branch": null, "baseline": null, "attempt_report": null }
+  },
+  "next_action": "提交 F04/F05 任务边界，创建独立 F05 工作树，再派发唯一 gpt-6.1-sol/xhigh 实施者。先核对实际创建结果和 live agents，未登记 agent 不等于未派发。F02/F03 不重做；本轮仅完成本地开发准备，未确认的平台项不伪报完成。",
   "quota_recovery": {
-    "verified_at_utc": "2026-10-02T01:45:49Z",
+    "verified_at_utc": "2026-10-02T15:21:00Z",
     "ordinary_usage_allowed": true,
-    "primary_used_percent": 11,
-    "primary_resets_at_utc": "2026-10-02T06:42:12Z",
-    "secondary_used_percent": 2,
+    "primary_used_percent": 10,
+    "primary_resets_at_utc": "2026-10-02T20:16:47Z",
+    "secondary_used_percent": 17,
     "secondary_resets_at_utc": "2026-10-09T01:42:12Z",
     "previous_interruption": "F03 原代理 errored 曾提示 Oct 6 08:59 恢复；本轮当前 usage 工具明确 ordinaryUsageAllowed=true、窗口为 11%/2% 且新 reset 时间，因此旧错误不再代表当前额度。不购买/重置/换账号/换模型。"
   },
-  "recovery_notes": "已授权 F02/F03，不包含 F04 之后的实施或部署。派单前后核对 live agents，防止创建与登记之间中断导致重复写者。"
+  "recovery_notes": "2026-10-02 新授权推进 F04/F05；首轮 F02/F03 已验收不重做。旧代理均 completed，精确 integration/F02/F03 cwd 的 lsof 无进程。JDK 8/Javac/Maven/MySQL binary 已实际核对；数据库还未启动。禁止推送、部署、内网和付费；派单前后核对实际写者。"
 }

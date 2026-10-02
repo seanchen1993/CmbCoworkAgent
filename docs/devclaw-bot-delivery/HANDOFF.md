@@ -2,6 +2,20 @@
 
 更新日期：2026-10-02
 
+## 最新阶段：F04/F05（以下旧阶段为历史）
+
+用户在 F02/F03 验收后要求“继续下一阶段”，并明确“jdk8 mydql5.7 继续任务”。当前授权扩至 F04 技术基线与 F05 本地开发环境，不进入 B01 或后续路线。任务单为 `tasks/F04.md`、`tasks/F05.md`。主代理仍只规划/审查，唯一实施者必须是 gpt-6.1-sol/xhigh、禁止派生。
+
+2026-10-02 15:26:31 UTC，同一个 devclaw-bot heartbeat 已原位恢复 ACTIVE，保留每 4 小时，prompt 更新为 F04/F05 边界；本轮验收后再次暂停。未创建重复任务。当前额度 ordinaryUsageAllowed=true，短窗口已用 10%、周窗口 17%；没有购买、重置、换模型或账号。
+
+恢复前集成 HEAD 为 `7e5707c39442b97d2199e6f3f71986d226e171a5` 且 clean。旧 F02/F03 代理均 completed 并明确停止；integration/F02/F03 精确 cwd 的 lsof 无存活命令。本轮尚未创建 F05 实施工作树或派单（后续以 state、live agents 和真实 Git 为准）。
+
+实测工具链：Corretto JDK/Javac 1.8.0_482 在 `corretto-1.8.0_482-1/Contents/Home` 可运行；java_home 列表里另一不带 -1 的残留目录不可作为执行路径。Maven 3.9.6 位于已有 `.m2/wrapper/dists` 缓存且在该 JDK 下启动成功；MySQL 客户端和 mysqld 均为 5.7.24。尚未创建/启动数据库，未触碰现有用户库。Docker/Podman 未发现。
+
+本轮交付开发模拟器（测试身份、假招乎、假模型）及真实 JDK8/MySQL5.7 隔离兼容探针，Node22 只作开发编排，不改变 Java 生产服务方向。内部 Spring Boot BOM、真实 S3/ES/网关和平台责任人均未知，F04 只确认了本地基线，不能标为全部平台确认完成。生产服务骨架/CRUD、Runtime、S3 联调及真实发布均不在本轮。
+
+下一步：提交任务单和状态 → 用准确提交创建独立 F05 工作树 → 记录 F05-A01 路径 → 派发指定子代理 → 检查实际 diff 并独立复验。实施者仅可改 deploy/dev、tests/bot/dev、package scripts 和自身 attempt，不改协调文档或现有代码/契约。完整验收门槛见 F05 任务单。
+
 ## 当前验收状态
 
 **F02＋F03 首轮已完成，不再派发实施任务。** F03 经主代理独立验收，代码 `731e0f92bea13bd3d01778f021a7c067fd3a5d29`，最终候选 HEAD `0f1b6680fb5e26d49a0526652643ef365ba12cf3` 仅追加报告；本地合入为 `53a86a207b3f60a6b1e94e305d7f9b2eeb186c49`。实施者 completed、明确停止写入，工作树 clean。主代理契约 14659（24/24）、node 76742、web 87248、IM19 50051 均 exit 0；集成后 source/test/package 与候选完全相同（仅交付文档不同），集成契约入口 78073 再次 24/24 及类型消费 exit 0。全部句柄关闭，R1～R4 关闭；详见 `reviews/F03-acceptance.md`。
