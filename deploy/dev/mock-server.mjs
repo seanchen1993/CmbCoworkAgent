@@ -68,10 +68,12 @@ export async function startMockServer(config) {
     if (!task || !groups.get(task.groupId).members.includes(actor.id)) throw fail(403, "TASK_FORBIDDEN")
     return task
   }
-  const server = http.createServer({ maxHeaderSize: 8192 }, async (req, res) => {
+  const server = http.createServer({ maxHeaderSize: 8192, headersTimeout: 1000, requestTimeout: 1000, connectionsCheckingInterval: 50 }, async (req, res) => {
     let admitted = false
     try {
       if (closing || active >= limits.activeRequests) throw fail(503, "REQUEST_CAPACITY")
+      // Disable parser count truncation; maxHeaderSize bounds bytes before this count.
+      if (req.rawHeaders.length / 2 > 32) throw fail(431, "HEADER_COUNT_LIMIT")
       const counts = new Map()
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const key = req.rawHeaders[i].toLowerCase()
@@ -124,7 +126,7 @@ export async function startMockServer(config) {
   })
   server.requestTimeout = 1000
   server.headersTimeout = 1000
-  server.maxHeadersCount = 32
+  server.maxHeadersCount = 0
   server.maxConnections = 16
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve) })
   return {

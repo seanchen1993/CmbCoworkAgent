@@ -29,31 +29,37 @@ export function isolatedEnv(dir, java) {
     PATH: [dirname(process.execPath), ...(java ? [dirname(java)] : []), "/usr/bin", "/bin"].join(":"),
     ...(java ? { JAVA_HOME: dirname(dirname(java)) } : {}),
     MYSQL_TEST_LOGIN_FILE: join(dir, "absent-login.cnf"),
+    MAVEN_SKIP_RC: "1",
     LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", TZ: "UTC"
   }
 }
 
 export function ownedProcess(file, args, { cwd, env, maxOutput = 65536 } = {}) {
+  if (!Number.isSafeInteger(maxOutput) || maxOutput < 128 || maxOutput > 1048576) throw new Error("Invalid child output bound")
   const child = spawn(file, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: false })
-  let output = "", overflow = false, spawnError, exited = false
-  const collect = (chunk) => {
-    output += chunk.toString()
-    if (Buffer.byteLength(output) > maxOutput) {
+  let output = Buffer.alloc(0), stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), overflow = false, spawnError, exited = false
+  const collect = (chunk, stream) => {
+    if (overflow) return
+    const available = maxOutput - output.length
+    const retained = chunk.subarray(0, available)
+    output = Buffer.concat([output, retained])
+    if (stream === "stdout") stdout = Buffer.concat([stdout, retained])
+    else stderr = Buffer.concat([stderr, retained])
+    if (chunk.length > available) {
       overflow = true
-      output = output.slice(0, maxOutput)
       child.kill("SIGKILL")
     }
   }
-  child.stdout.on("data", collect)
-  child.stderr.on("data", collect)
+  child.stdout.on("data", (chunk) => collect(chunk, "stdout"))
+  child.stderr.on("data", (chunk) => collect(chunk, "stderr"))
   const done = new Promise((resolve) => {
     child.once("error", (error) => { spawnError = error })
-    child.once("close", (code, signal) => { exited = true; resolve({ code, signal, output, spawnError, overflow }) })
+    child.once("close", (code, signal) => { exited = true; resolve({ code, signal, output: output.toString("utf8"), stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), spawnError, overflow }) })
   })
   return {
     child, done,
     get exited() { return exited },
-    get output() { return output },
+    get output() { return output.toString("utf8") },
     async stop() {
       if (!exited) {
         child.kill("SIGTERM")
@@ -64,7 +70,7 @@ export function ownedProcess(file, args, { cwd, env, maxOutput = 65536 } = {}) {
   }
 }
 
-export async function run(file, args, { timeoutMs = 15000, input, signal, ...options } = {}) {
+export async function run(file, args, { timeoutMs = 15000, input, signal, stdoutOnly = false, ...options } = {}) {
   if (signal?.aborted) throw new Error("Cancelled")
   const owned = ownedProcess(file, args, options)
   let timedOut = false
@@ -75,8 +81,13 @@ export async function run(file, args, { timeoutMs = 15000, input, signal, ...opt
   owned.child.stdin.end(input)
   try {
     const result = await owned.done
-    if (signal?.aborted || timedOut || result.code !== 0 || result.spawnError || result.overflow)
-      throw new Error(`Child failed: ${timedOut ? "timeout" : result.spawnError ? "unavailable" : result.overflow ? "output limit" : `exit ${result.code}`}`)
-    return result.output.trim()
+    if (signal?.aborted || timedOut || result.code !== 0 || result.spawnError || result.overflow) {
+      const failureCode = signal?.aborted ? "cancelled" : timedOut ? "timeout" : result.spawnError ? "unavailable" : result.overflow ? "output_limit" : "exit"
+      const error = new Error(`Child failed: ${failureCode === "exit" ? `exit ${result.code}` : failureCode}`)
+      error.failureCode = failureCode
+      error.exitCode = result.code
+      throw error
+    }
+    return (stdoutOnly ? result.stdout : result.output).trim()
   } finally { clearTimeout(timer); signal?.removeEventListener("abort", cancel); await owned.stop() }
 }

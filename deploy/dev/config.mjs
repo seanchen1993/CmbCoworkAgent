@@ -15,9 +15,11 @@ export function validateConfig(value) {
 }
 
 export async function configFromOptions(options) {
-  const config = options.config
-    ? JSON.parse(await readFile(options.config, "utf8"))
-    : { profile: options.profile, host: "127.0.0.1", s3: "disabled", es: "disabled" }
+  let config
+  if (options.config) {
+    try { config = JSON.parse(await readFile(options.config, "utf8")) }
+    catch { throw new Error("Unreadable or invalid JSON dev config") }
+  } else config = { profile: options.profile, host: "127.0.0.1", s3: "disabled", es: "disabled" }
   if (options.profile !== undefined && options.profile !== config.profile) throw new Error("Conflicting profile")
   return validateConfig(config)
 }
@@ -25,7 +27,7 @@ export async function configFromOptions(options) {
 export function parseArgs(args) {
   const [command, ...rest] = args
   if (!["doctor", "mock", "real", "check", "serve"].includes(command)) throw new Error("Use doctor|mock|real|check|serve")
-  const allowed = ["profile", "config", "java", "javac", "mysql", "mysqld", "jdbc", "maven", "lifetime-ms"]
+  const allowed = ["profile", "config", "java", "javac", "mysql", "mysqld", "mysql-messages", "jdbc", "maven", "lifetime-ms"]
   const options = {}
   for (let i = 0; i < rest.length; i += 2) {
     const key = rest[i]?.slice(2)

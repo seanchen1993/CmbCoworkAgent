@@ -107,7 +107,7 @@ test("fresh start loses ephemeral state, rotates credentials and closes ports tw
   let oldCredential
   for (let iteration = 0; iteration < 2; iteration++) await withServer(async (server) => {
     if (oldCredential) {
-      assert.notEqual(server.credentials.alice, oldCredential)
+      assert.ok(server.credentials.alice !== oldCredential, "credentials rotate (values withheld)")
       assert.equal((await request(server, oldCredential, "/dev/v1/session")).status, 401)
     }
     oldCredential = server.credentials.alice
@@ -115,3 +115,32 @@ test("fresh start loses ephemeral state, rotates credentials and closes ports tw
     assert.equal((await request(server, "alice", "/dev/v1/zhaohu", { groupId: "group-private-1", taskNumber: "T-1024", text: "ephemeral" })).status, 200)
   })
 })
+
+test("raw headers beyond truncation limit cannot conceal Origin or forged identity", async () => withServer(async (server) => {
+  for (const sensitive of ["Origin: https://evil.invalid", "X-Space-Id: space-2", "Authorization: Bearer forged"]) {
+    const address = new URL(server.url)
+    const response = await new Promise((resolve, reject) => {
+      const socket = net.connect({ host: "127.0.0.1", port: Number(address.port) })
+      let output = ""
+      socket.setTimeout(2000, () => socket.destroy(new Error("raw test timeout")))
+      socket.on("connect", () => socket.write(`GET /dev/v1/session HTTP/1.1\r\nHost: ${address.host}\r\nAuthorization: Bearer ${server.credentials.alice}\r\n${Array.from({ length: 35 }, (_, i) => `X-Pad-${i}: a\r\n`).join("")}${sensitive}\r\nConnection: close\r\n\r\n`))
+      socket.on("data", (chunk) => { output += chunk })
+      socket.on("end", () => { socket.destroy(); resolve(output) }).on("error", reject)
+    })
+    assert.match(response, /^HTTP\/1\.1 431/)
+  }
+}))
+
+test("incomplete HTTP headers have a real bounded deadline, not the default 30s check interval", async () => withServer(async (server) => {
+  const started = Date.now(), address = new URL(server.url)
+  const response = await new Promise((resolve, reject) => {
+    const socket = net.connect({ host: "127.0.0.1", port: Number(address.port) })
+    let output = ""
+    socket.setTimeout(2500, () => socket.destroy(new Error("incomplete headers exceeded bound")))
+    socket.on("connect", () => socket.write(`GET /dev/v1/session HTTP/1.1\r\nHost: ${address.host}\r\nX-Slow: `))
+    socket.on("data", (chunk) => { output += chunk })
+    socket.on("end", () => { socket.destroy(); resolve(output) }).on("error", reject)
+  })
+  assert.match(response, /^HTTP\/1\.1 408/)
+  assert.ok(Date.now() - started < 2000, "actual header deadline <2s")
+}))
