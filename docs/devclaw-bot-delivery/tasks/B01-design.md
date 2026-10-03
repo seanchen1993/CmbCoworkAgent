@@ -49,7 +49,7 @@ DTO不替代边界校验：运行时从构建时复制的原始Schema离线解�
 | --- | --- | --- |
 | createBot | active空间成员且具bot.create | maintainers包含自己且全为同空间active成员；主体可关联配置引用；ceiling不超主体可配置范围 |
 | getBot | active空间成员且为Bot当前维护者 | 一致读取Bot与currentVersion |
-| createBotVersion | 同上且Bot active | 新配置重新查引用／ceiling，CAS递增实体version和配置number |
+| createBotVersion | 同上 | 仅对新写入要求Bot active，新配置重新查引用／ceiling，CAS递增实体version和配置number |
 | createGroup | active空间成员且具group.create | 自己以admin在成员中；所有成员active同空间；各版本确属指定Bot和空间，Bot active且主体是维护者 |
 | getGroup | active空间成员且在当前Group成员表 | 知道groupId/botId不产生权限 |
 | updateGroupMembers | active空间成员且为当前Group admin | 新集合至少一admin、目标成员active同空间；新增／更换Bot版本按createGroup查关联权；未变的合法既有引用不要求每个admin都成为Bot维护者 |
