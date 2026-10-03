@@ -6,11 +6,11 @@ import { composeSpec, INIT_SQL, IMAGE_ID, MYSQL_IMAGE, LABEL } from "./compose.m
 
 const ownedTests = new Map()
 
-export async function prepareProject(state, { test = false } = {}) {
+export async function prepareProject(state, { test = false, existing = false } = {}) {
   const project = test ? `devclaw-bot-test-${randomBytes(8).toString("hex")}` : "devclaw-bot-dev"
   const role = test ? "test" : "dev"
   const dir = join(RUNTIME, project)
-  try {
+  if (!existing) try {
     await privateDirectory(dir, true)
     await writeFile(join(dir, "owner.json"), JSON.stringify({ project, role, owner: state.owner.id }) + "\n", { mode: 0o600, flag: "wx" })
     const root = randomBytes(32).toString("hex"), app = randomBytes(32).toString("hex")
