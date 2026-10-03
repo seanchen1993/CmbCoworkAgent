@@ -14,6 +14,12 @@
 
 要求：用已有yaml依赖解析完整配置，核对准确键和完整挂载数组、无provision／危险Docker覆盖等；重复键、额外挂载及错误profile拒绝。不要增依赖／改变锁文件，已有节点依赖可本地克隆。必须加入能覆盖散落同名键及超过500字符后新增mount的负例；主代理复验最终候选，不以“已收到”关闭。
 
+进行中复验：草稿已改为完整strict YAML + deep equality；主代理Node22运行 `--test tests/bot/docker/config.spec.mjs` exit0、6/6、skip0。仍需在最终冻结SHA上复跑，不能据此接受完整环境。
+
+## E2：完整容器策略与清理对象（已下发，待复验）
+
+`lifecycle.mjs`早期版本只检查3306绑定、bind源目录前缀及mount数；要求遍历全部实际发布端口（额外exposed但null可保留）、核对精确五个type/source/destination/RW，不允许同目录下替换挂载绕过。cleanupTest必须把entry.dir限定为RUNTIME内对应project的规范目录并要求已认领inode，不能接受缺inode的任意对象。需负例和执行型复验。
+
 ## 环境路径副作用（已记录，待最终核验）
 
 Colima0.10.3首次遇到不存在的COLIMA_HOME后，创建了默认`.colima`里的本次profile配置及空稀疏盘。子代理报告停止确切PID49223、检查来源仅含本次新建文件，再用可恢复移动保留到私有`.devclaw-bot-b00/colima`，未删除／覆盖用户配置。主代理要求后续不得广泛移动／删除默认根，只处理明确本次对象；子代理确认不会再做整根移动。
