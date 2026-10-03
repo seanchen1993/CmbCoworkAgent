@@ -154,14 +154,16 @@
       "baseline": "6530c05289dffe1ff4499643533c58afa225c073",
       "worktree_creation_operation_id": "3d1475fa-7262-4bfc-b9fd-6d4bdd32f500",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B00-A01.md",
+      "latest_checkpoint": "B00-A01实施中，唯一/root/b00_local_docker。安装session86970已exit0，报告Colima0.10.3/Docker29.8.2/Compose5.6.0/Lima2.2.0。首次COLIMA_HOME未生效副作用已记录并可恢复迁入任务目录；主代理只读确认默认.colima/.docker/.lima不存在，私有目录0700，ps见任务Colima PID49511仍启动。尚无Docker验收结论。早期审查已要求完整YAML配置校验，不能用regex/500字符窗口检查mounts。",
       "wait_reason": null
     },
     {
       "id": "B01",
-      "status": "design_pending",
+      "status": "ready_waiting_dependency",
       "spec": "tasks/B01.md",
+      "design": "tasks/B01-design.md",
       "depends_on": ["B00"],
-      "wait_reason": "Main must finalize contract consumption/auth/transaction acceptance and accept B00 before dispatch"
+      "wait_reason": "Design v1 complete; do not dispatch before B00 independent acceptance. No B01 writer exists."
     }
   ],
   "next_action": "B00-A01已派发唯一实施者/root/b00_local_docker，核对其检查点与实际资源，不重复派单。主代理并行完善B01设计，B00独立验收且B01任务单ready后才派B01。内部平台项延后，不重做已验收阶段，不推送部署或连接真实内网。",
