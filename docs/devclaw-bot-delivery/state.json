@@ -2,8 +2,8 @@
   "schema_version": 1,
   "updated_on": "2026-10-03",
   "project": "DevClaw Bot",
-  "phase": "F04_F05_LOCAL_DEV",
-  "status": "local_milestone_complete",
+  "phase": "B00_B01_LOCAL_SERVICE",
+  "status": "preparing",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -16,16 +16,21 @@
       "F02",
       "F03",
       "F04",
-      "F05"
+      "F05",
+      "B00",
+      "B01"
     ],
-    "implementation_task_ids": [],
+    "implementation_task_ids": ["B00", "B01"],
     "scope_confirmed": true,
-    "scope_confirmation": "2026-10-02 用户在 F02/F03 完成后要求继续下一阶段，随后明确 jdk8 mydql5.7 继续任务；当前 F04/F05 本地开发准备，不包含 B01 或后续路线。",
+    "scope_confirmation": "2026-10-03 用户明确先不考虑内部平台参数，在本地开发，docker自行创建环境，继续任务，随后再次继续。当前推进B00 Docker本地环境及B01六个Bot/Group接口；保留JDK8/MySQL5.7，不扩B02/B03/Runtime/UI。",
     "explicit_user_pause": false,
     "external_push_allowed": false,
     "deployment_allowed": false,
     "real_intranet_access_allowed": false,
-    "spending_or_quota_reset_allowed": false
+    "spending_or_quota_reset_allowed": false,
+    "local_container_tool_install_allowed": true,
+    "public_dev_dependency_download_allowed": true,
+    "internal_platform_parameters": "deferred_by_user_not_blocking_local_development"
   },
   "implementation_agent": {
     "model": "gpt-6.1-sol",
@@ -38,10 +43,10 @@
     "automation_id": "devclaw-bot",
     "status": "PAUSED",
     "cancellation_reason": null,
-    "pause_reason": "F04/F05 authorized local milestone accepted and integrated; external F04 platform items remain pending; no B01 authorization",
+    "pause_reason": "Old F04/F05 milestone complete; preparing bounded B00/B01 prompt update before reactivation",
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
-    "last_run_outcome": "local_milestone_complete_heartbeat_paused",
+    "last_run_outcome": "user_authorized_local_docker_next_milestone",
     "last_verified_at_utc": "2026-10-02T23:54:03Z"
   },
   "tasks": [
@@ -136,18 +141,33 @@
       "open_review_items": [],
       "remaining_acceptance": [],
       "wait_reason": null
+    },
+    {
+      "id": "B00",
+      "status": "ready",
+      "spec": "tasks/B00.md",
+      "attempt_id": "B00-A01",
+      "planned_agent_task_name": "b00_local_docker",
+      "wait_reason": null
+    },
+    {
+      "id": "B01",
+      "status": "design_pending",
+      "spec": "tasks/B01.md",
+      "depends_on": ["B00"],
+      "wait_reason": "Main must finalize contract consumption/auth/transaction acceptance and accept B00 before dispatch"
     }
   ],
-  "next_action": "本轮F04/F05本地开发准备已验收并集成，原四小时heartbeat已暂停；等待用户确认下一阶段范围。保留F04平台待确认项，不重做F02/F03/F05，不派发B01，不推送部署或连接真实资源。",
+  "next_action": "保存新授权/任务基线并准备独立B00工作树，派发唯一gpt-6.1-sol/xhigh实施者；主代理并行完善B01设计，B00验收后才派B01。内部平台项延后，不重做已验收阶段，不推送部署或连接真实内网。",
   "quota_recovery": {
-    "verified_at_utc": "2026-10-02T23:28:56Z",
+    "verified_at_utc": "2026-10-03T14:00:47Z",
     "ordinary_usage_allowed": true,
-    "primary_used_percent": 1,
-    "primary_resets_at_utc": "2026-10-03T04:28:57Z",
-    "secondary_used_percent": 0,
+    "primary_used_percent": 0,
+    "primary_resets_at_utc": "2026-10-03T19:00:47Z",
+    "secondary_used_percent": 16,
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
-    "previous_interruption": "F05实施与主代理审批曾因额度失败；当前新查询确认可用，没有购买/重置/换账号/模型。"
+    "previous_interruption": "新B00/B01任务单上次写入被审批额度拒绝，未执行/未安装/未派单。当前新查询确认已恢复并成功保存任务单，没有购买/重置/换账号/模型。"
   },
-  "recovery_notes": "原F05-A01在额度恢复后接续，同树保留dirty成果；旧未知结果未计通过，最终全部独立复跑通过。现已冻结、集成且所有句柄关闭；无替代写者、额度购买/重置或模型账号切换。",
-  "current_task_id": null
+  "recovery_notes": "最新用户授权覆盖旧HANDOFF中的等待下一阶段；恢复前819561e4 clean、B00/B01文件确实不存在、全部旧代理completed、ps只命中检查自身。Docker仍未安装。不得把此前失败写入当作已派发任务或已产生环境。",
+  "current_task_id": "B00"
 }
