@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_on": "2026-10-03",
+  "updated_on": "2026-10-04",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
   "status": "implementing",
@@ -46,7 +46,7 @@
     "pause_reason": null,
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
-    "last_run_outcome": "Existing heartbeat updated in place to bounded B00/B01 local scope; cadence preserved at 4 hours",
+    "last_run_outcome": "2026-10-03T22:14Z quota recovered; same B00 writer confirmed quota-errored/stopped, preserved clean checkpoints; actual task VM running despite old session unavailable, no containers. Resume original writer, no duplicate VM/download.",
     "last_verified_at_utc": "2026-10-03T14:12:18Z"
   },
   "tasks": [
@@ -154,7 +154,17 @@
       "baseline": "6530c05289dffe1ff4499643533c58afa225c073",
       "worktree_creation_operation_id": "3d1475fa-7262-4bfc-b9fd-6d4bdd32f500",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B00-A01.md",
-      "latest_checkpoint": "B00-A01实施中，唯一/root/b00_local_docker。安装session86970已exit0，报告Colima0.10.3/Docker29.8.2/Compose5.6.0/Lima2.2.0。首次COLIMA_HOME未生效副作用已记录并可恢复迁入任务目录；主代理只读确认默认.colima/.docker/.lima不存在，私有目录0700，ps见任务Colima PID49511仍启动。尚无Docker验收结论。早期审查已要求完整YAML配置校验，不能用regex/500字符窗口检查mounts。",
+      "checkpoint_code_commit": "03de1a54016ca2ea394cdfaa9caa92dad7ca4b38",
+      "checkpoint_head": "65be9662c7a8d554bce98c4c439e6332f765e88e",
+      "latest_checkpoint": "2026-10-03T22:14Z main recovery: implementation HEAD65be9662 clean, code03de1a54 draft not accepted; original agent quota-errored and stopped. Old41386 unavailable; actual devclaw-bot VM Running aarch64/2CPU/4GiB/30GiB, private socket real/owned0700-type permissions, engine29.5.2 namecolima-devclaw-bot; docker ps -a empty exit0. Task Lima processes50535/50537/50551 live; oldNode50143/Colima50152 absent. Exact Lima mounts only runtime RO, noSSHagent/loadpubkeys. Do not replay VM creation. E2 policy tests, real MySQL/JDBC, lifecycle, docs/freeze remain.",
+      "recovery_snapshot": {
+        "verified_at_utc": "2026-10-03T22:14:24Z",
+        "agent_status": "quota_errored_confirmed_stopped_original_followup_pending",
+        "private_root": "/Users/heyirui/.devclaw-bot-b00",
+        "socket": "/Users/heyirui/.devclaw-bot-b00/colima/devclaw-bot/docker.sock",
+        "old_session": "41386 unknown process ID; not counted as pass; actual VM and daemon inspected independently",
+        "remaining_resource_checks": "images/networks/volumes; actual amd64 Rosetta execution; all host published bindings must be literal loopback despite generated Lima generic port forwards"
+      },
       "wait_reason": null
     },
     {
@@ -166,16 +176,16 @@
       "wait_reason": "Design v1 complete; do not dispatch before B00 independent acceptance. No B01 writer exists."
     }
   ],
-  "next_action": "B00-A01已派发唯一实施者/root/b00_local_docker，核对其检查点与实际资源，不重复派单。主代理并行完善B01设计，B00独立验收且B01任务单ready后才派B01。内部平台项延后，不重做已验收阶段，不推送部署或连接真实内网。",
+  "next_action": "额度恢复，接续同一B00-A01原代理，不重建VM/下载。完成运行资源核对、E2负例、固定MySQL真实JDBC/持久化/清理、CLI与文档；主代理独立复验后才派已ready的B01，不重做F02/F03/F05或扩展后续路线。",
   "quota_recovery": {
-    "verified_at_utc": "2026-10-03T14:39:27Z",
+    "verified_at_utc": "2026-10-03T22:14:24Z",
     "ordinary_usage_allowed": true,
-    "primary_used_percent": 90,
-    "primary_resets_at_utc": "2026-10-03T19:00:47Z",
-    "secondary_used_percent": 30,
+    "primary_used_percent": 1,
+    "primary_resets_at_utc": "2026-10-04T03:14:23Z",
+    "secondary_used_percent": 32,
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
-    "previous_interruption": "本轮开始额度已恢复，新任务和B00派单已实际执行。14:39查询仍可用但短周期90%；已通知唯一实施者立即优先Git/attempt检查点，尚未把额度接近上限误记为已耗尽。未购买/重置/换账号/模型。"
+    "previous_interruption": "B00原代理上轮最终明确quota errored（Oct4 03:00 local恢复提示），本次live agents确认已停止；额度ordinaryUsageAllowed=true primary1% secondary32%，继续同配置原代理，不购买/重置/换账号/模型。"
   },
-  "recovery_notes": "最新用户授权覆盖旧HANDOFF中的等待下一阶段；恢复前819561e4 clean、B00/B01文件确实不存在、全部旧代理completed、ps只命中检查自身。Docker仍未安装。不得把此前失败写入当作已派发任务或已产生环境。",
+  "recovery_notes": "最新用户授权覆盖旧阶段等待。2026-10-03T22:14Z集成4b6acd23 clean、实施65be9662 clean；已有CLI和运行VM，不重复安装。原B00代理已quota errored，实际VM仍运行不代表写者仍在。旧41386结果不可得，按当前daemon/资源证据恢复，不虚报真实MySQL测试通过。",
   "current_task_id": "B00"
 }

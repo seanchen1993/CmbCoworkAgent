@@ -1,8 +1,14 @@
 # 当前交接点
 
-更新：2026-10-03（Asia/Shanghai）· 新授权B00/B01本地Docker开发
+更新：2026-10-04（Asia/Shanghai）· B00额度恢复，沿用现有运行VM
 
 ## 最新授权与恢复点（优先于下方旧阶段）
+
+**2026-10-03 22:14 UTC最新恢复：** 原B00代理上轮真实quota errored，live agents再次确认停止，F02/F03/F05仍completed。当前额度ordinaryUsageAllowed=true、primary1%/secondary32%，新短周期恢复点2026-10-04 03:14:23 UTC。集成HEAD4b6acd23 clean；B00实施HEAD65be9662 clean（代码03de1a54，报告65be9662），未通过验收。本次接续同一原代理B00-A01，不创建替代者，不购买/重置额度或更换模型。
+
+旧下载session41386已返回Unknown process id，不能以此推定失败。主代理只读核对实际专用VM已Running（aarch64/2CPU/4GiB/30GiB）；Lima50535/50537及SSH50551存活，旧Node50143/Colima50152不在。任务真实Unix socket `/Users/heyirui/.devclaw-bot-b00/colima/devclaw-bot/docker.sock` 属于当前用户，显式私有Docker client/socket info exit0：engine29.5.2、namecolima-devclaw-bot；ps -a为空exit0。缓存317MiB。**不重复VM启动/下载/安装**，先补images/networks/volumes inventory再继续MySQL阶段。
+
+实际Lima配置只挂载任务runtime目录RO，VZ/aarch64/4GiB，forwardAgent和loadDotSSHPubKeys均false。生成的通用端口转发含0.0.0.0段，尚未创建容器；最终必须检查容器所有实际published端口及宿主监听均127.0.0.1，不能只凭Compose期望值声称不对外开放。仍需验证amd64实际执行、E2精确挂载/全部端口/cleanup归属负例、真实Java8/MySQL5.7两空库/持久化/故障清理、CLI/README和冻结。以下14:xx记录为历史断点。
 
 用户最新明确“先不用考虑内部平台参数，你在本地开发，docker自行创建环境，继续任务”，随后再次“继续任务”。主代理将本轮限定为B00 Docker本地环境及B01伙伴/团队六个冻结接口；保持JDK8/MySQL5.7。内部平台BOM/S3/ES/维护方延后，不阻塞本地开发；仍禁止远程部署、真实内网、付费和未授权的后续路线。
 
