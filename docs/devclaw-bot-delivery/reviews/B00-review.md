@@ -1,6 +1,6 @@
 # B00 进行中审查
 
-2026-10-03 · 主代理记录；尚未提交候选，不能视为验收
+2026-10-04 · 主代理记录；尚未提交候选，不能视为验收
 
 ## 实际位置
 
@@ -31,3 +31,13 @@ Colima0.10.3首次遇到不存在的COLIMA_HOME后，创建了默认`.colima`里
 ## 验收仍待
 
 任务B00所有完整验收项及独立复验均待候选。不能用本机native MySQL通过、manifest查询、工具安装成功或VM配置存在替代容器JDBC/持久化/隔离/清理测试。
+
+## 22:14 UTC恢复独立核对
+
+实际代码03de1a54、报告65be9662且clean。主代理再次读完整host/lifecycle/compose/Java probe代码；E1语义校验与E2全部端口/精确挂载/当前进程对象和inode认领均在草稿中，E2负例仍待。没有将草稿自测升级为冻结候选验收。
+
+上次下载句柄41386不可查询，但实际专用VM与daemon已运行：Colima list exit0、aarch64/2CPU/4GiB/30GiB，显式私有client/socket docker info exit0、namecolima-devclaw-bot/engine29.5.2，ps -a空。Lima实际唯一host mount是runtime只读，SSH agent和宿主pubkey加载关闭。旧Node/Colima创建者已退出，专用Lima/SSH服务仍运行。原代理quota-errored停止，额度恢复后已followup原代理，live status running；无新写者。
+
+冻结后独立验收顺序：核对范围/候选SHA和无写者 → 配置策略负例 → 完整真实Docker/JDK8测试（独立唯一测试project；与实施者串行，避免生命周期竞争）→ 宿主loopback监听与实际资源隔离/清理 → F03/F05mock/node/web回归 → 冻结字节与测试结果核对后集成。不允许凭脚本输出成功而省略真实容器/资源证据。
+
+文档需区分30GiB稀疏数据盘和20GiB稀疏系统盘；MySQL5.7旧版本仅本地隔离开发，不宣称生产安全支持。VM通用portForward配置含0.0.0.0段，容器实际绑定及宿主监听必须证实127.0.0.1。

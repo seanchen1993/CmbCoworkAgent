@@ -159,7 +159,7 @@
       "latest_checkpoint": "2026-10-03T22:14Z main recovery: implementation HEAD65be9662 clean, code03de1a54 draft not accepted; original agent quota-errored and stopped. Old41386 unavailable; actual devclaw-bot VM Running aarch64/2CPU/4GiB/30GiB, private socket real/owned0700-type permissions, engine29.5.2 namecolima-devclaw-bot; docker ps -a empty exit0. Task Lima processes50535/50537/50551 live; oldNode50143/Colima50152 absent. Exact Lima mounts only runtime RO, noSSHagent/loadpubkeys. Do not replay VM creation. E2 policy tests, real MySQL/JDBC, lifecycle, docs/freeze remain.",
       "recovery_snapshot": {
         "verified_at_utc": "2026-10-03T22:14:24Z",
-        "agent_status": "quota_errored_confirmed_stopped_original_followup_pending",
+        "agent_status": "quota_errored_confirmed_stopped_then_original_followup_sent_and_live_running_verified",
         "private_root": "/Users/heyirui/.devclaw-bot-b00",
         "socket": "/Users/heyirui/.devclaw-bot-b00/colima/devclaw-bot/docker.sock",
         "old_session": "41386 unknown process ID; not counted as pass; actual VM and daemon inspected independently",
