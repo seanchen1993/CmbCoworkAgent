@@ -133,7 +133,7 @@ export async function vmStart(state) {
   const owner = JSON.parse(await privateFile(marker))
   if (owner.id !== state.owner.id || owner.profile !== PROFILE) throw new Error("B00_PROFILE_OWNER")
   if (existing) await validateVm(state)
-  await colima(state, ["start", "--cpus", "2", "--memory", "4", "--disk", "30", "--arch", "aarch64", "--runtime", "docker", "--vm-type", "vz", "--vz-rosetta", "--mount", RUNTIME, "--mount-type", "virtiofs", "--activate=false", "--ssh-config=false", "--template=false", "--ssh-agent=false", "--kubernetes=false", "--network-address=false", "--network-host-addresses=false"], { timeoutMs: 600000, maxOutput: 262144 })
+  await colima(state, ["start", "--cpus", "2", "--memory", "4", "--disk", "30", "--arch", "aarch64", "--runtime", "docker", "--vm-type", "vz", "--vz-rosetta", "--mount", RUNTIME, "--mount-type", "virtiofs", "--activate=false", "--ssh-config=false", "--template=false", "--ssh-agent=false", "--kubernetes=false", "--network-address=false", "--network-host-addresses=false"], { timeoutMs: 1800000, maxOutput: 262144 })
   return daemon(state)
 }
 
