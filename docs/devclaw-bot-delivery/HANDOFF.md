@@ -1,8 +1,16 @@
 # 当前交接点
 
-更新：2026-10-04（Asia/Shanghai）· B00额度恢复，沿用现有运行VM
+更新：2026-10-04（Asia/Shanghai）· B00等待专用VM内sudo DNS修复授权，续跑已暂停
 
 ## 最新授权与恢复点（优先于下方旧阶段）
+
+**22:39 UTC最终状态优先：waiting_decision，不是验收通过或额度耗尽。** 原B00-A01已停止写入；代码`ea2ab8e2fda1c111a911041204207324fd4fda68`，最终report-only HEAD`0c7035017a0595901e562b249d7da2f0ae49a7d1`，主代理确认clean。主代理独立Node22 config+policy测试exit0、11/11、skip0。真实MySQL镜像/容器/JDBC仍未完成，B01不派发。
+
+已独立复现根因：dnsmasq/base的dpkg状态是install ok installed2.90，但apt默认列出2.91及upgradable from；Colima0.10.3的hasDnsmasq仅匹配`[installed`而返回1，漏掉已安装包并跳过setupDNS。guest resolv.conf指向不存在的systemd stub，dnsmasq loaded/failed，01-colima.conf缺失。一次保留数据stop81605/start92331均exit0但DNS未恢复；不继续盲目重启/拉取。精确证据见`reviews/B00-review.md`和实施attempt。
+
+需要用户明确允许：只在已认领的devclaw-bot VM内使用guest sudo，备份旧resolv.conf软链接，按官方Colima方式创建精确DNS配置（现有私网gateway192.168.5.2和本VM内部IP）、写resolv.conf并重启dnsmasq；失败按备份和哈希核验回滚精确文件。不改Mac宿主DNS/代理/安全设置，不升级包、不重建VM、不部署。**此提案未执行，文件不是授权。** 未获决定不resume实施代理/heartbeat。
+
+原heartbeat在22:39:01 UTC经App工具原位PAUSED，实际TOML读回一致；名称、prompt、当前会话和4小时间隔保留，未创建新任务。最新额度仍可用（primary77%/secondary43%，22:39:34UTC），不以此替代权限决定。实施者最终inventory无images/containers/volumes，只有默认3networks；仅保留任务VM进程57942/57944/57957，旧50535/50537/50551已退出，无下载/测试句柄。以下恢复/ACTIVE段落为本轮过程历史。
 
 **2026-10-03 22:14 UTC最新恢复：** 原B00代理上轮真实quota errored，live agents再次确认停止，F02/F03/F05仍completed。当前额度ordinaryUsageAllowed=true、primary1%/secondary32%，新短周期恢复点2026-10-04 03:14:23 UTC。集成HEAD4b6acd23 clean；B00实施HEAD65be9662 clean（代码03de1a54，报告65be9662），未通过验收。本次接续同一原代理B00-A01，不创建替代者，不购买/重置额度或更换模型。
 
@@ -84,4 +92,4 @@ F04仍待：内部Spring Boot parent/BOM及补丁维护方；内网MySQL补丁/�
 
 ## 下一动作（当前）
 
-核对唯一B00实施者的检查点，审查本地工具/VM/镜像/Compose/测试真实结果；主代理补齐B01任务单。只有B00经独立复验接受后，才交同配置单一子代理实施B01。不重做F02/F03/F05，不自动进入B02及后续路线。内部平台参数如实延后；本地工具安装和公开镜像/依赖下载按新授权执行，不包含sudo、安全设置、远程部署、付费或真实资源权限。
+向用户请求上述仅任务VM内sudo修复决定，等待新授权，不因heartbeat自动继续。获准后先核对停止的原B00代理、实际Git/VM/秘密/资源，再接续同一attempt；保留数据/代码，不重建或重复安装。B00经完整独立复验接受后才派已ready的B01；不重做F02/F03/F05，不扩到B02及后续路线。当前没有完成整个B00/B01里程碑。

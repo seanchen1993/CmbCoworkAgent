@@ -3,7 +3,7 @@
   "updated_on": "2026-10-04",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
-  "status": "implementing",
+  "status": "waiting_decision",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -41,13 +41,13 @@
   "scheduler": {
     "kind": "heartbeat",
     "automation_id": "devclaw-bot",
-    "status": "ACTIVE",
+    "status": "PAUSED",
     "cancellation_reason": null,
-    "pause_reason": null,
+    "pause_reason": "B00 requires explicit permission for sudo DNS repair inside the task-owned guest VM; heartbeat paused at the pre-agreed new-authority boundary, not quota exhaustion or milestone completion",
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
-    "last_run_outcome": "2026-10-03T22:14Z quota recovered; same B00 writer confirmed quota-errored/stopped, preserved clean checkpoints; actual task VM running despite old session unavailable, no containers. Resume original writer, no duplicate VM/download.",
-    "last_verified_at_utc": "2026-10-03T14:12:18Z"
+    "last_run_outcome": "2026-10-03T22:39:01Z original heartbeat updated in place to PAUSED via app tool; actual TOML readback agrees, same thread/prompt/name/4-hour interval. B00 paused for user decision, not accepted; B01 not dispatched.",
+    "last_verified_at_utc": "2026-10-03T22:39:01Z"
   },
   "tasks": [
     {
@@ -144,7 +144,7 @@
     },
     {
       "id": "B00",
-      "status": "implementing",
+      "status": "waiting_decision",
       "spec": "tasks/B00.md",
       "attempt_id": "B00-A01",
       "agent_task_name": "b00_local_docker",
@@ -154,19 +154,21 @@
       "baseline": "6530c05289dffe1ff4499643533c58afa225c073",
       "worktree_creation_operation_id": "3d1475fa-7262-4bfc-b9fd-6d4bdd32f500",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B00-A01.md",
-      "checkpoint_code_commit": "03de1a54016ca2ea394cdfaa9caa92dad7ca4b38",
-      "checkpoint_head": "65be9662c7a8d554bce98c4c439e6332f765e88e",
-      "latest_checkpoint": "2026-10-03T22:14Z main recovery: implementation HEAD65be9662 clean, code03de1a54 draft not accepted; original agent quota-errored and stopped. Old41386 unavailable; actual devclaw-bot VM Running aarch64/2CPU/4GiB/30GiB, private socket real/owned0700-type permissions, engine29.5.2 namecolima-devclaw-bot; docker ps -a empty exit0. Task Lima processes50535/50537/50551 live; oldNode50143/Colima50152 absent. Exact Lima mounts only runtime RO, noSSHagent/loadpubkeys. Do not replay VM creation. E2 policy tests, real MySQL/JDBC, lifecycle, docs/freeze remain.",
+      "checkpoint_code_commit": "ea2ab8e2fda1c111a911041204207324fd4fda68",
+      "checkpoint_head": "0c7035017a0595901e562b249d7da2f0ae49a7d1",
+      "latest_checkpoint": "2026-10-03T22:39Z HEAD0c703501 clean, codeea2ab8e2; original writer completed/stopped waiting_decision, not review_pending. Main independent Node22 config+policy tests exit0 11/11 skip0; report-only final change. Real VM Running same daemon ID; one data-preserving stop81605/start92331 both exit0 but DNS still failed. Actual root cause independently reproduced: installed/upgradable dnsmasq fails Colima grep installed condition. No successful image/container/JDBC verification; B01 unstarted.",
       "recovery_snapshot": {
         "verified_at_utc": "2026-10-03T22:14:24Z",
-        "agent_status": "quota_errored_confirmed_stopped_then_original_followup_sent_and_live_running_verified",
+        "agent_status": "original_followup_completed_waiting_decision_confirmed_stopped_clean",
         "private_root": "/Users/heyirui/.devclaw-bot-b00",
         "socket": "/Users/heyirui/.devclaw-bot-b00/colima/devclaw-bot/docker.sock",
         "old_session": "41386 unknown process ID; not counted as pass; actual VM and daemon inspected independently",
-        "remaining_resource_checks": "images/networks/volumes; actual amd64 Rosetta execution; all host published bindings must be literal loopback despite generated Lima generic port forwards"
+        "remaining_resource_checks": "Writer final inventory: no images/containers/volumes, default3 networks only; VM PIDs57942/57944/57957 after safe restart, old50535/50537/50551 exited; no download/test handles. Rosetta registration observed, actual amd64 MySQL execution and loopback host listeners remain unverified."
       },
-      "environment_issue": "Original writer confirmed empty images/containers/volumes and only default Docker networks. Fixed MySQL pull fails immediately: registry-1.docker.io lookup via VM [::1]:53 connection refused. Investigating only task VM; no host DNS/proxy/security changes. One evidence-based data-preserving task VM stop/start allowed by existing lifecycle; no delete/rebuild. Policy tests reported 11/11 on dirty new policy file, not accepted.",
-      "wait_reason": null
+      "environment_issue": "Main read-only proof: dnsmasq/base install ok installed2.90; apt list advertises upgradable2.91, official hasDnsmasq grep exits1; resolv.conf points to missing systemd stub, dnsmasq loaded/failed and 01-colima.conf absent. Ordinary restart did not fix. Need user authorization before guest sudo; no host DNS/proxy/security/default context changes.",
+      "requested_decision": "Allow only task VM guest sudo to back up original resolv.conf symlink, create exact Colima DNS config with existing private gateway/internal VM IP, replace resolv.conf and restart dnsmasq; precise backup/hash-checked rollback. No package upgrades, host changes, VM rebuild or deployment.",
+      "latest_independent_check": "ea2ab8e2 Node22 --test tests/bot/docker/config.spec.mjs tests/bot/docker/policy.spec.mjs exit0 11/11 skip0; independent exact guest DNS read-only inspection corroborated failure statuses; see reviews/B00-review.md",
+      "wait_reason": "explicit_user_permission_for_task_guest_sudo_dns_repair"
     },
     {
       "id": "B01",
@@ -177,16 +179,16 @@
       "wait_reason": "Design v1 complete; do not dispatch before B00 independent acceptance. No B01 writer exists."
     }
   ],
-  "next_action": "额度恢复，接续同一B00-A01原代理，不重建VM/下载。完成运行资源核对、E2负例、固定MySQL真实JDBC/持久化/清理、CLI与文档；主代理独立复验后才派已ready的B01，不重做F02/F03/F05或扩展后续路线。",
+  "next_action": "等待用户明确是否允许仅任务VM内sudo DNS修复。未获授权不resume代理/heartbeat、不继续pull/restart/B01。获准后重新核对原停止写者、codeea2ab8e2/report0c703501及实际VM，接续原B00-A01，不新建写者；B00全部独立验收后才派B01。",
   "quota_recovery": {
-    "verified_at_utc": "2026-10-03T22:14:24Z",
+    "verified_at_utc": "2026-10-03T22:39:34Z",
     "ordinary_usage_allowed": true,
-    "primary_used_percent": 1,
+    "primary_used_percent": 77,
     "primary_resets_at_utc": "2026-10-04T03:14:23Z",
-    "secondary_used_percent": 32,
+    "secondary_used_percent": 43,
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
-    "previous_interruption": "B00原代理上轮最终明确quota errored（Oct4 03:00 local恢复提示），本次live agents确认已停止；额度ordinaryUsageAllowed=true primary1% secondary32%，继续同配置原代理，不购买/重置/换账号/模型。"
+    "previous_interruption": "本轮从primary1%接续同配置原B00代理；当前仍ordinaryUsageAllowed=true primary77%/secondary43%。现在因明确guest sudo授权边界等待，不是quota耗尽。未购买/重置/换账号/模型。"
   },
-  "recovery_notes": "最新用户授权覆盖旧阶段等待。2026-10-03T22:14Z集成4b6acd23 clean、实施65be9662 clean；已有CLI和运行VM，不重复安装。原B00代理已quota errored，实际VM仍运行不代表写者仍在。旧41386结果不可得，按当前daemon/资源证据恢复，不虚报真实MySQL测试通过。",
+  "recovery_notes": "2026-10-03T22:39Z已停止原代理并原位暂停heartbeat，等待guest sudo DNS修复决定。保留运行VM、工具、所有Git成果与测试记录；未集成/接受B00，未启动B01。旧41386不可得不算通过，真正root cause和一次restart失败已记录；不应由无新授权heartbeat自动恢复。",
   "current_task_id": "B00"
 }

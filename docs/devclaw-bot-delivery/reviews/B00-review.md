@@ -41,3 +41,18 @@ Colima0.10.3首次遇到不存在的COLIMA_HOME后，创建了默认`.colima`里
 冻结后独立验收顺序：核对范围/候选SHA和无写者 → 配置策略负例 → 完整真实Docker/JDK8测试（独立唯一测试project；与实施者串行，避免生命周期竞争）→ 宿主loopback监听与实际资源隔离/清理 → F03/F05mock/node/web回归 → 冻结字节与测试结果核对后集成。不允许凭脚本输出成功而省略真实容器/资源证据。
 
 文档需区分30GiB稀疏数据盘和20GiB稀疏系统盘；MySQL5.7旧版本仅本地隔离开发，不宣称生产安全支持。VM通用portForward配置含0.0.0.0段，容器实际绑定及宿主监听必须证实127.0.0.1。
+
+## 22:39 UTC冻结检查点与权限出口
+
+主代理在代码`ea2ab8e2fda1c111a911041204207324fd4fda68`独立执行Node22 `--test tests/bot/docker/config.spec.mjs tests/bot/docker/policy.spec.mjs`，exit0、11/11、skip0。E1/E2静态负例本次通过；完整容器运行、清理、CLI等未验收。最终HEAD`0c7035017a0595901e562b249d7da2f0ae49a7d1`只改attempt，代码字节不变，工作树clean，原实施者已完成回传并停止写入。没有合入未验收代码。
+
+主代理只读通过确切私有Colima profile复验：
+
+- dpkg：dnsmasq和dnsmasq-base均`install ok installed 2.90-2ubuntu0.3`。
+- apt默认list：`dnsmasq/noble-updates 2.91-0ubuntu0.24.04.1 all [upgradable from: 2.90-2ubuntu0.3]`。
+- 官方过滤条件`grep '\[installed'`退出1；不是未安装，属于检测漏判。
+- `/etc/resolv.conf`仍为指向`../run/systemd/resolve/stub-resolv.conf`的悬空软链；`test -e`退出1。dnsmasq loaded/failed/failed；`/etc/dnsmasq.d/01-colima.conf`不存在。组合只读脚本整体exit0只是输出完成，每个失败退出码已单独记录，不能算DNS成功。
+
+原实施者已经执行且报告一次保留数据stop81605/start92331各exit0，DNS未恢复；不再重复。官方v0.10.3 [dns.go](https://raw.githubusercontent.com/abiosoft/colima/v0.10.3/environment/vm/lima/dns.go)的hasDnsmasq条件与setupDNS短路对应上述事实；[lima.go](https://raw.githubusercontent.com/abiosoft/colima/v0.10.3/environment/vm/lima/lima.go)显示post-start链及已Running的短路。最初“可能因中断未收尾”仅初始推断，最终确切误判原因以上述包状态为准。
+
+按用户sudo边界进入waiting_decision：仅提议备份当前guest resolver、按官方方式写两个精确配置并重启dnsmasq，保留回滚；未执行特权修复、宿主DNS更改或包升级。4小时heartbeat22:39:01UTC已通过App原位PAUSED并读回核对。原代理最终资源清单仅任务VM57942/57944/57957，无images/containers/volumes/下载句柄。主代理暂停流程参照OpenAI Docs [定时任务](https://learn.chatgpt.com/docs/automations)，现有配置保留，不新建任务。
