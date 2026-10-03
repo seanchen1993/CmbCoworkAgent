@@ -165,6 +165,7 @@
         "old_session": "41386 unknown process ID; not counted as pass; actual VM and daemon inspected independently",
         "remaining_resource_checks": "images/networks/volumes; actual amd64 Rosetta execution; all host published bindings must be literal loopback despite generated Lima generic port forwards"
       },
+      "environment_issue": "Original writer confirmed empty images/containers/volumes and only default Docker networks. Fixed MySQL pull fails immediately: registry-1.docker.io lookup via VM [::1]:53 connection refused. Investigating only task VM; no host DNS/proxy/security changes. One evidence-based data-preserving task VM stop/start allowed by existing lifecycle; no delete/rebuild. Policy tests reported 11/11 on dirty new policy file, not accepted.",
       "wait_reason": null
     },
     {

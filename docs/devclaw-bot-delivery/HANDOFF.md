@@ -10,6 +10,8 @@
 
 实际Lima配置只挂载任务runtime目录RO，VZ/aarch64/4GiB，forwardAgent和loadDotSSHPubKeys均false。生成的通用端口转发含0.0.0.0段，尚未创建容器；最终必须检查容器所有实际published端口及宿主监听均127.0.0.1，不能只凭Compose期望值声称不对外开放。仍需验证amd64实际执行、E2精确挂载/全部端口/cleanup归属负例、真实Java8/MySQL5.7两空库/持久化/故障清理、CLI/README和冻结。以下14:xx记录为历史断点。
 
+恢复后的新环境问题：原实施者确认images/ps-a/volumes为空、只有Docker默认三network；固定MySQL拉取立即exit1，公开诊断为专用VM向`[::1]:53`查询registry-1.docker.io被拒绝。已要求停止重复pull，先只读定位VM resolver/service和启动日志；若确认启动服务异常且无其他占用，可在既定B00生命周期内对这一台VM执行一次有界保留数据stop/start，不能删除/重建。不得修改宿主DNS/代理/安全设置；需要改配置或特权服务先向主代理提交证据。新增E2离线策略测试报告11/11、skip0，对应dirty新增policy.spec，主代理已读，尚未最终复验。无真实MySQL通过结论。
+
 用户最新明确“先不用考虑内部平台参数，你在本地开发，docker自行创建环境，继续任务”，随后再次“继续任务”。主代理将本轮限定为B00 Docker本地环境及B01伙伴/团队六个冻结接口；保持JDK8/MySQL5.7。内部平台BOM/S3/ES/维护方延后，不阻塞本地开发；仍禁止远程部署、真实内网、付费和未授权的后续路线。
 
 上次B00/B01任务单写入因审批额度失败，工具明确未执行。2026-10-03 14:00:47 UTC已核对额度ordinaryUsageAllowed=true、primary0%/secondary16%；集成HEAD819561e4 clean，任务单原本不存在，全部旧代理completed，相关ps只命中检查自身，Docker/Colima仍未安装。现在任务单已保存，尚未据此假定新工作树或代理已建立；派发事实以state/live agents/Git为准。
