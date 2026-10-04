@@ -80,12 +80,18 @@ function resourceOwner(data, entry, type) {
   if (labels?.[`${LABEL}.owner`] !== entry.owner || labels?.[`${LABEL}.project`] !== entry.project || labels?.[`${LABEL}.role`] !== entry.role || labels?.["com.docker.compose.project"] !== entry.project) throw new Error("B00_RESOURCE_OWNER")
 }
 
-export async function resources(state, entry) {
+export async function resources(state, entry, { signal, deadline } = {}) {
   await validateProject(entry)
-  const ids = (await docker(state, ["ps", "-aq", "--filter", `label=com.docker.compose.project=${entry.project}`], { stdoutOnly: true })).split(/\s+/).filter(Boolean)
+  const inspect = args => {
+    if (signal?.aborted) throw new Error("B00_CANCELLED")
+    const timeoutMs = deadline === undefined ? 15000 : Math.min(15000, deadline - Date.now())
+    if (timeoutMs <= 0) throw new Error("B00_RESOURCE_TIMEOUT")
+    return docker(state, args, { stdoutOnly: true, signal, timeoutMs })
+  }
+  const ids = (await inspect(["ps", "-aq", "--filter", `label=com.docker.compose.project=${entry.project}`])).split(/\s+/).filter(Boolean)
   if (ids.length > 3) throw new Error("B00_UNEXPECTED_CONTAINER")
   const result = { containers: {}, volumes: {}, container: null, volume: null, network: null }
-  if (ids.length) for (const container of JSON.parse(await docker(state, ["inspect", ...ids], { stdoutOnly: true }))) {
+  if (ids.length) for (const container of JSON.parse(await inspect(["inspect", ...ids]))) {
     resourceOwner(container, entry, "container")
     const service = container.Config.Labels["com.docker.compose.service"]
     if (!["mysql", "es", "s3"].includes(service) || result.containers[service]) throw new Error("B00_UNEXPECTED_CONTAINER")
@@ -94,9 +100,9 @@ export async function resources(state, entry) {
   // Exact names, plus both our labels and Compose ownership, are required before any mutation.
   for (const [type, suffix] of [["volume", "data"], ["volume", "es-data"], ["volume", "s3-data"], ["network", "private"]]) {
     const name = `${entry.project}-${suffix}`
-    const listed = (await docker(state, [type, "ls", "--format", "{{.Name}}"], { stdoutOnly: true })).split("\n")
+    const listed = (await inspect([type, "ls", "--format", "{{.Name}}"])) .split("\n")
     if (listed.includes(name)) {
-      const resource = JSON.parse(await docker(state, [type, "inspect", name], { stdoutOnly: true }))[0]
+      const resource = JSON.parse(await inspect([type, "inspect", name]))[0]
       resourceOwner(resource, entry, type)
       if (type === "network") { validateNetwork(resource, entry, Object.values(result.containers)); result.network = resource }
       else result.volumes[suffix] = resource

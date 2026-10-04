@@ -44,7 +44,7 @@ export async function waitForS3(snapshot, { signal, timeoutMs = 30000, pauseMs =
 
 export async function serviceReadiness(state, entry, ports, signal) {
   const deadline = Date.now() + 30000
-  const current = await resources(state, entry), c = current.containers.s3
+  const current = await resources(state, entry, { signal, deadline }), c = current.containers.s3
   if (!c?.State.Running || validateContainer(c, entry, "s3") !== ports.s3) throw new Error("B00_S3_READY_STATE")
   const remaining = () => { const value = deadline - Date.now(); if (value <= 0) throw new Error("B00_S3_READY_TIMEOUT"); return Math.min(value, 3000) }
   const paths = await docker(state, ["exec", c.Id, "find", "/data/state", "-maxdepth", "1", "-name", "*.dat"], { stdoutOnly: true, timeoutMs: remaining(), signal })
@@ -63,7 +63,7 @@ export async function serviceReadiness(state, entry, ports, signal) {
     for (const id of volumes) {
       // Headers and JSON stay in memory; never follow location URLs. Decode the
       // explicit wget status instead of treating the shell's final printf as success.
-      const value = await docker(state, ["exec", c.Id, "/bin/sh", "-c", 'set +e; wget -S -O - -T 2 "$1" 2>&1; code=$?; printf "\\nB00_LOOKUP_EXIT=%s\\n" "$code"', "--", `http://127.0.0.1:9333/dir/lookup?volumeId=${id}`], { stdoutOnly: true, timeoutMs: remaining(), signal, maxOutput: 8192 })
+      const value = await docker(state, ["exec", c.Id, "/bin/sh", "-c", 'set +e; wget -q -S -O - -T 2 "$1" 2>&1; code=$?; printf "\\nB00_LOOKUP_EXIT=%s\\n" "$code"', "--", `http://127.0.0.1:9333/dir/lookup?volumeId=${id}`], { stdoutOnly: true, timeoutMs: remaining(), signal, maxOutput: 8192 })
       if (registeredLookup(value)) registered.push(id)
     }
     return { apiReady, volumes, registered }

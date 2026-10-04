@@ -23,5 +23,7 @@ test("exact volume paths and fixed lookup location reject unsafe or malformed me
   assert.equal(registeredLookup("HTTP/1.1 404 Not Found\nB00_LOOKUP_EXIT=1\n"), false)
   assert.throws(() => registeredLookup(wire({ locations: [{ url: "remote:8080" }] })), /B00_S3_VOLUME_LOCATION/)
   assert.throws(() => registeredLookup(wire({})), /B00_S3_LOOKUP_BODY/)
+  assert.throws(() => registeredLookup(wire({ locations: null })), /B00_S3_LOOKUP_BODY/)
+  assert.throws(() => registeredLookup(wire({ locations: [] }).replace("\nB00_LOOKUP_EXIT=", "\n100% progress\nB00_LOOKUP_EXIT=")), /B00_S3_LOOKUP_BODY/)
   assert.throws(() => registeredLookup("HTTP/1.1 403 Forbidden\nB00_LOOKUP_EXIT=1\n"), /B00_S3_LOOKUP_STATUS/)
 })
