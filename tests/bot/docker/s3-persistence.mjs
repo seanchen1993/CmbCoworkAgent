@@ -15,7 +15,7 @@ try {
     const c = (await resources(state, entry)).containers.s3
     return { container: c, port: validateContainer(c, entry, "s3") }
   }
-  const request = (port, method, path, body) => localHttp(port, method, path, { headers: s3Headers({ port, method, path, body, credentials }), body })
+  const request = (port, method, path, body, query = "") => localHttp(port, method, `${path}${query ? `?${query}` : ""}`, { headers: s3Headers({ port, method, path, query, body, credentials }), body })
   const path = `/${entry.project}/proof.txt`, started = await up()
   for (const [method, resource, body] of [["PUT", `/${entry.project}`], ["PUT", path, bytes]]) if ((await request(started.port, method, resource, body)).status !== 200) throw new Error("B00_S3_CREATE")
   const before = await request(started.port, "GET", path)
@@ -24,10 +24,13 @@ try {
   await stop(state, entry)
   const restarted = await up()
   for (let sample = 0; sample < 20; sample++) {
-    const response = await request(restarted.port, "GET", path), text = response.bytes.toString("utf8")
+    let response, failure, list
+    try { response = await request(restarted.port, "GET", path) } catch (e) { failure = ["B00_HTTP_IO", "B00_HTTP_TIMEOUT"].includes(e.message) ? e.message : "other" }
+    try { list = await request(restarted.port, "GET", `/${entry.project}`, undefined, "list-type=2") } catch {}
+    const text = response?.bytes.toString("utf8") ?? ""
     const code = text.match(/<Code>([^<]+)<\/Code>/)?.[1]
     const errorCode = ["InternalError", "NoSuchKey", "NoSuchBucket", "SlowDown", "AccessDenied", "SignatureDoesNotMatch", "InvalidAccessKeyId"].includes(code) ? code : "other_or_missing"
-    console.log(JSON.stringify({ stage: "post-restart", sample, httpStatus: response.status, contentMatch: response.status === 200 && response.bytes.equals(bytes), errorCode, connectionRefused: /connection refused/i.test(text), volumeUnavailable: /(?:no.*location|volume.*not found|failed.*lookup|lookup.*failed)/i.test(text), timeout: /timeout|timed out/i.test(text) }))
+    console.log(JSON.stringify({ stage: "post-restart", sample, httpStatus: response?.status ?? null, failure, contentMatch: response?.status === 200 && response.bytes.equals(bytes), bucketListStatus: list?.status ?? null, metadataKeyVisible: list?.status === 200 && list.bytes.toString().includes("<Key>proof.txt</Key>"), errorCode, connectionRefused: /connection refused/i.test(text), volumeUnavailable: /(?:no.*location|volume.*not found|failed.*lookup|lookup.*failed)/i.test(text), timeout: /timeout|timed out/i.test(text) }))
     await new Promise(resolve => setTimeout(resolve, 500))
   }
   const logs = await docker(state, ["logs", "--tail", "100", restarted.container.Id], { timeoutMs: 10000, maxOutput: 65536 })
