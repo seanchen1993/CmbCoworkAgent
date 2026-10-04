@@ -6,6 +6,8 @@
 
 ## 当前动作与实际证据
 
+**43957卷注册诊断已完成：** worker报告test-bacd9dc8110344c8 exit0且全清理，无运行句柄。持久化.dat卷[1,2,3,4]；样本0–13 API IO/无注册；14–17 LIST200/key可见但GET500/InternalError且无注册；18–19四卷均注册固定127.0.0.1:8080后GET200/contentMatch，无重写。仅该诊断实证，不补造45595当时lookup。原writer正按已定边界实现API认证+全部已有卷注册的共享30s就绪检查，再真实全验收，不再重复整套诊断。20:10:45UTC额度仍可用primary57%/secondary87%，短窗2026-10-05T00:52:17Z、周窗10-09T23:28:57Z；未到限额不擅自判等待。
+
 **S3最新诊断62561：** f3578b3代码、test-d7a3ff72548fa253 exit0且清理。重启前GET200/hash正确；重启后0–13样本GET/LIST无响应B00_HTTP_IO，约7s后14–19均GET200/contentMatch和LIST200/keyVisible，未改写数据。证明master-only健康过早；不等于45595的HTTP500卷机制已确认。原writer只验证已有.dat卷ID与固定本容器master lookup，再为lifecycle.start/restart和CLI status共用有界readiness；认证/结构错误立即拒绝，30s界与AbortSignal，persist读取/hash严格不改。暂无新真实全验收。
 
 **45595已结束，取代下文pending：** code ae3369a2/report9f72f9b，exit1；test-fbae893cc7b4e005 finally精确清理。首错 services-persist/B00_S3_STATUS/object-get/HTTP500，diagnosticsUnavailable和stopFailed均false；不能判定数据丢失或暂态根因。原写者仅进行独立S3重启短诊断，记录固定错误码/只读GET/卷注册时序，不改写proof数据或通用重试掩盖失败。B00未完成。
