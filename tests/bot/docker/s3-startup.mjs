@@ -14,7 +14,7 @@ try {
   if (c.State.Health?.Status === "healthy") {
     const port = validateContainer(c, entry, "s3")
     const uid = await docker(state, ["exec", c.Id, "awk", "/^Uid:/{print $2,$3,$4,$5}", "/proc/1/status"], { stdoutOnly: true })
-    const cwd = await docker(state, ["exec", c.Id, "readlink", "/proc/1/cwd"], { stdoutOnly: true })
+    const cwd = await docker(state, ["exec", "--user", `${process.getuid()}:${process.getuid()}`, c.Id, "readlink", "/proc/1/cwd"], { stdoutOnly: true })
     if (uid !== Array(4).fill(String(process.getuid())).join(" ") || cwd !== "/data/state") throw new Error("B00_SERVICE_UID")
     console.log(JSON.stringify({ stage: "process", uid: process.getuid(), cwd }))
     console.log(JSON.stringify({ stage: "verified", listener: await verifyListeners(port) }))
