@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto"
 import { join } from "node:path"
 import { request } from "node:http"
+import { setTimeout as pause } from "node:timers/promises"
 import { privateFile } from "./host.mjs"
 import { validateProject } from "./lifecycle.mjs"
 
@@ -55,22 +56,35 @@ async function jsonResponse(response, status, reason) {
   try { return JSON.parse(response.bytes.toString("utf8")) } catch { throw new Error(reason) }
 }
 
+export async function waitForBasicLicense(read, { signal, timeoutMs = 10000, pauseMs = 250 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new Error("B00_CANCELLED")
+    const response = await read(Math.min(5000, deadline - Date.now()))
+    if (response.status === 404) {
+      try { await pause(Math.min(pauseMs, Math.max(0, deadline - Date.now())), undefined, { signal }) } catch { throw new Error("B00_CANCELLED") }
+      continue
+    }
+    const body = await jsonResponse(response, 200, "B00_ES_LICENSE")
+    if (body?.license?.type !== "basic" || body?.license?.status !== "active") {
+      const error = new Error("B00_ES_LICENSE")
+      error.licenseState = { type: ["basic", "trial"].includes(body?.license?.type) ? body.license.type : "other_or_null", status: ["active", "expired", "invalid", "valid"].includes(body?.license?.status) ? body.license.status : "other_or_null" }
+      throw error
+    }
+    return { type: "basic", status: "active" }
+  }
+  throw new Error("B00_ES_LICENSE_TIMEOUT")
+}
+
 export async function servicesHealth(entry, ports, signal) {
   await validateProject(entry)
   const esPassword = (await privateFile(join(entry.dir, "es-password"))).trim()
   const authorization = `Basic ${Buffer.from(`elastic:${esPassword}`).toString("base64")}`
   const es = await jsonResponse(await localHttp(ports.es, "GET", "/", { headers: { authorization }, signal }), 200, "B00_ES_HEALTH")
   if (es.version?.number !== "8.19.22") throw new Error("B00_ES_VERSION")
-  // A new single-node cluster can accept HTTP before its Basic license metadata
-  // is installed. Wait only for that bounded null state; never accept a trial.
-  let license
-  for (let i = 0; i < 40; i++) {
-    license = await jsonResponse(await localHttp(ports.es, "GET", "/_license", { headers: { authorization }, signal }), 200, "B00_ES_LICENSE")
-    if (license.license) break
-    if (signal?.aborted) throw new Error("B00_CANCELLED")
-    await new Promise(resolve => setTimeout(resolve, 250))
-  }
-  if (license.license?.type !== "basic" || license.license?.status !== "active") { const error = new Error("B00_ES_LICENSE"); error.licenseState = { type: ["basic", "trial"].includes(license.license?.type) ? license.license.type : "other_or_null", status: ["active", "expired", "inactive"].includes(license.license?.status) ? license.license.status : "other_or_null" }; throw error }
+  // Observed startup 404 -> Basic active, as documented by the v8 license API.
+  // Only this GET's 404 is retryable. A 200 must have the exact Basic active state.
+  await waitForBasicLicense(timeoutMs => localHttp(ports.es, "GET", "/_license", { headers: { authorization }, signal, timeoutMs }), { signal })
   const credentials = JSON.parse(await privateFile(join(entry.dir, "s3-client.json")))
   const s3 = await localHttp(ports.s3, "GET", "/", { headers: s3Headers({ port: ports.s3, method: "GET", path: "/", credentials }), signal })
   if (s3.status !== 200 || !s3.bytes.toString().includes("ListAllMyBucketsResult")) throw new Error("B00_S3_HEALTH")

@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { argumentsFor } from "../../../deploy/dev/docker/cli.mjs"
-import { localEndpoint, localHttp, s3Headers } from "../../../deploy/dev/docker/services-probe.mjs"
+import { localEndpoint, localHttp, s3Headers, waitForBasicLicense } from "../../../deploy/dev/docker/services-probe.mjs"
 
 test("clients accept only literal local allocated ports and bounded requests", async () => {
   assert.equal(localEndpoint(54321), "http://127.0.0.1:54321")
@@ -25,4 +25,18 @@ test("Docker CLI arguments remain explicit and require Java8 paths for start/tes
   assert.deepEqual(argumentsFor(["status"]), { command: "status", tools: {} })
   assert.deepEqual(argumentsFor(["test", "--java", "/jdk/java", "--javac", "/jdk/javac", "--jdbc", "/jdbc.jar"]), { command: "test", tools: { java: "/jdk/java", javac: "/jdk/javac", jdbc: "/jdbc.jar" } })
   for (const argv of [["start"], ["status", "--java", "/java"], ["test", "--url", "https://remote"], ["unknown"]]) assert.throws(() => argumentsFor(argv), /B00_/)
+})
+test("license readiness retries only observed startup404, requires Basic active and respects cancellation/deadline", async () => {
+  let calls = 0
+  const response = (status, body) => ({ status, bytes: Buffer.from(JSON.stringify(body)) })
+  assert.deepEqual(await waitForBasicLicense(async () => ++calls === 1 ? response(404, {}) : response(200, { license: { type: "basic", status: "active" } }), { pauseMs: 1, timeoutMs: 100 }), { type: "basic", status: "active" })
+  assert.equal(calls, 2)
+  for (const bad of [response(401, {}), response(500, {}), response(200, { license: null }), response(200, {}), response(200, { license: { type: "trial", status: "active" } }), response(200, { license: { type: "basic", status: "expired" } })]) {
+    let attempts = 0
+    await assert.rejects(waitForBasicLicense(async () => { attempts++; return bad }), /B00_ES_LICENSE/)
+    assert.equal(attempts, 1)
+  }
+  await assert.rejects(waitForBasicLicense(async () => response(404, {}), { pauseMs: 1, timeoutMs: 10 }), /B00_ES_LICENSE_TIMEOUT/)
+  const c = new AbortController(); c.abort()
+  await assert.rejects(waitForBasicLicense(async () => { throw new Error("not called") }, { signal: c.signal }), /B00_CANCELLED/)
 })
