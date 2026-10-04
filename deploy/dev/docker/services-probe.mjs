@@ -51,7 +51,7 @@ export function s3Headers({ port, method, path, query = "", body = Buffer.alloc(
 }
 
 async function jsonResponse(response, status, reason) {
-  if (response.status !== status) throw new Error(reason)
+  if (response.status !== status) { const error = new Error(reason); error.httpStatus = response.status; throw error }
   try { return JSON.parse(response.bytes.toString("utf8")) } catch { throw new Error(reason) }
 }
 
@@ -70,7 +70,7 @@ export async function servicesHealth(entry, ports, signal) {
     if (signal?.aborted) throw new Error("B00_CANCELLED")
     await new Promise(resolve => setTimeout(resolve, 250))
   }
-  if (license.license?.type !== "basic" || license.license?.status !== "active") throw new Error("B00_ES_LICENSE")
+  if (license.license?.type !== "basic" || license.license?.status !== "active") { const error = new Error("B00_ES_LICENSE"); error.licenseState = { type: ["basic", "trial"].includes(license.license?.type) ? license.license.type : "other_or_null", status: ["active", "expired", "inactive"].includes(license.license?.status) ? license.license.status : "other_or_null" }; throw error }
   const credentials = JSON.parse(await privateFile(join(entry.dir, "s3-client.json")))
   const s3 = await localHttp(ports.s3, "GET", "/", { headers: s3Headers({ port: ports.s3, method: "GET", path: "/", credentials }), signal })
   if (s3.status !== 200 || !s3.bytes.toString().includes("ListAllMyBucketsResult")) throw new Error("B00_S3_HEALTH")
@@ -87,7 +87,7 @@ export async function servicesProbe(entry, ports, phase, signal) {
   const esRequest = (method, path, body) => localHttp(ports.es, method, path, { headers: { authorization: auth, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined, signal })
   const credentials = JSON.parse(await privateFile(join(entry.dir, "s3-client.json")))
   const s3Request = (method, path, { query = "", body, anonymous = false, badSignature = false } = {}) => localHttp(ports.s3, method, `${path}${query ? `?${query}` : ""}`, { headers: anonymous ? {} : s3Headers({ port: ports.s3, method, path, query, body, credentials, badSignature }), body, signal })
-  const checkS3 = (response, statuses) => { if (!statuses.includes(response.status)) throw new Error("B00_S3_STATUS"); return response }
+  const checkS3 = (response, statuses, action) => { if (!statuses.includes(response.status)) { const error = new Error("B00_S3_STATUS"); error.httpStatus = response.status; error.serviceAction = action; throw error } return response }
   if (phase === "create") {
     await servicesHealth(entry, ports, signal)
     for (const headers of [{}, { authorization: `Basic ${Buffer.from("elastic:wrong").toString("base64")}` }]) if ((await localHttp(ports.es, "GET", "/", { headers, signal })).status !== 401) throw new Error("B00_ES_AUTH")
@@ -102,9 +102,9 @@ export async function servicesProbe(entry, ports, phase, signal) {
     if (read._source?.message !== payload.toString("utf8")) throw new Error("B00_ES_CONTENT")
     const search = await jsonResponse(await esRequest("POST", `/${index}/_search`, { query: { term: { message: payload.toString("utf8") } } }), 200, "B00_ES_SEARCH")
     if (search.hits?.total?.value !== 1 || search.hits.hits[0]?._source?.message !== payload.toString("utf8")) throw new Error("B00_ES_SEARCH")
-    const object = checkS3(await s3Request("GET", `/${bucket}/${key}`), [200])
+    const object = checkS3(await s3Request("GET", `/${bucket}/${key}`), [200], "object-get")
     if (!object.bytes.equals(payload) || digest(object.bytes) !== contentHash) throw new Error("B00_S3_CONTENT")
-    const list = checkS3(await s3Request("GET", `/${bucket}`, { query: "list-type=2" }), [200]).bytes.toString("utf8")
+    const list = checkS3(await s3Request("GET", `/${bucket}`, { query: "list-type=2" }), [200], "object-list").bytes.toString("utf8")
     if (!list.includes(`<Key>${key}</Key>`) || !list.includes("<KeyCount>1</KeyCount>")) throw new Error("B00_S3_LIST")
   } else {
     await jsonResponse(await esRequest("DELETE", `/${index}`), 200, "B00_ES_DELETE")

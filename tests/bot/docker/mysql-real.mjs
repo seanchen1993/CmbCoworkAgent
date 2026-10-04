@@ -13,28 +13,38 @@ export async function mysqlReal(tools, signal) {
     for (let i = 0; i < 2; i++) {
       const entry = await prepareProject(state, { test: true })
       console.log(JSON.stringify({ stage: "claimed", project: entry.project }))
+      let phase = "start"
       try {
         const started = await start(state, entry, { signal })
         const listener = await verifyListeners(started.port)
+        phase = "jdbc-empty"
         const empty = await jdbc(state, entry, tools, dir, "empty", { signal })
+        phase = "jdbc-probe"
         const probe = await jdbc(state, entry, tools, dir, "probe", { signal })
+        phase = "services-create"
         const services = await servicesProbe(entry, started.ports, "create", signal)
+        phase = "jdbc-negative"
         for (const [action, options] of [["ping", { wrongPassword: true }], ["reject-version", {}]]) {
           let rejected = false
           try { await jdbc(state, entry, tools, dir, action, { ...options, signal }) } catch (error) { rejected = error.failureCode === "exit" && error.exitCode === 1 }
           if (!rejected) throw new Error("B00_EXPECTED_REJECTION")
         }
+        phase = "restart"
         const restarted = await restart(state, entry, { signal })
+        phase = "jdbc-persist"
         const persisted = await jdbc(state, entry, tools, dir, "persist", { signal })
+        phase = "services-persist"
         const servicesPersisted = await servicesProbe(entry, restarted.ports, "persist", signal)
+        phase = "services-delete"
         const deleted = await servicesProbe(entry, restarted.ports, "delete", signal)
+        phase = "cancelled-restart"
         const aborted = new AbortController(); aborted.abort()
         let cancelled = false
         try { await restart(state, entry, { signal: aborted.signal }) } catch (error) { cancelled = error.message === "B00_CANCELLED" }
         const stopped = await resources(state, entry)
         if (!cancelled || Object.values(stopped.containers).some(c => c.State.Running)) throw new Error("B00_CANCELLED_RESTART")
         proof.push({ project: entry.project, started, listener, empty, probe, services, restarted, persisted, servicesPersisted, deleted, cancelledRestart: "stopped_without_start" })
-      } finally {
+      } catch (error) { error.phase = phase; throw error } finally {
         console.log(JSON.stringify({ stage: "cleaned", result: await cleanupTest(state, entry) }))
       }
     }
@@ -51,7 +61,7 @@ if (process.argv[1]?.endsWith("/mysql-real.mjs")) {
   try {
     console.log(JSON.stringify({ status: "verified", proof: await mysqlReal({ java, javac, jdbc: jdbcJar }, controller.signal) }))
   } catch (error) {
-    console.log(JSON.stringify({ status: "failed", reason: /^B00_[A-Z_]+$/.test(error.message) ? error.message : error.failureCode || "controlled", exit: error.exitCode ?? 1, diagnostics: error.diagnostics, diagnosticsUnavailable: error.diagnosticsUnavailable === true, stopFailed: error.stopFailed === true }))
+    console.log(JSON.stringify({ status: "failed", reason: /^B00_[A-Z0-9_]+$/.test(error.message) ? error.message : error.failureCode || "controlled", phase: error.phase, errorClass: ["Error", "TypeError", "ReferenceError", "SyntaxError"].includes(error.name) ? error.name : "other", httpStatus: error.httpStatus, serviceAction: error.serviceAction, licenseState: error.licenseState, exit: error.exitCode ?? 1, diagnostics: error.diagnostics, diagnosticsUnavailable: error.diagnosticsUnavailable === true, stopFailed: error.stopFailed === true }))
     process.exitCode = 1
   } finally { clearTimeout(timer); process.removeListener("SIGTERM", cancel); process.removeListener("SIGINT", cancel) }
 }

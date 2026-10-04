@@ -49,7 +49,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const timer = setTimeout(cancel, 600000)
   try { console.log(JSON.stringify(await main(process.argv.slice(2), controller.signal))) }
   catch (error) {
-    console.error(JSON.stringify({ status: "failed", reason: /^B00_[A-Z_]+$/.test(error.message) ? error.message : error.failureCode || "compatibility_or_io", diagnostics: error.diagnostics, diagnosticsUnavailable: error.diagnosticsUnavailable === true, stopFailed: error.stopFailed === true, ...(Number.isInteger(error.exitCode) ? { exitCode: error.exitCode } : {}) }))
+    console.error(JSON.stringify({ status: "failed", reason: /^B00_[A-Z0-9_]+$/.test(error.message) ? error.message : error.failureCode || "compatibility_or_io", phase: error.phase, diagnostics: error.diagnostics, diagnosticsUnavailable: error.diagnosticsUnavailable === true, stopFailed: error.stopFailed === true, ...(Number.isInteger(error.exitCode) ? { exitCode: error.exitCode } : {}) }))
     process.exitCode = 1
   } finally { clearTimeout(timer); process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel) }
 }
