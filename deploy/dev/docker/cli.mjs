@@ -3,6 +3,7 @@ import { hostState, vmStart, vmStop, daemon } from "./host.mjs"
 import { prepareProject, start, stop, resources, validateContainer, verifyListeners, finishFailedStart } from "./lifecycle.mjs"
 import { verifyDev } from "./probe.mjs"
 import { servicesHealth, localEndpoint } from "./services-probe.mjs"
+import { serviceReadiness } from "./readiness.mjs"
 import { mysqlReal } from "../../../tests/bot/docker/mysql-real.mjs"
 
 export function argumentsFor(argv) {
@@ -40,7 +41,7 @@ export async function main(argv, signal) {
     services[service] = { status: c.State.Status, health: c.State.Health?.Status ?? "none", version: { mysql: "5.7.44", es: "8.19.22", s3: "4.48" }[service] }
     if (running) { ports[service] = validateContainer(c, entry, service); await verifyListeners(ports[service]); services[service].endpoint = service === "mysql" ? `127.0.0.1:${ports[service]}` : localEndpoint(ports[service]) }
   }
-  if (Object.keys(ports).length === 3) await servicesHealth(entry, ports, signal)
+  if (Object.keys(ports).length === 3) await serviceReadiness(state, entry, ports, signal)
   return { project: entry.project, status: Object.keys(ports).length === 3 ? "healthy" : "stopped_or_incomplete", services, volumes: Object.keys(current.volumes).map(suffix => `${entry.project}-${suffix}`), credentialDirectory: entry.dir }
 }
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

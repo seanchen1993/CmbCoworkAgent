@@ -6,6 +6,7 @@ import { run } from "../process.mjs"
 import { RUNTIME, docker, daemon, privateDirectory, privateFile } from "./host.mjs"
 import { composeSpec, INIT_SQL, S3_START, IMAGE_ID, MYSQL_IMAGE, LABEL } from "./compose.mjs"
 import { SERVICE_IMAGES, serviceImage } from "./service-images.mjs"
+import { serviceReadiness } from "./readiness.mjs"
 
 const ownedTests = new Map()
 
@@ -160,7 +161,8 @@ export async function start(state, entry, { signal, failAt } = {}) {
       await verifyListeners(ports[service])
       containers[service] = container.Id
     }
-    return { project: entry.project, containers, volumes: Object.keys(current.volumes).map((suffix) => `${entry.project}-${suffix}`), network: `${entry.project}-private`, ports, port: ports.mysql, host: "127.0.0.1", image: MYSQL_IMAGE, status: "healthy" }
+    const readiness = await serviceReadiness(state, entry, ports, signal)
+    return { project: entry.project, containers, volumes: Object.keys(current.volumes).map((suffix) => `${entry.project}-${suffix}`), network: `${entry.project}-private`, ports, port: ports.mysql, host: "127.0.0.1", image: MYSQL_IMAGE, status: "healthy", readiness }
   } catch (error) {
     // Even a timed-out Compose client may have created a container. Reconcile exact owned resources.
     return finishFailedStart(error, async () => {
