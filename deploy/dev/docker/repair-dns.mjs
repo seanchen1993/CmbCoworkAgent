@@ -15,3 +15,13 @@ export async function repairDns() {
   if (before.id !== after.id) throw new Error("B00_DAEMON_ID")
   return { result, daemon: after }
 }
+
+export async function repairDnsModes() {
+  const state = await hostState()
+  const before = await daemon(state)
+  const input = await readFile(new URL("./repair-dns-modes.sh", import.meta.url), "utf8")
+  const result = await colima(state, ["ssh", "--", "sudo", "-n", "bash", "-s", "--", state.owner.id], { input, stdoutOnly: true, timeoutMs: 15000 })
+  const after = await daemon(state)
+  if (before.id !== after.id) throw new Error("B00_DAEMON_ID")
+  return { result, daemon: after }
+}
