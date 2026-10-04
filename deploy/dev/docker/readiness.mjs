@@ -33,6 +33,7 @@ export async function waitForS3(snapshot, { signal, timeoutMs = 30000, pauseMs =
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error("B00_CANCELLED")
     const value = await snapshot(deadline)
+    if (signal?.aborted) throw new Error("B00_CANCELLED")
     if (Date.now() >= deadline) throw new Error("B00_S3_READY_TIMEOUT")
     if (typeof value.apiReady !== "boolean" || !Array.isArray(value.volumes) || !Array.isArray(value.registered) || value.registered.some(id => !value.volumes.includes(id))) throw new Error("B00_S3_READY_STATE")
     if (value.apiReady && isDeepStrictEqual([...value.volumes].sort(), [...value.registered].sort())) return { authenticated: true, registeredVolumeIds: value.volumes }
@@ -67,5 +68,5 @@ export async function serviceReadiness(state, entry, ports, signal) {
     }
     return { apiReady, volumes, registered }
   }, { signal, timeoutMs: Math.max(1, deadline - Date.now()) })
-  return { s3, services: await servicesHealth(entry, ports, signal) }
+  return { s3, services: await servicesHealth(entry, ports, signal, { deadline }) }
 }

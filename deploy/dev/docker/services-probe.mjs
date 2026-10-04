@@ -61,6 +61,7 @@ export async function waitForBasicLicense(read, { signal, timeoutMs = 10000, pau
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error("B00_CANCELLED")
     const response = await read(Math.min(5000, deadline - Date.now()))
+    if (signal?.aborted) throw new Error("B00_CANCELLED")
     if (response.status === 404) {
       try { await pause(Math.min(pauseMs, Math.max(0, deadline - Date.now())), undefined, { signal }) } catch { throw new Error("B00_CANCELLED") }
       continue
@@ -76,17 +77,18 @@ export async function waitForBasicLicense(read, { signal, timeoutMs = 10000, pau
   throw new Error("B00_ES_LICENSE_TIMEOUT")
 }
 
-export async function servicesHealth(entry, ports, signal) {
+export async function servicesHealth(entry, ports, signal, { deadline = Date.now() + 30000 } = {}) {
   await validateProject(entry)
+  const remaining = () => { const value = deadline - Date.now(); if (value <= 0) throw new Error("B00_SERVICE_READY_TIMEOUT"); return Math.min(5000, value) }
   const esPassword = (await privateFile(join(entry.dir, "es-password"))).trim()
   const authorization = `Basic ${Buffer.from(`elastic:${esPassword}`).toString("base64")}`
-  const es = await jsonResponse(await localHttp(ports.es, "GET", "/", { headers: { authorization }, signal }), 200, "B00_ES_HEALTH")
+  const es = await jsonResponse(await localHttp(ports.es, "GET", "/", { headers: { authorization }, signal, timeoutMs: remaining() }), 200, "B00_ES_HEALTH")
   if (es.version?.number !== "8.19.22") throw new Error("B00_ES_VERSION")
   // Observed startup 404 -> Basic active, as documented by the v8 license API.
   // Only this GET's 404 is retryable. A 200 must have the exact Basic active state.
-  await waitForBasicLicense(timeoutMs => localHttp(ports.es, "GET", "/_license", { headers: { authorization }, signal, timeoutMs }), { signal })
+  await waitForBasicLicense(timeoutMs => localHttp(ports.es, "GET", "/_license", { headers: { authorization }, signal, timeoutMs }), { signal, timeoutMs: Math.min(10000, deadline - Date.now()) })
   const credentials = JSON.parse(await privateFile(join(entry.dir, "s3-client.json")))
-  const s3 = await localHttp(ports.s3, "GET", "/", { headers: s3Headers({ port: ports.s3, method: "GET", path: "/", credentials }), signal })
+  const s3 = await localHttp(ports.s3, "GET", "/", { headers: s3Headers({ port: ports.s3, method: "GET", path: "/", credentials }), signal, timeoutMs: remaining() })
   if (s3.status !== 200 || !s3.bytes.toString().includes("ListAllMyBucketsResult")) throw new Error("B00_S3_HEALTH")
   return { es: { version: es.version.number, license: "basic", authenticated: true }, s3: { version: "4.48", authenticated: true } }
 }
