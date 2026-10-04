@@ -68,7 +68,7 @@ export async function hostState({ create = false } = {}) {
 }
 
 export async function colima(state, args, options = {}) {
-  return run(TOOLS.colima, [...args, "--profile", PROFILE], { env: state.env, cwd: BASE, ...options })
+  return run(TOOLS.colima, ["--profile", PROFILE, ...args], { env: state.env, cwd: BASE, ...options })
 }
 
 export function vmSpec() {
