@@ -83,4 +83,8 @@ E4核心修复f5ba1174：主代理读finishFailedStart/classifyStartup，并独�
 
 010d374f：S3卷内确切目录修复及子代理专项通过详见attempt；真实read排除了凭据不可读假设（test-r不能代替open/read），未引入tmpfs复制或放宽宿主权限。主代理已读固定本地HTTP/SigV4/ES和S3 CRUD草稿，边界合规。E5已下发：mysqlReal signal没有经restart传到start，取消时可能停止后又重启三服务；要求restart接受signal并传给start，stop/cleanup仍有界完成，补取消后不再启动证据。正在跑的5555按原快照收尾，不把新代码与旧通过结果混算。
 
-按用户sudo边界进入waiting_decision：仅提议备份当前guest resolver、按官方方式写两个精确配置并重启dnsmasq，保留回滚；未执行特权修复、宿主DNS更改或包升级。4小时heartbeat22:39:01UTC已通过App原位PAUSED并读回核对。原代理最终资源清单仅任务VM57942/57944/57957，无images/containers/volumes/下载句柄。主代理暂停流程参照OpenAI Docs [定时任务](https://learn.chatgpt.com/docs/automations)，现有配置保留，不新建任务。
+历史记录（2026-10-03，已被10-04授权及上文DNS复验覆盖）：当时按用户sudo边界进入waiting_decision，仅提议备份guest resolver、写两个精确配置及重启dnsmasq并保留回滚，未执行特权修复或包升级。4小时heartbeat22:39:01UTC原位PAUSED；其后03:49已恢复ACTIVE。暂停流程参照OpenAI Docs [定时任务](https://learn.chatgpt.com/docs/automations)，没有新建重复任务。
+
+## 12:21检查点（1c380c9d，尚未候选）
+
+主代理读实际CLI/probe/restart/network成员diff；E5已传signal且停止后检查aborted，最终实测仍待。子代理20/20离线自测不是主代理复验。5555第二环境license失败；后加null等待但当时未记录null，不能确认为根因。54429与47045均exit1且finally精确清理，47045第二环境定位services-persist；旧固定错误regex漏数字使B00_S3_*被折为controlled。已要求仅补安全操作名/数字status并记录首错，不凭通用重试掩盖持久化；真实两环境全通过、故障/SIGTERM清理和冻结回归仍待。
