@@ -6,6 +6,8 @@
 
 ## 当前动作与实际证据
 
+**45595已结束，取代下文pending：** code ae3369a2/report9f72f9b，exit1；test-fbae893cc7b4e005 finally精确清理。首错 services-persist/B00_S3_STATUS/object-get/HTTP500，diagnosticsUnavailable和stopFailed均false；不能判定数据丢失或暂态根因。原写者仅进行独立S3重启短诊断，记录固定错误码/只读GET/卷注册时序，不改写proof数据或通用重试掩盖失败。B00未完成。
+
 **19:57后最新检查点：** ae3369a2 clean保存仅ES许可404有界等待，200必须Basic active；worker21/21，主代理读diff并独立services.spec4/4 exit0。此前4b80ef11主代理Docker离线20/20、F03 60037 24/24、F05mock41436 15/15、node54489/web4738类型检查均exit0且已关闭，详见review。worker唯一完整runner45595，首project test-fbae893cc7b4e005，600s总界至20:07:15UTC，结果待核对；不并行生命周期，不将等待或单项成功算两套全通过。
 
 唯一实施者仍为原 `/root/b00_local_docker`（gpt-6.1-sol/xhigh），禁止派生或第二写者。11:51额度恢复后确认旧者停止、两树clean、同VM且无测试资源，再followup同一attempt。当前正在定位完整测试第二套环境重启后的 `services-persist` 失败，未交review_pending。
