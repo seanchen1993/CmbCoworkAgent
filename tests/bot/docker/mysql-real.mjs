@@ -42,7 +42,7 @@ if (process.argv[1]?.endsWith("/mysql-real.mjs")) {
   try {
     console.log(JSON.stringify({ status: "verified", proof: await mysqlReal({ java, javac, jdbc: jdbcJar }, controller.signal) }))
   } catch (error) {
-    console.log(JSON.stringify({ status: "failed", reason: /^B00_[A-Z_]+$/.test(error.message) ? error.message : error.failureCode || "controlled", exit: error.exitCode ?? 1 }))
+    console.log(JSON.stringify({ status: "failed", reason: /^B00_[A-Z_]+$/.test(error.message) ? error.message : error.failureCode || "controlled", exit: error.exitCode ?? 1, diagnostics: error.diagnostics }))
     process.exitCode = 1
   } finally { clearTimeout(timer); process.removeListener("SIGTERM", cancel); process.removeListener("SIGINT", cancel) }
 }

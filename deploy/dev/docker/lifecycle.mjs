@@ -162,6 +162,14 @@ export async function start(state, entry, { signal, failAt } = {}) {
     return { project: entry.project, containers, volumes: Object.keys(current.volumes).map((suffix) => `${entry.project}-${suffix}`), network: `${entry.project}-private`, ports, port: ports.mysql, host: "127.0.0.1", image: MYSQL_IMAGE, status: "healthy" }
   } catch (error) {
     // Even a timed-out Compose client may have created a container. Reconcile exact owned resources.
+    const current = await resources(state, entry)
+    error.diagnostics = []
+    for (const [service, container] of Object.entries(current.containers)) {
+      const text = await docker(state, ["logs", "--tail", "40", container.Id], { timeoutMs: 10000, maxOutput: 65536 })
+      // Raw logs stay in memory only. Return fixed classifications, never arbitrary
+      // startup messages, paths, credentials, or partial secret bytes.
+      error.diagnostics.push({ service, status: container.State.Status, exit: container.State.ExitCode, health: container.State.Health?.Status ?? null, permission: /Permission denied|AccessDeniedException|not writable/i.test(text), unknownFlag: /flag provided but not defined/i.test(text), rootRejected: /can not run elasticsearch as root|cannot run elasticsearch as root/i.test(text), configRead: /error.*(?:read|load).*config/i.test(text) })
+    }
     await stop(state, entry)
     throw error
   }
