@@ -2,6 +2,8 @@
 
 2026-10-04 11:51 UTC · B00 v2 implementing · 非验收完成
 
+**最新真实进展（010d374f）优先：** S3专项35131/test-507ece1bb3f8e8a8由实施者实测exit0：healthy、四UID501、cwd/data/state、策略和host127.0.0.1:32778通过、finally全清理；主代理尚未独立跑此专项。修复仅/data/state和/data/filerldb2确切卷内子目录归属。真实dd read证明凭据可读，之前test-r是误判，不复制tmpfs、不改host权限/ES。原写者当前唯一完整runner5555，test-2e51c926df4b56bb，两空MySQL/Java8+ES/S3认证CRUD/重启，结果待核对；probe/runner仍dirty，不能计通过。E4失败处理核心已在f5ba1174由主代理2/2独立复跑；候选前还需restart传signal避免取消后再启动服务，并完成CLI/故障清理/文档。12:07额度可用primary50%/secondary70%，reset16:50:49UTC。
+
 **11:51UTC额度恢复检查点优先：** 原B00确实quota errored/stopped，实施6f34f10b clean（安全诊断已提交）、集成23e430d9 clean。主代理实际inspect：同daemon/VM57942/57944/57957，三固定镜像都在，containers/volumes空、仅默认3networks，无旧写者/下载/test。当前ordinaryUsageAllowed=true、primary1%/secondary63%，新短窗reset16:50:49UTC；已followup同一原B00-A01，从S3权限根因继续，未重建/重新下载或改模型。四小时heartbeat仍ACTIVE。后文4点旧过程仅历史；B00未接受，B01未派。
 
 **04:23附近最新结果：** runner76454已exit1，test-7504952b91da84ca精确清理完成。随后诊断cell91确实执行为session15835、exit1（不是审批未执行）：test-b0e296f5398eb315也全部精确清理。子代理安全诊断仅确认S3 exited255/permission=true，MySQL/ES running/health starting，准确权限路径未定；不能称根因完全解决或JDBC/CRUD通过。无运行测试/下载句柄；原代理正在保存诊断/report的dirty检查点，再继续定位S3实际工作目录/metadata目录/uid访问。禁止长期root运行或放宽secret权限规避。04:20:57额度仍可用primary91%/secondary61%，不是耗尽；恢复08:41:51UTC。下面“启动中”已过时，以此结果为准。

@@ -79,4 +79,8 @@ capability检查改为标准化`CAP_`前缀后仍要求NET_RAW dropped，含错�
 
 E4已下发：start() catch先await资源及日志再stop，诊断失败会跳出而不尝试停止。要求best-effort诊断不阻断精确已归属资源的停止尝试，受控保留原错误及停止失败状态，禁止擅自清理未知资源；补一项日志失败仍尝试停止的回归。真实测试外层finally曾成功清理，不替代dev启动错误路径的正确性。待最终候选复验。
 
+E4核心修复f5ba1174：主代理读finishFailedStart/classifyStartup，并独立运行failure.spec.mjs exit0、2/2、skip0；诊断失败仍stop、原错误身份保留、停止失败独立标记、没有原日志泄漏。完整CLI/runner输出标记仍需最终复验。
+
+010d374f：S3卷内确切目录修复及子代理专项通过详见attempt；真实read排除了凭据不可读假设（test-r不能代替open/read），未引入tmpfs复制或放宽宿主权限。主代理已读固定本地HTTP/SigV4/ES和S3 CRUD草稿，边界合规。E5已下发：mysqlReal signal没有经restart传到start，取消时可能停止后又重启三服务；要求restart接受signal并传给start，stop/cleanup仍有界完成，补取消后不再启动证据。正在跑的5555按原快照收尾，不把新代码与旧通过结果混算。
+
 按用户sudo边界进入waiting_decision：仅提议备份当前guest resolver、按官方方式写两个精确配置并重启dnsmasq，保留回滚；未执行特权修复、宿主DNS更改或包升级。4小时heartbeat22:39:01UTC已通过App原位PAUSED并读回核对。原代理最终资源清单仅任务VM57942/57944/57957，无images/containers/volumes/下载句柄。主代理暂停流程参照OpenAI Docs [定时任务](https://learn.chatgpt.com/docs/automations)，现有配置保留，不新建任务。
