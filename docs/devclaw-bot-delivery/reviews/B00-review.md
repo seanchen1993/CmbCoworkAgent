@@ -96,3 +96,9 @@ E4核心修复f5ba1174：主代理读finishFailedStart/classifyStartup，并独�
 主代理以Node22独立执行：`node --test tests/bot/docker/{config,policy,failure,services}.spec.mjs` exit0（20/20、skip0）；`node tests/bot/check-contracts.mjs`会话60037 exit0（24/24、生成漂移与类型消费）；`node deploy/dev/cli.mjs mock --profile dev`会话41436 exit0（15/15，S3/ES旧mock仍disabled）；node/web `tsc --noEmit -p tsconfig.{node,web}.json --composite false`会话54489/4738各exit0。全部句柄关闭。复验后实际Git仅未跟踪es-startup，相关源与4b80ef11无diff。新readiness代码还需另行测试，以上不替代最终真实Docker/JDBC验收。
 
 许可问题：子代理补记真实33026前三样本HTTP404→后续200 Basic active；52508本轮10次均200，二者清理完毕。这是worker诊断，不是主代理复跑。[官方v8 GET license](https://www.elastic.co/docs/api/doc/elasticsearch/v8/operation/operation-license-get)支持启动cluster-state暂态404。已限定只为404做有界等待，200异常/非Basic/非active及认证错误均失败；禁止开trial和通用重试S3持久化断言。
+
+## 20:16共享readiness审查（db688142）
+
+43957的卷注册竞态证据见HANDOFF/attempt。主代理读新增readiness及start/restart/status接入，独立 `node --test tests/bot/docker/readiness.spec.mjs tests/bot/docker/services.spec.mjs` exit0、6/6、skip0。严格固定loopback/location、卷ID/path验证、认证和现有卷全部注册；不改变persist GET/hash。真实91840加载f376d607早于db688142，不把它的结果覆盖到后改代码。
+
+E6已下发：serviceReadiness先设30s deadline却在await resources时仍用多次默认15s Docker调用且未传signal；因此不可宣称整个函数严格30s或能及时取消。要求最小传播本次deadline/signal且不影响cleanup，或明确先完成单独有界ownership preflight再开始30s就绪窗口；不做大规模重构。最终候选实测仍待。
