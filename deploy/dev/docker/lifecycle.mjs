@@ -162,17 +162,30 @@ export async function start(state, entry, { signal, failAt } = {}) {
     return { project: entry.project, containers, volumes: Object.keys(current.volumes).map((suffix) => `${entry.project}-${suffix}`), network: `${entry.project}-private`, ports, port: ports.mysql, host: "127.0.0.1", image: MYSQL_IMAGE, status: "healthy" }
   } catch (error) {
     // Even a timed-out Compose client may have created a container. Reconcile exact owned resources.
-    const current = await resources(state, entry)
-    error.diagnostics = []
-    for (const [service, container] of Object.entries(current.containers)) {
-      const text = await docker(state, ["logs", "--tail", "40", container.Id], { timeoutMs: 10000, maxOutput: 65536 })
-      // Raw logs stay in memory only. Return fixed classifications, never arbitrary
-      // startup messages, paths, credentials, or partial secret bytes.
-      error.diagnostics.push({ service, status: container.State.Status, exit: container.State.ExitCode, health: container.State.Health?.Status ?? null, permission: /Permission denied|AccessDeniedException|not writable/i.test(text), unknownFlag: /flag provided but not defined/i.test(text), rootRejected: /can not run elasticsearch as root|cannot run elasticsearch as root/i.test(text), configRead: /error.*(?:read|load).*config/i.test(text) })
-    }
-    await stop(state, entry)
-    throw error
+    return finishFailedStart(error, async () => {
+      const current = await resources(state, entry), diagnostics = []
+      for (const [service, container] of Object.entries(current.containers)) {
+        const text = await docker(state, ["logs", "--tail", "40", container.Id], { timeoutMs: 10000, maxOutput: 65536 })
+        // Raw logs stay in memory only. Fixed classifications never copy messages.
+        diagnostics.push(classifyStartup(service, container, text))
+      }
+      return diagnostics
+    }, () => stop(state, entry))
   }
+}
+
+export async function finishFailedStart(error, readDiagnostics, stopOwned) {
+  try { error.diagnostics = await readDiagnostics() } catch { error.diagnosticsUnavailable = true }
+  // Diagnostics are best-effort. Always attempt owner-checked stopping, retain
+  // the original controlled failure and separately mark a cleanup failure.
+  try { await stopOwned() } catch { error.stopFailed = true }
+  throw error
+}
+
+export function classifyStartup(service, container, text) {
+  const permissionLines = text.split("\n").filter((line) => /permission denied|AccessDeniedException|not writable/i.test(line))
+  const permissionPaths = ["/data/state", "/data", "/data/filerldb2", "./filerldb2", "/run/secrets/s3-config", "/usr/share/elasticsearch/data", "/usr/share/elasticsearch/config"].filter((path) => permissionLines.some((line) => line.includes(path)))
+  return { service, status: container.State.Status, exit: container.State.ExitCode, health: container.State.Health?.Status ?? null, permission: permissionLines.length > 0, permissionPaths, preflight: text.includes("B00_S3_PREFLIGHT_OK"), secretUnreadable: text.includes("B00_S3_SECRET_UNREADABLE"), dataUnwritable: text.includes("B00_S3_DATA_UNWRITABLE"), filerMetadata: /(?:filerldb|filer store|filer.*leveldb)/i.test(text), workingDir: ["", "/", "/data", "/data/state"].includes(container.Config.WorkingDir) ? container.Config.WorkingDir : "other", unknownFlag: /flag provided but not defined/i.test(text), rootRejected: /can not run elasticsearch as root|cannot run elasticsearch as root/i.test(text), configRead: /error.*(?:read|load).*config/i.test(text) }
 }
 
 export async function stop(state, entry) {

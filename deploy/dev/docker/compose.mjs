@@ -16,6 +16,10 @@ case "$B00_UID" in ''|*[!0-9]*|0) exit 1;; esac
 test ! -L /data/state
 mkdir -p /data/state
 chown "$B00_UID:$B00_UID" /data/state
+su-exec "$B00_UID:$B00_UID" /bin/sh -c 'test -r /run/secrets/s3-config || { echo B00_S3_SECRET_UNREADABLE; exit 1; }; test -x /data/state && test -w /data/state || { echo B00_S3_DATA_UNWRITABLE; exit 1; }; echo B00_S3_PREFLIGHT_OK'
+# Filer's default relative metadata directory belongs in the persistent,
+# explicitly owned child directory, not the image's root-owned /data cwd.
+cd /data/state
 exec su-exec "$B00_UID:$B00_UID" /usr/bin/weed "$@"
 `
 
