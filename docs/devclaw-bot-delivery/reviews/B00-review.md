@@ -65,4 +65,12 @@ E3已下发：脚本umask077让两个最终系统DNS配置为root:root0600（主
 
 E3关闭（仅DNS前置检查）：候选`6a02d5b88fd5a24cb42ecb6d45e268f173cd0bdb`新增精确模式补修，主代理读代码和真实复验会话50085 exit0。两文件root:root0644/nlink1；resolver SHA256 `64f78010f6cdecf0169c0a5a540ba0668bd43e970b64872fc3b632c48469b0ae`，dnsmasq SHA256 `439a9eb6eb5f957f2dc088ca4d7e5b954cf2a1c6a7a4da946af362f482719251`；普通uid501可读resolver、getent成功和官方registry TLS401。原daemonID未变，宿主默认`.docker/.colima/.lima`均ENOENT。未重放特权修复，未验收完整B00三服务。
 
+## 固定镜像及真实运行发现
+
+主代理读ca970165/b55a64f7/4676058c实际diff；固定MySQL/ES/S3平台digest，Docker29 containerd Id=manifest的适配同时约束Descriptor与RepoDigest，没有仅放松Id检查。实际只读image inspect exit0：MySQL manifest dab0a802…/amd64/linux；ES c2a3ed5f…/arm64/linux，与冻结值一致。S3成功下载为实施者报告，尚待主代理实际核对。
+
+capability检查改为标准化`CAP_`前缀后仍要求NET_RAW dropped，含错误CAP_SYS_ADMIN拒绝负例，尚待冻结后复跑。主代理此前config/policy exit0 11/11仅对应新增该负例之前的代码，不能冒充12项已通过。
+
+实施真实诊断62262发现internal网络端口未发布；主代理裁决见`tasks/B00-services.md`的本地bridge段落。允许普通专用bridge不等于允许非回环发布/默认网络/任意外网调用，亦不宣称出网阻断。所有真实MySQL JDBC/ES/S3成功条件、网络与清理负例仍待完整候选。
+
 按用户sudo边界进入waiting_decision：仅提议备份当前guest resolver、按官方方式写两个精确配置并重启dnsmasq，保留回滚；未执行特权修复、宿主DNS更改或包升级。4小时heartbeat22:39:01UTC已通过App原位PAUSED并读回核对。原代理最终资源清单仅任务VM57942/57944/57957，无images/containers/volumes/下载句柄。主代理暂停流程参照OpenAI Docs [定时任务](https://learn.chatgpt.com/docs/automations)，现有配置保留，不新建任务。

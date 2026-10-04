@@ -23,6 +23,12 @@
 - 保留任务专用private network/volume/client/profile；三个服务各自具有限CPU/内存/日志/健康检查，非privileged、无host网络、无Docker socket/Home挂载。优先现有4GiB VM，串行测试；若实际容量不足，可在验证v1配置后仅为此profile保留盘增加到最多6GiB（宿主16GiB），同步严格完整配置校验和记录，不改宿主内核设置。
 - 每服务独立数据volume、精确标签/挂载/全部端口校验。dev入口一次启动三服务，重复不增加第二套；status报告安全地址/版本/健康，不输出secret。stop保留数据；test唯一project/volume，只收回确切本人资源。
 
+### 本地bridge裁决（2026-10-04）
+
+实际Docker29.5.2上，`internal:true`单网络容器虽healthy且HostConfig记录127.0.0.1映射，但NetworkSettings端口为空，主机JDBC不可达。实施诊断62262 exit0、确切测试资源已清理；[上游同版本报告](https://github.com/moby/moby/discussions/53256)支持该观察，不作为单凭网页验收。主代理允许改为**唯一任务user-defined bridge、internal:false**，网络driver option `com.docker.network.bridge.host_binding_ipv4=127.0.0.1`，每个published port仍显式127.0.0.1。不得用默认bridge、host网络、额外代理或修改宿主/daemon全局配置。
+
+边界变化已向用户说明：这是任务资源隔离和回环入站限制，**不是禁止出网的沙箱**；[Docker官方bridge文档](https://docs.docker.com/engine/network/drivers/bridge/)说明默认masquerading支持出网。测试仍仅明确本地endpoint，不因此授权任何真实内网/AWS/外部业务服务访问。同步验证实际network Driver/Internal/Options/IPv6、精确容器网络成员及全部发布端口/宿主lsof；补网络漂移负例，不弱化其他安全条件。
+
 ## 真实验收与交付
 
 MySQL继续原Java8/JDBC两空库、事务/CAS/UTF8/UTC/重启验收。ES：健康、认证、唯一测试index写/读/搜索/删除、错误凭据拒绝、重启数据保留。S3：签名认证、唯一测试bucket/object PUT/GET校验字节hash、LIST/DELETE、匿名/错误签名拒绝、重启对象保留；只删本人合成测试数据。SDK/CLI不得读用户AWS环境/默认profile或访问外网AWS；只用明确loopback endpoint和任务随机秘密。
