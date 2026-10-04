@@ -93,7 +93,7 @@ export function validateContainer(data, entry) {
   resourceOwner(data, entry, "container")
   const h = data.HostConfig
   if (data.Image !== IMAGE_ID || h.Privileged || h.NetworkMode === "host" || h.Memory !== 805306368 || h.MemorySwap !== 805306368 || h.NanoCpus !== 1000000000 || h.PidsLimit !== 128 || h.LogConfig.Type !== "json-file" || h.LogConfig.Config["max-size"] !== "5m" || h.LogConfig.Config["max-file"] !== "2") throw new Error("B00_CONTAINER_POLICY")
-  if (!h.SecurityOpt.includes("no-new-privileges:true") || !h.CapDrop.includes("NET_RAW")) throw new Error("B00_CONTAINER_SECURITY")
+  if (!h.SecurityOpt.includes("no-new-privileges:true") || !h.CapDrop.map((value) => value.replace(/^CAP_/, "")).includes("NET_RAW")) throw new Error("B00_CONTAINER_SECURITY")
   const expectedMounts = [
     { type: "volume", source: `/var/lib/docker/volumes/${entry.project}-data/_data`, destination: "/var/lib/mysql", rw: true },
     { type: "bind", source: join(entry.dir, "initialize.sql"), destination: "/docker-entrypoint-initdb.d/10-limited-account.sql", rw: false },

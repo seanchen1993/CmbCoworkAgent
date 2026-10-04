@@ -23,6 +23,12 @@ function container() {
   }
 }
 test("exact loopback container with five exact mounts passes", () => assert.equal(validateContainer(container(), entry), 54321))
+test("Docker canonical CAP_NET_RAW retains the exact capability-drop policy", () => {
+  const c = container(); c.HostConfig.CapDrop = ["CAP_NET_RAW"]
+  assert.equal(validateContainer(c, entry), 54321)
+  c.HostConfig.CapDrop = ["CAP_SYS_ADMIN"]
+  assert.throws(() => validateContainer(c, entry), /B00_CONTAINER_SECURITY/)
+})
 test("all published bindings are checked, including extra exposed ports", () => {
   for (const mutate of [
     (c) => { c.NetworkSettings.Ports["33060/tcp"] = [{ HostIp: "0.0.0.0", HostPort: "54322" }] },
