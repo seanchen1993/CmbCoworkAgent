@@ -59,7 +59,7 @@ export async function image(state, { pull = false } = {}) {
   await daemon(state)
   if (pull) await docker(state, ["pull", "--platform", "linux/amd64", MYSQL_IMAGE], { timeoutMs: 600000, maxOutput: 262144 })
   const data = JSON.parse(await docker(state, ["image", "inspect", MYSQL_IMAGE], { stdoutOnly: true }))[0]
-  if (data.Id !== IMAGE_ID || data.Architecture !== "amd64" || data.Os !== "linux" || !data.Config.Env.some((v) => /^MYSQL_VERSION=5\.7\.44(?:-|$)/.test(v))) throw new Error("B00_IMAGE_VERSION")
+  if (data.Id !== IMAGE_ID || data.Descriptor?.digest !== IMAGE_ID || !data.RepoDigests?.includes(`mysql@${IMAGE_ID}`) || data.Architecture !== "amd64" || data.Os !== "linux" || !data.Config.Env.some((v) => /^MYSQL_VERSION=5\.7\.44(?:-|$)/.test(v))) throw new Error("B00_IMAGE_VERSION")
   return { image: MYSQL_IMAGE, id: data.Id, architecture: data.Architecture }
 }
 

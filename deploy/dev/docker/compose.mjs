@@ -3,7 +3,10 @@ import { join } from "node:path"
 export const MYSQL_VERSION = "5.7.44"
 export const MYSQL_DIGEST = "sha256:dab0a802b44617303694fb17d166501de279c3031ddeb28c56ecf7fcab5ef0da"
 export const MYSQL_IMAGE = `docker.io/library/mysql:${MYSQL_VERSION}@${MYSQL_DIGEST}`
-export const IMAGE_ID = "sha256:5107333e08a87b836d48ff7528b1e84b9c86781cc9f1748bbc1b8c42a870d933"
+// Docker 29's containerd store reports the manifest as Id. The manifest pins
+// its separate OCI config digest; do not confuse the two identities.
+export const IMAGE_ID = MYSQL_DIGEST
+export const MYSQL_CONFIG_ID = "sha256:5107333e08a87b836d48ff7528b1e84b9c86781cc9f1748bbc1b8c42a870d933"
 export const LABEL = "com.devclaw.b00"
 export const INIT_SQL = "REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'devclaw_app'@'%';\nGRANT SELECT, INSERT, UPDATE, DELETE, CREATE, INDEX ON `devclaw`.* TO 'devclaw_app'@'%';\n"
 
