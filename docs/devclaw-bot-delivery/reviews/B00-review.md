@@ -88,3 +88,11 @@ E4核心修复f5ba1174：主代理读finishFailedStart/classifyStartup，并独�
 ## 12:21检查点（1c380c9d，尚未候选）
 
 主代理读实际CLI/probe/restart/network成员diff；E5已传signal且停止后检查aborted，最终实测仍待。子代理20/20离线自测不是主代理复验。5555第二环境license失败；后加null等待但当时未记录null，不能确认为根因。54429与47045均exit1且finally精确清理，47045第二环境定位services-persist；旧固定错误regex漏数字使B00_S3_*被折为controlled。已要求仅补安全操作名/数字status并记录首错，不凭通用重试掩盖持久化；真实两环境全通过、故障/SIGTERM清理和冻结回归仍待。
+
+## 19:52恢复及独立离线回归（4b80ef11，尚未最终候选）
+
+主代理核对原worker quota-errored停止后恢复同一attempt；实际同daemon/VM、三固定镜像、无容器卷/测试进程。4b80ef11只另有未跟踪es-startup诊断，未丢弃或重跑未知副作用。22个已提交文件均在授权范围，package仅新增scripts、部署README追加；主代理读Java/JDBC、CLI与lifecycle-real草稿，实际真实清理验收未通过前不接受。
+
+主代理以Node22独立执行：`node --test tests/bot/docker/{config,policy,failure,services}.spec.mjs` exit0（20/20、skip0）；`node tests/bot/check-contracts.mjs`会话60037 exit0（24/24、生成漂移与类型消费）；`node deploy/dev/cli.mjs mock --profile dev`会话41436 exit0（15/15，S3/ES旧mock仍disabled）；node/web `tsc --noEmit -p tsconfig.{node,web}.json --composite false`会话54489/4738各exit0。全部句柄关闭。复验后实际Git仅未跟踪es-startup，相关源与4b80ef11无diff。新readiness代码还需另行测试，以上不替代最终真实Docker/JDBC验收。
+
+许可问题：子代理补记真实33026前三样本HTTP404→后续200 Basic active；52508本轮10次均200，二者清理完毕。这是worker诊断，不是主代理复跑。[官方v8 GET license](https://www.elastic.co/docs/api/doc/elasticsearch/v8/operation/operation-license-get)支持启动cluster-state暂态404。已限定只为404做有界等待，200异常/非Basic/非active及认证错误均失败；禁止开trial和通用重试S3持久化断言。
