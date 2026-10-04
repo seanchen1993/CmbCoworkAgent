@@ -6,6 +6,8 @@
 
 ## 当前动作与实际证据
 
+**20:20最新进展：** db688142 tracked clean，仅lookup-wire.mjs未跟踪保留；共享readiness已实现，主代理独立readiness+services6/6 exit0。旧f376快照91840 exit1于restart/B00_S3_LOOKUP_BODY，test-f1359785eed7c3d8全清理。原writer仅查受控lookup wire结构/HTTP/可能wget尾文污染；当前诊断句柄须先向原者核对，不能重复启动。E6前置ownership核对明确独立有界后再开始30s readiness，不能不实宣称全部await均30s。当前额度可用primary89%/weekly92%（20:20），不是已耗尽；新代码未验收，B01未派。
+
 **43957卷注册诊断已完成：** worker报告test-bacd9dc8110344c8 exit0且全清理，无运行句柄。持久化.dat卷[1,2,3,4]；样本0–13 API IO/无注册；14–17 LIST200/key可见但GET500/InternalError且无注册；18–19四卷均注册固定127.0.0.1:8080后GET200/contentMatch，无重写。仅该诊断实证，不补造45595当时lookup。原writer正按已定边界实现API认证+全部已有卷注册的共享30s就绪检查，再真实全验收，不再重复整套诊断。20:10:45UTC额度仍可用primary57%/secondary87%，短窗2026-10-05T00:52:17Z、周窗10-09T23:28:57Z；未到限额不擅自判等待。
 
 **S3最新诊断62561：** f3578b3代码、test-d7a3ff72548fa253 exit0且清理。重启前GET200/hash正确；重启后0–13样本GET/LIST无响应B00_HTTP_IO，约7s后14–19均GET200/contentMatch和LIST200/keyVisible，未改写数据。证明master-only健康过早；不等于45595的HTTP500卷机制已确认。原writer只验证已有.dat卷ID与固定本容器master lookup，再为lifecycle.start/restart和CLI status共用有界readiness；认证/结构错误立即拒绝，30s界与AbortSignal，persist读取/hash严格不改。暂无新真实全验收。
