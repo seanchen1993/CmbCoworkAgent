@@ -6,6 +6,8 @@
 
 ## 当前动作与实际证据
 
+**b688fb89优先：** 94357已exit0全清理，证实lookup HTTP200合法locations后被wget progress尾文污染JSON；不是null。修复-q -S保持严格parser，并给resources传播同signal/剩余deadline，cleanup默认不改。主代理已读diff、独立全部Docker离线23/23 skip0 exit0。worker唯一15011/test-b105ec2b330b7ad9（20:22附近）验证quietwire，结果待核对；无其他生命周期，未全验收。下一先收此句柄结果/清理，再完整两环境和故障/CLI，不重放已完成94357。
+
 **20:20最新进展：** db688142 tracked clean，仅lookup-wire.mjs未跟踪保留；共享readiness已实现，主代理独立readiness+services6/6 exit0。旧f376快照91840 exit1于restart/B00_S3_LOOKUP_BODY，test-f1359785eed7c3d8全清理。原writer仅查受控lookup wire结构/HTTP/可能wget尾文污染；当前诊断句柄须先向原者核对，不能重复启动。E6前置ownership核对明确独立有界后再开始30s readiness，不能不实宣称全部await均30s。当前额度可用primary89%/weekly92%（20:20），不是已耗尽；新代码未验收，B01未派。
 
 **43957卷注册诊断已完成：** worker报告test-bacd9dc8110344c8 exit0且全清理，无运行句柄。持久化.dat卷[1,2,3,4]；样本0–13 API IO/无注册；14–17 LIST200/key可见但GET500/InternalError且无注册；18–19四卷均注册固定127.0.0.1:8080后GET200/contentMatch，无重写。仅该诊断实证，不补造45595当时lookup。原writer正按已定边界实现API认证+全部已有卷注册的共享30s就绪检查，再真实全验收，不再重复整套诊断。20:10:45UTC额度仍可用primary57%/secondary87%，短窗2026-10-05T00:52:17Z、周窗10-09T23:28:57Z；未到限额不擅自判等待。
