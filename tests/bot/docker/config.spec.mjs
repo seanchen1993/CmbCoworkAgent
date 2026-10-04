@@ -33,7 +33,10 @@ test("Compose keeps secrets out of environment and limits the exact private reso
   const mysql = spec.services.mysql
   assert.equal(mysql.image, MYSQL_IMAGE)
   assert.equal(mysql.platform, "linux/amd64")
-  assert.equal(spec.networks.private.internal, true)
+  assert.equal(spec.networks.private.internal, false)
+  assert.equal(spec.networks.private.driver, "bridge")
+  assert.equal(spec.networks.private.enable_ipv6, false)
+  assert.deepEqual(spec.networks.private.driver_opts, { "com.docker.network.bridge.host_binding_ipv4": "127.0.0.1" })
   assert.deepEqual(mysql.ports, [{ target: 3306, published: "0", host_ip: "127.0.0.1", protocol: "tcp" }])
   assert.equal(mysql.environment.MYSQL_ROOT_HOST, "localhost")
   assert.equal(mysql.environment.MYSQL_ROOT_PASSWORD, undefined)
@@ -44,4 +47,25 @@ test("Compose keeps secrets out of environment and limits the exact private reso
   assert.equal(mysql.mem_limit, "768m")
   assert.equal(mysql.pids_limit, 128)
   assert.equal(JSON.stringify(spec).includes("docker.sock"), false)
+})
+test("three pinned services expose only their API with file credentials and bounded resources", () => {
+  const spec = composeSpec({ project: "devclaw-bot-dev", role: "dev", owner: "12345678-1234-1234-1234-123456789abc", dir: `${RUNTIME}/devclaw-bot-dev` })
+  assert.deepEqual(Object.keys(spec.services), ["mysql", "es", "s3"])
+  assert.equal(Object.keys(spec.volumes).length, 3)
+  for (const [service, target] of [["es", 9200], ["s3", 8333]]) {
+    const s = spec.services[service]
+    assert.match(s.image, /@sha256:[a-f0-9]{64}$/)
+    assert.equal(s.platform, "linux/arm64")
+    assert.deepEqual(s.ports, [{ target, published: "0", host_ip: "127.0.0.1", protocol: "tcp" }])
+    assert.equal(s.restart, "no")
+    assert.equal(s.mem_limit, s.memswap_limit)
+    assert.equal(s.logging.options["max-size"], "5m")
+    assert.deepEqual(s.networks, ["private"])
+  }
+  assert.equal(spec.services.es.environment["xpack.security.enabled"], "true")
+  assert.equal(spec.services.es.environment["xpack.license.self_generated.type"], "basic")
+  assert.equal(spec.services.es.environment.ELASTIC_PASSWORD, undefined)
+  assert.equal(spec.services.es.environment.ELASTIC_PASSWORD_FILE, "/run/secrets/es-password")
+  assert.equal(spec.services.s3.command.includes("-s3.iam=false"), true)
+  assert.equal(spec.services.s3.command.includes("-master.telemetry=false"), true)
 })

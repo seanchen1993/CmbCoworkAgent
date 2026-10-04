@@ -1,14 +1,8 @@
 import { hostState } from "../../../deploy/dev/docker/host.mjs"
-import { prepareProject, start, restart, cleanupTest } from "../../../deploy/dev/docker/lifecycle.mjs"
+import { prepareProject, start, restart, cleanupTest, verifyListeners } from "../../../deploy/dev/docker/lifecycle.mjs"
 import { compileDockerProbe, jdbc } from "../../../deploy/dev/docker/probe.mjs"
-import { privateTemp, removePrivateTemp, run } from "../../../deploy/dev/process.mjs"
-
-export async function verifyListeners(port) {
-  const output = await run("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fn"], { env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" }, stdoutOnly: true })
-  const addresses = output.split("\n").filter((line) => line.startsWith("n"))
-  if (!addresses.length || addresses.some((line) => line !== `n127.0.0.1:${port}`)) throw new Error("B00_HOST_LISTENER")
-  return { port, listeners: addresses.length, address: "127.0.0.1" }
-}
+import { privateTemp, removePrivateTemp } from "../../../deploy/dev/process.mjs"
+export { verifyListeners }
 
 export async function mysqlReal(tools, signal) {
   const state = await hostState(), dir = await privateTemp()
@@ -44,7 +38,7 @@ if (process.argv[1]?.endsWith("/mysql-real.mjs")) {
   const controller = new AbortController()
   const cancel = () => controller.abort()
   process.once("SIGTERM", cancel); process.once("SIGINT", cancel)
-  const timer = setTimeout(cancel, 420000)
+  const timer = setTimeout(cancel, 600000)
   try {
     console.log(JSON.stringify({ status: "verified", proof: await mysqlReal({ java, javac, jdbc: jdbcJar }, controller.signal) }))
   } catch (error) {

@@ -1,8 +1,11 @@
 import { join } from "node:path"
 import { randomBytes, createHash } from "node:crypto"
 import { writeFile, readFile, lstat, rm } from "node:fs/promises"
+import { isDeepStrictEqual } from "node:util"
+import { run } from "../process.mjs"
 import { RUNTIME, docker, daemon, privateDirectory, privateFile } from "./host.mjs"
-import { composeSpec, INIT_SQL, IMAGE_ID, MYSQL_IMAGE, LABEL } from "./compose.mjs"
+import { composeSpec, INIT_SQL, S3_START, IMAGE_ID, MYSQL_IMAGE, LABEL } from "./compose.mjs"
+import { SERVICE_IMAGES, serviceImage } from "./service-images.mjs"
 
 const ownedTests = new Map()
 
@@ -13,13 +16,15 @@ export async function prepareProject(state, { test = false, existing = false } =
   if (!existing) try {
     await privateDirectory(dir, true)
     await writeFile(join(dir, "owner.json"), JSON.stringify({ project, role, owner: state.owner.id }) + "\n", { mode: 0o600, flag: "wx" })
-    const root = randomBytes(32).toString("hex"), app = randomBytes(32).toString("hex")
-    for (const [name, value] of [["root-password", root], ["app-password", app], ["app-client.cnf", `[client]\nuser=devclaw_app\npassword=${app}\n`]]) {
+    const root = randomBytes(32).toString("hex"), app = randomBytes(32).toString("hex"), es = randomBytes(32).toString("hex")
+    const s3 = { accessKey: randomBytes(16).toString("hex"), secretKey: randomBytes(32).toString("hex") }
+    for (const [name, value] of [["root-password", root], ["app-password", app], ["app-client.cnf", `[client]\nuser=devclaw_app\npassword=${app}\n`], ["es-password", es], ["es-client.cnf", `user = "elastic:${es}"\n`], ["s3-client.json", JSON.stringify(s3)], ["s3-config.json", JSON.stringify(s3Config(s3))]]) {
       await writeFile(join(dir, name), value + "\n", { mode: 0o600, flag: "wx" })
     }
-    await writeFile(join(dir, "secret-hashes.json"), JSON.stringify({ root: hash(root), app: hash(app) }) + "\n", { mode: 0o600, flag: "wx" })
+    await writeFile(join(dir, "secret-hashes.json"), JSON.stringify({ root: hash(root), app: hash(app), es: hash(es), s3: hash(JSON.stringify(s3)) }) + "\n", { mode: 0o600, flag: "wx" })
     // Static SQL has no secrets. mysqld's uid must read the individually RO-mounted file.
     await writeFile(join(dir, "initialize.sql"), INIT_SQL, { mode: 0o644, flag: "wx" })
+    await writeFile(join(dir, "s3-start.sh"), S3_START, { mode: 0o644, flag: "wx" })
     await writeFile(join(dir, "compose.json"), JSON.stringify(composeSpec({ project, owner: state.owner.id, role, dir }), null, 2) + "\n", { mode: 0o600, flag: "wx" })
   } catch (error) { if (error.code !== "EEXIST" || test) throw error }
   const entry = { project, role, dir, owner: state.owner.id }
@@ -38,17 +43,23 @@ export async function validateProject(entry) {
   if (JSON.stringify(owner) !== JSON.stringify({ project: entry.project, role: entry.role, owner: entry.owner })) throw new Error("B00_RESOURCE_OWNER")
   const root = (await privateFile(join(entry.dir, "root-password"))).trim()
   const app = (await privateFile(join(entry.dir, "app-password"))).trim()
-  if (!/^[a-f0-9]{64}$/.test(root) || !/^[a-f0-9]{64}$/.test(app) || app === root) throw new Error("B00_SECRET")
+  const es = (await privateFile(join(entry.dir, "es-password"))).trim()
+  const s3 = JSON.parse(await privateFile(join(entry.dir, "s3-client.json")))
+  if (![root, app, es, s3.secretKey].every((v) => /^[a-f0-9]{64}$/.test(v)) || new Set([root, app, es, s3.secretKey]).size !== 4 || !/^[a-f0-9]{32}$/.test(s3.accessKey)) throw new Error("B00_SECRET")
   const expectedHashes = JSON.parse(await privateFile(join(entry.dir, "secret-hashes.json")))
-  if (expectedHashes.root !== hash(root) || expectedHashes.app !== hash(app)) throw new Error("B00_SECRET_CONFIG")
+  if (!isDeepStrictEqual(expectedHashes, { root: hash(root), app: hash(app), es: hash(es), s3: hash(JSON.stringify(s3)) })) throw new Error("B00_SECRET_CONFIG")
   if (await privateFile(join(entry.dir, "app-client.cnf")) !== `[client]\nuser=devclaw_app\npassword=${app}\n\n`) throw new Error("B00_SECRET_CONFIG")
+  if (await privateFile(join(entry.dir, "es-client.cnf")) !== `user = "elastic:${es}"\n\n` || await privateFile(join(entry.dir, "s3-config.json")) !== JSON.stringify(s3Config(s3)) + "\n") throw new Error("B00_SECRET_CONFIG")
   const actual = JSON.parse(await privateFile(join(entry.dir, "compose.json")))
   if (JSON.stringify(actual) !== JSON.stringify(composeSpec({ project: entry.project, owner: entry.owner, role: entry.role, dir: entry.dir }))) throw new Error("B00_COMPOSE_CONFIG")
-  const sqlStat = await lstat(join(entry.dir, "initialize.sql"))
-  if (!sqlStat.isFile() || sqlStat.isSymbolicLink() || sqlStat.uid !== process.getuid() || sqlStat.nlink !== 1 || await readFile(join(entry.dir, "initialize.sql"), "utf8") !== INIT_SQL) throw new Error("B00_INIT_CONFIG")
+  for (const [name, expected] of [["initialize.sql", INIT_SQL], ["s3-start.sh", S3_START]]) {
+    const stat = await lstat(join(entry.dir, name))
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o644 || await readFile(join(entry.dir, name), "utf8") !== expected) throw new Error("B00_INIT_CONFIG")
+  }
 }
 
 function hash(value) { return createHash("sha256").update(value).digest("hex") }
+function s3Config(credentials) { return { identities: [{ name: "devclaw-local", credentials: [credentials], actions: ["Admin", "Read", "Write", "List", "Tagging"] }] } }
 
 export async function compose(state, entry, args, options = {}) {
   await validateProject(entry)
@@ -71,47 +82,60 @@ function resourceOwner(data, entry, type) {
 export async function resources(state, entry) {
   await validateProject(entry)
   const ids = (await docker(state, ["ps", "-aq", "--filter", `label=com.docker.compose.project=${entry.project}`], { stdoutOnly: true })).split(/\s+/).filter(Boolean)
-  if (ids.length > 1) throw new Error("B00_UNEXPECTED_CONTAINER")
-  const result = { container: null, volume: null, network: null }
-  if (ids.length) {
-    result.container = JSON.parse(await docker(state, ["inspect", ids[0]], { stdoutOnly: true }))[0]
-    resourceOwner(result.container, entry, "container")
-    if (result.container.Config.Labels["com.docker.compose.service"] !== "mysql") throw new Error("B00_UNEXPECTED_CONTAINER")
+  if (ids.length > 3) throw new Error("B00_UNEXPECTED_CONTAINER")
+  const result = { containers: {}, volumes: {}, container: null, volume: null, network: null }
+  if (ids.length) for (const container of JSON.parse(await docker(state, ["inspect", ...ids], { stdoutOnly: true }))) {
+    resourceOwner(container, entry, "container")
+    const service = container.Config.Labels["com.docker.compose.service"]
+    if (!["mysql", "es", "s3"].includes(service) || result.containers[service]) throw new Error("B00_UNEXPECTED_CONTAINER")
+    result.containers[service] = container
   }
   // Exact names, plus both our labels and Compose ownership, are required before any mutation.
-  for (const [type, name] of [["volume", `${entry.project}-data`], ["network", `${entry.project}-private`]]) {
+  for (const [type, suffix] of [["volume", "data"], ["volume", "es-data"], ["volume", "s3-data"], ["network", "private"]]) {
+    const name = `${entry.project}-${suffix}`
     const listed = (await docker(state, [type, "ls", "--format", "{{.Name}}"], { stdoutOnly: true })).split("\n")
     if (listed.includes(name)) {
-      result[type] = JSON.parse(await docker(state, [type, "inspect", name], { stdoutOnly: true }))[0]
-      resourceOwner(result[type], entry, type)
+      const resource = JSON.parse(await docker(state, [type, "inspect", name], { stdoutOnly: true }))[0]
+      resourceOwner(resource, entry, type)
+      if (type === "network") { validateNetwork(resource, entry); result.network = resource }
+      else result.volumes[suffix] = resource
     }
   }
-  return result
+  return { ...result, container: result.containers.mysql ?? null, volume: result.volumes.data ?? null }
 }
 
-export function validateContainer(data, entry) {
+export function validateNetwork(data, entry) {
+  resourceOwner(data, entry, "network")
+  if (data.Name !== `${entry.project}-private` || data.Driver !== "bridge" || data.Internal !== false || data.EnableIPv6 !== false || !isDeepStrictEqual(data.Options, { "com.docker.network.bridge.host_binding_ipv4": "127.0.0.1" })) throw new Error("B00_NETWORK_POLICY")
+}
+
+export function validateContainer(data, entry, service = "mysql") {
   resourceOwner(data, entry, "container")
+  const all = composeSpec({ project: entry.project, owner: entry.owner, role: entry.role, dir: entry.dir })
+  const expected = all.services[service]
+  if (!expected || data.Config.Labels["com.docker.compose.service"] !== service) throw new Error("B00_UNEXPECTED_CONTAINER")
   const h = data.HostConfig
-  if (data.Image !== IMAGE_ID || h.Privileged || h.NetworkMode === "host" || h.Memory !== 805306368 || h.MemorySwap !== 805306368 || h.NanoCpus !== 1000000000 || h.PidsLimit !== 128 || h.LogConfig.Type !== "json-file" || h.LogConfig.Config["max-size"] !== "5m" || h.LogConfig.Config["max-file"] !== "2") throw new Error("B00_CONTAINER_POLICY")
-  if (!h.SecurityOpt.includes("no-new-privileges:true") || !h.CapDrop.map((value) => value.replace(/^CAP_/, "")).includes("NET_RAW")) throw new Error("B00_CONTAINER_SECURITY")
-  const expectedMounts = [
-    { type: "volume", source: `/var/lib/docker/volumes/${entry.project}-data/_data`, destination: "/var/lib/mysql", rw: true },
-    { type: "bind", source: join(entry.dir, "initialize.sql"), destination: "/docker-entrypoint-initdb.d/10-limited-account.sql", rw: false },
-    { type: "bind", source: join(entry.dir, "root-password"), destination: "/run/secrets/root-password", rw: false },
-    { type: "bind", source: join(entry.dir, "app-password"), destination: "/run/secrets/app-password", rw: false },
-    { type: "bind", source: join(entry.dir, "app-client.cnf"), destination: "/run/secrets/app-client", rw: false }
-  ]
+  const id = service === "mysql" ? IMAGE_ID : SERVICE_IMAGES[service].digest
+  const memory = Number.parseInt(expected.mem_limit) * 1048576
+  if (data.Image !== id || h.Privileged || h.NetworkMode !== `${entry.project}-private` || h.Memory !== memory || h.MemorySwap !== memory || h.NanoCpus !== expected.cpus * 1000000000 || h.PidsLimit !== expected.pids_limit || h.LogConfig.Type !== "json-file" || !isDeepStrictEqual(h.LogConfig.Config, expected.logging.options)) throw new Error("B00_CONTAINER_POLICY")
+  if (!isDeepStrictEqual(h.SecurityOpt, ["no-new-privileges:true"]) || !isDeepStrictEqual(h.CapDrop.map((value) => value.replace(/^CAP_/, "")), ["NET_RAW"]) || h.CapAdd?.length) throw new Error("B00_CONTAINER_SECURITY")
+  if (data.Config.User !== (expected.user ?? "") || (expected.command && !isDeepStrictEqual(data.Config.Cmd, expected.command)) || (expected.entrypoint && !isDeepStrictEqual(data.Config.Entrypoint, expected.entrypoint)) || !isDeepStrictEqual(data.Config.Healthcheck?.Test, expected.healthcheck.test)) throw new Error("B00_CONTAINER_CONFIG")
+  const env = Object.fromEntries(data.Config.Env.map((v) => { const i = v.indexOf("="); return [v.slice(0, i), v.slice(i + 1)] }))
+  if (Object.entries(expected.environment).some(([k, v]) => env[k] !== v) || ["MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "ELASTIC_PASSWORD", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"].some((key) => env[key] !== undefined)) throw new Error("B00_CONTAINER_CONFIG")
+  const expectedMounts = expected.volumes.map((v) => v.type === "volume" ? { type: "volume", source: `/var/lib/docker/volumes/${all.volumes[v.source].name}/_data`, destination: v.target, rw: true } : { type: "bind", source: v.source, destination: v.target, rw: !v.read_only })
+  for (const secret of expected.secrets) expectedMounts.push({ type: "bind", source: all.secrets[secret.source].file, destination: `/run/secrets/${secret.target}`, rw: false })
   const normalize = (values) => JSON.stringify(values.sort((a, b) => a.destination.localeCompare(b.destination)))
   if (normalize(data.Mounts.map((m) => ({ type: m.Type, source: m.Source, destination: m.Destination, rw: m.RW }))) !== normalize(expectedMounts)) throw new Error("B00_CONTAINER_MOUNT")
-  if (!data.Mounts.some((m) => m.Type === "volume" && m.Name === `${entry.project}-data` && m.Destination === "/var/lib/mysql")) throw new Error("B00_CONTAINER_VOLUME")
+  for (const v of expected.volumes.filter((v) => v.type === "volume")) if (!data.Mounts.some((m) => m.Type === "volume" && m.Name === all.volumes[v.source].name && m.Destination === v.target)) throw new Error("B00_CONTAINER_VOLUME")
+  const portKey = `${expected.ports[0].target}/tcp`
   for (const [key, value] of Object.entries(data.NetworkSettings.Ports)) {
-    if (key !== "3306/tcp" && value !== null) throw new Error("B00_LOOPBACK")
+    if (key !== portKey && value !== null) throw new Error("B00_LOOPBACK")
   }
-  if (Object.keys(h.PortBindings).length !== 1 || !h.PortBindings["3306/tcp"] || h.PortBindings["3306/tcp"].length !== 1 || h.PortBindings["3306/tcp"][0].HostIp !== "127.0.0.1") throw new Error("B00_LOOPBACK")
-  const ports = data.NetworkSettings.Ports["3306/tcp"]
+  if (Object.keys(h.PortBindings).length !== 1 || !h.PortBindings[portKey] || h.PortBindings[portKey].length !== 1 || h.PortBindings[portKey][0].HostIp !== "127.0.0.1") throw new Error("B00_LOOPBACK")
+  const ports = data.NetworkSettings.Ports[portKey]
   if (!ports || ports.length !== 1 || ports[0].HostIp !== "127.0.0.1") throw new Error("B00_LOOPBACK")
   const port = Number(ports[0].HostPort)
-  if (!Number.isInteger(port) || port <= 1024 || port > 65535 || port === 3306) throw new Error("B00_LOOPBACK")
+  if (!Number.isInteger(port) || port <= 1024 || port > 65535 || [3306, 9200, 9300, 8333, 9333, 8888].includes(port)) throw new Error("B00_LOOPBACK")
   if (Object.keys(data.NetworkSettings.Networks).length !== 1 || !data.NetworkSettings.Networks[`${entry.project}-private`]) throw new Error("B00_PRIVATE_NETWORK")
   return port
 }
@@ -119,15 +143,23 @@ export function validateContainer(data, entry) {
 export async function start(state, entry, { signal, failAt } = {}) {
   await daemon(state)
   await image(state)
+  await serviceImage(state, "es")
+  await serviceImage(state, "s3")
   await resources(state, entry)
   if (signal?.aborted) throw new Error("B00_CANCELLED")
   try {
-    await compose(state, entry, ["up", "--detach", "--wait", "--wait-timeout", "120", "--no-build", "--pull", "never"], { timeoutMs: 140000, maxOutput: 262144, signal })
+    await compose(state, entry, ["up", "--detach", "--wait", "--wait-timeout", "180", "--no-build", "--pull", "never"], { timeoutMs: 200000, maxOutput: 262144, signal })
     if (failAt === "after-start") throw new Error("B00_INJECTED")
     const current = await resources(state, entry)
-    if (!current.container || !current.volume || !current.network || current.network.Internal !== true || current.container.State.Health.Status !== "healthy") throw new Error("B00_READINESS")
-    const port = validateContainer(current.container, entry)
-    return { project: entry.project, container: current.container.Id, volume: `${entry.project}-data`, network: `${entry.project}-private`, port, host: "127.0.0.1", image: MYSQL_IMAGE, status: "healthy" }
+    if (Object.keys(current.containers).length !== 3 || Object.keys(current.volumes).length !== 3 || !current.network) throw new Error("B00_READINESS")
+    const ports = {}, containers = {}
+    for (const [service, container] of Object.entries(current.containers)) {
+      if (container.State.Health?.Status !== "healthy") throw new Error("B00_READINESS")
+      ports[service] = validateContainer(container, entry, service)
+      await verifyListeners(ports[service])
+      containers[service] = container.Id
+    }
+    return { project: entry.project, containers, volumes: Object.keys(current.volumes).map((suffix) => `${entry.project}-${suffix}`), network: `${entry.project}-private`, ports, port: ports.mysql, host: "127.0.0.1", image: MYSQL_IMAGE, status: "healthy" }
   } catch (error) {
     // Even a timed-out Compose client may have created a container. Reconcile exact owned resources.
     await stop(state, entry)
@@ -138,9 +170,9 @@ export async function start(state, entry, { signal, failAt } = {}) {
 export async function stop(state, entry) {
   await daemon(state)
   const current = await resources(state, entry)
-  if (current.container) {
-    await docker(state, ["stop", "--time", "15", current.container.Id], { timeoutMs: 30000 })
-    const data = JSON.parse(await docker(state, ["inspect", current.container.Id], { stdoutOnly: true }))[0]
+  for (const container of Object.values(current.containers)) {
+    await docker(state, ["stop", "--time", "15", container.Id], { timeoutMs: 30000 })
+    const data = JSON.parse(await docker(state, ["inspect", container.Id], { stdoutOnly: true }))[0]
     resourceOwner(data, entry, "container")
     if (data.State.Running) throw new Error("B00_STOP_FAILED")
   }
@@ -152,11 +184,11 @@ export async function cleanupTest(state, entry) {
   if (!entry.inode || ownedTests.get(entry.project) !== entry || entry.dir !== join(RUNTIME, entry.project)) throw new Error("B00_DIRECTORY_OWNER")
   await daemon(state)
   const current = await resources(state, entry)
-  if (current.container) await docker(state, ["rm", "--force", current.container.Id], { timeoutMs: 30000 })
+  for (const container of Object.values(current.containers)) await docker(state, ["rm", "--force", container.Id], { timeoutMs: 30000 })
   if (current.network) await docker(state, ["network", "rm", `${entry.project}-private`])
-  if (current.volume) await docker(state, ["volume", "rm", `${entry.project}-data`])
+  for (const suffix of Object.keys(current.volumes)) await docker(state, ["volume", "rm", `${entry.project}-${suffix}`])
   const after = await resources(state, entry)
-  if (after.container || after.network || after.volume) throw new Error("B00_CLEANUP_FAILED")
+  if (Object.keys(after.containers).length || after.network || Object.keys(after.volumes).length) throw new Error("B00_CLEANUP_FAILED")
   await validateProject(entry)
   await rm(entry.dir, { recursive: true })
   try { await lstat(entry.dir); throw new Error("B00_CLEANUP_FAILED") } catch (error) { if (error.code !== "ENOENT") throw error }
@@ -173,4 +205,17 @@ export async function appSql(state, entry, sql) {
 export async function restart(state, entry) {
   await stop(state, entry)
   return start(state, entry)
+}
+
+export async function verifyListeners(port) {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    let output
+    try { output = await run("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fn"], { env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" }, stdoutOnly: true }) }
+    catch (error) { if (error.failureCode !== "exit" || error.exitCode !== 1) throw error }
+    const addresses = (output ?? "").split("\n").filter((line) => line.startsWith("n"))
+    if (addresses.some((line) => line !== `n127.0.0.1:${port}`)) throw new Error("B00_HOST_LISTENER")
+    if (addresses.length) return { port, listeners: addresses.length, address: "127.0.0.1" }
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  throw new Error("B00_HOST_LISTENER")
 }
