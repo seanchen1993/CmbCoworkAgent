@@ -34,6 +34,9 @@ test("exact task bridge rejects internal/default/IPv6/extra options and foreign 
   const network = { Name: `${entry.project}-private`, Driver: "bridge", Internal: false, EnableIPv6: false, Options: spec.networks.private.driver_opts, Labels: { ...spec.networks.private.labels, "com.docker.compose.project": entry.project } }
   validateNetwork(network, entry)
   for (const change of [{ Internal: true }, { Driver: "host" }, { EnableIPv6: true }, { Options: {} }, { Options: { ...network.Options, "unsafe": "true" } }, { Name: "bridge" }, { Labels: {} }]) assert.throws(() => validateNetwork({ ...network, ...change }, entry), /B00_(?:NETWORK_POLICY|RESOURCE_OWNER)/)
+  validateNetwork({ ...network, Containers: { owned: {} } }, entry, [{ Id: "owned", State: { Running: true } }])
+  validateNetwork({ ...network, Containers: {} }, entry, [{ Id: "stopped", State: { Running: false } }])
+  for (const members of [{}, { owned: {}, foreign: {} }]) assert.throws(() => validateNetwork({ ...network, Containers: members }, entry, [{ Id: "owned", State: { Running: true } }]), /B00_NETWORK_MEMBERS/)
 })
 test("ES and S3 exact mounts, API-only ports, file credentials and network membership", () => {
   for (const service of ["es", "s3"]) {

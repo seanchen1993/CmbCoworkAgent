@@ -35,10 +35,10 @@ export async function jdbc(state, entry, tools, dir, action, { signal, wrongPass
   return result
 }
 
-export async function verifyDev(state, entry, tools) {
+export async function verifyDev(state, entry, tools, signal) {
   const dir = await privateTemp()
   try {
-    const driver = await compileDockerProbe(tools, dir)
-    return { driver, jdbc: await jdbc(state, entry, tools, dir, "ping") }
+    const driver = await compileDockerProbe(tools, dir, signal)
+    return { driver, jdbc: await jdbc(state, entry, tools, dir, "ping", { signal }) }
   } finally { await removePrivateTemp(dir) }
 }

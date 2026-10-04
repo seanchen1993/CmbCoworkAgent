@@ -97,16 +97,17 @@ export async function resources(state, entry) {
     if (listed.includes(name)) {
       const resource = JSON.parse(await docker(state, [type, "inspect", name], { stdoutOnly: true }))[0]
       resourceOwner(resource, entry, type)
-      if (type === "network") { validateNetwork(resource, entry); result.network = resource }
+      if (type === "network") { validateNetwork(resource, entry, Object.values(result.containers)); result.network = resource }
       else result.volumes[suffix] = resource
     }
   }
   return { ...result, container: result.containers.mysql ?? null, volume: result.volumes.data ?? null }
 }
 
-export function validateNetwork(data, entry) {
+export function validateNetwork(data, entry, containers) {
   resourceOwner(data, entry, "network")
   if (data.Name !== `${entry.project}-private` || data.Driver !== "bridge" || data.Internal !== false || data.EnableIPv6 !== false || !isDeepStrictEqual(data.Options, { "com.docker.network.bridge.host_binding_ipv4": "127.0.0.1" })) throw new Error("B00_NETWORK_POLICY")
+  if (containers && !isDeepStrictEqual(Object.keys(data.Containers ?? {}).sort(), containers.filter(c => c.State.Running).map(c => c.Id).sort())) throw new Error("B00_NETWORK_MEMBERS")
 }
 
 export function validateContainer(data, entry, service = "mysql") {
@@ -223,9 +224,10 @@ export async function appSql(state, entry, sql) {
   return docker(state, ["exec", "-i", current.container.Id, "mysql", "--defaults-extra-file=/run/secrets/app-client", "--protocol=TCP", "--host=127.0.0.1", "--database=devclaw", "--batch", "--skip-column-names"], { input: sql, stdoutOnly: true })
 }
 
-export async function restart(state, entry) {
+export async function restart(state, entry, { signal } = {}) {
   await stop(state, entry)
-  return start(state, entry)
+  if (signal?.aborted) throw new Error("B00_CANCELLED")
+  return start(state, entry, { signal })
 }
 
 export async function verifyListeners(port) {

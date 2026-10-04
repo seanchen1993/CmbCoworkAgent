@@ -1,7 +1,8 @@
 import { hostState } from "../../../deploy/dev/docker/host.mjs"
-import { prepareProject, start, restart, cleanupTest, verifyListeners } from "../../../deploy/dev/docker/lifecycle.mjs"
+import { prepareProject, start, restart, resources, cleanupTest, verifyListeners } from "../../../deploy/dev/docker/lifecycle.mjs"
 import { compileDockerProbe, jdbc } from "../../../deploy/dev/docker/probe.mjs"
 import { privateTemp, removePrivateTemp } from "../../../deploy/dev/process.mjs"
+import { servicesProbe } from "../../../deploy/dev/docker/services-probe.mjs"
 export { verifyListeners }
 
 export async function mysqlReal(tools, signal) {
@@ -17,14 +18,22 @@ export async function mysqlReal(tools, signal) {
         const listener = await verifyListeners(started.port)
         const empty = await jdbc(state, entry, tools, dir, "empty", { signal })
         const probe = await jdbc(state, entry, tools, dir, "probe", { signal })
+        const services = await servicesProbe(entry, started.ports, "create", signal)
         for (const [action, options] of [["ping", { wrongPassword: true }], ["reject-version", {}]]) {
           let rejected = false
           try { await jdbc(state, entry, tools, dir, action, { ...options, signal }) } catch (error) { rejected = error.failureCode === "exit" && error.exitCode === 1 }
           if (!rejected) throw new Error("B00_EXPECTED_REJECTION")
         }
-        const restarted = await restart(state, entry)
+        const restarted = await restart(state, entry, { signal })
         const persisted = await jdbc(state, entry, tools, dir, "persist", { signal })
-        proof.push({ project: entry.project, started, listener, empty, probe, restarted, persisted })
+        const servicesPersisted = await servicesProbe(entry, restarted.ports, "persist", signal)
+        const deleted = await servicesProbe(entry, restarted.ports, "delete", signal)
+        const aborted = new AbortController(); aborted.abort()
+        let cancelled = false
+        try { await restart(state, entry, { signal: aborted.signal }) } catch (error) { cancelled = error.message === "B00_CANCELLED" }
+        const stopped = await resources(state, entry)
+        if (!cancelled || Object.values(stopped.containers).some(c => c.State.Running)) throw new Error("B00_CANCELLED_RESTART")
+        proof.push({ project: entry.project, started, listener, empty, probe, services, restarted, persisted, servicesPersisted, deleted, cancelledRestart: "stopped_without_start" })
       } finally {
         console.log(JSON.stringify({ stage: "cleaned", result: await cleanupTest(state, entry) }))
       }
@@ -42,7 +51,7 @@ if (process.argv[1]?.endsWith("/mysql-real.mjs")) {
   try {
     console.log(JSON.stringify({ status: "verified", proof: await mysqlReal({ java, javac, jdbc: jdbcJar }, controller.signal) }))
   } catch (error) {
-    console.log(JSON.stringify({ status: "failed", reason: /^B00_[A-Z_]+$/.test(error.message) ? error.message : error.failureCode || "controlled", exit: error.exitCode ?? 1, diagnostics: error.diagnostics }))
+    console.log(JSON.stringify({ status: "failed", reason: /^B00_[A-Z_]+$/.test(error.message) ? error.message : error.failureCode || "controlled", exit: error.exitCode ?? 1, diagnostics: error.diagnostics, diagnosticsUnavailable: error.diagnosticsUnavailable === true, stopFailed: error.stopFailed === true }))
     process.exitCode = 1
   } finally { clearTimeout(timer); process.removeListener("SIGTERM", cancel); process.removeListener("SIGINT", cancel) }
 }
