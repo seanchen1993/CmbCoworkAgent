@@ -44,13 +44,13 @@
   "scheduler": {
     "kind": "heartbeat",
     "automation_id": "devclaw-bot",
-    "status": "PAUSED",
+    "status": "ACTIVE",
     "cancellation_reason": null,
-    "pause_reason": "B00 requires explicit permission for sudo DNS repair inside the task-owned guest VM; heartbeat paused at the pre-agreed new-authority boundary, not quota exhaustion or milestone completion",
+    "pause_reason": null,
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
-    "last_run_outcome": "2026-10-03T22:39:01Z original heartbeat updated in place to PAUSED via app tool; actual TOML readback agrees, same thread/prompt/name/4-hour interval. B00 paused for user decision, not accepted; B01 not dispatched.",
-    "last_verified_at_utc": "2026-10-03T22:39:01Z"
+    "last_run_outcome": "2026-10-04T03:49:19Z app tool successfully updated original heartbeat to ACTIVE; TOML readback agrees. Same name/thread/4-hour interval; prompt adds user-approved guest DNS repair and B00 v2 local ES/S3. Earlier 02:01 update failed quota and was not executed. B01 remains undispatched.",
+    "last_verified_at_utc": "2026-10-04T03:49:19Z"
   },
   "tasks": [
     {
@@ -160,17 +160,17 @@
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B00-A01.md",
       "checkpoint_code_commit": "ea2ab8e2fda1c111a911041204207324fd4fda68",
       "checkpoint_head": "0c7035017a0595901e562b249d7da2f0ae49a7d1",
-      "latest_checkpoint": "2026-10-03T22:39Z HEAD0c703501 clean, codeea2ab8e2; original writer completed/stopped waiting_decision, not review_pending. Main independent Node22 config+policy tests exit0 11/11 skip0; report-only final change. Real VM Running same daemon ID; one data-preserving stop81605/start92331 both exit0 but DNS still failed. Actual root cause independently reproduced: installed/upgradable dnsmasq fails Colima grep installed condition. No successful image/container/JDBC verification; B01 unstarted.",
+      "latest_checkpoint": "2026-10-04T03:47Z HEAD0c703501 clean, codeea2ab8e2; prior authorized followup failed during remote compaction before tools due quota. Original writer verified errored/stopped, then same B00-A01 followup dispatched after quota recovery. No DNS repair had occurred at recovery check: resolver still dangling, dnsmasq failed, config absent; image/container/volume lists empty. Existing code independent tests 11/11 remain draft evidence only; no successful real service/JDBC acceptance, B01 unstarted.",
       "recovery_snapshot": {
-        "verified_at_utc": "2026-10-03T22:14:24Z",
-        "agent_status": "original_followup_completed_waiting_decision_confirmed_stopped_clean",
+        "verified_at_utc": "2026-10-04T03:47:17Z",
+        "agent_status": "original_errored_compaction_quota_confirmed_stopped_then_same_attempt_followup_dispatched",
         "private_root": "/Users/heyirui/.devclaw-bot-b00",
         "socket": "/Users/heyirui/.devclaw-bot-b00/colima/devclaw-bot/docker.sock",
         "old_session": "41386 unknown process ID; not counted as pass; actual VM and daemon inspected independently",
-        "remaining_resource_checks": "Writer final inventory: no images/containers/volumes, default3 networks only; VM PIDs57942/57944/57957 after safe restart, old50535/50537/50551 exited; no download/test handles. Rosetta registration observed, actual amd64 MySQL execution and loopback host listeners remain unverified."
+        "remaining_resource_checks": "Main recovery inventory: no images/containers/volumes; only task VM PIDs57942/57944/57957 and inspection shell, no old writer/download/test commands. Existing DNS failure unchanged; actual amd64 MySQL execution and loopback host listeners still unverified."
       },
-      "environment_issue": "Main read-only proof: dnsmasq/base install ok installed2.90; apt list advertises upgradable2.91, official hasDnsmasq grep exits1; resolv.conf points to missing systemd stub, dnsmasq loaded/failed and 01-colima.conf absent. Ordinary restart did not fix. Need user authorization before guest sudo; no host DNS/proxy/security/default context changes.",
-      "requested_decision": "Allow only task VM guest sudo to back up original resolv.conf symlink, create exact Colima DNS config with existing private gateway/internal VM IP, replace resolv.conf and restart dnsmasq; precise backup/hash-checked rollback. No package upgrades, host changes, VM rebuild or deployment.",
+      "environment_issue": "Confirmed Colima dnsmasq installed/upgradable detection bug leaves missing resolver target and dnsmasq failed. One ordinary restart did not fix. User-approved task-guest-only backup/repair/restart/rollback is now dispatched; not yet verified repaired at this checkpoint. No host DNS/proxy/security/default context changes authorized.",
+      "requested_decision": null,
       "latest_independent_check": "ea2ab8e2 Node22 --test tests/bot/docker/config.spec.mjs tests/bot/docker/policy.spec.mjs exit0 11/11 skip0; independent exact guest DNS read-only inspection corroborated failure statuses; see reviews/B00-review.md",
       "decision_resolution": "User explicitly allowed guest DNS repair and local ES/S3 on2026-10-04; prior wait is superseded. Resume original stopped writer only, verify each effect.",
       "wait_reason": null
@@ -184,16 +184,16 @@
       "wait_reason": "Design v1 complete; do not dispatch before B00 independent acceptance. No B01 writer exists."
     }
   ],
-  "next_action": "用户已批准仅任务VM内DNS sudo修复并加本地ES/S3。接续原B00-A01，先备份修复DNS并保存，再按B00 v2三服务环境验收；恢复4小时heartbeat新范围。不得重建写者/VM；B00完整独立验收后才B01。额度01:55UTC可用但primary86%，优先小步骤持久化。",
+  "next_action": "同一B00-A01已在额度恢复后接续，等待首个DNS修复实证检查点并独立检查，再推进B00 v2三服务验收；原4小时heartbeat已成功ACTIVE。不得重建写者/VM；B00完整独立验收后才B01，不提前实现业务搜索/上传。",
   "quota_recovery": {
-    "verified_at_utc": "2026-10-03T22:39:34Z",
+    "verified_at_utc": "2026-10-04T03:47:17Z",
     "ordinary_usage_allowed": true,
-    "primary_used_percent": 77,
-    "primary_resets_at_utc": "2026-10-04T03:14:23Z",
-    "secondary_used_percent": 43,
+    "primary_used_percent": 15,
+    "primary_resets_at_utc": "2026-10-04T08:41:51Z",
+    "secondary_used_percent": 49,
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
-    "previous_interruption": "本轮从primary1%接续同配置原B00代理；当前仍ordinaryUsageAllowed=true primary77%/secondary43%。现在因明确guest sudo授权边界等待，不是quota耗尽。未购买/重置/换账号/模型。"
+    "previous_interruption": "用户批准后的原B00派单因remote compact quota失败，自动任务update也明确未执行。03:41:51UTC额度恢复primary2%/secondary47%；03:47复查15%/49%且ordinaryUsageAllowed=true，已接续同一原代理。未购买/使用重置权益/换账号或模型。"
   },
-  "recovery_notes": "2026-10-03T22:39Z已停止原代理并原位暂停heartbeat，等待guest sudo DNS修复决定。保留运行VM、工具、所有Git成果与测试记录；未集成/接受B00，未启动B01。旧41386不可得不算通过，真正root cause和一次restart失败已记录；不应由无新授权heartbeat自动恢复。",
+  "recovery_notes": "2026-10-04T03:49Z：用户授权已覆盖旧DNS等待，真实额度恢复后沿用原B00代理/树/VM；原4小时heartbeat成功恢复ACTIVE并读回确认。派单恢复时DNS尚未修复，不能把工具恢复算环境验收。保留所有代码/资源，B00未接受或集成，B01未启动；旧未知测试不计通过。",
   "current_task_id": "B00"
 }

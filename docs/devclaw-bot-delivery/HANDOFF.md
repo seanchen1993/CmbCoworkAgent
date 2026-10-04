@@ -1,8 +1,14 @@
 # 当前交接点
 
-更新：2026-10-04（Asia/Shanghai）· B00等待专用VM内sudo DNS修复授权，续跑已暂停
+更新：2026-10-04 03:49 UTC · B00 v2已获授权，额度恢复后接续原代理，四小时续跑ACTIVE
 
 ## 最新授权与恢复点（优先于下方旧阶段）
+
+**2026-10-04 03:49 UTC当前事实优先：** 用户又明确“继续任务”。此前授权后的原B00 followup在remote compact阶段因quota失败，未执行DNS修复；02:01恢复heartbeat也明确未执行。03:41:51额度已恢复，03:47再次确认ordinaryUsageAllowed=true、primary15%/secondary49%，新短窗口reset08:41:51UTC。live agents确认原B00 errored/stopped；已向同一`/root/b00_local_docker`接续B00-A01，保持指定模型/配置及唯一写者，不重建代理或VM。
+
+主代理恢复检查：集成bc6f3935 clean、实施0c703501 clean/codeea2ab8e2；任务VM仍为57942/57944/57957，仅检查自身，无旧下载/测试命令。实际Docker images/containers/volumes为空；resolv.conf仍指向缺失stub、dnsmasq failed、01-colima.conf absent，修复尚未发生。先按`B00.md` v2及`B00-services.md`交付授权DNS小步骤并记录，再继续三服务。B00未验收，B01未派。
+
+原heartbeat经App工具原位成功ACTIVE，03:49:19实际TOML读回确认；保留名称、同一会话、每4小时，prompt加入已授权guest DNS和ES/S3范围，其他sudo/宿主更改仍需决定。没有创建重复任务。旧PAUSED与等待授权段落仅为历史，不得覆盖当前用户授权。
 
 **2026-10-04 01:55UTC新用户授权优先：** 用户明确“允许，docker启动es和s3一起吧”。此前等待guest sudo的决定已解除，允许且仅限上一提案中的任务VM DNS修复/备份/失败回滚；不授权宿主sudo/DNS/安全更改。B00升级v2，加入官方Elasticsearch8.19.22与SeaweedFS4.48本地S3兼容依赖，实际镜像digest待核对；任务设计见`tasks/B00-services.md`。保持应用JDK8/MySQL5.7，不改F05旧mock入口，不扩展产品接口。
 
@@ -96,4 +102,4 @@ F04仍待：内部Spring Boot parent/BOM及补丁维护方；内网MySQL补丁/�
 
 ## 下一动作（当前）
 
-向用户请求上述仅任务VM内sudo修复决定，等待新授权，不因heartbeat自动继续。获准后先核对停止的原B00代理、实际Git/VM/秘密/资源，再接续同一attempt；保留数据/代码，不重建或重复安装。B00经完整独立复验接受后才派已ready的B01；不重做F02/F03/F05，不扩到B02及后续路线。当前没有完成整个B00/B01里程碑。
+等待已接续的原B00-A01交DNS修复小检查点，主代理核对实际脚本与DNS/TLS/daemon，再推进MySQL5.7、ES与S3三服务的认证、读写、持久化、精确清理验证。所有实现与返工仍仅原指定子代理，主代理只审查复验/协调文档。B00完整独立接受后才派ready的B01；不重做F02/F03/F05，不扩到B02/Runtime/UI，未完成本轮B00+B01里程碑。
