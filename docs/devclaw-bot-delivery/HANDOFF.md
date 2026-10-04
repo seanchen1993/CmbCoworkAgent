@@ -4,6 +4,10 @@
 
 ## 最新授权与恢复点（优先于下方旧阶段）
 
+**2026-10-04 01:55UTC新用户授权优先：** 用户明确“允许，docker启动es和s3一起吧”。此前等待guest sudo的决定已解除，允许且仅限上一提案中的任务VM DNS修复/备份/失败回滚；不授权宿主sudo/DNS/安全更改。B00升级v2，加入官方Elasticsearch8.19.22与SeaweedFS4.48本地S3兼容依赖，实际镜像digest待核对；任务设计见`tasks/B00-services.md`。保持应用JDK8/MySQL5.7，不改F05旧mock入口，不扩展产品接口。
+
+恢复核对：集成5515aaae clean，实施0c703501 clean、codeea2ab8e2；原B00代理completed/stopped，ps仅任务VM57942/57944/57957及检查自身，无旧写者/拉取命令。额度ordinaryUsageAllowed=true、primary86%/secondary45%，reset03:14:23UTC；优先有限DNS修复检查点，未耗尽不能伪称quota blocked。恢复同一原代理，不换模型或重建。原4小时heartbeat将按新范围恢复，实际状态以工具回执/state为准。下面waiting_decision/PAUSED为旧出口，不是当前拒绝授权。
+
 **22:39 UTC最终状态优先：waiting_decision，不是验收通过或额度耗尽。** 原B00-A01已停止写入；代码`ea2ab8e2fda1c111a911041204207324fd4fda68`，最终report-only HEAD`0c7035017a0595901e562b249d7da2f0ae49a7d1`，主代理确认clean。主代理独立Node22 config+policy测试exit0、11/11、skip0。真实MySQL镜像/容器/JDBC仍未完成，B01不派发。
 
 已独立复现根因：dnsmasq/base的dpkg状态是install ok installed2.90，但apt默认列出2.91及upgradable from；Colima0.10.3的hasDnsmasq仅匹配`[installed`而返回1，漏掉已安装包并跳过setupDNS。guest resolv.conf指向不存在的systemd stub，dnsmasq loaded/failed，01-colima.conf缺失。一次保留数据stop81605/start92331均exit0但DNS未恢复；不继续盲目重启/拉取。精确证据见`reviews/B00-review.md`和实施attempt。

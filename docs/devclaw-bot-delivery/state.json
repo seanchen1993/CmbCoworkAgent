@@ -3,7 +3,7 @@
   "updated_on": "2026-10-04",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
-  "status": "waiting_decision",
+  "status": "implementing",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -22,7 +22,10 @@
     ],
     "implementation_task_ids": ["B00", "B01"],
     "scope_confirmed": true,
-    "scope_confirmation": "2026-10-03 用户明确先不考虑内部平台参数，在本地开发，docker自行创建环境，继续任务，随后再次继续。当前推进B00 Docker本地环境及B01六个Bot/Group接口；保留JDK8/MySQL5.7，不扩B02/B03/Runtime/UI。",
+    "scope_confirmation": "2026-10-04 用户允许前述仅任务VM内sudo DNS修复，并要求docker启动es和s3一起。B00 v2含MySQL5.7+本地ES/S3基础环境，然后B01六接口；应用JDK8不变，不扩产品API/B02/B03/Runtime/UI。",
+    "task_guest_dns_sudo_allowed": true,
+    "local_es_s3_containers_allowed": true,
+    "host_sudo_or_network_change_allowed": false,
     "explicit_user_pause": false,
     "external_push_allowed": false,
     "deployment_allowed": false,
@@ -144,8 +147,9 @@
     },
     {
       "id": "B00",
-      "status": "waiting_decision",
+      "status": "implementing",
       "spec": "tasks/B00.md",
+      "design": "tasks/B00-services.md",
       "attempt_id": "B00-A01",
       "agent_task_name": "b00_local_docker",
       "agent_id": "/root/b00_local_docker",
@@ -168,7 +172,8 @@
       "environment_issue": "Main read-only proof: dnsmasq/base install ok installed2.90; apt list advertises upgradable2.91, official hasDnsmasq grep exits1; resolv.conf points to missing systemd stub, dnsmasq loaded/failed and 01-colima.conf absent. Ordinary restart did not fix. Need user authorization before guest sudo; no host DNS/proxy/security/default context changes.",
       "requested_decision": "Allow only task VM guest sudo to back up original resolv.conf symlink, create exact Colima DNS config with existing private gateway/internal VM IP, replace resolv.conf and restart dnsmasq; precise backup/hash-checked rollback. No package upgrades, host changes, VM rebuild or deployment.",
       "latest_independent_check": "ea2ab8e2 Node22 --test tests/bot/docker/config.spec.mjs tests/bot/docker/policy.spec.mjs exit0 11/11 skip0; independent exact guest DNS read-only inspection corroborated failure statuses; see reviews/B00-review.md",
-      "wait_reason": "explicit_user_permission_for_task_guest_sudo_dns_repair"
+      "decision_resolution": "User explicitly allowed guest DNS repair and local ES/S3 on2026-10-04; prior wait is superseded. Resume original stopped writer only, verify each effect.",
+      "wait_reason": null
     },
     {
       "id": "B01",
@@ -179,7 +184,7 @@
       "wait_reason": "Design v1 complete; do not dispatch before B00 independent acceptance. No B01 writer exists."
     }
   ],
-  "next_action": "等待用户明确是否允许仅任务VM内sudo DNS修复。未获授权不resume代理/heartbeat、不继续pull/restart/B01。获准后重新核对原停止写者、codeea2ab8e2/report0c703501及实际VM，接续原B00-A01，不新建写者；B00全部独立验收后才派B01。",
+  "next_action": "用户已批准仅任务VM内DNS sudo修复并加本地ES/S3。接续原B00-A01，先备份修复DNS并保存，再按B00 v2三服务环境验收；恢复4小时heartbeat新范围。不得重建写者/VM；B00完整独立验收后才B01。额度01:55UTC可用但primary86%，优先小步骤持久化。",
   "quota_recovery": {
     "verified_at_utc": "2026-10-03T22:39:34Z",
     "ordinary_usage_allowed": true,
