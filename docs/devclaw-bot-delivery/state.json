@@ -158,9 +158,9 @@
       "baseline": "6530c05289dffe1ff4499643533c58afa225c073",
       "worktree_creation_operation_id": "3d1475fa-7262-4bfc-b9fd-6d4bdd32f500",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B00-A01.md",
-      "checkpoint_code_commit": "6a02d5b88fd5a24cb42ecb6d45e268f173cd0bdb",
-      "checkpoint_head": "6a02d5b88fd5a24cb42ecb6d45e268f173cd0bdb",
-      "latest_checkpoint": "2026-10-04T04:01Z DNS repaired by original writer:910e6c11 code,3fea7853 report,6a02d5b8 exact-mode correction. Main read scripts and independently checked sessions24644/50085 exit0: same daemon, dnsmasq active, both exact-hash configs root:root0644 nlink1, uid501 readable resolver and DNS/TLS401. Default .docker/.colima/.lima absent. Writer continues fixed official image checks/pulls; no real MySQL/ES/S3 acceptance yet, B01 unstarted.",
+      "checkpoint_code_commit": "a45904742cbfcff6cbfff49c5d40e58a7b359505",
+      "checkpoint_head": "a45904742cbfcff6cbfff49c5d40e58a7b359505",
+      "latest_checkpoint": "Three-service authenticated Compose/lifecycle saved a4590474, worker static tests15/15 skip0 (not main acceptance). Main read Compose and earlier image/capability diffs; MySQL/ES actual digests independently inspected, S3 download worker-reported. Actual internal:true no-port issue resolved by documented dedicated bridge design. Worker starts real runner76454 on unique test-7504952b91da84ca, result pending; no JDBC/ES/S3 CRUD success yet. DNS independently passed separately. B01 unstarted.",
       "recovery_snapshot": {
         "verified_at_utc": "2026-10-04T03:47:17Z",
         "agent_status": "original_errored_compaction_quota_confirmed_stopped_then_same_attempt_followup_dispatched",
@@ -184,13 +184,13 @@
       "wait_reason": "Design v1 complete; do not dispatch before B00 independent acceptance. No B01 writer exists."
     }
   ],
-  "next_action": "DNS小步骤已独立复验，同一B00-A01继续官方镜像digest/架构核对、三服务Compose及真实验收。原4小时heartbeat ACTIVE；恢复时先核对正在拉取/创建的实际结果，不重放。B00全部接受后才B01，不提前实现业务搜索/上传。",
+  "next_action": "等待原B00-A01真实runner76454结果并核对test-7504952b91da84ca清理，不重复启动。三镜像已下载、Compose a4590474；所有服务真实CRUD/持久化、完整CLI/中断清理仍待。原4小时heartbeat ACTIVE；B00独立接受后才B01。",
   "quota_recovery": {
-    "verified_at_utc": "2026-10-04T04:01:00Z",
+    "verified_at_utc": "2026-10-04T04:13:59Z",
     "ordinary_usage_allowed": true,
-    "primary_used_percent": 49,
+    "primary_used_percent": 76,
     "primary_resets_at_utc": "2026-10-04T08:41:51Z",
-    "secondary_used_percent": 54,
+    "secondary_used_percent": 59,
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
     "previous_interruption": "用户批准后的原B00派单因remote compact quota失败，自动任务update也明确未执行。03:41:51UTC额度恢复primary2%/secondary47%；03:47复查15%/49%且ordinaryUsageAllowed=true，已接续同一原代理。未购买/使用重置权益/换账号或模型。"
   },
