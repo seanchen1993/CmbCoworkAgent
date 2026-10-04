@@ -1,6 +1,8 @@
 # DevClaw Bot 当前交接点
 
-2026-10-04 04:14 UTC · B00 v2 implementing · 非验收完成
+2026-10-04 11:51 UTC · B00 v2 implementing · 非验收完成
+
+**11:51UTC额度恢复检查点优先：** 原B00确实quota errored/stopped，实施6f34f10b clean（安全诊断已提交）、集成23e430d9 clean。主代理实际inspect：同daemon/VM57942/57944/57957，三固定镜像都在，containers/volumes空、仅默认3networks，无旧写者/下载/test。当前ordinaryUsageAllowed=true、primary1%/secondary63%，新短窗reset16:50:49UTC；已followup同一原B00-A01，从S3权限根因继续，未重建/重新下载或改模型。四小时heartbeat仍ACTIVE。后文4点旧过程仅历史；B00未接受，B01未派。
 
 **04:23附近最新结果：** runner76454已exit1，test-7504952b91da84ca精确清理完成。随后诊断cell91确实执行为session15835、exit1（不是审批未执行）：test-b0e296f5398eb315也全部精确清理。子代理安全诊断仅确认S3 exited255/permission=true，MySQL/ES running/health starting，准确权限路径未定；不能称根因完全解决或JDBC/CRUD通过。无运行测试/下载句柄；原代理正在保存诊断/report的dirty检查点，再继续定位S3实际工作目录/metadata目录/uid访问。禁止长期root运行或放宽secret权限规避。04:20:57额度仍可用primary91%/secondary61%，不是耗尽；恢复08:41:51UTC。下面“启动中”已过时，以此结果为准。
 
