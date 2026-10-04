@@ -73,4 +73,10 @@ capability检查改为标准化`CAP_`前缀后仍要求NET_RAW dropped，含错�
 
 实施真实诊断62262发现internal网络端口未发布；主代理裁决见`tasks/B00-services.md`的本地bridge段落。允许普通专用bridge不等于允许非回环发布/默认网络/任意外网调用，亦不宣称出网阻断。所有真实MySQL JDBC/ES/S3成功条件、网络与清理负例仍待完整候选。
 
+## 11:51恢复审查（6f34f10b）
+
+主代理实际核对：三固定镜像在、无containers/volumes，只有默认3networks和原任务VM进程，无旧下载/测试写者。quota恢复后已接续同一原B00-A01。额外S3 image inspect exit0，Id/Descriptor/RepoDigest为固定f1f30347…、arm64/linux。官方镜像WorkingDir=/data；当前脚本仅chown/data/state再drop501且没有cd，默认相对metadata落父目录是待实证假设，已交实施者确认，不能算根因已完成。
+
+E4已下发：start() catch先await资源及日志再stop，诊断失败会跳出而不尝试停止。要求best-effort诊断不阻断精确已归属资源的停止尝试，受控保留原错误及停止失败状态，禁止擅自清理未知资源；补一项日志失败仍尝试停止的回归。真实测试外层finally曾成功清理，不替代dev启动错误路径的正确性。待最终候选复验。
+
 按用户sudo边界进入waiting_decision：仅提议备份当前guest resolver、按官方方式写两个精确配置并重启dnsmasq，保留回滚；未执行特权修复、宿主DNS更改或包升级。4小时heartbeat22:39:01UTC已通过App原位PAUSED并读回核对。原代理最终资源清单仅任务VM57942/57944/57957，无images/containers/volumes/下载句柄。主代理暂停流程参照OpenAI Docs [定时任务](https://learn.chatgpt.com/docs/automations)，现有配置保留，不新建任务。
