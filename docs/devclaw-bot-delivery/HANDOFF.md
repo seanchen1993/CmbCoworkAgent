@@ -4,6 +4,8 @@
 
 ## 最新授权与恢复点（优先于下方旧阶段）
 
+**04:01 UTC DNS前置条件已独立复验：** 原代理提交910e6c11修复与3fea7853报告，主代理发现系统DNS文件被umask设成0600，返工6a02d5b8只按owner/type/nlink/hash/backup身份将两个文件补为0644，未重跑one-shot或重启VM。主代理会话24644/50085均exit0：同daemon、dnsmasq active、两文件准确hash/root:root0644/nlink1、uid501可读resolver、DNS成功和HTTPS401；默认`.docker/.colima/.lima`仍不存在。原备份留在guest `/var/lib/devclaw-bot-b00-dns-1f9a09d0-60e9-4191-b0c4-dcc099eb6dac`。只解决DNS，不算B00环境交付；写者继续官方镜像核对/串行拉取。额度仍可用primary49%/secondary54%，08:41:51UTC短窗口恢复；未耗尽不伪报quota等待。
+
 **2026-10-04 03:49 UTC当前事实优先：** 用户又明确“继续任务”。此前授权后的原B00 followup在remote compact阶段因quota失败，未执行DNS修复；02:01恢复heartbeat也明确未执行。03:41:51额度已恢复，03:47再次确认ordinaryUsageAllowed=true、primary15%/secondary49%，新短窗口reset08:41:51UTC。live agents确认原B00 errored/stopped；已向同一`/root/b00_local_docker`接续B00-A01，保持指定模型/配置及唯一写者，不重建代理或VM。
 
 主代理恢复检查：集成bc6f3935 clean、实施0c703501 clean/codeea2ab8e2；任务VM仍为57942/57944/57957，仅检查自身，无旧下载/测试命令。实际Docker images/containers/volumes为空；resolv.conf仍指向缺失stub、dnsmasq failed、01-colima.conf absent，修复尚未发生。先按`B00.md` v2及`B00-services.md`交付授权DNS小步骤并记录，再继续三服务。B00未验收，B01未派。

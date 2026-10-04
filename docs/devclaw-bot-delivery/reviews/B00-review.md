@@ -55,4 +55,14 @@ Colima0.10.3首次遇到不存在的COLIMA_HOME后，创建了默认`.colima`里
 
 原实施者已经执行且报告一次保留数据stop81605/start92331各exit0，DNS未恢复；不再重复。官方v0.10.3 [dns.go](https://raw.githubusercontent.com/abiosoft/colima/v0.10.3/environment/vm/lima/dns.go)的hasDnsmasq条件与setupDNS短路对应上述事实；[lima.go](https://raw.githubusercontent.com/abiosoft/colima/v0.10.3/environment/vm/lima/lima.go)显示post-start链及已Running的短路。最初“可能因中断未收尾”仅初始推断，最终确切误判原因以上述包状态为准。
 
+## 已获授权后的DNS复验（2026-10-04）
+
+用户明确允许上述guest修复后，原实施者在代码`910e6c111327001ec69853b2995916ad719cf198`增加独立`repair-dns.sh/mjs`，不接入自动provision。主代理读实际代码：限制既定hostname/接口IP/原悬空link/缺失目标/failed服务，任务owner目录备份，精确两文件变更，失败仅哈希/类型/owner匹配时回滚；不改宿主、包或VM身份。host helper改为profile参数前置，避免ssh后的`--`把profile送入guest命令。
+
+主代理只读执行会话24644 exit0：同daemon `75050694-6599-4820-af0e-28384728124e`，dnsmasq active；guest getent成功，官方registry HTTPS401。另行id核对exit0为uid501，并非root；所以这不是仅root成功的结论。尚无容器/JDBC/ES/S3验收。
+
+E3已下发：脚本umask077让两个最终系统DNS配置为root:root0600（主代理stat），虽然uid501解析通过，resolv.conf并未正常公开可读。应在脚本明确0644，并仅在已有目标类型/owner/hash匹配后补修两文件权限；备份仍保持私有。不重跑原one-shot、不重建VM，等待普通用户可读及DNS/TLS复验。该修正仍在用户已批准的两文件DNS修复内。
+
+E3关闭（仅DNS前置检查）：候选`6a02d5b88fd5a24cb42ecb6d45e268f173cd0bdb`新增精确模式补修，主代理读代码和真实复验会话50085 exit0。两文件root:root0644/nlink1；resolver SHA256 `64f78010f6cdecf0169c0a5a540ba0668bd43e970b64872fc3b632c48469b0ae`，dnsmasq SHA256 `439a9eb6eb5f957f2dc088ca4d7e5b954cf2a1c6a7a4da946af362f482719251`；普通uid501可读resolver、getent成功和官方registry TLS401。原daemonID未变，宿主默认`.docker/.colima/.lima`均ENOENT。未重放特权修复，未验收完整B00三服务。
+
 按用户sudo边界进入waiting_decision：仅提议备份当前guest resolver、按官方方式写两个精确配置并重启dnsmasq，保留回滚；未执行特权修复、宿主DNS更改或包升级。4小时heartbeat22:39:01UTC已通过App原位PAUSED并读回核对。原代理最终资源清单仅任务VM57942/57944/57957，无images/containers/volumes/下载句柄。主代理暂停流程参照OpenAI Docs [定时任务](https://learn.chatgpt.com/docs/automations)，现有配置保留，不新建任务。
