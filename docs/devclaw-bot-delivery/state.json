@@ -3,12 +3,12 @@
   "updated_on": "2026-10-05",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
-  "status": "review_pending",
+  "status": "ready",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "54a58f856286e90e554d72f1ccdb9dc5fe1166eb"
+    "last_accepted_commit": "7a82c9bf4034c24207743752cb2121c050934939"
   },
   "authorization": {
     "approved_work": [
@@ -150,7 +150,7 @@
     },
     {
       "id": "B00",
-      "status": "review_pending",
+      "status": "accepted",
       "spec": "tasks/B00.md",
       "design": "tasks/B00-services.md",
       "attempt_id": "B00-A01",
@@ -163,44 +163,61 @@
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B00-A01.md",
       "checkpoint_code_commit": "7a82c9bf4034c24207743752cb2121c050934939",
       "checkpoint_head": "fad7a736715081e3cfd7e7c3192ef2bafacf7ab0",
-      "latest_checkpoint": "2026-10-05T04:06Z frozen candidate; main actual clean/scope/diff verified and original worker completed/stopped. Worker full55958, quiet15011, lifecycle69624, dev58285/25984 exit0. Deploy implementation unchanged from independently offline-tested b688; only dev-cli test/README appended. Main independent CLI status session50841 running; no acceptance/integration yet.",
+      "latest_checkpoint": "Main independently accepted frozen7a82/fad7; complete real9259 exit0, fault/SIGTERM59704 exit0, dev restore48382/dev-cli35909 exit0, final actual resources/lsof/default-config/private-mode audit exit0. Same three dev IDs/volumes/private-network healthy retained; no test resource or running command. Integration merge next.",
       "recovery_snapshot": {
-        "verified_at_utc": "2026-10-05T04:06Z",
-        "agent_status": "completed_review_pending_stopped_writing",
-        "working_tree": "Worker fad7a736 clean, candidate code7a82; main actual scope/diffcheck passed",
+        "verified_at_utc": "2026-10-05T04:18Z",
+        "agent_status": "completed_stopped_writing",
+        "worktree": "fad7a736715081e3cfd7e7c3192ef2bafacf7ab0 clean",
         "daemon_id": "75050694-6599-4820-af0e-28384728124e",
         "dev_project": "devclaw-bot-dev",
-        "retained_resources": "Worker proof: same dev three containers, three named volumes and exact private bridge. Main ps only original VM57942/57944/57957. Main CLI status50841 pending; stop dev before serial independent real tests, retain all volumes/credentials."
+        "containers": {
+          "mysql": "693a1c3fd9c1aefc968a850f6187724b3b89864283a78cf9c44c52a015eeba3c",
+          "es": "4f0ed4ed0cf39c979c49afe58d5433c5c0d5f2df70ad5b3965aeb65b9fff5d0d",
+          "s3": "9332987a1451797547d741d2e1202cec5bbe61abf0067002e7a4d11b2d3d8d26"
+        },
+        "network_id": "2e882b136c9a52cf97388b4945df6ae1f5dc195d3ed52c0dba7697cfaad7100d",
+        "volumes": [
+          "devclaw-bot-dev-data",
+          "devclaw-bot-dev-es-data",
+          "devclaw-bot-dev-s3-data"
+        ],
+        "endpoints": {
+          "mysql": "127.0.0.1:32878",
+          "es": "http://127.0.0.1:32877",
+          "s3": "http://127.0.0.1:32876"
+        },
+        "test_resources": "none",
+        "runtime_entries": [
+          "devclaw-bot-dev"
+        ],
+        "default_configs": "absent",
+        "private_modes": "0700/0600"
       },
-      "environment_issue": "No unresolved infrastructure blocker. Frozen full real/fault/SIGTERM and dev lifecycle worker proof recovered/recorded. Main independent real two-project/lifecycle cleanup/dev recovery still required.",
+      "environment_issue": null,
       "requested_decision": null,
-      "latest_independent_check": "Frozen7a82/fad7 full mysql-real9259 exit0 verified: two fresh projects ae845cacbaad2517/9e9152514226c4b1, realJava1.8.0_482/class52/JDBC8.0.33/MySQL5.7.44, ES/S3 create/persist/delete, authenticated/negative access, all restartvolumes1/2/3/4 registered, strictGEThash, cancelrestart stopped_without_start, exactfinallycleanup both. Main lifecycle59704 pending; dev stopped/volumes retained. Existing offline23/F03/F05mock/tsc independent unchanged.",
+      "latest_independent_check": "Main9259 two fresh environments fullJava8/JDBC5.7/ES/S3CRUD/restart/hash/cancelrestart/cleanup verified;59704 injection and actualSIGTERM verified;35909 repeatedstart sameidentity/stopdata+credentials/restart and x86_64/Rosetta verified. Final safe audit chunk0f5b28 exit0 verifies exact originalcontainers/network, threevolumes only, all127 singlelisteners/no testresources/defaultconfigENOENT/0700+0600. Runtimebyteidentical to b688 independent23/23, unchanged F03/F05mock/node/web regressions preserve priorpasses.",
       "decision_resolution": "User explicitly allowed guest DNS repair and local ES/S3 on2026-10-04; prior wait is superseded. Resume original stopped writer only, verify each effect.",
       "wait_reason": null,
       "code_commit": "7a82c9bf4034c24207743752cb2121c050934939",
       "report_commit": "fad7a736715081e3cfd7e7c3192ef2bafacf7ab0",
-      "live_commands": [
-        {
-          "owner": "main",
-          "session_id": 59704,
-          "command": "Node22 tests/bot/docker/lifecycle-real.mjs",
-          "state": "running",
-          "project": "devclaw-bot-test-295edfca790185df"
-        }
-      ]
+      "live_commands": [],
+      "accepted_on": "2026-10-05",
+      "merge_status": "pending_normal_merge"
     },
     {
       "id": "B01",
-      "status": "ready_waiting_dependency",
+      "status": "ready",
       "spec": "tasks/B01.md",
       "design": "tasks/B01-design.md",
       "depends_on": [
         "B00"
       ],
-      "wait_reason": "Design v1 complete; do not dispatch before B00 independent acceptance. No B01 writer exists."
+      "wait_reason": null,
+      "current_slice": "A1",
+      "slice_spec": "tasks/B01-A1.md"
     }
   ],
-  "next_action": "Resume main lifecycle59704 only. After exit0 restore dev via frozen CLI, independently verify dev-cli-real, actual exact resource/loopback/credential-mode/cleanup identities. Accept/merge B00 only after final checks; then B01 staged implementation.",
+  "next_action": "Merge accepted B00 report HEAD fad7a736 into integration, preserve clean tree, then fast-forward original stopped worker tree to integration checkpoint and dispatch B01-A1 to same6.1-sol/xhigh worker. A1 only build/runtime compatibility without HTTP/DB; independent slice review before A2.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -208,8 +225,17 @@
     "primary_resets_at_utc": "2026-10-05T08:07:19.000Z",
     "secondary_used_percent": 94,
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
-    "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange."
+    "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
+    "last_verified_limits": {
+      "verified_at_utc": "2026-10-05T04:14:26Z",
+      "ordinaryUsageAllowed": true,
+      "primary_used_percent": 16,
+      "primary_resets_at_utc": "2026-10-05T08:07:19Z",
+      "secondary_used_percent": 97,
+      "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
+      "policy": "No credit purchase/reset/account/model workaround. High percent alone is not exhausted; checkpoint smallslices."
+    }
   },
   "recovery_notes": "03:55UTC actualaudit completed; sameoriginal B00-A01 resumed. Weekly94% ishighbutordinaryusageallowed. Currentfulltestpass isworker evidence only; noacceptance/integration/B01dispatch.",
-  "current_task_id": "B00"
+  "current_task_id": "B01"
 }

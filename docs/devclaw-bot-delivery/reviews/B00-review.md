@@ -114,3 +114,14 @@ code `7a82c9bf4034c24207743752cb2121c050934939`、report-only/final HEAD `fad7a7
 04:12 UTC结果：9259 **exit0/verified**、两个空项目test-ae845cacbaad2517/test-9e9152514226c4b1全流程完成并精确finally清理。实际Java1.8.0_482/classMajor52/JDBC8.0.33、MySQL5.7.44 empty/probe/persist均verified；负密码及不符版本必须失败。ES8.19.22/active Basic、S34.48 create/persist/delete verified；重启前后相同容器/卷，启动卷[]、重启卷[1,2,3,4]全部注册后一次GET/hash，hash分别10d9eaad09d2f0a7f458ffc13c87a6b12618318cfa4b825d4598492cbd65c7c0、356f0eee0093bba8c4d056fbdb8eb281ef71f0dec6191ce60f6816bb1493cdfe。MySQL32857→32860及32863→32866均真实127单listener；所有服务入口已校验127。两次cancelledRestart=stopped_without_start，E5真实条件通过。清理两项目精确container/network/volume/directory removed。
 
 主代理后续独立`node22 tests/bot/docker/lifecycle-real.mjs`句柄59704正在运行，test-295edfca790185df已认领。仍待fault/SIGTERM、dev恢复/身份/实际资源最终核对，不提前accepted。
+
+## 最终决定：B00 accepted（2026-10-05）
+
+候选7a82c9bf/report fad7a736未再改字节，主代理独立后续全部exit0：
+
+- `node22 tests/bot/docker/lifecycle-real.mjs`59704：缺daemon真实exit1，远程socket/错profile连接前拒绝；295edfca790185df注入故障后三服务stop、三卷保留至精确cleanup；b75f079df380ecf2真实SIGTERM/子exit1，无容器/卷/网络、目录ENOENT。E4/E5真实收尾及E6取消条件通过，不skip。
+- `node22 deploy/dev/docker/cli.mjs start --java <上述真实Corretto8/bin/java> --javac <同目录javac> --jdbc <上述Connector8.0.33>`48382恢复原dev；`node22 tests/bot/docker/dev-cli-real.mjs <上述三个绝对路径>`35909 exit0：重复start身份不变、stop三卷/凭据不变、重开healthy。真实Java1.8.0_482/class52/JDBC8.0.33/MySQL5.7.44/x86_64、Rosetta OCF及认证ES/S3通过。
+- 最终独立只读诊断（Node22 --input-type=module -e，工具chunk0f5b28）exit0：通过hostState/prepareProject(existing)/resources及validateNetwork/validateContainer/verifyListeners，逐项断言原三container ID和network ID；实际Docker inventory仅原dev三容器/三卷/默认三网+devprivate，runtime只有dev；默认配置ENOENT、私有0700/0600无symlink/nlink1。不是仅采用worker输出。
+- 最后dev端点MySQL127.0.0.1:32878、ES http://127.0.0.1:32877、S3 http://127.0.0.1:32876，每port真实lsof一个127listener；同daemon75050694-6599-4820-af0e-28384728124e/29.5.2。精确原容器/网络/卷身份存state与attempt，无测试/下载/CLI句柄、工作树clean。端口未来可变，使用status。
+
+E1/E2/E4/E6的b688离线23/23、E3独立guest普通uid DNS/TLS、9259完整两空流程、59704真实故障/SIGTERM、35909 dev生命周期形成最终验收证据；部署实现与b688字节一致，原F03/F05mock/node/web已独立通过且未改。接受仅本地B00三服务，不认证生产维护、内部平台或S3全部高级语义；普通bridge有出网能力，不宣称断网沙箱。正常本地merge接受候选，然后推进已授权B01第一小片，无push/远程部署。
