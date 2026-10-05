@@ -1,14 +1,14 @@
 # DevClaw Bot 当前交接点
 
-2026-10-05 03:55 UTC（北京时间11:55）· B00 implementing · 尚未独立验收
+2026-10-05 04:06 UTC（北京时间12:06）· B00 review_pending · 主代理独立验收中
 
 ## 当前事实与下一动作
 
-- 原 `/root/b00_local_docker`（gpt-6.1-sol/xhigh）真实quota errored并已停止；主代理核对后接续同一B00-A01。唯一写者，禁止派生。
-- 集成HEAD fd6cd2ec clean（更新前）；实施HEAD `3045b7e09d696747245894f955fb2f918fcfc8ab` clean，代码 `b688fb892dc688ed3ef02e910cb5f0f32a9b9aa3`。主代理diff确认3045仅报告变化；实际Git优先。
-- 主代理03:55实际ps只有原VM57942/57944/57957，无测试/下载；同daemon且containers/volumes空、默认3network。15011主代理工具句柄不可查询，但原worker已从保留工具找回其真实exit0，quiet lookup ready=true/无进度污染。
-- 原worker同时找回 **55958 exit0**：两独立空项目test-29f50d41f13954b1/test-489e5cca62063734，JDK1.8.0_482/JDBC8.0.33/class52/MySQL5.7.44、事务/CAS/UTF8/UTC/负身份、ES/S3 create/persist/delete、卷注册后严格一次GET/hash、取消restart stopped_without_start，finally全精确清理。这是worker证据，准确加载SHA/完整命令正在补录attempt；不是主代理独立验收。
-- 余下：故障/SIGTERM生命周期、dev CLI start幂等/status/stop保留/最终健康三服务、README结果、冻结clean停止写入。主代理随后读最终diff并串行独立真实复验，才接受/集成B00和派B01；不得并行另一生命周期。
+- 原 `/root/b00_local_docker`（gpt-6.1-sol/xhigh）已完成review_pending并停止写入，无运行测试/下载/CLI句柄。保持同一代理与attempt；禁止派生。
+- 冻结code `7a82c9bf4034c24207743752cb2121c050934939`，report-only/finalHEAD `fad7a736715081e3cfd7e7c3192ef2bafacf7ab0` clean。主代理实际范围28文件/diffcheck通过，读新增dev-cli-real及README；部署代码与b688相同。尚未合入。
+- Worker55958两独立空环境全流程、15011 quiet lookup、69624故障/真实SIGTERM、58285/25984 dev CLI幂等/停止保留/重开均exit0，准确命令、资源身份、结果已保存attempt。它们是worker证据，不冒充主代理独立通过。
+- 保留dev三服务（worker最后端点MySQL32853/ES32854/S332852），三卷与同一private bridge；默认配置未改。主代理04:06 ps仅原VM57942/57944/57957、无旧测试进程。独立CLI status50841正在执行，结果仍待；恢复先核对句柄而非盲目重放。
+- 下一步主代理stop仅停dev保留三卷/凭据（避免4GiB同时运行两套三服务），串行独立mysql-real、lifecycle-real，再恢复同dev并检查实际健康/loopback/精确清理。通过才接受/集成B00并派B01；不能并行另一生命周期。
 - 主代理已独立通过b688 Docker离线23/23，旧F03 60037 24/24、F05mock41436 15/15、node54489/web4738 tsc均exit0且关闭。相关文件未改，不重复无关回归；新代码有变化才复验对应检查。
 
 ## 授权、位置与职责
