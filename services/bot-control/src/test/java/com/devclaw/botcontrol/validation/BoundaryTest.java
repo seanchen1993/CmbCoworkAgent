@@ -34,6 +34,8 @@ class BoundaryTest {
         rejected(() -> ContractBoundary.parse(utf8(number)), ContractBoundary.Category.JSON_SYNTAX);
         String text = "\"" + new String(new char[1048577]).replace('\0', 'a') + "\"";
         rejected(() -> ContractBoundary.parse(utf8(text)), ContractBoundary.Category.JSON_SYNTAX);
+        String boundedString = "\"" + new String(new char[70000]).replace('\0', 'a') + "\"";
+        rejected(() -> ContractBoundary.parse(utf8(boundedString)), ContractBoundary.Category.JSON_SYNTAX);
     }
     @Test void validSchemaPrecedesTypedConsumptionAndExactIntegersAreNotRounded() {
         ContractBoundary boundary = new ContractBoundary();
@@ -48,10 +50,10 @@ class BoundaryTest {
         rejected(() -> boundary.readRequest("createBotVersion", utf8(versionRequest("\"1\"")), CreateBotVersionRequest.class), ContractBoundary.Category.SCHEMA_INVALID);
         rejected(() -> boundary.readRequest("createBotVersion", utf8(versionRequest("1").replace("\"description\":\"x\"", "\"description\":null")), CreateBotVersionRequest.class), ContractBoundary.Category.SCHEMA_INVALID);
         rejected(() -> boundary.readRequest("createBotVersion", utf8(versionRequest("1").replace("\"commandId\":\"c1\"", "\"commandId\":\"c1\",\"unexpected\":true")), CreateBotVersionRequest.class), ContractBoundary.Category.SCHEMA_INVALID);
-        ErrorResponse response = boundary.readResponse("getBot", 503, utf8("{\"requestId\":\"r1\",\"error\":{\"code\":\"OUTCOME_UNKNOWN\",\"message\":\"safe\",\"retryable\":false}}"), ErrorResponse.class);
+        ErrorResponse response = boundary.readResponse("getBot", 503, utf8("{\"requestId\":\"r1\",\"error\":{\"code\":\"DEPENDENCY_UNAVAILABLE\",\"message\":\"safe\",\"retryable\":false}}"), ErrorResponse.class);
         assertFalse(new String(boundary.writeResponse("getBot", 503, response), StandardCharsets.UTF_8).contains("currentVersion"));
-        response.error.retryable = true;
-        rejected(() -> boundary.writeResponse("getBot", 503, response), ContractBoundary.Category.SCHEMA_INVALID);
+        response.error.code = ErrorCode.OUTCOME_UNKNOWN; response.error.retryable = true;
+        rejected(() -> boundary.writeResponse("createBot", 409, response), ContractBoundary.Category.SCHEMA_INVALID);
     }
     private static String versionRequest(String number) {
         return "{\"commandId\":\"c1\",\"expectedVersion\":" + number + ",\"config\":{\"description\":\"x\",\"instructions\":\"x\",\"knowledgeRefs\":[],\"repositoryRefs\":[],\"skillAllowlist\":[],\"capabilityCeiling\":[\"repository.read\"],\"memoryPolicy\":\"disabled\"}}";
@@ -69,6 +71,36 @@ class BoundaryTest {
         rejected(() -> boundary.validateParameter("getBot", "X-DevClaw-Space", "space1\n"), ContractBoundary.Category.SCHEMA_INVALID);
         assertThrows(RuntimeException.class, () -> boundary.offlineFactory().getSchema(SchemaLocation.of("https://sentinel.invalid/remote")));
         assertThrows(RuntimeException.class, () -> boundary.offlineFactory().getSchema(SchemaLocation.of("file:///sentinel/not-a-source")));
+        assertEquals("^a\\z", ContractBoundary.strictPatternEnd("^a$"));
+        assertEquals("a\\$", ContractBoundary.strictPatternEnd("a\\$"));
+        assertEquals("a\\\\\\z", ContractBoundary.strictPatternEnd("a\\\\$"));
+        assertEquals("a", ContractBoundary.strictPatternEnd("a"));
+    }
+    @Test void publicConsumersCoverFourRequestsSixSuccessesEveryErrorAndParameter() throws Exception {
+        ContractBoundary boundary = new ContractBoundary(); ObjectMapper mapper = new ObjectMapper();
+        JsonNode fixtures = mapper.readTree(BoundaryTest.class.getResourceAsStream("/parity-fixtures.json"));
+        int requests = 0, success = 0, errors = 0, parameters = 0;
+        for (JsonNode fixture : fixtures) {
+            JsonNode consumer = fixture.get("consumer"); if (consumer == null) continue;
+            String operation = consumer.get("operation").asText(); byte[] bytes = utf8(fixture.get("json").asText());
+            if (consumer.get("kind").asText().equals("parameter")) {
+                assertEquals(mapper.readTree(bytes).textValue(), boundary.validateParameter(operation, consumer.get("name").asText(), mapper.readTree(bytes).textValue()));
+                parameters++; continue;
+            }
+            Class<?> type = Class.forName("com.devclaw.botcontrol.contracts.BotContracts$" + fixture.get("schema").asText());
+            if (consumer.get("kind").asText().equals("request")) {
+                Object value = boundary.readRequest(operation, bytes, type);
+                Object restored = boundary.readRequest(operation, mapper.writeValueAsBytes(value), type);
+                assertEquals(mapper.readTree(bytes), mapper.valueToTree(restored)); requests++;
+            } else {
+                int status = consumer.get("status").intValue();
+                Object value = boundary.readResponse(operation, status, bytes, type);
+                assertEquals(mapper.readTree(bytes), mapper.readTree(boundary.writeResponse(operation, status, value)));
+                if (status < 300) success++; else errors++;
+            }
+        }
+        assertEquals(4, requests); assertEquals(6, success); assertTrue(errors > 20); assertEquals(10, parameters);
+        System.out.println("B01_A2B_PUBLIC " + requests + " requests / " + success + " successes / " + errors + " declared errors / " + parameters + " parameters");
     }
     @Test void originalSchemaActuallyRunsEverySharedFixtureAndReportsConclusions() throws Exception {
         ContractBoundary boundary = new ContractBoundary(); ObjectMapper mapper = new ObjectMapper();

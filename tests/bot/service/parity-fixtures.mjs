@@ -2,7 +2,7 @@ import { operations as positives } from "../../../contracts/bot/v1/fixtures/posi
 
 export function parityFixtures(documents, closure) {
   const defs = documents["schemas.json"].$defs, result = []
-  const add = (id, schema, value, raw) => result.push({ id, schema, json: raw ?? JSON.stringify(value) })
+  const add = (id, schema, value, raw, consumer) => result.push({ id, schema, json: raw ?? JSON.stringify(value), ...(consumer ? { consumer } : {}) })
   function sample(schema) {
     if (schema.$ref) return sample(defs[schema.$ref.split("/").at(-1)])
     if (schema.enum) return schema.enum[0]
@@ -77,15 +77,15 @@ export function parityFixtures(documents, closure) {
   const schemaName = schema => schema.$ref.split("/").at(-1)
   for (const operation of closure.operations) {
     const original = api.paths[operation.path][operation.method], fixture = positives.find(value => value.operationId === operation.id)
-    if (original.requestBody) add(`operation.${operation.id}.request`, schemaName(deref(original.requestBody).content["application/json"].schema), fixture.request.body)
+    if (original.requestBody) add(`operation.${operation.id}.request`, schemaName(deref(original.requestBody).content["application/json"].schema), fixture.request.body, undefined, { operation: operation.id, kind: "request" })
     for (const [status, ref] of Object.entries(original.responses)) {
       const success = fixture.responses.find(value => String(value.status) === status)
       const code = Object.keys(api["x-error-status"]).find(key => String(api["x-error-status"][key]) === status)
-      add(`operation.${operation.id}.response.${status}`, schemaName(deref(ref).content["application/json"].schema), success?.body ?? { requestId: "request1", error: { code, message: "Safe synthetic error", retryable: false } })
+      add(`operation.${operation.id}.response.${status}`, schemaName(deref(ref).content["application/json"].schema), success?.body ?? { requestId: "request1", error: { code, message: "Safe synthetic error", retryable: false } }, undefined, { operation: operation.id, kind: "response", status: Number(status) })
     }
     for (const ref of api.paths[operation.path].parameters ?? []) {
       const parameter = deref(ref)
-      add(`operation.${operation.id}.parameter.${parameter.name}`, schemaName(parameter.schema), parameter.in === "path" ? fixture.request.path[parameter.name] : fixture.request.headers[parameter.name])
+      add(`operation.${operation.id}.parameter.${parameter.name}`, schemaName(parameter.schema), parameter.in === "path" ? fixture.request.path[parameter.name] : fixture.request.headers[parameter.name], undefined, { operation: operation.id, kind: "parameter", name: parameter.name })
     }
   }
   for (const end of ["\n", "\r", "\r\n", "\u2028", "\u2029"]) for (const name of ["Id", "UtcDateTime"]) add(`pattern.${name}.suffix.${JSON.stringify(end)}`, name, (name === "Id" ? "id1" : "2026-10-01T12:00:00Z") + end)

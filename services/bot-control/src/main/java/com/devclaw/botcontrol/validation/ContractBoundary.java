@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.core.StreamReadConstraints;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SchemaLocation;
@@ -15,11 +16,16 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /** Offline structural boundary only. No transport, identity, persistence or business semantics. */
 public final class ContractBoundary {
@@ -31,7 +37,8 @@ public final class ContractBoundary {
     }
     private static final String PREFIX = "/contracts/bot/v1/";
     private static final int MAX_BYTES = 1048576;
-    private final ObjectMapper mapper = CompatibilityProbe.strictMapper();
+    private static final ObjectMapper PARSER = strictMapper();
+    private final ObjectMapper mapper = strictMapper();
     private final JsonNode manifest;
     private final Map<String, JsonSchema> schemas = new HashMap<String, JsonSchema>();
     private final JsonSchemaFactory factory;
@@ -40,12 +47,16 @@ public final class ContractBoundary {
         try {
             manifest = mapper.readTree(resource("manifest.json"));
             final Map<String, byte[]> sources = new HashMap<String, byte[]>();
+            final Set<String> patterns = new HashSet<String>();
+            JsonNode fieldSource = null;
             for (String file : new String[]{"schemas.json", "openapi.json", "state-transitions.json"}) {
                 byte[] bytes = resource(file);
                 if (!digest(bytes).equals(manifest.path("hashes").path(file).asText())) throw new Failure(Category.SCHEMA_RESOURCE);
                 JsonNode document = mapper.readTree(bytes);
+                if (file.equals("schemas.json")) fieldSource = document;
                 if (!file.equals("openapi.json")) sources.put(document.path("$id").asText(), bytes);
             }
+            for (JsonNode name : manifest.path("definitions")) collectPatterns(fieldSource.path("$defs").path(name.asText()), patterns);
             factory = JsonSchemaFactory.getInstance(VersionFlag.V202012, builder -> builder.schemaLoaders(loaders -> loaders.values(values -> {
                 values.clear();
                 values.add(iri -> {
@@ -54,7 +65,12 @@ public final class ContractBoundary {
                     return () -> new ByteArrayInputStream(bytes);
                 });
             })));
-            SchemaValidatorsConfig config = SchemaValidatorsConfig.builder().formatAssertionsEnabled(true).typeLoose(false).build();
+            SchemaValidatorsConfig config = SchemaValidatorsConfig.builder().formatAssertionsEnabled(true).typeLoose(false)
+                .regularExpressionFactory(expression -> {
+                    if (!patterns.contains(expression)) throw new Failure(Category.SCHEMA_RESOURCE);
+                    Pattern pattern = Pattern.compile(strictPatternEnd(expression));
+                    return value -> pattern.matcher(value).find();
+                }).build();
             for (JsonNode name : manifest.path("definitions")) {
                 String definition = name.asText();
                 if (!definition.matches("[A-Za-z][A-Za-z0-9]*")) throw new Failure(Category.SCHEMA_RESOURCE);
@@ -63,6 +79,26 @@ public final class ContractBoundary {
             if (schemas.isEmpty()) throw new Failure(Category.SCHEMA_RESOURCE);
         } catch (Failure failure) { throw failure; }
         catch (Exception failure) { throw new Failure(Category.SCHEMA_RESOURCE); }
+    }
+
+    private static ObjectMapper strictMapper() {
+        ObjectMapper mapper = CompatibilityProbe.strictMapper();
+        mapper.getFactory().setStreamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(64).maxNumberLength(128).maxStringLength(65536).build());
+        return mapper;
+    }
+    private static void collectPatterns(JsonNode schema, Set<String> patterns) {
+        if (schema.isObject()) {
+            if (schema.path("pattern").isTextual()) patterns.add(schema.get("pattern").asText());
+            for (JsonNode child : schema) collectPatterns(child, patterns);
+        } else if (schema.isArray()) for (JsonNode child : schema) collectPatterns(child, patterns);
+    }
+    // Only terminal unescaped anchors change; a literal \$ remains a literal dollar sign.
+    // This adapter is limited to the original reachable patterns and tested against Ajv.
+    static String strictPatternEnd(String expression) {
+        if (!expression.endsWith("$")) return expression;
+        int slashes = 0;
+        for (int index = expression.length() - 2; index >= 0 && expression.charAt(index) == '\\'; index--) slashes++;
+        return slashes % 2 == 0 ? expression.substring(0, expression.length() - 1) + "\\z" : expression;
     }
 
     private static byte[] resource(String file) throws Exception {
@@ -82,7 +118,9 @@ public final class ContractBoundary {
     static JsonNode parse(byte[] bytes) {
         if (bytes == null || bytes.length == 0 || bytes.length > MAX_BYTES) throw new Failure(Category.JSON_SYNTAX);
         try {
-            JsonNode result = CompatibilityProbe.strictRead(bytes);
+            String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
+            JsonNode result = PARSER.readTree(text);
             if (result == null || result.isMissingNode()) throw new Failure(Category.JSON_SYNTAX);
             return result;
         } catch (Exception failure) { throw new Failure(Category.JSON_SYNTAX); }
