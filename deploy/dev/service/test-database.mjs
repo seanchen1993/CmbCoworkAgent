@@ -79,7 +79,8 @@ export function containerPolicy(data, entry, ready = false) {
   }
   const networks = checked.NetworkSettings.Networks ?? {}
   if (!Object.keys(networks).length) checked.NetworkSettings.Networks = { [`${entry.project}-private`]: {} }
-  return validateContainer(checked, entry, "mysql")
+  const port = validateContainer(checked, entry, "mysql")
+  return ports["3306/tcp"] == null ? null : port
 }
 export async function testResources(entry, signal, ready = false) {
   await validateTestMetadata(entry)
@@ -123,8 +124,10 @@ export async function startTestDatabase(entry, signal) {
   return { project: entry.project, container: entry.container, port: entry.port, daemon: entry.daemon }
 }
 export async function appPassword(entry) {
-  await testResources(entry)
-  if (!entry.container || !entry.port) fail("READINESS")
+  const current = await testResources(entry, undefined, true)
+  if (!entry.container || !entry.port || current.containers.length !== 1 || !current.containers[0].State.Running ||
+      current.containers[0].State.Health?.Status !== "healthy" || current.port !== entry.port) fail("READINESS")
+  await verifyListeners(current.port)
   const value = await privateFile(join(entry.dir, "app-password"))
   if (!/^[a-f0-9]{64}\n$/.test(value) || await privateFile(join(entry.dir, "app-client.cnf")) !== `[client]\nuser=devclaw_app\npassword=${value.trim()}\n\n`) fail("SECRET")
   return value.trim()
