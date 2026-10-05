@@ -45,3 +45,11 @@ Frozen code03cc2f24766438614c0378cc7975fad5d07cd3c5/final report720177d809cbea85
 R1本次独立test9实际39ms非零拒绝，已关闭。main本次首次build缓存编译class复用但JUnit/probe/audit实际运行，不声称全新编译；正常merge后集成树新增源码须实际编译再次核对。不以worker自测代替独立结果、不接受wholeB01或运行时Schema边界。下一集成复验，然后A2b。
 
 集成7bd0ce8d；实际diff冻结720177d8..merge仅coorddocs差异，代码相同。主代理集成完整build77272 exit0，**实际全新编译2主源码/2测试源码**，九JUnit0skip、真实JDK8 probe、全部25ownclass52/35libs，Jar SHA e2b168ca8dc01007c6f69eefdffd90e54306a7f646250bcf1a250ec57c8b4a58/tree同2b437c98。新JAR时间戳与worker不同不当源漂移。A2a accepted/merged完成，无主代理句柄。下一A2b原Schema/Java-Ajv一致性ready，仍未实现/不提前进入HTTP/DB业务。
+
+## A2b实施起点与精度风险（2026-10-05 15:25 UTC，未验收）
+
+原high代理完成停写、两树8589e084 clean且无Java/Maven进程后，正式followup同B01-A02/A2b，无替代代理。主代理实际Git/报告核对小起点b2c45bf4，只本人报告变化；尚无A2b交付或独立通过。主代理不竞争builder。
+
+主代理只读Node22原 `tests/bot/schema-support.mjs` 的Version validator，准确命令 `node --input-type=module -e` 导入validator，对原字节JSON.parse逐项验证，chunk1e8c6f exit0：1/1.0/1e0 true；1.0000000000000001、0.99999999999999999、9007199254740990.5、9007199254740991.1被JS Number舍入后也是true；9007199254740992 false。这是原Node数值解析的已观察限制，不是数学非整数合法，也不代表Java已测。
+
+已给worker精确证据：上述原字节非整数须进入严格parser/typed boundary拒绝测试，不得先Double/cast丢精度；同组Schema数据值parity仍逐项实跑原Ajv，不能伪称原Ajv拒绝或吞掉共有case mismatch。不修改冻结源/旧Node支持文件。交付必须区分严格原字节边界和基于JS数据值的Schema语义一致性，不能宣称所有原字节在Node/Java全链路等价。此项是安全验收要求而非新产品范围。

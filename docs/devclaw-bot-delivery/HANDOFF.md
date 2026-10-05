@@ -14,6 +14,7 @@
 - 下一正常merge接受片并在集成树编译复验；A2b仍draft，需集成完成后ready再接续同high原代理。仅DTO消费，不是六API实现或完整Schema校验；定时任务保持停用。
 - 15:13UTC A2a已正常merge `7bd0ce8d8cf83b9ee7b15108ab600f44be9e811a`，代码与冻结720177d8字节一致（只协调文档不同）；集成完整build77272 exit0真实javac2主源码/2测试源码，JUnit9/0skip、25class52/35libs/probe通过。新jar e2b168ca8dc01007c6f69eefdffd90e54306a7f646250bcf1a250ec57c8b4a58，tree同A1；句柄闭合。A2b任务现ready，额度允许（23%/4%），下一FF同已停止high原代理后正式followup，不新增写者。自动化仍PAUSED。
 - 15:20UTC A2b已正式followup给同 `/root/b01_contracts_high` / B01-A02（仍high、无新agent）。主代理实际核对两树 `8589e08404ebd8d2860bf7091c0ac8b586086659` clean、原代理completed停写、Java/Maven processcheck为空；额度ordinaryUsageAllowed=true（26%/4%）。准确任务单A2b/工作树/文件/验收/本人报告范围已下发。等待严格JSON→离线原Schema→typedDTO与实际Java/Ajv同组parity小检查点，不竞争builder、不先做HTTP/DB/业务；定时续跑仍PAUSED。
+- 15:25UTC主代理实际核对b2c45bf4 report-only A2b起点；尚无实施接受。只读原Ajv发现精确非整数原字节会经JSON.parse舍入后当合法Version，证据chunk1e8c6f与逐项字面量已写review/tasks并发worker；Java严格bytes必须拒绝，Schema数据值parity和原字节解析局限分开报告，不改冻结源/抄预期/吞mismatch。当前无主代理构建或Docker副作用。
 
 ## 最新用户请求与停用检查点（优先于下方历史）
 
