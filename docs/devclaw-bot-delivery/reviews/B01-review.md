@@ -73,3 +73,9 @@ worker报告第三完整build26599/cd896a74 exit0，真实3main/3test源码Java8
 仅接受A2b离线输入/输出边界和可精确表示数据值的Schema语义parity。四raw数学非整数Java严格拒绝，而原JS Number舍入实际true，分层测试/文档明确；不是任意rawJSON字节Node/Java完全等价。整体六业务接口、数据库迁移/HTTP/权限/事务仍未实现，B1draft未派。定时续跑保持PAUSED。
 
 16:01UTC集成完成a4987bc93e62cc44726d20b7a8bb483063aacb7a；除delivery coordination外与冻结report0c5b8cc3实际diffexit0。主代理集成准确同build命令6982 **exit0**（chunkbf0686）：真实Corretto8重新javac3主源码/3测试源码，15JUnit/0fail/error/skip；1107同runIdf4e3eaa8-5a70-43fa-b7e3-7302dc2b8869/326valid781invalid/0mismatch，public4/6/42/10、29class52/35libs、原三source exactbytes与manifest、fatjarprobe通过。新jarSHAeb9d909c7223879fcc350a6e6101b480e7b3ba2851d28e3a42b0e7c4b93d44c4，tree不变；无主代理构建句柄。A2b accepted/merged，B1ready但未正式派；六API仍非已完成。
+
+## B1实施起点与数据顺序要求（2026-10-05 16:09 UTC，未验收）
+
+同high/B01-A02从实际5ddaaa59 clean正式followup，精确task/路径/范围/真实两空库验收已下发，未新增写者。主代理只读B00原owner/compose/resources/container/privateFile/probe接口与原Schema，尚未独立连接DB或接受任何B1代码。主代理readonlye0924a原dev三服务同ID/回环端口healthy，无resource变更。
+
+源实际chunk30592f Id max128，pattern `^[A-Za-z0-9][A-Za-z0-9._:-]*$`；Bot/Group关系都是有序数组，config/原回执JSON完整Unicode须保留。已发worker明确按source Id、关系ordinal/集合唯一、SQL锁排序和展示顺序分开、重开后稳定顺序的B1不变量；同步任务单，不扩到业务片。Schema合法性与space/FK/语义去重不可互相替代。当前主代理无builder/DB副作用，B1未通过，定时PAUSED。
