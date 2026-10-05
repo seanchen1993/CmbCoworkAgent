@@ -1,6 +1,14 @@
 # DevClaw Bot 当前交接点
 
-2026-10-05 11:13 UTC（北京时间19:13）· B00/A1已验收合入 · 自动续跑已按用户要求停用
+2026-10-05 14:50 UTC（北京时间22:50）· 用户手动接续B01 · gpt-6.1-sol/high · 定时续跑保持停用
+
+## 最新手动接续（覆盖下方停用时的等待下一用户请求）
+
+- 用户明确“子代理使用gpt-6.1 sol high，然后继续任务”；本轮手动推进B01-A2a，定时任务仍PAUSED，不调用恢复scheduler。
+- 主代理完整读最新文档并核对：main b72fe1e5 clean、worker aea2026d clean，旧xhigh代理errored且interrupt已确认停止，无Java/Maven进程/实施cwd句柄。额度ordinaryUsageAllowed=true（5%/1%已用），dev原三容器同ID/回环端口healthy，未重放DNS/安装/镜像/容器创建。
+- 旧代理工具无法就地调整effort；按用户明确配置变更创建B01-A02/high唯一写者，原树、A1/旧报告、构建缓存和开发数据全部保留。旧代理不再接续；不是绕过额度限制，不买/reset/换账号。
+- 当前任务B01.md/design/B01-A2a.md；报告改为本人attempts/B01-A02.md，旧A01只读。主代理重新遍历冻结Schema闭包25定义，旧24为任务单计数笔误，冻结源未改。A2a仅DTO生成/漂移/消费测试，主代理独立验收后才下一片；无HTTP/DB/Runtime/UI/新产品API。
+- 本段派单准备，实际新agent_id/基线随后记录state。当前所有代码成果已验收部分仍B00/A1，不把派单当完成。
 
 ## 最新用户请求与停用检查点（优先于下方历史）
 
