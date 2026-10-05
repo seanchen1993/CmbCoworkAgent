@@ -28,6 +28,8 @@ async function readPrivate(path) {
 }
 
 export async function build() {
+  // Check-only: a build must never regenerate DTOs and conceal committed drift.
+  console.log(await run(process.execPath, [join(root, "scripts/generate-bot-java-contracts.mjs"), "--check"], { cwd: root }))
   await directory(base)
   const ownerFile = join(base, "owner.json")
   try { await writeFile(ownerFile, JSON.stringify({ kind: "devclaw-bot-b01-a1", id: randomUUID() }) + "\n", { mode: 0o600, flag: "wx" }) } catch (e) { if (e.code !== "EEXIST") throw e }
@@ -64,18 +66,23 @@ export async function audit() {
     const libraries = contents.filter(name => /^BOOT-INF\/lib\/[^/]+\.jar$/.test(name)).map(name => name.slice("BOOT-INF/lib/".length)).sort()
     const required = ["spring-boot-2.7.18.jar", "spring-boot-autoconfigure-2.7.18.jar", "spring-webmvc-5.3.31.jar", "spring-jdbc-5.3.31.jar", "HikariCP-4.0.3.jar", "mysql-connector-j-8.0.33.jar", "flyway-core-8.5.13.jar", "flyway-mysql-8.5.13.jar", "json-schema-validator-1.5.9.jar", "jackson-core-2.18.3.jar", "jackson-annotations-2.18.3.jar", "jackson-databind-2.18.3.jar", "slf4j-api-2.0.17.jar", "log4j-api-2.25.3.jar", "log4j-core-2.25.3.jar", "log4j-slf4j2-impl-2.25.3.jar"]
     if (required.some(name => libraries.filter(value => value === name).length !== 1) || libraries.some(name => /logback|log4j-to-slf4j|slf4j-(?:simple|jdk14|log4j12|reload4j)|spring-boot-starter-logging|slf4j-api-1\./.test(name))) throw new Error("B01_PACKAGED_DEPENDENCIES")
-    const classes = contents.filter(name => /^BOOT-INF\/classes\/com\/devclaw\/botcontrol\/[A-Za-z0-9_$]+\.class$/.test(name))
+    const classes = contents.filter(name => /^BOOT-INF\/classes\/.+\.class$/.test(name))
     if (classes.length < 2) throw new Error("B01_PACKAGED_CLASSES")
     await run(join(jdk, "bin/jar"), ["xf", jar, ...classes], { env, cwd: temp })
     for (const name of classes) {
       const bytes = await readFile(join(temp, name))
       if (bytes.readUInt32BE(0) !== 0xcafebabe || bytes.readUInt16BE(6) !== 52) throw new Error("B01_CLASS_MAJOR")
     }
-    const xml = await readFile(join(project, "target/surefire-reports/TEST-com.devclaw.botcontrol.CompatibilityTest.xml"), "utf8")
-    const suite = xml.match(/<testsuite\b[^>]*>/)?.[0] ?? ""
-    for (const [field, value] of [["tests", "4"], ["failures", "0"], ["errors", "0"], ["skipped", "0"]]) if (!suite.includes(`${field}="${value}"`)) throw new Error("B01_TEST_RESULT")
+    const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5 }
+    let tests = 0
+    for (const [name, count] of Object.entries(suites)) {
+      const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")
+      const suite = xml.match(/<testsuite\b[^>]*>/)?.[0] ?? ""
+      for (const [field, value] of [["tests", String(count)], ["failures", "0"], ["errors", "0"], ["skipped", "0"]]) if (!suite.includes(`${field}="${value}"`)) throw new Error("B01_TEST_RESULT")
+      tests += count
+    }
     const tree = await readFile(join(project, "target/dependency-tree.txt"), "utf8")
-    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, tests: 4, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
+    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, suites, tests, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
   } finally { await removePrivateTemp(temp) }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
