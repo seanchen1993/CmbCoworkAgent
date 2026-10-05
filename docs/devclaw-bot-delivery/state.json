@@ -3,12 +3,12 @@
   "updated_on": "2026-10-05",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
-  "status": "integrating",
+  "status": "dispatch_prepared",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "69f326ce7cc8af6d467c0a33c09cee1bb8f30f3c"
+    "last_accepted_commit": "7bd0ce8d8cf83b9ee7b15108ab600f44be9e811a"
   },
   "authorization": {
     "approved_work": [
@@ -211,15 +211,15 @@
     },
     {
       "id": "B01",
-      "status": "integrating",
+      "status": "dispatch_prepared",
       "spec": "tasks/B01.md",
       "design": "tasks/B01-design.md",
       "depends_on": [
         "B00"
       ],
       "wait_reason": null,
-      "current_slice": "A2a",
-      "slice_spec": "tasks/B01-A2a.md",
+      "current_slice": "A2b",
+      "slice_spec": "tasks/B01-A2b.md",
       "attempt_id": "B01-A02",
       "agent_task_name": "b01_contracts_high",
       "agent_id": "/root/b01_contracts_high",
@@ -227,7 +227,7 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
-      "latest_checkpoint": "A2a code03cc2f24/report720177d8 frozen, workerstopped/clean. Mainread all9 scoped files/generatedDTO/fullgenerator/consumer/helper; frozen source/src/locks/A1 unchanged. Mainindependent Node12 chunkebd169 exit0; F03session45195 exit0 24/check/typeconsumer; fullbuild20746 exit0 realJava8/JUnit9/probe/all25 ownclass52/35libs. R1 cycle fixture actualpass. A2a independentlyaccepted pendingnormalmerge and integrationfreshcompile, no A2b yet; wholeB01 six businessAPI unimplemented; schedulerPAUSED.",
+      "latest_checkpoint": "A2a accepted/normalmerge7bd0ce8d runtime identical to frozen720177d8 outside coordinationdocs. Mainintegrationbuild77272 exit0 actualjavac2 main/2test sources withrealJDK8,9JUnit0fail/errors/skip/probe/all25class52/35libs, jar e2b168ca8dc01007c6f69eefdffd90e54306a7f646250bcf1a250ec57c8b4a58/treeunchanged. MainNode12/F03/build20746 passed/closed. A2b ready next, same high worker stopped/clean, quotaallowed23%primary/4%weekly. WholeB01 six businessAPI unimplemented; schedulerPAUSED.",
       "dispatched_slice": "A2a",
       "slice_baseline": "7c25bf479f51f994b99f7df471a950eddde07d3d",
       "dispatch_verified": "Spawn succeeded /root/b01_contracts_high with explicit gpt-6.1-sol/high, fork none, self-contained B01-A2a brief. Same preserved worker tree normalFF7c25bf47 clean before dispatch. Oldwriter interrupted/stopped, ordinaryquotaallowed true, no concurrentwriter. Newattempt B01-A02 reports only own file; mainowns state/HANDOFF. Scheduler stillPAUSED.",
@@ -248,7 +248,9 @@
       "checkpoint_head": "720177d809cbea85b2a4b58c2043dfb9580eb9ec",
       "slices": {
         "A2a": {
-          "status": "accepted_pending_integration",
+          "status": "accepted_merged",
+          "integration_commit": "7bd0ce8d8cf83b9ee7b15108ab600f44be9e811a",
+          "integrated_fresh_compile": {"session_id":77272,"exit_code":0,"compiled_main_sources":2,"compiled_test_sources":2,"java":"1.8.0_482","tests":9,"skipped":0,"class_major":52,"own_classes":25,"runtime_libraries":35,"jar_sha256":"e2b168ca8dc01007c6f69eefdffd90e54306a7f646250bcf1a250ec57c8b4a58","tree_sha256":"2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b"},
           "code_commit": "03cc2f24766438614c0378cc7975fad5d07cd3c5",
           "report_commit": "720177d809cbea85b2a4b58c2043dfb9580eb9ec",
           "independent_node_chunk": "ebd169",
@@ -303,7 +305,7 @@
       }
     }
   ],
-  "next_action": "A2a independentlyaccepted: normalmerge frozenworker, verify sameactualsource and newintegrationJava8compile/tests, save acceptedmerge. Then ready A2b task and resume same stopped high worker ifquotaallows. No automatictrigger/otherproductroute; schedulerPAUSED.",
+  "next_action": "A2a accepted/merged and integration freshcompile independentlypassed. Save readyA2b task, normalFF stopped clean samehigh worker tree to updatedcoordHEAD, followup B01-A02/A2b only. Explicitmanualcontinue stillauthorized/currentordinaryquotaallowed. Mainread/reverify before accepting, noDB/HTTP/business yet. Scheduler remainsPAUSED.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -313,11 +315,11 @@
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {
-      "verified_at_utc": "2026-10-05T14:49:08Z",
+      "verified_at_utc": "2026-10-05T15:13:33Z",
       "ordinaryUsageAllowed": true,
-      "primary_used_percent": 5,
+      "primary_used_percent": 23,
       "primary_resets_at_utc": "2026-10-05T16:10:30Z",
-      "secondary_used_percent": 1,
+      "secondary_used_percent": 4,
       "secondary_resets_at_utc": "2026-10-12T11:10:30Z",
       "policy": "Current ordinaryUsageAllowed=true/limitReachednull. No purchase/reset/account change. User explicitly selects same model at high effort; one preserved-tree replacement for this configuration change, not quota avoidance. Actualquotaerrorstop, automatictrigger remainsPAUSED."
     }

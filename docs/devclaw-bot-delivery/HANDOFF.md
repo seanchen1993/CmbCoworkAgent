@@ -12,6 +12,7 @@
 - 起点report-only `e8b13615c3b18a1a31f344bea8bb30f8ea9afe10` 已由主代理实际Git/报告核对；worker完整读材料、首次clean、尚无构建/测试/产品副作用，开始生成与消费测试。后续报告写A02，不把旧A01的历史review_pending当本片完成。
 - 15:10UTC A2a已独立接受待集成：code03cc2f24766438614c0378cc7975fad5d07cd3c5/report720177d809cbea85b2a4b58c2043dfb9580eb9ec，worker冻结停写/clean，无未知句柄。main读9个允许文件及全部代码，冻结源/A1/旧TS/src/锁不变；独立Node12 chunkebd169 exit0、F03 45195 exit0 24/check/tsc消费、完整Java8 build20746 exit0九JUnit/25自有class52/35库/probe，R1循环负例通过。主代理句柄全部闭合，未改实现/容器。
 - 下一正常merge接受片并在集成树编译复验；A2b仍draft，需集成完成后ready再接续同high原代理。仅DTO消费，不是六API实现或完整Schema校验；定时任务保持停用。
+- 15:13UTC A2a已正常merge `7bd0ce8d8cf83b9ee7b15108ab600f44be9e811a`，代码与冻结720177d8字节一致（只协调文档不同）；集成完整build77272 exit0真实javac2主源码/2测试源码，JUnit9/0skip、25class52/35libs/probe通过。新jar e2b168ca8dc01007c6f69eefdffd90e54306a7f646250bcf1a250ec57c8b4a58，tree同A1；句柄闭合。A2b任务现ready，额度允许（23%/4%），下一FF同已停止high原代理后正式followup，不新增写者。自动化仍PAUSED。
 
 ## 最新用户请求与停用检查点（优先于下方历史）
 

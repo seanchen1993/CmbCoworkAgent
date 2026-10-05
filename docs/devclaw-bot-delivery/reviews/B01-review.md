@@ -43,3 +43,5 @@ Frozen code03cc2f24766438614c0378cc7975fad5d07cd3c5/final report720177d809cbea85
 主代理独立命令（cwd实施树，Node22准确路径）及实际结果：`--test tests/bot/service/java-generator.spec.mjs` chunkebd169 exit0 **12/12、0skip**；`tests/bot/check-contracts.mjs` session45195 exit0 **24/24**并原TS生成check/tsc消费；`deploy/dev/service/build.mjs` session20746 exit0：真实Corretto1.8.0_482/Maven3.9.6，实际JUnit5消费+4兼容=**9/0fail/errors/skip**，fatjar真实probeverified、webfalse/databasefalse，实际25ownclass52/35libs/固定版本与单provider。Jar SHA14a686bdfb6a7e2f4a85940502973f6baab022999e01d065b53c265cca7a246a；tree SHA2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b与A1同。工作树依然clean，两个session闭合。
 
 R1本次独立test9实际39ms非零拒绝，已关闭。main本次首次build缓存编译class复用但JUnit/probe/audit实际运行，不声称全新编译；正常merge后集成树新增源码须实际编译再次核对。不以worker自测代替独立结果、不接受wholeB01或运行时Schema边界。下一集成复验，然后A2b。
+
+集成7bd0ce8d；实际diff冻结720177d8..merge仅coorddocs差异，代码相同。主代理集成完整build77272 exit0，**实际全新编译2主源码/2测试源码**，九JUnit0skip、真实JDK8 probe、全部25ownclass52/35libs，Jar SHA e2b168ca8dc01007c6f69eefdffd90e54306a7f646250bcf1a250ec57c8b4a58/tree同2b437c98。新JAR时间戳与worker不同不当源漂移。A2a accepted/merged完成，无主代理句柄。下一A2b原Schema/Java-Ajv一致性ready，仍未实现/不提前进入HTTP/DB业务。
