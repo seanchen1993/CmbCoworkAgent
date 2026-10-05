@@ -3,7 +3,7 @@
   "updated_on": "2026-10-05",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
-  "status": "dispatch_prepared",
+  "status": "idle_awaiting_manual_continuation",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -30,6 +30,7 @@
     "local_es_s3_containers_allowed": true,
     "host_sudo_or_network_change_allowed": false,
     "explicit_user_pause": false,
+    "automatic_continuation_paused_by_user": true,
     "external_push_allowed": false,
     "deployment_allowed": false,
     "real_intranet_access_allowed": false,
@@ -47,13 +48,13 @@
   "scheduler": {
     "kind": "heartbeat",
     "automation_id": "devclaw-bot",
-    "status": "ACTIVE",
+    "status": "PAUSED",
     "cancellation_reason": null,
-    "pause_reason": null,
+    "pause_reason": "2026-10-05 用户要求汇报当前进度，并停用定时自动续任务；只暂停自动触发，保留全部代码、检查点与开发环境，不自动恢复。",
     "proposed_interval_minutes": 240,
     "not_before_utc": null,
-    "last_run_outcome": "2026-10-04T03:49:19Z app tool successfully updated original heartbeat to ACTIVE; TOML readback agrees. Same name/thread/4-hour interval; prompt adds user-approved guest DNS repair and B00 v2 local ES/S3. Earlier 02:01 update failed quota and was not executed. B01 remains undispatched.",
-    "last_verified_at_utc": "2026-10-04T11:52:00Z"
+    "last_run_outcome": "2026-10-05 current user request: app automation update returned PAUSED for devclaw-bot; TOML readback confirms same name/thread/four-hour schedule, no replacement or deletion. No new implementation dispatched.",
+    "last_verified_at_utc": "2026-10-05T11:13:47Z"
   },
   "tasks": [
     {
@@ -207,7 +208,7 @@
     },
     {
       "id": "B01",
-      "status": "dispatch_prepared",
+      "status": "ready_awaiting_manual_continuation",
       "spec": "tasks/B01.md",
       "design": "tasks/B01-design.md",
       "depends_on": [
@@ -223,9 +224,11 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A01.md",
-      "latest_checkpoint": "A1 accepted/merged69f326ce; mainintegratedfresh86029 exit0 recompiledoneJava source+oneJUnit source withactualJDK8,4tests0skip/probe/class52/35libs verified. WholeB01 stillnotimplemented. A2a taskready DTOgeneratoronly, originalstoppedworker to beFF andfollowup; no A2a writer yet.",
-      "dispatched_slice": "A1",
-      "dispatch_verified": "Original same6.1-sol/xhigh worker followup succeeded; collaboration list confirmsrunning; no newwriter/agent. Worker treeFF0e33703a clean before dispatch.",
+      "latest_checkpoint": "A1 accepted/merged69f326ce; mainintegratedfresh86029 exit0 actualJDK8/fourtests0skip/probe/class52/35libs. A2a followup was acknowledged after worker normal FF to aea2026d, but originalworker then errored with usage limit. Current main and worker both aea2026d clean, no A2a implementation/Java generator/SQL/HTTP business code; unchanged A1 attempt. No Java/Maven process or open worker cwd handle observed. WholeB01 six business APIs remain unimplemented. Current user stopped automatic continuation; no new dispatch.",
+      "dispatched_slice": "A2a",
+      "slice_baseline": "aea2026d013a3546c91fd06872a214ffdc3e223d",
+      "dispatch_verified": "Prior A2a followup acknowledged for same gpt-6.1-sol/xhigh worker, then actual usage-limit failure. Current collaboration list confirms errored/stopped, Git confirms aea2026d clean in both trees. No new agent or attempt created.",
+      "last_interruption": "A2a originalworker actual usage-limit error advertised Oct10 2026 07:28 AM; historical error, not current quota availability. Current read-only limits ordinaryUsageAllowed=true; no implementation resumed because latest user only requests progress and stopping scheduled continuation.",
       "checkpoint_code_commit": "b6c147c7131f8d41e37bb73bbe9b1f1bc2d229e6",
       "live_commands": [],
       "private_build": {
@@ -274,7 +277,7 @@
       }
     }
   ],
-  "next_action": "FF existingcleanstoppedworker tree to thismaincoordHEAD; dispatch B01-A2a generator/typedDTO slice only to same6.1-sol/xhigh. Currenttool ordinaryUsageAllowedtrue despite roundedweekly100%; do not infer exhaustion from percent. Actualquotaerror -> preservecheckpoint/stop/resumeoriginal later. No A2b/HTTP/DB/business yet.",
+  "next_action": "Wait for explicit manual continuation; scheduler remains PAUSED and must not be reactivated automatically. On a later authorized continuation, reread actual Git/docs/processes/quota, preserve A1 and dev containers, then resume same stopped gpt-6.1-sol/xhigh worker for B01-A2a only. No A2b/HTTP/DB/business or later route automatically.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -284,15 +287,15 @@
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {
-      "verified_at_utc": "2026-10-05T04:45Z",
+      "verified_at_utc": "2026-10-05T11:13:47Z",
       "ordinaryUsageAllowed": true,
-      "primary_used_percent": 35,
-      "primary_resets_at_utc": "2026-10-05T08:07:19Z",
-      "secondary_used_percent": 100,
-      "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
-      "policy": "Rounded100% alone is not blocking: actualordinaryUsageAllowed stilltrue, limitreachednull. Smallinitialcheckpointfirst; actualquotaerrorstop/noresetpurchasemodelswitch."
+      "primary_used_percent": 2,
+      "primary_resets_at_utc": "2026-10-05T16:10:29Z",
+      "secondary_used_percent": 0,
+      "secondary_resets_at_utc": "2026-10-12T11:10:29Z",
+      "policy": "Current read-only app limits ordinaryUsageAllowed=true and limitReached null. Historical worker failure remains recorded, but its old restore time is not a current blocker. This turn made no purchase/reset/account/model change and did not resume implementation; user stopped scheduled continuation."
     }
   },
-  "recovery_notes": "03:55UTC actualaudit completed; sameoriginal B00-A01 resumed. Weekly94% ishighbutordinaryusageallowed. Currentfulltestpass isworker evidence only; noacceptance/integration/B01dispatch.",
+  "recovery_notes": "2026-10-05T11:13:47Z progress/stop audit: B00 and A1 accepted/merged, both Git trees aea2026d clean; A2a worker errored/stopped with no observed implementation. All three retained original dev containers healthy on prior 127.0.0.1 ports; no Java/Maven process/open worker cwd handle. Original automation PAUSED by app tool and TOML readback. Current ordinary quota available, but no new work authorized by this status-only request. Preserve all code/cache/data, wait for manual continuation.",
   "current_task_id": "B01"
 }

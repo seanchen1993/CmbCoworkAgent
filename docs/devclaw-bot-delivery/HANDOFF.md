@@ -1,6 +1,15 @@
 # DevClaw Bot 当前交接点
 
-2026-10-05 04:46 UTC（北京时间12:46）· B00/A1 accepted/merged · B01-A2a准备派单
+2026-10-05 11:13 UTC（北京时间19:13）· B00/A1已验收合入 · 自动续跑已按用户要求停用
+
+## 最新用户请求与停用检查点（优先于下方历史）
+
+- 用户本次只要求汇报进度并停用定时自动续任务，不是继续实施。App工具已将原 `devclaw-bot` 更新为PAUSED，实际TOML读回一致；保留名称、同会话和原四小时配置，不删除、不创建替代任务，不自行恢复。
+- B00三服务与B01-A1已独立验收并合入。六个伙伴/团队业务API仍未实现，Java DTO、Schema完整对照、迁移、HTTP与事务/权限验收均未完成。
+- A2a先前正常FF实施树至 `aea2026d013a3546c91fd06872a214ffdc3e223d` 后已向同一原代理followup，但代理实际报额度错误，未交付新代码。本次实际核对两树同HEAD且clean，attempt仍为A1；当前Java文件仅CompatibilityProbe/CompatibilityTest，未出现生成器/SQL/业务HTTP代码。原代理errored/停止，无新写者，无Java/Maven进程，实施树lsof为空。
+- 本次额度只读核对ordinaryUsageAllowed=true（短窗2%/周窗0%已用）；旧错误提示的10月10日恢复时间仅保留为历史，不能据此宣称现在仍不可用。本次未购买/重置额度、切换账号/模型或重启实施。
+- Docker只读ps：原MySQL/ES/S3三容器仍healthy、同ID，端口仍127.0.0.1:32878/32877/32876。保留全部数据、私有凭据、构建缓存与VM，不stop/delete/prune。
+- 下一步等待用户手动明确继续，再核对实际状态并接续原6.1-sol/xhigh唯一代理做A2a。自动触发保持停用，不能因额度恢复或旧heartbeat自行派单。下方04:46内容是历史检查证据，过时的“ACTIVE/未派A2”不代表当前状态。
 
 ## 当前事实与下一动作
 
@@ -22,7 +31,7 @@
 
 - 集成：`/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork`，`codex/devclaw-bot-integration`。
 - 实施：`/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork`，`codex/devclaw-bot-local`，基线6530c052。**不得在默认d12a实施。**
-- 当前任务：tasks/B01.md、B01-design.md、B01-A1.md；旧B00已结束。报告：实施树delivery/attempts/B01-A01.md。
+- 当前待续任务：tasks/B01.md、B01-design.md、B01-A2a.md；A1与旧B00已结束。报告：实施树delivery/attempts/B01-A01.md。
 - B01允许services/bot-control/**、Java生成器（A2）、tests/bot/service/**、deploy/dev/service/**、README/package scripts/.gitignore窄追加及本人attempt。A1只兼容切片，不写DTO/HTTP监听/DB业务；不改src/contracts schema/F05/B00/锁文件/主代理记录。主代理独占state/HANDOFF/tasks/reviews，做设计、审查、复验和集成。
 - B01当前tasks/B01-A2a.md准备派单：只从六operation来源推导可达Java DTO/生成器/漂移检查，下一A2b才运行时Schema/完整parity。原代理停止，拟FF新文档HEAD后followup，未新增写者。仍不做HTTP/DB业务或后续路线。
 
