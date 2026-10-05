@@ -3,7 +3,7 @@
   "updated_on": "2026-10-05",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
-  "status": "implementing",
+  "status": "waiting_decision",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -211,13 +211,13 @@
     },
     {
       "id": "B01",
-      "status": "implementing",
+      "status": "waiting_decision",
       "spec": "tasks/B01.md",
       "design": "tasks/B01-design.md",
       "depends_on": [
         "B00"
       ],
-      "wait_reason": null,
+      "wait_reason": "B1 actual FK DDL failed42000/1142 (missing REFERENCES). Minimum new-empty-test bootstrap patch rejected by auto-review; no change applied/no bypass. Direct human permission required for schema REFERENCES in new test initializers only. Existing dev/B00/root credentials unchanged. Not quota or user pause.",
       "current_slice": "B1",
       "slice_spec": "tasks/B01-B1.md",
       "attempt_id": "B01-A02",
@@ -227,13 +227,13 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
-      "latest_checkpoint": "B1e85c40d2/9352 actualprerequisitefailed SQLState42000 errno1142 forFKchildCREATE afterparentCREATE/limitedschema-accountchecks pass; ownede120754f14f16cae removed finally reported, notB1acceptance. Mainreadactualsource/INIT_SQL approves fixed B1_TEST_INIT_SQL original+REFERENCES onlyforNEWemptytests bootstrap within localDocker authorization; noB00/originaldev/liveGRANT/rootread/othergrant. Worker finishingR1/R2negativechecks, newemptyFKprobe next; mainnocompetingbuilder/DBmutation, autoPAUSED.",
+      "latest_checkpoint": "B1 stopped waitingdirectuserpermission after auto-review rejected REFERENCES bootstrap patch; nofilechange/no workaround/no newtest launch. Preserve codeb06ff263/report660240ae clean (only5allowedfiles), fullworkercompleted/stopped/nohandles. Mainactualfulladapter/testdiffread and independentofflineNode77560d exit0 3/3; readonlyDocker95d76d original3samefullIDs/portshealthy,8b0655 only3devvolumes,22b02b notestnetwork,177c06 noprocess. B1 migrations/config/API notdone/notaccepted/notmerged. Proposedgrant inactivependingtrustedhumanapproval; autoPAUSED.",
       "dispatched_slice": "B1",
       "slice_baseline": "5ddaaa59edbe70bb39d636350135d623102791af",
       "dispatch_verified": "Same /root/b01_contracts_high followup succeeded at16:04UTC with existing gpt-6.1-sol/high configuration, no newagent. Actualworker5ddaaa59 clean, previousagentcompleted/stopped, Java/Maven pgrep665b14 empty; B1ready after A2bmerge/freshcompile. Exacttask/files/acceptance/privateDocker/ownA02/nochildren supplied, schedulerPAUSED. LatestordinaryUsageAllowed=true55%/9%, noreset/purchase/accountchange.",
       "previous_attempts": [{"attempt_id":"B01-A01","agent_id":"/root/b00_local_docker","model":"gpt-6.1-sol","reasoning_effort":"xhigh","status":"retired_stopped_after_user_configuration_change","last_worker_head":"aea2026d013a3546c91fd06872a214ffdc3e223d","attempt_report":"attempts/B01-A01.md","delivered":"A1 accepted/merged; no A2a implementation"}],
       "last_interruption": "A2a originalworker actual usage-limit error advertised Oct10 2026 07:28 AM; historical error, not current quota availability. Current read-only limits ordinaryUsageAllowed=true; no implementation resumed because latest user only requests progress and stopping scheduled continuation.",
-      "checkpoint_code_commit": "575ed53b376fe31142271a02b2acf0c059415bbb",
+      "checkpoint_code_commit": "b06ff263fd5aa507037146cd0fc3826ea873f0ac",
       "live_commands": [],
       "private_build": {
         "base": "/Users/heyirui/.devclaw-bot-b01-a1",
@@ -245,7 +245,7 @@
         "docker_effects": "none"
       },
       "latest_independent_check": "Main A2b build82363 exit0 actualCorretto1.8.0_482/Maven3.9.6,15tests0fail/error/skip,1107Schema parity samebbaccc45-ace4-42da-b762-4600df2c4402/0mismatch,29class52/35fixedlibs/exactfrozenresources/fatjarprobe; workerclasses cached so notfreshcompileclaim. Nodea2b36715/15/F0398890exit0. Pending integrated fresh compilation; no HTTP/DB/business.",
-      "checkpoint_head": "0c5b8cc377d21dbfc5799e137e1cd6c6e6587ffb",
+      "checkpoint_head": "660240aecde126b7ba8a4af1a92188805d5e0bc2",
       "slices": {
         "A2b": {
           "status": "accepted_merged",
@@ -270,14 +270,17 @@
           "limits": "Only offline strict byte parser/source-derived Schema/typed DTO. JS Number raw-byte rounding limitation separately tested/documented, not arbitrary Java/JS byte equivalence. No HTTP/DB/business APIs."
         },
         "B1": {
-          "status": "implementing",
+          "status": "waiting_decision",
           "task": "tasks/B01-B1.md",
           "baseline": "5ddaaa59edbe70bb39d636350135d623102791af",
           "dispatch_at_utc": "2026-10-05T16:04:00Z",
-          "checkpoint_head": "c7390ccdf519d0e64830330c38793cd0bdc9d325",
+          "checkpoint_head": "660240aecde126b7ba8a4af1a92188805d5e0bc2",
+          "checkpoint_code_commit": "b06ff263fd5aa507037146cd0fc3826ea873f0ac",
           "approved_adaptation": "B00validateProject indirectlyreadsroot. Main16:13UTC approved newdeploy/dev/service test-onlymetadata adapter onlyownednewtests/reuseowner-daemon-container-network-loopback/staticcompose checks; noB00modification/noexistingrootread/app-onlySQL. Newemptytestrootbootstrap write-only permitted; actualcleanup/SIGTERM/unknown-owner negativesrequired. Worker16502readonlycapacity3healthy/no mutation, not independentDB acceptance.",
           "prerequisite_failure": {"code_commit":"e85c40d2c4fb451bf9123599a610a2a8764ebc07","session_id":9352,"exit_code":1,"sql_state":"42000","errno":1142,"stage":"FK child CREATE after parent CREATE passed","test_project":"devclaw-bot-test-e120754f14f16cae","cleanup":"workerreported exactallremoved; no retaineddev mutation","commands_closed":true},
-          "test_bootstrap_decision": "Main16:22UTC fixedadditionalREFERENCES ON devclaw.* permitted onlynewemptytest officialinit, oldB00INIT keptliteral source+one staticgrant in serviceadapter. Noexistingdev/rootsecretread/liveGRANT/ALL/GRANTOPTION/otherDB. Exactclosedgrantsetactualprobe thenB1continue; oldfailurepreserved. Furtherprivilegesrequireactualevidence/newmaindecision.",
+          "test_bootstrap_decision": "INACTIVE PENDING DIRECT USER PERMISSION. Main16:22UTC proposed fixedREFERENCES ondevclaw.* onlynewemptytest officialinit (noexistingdev/B00/rootread/liveGRANT/ALL/GRANTOPTION/otherDB), but actualauto-review rejected patch as permission expansion. No changeapplied/no retry viaothermechanism. Must askhuman toapprovepreciseproposal, then resume preservedsamehighworker after actualaudit; oldfailure remains.",
+          "safety_review_block": {"at_utc":"2026-10-05T16:22:44Z","result":"apply_patch_rejected_nochange","next_requirement":"trusted direct human permission for new-empty-test schema REFERENCES bootstrap","agent_status":"completed_stopped","implementation_not_done":["DB schema/migrations","closed local DB config/readiness","two successful fresh DB probes","actual pre-ready failure and SIGTERM cleanup","Schema-valid escaped-text lossless JDBC roundtrip"]},
+          "independent_partial_audit": {"at_utc":"2026-10-05T16:25:05Z","node_chunk":"77560d","node_tests":3,"exit_code":0,"only_scope_files":5,"code_to_report_diff_exit_code":0,"worker_clean":true,"original_dev_docker_chunk":"95d76d","dev_volumes_chunk":"8b0655","test_networks_chunk":"22b02b","process_chunk":"177c06","test_resources":"none","main_db_or_privilege_mutation":"none","not_acceptance":true},
           "open_review_items": ["R1 pre-ready failure/cancellation cleanup with full actualpolicy ownership", "R2 appsecret departure requires actualready/currentport/listener not cleanup projection", "Schema-valid text escape/NUL lossless JDBC roundtrip"],
           "prerequisites": "A2b accepted/merged a4987bc9; integrated freshcompile6982 passed. B00 originaldev3samehealthy e0924a; no resource mutation. Samehigh agent completed/stopped, no newwriter.",
           "acceptance": "MySQL5.7/JDK8 real two sequential isolated testprojects, migration/no-op/checksum/FK/space/UTF8UTC/account/config failures/deadlines/SIGTERM and precisecleanup; noHTTP/business. Main independent actualdiff/realtest before acceptance."
@@ -340,7 +343,7 @@
       }
     }
   ],
-  "next_action": "B1formallydispatched to samehigh agent/ownA02 fromactual5ddaaa59 clean. Awaitsmallcheckpoint, readactualimplementation incrementally, no competingbuilder. Mainindependentconfig/realJDK8/twoMySQL5.7/migration/FK/account/failure/SIGTERMcleanup required beforeaccept/merge. NoHTTP/business until next formal slice; preserve dev3data/cache/autoPAUSED.",
+  "next_action": "Stop dependentimplementation and askhuman directapproval: onlynewemptytask testMySQL officialbootstrap adds REFERENCES ON devclaw.* fordevclaw_app, noexistingdev/B00/liveGRANT/rootread/ALL/otherDB. Auto-review alreadyrejected/nochange; do notbypass/retry/spawn. Preserve b06code/660report/dev3/cache. Ifapproved, auditactualGit/agents/process/limits then followsamehigh/B01-A02 and verifynewFKprobe beforeB1migration. NoB1acceptance/HTTP/business yet; schedulerPAUSED.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,

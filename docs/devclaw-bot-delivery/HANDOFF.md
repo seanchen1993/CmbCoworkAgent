@@ -1,6 +1,16 @@
 # DevClaw Bot 当前交接点
 
-2026-10-05 16:01 UTC · 用户手动接续B01 · gpt-6.1-sol/high · 定时续跑保持停用
+2026-10-05 16:25 UTC · B01-B1等待用户直接权限确认 · gpt-6.1-sol/high已停止写入 · 定时续跑保持停用
+
+## 最新停点：权限提议被安全审查拒绝，未落地
+
+- A2a/A2b已独立接受合入，最后A2bmerge a4987bc9/集成freshcompile6982 exit0 15JUnit/1107parity通过。B1尚未完成，不把本轮说成六API交付。
+- B1真实app FK子表CREATE失败42000/1142，原父CREATE/限定schema检查通过。下方16:22主代理最小REFERENCES技术提议随后被auto-review拒绝，**无文件/账号/资源变更，禁止绕过**；该提议现在inactive，必须用户直接批准准确范围，不能把任务文档当权限。
+- 待用户确认：仅未来新建的空test project官方MySQL初始化，为devclaw_app在devclaw.*增加REFERENCES；不改现有dev、B00原实现/配置，不读已有root秘密/用root连JDBC，不liveGRANT/ALL/GRANTOPTION/其他schema。不批准前不启动依赖实现或新测试，不重派代理绕过。
+- 保留worker code `b06ff263fd5aa507037146cd0fc3826ea873f0ac` / report-only `660240aecde126b7ba8a4af1a92188805d5e0bc2`，samehigh已completed/停写/clean，无未知句柄。只五允许文件：root-free test helper、最小privilege probe/Java与离线metadata测试、本A02报告；迁移/config/六API尚未实施/未merge。
+- main实际读最终adapter与tests、code..report除本人报告diffexit0，独立Node77560d exit0 3/3。只离线局部通过，不是B1验收；R1/R2窄源码修正已读，实际未ready/SIGTERM/字符串往返及两空库仍待。
+- main独立只读95d76d：原三服务全ID/12732878/32877/32876同且healthy；8b0655仅原三dev卷、22b02b无test network，177c06无Java/probe/Maven进程。worker失败测试e120全部精确finally回收。所有开发数据/凭据/cache/target保留，定时自动续跑仍PAUSED。
+- 用户直接批准后，先核对实际Git/代理/进程/当前额度，再从保留tree/checkpoint接续samehigh B01-A02；先新空库最小FK/有限grant probe，不能沿用1142失败当通过。当前等待不是quota、不是用户暂停整个任务，也不自动恢复定时任务。
 
 ## 最新手动接续（覆盖下方停用时的等待下一用户请求）
 

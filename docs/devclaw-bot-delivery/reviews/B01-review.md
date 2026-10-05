@@ -89,3 +89,11 @@ B1-R1早期code草稿chunk23f8b4只读发现：testResources无条件调用要�
 B1-R2草稿只读：appPassword原默认ready=false及只查旧entry.container/port可能把cleanup投影用成连接资格；已要求secret出站用原件ready=true、Running/healthy、实际当前port同登记、listener/ID/daemon核对。已读fd23cb有限readiness投影保留实际Config/HostConfig/mount/security、不隐藏present未知ports/networks，可仅清理用；缺端口须输出null/not-ready不伪称65535实际endpoint。最终待worker当前代码+离线恶意policy/实际未ready和SIGTERM证明及main独立。
 
 16:22UTC实际先决失败worker报告e85c40d2/session9352 exit1：父CREATE成功、含FK子CREATE SQLState42000/1142；原app六项schema权力/session/version已检查，现有原INIT_SQL主代理实际读b1e6f6确认无REFERENCES。主代理不放弃space/FK，为用户已授权localDocker新空测试库技术批准固定B1_TEST_INIT_SQL=原INIT_SQL＋schema REFERENCES一条，旧B00/现有dev完全不改，不读已有root/不root连接/liveGRANT/ALL/GRANTOPTION。新库再实测封闭权限集合及FK，更多权限需实证决策。失败9352/e120资源worker报告finallyremoved、保留失败事实；不是main独立数据库验收。无主代理实现/SQL/资源mutation，autoPAUSED。
+
+## B1权限审查停点（16:25UTC，未验收）
+
+上述技术提议实际apply_patch被auto-review拒绝：认为权限扩展需直接用户授权，主代理决定不能替代。worker无文件改动/无替代写法或执行绕过/无新测试环境；实际停写codeb06ff263fd5aa507037146cd0fc3826ea873f0ac/report660240aecde126b7ba8a4af1a92188805d5e0bc2，5允许文件/clean/报告-only diffexit0。最小REFERENCES方案现inactive，等待human准确批准，不重复派单或盲重放。任务单/state/HANDOFF均已将此新停点放到前面。
+
+主代理实际读最终147行adapter、52行offline测试与前述privilegehelper/Java：R1缺port只返回null且clone不改原件，未知实际ports/network/policy/mount不隐藏；R2 appSecret先真实ready/currentport/Running/healthy/listener后private read。独立Node22 `--test tests/bot/service/database-metadata.spec.mjs` chunk77560d **exit0 3/3/0skip**；只离线边界通过，实际未ready/SIGTERM及完整迁移/config/两空库/合法escape存储尚未跑，不accept B1，不merge局部草稿。
+
+主代理只读Docker实际95d76d原3container完整ID/127ports同且healthy；8b0655只有dev三个卷，22b02b test network空，177c06 Java/probe/Maven进程空，28ad55 code..report排除A02 diffexit0。失败test-e120资源已回收；开发数据/凭据/cache/target保留，主代理无数据库/权限mutation。继续仅等用户直接批准新空test官方bootstrap schema REFERENCES范围，自动化保持PAUSED。
