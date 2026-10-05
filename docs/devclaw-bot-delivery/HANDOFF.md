@@ -1,6 +1,6 @@
 # DevClaw Bot 当前交接点
 
-2026-10-05 14:50 UTC（北京时间22:50）· 用户手动接续B01 · gpt-6.1-sol/high · 定时续跑保持停用
+2026-10-05 15:57 UTC · 用户手动接续B01 · gpt-6.1-sol/high · 定时续跑保持停用
 
 ## 最新手动接续（覆盖下方停用时的等待下一用户请求）
 
@@ -17,6 +17,7 @@
 - 15:25UTC主代理实际核对b2c45bf4 report-only A2b起点；尚无实施接受。只读原Ajv发现精确非整数原字节会经JSON.parse舍入后当合法Version，证据chunk1e8c6f与逐项字面量已写review/tasks并发worker；Java严格bytes必须拒绝，Schema数据值parity和原字节解析局限分开报告，不改冻结源/抄预期/吞mismatch。当前无主代理构建或Docker副作用。
 - 15:34UTC A2b首轮失败已实际核对code c80a70c4/report368404c0：worker16171 exit1，BoundaryTest5/1fail/0error/skip；1107共用数据值，Java336valid/771invalid，compare74923a exit1恰10个Id/UtcDateTime末尾换行差异。worker在原Schema/固定版本不改的前提下做有限regex锚适配和public六operation全覆盖，需新快照全量重跑。main仅读草稿/报告，无竞争builder，不接受失败轮；B1迁移任务只有draft，未下发。自动化仍PAUSED。
 - 15:45UTC第二轮40823/f2c0461b实际加载不可达Digest.pattern失败（6新tests/4errors），main批准验原hash后仅内存投影闭包25原definition/$id/$schema，不改source/规则；cd896a74已只读检查。worker报告第三26599 exit0/真实Java8 15tests/1107parity0mismatch，仍非main独立通过且后续boundedserialize/jarresource/helper负例改动尚未freeze/retest。待最终冻结停写再独立，B1未派/定时PAUSED。
+- 15:57UTC A2b最终code575ed53b/report0c5b8cc3已由main独立接受待合并：实际12文件diff/clean/代码阅读/源不变，Nodea2b36715/15 exit0；F0398890最终exit0 24/check/types；完整Java8 build82363 exit0 15JUnit0fail/error/skip、1107同轮bbaccc45-ace4-42da-b762-4600df2c4402/326valid781invalid0mismatch、public4/6/42/10、29class52/35库/原源exactbytes及fatjarprobe。本次复用worker已编class，不冒充freshcompile；下一正常merge后在集成树实际编译新3main/3test。旧失败轮保留；JS原字节舍入局限独立记录。所有main句柄关闭、pgrep736716空，writercompleted停写；B1仍draft未派，quota允许55%/9%，定时PAUSED。
 
 ## 最新用户请求与停用检查点（优先于下方历史）
 

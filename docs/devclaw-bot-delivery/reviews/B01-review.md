@@ -61,3 +61,13 @@ R1本次独立test9实际39ms非零拒绝，已关闭。main本次首次build缓
 15:45UTC增量检查：f2c0461b的有限pattern策略在worker第二build40823 exit1遇到networknt全$defs预编译不可达Digest.pattern，6新JUnit/0fail/4errors/skip；此轮未写新parity，旧target不算该轮结果。main批准先验原资源hash，再仅投影闭包25原definition节点/$id/$schema到内存，不改选中规则/source；read cd896a74实际代码符合该窄适配。compile策略不扩大到Task/Run。新增unique runId匹配阻止跨轮旧结果。
 
 worker报告第三完整build26599/cd896a74 exit0，真实3main/3test源码Java8编译，15JUnit/0fail/errors/skip、1107/326valid/781invalid/0mismatch；public4requests/6success/42errorstatus/10parameters，28ownclass52/35libs/probe。main当前只读代码/消息，不称独立通过。当前还在补bounded response写出/序列化前selector和DTO类检查、jar内原资源exact字节与Node防stale负例，必须最终freeze新快照再main全套；第三轮通过不继承给后续改动。
+
+## A2b独立接受（2026-10-05 15:57 UTC，合并待做）
+
+冻结code575ed53b376fe31142271a02b2acf0c059415bbb/report0c5b8cc377d21dbfc5799e137e1cd6c6e6587ffb。main实际核对12文件允许范围、diffcheck/clean、code..report除本人报告无diff；读全部实现增量、配置/构建和测试。有限source-derived投影和regex终结锚仅修已观察差异，不改原协议、可达25definition节点或固定依赖；publicselector/status/class在serializer前拒绝及共用有界写出已读，离线loader默认清空、不支持任意root/文件/网络引用。
+
+主代理准确Node22命令（cwd实施树）：`--test tests/bot/service/java-generator.spec.mjs tests/bot/service/parity-support.spec.mjs` chunka2b367 **exit0 15/15**；`tests/bot/check-contracts.mjs` session98890 **exit0 24/24**及原TS check/类型消费；`deploy/dev/service/build.mjs` session82363 **exit0**（chunk6cf8c4）。实际Corretto1.8.0_482/Maven3.9.6，15JUnit/0fail/errors/skipped；1107原Ajv与Java同runIdbbaccc45-ace4-42da-b762-4600df2c4402/326valid781invalid/0mismatch，public4请求/6success/42声明errorstatus/10参数真实typed消费。目标结果三文件runId/行数主代理另实际读回(chunk2c10b3)，旧结果不能替代新轮。
+
+实际fatjar29ownclass52、35固定库/treeSHA2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b、原source三份exactbytes与manifest一致、Java8原4组probeverified/webfalse/databasefalse。main jarSHA493206e5a9ff7f612a0b03ff6a2ff69a80ff3425d8c047334ec034b26da3e522。本轮worker已编classes复用，但真实JUnit/打包/产物审计独立执行；**不声称freshcompile**，正常merge后集成树新源码必须实际重编。两session均关闭、pgrep736716 empty/exit1（无匹配），workercompleted/停写/clean，无Docker副作用。
+
+仅接受A2b离线输入/输出边界和可精确表示数据值的Schema语义parity。四raw数学非整数Java严格拒绝，而原JS Number舍入实际true，分层测试/文档明确；不是任意rawJSON字节Node/Java完全等价。整体六业务接口、数据库迁移/HTTP/权限/事务仍未实现，B1draft未派。定时续跑保持PAUSED。
