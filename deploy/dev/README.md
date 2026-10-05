@@ -132,3 +132,11 @@ B00_JDBC=/absolute/path/to/mysql-connector-j-8.0.33.jar
 Compose健康后，`start`（包括`restart`）、`status`及真实测试使用同一绝对30s就绪窗口，涵盖资源核对、认证S3 LIST、全部已有`.dat`卷在本容器固定loopback master上的注册和ES Basic检查；空环境不要求凭空出现卷。已观察ES初启许可404及S3重启卷注册滞后，仅对这些未就绪状态有界等待，认证/结构错误立即拒绝，取消可中断；持久化GET/hash仍一次严格断言，不重写数据或靠重试掩盖失败。`stop`后随机端口可能重新分配，使用新的`status`结果。
 
 2026-10-05 macOS15.4/arm64实测：两独立空环境的完整Java8/MySQL/ES/S3流程、故障及OS SIGTERM清理均通过；dev CLI重复启动未新增容器，stop保留三卷和凭据，重开后健康，MySQL实际执行x86_64 5.7.44且Rosetta enabled/OCF。当前供开发使用的一套服务以`status`为准；这只是B00自测结果，主代理独立验收尚待进行，不等于生产或内部平台兼容认证。可重复检查dev生命周期：`"$B00_NODE" tests/bot/docker/dev-cli-real.mjs "$B00_JAVA" "$B00_JAVAC" "$B00_JDBC"`（需已有dev项目，结束保留健康服务）。
+
+## B01-A1：Java8依赖兼容构建（尚无API服务）
+
+`services/bot-control`当前只是四组兼容测试及可执行probe，不监听HTTP、不连接数据库、不执行迁移，不代表六接口已实现。固定Boot2.7.18/MVC/JDBC/Hikari4.0.3、ConnectorJ8.0.33、Flyway8.5.13、networknt1.5.9、Jackson2.18.3、SLF4J2.0.17/Log4j2.25.3单provider。非生产维护基线，也不是内部增强Boot兼容认证；DTO与完整F03 parity等待下一片授权。
+
+本机已核对Corretto1.8.0_482、Maven3.9.6的准确路径固定在`deploy/dev/service/build.mjs`（其他机器需明确适配并重新验收，不自动猜测全局配置）。用Node22运行`node deploy/dev/service/build.mjs`：直接Java/Classworlds入口、真实Java8编译/测试/fatjar运行，然后审计实际BOOT-INF/lib、自有class52和4项/0skip。首轮公开依赖仅Central HTTPS下载，构建600s、fatjar运行30s上限；`--audit-only`只检查现有产物，不替代构建及运行。
+
+独立状态/仓库在`~/.devclaw-bot-b01-a1`（owner标记、目录0700/文件0600），空global settings及无server/proxy的Central-only mirror，私有HOME/user.home/local repo。不会读取用户settings/mvnrc/.mvn或继承Java/Maven注入变量，不操作B00环境。产物`services/bot-control/target/`精确忽略；缓存保留，没有清理全局Maven或删除任何开发数据。
