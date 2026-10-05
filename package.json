@@ -102,7 +102,15 @@
     "test:mods:e2e": "node tests/run-mods-e2e.mjs",
     "test:mods:settings:e2e": "npm run build && tsx tests/mods-settings-e2e.spec.ts",
     "test:mods:function": "vitest run src/main/mods/v2 src/shared/mods/v2",
-    "test:mods:function:process": "node tests/run-function-mods-process.mjs"
+    "test:mods:function:process": "node tests/run-function-mods-process.mjs",
+    "dev:bot-docker": "node deploy/dev/docker/cli.mjs start",
+    "check:bot-docker": "node deploy/dev/docker/cli.mjs status",
+    "stop:bot-docker": "node deploy/dev/docker/cli.mjs stop",
+    "test:bot-docker": "node deploy/dev/docker/cli.mjs test",
+    "test:bot-docker-policy": "node --test tests/bot/docker/*.spec.mjs",
+    "test:bot-docker-lifecycle": "node tests/bot/docker/lifecycle-real.mjs",
+    "dev:bot-docker-vm-start": "node deploy/dev/docker/cli.mjs vm-start",
+    "stop:bot-docker-vm": "node deploy/dev/docker/cli.mjs vm-stop"
   },
   "build": {
     "appId": "com.cmbdevclaw.com",

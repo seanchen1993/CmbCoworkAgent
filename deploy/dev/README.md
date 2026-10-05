@@ -90,3 +90,45 @@ HTTP边界：正文8192字节、文本512字符、附件4条/单个元信息大�
 探针只创建 `f05_probe` 测试表。JDBC不提供外部URL选项，固定127.0.0.1、f05_compat；Java socket/connect超时与编排启动/执行截止时间均有限。一般子命令15s、初始化30s、就绪20s，正常/异常/中断先关闭本人持有子进程（TERM后2s可KILL）再删除本人目录；绝不按进程名或未经认领的PID停止服务。失败只报告allowlist阶段/原因/退出码，不转储含SQL/完整或半截密码的原始输出。
 
 `real` 每次实际跑两空实例及 after-initialize/bootstrap/listen、真实mysqld启动失败和独立Node进程OS SIGTERM。测试只对已记录本人PID做 signal0 存活检查，不以PID执行kill；核对目录ENOENT、已监听端口ECONNREFUSED。诊断文件、class和数据库数据只在临时目录，finally删除，不留在仓库。无法证明收尾时入口失败，不输出通过。
+
+## B00 Docker 三服务本地依赖（独立入口）
+
+本入口提供 MySQL5.7.44、Elasticsearch8.19.22（Basic，容器自带JDK）及 SeaweedFS4.48 的 S3 兼容服务。应用仍只用 JDK8；不实现 Java ES/S3 业务适配器，不启动登录服务。上方 F05 的 S3/ES `disabled` 不变。最新真实结果与未完成项以 [B00-A01](../../docs/devclaw-bot-delivery/attempts/B00-A01.md) 为准；本段不是主代理已接受的声明。
+
+要求 macOS arm64、Rosetta、Node22、稳定 Homebrew Colima/Docker CLI/Compose（不用 Docker Desktop）、显式 JDK8 java/javac 和 Connector/J8.0.33。本任务已安装 Colima0.10.3/Lima2.2.0/Docker CLI29.8.2/Compose5.6.0；daemon29.5.2。工具缺失即失败，不静默换原生 MySQL、远程daemon或其他数据库。重新安装/下载不属于日常 `start`：它只接受已缓存的固定镜像。
+
+镜像来自已核对官方源，固定对应平台的 manifest/实际 Docker29 ID（不是 `latest`）：
+
+- MySQL `docker.io/library/mysql:5.7.44@sha256:dab0a802b44617303694fb17d166501de279c3031ddeb28c56ecf7fcab5ef0da`，linux/amd64，经 Rosetta；不可替换8.x/MariaDB。
+- [Elasticsearch官方8.19文档](https://www.elastic.co/guide/en/elasticsearch/reference/8.19/docker.html)：`docker.elastic.co/elasticsearch/elasticsearch:8.19.22@sha256:c2a3ed5f968be6d59c960aa0c60cfdaee667b6bc8211142021a41d0e85b43237`，linux/arm64；认证开启，不开trial。
+- [SeaweedFS官方4.48 release](https://github.com/seaweedfs/seaweedfs/releases/tag/4.48)：`docker.io/chrislusf/seaweedfs:4.48@sha256:f1f303474940e9e088edbd2c1658f7ac38cb0dd90f91a2b0a51916d74b8575a1`，linux/arm64。
+
+私有 client/profile/state 位于当前用户 `~/.devclaw-bot-b00`，目录0700，文件凭据0600；默认 Docker/Colima/Lima 配置不改。专用 profile `devclaw-bot` 为2CPU/4GiB，30GiB稀疏数据盘加20GiB稀疏系统盘（上限不是立即占用量），仅本任务 runtime 目录只读映射给VM，无HOME/根目录/SSH agent/host network/privileged/socket挂载。容器内存上限分别768MiB/1280MiB/512MiB，总2560MiB；CPU上限1/1/.75、PID128/512/128、日志每服务5MiB×2、restart=no。S3入口root仅准备精确volume子目录后exec降UID501（实际当前用户UID）；长期进程非root，秘密不改权限、不进argv/env。
+
+三服务分别用独立named volume，只有API映射到字面量127.0.0.1的随机非默认端口；不发布ES transport或S3 admin/filer/master。唯一任务自定义bridge `internal:false`、host_binding_ipv4=127.0.0.1：资源/入站隔离，**不是禁止出网的沙箱**，不因此授权真实内网/AWS/外部业务访问。检查会核对实际Docker网络成员/全部挂载/发布端口和宿主lsof，客户端无外部URL选项、不读AWS默认profile、不使用代理或重定向。
+
+在仓库根目录设置自己已存在的绝对工具路径（不填密码）：
+
+```sh
+B00_NODE=/absolute/path/to/node22
+B00_JAVA=/absolute/path/to/jdk8/bin/java
+B00_JAVAC=/absolute/path/to/jdk8/bin/javac
+B00_JDBC=/absolute/path/to/mysql-connector-j-8.0.33.jar
+"$B00_NODE" deploy/dev/docker/cli.mjs vm-status
+"$B00_NODE" deploy/dev/docker/cli.mjs start --java "$B00_JAVA" --javac "$B00_JAVAC" --jdbc "$B00_JDBC"
+"$B00_NODE" deploy/dev/docker/cli.mjs status
+"$B00_NODE" deploy/dev/docker/cli.mjs stop
+"$B00_NODE" deploy/dev/docker/cli.mjs test --java "$B00_JAVA" --javac "$B00_JAVAC" --jdbc "$B00_JDBC"
+"$B00_NODE" --test tests/bot/docker/*.spec.mjs
+"$B00_NODE" tests/bot/docker/lifecycle-real.mjs
+```
+
+`start` 幂等，一次启动三服务并用真实Java8/JDBC和认证HTTP检查；stdout仅地址/版本/资源名/私有凭据目录，不打印密码。root仅localhost，app账号仅devclaw schema的SELECT/INSERT/UPDATE/DELETE/CREATE/INDEX；随机root/app/ES/S3凭据互不复用。可信程序从报告的 `credentialDirectory` 读取 `app-client.cnf`、`es-client.cnf`、`s3-client.json`（均0600），不要把内容复制到聊天/Git/命令行。`status` 检查实际健康和回环监听；`stop` 只停止该dev项目且保留三volume/凭据。需要释放VM内存时先stop，再显式`vm-stop`；已有profile的`vm-start`保留数据、最长1800s，禁止delete/覆盖其他配置。
+
+`test` 总截止600s，串行两个64bit随机后缀的独立项目，实际Java8/class52/容器MySQL5.7.44：UTF8MB4中文emoji、UTC/DATETIME(3)、有限权限、双连接READ_COMMITTED、commit/rollback/唯一索引/CAS、重启数据及第二空库。ES测试Unicode写读搜索/删除、匿名和错密码401、Basic版本、重启保留；S3只用本地SigV4签名PUT/GET字节hash/LIST/DELETE、匿名/坏签名403、重启保留。`lifecycle-real` 是另外串行的启动失败与OS SIGTERM精确清理验收。失败码只报告固定阶段/状态，不输出原始服务日志；日志读取失败仍尝试owner-checked停止，停止失败有显式标记。
+
+测试finally只回收当次进程认领对象、规范目录和inode、标签一致的精确容器/网络/卷；无prune/down-v/全局删除。SIGKILL/断电不保证finally，不能仅凭名称自动认领旧测试资源；报告明确资源交由授权恢复者核对。S3尚不认证AWS所有高级语义（multipart/versioning/ACL策略/TLS/跨区域一致性），HTTP仅本机开发用，不作生产认证。
+
+Compose健康后，`start`（包括`restart`）、`status`及真实测试使用同一绝对30s就绪窗口，涵盖资源核对、认证S3 LIST、全部已有`.dat`卷在本容器固定loopback master上的注册和ES Basic检查；空环境不要求凭空出现卷。已观察ES初启许可404及S3重启卷注册滞后，仅对这些未就绪状态有界等待，认证/结构错误立即拒绝，取消可中断；持久化GET/hash仍一次严格断言，不重写数据或靠重试掩盖失败。`stop`后随机端口可能重新分配，使用新的`status`结果。
+
+2026-10-05 macOS15.4/arm64实测：两独立空环境的完整Java8/MySQL/ES/S3流程、故障及OS SIGTERM清理均通过；dev CLI重复启动未新增容器，stop保留三卷和凭据，重开后健康，MySQL实际执行x86_64 5.7.44且Rosetta enabled/OCF。当前供开发使用的一套服务以`status`为准；这只是B00自测结果，主代理独立验收尚待进行，不等于生产或内部平台兼容认证。可重复检查dev生命周期：`"$B00_NODE" tests/bot/docker/dev-cli-real.mjs "$B00_JAVA" "$B00_JAVAC" "$B00_JDBC"`（需已有dev项目，结束保留健康服务）。
