@@ -8,7 +8,7 @@
 - 主代理完整读最新文档并核对：main b72fe1e5 clean、worker aea2026d clean，旧xhigh代理errored且interrupt已确认停止，无Java/Maven进程/实施cwd句柄。额度ordinaryUsageAllowed=true（5%/1%已用），dev原三容器同ID/回环端口healthy，未重放DNS/安装/镜像/容器创建。
 - 旧代理工具无法就地调整effort；按用户明确配置变更创建B01-A02/high唯一写者，原树、A1/旧报告、构建缓存和开发数据全部保留。旧代理不再接续；不是绕过额度限制，不买/reset/换账号。
 - 当前任务B01.md/design/B01-A2a.md；报告改为本人attempts/B01-A02.md，旧A01只读。主代理重新遍历冻结Schema闭包25定义，旧24为任务单计数笔误，冻结源未改。A2a仅DTO生成/漂移/消费测试，主代理独立验收后才下一片；无HTTP/DB/Runtime/UI/新产品API。
-- 本段派单准备，实际新agent_id/基线随后记录state。当前所有代码成果已验收部分仍B00/A1，不把派单当完成。
+- 已成功派单 `/root/b01_contracts_high`（显式gpt-6.1-sol/high，fork none），B01-A02/A2a唯一实施写者。实施树正常FF至 `7c25bf479f51f994b99f7df471a950eddde07d3d` clean后交接。等待小checkpoint/实现/自测；主代理不并行改实现或跑竞争builder。已验收部分仍B00/A1，不把派单当完成。
 
 ## 最新用户请求与停用检查点（优先于下方历史）
 

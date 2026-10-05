@@ -3,7 +3,7 @@
   "updated_on": "2026-10-05",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
-  "status": "dispatch_prepared",
+  "status": "implementing",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -211,7 +211,7 @@
     },
     {
       "id": "B01",
-      "status": "dispatch_prepared",
+      "status": "implementing",
       "spec": "tasks/B01.md",
       "design": "tasks/B01-design.md",
       "depends_on": [
@@ -222,15 +222,15 @@
       "slice_spec": "tasks/B01-A2a.md",
       "attempt_id": "B01-A02",
       "agent_task_name": "b01_contracts_high",
-      "agent_id": null,
+      "agent_id": "/root/b01_contracts_high",
       "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork",
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
       "latest_checkpoint": "A1 accepted/merged69f326ce; mainintegratedfresh86029 exit0 actualJDK8/fourtests0skip/probe/class52/35libs. A2a followup was acknowledged after worker normal FF to aea2026d, but originalworker then errored with usage limit. Current main and worker both aea2026d clean, no A2a implementation/Java generator/SQL/HTTP business code; unchanged A1 attempt. No Java/Maven process or open worker cwd handle observed. WholeB01 six business APIs remain unimplemented. Current user stopped automatic continuation; no new dispatch.",
       "dispatched_slice": "A2a",
-      "slice_baseline": "aea2026d013a3546c91fd06872a214ffdc3e223d",
-      "dispatch_verified": "New high writer not yet dispatched. Oldxhigh worker errored/stopped and interrupt returns same prior error; worker aea2026d clean/mainb72fe1e5 clean, no Java/Maven/cwd handles. User changed effort explicitly, current ordinaryquotaallowed=true (primary5%,secondary1%). Same preserved tree will be normalFF before handoff.",
+      "slice_baseline": "7c25bf479f51f994b99f7df471a950eddde07d3d",
+      "dispatch_verified": "Spawn succeeded /root/b01_contracts_high with explicit gpt-6.1-sol/high, fork none, self-contained B01-A2a brief. Same preserved worker tree normalFF7c25bf47 clean before dispatch. Oldwriter interrupted/stopped, ordinaryquotaallowed true, no concurrentwriter. Newattempt B01-A02 reports only own file; mainowns state/HANDOFF. Scheduler stillPAUSED.",
       "previous_attempts": [{"attempt_id":"B01-A01","agent_id":"/root/b00_local_docker","model":"gpt-6.1-sol","reasoning_effort":"xhigh","status":"retired_stopped_after_user_configuration_change","last_worker_head":"aea2026d013a3546c91fd06872a214ffdc3e223d","attempt_report":"attempts/B01-A01.md","delivered":"A1 accepted/merged; no A2a implementation"}],
       "last_interruption": "A2a originalworker actual usage-limit error advertised Oct10 2026 07:28 AM; historical error, not current quota availability. Current read-only limits ordinaryUsageAllowed=true; no implementation resumed because latest user only requests progress and stopping scheduled continuation.",
       "checkpoint_code_commit": "b6c147c7131f8d41e37bb73bbe9b1f1bc2d229e6",
@@ -281,7 +281,7 @@
       }
     }
   ],
-  "next_action": "Current user manually authorized continue with gpt-6.1-sol/high. Save updated task/config, normalFF same clean worker tree, dispatch B01-A02/A2a as sole writer after confirming old writer stopped and ordinaryquotaallowed. Keep schedulerPAUSED. Main review/independent acceptance before A2b, no unrelated product route.",
+  "next_action": "B01-A02/A2a sole high writer dispatched. Await small checkpoint and actual implementation/tests; main may read early diff but not modify implementation or launch a competing builder. Freeze/stop writer then independent review/verification/merge before next A2b. Keep schedulerPAUSED; no unrelated product route.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
