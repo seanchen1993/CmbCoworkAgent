@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.core.StreamReadConstraints;
+import com.fasterxml.jackson.core.StreamWriteConstraints;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SchemaLocation;
@@ -95,6 +96,7 @@ public final class ContractBoundary {
     private static ObjectMapper strictMapper() {
         ObjectMapper mapper = CompatibilityProbe.strictMapper();
         mapper.getFactory().setStreamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(64).maxNumberLength(128).maxStringLength(65536).build());
+        mapper.getFactory().setStreamWriteConstraints(StreamWriteConstraints.builder().maxNestingDepth(64).build());
         return mapper;
     }
     private static void collectPatterns(JsonNode schema, Set<String> patterns) {
@@ -157,12 +159,32 @@ public final class ContractBoundary {
         return value;
     }
     private <T> T consume(String definition, byte[] bytes, Class<T> type) {
+        requireType(definition, type);
         try {
-            Class<?> expected = Class.forName(BotContracts.class.getName() + "$" + definition);
-            if (!expected.equals(type)) throw new Failure(Category.SELECTION);
             return mapper.treeToValue(integralNodes(validateDefinition(definition, bytes)), type);
         } catch (Failure failure) { throw failure; }
         catch (Exception failure) { throw new Failure(Category.DTO_INVALID); }
+    }
+    private void requireType(String definition, Class<?> type) {
+        try {
+            if (!Class.forName(BotContracts.class.getName() + "$" + definition).equals(type)) throw new Failure(Category.SELECTION);
+        } catch (ClassNotFoundException failure) { throw new Failure(Category.SCHEMA_RESOURCE); }
+    }
+    private String responseDefinition(String operation, int status) {
+        String definition = operation(operation).path("responses").path(String.valueOf(status)).asText();
+        if (definition.isEmpty()) throw new Failure(Category.SELECTION);
+        return definition;
+    }
+    private <T> byte[] serialize(T value) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream() {
+            @Override public void write(int value) { if (count >= MAX_BYTES) throw new Failure(Category.DTO_INVALID); super.write(value); }
+            @Override public void write(byte[] bytes, int offset, int length) {
+                if (length > MAX_BYTES - count) throw new Failure(Category.DTO_INVALID);
+                super.write(bytes, offset, length);
+            }
+        };
+        mapper.writeValue(output, value);
+        return output.toByteArray();
     }
     // After validation only: canonical mathematical integers bind to Long without Double or truncation.
     private JsonNode integralNodes(JsonNode node) {
@@ -185,15 +207,15 @@ public final class ContractBoundary {
         return consume(definition, bytes, type);
     }
     public <T> T readResponse(String operation, int status, byte[] bytes, Class<T> type) {
-        String definition = operation(operation).path("responses").path(String.valueOf(status)).asText();
-        if (definition.isEmpty()) throw new Failure(Category.SELECTION);
-        return consume(definition, bytes, type);
+        return consume(responseDefinition(operation, status), bytes, type);
     }
     public <T> byte[] writeResponse(String operation, int status, T value) {
+        String definition = responseDefinition(operation, status);
         if (value == null) throw new Failure(Category.DTO_INVALID);
+        requireType(definition, value.getClass());
         try {
-            byte[] bytes = mapper.writeValueAsBytes(value);
-            readResponse(operation, status, bytes, value.getClass());
+            byte[] bytes = serialize(value);
+            validateDefinition(definition, bytes);
             return bytes;
         } catch (Failure failure) { throw failure; }
         catch (Exception failure) { throw new Failure(Category.DTO_INVALID); }
@@ -201,7 +223,7 @@ public final class ContractBoundary {
     public String validateParameter(String operation, String name, String value) {
         String definition = operation(operation).path("parameters").path(name == null ? "" : name).asText();
         if (definition.isEmpty()) throw new Failure(Category.SELECTION);
-        try { validateDefinition(definition, mapper.writeValueAsBytes(value)); return value; }
+        try { validateDefinition(definition, serialize(value)); return value; }
         catch (Failure failure) { throw failure; }
         catch (Exception failure) { throw new Failure(Category.DTO_INVALID); }
     }

@@ -143,3 +143,7 @@ Compose健康后，`start`（包括`restart`）、`status`及真实测试使用�
 ### B01-A2a Java contract consumption
 
 `npm run generate:bot-java-contracts` explicitly regenerates the six-operation reachable DTO graph; `npm run check:bot-java-contracts` never writes. `npm run test:bot-java-generator` runs Node22 controlled temporary-fixture rejection/drift tests without changing frozen contracts. `npm run test:bot-service-build` uses the existing isolated Java8/Maven entry point: checks committed DTO drift first, compiles typed consumers, preserves the four compatibility groups and audits every recursively packaged application class as major52 plus the fixed runtime dependencies. No generator runs automatically during Maven compilation, and this slice starts no HTTP listener, database or Docker operation. DTOs do not replace original runtime Schema validation (A2b).
+
+### B01-A2b 离线Schema验证
+
+用Node22执行`npm run test:bot-service-contracts`：新增Node生成/比较支持测试→原Schema资源exact bytes/manifest构建→实际JDK8四兼容+五DTO+六边界组→Java/既有Ajv同runId逐例比较→fatjar源字节/manifest/class52/固定依赖审计。资源、合成fixtures和逐例报告只写服务精确ignored target，保留缓存和失败证据，不连接Docker/HTTP/DB。运行时仅可信classpath和六操作映射，不能由请求指定文件/URL；Schema数据值parity与严格JSON字节层精度分开报告，不冒充生产鉴权、业务/CAS或任意原字节的JS等价。

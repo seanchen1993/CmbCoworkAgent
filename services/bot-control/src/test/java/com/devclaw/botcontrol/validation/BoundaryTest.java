@@ -13,6 +13,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class BoundaryTest {
+    private static final class WrongResponse {
+        @com.fasterxml.jackson.annotation.JsonValue public String trap() { throw new AssertionError("wrong DTO serializer must never run"); }
+    }
     private static byte[] utf8(String text) { return text.getBytes(StandardCharsets.UTF_8); }
     private static void rejected(Runnable call, ContractBoundary.Category category) {
         ContractBoundary.Failure failure = assertThrows(ContractBoundary.Failure.class, call::run);
@@ -54,6 +57,8 @@ class BoundaryTest {
         assertFalse(new String(boundary.writeResponse("getBot", 503, response), StandardCharsets.UTF_8).contains("currentVersion"));
         response.error.code = ErrorCode.OUTCOME_UNKNOWN; response.error.retryable = true;
         rejected(() -> boundary.writeResponse("createBot", 409, response), ContractBoundary.Category.SCHEMA_INVALID);
+        response.error.message = new String(new char[1048577]).replace('\0', 'a');
+        rejected(() -> boundary.writeResponse("createBot", 409, response), ContractBoundary.Category.DTO_INVALID);
     }
     private static String versionRequest(String number) {
         return "{\"commandId\":\"c1\",\"expectedVersion\":" + number + ",\"config\":{\"description\":\"x\",\"instructions\":\"x\",\"knowledgeRefs\":[],\"repositoryRefs\":[],\"skillAllowlist\":[],\"capabilityCeiling\":[\"repository.read\"],\"memoryPolicy\":\"disabled\"}}";
@@ -66,6 +71,9 @@ class BoundaryTest {
         rejected(() -> boundary.readRequest("getBot", utf8("{}"), CreateBotRequest.class), ContractBoundary.Category.SELECTION);
         rejected(() -> boundary.readRequest("createBotVersion", utf8(versionRequest("1")), CreateBotRequest.class), ContractBoundary.Category.SELECTION);
         rejected(() -> boundary.readResponse("getBot", 299, utf8("{}"), ErrorResponse.class), ContractBoundary.Category.SELECTION);
+        rejected(() -> boundary.writeResponse("getBot", 200, new WrongResponse()), ContractBoundary.Category.SELECTION);
+        rejected(() -> boundary.writeResponse("unknownOperation", 200, new WrongResponse()), ContractBoundary.Category.SELECTION);
+        rejected(() -> boundary.writeResponse("getBot", 299, new WrongResponse()), ContractBoundary.Category.SELECTION);
         rejected(() -> boundary.validateParameter("getBot", "../botId", "id1"), ContractBoundary.Category.SELECTION);
         assertEquals("bot1", boundary.validateParameter("getBot", "botId", "bot1"));
         rejected(() -> boundary.validateParameter("getBot", "X-DevClaw-Space", "space1\n"), ContractBoundary.Category.SCHEMA_INVALID);

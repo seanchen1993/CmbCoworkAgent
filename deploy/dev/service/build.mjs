@@ -72,7 +72,16 @@ export async function audit() {
     if (required.some(name => libraries.filter(value => value === name).length !== 1) || libraries.some(name => /logback|log4j-to-slf4j|slf4j-(?:simple|jdk14|log4j12|reload4j)|spring-boot-starter-logging|slf4j-api-1\./.test(name))) throw new Error("B01_PACKAGED_DEPENDENCIES")
     const classes = contents.filter(name => /^BOOT-INF\/classes\/.+\.class$/.test(name))
     if (classes.length < 2) throw new Error("B01_PACKAGED_CLASSES")
-    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes], { env, cwd: temp })
+    const resources = ["schemas.json", "openapi.json", "state-transitions.json", "manifest.json"].map(file => `BOOT-INF/classes/contracts/bot/v1/${file}`)
+    if (resources.some(name => contents.filter(value => value === name).length !== 1)) throw new Error("B01_PACKAGED_SCHEMA_RESOURCES")
+    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources], { env, cwd: temp })
+    const manifest = JSON.parse(await readFile(join(temp, resources[3]), "utf8")), sourceHashes = {}
+    if (!(await readFile(join(temp, resources[3]))).equals(await readFile(join(project, "target/generated-resources/contracts/bot/v1/manifest.json")))) throw new Error("B01_PACKAGED_SCHEMA_RESOURCES")
+    for (const name of resources.slice(0, 3)) {
+      const file = name.slice(name.lastIndexOf("/") + 1), bytes = await readFile(join(temp, name))
+      sourceHashes[file] = createHash("sha256").update(bytes).digest("hex")
+      if (!bytes.equals(await readFile(join(root, "contracts/bot/v1", file))) || manifest.hashes[file] !== sourceHashes[file]) throw new Error("B01_PACKAGED_SCHEMA_RESOURCES")
+    }
     for (const name of classes) {
       const bytes = await readFile(join(temp, name))
       if (bytes.readUInt32BE(0) !== 0xcafebabe || bytes.readUInt16BE(6) !== 52) throw new Error("B01_CLASS_MAJOR")
@@ -86,7 +95,7 @@ export async function audit() {
       tests += count
     }
     const tree = await readFile(join(project, "target/dependency-tree.txt"), "utf8")
-    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, suites, tests, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
+    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, sourceHashes, suites, tests, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
   } finally { await removePrivateTemp(temp) }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
