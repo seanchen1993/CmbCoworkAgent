@@ -128,3 +128,5 @@ B00_JDBC=/absolute/path/to/mysql-connector-j-8.0.33.jar
 `test` 总截止600s，串行两个64bit随机后缀的独立项目，实际Java8/class52/容器MySQL5.7.44：UTF8MB4中文emoji、UTC/DATETIME(3)、有限权限、双连接READ_COMMITTED、commit/rollback/唯一索引/CAS、重启数据及第二空库。ES测试Unicode写读搜索/删除、匿名和错密码401、Basic版本、重启保留；S3只用本地SigV4签名PUT/GET字节hash/LIST/DELETE、匿名/坏签名403、重启保留。`lifecycle-real` 是另外串行的启动失败与OS SIGTERM精确清理验收。失败码只报告固定阶段/状态，不输出原始服务日志；日志读取失败仍尝试owner-checked停止，停止失败有显式标记。
 
 测试finally只回收当次进程认领对象、规范目录和inode、标签一致的精确容器/网络/卷；无prune/down-v/全局删除。SIGKILL/断电不保证finally，不能仅凭名称自动认领旧测试资源；报告明确资源交由授权恢复者核对。S3尚不认证AWS所有高级语义（multipart/versioning/ACL策略/TLS/跨区域一致性），HTTP仅本机开发用，不作生产认证。
+
+Compose健康后，`start`（包括`restart`）、`status`及真实测试使用同一绝对30s就绪窗口，涵盖资源核对、认证S3 LIST、全部已有`.dat`卷在本容器固定loopback master上的注册和ES Basic检查；空环境不要求凭空出现卷。已观察ES初启许可404及S3重启卷注册滞后，仅对这些未就绪状态有界等待，认证/结构错误立即拒绝，取消可中断；持久化GET/hash仍一次严格断言，不重写数据或靠重试掩盖失败。`stop`后随机端口可能重新分配，使用新的`status`结果。
