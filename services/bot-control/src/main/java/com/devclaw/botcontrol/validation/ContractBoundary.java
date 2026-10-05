@@ -57,6 +57,17 @@ public final class ContractBoundary {
                 if (!file.equals("openapi.json")) sources.put(document.path("$id").asText(), bytes);
             }
             for (JsonNode name : manifest.path("definitions")) collectPatterns(fieldSource.path("$defs").path(name.asText()), patterns);
+            // networknt eagerly compiles $defs when loading a document. Project only original
+            // reachable definition nodes; no field/constraint is rewritten or made permissive.
+            ObjectNode scoped = (ObjectNode) fieldSource.deepCopy();
+            ObjectNode reachableDefs = mapper.createObjectNode();
+            for (JsonNode name : manifest.path("definitions")) {
+                JsonNode definition = fieldSource.path("$defs").get(name.asText());
+                if (definition == null) throw new Failure(Category.SCHEMA_RESOURCE);
+                reachableDefs.set(name.asText(), definition);
+            }
+            scoped.set("$defs", reachableDefs);
+            sources.put(fieldSource.path("$id").asText(), mapper.writeValueAsBytes(scoped));
             factory = JsonSchemaFactory.getInstance(VersionFlag.V202012, builder -> builder.schemaLoaders(loaders -> loaders.values(values -> {
                 values.clear();
                 values.add(iri -> {
@@ -135,6 +146,11 @@ public final class ContractBoundary {
         return value;
     }
     JsonSchemaFactory offlineFactory() { return factory; } // package-private policy test seam, not an input-loading API.
+    void testOfflineReference(String reference) {
+        ObjectNode schema = mapper.createObjectNode(); schema.put("$ref", reference);
+        try { factory.getSchema(schema).validate(mapper.createObjectNode()); }
+        catch (Exception failure) { throw new Failure(Category.SCHEMA_RESOURCE); }
+    }
     private JsonNode operation(String operation) {
         JsonNode value = operation == null ? null : manifest.path("operations").get(operation);
         if (value == null) throw new Failure(Category.SELECTION);

@@ -71,6 +71,8 @@ class BoundaryTest {
         rejected(() -> boundary.validateParameter("getBot", "X-DevClaw-Space", "space1\n"), ContractBoundary.Category.SCHEMA_INVALID);
         assertThrows(RuntimeException.class, () -> boundary.offlineFactory().getSchema(SchemaLocation.of("https://sentinel.invalid/remote")));
         assertThrows(RuntimeException.class, () -> boundary.offlineFactory().getSchema(SchemaLocation.of("file:///sentinel/not-a-source")));
+        rejected(() -> boundary.testOfflineReference("https://sentinel.invalid/remote"), ContractBoundary.Category.SCHEMA_RESOURCE);
+        rejected(() -> boundary.testOfflineReference("file:///sentinel/not-a-source"), ContractBoundary.Category.SCHEMA_RESOURCE);
         assertEquals("^a\\z", ContractBoundary.strictPatternEnd("^a$"));
         assertEquals("a\\$", ContractBoundary.strictPatternEnd("a\\$"));
         assertEquals("a\\\\\\z", ContractBoundary.strictPatternEnd("a\\\\$"));
@@ -78,7 +80,7 @@ class BoundaryTest {
     }
     @Test void publicConsumersCoverFourRequestsSixSuccessesEveryErrorAndParameter() throws Exception {
         ContractBoundary boundary = new ContractBoundary(); ObjectMapper mapper = new ObjectMapper();
-        JsonNode fixtures = mapper.readTree(BoundaryTest.class.getResourceAsStream("/parity-fixtures.json"));
+        JsonNode fixtures = mapper.readTree(BoundaryTest.class.getResourceAsStream("/parity-fixtures.json")).get("fixtures");
         int requests = 0, success = 0, errors = 0, parameters = 0;
         for (JsonNode fixture : fixtures) {
             JsonNode consumer = fixture.get("consumer"); if (consumer == null) continue;
@@ -91,7 +93,7 @@ class BoundaryTest {
             if (consumer.get("kind").asText().equals("request")) {
                 Object value = boundary.readRequest(operation, bytes, type);
                 Object restored = boundary.readRequest(operation, mapper.writeValueAsBytes(value), type);
-                assertEquals(mapper.readTree(bytes), mapper.valueToTree(restored)); requests++;
+                assertEquals(mapper.readTree(bytes), mapper.readTree(mapper.writeValueAsBytes(restored))); requests++;
             } else {
                 int status = consumer.get("status").intValue();
                 Object value = boundary.readResponse(operation, status, bytes, type);
@@ -104,7 +106,8 @@ class BoundaryTest {
     }
     @Test void originalSchemaActuallyRunsEverySharedFixtureAndReportsConclusions() throws Exception {
         ContractBoundary boundary = new ContractBoundary(); ObjectMapper mapper = new ObjectMapper();
-        JsonNode fixtures = mapper.readTree(BoundaryTest.class.getResourceAsStream("/parity-fixtures.json"));
+        JsonNode input = mapper.readTree(BoundaryTest.class.getResourceAsStream("/parity-fixtures.json"));
+        JsonNode fixtures = input.get("fixtures");
         ArrayNode results = mapper.createArrayNode(); int positive = 0, negative = 0;
         for (JsonNode fixture : fixtures) {
             boolean valid = true;
@@ -117,7 +120,8 @@ class BoundaryTest {
             result.put("id", fixture.get("id").asText()); result.put("schema", fixture.get("schema").asText()); result.put("valid", valid);
             if (valid) positive++; else negative++;
         }
-        Files.write(Paths.get("target/parity-java-results.json"), mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(results));
+        ObjectNode report = mapper.createObjectNode(); report.set("runId", input.get("runId")); report.set("results", results);
+        Files.write(Paths.get("target/parity-java-results.json"), mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(report));
         assertTrue(positive > 25); assertTrue(negative > 25);
         System.out.println("B01_A2B_PARITY " + results.size() + " actual Java conclusions, " + positive + " valid / " + negative + " invalid");
     }

@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 import { generate } from "../../../scripts/generate-bot-java-contracts.mjs"
@@ -39,8 +39,9 @@ export async function prepareContracts() {
   for (const [file, contents] of Object.entries(bytes)) await writeFile(join(output, file), contents)
   await writeFile(join(output, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n")
   const fixtures = parityFixtures(docs, closure)
+  const runId = randomUUID()
   const ajv = fixtures.map(fixture => ({ id: fixture.id, schema: fixture.schema, valid: Boolean(validator(fixture.schema)(JSON.parse(fixture.json))) }))
-  await writeFile(join(testOutput, "parity-fixtures.json"), JSON.stringify(fixtures) + "\n")
-  await writeFile(join(root, "services/bot-control/target/parity-ajv-results.json"), JSON.stringify(ajv, null, 2) + "\n")
-  console.log(JSON.stringify({ stage: "schema-resources", hashes, definitions: manifest.definitions.length, operations: Object.keys(manifest.operations).length, parityFixtures: fixtures.length }))
+  await writeFile(join(testOutput, "parity-fixtures.json"), JSON.stringify({ runId, fixtures }) + "\n")
+  await writeFile(join(root, "services/bot-control/target/parity-ajv-results.json"), JSON.stringify({ runId, results: ajv }, null, 2) + "\n")
+  console.log(JSON.stringify({ stage: "schema-resources", runId, hashes, definitions: manifest.definitions.length, operations: Object.keys(manifest.operations).length, parityFixtures: fixtures.length }))
 }
