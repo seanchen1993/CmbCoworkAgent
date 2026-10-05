@@ -1,10 +1,10 @@
 # DevClaw Bot 当前交接点
 
-2026-10-05 04:24 UTC（北京时间12:24）· B00 accepted/merged · B01-A1已派单 implementing
+2026-10-05 04:41 UTC（北京时间12:41）· B00 accepted/merged · B01-A1独立通过/准备集成
 
 ## 当前事实与下一动作
 
-- 原 `/root/b00_local_docker`（gpt-6.1-sol/xhigh）B00冻结停止后沿用为B01-A01唯一写者。正式followup已成功，live agents证实running；禁止派生，无新代理。当前只A1兼容切片。
+- 原 `/root/b00_local_docker`（gpt-6.1-sol/xhigh）沿用为B01-A01唯一写者；A1已slice_review_pending并停止写入，无构建/下载句柄。禁止派生，无新代理。A2尚未派。
 - B00冻结code `7a82c9bf4034c24207743752cb2121c050934939`/report fad7a736已独立接受，正常merge `1ba44e2fd6984f80b8d1aa7be6b3ed9ec51b72d8`到集成树。实际合并源字节无diff，集成树CLI79096 exit0同健康dev，不再重做B00。
 - Worker55958两独立空环境全流程、15011 quiet lookup、69624故障/真实SIGTERM、58285/25984 dev CLI幂等/停止保留/重开均exit0，准确命令、资源身份、结果已保存attempt。它们是worker证据，不冒充主代理独立通过。
 - 主代理独立CLI status50841 exit0/三服务healthy（MySQL32853/ES32854/S332852），stop64205 exit0/data preserved。dev三卷/凭据保留，暂时停止以避免4GiB同时跑两套三服务；原VM57942/57944/57957与daemon保留。
@@ -12,8 +12,8 @@
 - 主代理lifecycle59704 exit0：注入故障全部stop后清理、真实SIGTERM子项目b75f079df380ecf2 exit1且container/volume/network无、目录ENOENT。dev restore48382及独立dev-cli35909 exit0，重复启动身份不变、stop保留三卷/凭据、重开健康；实际MySQLx86_64/Rosetta OCF、class52通过。
 - 最终主代理只读audit0f5b28 exit0：原三容器ID/同private network不变，三卷且无测试残留、runtime仅dev，默认Docker/Colima/Lima均ENOENT，0700/0600；真实MySQL32878/ES32877/S332876各一个127listener。无运行主代理命令。资源完整ID在state/attempt，端口以后以status为准。
 - B01-A1已正式派单：先固定依赖/真实Java8构建/非Web且不连库兼容验证，不抢先六接口业务或DTO；A1独立复验后再A2。实施树正常FF `0e33703aaa411133af0cf4c25970721a41906a89` clean后派发，准确baseline/回执已在state；报告仅本人attempts/B01-A01.md。等待初次checkpoint，不并行另一个写者。
-- A1 worker67208加载50c9400a实际exit0/BUILD SUCCESS，4tests/0failure-error-skip及fatjar真实Java8 verified；6d778944最小owner首读前metadata校验与artifact audit已保存，--audit-only实测2ownclass52/34runtime库/固定核心版本/无旧binding桥接。主代理已读全部改动；仍待新helper完整缓存复验及冻结、主代理独立Java8验收，不算A1accepted。
-- A1私有repo/settings位于~/.devclaw-bot-b01-a1，owner c0f9e4ba-891e-4b16-a675-d24d912d63dc；旧67208已关闭，最新消息暂无句柄，下一final warm build须先取得准确句柄不重放。只JSON兼容，未认证YAML（JacksonYaml2.18.3/SnakeYaml1.30transitives保留事实）；无Docker/HTTP/DB变更。
+- A1冻结codeb6c147c7131f8d41e37bb73bbe9b1f1bc2d229e6/report0b22599fd7223ec510b11313a747d40479568392，clean/停止写入。主代理18334独立build.mjs exit0，真实Corretto8/Maven3.9.6、4tests0skip、fatjar4组兼容验证、2自有class52、实际35库/单provider/无旧binding桥接。前34口述已被实际35更正。A1仅本地JSON/框架兼容接受，正常merge及集成树新target全新编译复验待执行；B01六接口仍未实现。
+- A1私有repo/settings位于~/.devclaw-bot-b01-a1，owner c0f9e4ba-891e-4b16-a675-d24d912d63dc；worker67208/26923、main18334全exit0，暂无句柄。只JSON兼容，未认证YAML（JacksonYaml2.18.3/SnakeYaml1.30transitives保留事实）；无Docker/HTTP/DB变更。A2准备前核对额度、复用停止的原代理，无新写者。
 - 主代理已独立通过b688 Docker离线23/23，旧F03 60037 24/24、F05mock41436 15/15、node54489/web4738 tsc均exit0且关闭。相关文件未改，不重复无关回归；新代码有变化才复验对应检查。
 
 ## 授权、位置与职责
