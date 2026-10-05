@@ -227,7 +227,7 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
-      "latest_checkpoint": "A2b actualcode c80a70c4/report368404c0: workerbuild16171 exit1 BoundaryTest5/1fail/0errors/skip. Worker shared1107 actualJava336valid/771invalid, compare74923a exit1 tenIds/date terminalnewline mismatches. Mainread incremental7files and actualreport only, noindependentbuild/pass. Worker fixing limitedsource regexanchor and publicsixop/status/parametercoverage, fullretest needed. Precise rawfraction cases rejected in failedround; schema data-valueparity distinctfromJS rawrounding limits. B1draftonly/no dispatch; schedulerPAUSED.",
+      "latest_checkpoint": "A2b sourceprojection adaptation cd896a74 read bymain after actual40823 wholedefs eagercompile failure; sourcehash verified before25originaldefinition in-memoryprojection, no rule/sourcechange. Worker26599/cd896a74 reportedexit0 realJDK8 15tests/1107parity 326valid781invalid0mismatch/public4request6success42error10parameter/28class52/35libs. Main hasNOT independentlyrun/accepted. Worker adding boundedserialize/class prechecks/jarresource audit/paritynegative helpers, finalnewfreeze/retest pending. B1draft/no dispatch, schedulerPAUSED.",
       "dispatched_slice": "A2b",
       "slice_baseline": "8589e08404ebd8d2860bf7091c0ac8b586086659",
       "dispatch_verified": "Same /root/b01_contracts_high followup succeeded with existing gpt-6.1-sol/high configuration, no replacement/spawn. Actualworker8589e084 clean before dispatch, previous agent completed and Java/Maven processcheck empty. ExplicitreadyA2b task/paths/scope/acceptance/reportA02 supplied. Mainowns state/HANDOFF, child no descendants. SchedulerPAUSED, quotaordinaryUsageAllowed true26%/4% at15:20UTC.",
@@ -257,6 +257,8 @@
           "first_report_checkpoint": "368404c0",
           "worker_first_build": {"session_id":16171,"exit_code":1,"new_tests":5,"failures":1,"errors":0,"skipped":0},
           "worker_first_parity": {"fixtures":1107,"java_valid":336,"java_invalid":771,"mismatches":10,"exit_code":1,"mismatch":"Id/UtcDateTime LF/CR/CRLF/U2028/U2029 terminalanchors"},
+          "worker_second_build": {"code":"f2c0461b","session_id":40823,"exit_code":1,"new_tests":6,"failures":0,"errors":4,"reason":"networknt eagerly compiled unreachable Digest.pattern; no freshparity results"},
+          "worker_third_build": {"code":"cd896a74","session_id":26599,"exit_code":0,"tests":15,"failures":0,"errors":0,"skipped":0,"fixtures":1107,"valid":326,"invalid":781,"mismatches":0,"run_id":"044308fd-7760-4865-883f-fe29ffe78bc1","classes":28,"class_major":52,"runtime_libraries":35,"status":"worker_report_only_not_final_code_or_main_acceptance"},
           "main_independent_status": "not_yet_run_wait_for_frozen_stopped_writer"
         },
         "A2a": {

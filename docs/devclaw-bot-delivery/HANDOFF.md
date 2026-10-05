@@ -16,6 +16,7 @@
 - 15:20UTC A2b已正式followup给同 `/root/b01_contracts_high` / B01-A02（仍high、无新agent）。主代理实际核对两树 `8589e08404ebd8d2860bf7091c0ac8b586086659` clean、原代理completed停写、Java/Maven processcheck为空；额度ordinaryUsageAllowed=true（26%/4%）。准确任务单A2b/工作树/文件/验收/本人报告范围已下发。等待严格JSON→离线原Schema→typedDTO与实际Java/Ajv同组parity小检查点，不竞争builder、不先做HTTP/DB/业务；定时续跑仍PAUSED。
 - 15:25UTC主代理实际核对b2c45bf4 report-only A2b起点；尚无实施接受。只读原Ajv发现精确非整数原字节会经JSON.parse舍入后当合法Version，证据chunk1e8c6f与逐项字面量已写review/tasks并发worker；Java严格bytes必须拒绝，Schema数据值parity和原字节解析局限分开报告，不改冻结源/抄预期/吞mismatch。当前无主代理构建或Docker副作用。
 - 15:34UTC A2b首轮失败已实际核对code c80a70c4/report368404c0：worker16171 exit1，BoundaryTest5/1fail/0error/skip；1107共用数据值，Java336valid/771invalid，compare74923a exit1恰10个Id/UtcDateTime末尾换行差异。worker在原Schema/固定版本不改的前提下做有限regex锚适配和public六operation全覆盖，需新快照全量重跑。main仅读草稿/报告，无竞争builder，不接受失败轮；B1迁移任务只有draft，未下发。自动化仍PAUSED。
+- 15:45UTC第二轮40823/f2c0461b实际加载不可达Digest.pattern失败（6新tests/4errors），main批准验原hash后仅内存投影闭包25原definition/$id/$schema，不改source/规则；cd896a74已只读检查。worker报告第三26599 exit0/真实Java8 15tests/1107parity0mismatch，仍非main独立通过且后续boundedserialize/jarresource/helper负例改动尚未freeze/retest。待最终冻结停写再独立，B1未派/定时PAUSED。
 
 ## 最新用户请求与停用检查点（优先于下方历史）
 

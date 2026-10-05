@@ -57,3 +57,7 @@ R1本次独立test9实际39ms非零拒绝，已关闭。main本次首次build缓
 15:34UTC早期只读七文件草稿（c80a70c4，尚未主代理实跑）：prepare原源闭包/mapping、固定resource摘要、仅可信classpath/清除defaultloaders、strictRead原A1实际BigInteger/BigDecimal/UTF8/重复键/有界策略、Schema先行/DTO数学整数规范化、独立Java和原Ajv逐例结论路径。POM仅resource/testResource，不改固定版本；new code尚未接受。请求worker补public六operation四请求/全部状态响应/参数真实typed消费，避免单独definition parity旁路mapping；建议纠正503合成ErrorResponse为DEPENDENCY_UNAVAILABLE，OUTCOME_UNKNOWN条件测试用声明409写操作，未提前实现HTTP业务分发。
 
 实际worker失败检查点已核对Git/报告code c80a70c4/report368404c0：build16171 exit1，新BoundaryTest5项1fail/0error/skip；生成1107共用fixtures，Java336valid/771invalid，独立worker compare74923a exit1恰10差异（Id/UtcDateTime各五种终结换行，Ajvfalse/Java true）。原字节精确非整数四例及其他1097一致仅失败轮证据，不冒充main通过/最终通过。已要求保持原JSON和依赖不变，通过有限source pattern的RegularExpressionFactory末尾锚适配，避免转义字面量改义，并全量重新跑；旧句柄闭合，无第二main builder。A2b仍实施中，不派B1。
+
+15:45UTC增量检查：f2c0461b的有限pattern策略在worker第二build40823 exit1遇到networknt全$defs预编译不可达Digest.pattern，6新JUnit/0fail/4errors/skip；此轮未写新parity，旧target不算该轮结果。main批准先验原资源hash，再仅投影闭包25原definition节点/$id/$schema到内存，不改选中规则/source；read cd896a74实际代码符合该窄适配。compile策略不扩大到Task/Run。新增unique runId匹配阻止跨轮旧结果。
+
+worker报告第三完整build26599/cd896a74 exit0，真实3main/3test源码Java8编译，15JUnit/0fail/errors/skip、1107/326valid/781invalid/0mismatch；public4requests/6success/42errorstatus/10parameters，28ownclass52/35libs/probe。main当前只读代码/消息，不称独立通过。当前还在补bounded response写出/序列化前selector和DTO类检查、jar内原资源exact字节与Node防stale负例，必须最终freeze新快照再main全套；第三轮通过不继承给后续改动。
