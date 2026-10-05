@@ -81,3 +81,7 @@ worker报告第三完整build26599/cd896a74 exit0，真实3main/3test源码Java8
 源实际chunk30592f Id max128，pattern `^[A-Za-z0-9][A-Za-z0-9._:-]*$`；Bot/Group关系都是有序数组，config/原回执JSON完整Unicode须保留。已发worker明确按source Id、关系ordinal/集合唯一、SQL锁排序和展示顺序分开、重开后稳定顺序的B1不变量；同步任务单，不扩到业务片。Schema合法性与space/FK/语义去重不可互相替代。当前主代理无builder/DB副作用，B1未通过，定时PAUSED。
 
 16:13UTC worker发现原B00 validateProject读取root，主代理实际读453c15/8e0b42证实resources/compose/prepare/cleanup间接调用；不以旧B00权限扩大本片DB账号。批准newdeploy/dev/service test-onlymetadata adapter，只管理新建内存注册test项目、复用原owner/daemon/container/network/loopback/固定compose/digest，newrootbootstrap生成写入但不读取已有root、不拿root连SQL，app-only stdin。metadata-before-read/清理精确注册+标签+inode/实际SIGTERM与未知owner拒绝，完整task已同步。workerreadonly16502报告VM4094447616B、3服务约109.9/448/907.7MiB，顺序加一个mysql768MiB无需停dev；仅worker只读报告，不主代理DB通过或资源mutation。主代理无新builder/DB调用，等待实现与真实FK权限证据。
+
+16:14UTC主代理原Ajv实跑chunk2bb7c9 exit0：ShortText/Text对合法JSON escape的孤立高/低surrogate与嵌入NUL均true。已发worker并补任务单，要求name/config/receipt实际JDBC完整往返；若直接utf8mb4编码不支持，内部JSON转义保存，不改冻结源或默默替换/截断。当前只源验证，不冒称数据库已发生替换。
+
+B1-R1早期code草稿chunk23f8b4只读发现：testResources无条件调用要求实际loopback端口的validateContainer，cleanupTestDatabase也经过该路径。失败/取消后未启动或退出容器可能无端口而挡住精确清理；已发worker分层“严格归属/可清理固定资源”和“运行readiness/port”，保留注册/daemon/name/labels/image/mount/network/volume规则，新增实际未ready/SIGTERM清理。此为待验证风险、非主代理已复现失败，原B00不改；主代理不竞争builder/连接DB。
