@@ -102,3 +102,11 @@ E4核心修复f5ba1174：主代理读finishFailedStart/classifyStartup，并独�
 43957的卷注册竞态证据见HANDOFF/attempt。主代理读新增readiness及start/restart/status接入，独立 `node --test tests/bot/docker/readiness.spec.mjs tests/bot/docker/services.spec.mjs` exit0、6/6、skip0。严格固定loopback/location、卷ID/path验证、认证和现有卷全部注册；不改变persist GET/hash。真实91840加载f376d607早于db688142，不把它的结果覆盖到后改代码。
 
 E6已下发：serviceReadiness先设30s deadline却在await resources时仍用多次默认15s Docker调用且未传signal；因此不可宣称整个函数严格30s或能及时取消。要求最小传播本次deadline/signal且不影响cleanup，或明确先完成单独有界ownership preflight再开始30s就绪窗口；不做大规模重构。最终候选实测仍待。
+
+## 2026-10-05 冻结候选独立验收（进行中）
+
+code `7a82c9bf4034c24207743752cb2121c050934939`、report-only/final HEAD `fad7a736715081e3cfd7e7c3192ef2bafacf7ab0`。主代理实际git clean/diffcheck，28文件全在允许范围，README只追加、package只加scripts；src/contracts/F05/锁及旧测试未改。部署实现与b688字节一致，新增dev-cli-real与README已阅读。原workercompleted并停止写入；ps只有原任务VM，无测试/下载/CLI残留。
+
+主代理前置独立CLI status50841 exit0：三服务healthy/MySQL5.7.44端口32853、ES8.19.22端口32854、S34.48端口32852；全部literal127。CLI stop64205 exit0/data preserved，dev只停不删，避免4GiB VM同时运行dev/test。
+
+主代理真实完整验收9259已启动（待结果），准确命令：`/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node tests/bot/docker/mysql-real.mjs /Users/heyirui/Library/Java/JavaVirtualMachines/corretto-1.8.0_482-1/Contents/Home/bin/java /Users/heyirui/Library/Java/JavaVirtualMachines/corretto-1.8.0_482-1/Contents/Home/bin/javac /Users/heyirui/.m2/repository/com/mysql/mysql-connector-j/8.0.33/mysql-connector-j-8.0.33.jar`，cwd实施树。已认领test-ae845cacbaad2517，600s总取消界，尚非通过。旧b688离线23/23及F03/F05mock/node/web既有回归字节未改，不机械重复；通过real后仍须独立fault/SIGTERM与dev恢复/身份/监听/清理验收。
