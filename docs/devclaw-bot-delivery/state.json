@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_on": "2026-10-04",
+  "updated_on": "2026-10-05",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
   "status": "implementing",
@@ -162,17 +162,17 @@
       "worktree_creation_operation_id": "3d1475fa-7262-4bfc-b9fd-6d4bdd32f500",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B00-A01.md",
       "checkpoint_code_commit": "b688fb892dc688ed3ef02e910cb5f0f32a9b9aa3",
-      "checkpoint_head": "b688fb892dc688ed3ef02e910cb5f0f32a9b9aa3",
-      "latest_checkpoint": "Workerb688fb89 saved quiet wget and sharedresources signal/deadline.94357 diagnosticexit0/fullcleanup:404->200 validlocations buttrailingprogress polluted strictJSON.15011/test-b105ec2b330b7ad9 solequietwire verification started~20:22UTC, resultpending. Main read actualb688diff; Node22 allDocker specs23/23 skip0 exit0 independently. No frozen fullrealtestpass yet; E6 codepropagation present, realcancellationpending.",
+      "checkpoint_head": "3045b7e09d696747245894f955fb2f918fcfc8ab",
+      "latest_checkpoint": "2026-10-05T03:55Z recovery: original worker stopped/quota error, same3045 trackedclean (codeb688). Main actualsameVM/daemon, no test/download process, containers/volumesempty/default3network. Old15011notinmainhandle registry, originalwriter recovered actualexit0 quietlookup. Also recovered55958 exit0 proof: twofreshprojects test-29f50d41f13954b1/test-489e5cca62063734 realJDK8/MySQL/ES/S3CRUD/restart/strictGEThash/cancelledrestart/completecleanup. Worker saving exactcodeSHA/output; notmainindependentacceptance. Remainingfault/SIGTERM/devCLI/freeze.",
       "recovery_snapshot": {
-        "verified_at_utc": "2026-10-04T19:52:16Z",
-        "agent_status": "original_quota_errored_confirmed_stopped_then_same_attempt_followup_sent",
+        "verified_at_utc": "2026-10-05T03:55:26Z",
+        "agent_status": "original_quota_errored_confirmed_stopped_then_same_agent_followup_sent",
         "private_root": "/Users/heyirui/.devclaw-bot-b00",
         "socket": "/Users/heyirui/.devclaw-bot-b00/colima/devclaw-bot/docker.sock",
-        "working_tree": "4b80ef11 tracked clean plus untracked tests/bot/docker/es-startup.mjs preserved; integration fddc77d9 clean",
-        "remaining_resource_checks": "Main ps only original VM57942/57944/57957, no live test/download; Docker info same daemon75050694-6599-4820-af0e-28384728124e; no containers/volumes; default3network; all3fixed images listed. No unknown prior test counted successful."
+        "working_tree": "Integrationfd6cd2ec clean; worker3045b7e0clean, code identical tob688fb89 outsideattempt",
+        "remaining_resource_checks": "Actualsame daemon75050694-6599-4820-af0e-28384728124e, VM57942/57944/57957; no tests/downloads/containers/volumes,default3network. Main15011 handleunavailable; originalwriter recoveredactualoutput for15011and55958 beforefreshwork."
       },
-      "environment_issue": "S3 startupregistrationgating implemented; malformedlookupwas provenwgetprogress contamination, now-q -Swithstrictparser. Awaitactualquietwireverification thenfulltesting; no persistenceassertionrelaxed.",
+      "environment_issue": "PriorESlicense404 andS3registration/wgetparser issues corrected; worker recovered complete55958exit0. No newinfrastructureauthorizationneeded. Independent frozenverification and remainingCLI/cancellationdeliverypending.",
       "requested_decision": null,
       "latest_independent_check": "Mainb688fb89 readresources deadline/signal andquietwgetdiff; allDocker config/policy/failure/readiness/services23/23 skip0 exit0. Previous F03/F05mock/node/web regressionallpassed unchangedfiles. Full realtwoenv/lifecycleSIGTERM/CLI/freeze/integration notaccepted.",
       "decision_resolution": "User explicitly allowed guest DNS repair and local ES/S3 on2026-10-04; prior wait is superseded. Resume original stopped writer only, verify each effect.",
@@ -189,16 +189,16 @@
       "wait_reason": "Design v1 complete; do not dispatch before B00 independent acceptance. No B01 writer exists."
     }
   ],
-  "next_action": "先核对原writer15011 quietwire实际结果及精确清理，再同一快照真实两环境/故障SIGTERM/devCLI；主代理独立验收后才B01。",
+  "next_action": "原writer先补录找回的15011/55958真实结果，不重复已通过全流程；完成故障/SIGTERM/devCLI/健康服务和冻结。主代理冻结SHA独立关键真实复验后接受B00，再B01。",
   "quota_recovery": {
-    "verified_at_utc": "2026-10-04T20:20:00Z",
+    "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
-    "primary_used_percent": 89,
-    "primary_resets_at_utc": "2026-10-05T00:52:17.000Z",
-    "secondary_used_percent": 92,
+    "primary_used_percent": 1,
+    "primary_resets_at_utc": "2026-10-05T08:07:19.000Z",
+    "secondary_used_percent": 94,
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
-    "previous_interruption": "Original worker explicit usage limit after4b80ef11 and untracked ES diagnostic; current applicable quota recovered. Resume same original attempt/model, no credits/reset/account change."
+    "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange."
   },
-  "recovery_notes": "Same original writer running, ordinaryUsageAllowed=true at20:20; 89% short/92% weekly is not exhaustion. Preserve4b80/es-startup andnewer commits. No B00acceptance/B01dispatch. Ifactualquotaerror inspect pendinglookup/test/resources before same-agentresume, no credits/reset/model switch.",
+  "recovery_notes": "03:55UTC actualaudit completed; sameoriginal B00-A01 resumed. Weekly94% ishighbutordinaryusageallowed. Currentfulltestpass isworker evidence only; noacceptance/integration/B01dispatch.",
   "current_task_id": "B00"
 }
