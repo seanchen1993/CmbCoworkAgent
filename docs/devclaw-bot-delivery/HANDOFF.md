@@ -1,6 +1,6 @@
 # DevClaw Bot 当前交接点
 
-2026-10-05 04:41 UTC（北京时间12:41）· B00 accepted/merged · B01-A1独立通过/准备集成
+2026-10-05 04:46 UTC（北京时间12:46）· B00/A1 accepted/merged · B01-A2a准备派单
 
 ## 当前事实与下一动作
 
@@ -12,7 +12,7 @@
 - 主代理lifecycle59704 exit0：注入故障全部stop后清理、真实SIGTERM子项目b75f079df380ecf2 exit1且container/volume/network无、目录ENOENT。dev restore48382及独立dev-cli35909 exit0，重复启动身份不变、stop保留三卷/凭据、重开健康；实际MySQLx86_64/Rosetta OCF、class52通过。
 - 最终主代理只读audit0f5b28 exit0：原三容器ID/同private network不变，三卷且无测试残留、runtime仅dev，默认Docker/Colima/Lima均ENOENT，0700/0600；真实MySQL32878/ES32877/S332876各一个127listener。无运行主代理命令。资源完整ID在state/attempt，端口以后以status为准。
 - B01-A1已正式派单：先固定依赖/真实Java8构建/非Web且不连库兼容验证，不抢先六接口业务或DTO；A1独立复验后再A2。实施树正常FF `0e33703aaa411133af0cf4c25970721a41906a89` clean后派发，准确baseline/回执已在state；报告仅本人attempts/B01-A01.md。等待初次checkpoint，不并行另一个写者。
-- A1冻结codeb6c147c7131f8d41e37bb73bbe9b1f1bc2d229e6/report0b22599fd7223ec510b11313a747d40479568392，clean/停止写入。主代理18334独立build.mjs exit0，真实Corretto8/Maven3.9.6、4tests0skip、fatjar4组兼容验证、2自有class52、实际35库/单provider/无旧binding桥接。前34口述已被实际35更正。A1仅本地JSON/框架兼容接受，正常merge及集成树新target全新编译复验待执行；B01六接口仍未实现。
+- A1 codeb6c147c7131f8d41e37bb73bbe9b1f1bc2d229e6/report0b22599f已独立接受并正常merge69f326ce。主代理18334独立验证与集成树全新编译86029均exit0：实际Corretto8/Maven3.9.6重编main/test各1源码、4tests0skip、fatjar4组、2自有class52及实际35库/单provider。只JSON/框架兼容，B01六接口仍未实现。
 - A1私有repo/settings位于~/.devclaw-bot-b01-a1，owner c0f9e4ba-891e-4b16-a675-d24d912d63dc；worker67208/26923、main18334全exit0，暂无句柄。只JSON兼容，未认证YAML（JacksonYaml2.18.3/SnakeYaml1.30transitives保留事实）；无Docker/HTTP/DB变更。A2准备前核对额度、复用停止的原代理，无新写者。
 - 主代理已独立通过b688 Docker离线23/23，旧F03 60037 24/24、F05mock41436 15/15、node54489/web4738 tsc均exit0且关闭。相关文件未改，不重复无关回归；新代码有变化才复验对应检查。
 
@@ -24,7 +24,7 @@
 - 实施：`/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork`，`codex/devclaw-bot-local`，基线6530c052。**不得在默认d12a实施。**
 - 当前任务：tasks/B01.md、B01-design.md、B01-A1.md；旧B00已结束。报告：实施树delivery/attempts/B01-A01.md。
 - B01允许services/bot-control/**、Java生成器（A2）、tests/bot/service/**、deploy/dev/service/**、README/package scripts/.gitignore窄追加及本人attempt。A1只兼容切片，不写DTO/HTTP监听/DB业务；不改src/contracts schema/F05/B00/锁文件/主代理记录。主代理独占state/HANDOFF/tasks/reviews，做设计、审查、复验和集成。
-- B01任务/设计依赖B00已满足；当前tasks/B01-A1.md implementing，由原代理唯一实施。不进入B02/B03/Runtime/UI或业务上传/搜索API。
+- B01当前tasks/B01-A2a.md准备派单：只从六operation来源推导可达Java DTO/生成器/漂移检查，下一A2b才运行时Schema/完整parity。原代理停止，拟FF新文档HEAD后followup，未新增写者。仍不做HTTP/DB业务或后续路线。
 
 ## 本地环境与已解决问题
 
@@ -38,6 +38,6 @@ DNS已独立关闭：两精确guest文件root0644，普通uid501可读/解析，
 
 ## 额度、续跑与已接受阶段
 
-04:21UTC ordinaryUsageAllowed=true，primary19%/secondary97%已用；短窗恢复2026-10-05T08:07:19Z（北京时间16:07），周窗2026-10-09T23:28:57Z（北京时间10月10日07:28）。高使用率不等于耗尽；以小切片尽早保存。实际quota错误后核对旧writer/句柄与资源，恢复时接续原代理，不自动使用重置权益。
+04:45UTC ordinaryUsageAllowed=true，primary35%/secondary显示100%已用但limitReached仍null，不能仅凭舍入百分比判耗尽。短窗恢复2026-10-05T08:07:19Z（北京时间16:07），周窗2026-10-09T23:28:57Z（北京时间10月10日07:28）。小片先保存起点；实际quota错误才停实现，恢复接续原代理，不购买/重置/换模型账号。
 
 原heartbeat devclaw-bot ACTIVE、每4小时、同一会话，prompt含最新B00+B01/DNS/ES/S3授权；本次未修改scheduler。用户停止/需新授权/本轮里程碑完成才停续跑，普通额度等待保留恢复机制，未变化安静。F02/F03/F05已独立接受；F04内部平台项延后不重做。旧交接历史保留在Git fd6cd2ec，完整失败/修复与命令在review/attempt。

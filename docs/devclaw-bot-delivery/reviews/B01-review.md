@@ -23,3 +23,5 @@ R2证据要求已发：冻结前明确检查自有class major52和fatjar BOOT-IN
 主代理准确命令 `/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node deploy/dev/service/build.mjs`（cwd实施树）18334 **exit0**：Corretto1.8.0_482/Maven3.9.6、4tests/failures0/errors0/skipped0；fatjar四组运行verified、webfalse/databasefalse。真实audit 2自有class52、**35** BOOT-INF库，早先34口述已更正；核心固定版本/一个SLF4J2 provider、无旧binding/桥接通过。jar SHA08eea59ae44001ce811f3187c7604c5c7330997aed10ac264cefbb95eaf1a8c0，tree SHA2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b，匹配worker最终证据。R1代码修复和正常启动通过；R2已独立读到实际产物事实，不仅POM。
 
 仅接受A1局部兼容，不宣称整个B01/六API/数据库/YAML/生产支持完成。下一正常合并接受片，然后集成树新target进行全新编译和相同运行检查，再签发A2。旧src/F03/F05/B00/锁未改，不机械重做不相关回归。
+
+集成完成69f326ce。主代理从集成树执行同一准确build.mjs命令86029 exit0，**全新编译**main1源码/test1源码（不是缓存class跳过编译），4tests0skip、fatjar/class52/35libs通过。新jar9f5ac2cd537272a89a0469841f6094bf06d85b60f2647abfa381233ebbe5c921，tree仍2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b；JAR时间戳导致不同SHA不冒充源漂移，源码已正常merge/未改。A1 accepted/merged完整，无构建句柄；下一只A2a可达DTO，不一步抢先业务API。

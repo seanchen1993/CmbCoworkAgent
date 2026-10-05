@@ -3,12 +3,12 @@
   "updated_on": "2026-10-05",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
-  "status": "implementing",
+  "status": "dispatch_prepared",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "1ba44e2fd6984f80b8d1aa7be6b3ed9ec51b72d8"
+    "last_accepted_commit": "69f326ce7cc8af6d467c0a33c09cee1bb8f30f3c"
   },
   "authorization": {
     "approved_work": [
@@ -207,15 +207,15 @@
     },
     {
       "id": "B01",
-      "status": "implementing",
+      "status": "dispatch_prepared",
       "spec": "tasks/B01.md",
       "design": "tasks/B01-design.md",
       "depends_on": [
         "B00"
       ],
       "wait_reason": null,
-      "current_slice": "A1",
-      "slice_spec": "tasks/B01-A1.md",
+      "current_slice": "A2a",
+      "slice_spec": "tasks/B01-A2a.md",
       "attempt_id": "B01-A01",
       "agent_task_name": "b00_local_docker",
       "agent_id": "/root/b00_local_docker",
@@ -223,7 +223,7 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A01.md",
-      "latest_checkpoint": "A1 frozen b6c/0b22599clean, mainactualscope7files/diffcheck/readallchanges passed. Main18334 actualexit0/4of4+fatjar+2class52/35libs. Old34口述已被实际35覆盖。A1 accepted (localJSON/frameworkcompatonly) pending normalmerge and fresh compile from integration without existingtarget. B01 sixAPIs notimplemented.",
+      "latest_checkpoint": "A1 accepted/merged69f326ce; mainintegratedfresh86029 exit0 recompiledoneJava source+oneJUnit source withactualJDK8,4tests0skip/probe/class52/35libs verified. WholeB01 stillnotimplemented. A2a taskready DTOgeneratoronly, originalstoppedworker to beFF andfollowup; no A2a writer yet.",
       "dispatched_slice": "A1",
       "dispatch_verified": "Original same6.1-sol/xhigh worker followup succeeded; collaboration list confirmsrunning; no newwriter/agent. Worker treeFF0e33703a clean before dispatch.",
       "checkpoint_code_commit": "b6c147c7131f8d41e37bb73bbe9b1f1bc2d229e6",
@@ -241,7 +241,7 @@
       "checkpoint_head": "0b22599fd7223ec510b11313a747d40479568392",
       "slices": {
         "A1": {
-          "status": "accepted_pending_integrated_fresh_compile",
+          "status": "accepted_merged",
           "code_commit": "b6c147c7131f8d41e37bb73bbe9b1f1bc2d229e6",
           "report_commit": "0b22599fd7223ec510b11313a747d40479568392",
           "independent_command": "/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node deploy/dev/service/build.mjs",
@@ -255,12 +255,26 @@
           "own_classes": 2,
           "runtime_libraries": 35,
           "artifact_sha256": "08eea59ae44001ce811f3187c7604c5c7330997aed10ac264cefbb95eaf1a8c0",
-          "dependency_tree_sha256": "2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b"
+          "dependency_tree_sha256": "2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b",
+          "integration_commit": "69f326ce7cc8af6d467c0a33c09cee1bb8f30f3c",
+          "integrated_fresh_compile": {
+            "session_id": 86029,
+            "exit_code": 0,
+            "compiled_main_sources": 1,
+            "compiled_test_sources": 1,
+            "java": "1.8.0_482",
+            "tests": 4,
+            "skipped": 0,
+            "class_major": 52,
+            "runtime_libraries": 35,
+            "jar_sha256": "9f5ac2cd537272a89a0469841f6094bf06d85b60f2647abfa381233ebbe5c921",
+            "tree_sha256": "2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b"
+          }
         }
       }
     }
   ],
-  "next_action": "Normalmerge accepted A1 reportHEAD0b22599f, run build from integration (newtarget/freshcompile) and verify no runningbuilds/clean. Then prepare/dispatch A2 contractDTO+offlineJSON parity to same stopped6.1-sol/xhigh worker if applicablequotaallows. No broader route.",
+  "next_action": "FF existingcleanstoppedworker tree to thismaincoordHEAD; dispatch B01-A2a generator/typedDTO slice only to same6.1-sol/xhigh. Currenttool ordinaryUsageAllowedtrue despite roundedweekly100%; do not infer exhaustion from percent. Actualquotaerror -> preservecheckpoint/stop/resumeoriginal later. No A2b/HTTP/DB/business yet.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
@@ -270,13 +284,13 @@
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {
-      "verified_at_utc": "2026-10-05T04:21Z",
+      "verified_at_utc": "2026-10-05T04:45Z",
       "ordinaryUsageAllowed": true,
-      "primary_used_percent": 19,
+      "primary_used_percent": 35,
       "primary_resets_at_utc": "2026-10-05T08:07:19Z",
-      "secondary_used_percent": 97,
+      "secondary_used_percent": 100,
       "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
-      "policy": "Checkpoint small slices; do not reset/purchase/switch account/model."
+      "policy": "Rounded100% alone is not blocking: actualordinaryUsageAllowed stilltrue, limitreachednull. Smallinitialcheckpointfirst; actualquotaerrorstop/noresetpurchasemodelswitch."
     }
   },
   "recovery_notes": "03:55UTC actualaudit completed; sameoriginal B00-A01 resumed. Weekly94% ishighbutordinaryusageallowed. Currentfulltestpass isworker evidence only; noacceptance/integration/B01dispatch.",
