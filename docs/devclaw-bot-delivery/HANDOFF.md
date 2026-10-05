@@ -12,6 +12,7 @@
 - 主代理lifecycle59704 exit0：注入故障全部stop后清理、真实SIGTERM子项目b75f079df380ecf2 exit1且container/volume/network无、目录ENOENT。dev restore48382及独立dev-cli35909 exit0，重复启动身份不变、stop保留三卷/凭据、重开健康；实际MySQLx86_64/Rosetta OCF、class52通过。
 - 最终主代理只读audit0f5b28 exit0：原三容器ID/同private network不变，三卷且无测试残留、runtime仅dev，默认Docker/Colima/Lima均ENOENT，0700/0600；真实MySQL32878/ES32877/S332876各一个127listener。无运行主代理命令。资源完整ID在state/attempt，端口以后以status为准。
 - B01-A1已正式派单：先固定依赖/真实Java8构建/非Web且不连库兼容验证，不抢先六接口业务或DTO；A1独立复验后再A2。实施树正常FF `0e33703aaa411133af0cf4c25970721a41906a89` clean后派发，准确baseline/回执已在state；报告仅本人attempts/B01-A01.md。等待初次checkpoint，不并行另一个写者。
+- A1初始code50c9400a已保存（6允许文件、四组兼容测试）。唯一worker build67208在04:29:19前启动，600s界/最迟04:39:19；stage实际Java1.8.0_482/Maven3.9.6已确认，构建结论仍待，恢复不重复启动。私有repo/settings位于~/.devclaw-bot-b01-a1，owner c0f9e4ba-891e-4b16-a675-d24d912d63dc；不动Docker。主代理已读实际六文件，要求最小owner首读前metadata校验和产物class52/实际依赖清单证据，尚非A1accepted。
 - 主代理已独立通过b688 Docker离线23/23，旧F03 60037 24/24、F05mock41436 15/15、node54489/web4738 tsc均exit0且关闭。相关文件未改，不重复无关回归；新代码有变化才复验对应检查。
 
 ## 授权、位置与职责
