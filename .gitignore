@@ -53,3 +53,5 @@ chrome-extension/
 chrome-extension.zip
 
 playwright-main/
+# B01-A1 Maven output only; private repository/settings live outside Git.
+/services/bot-control/target/
