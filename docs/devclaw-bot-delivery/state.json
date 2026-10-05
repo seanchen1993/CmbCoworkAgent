@@ -3,7 +3,7 @@
   "updated_on": "2026-10-05",
   "project": "DevClaw Bot",
   "phase": "B00_B01_LOCAL_SERVICE",
-  "status": "dispatch_prepared",
+  "status": "implementing",
   "integration": {
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
@@ -207,7 +207,7 @@
     },
     {
       "id": "B01",
-      "status": "dispatch_prepared",
+      "status": "implementing",
       "spec": "tasks/B01.md",
       "design": "tasks/B01-design.md",
       "depends_on": [
@@ -221,12 +221,14 @@
       "agent_id": "/root/b00_local_docker",
       "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork",
       "branch": "codex/devclaw-bot-local",
-      "baseline": "1ba44e2fd6984f80b8d1aa7be6b3ed9ec51b72d8",
+      "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A01.md",
-      "latest_checkpoint": "A1 only dependency/runtime compatibility; original completed authorized6.1-sol/xhigh writer to be reused after clean fastforward. No B01 code writer running yet; no HTTP/DB/business inA1."
+      "latest_checkpoint": "B01-A1 formally dispatched after B00 acceptance/merge. Only realJava8 dependency/context/schema-parser/logging compatibility slice; no HTTP/DB/business/DTO yet. Await initial attempt/checkpoint; keep samewriter.",
+      "dispatched_slice": "A1",
+      "dispatch_verified": "Original same6.1-sol/xhigh worker followup succeeded; collaboration list confirmsrunning; no newwriter/agent. Worker treeFF0e33703a clean before dispatch."
     }
   ],
-  "next_action": "Fast-forward existing clean stopped worker tree to updated integration documentation head; send original worker B01-A1 with precise HEAD, task/design/file scope/acceptance/attempt path. Update dispatch receipt after followup succeeds; no new writer or resource lifecycle.",
+  "next_action": "Original worker B01-A1 implementation/checkpoints; main independently inspect exact diff and run realJava8 compatibility tests when slice freezes. A1 acceptance before A2; never B02/B03/Runtime/UI. On actualquota failure retainhandles/resources, wait for restoration and resume originalworker.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
