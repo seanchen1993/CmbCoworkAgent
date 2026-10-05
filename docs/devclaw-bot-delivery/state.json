@@ -227,7 +227,7 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
-      "latest_checkpoint": "A2b accepted/merge a4987bc9/freshcompile6982 exit0. B1 formallyfollowup samehigh B01-A02 after normalFF5ddaaa59 actualclean; priorwritercompleted and pgrep665b14 empty. ExplicitreadyB1task/accuratepaths/allowedfiles/realDBacceptance/ownA02 supplied. Originaldev3samehealthy e0924a; main noDB/container mutation. Await B1smallcheckpoint, no competingimplementation/builder; autoPAUSED/sixAPI business incomplete.",
+      "latest_checkpoint": "B1actual起点c7390ccd report-only verified; workerreadall/Gitclean, noimplementationaccepted. B00lifecycle helpers indirectlyreadroot; mainapproved narrowlynewservice test-onlymetadata adapter reusing actualowner/daemon/container/network/loopbackrules, app-onlyDB/noB00change/newbootstraprootwriteonly. Workerreadonly16502exit0 reportsoriginal3healthy sameIDs/ports/VMcapacity enoughforsequentialmysql/no mutation orhandles; mainreadactualsource confirms indirectread. Awaitadapter/config/DDL smallcheckpoint, no competingbuilder, autoPAUSED.",
       "dispatched_slice": "B1",
       "slice_baseline": "5ddaaa59edbe70bb39d636350135d623102791af",
       "dispatch_verified": "Same /root/b01_contracts_high followup succeeded at16:04UTC with existing gpt-6.1-sol/high configuration, no newagent. Actualworker5ddaaa59 clean, previousagentcompleted/stopped, Java/Maven pgrep665b14 empty; B1ready after A2bmerge/freshcompile. Exacttask/files/acceptance/privateDocker/ownA02/nochildren supplied, schedulerPAUSED. LatestordinaryUsageAllowed=true55%/9%, noreset/purchase/accountchange.",
@@ -274,6 +274,8 @@
           "task": "tasks/B01-B1.md",
           "baseline": "5ddaaa59edbe70bb39d636350135d623102791af",
           "dispatch_at_utc": "2026-10-05T16:04:00Z",
+          "checkpoint_head": "c7390ccdf519d0e64830330c38793cd0bdc9d325",
+          "approved_adaptation": "B00validateProject indirectlyreadsroot. Main16:13UTC approved newdeploy/dev/service test-onlymetadata adapter onlyownednewtests/reuseowner-daemon-container-network-loopback/staticcompose checks; noB00modification/noexistingrootread/app-onlySQL. Newemptytestrootbootstrap write-only permitted; actualcleanup/SIGTERM/unknown-owner negativesrequired. Worker16502readonlycapacity3healthy/no mutation, not independentDB acceptance.",
           "prerequisites": "A2b accepted/merged a4987bc9; integrated freshcompile6982 passed. B00 originaldev3samehealthy e0924a; no resource mutation. Samehigh agent completed/stopped, no newwriter.",
           "acceptance": "MySQL5.7/JDK8 real two sequential isolated testprojects, migration/no-op/checksum/FK/space/UTF8UTC/account/config failures/deadlines/SIGTERM and precisecleanup; noHTTP/business. Main independent actualdiff/realtest before acceptance."
         },

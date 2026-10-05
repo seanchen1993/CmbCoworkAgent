@@ -79,3 +79,5 @@ worker报告第三完整build26599/cd896a74 exit0，真实3main/3test源码Java8
 同high/B01-A02从实际5ddaaa59 clean正式followup，精确task/路径/范围/真实两空库验收已下发，未新增写者。主代理只读B00原owner/compose/resources/container/privateFile/probe接口与原Schema，尚未独立连接DB或接受任何B1代码。主代理readonlye0924a原dev三服务同ID/回环端口healthy，无resource变更。
 
 源实际chunk30592f Id max128，pattern `^[A-Za-z0-9][A-Za-z0-9._:-]*$`；Bot/Group关系都是有序数组，config/原回执JSON完整Unicode须保留。已发worker明确按source Id、关系ordinal/集合唯一、SQL锁排序和展示顺序分开、重开后稳定顺序的B1不变量；同步任务单，不扩到业务片。Schema合法性与space/FK/语义去重不可互相替代。当前主代理无builder/DB副作用，B1未通过，定时PAUSED。
+
+16:13UTC worker发现原B00 validateProject读取root，主代理实际读453c15/8e0b42证实resources/compose/prepare/cleanup间接调用；不以旧B00权限扩大本片DB账号。批准newdeploy/dev/service test-onlymetadata adapter，只管理新建内存注册test项目、复用原owner/daemon/container/network/loopback/固定compose/digest，newrootbootstrap生成写入但不读取已有root、不拿root连SQL，app-only stdin。metadata-before-read/清理精确注册+标签+inode/实际SIGTERM与未知owner拒绝，完整task已同步。workerreadonly16502报告VM4094447616B、3服务约109.9/448/907.7MiB，顺序加一个mysql768MiB无需停dev；仅worker只读报告，不主代理DB通过或资源mutation。主代理无新builder/DB调用，等待实现与真实FK权限证据。
