@@ -85,3 +85,7 @@ worker报告第三完整build26599/cd896a74 exit0，真实3main/3test源码Java8
 16:14UTC主代理原Ajv实跑chunk2bb7c9 exit0：ShortText/Text对合法JSON escape的孤立高/低surrogate与嵌入NUL均true。已发worker并补任务单，要求name/config/receipt实际JDBC完整往返；若直接utf8mb4编码不支持，内部JSON转义保存，不改冻结源或默默替换/截断。当前只源验证，不冒称数据库已发生替换。
 
 B1-R1早期code草稿chunk23f8b4只读发现：testResources无条件调用要求实际loopback端口的validateContainer，cleanupTestDatabase也经过该路径。失败/取消后未启动或退出容器可能无端口而挡住精确清理；已发worker分层“严格归属/可清理固定资源”和“运行readiness/port”，保留注册/daemon/name/labels/image/mount/network/volume规则，新增实际未ready/SIGTERM清理。此为待验证风险、非主代理已复现失败，原B00不改；主代理不竞争builder/连接DB。
+
+B1-R2草稿只读：appPassword原默认ready=false及只查旧entry.container/port可能把cleanup投影用成连接资格；已要求secret出站用原件ready=true、Running/healthy、实际当前port同登记、listener/ID/daemon核对。已读fd23cb有限readiness投影保留实际Config/HostConfig/mount/security、不隐藏present未知ports/networks，可仅清理用；缺端口须输出null/not-ready不伪称65535实际endpoint。最终待worker当前代码+离线恶意policy/实际未ready和SIGTERM证明及main独立。
+
+16:22UTC实际先决失败worker报告e85c40d2/session9352 exit1：父CREATE成功、含FK子CREATE SQLState42000/1142；原app六项schema权力/session/version已检查，现有原INIT_SQL主代理实际读b1e6f6确认无REFERENCES。主代理不放弃space/FK，为用户已授权localDocker新空测试库技术批准固定B1_TEST_INIT_SQL=原INIT_SQL＋schema REFERENCES一条，旧B00/现有dev完全不改，不读已有root/不root连接/liveGRANT/ALL/GRANTOPTION。新库再实测封闭权限集合及FK，更多权限需实证决策。失败9352/e120资源worker报告finallyremoved、保留失败事实；不是main独立数据库验收。无主代理实现/SQL/资源mutation，autoPAUSED。
