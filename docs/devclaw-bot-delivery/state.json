@@ -227,10 +227,10 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
-      "latest_checkpoint": "A2b accepted normallymerged a4987bc9; codebyteidentical to0c5b8cc3 exceptcoorddocs. Integratedbuild6982 exit0 actual3main/3test freshlycompiled onCorretto8,15JUnit/1107samef4e3eaa8parity0mismatch/public4/6/42/10/29class52/35libs/exactsource/probe. Noopencommands. B1task nowready, actuale0924a original3devcontainerssamehealthy/ports; nextFF stopped samehighworker then formal followup, no newwriter. SchedulerPAUSED, sixAPI business stillincomplete.",
-      "dispatched_slice": "A2b",
-      "slice_baseline": "8589e08404ebd8d2860bf7091c0ac8b586086659",
-      "dispatch_verified": "Same /root/b01_contracts_high followup succeeded with existing gpt-6.1-sol/high configuration, no replacement/spawn. Actualworker8589e084 clean before dispatch, previous agent completed and Java/Maven processcheck empty. ExplicitreadyA2b task/paths/scope/acceptance/reportA02 supplied. Mainowns state/HANDOFF, child no descendants. SchedulerPAUSED, quotaordinaryUsageAllowed true26%/4% at15:20UTC.",
+      "latest_checkpoint": "A2b accepted/merge a4987bc9/freshcompile6982 exit0. B1 formallyfollowup samehigh B01-A02 after normalFF5ddaaa59 actualclean; priorwritercompleted and pgrep665b14 empty. ExplicitreadyB1task/accuratepaths/allowedfiles/realDBacceptance/ownA02 supplied. Originaldev3samehealthy e0924a; main noDB/container mutation. Await B1smallcheckpoint, no competingimplementation/builder; autoPAUSED/sixAPI business incomplete.",
+      "dispatched_slice": "B1",
+      "slice_baseline": "5ddaaa59edbe70bb39d636350135d623102791af",
+      "dispatch_verified": "Same /root/b01_contracts_high followup succeeded at16:04UTC with existing gpt-6.1-sol/high configuration, no newagent. Actualworker5ddaaa59 clean, previousagentcompleted/stopped, Java/Maven pgrep665b14 empty; B1ready after A2bmerge/freshcompile. Exacttask/files/acceptance/privateDocker/ownA02/nochildren supplied, schedulerPAUSED. LatestordinaryUsageAllowed=true55%/9%, noreset/purchase/accountchange.",
       "previous_attempts": [{"attempt_id":"B01-A01","agent_id":"/root/b00_local_docker","model":"gpt-6.1-sol","reasoning_effort":"xhigh","status":"retired_stopped_after_user_configuration_change","last_worker_head":"aea2026d013a3546c91fd06872a214ffdc3e223d","attempt_report":"attempts/B01-A01.md","delivered":"A1 accepted/merged; no A2a implementation"}],
       "last_interruption": "A2a originalworker actual usage-limit error advertised Oct10 2026 07:28 AM; historical error, not current quota availability. Current read-only limits ordinaryUsageAllowed=true; no implementation resumed because latest user only requests progress and stopping scheduled continuation.",
       "checkpoint_code_commit": "575ed53b376fe31142271a02b2acf0c059415bbb",
@@ -270,8 +270,10 @@
           "limits": "Only offline strict byte parser/source-derived Schema/typed DTO. JS Number raw-byte rounding limitation separately tested/documented, not arbitrary Java/JS byte equivalence. No HTTP/DB/business APIs."
         },
         "B1": {
-          "status": "ready_not_dispatched",
+          "status": "implementing",
           "task": "tasks/B01-B1.md",
+          "baseline": "5ddaaa59edbe70bb39d636350135d623102791af",
+          "dispatch_at_utc": "2026-10-05T16:04:00Z",
           "prerequisites": "A2b accepted/merged a4987bc9; integrated freshcompile6982 passed. B00 originaldev3samehealthy e0924a; no resource mutation. Samehigh agent completed/stopped, no newwriter.",
           "acceptance": "MySQL5.7/JDK8 real two sequential isolated testprojects, migration/no-op/checksum/FK/space/UTF8UTC/account/config failures/deadlines/SIGTERM and precisecleanup; noHTTP/business. Main independent actualdiff/realtest before acceptance."
         },
@@ -333,7 +335,7 @@
       }
     }
   ],
-  "next_action": "B1ready after A2b accepted/merge/freshcompile. FF stopped samehighworker to this coordinationcheckpoint then formally dispatch B1task with accuratebaseline/allowedpaths/acceptance/ownA02report. NoHTTP/command business yet; preserve dev3data/cache and autoPAUSED.",
+  "next_action": "B1formallydispatched to samehigh agent/ownA02 fromactual5ddaaa59 clean. Awaitsmallcheckpoint, readactualimplementation incrementally, no competingbuilder. Mainindependentconfig/realJDK8/twoMySQL5.7/migration/FK/account/failure/SIGTERMcleanup required beforeaccept/merge. NoHTTP/business until next formal slice; preserve dev3data/cache/autoPAUSED.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
