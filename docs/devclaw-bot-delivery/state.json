@@ -174,7 +174,7 @@
       },
       "environment_issue": "No unresolved infrastructure blocker. Frozen full real/fault/SIGTERM and dev lifecycle worker proof recovered/recorded. Main independent real two-project/lifecycle cleanup/dev recovery still required.",
       "requested_decision": null,
-      "latest_independent_check": "Frozen7a82/fad7 scope28files/diffcheck/readnewhelperpassed. MainCLI status50841 exit0 healthy (MySQL32853/ES32854/S332852); CLI stop64205 exit0 data preserved. Main frozen real2projects9259 now claimed test-ae845cacbaad2517 and running (notpass); lifecycle/dev recovery remain. b688Docker23/23 and unchanged F03/F05mock/node/web regressions already independently passed.",
+      "latest_independent_check": "Frozen7a82/fad7 scope28files/diffcheck/readnewhelperpassed. Main status50841 and stop64205 exit0, dev data preserved. Main9259 first test-ae845cacbaad2517 all stages reached exactcleanup/advance; second test-9e9152514226c4b1 claimed/running, full overall exit stillpending. Lifecycle/dev recovery remain. b688Docker23/23 and unchanged F03/F05mock/node/web regressions independently passed.",
       "decision_resolution": "User explicitly allowed guest DNS repair and local ES/S3 on2026-10-04; prior wait is superseded. Resume original stopped writer only, verify each effect.",
       "wait_reason": null,
       "code_commit": "7a82c9bf4034c24207743752cb2121c050934939",
@@ -185,7 +185,7 @@
           "session_id": 9259,
           "command": "Node22 tests/bot/docker/mysql-real.mjs Corretto8/java Corretto8/javac ConnectorJ8.0.33.jar",
           "state": "running",
-          "project": "devclaw-bot-test-ae845cacbaad2517",
+          "project": "devclaw-bot-test-9e9152514226c4b1",
           "total_abort_ms": 600000
         }
       ]
