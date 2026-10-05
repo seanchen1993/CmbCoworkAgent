@@ -8,7 +8,8 @@
 - 冻结code `7a82c9bf4034c24207743752cb2121c050934939`，report-only/finalHEAD `fad7a736715081e3cfd7e7c3192ef2bafacf7ab0` clean。主代理实际范围28文件/diffcheck通过，读新增dev-cli-real及README；部署代码与b688相同。尚未合入。
 - Worker55958两独立空环境全流程、15011 quiet lookup、69624故障/真实SIGTERM、58285/25984 dev CLI幂等/停止保留/重开均exit0，准确命令、资源身份、结果已保存attempt。它们是worker证据，不冒充主代理独立通过。
 - 主代理独立CLI status50841 exit0/三服务healthy（MySQL32853/ES32854/S332852），stop64205 exit0/data preserved。dev三卷/凭据保留，暂时停止以避免4GiB同时跑两套三服务；原VM57942/57944/57957与daemon保留。
-- 主代理唯一完整real句柄9259运行，第一test-ae845cacbaad2517全阶段到达精确cleanup并进入第二test-9e9152514226c4b1；600s总取消界，整体exit仍待。恢复先resume该句柄，不重复启动。随后串行lifecycle-real，再恢复同dev并核对实际健康/loopback/精确清理；通过才接受/集成B00并派B01。
+- 主代理完整real9259已exit0/verified，两空项目test-ae845cacbaad2517/test-9e9152514226c4b1真实Java8/class52/JDBC/MySQL、ES/S3读写删除/重启后严格hash、已有卷注册、取消restart仅stop及精确finally清理全通过。
+- 主代理唯一lifecycle59704运行，已认领test-295edfca790185df；恢复先resume不重放。dev仍停止保留三卷/秘密。随后恢复同dev并独立dev-cli-real/实际健康/loopback/清理检查，通过才接受/集成B00及派B01。
 - 主代理已独立通过b688 Docker离线23/23，旧F03 60037 24/24、F05mock41436 15/15、node54489/web4738 tsc均exit0且关闭。相关文件未改，不重复无关回归；新代码有变化才复验对应检查。
 
 ## 授权、位置与职责

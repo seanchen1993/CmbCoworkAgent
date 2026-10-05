@@ -110,3 +110,7 @@ code `7a82c9bf4034c24207743752cb2121c050934939`、report-only/final HEAD `fad7a7
 主代理前置独立CLI status50841 exit0：三服务healthy/MySQL5.7.44端口32853、ES8.19.22端口32854、S34.48端口32852；全部literal127。CLI stop64205 exit0/data preserved，dev只停不删，避免4GiB VM同时运行dev/test。
 
 主代理真实完整验收9259已启动（待结果），准确命令：`/Users/heyirui/.npm/_npx/52027bd8fc0022aa/node_modules/node/bin/node tests/bot/docker/mysql-real.mjs /Users/heyirui/Library/Java/JavaVirtualMachines/corretto-1.8.0_482-1/Contents/Home/bin/java /Users/heyirui/Library/Java/JavaVirtualMachines/corretto-1.8.0_482-1/Contents/Home/bin/javac /Users/heyirui/.m2/repository/com/mysql/mysql-connector-j/8.0.33/mysql-connector-j-8.0.33.jar`，cwd实施树。已认领test-ae845cacbaad2517，600s总取消界，尚非通过。旧b688离线23/23及F03/F05mock/node/web既有回归字节未改，不机械重复；通过real后仍须独立fault/SIGTERM与dev恢复/身份/监听/清理验收。
+
+04:12 UTC结果：9259 **exit0/verified**、两个空项目test-ae845cacbaad2517/test-9e9152514226c4b1全流程完成并精确finally清理。实际Java1.8.0_482/classMajor52/JDBC8.0.33、MySQL5.7.44 empty/probe/persist均verified；负密码及不符版本必须失败。ES8.19.22/active Basic、S34.48 create/persist/delete verified；重启前后相同容器/卷，启动卷[]、重启卷[1,2,3,4]全部注册后一次GET/hash，hash分别10d9eaad09d2f0a7f458ffc13c87a6b12618318cfa4b825d4598492cbd65c7c0、356f0eee0093bba8c4d056fbdb8eb281ef71f0dec6191ce60f6816bb1493cdfe。MySQL32857→32860及32863→32866均真实127单listener；所有服务入口已校验127。两次cancelledRestart=stopped_without_start，E5真实条件通过。清理两项目精确container/network/volume/directory removed。
+
+主代理后续独立`node22 tests/bot/docker/lifecycle-real.mjs`句柄59704正在运行，test-295edfca790185df已认领。仍待fault/SIGTERM、dev恢复/身份/实际资源最终核对，不提前accepted。
