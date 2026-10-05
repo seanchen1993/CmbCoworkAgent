@@ -25,3 +25,13 @@ R2证据要求已发：冻结前明确检查自有class major52和fatjar BOOT-IN
 仅接受A1局部兼容，不宣称整个B01/六API/数据库/YAML/生产支持完成。下一正常合并接受片，然后集成树新target进行全新编译和相同运行检查，再签发A2。旧src/F03/F05/B00/锁未改，不机械重做不相关回归。
 
 集成完成69f326ce。主代理从集成树执行同一准确build.mjs命令86029 exit0，**全新编译**main1源码/test1源码（不是缓存class跳过编译），4tests0skip、fatjar/class52/35libs通过。新jar9f5ac2cd537272a89a0469841f6094bf06d85b60f2647abfa381233ebbe5c921，tree仍2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b；JAR时间戳导致不同SHA不冒充源漂移，源码已正常merge/未改。A1 accepted/merged完整，无构建句柄；下一只A2a可达DTO，不一步抢先业务API。
+
+## A2a早期检查（2026-10-05 15:04 UTC，未验收）
+
+用户手动接续并显式改high，旧xhigh停止/额度允许后保留同实施树；原A1/B00不重做。新B01-A02/high唯一worker从7c25bf47派单，起点report-only e8b13615已实际核对；定时任务保持PAUSED。
+
+主代理只读尚未冻结的Java生成器/单BotContracts.java/5项typed消费测试/builder增量。六operation通过OpenAPI参数、request/response引用推导，闭包25、封闭POJO/enum/List/Long、原Schema约束明确留A2b；builder只check不重生，递归检查所有own class52，保留A1四组+五消费套件。当前只观察源码，未运行独立builder/未接受。
+
+A2a-R1：refinement追踪parent property alias缺循环保护，受控ErrorCode自引用可陷while。已交worker小修正；当前源码已加局部seen/recursive refinement拒绝，指定该路径负例待worker补齐及主代理独立实跑。worker口头11个Node tests/--check exit0是worker证据且早于循环负例，不算主代理通过或冻结结果。要求Java长构建前保存实际SHA/结果/句柄检查点；保留所有未提交实现，不覆盖/清空。
+
+下一A2b离线Schema/Java-Ajv一致性任务单仅draft，依赖A2a主代理接受/合入，不并行派发。主代理用既有Ajv只读实际观察Id终结换行拒绝及闰秒允许等边界，已记draft供后续双方实跑，未宣称Java已兼容。
