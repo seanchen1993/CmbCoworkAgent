@@ -53,3 +53,7 @@ R1本次独立test9实际39ms非零拒绝，已关闭。main本次首次build缓
 主代理只读Node22原 `tests/bot/schema-support.mjs` 的Version validator，准确命令 `node --input-type=module -e` 导入validator，对原字节JSON.parse逐项验证，chunk1e8c6f exit0：1/1.0/1e0 true；1.0000000000000001、0.99999999999999999、9007199254740990.5、9007199254740991.1被JS Number舍入后也是true；9007199254740992 false。这是原Node数值解析的已观察限制，不是数学非整数合法，也不代表Java已测。
 
 已给worker精确证据：上述原字节非整数须进入严格parser/typed boundary拒绝测试，不得先Double/cast丢精度；同组Schema数据值parity仍逐项实跑原Ajv，不能伪称原Ajv拒绝或吞掉共有case mismatch。不修改冻结源/旧Node支持文件。交付必须区分严格原字节边界和基于JS数据值的Schema语义一致性，不能宣称所有原字节在Node/Java全链路等价。此项是安全验收要求而非新产品范围。
+
+15:34UTC早期只读七文件草稿（c80a70c4，尚未主代理实跑）：prepare原源闭包/mapping、固定resource摘要、仅可信classpath/清除defaultloaders、strictRead原A1实际BigInteger/BigDecimal/UTF8/重复键/有界策略、Schema先行/DTO数学整数规范化、独立Java和原Ajv逐例结论路径。POM仅resource/testResource，不改固定版本；new code尚未接受。请求worker补public六operation四请求/全部状态响应/参数真实typed消费，避免单独definition parity旁路mapping；建议纠正503合成ErrorResponse为DEPENDENCY_UNAVAILABLE，OUTCOME_UNKNOWN条件测试用声明409写操作，未提前实现HTTP业务分发。
+
+实际worker失败检查点已核对Git/报告code c80a70c4/report368404c0：build16171 exit1，新BoundaryTest5项1fail/0error/skip；生成1107共用fixtures，Java336valid/771invalid，独立worker compare74923a exit1恰10差异（Id/UtcDateTime各五种终结换行，Ajvfalse/Java true）。原字节精确非整数四例及其他1097一致仅失败轮证据，不冒充main通过/最终通过。已要求保持原JSON和依赖不变，通过有限source pattern的RegularExpressionFactory末尾锚适配，避免转义字面量改义，并全量重新跑；旧句柄闭合，无第二main builder。A2b仍实施中，不派B1。

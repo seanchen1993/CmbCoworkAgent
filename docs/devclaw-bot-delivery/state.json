@@ -227,7 +227,7 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
-      "latest_checkpoint": "A2b formallysent15:20UTC same high B01-A02 from8589e084 clean. ActualGit/report b2c45bf4 smallstart onlyreport verified. OriginalJSON.parse/Ajv Version rounds exactfractionalraw lexemes (chunk1e8c6f); main sent precise rawboundary negatives/separate schema data-valueparity requirement and savedreview, no freeze-sourcechange. No A2bimplementation accepted/no competingbuilder. SchedulerPAUSED, noHTTP/DB/business yet.",
+      "latest_checkpoint": "A2b actualcode c80a70c4/report368404c0: workerbuild16171 exit1 BoundaryTest5/1fail/0errors/skip. Worker shared1107 actualJava336valid/771invalid, compare74923a exit1 tenIds/date terminalnewline mismatches. Mainread incremental7files and actualreport only, noindependentbuild/pass. Worker fixing limitedsource regexanchor and publicsixop/status/parametercoverage, fullretest needed. Precise rawfraction cases rejected in failedround; schema data-valueparity distinctfromJS rawrounding limits. B1draftonly/no dispatch; schedulerPAUSED.",
       "dispatched_slice": "A2b",
       "slice_baseline": "8589e08404ebd8d2860bf7091c0ac8b586086659",
       "dispatch_verified": "Same /root/b01_contracts_high followup succeeded with existing gpt-6.1-sol/high configuration, no replacement/spawn. Actualworker8589e084 clean before dispatch, previous agent completed and Java/Maven processcheck empty. ExplicitreadyA2b task/paths/scope/acceptance/reportA02 supplied. Mainowns state/HANDOFF, child no descendants. SchedulerPAUSED, quotaordinaryUsageAllowed true26%/4% at15:20UTC.",
@@ -252,7 +252,12 @@
           "baseline": "8589e08404ebd8d2860bf7091c0ac8b586086659",
           "task": "tasks/B01-A2b.md",
           "dispatch_at_utc": "2026-10-05T15:20:39Z",
-          "acceptance": "Main independently read actualdiff and run strict-parser/schema/DTO/Java-Ajv parity and fullJava8/F03 before accepting; noHTTP/DB/business yet"
+          "acceptance": "Main independently read actualdiff and run strict-parser/schema/DTO/Java-Ajv parity and fullJava8/F03 before accepting; noHTTP/DB/business yet",
+          "first_code_checkpoint": "c80a70c4",
+          "first_report_checkpoint": "368404c0",
+          "worker_first_build": {"session_id":16171,"exit_code":1,"new_tests":5,"failures":1,"errors":0,"skipped":0},
+          "worker_first_parity": {"fixtures":1107,"java_valid":336,"java_invalid":771,"mismatches":10,"exit_code":1,"mismatch":"Id/UtcDateTime LF/CR/CRLF/U2028/U2029 terminalanchors"},
+          "main_independent_status": "not_yet_run_wait_for_frozen_stopped_writer"
         },
         "A2a": {
           "status": "accepted_merged",
