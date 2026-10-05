@@ -130,3 +130,5 @@ B00_JDBC=/absolute/path/to/mysql-connector-j-8.0.33.jar
 测试finally只回收当次进程认领对象、规范目录和inode、标签一致的精确容器/网络/卷；无prune/down-v/全局删除。SIGKILL/断电不保证finally，不能仅凭名称自动认领旧测试资源；报告明确资源交由授权恢复者核对。S3尚不认证AWS所有高级语义（multipart/versioning/ACL策略/TLS/跨区域一致性），HTTP仅本机开发用，不作生产认证。
 
 Compose健康后，`start`（包括`restart`）、`status`及真实测试使用同一绝对30s就绪窗口，涵盖资源核对、认证S3 LIST、全部已有`.dat`卷在本容器固定loopback master上的注册和ES Basic检查；空环境不要求凭空出现卷。已观察ES初启许可404及S3重启卷注册滞后，仅对这些未就绪状态有界等待，认证/结构错误立即拒绝，取消可中断；持久化GET/hash仍一次严格断言，不重写数据或靠重试掩盖失败。`stop`后随机端口可能重新分配，使用新的`status`结果。
+
+2026-10-05 macOS15.4/arm64实测：两独立空环境的完整Java8/MySQL/ES/S3流程、故障及OS SIGTERM清理均通过；dev CLI重复启动未新增容器，stop保留三卷和凭据，重开后健康，MySQL实际执行x86_64 5.7.44且Rosetta enabled/OCF。当前供开发使用的一套服务以`status`为准；这只是B00自测结果，主代理独立验收尚待进行，不等于生产或内部平台兼容认证。可重复检查dev生命周期：`"$B00_NODE" tests/bot/docker/dev-cli-real.mjs "$B00_JAVA" "$B00_JAVAC" "$B00_JDBC"`（需已有dev项目，结束保留健康服务）。
