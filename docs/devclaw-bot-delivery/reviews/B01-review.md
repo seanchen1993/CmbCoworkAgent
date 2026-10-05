@@ -35,3 +35,11 @@ R2证据要求已发：冻结前明确检查自有class major52和fatjar BOOT-IN
 A2a-R1：refinement追踪parent property alias缺循环保护，受控ErrorCode自引用可陷while。已交worker小修正；当前源码已加局部seen/recursive refinement拒绝，指定该路径负例待worker补齐及主代理独立实跑。worker口头11个Node tests/--check exit0是worker证据且早于循环负例，不算主代理通过或冻结结果。要求Java长构建前保存实际SHA/结果/句柄检查点；保留所有未提交实现，不覆盖/清空。
 
 下一A2b离线Schema/Java-Ajv一致性任务单仅draft，依赖A2a主代理接受/合入，不并行派发。主代理用既有Ajv只读实际观察Id终结换行拒绝及闰秒允许等边界，已记draft供后续双方实跑，未宣称Java已兼容。
+
+## A2a独立接受（2026-10-05 15:10 UTC，集成待做）
+
+Frozen code03cc2f24766438614c0378cc7975fad5d07cd3c5/final report720177d809cbea85b2a4b58c2043dfb9580eb9ec；03cc..720排除本人报告diff exit0，workerclean/停写/闭合85039与30262。主代理完整读九文件允许增量与380行generated DTO，核对参考来源、有限keywords/未知失败、check-only、Long/typed lists、wire enums、optional、省略/required-null明确非边界验证。package仅四script/README窄追加，原A1源码/pom/版本/冻结源/TS/src/锁/F05/B00无diff。
+
+主代理独立命令（cwd实施树，Node22准确路径）及实际结果：`--test tests/bot/service/java-generator.spec.mjs` chunkebd169 exit0 **12/12、0skip**；`tests/bot/check-contracts.mjs` session45195 exit0 **24/24**并原TS生成check/tsc消费；`deploy/dev/service/build.mjs` session20746 exit0：真实Corretto1.8.0_482/Maven3.9.6，实际JUnit5消费+4兼容=**9/0fail/errors/skip**，fatjar真实probeverified、webfalse/databasefalse，实际25ownclass52/35libs/固定版本与单provider。Jar SHA14a686bdfb6a7e2f4a85940502973f6baab022999e01d065b53c265cca7a246a；tree SHA2b437c98f8c4d2271394cc8e9b9b2c6242d85d7755191f1001c5464a3b601c4b与A1同。工作树依然clean，两个session闭合。
+
+R1本次独立test9实际39ms非零拒绝，已关闭。main本次首次build缓存编译class复用但JUnit/probe/audit实际运行，不声称全新编译；正常merge后集成树新增源码须实际编译再次核对。不以worker自测代替独立结果、不接受wholeB01或运行时Schema边界。下一集成复验，然后A2b。
