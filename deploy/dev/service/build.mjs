@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url"
 import { mkdir, lstat, readFile, writeFile, readdir } from "node:fs/promises"
 import { randomUUID, createHash } from "node:crypto"
 import { run, privateTemp, removePrivateTemp } from "../process.mjs"
+import { prepareContracts } from "./prepare-contracts.mjs"
+import { compareParity } from "./compare-parity.mjs"
 
 const root = fileURLToPath(new URL("../../../", import.meta.url)), project = join(root, "services/bot-control")
 const base = join(homedir(), ".devclaw-bot-b01-a1")
@@ -30,6 +32,7 @@ async function readPrivate(path) {
 export async function build() {
   // Check-only: a build must never regenerate DTOs and conceal committed drift.
   console.log(await run(process.execPath, [join(root, "scripts/generate-bot-java-contracts.mjs"), "--check"], { cwd: root }))
+  await prepareContracts()
   await directory(base)
   const ownerFile = join(base, "owner.json")
   try { await writeFile(ownerFile, JSON.stringify({ kind: "devclaw-bot-b01-a1", id: randomUUID() }) + "\n", { mode: 0o600, flag: "wx" }) } catch (e) { if (e.code !== "EEXIST") throw e }
@@ -50,6 +53,7 @@ export async function build() {
   console.log(JSON.stringify({ stage: "build", owner: owner.id, java: "1.8.0_482", maven: "3.9.6", repository: join(base, "repository"), central: "https://repo.maven.apache.org/maven2", timeoutMs: 600000 }))
   const output = await run(java, [...args, "-B", "-ntp", "-s", join(base, "settings.xml"), "-gs", join(base, "global-settings.xml"), `-Dmaven.repo.local=${join(base, "repository")}`, "-Dmaven.wagon.http.retryHandler.count=1", "-Dmaven.wagon.httpconnectionManager.ttlSeconds=30", "-Dmaven.wagon.rto=30000", "package", "dependency:tree", "-DoutputFile=target/dependency-tree.txt"], { cwd: project, env, timeoutMs: 600000, maxOutput: 1048576 })
   console.log(output)
+  await compareParity()
   const jar = join(project, "target/bot-control-0.0.1-SNAPSHOT.jar")
   const packaged = await run(java, [`-Duser.home=${join(base, "home")}`, "-jar", jar], { cwd: project, env, timeoutMs: 30000 })
   if (!packaged.includes('"status":"verified"')) throw new Error("B01_PACKAGED_PROBE")
@@ -68,12 +72,21 @@ export async function audit() {
     if (required.some(name => libraries.filter(value => value === name).length !== 1) || libraries.some(name => /logback|log4j-to-slf4j|slf4j-(?:simple|jdk14|log4j12|reload4j)|spring-boot-starter-logging|slf4j-api-1\./.test(name))) throw new Error("B01_PACKAGED_DEPENDENCIES")
     const classes = contents.filter(name => /^BOOT-INF\/classes\/.+\.class$/.test(name))
     if (classes.length < 2) throw new Error("B01_PACKAGED_CLASSES")
-    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes], { env, cwd: temp })
+    const resources = ["schemas.json", "openapi.json", "state-transitions.json", "manifest.json"].map(file => `BOOT-INF/classes/contracts/bot/v1/${file}`)
+    if (resources.some(name => contents.filter(value => value === name).length !== 1)) throw new Error("B01_PACKAGED_SCHEMA_RESOURCES")
+    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources], { env, cwd: temp })
+    const manifest = JSON.parse(await readFile(join(temp, resources[3]), "utf8")), sourceHashes = {}
+    if (!(await readFile(join(temp, resources[3]))).equals(await readFile(join(project, "target/generated-resources/contracts/bot/v1/manifest.json")))) throw new Error("B01_PACKAGED_SCHEMA_RESOURCES")
+    for (const name of resources.slice(0, 3)) {
+      const file = name.slice(name.lastIndexOf("/") + 1), bytes = await readFile(join(temp, name))
+      sourceHashes[file] = createHash("sha256").update(bytes).digest("hex")
+      if (!bytes.equals(await readFile(join(root, "contracts/bot/v1", file))) || manifest.hashes[file] !== sourceHashes[file]) throw new Error("B01_PACKAGED_SCHEMA_RESOURCES")
+    }
     for (const name of classes) {
       const bytes = await readFile(join(temp, name))
       if (bytes.readUInt32BE(0) !== 0xcafebabe || bytes.readUInt16BE(6) !== 52) throw new Error("B01_CLASS_MAJOR")
     }
-    const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5 }
+    const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5, "validation.BoundaryTest": 6 }
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {
       const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")
@@ -82,7 +95,7 @@ export async function audit() {
       tests += count
     }
     const tree = await readFile(join(project, "target/dependency-tree.txt"), "utf8")
-    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, suites, tests, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
+    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, sourceHashes, suites, tests, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
   } finally { await removePrivateTemp(temp) }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

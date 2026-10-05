@@ -64,3 +64,9 @@ ThreadBinding/ProjectBinding.provider 是不透明 ProviderId（同 Id 格式）
 `scripts/generate-bot-java-contracts.mjs` derives only the six Bot/Group operations' request, success/error, header and path schema closure from these frozen documents. Its Java8 output is `services/bot-control/src/main/java/com/devclaw/botcontrol/contracts/BotContracts.java`: closed POJOs, wire-valued enums, `Long` integers and typed lists/consumer signatures. The generated header hashes exact source bytes; `--check` compares without writing and rejects drift. Unknown reachable keywords, nonlocal references, open objects and unsupported shapes fail before output is written. Task/Run/Runtime types are outside this slice.
 
 Optional null fields are omitted; required fields remain represented. DTOs are structural consumption types, not runtime Schema validation, null/range/conditional enforcement, permissions or a running HTTP service. Original Schema validation and Java/Ajv parity belong to A2b. Run `npm run test:bot-java-generator` with Node22 and `npm run test:bot-service-build` for the isolated real-JDK8 compatibility/consumption build. The build checks drift and never regenerates silently.
+
+## B01-A2b 离线原Schema边界
+
+构建helper复制三份冻结源的原始字节和SHA256，并从六operation引用派生允许的request/声明status response/参数映射。`ContractBoundary`仅从固定classpath资源加载、校验摘要；networknt会预编译整份$defs，因此运行时仅投影25个可达原definition节点，不改其字段、关键词或约束。无默认远程/file loader、任意输入路径或全量Task/Run校验入口。严格JSON字节（1MiB、depth64、string65536、number128）先解析，再原Schema校验，最后typed DTO消费；响应先核对selector/status/class再有界序列化并原Schema校验。有限pattern末尾未转义`$`适配Java `\z`，保留字面`\$`，修正Java默认末尾换行差异。
+
+`npm run test:bot-service-contracts`（Node22）实跑生成/比较支持用例及真实Java8完整构建，保存同runId的原Ajv/Java逐例结论至服务target/parity-report.json。Schema数据值parity与严格原字节精度分层：既有Ajv经JS JSON.parse会舍入一些精确非整数（如1.0000000000000001）；Java字节边界不得因此放宽，单独测试拒绝。此处不宣称两侧任意原始JSON字节全链路等价，不修改冻结源。仍无HTTP、身份、DB或业务语义。
