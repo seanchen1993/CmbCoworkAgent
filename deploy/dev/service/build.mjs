@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url"
 import { mkdir, lstat, readFile, writeFile, readdir } from "node:fs/promises"
 import { randomUUID, createHash } from "node:crypto"
 import { run, privateTemp, removePrivateTemp } from "../process.mjs"
+import { prepareContracts } from "./prepare-contracts.mjs"
+import { compareParity } from "./compare-parity.mjs"
 
 const root = fileURLToPath(new URL("../../../", import.meta.url)), project = join(root, "services/bot-control")
 const base = join(homedir(), ".devclaw-bot-b01-a1")
@@ -30,6 +32,7 @@ async function readPrivate(path) {
 export async function build() {
   // Check-only: a build must never regenerate DTOs and conceal committed drift.
   console.log(await run(process.execPath, [join(root, "scripts/generate-bot-java-contracts.mjs"), "--check"], { cwd: root }))
+  await prepareContracts()
   await directory(base)
   const ownerFile = join(base, "owner.json")
   try { await writeFile(ownerFile, JSON.stringify({ kind: "devclaw-bot-b01-a1", id: randomUUID() }) + "\n", { mode: 0o600, flag: "wx" }) } catch (e) { if (e.code !== "EEXIST") throw e }
@@ -50,6 +53,7 @@ export async function build() {
   console.log(JSON.stringify({ stage: "build", owner: owner.id, java: "1.8.0_482", maven: "3.9.6", repository: join(base, "repository"), central: "https://repo.maven.apache.org/maven2", timeoutMs: 600000 }))
   const output = await run(java, [...args, "-B", "-ntp", "-s", join(base, "settings.xml"), "-gs", join(base, "global-settings.xml"), `-Dmaven.repo.local=${join(base, "repository")}`, "-Dmaven.wagon.http.retryHandler.count=1", "-Dmaven.wagon.httpconnectionManager.ttlSeconds=30", "-Dmaven.wagon.rto=30000", "package", "dependency:tree", "-DoutputFile=target/dependency-tree.txt"], { cwd: project, env, timeoutMs: 600000, maxOutput: 1048576 })
   console.log(output)
+  await compareParity()
   const jar = join(project, "target/bot-control-0.0.1-SNAPSHOT.jar")
   const packaged = await run(java, [`-Duser.home=${join(base, "home")}`, "-jar", jar], { cwd: project, env, timeoutMs: 30000 })
   if (!packaged.includes('"status":"verified"')) throw new Error("B01_PACKAGED_PROBE")
@@ -73,7 +77,7 @@ export async function audit() {
       const bytes = await readFile(join(temp, name))
       if (bytes.readUInt32BE(0) !== 0xcafebabe || bytes.readUInt16BE(6) !== 52) throw new Error("B01_CLASS_MAJOR")
     }
-    const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5 }
+    const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5, "validation.BoundaryTest": 5 }
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {
       const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")
