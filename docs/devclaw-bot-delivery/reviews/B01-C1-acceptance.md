@@ -45,3 +45,7 @@
 首次62868整套失败、实际额度中断及原MySQL OOM恢复历史保留。Mount排序修正仅new-harness按唯一Destination/服务键归一，完整字段保留、变化与重复负例拒绝；不是忽略原环境变化或降低安全检查。仅回收本轮可重建测试资源，不删除原dev或用户数据。
 
 候选C1可接受并正常merge；集成新编/真实产物复验完成前不标accepted_merged。没有HTTP、真实身份平台、招乎/模型/仓库调用、outbox发送器、Runtime、UI、B02/B03或生产exactly-once保证；原dev未迁移，不能称已可serve。后续切片仍须ready任务和正式派单，不能由本验收自动启动。
+
+## 集成复验检查点
+
+正常merge `da9293173af426d41dd6582dfddc580219e28d52`（3112c2）；0eec29除协调文档源码与4019准确相等、clean。集成Node65170/5dae19共26与F0377364/463ecf原24/check/types均exit0；新build51537/c6c3fe实际重新Java8编译18main/7test，25JUnit无fail/error/skip，1107同5373825e零diff、50class52/34库/原资源/fatjar通过。新jar `aeda6c5f48cb07c01de1c9456bacfb73ac990c30a7eaa731f2fe930974dc8c5b`，tree同上。唯一集成application60137运行未知，真两库/新生命周期及原B1集成回归/最终审计仍待，不先标完整集成接受。
