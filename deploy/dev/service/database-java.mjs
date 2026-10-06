@@ -5,6 +5,8 @@ import { appPassword, active } from "./test-database.mjs"
 
 const root = fileURLToPath(new URL("../../../", import.meta.url))
 const jdk = "/Users/heyirui/Library/Java/JavaVirtualMachines/corretto-1.8.0_482-1/Contents/Home"
+let databaseChildren = 0
+export function databaseChildCount() { return databaseChildren }
 export async function packagedDatabaseRuntime() {
   const dir = await privateTemp(), java = join(jdk, "bin/java"), env = isolatedEnv(dir, java)
   try {
@@ -27,6 +29,7 @@ export async function javaDatabase(runtime, entry, command, { signal, probe = fa
   const main = `com.devclaw.botcontrol.persistence.${probe ? "DatabaseIntegrationProbe" : "DatabaseCommand"}`
   active(signal)
   const child = ownedProcess(runtime.java, ["-Duser.timezone=UTC", "-cp", runtime.classpath, main, command], { cwd: runtime.dir, env: runtime.env, maxOutput: 32768 })
+  databaseChildren++
   let timedOut = false, armedPromise, armed = false
   const stop = () => { void child.stop() }
   const timer = setTimeout(() => { timedOut = true; stop() }, 45000)
