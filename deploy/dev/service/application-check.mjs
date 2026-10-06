@@ -86,10 +86,12 @@ async function race(runtime, entry, modes, signal) {
   } finally { await Promise.all(processes.map(x => x.stop())) }
 }
 export async function applicationCheck(signal) {
-  const originalDev = await devProof(), runtime = await packagedDatabaseRuntime(), projects = []
+  active(signal); const originalDev = await devProof(); active(signal)
+  const runtime = await packagedDatabaseRuntime(), projects = []
   try {
+    active(signal)
     for (let iteration = 1; iteration <= 2; iteration++) {
-      active(signal); await capacity(); const entry = await createTestDatabase()
+      active(signal); await capacity(); active(signal); const entry = await createTestDatabase()
       try {
         console.log(JSON.stringify({ stage: "registered", project: entry.project, iteration }))
         console.log(JSON.stringify({ stage: "ready", ...await startTestDatabase(entry, signal) }))
@@ -119,9 +121,9 @@ async function lifecycleChild(mode) {
   process.once("SIGTERM", cancel); process.once("SIGINT", cancel)
   let entry, runtime, failed = false, cleanupFailed = false
   try {
-    active(controller.signal); await capacity(); entry = await createTestDatabase()
+    active(controller.signal); await capacity(); active(controller.signal); entry = await createTestDatabase()
     console.log(JSON.stringify({ stage: "registered", project: entry.project }))
-    runtime = await packagedDatabaseRuntime()
+    active(controller.signal); runtime = await packagedDatabaseRuntime(); active(controller.signal)
     console.log(JSON.stringify({ stage: "ready", ...await startTestDatabase(entry, controller.signal) }))
     await migrated(runtime, entry, controller.signal)
     const java = await startApplicationJava(runtime, entry, "hold", controller.signal)
