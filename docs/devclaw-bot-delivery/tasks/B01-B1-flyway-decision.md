@@ -21,7 +21,7 @@ worker真实database-check35236和95334均exit1且各自精确finally回收；�
 
 1. 真实Corretto8/Maven完整构建（不是audit-only）：原A1/A2与新Persistence tests、1107同轮Java/Ajv parity零差异、class52、单日志provider、实际fatjar三冻结资源/manifest/V1/log配置bytes检查。公开可信下载允许，但继续任务专用private settings/cache和Central HTTPS，不读取用户settings/认证。不复用旧20tests通过当新快照通过。
 2. 两个新的owner-checked隔离MySQL5.7项目顺序真实migration/no-op/readiness/catalog/原Unicode与1MiB原JSON bytes/稳定顺序/max-safe Long/permissions；固定新空库schema-ALL且无FK/global/GRANT OPTION/其他库。不能读旧root/改现存dev/livegrant。失败不自动repair/drop/reset。
-3. history旧/未知/漂移/失败/缺项的事务fixture，必须核对实际测试前后history完整事实相等；Flyway可能改变事务状态，不只假设rollback生效。每个拒绝后检查history和readiness未被fixture永久改动。真实SQL超时、错密码/离线、metadata负例、未ready故障及OS SIGTERM（含ready→secret检查期间已abort必须0数据库子JVM/0秘密发送）全部有界、精确finally回收。
+3. history旧/未知/漂移/失败/缺项的fixture，必须核对运行时拒绝前后mutated完整事实相等，不只假设rollback生效；按后续[B1 v2.2固定夹具决定](B01-B1-history-fixtures.md)显式commit和仅测试main的准确tear-down，每次恢复后原history事实相等+readiness。不开生产selector或repair。真实SQL超时、错密码/离线、metadata负例、未ready故障及OS SIGTERM（含ready→secret检查期间已abort必须0数据库子JVM/0秘密发送）全部有界、精确finally回收。
 4. 先核对已失败两轮与全部句柄闭合，再启动新轮；本片不并发两空库、不竞争builder。报告失败阶段只固定command/status/category，不输出任意驱动异常/SQL/URL/凭据。资源归属/原dev3健康/无测试残留都实际核对。
 
 最终freeze代码/report SHA、clean停写和确定全部命令关闭交主代理；主代理真实diff和独立复验接受之前不进C1/HTTP。定时自动续跑保持PAUSED。此决定是实现兼容性修正，不能代替任何新增外部/付费/系统权限授权。
