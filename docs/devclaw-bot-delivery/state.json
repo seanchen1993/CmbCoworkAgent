@@ -31,8 +31,8 @@
     "host_sudo_or_network_change_allowed": false,
     "explicit_user_pause": false,
     "automatic_continuation_paused_by_user": true,
-    "manual_continuation_authorized_at_utc": "2026-10-06T03:54:33Z",
-    "manual_continuation_instruction": "用户直接要求数据库不依赖外键、开发环境可有全部权限并继续；仍限既有B01，实施gpt-6.1-sol/high，自动触发停用。时间为本轮核对时间，不是精确用户发送时间。",
+    "manual_continuation_authorized_at_utc": "2026-10-06T11:13:33Z",
+    "manual_continuation_instruction": "用户最新直接要求继续任务，接续保留的B01-C1；之前无FK/任务schemaALL/gpt-6.1-sol-high选择不变，自动触发停用。原写者实际quota失败后当前ordinaryUsageAllowed=true且旧提示恢复时间已过，可恢复同原写者；此时间是本轮核对时间，不是精确发送时间。",
     "database_foreign_keys": "none; application transactional validation/locks plus PK/unique/index",
     "local_database_permissions": "ALL PRIVILEGES ON devclaw.* only; no GRANT OPTION/global/other schemas. B1 fixed official new-empty-test bootstrap only; retained dev unchanged.",
     "external_push_allowed": false,
@@ -267,6 +267,9 @@
           "design_checkpoint": {"report_commit":"cfa73372236f0a85a7e3950b08c97013a156a6f5","scope":"actualgitshow only10 A02 lines; no code/resource/test implementation delivered","worker_reported_clean":true,"worker_reported_live_commands":false,"main_read":"full actual checkpoint patch and frozen x-error-status/public method maps","main_result":"design approach approved, not code/test acceptance","clarifications":"frozenOUTCOME_UNKNOWN409/retryablefalse; peroperation declaredstatus incl GET no409; bytes>1MiB PAYLOAD_TOO_LARGE413 vs syntax/schema400; locator before currentauthorization only then receipt semantics; corrupt creationreceipt no undeclared404"},
           "main_review": "reviews/B01-C1-review.md",
           "test_clarification": "directmessage to samechild: different-command sameCAS across two distinct authorized principals; same-command race sameprincipal; receipt persistedbody space/target/oldversion facts; no scope change",
+          "quota_interruption": {"agent":"same /root/b01_contracts_high high B01-A02","actual_error":"usage-limit; try again at4:46PM local","agent_status":"errored; interrupt confirms previouserrored stopped","actual_process_empty_chunk":"619104","tracked_head":"cfa73372236f0a85a7e3950b08c97013a156a6f5","tracked_diff_empty_chunk":"166aab","status_chunk":"0f98f2","log_chunk":"8d5c1d","preserved_untracked_sources":9,"tests_or_build_run":"none observed/reported; not acceptance","recovery_task":"tasks/B01-C1-recovery.md ready","quota_now":"ordinaryUsageAllowed=true/primary1pct/secondary28pct at2026-10-06T11:13:33Z; oldadvertisedtimepassed","new_writer_or_reset":"none"},
+          "uncommitted_source_snapshot": {"kind":"actual shasum256 of nine preserved newJava files; no codecommit/selftest yet","base":"/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/services/bot-control/src/main/java/com/devclaw/botcontrol","files":{"application/ApplicationResponse.java":"a6db097f49ae16ee67a51aa917a11e6cf16639adf3983f000cb781e60fe22855","application/Operation.java":"7ba304fb4142cf3acab74934e28707649cd00202f6f8f20c55ff3870745f897b","application/BotApplication.java":"1a81805883e1dd7b4c89b3cd31b68b10624261b6d5436d05e289292570e0a9fc","domain/ApplicationFault.java":"76a44dc5a3077362340de1b2e4f6494d5bbbd4bb2ae9ba4a1df4d5bd5c54d7c7","domain/CanonicalCommand.java":"5aba5126849f5f8deafdf02d81263683e41154fb6cdc8859994e99d46ae586c1","ports/TrustedContext.java":"be6aea4871899aa509e8104cca8dd82bf72710fca6eab199673e6bb33f01e9b9","ports/IdentityPolicy.java":"d0de05c6955885c6f307c5fcea32fa1fe9183ab7b8356e732ad8974478e0f598","ports/TransactionObserver.java":"25b662863842fad4791169e2e4783654aa4eba3b8fbf738fb5a6d09eed02b8a4","persistence/JdbcApplicationStore.java":"86bd5afac15a14e985e7f22fcb8340e802bc86200cb0959ea08e25314a10f79a"}},
+          "unexpected_dev_resource_state": {"readonly_ps_chunk":"848ffb","mysql_inspect_chunk":"54d0c4","daemon_chunk":"7f72b9","capacity_chunk":"e500cb","mysql_id":"693a1c3fd9c1aefc968a850f6187724b3b89864283a78cf9c44c52a015eeba3c","status":"exited137/OOMKilledtrue/restartCount0/policyno","finished_at_utc":"2026-10-06T06:00:25.723419241Z","owner_labels_image_mount_volume":"same acceptedoriginaldev; data retained","es_s3":"same originalhealthy","next":"samechild verifyownership then start exactoriginalMySQL once/no config or data mutation; health/current127port audit; ifrecurs stoptest/report, no blindrestart/rebuild"},
           "main_acceptance": "none"
         },
         "A2b": {
@@ -397,13 +400,13 @@
     "secondary_resets_at_utc": "2026-10-09T23:28:57Z",
     "previous_interruption": "Originalworkeractualusage-limit error after3045checkpoint; resumedsameoriginalafteractualquota recovery. Nocredits/reset/account/modelchange.",
     "last_verified_limits": {
-      "verified_at_utc": "2026-10-06T03:50:55Z",
+      "verified_at_utc": "2026-10-06T11:13:33Z",
       "ordinaryUsageAllowed": true,
-      "primary_used_percent": 4,
-      "primary_resets_at_utc": "2026-10-06T08:46:52Z",
-      "secondary_used_percent": 13,
+      "primary_used_percent": 1,
+      "primary_resets_at_utc": "2026-10-06T16:11:48Z",
+      "secondary_used_percent": 28,
       "secondary_resets_at_utc": "2026-10-12T11:10:29Z",
-      "policy": "Current ordinaryUsageAllowed=true/limitReachednull. No purchase/reset/account change. User explicitly selects same model at high effort; one preserved-tree replacement for this configuration change, not quota avoidance. Actualquotaerrorstop, automatictrigger remainsPAUSED."
+      "policy": "Originalhigh child actualquotaerrored atC1 partialsource; currentordinaryUsageAllowedtrue and previous16:46localresume timepassed. Preserve/recover SAMEagent with same model/high after stop/process/source/resource audit; no purchase/reset/account/modelchange/newwriter. New actualquotaerror stops again; automatictrigger remainsPAUSED."
     }
   },
   "recovery_notes": "Current human manually authorizes continued B01 with noFK/task-schemaALL and same gpt-6.1-sol/high writer; automatic scheduler PAUSED and must not resume. B1 fully accepted/normalmerged/integratedJava8freshcompile+realDB passed70f5. C1 formally dispatched to retainedworker9f2c33bf, initialack received; no C1 acceptance/HTTP/C2+. Preserve code/cache/targets/originaldev3 and all historical failures. Before resumption inspect actual writer/commands/resources; do not infer stopped/completed from missing IDs, duplicate writer, reset or blindly replay external effects. Older2026-10-05status-only stop applied to automation, superseded for manual implementation by latest human requests.",

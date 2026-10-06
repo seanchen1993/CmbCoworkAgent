@@ -1,6 +1,13 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · B01-B1已接受合入；C1 v1已正式派给原high唯一写者 · 定时续跑保持停用
+2026-10-06 · C1原high额度中断已恢复可用，保留九源码并准备同代理接续 · 定时续跑保持停用
+
+## 最新人类手动继续与恢复事实（优先于下方运行中）
+
+- 用户最新直接“继续任务”，仍仅原B01-C1/noFK/schemaALL/gpt-6.1-sol-high。原child真实quota错误16:46local提示已发生，不掩盖为完成；当前clock11:13:33UTC、工具ordinaryUsageAllowed=true/短窗1%周窗28%，旧时间已过。新reset16:11:48UTC/周窗10月12日11:10:29UTC。无本代理购买/reset/换账号模型；原errored已interrupt确认停，619104实际无Java/测试进程，恢复同原agent而非新建attempt。
+- worker实际cfa73372236f0a85a7e3950b08c97013a156a6f5，tracked diff166aab空，0f98f2/8d5c1d确认9新Java未跟踪源完整保留；每文件actual SHA在state。main已读9源码草稿，**尚无C1构建/测试通过或接受**。既有B1接受70f5/集成结果不变，target/cache/dev数据保留。下一ready `tasks/B01-C1-recovery.md`正常同步后formal同high接续，不reset/清空或并行实现。
+- 等待中外部环境变化：848ffb/54d0c4原MySQL完整ID693a1c...在06:00:25UTC OOMKilled=true/exited137/restartCount0；原owner/project/image/mount/卷一致，daemon7f72b9同75050694。ES/S3同ID/回环端口仍healthy，e500cb容量约913/110MiB。此前“原dev3healthy”只历史，不声称当前MySQL在线。先child再次验证精确归属再启动该原容器一次，有界health/当前127port/listener检查，不改参数/权限/初始化/内存/digest、不读root/删卷/重建；再OOM停测试报main，未知start先inspect不盲重放。
+- C1草稿仍待落实已确认源映射：GET body400而非未声明413/409，createGroup缺/外空间Bot或错版本400而非未声明404，坏receipt503。其他当前引用/安全错误/严格持久JSON等窄审查点在recovery任务与review；child实施返工，main不改代码。定时续跑持续PAUSED。
 
 ## 当前下一技术切片
 
