@@ -197,6 +197,14 @@ public final class ApplicationIntegrationProbe {
         corruptReceipt(source, app, Operation.CREATE_GROUP, "group", null, g, createdGroup, n -> ((ObjectNode)n.get("group")).put("createdAt", "2020-01-01T00:00:00Z"));
         edit(source, "UPDATE command_receipts SET body_bytes=? WHERE space_id='A' AND principal_id='p1' AND command_id='create'", "{\"bot\":{},\"bot\":{}}".getBytes(StandardCharsets.UTF_8)); denied(source, app, Operation.CREATE_BOT, P1, null, c, ErrorCode.DEPENDENCY_UNAVAILABLE, 503); corruptChecks++;
         edit(source, "UPDATE command_receipts SET body_bytes=? WHERE space_id='A' AND principal_id='p1' AND command_id='create'", created.body());
+        for (String corruptOperation : Arrays.asList("unknownOperation", "getBot", "createBotVersion")) {
+            edit(source, "UPDATE command_receipts SET operation=? WHERE space_id='A' AND principal_id='p1' AND command_id='create'", corruptOperation);
+            denied(source, app, Operation.CREATE_BOT, P1, null, c, ErrorCode.DEPENDENCY_UNAVAILABLE, 503); corruptChecks++;
+            edit(source, "UPDATE command_receipts SET operation='createBot' WHERE space_id='A' AND principal_id='p1' AND command_id='create'");
+        }
+        edit(source, "UPDATE command_receipts SET http_status=200 WHERE space_id='A' AND principal_id='p1' AND command_id='create'");
+        denied(source, app, Operation.CREATE_BOT, P1, null, c, ErrorCode.DEPENDENCY_UNAVAILABLE, 503); corruptChecks++;
+        edit(source, "UPDATE command_receipts SET http_status=201 WHERE space_id='A' AND principal_id='p1' AND command_id='create'");
 
         stage = "corrupt-storage";
         for (String pointer : Arrays.asList("missing", first.botVersion.id, other.botVersion.id, foreign.botVersion.id)) {

@@ -75,6 +75,7 @@ public final class BotApplication {
                 JdbcApplicationStore.Receipt receipt = op.write() ? db.receipt(actor.principalId, command(input)) : null;
                 if (receipt != null) {
                     if (op.create()) authorizeReceiptTarget(db, actor, receipt);
+                    receiptMetadata(receipt);
                     if (!now.before(receipt.expires)) throw new ApplicationFault(ErrorCode.COMMAND_EXPIRED);
                     byte[] fingerprint = CanonicalCommand.fingerprint(actor, op, id, input);
                     if (!op.wire.equals(receipt.operation) || !MessageDigest.isEqual(fingerprint, receipt.fingerprint)) throw new ApplicationFault(ErrorCode.COMMAND_CONFLICT);
@@ -139,6 +140,14 @@ public final class BotApplication {
         else if ("bot_version".equals(receipt.type)) authorizeBot(actor, requireBot(db, db.versionOwner(receipt.target), true));
         else if ("group".equals(receipt.type)) authorizeGroup(actor, requireGroup(db, receipt.target, true), true);
         else throw JdbcApplicationStore.corrupt();
+    }
+    private void receiptMetadata(JdbcApplicationStore.Receipt receipt) {
+        Operation original = null;
+        for (Operation candidate : Operation.values()) if (candidate.write() && candidate.wire.equals(receipt.operation)) original = candidate;
+        if (original == null || receipt.status != original.success ||
+            !(original == Operation.CREATE_BOT_VERSION ? "bot_version" : original.bot() ? "bot" : "group").equals(receipt.type)) throw JdbcApplicationStore.corrupt();
+        try { boundary.validateParameter("getBot", "botId", receipt.target); }
+        catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
     }
     private void verifyReceipt(JdbcApplicationStore db, Operation op, TrustedContext actor, String pathId, JdbcApplicationStore.Receipt r) throws SQLException {
         if (r.status != op.success) throw JdbcApplicationStore.corrupt();

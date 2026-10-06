@@ -97,7 +97,7 @@ export async function applicationCheck(signal) {
         console.log(JSON.stringify({ stage: "ready", ...await startTestDatabase(entry, signal) }))
         await migrated(runtime, entry, signal)
         const suite = await probe(runtime, entry, "suite", signal); check(applicationResponses(suite) === 6)
-        check(suite.denials >= 30 && suite.replays >= 8 && suite.rollbacks === 7 && suite.corruptReceipts === 8)
+        check(suite.denials >= 30 && suite.replays >= 8 && suite.rollbacks === 7 && suite.corruptReceipts === 12)
         console.log(JSON.stringify({ stage: "suite-proof", project: entry.project, iteration, assertions: suite.assertions, denials: suite.denials, replays: suite.replays, rollbacks: suite.rollbacks, corruptReceipts: suite.corruptReceipts, actualAjvResponses: 6 }))
         await probe(runtime, entry, "reopen", signal); await probe(runtime, entry, "race-seed", signal)
         await race(runtime, entry, ["race-same", "race-same"], signal)
@@ -144,6 +144,7 @@ async function lifecycleChild(mode) {
   }
 }
 export async function applicationLifecycle(signal) {
+  active(signal); const originalDev = await devProof(); active(signal)
   for (const mode of ["injected", "sigterm"]) {
     active(signal)
     const child = ownedProcess(process.execPath, [filename, "--child", mode], { cwd: root, env: isolatedEnv(root), maxOutput: 65536 })
@@ -156,14 +157,16 @@ export async function applicationLifecycle(signal) {
     try {
       const r = await child.done; check(!timedOut && r.code === 1 && !r.stderr && !r.spawnError && !r.overflow)
       const lines = r.stdout.trim().split("\n").map(JSON.parse), project = lines.find(x => x.stage === "registered")?.project
-      const failure = lines.find(x => x.stage === "failure"), stopped = lines.find(x => x.stage === "java-stopped"), cleanup = lines.find(x => x.stage === "cleanup"), armed = lines.find(x => x.stage === "java-armed")
+      const failure = lines.find(x => x.stage === "failure"), stopped = lines.find(x => x.stage === "java-stopped"), cleanup = lines.find(x => x.stage === "cleanup"), armed = lines.find(x => x.stage === "java-armed"), ready = lines.find(x => x.stage === "ready")
       check(failure?.category === (mode === "injected" ? "C1_INJECTED" : "C1_CANCELLED") && stopped?.active === 0 && stopped.starts === 1 && stopped.secretSends === 1 && Number.isInteger(armed?.pid))
       check(cleanup?.status === "removed" && cleanup.project === project && (mode !== "sigterm" || sent))
+      check(ready?.project === project && /^[a-f0-9]{64}$/.test(ready.container) && Number.isInteger(ready.port) && ready.port > 1024 && ready.port <= 65535)
       let javaAlive = false; try { process.kill(armed.pid, 0); javaAlive = true } catch (error) { if (error.code !== "ESRCH") throw error }; check(!javaAlive)
       await absent(project)
-      console.log(JSON.stringify({ stage: "application-lifecycle-proof", mode, project, javaPid: armed.pid, signal: sent ? "SIGTERM" : "injected", nodeExit: r.code, javaActuallyAbsent: true, activeJava: 0, cleanup: "actually-absent" }))
+      console.log(JSON.stringify({ stage: "application-lifecycle-proof", mode, project, container: ready.container, port: ready.port, javaPid: armed.pid, signal: sent ? "SIGTERM" : "injected", nodeExit: r.code, javaActuallyAbsent: true, activeJava: 0, cleanup: "actually-absent" }))
     } finally { clearTimeout(timer); signal?.removeEventListener("abort", cancel); await child.stop() }
   }
+  check(JSON.stringify(await devProof()) === JSON.stringify(originalDev))
   return { status: "verified", lifecycleCases: 2 }
 }
 if (process.argv[1] && resolve(process.argv[1]) === filename) {
