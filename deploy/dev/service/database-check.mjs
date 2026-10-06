@@ -14,9 +14,10 @@ export async function databaseCheck(signal) {
         console.log(JSON.stringify({ stage: "registered", project: entry.project, iteration }))
         console.log(JSON.stringify({ stage: "ready", ...await startTestDatabase(entry, signal) }))
         let result = await javaDatabase(runtime, entry, "readiness", { signal })
+        console.log(JSON.stringify({ stage: "empty-readiness", status: result.proof.status, category: /^[A-Z_]+$/.test(result.proof.category) ? result.proof.category : "NONE" }))
         check(result.exitCode === 1 && result.proof.category === "MIGRATION_INVALID")
-        result = await javaDatabase(runtime, entry, "migrate", { signal }); check(result.exitCode === 0 && result.proof.migrations === 1)
-        result = await javaDatabase(runtime, entry, "migrate", { signal }); check(result.exitCode === 0 && result.proof.migrations === 0)
+        result = await javaDatabase(runtime, entry, "migrate", { signal }); console.log(JSON.stringify({ stage: "first-migrate", status: result.proof.status, category: /^[A-Z_]+$/.test(result.proof.category) ? result.proof.category : "NONE", migrations: result.proof.migrations })); check(result.exitCode === 0 && result.proof.migrations === 1)
+        result = await javaDatabase(runtime, entry, "migrate", { signal }); console.log(JSON.stringify({ stage: "noop-migrate", status: result.proof.status, category: /^[A-Z_]+$/.test(result.proof.category) ? result.proof.category : "NONE", migrations: result.proof.migrations })); check(result.exitCode === 0 && result.proof.migrations === 0)
         for (const command of ["store", "reload", "history"]) {
           result = await javaDatabase(runtime, entry, command, { signal, probe: true })
           if (result.exitCode !== 0) console.log(JSON.stringify({ stage: "probe-failure", case: command, category: /^[A-Z_]+$/.test(result.proof.category) ? result.proof.category : "UNCLASSIFIED", ...(Number.isInteger(result.proof.errno) ? { errno: result.proof.errno } : {}) }))
