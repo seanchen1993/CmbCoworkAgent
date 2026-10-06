@@ -147,3 +147,11 @@ Compose健康后，`start`（包括`restart`）、`status`及真实测试使用�
 ### B01-A2b 离线Schema验证
 
 用Node22执行`npm run test:bot-service-contracts`：新增Node生成/比较支持测试→原Schema资源exact bytes/manifest构建→实际JDK8四兼容+五DTO+六边界组→Java/既有Ajv同runId逐例比较→fatjar源字节/manifest/class52/固定依赖审计。资源、合成fixtures和逐例报告只写服务精确ignored target，保留缓存和失败证据，不连接Docker/HTTP/DB。运行时仅可信classpath和六操作映射，不能由请求指定文件/URL；Schema数据值parity与严格JSON字节层精度分开报告，不冒充生产鉴权、业务/CAS或任意原字节的JS等价。
+
+### B01-B1 本地存储探针（无HTTP业务）
+
+本片迁移九张业务表及固定history，保持MySQL5.7.44/真实Corretto8，唯一兼容依赖调整为Flyway **Community core7.15.0**（移除8.5.13 mysql模块）。8.5.13在真实5.7迁移要求商业版，未绕过许可；7.15仅受控本地基线，不声明生产安全维护。其余固定版本不变；完整构建现在20JUnit/同轮1107parity、全自有class52/实际34库，打包三原源/manifest/V1/log字节审计均保留。
+
+用Node22按顺序执行：`node deploy/dev/service/build.mjs`、`node deploy/dev/service/database-check.mjs`、`node deploy/dev/service/database-lifecycle.mjs`。两空库测试总600s；取消/故障子测试每项240s（父250s），只创建当前进程登记的随机test project，Compose仅mysql/pull never，实际owner/daemon/metadata/容器/回环listener先于app秘密stdin。新空库官方bootstrap固定ALL ON devclaw.*、无GRANT OPTION/global/其他库；root初始化秘密只新生成写给官方入口，程序不读取内容或用root JDBC。不接管旧test/dev，不改B00或现存dev有限账号/数据；现存dev尚未由本片迁移或提供serve口。
+
+无物理FK/CHECK，保留space PK/unique/关联索引及显式ordinal；后续应用事务负责关系/权限/CAS/版本和不可变语义。本片只实测存储：内部ASCII JSON-escaped name保留合法NUL/孤立surrogate，MEDIUMBLOB保留有界原config/receipt字节，UTC/Long/binary ID/顺序在独立JVM重开后不变。固定生产迁移口禁clean/repair/baseline/createSchemas、严格future/missing/ignored拒绝。五损坏history负例仅在可回收测试库显式commit，实际runner拒绝且不改完整事实；test-main仅对准确已知单V1行做预定义参数化tear-down并核对原十列全行+ready，意外变化不盲恢复。SIGTERM/失败finally仅精确回收登记test容器/网络/卷/目录，原dev三服务、缓存和target保留；SIGKILL/断电不能保证finally，不自动认领遗留资源。

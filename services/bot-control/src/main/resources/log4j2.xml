@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Boundary failures are emitted only as fixed safe categories by dev CLI.
+     Do not let framework/driver diagnostics emit SQL, URL, input or secrets. -->
+<Configuration status="OFF"><Loggers><Root level="off"/></Loggers></Configuration>

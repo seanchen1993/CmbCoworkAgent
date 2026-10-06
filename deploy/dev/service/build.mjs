@@ -68,13 +68,18 @@ export async function audit() {
   try {
     const contents = (await run(join(jdk, "bin/jar"), ["tf", jar], { env, cwd: temp })).split("\n")
     const libraries = contents.filter(name => /^BOOT-INF\/lib\/[^/]+\.jar$/.test(name)).map(name => name.slice("BOOT-INF/lib/".length)).sort()
-    const required = ["spring-boot-2.7.18.jar", "spring-boot-autoconfigure-2.7.18.jar", "spring-webmvc-5.3.31.jar", "spring-jdbc-5.3.31.jar", "HikariCP-4.0.3.jar", "mysql-connector-j-8.0.33.jar", "flyway-core-8.5.13.jar", "flyway-mysql-8.5.13.jar", "json-schema-validator-1.5.9.jar", "jackson-core-2.18.3.jar", "jackson-annotations-2.18.3.jar", "jackson-databind-2.18.3.jar", "slf4j-api-2.0.17.jar", "log4j-api-2.25.3.jar", "log4j-core-2.25.3.jar", "log4j-slf4j2-impl-2.25.3.jar"]
+    const required = ["spring-boot-2.7.18.jar", "spring-boot-autoconfigure-2.7.18.jar", "spring-webmvc-5.3.31.jar", "spring-jdbc-5.3.31.jar", "HikariCP-4.0.3.jar", "mysql-connector-j-8.0.33.jar", "flyway-core-7.15.0.jar", "json-schema-validator-1.5.9.jar", "jackson-core-2.18.3.jar", "jackson-annotations-2.18.3.jar", "jackson-databind-2.18.3.jar", "slf4j-api-2.0.17.jar", "log4j-api-2.25.3.jar", "log4j-core-2.25.3.jar", "log4j-slf4j2-impl-2.25.3.jar"]
+    if (libraries.some(name => name.startsWith("flyway-") && name !== "flyway-core-7.15.0.jar")) throw new Error("B01_PACKAGED_DEPENDENCIES")
     if (required.some(name => libraries.filter(value => value === name).length !== 1) || libraries.some(name => /logback|log4j-to-slf4j|slf4j-(?:simple|jdk14|log4j12|reload4j)|spring-boot-starter-logging|slf4j-api-1\./.test(name))) throw new Error("B01_PACKAGED_DEPENDENCIES")
     const classes = contents.filter(name => /^BOOT-INF\/classes\/.+\.class$/.test(name))
     if (classes.length < 2) throw new Error("B01_PACKAGED_CLASSES")
     const resources = ["schemas.json", "openapi.json", "state-transitions.json", "manifest.json"].map(file => `BOOT-INF/classes/contracts/bot/v1/${file}`)
     if (resources.some(name => contents.filter(value => value === name).length !== 1)) throw new Error("B01_PACKAGED_SCHEMA_RESOURCES")
-    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources], { env, cwd: temp })
+    const migrationResource = "BOOT-INF/classes/db/bot-migration/V1__bot_group_storage.sql"
+    if (contents.filter(name => name.startsWith("BOOT-INF/classes/db/bot-migration/") && name.endsWith(".sql")).join() !== migrationResource) throw new Error("B01_PACKAGED_MIGRATIONS")
+    await run(join(jdk, "bin/jar"), ["xf", jar, ...classes, ...resources, migrationResource, "BOOT-INF/classes/log4j2.xml"], { env, cwd: temp })
+    const migrationBytes = await readFile(join(temp, migrationResource))
+    if (!migrationBytes.equals(await readFile(join(project, "src/main/resources/db/bot-migration/V1__bot_group_storage.sql"))) || !(await readFile(join(temp, "BOOT-INF/classes/log4j2.xml"))).equals(await readFile(join(project, "src/main/resources/log4j2.xml")))) throw new Error("B01_PACKAGED_MIGRATIONS")
     const manifest = JSON.parse(await readFile(join(temp, resources[3]), "utf8")), sourceHashes = {}
     if (!(await readFile(join(temp, resources[3]))).equals(await readFile(join(project, "target/generated-resources/contracts/bot/v1/manifest.json")))) throw new Error("B01_PACKAGED_SCHEMA_RESOURCES")
     for (const name of resources.slice(0, 3)) {
@@ -86,7 +91,7 @@ export async function audit() {
       const bytes = await readFile(join(temp, name))
       if (bytes.readUInt32BE(0) !== 0xcafebabe || bytes.readUInt16BE(6) !== 52) throw new Error("B01_CLASS_MAJOR")
     }
-    const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5, "validation.BoundaryTest": 6 }
+    const suites = { CompatibilityTest: 4, ContractConsumptionTest: 5, "validation.BoundaryTest": 6, "persistence.PersistenceBoundaryTest": 5 }
     let tests = 0
     for (const [name, count] of Object.entries(suites)) {
       const xml = await readFile(join(project, `target/surefire-reports/TEST-com.devclaw.botcontrol.${name}.xml`), "utf8")
@@ -95,7 +100,7 @@ export async function audit() {
       tests += count
     }
     const tree = await readFile(join(project, "target/dependency-tree.txt"), "utf8")
-    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, sourceHashes, suites, tests, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
+    console.log(JSON.stringify({ stage: "artifact-audit", classMajor: 52, classes, libraries, sourceHashes, migrationSha256: createHash("sha256").update(migrationBytes).digest("hex"), suites, tests, failures: 0, errors: 0, skipped: 0, treeSha256: createHash("sha256").update(tree).digest("hex"), jarSha256: createHash("sha256").update(await readFile(jar)).digest("hex") }))
   } finally { await removePrivateTemp(temp) }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
