@@ -156,7 +156,7 @@ public final class BotApplication {
                 if (!"group".equals(r.type) || !r.target.equals(g.id) || !actor.spaceId.equals(g.spaceId) || (pathId != null && !pathId.equals(g.id))) throw JdbcApplicationStore.corrupt();
                 Group stored = requireGroup(db, g.id, true);
                 if (!g.name.equals(stored.name) || !g.createdAt.equals(stored.createdAt) || !Arrays.equals(JdbcApplicationStore.json(g.limits), JdbcApplicationStore.json(stored.limits))) throw JdbcApplicationStore.corrupt();
-                bindings(db, actor, g.bots, g.bots, false);
+                bindings(db, actor, g.bots, stored.bots, false);
             }
         } catch (ContractBoundary.Failure failure) { throw JdbcApplicationStore.corrupt(); }
     }
@@ -198,22 +198,32 @@ public final class BotApplication {
         for (Capability capability : config.capabilityCeiling) if (!policy.mayConfigure(actor, capability)) throw new ApplicationFault(ErrorCode.FORBIDDEN);
     }
     private void bindings(JdbcApplicationStore db, TrustedContext actor, List<GroupBot> values, List<GroupBot> previous, boolean writing) throws SQLException {
-        Map<String, GroupBot> old = new HashMap<>(); for (GroupBot b : previous) old.put(b.botId, b);
+        Map<String, GroupBot> old = new HashMap<>();
+        for (GroupBot b : previous) if (old.put(b.botId, b) != null) throw JdbcApplicationStore.corrupt();
         TreeMap<String, GroupBot> ordered = new TreeMap<>();
-        for (GroupBot b : values) if (ordered.put(b.botId, b) != null) throw new ApplicationFault(ErrorCode.INVALID_PAYLOAD);
+        for (GroupBot b : values) if (ordered.put(b.botId, b) != null) throw writing ? new ApplicationFault(ErrorCode.INVALID_PAYLOAD) : JdbcApplicationStore.corrupt();
+        TreeSet<String> allBotIds = new TreeSet<>(old.keySet()); allBotIds.addAll(ordered.keySet());
         Map<String, Bot> bots = new HashMap<>(); TreeSet<String> versionIds = new TreeSet<>();
         // Group parent -> ALL ordered Bot parents -> ALL ordered BotVersion rows.
-        for (GroupBot b : ordered.values()) { Bot bot = db.bot(b.botId); if (bot == null) throw writing ? new ApplicationFault(ErrorCode.INVALID_PAYLOAD) : JdbcApplicationStore.corrupt(); validVersion(bot.version); bots.put(b.botId, bot); versionIds.add(bot.currentBotVersionId); versionIds.add(b.botVersionId); }
+        for (String id : allBotIds) {
+            Bot bot = db.bot(id);
+            if (bot == null) throw writing && !old.containsKey(id) ? new ApplicationFault(ErrorCode.INVALID_PAYLOAD) : JdbcApplicationStore.corrupt();
+            validVersion(bot.version); bots.put(id, bot); versionIds.add(bot.currentBotVersionId);
+        }
+        for (GroupBot b : previous) versionIds.add(b.botVersionId);
+        for (GroupBot b : values) versionIds.add(b.botVersionId);
         Map<String, BotVersion> versions = new HashMap<>(); for (String id : versionIds) versions.put(id, db.version(id));
-        for (GroupBot b : ordered.values()) {
+        List<GroupBot> checked = new ArrayList<>(previous); checked.addAll(ordered.values());
+        for (int i = 0; i < checked.size(); i++) {
+            GroupBot b = checked.get(i); boolean newInput = i >= previous.size();
             Bot bot = bots.get(b.botId); BotVersion current = versions.get(bot.currentBotVersionId), selected = versions.get(b.botVersionId);
             if (current == null || !bot.id.equals(current.botId) || !actor.spaceId.equals(current.spaceId)) throw JdbcApplicationStore.corrupt();
             validVersion(current.number); if (!bot.version.equals(current.number) || db.latestVersionNumber(bot.id) != current.number) throw JdbcApplicationStore.corrupt();
-            if (selected == null || !bot.id.equals(selected.botId) || !actor.spaceId.equals(selected.spaceId)) throw writing ? new ApplicationFault(ErrorCode.INVALID_PAYLOAD) : JdbcApplicationStore.corrupt();
+            if (selected == null || !bot.id.equals(selected.botId) || !actor.spaceId.equals(selected.spaceId)) throw writing && newInput ? new ApplicationFault(ErrorCode.INVALID_PAYLOAD) : JdbcApplicationStore.corrupt();
             validVersion(selected.number);
             GroupBot before = old.get(b.botId);
             boolean changed = before == null || !before.botVersionId.equals(b.botVersionId);
-            if (writing && changed) { if (bot.status != BotStatus.ACTIVE) throw new ApplicationFault(ErrorCode.FORBIDDEN); authorizeBot(actor, bot); }
+            if (writing && newInput && changed) { if (bot.status != BotStatus.ACTIVE) throw new ApplicationFault(ErrorCode.FORBIDDEN); authorizeBot(actor, bot); }
         }
     }
     private static void cas(Long actual, Long expected) { if (!actual.equals(expected)) throw new ApplicationFault(ErrorCode.VERSION_CONFLICT, actual); }
