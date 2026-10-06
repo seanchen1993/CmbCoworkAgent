@@ -230,9 +230,9 @@
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
       "latest_checkpoint": "2026-10-06 B1 normally merged70f5aed6 with codeequality0d9bf0; integrated2232 genuinely9main/5test recompile20JUnit/1107same0b1cf44e zero/36own52/34libs/exactresources/probe passed, Node20/F0324checkstype passed; actual freshartifact twoDB27253 exit0/fullsuite/finally. Final555ccb/b9bbc0/d7d31c onlyoriginaldev3/volumes/network preserved, clean. B1 done/accepted; C1 ready exacttask withinB01, notyetformal dispatched, samehigh stopped/worker1ba0clean; autoPAUSED.",
-      "dispatched_slice": "B1",
-      "slice_baseline": "4130e85acf77eeb903130aa80bcc574c4c1cfbab",
-      "dispatch_verified": "2026-10-06 B1v2.1 sameoriginalhigh followup succeeded after actualstopped/clean/noprocess/resourcescheck, worker7429cfec normaldocs-onlymerge. TaskB01-B1-flyway-decision ready supplied exacttree/allowedfiles/tests/A02; only FlywayCommunitycore7.15/remove8mysql/api change, retainedJDK8/MySQL5.7, no license/purchase/bypass. No secondwriter/descendant, schedulerPAUSED.",
+      "dispatched_slice": "C1",
+      "slice_baseline": "9f2c33bf504b382ad609e551bdaa9006e9bbbdfb",
+      "dispatch_verified": "2026-10-06 C1v1 formalfollowup succeeded to SAMEoriginal gpt-6.1-sol/high /root/b01_contracts_high/B01-A02 after completed/clean662699/process0056f2 empty; normal FF worker1ba0 to ready9f2c33bf (9a59aa), b49c57 clean/6388d2 only5coorddocs/64ab72 exactHEAD. Accurate task/worktree/filelimits/acceptance/A02/stopconditions supplied; only application/JDBC六ops, noHTTP/C2+/externalactions/newagent/descendants; schedulerPAUSED.",
       "previous_attempts": [{"attempt_id":"B01-A01","agent_id":"/root/b00_local_docker","model":"gpt-6.1-sol","reasoning_effort":"xhigh","status":"retired_stopped_after_user_configuration_change","last_worker_head":"aea2026d013a3546c91fd06872a214ffdc3e223d","attempt_report":"attempts/B01-A01.md","delivered":"A1 accepted/merged; no A2a implementation"}],
       "last_interruption": "A2a originalworker actual usage-limit error advertised Oct10 2026 07:28 AM; historical error, not current quota availability. Current read-only limits ordinaryUsageAllowed=true; no implementation resumed because latest user only requests progress and stopping scheduled continuation.",
       "checkpoint_code_commit": "d15268f66c0308bff7d2f154bb02ab20fa320cfa",
@@ -250,7 +250,7 @@
       "checkpoint_head": "1ba0be9172eef2cb8d27ad6196bd181a1d46649a",
       "slices": {
         "C1": {
-          "status": "ready_not_dispatched",
+          "status": "implementing",
           "task": "tasks/B01-C1.md",
           "accepted_baseline": "70f5aed6a5c19f4cde10e70c8db037d4e8d42a70",
           "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork",
@@ -258,7 +258,12 @@
           "scope": "six application operations/trusted policy ports/JDBC transactions/immutable receipts/safe mutation outbox; no HTTP or external calls",
           "database_policy": "no physicalFK; same transaction explicit space/version/member validation+deterministic locks; new isolated test schemaALL only",
           "acceptance": "task exact files/commands: actualJava8/two sequential isolatedMySQL/sixops/permissions/replay/CAS/rollback/outcomeunknown/twoJVMrace/actualcancel cleanup; main independent diff and tests required",
-          "implementation_started": false
+          "formal_followup": "succeeded",
+          "dispatch_baseline": "9f2c33bf504b382ad609e551bdaa9006e9bbbdfb",
+          "dispatch_precheck": "sameoriginalhigh completed stopped, worker662699 clean, 0056f2 noJava/testprocess; existingdev3 samehealthy after integration tests",
+          "normal_docs_sync": "9a59aa FF only5coorddocs; b49c57clean/6388d2scope/64ab72 exactHEAD",
+          "implementation_started": "formal task triggered; await first saved design/code checkpoint, no delivered implementation yet",
+          "main_acceptance": "none"
         },
         "A2b": {
           "status": "accepted_merged",
@@ -378,7 +383,7 @@
       }
     }
   ],
-  "next_action": "B1 accepted/merged70f5aed6/integrated actual9main+5test Java8compile and freshartifact twoDB27253 allpassed; no unknown sessions/resources. C1 v1 ready exactscope/files/tests. Save coordinating docs, verify oldhigh completed/clean/no processes and normally FF retainedworker1ba0 to ready-docs HEAD, then formally followup SAME high B01-A02. No newagent/HTTP/B02+ or automatic trigger; schedulerPAUSED.",
+  "next_action": "C1v1 formally dispatched to SAMEoriginal high B01-A02 at retainedworker9f2c33bf clean after actualcompleted/noJava check and docs-only FF. Wait first narrow interface/locks/errors/test-design checkpoint, review actual incremental code then finalfreeze/selftests and main independent JDBC/2JVM/rollback/cancel verification before acceptance. Main never competes implementation or builder/resource commands. B1 accepted/merged70f/integrated allpassed; noHTTP/C2+/newagent/automatictrigger, schedulerPAUSED.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
