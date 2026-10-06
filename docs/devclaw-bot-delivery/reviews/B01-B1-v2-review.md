@@ -1,8 +1,8 @@
 # B01-B1 v2主代理审查记录
 
-2026-10-06 · incremental review · 尚未独立验收或接受B1
+2026-10-06 · incremental历史记录 · 最终B1已独立接受，见[B01-B1-acceptance.md](B01-B1-acceptance.md)
 
-最新用户无外键/开发环境全部权限决定已写设计v2；仅task schema-ALL，无global/GRANT OPTION/其他库，不改现存dev。A2b已验收；本片B1还在原high唯一写者实施，不派C1/HTTP。
+最新用户无外键/开发环境全部权限决定已写设计v2；仅task schema-ALL，无global/GRANT OPTION/其他库，不改现存dev。下方是逐步审查历史；最终d15268f6/report1ba0be91停写clean，主代理Node/F03/Java8/两真实MySQL库/故障和两个真实SIGTERM全部通过，R1/R2等已关闭。等待正常合入与集成树实际编译，不提前派C1/HTTP。
 
 ## 已实际读取的代码快照
 
