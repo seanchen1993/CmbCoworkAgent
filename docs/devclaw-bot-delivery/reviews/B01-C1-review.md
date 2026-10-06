@@ -39,3 +39,5 @@
 原dev MySQL actualOOM/exited137是等待期间环境变化，不是C1失败或成功。child仅已授权原任务容器归属校验与start-once/健康端口恢复；main未执行restart，不改B00/权限/数据/内存/digest/root，await实证。再OOM停止新资源测试而非循环重启或跳过真库门槛。
 
 11:30:10UTC child32259 exit0/592fe5原container start-once恢复；main55bf21实际独立inspect/listener确认原三容器同ID/image/owner/daemon健康，MySQL现在12732893单listener，原ES/S3端口不变。没有C1业务测试通过。main57af34 actual checkpoint6ec00f21只九保留Java513行＋A02八行，全部读d9ab8d/a641cf/abcb15；实现尚未build/test，原已知status/currentnumber/strictJSON负例仍必须落实，不以checkpoint提交为接受。
+
+main完整读085ac307增量047ea7：operation声明status已修、current safe整数/最高版本pointer由固定SQL+父锁核对；stored config/limits固定合法envelope消费原始字节→原Schema/typed DTO，不能先coerce再校验，原Boundary/B1未改。新五unit与build suite追加完整保留旧20/parity/资源审计；最大Text按原源16384而非摘要错误65536，未改parser。builder44567实际启动但结果未知；单元/真库均未接受。历史Bot.header.version须等body BotVersion.number，Bot.name/createdAt、Group.createdAt等不可变头字段查持久事实，不能比历史mutable version/updatedAt/status/members与current；samechild已确认在builder关闭后补新类+真实corrupt-receipt负例。仍须全部真库/JVM/事务/取消自测与main独立复验。
