@@ -1,6 +1,19 @@
 # B01-B1 主代理独立验收
 
-2026-10-06 · accepted candidate，等待正常合入及集成树实际编译复验
+2026-10-06 · accepted、正常合入并完成集成树真实编译/数据库复验
+
+## 集成复验结果（最终状态）
+
+正常merge `70f5aed6a5c19f4cde10e70c8db037d4e8d42a70`，与冻结1ba0be91除主代理协调文档外代码字节相同（0d9bf0 exit0），无冲突/reset。集成Node7af37d exit0 20/20；F0398324最终c5e18c exit0 原24/24＋checks/types。
+
+集成完整build **2232最终908b02 exit0**：实际Corretto8 javac **重新编译9main/5test**，20JUnit零fail/error/skip，1107同轮 `0b1cf44e-aa02-4779-98d2-0df3772a737b` 326valid/781invalid/0mismatch，36自有class52/34运行库、原Schema/manifest/V1/log exact及打包probe通过。新jar `edcf2fe35edbf8131559d5bda4adc2e4a6e660396a4a9207a8a4050d0a930ae4`；dependency tree仍 `c6eeac9cad3a0209dc4ef80d5b0a1e33ca638dbe4f0e1b49f2018020a38317f6`。
+
+使用**该新编译产物**再次运行完整数据库入口 **27253最终44ae19 exit0**，两个顺序真实MySQL5.7库全suite/每库5history/SQLTimeout1030与1012ms/精确finally均通过：
+
+- `devclaw-bot-test-6bd9921ad9695dc4` / `05eb2d51d0a72e3c222a58e808d53af91f496b3074eb7501f4b93361b2cd3ebf` / 12732891。
+- `devclaw-bot-test-3e5b6ae46adbb51c` / `d960e002f9745dbcd8811d146facaa7f73f7c9760db110928021f5bbea1c254b` / 12732892。
+
+随后555ccb只原三dev同ID/回环端口healthy、b9bbc0仅原三卷、d7d31c仅原网络、de92e1 integration clean；没有额外资源/数据/权限变更。B1所有required work已完成，C1可ready，但只有正式派单后才实施；自动触发仍停用。
 
 ## 接受范围
 

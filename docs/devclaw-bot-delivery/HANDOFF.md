@@ -1,6 +1,13 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · B01-B1 v2.2主代理独立接受，待正常合入与集成复验 · 定时续跑保持停用
+2026-10-06 · B01-B1 v2.2已接受合入/集成复验通过；C1 ready待正式派单 · 定时续跑保持停用
+
+## 当前下一技术切片
+
+- B1正常merge `70f5aed6a5c19f4cde10e70c8db037d4e8d42a70`，与1ba0报告HEAD除coorddocs字节相同0d9bf0 exit0。集成2232最终908b02 exit0：**实际重新编译9main/5test**，20JUnit/1107同 `0b1cf44e-aa02-4779-98d2-0df3772a737b` 零diff/36own52/34libs/原资源/V1/log exact及probe。Jar `edcf2fe35edbf8131559d5bda4adc2e4a6e660396a4a9207a8a4050d0a930ae4`，tree同c6eeac9c；Node7af37d20/20、F0398324最终c5e18c原24/check/types全exit0。
+- 集成新产物真实DB27253最终44ae19 exit0，两顺序6bd992/3e5b6a（完整ID/port32891/32892在state/review），migration/catalog/zeroFK/bytes/5history/privilege/坏密码/停止/超时1030、1012ms等全通过且finallyexactremoved。555ccb/b9bbc0/d7d31c原三dev同ID/端口healthy、仅原三卷/网络；de92e1 clean。全部句柄关闭，B1 required work完成，不重做。**不代表六API或HTTP已交付。**
+- `tasks/B01-C1.md` v1 ready：六个应用操作、可信身份/策略port、无FK同事务关联验证/锁序、不可变回执/安全outbox、真实权限/幂等/rollback/unknowncommit/两个JVM竞争与取消收尾。准确基线/树/文件/测试已填写；只B01内下一技术片，不含C2/HTTP、产品下一路线或外部调用。当前未派单/未实施。
+- 下一保存ready协调文档，实际核对同原high completed/worker1ba0clean/无Java或测试进程，正常FF保留worker到ready docs HEAD，formal followup同 `/root/b01_contracts_high` / B01-A02，禁止派生或第二写者。main独占state/HANDOFF/tasks/reviews；child仅代码与本人A02。自动触发保持PAUSED，不能恢复scheduler。
 
 ## 最新主代理独立验收（优先于下方历史运行未知）
 

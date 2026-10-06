@@ -8,7 +8,7 @@
     "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-integration/cmbCowork",
     "branch": "codex/devclaw-bot-integration",
     "code_baseline": "4d778d28972eb9a60fe792bd0a9c5450f4c5f0ee",
-    "last_accepted_commit": "a4987bc93e62cc44726d20b7a8bb483063aacb7a"
+    "last_accepted_commit": "70f5aed6a5c19f4cde10e70c8db037d4e8d42a70"
   },
   "authorization": {
     "approved_work": [
@@ -220,8 +220,8 @@
         "B00"
       ],
       "wait_reason": null,
-      "current_slice": "B1",
-      "slice_spec": "tasks/B01-B1.md",
+      "current_slice": "C1",
+      "slice_spec": "tasks/B01-C1.md",
       "attempt_id": "B01-A02",
       "agent_task_name": "b01_contracts_high",
       "agent_id": "/root/b01_contracts_high",
@@ -229,7 +229,7 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
-      "latest_checkpoint": "2026-10-06 B1 final d15268f6/report1ba0be91 clean/stopped independently accepted: actual21file review/Node20/F0324+checks/fullJava8build20+1107zero+34libs/real two-DB3051/lifecycle75260 all exit0. Main readonly original3 sameID healthy/only3devvolumes+network/runtime/no process, all handles closed. Acceptance reviews/B01-B1-acceptance.md, normalmerge and integrated freshcompile next; C1 not dispatched, autoPAUSED.",
+      "latest_checkpoint": "2026-10-06 B1 normally merged70f5aed6 with codeequality0d9bf0; integrated2232 genuinely9main/5test recompile20JUnit/1107same0b1cf44e zero/36own52/34libs/exactresources/probe passed, Node20/F0324checkstype passed; actual freshartifact twoDB27253 exit0/fullsuite/finally. Final555ccb/b9bbc0/d7d31c onlyoriginaldev3/volumes/network preserved, clean. B1 done/accepted; C1 ready exacttask withinB01, notyetformal dispatched, samehigh stopped/worker1ba0clean; autoPAUSED.",
       "dispatched_slice": "B1",
       "slice_baseline": "4130e85acf77eeb903130aa80bcc574c4c1cfbab",
       "dispatch_verified": "2026-10-06 B1v2.1 sameoriginalhigh followup succeeded after actualstopped/clean/noprocess/resourcescheck, worker7429cfec normaldocs-onlymerge. TaskB01-B1-flyway-decision ready supplied exacttree/allowedfiles/tests/A02; only FlywayCommunitycore7.15/remove8mysql/api change, retainedJDK8/MySQL5.7, no license/purchase/bypass. No secondwriter/descendant, schedulerPAUSED.",
@@ -249,6 +249,17 @@
       "latest_independent_check": "B1 candidate allpassed: Nodee35ca8 20/20; F0369528 final219283 exit0 24/check/types; build28320 final4135ef exit0 actualJava8 20JUnit/1107same21264c24 zero/36own52/34libs/exactresources; DB3051 finala81b6a exit0 two sequential MySQL5.7/zeroFK/allcases/finally; lifecycle75260 final100a80 exit0 3cases/2actualSIGTERM/0JDBC/0secretstdin/exactabsence. Finalreadonlye9663c/0bc96e/6420c2/3ceab3 originaldev3 preserved/no testresources;1626ce no processes. Candidate accepted, integrated freshcompile still required.",
       "checkpoint_head": "1ba0be9172eef2cb8d27ad6196bd181a1d46649a",
       "slices": {
+        "C1": {
+          "status": "ready_not_dispatched",
+          "task": "tasks/B01-C1.md",
+          "accepted_baseline": "70f5aed6a5c19f4cde10e70c8db037d4e8d42a70",
+          "worktree": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork",
+          "writer": "same /root/b01_contracts_high gpt-6.1-sol/high B01-A02; no descendants",
+          "scope": "six application operations/trusted policy ports/JDBC transactions/immutable receipts/safe mutation outbox; no HTTP or external calls",
+          "database_policy": "no physicalFK; same transaction explicit space/version/member validation+deterministic locks; new isolated test schemaALL only",
+          "acceptance": "task exact files/commands: actualJava8/two sequential isolatedMySQL/sixops/permissions/replay/CAS/rollback/outcomeunknown/twoJVMrace/actualcancel cleanup; main independent diff and tests required",
+          "implementation_started": false
+        },
         "A2b": {
           "status": "accepted_merged",
           "baseline": "8589e08404ebd8d2860bf7091c0ac8b586086659",
@@ -272,8 +283,10 @@
           "limits": "Only offline strict byte parser/source-derived Schema/typed DTO. JS Number raw-byte rounding limitation separately tested/documented, not arbitrary Java/JS byte equivalence. No HTTP/DB/business APIs."
         },
         "B1": {
-          "status": "independently_accepted_pending_integration",
+          "status": "accepted_merged",
           "acceptance_evidence": "reviews/B01-B1-acceptance.md",
+          "integration_commit": "70f5aed6a5c19f4cde10e70c8db037d4e8d42a70",
+          "integrated_verification": {"code_equality_chunk":"0d9bf0","code_equality_exit_code":0,"node_chunk":"7af37d","node_tests":20,"node_exit_code":0,"f03_session":98324,"f03_final_chunk":"c5e18c","f03_tests":24,"f03_exit_code":0,"build_session":2232,"build_final_chunk":"908b02","build_exit_code":0,"actual_main_sources_compiled":9,"actual_test_sources_compiled":5,"java":"1.8.0_482","tests":20,"failures":0,"errors":0,"skipped":0,"fixtures":1107,"valid":326,"invalid":781,"mismatches":0,"run_id":"0b1cf44e-aa02-4779-98d2-0df3772a737b","classes":36,"class_major":52,"libraries":34,"tree_sha256":"c6eeac9cad3a0209dc4ef80d5b0a1e33ca638dbe4f0e1b49f2018020a38317f6","jar_sha256":"edcf2fe35edbf8131559d5bda4adc2e4a6e660396a4a9207a8a4050d0a930ae4","resource_bytes":"original3schemas/manifest/V1/log exact","database_session":27253,"database_exit_code":0,"database_final_chunk":"44ae19","projects":[{"project":"devclaw-bot-test-6bd9921ad9695dc4","container":"05eb2d51d0a72e3c222a58e808d53af91f496b3074eb7501f4b93361b2cd3ebf","port":32891,"query_timeout_millis":1030},{"project":"devclaw-bot-test-3e5b6ae46adbb51c","container":"d960e002f9745dbcd8811d146facaa7f73f7c9760db110928021f5bbea1c254b","port":32892,"query_timeout_millis":1012}],"database_result":"fresh integrated artifact two full actual MySQL5.7 suites passed; exactfinally both removed","final_resources":"555ccb/b9bbc0/d7d31c originaldev3samehealthy/3volumes/1network only; de92e1 clean","all_commands_closed":true},
           "final_worker_freeze": {"code":"d15268f66c0308bff7d2f154bb02ab20fa320cfa","report_head":"1ba0be9172eef2cb8d27ad6196bd181a1d46649a","writer":"same gpt-6.1-sol/high /root/b01_contracts_high B01-A02","agent_status":"completed_stopped","worker_clean_chunk":"8877b9","report_only_diff_chunk":"064c00","original_source_unchanged_chunk":"396ec2","process_empty_chunk":"6c62a8","latest_lifecycle_session":11848,"latest_lifecycle_exit_code":0,"latest_lifecycle_chunk":"eb1517","cases":3,"database_child_starts":0,"jdbc_secret_stdin_sends":0,"worker_resource_audit_chunk":"771f23","unknown_commands":false,"not_main_acceptance":true},
           "main_independent_verification": {"status":"passed_candidate_accepted","code":"d15268f66c0308bff7d2f154bb02ab20fa320cfa","actual_diff_review":"complete incremental read of all 21 allowed implementation files; final six production classes 412c0c; no frozen source/B00/F05 changes","node":{"chunk":"e35ca8","exit_code":0,"tests":20,"failures":0,"skipped":0},"f03":{"session_id":69528,"exit_code":0,"final_chunk":"219283","tests":24,"source_check":true,"generated_type_consumption":true},"build":{"session_id":28320,"exit_code":0,"final_chunk":"4135ef","java":"1.8.0_482","tests":20,"failures":0,"errors":0,"skipped":0,"fixtures":1107,"valid":326,"invalid":781,"mismatches":0,"run_id":"21264c24-e575-435f-bdd5-a442bd1fd67f","classes":36,"class_major":52,"libraries":34,"tree_sha256":"c6eeac9cad3a0209dc4ef80d5b0a1e33ca638dbe4f0e1b49f2018020a38317f6","jar_sha256":"6a69e1ec03475b68caebb28497192241c23efaccbd7727d70ec6376e52dbbc0c","compilation":"cached worker classes; actual JUnit/parity/package/audit rerun, integrated freshcompile required after merge","commands_closed":true},"database":{"session_id":3051,"exit_code":0,"final_chunk":"a81b6a","full_facts":"main_database_final"},"lifecycle":{"session_id":75260,"exit_code":0,"final_chunk":"100a80","cases":3,"full_facts":"main_lifecycle_current"},"integration":"accepted_pending_normalmerge_and_freshcompile","all_commands_closed":true},
           "main_database_final": {"session_id":3051,"exit_code":0,"final_chunk":"a81b6a","projects":[{"project":"devclaw-bot-test-a35000e6d308d005","container":"f87909be800e200fd90ffd25371d8b4a84683a878bf68214e14e783bf3dc425e","port":32888,"query_timeout_millis":1033},{"project":"devclaw-bot-test-f185b17b5db9f1b7","container":"a756db6dd692db4a4cc2526bef9f0ea6d3e823f306cdb60bef565c688489db8b","port":32889,"query_timeout_millis":1027}],"sequential_databases":2,"history_cases_each":5,"result":"both actual catalog/zeroFK/migration1-noop0/escape+bytes+UTC+ordering reopened/fullhistory immutable checks/schema-scoped privileges and 3 denials/badpassword/stopped-stale endpoint/queryTimeout passed","cleanup":"both exact test-only projects removed by finally","commands_closed":true,"not_business_relationship_acceptance":true},
@@ -365,7 +378,7 @@
       }
     }
   ],
-  "next_action": "B1 final d15268f6/report1ba0be91 independently accepted; main full actualdiff/Node20/F0324/Java8build20+1107zero/twoDB3051/lifecycle75260 all exit0; final originaldev-only ownership audit passed and all commands closed. Save acceptance, normalmerge worker1ba0be91 into integration, verify code equality and run integrated actualfreshcompile. Only after pass make C1 ready and formally continue sameoriginal high B01-A02; no newwriter/HTTP or scope expansion, automatic continuation remains PAUSED.",
+  "next_action": "B1 accepted/merged70f5aed6/integrated actual9main+5test Java8compile and freshartifact twoDB27253 allpassed; no unknown sessions/resources. C1 v1 ready exactscope/files/tests. Save coordinating docs, verify oldhigh completed/clean/no processes and normally FF retainedworker1ba0 to ready-docs HEAD, then formally followup SAME high B01-A02. No newagent/HTTP/B02+ or automatic trigger; schedulerPAUSED.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
