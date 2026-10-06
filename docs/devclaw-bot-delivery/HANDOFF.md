@@ -9,6 +9,7 @@
 - 正式窄任务为tasks/B01-B1-flyway-decision.md，加上B1/design v2.1；由同原high/B01-A02从保留成果接续，不新建写者。旧35库/hash保留历史，新实际依赖和fatjar必须审计，真实两库/未ready/SIGTERM/损坏history/原字节再验证；lifecycle新代码只保存未执行，不算通过。
 - 继续仅B01存储切片，不做C1/HTTP/业务或后续产品路线；现存dev三服务/数据/权限不变，定时续跑PAUSED。主代理独立接受前，不集成未验收代码。
 - **v2.1已正式接续同原high写者：** main决定bbfb452b正常docs-onlymerge到worker7429cfec7f13f5e270b5a292cbbc8a62af482f73，实际cdedab clean/f498ed只7协调文件；先核对原completed2d6a、process231dca空、Dockerb79bdc仅原三服务同ID健康。followup已成功供应准确任务/树/文件/验收/A02，未新建写者或复造失败资源。下一等待实际新快照与真实构建/迁移/lifecycle结果，main不竞争builder/数据库。
+- 04:26UTC新code13cb0d94五实现文件完整diff已main读取551236：core7.15.0/Community严格开关、reject其他Flyway、完整history前后比较与严格真实query timeout落实。worker唯一builder39337（600s/fatjar30s）运行未知，prepare本轮cdbd1e00/1107尚不是Java parity通过；没有新DB/lifecycle结果。不要接管worker句柄或重建并行builder，主代理独立验收仍待finalfreeze。
 
 ## 最新人类决定与本轮接续（覆盖下方历史停点）
 

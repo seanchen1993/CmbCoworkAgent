@@ -20,6 +20,8 @@
 
 main核对官方7.15.0源码后批准唯一core7.15.0/移除mysql模块与Community配置API适配，详见tasks/B01-B1-flyway-decision.md；其余版本不变，无许可证绕过/付费/数据库升级。worker保留停点f4b6b548/report2d6a1599，clean停写、全部句柄闭合、实际lifecycle代码尚未执行。后续新artifact/hash/tree及所有实际测试须重新验证。history负例还须检查fixture前后完整history事实相等，不能仅凭rollback调用假设Flyway未隐式提交。
 
+04:26UTC实际读13cb0d94b9f99fb6944153edad923513ab185904全部五实现文件diff（chunk551236）：POM单core7.15.0、Community四ignore开关严格值、build拒绝任何其他flyway模块；新配置JUnit断言完整。每个history fixture取十列全行事实前后比较并再次readiness，真实query只捕SQLTimeoutException且750..3999ms，避免任意SQL失败误通过。唯一builder39337由worker启动，当前结果未知，主代理不竞争构建/DB，也未把代码断言当真实通过。
+
 1. SIGTERM若在ready/appPassword期间已触发，必须在ownedProcess启动和秘密stdin发送前检查已abort，不能只事后加abort listener；finally清理不被signal取消。child仍需窄修及真实测试，不认定已解决。
 2. 实际打包迁移与日志资源纳入审计已在5fb落实，仍须真实Java8构建/解析和两库验证，不能只源文本匹配。
 3. 合法Unicode/emoji/NUL/孤立surrogate、最大边界、原JSON/不可变receipt字节和stableordinal必须真实JDBC重开往返；当前离线codec源码/用例不替代数据库证据。
