@@ -1,6 +1,12 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · B01-B1 v2.1免费迁移兼容修正待接续原high唯一写者 · 定时续跑保持停用
+2026-10-06 · B01-B1 v2.2隔离history测试夹具待接续原high唯一写者 · 定时续跑保持停用
+
+## 04:30UTC最新实际结果与v2.2接续
+
+- 30892真实exit1：testfdce9176117ed318/mysqlab4ab2d2/12732883首次migration1、no-op0、store/reload和严格queryTimeout实际通过，history十列fixture核对失败；Flyway7.15确实将原autocommit false改true，原假设不能成立。项目精确finally回收，原dev不动，不计完整B1验收。
+- 同原high已冻结失败reportcfea745e/codeb18ebf37，实际clean停写/无运行句柄；offlineNode21fa5e仅20/20通过，不是新DB结果。没有新增生产table selector、没有新资源。
+- main仅批准test-only固定五种history显式commit、实际runner拒绝后mutated事实不变、预定义准确单V1行快照tear-down、原十列facts完全相等+ready，详见tasks/B01-B1-history-fixtures.md ready/B1 v2.2。不依赖rollback，不开生产selector/repair/drop/reset、不掩盖真实失败，不触原dev或sourceSQL。先主代理实际状态核对/正常docsmerge，再formal同high接续；两新库/全部构建/lifecycle与main独立验收仍待。
 
 ## 最新实际停点与技术修正（优先于下方运行中记录）
 
@@ -8,6 +14,9 @@
 - main本地javap c24490与worker独立证据确认Flyway8.5.13对MySQL5.7实际抛商业版要求。不能购买/试用许可证、patch检查、升MySQL/JDK或掩盖失败。主代理核对官方源码，任务v2.1唯一批准Flyway Community core7.15.0（移除独立mysql模块），其余版本/用户技术约束不变；7.15 ignoreMigrationPatterns是Teams-only，改Community显式pending true/future+missing+ignored false。
 - 正式窄任务为tasks/B01-B1-flyway-decision.md，加上B1/design v2.1；由同原high/B01-A02从保留成果接续，不新建写者。旧35库/hash保留历史，新实际依赖和fatjar必须审计，真实两库/未ready/SIGTERM/损坏history/原字节再验证；lifecycle新代码只保存未执行，不算通过。
 - 继续仅B01存储切片，不做C1/HTTP/业务或后续产品路线；现存dev三服务/数据/权限不变，定时续跑PAUSED。主代理独立接受前，不集成未验收代码。
+- **v2.1已正式接续同原high写者：** main决定bbfb452b正常docs-onlymerge到worker7429cfec7f13f5e270b5a292cbbc8a62af482f73，实际cdedab clean/f498ed只7协调文件；先核对原completed2d6a、process231dca空、Dockerb79bdc仅原三服务同ID健康。followup已成功供应准确任务/树/文件/验收/A02，未新建写者或复造失败资源。下一等待实际新快照与真实构建/迁移/lifecycle结果，main不竞争builder/数据库。
+- 04:26UTC新code13cb0d94五实现文件完整diff已main读取551236：core7.15.0/Community严格开关、reject其他Flyway、完整history前后比较与严格真实query timeout落实。worker唯一builder39337（600s/fatjar30s）运行未知，prepare本轮cdbd1e00/1107尚不是Java parity通过；没有新DB/lifecycle结果。不要接管worker句柄或重建并行builder，主代理独立验收仍待finalfreeze。
+- **04:27结果更新：** 39337和离线诊断12873都exit1，只有新getter isCreateSchemas→getCreateSchemas编译适配，旧prepare不是parity通过；小修b18ebf37已main实际diff读取9c5cf8。新完整builder67960 exit0/14e559，worker20JUnit与1107同14ebb38c/零差异、36own52/34库/onlycore7.15/fatjar原资源与V1exact通过；tree c6eeac9c、jar1439d3f3，报告35c67270。当前唯一真实DB30892总600s、第一项目fdce9176117ed318，结果未知，未ready/SIGTERM还未验。之前“39337运行中”只历史；主代理不重复资源或把worker构建当DB/main接受。
 
 ## 最新人类决定与本轮接续（覆盖下方历史停点）
 
