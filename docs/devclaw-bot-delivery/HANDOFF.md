@@ -1,6 +1,13 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 03:54 UTC · 用户新决定已解除旧设计停点 · B01-B1 v2 ready待正式接续 · 定时续跑保持停用
+2026-10-06 · B01-B1 v2.1免费迁移兼容修正待接续原high唯一写者 · 定时续跑保持停用
+
+## 最新实际停点与技术修正（优先于下方运行中记录）
+
+- worker已保存code f4b6b548849850becc6a9f44a84decf031487f7f / report-only2d6a1599200514d6502cc1d126768c1ef8a24dbb，实际clean停写。82377 builder exit0是20JUnit/1107parity通过；真实database-check35236、95334都exit1且各测试project精确finally回收。95334 safe阶段证明empty-readiness正确拒绝、first-migrate仍MIGRATION_INVALID，未到no-op/存储/第二库。没有B1通过或合入。
+- main本地javap c24490与worker独立证据确认Flyway8.5.13对MySQL5.7实际抛商业版要求。不能购买/试用许可证、patch检查、升MySQL/JDK或掩盖失败。主代理核对官方源码，任务v2.1唯一批准Flyway Community core7.15.0（移除独立mysql模块），其余版本/用户技术约束不变；7.15 ignoreMigrationPatterns是Teams-only，改Community显式pending true/future+missing+ignored false。
+- 正式窄任务为tasks/B01-B1-flyway-decision.md，加上B1/design v2.1；由同原high/B01-A02从保留成果接续，不新建写者。旧35库/hash保留历史，新实际依赖和fatjar必须审计，真实两库/未ready/SIGTERM/损坏history/原字节再验证；lifecycle新代码只保存未执行，不算通过。
+- 继续仅B01存储切片，不做C1/HTTP/业务或后续产品路线；现存dev三服务/数据/权限不变，定时续跑PAUSED。主代理独立接受前，不集成未验收代码。
 
 ## 最新人类决定与本轮接续（覆盖下方历史停点）
 
@@ -9,6 +16,11 @@
 - main26ce/worker660240ae实际clean，旧b06代码/660报告/缓存target全部保留；main只读79f60d/4212f4和进程ba18b9（无Java/Maven/probe/cwd）已核对，Docker a83f6e原三ID/12732878、32877、32876一致healthy，无测试容器。quota当前ordinaryUsageAllowed=true（4%/13%已用），不购买/reset/换账号。
 - 原high写者最后报告明确completed停写，工具只读消息恢复同target为pending_init；无并行替代写者。先正常merge主代理v2协调文档到保留worker（存在未验收B1分叉，不能reset/强制FF），再正式followup同gpt-6.1-sol/high与B01-A02，不派生。
 - 任务B01.md/design v2/B01-B1 v2；范围迁移/封闭本地连接/readiness、零FK/schema-ALL、两顺序真实MySQL5.7/JDK8、未ready/真实SIGTERM/Unicode无损与精确清理。当前B1仍未完成/接受，六业务HTTP还未实现；主代理实际diff和独立复验后才合入/下一片。自动化仍PAUSED，不重新启用。
+- 新协调文档main `02b558cf`已正常merge至保留worker `4130e85acf77eeb903130aa80bcc574c4c1cfbab`，aca58a/5c8da5实际clean且仅七协调文档变化，无产品实现被覆盖。原 `/root/b01_contracts_high`正式followup成功，list_agents已running；准确新基线/用户决定/ready任务/文件范围/验收/本人A02已提供。没有新代理或第二写者，主代理不并行实施/竞争构建；等待检查点和冻结交回再独立验证。
+- worker新起点report59c2/code `b582147cfc371c5c771c3aae666c15a759683cdf`已实际核对，schema-ALL初始化落地、零FK先决代码保存；容量48760 exit0（原dev保留，无需暂停）。唯一probe10513运行中/test a7215a926b95a0ee，总240s/compose170s/Java15s，结果未知不能重放。main实际读adapter/probe，仅代码审查未独立DB验收；已要求取消时在Java启动/secret stdin之前查已abort及迁移fatjar资源真实审计。C1草案6ab3760a仅提前规划、未派发。
+- **该probe结果已确定（覆盖上一行运行中）：** 10513 exit0/chunk3d8459，report-only d3a67241937d7cc02c7d5c02381242cc9021d501已实读；真实Java8/JDBC8.0.33/MySQL5.7.44、schemaALL＋USAGE、零FK、CREATE/ALTER/INDEX/DROP、三个跨库/global拒绝通过。testa721/mysql6e78/12732880已worker精确finally回收，main只读664b99确原三dev同ID/端口healthy，无测试容器。只先决自测通过，九表迁移/config/readiness/两库/取消/合法字符串仍未完成，无B1独立接受或集成。
+- code5fbfa5b6/fullreport b1741a4d已实读，首轮builder46585 exit0：真正Java8编9main/4test、20JUnit/1107同轮parity零失败或skip、36class52/35固定库、fatjar迁移/log/sourcebytes审计通过。main已完整读6persistence类/SQL/新5JUnit/POM/audit，审查B01-B1-v2-review已保存；仍只是worker该快照自测，真实两库/故障/取消和最终main独立未完成。当前未提交的新真实JDBC probe及abort编排修改保留，不能用旧build替代最终验证。
+- 新真实验收code2910e65d已保存/实读完整JDBC及Node helper/adapter/5metadata tests，发secret前已abort检查落实；builder82377 worker报告exit0/20JUnit/1107同e1fda1b7零差异。当前唯一DB35236运行中，test56471ba307355067 iteration1注册，总600s两项目顺序，未启动竞争builder；结果未知勿重放。实际未ready故障/SIGTERM仍下一窄补，主代理独立验收还未开始。
 
 ## 历史停点（2026-10-05，已被新用户决定覆盖）：权限提议被安全审查拒绝，未落地
 
