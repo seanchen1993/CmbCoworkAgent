@@ -1,7 +1,10 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { metadata, markerMatches, validateTestMetadata, cleanupTestDatabase, containerPolicy } from "../../../deploy/dev/service/test-database.mjs"
+import { metadata, markerMatches, validateTestMetadata, cleanupTestDatabase, containerPolicy, readAppSecret, active } from "../../../deploy/dev/service/test-database.mjs"
 import { composeSpec, IMAGE_ID } from "../../../deploy/dev/docker/compose.mjs"
+import { privateTemp, removePrivateTemp } from "../../../deploy/dev/process.mjs"
+import { writeFile, chmod, unlink, symlink, link, rename } from "node:fs/promises"
+import { join } from "node:path"
 
 function stat(extra = {}) { return { uid: process.getuid(), mode: 0o600, nlink: 1, isSymbolicLink: () => false, isFile: () => true, isDirectory: () => false, ...extra } }
 test("B1 checks private metadata before content (mode/uid/link/type/nlink)", () => {
@@ -9,6 +12,25 @@ test("B1 checks private metadata before content (mode/uid/link/type/nlink)", () 
   for (const bad of [{ uid: process.getuid() + 1 }, { mode: 0o644 }, { nlink: 2 }, { isSymbolicLink: () => true }, { isFile: () => false }]) {
     assert.throws(() => metadata(stat(bad), 0o600), /B1_PRIVATE_METADATA/)
   }
+})
+
+test("B1 actual private app files reject missing/mode/symlink/hardlink/content before secret leaves", async () => {
+  const dir = await privateTemp(), password = "a".repeat(64)
+  const app = join(dir, "app-password"), client = join(dir, "app-client.cnf")
+  const reset = async () => { await writeFile(app, password + "\n", { mode: 0o600 }); await writeFile(client, `[client]\nuser=devclaw_app\npassword=${password}\n\n`, { mode: 0o600 }) }
+  try {
+    await reset(); assert.equal(await readAppSecret(dir), password)
+    await chmod(app, 0o644); await assert.rejects(readAppSecret(dir), /PRIVATE_/); await chmod(app, 0o600)
+    await rename(app, join(dir, "retained")); await assert.rejects(readAppSecret(dir)); await rename(join(dir, "retained"), app)
+    await unlink(app); await symlink(client, app); await assert.rejects(readAppSecret(dir), /PRIVATE_/); await unlink(app); await reset()
+    await link(app, join(dir, "extra-link")); await assert.rejects(readAppSecret(dir), /PRIVATE_/); await unlink(join(dir, "extra-link"))
+    await writeFile(app, "SENTINEL_SECRET\n"); await assert.rejects(readAppSecret(dir), /B1_SECRET/); await reset()
+    await writeFile(client, "SENTINEL_SECRET\n"); await assert.rejects(readAppSecret(dir), /B1_SECRET/)
+  } finally { await removePrivateTemp(dir) }
+})
+test("B1 cancellation guard refuses already-aborted work", () => {
+  const controller = new AbortController(); controller.abort()
+  assert.throws(() => active(controller.signal), /B1_CANCELLED/)
 })
 
 function unstarted() {

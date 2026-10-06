@@ -11,6 +11,7 @@ const owned = new Map()
 // 2026-10-06 direct human decision: NEW empty test bootstrap only, no live grant.
 export const B1_TEST_INIT_SQL = "REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'devclaw_app'@'%';\nGRANT ALL PRIVILEGES ON `devclaw`.* TO 'devclaw_app'@'%';\n"
 const fail = category => { throw new Error(`B1_${category}`) }
+export function active(signal) { if (signal?.aborted) fail("CANCELLED") }
 export function metadata(stat, mode, directory = false) {
   if (stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o777) !== mode ||
       (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) fail("PRIVATE_METADATA")
@@ -116,6 +117,7 @@ export async function testResources(entry, signal, ready = false) {
   return { containers, port, network, volume }
 }
 export async function startTestDatabase(entry, signal) {
+  active(signal)
   await testResources(entry, signal)
   await docker(entry.state, ["compose", "--project-name", entry.project, "--file", join(entry.dir, "compose.json"), "up", "--detach", "--wait", "--wait-timeout", "150", "--no-build", "--pull", "never", "mysql"], { signal, timeoutMs: 170000, maxOutput: 262144 })
   const current = await testResources(entry, signal, true)
@@ -125,14 +127,36 @@ export async function startTestDatabase(entry, signal) {
   entry.port = current.port
   return { project: entry.project, container: entry.container, port: entry.port, daemon: entry.daemon }
 }
-export async function appPassword(entry) {
-  const current = await testResources(entry, undefined, true)
+export async function createUnstartedDatabase(entry, signal) {
+  await testResources(entry, signal); active(signal)
+  await docker(entry.state, ["compose", "--project-name", entry.project, "--file", join(entry.dir, "compose.json"), "create", "--no-build", "--pull", "never", "mysql"], { signal, timeoutMs: 60000, maxOutput: 262144 })
+  const current = await testResources(entry, signal)
+  if (current.containers.length !== 1 || current.containers[0].State.Running || !current.network || !current.volume || current.port !== null) fail("PRE_READY")
+  entry.container = current.containers[0].Id
+  return { project: entry.project, container: entry.container, port: null, status: "not-ready" }
+}
+export async function stopTestDatabase(entry) {
+  const current = await testResources(entry)
+  if (current.containers.length !== 1) fail("READINESS")
+  await docker(entry.state, ["stop", "--time", "1", current.containers[0].Id], { timeoutMs: 10000 })
+}
+export async function readAppSecret(dir) {
+  await privateDirectory(dir)
+  for (const name of ["app-password", "app-client.cnf"]) metadata(await lstat(join(dir, name)), 0o600)
+  const value = await privateFile(join(dir, "app-password"))
+  if (!/^[a-f0-9]{64}\n$/.test(value) || await privateFile(join(dir, "app-client.cnf")) !== `[client]\nuser=devclaw_app\npassword=${value.trim()}\n\n`) fail("SECRET")
+  return value.trim()
+}
+export async function appPassword(entry, signal) {
+  active(signal)
+  const current = await testResources(entry, signal, true)
   if (!entry.container || !entry.port || current.containers.length !== 1 || !current.containers[0].State.Running ||
       current.containers[0].State.Health?.Status !== "healthy" || current.port !== entry.port) fail("READINESS")
   await verifyListeners(current.port)
-  const value = await privateFile(join(entry.dir, "app-password"))
-  if (!/^[a-f0-9]{64}\n$/.test(value) || await privateFile(join(entry.dir, "app-client.cnf")) !== `[client]\nuser=devclaw_app\npassword=${value.trim()}\n\n`) fail("SECRET")
-  return value.trim()
+  active(signal)
+  const value = await readAppSecret(entry.dir)
+  active(signal)
+  return value
 }
 export async function cleanupTestDatabase(entry) {
   const current = await testResources(entry) // cancellation must not cancel cleanup
