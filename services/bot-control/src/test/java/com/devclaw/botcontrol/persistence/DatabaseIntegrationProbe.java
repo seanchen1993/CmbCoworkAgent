@@ -3,7 +3,6 @@ package com.devclaw.botcontrol.persistence;
 import com.devclaw.botcontrol.contracts.BotContracts;
 import com.devclaw.botcontrol.validation.ContractBoundary;
 import com.zaxxer.hikari.HikariDataSource;
-import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import java.nio.charset.StandardCharsets;
 import java.sql.*;
 import java.util.*;
@@ -15,6 +14,8 @@ public final class DatabaseIntegrationProbe {
     private static final String[] NAMES = {"中文🚀", "x\u0000y", "\ud800", "\udc00", String.join("", Collections.nCopies(256, "🚀"))};
     private static final String CONFIG = "{ \"description\":\"\\ud800\",\"instructions\":\"x\\u0000y\",\"knowledgeRefs\":[],\"repositoryRefs\":[],\"skillAllowlist\":[],\"capabilityCeiling\":[],\"memoryPolicy\":\"explicit_only\",\"persona\":\"\\udc00\" }";
     private static String phase = "configuration";
+    private static int historyVerified;
+    private static long queryTimeoutMillis;
     private static void check(boolean value) { if (!value) throw new IllegalStateException(); }
     private static int execute(Connection c, String sql, Object... values) throws SQLException {
         try (PreparedStatement s = c.prepareStatement(sql)) {
@@ -170,6 +171,7 @@ public final class DatabaseIntegrationProbe {
             catch (SQLTimeoutException e) { timedOut = true; }
             long elapsed = (System.nanoTime() - started) / 1000000;
             check(timedOut && elapsed >= 750 && elapsed < 4000);
+            queryTimeoutMillis = elapsed;
         }
     }
     private static List<List<String>> historyFacts(Connection c) throws SQLException {
@@ -187,19 +189,41 @@ public final class DatabaseIntegrationProbe {
         return rows;
     }
     private static void historyFailures(HikariDataSource source) throws Exception {
-        // Observe full history before/after EACH fixture: rollback is not assumed
-        // to work if a library changes autocommit. No repair/reset fallback.
+        // Disposable, owner-checked test DB ONLY. Commit each fixed fixture;
+        // the real production runner must reject without modifying ANY fact.
+        // Known fixture tear-down is explicit test code, never runtime repair.
         String[] edits = {"UPDATE bot_schema_history SET version='0' WHERE installed_rank=1", "UPDATE bot_schema_history SET version='999' WHERE installed_rank=1", "UPDATE bot_schema_history SET checksum=checksum+1 WHERE installed_rank=1", "UPDATE bot_schema_history SET success=0 WHERE installed_rank=1", "DELETE FROM bot_schema_history WHERE installed_rank=1"};
-        for (String edit : edits) try (Connection c = source.getConnection()) {
-            List<List<String>> before = historyFacts(c);
-            c.setAutoCommit(false); execute(c, edit);
-            boolean rejected = false;
-            try { new MigrationRunner(new SingleConnectionDataSource(c, true)).requireCurrent(); }
-            catch (DatabaseFailure e) { rejected = e.category() == DatabaseFailure.Category.MIGRATION_INVALID; }
-            finally { c.rollback(); }
-            check(rejected);
-            check(before.equals(historyFacts(c)));
+        for (int index = 0; index < edits.length; index++) try (Connection c = source.getConnection()) {
             DatabaseReadiness.requireReady(source);
+            List<List<String>> original = historyFacts(c);
+            check(original.size() == 1);
+            List<String> row = original.get(0);
+            check("1".equals(row.get(0)) && "1".equals(row.get(1)) && "SQL".equals(row.get(3)) && MigrationRunner.SCRIPT.equals(row.get(4)) && row.get(5) != null && "1".equals(row.get(9)));
+            List<List<String>> expected = new ArrayList<List<String>>();
+            if (index != 4) {
+                List<String> changed = new ArrayList<String>(row);
+                if (index == 0 || index == 1) changed.set(1, index == 0 ? "0" : "999");
+                else if (index == 2) changed.set(5, Integer.toString(Math.addExact(Integer.parseInt(row.get(5)), 1)));
+                else changed.set(9, "0");
+                expected.add(changed);
+            }
+            c.setAutoCommit(false); check(execute(c, edits[index]) == 1); c.commit();
+            List<List<String>> mutated = historyFacts(c);
+            check(expected.equals(mutated));
+            boolean rejected = false;
+            try { new MigrationRunner(source).requireCurrent(); }
+            catch (DatabaseFailure e) { rejected = e.category() == DatabaseFailure.Category.MIGRATION_INVALID; }
+            // Stop on unexpected facts; NEVER restore unknown runtime changes.
+            check(mutated.equals(historyFacts(c)));
+            Object[] values = { Integer.valueOf(row.get(0)), row.get(1), row.get(2), row.get(3), row.get(4), Integer.valueOf(row.get(5)), row.get(6), Timestamp.valueOf(row.get(7)), Integer.valueOf(row.get(8)), Integer.valueOf(row.get(9)) };
+            int restored = index == 4
+                ? execute(c, "INSERT INTO bot_schema_history(installed_rank,version,description,type,script,checksum,installed_by,installed_on,execution_time,success) VALUES(?,?,?,?,?,?,?,?,?,?)", values)
+                : execute(c, "UPDATE bot_schema_history SET installed_rank=?,version=?,description=?,type=?,script=?,checksum=?,installed_by=?,installed_on=?,execution_time=?,success=? WHERE installed_rank=1", values);
+            check(restored == 1); c.commit();
+            check(original.equals(historyFacts(c)));
+            DatabaseReadiness.requireReady(source);
+            check(rejected); // restored readiness cannot turn a failed rejection into pass
+            historyVerified++;
         }
         DatabaseReadiness.requireReady(source);
     }
@@ -221,7 +245,7 @@ public final class DatabaseIntegrationProbe {
                 else historyFailures(source);
                 check(new MigrationRunner(source).migrate() == 0);
             }
-            System.out.println("{\"status\":\"verified\",\"case\":\"" + args[0] + "\"}");
+            System.out.println("{\"status\":\"verified\",\"case\":\"" + args[0] + "\"" + (args[0].equals("history") ? ",\"historyCases\":" + historyVerified : args[0].equals("reload") ? ",\"queryTimeoutMillis\":" + queryTimeoutMillis : "") + "}");
         } catch (Throwable e) {
             System.out.println("{\"status\":\"failed\",\"phase\":\"" + phase + "\",\"category\":\"" + (e instanceof DatabaseFailure ? ((DatabaseFailure)e).category().name() : "PROBE_ASSERTION") + "\"" + (e instanceof SQLException ? ",\"errno\":" + ((SQLException)e).getErrorCode() : "") + "}"); System.exit(1);
         }

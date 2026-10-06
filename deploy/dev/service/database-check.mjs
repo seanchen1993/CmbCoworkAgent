@@ -22,6 +22,8 @@ export async function databaseCheck(signal) {
           result = await javaDatabase(runtime, entry, command, { signal, probe: true })
           if (result.exitCode !== 0) console.log(JSON.stringify({ stage: "probe-failure", case: command, category: /^[A-Z_]+$/.test(result.proof.category) ? result.proof.category : "UNCLASSIFIED", ...(Number.isInteger(result.proof.errno) ? { errno: result.proof.errno } : {}) }))
           check(result.exitCode === 0 && result.proof.case === command)
+          if (command === "history") { check(result.proof.historyCases === 5); console.log(JSON.stringify({ stage: "history-proof", cases: result.proof.historyCases, mutatedFactsUnchanged: true, restoredOriginalFactsAndReady: true })) }
+          if (command === "reload") { check(Number.isInteger(result.proof.queryTimeoutMillis) && result.proof.queryTimeoutMillis >= 750 && result.proof.queryTimeoutMillis < 4000); console.log(JSON.stringify({ stage: "query-timeout-proof", type: "SQLTimeoutException", elapsedMillis: result.proof.queryTimeoutMillis })) }
         }
         result = await javaDatabase(runtime, entry, "readiness", { signal, badPassword: true });
         check(result.exitCode === 1 && ["DB_AUTH", "DB_TIMEOUT", "DB_UNAVAILABLE"].includes(result.proof.category))
