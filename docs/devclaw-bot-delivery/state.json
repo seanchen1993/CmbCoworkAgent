@@ -229,7 +229,7 @@
       "branch": "codex/devclaw-bot-local",
       "baseline": "0e33703aaa411133af0cf4c25970721a41906a89",
       "attempt_report": "/Users/heyirui/.codex/worktrees/devclaw-bot-local/cmbCowork/docs/devclaw-bot-delivery/attempts/B01-A02.md",
-      "latest_checkpoint": "2026-10-06 B1 normally merged70f5aed6 with codeequality0d9bf0; integrated2232 genuinely9main/5test recompile20JUnit/1107same0b1cf44e zero/36own52/34libs/exactresources/probe passed, Node20/F0324checkstype passed; actual freshartifact twoDB27253 exit0/fullsuite/finally. Final555ccb/b9bbc0/d7d31c onlyoriginaldev3/volumes/network preserved, clean. B1 done/accepted; C1 ready exacttask withinB01, notyetformal dispatched, samehigh stopped/worker1ba0clean; autoPAUSED.",
+      "latest_checkpoint": "2026-10-06 B1 acceptedmerged70f5/integrated allpassed. C1v1 formal SAMEhigh followup succeeded at worker9f2c33bf after stopped/clean/noJava and normaldocsFF; child ack actualHEAD/clean/requiredmaterialsread, no builder/DB/handles/quotaerror, preparing narrow design. Main review preflight B01-C1-review.md covers authority/receipt/locks/two-different-principal CASrace/cancellation. No delivered C1 code or acceptance, noHTTP/C2+, autoPAUSED.",
       "dispatched_slice": "C1",
       "slice_baseline": "9f2c33bf504b382ad609e551bdaa9006e9bbbdfb",
       "dispatch_verified": "2026-10-06 C1v1 formalfollowup succeeded to SAMEoriginal gpt-6.1-sol/high /root/b01_contracts_high/B01-A02 after completed/clean662699/process0056f2 empty; normal FF worker1ba0 to ready9f2c33bf (9a59aa), b49c57 clean/6388d2 only5coorddocs/64ab72 exactHEAD. Accurate task/worktree/filelimits/acceptance/A02/stopconditions supplied; only application/JDBC六ops, noHTTP/C2+/externalactions/newagent/descendants; schedulerPAUSED.",
@@ -263,6 +263,9 @@
           "dispatch_precheck": "sameoriginalhigh completed stopped, worker662699 clean, 0056f2 noJava/testprocess; existingdev3 samehealthy after integration tests",
           "normal_docs_sync": "9a59aa FF only5coorddocs; b49c57clean/6388d2scope/64ab72 exactHEAD",
           "implementation_started": "formal task triggered; await first saved design/code checkpoint, no delivered implementation yet",
+          "initial_ack": "child confirmed actualHEAD9f2c33bf/clean, requiredmaterialsread, inspecting frozen errors/DTO/Boundary; no builder/DB/newhandle/actualquotaerror",
+          "main_review": "reviews/B01-C1-review.md",
+          "test_clarification": "directmessage to samechild: different-command sameCAS across two distinct authorized principals; same-command race sameprincipal; receipt persistedbody space/target/oldversion facts; no scope change",
           "main_acceptance": "none"
         },
         "A2b": {
@@ -402,6 +405,6 @@
       "policy": "Current ordinaryUsageAllowed=true/limitReachednull. No purchase/reset/account change. User explicitly selects same model at high effort; one preserved-tree replacement for this configuration change, not quota avoidance. Actualquotaerrorstop, automatictrigger remainsPAUSED."
     }
   },
-  "recovery_notes": "2026-10-05T11:13:47Z progress/stop audit: B00 and A1 accepted/merged, both Git trees aea2026d clean; A2a worker errored/stopped with no observed implementation. All three retained original dev containers healthy on prior 127.0.0.1 ports; no Java/Maven process/open worker cwd handle. Original automation PAUSED by app tool and TOML readback. Current ordinary quota available, but no new work authorized by this status-only request. Preserve all code/cache/data, wait for manual continuation.",
+  "recovery_notes": "Current human manually authorizes continued B01 with noFK/task-schemaALL and same gpt-6.1-sol/high writer; automatic scheduler PAUSED and must not resume. B1 fully accepted/normalmerged/integratedJava8freshcompile+realDB passed70f5. C1 formally dispatched to retainedworker9f2c33bf, initialack received; no C1 acceptance/HTTP/C2+. Preserve code/cache/targets/originaldev3 and all historical failures. Before resumption inspect actual writer/commands/resources; do not infer stopped/completed from missing IDs, duplicate writer, reset or blindly replay external effects. Older2026-10-05status-only stop applied to automation, superseded for manual implementation by latest human requests.",
   "current_task_id": "B01"
 }
