@@ -18,7 +18,9 @@ public final class MigrationRunner {
             .validateOnMigrate(true).validateMigrationNaming(true).failOnMissingLocations(true)
             // Pending source migrations are legitimate for explicit migrate;
             // readiness additionally requires exactly one applied SUCCESS.
-            .ignoreMigrationPatterns("*:pending").outOfOrder(false).placeholderReplacement(false)
+            .ignorePendingMigrations(true).ignoreFutureMigrations(false)
+            .ignoreMissingMigrations(false).ignoreIgnoredMigrations(false)
+            .outOfOrder(false).placeholderReplacement(false)
             .connectRetries(0).lockRetryCount(2).loggers("slf4j");
     }
     public int migrate() {

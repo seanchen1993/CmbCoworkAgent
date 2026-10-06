@@ -167,21 +167,39 @@ public final class DatabaseIntegrationProbe {
             // Real query timeout; no fake timeout flag or skipped SQL.
             boolean timedOut = false; long started = System.nanoTime();
             try (Statement s = c.createStatement()) { s.setQueryTimeout(1); s.executeQuery("SELECT SLEEP(5)"); }
-            catch (SQLException e) { timedOut = true; }
-            check(timedOut && (System.nanoTime() - started) / 1000000 < 4000);
+            catch (SQLTimeoutException e) { timedOut = true; }
+            long elapsed = (System.nanoTime() - started) / 1000000;
+            check(timedOut && elapsed >= 750 && elapsed < 4000);
         }
     }
+    private static List<List<String>> historyFacts(Connection c) throws SQLException {
+        List<List<String>> rows = new ArrayList<List<String>>();
+        try (Statement s = c.createStatement()) {
+            s.setQueryTimeout(3);
+            try (ResultSet r = s.executeQuery("SELECT installed_rank,version,description,type,script,checksum,installed_by,installed_on,execution_time,success FROM bot_schema_history ORDER BY installed_rank")) {
+                while (r.next()) {
+                    List<String> row = new ArrayList<String>();
+                    for (int column = 1; column <= 10; column++) row.add(r.getString(column));
+                    rows.add(row);
+                }
+            }
+        }
+        return rows;
+    }
     private static void historyFailures(HikariDataSource source) throws Exception {
-        // Controlled uncommitted history fixtures. Only the test connection sees
-        // them; each rollback restores original bytes, no runner repair/reset.
+        // Observe full history before/after EACH fixture: rollback is not assumed
+        // to work if a library changes autocommit. No repair/reset fallback.
         String[] edits = {"UPDATE bot_schema_history SET version='0' WHERE installed_rank=1", "UPDATE bot_schema_history SET version='999' WHERE installed_rank=1", "UPDATE bot_schema_history SET checksum=checksum+1 WHERE installed_rank=1", "UPDATE bot_schema_history SET success=0 WHERE installed_rank=1", "DELETE FROM bot_schema_history WHERE installed_rank=1"};
         for (String edit : edits) try (Connection c = source.getConnection()) {
+            List<List<String>> before = historyFacts(c);
             c.setAutoCommit(false); execute(c, edit);
             boolean rejected = false;
             try { new MigrationRunner(new SingleConnectionDataSource(c, true)).requireCurrent(); }
             catch (DatabaseFailure e) { rejected = e.category() == DatabaseFailure.Category.MIGRATION_INVALID; }
             finally { c.rollback(); }
             check(rejected);
+            check(before.equals(historyFacts(c)));
+            DatabaseReadiness.requireReady(source);
         }
         DatabaseReadiness.requireReady(source);
     }

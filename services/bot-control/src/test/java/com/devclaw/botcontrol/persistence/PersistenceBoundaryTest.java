@@ -61,6 +61,7 @@ class PersistenceBoundaryTest {
             FluentConfiguration c = MigrationRunner.configuration(pool);
             assertTrue(c.isCleanDisabled()); assertFalse(c.isCleanOnValidationError()); assertFalse(c.isBaselineOnMigrate()); assertFalse(c.isCreateSchemas());
             assertFalse(c.isOutOfOrder()); assertFalse(c.isPlaceholderReplacement()); assertEquals(0, c.getConnectRetries()); assertEquals(2, c.getLockRetryCount());
+            assertTrue(c.isIgnorePendingMigrations()); assertFalse(c.isIgnoreFutureMigrations()); assertFalse(c.isIgnoreMissingMigrations()); assertFalse(c.isIgnoreIgnoredMigrations());
             assertEquals("bot_schema_history", c.getTable()); assertEquals("devclaw", c.getDefaultSchema());
             assertEquals("classpath:db/bot-migration", c.getLocations()[0].getDescriptor());
         }

@@ -68,7 +68,8 @@ export async function audit() {
   try {
     const contents = (await run(join(jdk, "bin/jar"), ["tf", jar], { env, cwd: temp })).split("\n")
     const libraries = contents.filter(name => /^BOOT-INF\/lib\/[^/]+\.jar$/.test(name)).map(name => name.slice("BOOT-INF/lib/".length)).sort()
-    const required = ["spring-boot-2.7.18.jar", "spring-boot-autoconfigure-2.7.18.jar", "spring-webmvc-5.3.31.jar", "spring-jdbc-5.3.31.jar", "HikariCP-4.0.3.jar", "mysql-connector-j-8.0.33.jar", "flyway-core-8.5.13.jar", "flyway-mysql-8.5.13.jar", "json-schema-validator-1.5.9.jar", "jackson-core-2.18.3.jar", "jackson-annotations-2.18.3.jar", "jackson-databind-2.18.3.jar", "slf4j-api-2.0.17.jar", "log4j-api-2.25.3.jar", "log4j-core-2.25.3.jar", "log4j-slf4j2-impl-2.25.3.jar"]
+    const required = ["spring-boot-2.7.18.jar", "spring-boot-autoconfigure-2.7.18.jar", "spring-webmvc-5.3.31.jar", "spring-jdbc-5.3.31.jar", "HikariCP-4.0.3.jar", "mysql-connector-j-8.0.33.jar", "flyway-core-7.15.0.jar", "json-schema-validator-1.5.9.jar", "jackson-core-2.18.3.jar", "jackson-annotations-2.18.3.jar", "jackson-databind-2.18.3.jar", "slf4j-api-2.0.17.jar", "log4j-api-2.25.3.jar", "log4j-core-2.25.3.jar", "log4j-slf4j2-impl-2.25.3.jar"]
+    if (libraries.some(name => name.startsWith("flyway-") && name !== "flyway-core-7.15.0.jar")) throw new Error("B01_PACKAGED_DEPENDENCIES")
     if (required.some(name => libraries.filter(value => value === name).length !== 1) || libraries.some(name => /logback|log4j-to-slf4j|slf4j-(?:simple|jdk14|log4j12|reload4j)|spring-boot-starter-logging|slf4j-api-1\./.test(name))) throw new Error("B01_PACKAGED_DEPENDENCIES")
     const classes = contents.filter(name => /^BOOT-INF\/classes\/.+\.class$/.test(name))
     if (classes.length < 2) throw new Error("B01_PACKAGED_CLASSES")
