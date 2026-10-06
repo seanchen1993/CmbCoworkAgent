@@ -23,3 +23,9 @@
 ## 接受门槛
 
 等child最终code/report-only SHA、clean停写、全部句柄确切闭合；主代理读取实际完整diff、独立跑完整构建/原契约/真实六操作/跨JVM/rollback/权限/未知结果/故障清理后才接受并集成。当前不接受任何C1实现，不进入HTTP/C2或产品后续路线。
+
+## 首个设计checkpoint已实际审查
+
+主代理实际读 `cfa73372236f0a85a7e3950b08c97013a156a6f5` 全增量：仅A02报告10行，execute/可信Context+Policy/new固定JdbcStore、权限在receipt语义前/receipt在CAS前、Group→排序Bot→排序Version、无Bot→Group反向、immutable bytes/DBUTC/typed canonical和跨JVM/取消测试分组符合任务方向。没有代码、测试或资源结果，不作实现接受。
+
+已核冻结OpenAPI `x-error-status`：OUTCOME_UNKNOWN确为409且retryable=false，不是503；每operation还须声明对应status，GET不可借写409。原bytes超过1MiB用已有PAYLOAD_TOO_LARGE413，其他语法/Schema为400，不改原Boundary或做HTTP。创建历史receipt只先作服务端目标定位、再当前授权，之后expiry/conflict/body；腐坏/悬空服务端receipt不能返回跨空间内容或创建接口未声明404。以上窄澄清已发送同child，整体设计可继续。

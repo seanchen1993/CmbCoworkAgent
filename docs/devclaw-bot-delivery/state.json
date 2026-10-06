@@ -247,7 +247,7 @@
         "docker_effects": "none"
       },
       "latest_independent_check": "B1 candidate allpassed: Nodee35ca8 20/20; F0369528 final219283 exit0 24/check/types; build28320 final4135ef exit0 actualJava8 20JUnit/1107same21264c24 zero/36own52/34libs/exactresources; DB3051 finala81b6a exit0 two sequential MySQL5.7/zeroFK/allcases/finally; lifecycle75260 final100a80 exit0 3cases/2actualSIGTERM/0JDBC/0secretstdin/exactabsence. Finalreadonlye9663c/0bc96e/6420c2/3ceab3 originaldev3 preserved/no testresources;1626ce no processes. Candidate accepted, integrated freshcompile still required.",
-      "checkpoint_head": "1ba0be9172eef2cb8d27ad6196bd181a1d46649a",
+      "checkpoint_head": "cfa73372236f0a85a7e3950b08c97013a156a6f5",
       "slices": {
         "C1": {
           "status": "implementing",
@@ -264,6 +264,7 @@
           "normal_docs_sync": "9a59aa FF only5coorddocs; b49c57clean/6388d2scope/64ab72 exactHEAD",
           "implementation_started": "formal task triggered; await first saved design/code checkpoint, no delivered implementation yet",
           "initial_ack": "child confirmed actualHEAD9f2c33bf/clean, requiredmaterialsread, inspecting frozen errors/DTO/Boundary; no builder/DB/newhandle/actualquotaerror",
+          "design_checkpoint": {"report_commit":"cfa73372236f0a85a7e3950b08c97013a156a6f5","scope":"actualgitshow only10 A02 lines; no code/resource/test implementation delivered","worker_reported_clean":true,"worker_reported_live_commands":false,"main_read":"full actual checkpoint patch and frozen x-error-status/public method maps","main_result":"design approach approved, not code/test acceptance","clarifications":"frozenOUTCOME_UNKNOWN409/retryablefalse; peroperation declaredstatus incl GET no409; bytes>1MiB PAYLOAD_TOO_LARGE413 vs syntax/schema400; locator before currentauthorization only then receipt semantics; corrupt creationreceipt no undeclared404"},
           "main_review": "reviews/B01-C1-review.md",
           "test_clarification": "directmessage to samechild: different-command sameCAS across two distinct authorized principals; same-command race sameprincipal; receipt persistedbody space/target/oldversion facts; no scope change",
           "main_acceptance": "none"
@@ -386,7 +387,7 @@
       }
     }
   ],
-  "next_action": "C1v1 formally dispatched to SAMEoriginal high B01-A02 at retainedworker9f2c33bf clean after actualcompleted/noJava check and docs-only FF. Wait first narrow interface/locks/errors/test-design checkpoint, review actual incremental code then finalfreeze/selftests and main independent JDBC/2JVM/rollback/cancel verification before acceptance. Main never competes implementation or builder/resource commands. B1 accepted/merged70f/integrated allpassed; noHTTP/C2+/newagent/automatictrigger, schedulerPAUSED.",
+  "next_action": "C1 designreport cfa73372 actual10line-only patch read; main approves interface/locks/policy/test approach and delivered narrow frozenstatus/bytes/receipt clarifications to SAME high writer. Wait verifiable code checkpoints; read actualdiff incrementally, finalfreeze/selftests then independent fullJava8/real sixops/2distinct-principal JVM-CAS/rollback/unknowncommit/cancel before acceptance. No competing implementation/builder/resource commands, noHTTP/C2+/newwriter/automatictrigger; B1 acceptedmerged70f allpassed, schedulerPAUSED.",
   "quota_recovery": {
     "verified_at_utc": "2026-10-05T03:55:26Z",
     "ordinary_usage_allowed": true,
