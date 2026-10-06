@@ -1,6 +1,6 @@
 # B01 设计决定：本地六接口服务
 
-2026-10-06 · v2 · 用户最新决定：不依赖数据库外键，开发账号可拥有任务库全部权限；不代表生产技术基线
+2026-10-06 · v2.1 · 用户最新决定：不依赖数据库外键，开发账号可拥有任务库全部权限；修正本地迁移依赖，不代表生产技术基线
 
 ## 1. 产品与模块边界
 
@@ -14,13 +14,13 @@ Java服务按`http → application → domain + ports → persistence/dev adapte
 
 - 实际JDK8编译、测试、运行，产物class major52；用新JDK编译source8不算通过，不使用Java9+ API。
 - 本地公开Spring Boot **2.7.18** + MVC/JDBC/HikariCP，Maven **3.9.6**。这是可替换的开发基线，不是内部增强2.7.2的安全认证替代；禁止公网监听／远程部署。
-- Connector/J **8.0.33**、Flyway core + mysql **8.5.13**；真实Docker MySQL5.7，H2／mock SQL不能替代集成验证。
+- Connector/J **8.0.33**、Flyway Community core **7.15.0**（MySQL支持在core，不含独立flyway-mysql模块）。原8.5.13真实运行发现对MySQL5.7抛商业版本要求，不能作为本轮免费基线；只此依赖按[B1兼容性决定](B01-B1-flyway-decision.md)调整，其余版本固定。真实Docker MySQL5.7、JDK8不变，H2／mock SQL不能替代集成验证。
 - JSON Schema validator **networknt1.5.9**（Draft2020-12），Jackson BOM **2.18.3**。显式开启format assertions，关闭宽松类型转换和远程schema加载。
 - 避免Boot默认SLF4J1.7与validator的SLF4J2混用：排除默认logging starter，固定SLF4J API **2.0.17**，Log4j2 API/core/slf4j2-impl **2.25.3**，只有一个provider。无log4j-to-slf4j回环／Logback／SLF4J1.x混入。A步出现实证不兼容须报告并由主代理调整，不能自行升级JDK／Boot主版本或隐瞒linkage error。
 - 下载仅走Maven Central HTTPS mirror；使用空的任务专用user/global settings和任务专用local repository，不读取用户settings.xml、私服认证／代理凭据／extensions。可离线复用已核对的公开缓存包，记录实际dependency tree与打包内容。
 - 不加Actuator、Swagger UI、注册发现、云配置、ES/S3／模型／招乎SDK、生产认证替身。框架默认登录页／错误页／datasource猜测不作为有效服务。
 
-依据：[Boot Java8要求](https://docs.spring.io/spring-boot/docs/2.7.18/reference/html/getting-started.html)；[该分支公开支持已结束](https://spring.io/blog/2023/11/23/spring-boot-2-7-18-available-now/)，不能宣称生产安全维护。[networknt1.5.9说明](https://github.com/networknt/json-schema-validator/blob/1.5.9/README.md)及[固定POM](https://github.com/networknt/json-schema-validator/blob/1.5.9/pom.xml)给出Java8、2020-12、format行为和依赖版本；[Flyway8.5.13 POM](https://github.com/flyway/flyway/blob/flyway-8.5.13/pom.xml)给出Java8 target；[Log4j安装说明](https://logging.apache.org/log4j/2.x/manual/installation.html)说明Java8 runtime和SLF4J2 binding。兼容文档不等于本工程已通过，必须真实运行。
+依据：[Boot Java8要求](https://docs.spring.io/spring-boot/docs/2.7.18/reference/html/getting-started.html)；[该分支公开支持已结束](https://spring.io/blog/2023/11/23/spring-boot-2-7-18-available-now/)，不能宣称生产安全维护。[networknt1.5.9说明](https://github.com/networknt/json-schema-validator/blob/1.5.9/README.md)及[固定POM](https://github.com/networknt/json-schema-validator/blob/1.5.9/pom.xml)给出Java8、2020-12、format行为和依赖版本；[Flyway7.15.0 POM](https://github.com/flyway/flyway/blob/flyway-7.15.0/pom.xml)声明Java8编译，[MySQL支持实现](https://github.com/flyway/flyway/blob/flyway-7.15.0/flyway-core/src/main/java/org/flywaydb/core/internal/database/mysql/MySQLDatabase.java)的商业版本下限是低于5.7，不是低于8.0；[Log4j安装说明](https://logging.apache.org/log4j/2.x/manual/installation.html)说明Java8 runtime和SLF4J2 binding。兼容文档不等于本工程已通过，必须真实运行；此老版本只作受控本地开发基线，不声称当前安全维护或生产可用。
 
 ## 3. 同一契约源，两层验证
 

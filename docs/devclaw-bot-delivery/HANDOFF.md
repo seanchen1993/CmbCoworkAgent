@@ -1,6 +1,13 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · 用户新决定已解除旧设计停点 · 原high唯一写者正在接续B01-B1 v2 · 定时续跑保持停用
+2026-10-06 · B01-B1 v2.1免费迁移兼容修正待接续原high唯一写者 · 定时续跑保持停用
+
+## 最新实际停点与技术修正（优先于下方运行中记录）
+
+- worker已保存code f4b6b548849850becc6a9f44a84decf031487f7f / report-only2d6a1599200514d6502cc1d126768c1ef8a24dbb，实际clean停写。82377 builder exit0是20JUnit/1107parity通过；真实database-check35236、95334都exit1且各测试project精确finally回收。95334 safe阶段证明empty-readiness正确拒绝、first-migrate仍MIGRATION_INVALID，未到no-op/存储/第二库。没有B1通过或合入。
+- main本地javap c24490与worker独立证据确认Flyway8.5.13对MySQL5.7实际抛商业版要求。不能购买/试用许可证、patch检查、升MySQL/JDK或掩盖失败。主代理核对官方源码，任务v2.1唯一批准Flyway Community core7.15.0（移除独立mysql模块），其余版本/用户技术约束不变；7.15 ignoreMigrationPatterns是Teams-only，改Community显式pending true/future+missing+ignored false。
+- 正式窄任务为tasks/B01-B1-flyway-decision.md，加上B1/design v2.1；由同原high/B01-A02从保留成果接续，不新建写者。旧35库/hash保留历史，新实际依赖和fatjar必须审计，真实两库/未ready/SIGTERM/损坏history/原字节再验证；lifecycle新代码只保存未执行，不算通过。
+- 继续仅B01存储切片，不做C1/HTTP/业务或后续产品路线；现存dev三服务/数据/权限不变，定时续跑PAUSED。主代理独立接受前，不集成未验收代码。
 
 ## 最新人类决定与本轮接续（覆盖下方历史停点）
 

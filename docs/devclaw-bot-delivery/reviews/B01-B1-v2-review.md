@@ -14,6 +14,12 @@
 
 ## 已提出的审查点
 
+### 04:17UTC实测依赖失败与窄技术决定
+
+实际worker35236与95334两轮均exit1且finally回收，第二轮safe阶段已明确first-migrate为MIGRATION_INVALID。main本地javap chunkc24490和worker独立javap确认固定8.5.13对MySQL5.7实际抛商业版门槛异常。不能把之前20JUnit/1107parity构建通过说成数据库可用；没有B1接受。
+
+main核对官方7.15.0源码后批准唯一core7.15.0/移除mysql模块与Community配置API适配，详见tasks/B01-B1-flyway-decision.md；其余版本不变，无许可证绕过/付费/数据库升级。worker保留停点f4b6b548/report2d6a1599，clean停写、全部句柄闭合、实际lifecycle代码尚未执行。后续新artifact/hash/tree及所有实际测试须重新验证。history负例还须检查fixture前后完整history事实相等，不能仅凭rollback调用假设Flyway未隐式提交。
+
 1. SIGTERM若在ready/appPassword期间已触发，必须在ownedProcess启动和秘密stdin发送前检查已abort，不能只事后加abort listener；finally清理不被signal取消。child仍需窄修及真实测试，不认定已解决。
 2. 实际打包迁移与日志资源纳入审计已在5fb落实，仍须真实Java8构建/解析和两库验证，不能只源文本匹配。
 3. 合法Unicode/emoji/NUL/孤立surrogate、最大边界、原JSON/不可变receipt字节和stableordinal必须真实JDBC重开往返；当前离线codec源码/用例不替代数据库证据。
