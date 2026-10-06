@@ -43,3 +43,7 @@
 main完整读085ac307增量047ea7：operation声明status已修、current safe整数/最高版本pointer由固定SQL+父锁核对；stored config/limits固定合法envelope消费原始字节→原Schema/typed DTO，不能先coerce再校验，原Boundary/B1未改。新五unit与build suite追加完整保留旧20/parity/资源审计；最大Text按原源16384而非摘要错误65536，未改parser。builder44567实际启动但结果未知；单元/真库均未接受。历史Bot.header.version须等body BotVersion.number，Bot.name/createdAt、Group.createdAt等不可变头字段查持久事实，不能比历史mutable version/updatedAt/status/members与current；samechild已确认在builder关闭后补新类+真实corrupt-receipt负例。仍须全部真库/JVM/事务/取消自测与main独立复验。
 
 11:39UTC结果更新：worker44567确切exit0/85e0a4，085新编18main/6test、25JUnit/0fail-error-skip、1107同9bbde16b零diff/50own52/34libs/原artifact资源与probe通过；只是worker整套构建证据，main1b00ae仅读实际新unit5/0/0/0，不冒充独立执行。main完整读1999c826小diffbef504（仅newBotApplication两行receipt check+A02）：不可变头字段检查符合历史语义，但修后尚未build，真库/并发/rollback/取消未做。保留实际版本对应关系，不用085构建担保新diff或六接口JDBC成功。
+
+11:54:30UTC新增JDBC/harness checkpoint8fc3/bdf9 main680678/6801df完整读新Node三类+spec和prod bindings union：旧/新Bot及版本全部确定排序锁、旧持久关系腐坏不能被删除绑定掩盖；在capacity等待后/runtime前后再查abort避免取消后开新步骤，原B1/B00不改。初版268JavaProbe31b433/61c66f已全读；最终301行全读留冻结候选阶段。50159实际workerbuild25JUnit/1107零diff/class52/34libs通过；不是main独立。
+
+62868实际两库core全部通过（准确SQLfacts/PID/stats在state/A02）但总exit1/d98bdb，最后devsnapshot失败而lifecycle未执行，不接受partial。child连续三次真实inspect e14c92证实同ID/health/port/mount映射、Mount数组顺序不稳定；main完整读cdf6ce20/da05修正7362ef/aa6961，仅canonical唯一Destination/服务键序，保留全部Mount字段且已有validator仍实际检查；changedRW/source/duplicate缺dest负例不被掩盖。只新harness/spec，无原环境修改。新的33935整套复验运行未知，必须真两库+实际新harness故障/SIGTERM总通过和最终回归/freeze，再main独立后才能接受。
