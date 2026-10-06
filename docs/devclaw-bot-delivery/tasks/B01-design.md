@@ -1,6 +1,6 @@
 # B01 设计决定：本地六接口服务
 
-2026-10-03 · v1 · 主代理设计，尚未实现／验证，不代表生产技术基线
+2026-10-06 · v2 · 用户最新决定：不依赖数据库外键，开发账号可拥有任务库全部权限；不代表生产技术基线
 
 ## 1. 产品与模块边界
 
@@ -63,12 +63,14 @@ DTO不替代边界校验：运行时从构建时复制的原始Schema离线解�
 ## 6. SQL、版本与迁移
 
 - InnoDB、utf8mb4、UTC/DATETIME(3)；ID/命令键为ASCII二进制比较，实测大小写ID不互命中，并注意MySQL5.7索引长度。
-- 表覆盖Bot、BotVersion、maintainers、Group、group_members、group_bots、command_scope锁、command_receipts、mutation_outbox。所有查询／唯一约束限定spaceId；关联外键含spaceId，版本必须属于Bot。创建循环外键确需省略时以同事务与不变量检查保证currentVersion存在且正确。
+- 表覆盖Bot、BotVersion、maintainers、Group、group_members、group_bots、command_scope锁、command_receipts、mutation_outbox。**不创建物理外键，不以数据库FK保证业务关系。** 所有查询、关系查验、锁键及唯一约束限定spaceId；以组合索引支持BotVersion归属、Group关联及currentVersion读取。
+- 关联完整性由application层显式负责：同事务核对空间、BotVersion所属Bot、currentVersion存在且正确、成员与维护者资格；按确定顺序锁定被引用对象，再执行原子写入。PK/unique索引仍保证实体/命令/集合去重与ordinal唯一，不能因无FK删除这些约束。B1仅交付存储结构，关系拒绝在后续C/D真实业务事务验收，不伪称原始SQL会拒绝悬空引用。
 - BotVersion append-only，Group保存准确botVersionId，不跟随currentVersion变化。读取使用一致事务／对象行共享锁，避免header和成员／版本跨快照。
 - 初始version=1；CAS只+1，到契约上限拒绝不溢出；仅向已授权主体回冲突currentVersion。
 - config/回执JSON使用有界足够列（如MEDIUMTEXT），入库／出库均原Schema校验，不截断TEXT／丢emoji。SQL参数化，用户内容不拼接为表名／SQL。
 - Flyway增量迁移，禁clean／baselineOnMigrate、校验checksum，再执行no-op。5.7 DDL不保证回滚，失败保留现场、报错，不自动repair/drop/recreate。启动校验已迁移版本，HTTP请求不跑DDL。
-- 本地CLI先显式migrate再serve，仅连接B00已核验归属的回环端口/schema，不接受任意扩展JDBC URL。服务使用schema限定账号，不读root秘密，不回退root／匿名，不访问其他schema。生产迁移账号分离/轮换后续接入，不把schema级dev账号宣称为生产最小权限。
+- 本地CLI先显式migrate再serve，仅连接B00已核验归属的回环端口/schema，不接受任意扩展JDBC URL。根据2026-10-06用户直接授权，新隔离开发/测试库的devclaw_app可持有 **ALL PRIVILEGES ON devclaw.***，无GRANT OPTION、全局*.*或其他库权限。账号有能力做DDL不代表正常流程可clean/reset；授权、事务、接口范围仍受应用层约束。
+- B1通过本服务固定的官方空库初始化脚本配置上述权限，不改已验收B00/F05入口、不变更现存dev账号/数据；现存dev仍是原六项权限，不能声称已提升。实际应用/JDBC只用app账号，不读已有root秘密、不回退root/匿名。后续现存dev接入需独立受控步骤；生产迁移账号分离和最小权限仍是后续接入项。
 
 ## 7. 写命令事务顺序
 
@@ -76,7 +78,7 @@ DTO不替代边界校验：运行时从构建时复制的原始Schema离线解�
 2. READ_COMMITTED短事务，通过(spaceId,principalId)数据库锁行串行化该主体命令；锁超时／死锁全回滚，不靠应用内mutex冒充跨进程保证。
 3. 对现有目标加行锁并查当前资源权限；创建操作先查create权。再查(spaceId,principalId,commandId)回执。创建接口的历史目标从服务端回执元数据解析，回旧body前再查该目标当前权限，不按新请求成员表鉴权。
 4. 已有回执先按DB UTC检查过期，再比指纹；异操作／路径／内容为COMMAND_CONFLICT。同内容且当前有权返回原HTTP状态及不可变body，不再查当前CAS／新写语义，不新增outbox。
-5. 无回执才查CAS与新配置／引用／成员，原子写业务、验证输出、保存一份成功回执及一份mutation_outbox，然后commit才返回。outbox只含安全对象引用／版本／主体／操作，无配置正文／秘密。失败无半成品版本、成员集、回执或outbox。
+5. 无回执才查CAS与新配置／引用／成员；在同事务内按确定顺序锁定引用行并显式检查空间和BotVersion归属（无数据库FK兜底），原子写业务、验证输出、保存一份成功回执及一份mutation_outbox，然后commit才返回。outbox只含安全对象引用／版本／主体／操作，无配置正文／秘密。失败无半成品版本、成员集、回执或outbox。
 
 指纹包含认证空间／主体、规范method/path、移除commandId后的规范JSON；对象键排序，合法等值整数归一，数组顺序保留，expectedVersion仍参与。另一主体／空间同commandId独立；不同ID同body不能误去重。
 
@@ -94,7 +96,7 @@ DTO不替代边界校验：运行时从构建时复制的原始Schema离线解�
 4. **幂等**：四写接口重放原状态/body/ID/version；键序/等值整数不误冲突；同ID改body/path/method冲突；跨主体/空间ID独立；CAS前进仍可回原成功；撤权拒绝；过期不重复创建。
 5. **并发**：两个独立JVM同库，同ID并发只有一次业务更新/版本/outbox；不同ID同expectedVersion仅一成功另一409，无半写。不能只测单进程顺序调用。
 6. **事务/未知结果**：测试专用注入点在写版本／部分成员后、写回执／提交前失败，所有相关表回滚；提交后模拟响应丢失，再重启以原命令取回结果。注入只在测试构造器/port，无公网header／生产env开关。
-7. **迁移/账号**：两空环境、再迁移、checksum漂移拒绝、重启/UTC/emoji/大小写ID；不能访问其他schema/mysql表/CREATE USER；坏版本／DB不可用／缺秘密启动失败，无root回退。
+7. **迁移/账号**：两空环境、再迁移、checksum漂移拒绝、重启/UTC/emoji/大小写ID、catalog确认零物理FK及必要PK/unique/关联索引；实际账号具devclaw.*全部权限且无GRANT OPTION/global/其他schema权力，不能访问mysql表/CREATE USER。坏版本／DB不可用／缺秘密启动失败，无root回退；跨空间/错BotVersion等关系由第3项业务调用拒绝，不能混写成DB约束测试。
 8. **入口/日志**：超大/慢请求、深度/重复键/坏UTF8/路径/query、chunked限额、Origin、秘密哨兵；输出/日志/错误无token/password/输入原文／堆栈；真实daemon/SQL/JVM异常也安全映射。
 9. **回归**：F03统一入口（当前24项及生成/type消费），F05 mock（当前15项），B00关键离线/真实入口，node/web类型检查；src、锁文件、冻结契约、原scripts语义未改。
 

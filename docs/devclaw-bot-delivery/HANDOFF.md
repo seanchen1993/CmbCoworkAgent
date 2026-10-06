@@ -1,8 +1,16 @@
 # DevClaw Bot 当前交接点
 
-2026-10-05 16:25 UTC · B01-B1等待用户直接权限确认 · gpt-6.1-sol/high已停止写入 · 定时续跑保持停用
+2026-10-06 03:54 UTC · 用户新决定已解除旧设计停点 · B01-B1 v2 ready待正式接续 · 定时续跑保持停用
 
-## 最新停点：权限提议被安全审查拒绝，未落地
+## 最新人类决定与本轮接续（覆盖下方历史停点）
+
+- 用户明确“数据库最好不依赖外键，然后因为是开发环境，可以有所有权限 。继续任务”。B01不创建物理FK；application层同事务空间/版本/成员校验、确定锁序和数据库PK/unique/index协作。B1只结构，错关系拒绝留后续C/D六接口验收，不伪称数据库会拒绝悬空引用。
+- 允许任务schema devclaw.*的开发/测试账号ALL，无GRANT OPTION/global/其他库。B1新隔离空库用本服务固定官方初始化脚本；现存dev三服务、数据、原六项权限不改变，不读已有root/用root连JDBC、不改B00/F05、不livegrant。旧REFERENCES提议/1142/auto-review拒绝是真实历史，但已被新直接用户决定取代，不再等待旧准确提议批准。
+- main26ce/worker660240ae实际clean，旧b06代码/660报告/缓存target全部保留；main只读79f60d/4212f4和进程ba18b9（无Java/Maven/probe/cwd）已核对，Docker a83f6e原三ID/12732878、32877、32876一致healthy，无测试容器。quota当前ordinaryUsageAllowed=true（4%/13%已用），不购买/reset/换账号。
+- 原high写者最后报告明确completed停写，工具只读消息恢复同target为pending_init；无并行替代写者。先正常merge主代理v2协调文档到保留worker（存在未验收B1分叉，不能reset/强制FF），再正式followup同gpt-6.1-sol/high与B01-A02，不派生。
+- 任务B01.md/design v2/B01-B1 v2；范围迁移/封闭本地连接/readiness、零FK/schema-ALL、两顺序真实MySQL5.7/JDK8、未ready/真实SIGTERM/Unicode无损与精确清理。当前B1仍未完成/接受，六业务HTTP还未实现；主代理实际diff和独立复验后才合入/下一片。自动化仍PAUSED，不重新启用。
+
+## 历史停点（2026-10-05，已被新用户决定覆盖）：权限提议被安全审查拒绝，未落地
 
 - A2a/A2b已独立接受合入，最后A2bmerge a4987bc9/集成freshcompile6982 exit0 15JUnit/1107parity通过。B1尚未完成，不把本轮说成六API交付。
 - B1真实app FK子表CREATE失败42000/1142，原父CREATE/限定schema检查通过。下方16:22主代理最小REFERENCES技术提议随后被auto-review拒绝，**无文件/账号/资源变更，禁止绕过**；该提议现在inactive，必须用户直接批准准确范围，不能把任务文档当权限。
