@@ -1,6 +1,15 @@
 # DevClaw Bot 当前交接点
 
-2026-10-06 · C1原high已冻结停写，主代理独立验收中 · 定时续跑保持停用
+2026-10-06 · C1已独立验收、正常合入并完成集成真实复验 · 定时续跑停用
+
+## 当前交接（优先于以下历史检查点）
+
+- **C1 accepted_merged：** code3987a832、report-only4019d088，正常merge `da9293173af426d41dd6582dfddc580219e28d52`。主代理完整审查19文件并独立跑六个入口，集成树实际重新Java8编译18main/7test后又完整复验六入口全部exit0；实际jar和tree哈希db9bfd一致。证据见reviews/B01-C1-acceptance.md和state。
+- 集成Node26、F03原24/check/types、25JUnit/1107同组零差异；application60137/307726两库各376断言＋新故障/真实SIGTERM全通过；原database53506/989b28两库10表零FK/迁移/字节/5history/越权/timeout等全通过；原lifecycle63498/cf0853三个case全部child1/JDBC starts0/项目实际absence。所有main句柄已关闭，不再poll或重放已完成命令。
+- 原gpt-6.1-sol/high B01-A02 completed停写，worker4019 clean，无新代理、attempt或派生。集成代码除协调文档与候选实际字节相同6d49c2，冻结五source hash d68872全部匹配；没有产品代码返工剩余。
+- 只读05b062/ad0b45/cffe0d/a0d894/29a670/cb0ed9/7076ca确认原daemon75050694/owner1f9a09d0/三容器同ID-image-mount-network且healthy/OOMfalse，仅原三dev卷和原private网络；runtime仅真实全名devclaw-bot-dev/inode68511080/0700；三个端口12732893/32877/32876各一个原ssh57957 listener。ed45b5实际pgrep空。测试资源已精确清理、可按入口重建，原dev数据/账号/私有凭据/target/cache保留。诊断两次简写路径错误已用实际全名校正，未据错误路径宣称资源丢失或源哈希通过。
+- 原dev仍未迁移且原limited账号未变；用户允许的schemaALL只应用于新隔离测试库，不能称开发三服务已可serve伙伴接口。**尚无HTTP/招乎入口，B01总体未完成，C2任务尚未ready或派发。** 下一仅准备既有B01六HTTP接口的明确任务/可信本地身份适配与验收，ready并核对原写者后才formal followup；不自动进入Runtime/UI/B02/B03/真实IM/outbox投递。
+- 自动配置6176ef实际仍为原名PAUSED，本轮没恢复/更新/创建自动任务。最新人工继续只授权手动工作。下方旧ready/running_unknown/待接受/OOM/额度停点为历史，不覆盖此完整接受结果。
 
 ## 最新人类手动继续与恢复事实（优先于下方运行中）
 
