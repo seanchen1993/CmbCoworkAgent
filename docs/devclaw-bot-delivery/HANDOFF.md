@@ -4,6 +4,9 @@
 
 ## 最新人类手动继续与恢复事实（优先于下方运行中）
 
+- **当前唯一main53506集成原B1 database-check**，600s总时限，first registered `devclaw-bot-test-fdbe4d1f1abfc08b`，结果未知；main自己poll，不能并发重复测试或poll已闭合60137。其确定结束后才原B1三lifecycle与最终审计。child仍停写，noHTTP/C2/自动恢复。
+- **集成application60137已确切exit0/307726，覆盖下方运行未知：** fresh产物两库3d129433/7c10b028…/12732914、f263a023/b6d08ace…/12732915各376断言/52九表完整facts拒绝/21重放/7完整回滚/12腐坏回执/6原Ajv；同command JVM44873/44884与45076/45087=201/201同hash，不同主体双方scope握手CAS44901/44915与45107/45118=201/409，重开及SQL最终facts通过。16应用JVM闭合；新增故障c260da45/49009fad…/32916/JVM45282与真实SIGTERM787e7453/6f30d838…/32917各child1/PID和精确项目资源实际absence，原dev完整same healthy。main实际d3c82b pgrep空/13a56a仅原三容器健康，无重复未知命令。
+- 当前无main运行句柄，childcompleted停写。下一仅集成原B1两库与三lifecycle顺序复验、最终readonly审计后记录accepted_merged，不复跑60137或新建写者。仍无C2/HTTP/招乎/Runtime/UI，自动触发PAUSED；下方旧运行状态是历史。
 - **已正常merge da9293173af426d41dd6582dfddc580219e28d52，集成新编通过：** 3112c2 ort正常合入，无reset/冲突覆盖；0eec29候选4019..integration除coorddocs实际字节相同/clean。集成Node65170/5dae19 exit0全26，F0377364/463ecf exit0原24/check/types；51537/c6c3fe exit0 **实际18main/7test重新Java8编译**、25JUnit0fail-error-skip、1107同5373825e零diff/50class52/34库/原资源/fatjar通过。新jar aeda6c5f48cb07c01de1c9456bacfb73ac990c30a7eaa731f2fe930974dc8c5b，tree仍c6eeac9c。
 - 当前唯一main集成产物 **application-check60137** 总1200s两库及新故障/SIGTERM，结果未知；之后集成原B1数据库/lifecycle与最终readonlyaudit才标accepted_merged。child停写，无C2/HTTP/Runtime/UI/自动续跑。旧“待merge”和cached候选结果是历史，不能忽视当前真正freshcompile或未完成的真库复验。
 - **12:17:25UTC C1候选已由主代理独立接受，待正常集成：** reviews/B01-C1-acceptance.md保存实际全19文件审查、六个要求入口全部独立exit0（Node26/F0324/25JUnit1107zero/真两库六操作及新2lifecycle/原B1两库及3lifecycle）与准确资源/PID/哈希。55442已完整0c9ba9 exit0，故障9a9aec61与真实SIGTERM923a7b45/6732fc34实际resourceabsence、JDBC starts0。最终c2dc81正确owner/同daemon/原三ID健康、仅原三卷/网络；b0dc27 runtime仅dev/inode68511080；9b61cd actualpgrep exit1空；134d26 worker4019 clean/原源未改。全部main句柄闭合，child持续停写，不能把过去running_unknown当当前状态。

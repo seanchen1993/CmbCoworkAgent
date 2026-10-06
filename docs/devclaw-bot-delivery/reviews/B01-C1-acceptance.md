@@ -49,3 +49,6 @@
 ## 集成复验检查点
 
 正常merge `da9293173af426d41dd6582dfddc580219e28d52`（3112c2）；0eec29除协调文档源码与4019准确相等、clean。集成Node65170/5dae19共26与F0377364/463ecf原24/check/types均exit0；新build51537/c6c3fe实际重新Java8编译18main/7test，25JUnit无fail/error/skip，1107同5373825e零diff、50class52/34库/原资源/fatjar通过。新jar `aeda6c5f48cb07c01de1c9456bacfb73ac990c30a7eaa731f2fe930974dc8c5b`，tree同上。唯一集成application60137运行未知，真两库/新生命周期及原B1集成回归/最终审计仍待，不先标完整集成接受。
+### 集成真实应用复验已确定
+
+application60137最终307726 exit0（core396cfa）：两库3d129433/7c10b028…/32914与f263a023/b6d08ace…/32915各376断言、52完整事实拒绝、21重放、7回滚、12腐坏回执、6原Ajv响应；重开及双JVM同command201/201同hash、两个不同主体双方scope握手后的CAS201/409与SQL最终事实全通过。16应用JVM闭合。新增故障c260da45/49009fad…/32916/JVM45282与真实SIGTERM787e7453/6f30d838…/32917各child1，实际Java和精确容器/卷/网络/runtime均不存在，原dev完整身份前后相等且健康。完整ID在state。原B1集成数据库及生命周期回归、最终审计仍待；尚不标accepted_merged。
